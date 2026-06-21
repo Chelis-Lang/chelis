@@ -153,6 +153,52 @@ async fn lower_endpoint_returns_wire_dag_and_check_failures() {
 }
 
 #[tokio::test]
+async fn lower_and_grad_responses_carry_validated_schema_version() {
+    // WI-2 validate-on-consume (WS-5 Part A): the WireDag the server hands
+    // back across the process edge is validated at the boundary, so the DAG
+    // the client receives carries the supported `schema_version` and the
+    // response is never a `schema`-stage failure on the happy path.
+    let supported = chelis_tide::schema::WIRE_DAG_SCHEMA_VERSION as u64;
+
+    let (_, lowered) = post_json(
+        router(),
+        "/lower",
+        json!({"source_kind":"surf","source":MATMUL_PROGRAM}),
+    )
+    .await;
+    assert!(lowered["ok"].as_bool().unwrap());
+    assert_eq!(
+        lowered["result"]["dag"]["schema_version"].as_u64(),
+        Some(supported),
+        "lowered DAG crosses the boundary stamped at the supported version"
+    );
+    assert_ne!(
+        lowered["stage"].as_str(),
+        Some("schema"),
+        "the happy path never surfaces a schema-stage failure"
+    );
+
+    let (_, graded) = post_json(
+        router(),
+        "/grad",
+        json!({
+            "source_kind":"surf",
+            "source":LOSS_PROGRAM,
+            "output_name":"loss",
+            "wrt_names":["x"]
+        }),
+    )
+    .await;
+    assert!(graded["ok"].as_bool().unwrap());
+    assert_eq!(
+        graded["result"]["dag"]["schema_version"].as_u64(),
+        Some(supported),
+        "gradient DAG crosses the boundary stamped at the supported version"
+    );
+    assert_ne!(graded["stage"].as_str(), Some("schema"));
+}
+
+#[tokio::test]
 async fn compile_endpoint_returns_generated_files_and_backend_errors() {
     let (_, c_ok) = post_json(
         router(),

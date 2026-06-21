@@ -22,12 +22,12 @@ use crate::schema::{
     CompileTarget, DecompileRequest, DecompileResult, DesugarRequest, DesugarResult, Diagnostic,
     EvalRequest, EvalResult, EvaluatedRoot, FitnessComponents, GeneratedFile, GradRequest,
     GradResult, LowerRequest, LowerResult, ParseRequest, ParseResult, SourceKind, Span,
-    ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireDag, WireDagNode, WireDeepAtom,
-    WireDeepExpr, WireDeepExprKind, WireDimExpr, WireDimInfo, WireFusedInput, WireFusedStep,
-    WireFusedStepOp, WireImportKind, WireLetBinding, WireLetPattern, WireLiteral, WireMatchArm,
-    WireMetaEntry, WireParam, WirePattern, WirePropertyOption, WireRecordExprField,
-    WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireSurfDecl, WireSurfExpr,
-    WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp, WireVariant,
+    ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireDag, WireDagNode,
+    WireDagSchemaError, WireDeepAtom, WireDeepExpr, WireDeepExprKind, WireDimExpr, WireDimInfo,
+    WireFusedInput, WireFusedStep, WireFusedStepOp, WireImportKind, WireLetBinding, WireLetPattern,
+    WireLiteral, WireMatchArm, WireMetaEntry, WireParam, WirePattern, WirePropertyOption,
+    WireRecordExprField, WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireSurfDecl,
+    WireSurfExpr, WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp, WireVariant,
     WireVariantFields,
 };
 
@@ -128,8 +128,14 @@ pub fn check(request: crate::schema::CheckRequest) -> Result<CheckResult> {
 
 pub fn lower(request: LowerRequest) -> Result<LowerResult> {
     let compiled = compile_source(request.source_kind, &request.source)?;
+    let dag = wire_dag(&compiled.dag);
+    // WI-2 validate-on-consume: fail closed before this DAG crosses the
+    // process edge to the client. A build that emits a `schema_version` it
+    // cannot itself interpret must surface a typed `schema`-stage error, not
+    // hand the client an untrusted surface and not panic.
+    schema_stage_check(dag.validate_schema_version())?;
     Ok(LowerResult {
-        dag: wire_dag(&compiled.dag),
+        dag,
         named_roots: compiled
             .named_roots
             .into_iter()
@@ -883,8 +889,12 @@ pub fn grad(request: GradRequest) -> Result<GradResult> {
         })
         .collect();
 
+    let dag = wire_dag(&grad_result.dag);
+    // WI-2 validate-on-consume: fail closed before the gradient DAG crosses
+    // the process edge (same rationale as `lower`).
+    schema_stage_check(dag.validate_schema_version())?;
     Ok(GradResult {
-        dag: wire_dag(&grad_result.dag),
+        dag,
         output_node: grad_result.output_node.0,
         grad_nodes_by_name,
         forward_nodes_by_name: compiled
@@ -1972,6 +1982,25 @@ fn unknown_name_error(stage: &str, field: &str, name: &str) -> CompilerError {
 
 pub(crate) fn stage_error(stage: &str, message: impl Into<String>, kind: &str) -> CompilerError {
     stage_error_with_span(stage, message, kind, None)
+}
+
+/// Lift a [`WireDagSchemaError`] from validating a `WireDag` at a
+/// process boundary into a typed `schema`-stage [`CompilerError`] (WI-2).
+/// An unsupported schema version is rejected here -- surfaced to the client
+/// as a normal failure envelope -- rather than panicking or silently handing
+/// back a DAG whose surface this build cannot trust.
+pub(crate) fn schema_stage_check(
+    result: std::result::Result<(), WireDagSchemaError>,
+) -> Result<()> {
+    result.map_err(|err| {
+        let WireDagSchemaError::UnknownSchemaVersion { found, supported } = err;
+        let mut error = stage_error("schema", err.to_string(), "unknown_schema_version");
+        if let Some(diagnostic) = error.errors.first_mut() {
+            diagnostic.expected = Some(format!("schema_version <= {supported}"));
+            diagnostic.got = Some(found.to_string());
+        }
+        error
+    })
 }
 
 fn deep_span_to_schema(span: Option<chelis_deep::Span>) -> Option<Span> {
@@ -3820,5 +3849,109 @@ bad = shape(scalar_to_tensor(cast(3, int64)), axis)
                 .iter()
                 .any(|diag| diag.message == "shape requires non-negative axis, got -1")
         );
+    }
+
+    // WI-2 validate-on-consume (WS-5 Part A). The schema-version check at the
+    // WireDag process boundary must fail closed on an unsupported version with
+    // a typed `schema`-stage error, accept a supported version, and never
+    // silently pass an unknown surface through.
+
+    fn wire_dag_at_version(version: u32) -> WireDag {
+        WireDag {
+            schema_version: version,
+            nodes: Vec::new(),
+            roots: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn schema_stage_check_accepts_supported_version() {
+        let dag = wire_dag_at_version(crate::schema::WIRE_DAG_SCHEMA_VERSION);
+        schema_stage_check(dag.validate_schema_version())
+            .expect("the supported schema version is accepted at the consume boundary");
+    }
+
+    #[test]
+    fn schema_stage_check_accepts_legacy_lower_version() {
+        // A strictly-lower (pre-versioning) payload is forward-compatible under
+        // the additive-default guarantee and must not be rejected.
+        let legacy = wire_dag_at_version(0);
+        schema_stage_check(legacy.validate_schema_version())
+            .expect("a lower-than-baseline version is accepted");
+    }
+
+    #[test]
+    fn schema_stage_check_rejects_over_version_with_typed_error() {
+        let future = crate::schema::WIRE_DAG_SCHEMA_VERSION + 1;
+        let dag = wire_dag_at_version(future);
+        let error = schema_stage_check(dag.validate_schema_version())
+            .expect_err("an over-version DAG is rejected at the consume boundary");
+        assert_eq!(
+            error.stage, "schema",
+            "rejection is a typed schema-stage error"
+        );
+        assert_eq!(error.errors.len(), 1, "exactly one diagnostic: {error:?}");
+        let diagnostic = &error.errors[0];
+        assert_eq!(diagnostic.kind, "unknown_schema_version");
+        assert_eq!(
+            diagnostic.got.as_deref(),
+            Some(future.to_string().as_str()),
+            "the diagnostic reports the unsupported version it was handed"
+        );
+        assert_eq!(
+            diagnostic.expected.as_deref(),
+            Some(
+                format!(
+                    "schema_version <= {}",
+                    crate::schema::WIRE_DAG_SCHEMA_VERSION
+                )
+                .as_str()
+            ),
+            "the diagnostic reports the supported ceiling"
+        );
+    }
+
+    #[test]
+    fn lower_happy_path_passes_schema_validation() {
+        let result = lower(LowerRequest {
+            source_kind: SourceKind::Surf,
+            source: "a = (a : tensor[2, 3, f32])\n\
+                     b = (b : tensor[3, 4, f32])\n\
+                     out = (matmul(a, b) : tensor[2, 4, f32])\n"
+                .to_string(),
+        })
+        .expect("lower succeeds");
+        // The DAG the server hands back is at the supported version, so the
+        // boundary validation it just ran accepted it.
+        assert_eq!(
+            result.dag.schema_version,
+            crate::schema::WIRE_DAG_SCHEMA_VERSION
+        );
+        result
+            .dag
+            .validate_schema_version()
+            .expect("the produced DAG validates");
+    }
+
+    #[test]
+    fn grad_happy_path_passes_schema_validation() {
+        let result = grad(GradRequest {
+            source_kind: SourceKind::Surf,
+            source: "x = (x : tensor[f32])\n\
+                     out = (mul(x, x) : tensor[f32])\n"
+                .to_string(),
+            output_name: "out".to_string(),
+            wrt_names: vec!["x".to_string()],
+            fuse: true,
+        })
+        .expect("grad succeeds");
+        assert_eq!(
+            result.dag.schema_version,
+            crate::schema::WIRE_DAG_SCHEMA_VERSION
+        );
+        result
+            .dag
+            .validate_schema_version()
+            .expect("the produced gradient DAG validates");
     }
 }
