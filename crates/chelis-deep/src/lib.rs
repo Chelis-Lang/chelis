@@ -7,10 +7,16 @@
 pub mod ast;
 pub mod lexer;
 pub mod parser;
+pub mod path;
 pub mod printer;
 pub mod span;
 pub mod validate;
 
 pub use ast::{Atom, Expr, List, MetaExpr, MetaMap};
 pub use lexer::LiteralSuffix;
+pub use path::{
+    DeepPath, PathError, PathSegment, ResolveError, ResolvedFunction, function_body,
+    function_defsig, module_excluding_function_def, module_has_defsig_for, resolve_function,
+    splice_function_body, spliced_function_def,
+};
 pub use span::Span;

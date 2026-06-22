@@ -698,6 +698,7 @@ dependencies = [
  "assert_cmd",
  "axum",
  "chelis-compiler-api",
+ "chelis-deep",
  "chelis-prove",
  "chelis-surf",
  "http-body-util",

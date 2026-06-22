@@ -908,6 +908,7 @@ pub fn compile_reef_context(
                 got: None,
                 suggestions: vec![],
                 span: None,
+                deep_path: None,
             })
             .collect(),
     })?;
@@ -934,6 +935,7 @@ pub fn compile_reef_context(
                         offset: span.offset,
                         len: span.len,
                     }),
+                    deep_path: None,
                 }],
             }
         })?;
@@ -1021,6 +1023,7 @@ fn reef_error(msg: &str) -> CompilerError {
             got: None,
             suggestions: vec![],
             span: None,
+            deep_path: None,
         }],
     }
 }
@@ -1036,6 +1039,7 @@ fn hash_error(msg: &str) -> CompilerError {
             got: None,
             suggestions: vec![],
             span: None,
+            deep_path: None,
         }],
     }
 }

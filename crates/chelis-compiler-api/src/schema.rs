@@ -72,6 +72,30 @@ pub struct Diagnostic {
     pub suggestions: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub span: Option<Span>,
+    /// Forward-compatible Deep-address slot for the L2 authoring loop. The
+    /// fragment body-replacement check (`chelis_replace_function_body`) will
+    /// populate this with the Deep path of the offending node so a caller can
+    /// pinpoint the rejected subtree without re-deriving it. It is `None`
+    /// today (L0; provenance threading is L2 work), and every other tool
+    /// leaves it `None`, so the `skip_serializing_if` keeps their wire output
+    /// byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deep_path: Option<WireDeepErrorPath>,
+}
+
+/// Wire form of `chelis_compiler_api::fragment::DeepErrorPath`: the Deep
+/// address of an offending node, relative to the def it lives in. Serialized
+/// as the dot-joined path string plus the owning def's qualified name so the
+/// shape does not couple the wire surface to the internal `DeepPath` type. It
+/// is never emitted in L0 (the inner `deep_path` is always `None` there); the
+/// type exists so populating it in L2 adds no new field to [`Diagnostic`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireDeepErrorPath {
+    /// The qualified name of the def the address is relative to.
+    pub def_qualified_name: String,
+    /// The path from the def node to the offending subtree, as the canonical
+    /// dot-joined `DeepPath` rendering.
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -148,6 +172,38 @@ pub struct DesugarRequest {
 pub struct DesugarResult {
     pub deep_text: String,
     pub deep_ast: Vec<WireDeepExpr>,
+}
+
+/// Request for `chelis_replace_function_body`: replace one function's body in
+/// a Deep module with a new Deep body expression, returning the canonical Deep
+/// of the changed def and the full rewritten module. Deep-native: both
+/// `module` and `new_body` are Deep s-expression text; there is no Surf
+/// ingestion path. The tool is pure — it persists nothing and writes no file.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReplaceFunctionBodyRequest {
+    /// The full module as canonical Deep (`.dp`) text.
+    pub module: String,
+    /// The qualified (or bare) name of the function whose body to replace.
+    pub function_name: String,
+    /// The new function body as a single Deep s-expression.
+    pub new_body: String,
+}
+
+/// Result of a clean `chelis_replace_function_body`: the changed def and the
+/// full rewritten module, both in canonical Deep. The L0 validation runs full
+/// whole-module `chelis check` on `module_deep`, so the verdict EQUALS full
+/// `chelis check` of the rewritten module by construction (the splice-faithfulness
+/// gate locks that the rewrite is the module full check is run on); a returned
+/// result is a module that type-, effect-, and linearity-checks. Closure-scoped
+/// validation (caller-ward effect closure, the def's SCC for termination,
+/// per-def for type) is the future optimization, not a fragment-scoped path that
+/// could disagree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplaceFunctionBodyResult {
+    /// Canonical Deep of just the changed `(def ...)` node.
+    pub changed_def_deep: String,
+    /// Canonical Deep of the full rewritten module.
+    pub module_deep: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

@@ -501,6 +501,60 @@ fn eval_ill_typed_dp_fails_with_type_error() {
     );
 }
 
+// ── EFFECT SOUNDNESS: module-wrapped .dp rejects declared-pure-does-Random ─
+
+#[test]
+fn check_module_wrapped_dp_rejects_declared_pure_body_doing_random() {
+    // A `.dp` MODULE whose declared-pure (`! { }`) `entry` calls a Random-
+    // performing sibling must be REJECTED by `chelis check <module>.dp`. The
+    // whole-program effect validators descend into the `(module ...)` wrapper,
+    // so the module-wrapped check agrees with the flattened build/eval path.
+    // Author the `.ch` and derive the canonical module-wrapped `.dp` via
+    // `chelis deep` so the wrapper is genuinely present.
+    let dir = tempdir().expect("tempdir");
+    let ch_src = "module Frag.Effect\nexport (entry)\n\
+        def noisy(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)\n\
+        def entry(x: tensor[8, f32]) -> tensor[8, f32] ! { } = noisy(x)\n";
+    let ch_path = write_fixture(dir.path(), "effect.ch", ch_src);
+    let deep_out = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(dir.path())
+        .args(["deep", ch_path.to_str().unwrap()])
+        .output()
+        .expect("run chelis deep");
+    assert!(
+        deep_out.status.success(),
+        "chelis deep must desugar the .ch; stderr={}",
+        String::from_utf8_lossy(&deep_out.stderr)
+    );
+    let dp_text = String::from_utf8(deep_out.stdout).expect("utf8 deep output");
+    // The rendered Deep must carry the `(module ...)` wrapper this test
+    // exercises; otherwise the descent it locks would be untested.
+    assert!(
+        dp_text.contains("(module"),
+        "rendered .dp must be module-wrapped; dp={dp_text}"
+    );
+    let dp_path = write_fixture(dir.path(), "effect.dp", &dp_text);
+
+    let (code, stdout) = run_check(&dp_path, false);
+    let report = parse_report(&stdout);
+    let errors = report["errors"].as_array().expect("errors array");
+    assert!(
+        errors.iter().any(|e| {
+            let message = e["message"].as_str().unwrap_or("");
+            message.contains("entry") && message.contains("Random")
+        }),
+        "module-wrapped declared-pure body performing Random must be rejected with an \
+         effect error naming entry and Random; stdout={stdout}"
+    );
+    assert_eq!(
+        code,
+        Some(CHECK_ERRORS_EXIT_CODE),
+        "effect-unsound module-wrapped .dp must exit {CHECK_ERRORS_EXIT_CODE}; stdout={stdout}"
+    );
+}
+
 // ── EVAL NEGATIVE: unknown tag -> Deep strict error, not Surf parse ────
 
 #[test]

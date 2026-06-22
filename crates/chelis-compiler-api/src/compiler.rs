@@ -107,6 +107,135 @@ pub fn desugar(request: DesugarRequest) -> Result<DesugarResult> {
     })
 }
 
+/// Replace one function's body in a Deep module with a new Deep body, returning
+/// the canonical Deep of the changed def and the full rewritten module.
+///
+/// Deep-native and pure: it parses the `module` and `new_body` as Deep, runs
+/// full whole-module `chelis check` on the rewritten module (the
+/// `check_body_replacement` seam runs FITNESS, then TYPE, then EFFECTS, then
+/// LINEARITY over the whole rewritten module), and returns canonical Deep on
+/// success. Nothing is persisted; no file is written. On any failure it returns
+/// a structured [`CompilerError`] whose stage names the rejecting pass.
+pub fn replace_function_body(
+    request: crate::schema::ReplaceFunctionBodyRequest,
+) -> Result<crate::schema::ReplaceFunctionBodyResult> {
+    // The new body must be exactly one Deep expression. Zero or many is a
+    // parse-stage rejection, not a check failure.
+    let new_body_exprs =
+        chelis_deep::parser::parse_str_strict(&request.new_body).map_err(|err| {
+            stage_error_with_span(
+                "replace",
+                err.to_string(),
+                "deep_parse_error",
+                parse_error_span_deep(&err),
+            )
+        })?;
+    let new_body = match new_body_exprs.as_slice() {
+        [single] => single,
+        other => {
+            return Err(stage_error(
+                "replace",
+                format!(
+                    "`new_body` must be exactly one Deep expression, got {}",
+                    other.len()
+                ),
+                "deep_parse_error",
+            ));
+        }
+    };
+
+    // The module is parsed strictly too: a malformed `.dp` is a parse error.
+    let module = chelis_deep::parser::parse_str_strict(&request.module).map_err(|err| {
+        stage_error_with_span(
+            "replace",
+            err.to_string(),
+            "deep_parse_error",
+            parse_error_span_deep(&err),
+        )
+    })?;
+
+    // Whole-module body-replacement check: full `chelis check` of the rewritten
+    // module. On rejection the error is tagged by the failing pass; on success
+    // the report carries the full rewritten module the verdict equals.
+    let report = crate::fragment::check_body_replacement(&module, &request.function_name, new_body)
+        .map_err(replacement_error_to_compiler_error)?;
+
+    // The single rewritten def, for `changed_def_deep`. `spliced_function_def`
+    // returns just the one `(def ...)` node; print it on its own line.
+    let changed_def =
+        chelis_deep::spliced_function_def(&module, &request.function_name, new_body.clone())
+            .map_err(|err| stage_error("replace", err.to_string(), "name_resolution_error"))?;
+
+    Ok(crate::schema::ReplaceFunctionBodyResult {
+        changed_def_deep: chelis_deep::printer::print_expr(&changed_def),
+        module_deep: chelis_deep::printer::print_canonical(&report.rewritten_module),
+    })
+}
+
+/// Map a [`crate::fragment::ReplacementError`] to a structured
+/// [`CompilerError`]. The stage and `kind` discriminate the rejecting pass so
+/// the caller can branch on it; the forward-compatible `deep_path` slot is
+/// threaded through (always `None` in L0).
+fn replacement_error_to_compiler_error(error: crate::fragment::ReplacementError) -> CompilerError {
+    use crate::fragment::ReplacementError;
+    let (kind, location, deep_path) = match &error {
+        ReplacementError::NameResolution { location, .. } => {
+            ("name_resolution_error", *location, None)
+        }
+        ReplacementError::Type {
+            location,
+            deep_path,
+            ..
+        } => ("type_error", *location, deep_path.clone()),
+        ReplacementError::Effect {
+            location,
+            deep_path,
+            ..
+        } => ("effect_error", *location, deep_path.clone()),
+        ReplacementError::Linearity {
+            location,
+            deep_path,
+            ..
+        } => ("linearity_error", *location, deep_path.clone()),
+    };
+    CompilerError {
+        stage: error.stage().to_string(),
+        errors: vec![Diagnostic {
+            kind: kind.to_string(),
+            message: error.message().to_string(),
+            severity: 1.0,
+            expected: None,
+            got: None,
+            suggestions: Vec::new(),
+            span: location,
+            deep_path: deep_path.map(wire_deep_error_path),
+        }],
+    }
+}
+
+/// Convert the internal forward-compatible [`crate::fragment::DeepErrorPath`]
+/// into its wire form. Never reached in L0 (the inner `deep_path` is always
+/// `None`); present so L2 provenance threading adds no new mapping seam. The
+/// path renders as a dot-joined sequence of segments (`body.2.0`) so the wire
+/// shape is a plain string rather than the internal `DeepPath` type.
+fn wire_deep_error_path(path: crate::fragment::DeepErrorPath) -> crate::schema::WireDeepErrorPath {
+    use chelis_deep::path::PathSegment;
+    let rendered = path
+        .path
+        .segments()
+        .iter()
+        .map(|segment| match segment {
+            PathSegment::Body => "body".to_string(),
+            PathSegment::Child(index) => index.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(".");
+    crate::schema::WireDeepErrorPath {
+        def_qualified_name: path.def_qualified_name,
+        path: rendered,
+    }
+}
+
 pub fn check(request: crate::schema::CheckRequest) -> Result<CheckResult> {
     let deep_exprs = deep_exprs_from_source(request.source_kind, &request.source)?;
     let report = chelis_types::check_ir_fitness(&deep_exprs);
@@ -472,6 +601,7 @@ fn compile_new_source_in_context(
                         got: None,
                         suggestions: vec![],
                         span: None,
+                        deep_path: None,
                     })
                     .collect(),
             })?;
@@ -1023,6 +1153,7 @@ fn compile_source(source_kind: SourceKind, source: &str) -> Result<CompiledSourc
                 got: None,
                 suggestions: vec![],
                 span: None,
+                deep_path: None,
             })
             .collect(),
     })?;
@@ -2026,6 +2157,7 @@ fn stage_error_with_span(
             got: None,
             suggestions: Vec::new(),
             span: diagnostic_span,
+            deep_path: None,
         }],
     }
 }
@@ -2060,6 +2192,7 @@ pub(crate) fn check_error_diagnostic(error: &CheckError) -> Diagnostic {
         got: error.got.clone(),
         suggestions: error.suggestions.clone(),
         span: None,
+        deep_path: None,
     }
 }
 
