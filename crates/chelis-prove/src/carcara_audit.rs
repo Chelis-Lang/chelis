@@ -9,20 +9,81 @@
 //! integration-shape contract in
 //! `spec/design/verification_stack_master_plan.md`.
 //!
-//! The audit covers exactly the fragment cvc5 emits a complete Alethe proof
-//! for: equality-with-uninterpreted-functions, linear arithmetic, and
-//! bit-vectors. A nonlinear-real `Proved` (the `QF_NRA`/`NRA` core) has no
-//! Alethe proof to re-check, so the audit is reported ABSENT there, never as a
-//! failure.
+//! The audit covers exactly the fragment cvc5 emits an Alethe proof for, which
+//! for the goals this crate lowers is equality-with-uninterpreted-functions and
+//! linear arithmetic (the `SmtExpr`/`SmtSort` surface has no bit-vector
+//! representation, so the bit-vector slice of Alethe is not reachable here). A
+//! nonlinear-real `Proved` (the `QF_NRA`/`NRA` core) has no Alethe proof to
+//! re-check, so the audit is reported ABSENT ([`CarcaraAudit::Unavailable`])
+//! there, never as a failure.
+//!
+//! What Carcara actually re-checks vs trusts. Carcara verifies most of the
+//! proof step by step (assume against the problem premises, resolution,
+//! subproof discharge, congruence, transitivity, ...), but it accepts THREE
+//! kinds of step as TRUSTED HOLES with zero checking (carcara
+//! `checker/shared.rs`): `hole` (cvc5's `TRUST_THEORY_REWRITE` /
+//! `ARITH_POLY_NORM_REL` trust steps), `lia_generic` (cvc5's linear-arithmetic
+//! macro step), and any rule in the configured allowed-rules set (we add
+//! `rare_rewrite`, cvc5's RARE/DSL rewrite leaf, because checking it needs
+//! cvc5's compiled RARE database the in-process auditor lacks). A real cvc5
+//! Alethe proof of even a simple linear goal contains `hole` and `lia_generic`
+//! steps carrying genuine arithmetic content, so the audit's guarantee is "the
+//! proof structure re-checks, MODULO these trusted leaves", not a full
+//! independent re-derivation. To keep that honest, a proof that leans on any
+//! trusted leaf is reported [`CarcaraAudit::ConfirmedModuloRewrites`] (carrying
+//! the exact set and counts of trusted-rule kinds hit), distinct from a fully
+//! hole-free [`CarcaraAudit::Confirmed`]. The trusted leaves are themselves
+//! SOUND (genuine cvc5 inferences, matching cvc5's own trust posture); this is a
+//! disclosure boundary, not an unsoundness.
 //!
 //! The audit result is folded into the discharge as an independent-audit
-//! EVIDENCE DIMENSION; it never changes a discharge's soundness or qualifier.
-//! A cvc5 `Proved` stays `Soundness::Exact` carrying `Qualifier::Exact`. A
-//! re-check that FAILS is surfaced loudly in the evidence as an auditor
-//! disagreement and is never silently trusted or read as a clean discharge.
+//! EVIDENCE DIMENSION; it never changes a discharge's soundness or qualifier. A
+//! cvc5 `Proved` stays `Soundness::Exact` carrying `Qualifier::Exact`. A
+//! re-check that FAILS is recorded as a [`CarcaraAudit::Failed`] auditor
+//! disagreement in the evidence and is never folded into a confirmed state.
+//! NOTE: today this evidence dimension is WRITE-ONLY -- no production consumer
+//! reads `evidence["carcara_audit"]`, and a `Failed` audit does not change the
+//! discharge's `result()`/`soundness()`. Wiring a consumer that acts on (or
+//! serializes) a `Failed` audit is a tracked follow-up; until then the audit is
+//! an in-memory evidence dimension, not a surfaced gate.
 
 use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr, SmtSort};
 use crate::tier_b::SmtProperty;
+
+/// The Alethe step rules Carcara accepts as TRUSTED HOLES (zero checking), as
+/// implemented in carcara `checker/shared.rs`:
+///
+/// - `hole`: a native always-valid hole; cvc5 emits its `TRUST_THEORY_REWRITE`
+///   and `ARITH_POLY_NORM_REL` trust steps as `hole`.
+/// - `lia_generic`: a native step Carcara explicitly ignores (logs a warning,
+///   returns Ok); cvc5's linear-integer/real-arithmetic macro lemmas.
+/// - `rare_rewrite`: NOT native-trusted; trusted only because we add it to the
+///   checker's allowed-rules set ([`run_carcara_check`]), since checking it
+///   needs cvc5's compiled RARE rewrite database the in-process auditor lacks.
+///
+/// This is the SINGLE SOURCE OF TRUTH for "what the audit trusts without
+/// checking": the allowed-rules config, the proof scan that enumerates trusted
+/// leaves, and the disclosure test all derive from it, so the three cannot
+/// drift. `rare_rewrite` must be first because [`run_carcara_check`] also feeds
+/// the allowlisted subset (currently just `rare_rewrite`) to Carcara's config.
+#[cfg(feature = "carcara")]
+const TRUSTED_HOLE_RULES: &[&str] = &["rare_rewrite", "hole", "lia_generic"];
+
+/// The subset of [`TRUSTED_HOLE_RULES`] that is trusted only via the checker's
+/// allowed-rules config (vs the rules Carcara treats as holes natively). `hole`
+/// and `lia_generic` are native holes and must NOT be allowlisted (that would be
+/// redundant and misleading); only `rare_rewrite` is ours to allow.
+#[cfg(feature = "carcara")]
+const ALLOWLISTED_HOLE_RULES: &[&str] = &["rare_rewrite"];
+
+/// One trusted-rule kind and how many times it appeared in the audited proof.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TrustedRuleCount {
+    /// The Alethe rule name (one of [`TRUSTED_HOLE_RULES`]).
+    pub rule: String,
+    /// How many steps in the proof used this rule.
+    pub count: usize,
+}
 
 /// The outcome of routing a cvc5 Alethe proof through Carcara.
 ///
@@ -37,21 +98,26 @@ pub enum CarcaraAudit {
     /// Carcara independently re-checked cvc5's Alethe proof end to end with no
     /// holes: every step, including all rewrite leaves, was verified.
     Confirmed,
-    /// Carcara re-checked the proof's full logical structure (assumptions,
-    /// resolution, subproofs, theory lemmas, reaching the empty clause) and
-    /// CONFIRMED it, but treated cvc5's named RARE/DSL rewrite leaves
-    /// (`rare_rewrite`) as TRUSTED HOLES, because checking those requires
-    /// cvc5's compiled rewrite database which is not available to the in-process
-    /// auditor. This is strictly weaker than [`CarcaraAudit::Confirmed`] and is
-    /// surfaced as its own state, never silently reported as a full check. It
-    /// matches cvc5's own posture (cvc5 already emits some rewrites as
-    /// `TRUST_THEORY_REWRITE` holes). Carries the count of trusted rewrite
-    /// leaves.
-    ConfirmedModuloRewrites(String),
+    /// Carcara re-checked the proof and CONFIRMED it, but the proof leans on one
+    /// or more steps Carcara accepts as TRUSTED HOLES with zero checking. Three
+    /// step kinds are trusted (carcara `checker/shared.rs`): `hole` (cvc5's
+    /// `TRUST_THEORY_REWRITE` / `ARITH_POLY_NORM_REL` trust steps),
+    /// `lia_generic` (cvc5's linear-arithmetic macro step), and `rare_rewrite`
+    /// (cvc5's RARE/DSL rewrite leaf, allowlisted because checking it needs
+    /// cvc5's compiled RARE database the in-process auditor lacks). Every OTHER
+    /// step kind (assume, resolution, subproof, congruence, transitivity, ...)
+    /// was checked. This is strictly weaker than [`CarcaraAudit::Confirmed`] and
+    /// is its own state, never reported as a full check. The trusted leaves are
+    /// sound cvc5 inferences (matching cvc5's own trust posture); this is a
+    /// disclosure boundary, not an unsoundness. Carries the exact set of
+    /// trusted-rule kinds that appeared in the proof, each with its count, so the
+    /// disclosure reflects the actual proof and cannot silently drift.
+    ConfirmedModuloRewrites(Vec<TrustedRuleCount>),
     /// Carcara re-checked the proof and it FAILED (the proof does not check, or
-    /// the problem/proof did not parse). This is a loud, surfaced disagreement
-    /// between cvc5 and the auditor: it is never silently trusted. Carries the
-    /// auditor's reason.
+    /// the problem/proof did not parse). A cvc5-vs-auditor disagreement, recorded
+    /// in the evidence and never folded into a confirmed state. Carries the
+    /// auditor's reason. (NB: this evidence is write-only today -- no production
+    /// consumer reads it yet; see the module docs.)
     Failed(String),
     /// No Alethe proof was available to audit (e.g. cvc5 produced none for this
     /// logic fragment, such as the nonlinear-real core). The cvc5 result is
@@ -108,7 +174,7 @@ fn expr_in_audit_fragment(expr: &SmtExpr) -> Result<(), String> {
                 // coefficient (`c * x`) stays linear.
                 if !is_numeric_literal(l) && !is_numeric_literal(r) {
                     return Err("nonlinear multiplication is outside the Carcara-audited \
-                                (linear/EUF/BV) fragment"
+                                (linear / EUF) fragment"
                         .to_string());
                 }
                 stack.push(l);
@@ -142,7 +208,7 @@ fn expr_in_audit_fragment(expr: &SmtExpr) -> Result<(), String> {
             // linear/EUF fragment Carcara audits.
             SmtExpr::Apply(name, _) => {
                 return Err(format!(
-                    "intrinsic `{name}` is outside the Carcara-audited (linear/EUF/BV) fragment"
+                    "intrinsic `{name}` is outside the Carcara-audited (linear / EUF) fragment"
                 ));
             }
         }
@@ -338,9 +404,10 @@ pub fn render_smtlib_problem(property: &SmtProperty) -> Result<String, String> {
 /// originating SMT-LIB problem, and have Carcara independently re-check the
 /// proof against the problem. The return value is the evidence dimension:
 ///
-/// - [`CarcaraAudit::Confirmed`]: Carcara re-checked the cvc5 proof clean.
+/// - [`CarcaraAudit::Confirmed`] / [`CarcaraAudit::ConfirmedModuloRewrites`]:
+///   Carcara re-checked the cvc5 proof (fully, or modulo trusted holes).
 /// - [`CarcaraAudit::Failed`]: Carcara REJECTED the proof (or the
-///   problem/proof did not parse). A surfaced cvc5-vs-auditor disagreement.
+///   problem/proof did not parse). A cvc5-vs-auditor disagreement.
 /// - [`CarcaraAudit::Unavailable`]: the property is outside the audited
 ///   fragment, or cvc5 emitted no Alethe proof, so there was nothing to audit.
 ///
@@ -349,6 +416,15 @@ pub fn render_smtlib_problem(property: &SmtProperty) -> Result<String, String> {
 /// [`crate::tier_b::lower_to_cvc5`] lowering the production solve used, so the
 /// audited assertions are the assertions cvc5 proved. It is invoked only on the
 /// `Proved` path, only under the `carcara` feature.
+///
+/// ISOLATION NOTE (latent, inert today): this re-solve runs cvc5 IN-PROCESS,
+/// even when the production host has enabled the worker-isolation path
+/// (`crate::worker`). It is inert today because no shipping host turns on both
+/// `--features carcara` and isolation (the `chelis` CLI does not enable
+/// `carcara`). But a future host that does would run this audit re-solve in the
+/// non-isolated parent, defeating the isolation guarantee for the audit's cvc5
+/// call. This must be escalated and routed through the isolation worker BEFORE
+/// any such host ships; it is not a routine fix.
 #[cfg(feature = "carcara")]
 pub fn audit_cvc5_proof(property: &SmtProperty, timeout_ms: u64) -> CarcaraAudit {
     let (problem, alethe) = match capture_alethe_proof(property, timeout_ms) {
@@ -376,7 +452,7 @@ fn capture_alethe_proof(
     use cvc5_rs::{Kind, ProofComponent, ProofFormat, Solver, TermManager};
     use std::collections::HashMap;
 
-    // Only the linear/EUF/BV fragment has a cvc5 Alethe proof to re-check.
+    // Only the linear / EUF fragment has a cvc5 Alethe proof to re-check.
     // Outside it, there is nothing to audit (and rendering the SMT-LIB problem
     // would be meaningless), so report Unavailable, never Failed.
     let problem = match render_smtlib_problem(property) {
@@ -488,21 +564,42 @@ fn capture_alethe_proof(
     Ok((problem, alethe))
 }
 
-/// Run Carcara on an explicit `(problem, proof)` pair and map the result to a
-/// [`CarcaraAudit`] outcome.
+/// Count how many steps in an Alethe proof use each of the [`TRUSTED_HOLE_RULES`].
 ///
-/// The one Alethe rule the in-process auditor trusts as a hole: cvc5's
-/// named RARE/DSL rewrite leaf. Checking a `rare_rewrite` step requires the
-/// definition of the named DSL rule (e.g. `evaluate`), which lives in cvc5's
-/// compiled rewrite database and is not available to Carcara in-process. Every
-/// OTHER rule (assume, resolution, subproof, la_generic, cong, trans, ...) is
-/// fully checked, so the proof's entire logical skeleton is re-verified; only
-/// these arithmetic-rewrite leaves are trusted. This matches cvc5's own posture
-/// (it already emits some rewrites as `TRUST_THEORY_REWRITE` holes). A proof
-/// that leans on a trusted leaf is reported [`CarcaraAudit::ConfirmedModuloRewrites`],
-/// never conflated with a full check.
+/// Alethe renders a step's rule as the token immediately after `:rule`, e.g.
+/// `(step t1 (cl ...) :rule hole ...)`. We scan for `:rule <name>` occurrences
+/// of each trusted kind. This is a disclosure aid (it powers
+/// [`CarcaraAudit::ConfirmedModuloRewrites`]), not a checker: the actual
+/// trust decision is Carcara's (native `hole`/`lia_generic` plus our
+/// allowlisted `rare_rewrite`); this scan reports WHICH of those Carcara hit.
+/// Only kinds with a non-zero count are returned, sorted by the canonical order
+/// in [`TRUSTED_HOLE_RULES`].
 #[cfg(feature = "carcara")]
-const TRUSTED_REWRITE_RULE: &str = "rare_rewrite";
+fn count_trusted_hole_rules(proof: &str) -> Vec<TrustedRuleCount> {
+    TRUSTED_HOLE_RULES
+        .iter()
+        .filter_map(|&rule| {
+            // Match `:rule <name>` where <name> is followed by whitespace or a
+            // delimiter, so `hole` does not match a longer rule that happens to
+            // start with "hole".
+            let needle = format!(":rule {rule}");
+            let count = proof
+                .match_indices(&needle)
+                .filter(|(idx, _)| {
+                    let after = idx + needle.len();
+                    proof[after..]
+                        .chars()
+                        .next()
+                        .is_none_or(|c| c.is_whitespace() || c == ')' || c == '(')
+                })
+                .count();
+            (count > 0).then_some(TrustedRuleCount {
+                rule: rule.to_string(),
+                count,
+            })
+        })
+        .collect()
+}
 
 /// Run Carcara on an explicit `(problem, proof)` pair and map the result to a
 /// [`CarcaraAudit`] outcome.
@@ -513,23 +610,24 @@ const TRUSTED_REWRITE_RULE: &str = "rare_rewrite";
 /// Alethe output for a mixed-arithmetic (LIRA) proof freely mixes Int literals
 /// (`0`, `-1`) and rational/Real literals (`0/1`, `1/1`) in the same arithmetic
 /// term, so without Int-Real subtyping Carcara rejects a SOUND proof on a sort
-/// clash (e.g. `expected 'Int', got 'Real'`). This relaxation only affects the
-/// predefined arithmetic operators, matching cvc5's own typing of its proof.
-/// [`TRUSTED_REWRITE_RULE`] is allowed as a hole.
+/// clash (e.g. `expected 'Int', got 'Real'`). The [`ALLOWLISTED_HOLE_RULES`]
+/// (`rare_rewrite`) are added to the checker's allowed-rules; `hole` and
+/// `lia_generic` are trusted natively by Carcara without being allowlisted.
 ///
-/// `Ok(false)` = fully re-checked (no holes) -> [`CarcaraAudit::Confirmed`].
-/// `Ok(true)` = re-checked but at least one trusted rewrite leaf was a hole ->
-/// [`CarcaraAudit::ConfirmedModuloRewrites`]. `Err` = a surfaced failure (a
-/// rejected proof, or a parse error) that is never silently trusted.
+/// `Ok(false)` = fully re-checked, no holes -> [`CarcaraAudit::Confirmed`].
+/// `Ok(true)` = re-checked but at least one step was trusted as a hole ->
+/// [`CarcaraAudit::ConfirmedModuloRewrites`] carrying the actual trusted-rule
+/// kinds + counts scanned from the proof. `Err` = a surfaced failure (a rejected
+/// proof, or a parse error), never folded into a confirmed state.
 #[cfg(feature = "carcara")]
 fn run_carcara_check(problem: &str, proof: &str) -> CarcaraAudit {
     let mut parser_config = carcara::parser::Config::new();
     parser_config.allow_int_real_subtyping = true;
 
     let mut checker_config = carcara::checker::Config::new();
-    checker_config
-        .allowed_rules
-        .insert(TRUSTED_REWRITE_RULE.to_string());
+    for &rule in ALLOWLISTED_HOLE_RULES {
+        checker_config.allowed_rules.insert(rule.to_string());
+    }
 
     match carcara::check(
         problem.as_bytes(),
@@ -540,10 +638,21 @@ fn run_carcara_check(problem: &str, proof: &str) -> CarcaraAudit {
         false,
     ) {
         Ok(false) => CarcaraAudit::Confirmed,
-        Ok(true) => CarcaraAudit::ConfirmedModuloRewrites(format!(
-            "re-checked end to end; cvc5's `{TRUSTED_REWRITE_RULE}` rewrite leaves trusted as holes \
-             (no in-process RARE rule database)"
-        )),
+        Ok(true) => {
+            // Carcara reported the proof as holey; enumerate which trusted-rule
+            // kinds it actually contains so the disclosure is exact. If the scan
+            // finds none (Carcara saw a hole our scan does not recognize), say so
+            // explicitly via a sentinel rather than reporting an empty, falsely
+            // reassuring set.
+            let mut trusted = count_trusted_hole_rules(proof);
+            if trusted.is_empty() {
+                trusted.push(TrustedRuleCount {
+                    rule: "unrecognized_hole".to_string(),
+                    count: 0,
+                });
+            }
+            CarcaraAudit::ConfirmedModuloRewrites(trusted)
+        }
         Err(e) => CarcaraAudit::Failed(format!("Carcara rejected cvc5's Alethe proof: {e}")),
     }
 }
@@ -699,7 +808,10 @@ mod tests {
 
         // ConfirmedModuloRewrites is a confirmation, but a weaker one; it is
         // never a failure and never silently equal to a full Confirmed.
-        let modulo = CarcaraAudit::ConfirmedModuloRewrites("rewrite leaves trusted".to_string());
+        let modulo = CarcaraAudit::ConfirmedModuloRewrites(vec![TrustedRuleCount {
+            rule: "hole".to_string(),
+            count: 2,
+        }]);
         assert!(modulo.is_confirmed());
         assert!(!modulo.is_failed());
         assert_ne!(modulo, CarcaraAudit::Confirmed);
@@ -716,22 +828,11 @@ mod tests {
     // --- WI-16 acceptance: the live cvc5 -> Alethe -> Carcara round-trip ---
     // (carcara feature: needs cvc5 linked AND carcara linked.)
 
+    /// The goal whose REAL cvc5 Alethe proof the round-trip / disclosure tests
+    /// share: a linear, provable goal `x >= 0 |- x + 1 > 0` over the reals.
     #[cfg(feature = "carcara")]
-    #[test]
-    fn valid_cvc5_proof_re_checks_clean_as_confirmed() {
-        // A linear, provable goal: x >= 0 |- x + 1 > 0 (over the reals). cvc5
-        // proves it (UNSAT on the negation), emits an Alethe proof, and Carcara
-        // must independently CONFIRM that proof.
-        //
-        // The pinned outcome is ConfirmedModuloRewrites: Carcara re-checks the
-        // proof end to end (assumptions, resolution, subproofs, theory lemmas,
-        // reaching the empty clause) but trusts cvc5's named `rare_rewrite`
-        // arithmetic-rewrite leaves as holes, because checking those requires
-        // cvc5's compiled RARE rewrite database which the in-process auditor
-        // does not have. That is the honest, achievable guarantee for cvc5's
-        // Alethe output -- NOT a false full check -- and it is strictly a real
-        // independent re-verification of the proof structure.
-        let prop = SmtProperty {
+    fn linear_acceptance_goal() -> SmtProperty {
+        SmtProperty {
             variables: vec![("x".to_string(), SmtSort::Real)],
             preconditions: vec![SmtExpr::Cmp(
                 CmpOp::Ge,
@@ -747,18 +848,90 @@ mod tests {
                 )),
                 Box::new(SmtExpr::RealLit(0.0)),
             ),
+        }
+    }
+
+    #[cfg(feature = "carcara")]
+    #[test]
+    fn valid_cvc5_proof_re_checks_as_confirmed_modulo_trusted_leaves() {
+        // cvc5 proves the goal (UNSAT on the negation) and emits an Alethe
+        // proof; Carcara re-checks it. The pinned outcome is
+        // ConfirmedModuloRewrites: Carcara checks most of the proof step by
+        // step, but the REAL cvc5 proof of even this simple linear goal leans on
+        // trusted holes (`hole` carrying ARITH_POLY_NORM_REL arithmetic, and
+        // `lia_generic`), so the audit is NOT a full hole-free re-derivation.
+        // This is the honest, achievable guarantee -- a real independent
+        // re-verification of the proof structure modulo cvc5's sound trusted
+        // leaves -- not a false full check.
+        let audit = audit_cvc5_proof(&linear_acceptance_goal(), 10_000);
+        let CarcaraAudit::ConfirmedModuloRewrites(trusted) = &audit else {
+            panic!("expected ConfirmedModuloRewrites, got {audit:?}");
         };
-        let audit = audit_cvc5_proof(&prop, 10_000);
-        assert!(
-            matches!(audit, CarcaraAudit::ConfirmedModuloRewrites(_)),
-            "Carcara must independently re-check cvc5's Alethe proof (modulo trusted \
-             rewrite leaves), got {audit:?}"
-        );
         assert!(
             audit.is_confirmed(),
-            "is_confirmed must hold for a re-checked proof"
+            "modulo-rewrites is still a confirmation"
         );
         assert!(!audit.is_failed(), "a re-checked proof is not a failure");
+        // The disclosure must be non-empty (the proof really does lean on
+        // trusted leaves), every disclosed kind must be a known trusted rule
+        // with a positive count, and the sentinel must NOT appear (every hole in
+        // a real cvc5 proof is one of the known kinds).
+        assert!(
+            !trusted.is_empty(),
+            "a modulo-rewrites outcome must disclose at least one trusted rule"
+        );
+        for t in trusted {
+            assert!(
+                TRUSTED_HOLE_RULES.contains(&t.rule.as_str()),
+                "disclosed rule `{}` must be a known trusted-hole rule",
+                t.rule
+            );
+            assert!(t.count > 0, "disclosed rule `{}` has a zero count", t.rule);
+            assert_ne!(
+                t.rule, "unrecognized_hole",
+                "a real cvc5 proof must not contain a hole the scan cannot name"
+            );
+        }
+    }
+
+    /// DRIFT GUARD for the disclosure: the trusted-rule set the audit reports
+    /// must EXACTLY match an independent scan of the captured Alethe proof. If
+    /// the enumeration ever drifts from what the proof actually contains (or from
+    /// what Carcara trusts), this fails. It also confirms -- by checking the real
+    /// proof text -- that the proof genuinely contains `hole` steps, so the
+    /// earlier false claim ("only rare_rewrite trusted; every other rule fully
+    /// checked") cannot silently return.
+    #[cfg(feature = "carcara")]
+    #[test]
+    fn modulo_rewrites_payload_exactly_matches_an_independent_proof_scan() {
+        let goal = linear_acceptance_goal();
+        let (_problem, alethe) =
+            capture_alethe_proof(&goal, 10_000).expect("cvc5 produces a proof for the linear goal");
+
+        // Independent scan of the captured proof.
+        let scanned = count_trusted_hole_rules(&alethe);
+
+        // The audit's disclosed set must equal the independent scan.
+        let audit = audit_cvc5_proof(&goal, 10_000);
+        let CarcaraAudit::ConfirmedModuloRewrites(disclosed) = audit else {
+            panic!("expected ConfirmedModuloRewrites");
+        };
+        assert_eq!(
+            disclosed, scanned,
+            "the disclosed trusted-rule set must match an independent proof scan"
+        );
+
+        // The real proof must contain `hole` steps with genuine content -- this
+        // is the fact the earlier docstring falsely denied.
+        assert!(
+            alethe.contains(":rule hole"),
+            "cvc5's Alethe proof of this goal contains `hole` (trusted-as-unchecked) steps; \
+             the audit must disclose them, not claim every non-rare_rewrite rule is checked"
+        );
+        assert!(
+            scanned.iter().any(|t| t.rule == "hole" && t.count > 0),
+            "the scan must count the `hole` steps the proof contains"
+        );
     }
 
     #[cfg(feature = "carcara")]

@@ -9,8 +9,10 @@ description = "Three-tier property verification: type check → SMT (cvc5) → f
 [features]
 smt = ["cvc5-rs", "num-rational"]
 # WI-16 Carcara auditability: re-check cvc5's Alethe proofs in-process for
-# independent auditability of the EUF/LIA/BV fragment. It audits cvc5's
-# output, so it implies `smt`. `gmp-mpfr-sys/use-system-libs` forces the
+# independent auditability of the linear-arithmetic / EUF fragment (the
+# SmtExpr/SmtSort surface has no bit-vector representation, so the bit-vector
+# slice of Alethe is not reachable here). It audits cvc5's output, so it
+# implies `smt`. `gmp-mpfr-sys/use-system-libs` forces the
 # transitive `rug -> gmp-mpfr-sys` build to LINK the system GMP/MPFR (needs
 # the `gmp-devel`/`mpfr-devel` headers) instead of compiling GMP+MPFR from C
 # source, keeping the build off the slow from-source path. carcara's `rug`
