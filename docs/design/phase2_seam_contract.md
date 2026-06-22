@@ -1,7 +1,10 @@
 # Phase 2 seam contract: the five surfaces Beacon pins against
 
-Status: PROPOSED, pending sign-off from the Beacon shell agent
-(`Chelis-Lang/beacon`, `~/Documents/scratch/beacon-bakeoff`).
+Status: SIGNED OFF by the Beacon shell agent (`Chelis-Lang/beacon`,
+`~/Documents/scratch/beacon-bakeoff`) with one correction to ① (recorded
+below). Surfaces 1, 3, 4 confirmed usable as shipped; surface 2 (`IrHandle`)
+is now frozen at the hash-addressed `WireDag` v1 shape the correction
+specified, and WI-3 populates against it.
 
 The verification-stack dispatch layer (WI-3 graph-extraction producer, WI-9
 `DischargeEngine` registry) exposes a small frozen API that an out-of-tree shell
@@ -32,32 +35,37 @@ impl Goal {
 
 `box_range` rejects an inverted/NaN interval as `GoalError::IllFormed`. Stable.
 
-## 2. `IrHandle`  — OPEN QUESTION ① for Beacon
+## 2. `IrHandle`  — CONFIRMED ① (Beacon correction applied)
 
 ```rust
-pub struct IrHandle { node: Option<u64> }   // private field
+pub struct IrHandle {                  // private fields
+    dag_hash: Option<String>,          // lowercase-hex sha256 of the serialized WireDag v1 bytes
+    root_index: Option<u64>,           // which WireDag.roots entry the goal's output selects
+}
 
 impl IrHandle {
-    pub const fn unpopulated() -> Self;
-    pub const fn from_node(node: u64) -> Self;   // WI-3 producer surface
+    pub fn unpopulated() -> Self;
+    pub fn from_wire_dag(dag_hash: String, root_index: u64) -> Self;  // WI-3 producer surface
     pub const fn is_populated(&self) -> bool;
-    pub const fn node(&self) -> Option<u64>;
+    pub fn dag_hash(&self) -> Option<&str>;
+    pub const fn root_index(&self) -> Option<u64>;
 }
 ```
 
-Today `IrHandle` is a bare node index, deliberately opaque so adding a payload
-later does not change the `Goal` shape OR pull a `chelis-ir` dependency into
-`chelis-prove` before a consumer needs it. It is NOT the serialized `WireDag`.
+**① RESOLVED.** Beacon's sign-off corrected the default assumption: Beacon does
+not consume a `node: u64` index, nor a borrow of an in-memory `chelis_ir::Dag`.
+It consumes the SERIALIZED `WireDag` v1 JSON bytes out of process: it parses the
+slice, asserts `schema_version == 1`, computes a sha256 over those bytes, and
+selects the output by `root_index`. So `IrHandle` addresses that artifact by its
+content hash (lowercase hex) plus a root index, NOT by a node id.
 
-**① How does Beacon's interval evaluator resolve a populated `IrHandle` to the
-actual `chelis_ir::Dag`?** Two options, pick the one your evaluator needs:
-- (a) `IrHandle` stays a `node: u64` index, and the `Dag` is handed to Beacon
-  separately (e.g. as a second argument or via the registry), so `chelis-prove`
-  keeps zero `chelis-ir` dependency. WI-3 populates `from_node(id)`.
-- (b) `IrHandle` carries a richer payload (a handle into / borrow of the
-  `chelis_ir::Dag`), which pulls `chelis-ir` into `chelis-prove`'s public API.
-
-Default assumption if unspecified: (a). Confirm or correct.
+`IrHandle` still holds only a hash + index: it does NOT carry a `chelis_ir::Dag`
+or a `WireDag` value, so populating it pulls no live IR dependency into
+`chelis-prove`'s public API. The WI-3 producer (which DOES have the IR in scope)
+serializes the `WireDag` v1, validates its `schema_version` at the producer
+boundary, hashes the bytes, and hands the digest + root index here via
+`from_wire_dag`. A bare `from_node(u64)` is removed: it addressed nothing a
+cross-process consumer could resolve.
 
 ## 3. `GoalShape::BoxRange`  — OPEN QUESTION ② for Beacon
 

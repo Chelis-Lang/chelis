@@ -5,10 +5,10 @@
 //! boundary (which already abstracts a single SMT backend). The seam expresses:
 //!
 //! - [`Goal`]: a canonical, engine-independent statement to discharge. It
-//!   carries an OPTIONAL in-memory IR back-reference ([`Goal::ir`]) which is a
-//!   handle to the internal compiler IR. In Phase 1 the cvc5 path leaves this
-//!   `None`; the graph-extraction seam (WI-3, deferred) populates it later. It
-//!   is deliberately NOT the serialized `WireDag`.
+//!   carries an OPTIONAL IR back-reference ([`Goal::ir`]) which addresses the
+//!   serialized `WireDag` v1 artifact a consumer (Beacon) deserializes. In
+//!   Phase 1 the cvc5 path leaves this unpopulated; the graph-extraction seam
+//!   (WI-3) populates it with the artifact's content hash + a root index.
 //! - [`Soundness`] and [`Qualifier`] / [`QualifierSet`]: the guarantee an
 //!   engine attaches to a discharge. The seven qualifier kinds are incomparable
 //!   on one axis, so they form a set, not a chain (the WI-6 verdict algebra
@@ -28,44 +28,70 @@
 
 use crate::tier_b::{SmtProperty, TierBResult};
 
-/// Opaque, type-erased in-memory back-reference to the internal compiler IR.
+/// A content-addressed back-reference to a serialized `WireDag` v1 artifact.
+///
+/// This is exactly what an out-of-tree consumer (Beacon) resolves: it parses
+/// the serialized `WireDag` v1 JSON bytes, asserts `schema_version == 1`,
+/// computes a sha256 over those bytes, and selects the output of interest by
+/// `root_index`. So the handle addresses that artifact by:
+///
+/// - [`dag_hash`](Self::dag_hash): the lowercase-hex sha256 of the serialized
+///   `WireDag` v1 bytes. A consumer recomputes the same digest over the bytes
+///   it received and compares for byte-identity; lowercase hex round-trips
+///   cleanly through JSON and is cheap to compare.
+/// - [`root_index`](Self::root_index): which `WireDag.roots` entry this goal's
+///   single scalar output corresponds to.
 ///
 /// In Phase 1 this is always unpopulated for the cvc5 path. The
-/// graph-extraction seam (WI-3, deferred) will give this a concrete payload
-/// (a handle to / index into the internal `chelis_ir::Dag`). It is modelled as
-/// an opaque handle now so adding the payload later does not change the
-/// [`Goal`] shape or pull a `chelis-ir` dependency into this crate before a
-/// consumer needs it.
-///
-/// It is NOT the serialized `WireDag`: this seam never reaches for the wire
-/// schema or its `schema_version`.
+/// graph-extraction seam (WI-3) populates it via [`from_wire_dag`](Self::from_wire_dag)
+/// once it has serialized and hashed the artifact. The handle stays a plain
+/// hash + index: it does NOT hold a `chelis_ir::Dag` or a `WireDag` value, so
+/// populating it pulls no live IR dependency into this crate; the producer
+/// computes the hash and hands it here.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct IrHandle {
-    /// Stable identifier of the IR graph this goal was extracted from, once a
-    /// producer populates it. `None` on the Phase 1 cvc5 path.
-    node: Option<u64>,
+    /// Lowercase-hex sha256 of the serialized `WireDag` v1 artifact this goal
+    /// was extracted from, once a producer populates it. `None` on the Phase 1
+    /// cvc5 path.
+    dag_hash: Option<String>,
+    /// Which `WireDag.roots` entry this goal's output corresponds to. `None`
+    /// on the Phase 1 cvc5 path.
+    root_index: Option<u64>,
 }
 
 impl IrHandle {
     /// The unpopulated handle used on the Phase 1 cvc5 path.
-    pub const fn unpopulated() -> Self {
-        Self { node: None }
+    pub fn unpopulated() -> Self {
+        Self {
+            dag_hash: None,
+            root_index: None,
+        }
     }
 
-    /// Construct a handle referencing a specific IR node/graph index. Reserved
-    /// for the WI-3 graph-extraction producer; unused on the cvc5 path.
-    pub const fn from_node(node: u64) -> Self {
-        Self { node: Some(node) }
+    /// Construct a handle addressing a serialized `WireDag` v1 artifact by its
+    /// content hash and the root index this goal's output selects. Reserved for
+    /// the WI-3 graph-extraction producer; unused on the cvc5 path. `dag_hash`
+    /// is the lowercase-hex sha256 of the serialized artifact bytes.
+    pub fn from_wire_dag(dag_hash: String, root_index: u64) -> Self {
+        Self {
+            dag_hash: Some(dag_hash),
+            root_index: Some(root_index),
+        }
     }
 
     /// Whether this handle has been populated by a producer.
     pub const fn is_populated(&self) -> bool {
-        self.node.is_some()
+        self.dag_hash.is_some()
     }
 
-    /// The referenced node index, if populated.
-    pub const fn node(&self) -> Option<u64> {
-        self.node
+    /// The content hash of the addressed `WireDag` v1 artifact, if populated.
+    pub fn dag_hash(&self) -> Option<&str> {
+        self.dag_hash.as_deref()
+    }
+
+    /// The root index this goal's output selects, if populated.
+    pub const fn root_index(&self) -> Option<u64> {
+        self.root_index
     }
 }
 
@@ -109,8 +135,9 @@ pub enum GoalShape {
 pub struct Goal {
     /// What is being asserted.
     pub shape: GoalShape,
-    /// Optional in-memory IR back-reference. Unpopulated on the Phase 1 cvc5
-    /// path; populated later by the WI-3 graph-extraction seam.
+    /// Optional back-reference to the serialized `WireDag` v1 artifact this
+    /// goal was extracted from (content hash + root index). Unpopulated on the
+    /// Phase 1 cvc5 path; populated by the WI-3 graph-extraction seam.
     pub ir: IrHandle,
 }
 
@@ -540,7 +567,39 @@ mod tests {
     fn goal_smt_leaves_ir_handle_unpopulated_in_phase_1() {
         let goal = Goal::smt(trivially_true_property());
         assert!(!goal.ir.is_populated());
+        assert!(goal.ir.dag_hash().is_none());
+        assert!(goal.ir.root_index().is_none());
         assert!(goal.as_smt().is_some());
+    }
+
+    #[test]
+    fn ir_handle_unpopulated_addresses_nothing() {
+        let handle = IrHandle::unpopulated();
+        assert!(!handle.is_populated());
+        assert!(handle.dag_hash().is_none());
+        assert!(handle.root_index().is_none());
+        assert_eq!(handle, IrHandle::default());
+    }
+
+    #[test]
+    fn ir_handle_from_wire_dag_carries_hash_and_root_index() {
+        // The WI-3 producer surface: a content hash (lowercase-hex sha256 of
+        // the serialized WireDag v1 bytes) plus the root index the goal's
+        // output selects. The handle holds only the hash + index -- never a
+        // Dag or WireDag value.
+        let hash = "a".repeat(64);
+        let handle = IrHandle::from_wire_dag(hash.clone(), 2);
+        assert!(handle.is_populated());
+        assert_eq!(handle.dag_hash(), Some(hash.as_str()));
+        assert_eq!(handle.root_index(), Some(2));
+    }
+
+    #[test]
+    fn goal_with_ir_attaches_a_populated_handle() {
+        let handle = IrHandle::from_wire_dag("b".repeat(64), 0);
+        let goal = Goal::smt(trivially_true_property()).with_ir(handle.clone());
+        assert!(goal.ir.is_populated());
+        assert_eq!(goal.ir, handle);
     }
 
     #[cfg(feature = "smt")]
