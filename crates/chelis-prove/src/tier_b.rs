@@ -472,7 +472,35 @@ pub fn lower_to_cvc5(
                     "non-finite real literal `{value}` cannot lower to cvc5 (routes to Tier C)"
                 ));
             }
-            (tm.mk_real_from_str(&format!("{value}")), SmtSort::Real)
+            // SOUNDNESS: lower to the literal's EXACT f64 VALUE, not its decimal
+            // spelling. `format!("{value}")` renders the shortest decimal that
+            // round-trips (e.g. "0.1"), which cvc5 then parses as the EXACT
+            // DECIMAL 1/10 -- a different number from the `f64` the program
+            // actually runs (`0.1_f64` == 0.1000000000000000055...). Reasoning
+            // over the exact decimal let cvc5 PROVE float goals that are FALSE
+            // at runtime (e.g. `0.1 + 0.2 == 0.3` holds in exact reals but
+            // `0.1_f64 + 0.2_f64 == 0.30000000000000004 != 0.3`), diverging
+            // from the concrete f64 evaluator (`concrete_eval`, the ground
+            // truth). Render the f64 as its exact rational `numerator/
+            // denominator` (cvc5 parses "n/d" as an exact rational), the same
+            // value the runtime evaluator uses. `from_float` returns `Some` for
+            // every finite f64 (only `None` on inf/NaN, already rejected
+            // above).
+            //
+            // KNOWN LIMITATION (not closed here): this fixes only the LITERAL
+            // representation. cvc5 still performs EXACT-RATIONAL arithmetic over
+            // these f64-valued literals; it does NOT model the IEEE-754
+            // rounding of each `+`/`-`/`*`/`/` the runtime applies. A goal whose
+            // truth depends on operation rounding (not just literal value) can
+            // still diverge from the f64 runtime. Full FP-rounding soundness is
+            // a separate, larger problem (a bit-precise float theory); this
+            // change only makes each literal match runtime, closing the
+            // exact-decimal-literal divergence.
+            let exact = num_rational::BigRational::from_float(*value).ok_or_else(|| {
+                format!("real literal `{value}` has no exact rational (routes to Tier C)")
+            })?;
+            let rational_str = format!("{}/{}", exact.numer(), exact.denom());
+            (tm.mk_real_from_str(&rational_str), SmtSort::Real)
         }
         SmtExpr::IntLit(value) => (tm.mk_integer(*value), SmtSort::Int),
         SmtExpr::BoolLit(value) => {
