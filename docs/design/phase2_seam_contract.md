@@ -67,6 +67,21 @@ boundary, hashes the bytes, and hands the digest + root index here via
 `from_wire_dag`. A bare `from_node(u64)` is removed: it addressed nothing a
 cross-process consumer could resolve.
 
+**Finite-float precondition on the content-address path.** The hash is taken
+over the JSON serialization of the `WireDag`, and `serde_json` serializes a
+non-finite f64 (`NaN` / `+inf` / `-inf`) as the JSON token `null`. That breaks
+content addressing two ways: the bytes no longer parse back as a `WireDag` (a
+consumer's `from_validated_json` fails on `null`-where-`f64`-expected, *after*
+the self-consistent hash already matched, so it is silent at the producer), and
+`+inf` / `-inf` / `NaN` all collapse to the same `null`, so three distinct DAGs
+would share one hash. **The content-address path therefore requires finite
+floats: the WI-3 producer rejects any `WireDag` carrying a non-finite node-op
+float at its boundary** (before serialize + hash), the same fail-closed posture
+as the `schema_version` check. A canonical non-finite representation — to support
+content-addressing DAGs that legitimately contain `inf`/`NaN` — is a tracked
+follow-up requiring a coordinated `WireDag`-JSON-format change with Beacon's
+consume path; it is out of scope for WI-3.
+
 ## 3. `GoalShape::BoxRange`  — OPEN QUESTION ② for Beacon
 
 ```rust

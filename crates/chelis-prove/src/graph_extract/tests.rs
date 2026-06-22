@@ -370,3 +370,193 @@ fn unlowerable_source_surfaces_a_lower_failure() {
         "expected a lowering failure, got {err:?}"
     );
 }
+
+// ===========================================================================
+// Non-finite float guard (the critical silent-corruption fix).
+//
+// serde_json serializes a non-finite f64 (NaN / +inf / -inf) as `null`,
+// which would (a) produce a self-consistent hash over bytes a consumer
+// cannot parse back as a WireDag, and (b) collapse +inf / -inf / NaN to one
+// hash. The producer must REJECT such a DAG at the boundary, before hashing.
+// ===========================================================================
+
+/// A single-node `WireDag` v1 carrying `op`, rooted at node 0, output `out`.
+fn single_op_dag(op: WireRiscOp) -> WireDag {
+    WireDag {
+        schema_version: WIRE_DAG_SCHEMA_VERSION,
+        nodes: vec![WireDagNode {
+            id: 0,
+            op,
+            inputs: vec![],
+            output_type: WireTensorType {
+                dims: vec![WireDimInfo::Lit { size: 1 }],
+                precision: "f32".to_string(),
+            },
+        }],
+        roots: vec![0],
+    }
+}
+
+fn extract_single_op(op: WireRiscOp) -> Result<ExtractedGoal, GraphExtractError> {
+    let mut named_roots = BTreeMap::new();
+    named_roots.insert("out".to_string(), 0usize);
+    box_range_goal_from_wire_dag(
+        &single_op_dag(op),
+        &named_roots,
+        input_box(&[("x", -1.0, 1.0)]),
+        output_range("out", 0.0, 1.0),
+    )
+}
+
+#[test]
+fn non_finite_const_from_real_source_is_rejected_not_corrupted() {
+    // `1.0e400` overflows f64 to +inf and lowers to Const(inf). Before the
+    // guard, this produced an artifact whose bytes serialize the inf as
+    // `null` -- a self-consistent hash over UNPARSEABLE bytes (silent
+    // corruption). It must now be rejected with the typed error.
+    let err = box_range_goal_from_source(
+        "out = (1.0e400 : tensor[f32])\n",
+        SourceKind::Surf,
+        input_box(&[("x", -1.0, 1.0)]),
+        output_range("out", 0.0, 1.0),
+    )
+    .expect_err("a non-finite Const from real source must be rejected, not corrupted");
+    assert!(
+        matches!(err, GraphExtractError::NonFiniteValue { .. }),
+        "expected NonFiniteValue, got {err:?}"
+    );
+}
+
+#[test]
+fn finite_extreme_const_from_real_source_still_passes_and_hashes() {
+    // The positive twin: a finite extreme (1e300) is NOT non-finite, so it
+    // serializes as a real JSON number and produces a populated goal.
+    let extracted = box_range_goal_from_source(
+        "out = (1.0e300 : tensor[f32])\n",
+        SourceKind::Surf,
+        input_box(&[("x", -1.0, 1.0)]),
+        output_range("out", 0.0, 1.0),
+    )
+    .expect("a finite extreme const passes the boundary");
+    assert!(extracted.goal.ir.is_populated());
+    // The bytes round-trip as a WireDag (the corruption the guard prevents).
+    let parsed: WireDag = serde_json::from_slice(&extracted.wire_dag_bytes)
+        .expect("a finite-float artifact parses back as a WireDag");
+    parsed
+        .validate_schema_version()
+        .expect("the artifact is a supported version");
+}
+
+#[test]
+fn each_non_finite_const_variant_is_rejected() {
+    // +inf, -inf, and NaN would all serialize to the same `null` (the
+    // collision). Each must be rejected so the collision is never reachable.
+    for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+        let err = extract_single_op(WireRiscOp::Const { value })
+            .expect_err("a non-finite Const must be rejected");
+        match err {
+            GraphExtractError::NonFiniteValue { node, field } => {
+                assert_eq!(node, 0);
+                assert_eq!(field, "value");
+            }
+            other => panic!("expected NonFiniteValue for {value}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn every_f64_bearing_op_field_is_guarded() {
+    // EXHAUSTIVE over the f64-bearing WireRiscOp variants: each f64 field,
+    // when non-finite, must be rejected and must NAME the offending field.
+    // This is the systemic lock -- if a new op adds an f64 field, the
+    // production match (no wildcard) stops compiling AND this list must grow.
+    let cases: Vec<(WireRiscOp, &str)> = vec![
+        (
+            WireRiscOp::UniformLike {
+                low: f64::NAN,
+                high: 1.0,
+                seed: 0,
+            },
+            "low",
+        ),
+        (
+            WireRiscOp::UniformLike {
+                low: 0.0,
+                high: f64::INFINITY,
+                seed: 0,
+            },
+            "high",
+        ),
+        (
+            WireRiscOp::Dropout {
+                rate: f64::NEG_INFINITY,
+                seed: 0,
+            },
+            "rate",
+        ),
+        (
+            WireRiscOp::Pad {
+                padding: vec![(0, 0)],
+                fill: f64::NAN,
+            },
+            "fill",
+        ),
+        (
+            WireRiscOp::Const {
+                value: f64::INFINITY,
+            },
+            "value",
+        ),
+    ];
+
+    // Pin the count so a future f64 field cannot silently shrink this list.
+    assert_eq!(
+        cases.len(),
+        5,
+        "5 f64-bearing op fields: UniformLike.low, UniformLike.high, \
+         Dropout.rate, Pad.fill, Const.value. Update this test AND the \
+         production guard if a new op carries an f64."
+    );
+
+    for (op, expected_field) in cases {
+        let err = extract_single_op(op).expect_err("a non-finite op field must be rejected");
+        match err {
+            GraphExtractError::NonFiniteValue { node, field } => {
+                assert_eq!(node, 0);
+                assert_eq!(
+                    field, expected_field,
+                    "the rejection must name the offending field"
+                );
+            }
+            other => panic!("expected NonFiniteValue naming `{expected_field}`, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn finite_f64_bearing_ops_pass_the_finite_guard() {
+    // The positive twin: the same op variants with FINITE floats pass the
+    // guard (they are rejected later only if some other check fails, but the
+    // finite guard itself must not reject them).
+    let finite_ops = [
+        WireRiscOp::UniformLike {
+            low: -1.0,
+            high: 1.0,
+            seed: 0,
+        },
+        WireRiscOp::Dropout { rate: 0.5, seed: 0 },
+        WireRiscOp::Pad {
+            padding: vec![(0, 0)],
+            fill: 0.0,
+        },
+        WireRiscOp::Const { value: 3.5 },
+    ];
+    for op in finite_ops {
+        let extracted =
+            extract_single_op(op.clone()).expect("a finite-float op passes the finite guard");
+        assert!(
+            extracted.goal.ir.is_populated(),
+            "finite op {op:?} should produce a populated goal"
+        );
+    }
+}

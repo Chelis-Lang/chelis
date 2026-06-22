@@ -21,6 +21,18 @@
 //! thing is the lowered thing. (Cross-invocation hash-match with the build
 //! is a property to be aware of; the shape tests here verify within-run.)
 //!
+//! ## Finite-float precondition
+//!
+//! The content-address path requires FINITE floats. `serde_json` serializes
+//! a non-finite f64 (NaN / +inf / -inf) as the JSON token `null`, which both
+//! fails a consumer's round-trip parse and collapses the three non-finite
+//! values to one byte sequence (one hash). [`check_finite_floats`] rejects a
+//! DAG carrying any non-finite node-op float at the producer boundary, before
+//! serialize + hash, with [`GraphExtractError::NonFiniteValue`] — never
+//! hashing an artifact a consumer cannot parse. A canonical non-finite
+//! representation (to support content-addressing such DAGs) is a tracked
+//! follow-up requiring a coordinated `WireDag`-JSON-format change with Beacon.
+//!
 //! ## What this is NOT
 //!
 //! This producer is standalone machinery, not a rewire of the SMT path.
@@ -42,7 +54,7 @@
 
 use chelis_compiler_api::compiler;
 use chelis_compiler_api::schema::{
-    LowerRequest, SourceKind, WIRE_DAG_SCHEMA_VERSION, WireDag, WireDagSchemaError,
+    LowerRequest, SourceKind, WIRE_DAG_SCHEMA_VERSION, WireDag, WireDagSchemaError, WireRiscOp,
 };
 use sha2::{Digest, Sha256};
 
@@ -101,6 +113,112 @@ pub enum GraphExtractError {
     /// Carries the underlying [`GoalError`].
     #[error("ill-formed box/range bounds: {0}")]
     IllFormedGoal(#[from] GoalError),
+
+    /// A node op carries a NON-FINITE float (NaN / +inf / -inf), so the DAG
+    /// cannot be content-addressed: `serde_json` serializes a non-finite f64
+    /// as the JSON token `null`, which (a) does NOT parse back as an f64 (a
+    /// consumer's deserialize fails), and (b) collapses +inf / -inf / NaN to
+    /// ONE byte sequence, so three distinct DAGs would collide on one hash.
+    /// The producer fails CLOSED here (same posture as the schema-version
+    /// check) rather than hashing an artifact a consumer cannot parse. The
+    /// content-address path requires finite floats; see
+    /// `docs/design/phase2_seam_contract.md`.
+    #[error(
+        "node {node} op field `{field}` is a non-finite float (NaN/inf); the content-address path requires finite floats"
+    )]
+    NonFiniteValue { node: usize, field: &'static str },
+}
+
+/// Reject a [`WireDag`] that carries any non-finite float in a node op,
+/// failing closed BEFORE serialize + hash.
+///
+/// `serde_json` serializes a non-finite f64 (NaN / +inf / -inf) as the JSON
+/// token `null`. That breaks content addressing two ways: the bytes do not
+/// parse back as a `WireDag` (a consumer's deserialize fails on
+/// `null`-where-f64-expected, AFTER the self-consistent hash already matched,
+/// so it is silent at the producer), and +inf / -inf / NaN all collapse to
+/// the same `null`, so three distinct DAGs would share one hash. `to_vec`
+/// returns `Ok(null)` rather than `Err`, so the serialize `.expect` never
+/// fires — this guard is the only thing that catches it.
+///
+/// The match is EXHAUSTIVE with no wildcard, so a future `WireRiscOp` variant
+/// forces a compile error here rather than silently slipping the guard; the
+/// f64-bearing variants are checked and the f64-free ones are listed
+/// explicitly. The `every_f64_bearing_op_field_is_guarded` test pins the
+/// f64-bearing field set so the list cannot drift unnoticed.
+fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
+    fn reject_if_non_finite(
+        node: usize,
+        field: &'static str,
+        value: f64,
+    ) -> Result<(), GraphExtractError> {
+        if value.is_finite() {
+            Ok(())
+        } else {
+            Err(GraphExtractError::NonFiniteValue { node, field })
+        }
+    }
+
+    for n in &wire_dag.nodes {
+        let id = n.id;
+        match &n.op {
+            // --- f64-bearing ops: check EVERY f64 field ---
+            WireRiscOp::UniformLike { low, high, .. } => {
+                reject_if_non_finite(id, "low", *low)?;
+                reject_if_non_finite(id, "high", *high)?;
+            }
+            WireRiscOp::Dropout { rate, .. } => reject_if_non_finite(id, "rate", *rate)?,
+            WireRiscOp::Pad { fill, .. } => reject_if_non_finite(id, "fill", *fill)?,
+            WireRiscOp::Const { value } => reject_if_non_finite(id, "value", *value)?,
+
+            // --- f64-free ops: no float to check. Listed explicitly (no
+            // wildcard) so a new variant breaks the build until someone
+            // decides whether it carries an f64. ---
+            WireRiscOp::Add
+            | WireRiscOp::Mul
+            | WireRiscOp::Div
+            | WireRiscOp::CmpLt
+            | WireRiscOp::MaxElem
+            | WireRiscOp::Neg
+            | WireRiscOp::Recip
+            | WireRiscOp::Exp
+            | WireRiscOp::Log
+            | WireRiscOp::Sin
+            | WireRiscOp::Sqrt
+            | WireRiscOp::Cos
+            | WireRiscOp::Tan
+            | WireRiscOp::Atan
+            | WireRiscOp::Abs
+            | WireRiscOp::Floor
+            | WireRiscOp::Ceil
+            | WireRiscOp::Sum { .. }
+            | WireRiscOp::MaxReduce { .. }
+            | WireRiscOp::MinReduce { .. }
+            | WireRiscOp::ProdReduce { .. }
+            | WireRiscOp::ReduceWindow { .. }
+            | WireRiscOp::ReduceWindowGrad { .. }
+            | WireRiscOp::Argmax { .. }
+            | WireRiscOp::Argmin { .. }
+            | WireRiscOp::Reshape { .. }
+            | WireRiscOp::Permute { .. }
+            | WireRiscOp::Expand { .. }
+            | WireRiscOp::OneHot { .. }
+            | WireRiscOp::Shrink { .. }
+            | WireRiscOp::Stride { .. }
+            | WireRiscOp::Load { .. }
+            | WireRiscOp::Store { .. }
+            | WireRiscOp::Copy
+            | WireRiscOp::Drop
+            | WireRiscOp::Realize
+            | WireRiscOp::Cast { .. }
+            | WireRiscOp::FusedElem { .. }
+            | WireRiscOp::BlasMatmul { .. }
+            | WireRiscOp::Gather { .. }
+            | WireRiscOp::ScatterAdd { .. }
+            | WireRiscOp::Scatter { .. } => {}
+        }
+    }
+    Ok(())
 }
 
 /// Serialize a [`WireDag`] to canonical JSON bytes for hashing.
@@ -110,6 +228,14 @@ pub enum GraphExtractError {
 /// `WireDag.roots` / `WireDagNode.inputs` are ordered `Vec`s, so equal DAGs
 /// produce byte-identical output. This is the canonical artifact a consumer
 /// recomputes its sha256 over.
+///
+/// PRECONDITION: every float in the DAG's node ops is FINITE. A non-finite
+/// f64 serializes as the JSON token `null` (not a number), which both breaks
+/// round-trip parse and collapses +inf / -inf / NaN to one byte sequence, so
+/// the byte-identical-for-equal-DAGs property holds ONLY for finite floats.
+/// [`check_finite_floats`] enforces this precondition at the producer
+/// boundary before this is called, so by the time a DAG reaches here it
+/// carries only finite floats and the canonical claim is true.
 fn serialize_wire_dag(wire_dag: &WireDag) -> Vec<u8> {
     serde_json::to_vec(wire_dag).expect("WireDag serializes to JSON")
 }
@@ -138,8 +264,9 @@ pub fn name_sorted_input_box(mut dims: Vec<(String, f64, f64)>) -> IntervalBox {
 /// its `named_roots`, addressing the goal's ONE scalar output by name.
 ///
 /// This is the pure core of the producer: it asserts the DAG's schema
-/// version at the boundary (failing closed on an unsupported version),
-/// serializes + hashes the canonical bytes, resolves the root index for
+/// version AND that every node-op float is finite at the boundary (failing
+/// closed on an unsupported version or a non-finite float), serializes +
+/// hashes the canonical bytes, resolves the root index for
 /// `output_range.output` via `named_roots`, and builds the box/range goal
 /// with a populated [`IrHandle`]. The input box is emitted name-sorted.
 ///
@@ -158,6 +285,12 @@ pub fn box_range_goal_from_wire_dag(
     wire_dag
         .validate_schema_version()
         .map_err(GraphExtractError::SchemaRejected)?;
+
+    // Fail closed on a non-finite float before hashing: serde_json emits a
+    // non-finite f64 as `null`, which would produce a self-consistent hash
+    // over bytes a consumer cannot parse (and would collapse +inf/-inf/NaN to
+    // one hash). Same boundary posture as the schema-version check.
+    check_finite_floats(wire_dag)?;
 
     // Resolve the goal's single output to a root index by NAME (Beacon's
     // Load seeding is name-addressed; a positional index would force a
