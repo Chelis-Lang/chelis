@@ -606,6 +606,7 @@ dependencies = [
  "cvc5-rs",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
 ]
 
