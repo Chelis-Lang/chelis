@@ -7,7 +7,7 @@ use crate::compiler;
 use crate::schema::{
     ApiEnvelope, BatchRequestEnvelope, BatchResultEnvelope, CheckRequest, CompileRequest,
     DecompileRequest, DesugarRequest, EvalRequest, GradRequest, LowerRequest, ParseRequest,
-    ValidateRequest,
+    ReplaceFunctionBodyRequest, ValidateRequest,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -24,6 +24,7 @@ pub fn router() -> Router {
         .route("/grad", post(grad))
         .route("/validate", post(validate))
         .route("/decompile", post(decompile))
+        .route("/replace_function_body", post(replace_function_body))
         .route("/batch", post(batch))
         .with_state(AppState)
 }
@@ -98,6 +99,15 @@ async fn decompile(
     Json(request): Json<DecompileRequest>,
 ) -> Json<ApiEnvelope<crate::schema::DecompileResult>> {
     Json(compiler::result_envelope(compiler::decompile(request)))
+}
+
+async fn replace_function_body(
+    State(_state): State<AppState>,
+    Json(request): Json<ReplaceFunctionBodyRequest>,
+) -> Json<ApiEnvelope<crate::schema::ReplaceFunctionBodyResult>> {
+    Json(compiler::result_envelope(compiler::replace_function_body(
+        request,
+    )))
 }
 
 async fn batch(

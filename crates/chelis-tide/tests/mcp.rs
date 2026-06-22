@@ -15,6 +15,198 @@ out = (add(copy(x), x) : tensor[4, f32])
 const SIMPLE_DEEP: &str = r#"(def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
 "#;
 
+/// The canonical Deep `chelis deep` emits for `economoist/src/growth.ch`:
+/// the Gordon-growth present-value model, one `f32 -> f32 -> f32 -> f32`
+/// function `gordon_pv` whose body is `d / (r - g)`. A real module so the
+/// fragment body-replacement check runs against a genuine held context, not a
+/// synthetic stub.
+const GROWTH_DEEP: &str = r#"(module {}
+  economoist.growth
+  (export {} gordon_pv)
+  (defsig {}
+    gordon_pv
+    (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32) (t-prim {} f32)))
+  (def {}
+    gordon_pv
+    (fn {}
+      (params {}
+        (d {type: (t-prim {} f32)})
+        (r {type: (t-prim {} f32)})
+        (g {type: (t-prim {} f32)}))
+      (app {span: "surf:1852..1862"}
+        (var {} div)
+        (var {span: "surf:1852..1853"} d)
+        (app {span: "surf:1857..1862"}
+          (var {} sub)
+          (var {span: "surf:1857..1858"} r)
+          (var {span: "surf:1861..1862"} g))))))
+"#;
+
+/// A well-typed replacement body for `gordon_pv`: `d * r`, still
+/// `(f32, f32, f32) -> f32`, so the fragment check accepts it.
+const GROWTH_WELL_TYPED_BODY: &str = "(app {} (var {} mul) (var {} d) (var {} r))";
+
+/// An ill-typed replacement body for `gordon_pv`: casting `d` to `f64`
+/// returns `f64` from an `f32`-declared function, a precision mismatch the
+/// type pass rejects.
+const GROWTH_ILL_TYPED_BODY: &str = "(cast {} (var {} d) (t-prim {} f64))";
+
+fn call_replace(arguments: serde_json::Value) -> serde_json::Value {
+    handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":99,
+        "method":"tools/call",
+        "params":{"name":"chelis_replace_function_body","arguments":arguments}
+    }))
+    .expect("replace_function_body response")
+}
+
+/// Success case: replacing `gordon_pv`'s body with a well-typed expression
+/// returns the changed def and the rewritten module as canonical Deep. The
+/// returned `module_deep` is asserted to round-trip (parse_str_strict +
+/// print_canonical is idempotent) and to be accepted by a full
+/// `chelis_compiler_api` check, so the verdict the tool reports is the same
+/// verdict full `chelis check` would reach (the Phase B parity contract).
+#[test]
+fn replace_function_body_accepts_well_typed_replacement() {
+    let response = call_replace(json!({
+        "module": GROWTH_DEEP,
+        "function_name": "gordon_pv",
+        "new_body": GROWTH_WELL_TYPED_BODY,
+    }));
+    assert_eq!(
+        response["result"]["isError"], false,
+        "well-typed replacement is not an error: {}",
+        response["result"]["structuredContent"]
+    );
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["ok"], true);
+    let result = &structured["result"];
+    let module_deep = result["module_deep"].as_str().expect("module_deep string");
+    let changed_def_deep = result["changed_def_deep"]
+        .as_str()
+        .expect("changed_def_deep string");
+
+    // The changed def carries the new body and the original name.
+    assert!(
+        changed_def_deep.contains("gordon_pv"),
+        "changed def names the function: {changed_def_deep}"
+    );
+    assert!(
+        changed_def_deep.contains("mul"),
+        "changed def carries the new `mul` body: {changed_def_deep}"
+    );
+
+    // `module_deep` is canonical: parse_str_strict + print_canonical is a
+    // fixed point.
+    let reparsed =
+        chelis_deep::parser::parse_str_strict(module_deep).expect("module_deep reparses");
+    let reprinted = chelis_deep::printer::print_canonical(&reparsed);
+    assert_eq!(
+        reprinted, module_deep,
+        "module_deep is canonical (round-trip idempotent)"
+    );
+
+    // Full `chelis check` of the rewritten module accepts it with zero
+    // errors: the fragment verdict agrees with the whole-program checker.
+    let check = chelis_compiler_api::compiler::check(chelis_compiler_api::schema::CheckRequest {
+        source_kind: chelis_compiler_api::schema::SourceKind::Deep,
+        source: module_deep.to_string(),
+    })
+    .expect("rewritten module checks");
+    assert!(
+        check.errors.is_empty(),
+        "full check of the rewritten module is clean: {:?}",
+        check.errors
+    );
+}
+
+/// Structured-error case: an unparseable `new_body` is a parse-stage failure
+/// (stage `replace`, kind `deep_parse_error`), not a check failure.
+#[test]
+fn replace_function_body_unparseable_body_is_parse_error() {
+    let response = call_replace(json!({
+        "module": GROWTH_DEEP,
+        "function_name": "gordon_pv",
+        "new_body": "(app {} (var {} mul) (var {} d)",
+    }));
+    assert_eq!(response["result"]["isError"], true);
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["ok"], false);
+    assert_eq!(structured["stage"], "replace");
+    let errors = structured["errors"].as_array().expect("errors array");
+    assert!(!errors.is_empty());
+    assert_eq!(errors[0]["kind"], "deep_parse_error");
+}
+
+/// Structured-error case: a `new_body` that parses to more than one Deep
+/// expression is rejected at the parse stage with a clear message, not
+/// silently truncated to the first expression.
+#[test]
+fn replace_function_body_multi_expression_body_is_parse_error() {
+    let response = call_replace(json!({
+        "module": GROWTH_DEEP,
+        "function_name": "gordon_pv",
+        "new_body": "(var {} d) (var {} r)",
+    }));
+    assert_eq!(response["result"]["isError"], true);
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["stage"], "replace");
+    let errors = structured["errors"].as_array().expect("errors array");
+    assert_eq!(errors[0]["kind"], "deep_parse_error");
+    assert!(
+        errors[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("exactly one"),
+        "the message names the one-expression contract: {}",
+        errors[0]["message"]
+    );
+}
+
+/// Structured-error case: a `function_name` absent from the module is a
+/// name-resolution failure (stage `name-resolution`, kind
+/// `name_resolution_error`).
+#[test]
+fn replace_function_body_unknown_function_is_name_resolution_error() {
+    let response = call_replace(json!({
+        "module": GROWTH_DEEP,
+        "function_name": "absent_function",
+        "new_body": GROWTH_WELL_TYPED_BODY,
+    }));
+    assert_eq!(response["result"]["isError"], true);
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["ok"], false);
+    assert_eq!(structured["stage"], "name-resolution");
+    let errors = structured["errors"].as_array().expect("errors array");
+    assert_eq!(errors[0]["kind"], "name_resolution_error");
+}
+
+/// Structured-error case: an ill-typed replacement body is a type failure
+/// (stage `check`, kind `type_error`). The forward-compatible `deep_path`
+/// slot is absent on the wire in L0 (it serializes only when populated).
+#[test]
+fn replace_function_body_ill_typed_body_is_type_error() {
+    let response = call_replace(json!({
+        "module": GROWTH_DEEP,
+        "function_name": "gordon_pv",
+        "new_body": GROWTH_ILL_TYPED_BODY,
+    }));
+    assert_eq!(response["result"]["isError"], true);
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["ok"], false);
+    assert_eq!(structured["stage"], "check");
+    let errors = structured["errors"].as_array().expect("errors array");
+    assert_eq!(errors[0]["kind"], "type_error");
+    // L0 never populates the forward-compatible Deep-path slot, so it must be
+    // absent from the wire payload (skip-if-none).
+    assert!(
+        errors[0].get("deep_path").is_none(),
+        "deep_path is omitted on the wire in L0: {}",
+        errors[0]
+    );
+}
+
 #[test]
 fn initialize_and_tool_discovery_work() {
     let init = handle_message(&json!({
@@ -49,9 +241,31 @@ fn initialize_and_tool_discovery_work() {
             "chelis_eval",
             "chelis_grad",
             "chelis_validate",
+            "chelis_replace_function_body",
             "chelis_prove",
         ]
     );
+
+    let replace_tool = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "chelis_replace_function_body")
+        .expect("replace_function_body tool");
+    for property in ["module", "function_name", "new_body"] {
+        assert_eq!(
+            replace_tool["inputSchema"]["properties"][property]["type"], "string",
+            "replace tool exposes `{property}` as a string"
+        );
+        assert!(
+            replace_tool["inputSchema"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == property),
+            "replace tool requires `{property}`"
+        );
+    }
 
     let check_tool = tools["result"]["tools"]
         .as_array()

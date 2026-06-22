@@ -323,6 +323,7 @@ pub fn build_stdlib_context(
                     got: None,
                     suggestions: vec![],
                     span: None,
+                    deep_path: None,
                 }],
             })?
             .into_exprs();
@@ -351,6 +352,7 @@ pub fn build_stdlib_context(
                 got: None,
                 suggestions: vec![],
                 span: None,
+                deep_path: None,
             })
             .collect(),
     })?;
