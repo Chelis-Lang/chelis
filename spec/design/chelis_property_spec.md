@@ -168,7 +168,7 @@ that the module type-checked and every obligation was discharged.
 summary record.
 
 ```json
-{"kind":"property","name":"call_price_non_negative","status":"passed","composite_verdict":"proven_modulo_fuzz_validated_contract","assumptions":[],"samples":100,"seed":0}
+{"kind":"property","name":"call_price_non_negative","status":"passed","composite_verdict":"fuzz_validated_empirical","assumptions":[],"samples":100,"seed":0}
 {"kind":"property","name":"req_PRC_001","status":"failed","composite_verdict":"failed","assumptions":[],"samples":1,"seed":0,"source":{"kind":"bridge:c-earchin","spans":"references/pricing_rules.spans.json"}}
 {"kind":"property","name":"tensor_symbolic_shape","status":"unsupported","composite_verdict":"unsupported","assumptions":[],"reason":"symbolic tensor dimensions are not supported in L2 v1"}
 {"kind":"summary","total":3,"passed":1,"failed":1,"unsupported":1,"errors":0}
@@ -178,10 +178,18 @@ Every `{kind:"property"}` and `{kind:"obligation"}` result record carries:
 
 - `composite_verdict`: one of `proven`,
   `proven_modulo_fuzz_validated_contract`,
-  `proven_modulo_asserted_axiom`, `invalid`, `unsupported`, or `failed`.
+  `proven_modulo_asserted_axiom`, `fuzz_validated_empirical`, `invalid`,
+  `unsupported`, or `failed`.
   `status:"passed"` remains the compatibility bucket; consumers that need
   proof strength must read `composite_verdict`. A fuzz-validated result must
-  not render as `composite_verdict:"proven"`.
+  not render as `composite_verdict:"proven"` or any `proven_*` badge. A
+  property whose BASE was established by fuzz sampling only (no SMT proof
+  underneath -- a non-smt build, or a `--tier auto` fuzz fall-through, or
+  `--tier fuzz-only`) renders `fuzz_validated_empirical`: a green-exit
+  empirical pass that is not proven. The `proven_modulo_fuzz_validated_contract`
+  badge is reserved for an exact SMT base discharged modulo a fuzz-validated
+  CONTRACT assumption -- the base itself is proven there, only a contract is
+  fuzz-validated.
 - `assumptions`: an array of assumption records. Each record has `name`,
   optional `source_type` / `producer`, optional
   `discharge:{method:"smt"|"fuzz"|"axiom", evidence:{...}}`, and optional
@@ -223,11 +231,14 @@ worst-status exit code as user properties (`Passed=0`, `Failed=1`,
 
 ### Composition and non-vacuity
 
-COMPOSE folds each result with the assumption discharges it depends on.
-All-SMT discharges compose to `composite_verdict:"proven"`. Any fuzz
-discharge composes to
+COMPOSE folds each result with the assumption discharges it depends on. A
+fuzz-only BASE (the property/obligation itself established by fuzz, with no SMT
+proof underneath) composes to `composite_verdict:"fuzz_validated_empirical"`
+and can never compose to any `proven_*` badge: a base that was not proven is
+not proven-modulo-anything. For an SMT-proven base, all-SMT discharges compose
+to `composite_verdict:"proven"`; any fuzz CONTRACT discharge composes to
 `"proven_modulo_fuzz_validated_contract"` unless a weaker discharge is
-present. Any asserted axiom composes to
+present; any asserted axiom composes to
 `"proven_modulo_asserted_axiom"`. Missing/unsupported discharges compose to
 `"unsupported"`; counterexample-backed discharges compose to `"failed"`.
 

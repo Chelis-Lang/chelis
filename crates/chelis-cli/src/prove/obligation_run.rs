@@ -158,9 +158,13 @@ fn obligation_display_status(outcome: &ObligationOutcome) -> &'static str {
     match outcome.composite_verdict {
         CompositeVerdict::Failed => "failed",
         CompositeVerdict::Invalid | CompositeVerdict::Unsupported => "unsupported",
+        // `FuzzValidatedEmpirical` is a green-exit pass (chelis#422); like the
+        // proven badges it reports through the obligation status below, with
+        // the badge carrying the not-proven distinction.
         CompositeVerdict::Proven
         | CompositeVerdict::ProvenModuloFuzzValidatedContract
-        | CompositeVerdict::ProvenModuloAssertedAxiom => match outcome.status {
+        | CompositeVerdict::ProvenModuloAssertedAxiom
+        | CompositeVerdict::FuzzValidatedEmpirical => match outcome.status {
             ObligationStatus::Passed => "passed",
             ObligationStatus::Failed => "failed",
             ObligationStatus::Unsupported => "unsupported",

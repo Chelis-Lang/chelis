@@ -53,6 +53,12 @@ pub enum CompositeVerdict {
     Proven,
     ProvenModuloFuzzValidatedContract,
     ProvenModuloAssertedAxiom,
+    /// The base proof obligation passed under randomized fuzz sampling only,
+    /// with no SMT proof underneath it (chelis#422). A green-exit empirical
+    /// result that is NOT proven: it must never read as `proven_*`. Distinct
+    /// from [`CompositeVerdict::ProvenModuloFuzzValidatedContract`], where an
+    /// exact SMT base is proven modulo a fuzz-validated contract assumption.
+    FuzzValidatedEmpirical,
     Invalid,
     Unsupported,
     Failed,
@@ -66,6 +72,7 @@ impl CompositeVerdict {
                 "proven_modulo_fuzz_validated_contract"
             }
             CompositeVerdict::ProvenModuloAssertedAxiom => "proven_modulo_asserted_axiom",
+            CompositeVerdict::FuzzValidatedEmpirical => "fuzz_validated_empirical",
             CompositeVerdict::Invalid => "invalid",
             CompositeVerdict::Unsupported => "unsupported",
             CompositeVerdict::Failed => "failed",
@@ -92,6 +99,10 @@ impl CompositeVerdict {
             CompositeVerdict::ProvenModuloAssertedAxiom => VerdictGuarantee::Green {
                 soundness: Soundness::Exact,
                 qualifiers: QualifierSet::from_iter_kinds([Qualifier::Axiom]),
+            },
+            CompositeVerdict::FuzzValidatedEmpirical => VerdictGuarantee::Green {
+                soundness: Soundness::Empirical,
+                qualifiers: QualifierSet::from_iter_kinds([Qualifier::FuzzBase]),
             },
             CompositeVerdict::Unsupported => VerdictGuarantee::Unestablished,
             CompositeVerdict::Invalid => VerdictGuarantee::Vacuous,
@@ -214,18 +225,26 @@ impl VerdictRollup {
             };
         }
         // All-green. The qualifier set drives the badge, weakest kind first:
-        // an asserted axiom is a weaker green than a fuzz-validated contract,
-        // which is weaker than an exact proof, matching the legacy precedence.
-        // Covered-or-rejected: only `Exact` soundness with no weaker qualifier
-        // may render `Proven`. A green rollup at sub-`Exact` soundness carrying
-        // a non-fuzz/non-axiom qualifier (`SoundOverApproximation`,
-        // `DeltaComplete`, `SpecialFunctionCertified`, `CertificateBearing`)
-        // has no green badge yet, so it conservatively renders `Unsupported`
-        // rather than laundering into `Proven`. The proper sound-over-
-        // approximation green badge and its lattice projection land with WI-9
-        // when a producer first emits those qualifiers; until then any such
-        // rollup is rejected from the green path here at the rendering point.
-        if self.qualifiers.contains(Qualifier::Axiom) {
+        // a fuzz-only BASE is weaker than an asserted axiom, which is weaker
+        // than a fuzz-validated contract, which is weaker than an exact proof,
+        // matching the legacy precedence. Covered-or-rejected: only `Exact`
+        // soundness with no weaker qualifier may render `Proven`. A green
+        // rollup at sub-`Exact` soundness carrying a non-fuzz/non-axiom
+        // qualifier (`SoundOverApproximation`, `DeltaComplete`,
+        // `SpecialFunctionCertified`, `CertificateBearing`) has no green badge
+        // yet, so it conservatively renders `Unsupported` rather than
+        // laundering into `Proven`. The proper sound-over-approximation green
+        // badge and its lattice projection land with WI-9 when a producer
+        // first emits those qualifiers; until then any such rollup is rejected
+        // from the green path here at the rendering point.
+        if self.qualifiers.contains(Qualifier::FuzzBase) {
+            // chelis#422: a fuzz-only base dominates every other green
+            // qualifier. The base was never proven, so the verdict can never
+            // read as `proven_*` (proven-modulo-axiom or
+            // proven-modulo-fuzz-contract), regardless of what was discharged
+            // on top of it.
+            CompositeVerdict::FuzzValidatedEmpirical
+        } else if self.qualifiers.contains(Qualifier::Axiom) {
             CompositeVerdict::ProvenModuloAssertedAxiom
         } else if self.qualifiers.contains(Qualifier::Fuzz) {
             CompositeVerdict::ProvenModuloFuzzValidatedContract
@@ -749,16 +768,21 @@ mod tests {
             CompositeVerdict::Proven => 0,
             CompositeVerdict::ProvenModuloFuzzValidatedContract => 1,
             CompositeVerdict::ProvenModuloAssertedAxiom => 2,
-            CompositeVerdict::Unsupported => 3,
-            CompositeVerdict::Invalid => 4,
-            CompositeVerdict::Failed => 5,
+            // A fuzz-only BASE is weaker than any proven-modulo badge (it was
+            // never proven) but still a green pass, so it is stronger than the
+            // terminal non-green outcomes (chelis#422).
+            CompositeVerdict::FuzzValidatedEmpirical => 3,
+            CompositeVerdict::Unsupported => 4,
+            CompositeVerdict::Invalid => 5,
+            CompositeVerdict::Failed => 6,
         }
     }
 
-    const ALL_VERDICTS: [CompositeVerdict; 6] = [
+    const ALL_VERDICTS: [CompositeVerdict; 7] = [
         CompositeVerdict::Proven,
         CompositeVerdict::ProvenModuloFuzzValidatedContract,
         CompositeVerdict::ProvenModuloAssertedAxiom,
+        CompositeVerdict::FuzzValidatedEmpirical,
         CompositeVerdict::Unsupported,
         CompositeVerdict::Invalid,
         CompositeVerdict::Failed,

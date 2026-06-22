@@ -253,6 +253,13 @@ pub enum Qualifier {
     CertificateBearing,
     /// Established by randomized fuzz sampling only.
     Fuzz,
+    /// The BASE proof obligation itself was established by randomized fuzz
+    /// sampling only -- no SMT proof underlies it (chelis#422). Distinct from
+    /// [`Qualifier::Fuzz`], which marks a fuzz-validated CONTRACT assumption
+    /// discharged UNDER an otherwise-exact base. A `FuzzBase` rollup can never
+    /// render a `proven_*` badge: a fuzz-only base is not proven, so it must
+    /// not read as proven-modulo-anything.
+    FuzzBase,
     /// Asserted as an axiom (trusted, not derived).
     Axiom,
 }
@@ -266,6 +273,7 @@ impl Qualifier {
             Qualifier::SoundOverApproximation => "sound_over_approximation",
             Qualifier::CertificateBearing => "certificate_bearing",
             Qualifier::Fuzz => "fuzz",
+            Qualifier::FuzzBase => "fuzz_base",
             Qualifier::Axiom => "axiom",
         }
     }
@@ -295,7 +303,7 @@ impl Qualifier {
             Qualifier::DeltaComplete
             | Qualifier::SpecialFunctionCertified
             | Qualifier::SoundOverApproximation => Soundness::SoundApproximate,
-            Qualifier::Fuzz => Soundness::Empirical,
+            Qualifier::Fuzz | Qualifier::FuzzBase => Soundness::Empirical,
             Qualifier::Axiom => Soundness::Untrusted,
         }
     }

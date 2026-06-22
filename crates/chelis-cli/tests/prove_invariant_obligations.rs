@@ -122,11 +122,21 @@ fn c2_fuzz_discharge_is_qualified_and_carries_seed_tolerance() {
     let ob = obligations(&records)[0];
     assert_eq!(ob["status"], "passed");
     assert_eq!(ob["proof_tier"], "fuzz");
-    assert_eq!(
-        ob["composite_verdict"],
-        "proven_modulo_fuzz_validated_contract"
+    // chelis#422: a fuzz-only obligation BASE (proof_tier "fuzz", no SMT) is
+    // empirically validated, NOT proven. The honest badge is
+    // `fuzz_validated_empirical`, never a `proven_*` badge -- the
+    // proven-modulo-fuzz-CONTRACT badge is reserved for an exact SMT base
+    // discharged modulo a fuzz contract (see c1_all_smt_discharges, which keeps
+    // `proven`). The fuzz discharge evidence below is the actual subject of
+    // this test and is unchanged.
+    assert_eq!(ob["composite_verdict"], "fuzz_validated_empirical");
+    assert!(
+        !ob["composite_verdict"]
+            .as_str()
+            .unwrap()
+            .starts_with("proven"),
+        "a fuzz-only base must never read as proven_*: {ob}"
     );
-    assert_ne!(ob["composite_verdict"], "proven");
     let evidence = &ob["assumptions"][0]["discharge"]["evidence"];
     assert_eq!(ob["assumptions"][0]["discharge"]["method"], "fuzz");
     assert_eq!(evidence["status"], "validated");

@@ -149,11 +149,20 @@ fn prove_json_schema_has_property_and_summary_records() {
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).expect("json line"))
         .collect::<Vec<_>>();
-    assert_eq!(records[0]["kind"], "property");
-    assert_eq!(records[0]["name"], "truth");
-    assert_eq!(records[0]["status"], "passed");
-    assert_eq!(records[1]["kind"], "summary");
-    assert_eq!(records[1]["passed"], 1);
+    // Find records by kind: a non-smt build also emits a
+    // {kind:"warning", stage:"properties"} degradation record (chelis#422),
+    // so positional indexing would be brittle across build configs.
+    let property = records
+        .iter()
+        .find(|r| r["kind"] == "property")
+        .expect("a property record");
+    assert_eq!(property["name"], "truth");
+    assert_eq!(property["status"], "passed");
+    let summary = records
+        .iter()
+        .find(|r| r["kind"] == "summary")
+        .expect("a summary record");
+    assert_eq!(summary["passed"], 1);
 }
 
 #[cfg(feature = "smt")]
@@ -893,9 +902,17 @@ fn wi7_deep_user_green_with_preconditions_carries_established_non_vacuity() {
     let records = property_records(&output.stdout);
     let record = &records[0];
     assert_eq!(record["status"], "passed");
-    assert_eq!(
-        record["composite_verdict"],
-        "proven_modulo_fuzz_validated_contract"
+    // chelis#422: a fuzz-only base (no SMT) is empirically validated, not
+    // proven. The honest badge is `fuzz_validated_empirical`, NEVER a
+    // `proven_*` badge -- the proven-modulo-fuzz-CONTRACT badge is reserved
+    // for an exact SMT base discharged modulo a fuzz contract.
+    assert_eq!(record["composite_verdict"], "fuzz_validated_empirical");
+    assert!(
+        !record["composite_verdict"]
+            .as_str()
+            .unwrap()
+            .starts_with("proven"),
+        "a fuzz-only base must never read as proven_*: {record}"
     );
     assert_established_precondition_non_vacuity(record, "deep_pre_green");
 }
@@ -1014,6 +1031,11 @@ fn wi7_vacuous_preconditions_cannot_reach_a_green_on_the_local_path() {
     assert_ne!(
         records[0]["composite_verdict"], "proven_modulo_fuzz_validated_contract",
         "vacuous preconditions cannot render a green badge: {}",
+        records[0]
+    );
+    assert_ne!(
+        records[0]["composite_verdict"], "fuzz_validated_empirical",
+        "vacuous preconditions cannot render any green badge, fuzz-base included: {}",
         records[0]
     );
 }
@@ -1488,6 +1510,111 @@ fn non_smt_prove_does_not_warn_for_plain_property_file() {
         !stderr.contains("obligation verification requires"),
         "a module with no invariant-carrying opaque type must not warn; stderr={stderr}"
     );
+}
+
+// chelis#422 negative test (non-smt build): a measure-zero-false @property
+// (`(x - 12345.0)^2 > 0.0` under `x > 0`, false at x = 12345.0) used to
+// fuzz-pass with the proven-flavored `proven_modulo_fuzz_validated_contract`
+// badge -- a false green, because fuzz never sampled the exact root and the
+// non-smt build has no SMT to refute it. On a non-smt build the run must now
+// be HONEST: the green carries `fuzz_validated_empirical` (never `proven_*`),
+// and the @property degradation warning fires so a fuzz-only pass is not
+// mistaken for an SMT proof. Exit stays success -- a fuzz pass is still a pass,
+// it just is not proven.
+#[cfg(not(feature = "smt"))]
+#[test]
+fn non_smt_measure_zero_false_property_is_not_a_proven_green() {
+    let dir = write_prop(
+        r#"
+@property always_positive forall(x: f32) where x > 0.0:
+  (x - 12345.0) * (x - 12345.0) > 0.0
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--samples",
+            "100",
+            "--seed",
+            "0",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    // A clean fuzz pass still exits success.
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let records = property_records(&output.stdout);
+    assert_eq!(records.len(), 1, "records: {records:?}");
+    let record = &records[0];
+    assert_eq!(record["status"], "passed");
+    // The core of the fix: the badge must be the honest empirical one, NEVER a
+    // proven-flavored badge, for a fuzz-only base on a non-smt build.
+    assert_eq!(record["composite_verdict"], "fuzz_validated_empirical");
+    assert!(
+        !record["composite_verdict"]
+            .as_str()
+            .unwrap()
+            .starts_with("proven"),
+        "a measure-zero-false fuzz pass must never read as proven_*: {record}"
+    );
+    // The @property degradation warning fires loudly on stderr...
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("@property verification requires the smt-enabled build")
+            && stderr.contains("Rebuild with --features smt"),
+        "the non-smt @property degradation warning must fire on stderr; stderr={stderr}"
+    );
+    // ...and as a machine-facing stdout record so a JSON consumer sees it too.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let warning = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|r| r["kind"] == "warning" && r["stage"] == "properties")
+        .expect("a machine-facing @property degradation record on stdout");
+    assert_eq!(
+        warning["fuzz_only"], 1,
+        "names the fuzz-only count: {warning}"
+    );
+}
+
+// chelis#422 positive twin (non-smt build): an honest fuzz green that happens
+// to be TRUE still carries `fuzz_validated_empirical`, not `proven_*` -- the
+// distinction is about the verification METHOD (fuzz vs SMT), not the truth of
+// the property. A non-smt build can never SMT-prove, so it never mints a
+// proven badge even for a true property.
+#[cfg(not(feature = "smt"))]
+#[test]
+fn non_smt_true_property_green_is_empirical_not_proven() {
+    let dir = write_prop(
+        r#"
+@property nonneg forall(x: f32):
+  (x * x) >= 0.0
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--samples",
+            "8",
+            "--seed",
+            "0",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert!(output.status.success());
+    let records = property_records(&output.stdout);
+    assert_eq!(records[0]["status"], "passed");
+    assert_eq!(records[0]["composite_verdict"], "fuzz_validated_empirical");
 }
 
 // ===================================================================

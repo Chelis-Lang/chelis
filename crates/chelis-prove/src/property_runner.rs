@@ -160,9 +160,15 @@ impl PropertyOutcome {
         match self.composite_verdict {
             CompositeVerdict::Failed => return "failed",
             CompositeVerdict::Invalid | CompositeVerdict::Unsupported => return "unsupported",
+            // `FuzzValidatedEmpirical` is a green-exit pass (a fuzz base that
+            // sampled clean); it falls through to the `is_pass` check below
+            // exactly like the proven badges, so it reports `"passed"`
+            // (chelis#422) -- the badge, not the status, carries the
+            // not-proven distinction.
             CompositeVerdict::Proven
             | CompositeVerdict::ProvenModuloFuzzValidatedContract
-            | CompositeVerdict::ProvenModuloAssertedAxiom => {}
+            | CompositeVerdict::ProvenModuloAssertedAxiom
+            | CompositeVerdict::FuzzValidatedEmpirical => {}
         }
         if self.is_pass() {
             "passed"
@@ -189,9 +195,12 @@ fn base_verdict(
     match status {
         PropertyStatus::Passed => match proof_tier {
             PropertyTier::Smt => CompositeVerdict::Proven,
-            PropertyTier::Fuzz if samples > 0 => {
-                CompositeVerdict::ProvenModuloFuzzValidatedContract
-            }
+            // chelis#422: a fuzz-tier BASE pass is empirically validated, NOT
+            // proven. It must carry `FuzzValidatedEmpirical`, never the
+            // `proven_modulo_fuzz_validated_contract` badge that is reserved
+            // for an exact SMT base discharged modulo a fuzz-validated
+            // contract assumption.
+            PropertyTier::Fuzz if samples > 0 => CompositeVerdict::FuzzValidatedEmpirical,
             _ => CompositeVerdict::Unsupported,
         },
         PropertyStatus::Failed => {

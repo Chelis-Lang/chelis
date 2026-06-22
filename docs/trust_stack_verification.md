@@ -40,8 +40,10 @@ properties and dispatches them through three verification tiers:
 
 - **COMPOSE:** Folds each proof with the producer/contract assumptions it
   depends on. Result JSON carries `composite_verdict` plus per-assumption
-  `discharge:{method,evidence}` records. All-SMT discharges compose to
-  `proven`; fuzz discharges are qualified as
+  `discharge:{method,evidence}` records. A fuzz-only BASE (no SMT proof
+  underneath) composes to `fuzz_validated_empirical` and never to a `proven_*`
+  badge. For an SMT-proven base: all-SMT discharges compose to `proven`; a
+  fuzz CONTRACT discharge is qualified as
   `proven_modulo_fuzz_validated_contract`; asserted axioms are qualified as
   `proven_modulo_asserted_axiom`.
 

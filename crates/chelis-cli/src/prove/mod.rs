@@ -348,7 +348,10 @@ fn prove_surf_file(
     // is stderr-only and never touches the stdout NDJSON stream or the exit
     // code.
     #[cfg(not(feature = "smt"))]
-    warn_obligations_skipped_without_smt(path, count_invariant_opaque_surf(&flat), options);
+    {
+        warn_obligations_skipped_without_smt(path, count_invariant_opaque_surf(&flat), options);
+        warn_properties_not_smt_verified(path, count_surf_properties(&flat), options);
+    }
     Ok(file_status)
 }
 
@@ -1353,6 +1356,8 @@ fn prove_deep_file(
         return Ok(Status::Error);
     }
     let properties = discover_deep_properties(path, &exprs, options.only)?;
+    #[cfg(not(feature = "smt"))]
+    let deep_property_count = properties.len();
     let mut file_status = Status::Passed;
 
     // User `@property` declarations run through the SHARED property runner
@@ -1392,7 +1397,10 @@ fn prove_deep_file(
         file_status = combine_status(file_status, ob_status);
     }
     #[cfg(not(feature = "smt"))]
-    warn_obligations_skipped_without_smt(path, count_invariant_opaque_deep(&exprs), options);
+    {
+        warn_obligations_skipped_without_smt(path, count_invariant_opaque_deep(&exprs), options);
+        warn_properties_not_smt_verified(path, deep_property_count, options);
+    }
     Ok(file_status)
 }
 
@@ -1642,6 +1650,18 @@ fn count_invariant_opaque_surf(decls: &[Decl]) -> usize {
         .count()
 }
 
+/// Count `@property` declarations in a flattened Surf module, for the non-smt
+/// @property degradation warning (chelis#422). Feature-independent so both the
+/// `chelis-prove`-without-`smt` build (shared runner, Tier B is a no-op) and
+/// the no-`chelis-prove` build (CLI-local Tier C) flag a fuzz-only run.
+#[cfg(not(feature = "smt"))]
+fn count_surf_properties(decls: &[Decl]) -> usize {
+    decls
+        .iter()
+        .filter(|decl| matches!(decl, Decl::Property { .. }))
+        .count()
+}
+
 /// Deep twin of `count_invariant_opaque_surf`: a `deftype` whose metadata
 /// carries both `opaque: true` and an `invariant` entry.
 #[cfg(not(feature = "smt"))]
@@ -1707,6 +1727,41 @@ fn warn_obligations_skipped_without_smt(path: &Path, count: usize, options: &Pro
         "warning: producer obligation verification requires the smt-enabled build; {count} \
          invariant-carrying opaque type(s) in {} did not have their obligations SMT-verified. \
          Rebuild with --features smt to verify them.",
+        path.display()
+    );
+}
+
+/// Emit a one-line stderr warning (never touching stdout or the exit code)
+/// when a non-smt build verifies `@property` declarations, so a clean green is
+/// not mistaken for an SMT proof. chelis#422: on a non-smt build the @property
+/// path runs Tier C (fuzz) only, so its greens carry `fuzz_validated_empirical`
+/// (never `proven_*`); this warning is the @property-path analogue of
+/// [`warn_obligations_skipped_without_smt`], degrading the run loudly so a
+/// fuzz-only pass cannot be read as formally proven. Under `--json` it also
+/// emits a machine-facing record so a consumer reading stdout alone sees the
+/// degradation, not only the stderr line.
+#[cfg(not(feature = "smt"))]
+fn warn_properties_not_smt_verified(path: &Path, count: usize, options: &ProveOptions<'_>) {
+    if count == 0 {
+        return;
+    }
+    if options.json {
+        println!(
+            "{}",
+            json!({
+                "kind": "warning",
+                "stage": "properties",
+                "fuzz_only": count,
+                "reason": "@property verification requires the smt-enabled build \
+                           (--features smt); properties were validated by fuzz only \
+                           (fuzz_validated_empirical), not SMT-proven, in this build",
+            })
+        );
+    }
+    eprintln!(
+        "warning: @property verification requires the smt-enabled build; {count} \
+         property declaration(s) in {} were validated by fuzz only (fuzz_validated_empirical), \
+         not SMT-proven. Rebuild with --features smt to prove them.",
         path.display()
     );
 }
@@ -2216,9 +2271,18 @@ fn matches_filter(name: &str, only: Option<&str>) -> bool {
     name.contains(pattern)
 }
 
+/// The CLI-local (no-`chelis-prove`) property path runs Tier C (fuzz) only --
+/// SMT is not compiled in -- so a green here is a fuzz-only BASE pass, never an
+/// SMT proof. It must render `fuzz_validated_empirical`, NEVER a `proven_*`
+/// badge: a fuzz-only pass is not proven (chelis#422). The proven-flavored
+/// `proven_modulo_fuzz_validated_contract` badge is reserved for an exact SMT
+/// base discharged modulo a fuzz-validated contract, which this path cannot
+/// produce. Mirrors `chelis_prove::property_runner::base_verdict` for
+/// `PropertyTier::Fuzz`, so a CLI-local green and a shared-runner fuzz-base
+/// green agree on the same badge string.
 fn simple_composite_verdict(status: &str, samples: usize) -> &'static str {
     match status {
-        "passed" if samples > 0 => "proven_modulo_fuzz_validated_contract",
+        "passed" if samples > 0 => "fuzz_validated_empirical",
         "passed" => "unsupported",
         "failed" => "failed",
         _ => "unsupported",

@@ -8,6 +8,41 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`chelis prove`: a fuzz-only `@property` base no longer reads as proven
+  (chelis#422)** — on a non-smt build (and on a `--tier auto` fuzz
+  fall-through or `--tier fuzz-only`) the `@property` path runs Tier C (fuzz)
+  only, yet a clean pass emitted the proven-flavored
+  `composite_verdict:"proven_modulo_fuzz_validated_contract"` and exited
+  success — a false green on a measure-zero falsehood the fuzzer never
+  sampled. A fuzz-only BASE now renders the honest
+  `composite_verdict:"fuzz_validated_empirical"` (a green-exit empirical pass
+  that is never `proven_*`), and a non-smt build emits an `@property`
+  degradation warning on stderr and as a `{kind:"warning",stage:"properties"}`
+  stdout record so a fuzz-only pass is not mistaken for an SMT proof. The
+  `proven_modulo_fuzz_validated_contract` badge is now reserved for its true
+  meaning: an exact SMT base discharged modulo a fuzz-validated CONTRACT
+  assumption. The same fix covers derived producer obligations. A new
+  `CompositeVerdict::FuzzValidatedEmpirical` (backed by a `Qualifier::FuzzBase`
+  the rollup lattice cannot launder into a proven badge) carries the
+  distinction. Negative oracles in `crates/chelis-cli/tests/prove.rs`
+  (`non_smt_measure_zero_false_property_is_not_a_proven_green`) and the
+  `composition` lattice oracle pin it.
+
+- **`chelis prove`: call-form predicates lower to SMT instead of silently
+  fuzzing (chelis#422)** — operator-form `(x * x) >= 0.0` lowered to SMT and
+  proved, but call-form `gte(mul(x, x), 0.0)` returned `None` from the
+  predicate-position lowering and silently dropped to a Tier C fuzz pass, so a
+  measure-zero-false call-form rendered a fuzz green. Call-form comparison
+  primitives (`gt`/`gte`/`lt`/`lte`/`eq`/`neq`, and the desugared `cmplt`) now
+  lower to `SmtExpr::Cmp` and call-form arithmetic (`add`/`sub`/`mul`/`div`)
+  to interpreted `SmtExpr::Arith` nodes, making call-form fully equivalent to
+  operator-form. A measure-zero-false call-form is now SMT-refuted with a
+  counterexample, not fuzz-passed. Oracles in
+  `crates/chelis-cli/tests/prove.rs`
+  (`call_form_predicate_proves_at_smt_like_operator_form`,
+  `measure_zero_false_call_form_is_refuted_at_smt_not_fuzz_passed`) and unit
+  tests in `crates/chelis-prove/src/property_runner/smt_lower.rs`.
+
 - **C backend: function-body heap temporaries and nested-tuple printing no
   longer leak (completes #406)** — #412 freed the heap temporaries the
   program-root `main` allocates, but two sibling "definitely lost" classes

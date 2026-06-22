@@ -87,9 +87,11 @@ impl ObligationOutcome {
         let base = match status {
             ObligationStatus::Passed => match proof_tier {
                 ObligationTier::Smt => CompositeVerdict::Proven,
-                ObligationTier::Fuzz if samples > 0 => {
-                    CompositeVerdict::ProvenModuloFuzzValidatedContract
-                }
+                // chelis#422: a fuzz-tier obligation BASE pass is empirically
+                // validated, not proven. Same distinction as the property
+                // runner's base_verdict -- the `proven_modulo_*` badge is
+                // reserved for an exact SMT base modulo a fuzz contract.
+                ObligationTier::Fuzz if samples > 0 => CompositeVerdict::FuzzValidatedEmpirical,
                 _ => CompositeVerdict::Unsupported,
             },
             ObligationStatus::Failed => {
