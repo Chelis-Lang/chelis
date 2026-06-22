@@ -218,9 +218,38 @@ fn infer_program_effects_with_context(
     (effects, top_level_callables)
 }
 
+/// Yield each top-level declaration, descending through any `(module {} name
+/// ...)` wrapper. Deep sources produced by Surf `module X` desugaring nest
+/// every def/defsig inside this wrapper; the whole-program effect validators
+/// below compare declared-vs-inferred and hunt unhandled-Random roots over a
+/// flat decl list, so without descent a module-wrapped `.dp` would hide every
+/// nested def from them. This mirrors `top_level_decl_items` in chelis-types,
+/// so the effect pass sees the same flattened decl set the type pass does and
+/// the module-wrapped `chelis check` path agrees with the flattened
+/// build/eval path. Descends nested wrappers to any depth.
+fn flattened_top_level(exprs: &[Expr]) -> Vec<&Expr> {
+    fn push<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+        if let Expr::List(list, _) = expr
+            && get_tag(list) == Some("module")
+        {
+            // `(module {} name children...)`: skip tag, meta, name.
+            for child in list.elements.iter().skip(3) {
+                push(child, out);
+            }
+            return;
+        }
+        out.push(expr);
+    }
+    let mut out = Vec::new();
+    for expr in exprs {
+        push(expr, &mut out);
+    }
+    out
+}
+
 fn top_level_def_bodies(exprs: &[Expr]) -> HashMap<String, Expr> {
     let mut defs = HashMap::new();
-    for expr in exprs {
+    for expr in flattened_top_level(exprs) {
         if let Expr::List(list, _) = expr
             && get_tag(list) == Some("def")
         {
@@ -684,7 +713,7 @@ fn validate_unhandled_random_roots(
     effects_by_def: &HashMap<String, EffectSet>,
     errors: &mut Vec<EffectError>,
 ) {
-    for expr in exprs {
+    for expr in flattened_top_level(exprs) {
         if let Expr::List(list, _) = expr
             && get_tag(list) == Some("def")
         {
@@ -775,7 +804,7 @@ fn validate_declared_vs_inferred(
     errors: &mut Vec<EffectError>,
 ) {
     let mut declared_by_name: HashMap<String, EffectSet> = HashMap::new();
-    for expr in exprs {
+    for expr in flattened_top_level(exprs) {
         if let Expr::List(list, _) = expr
             && get_tag(list) == Some("defsig")
         {
@@ -1455,5 +1484,116 @@ def leak() -> unit ! {IO} = test_assert(true, "sneak")
             }),
             "expected UnhandledEffect mentioning Test, got {errors:?}"
         );
+    }
+
+    // ----- Module-wrapped whole-program effect soundness -----
+    //
+    // A `.dp` MODULE wraps its decls in `(module ...)`. The whole-program
+    // effect validators must descend into that wrapper so a module-wrapped
+    // `chelis check` agrees with the flattened build/eval path. Without the
+    // descent, a declared-pure function whose body performs Random/IO would be
+    // accepted module-wrapped but rejected flattened.
+
+    /// Type-check a module-WRAPPED Deep program (the shape `chelis check` runs
+    /// on a `.dp` MODULE), preserving the `(module ...)` wrapper.
+    fn typed_module(src: &str) -> CheckedProgram {
+        let decls = parse_surf(src).expect("surf parse");
+        let deep = desugar_program(&decls);
+        chelis_types::check_typed_program(&deep).expect("type check")
+    }
+
+    #[test]
+    fn module_wrapped_declared_pure_body_does_random_is_rejected() {
+        // `entry` is declared pure (`! { }`) but its body calls `noisy`, which
+        // performs Random. Wrapped in `(module ...)`, the declared-vs-inferred
+        // validator must still fire after descending into the wrapper.
+        let checked = typed_module(
+            r#"module Frag.Effect
+export (entry)
+def noisy(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)
+def entry(x: tensor[8, f32]) -> tensor[8, f32] ! { } = noisy(x)
+"#,
+        );
+        let errors = check_program(&checked)
+            .expect_err("module-wrapped declared-pure body performing Random must be rejected");
+        assert!(
+            errors.iter().any(|error| {
+                error.kind == EffectErrorKind::UnhandledEffect
+                    && error.message.contains("entry")
+                    && error.message.contains("Random")
+            }),
+            "expected UnhandledEffect on entry mentioning Random, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn module_wrapped_declared_pure_body_does_io_is_rejected() {
+        // The IO counterpart: a declared-pure function whose body calls a
+        // file-IO builtin must be rejected module-wrapped, the same as Random.
+        let checked = typed_module(
+            r#"module Frag.Io
+export (entry)
+def entry(path: string) -> string ! { } = read_file(path)
+"#,
+        );
+        let errors = check_program(&checked)
+            .expect_err("module-wrapped declared-pure body performing IO must be rejected");
+        assert!(
+            errors.iter().any(|error| {
+                error.kind == EffectErrorKind::UnhandledEffect
+                    && error.message.contains("entry")
+                    && error.message.contains("IO")
+            }),
+            "expected UnhandledEffect on entry mentioning IO, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn module_wrapped_unhandled_random_value_root_is_rejected() {
+        // A value-binding (non-fn) root that performs Random inside a module
+        // wrapper must still be caught by the unhandled-random-roots validator.
+        let checked = typed_module(
+            r#"module Frag.Root
+export (sampled)
+sampled: tensor[8, f32] = dropout(to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]), 0.5)
+"#,
+        );
+        let errors = check_program(&checked)
+            .expect_err("module-wrapped unhandled Random value root must be rejected");
+        assert!(
+            errors.iter().any(|error| {
+                error.kind == EffectErrorKind::UnhandledEffect && error.message.contains("Random")
+            }),
+            "expected unhandled Random effect, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn module_wrapped_pure_program_checks_clean() {
+        // The negative-parity case: a pure module must still check clean after
+        // the descent change (no effects -> no rejection).
+        let checked = typed_module(
+            r#"module Frag.Pure
+export (entry)
+def helper(x: f32) -> f32 = add(x, x)
+def entry(x: f32) -> f32 = helper(mul(x, x))
+"#,
+        );
+        check_program(&checked).expect("pure module-wrapped program must check clean");
+    }
+
+    #[test]
+    fn module_wrapped_honest_random_signature_checks_clean() {
+        // A module-wrapped function that honestly declares `! { Random }` and
+        // handles the effect with `with seed(...)` must check clean: the
+        // descent fix tightens the unsound-accept path only, not honest code.
+        let checked = typed_module(
+            r#"module Frag.Honest
+export (entry)
+def entry(x: tensor[8, f32]) -> tensor[8, f32] =
+  with seed(7) { dropout(x, 0.5) }
+"#,
+        );
+        check_program(&checked).expect("handled-Random module-wrapped program must check clean");
     }
 }

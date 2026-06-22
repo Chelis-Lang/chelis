@@ -14,13 +14,24 @@
 //! For a parsed Deep module and a target function:
 //!
 //! - the *held context* is the module with the target's `(def ...)` node
-//!   removed and its `(defsig ...)` retained (see
-//!   [`chelis_deep::module_excluding_function_def`]). The signature stays in
-//!   scope so a recursive new body resolves against the declared type rather
-//!   than the stale old body;
-//! - the *fragment* is the single rewritten `(def <name> <new body>)` node
-//!   (see [`chelis_deep::spliced_function_def`]), checked as new code against
-//!   the held context.
+//!   removed and its `(defsig ...)` RETAINED (see
+//!   [`chelis_deep::module_excluding_function_def`]), so a sibling that calls
+//!   the target still resolves against the target's declared signature;
+//! - the *fragment* is a two-decl mini-program `[ target (defsig ...),
+//!   (def <name> <new body>) ]`: the target's signature is carried INTO the
+//!   fragment, adjacent to the spliced def (see [`chelis_deep::function_defsig`]
+//!   and [`chelis_deep::spliced_function_def`]), and is checked as new code
+//!   against the held context.
+//!
+//! Carrying the target's `defsig` into the fragment mirrors the whole-program
+//! analysis: the expected return type derives from the defsig, the effect
+//! declared-vs-inferred mismatch FIRES against the new body (catching a
+//! declared-pure body that performs `Random`/`Io`), a recursive new body
+//! resolves against the signature, and linearity is unchanged. The held context
+//! keeps the same `defsig` so sibling calls into the target still resolve.
+//! Together these match what whole-program `chelis check` does on the flattened
+//! rewritten module, where every def is checked against its own defsig over one
+//! flat decl set while every sibling call also resolves against that defsig.
 //!
 //! The held context is built ONCE per replacement
 //! ([`build_compiled_library_context`] runs the per-decl inference and
@@ -58,10 +69,11 @@ pub enum ReplacementError {
         location: Option<Span>,
     },
     /// The target function has no `(defsig ...)` declaration, so its
-    /// signature is inferred from its body rather than declared. The held
-    /// context retains only `(defsig ...)` declarations for the excluded
-    /// target, so an inferred-signature target leaves no binding for its own
-    /// name in scope: a recursive new body would be checked against an absent
+    /// signature is inferred from its body rather than declared. The fragment
+    /// carries the target's `(defsig ...)` alongside the new `(def ...)` so a
+    /// recursive new body resolves against the declared signature; an
+    /// inferred-signature target has no `(defsig ...)` to move into the
+    /// fragment, so a recursive new body would be checked against an absent
     /// signature, diverging from a full check that re-infers the signature
     /// from the new body. Rather than risk that silent fragment-vs-full
     /// divergence, the fragment check rejects inferred-signature targets up
@@ -182,18 +194,26 @@ impl HeldContext {
     }
 }
 
-/// Check a single spliced `(def <name> <new body>)` against an already-built
-/// held context, running the three context-scoped passes in the pinned order
-/// TYPE -> EFFECTS -> LINEARITY.
+/// Check a spliced fragment against an already-built held context, running the
+/// three context-scoped passes in the pinned order TYPE -> EFFECTS ->
+/// LINEARITY.
+///
+/// `frag_deep` is the fragment mini-program `[ target (defsig ...),
+/// (def <name> <new body>) ]`: the target's signature travels with the new def
+/// so the effect declared-vs-inferred check fires against the new body and a
+/// recursive new body resolves against the signature, mirroring whole-program
+/// `chelis check`, which checks every def against its own defsig over one flat
+/// decl set.
 ///
 /// This mirrors `compile_new_source_in_context`'s Phase C/D/E block: the type
 /// pass uses the signature-context form (matching that path's borrow-arg
 /// handling), and the effect and linearity passes run against the held library
 /// `CheckedProgram`. The held context is consumed by reference only and is
 /// never re-type-checked here.
-pub fn check_fragment_def(context: &HeldContext, frag_def: &Expr) -> Result<(), ReplacementError> {
-    let frag_deep = std::slice::from_ref(frag_def);
-
+pub fn check_fragment_def(
+    context: &HeldContext,
+    frag_deep: &[Expr],
+) -> Result<(), ReplacementError> {
     // Phase C: type-check the spliced body against the held type env, using
     // the held library's signature inference for borrow-arg parity (the same
     // signature-context form `compile_new_source_in_context` uses).
@@ -249,12 +269,14 @@ pub fn check_body_replacement(
     chelis_deep::resolve_function(module, target_qualified_name)
         .map_err(resolve_error_to_replacement_error)?;
 
-    // The held context retains only the target's `(defsig ...)` to keep its
-    // signature in scope. A target with no `(defsig ...)` has its signature
-    // inferred from the body, so the held context would carry no binding for
-    // the target name and a recursive new body would be checked differently
-    // than a full check that re-infers from the new body. Reject up front
-    // rather than risk that silent fragment-vs-full divergence.
+    // The fragment carries the target's `(defsig ...)` alongside the new
+    // `(def ...)` so a recursive new body resolves against the declared
+    // signature and the effect declared-vs-inferred check fires against it. A
+    // target with no `(defsig ...)` has its signature inferred from the body,
+    // so there is no signature to move into the fragment and a recursive new
+    // body would be checked against an absent signature, diverging from a full
+    // check that re-infers from the new body. Reject up front rather than risk
+    // that silent fragment-vs-full divergence.
     if !chelis_deep::module_has_defsig_for(module, target_qualified_name) {
         return Err(ReplacementError::UndeclaredSignature {
             message: format!(
@@ -267,9 +289,9 @@ pub fn check_body_replacement(
         });
     }
 
-    // Held decls: the module with the target `(def ...)` removed and its
-    // `(defsig ...)` retained, so a recursive new body resolves against the
-    // signature rather than the old body.
+    // Held decls: the module with the target's `(def ...)` removed and its
+    // `(defsig ...)` RETAINED, so a sibling that calls the target still
+    // resolves against the target's declared signature in the held context.
     let held_decls = chelis_deep::module_excluding_function_def(module, target_qualified_name)
         .map_err(resolve_error_to_replacement_error)?;
 
@@ -277,12 +299,29 @@ pub fn check_body_replacement(
     // held decls); reused for all three fragment passes below.
     let context = HeldContext::build(&held_decls)?;
 
-    // The single spliced def, checked as new code against the held context.
+    // The fragment mini-program: the target's defsig followed by the spliced
+    // def, checked as new code against the held context. Carrying the defsig
+    // into the fragment is what makes the fragment's declared-vs-inferred
+    // effect check fire against the new body (catching a declared-pure body
+    // that performs Random/Io); the held context retains the same defsig so
+    // sibling calls into the target still resolve. The defsig is present
+    // because `module_has_defsig_for` returned true above.
+    let frag_defsig =
+        chelis_deep::function_defsig(module, target_qualified_name).ok_or_else(|| {
+            ReplacementError::UndeclaredSignature {
+                message: format!(
+                    "target `{target_qualified_name}` has no defsig declaration to carry into the \
+                 fragment"
+                ),
+                location: None,
+            }
+        })?;
     let frag_def =
         chelis_deep::spliced_function_def(module, target_qualified_name, new_body.clone())
             .map_err(resolve_error_to_replacement_error)?;
+    let frag_deep = [frag_defsig, frag_def];
 
-    check_fragment_def(&context, &frag_def)?;
+    check_fragment_def(&context, &frag_deep)?;
 
     // The full rewritten module the verdict is defined to agree with.
     let rewritten_module =
@@ -395,9 +434,9 @@ mod tests {
 
     #[test]
     fn held_context_excludes_target_def_keeps_defsig() {
-        // The held decls produced for `f` must drop `f`'s def but keep its
-        // defsig, so the held context still type-checks (a recursive new body
-        // would resolve against the signature) without the old body present.
+        // The held decls produced for `f` must drop `f`'s def but RETAIN its
+        // defsig, so a sibling that calls `f` still resolves against the
+        // declared signature. `g` (defsig + def) is intact.
         let module = render_deep(TWO_FN);
         let held = chelis_deep::module_excluding_function_def(&module, "f").expect("exclude f");
         let tags = held_decl_tags(&held);
@@ -424,8 +463,9 @@ mod tests {
         let held = chelis_deep::module_excluding_function_def(&module, "f").expect("exclude f");
         let context = HeldContext::build(&held).expect("held context");
         let new_body = render_body("module M\ndef h(x: f32) -> f32 = sub(x, x)\n", "h");
+        let frag_defsig = chelis_deep::function_defsig(&module, "f").expect("f defsig");
         let frag_def = chelis_deep::spliced_function_def(&module, "f", new_body).expect("splice");
-        check_fragment_def(&context, &frag_def).expect("well-typed body accepts");
+        check_fragment_def(&context, &[frag_defsig, frag_def]).expect("well-typed body accepts");
     }
 
     #[test]

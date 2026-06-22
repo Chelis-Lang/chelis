@@ -21,25 +21,23 @@
 //! either path fails loudly rather than silently keeping the two paths in
 //! lockstep on the wrong answer.
 //!
-//! ## Two full-check shapes
+//! ## Full-check shape: module-wrapped and flattened agree
 //!
-//! The brief names the full path as `cmd_check_one_deep`, which runs
-//! `check_typed_program -> check_program -> check_linearity` on the
-//! module-WRAPPED rewritten program. The production fragment-authoring path
-//! (`compile_new_source_in_context`) instead FLATTENS module wrappers before
-//! the effect and linearity passes. These two shapes diverge for the cross-def
-//! effect validators (`validate_unhandled_random_roots`,
-//! `validate_declared_vs_inferred`), which walk the top-level expr list and do
-//! NOT descend into a `(module ...)` wrapper: a declared-pure function whose
-//! body performs `Random`/`Io` is rejected when checked flat but accepted when
-//! checked module-wrapped. The per-body linearity walk and the type pass
-//! recurse into module-wrapped bodies, so they agree under both shapes.
+//! The full path `cmd_check_one_deep` runs `check_typed_program ->
+//! check_program -> check_linearity` on the module-WRAPPED rewritten program.
+//! The production fragment-authoring path (`compile_new_source_in_context`)
+//! FLATTENS module wrappers before the effect and linearity passes. These two
+//! shapes now AGREE on every case: the whole-program effect validators
+//! (`validate_unhandled_random_roots`, `validate_declared_vs_inferred`) descend
+//! into a `(module ...)` wrapper, so a declared-pure function whose body
+//! performs `Random`/`Io` is rejected under both shapes. The per-body linearity
+//! walk and the type pass already recursed into module-wrapped bodies, so they
+//! agreed before; with the effect descent the two shapes are fully aligned.
 //!
-//! Each case therefore pins BOTH the module-wrapped verdict
-//! (`expected_module_wrapped`, the brief's `cmd_check_one_deep` oracle) and the
-//! flattened verdict (`expected_flattened`, the production-intent oracle), and
-//! asserts the fragment agrees with the named one. The effect-reject case is
-//! the documented divergence: see `effect_declared_pure_body_introduces_random`.
+//! Each case pins both the module-wrapped verdict (`expected_module_wrapped`)
+//! and the flattened verdict (`expected_flattened`) so a behavior change in
+//! either is loud, and asserts the fragment agrees with the module-wrapped
+//! oracle. The two pinned verdicts are equal for every case here.
 
 use chelis_compiler_api::{ReplacementError, ReplacementReport, check_body_replacement};
 use chelis_deep::{Atom, Expr};
@@ -170,15 +168,15 @@ fn fragment_verdict(result: &Result<ReplacementReport, ReplacementError>) -> Ver
 // ── The differential assertion ───────────────────────────────────────────
 
 /// Run the fragment check and both full-check shapes for one case, pin each
-/// shape's own verdict, and assert the fragment agrees with the brief's
-/// module-wrapped oracle.
+/// shape's own verdict, and assert the fragment agrees with the module-wrapped
+/// oracle.
 ///
 /// The fragment is defined to track `cmd_check_one_deep` (the module-wrapped
 /// full check). `expected_module_wrapped` / `expected_flattened` pin each full
-/// path's own accept/reject so a behavior change in either is loud and the
-/// module-wrapped-vs-flattened divergence stays documented and locked.
-/// `assert_failing_pass` is set only where the module-wrapped full check and
-/// the fragment both report a single unambiguous failing pass.
+/// path's own accept/reject so a behavior change in either is loud; the two are
+/// equal for every case here now that the effect pass descends into the module
+/// wrapper. `assert_failing_pass` is set only where the module-wrapped full
+/// check and the fragment both report a single unambiguous failing pass.
 fn assert_parity(
     case: &str,
     module: &[Expr],
@@ -324,14 +322,15 @@ def is_odd(n: int32) -> bool = if eq(n, 0) then false else is_even(sub(n, 1))
 
 /// Constructed: an effect-propagation module. `entry` is declared pure
 /// (`! { }`) and currently calls only the pure `pure_sibling`. `noisy`
-/// performs `Random` via the `dropout` builtin. Splicing a `noisy`-calling
-/// body into `entry` performs `Random` under a pure signature; full check
-/// catches that only when flattened (the module-wrapped declared-vs-inferred
-/// validator does not descend into the module wrapper). Checks clean
-/// standalone.
+/// performs `Random` via the `dropout` builtin; `logger` performs `Io` via
+/// `debug`. Splicing a `noisy`- or `logger`-calling body into `entry` performs
+/// an effect under a pure signature; full check rejects it under both the
+/// module-wrapped and flattened shapes (the declared-vs-inferred validator
+/// descends into the module wrapper). Checks clean standalone.
 const EFFECT_MODULE: &str = r#"module Frag.Effect
 export (entry)
 def noisy(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)
+def logger(x: tensor[8, f32]) -> tensor[8, f32] = debug(x)
 def pure_sibling(x: tensor[8, f32]) -> tensor[8, f32] = add(x, x)
 def entry(x: tensor[8, f32]) -> tensor[8, f32] ! { } = pure_sibling(add(x, x))
 "#;
@@ -535,40 +534,45 @@ fn effect_pure_body_agrees_accept() {
 
 #[test]
 fn effect_declared_pure_body_introduces_random() {
-    // DOCUMENTED DIVERGENCE (escalated). `entry` is declared pure (`! { }`);
-    // the new body calls `noisy`, which performs `Random`. The two full-check
-    // shapes disagree:
-    //   - module-wrapped (`cmd_check_one_deep`, the brief's oracle): ACCEPT.
-    //     The declared-vs-inferred effect validator walks top-level exprs and
-    //     does not descend into the `(module ...)` wrapper, so it never sees
-    //     the nested `entry` def/defsig.
-    //   - flattened (`compile_new_source_in_context`'s shape): REJECT. With the
-    //     wrapper stripped the validator sees the declared-pure defsig and the
-    //     Random-performing body.
-    // The fragment's `check_effects_with_context` validates only the spliced
-    // def (the defsig lives in the held context), so it does NOT re-check the
-    // held declared-pure signature against the new body and ACCEPTS, agreeing
-    // with the brief's module-wrapped oracle. Threading the target's defsig
-    // into the fragment would make it reject (agreeing with the flattened
-    // oracle) but stricter than `cmd_check_one_deep`; which oracle the keystone
-    // should track is an orchestrator decision, recorded in the return brief.
+    // `entry` is declared pure (`! { }`); the new body calls `noisy`, which
+    // performs `Random`. Both full-check shapes REJECT on the effect pass: the
+    // declared-vs-inferred validator descends into the `(module ...)` wrapper
+    // and sees the nested declared-pure defsig against the Random-performing
+    // body. The fragment carries `entry`'s defsig alongside the new def, so its
+    // `check_effects_with_context` runs the same declared-vs-inferred check
+    // against the new body and also REJECTS: clean accept/reject agreement.
     let module = render_deep(EFFECT_MODULE);
     let body = render_body(
         "module M\ndef f(x: tensor[8, f32]) -> tensor[8, f32] = noisy(x)\n",
         "f",
     );
-    assert_parity(
+    assert_parity_mw(
         "effect/declared_pure_introduces_random",
         &module,
         "entry",
         &body,
-        // module-wrapped oracle accepts (validator no-op under the wrapper);
-        // the fragment is defined to track this oracle and also accepts.
-        Verdict::Accept,
-        // flattened oracle rejects on the effect pass.
         Verdict::Reject(FailingPass::Effect),
-        // Both module-wrapped and fragment accept, so no failing-pass to match.
-        false,
+        true,
+    );
+}
+
+#[test]
+fn effect_declared_pure_body_introduces_io() {
+    // The IO counterpart: `entry` is declared pure (`! { }`); the new body
+    // calls `logger`, which performs `Io` via `debug`. Both full-check shapes
+    // and the fragment REJECT on the effect pass, the same as the Random case.
+    let module = render_deep(EFFECT_MODULE);
+    let body = render_body(
+        "module M\ndef f(x: tensor[8, f32]) -> tensor[8, f32] = logger(x)\n",
+        "f",
+    );
+    assert_parity_mw(
+        "effect/declared_pure_introduces_io",
+        &module,
+        "entry",
+        &body,
+        Verdict::Reject(FailingPass::Effect),
+        true,
     );
 }
 
