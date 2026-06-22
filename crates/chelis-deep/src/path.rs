@@ -377,6 +377,84 @@ pub fn splice_function_body(
     Ok(program)
 }
 
+/// Return only the named function's rewritten `(def {meta} <name> (fn {}
+/// (params {} ...) <new_body>))` node, with the body subtree replaced by
+/// `new_body` and the def metadata, name, fn metadata, and params left
+/// verbatim.
+///
+/// This is the "fragment" half of a fragment-scoped body check: the
+/// returned single-element decl list is checked as new code against the
+/// held context produced by [`module_excluding_function_def`], exactly as
+/// `compile_new_source_in_context` checks new entry decls against a
+/// compiled library context. Unlike [`splice_function_body`], which
+/// returns the whole rewritten module, this returns just the one def so
+/// the context-scoped passes type-check, effect-check, and linearity-check
+/// only the spliced body and never re-walk the held library.
+pub fn spliced_function_def(
+    module_exprs: &[Expr],
+    qualified_name: &str,
+    new_body: Expr,
+) -> Result<Expr, ResolveError> {
+    let resolved = resolve_function(module_exprs, qualified_name)?;
+    let mut program = module_exprs.to_vec();
+
+    let module = program
+        .iter_mut()
+        .find_map(|expr| as_tagged_list_mut(expr, "module"))
+        .ok_or_else(|| ResolveError::NoModule {
+            searched: qualified_name.to_string(),
+        })?;
+
+    let def = module
+        .elements
+        .get_mut(MODULE_DECLS_START + resolved.decl_index)
+        .expect("resolve_function returned an in-range decl index");
+
+    let body_slot = function_body_mut(def).expect("resolved function has a body slot");
+    *body_slot = new_body;
+
+    Ok(def.clone())
+}
+
+/// Return the program with the named function's `(def {meta} <name> (fn
+/// ...))` node removed and everything else left byte-identical, including
+/// the function's own `(defsig {} <name> (t-fn ...))` declaration.
+///
+/// This is the "held context" half of a fragment-scoped body check: the
+/// caller type-checks the held program (the target's signature is still
+/// present, so a recursive reference to the target resolves against its
+/// declared type) and then checks a single spliced `(def <name> <new
+/// body>)` against that held context as new code. Removing only the `def`
+/// node (not the `defsig`) is what lets a recursive new body resolve
+/// against the signature rather than the stale old body.
+///
+/// The single `(def ...)` node identified by [`resolve_function`] is
+/// dropped from the module's declaration list; the `defsig`, every other
+/// declaration, the module name, and the export list are preserved
+/// verbatim. Resolution errors are propagated unchanged.
+pub fn module_excluding_function_def(
+    module_exprs: &[Expr],
+    qualified_name: &str,
+) -> Result<Vec<Expr>, ResolveError> {
+    let resolved = resolve_function(module_exprs, qualified_name)?;
+    let mut program = module_exprs.to_vec();
+
+    let module = program
+        .iter_mut()
+        .find_map(|expr| as_tagged_list_mut(expr, "module"))
+        .ok_or_else(|| ResolveError::NoModule {
+            searched: qualified_name.to_string(),
+        })?;
+
+    // The resolved decl_index is relative to module.elements[MODULE_DECLS_START..],
+    // so the def node lives at MODULE_DECLS_START + decl_index.
+    module
+        .elements
+        .remove(MODULE_DECLS_START + resolved.decl_index);
+
+    Ok(program)
+}
+
 /// Borrow the body subtree of a function `(def ...)` node, if present.
 pub fn function_body(def: &Expr) -> Option<&Expr> {
     let Expr::List(def_list, _) = def else {
@@ -565,5 +643,103 @@ mod tests {
             parse_one("(def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))");
         let body = function_body(&fn_def).expect("function body present");
         assert!(matches!(body, Expr::List(list, _) if tag(list) == Some("var")));
+    }
+
+    /// A two-function module with a `defsig` per function, matching the shape
+    /// `chelis deep` renders.
+    fn two_fn_module() -> Vec<Expr> {
+        parse_str(
+            "(module {} m \
+               (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32))) \
+               (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))) \
+               (defsig {} g (t-fn {} (t-prim {} f32) (t-prim {} f32))) \
+               (def {} g (fn {} (params {} (y {type: (t-prim {} f32)})) (var {} y))))",
+        )
+        .expect("module parse")
+    }
+
+    fn module_decl_tags(program: &[Expr]) -> Vec<(String, Option<String>)> {
+        let module = find_module(program).expect("module present");
+        decls(module)
+            .iter()
+            .filter_map(|d| {
+                let Expr::List(list, _) = d else {
+                    return None;
+                };
+                let decl_tag = tag(list)?.to_string();
+                let name = match list.elements.get(2) {
+                    Some(Expr::Atom(Atom::Symbol(s), _)) => Some(s.clone()),
+                    _ => None,
+                };
+                Some((decl_tag, name))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn module_excluding_function_def_drops_def_keeps_defsig() {
+        let module = two_fn_module();
+        let held = module_excluding_function_def(&module, "f").expect("exclude f");
+        let decls = module_decl_tags(&held);
+        // f's defsig is retained; f's def is gone; g is untouched.
+        assert_eq!(
+            decls,
+            vec![
+                ("defsig".to_string(), Some("f".to_string())),
+                ("defsig".to_string(), Some("g".to_string())),
+                ("def".to_string(), Some("g".to_string())),
+            ],
+        );
+    }
+
+    #[test]
+    fn module_excluding_unknown_function_is_resolve_error() {
+        let module = two_fn_module();
+        let err = module_excluding_function_def(&module, "nope").unwrap_err();
+        assert!(matches!(err, ResolveError::FunctionNotFound { .. }));
+    }
+
+    #[test]
+    fn spliced_function_def_returns_only_the_rewritten_def() {
+        let module = two_fn_module();
+        let new_body = parse_one("(var {} replaced)");
+        let def = spliced_function_def(&module, "f", new_body).expect("splice f");
+        // The returned node is f's def with the new body, not the module.
+        let Expr::List(list, _) = &def else {
+            panic!("expected a def list");
+        };
+        assert_eq!(tag(list), Some("def"));
+        assert_eq!(def_name(list), Some("f"));
+        let body = function_body(&def).expect("body slot");
+        assert!(matches!(body, Expr::List(b, _) if tag(b) == Some("var")));
+        // The original module is untouched: f still has its original body.
+        let original_f = resolve_function(&module, "f").expect("resolve f");
+        let f_def = match &module[0] {
+            Expr::List(m, _) => &m.elements[MODULE_DECLS_START + original_f.decl_index],
+            _ => panic!("module"),
+        };
+        let orig_body = function_body(f_def).expect("orig body");
+        // The original body is `(var {} x)`, not `(var {} replaced)`.
+        if let Expr::List(orig, _) = orig_body {
+            assert_eq!(tag(orig), Some("var"));
+            assert!(
+                matches!(orig.elements.get(2), Some(Expr::Atom(Atom::Symbol(s), _)) if s == "x"),
+                "original body var should still name `x`, got {:?}",
+                orig.elements.get(2),
+            );
+        } else {
+            panic!("expected var body");
+        }
+    }
+
+    #[test]
+    fn spliced_function_def_on_value_binding_is_not_a_function() {
+        let module = parse_str(
+            "(module {} m \
+               (def {} pi (lit {type: (t-prim {} f32)} 3.14)))",
+        )
+        .expect("module parse");
+        let err = spliced_function_def(&module, "pi", parse_one("(lit {} 1.0)")).unwrap_err();
+        assert!(matches!(err, ResolveError::NotAFunction { .. }));
     }
 }
