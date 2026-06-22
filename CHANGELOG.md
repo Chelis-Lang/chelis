@@ -8,6 +8,21 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`chelis prove`: call-form predicates lower to SMT instead of silently
+  fuzzing (chelis#422)** — operator-form `(x * x) >= 0.0` lowered to SMT and
+  proved, but call-form `gte(mul(x, x), 0.0)` returned `None` from the
+  predicate-position lowering and silently dropped to a Tier C fuzz pass, so a
+  measure-zero-false call-form rendered a fuzz green. Call-form comparison
+  primitives (`gt`/`gte`/`lt`/`lte`/`eq`/`neq`, and the desugared `cmplt`) now
+  lower to `SmtExpr::Cmp` and call-form arithmetic (`add`/`sub`/`mul`/`div`)
+  to interpreted `SmtExpr::Arith` nodes, making call-form fully equivalent to
+  operator-form. A measure-zero-false call-form is now SMT-refuted with a
+  counterexample, not fuzz-passed. Oracles in
+  `crates/chelis-cli/tests/prove.rs`
+  (`call_form_predicate_proves_at_smt_like_operator_form`,
+  `measure_zero_false_call_form_is_refuted_at_smt_not_fuzz_passed`) and unit
+  tests in `crates/chelis-prove/src/property_runner/smt_lower.rs`.
+
 - **C backend: function-body heap temporaries and nested-tuple printing no
   longer leak (completes #406)** — #412 freed the heap temporaries the
   program-root `main` allocates, but two sibling "definitely lost" classes
