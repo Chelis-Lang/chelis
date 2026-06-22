@@ -287,8 +287,42 @@ fresh `_anon_dim` per node over output types only, desyncing the same logical
 dim -- fixing it alone just turns `*` into an `_anon_dim` the guard still
 correctly rejects.
 
-Status: DEFERRED to a focused chelis-types follow-up (the CLEAN fix). Pinned
-by `crates/chelis-cli/tests/reshape_symbolic_dim_vmap_column.rs` (de269c7a):
-`vmap_over_symbolic_column_currently_ices_at_the_vmap_kernel` passes today;
-`vmap_over_symbolic_column_builds_without_symbolic_dim_ice` is `#[ignore]`d
-and auto-flips green when the chelis-types fix lands.
+Status: RESOLVED via the CLEAN fix (S2, chelis#405). The fix is a single
+chelis-types change in `narrow_wildcards_with`
+(`crates/chelis-types/src/infer.rs`): the #39 post-defsig wildcard
+narrowing now substitutes a body `Dim::Wildcard` with a declared
+`Dim::Var(v)` -- not only a `Dim::Lit` -- when `v` is bound by a *parameter*
+tensor-dim position of the declared signature (the new `param_bound_dvars`
+gate). For `const_col[n](spots: tensor[n, ..]) -> tensor[n, 1]` the return
+dim `n` is the same dim var as the `spots` parameter axis-0, so the body's
+`tensor[*, 1]` narrows to the published `tensor[n, 1]`; `n` then traces to
+the spots `Load` in the lowered IR, the `vmap` kernel batch dim is
+Load-declared, and the dag guard passes with no IR/codegen change.
+
+The narrowing is gated, not broadened: a *return-only* dim var (e.g.
+`arange[n](start: int32, stop: int32) -> tensor[n, int32]`, length from a
+value parameter) is NOT param-bound, so its body wildcard is left as `*` --
+exactly preserving the RT-39+44 soundness boundary (commit 8067c9ce) that
+the literal-only restriction was protecting. The earlier broad
+`Wildcard -> Dim::Var` narrowing was unsound precisely because it baked
+such free return-only vars into the scheme; the `param_bound_dvars` gate is
+the line between "the caller supplies this dim" (safe) and
+"output-inferred / value-parameter-derived" (unsafe).
+
+The FOUNDATIONAL fork (relaxing the dag.rs Load-only invariant) was NOT
+taken; the clean single-altitude fix was sufficient.
+
+Pinned by `crates/chelis-cli/tests/reshape_symbolic_dim_vmap_column.rs`:
+`vmap_over_symbolic_column_builds_without_symbolic_dim_ice` is now
+un-`#[ignore]`d and green (the build succeeds, no undeclared symbolic dim
+reaches cc). The companion `..._currently_ices_at_the_vmap_kernel` test
+that pinned the pre-fix ICE was deleted (it asserted a crash that no longer
+happens). A narrow chelis-types unit lock
+(`const_col_chain_propagates_declared_dim_to_callers` plus the
+`narrow_*`/`param_bound_dvars` pure-function tests in `infer.rs`) regresses
+the checker-level behavior.
+
+The secondary `rename_anonymous_dims` per-node `_anon_dim` minting (noted
+above) is moot for this idiom now that the dim is `Load`-declared rather
+than `*`; it remains a latent backend-c sharpening opportunity but no
+longer fires on the const_col path.
