@@ -33,8 +33,6 @@ use crate::composition::{
     NonVacuityRecord, NonVacuityStatus, rollup_composite,
 };
 use crate::contracts::{NORMAL_CDF_RANGE, NORMAL_CDF_REFLECTION, standard_contract_registry};
-#[cfg(feature = "smt")]
-use crate::discharge::DischargeEngine;
 
 /// The verification status of one user property.
 #[derive(Debug, Clone, PartialEq, Eq)]

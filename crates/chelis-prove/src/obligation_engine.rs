@@ -18,9 +18,6 @@ use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_types::types::{Prim, Type};
 
-#[cfg(feature = "smt")]
-use crate::discharge::DischargeEngine;
-
 use crate::composition::{
     AssumptionDischarge, AssumptionRecord, CompositeVerdict, DischargeMethod, FUZZ_TOLERANCE,
     NonVacuityRecord, NonVacuityStatus, rollup_composite,
