@@ -16,6 +16,7 @@ pub mod contracts;
 pub mod discharge;
 pub mod dispatch;
 pub mod from_property_spec;
+pub mod graph_extract;
 pub mod inlineability;
 pub mod obligation_engine;
 pub mod obligations;
@@ -50,6 +51,10 @@ pub use discharge::Cvc5Engine;
 pub use chelis_pred::{PredAmenability, predicate_free_vars};
 pub use dispatch::{DispatchOptions, dispatch_property};
 pub use from_property_spec::{PropertySpecInput, to_dispatch_amenability, to_smt_property};
+pub use graph_extract::{
+    ExtractedGoal, GraphExtractError, box_range_goal_from_source, box_range_goal_from_wire_dag,
+    box_range_goals_from_source, name_sorted_input_box,
+};
 pub use inlineability::{Fuzzability, Inlineability, classify_fuzzability, classify_inlineability};
 pub use tier_b::{
     AssumptionSatisfiability, SmtProperty, check_assumptions_satisfiable, solve_property,
