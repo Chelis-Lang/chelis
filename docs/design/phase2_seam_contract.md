@@ -123,15 +123,50 @@ Beacon implements this for its interval engine: `fitness` returns true for
 minimum-soundness map — a sound-over-approximation result carries
 `Qualifier::SoundOverApproximation` at `Soundness::SoundApproximate`). Stable.
 
-## 5. WI-9 registry external-registration entry point  — DESIGNED IN WAVE 2
+## 5. WI-9 registry external-registration entry point  — LANDED IN WAVE 2
 
-The registry that selects an engine by `fitness()` is WI-9 (Wave 2). Its
-external-registration entry point — how Beacon's out-of-tree engine registers so a
-`BoxRange` goal routes to it — will be added to this contract and signed off before
-WS-7's gradient-goal shape lands. Until WI-9 exists, a `BoxRange` goal with no
-registered fitting engine yields a `Discharge` at `Soundness::Untrusted` with an
-empty `QualifierSet`, projecting to `CompositeVerdict::Unsupported` (never a silent
-pass).
+The registry that selects an engine by `fitness()` is WI-9 (Wave 2), now landed
+as `chelis_prove::DischargeRegistry`. The external-registration entry point — how
+Beacon's out-of-tree engine registers so a `BoxRange` goal routes to it — is:
+
+```rust
+pub struct DischargeRegistry { /* private */ }
+
+impl DischargeRegistry {
+    pub fn new() -> Self;                                     // empty registry
+    pub fn with_builtin_engines() -> Self;                   // in-tree engines for the active feature lane
+    pub fn register(&mut self, engine: Box<dyn DischargeEngine>); // the Beacon rail
+    pub fn dispatch(&self, goal: &Goal, timeout_ms: u64) -> Discharge;
+    pub fn selected_engine_name(&self, goal: &Goal) -> Option<&'static str>;
+}
+```
+
+Beacon constructs `DischargeRegistry::with_builtin_engines()` and `register`s its
+boxed interval engine on top, then `dispatch`es. The registry stores boxed trait
+objects (not a closed enum) precisely so an out-of-tree engine can register
+without touching this crate.
+
+**Deterministic selection / tie-break.** `dispatch` selects the FIRST registered
+engine whose `fitness(goal)` is true, in registration order. Registration order
+IS the priority: an engine registered earlier is selected ahead of a later one
+when both fit a goal. So Beacon's interval / Arb sound lane registers ahead of any
+weaker fallback to own the `BoxRange` lane. The tie-break is explicit and
+registerable, not accidental.
+
+**No-fit path (unchanged guarantee).** A goal that no registered engine fits
+yields a `Discharge` at `Soundness::Untrusted` with an empty `QualifierSet` and a
+`TierBResult::Error` result (built through `Discharge::new`, so the integrity
+invariant holds). It projects to `CompositeVerdict::Unsupported` — never a silent
+pass, never a green, never `Proven`. No new soundness or verdict variant is
+introduced.
+
+**Dual-lane preservation.** `with_builtin_engines()` registers the in-tree engine
+per feature so neither feature lane changes behavior: under `--features smt` it
+registers `Cvc5Engine`; in the default (solver-free) build it registers the
+solver-free `SolvePropertyEngine`, which wraps the same unconditional
+`solve_property` call the non-smt path used directly before WI-9. The default
+binary still links zero cvc5-named symbols (the `check_is_solver_free_on_the_corpus`
+gate).
 
 ## Sign-off
 

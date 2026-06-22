@@ -15,6 +15,7 @@ pub mod concrete_eval;
 pub mod contracts;
 pub mod discharge;
 pub mod dispatch;
+pub mod engine_registry;
 pub mod from_property_spec;
 pub mod graph_extract;
 pub mod inlineability;
@@ -46,6 +47,12 @@ pub use discharge::{
 // default build keeps zero cvc5-named symbols (the solver-free gate).
 #[cfg(feature = "smt")]
 pub use discharge::Cvc5Engine;
+// WI-9: the discharge-engine registry + fitness-based dispatcher and its no-fit
+// honesty floor. The solver-free SMT engine is the default-build SMT lane and
+// exists only when cvc5 is absent.
+#[cfg(not(feature = "smt"))]
+pub use engine_registry::SolvePropertyEngine;
+pub use engine_registry::{DischargeRegistry, no_fit_discharge};
 // Re-export the chelis-pred predicate helpers so downstream CLI/tide
 // consumers reach them through chelis-prove (RFC D-PRED consumer surface).
 pub use chelis_pred::{PredAmenability, predicate_free_vars};

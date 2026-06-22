@@ -432,23 +432,23 @@ fn run_one(
         if let Some(lowered) =
             crate::tier_b_lower::lower_obligation(exprs, inv, ob, &pparams, consts)
         {
-            // Route the cvc5 solve through the discharge-engine seam (WI-4)
-            // under the smt feature. The cvc5 engine wraps the same
-            // solve_property pipeline, so `into_result()` yields the identical
-            // TierBResult and the match arms below are unchanged. The default
-            // (non-smt) binary has no cvc5 engine, so it calls the same
-            // solve_property stub directly -- identical result, and no
-            // cvc5-named symbol leaks into the solver-free default build.
-            #[cfg(feature = "smt")]
-            let discharge_result = crate::discharge::Cvc5Engine::new()
-                .discharge(
-                    &crate::discharge::Goal::smt(lowered.property.clone()),
-                    options.smt_timeout_ms,
-                )
-                .into_result();
-            #[cfg(not(feature = "smt"))]
+            // Route the solve through the WI-9 discharge-engine registry. The
+            // registry selects the SMT engine for this SMT goal by fitness, and
+            // `into_result()` yields the identical TierBResult so the match arms
+            // below are unchanged. The per-lane engine choice is internal to
+            // `with_builtin_engines`: under `--features smt` it is the cvc5
+            // engine (wrapping the same solve_property pipeline); in the default
+            // build it is the solver-free solve_property engine (wrapping the
+            // same direct solve_property call). Both lanes are byte-identical to
+            // the pre-WI-9 dispatch, and no cvc5-named symbol leaks into the
+            // solver-free default build.
             let discharge_result =
-                crate::tier_b::solve_property(&lowered.property, options.smt_timeout_ms);
+                crate::engine_registry::DischargeRegistry::with_builtin_engines()
+                    .dispatch(
+                        &crate::discharge::Goal::smt(lowered.property.clone()),
+                        options.smt_timeout_ms,
+                    )
+                    .into_result();
             match discharge_result {
                 TierBResult::Proved => {
                     let non_vacuity =
