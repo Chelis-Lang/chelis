@@ -22,10 +22,7 @@ pub use context::{
 /// (RFC `opaque_invariants_rfc.md` D-DECODE). No production codec consumes
 /// it in V1 -- see `decode` module docs.
 pub use decode::{DecodeError, decode_adt_value, try_decode_adt_value};
-pub use fragment::{
-    DeepErrorPath, HeldContext, ReplacementError, ReplacementReport, check_body_replacement,
-    check_fragment_def,
-};
+pub use fragment::{DeepErrorPath, ReplacementError, ReplacementReport, check_body_replacement};
 pub use layered::{LayeredCheck, check_layered, check_layered_for_build, stdlib_structural_stats};
 /// The host-runtime value type returned by the decode chokepoint.
 /// Experimental: surfaced for the decode contract point; its shape is not

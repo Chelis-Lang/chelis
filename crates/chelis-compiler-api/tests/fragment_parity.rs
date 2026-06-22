@@ -1,46 +1,48 @@
-//! The keystone differential gate for fragment-scoped body replacement.
+//! Splice-faithfulness and tagged-error coverage for whole-module body
+//! replacement.
 //!
-//! For each case this runs the fragment check
-//! ([`chelis_compiler_api::check_body_replacement`]) AND full `chelis check`
-//! of the rewritten module, and asserts the two verdicts AGREE: full check
-//! rejects the rewritten module IFF the fragment check rejects the body. A
-//! fragment check that greens a body full check would reject is the cardinal
-//! failure this gate exists to catch.
+//! The body-replacement tool's verdict EQUALS full `chelis check` of the
+//! rewritten module BY CONSTRUCTION: [`chelis_compiler_api::check_body_replacement`]
+//! splices the new body and runs the same whole-module pipeline
+//! `cmd_check_one_deep` runs. There is no separate scoped analysis that could
+//! disagree, so this gate no longer guards a fragment-vs-full soundness gap.
+//! What it DOES guard:
 //!
-//! ## Agreement definition
+//! 1. **Splice faithfulness.** The module the tool checks is the module obtained
+//!    by replacing exactly the target's body and nothing else. Each case
+//!    re-derives the rewritten module via the same `splice_function_body` the
+//!    tool uses, asserts the tool's verdict equals full `chelis check` of THAT
+//!    module, and asserts the splice changed only the target's body (every other
+//!    decl is byte-identical under canonical printing) and round-trips through
+//!    the parser. The body-only-changed and round-trip invariants are also
+//!    locked at the splice primitive in `chelis-deep`'s `path` tests
+//!    (`spliced_function_def_returns_only_the_rewritten_def` and the
+//!    `splice_function_body` doc invariant); they are re-asserted here at the
+//!    tool boundary so a regression in either layer is loud.
 //!
-//! Both paths run the same passes in the same pinned order TYPE -> EFFECTS ->
-//! LINEARITY and short-circuit on the first failing pass. Agreement is
-//! primarily the ACCEPT/REJECT boundary. The failing-pass identity (Type vs
-//! Effect vs Linearity) is asserted ONLY where both paths agree on a single
-//! unambiguous failing pass; a body wrong two ways may differ in first-failing
-//! pass between the whole-module walk and the fragment walk and must not flake
-//! the gate, provided both reject.
+//! 2. **Tagged-error coverage.** Each rejection case pins which pass rejects
+//!    (Type / Effect / Linearity) so the tool's error tag stays faithful to the
+//!    pass that actually failed. The cases span the full pass surface: type /
+//!    precision, declared-pure-body-performs-Random/IO, effect propagation to a
+//!    held caller, linearity use-after-consume, and the two cross-def structural
+//!    detectors (base-case-free recursion group, top-level binding cycle).
 //!
-//! Each case also pins its OWN expected accept/reject, so a behavior change in
-//! either path fails loudly rather than silently keeping the two paths in
-//! lockstep on the wrong answer.
+//! ## Verdict definition
 //!
-//! ## Full-check shape: module-wrapped and flattened agree
+//! `full_check_verdict` runs the pinned pipeline order `check_ir_fitness` ->
+//! `check_typed_program` -> `check_program` (effects) -> `check_linearity` and
+//! short-circuits on the first failing pass. The tool runs the same passes in
+//! the same order, so the ACCEPT/REJECT boundary and the first-failing-pass tag
+//! match by construction. Each case still pins its OWN expected accept/reject so
+//! a behavior change in the pipeline fails loudly rather than silently keeping
+//! the tool and the oracle in lockstep on the wrong answer.
 //!
-//! The full path `cmd_check_one_deep` runs `check_ir_fitness` (the
-//! whole-module type/structural pass, including the cross-def
-//! non-termination and binding-cycle detectors) FIRST, THEN
-//! `check_typed_program -> check_program -> check_linearity` on the
-//! module-WRAPPED rewritten program. [`full_check_verdict`] mirrors that order.
-//! The production fragment-authoring path (`compile_new_source_in_context`)
-//! FLATTENS module wrappers before the effect and linearity passes. These two
-//! shapes now AGREE on every case: the whole-program effect validators
-//! (`validate_unhandled_random_roots`, `validate_declared_vs_inferred`) descend
-//! into a `(module ...)` wrapper, so a declared-pure function whose body
-//! performs `Random`/`Io` is rejected under both shapes. The per-body linearity
-//! walk and the type pass already recursed into module-wrapped bodies, so they
-//! agreed before; with the effect descent the two shapes are fully aligned.
+//! ## Module-wrapped and flattened agree
 //!
-//! Each case pins both the module-wrapped verdict (`expected_module_wrapped`)
-//! and the flattened verdict (`expected_flattened`) so a behavior change in
-//! either is loud, and asserts the fragment agrees with the module-wrapped
-//! oracle. The two pinned verdicts are equal for every case here.
+//! The rewritten module is `(module ...)`-wrapped (it comes from
+//! `splice_function_body`). The effect validators descend into that wrapper, so
+//! the module-wrapped and flattened full-check verdicts agree on every case
+//! here. Each case pins both shapes so a regression in the descent is loud.
 
 use chelis_compiler_api::{ReplacementError, ReplacementReport, check_body_replacement};
 use chelis_deep::{Atom, Expr};
@@ -106,7 +108,7 @@ fn flatten_modules(exprs: &[Expr]) -> Vec<Expr> {
     out
 }
 
-// ── Verdicts and the full-check paths ────────────────────────────────────
+// ── Verdicts and the full-check path ─────────────────────────────────────
 
 /// Which pass first rejected a program, or `Accept` if all passes accepted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,11 +138,8 @@ impl Verdict {
 /// `check_typed_program` -> `check_program` (effects) -> `check_linearity`,
 /// short-circuiting on the first failing pass and naming it.
 ///
-/// `cmd_check_one_deep`'s overall verdict is "ok iff every reported error list
-/// is empty"; its first list comes from `check_ir_fitness`. Omitting that pass
-/// would blind this gate to a cross-def structural rejection that the fragment
-/// must agree with, so it runs first here. A fitness rejection is named
-/// `FailingPass::Type` because the fragment surfaces the same structural
+/// This is the oracle the tool is defined to equal. A fitness rejection is
+/// named `FailingPass::Type` because the tool surfaces the same structural
 /// rejection as a `ReplacementError::Type`.
 fn full_check_verdict(module: &[Expr]) -> Verdict {
     let fitness = chelis_types::check_ir_fitness(module);
@@ -161,39 +160,106 @@ fn full_check_verdict(module: &[Expr]) -> Verdict {
     }
 }
 
-/// Map a fragment-check result to a [`Verdict`]. A name-resolution miss is a
+/// Map a body-replacement result to a [`Verdict`]. A name-resolution miss is a
 /// gate-author error (the target must resolve), so it panics rather than
 /// becoming a verdict.
-fn fragment_verdict(result: &Result<ReplacementReport, ReplacementError>) -> Verdict {
+fn tool_verdict(result: &Result<ReplacementReport, ReplacementError>) -> Verdict {
     match result {
         Ok(_) => Verdict::Accept,
         Err(ReplacementError::Type { .. }) => Verdict::Reject(FailingPass::Type),
         Err(ReplacementError::Effect { .. }) => Verdict::Reject(FailingPass::Effect),
         Err(ReplacementError::Linearity { .. }) => Verdict::Reject(FailingPass::Linearity),
         Err(ReplacementError::NameResolution { message, .. }) => {
-            panic!("fragment target failed to resolve (gate-author error): {message}")
-        }
-        Err(ReplacementError::UndeclaredSignature { message, .. }) => {
-            // Every parity case targets rendered Deep, which always emits a
-            // defsig, so a defsig-less target here is a gate-author error, not
-            // a pass verdict.
-            panic!("fragment target has no defsig (gate-author error): {message}")
+            panic!("body-replacement target failed to resolve (gate-author error): {message}")
         }
     }
 }
 
+// ── Splice faithfulness ───────────────────────────────────────────────────
+
+/// Assert the splice the tool runs is faithful: the rewritten module replaces
+/// exactly the target's body and nothing else, and round-trips through the
+/// parser.
+///
+/// Body-only-changed: every decl other than the target's is byte-identical
+/// under canonical printing between the original and rewritten module, and the
+/// target's body is the spliced one. Round-trip: the rewritten module's
+/// canonical print re-parses to a module whose canonical print is identical.
+fn assert_splice_faithful(module: &[Expr], target: &str, new_body: &Expr) {
+    let rewritten = chelis_deep::splice_function_body(module, target, new_body.clone())
+        .expect("splice for faithfulness check");
+
+    // The target's body in the rewritten module is the spliced one.
+    let resolved = chelis_deep::resolve_function(&rewritten, target).expect("resolve in rewritten");
+    let rewritten_target_def = module_decl(&rewritten[0], resolved.decl_index)
+        .expect("target def in rewritten module")
+        .clone();
+    let rewritten_body =
+        chelis_deep::function_body(&rewritten_target_def).expect("rewritten target has a body");
+    assert_eq!(
+        chelis_deep::printer::print_expr(rewritten_body),
+        chelis_deep::printer::print_expr(new_body),
+        "spliced body must equal the new body verbatim under canonical printing",
+    );
+
+    // Body-only-changed: every NON-target decl is byte-identical; only the
+    // target's def differs (its body changed).
+    let orig_decls = module_decls(module);
+    let new_decls = module_decls(&rewritten);
+    assert_eq!(
+        orig_decls.len(),
+        new_decls.len(),
+        "splice must not add or drop decls",
+    );
+    let target_index = resolved.decl_index;
+    for (index, (orig, new)) in orig_decls.iter().zip(new_decls.iter()).enumerate() {
+        let orig_print = chelis_deep::printer::print_expr(orig);
+        let new_print = chelis_deep::printer::print_expr(new);
+        if index == target_index {
+            // The target def is the only decl allowed to differ.
+            continue;
+        }
+        assert_eq!(
+            orig_print, new_print,
+            "non-target decl at index {index} changed under splice",
+        );
+    }
+
+    // Round-trip: canonical print re-parses to the same canonical text.
+    let printed = chelis_deep::printer::print_canonical(&rewritten);
+    let reparsed = chelis_deep::parser::parse_str(&printed).expect("rewritten module re-parses");
+    assert_eq!(
+        chelis_deep::printer::print_canonical(&reparsed),
+        printed,
+        "rewritten module must round-trip through the parser",
+    );
+}
+
+/// The decls inside the single `(module ...)` node (the slice after the tag,
+/// metadata map, and module name).
+fn module_decls(module: &[Expr]) -> Vec<Expr> {
+    module
+        .iter()
+        .find_map(|expr| {
+            let Expr::List(list, _) = expr else {
+                return None;
+            };
+            is_tag(list, "module").then(|| list.elements[3..].to_vec())
+        })
+        .expect("single module node")
+}
+
 // ── The differential assertion ───────────────────────────────────────────
 
-/// Run the fragment check and both full-check shapes for one case, pin each
-/// shape's own verdict, and assert the fragment agrees with the module-wrapped
-/// oracle.
+/// Run the tool and both full-check shapes for one case, pin each shape's own
+/// verdict, assert the tool equals the module-wrapped oracle, and assert the
+/// splice is faithful.
 ///
-/// The fragment is defined to track `cmd_check_one_deep` (the module-wrapped
-/// full check). `expected_module_wrapped` / `expected_flattened` pin each full
-/// path's own accept/reject so a behavior change in either is loud; the two are
-/// equal for every case here now that the effect pass descends into the module
-/// wrapper. `assert_failing_pass` is set only where the module-wrapped full
-/// check and the fragment both report a single unambiguous failing pass.
+/// The tool is defined to equal `cmd_check_one_deep` (the module-wrapped full
+/// check). `expected_module_wrapped` / `expected_flattened` pin each full path's
+/// own accept/reject so a behavior change in either is loud; the two are equal
+/// for every case here. `assert_failing_pass` is set where the module-wrapped
+/// full check and the tool both report a single unambiguous failing pass.
 fn assert_parity(
     case: &str,
     module: &[Expr],
@@ -203,11 +269,16 @@ fn assert_parity(
     expected_flattened: Verdict,
     assert_failing_pass: bool,
 ) {
-    let frag_result = check_body_replacement(module, target, new_body);
-    let frag = fragment_verdict(&frag_result);
+    // Splice faithfulness: the rewritten module replaces exactly the target's
+    // body and round-trips, so the verdict below is computed over the module
+    // the caller actually authored.
+    assert_splice_faithful(module, target, new_body);
 
-    // Both full paths check the SAME rewritten module the fragment is defined
-    // to agree with. Build it via the same splice the fragment uses.
+    let tool_result = check_body_replacement(module, target, new_body);
+    let tool = tool_verdict(&tool_result);
+
+    // Both full paths check the SAME rewritten module the tool is defined to
+    // equal. Build it via the same splice the tool uses.
     let rewritten = chelis_deep::splice_function_body(module, target, new_body.clone())
         .expect("splice for full-check path");
     let module_wrapped = full_check_verdict(&rewritten);
@@ -223,23 +294,25 @@ fn assert_parity(
         "[{case}] flattened full-check {flattened:?} != pinned {expected_flattened:?}",
     );
 
-    // The cardinal invariant: the fragment's accept/reject boundary matches
-    // the brief's module-wrapped oracle.
+    // The cardinal invariant: the tool's accept/reject boundary equals the
+    // module-wrapped oracle (it is computed over the same module by the same
+    // passes, so this holds by construction; the assertion catches a regression
+    // in either path).
     assert_eq!(
-        frag.is_accept(),
+        tool.is_accept(),
         module_wrapped.is_accept(),
-        "[{case}] ACCEPT/REJECT disagreement vs module-wrapped: fragment={frag:?} full={module_wrapped:?}; \
-         fragment error (if any): {:?}",
-        frag_result
+        "[{case}] ACCEPT/REJECT disagreement vs module-wrapped: tool={tool:?} full={module_wrapped:?}; \
+         tool error (if any): {:?}",
+        tool_result
             .as_ref()
             .err()
             .map(|e| (e.stage(), e.message().to_string())),
     );
 
-    if assert_failing_pass && !frag.is_accept() {
+    if assert_failing_pass && !tool.is_accept() {
         assert_eq!(
-            frag, module_wrapped,
-            "[{case}] failing-pass disagreement vs module-wrapped: fragment={frag:?} full={module_wrapped:?}",
+            tool, module_wrapped,
+            "[{case}] failing-pass disagreement vs module-wrapped: tool={tool:?} full={module_wrapped:?}",
         );
     }
 }
@@ -320,7 +393,7 @@ def bs_call_scalar(s: f32, k: f32, r: f32, sigma: f32, t: f32) -> f32 = cast(bs_
 
 /// Constructed: a recursive integer countdown. The new body of `count_down`
 /// references `count_down` itself, so it must resolve against the function's
-/// `defsig` in the held context (the old body is excluded). Checks clean
+/// `defsig` (whole-module inference re-derives the signature). Checks clean
 /// standalone.
 const RECURSIVE_MODULE: &str = r#"module Frag.Recursive
 export (count_down)
@@ -329,8 +402,7 @@ def count_down(n: int32) -> int32 = if eq(n, 0) then 0 else count_down(sub(n, 1)
 
 /// Constructed: a mutually-recursive `is_even` / `is_odd` pair. A new body for
 /// `is_even` references `is_odd` (a sibling) and vice versa; both must resolve
-/// against their sibling's `defsig` in the held context. Checks clean
-/// standalone.
+/// against their sibling's `defsig`. Checks clean standalone.
 const MUTUAL_RECURSION_MODULE: &str = r#"module Frag.Mutual
 export (is_even, is_odd)
 def is_even(n: int32) -> bool = if eq(n, 0) then true else is_odd(sub(n, 1))
@@ -341,9 +413,9 @@ def is_odd(n: int32) -> bool = if eq(n, 0) then false else is_even(sub(n, 1))
 /// (`! { }`) and currently calls only the pure `pure_sibling`. `noisy`
 /// performs `Random` via the `dropout` builtin; `logger` performs `Io` via
 /// `debug`. Splicing a `noisy`- or `logger`-calling body into `entry` performs
-/// an effect under a pure signature; full check rejects it under both the
-/// module-wrapped and flattened shapes (the declared-vs-inferred validator
-/// descends into the module wrapper). Checks clean standalone.
+/// an effect under a pure signature; full check rejects it under both shapes
+/// (the declared-vs-inferred validator descends into the module wrapper).
+/// Checks clean standalone.
 const EFFECT_MODULE: &str = r#"module Frag.Effect
 export (entry)
 def noisy(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)
@@ -352,14 +424,40 @@ def pure_sibling(x: tensor[8, f32]) -> tensor[8, f32] = add(x, x)
 def entry(x: tensor[8, f32]) -> tensor[8, f32] ! { } = pure_sibling(add(x, x))
 "#;
 
+/// Constructed: cross-def effect propagation to a held caller (the red-team
+/// finding). `t` is declared `! { Random }` but its body is pure (`add(x, x)`),
+/// so its INFERRED effect is empty: over-declaration, which is allowed.
+/// `caller` is declared pure (`! { }`) and calls `t`; since `t`'s inferred
+/// effect is empty, `caller`'s inferred effect is empty too, so the base module
+/// checks clean. Splicing `t`'s body to perform `Random` (via `dropout`) raises
+/// `t`'s INFERRED effect to `{ Random }` (still matching its declared `Random`,
+/// so a `t`-local view accepts), but `caller` now INHERITS `Random` and
+/// violates its declared purity. Only the whole-module check sees that
+/// propagation, so it REJECTS on the effect pass. This is the divergence a
+/// single-def-scoped check would have missed.
+const CROSS_DEF_RANDOM_MODULE: &str = r#"module Frag.CrossRandom
+export (caller)
+def t(x: tensor[8, f32]) -> tensor[8, f32] ! { Random } = add(x, x)
+def caller(x: tensor[8, f32]) -> tensor[8, f32] ! { } = t(x)
+"#;
+
+/// The IO analog of [`CROSS_DEF_RANDOM_MODULE`]. `t` is declared `! { IO }` with
+/// a pure body; `caller` is declared pure and calls `t`. Splicing `t`'s body to
+/// perform `Io` (via `debug`) makes `caller` inherit `Io` and violate its
+/// declared purity. Checks clean standalone.
+const CROSS_DEF_IO_MODULE: &str = r#"module Frag.CrossIo
+export (caller)
+def t(x: tensor[8, f32]) -> tensor[8, f32] ! { IO } = add(x, x)
+def caller(x: tensor[8, f32]) -> tensor[8, f32] ! { } = t(x)
+"#;
+
 /// Constructed: a `ping` / `pong` mutually-recursive pair where `ping` holds
 /// the sole base case (`if eq(n, 0) then 0 ...`) and `pong` is unconditional.
 /// Splicing `ping`'s body to drop the base case (new body `pong(sub(n, 1))`)
 /// closes the recursion group with no base case anywhere, which the whole-module
 /// `detect_trivial_non_terminating_fns` detector flags. The detector is a
 /// recursion-group property, so it fires only when the full rewritten module is
-/// analyzed; the 2-decl fragment never sees `pong`. Checks clean standalone (the
-/// base case is present).
+/// analyzed. Checks clean standalone (the base case is present).
 const PINGPONG_MODULE: &str = r#"module Frag.PingPong
 export (ping, pong)
 def ping(n: int32) -> int32 = if eq(n, 0) then 0 else pong(sub(n, 1))
@@ -370,12 +468,10 @@ def pong(n: int32) -> int32 = ping(sub(n, 1))
 /// (`a` reads `b`, `b` reads `a`), which the whole-module
 /// `detect_top_level_binding_cycles` detector flags. This is the SECOND
 /// cross-def structural detector the fitness pass runs. The body-replacement
-/// API only targets functions with a declared signature, so a value-binding
-/// cycle cannot be introduced through a fragment splice; this fixture verifies
-/// the oracle ([`full_check_verdict`]) now mirrors `cmd_check_one_deep` by
-/// running `check_ir_fitness` first and so REJECTS the cycle. Before that
-/// change the oracle ran only `check_typed_program`, whose `infer_program`
-/// pass does not run `validate_ir_program` and so missed this detector.
+/// tool only targets functions with a declared signature, so a value-binding
+/// cycle cannot be introduced through a splice; this fixture verifies the
+/// oracle ([`full_check_verdict`]) mirrors `cmd_check_one_deep` by running
+/// `check_ir_fitness` first and so REJECTS the cycle.
 const BINDING_CYCLE_MODULE: &str = r#"module Frag.BindingCycle
 export (a, b)
 a: int32 = add(b, 1)
@@ -386,7 +482,7 @@ b: int32 = add(a, 1)
 /// parameter. A body that consumes `x` (via the consuming `realize`) and then
 /// uses it again is a `UseAfterConsume` violation; a body that consumes it
 /// exactly once is clean. `consumer` is a sibling that references `target` so
-/// the held context retains a real call site. Checks clean standalone.
+/// the rewritten module retains a real call site. Checks clean standalone.
 const LINEARITY_MODULE: &str = r#"module Frag.Linearity
 export (target)
 def target(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)
@@ -481,8 +577,7 @@ fn shoals_chain_wrong_return_precision_agrees_reject() {
 #[test]
 fn recursive_body_resolves_against_signature_agrees_accept() {
     let module = render_deep(RECURSIVE_MODULE);
-    // A new recursive body must resolve `count_down` against its defsig, not
-    // the excluded old body.
+    // A new recursive body must resolve `count_down` against its signature.
     let body = render_body(
         "module M\ndef f(n: int32) -> int32 = if lt(n, 1) then 0 else add(1, count_down(sub(n, 1)))\n",
         "f",
@@ -500,8 +595,8 @@ fn recursive_body_resolves_against_signature_agrees_accept() {
 #[test]
 fn recursive_body_wrong_return_type_agrees_reject() {
     let module = render_deep(RECURSIVE_MODULE);
-    // The recursive call resolves against the defsig, but its int32 result is
-    // cast to f32 and returned under an int32 signature: precision mismatch
+    // The recursive call resolves against the signature, but its int32 result
+    // is cast to f32 and returned under an int32 signature: precision mismatch
     // against the declared return. TYPE reject.
     let body = render_body(
         "module M\ndef f(n: int32) -> int32 = cast(count_down(n), f32)\n",
@@ -523,7 +618,7 @@ fn recursive_body_wrong_return_type_agrees_reject() {
 fn mutual_recursion_body_resolves_sibling_agrees_accept() {
     let module = render_deep(MUTUAL_RECURSION_MODULE);
     // New body for is_even referencing the sibling is_odd: resolves against
-    // is_odd's defsig in the held context.
+    // is_odd's signature.
     let body = render_body(
         "module M\ndef f(n: int32) -> bool = if lt(n, 1) then true else is_odd(sub(n, 1))\n",
         "f",
@@ -558,13 +653,12 @@ fn mutual_recursion_body_wrong_type_agrees_reject() {
     );
 }
 
-// ── Effect propagation across defs ──────────────────────────────────────────
+// ── Effect: declared-vs-inferred on the spliced def itself ──────────────────
 
 #[test]
 fn effect_pure_body_agrees_accept() {
     let module = render_deep(EFFECT_MODULE);
-    // entry stays pure: calls only pure_sibling. Accepted by both full shapes
-    // and the fragment.
+    // entry stays pure: calls only pure_sibling. Accepted.
     let body = render_body(
         "module M\ndef f(x: tensor[8, f32]) -> tensor[8, f32] = pure_sibling(add(x, x))\n",
         "f",
@@ -582,12 +676,8 @@ fn effect_pure_body_agrees_accept() {
 #[test]
 fn effect_declared_pure_body_introduces_random() {
     // `entry` is declared pure (`! { }`); the new body calls `noisy`, which
-    // performs `Random`. Both full-check shapes REJECT on the effect pass: the
-    // declared-vs-inferred validator descends into the `(module ...)` wrapper
-    // and sees the nested declared-pure defsig against the Random-performing
-    // body. The fragment carries `entry`'s defsig alongside the new def, so its
-    // `check_effects_with_context` runs the same declared-vs-inferred check
-    // against the new body and also REJECTS: clean accept/reject agreement.
+    // performs `Random`. The declared-vs-inferred validator descends into the
+    // `(module ...)` wrapper and rejects on the effect pass.
     let module = render_deep(EFFECT_MODULE);
     let body = render_body(
         "module M\ndef f(x: tensor[8, f32]) -> tensor[8, f32] = noisy(x)\n",
@@ -606,8 +696,8 @@ fn effect_declared_pure_body_introduces_random() {
 #[test]
 fn effect_declared_pure_body_introduces_io() {
     // The IO counterpart: `entry` is declared pure (`! { }`); the new body
-    // calls `logger`, which performs `Io` via `debug`. Both full-check shapes
-    // and the fragment REJECT on the effect pass, the same as the Random case.
+    // calls `logger`, which performs `Io` via `debug`. Rejected on the effect
+    // pass, the same as the Random case.
     let module = render_deep(EFFECT_MODULE);
     let body = render_body(
         "module M\ndef f(x: tensor[8, f32]) -> tensor[8, f32] = logger(x)\n",
@@ -619,6 +709,73 @@ fn effect_declared_pure_body_introduces_io() {
         "entry",
         &body,
         Verdict::Reject(FailingPass::Effect),
+        true,
+    );
+}
+
+// ── Effect: cross-def propagation to a held caller (red-team finding) ───────
+
+#[test]
+fn effect_cross_def_random_propagates_to_held_caller_rejects() {
+    // `t` is declared `! { Random }` with a pure body; `caller` (declared pure)
+    // calls `t`. Splicing `t`'s body to perform `Random` keeps `t` itself
+    // self-consistent (its declared Random now matches its inferred Random) but
+    // makes `caller` INHERIT Random and violate its declared purity. Only the
+    // whole-module check sees that propagation, so it REJECTS on the effect
+    // pass. A single-def-scoped check of `t` alone would have ACCEPTED.
+    let module = render_deep(CROSS_DEF_RANDOM_MODULE);
+    let body = render_body(
+        "module M\ndef f(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)\n",
+        "f",
+    );
+    assert_parity_mw(
+        "effect/cross_def_random_to_held_caller",
+        &module,
+        "t",
+        &body,
+        Verdict::Reject(FailingPass::Effect),
+        true,
+    );
+}
+
+#[test]
+fn effect_cross_def_io_propagates_to_held_caller_rejects() {
+    // The IO analog: `t` is declared `! { IO }` with a pure body; `caller`
+    // (declared pure) calls `t`. Splicing `t`'s body to perform `Io` (via
+    // `debug`) makes `caller` inherit `Io` and violate its declared purity.
+    // Whole-module check REJECTS on the effect pass.
+    let module = render_deep(CROSS_DEF_IO_MODULE);
+    let body = render_body(
+        "module M\ndef f(x: tensor[8, f32]) -> tensor[8, f32] = debug(x)\n",
+        "f",
+    );
+    assert_parity_mw(
+        "effect/cross_def_io_to_held_caller",
+        &module,
+        "t",
+        &body,
+        Verdict::Reject(FailingPass::Effect),
+        true,
+    );
+}
+
+#[test]
+fn effect_cross_def_pure_body_keeps_caller_pure_accepts() {
+    // Control: splicing `t`'s body to another pure expression keeps `t`'s
+    // inferred effect empty, so `caller` stays pure and the whole-module check
+    // ACCEPTS. This pins that the reject above is the propagated effect, not the
+    // mere presence of the `! { Random }` declaration on `t`.
+    let module = render_deep(CROSS_DEF_RANDOM_MODULE);
+    let body = render_body(
+        "module M\ndef f(x: tensor[8, f32]) -> tensor[8, f32] = mul(x, x)\n",
+        "f",
+    );
+    assert_parity_mw(
+        "effect/cross_def_pure_keeps_caller_pure",
+        &module,
+        "t",
+        &body,
+        Verdict::Accept,
         true,
     );
 }
@@ -649,7 +806,7 @@ fn linearity_use_after_consume_agrees_reject() {
     let module = render_deep(LINEARITY_MODULE);
     // `realize(x)` consumes `x`; the later `add(x, y)` uses the consumed `x`:
     // UseAfterConsume. The per-body linearity walk recurses into module-wrapped
-    // bodies, so both full shapes and the fragment reject on linearity.
+    // bodies, so the full check rejects on linearity.
     let body = render_body(
         r#"module M
 def f(x: tensor[4, f32]) -> tensor[4, f32] = {
@@ -678,11 +835,9 @@ fn pingpong_drop_base_case_agrees_reject() {
     // whole-module `detect_trivial_non_terminating_fns` detector flags both
     // `ping` and `pong` as trivially non-terminating. That detector is a
     // recursion-group property and only fires when the FULL rewritten module is
-    // analyzed: the 2-decl fragment `[ping defsig, ping def]` never sees `pong`.
-    // The fragment's whole-module fitness gate (added to `check_body_replacement`)
-    // runs `check_ir_fitness` on the rewritten module and so REJECTS, matching
-    // `cmd_check_one_deep`. Reject identity is a structural Type rejection on
-    // both paths.
+    // analyzed. The tool runs `check_ir_fitness` on the rewritten module and so
+    // REJECTS, matching `cmd_check_one_deep`. Reject identity is a structural
+    // Type rejection on both paths.
     let module = render_deep(PINGPONG_MODULE);
     let body = render_body(
         "module M\ndef f(n: int32) -> int32 = pong(sub(n, 1))\n",
@@ -706,8 +861,7 @@ fn binding_cycle_oracle_rejects() {
     // that pass; `check_typed_program`'s `infer_program` does not run
     // `validate_ir_program`. A value binding has no declared signature, so it
     // cannot be a `check_body_replacement` target and this detector is exercised
-    // at the oracle level only. Before Part 1 the oracle (which ran only
-    // `check_typed_program`) ACCEPTED this module; now it REJECTS.
+    // at the oracle level only.
     let module = render_deep(BINDING_CYCLE_MODULE);
     assert_eq!(
         full_check_verdict(&module),

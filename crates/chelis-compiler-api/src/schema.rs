@@ -190,10 +190,14 @@ pub struct ReplaceFunctionBodyRequest {
 }
 
 /// Result of a clean `chelis_replace_function_body`: the changed def and the
-/// full rewritten module, both in canonical Deep. The fragment check has
-/// already agreed with full `chelis check` of `module_deep` (the Phase B
-/// parity gate locks that agreement), so a returned result is a module that
-/// type-, effect-, and linearity-checks.
+/// full rewritten module, both in canonical Deep. The L0 validation runs full
+/// whole-module `chelis check` on `module_deep`, so the verdict EQUALS full
+/// `chelis check` of the rewritten module by construction (the splice-faithfulness
+/// gate locks that the rewrite is the module full check is run on); a returned
+/// result is a module that type-, effect-, and linearity-checks. Closure-scoped
+/// validation (caller-ward effect closure, the def's SCC for termination,
+/// per-def for type) is the future optimization, not a fragment-scoped path that
+/// could disagree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplaceFunctionBodyResult {
     /// Canonical Deep of just the changed `(def ...)` node.

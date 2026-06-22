@@ -43,7 +43,7 @@ const GROWTH_DEEP: &str = r#"(module {}
 "#;
 
 /// A well-typed replacement body for `gordon_pv`: `d * r`, still
-/// `(f32, f32, f32) -> f32`, so the fragment check accepts it.
+/// `(f32, f32, f32) -> f32`, so the whole-module check accepts it.
 const GROWTH_WELL_TYPED_BODY: &str = "(app {} (var {} mul) (var {} d) (var {} r))";
 
 /// An ill-typed replacement body for `gordon_pv`: casting `d` to `f64`
@@ -95,8 +95,8 @@ fn call_replace(arguments: serde_json::Value) -> serde_json::Value {
 /// returns the changed def and the rewritten module as canonical Deep. The
 /// returned `module_deep` is asserted to round-trip (parse_str_strict +
 /// print_canonical is idempotent) and to be accepted by a full
-/// `chelis_compiler_api` check, so the verdict the tool reports is the same
-/// verdict full `chelis check` would reach (the Phase B parity contract).
+/// `chelis_compiler_api` check, so the verdict the tool reports equals the
+/// verdict full `chelis check` reaches (the tool runs that check by construction).
 #[test]
 fn replace_function_body_accepts_well_typed_replacement() {
     let response = call_replace(json!({
@@ -240,11 +240,11 @@ fn replace_function_body_ill_typed_body_is_type_error() {
 /// Structured-error case: splicing away the sole base case of a cross-def
 /// recursion group is rejected by the tool, agreeing with full `chelis check`.
 /// `ping` holds the only base case of the `ping`/`pong` group; the new body
-/// calls `pong` unconditionally. The three fragment-scoped passes see only
-/// `[ping defsig, ping def]` and do not catch it, but the whole-module fitness
-/// gate (`detect_trivial_non_terminating_fns`) does, so the tool returns a
-/// structured `check`/`type_error` rather than greening a module full check
-/// would reject. The fitness pass rejects a base-case-free recursion group
+/// calls `pong` unconditionally. A single-def-scoped view of `ping` alone would
+/// not catch it, but the whole-module check the tool runs
+/// (`detect_trivial_non_terminating_fns` in the fitness pass) does, so the tool
+/// returns a structured `check`/`type_error` rather than greening a module full
+/// check would reject. The fitness pass rejects a base-case-free recursion group
 /// before the separate whole-module inference that can wedge on it, so the tool
 /// returns promptly.
 #[test]

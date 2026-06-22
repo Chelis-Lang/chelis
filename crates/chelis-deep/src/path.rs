@@ -411,15 +411,10 @@ pub fn splice_function_body(
 /// `new_body` and the def metadata, name, fn metadata, and params left
 /// verbatim.
 ///
-/// This is the "fragment" half of a fragment-scoped body check: the
-/// returned def is paired with the target's `(defsig ...)` (see
-/// [`function_defsig`]) into a two-decl mini-program checked as new code
-/// against the held context produced by [`module_excluding_function_def`],
-/// exactly as `compile_new_source_in_context` checks new entry decls against
-/// a compiled library context. Unlike [`splice_function_body`], which returns
-/// the whole rewritten module, this returns just the one def so the
-/// context-scoped passes type-check, effect-check, and linearity-check only
-/// the spliced body and never re-walk the held library.
+/// Unlike [`splice_function_body`], which returns the whole rewritten module,
+/// this returns just the one rewritten def. The body-replacement tool surfaces
+/// it as the `changed_def_deep` field (the single def the caller authored),
+/// alongside the whole rewritten module the verdict is computed over.
 pub fn spliced_function_def(
     module_exprs: &[Expr],
     qualified_name: &str,
@@ -450,16 +445,13 @@ pub fn spliced_function_def(
 /// ...))` node removed and everything else left byte-identical, including
 /// the function's own `(defsig {} <name> (t-fn ...))` declaration.
 ///
-/// This is the held-context half of a fragment-scoped body check. The target's
-/// `(defsig ...)` is RETAINED so a sibling that calls the target still resolves
-/// against the target's declared signature in the held context. The target's
-/// `(def ...)` (its old body) is removed because the fragment supplies the new
-/// body. The fragment slice ALSO carries the target's `(defsig ...)` (see
-/// [`function_defsig`]) so the fragment's declared-vs-inferred effect check
-/// fires against the new body and a recursive new body resolves against the
-/// signature: together these mirror whole-program `chelis check`, which checks
-/// every def against its own defsig over one flat decl set while every sibling
-/// call also resolves against that defsig.
+/// The target's `(defsig ...)` is RETAINED while its `(def ...)` (its old body)
+/// is removed, so the result is a module that still declares the target's
+/// signature but supplies no body for it. This was built for a single-def-scoped
+/// body check that has since been dropped in favor of full whole-module
+/// validation; the function and its byte-identical-except-the-removed-def
+/// guarantee remain exercised by the `path` tests and available to a future
+/// closure-scoped validator.
 ///
 /// The single `(def ...)` node identified by [`resolve_function`] is dropped
 /// from the module's declaration list; the `defsig`, every other declaration,
@@ -491,17 +483,15 @@ pub fn module_excluding_function_def(
 /// Return the named function's own `(defsig {} <name> (t-fn ...))` declaration
 /// node, if the single module declares one.
 ///
-/// A fragment-scoped body check carries the target's `defsig` into the fragment
-/// slice (adjacent to the new `def`) so the fragment's effect validator sees
-/// the declared signature against the new body, mirroring the whole-program
-/// declared-vs-inferred check. The held context built by
-/// [`module_excluding_function_def`] also retains the target's `defsig` so
-/// sibling calls into the target still resolve; carrying a copy into the
-/// fragment is what makes the fragment's own declared-vs-inferred check fire.
+/// This returns the declared signature node for a target. It was built for a
+/// single-def-scoped body check that carried the target's `defsig` alongside a
+/// spliced `def`; that check has since been dropped in favor of full
+/// whole-module validation. The function remains exercised by the `path` tests
+/// and available to a future closure-scoped validator.
 ///
-/// Returns `None` when the target has no matching `(defsig ...)`. Callers query
-/// [`module_has_defsig_for`] first and reject inferred-signature targets, so a
-/// `None` here on a resolved function indicates a defsig-less target.
+/// Returns `None` when the target has no matching `(defsig ...)`. Pair it with
+/// [`module_has_defsig_for`] to distinguish a declared-signature target from a
+/// defsig-less one whose signature is inferred from its body.
 pub fn function_defsig(module_exprs: &[Expr], qualified_name: &str) -> Option<Expr> {
     let module = find_module(module_exprs)?;
     let (_prefix, bare_name) = split_qualified_name(qualified_name);
@@ -514,14 +504,12 @@ pub fn function_defsig(module_exprs: &[Expr], qualified_name: &str) -> Option<Ex
 /// True when the single module in `module_exprs` declares a `(defsig {}
 /// <name> ...)` for the target named by `qualified_name`.
 ///
-/// A fragment-scoped body check moves the target's declared signature into the
-/// fragment alongside the new body (see [`function_defsig`]) so a recursive new
-/// body resolves against the declared type. A target with no `(defsig ...)` has
-/// its signature inferred from the body, so there is no signature to move into
-/// the fragment and a recursive new body would be checked differently than a
-/// full check that re-infers from the new body. Callers query this before
-/// building a held context so they can reject inferred-signature targets rather
-/// than silently diverge.
+/// A target with no `(defsig ...)` has its signature inferred from its body; one
+/// with a `(defsig ...)` declares it. This distinction drove a single-def-scoped
+/// body check that has since been dropped in favor of full whole-module
+/// validation, which re-infers a defsig-less target's signature from its body
+/// uniformly. The predicate remains exercised by the `path` tests and available
+/// to a future closure-scoped validator.
 ///
 /// The bare name and any module prefix are matched the same way
 /// [`resolve_function`] matches them. Resolution-shape errors (no module,

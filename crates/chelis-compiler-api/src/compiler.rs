@@ -110,12 +110,12 @@ pub fn desugar(request: DesugarRequest) -> Result<DesugarResult> {
 /// Replace one function's body in a Deep module with a new Deep body, returning
 /// the canonical Deep of the changed def and the full rewritten module.
 ///
-/// Deep-native and pure: it parses the `module` and `new_body` as Deep,
-/// fragment-checks the replacement against the rest of the module (the Phase B
-/// `check_body_replacement` seam — TYPE then EFFECTS then LINEARITY scoped to
-/// the spliced body), and returns canonical Deep on success. Nothing is
-/// persisted; no file is written. On any failure it returns a structured
-/// [`CompilerError`] whose stage names the rejecting pass.
+/// Deep-native and pure: it parses the `module` and `new_body` as Deep, runs
+/// full whole-module `chelis check` on the rewritten module (the
+/// `check_body_replacement` seam runs FITNESS, then TYPE, then EFFECTS, then
+/// LINEARITY over the whole rewritten module), and returns canonical Deep on
+/// success. Nothing is persisted; no file is written. On any failure it returns
+/// a structured [`CompilerError`] whose stage names the rejecting pass.
 pub fn replace_function_body(
     request: crate::schema::ReplaceFunctionBodyRequest,
 ) -> Result<crate::schema::ReplaceFunctionBodyResult> {
@@ -154,9 +154,9 @@ pub fn replace_function_body(
         )
     })?;
 
-    // Fragment-scoped body-replacement check (Phase B). On rejection the error
-    // is tagged by the failing pass; on success the report carries the full
-    // rewritten module the verdict is defined to agree with.
+    // Whole-module body-replacement check: full `chelis check` of the rewritten
+    // module. On rejection the error is tagged by the failing pass; on success
+    // the report carries the full rewritten module the verdict equals.
     let report = crate::fragment::check_body_replacement(&module, &request.function_name, new_body)
         .map_err(replacement_error_to_compiler_error)?;
 
@@ -172,7 +172,7 @@ pub fn replace_function_body(
     })
 }
 
-/// Map a fragment-check [`crate::fragment::ReplacementError`] to a structured
+/// Map a [`crate::fragment::ReplacementError`] to a structured
 /// [`CompilerError`]. The stage and `kind` discriminate the rejecting pass so
 /// the caller can branch on it; the forward-compatible `deep_path` slot is
 /// threaded through (always `None` in L0).
@@ -181,9 +181,6 @@ fn replacement_error_to_compiler_error(error: crate::fragment::ReplacementError)
     let (kind, location, deep_path) = match &error {
         ReplacementError::NameResolution { location, .. } => {
             ("name_resolution_error", *location, None)
-        }
-        ReplacementError::UndeclaredSignature { location, .. } => {
-            ("undeclared_signature_error", *location, None)
         }
         ReplacementError::Type {
             location,
