@@ -23,8 +23,11 @@
 //!
 //! ## Full-check shape: module-wrapped and flattened agree
 //!
-//! The full path `cmd_check_one_deep` runs `check_typed_program ->
-//! check_program -> check_linearity` on the module-WRAPPED rewritten program.
+//! The full path `cmd_check_one_deep` runs `check_ir_fitness` (the
+//! whole-module type/structural pass, including the cross-def
+//! non-termination and binding-cycle detectors) FIRST, THEN
+//! `check_typed_program -> check_program -> check_linearity` on the
+//! module-WRAPPED rewritten program. [`full_check_verdict`] mirrors that order.
 //! The production fragment-authoring path (`compile_new_source_in_context`)
 //! FLATTENS module wrappers before the effect and linearity passes. These two
 //! shapes now AGREE on every case: the whole-program effect validators
@@ -127,9 +130,23 @@ impl Verdict {
 }
 
 /// Run full whole-program `chelis check` on `module`, mirroring
-/// `cmd_check_one_deep`: `check_typed_program` -> `check_program` (effects) ->
-/// `check_linearity`, short-circuiting on the first failing pass and naming it.
+/// `cmd_check_one_deep` exactly: `check_ir_fitness` (the whole-module
+/// type/structural pass, including the cross-def `detect_trivial_non_terminating_fns`
+/// and `detect_top_level_binding_cycles` detectors) FIRST, THEN
+/// `check_typed_program` -> `check_program` (effects) -> `check_linearity`,
+/// short-circuiting on the first failing pass and naming it.
+///
+/// `cmd_check_one_deep`'s overall verdict is "ok iff every reported error list
+/// is empty"; its first list comes from `check_ir_fitness`. Omitting that pass
+/// would blind this gate to a cross-def structural rejection that the fragment
+/// must agree with, so it runs first here. A fitness rejection is named
+/// `FailingPass::Type` because the fragment surfaces the same structural
+/// rejection as a `ReplacementError::Type`.
 fn full_check_verdict(module: &[Expr]) -> Verdict {
+    let fitness = chelis_types::check_ir_fitness(module);
+    if !fitness.errors.is_empty() {
+        return Verdict::Reject(FailingPass::Type);
+    }
     let typed = match chelis_types::check_typed_program(module) {
         Ok(checked) => checked,
         Err(_) => return Verdict::Reject(FailingPass::Type),
@@ -333,6 +350,36 @@ def noisy(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)
 def logger(x: tensor[8, f32]) -> tensor[8, f32] = debug(x)
 def pure_sibling(x: tensor[8, f32]) -> tensor[8, f32] = add(x, x)
 def entry(x: tensor[8, f32]) -> tensor[8, f32] ! { } = pure_sibling(add(x, x))
+"#;
+
+/// Constructed: a `ping` / `pong` mutually-recursive pair where `ping` holds
+/// the sole base case (`if eq(n, 0) then 0 ...`) and `pong` is unconditional.
+/// Splicing `ping`'s body to drop the base case (new body `pong(sub(n, 1))`)
+/// closes the recursion group with no base case anywhere, which the whole-module
+/// `detect_trivial_non_terminating_fns` detector flags. The detector is a
+/// recursion-group property, so it fires only when the full rewritten module is
+/// analyzed; the 2-decl fragment never sees `pong`. Checks clean standalone (the
+/// base case is present).
+const PINGPONG_MODULE: &str = r#"module Frag.PingPong
+export (ping, pong)
+def ping(n: int32) -> int32 = if eq(n, 0) then 0 else pong(sub(n, 1))
+def pong(n: int32) -> int32 = ping(sub(n, 1))
+"#;
+
+/// Constructed: a module carrying a top-level value-binding cycle
+/// (`a` reads `b`, `b` reads `a`), which the whole-module
+/// `detect_top_level_binding_cycles` detector flags. This is the SECOND
+/// cross-def structural detector the fitness pass runs. The body-replacement
+/// API only targets functions with a declared signature, so a value-binding
+/// cycle cannot be introduced through a fragment splice; this fixture verifies
+/// the oracle ([`full_check_verdict`]) now mirrors `cmd_check_one_deep` by
+/// running `check_ir_fitness` first and so REJECTS the cycle. Before that
+/// change the oracle ran only `check_typed_program`, whose `infer_program`
+/// pass does not run `validate_ir_program` and so missed this detector.
+const BINDING_CYCLE_MODULE: &str = r#"module Frag.BindingCycle
+export (a, b)
+a: int32 = add(b, 1)
+b: int32 = add(a, 1)
 "#;
 
 /// Constructed: a linearity module. `target(x)` takes an owned tensor
@@ -619,6 +666,58 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] = {
         &body,
         Verdict::Reject(FailingPass::Linearity),
         true,
+    );
+}
+
+// ── Cross-def structural fitness (whole-module detectors) ───────────────────
+
+#[test]
+fn pingpong_drop_base_case_agrees_reject() {
+    // `ping` holds the sole base case of the `ping`/`pong` group. Splicing its
+    // body to call `pong` unconditionally removes the only base case, so the
+    // whole-module `detect_trivial_non_terminating_fns` detector flags both
+    // `ping` and `pong` as trivially non-terminating. That detector is a
+    // recursion-group property and only fires when the FULL rewritten module is
+    // analyzed: the 2-decl fragment `[ping defsig, ping def]` never sees `pong`.
+    // The fragment's whole-module fitness gate (added to `check_body_replacement`)
+    // runs `check_ir_fitness` on the rewritten module and so REJECTS, matching
+    // `cmd_check_one_deep`. Reject identity is a structural Type rejection on
+    // both paths.
+    let module = render_deep(PINGPONG_MODULE);
+    let body = render_body(
+        "module M\ndef f(n: int32) -> int32 = pong(sub(n, 1))\n",
+        "f",
+    );
+    assert_parity_mw(
+        "pingpong/drop_base_case",
+        &module,
+        "ping",
+        &body,
+        Verdict::Reject(FailingPass::Type),
+        true,
+    );
+}
+
+#[test]
+fn binding_cycle_oracle_rejects() {
+    // The oracle must mirror `cmd_check_one_deep`, which runs `check_ir_fitness`
+    // (the whole-module `detect_top_level_binding_cycles` detector) first. A
+    // value-binding cycle (`a` reads `b`, `b` reads `a`) is rejected only by
+    // that pass; `check_typed_program`'s `infer_program` does not run
+    // `validate_ir_program`. A value binding has no declared signature, so it
+    // cannot be a `check_body_replacement` target and this detector is exercised
+    // at the oracle level only. Before Part 1 the oracle (which ran only
+    // `check_typed_program`) ACCEPTED this module; now it REJECTS.
+    let module = render_deep(BINDING_CYCLE_MODULE);
+    assert_eq!(
+        full_check_verdict(&module),
+        Verdict::Reject(FailingPass::Type),
+        "oracle must reject a top-level binding cycle via the fitness pass",
+    );
+    assert_eq!(
+        full_check_verdict(&flatten_modules(&module)),
+        Verdict::Reject(FailingPass::Type),
+        "flattened oracle must also reject the binding cycle",
     );
 }
 

@@ -51,6 +51,36 @@ const GROWTH_WELL_TYPED_BODY: &str = "(app {} (var {} mul) (var {} d) (var {} r)
 /// type pass rejects.
 const GROWTH_ILL_TYPED_BODY: &str = "(cast {} (var {} d) (t-prim {} f64))";
 
+/// A `ping`/`pong` mutually-recursive module where `ping` holds the sole base
+/// case (`if eq(n, 0) then 0 ...`). The held context retains `pong` (which is
+/// unconditional) and `ping`'s defsig, so the 2-decl fragment never sees the
+/// full recursion group. Checks clean standalone.
+const PINGPONG_DEEP: &str = r#"(module {}
+  frag.pingpong
+  (export {} ping pong)
+  (defsig {} ping (t-fn {} (t-prim {} int32) (t-prim {} int32)))
+  (defsig {} pong (t-fn {} (t-prim {} int32) (t-prim {} int32)))
+  (def {}
+    ping
+    (fn {}
+      (params {} (n {type: (t-prim {} int32)}))
+      (if {}
+        (app {} (var {} eq) (var {} n) (lit {type: (t-prim {} int32)} 0))
+        (lit {type: (t-prim {} int32)} 0)
+        (app {} (var {} pong) (app {} (var {} sub) (var {} n) (lit {type: (t-prim {} int32)} 1))))))
+  (def {}
+    pong
+    (fn {}
+      (params {} (n {type: (t-prim {} int32)}))
+      (app {} (var {} ping) (app {} (var {} sub) (var {} n) (lit {type: (t-prim {} int32)} 1))))))
+"#;
+
+/// A replacement body for `ping` that drops the base case: it calls `pong`
+/// unconditionally, closing a base-case-free `ping`/`pong` recursion group. The
+/// whole-module non-termination detector flags it; the 2-decl fragment cannot.
+const PINGPONG_NO_BASE_BODY: &str =
+    "(app {} (var {} pong) (app {} (var {} sub) (var {} n) (lit {type: (t-prim {} int32)} 1)))";
+
 fn call_replace(arguments: serde_json::Value) -> serde_json::Value {
     handle_message(&json!({
         "jsonrpc":"2.0",
@@ -204,6 +234,64 @@ fn replace_function_body_ill_typed_body_is_type_error() {
         errors[0].get("deep_path").is_none(),
         "deep_path is omitted on the wire in L0: {}",
         errors[0]
+    );
+}
+
+/// Structured-error case: splicing away the sole base case of a cross-def
+/// recursion group is rejected by the tool, agreeing with full `chelis check`.
+/// `ping` holds the only base case of the `ping`/`pong` group; the new body
+/// calls `pong` unconditionally. The three fragment-scoped passes see only
+/// `[ping defsig, ping def]` and do not catch it, but the whole-module fitness
+/// gate (`detect_trivial_non_terminating_fns`) does, so the tool returns a
+/// structured `check`/`type_error` rather than greening a module full check
+/// would reject. The fitness pass rejects a base-case-free recursion group
+/// before the separate whole-module inference that can wedge on it, so the tool
+/// returns promptly.
+#[test]
+fn replace_function_body_cross_def_base_case_drop_is_rejected() {
+    // Guard: the fixture itself checks clean (the base case is present), so the
+    // rejection below is the dropped base case, not a malformed fixture.
+    let baseline =
+        chelis_compiler_api::compiler::check(chelis_compiler_api::schema::CheckRequest {
+            source_kind: chelis_compiler_api::schema::SourceKind::Deep,
+            source: PINGPONG_DEEP.to_string(),
+        })
+        .expect("fixture checks");
+    assert!(
+        baseline.errors.is_empty(),
+        "ping/pong fixture is clean standalone: {:?}",
+        baseline.errors
+    );
+
+    let start = std::time::Instant::now();
+    let response = call_replace(json!({
+        "module": PINGPONG_DEEP,
+        "function_name": "ping",
+        "new_body": PINGPONG_NO_BASE_BODY,
+    }));
+    let elapsed = start.elapsed();
+    assert_eq!(
+        response["result"]["isError"], true,
+        "base-case drop must be rejected: {}",
+        response["result"]["structuredContent"]
+    );
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["ok"], false);
+    assert_eq!(structured["stage"], "check");
+    let errors = structured["errors"].as_array().expect("errors array");
+    assert_eq!(errors[0]["kind"], "type_error");
+    assert!(
+        errors[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("trivially non-terminating"),
+        "the diagnostic names the non-termination cause: {}",
+        errors[0]["message"]
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(30),
+        "tool path returns promptly (the fitness pass precedes any wedging \
+         whole-module inference), took {elapsed:?}"
     );
 }
 

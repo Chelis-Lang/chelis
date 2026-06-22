@@ -2,12 +2,28 @@
 //!
 //! The Deep authoring loop replaces one function body at a time. Re-running
 //! the whole-program `chelis check` pipeline on every keystroke would be
-//! wasteful, so this module checks only the spliced body against a held
-//! context built once from the rest of the module. The keystone invariant
-//! is that the fragment verdict MUST AGREE with full `chelis check` of the
-//! rewritten module: a fragment check that accepts a body full check would
-//! reject is the cardinal failure. The agreement is locked by the
-//! differential gate at `tests/fragment_parity.rs`.
+//! wasteful, so this module checks the spliced body against a held context
+//! built once from the rest of the module. The keystone invariant is that the
+//! fragment verdict MUST AGREE with full `chelis check` of the rewritten
+//! module: a fragment check that accepts a body full check would reject is the
+//! cardinal failure. The agreement is locked by the differential gate at
+//! `tests/fragment_parity.rs`.
+//!
+//! ## Fragment-scoped vs whole-module checks
+//!
+//! Three passes are fragment-scoped, checking only the spliced body against the
+//! held context: the type pass, the effect pass, and the linearity pass. One
+//! check is whole-module and cannot be fragment-scoped: the structural fitness
+//! pass `chelis_types::check_ir_fitness`, which runs the cross-def detectors
+//! `detect_trivial_non_terminating_fns` (a base-case-free recursion group) and
+//! `detect_top_level_binding_cycles` (a value-binding cycle). A recursion group
+//! spans defs the 2-decl fragment never sees, so a sibling holding the sole
+//! base case could be spliced away undetected by the fragment-scoped passes
+//! while full `chelis check` rejects the rewritten module. To keep the verdict
+//! in agreement, [`check_body_replacement`] runs `check_ir_fitness` over the
+//! full rewritten module after the fragment-scoped passes accept. This re-does
+//! whole-module type/structural work; incremental whole-module fitness is a
+//! future concern, not an L0 correctness requirement.
 //!
 //! ## The seam
 //!
@@ -248,14 +264,19 @@ pub fn check_fragment_def(
 
 /// Check replacing the body of `target_qualified_name` in `module` with
 /// `new_body`, running TYPE + EFFECTS + LINEARITY scoped to the spliced body
-/// against a held context built once from the rest of the module.
+/// against a held context built once from the rest of the module, then a
+/// whole-module structural fitness gate over the full rewritten module.
 ///
 /// This is the primary fragment-check surface. It resolves the target,
 /// excludes its `(def ...)` node (retaining its `(defsig ...)`), builds the
 /// held context once, splices `new_body`, and runs the three context-scoped
-/// passes in order. On success it returns the full rewritten module; on
-/// rejection it returns a tagged [`ReplacementError`] naming the first failing
-/// pass.
+/// passes in order. The three context-scoped passes are fragment-scoped; the
+/// final fitness gate (`chelis_types::check_ir_fitness`) is whole-module and
+/// catches cross-def structural violations (base-case-free recursion groups,
+/// value-binding cycles) the fragment-scoped passes cannot see. On success it
+/// returns the full rewritten module; on rejection it returns a tagged
+/// [`ReplacementError`] naming the first failing pass (a fitness rejection is
+/// tagged `Type`).
 ///
 /// The verdict MUST AGREE with full `chelis check` of the returned
 /// `rewritten_module`. A disagreement is a bug in this function, not a case to
@@ -327,6 +348,33 @@ pub fn check_body_replacement(
     let rewritten_module =
         chelis_deep::splice_function_body(module, target_qualified_name, new_body.clone())
             .map_err(resolve_error_to_replacement_error)?;
+
+    // Whole-module structural fitness gate. The three passes above are
+    // fragment-scoped (local type, effects, and linearity of the new body
+    // against the held context), but `chelis check` also runs whole-module
+    // structural detectors that are recursion-group properties, chiefly
+    // `detect_trivial_non_terminating_fns` (a base-case-free self- or
+    // mutual-recursion group) and `detect_top_level_binding_cycles` (a
+    // value-binding cycle). A base case the held context still holds in a
+    // SIBLING def cannot be seen by the 2-decl fragment, so splicing it away
+    // would slip past the fragment-scoped passes while full `chelis check`
+    // rejects the rewritten module. To keep the verdict in agreement, run the
+    // same whole-module fitness pass `cmd_check_one_deep` runs first
+    // (`chelis_types::check_ir_fitness`) over the rewritten module and reject
+    // if it reports any error. This re-does whole-module type/structural work
+    // rather than reusing the held context; that is acceptable for L0
+    // correctness (incremental whole-module fitness is a future concern). The
+    // fitness pass rejects a base-case-free recursion group promptly, before
+    // the separate whole-module `check_typed_program` inference that can wedge
+    // on such a module, so the tool path does not hang.
+    let fitness = chelis_types::check_ir_fitness(&rewritten_module);
+    if !fitness.errors.is_empty() {
+        return Err(ReplacementError::Type {
+            message: join_messages(fitness.errors.iter().map(|error| error.message.as_str())),
+            location: None,
+            deep_path: None,
+        });
+    }
 
     Ok(ReplacementReport {
         rewritten_module,
@@ -541,6 +589,46 @@ mod tests {
         let new_body = render_body("module M\ndef h(x: f32) -> f32 = x\n", "h");
         let report = check_body_replacement(&module, "f", &new_body).expect("accept");
         assert!(report.checks_clean);
+    }
+
+    /// A `ping`/`pong` mutually-recursive pair where `ping` holds the sole base
+    /// case. Splicing `ping`'s body to call `pong` unconditionally removes the
+    /// only base case, closing a base-case-free recursion group that the
+    /// whole-module `detect_trivial_non_terminating_fns` detector flags.
+    const PINGPONG: &str = "module Frag.PingPong\nexport (ping, pong)\ndef ping(n: int32) -> int32 = if eq(n, 0) then 0 else pong(sub(n, 1))\ndef pong(n: int32) -> int32 = ping(sub(n, 1))\n";
+
+    #[test]
+    fn cross_def_base_case_drop_is_rejected_promptly() {
+        // The fragment-scoped passes see only `[ping defsig, ping def]` and
+        // would accept the base-case-free body; the whole-module fitness gate
+        // catches it, matching full `chelis check`. The fitness pass rejects a
+        // base-case-free recursion group fast (it precedes the whole-module
+        // inference that can wedge on such a module), so this returns promptly.
+        let module = render_deep(PINGPONG);
+        let new_body = render_body(
+            "module M\ndef f(n: int32) -> int32 = pong(sub(n, 1))\n",
+            "f",
+        );
+        let start = std::time::Instant::now();
+        let err = check_body_replacement(&module, "ping", &new_body)
+            .expect_err("base-case drop must be rejected to agree with full check");
+        let elapsed = start.elapsed();
+        assert!(
+            matches!(err, ReplacementError::Type { .. }),
+            "expected Type (structural fitness) rejection, got {err:?}",
+        );
+        assert_eq!(err.stage(), "check");
+        assert!(
+            err.message().contains("trivially non-terminating"),
+            "fitness diagnostic should name the non-termination cause: {}",
+            err.message(),
+        );
+        // The path returns without wedging; the fitness pass precedes the
+        // whole-module inference that can hang on base-case-free recursion.
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "fragment path should reject promptly, took {elapsed:?}",
+        );
     }
 
     #[test]
