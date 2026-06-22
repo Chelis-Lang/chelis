@@ -168,6 +168,61 @@ solver-free `SolvePropertyEngine`, which wraps the same unconditional
 binary still links zero cvc5-named symbols (the `check_is_solver_free_on_the_corpus`
 gate).
 
+## 6. WI-10 AD-as-verification-target rail  — LANDED IN WAVE 2
+
+The AD rail (`chelis_prove::ad_rail`) makes the gradient (adjoint) graph
+dispatchable like any other property. It is the gradient analogue of the WI-3
+forward producer: where WI-3 turns a forward program's output into a box/range
+goal, the AD rail turns the GRADIENT of a program into a fan-out of box/range
+goals — one per gradient target — for a "verified-bounded-sensitivities" goal
+(Greeks over an input region).
+
+```rust
+pub struct GradTargetRange { pub target: String, pub lo: f64, pub hi: f64 }
+pub struct AdRailRequest {
+    pub source: String,
+    pub source_kind: SourceKind,
+    pub output_name: String,           // the scalar output to differentiate
+    pub wrt_names: Vec<String>,        // the inputs differentiated w.r.t. (each = one Greek)
+    pub input_box: IntervalBox,        // shared region; emitted name-sorted (WI-3 shape)
+    pub target_ranges: Vec<GradTargetRange>,
+}
+pub struct GradGoal { pub target: String, pub extracted: ExtractedGoal }
+
+pub fn grad_goals_from_request(req: &AdRailRequest) -> Result<Vec<GradGoal>, AdRailError>;
+pub fn dispatch_grad_goals(
+    registry: &DischargeRegistry, goals: &[GradGoal], timeout_ms: u64,
+) -> Vec<(String, Discharge)>;
+```
+
+**Fan-out, not packing.** `chelis_compiler_api::compiler::grad` lowers the
+combined forward+backward DAG ONCE and returns `grad_nodes_by_name`: a
+`BTreeMap<String, usize>` from each `wrt` input NAME to the ROOT INDEX of that
+input's gradient. That map is exactly the named-roots shape
+`box_range_goal_from_wire_dag` resolves against, so the rail reuses the WI-3
+core verbatim. A gradient over N targets becomes N SEPARATE box/range goals
+(one scalar output — one Greek — each), NOT one goal packing a vector of
+sensitivities (the Beacon agent's hard requirement: an interval engine bounds
+one scalar output per goal). All N goals share the ONE gradient-DAG content
+hash and the same name-keyed input box, differing only in root index and output
+range.
+
+**No in-tree fit (what this wave lands).** There is no `BoxRange` engine
+in-tree (cvc5 fits only `Smt`; Beacon is out-of-tree), so each gradient goal
+dispatched through `with_builtin_engines()` is NO-FIT — the canonical
+`Soundness::Untrusted` + empty `QualifierSet` → `CompositeVerdict::Unsupported`,
+never green. This wave lands the plumbing (grad → per-target goal → dispatch)
+plus the honest no-fit outcome; the real verified-Greeks discharge is Beacon's,
+out of tree. An out-of-tree interval engine registered on top of
+`with_builtin_engines()` routes each gradient goal to it instead, exactly like
+any other `BoxRange` goal.
+
+**Boundary checks.** The gradient `WireDag` flows through the same WI-3
+fail-closed boundary as a forward DAG: a non-v1 schema, a non-finite node-op
+float, or an inverted/NaN output range is rejected before hashing. An unknown
+gradient target (a `target` not among `wrt_names`) fails the WHOLE fan-out with
+`AdRailError::UnknownGradTarget` — no partial goal set, no wrong-root goal.
+
 ## Sign-off
 
 Beacon agent: confirm ① and ② (and that 1/4 are usable as shipped). Record the

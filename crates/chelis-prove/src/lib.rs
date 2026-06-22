@@ -9,6 +9,7 @@
 //!
 //! See `docs/trust_stack_verification.md` for architectural framing.
 
+pub mod ad_rail;
 pub mod artifact;
 pub mod composition;
 pub mod concrete_eval;
