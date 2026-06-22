@@ -79,16 +79,38 @@ impl DischargeRegistry {
     /// lane. This is the constructor the in-tree dispatch sites use; it
     /// preserves both feature lanes byte-identically (see the module docs):
     ///
+    /// - `--features z3`: registers [`crate::z3_engine::Z3Engine`] FIRST (it is
+    ///   the preferred polynomial-NRA SMT engine; WI-12).
     /// - `--features smt`: registers [`crate::discharge::Cvc5Engine`].
-    /// - default (non-smt): registers [`SolvePropertyEngine`] (solver-free).
+    /// - neither solver lane: registers [`SolvePropertyEngine`] (solver-free).
+    ///
+    /// # SMT-engine priority (the WI-12 role split)
+    ///
+    /// Both [`crate::z3_engine::Z3Engine`] and [`crate::discharge::Cvc5Engine`]
+    /// fit [`crate::discharge::GoalShape::Smt`]. When BOTH solver lanes are
+    /// built, Z3 is registered FIRST, so an SMT goal routes to Z3, with cvc5 as
+    /// the next-registered fallback. This makes the master-plan role split
+    /// explicit -- Z3 is the preferred backend for polynomial NRA, where cvc5 is
+    /// weaker -- rather than letting Z3 silently shadow cvc5: the priority is
+    /// the deterministic registration-order tie-break documented above, and a
+    /// goal Z3 cannot encode (e.g. a transcendental) returns an untrusted Error
+    /// from Z3, which the dispatcher does NOT re-route to cvc5 (first-fit by
+    /// shape, not by outcome). When only ONE solver lane is built, that lane's
+    /// engine is the sole SMT engine.
     ///
     /// An out-of-tree consumer that wants the box/range lane (Beacon) starts
     /// from here and [`register`](Self::register)s its own engine on top.
     pub fn with_builtin_engines() -> Self {
         let mut registry = Self::new();
+        // Z3 registers ahead of cvc5: preferred for polynomial NRA (WI-12).
+        #[cfg(feature = "z3")]
+        registry.register(Box::new(crate::z3_engine::Z3Engine::new()));
         #[cfg(feature = "smt")]
         registry.register(Box::new(crate::discharge::Cvc5Engine::new()));
-        #[cfg(not(feature = "smt"))]
+        // The solver-free SMT lane is the fallback ONLY when no real solver
+        // (neither z3 nor cvc5) is linked, so the default build stays
+        // byte-identical and solver-free.
+        #[cfg(not(any(feature = "smt", feature = "z3")))]
         registry.register(Box::new(SolvePropertyEngine::new()));
         registry
     }
@@ -554,13 +576,13 @@ mod tests {
         assert_no_fit_lattice_membership(&discharge);
     }
 
-    #[cfg(not(feature = "smt"))]
+    #[cfg(not(any(feature = "smt", feature = "z3")))]
     #[test]
     fn builtin_registry_routes_smt_goal_to_solve_property_engine() {
-        // The default (non-smt) lane: the SMT goal routes to the solver-free
-        // solve_property engine, NOT to cvc5 (which is absent). solve_property
-        // returns Timeout in the non-smt build, byte-identical to the pre-WI-9
-        // direct call.
+        // The default (no-solver) lane: the SMT goal routes to the solver-free
+        // solve_property engine, NOT to cvc5 or z3 (both absent). solve_property
+        // returns Timeout in this build, byte-identical to the pre-WI-9 direct
+        // call.
         let registry = DischargeRegistry::with_builtin_engines();
         let goal = smt_goal();
         assert_eq!(registry.selected_engine_name(&goal), Some("solve_property"));
@@ -568,7 +590,7 @@ mod tests {
         assert_eq!(
             *discharge.result(),
             TierBResult::Timeout,
-            "non-smt solve_property stub returns Timeout for an SMT goal"
+            "no-solver solve_property stub returns Timeout for an SMT goal"
         );
         assert_eq!(discharge.soundness(), Soundness::Untrusted);
         assert!(discharge.qualifier_set().is_empty());
@@ -577,8 +599,141 @@ mod tests {
     #[cfg(not(feature = "smt"))]
     #[test]
     fn builtin_registry_box_range_goal_is_no_fit_in_nonsmt_lane() {
+        // Neither the solver-free lane nor the z3 lane fits a BoxRange goal, so
+        // it is no-fit in any build without cvc5 (which also does not fit it).
         let registry = DischargeRegistry::with_builtin_engines();
         let discharge = registry.dispatch(&box_range_goal(), 1_000);
         assert_no_fit_lattice_membership(&discharge);
+    }
+
+    // --- z3 lane: Z3 is the registered SMT engine (WI-12) ---
+
+    #[cfg(feature = "z3")]
+    #[test]
+    fn builtin_registry_routes_smt_goal_to_z3_when_z3_is_built() {
+        // With the z3 feature on, Z3 is the FIRST-registered SMT engine, so an
+        // SMT goal selects z3 (ahead of cvc5 when both lanes are built; sole SMT
+        // engine when only z3 is built).
+        let registry = DischargeRegistry::with_builtin_engines();
+        assert_eq!(registry.selected_engine_name(&smt_goal()), Some("z3"));
+    }
+
+    #[cfg(feature = "z3")]
+    #[test]
+    fn builtin_registry_z3_proves_trivial_smt_goal_as_exact() {
+        let registry = DischargeRegistry::with_builtin_engines();
+        let discharge = registry.dispatch(&smt_goal(), 5_000);
+        assert_eq!(*discharge.result(), TierBResult::Proved);
+        assert_eq!(discharge.soundness(), Soundness::Exact);
+        assert!(discharge.qualifier_set().contains(Qualifier::Exact));
+    }
+
+    #[cfg(feature = "z3")]
+    #[test]
+    fn builtin_registry_box_range_goal_is_no_fit_in_z3_lane() {
+        // Z3 fits only Smt goals; a BoxRange goal is no-fit even with z3 built.
+        let registry = DischargeRegistry::with_builtin_engines();
+        let discharge = registry.dispatch(&box_range_goal(), 5_000);
+        assert_no_fit_lattice_membership(&discharge);
+    }
+
+    // --- cross-engine agreement: z3 and cvc5 decide the same goal the same way ---
+    //
+    // The KEY correctness oracle for a second SMT backend: on goals BOTH engines
+    // accept, the two must AGREE (Proved <-> Proved, Disproved <-> Disproved).
+    // A divergence would mean one engine is unsound on that goal. Runs only when
+    // BOTH solver lanes are linked.
+
+    #[cfg(all(feature = "z3", feature = "smt"))]
+    #[test]
+    fn z3_and_cvc5_agree_on_a_true_polynomial_goal() {
+        use crate::discharge::Cvc5Engine;
+        use crate::solver::ArithOp;
+
+        // forall x: Real . x * x >= 0 -- both NRA backends prove it.
+        let property = SmtProperty {
+            variables: vec![("x".to_string(), SmtSort::Real)],
+            preconditions: vec![],
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Ge,
+                Box::new(SmtExpr::Arith(
+                    ArithOp::Mul,
+                    Box::new(SmtExpr::Var("x".to_string())),
+                    Box::new(SmtExpr::Var("x".to_string())),
+                )),
+                Box::new(SmtExpr::RealLit(0.0)),
+            ),
+        };
+        let goal = Goal::smt(property);
+        let z3 = crate::z3_engine::Z3Engine::new().discharge(&goal, 5_000);
+        let cvc5 = Cvc5Engine::new().discharge(&goal, 5_000);
+        assert_eq!(*z3.result(), TierBResult::Proved, "z3 must prove x*x >= 0");
+        assert_eq!(
+            *cvc5.result(),
+            TierBResult::Proved,
+            "cvc5 must prove x*x >= 0"
+        );
+        assert_eq!(
+            z3.soundness(),
+            cvc5.soundness(),
+            "both engines attach Exact soundness to a proved goal"
+        );
+    }
+
+    #[cfg(all(feature = "z3", feature = "smt"))]
+    #[test]
+    fn z3_and_cvc5_agree_on_a_false_polynomial_goal() {
+        use crate::discharge::Cvc5Engine;
+        use crate::solver::ArithOp;
+
+        // forall x: Real . x * x >= 1 -- false (x = 0); both engines disprove.
+        let property = SmtProperty {
+            variables: vec![("x".to_string(), SmtSort::Real)],
+            preconditions: vec![],
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Ge,
+                Box::new(SmtExpr::Arith(
+                    ArithOp::Mul,
+                    Box::new(SmtExpr::Var("x".to_string())),
+                    Box::new(SmtExpr::Var("x".to_string())),
+                )),
+                Box::new(SmtExpr::RealLit(1.0)),
+            ),
+        };
+        let goal = Goal::smt(property);
+        let z3 = crate::z3_engine::Z3Engine::new().discharge(&goal, 5_000);
+        let cvc5 = Cvc5Engine::new().discharge(&goal, 5_000);
+        assert!(
+            matches!(z3.result(), TierBResult::Disproved(_)),
+            "z3 must disprove x*x >= 1"
+        );
+        assert!(
+            matches!(cvc5.result(), TierBResult::Disproved(_)),
+            "cvc5 must disprove x*x >= 1"
+        );
+        assert_eq!(z3.soundness(), cvc5.soundness());
+    }
+
+    #[cfg(all(feature = "z3", feature = "smt"))]
+    #[test]
+    fn z3_and_cvc5_agree_on_a_linear_true_goal() {
+        use crate::discharge::Cvc5Engine;
+
+        // A trivially-true linear goal both accept: x == x.
+        let goal = smt_goal();
+        let z3 = crate::z3_engine::Z3Engine::new().discharge(&goal, 5_000);
+        let cvc5 = Cvc5Engine::new().discharge(&goal, 5_000);
+        assert_eq!(z3.result(), cvc5.result());
+        assert_eq!(z3.soundness(), cvc5.soundness());
+        assert_eq!(z3.qualifier_set(), cvc5.qualifier_set());
+    }
+
+    #[cfg(all(feature = "z3", feature = "smt"))]
+    #[test]
+    fn z3_registered_ahead_of_cvc5_when_both_lanes_built() {
+        // The role split is explicit: with BOTH solver lanes built, the SMT goal
+        // routes to z3 (registered first), not cvc5.
+        let registry = DischargeRegistry::with_builtin_engines();
+        assert_eq!(registry.selected_engine_name(&smt_goal()), Some("z3"));
     }
 }

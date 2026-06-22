@@ -30,6 +30,10 @@ pub mod tier_b;
 pub mod tier_b_lower;
 pub mod tier_c;
 pub mod worker;
+// The Z3 NRA engine (WI-12) exists only when libz3 is linked (the z3 feature);
+// the default build keeps zero z3-named symbols, like the cvc5 smt lane.
+#[cfg(feature = "z3")]
+pub mod z3_engine;
 
 pub use artifact::{ProofArtifact, ProofStatus, ProofTier};
 pub use composition::{
@@ -48,6 +52,10 @@ pub use discharge::{
 // default build keeps zero cvc5-named symbols (the solver-free gate).
 #[cfg(feature = "smt")]
 pub use discharge::Cvc5Engine;
+// The Z3 NRA engine (WI-12) is exported only when libz3 is linked (the z3
+// feature), mirroring the cvc5 lane's gating.
+#[cfg(feature = "z3")]
+pub use z3_engine::Z3Engine;
 // WI-9: the discharge-engine registry + fitness-based dispatcher and its no-fit
 // honesty floor. The solver-free SMT engine is the default-build SMT lane and
 // exists only when cvc5 is absent.
