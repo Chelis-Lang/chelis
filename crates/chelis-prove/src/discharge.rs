@@ -545,7 +545,27 @@ impl DischargeEngine for Cvc5Engine {
             }
         };
         let (soundness, qualifier_set) = Self::classify(&result);
-        let evidence = serde_json::json!({ "solver": "cvc5" });
+        #[cfg_attr(not(feature = "carcara"), allow(unused_mut))]
+        let mut evidence = serde_json::json!({ "solver": "cvc5" });
+
+        // WI-16 Carcara audit dimension: when the `carcara` feature is on and
+        // cvc5 returned a proof (Proved == UNSAT), independently re-check that
+        // proof with Carcara and FOLD the outcome into the evidence. This does
+        // NOT change `soundness`/`qualifier_set`: a cvc5 `Proved` keeps the
+        // classification's `SoundApproximate` / `RealArith` badge (the auditor
+        // adds an independent-audit dimension, it does not manufacture a
+        // stronger badge). A re-check FAILURE is recorded in the evidence as an
+        // auditor disagreement (write-only today; see `carcara_audit`), never
+        // folded into a confirmed state.
+        #[cfg(feature = "carcara")]
+        if matches!(result, TierBResult::Proved)
+            && let Some(property) = goal.as_smt()
+        {
+            let audit = crate::carcara_audit::audit_cvc5_proof(property, timeout_ms);
+            evidence["carcara_audit"] = serde_json::to_value(&audit)
+                .unwrap_or(serde_json::Value::String("serialization_error".to_string()));
+        }
+
         // The classification only ever pairs the `real_arithmetic` qualifier
         // with `Soundness::SoundApproximate` (its floor) or returns an empty
         // set at `Untrusted`, so this constructor cannot fail here; surfacing
@@ -900,6 +920,43 @@ mod tests {
         assert!(
             !discharge.qualifier_set().contains(Qualifier::Exact),
             "an over-reals proof must not claim exact machine soundness"
+        );
+    }
+
+    // WI-16: with the carcara feature on, a Proved goal in the audited
+    // fragment carries an independent-audit evidence dimension WITHOUT any
+    // change to its soundness/qualifier (cvc5 Exact/Exact is unchanged; the
+    // auditor adds auditability, it does not manufacture a stronger badge).
+    #[cfg(feature = "carcara")]
+    #[test]
+    fn cvc5_proved_goal_carries_a_confirmed_carcara_audit_dimension() {
+        let engine = Cvc5Engine::new();
+        // x == x is linear/EUF, so cvc5 emits an Alethe proof Carcara confirms.
+        let goal = Goal::smt(trivially_true_property());
+        let discharge = engine.discharge(&goal, 10_000);
+        // The cvc5 result and its badge are unchanged by the audit: the auditor
+        // adds an evidence dimension, it does not move soundness/qualifier.
+        assert_eq!(*discharge.result(), TierBResult::Proved);
+        assert_eq!(discharge.soundness(), Soundness::Exact);
+        assert!(discharge.qualifier_set().contains(Qualifier::Exact));
+        // The audit dimension is present and is a confirmation (either a full
+        // `confirmed` or `confirmed_modulo_rewrites` depending on whether cvc5's
+        // proof of `x == x` leans on a trusted rewrite leaf; both re-verify the
+        // proof structure). It must NOT be a failure or absent.
+        let status = discharge
+            .evidence()
+            .get("carcara_audit")
+            .and_then(|v| v.get("status"))
+            .and_then(|s| s.as_str())
+            .unwrap_or_else(|| {
+                panic!(
+                    "evidence must carry a carcara_audit status, got {:?}",
+                    discharge.evidence()
+                )
+            });
+        assert!(
+            status == "confirmed" || status == "confirmed_modulo_rewrites",
+            "carcara_audit must be a confirmation, got status `{status}`"
         );
     }
 
