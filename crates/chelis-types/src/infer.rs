@@ -7342,30 +7342,52 @@ fn extract_string_literal(expr: &deep::Expr) -> Option<String> {
 
 /// Narrow `Dim::Wildcard` slots in `ty` against the matching positions in
 /// `template`, replacing each Wildcard with the template's concrete dim
-/// (`Dim::Lit` or `Dim::Name`) where one is available. Used after a defsig
-/// unify to ensure the scheme registered for callers reflects the declared
-/// concrete shape rather than the body's permissive wildcards (#39).
+/// where one is available. Used after a defsig unify to ensure the scheme
+/// registered for callers reflects the declared concrete shape rather than
+/// the body's permissive wildcards (#39).
 ///
 /// This is structural and conservative: it only walks shapes that match
 /// (same rank for tensors, same arity for fn/tuple/adt), and only narrows
-/// Wildcard → concrete. Other dim shapes (Var, existing Lit/Name) are
-/// preserved. If shapes don't line up, the input is returned unchanged so
-/// genuine type errors flagged by `unify` aren't masked.
-fn narrow_wildcards_with(ty: &Type, template: &Type) -> Type {
+/// Wildcard → a safe template dim. If shapes don't line up, the input is
+/// returned unchanged so genuine type errors flagged by `unify` aren't
+/// masked.
+///
+/// Which template dims are "safe" to substitute:
+///
+/// - `Dim::Lit(_)` — always safe. Concrete literals are self-contained.
+///
+/// - `Dim::Var(v)` — safe ONLY when `v` is also bound by a *parameter*
+///   tensor-dim position of the declared signature (`param_dvars`). This
+///   is the `const_col[n](spots: tensor[n, f32], ..) -> tensor[n, 1]`
+///   family: the body's `to_tensor(map(..))` return is `tensor[*, 1]`,
+///   but the declared return dim `n` is the same dim var as the `spots`
+///   parameter's axis-0, so the caller binds `n` from its actual argument.
+///   Narrowing `*` → `Var(n)` reconnects the return to the input dim,
+///   which is what downstream lowering needs so a `vmap` lane kernel reads
+///   a Load-declared batch dim instead of an undeclared `_anon_dim`
+///   (chelis#405 / WS-3 build ICE).
+///
+///   A *return-only* dim var (one that appears in the declared return but
+///   in NO parameter tensor position — e.g. `arange[n](start: int32,
+///   stop: int32) -> tensor[n, int32]`, where the length comes from a
+///   value parameter) is NOT in `param_dvars` and is deliberately left as
+///   `Wildcard`. Baking such an unbound var into the generalized scheme is
+///   the red-team RT-39+44 soundness regression (commit 8067c9ce): it
+///   leaks a free dim var into callers and breaks the chelis-std self-test
+///   corpus. The `param_dvars` gate is exactly the line between "the
+///   caller supplies this dim" (safe) and "this dim is output-inferred /
+///   value-parameter-derived" (unsafe).
+///
+/// - `Dim::Name`, `Dim::Rank`, existing `Var`/`Lit` in `ty` — preserved.
+fn narrow_wildcards_with(ty: &Type, template: &Type, param_dvars: &HashSet<DimVar>) -> Type {
     match (ty, template) {
         (Type::Tensor(dims, prec), Type::Tensor(tmpl_dims, _)) if dims.len() == tmpl_dims.len() => {
             let new_dims = dims
                 .iter()
                 .zip(tmpl_dims.iter())
                 .map(|(d, t)| match (d, t) {
-                    // Only narrow Wildcard → concrete literal. Substituting
-                    // Dim::Name or Dim::Var into the generalized scheme can
-                    // bind a function-parameter-bound name (`tensor[n, f32]`
-                    // where n is the def's int64 param) into the type, which
-                    // overflows the inference stack when the resulting
-                    // scheme is later instantiated. Concrete literals are
-                    // self-contained and safe.
                     (Dim::Wildcard, Dim::Lit(_)) => t.clone(),
+                    (Dim::Wildcard, Dim::Var(v)) if param_dvars.contains(v) => t.clone(),
                     _ => d.clone(),
                 })
                 .collect();
@@ -7375,16 +7397,16 @@ fn narrow_wildcards_with(ty: &Type, template: &Type) -> Type {
             let new_args = args
                 .iter()
                 .zip(t_args.iter())
-                .map(|(a, t)| narrow_wildcards_with(a, t))
+                .map(|(a, t)| narrow_wildcards_with(a, t, param_dvars))
                 .collect();
-            let new_ret = Box::new(narrow_wildcards_with(ret, t_ret));
+            let new_ret = Box::new(narrow_wildcards_with(ret, t_ret, param_dvars));
             Type::Fn(new_args, new_ret)
         }
         (Type::Tuple(ts), Type::Tuple(t_ts)) if ts.len() == t_ts.len() => {
             let new_ts = ts
                 .iter()
                 .zip(t_ts.iter())
-                .map(|(t, tt)| narrow_wildcards_with(t, tt))
+                .map(|(t, tt)| narrow_wildcards_with(t, tt, param_dvars))
                 .collect();
             Type::Tuple(new_ts)
         }
@@ -7392,12 +7414,31 @@ fn narrow_wildcards_with(ty: &Type, template: &Type) -> Type {
             let new_args = args
                 .iter()
                 .zip(t_args.iter())
-                .map(|(a, t)| narrow_wildcards_with(a, t))
+                .map(|(a, t)| narrow_wildcards_with(a, t, param_dvars))
                 .collect();
             Type::Adt(n.clone(), new_args)
         }
         _ => ty.clone(),
     }
+}
+
+/// Collect the set of dim vars that occur in a *parameter* (non-return)
+/// tensor-dim position of a resolved declared `Fn` signature. These are
+/// the dims a caller binds from its actual arguments; the
+/// `narrow_wildcards_with` gate uses this set to decide when a body
+/// wildcard may be safely narrowed to a declared `Dim::Var`. A non-`Fn`
+/// type (or one whose params carry no tensor dim vars) yields the empty
+/// set, so narrowing falls back to the literal-only behavior.
+fn param_bound_dvars(decl_ty: &Type) -> HashSet<DimVar> {
+    let mut out = HashSet::new();
+    if let Type::Fn(params, _) = decl_ty {
+        for param in params {
+            for dv in crate::env::free_dvars(param) {
+                out.insert(dv);
+            }
+        }
+    }
+    out
 }
 
 fn tensor_concat_result_type(element_ty: &Type) -> Result<Type, String> {
@@ -8424,7 +8465,16 @@ fn infer_top_level(
                     vec![],
                 ));
             }
-            narrow_wildcards_with(&resolved_body, &resolved_decl)
+            // #39 wildcard narrowing. The narrow may now substitute a
+            // declared `Dim::Var` (not just `Dim::Lit`) into a body
+            // wildcard, but ONLY for dim vars bound by a parameter tensor
+            // position (`param_bound_dvars`). That keeps the
+            // `const_col[n](spots: tensor[n, ..]) -> tensor[n, 1]` family's
+            // return dim tied to its input (chelis#405 / WS-3 build ICE)
+            // while leaving return-only / value-parameter dims as
+            // wildcards (the RT-39+44 soundness boundary, commit 8067c9ce).
+            let param_dvars = param_bound_dvars(&resolved_decl);
+            narrow_wildcards_with(&resolved_body, &resolved_decl, &param_dvars)
         } else {
             body_ty
         };
@@ -21442,6 +21492,170 @@ def use_it(x: tensor[3, f32]) -> tensor[3, f32] =
              unification mismatch; unification must not have been over-loosened (chelis#293), \
              got: {:?}",
             result.errors
+        );
+    }
+
+    // ── #39 / chelis#405 wildcard-narrowing param-bound-dvar gate ────
+
+    /// `narrow_wildcards_with` narrows a body `Wildcard` to a declared
+    /// `Dim::Var` ONLY when that var is bound by a parameter tensor
+    /// position. This is the `const_col[n](spots: tensor[n, ..]) ->
+    /// tensor[n, 1]` family: the return dim `n` is the same var as the
+    /// `spots` parameter axis-0, so the caller binds it. The narrow
+    /// reconnects the wildcard return to that input dim.
+    #[test]
+    fn narrow_substitutes_param_bound_dim_var_for_wildcard() {
+        let n = DimVar(7);
+        let decl = Type::Fn(
+            vec![
+                Type::Tensor(
+                    vec![Dim::Var(n), Dim::Lit(1)],
+                    TensorPrec::Concrete(Prim::F64),
+                ),
+                Type::Prim(Prim::F64),
+            ],
+            Box::new(Type::Tensor(
+                vec![Dim::Var(n), Dim::Lit(1)],
+                TensorPrec::Concrete(Prim::F64),
+            )),
+        );
+        // The inferred body return is the shape-erased `tensor[*, 1]`.
+        let body = Type::Fn(
+            vec![
+                Type::Tensor(
+                    vec![Dim::Var(n), Dim::Lit(1)],
+                    TensorPrec::Concrete(Prim::F64),
+                ),
+                Type::Prim(Prim::F64),
+            ],
+            Box::new(Type::Tensor(
+                vec![Dim::Wildcard, Dim::Lit(1)],
+                TensorPrec::Concrete(Prim::F64),
+            )),
+        );
+        let param_dvars = param_bound_dvars(&decl);
+        assert!(
+            param_dvars.contains(&n),
+            "n appears in a parameter tensor position, so it is param-bound"
+        );
+        let narrowed = narrow_wildcards_with(&body, &decl, &param_dvars);
+        let Type::Fn(_, ret) = &narrowed else {
+            panic!("expected Fn, got {narrowed:?}");
+        };
+        assert_eq!(
+            **ret,
+            Type::Tensor(
+                vec![Dim::Var(n), Dim::Lit(1)],
+                TensorPrec::Concrete(Prim::F64)
+            ),
+            "the return wildcard must narrow to the param-bound dim var n, not stay `*`"
+        );
+    }
+
+    /// A *return-only* dim var (it appears in the declared return but in
+    /// NO parameter tensor position, e.g. `arange[n](start: int32, stop:
+    /// int32) -> tensor[n, int32]`) is NOT param-bound. The body wildcard
+    /// must stay `Wildcard`: narrowing it to the unbound var would leak a
+    /// free dim var into callers (the RT-39+44 soundness regression,
+    /// commit 8067c9ce).
+    #[test]
+    fn narrow_keeps_wildcard_for_return_only_dim_var() {
+        let n = DimVar(11);
+        let decl = Type::Fn(
+            vec![Type::Prim(Prim::Int32), Type::Prim(Prim::Int32)],
+            Box::new(Type::Tensor(
+                vec![Dim::Var(n)],
+                TensorPrec::Concrete(Prim::Int32),
+            )),
+        );
+        let body = Type::Fn(
+            vec![Type::Prim(Prim::Int32), Type::Prim(Prim::Int32)],
+            Box::new(Type::Tensor(
+                vec![Dim::Wildcard],
+                TensorPrec::Concrete(Prim::Int32),
+            )),
+        );
+        let param_dvars = param_bound_dvars(&decl);
+        assert!(
+            !param_dvars.contains(&n),
+            "n is return-only: it must not be in the param-bound set"
+        );
+        let narrowed = narrow_wildcards_with(&body, &decl, &param_dvars);
+        let Type::Fn(_, ret) = &narrowed else {
+            panic!("expected Fn, got {narrowed:?}");
+        };
+        assert_eq!(
+            **ret,
+            Type::Tensor(vec![Dim::Wildcard], TensorPrec::Concrete(Prim::Int32)),
+            "a return-only dim var's body wildcard must stay `*` (no free-var leak)"
+        );
+    }
+
+    /// `Wildcard` against a declared `Dim::Lit` is always narrowed
+    /// regardless of the param-bound set -- concrete literals are
+    /// self-contained (the original #39 behavior).
+    #[test]
+    fn narrow_substitutes_literal_for_wildcard_unconditionally() {
+        let empty = HashSet::new();
+        let body = Type::Tensor(
+            vec![Dim::Wildcard, Dim::Wildcard],
+            TensorPrec::Concrete(Prim::F32),
+        );
+        let decl = Type::Tensor(
+            vec![Dim::Lit(4), Dim::Lit(1)],
+            TensorPrec::Concrete(Prim::F32),
+        );
+        let narrowed = narrow_wildcards_with(&body, &decl, &empty);
+        assert_eq!(
+            narrowed,
+            Type::Tensor(
+                vec![Dim::Lit(4), Dim::Lit(1)],
+                TensorPrec::Concrete(Prim::F32)
+            )
+        );
+    }
+
+    /// End-to-end regression lock (chelis#405 / WS-3): the
+    /// `const_col`-style `shape -> to_tensor(map(range)) -> reshape` chain
+    /// must publish a scheme whose return batch dim is the param-bound
+    /// DECLARED dim, not the shape-erased `*`. Pre-fix the published scheme
+    /// was `tensor[*, 1]`, so a CALLER that forwards the result observed
+    /// `*` for its batch axis; that erased the link the C backend needs and
+    /// ICEd the §345 `symbolic_occurrences` guard at the `vmap` lane
+    /// kernel. The fix ties the return dim to the `spots` parameter dim
+    /// var, so a caller forwarding `const_col`'s result sees a declared
+    /// dim. (`type_env` records each def's body annotation; the call-site
+    /// result type in the *caller's* body annotation is what reflects the
+    /// narrowed published scheme, so the lock inspects the caller.)
+    #[test]
+    fn const_col_chain_propagates_declared_dim_to_callers() {
+        let checked = checked_surf(
+            r#"
+def const_col[n](spots: tensor[n, f32], v: f64) -> tensor[n, 1, f64] = {
+  nn = cast(shape(copy(spots), cast(0, int32)), int64)
+  reshape(to_tensor(map(fn (i: int64) -> v, range(cast(0, int64), nn))), [nn, cast(1, int64)])
+}
+def caller[n](spots: tensor[n, f32]) -> tensor[n, 1, f64] = const_col(spots, cast(1.0, f64))
+"#,
+        );
+        let caller_ty = checked
+            .type_env()
+            .get("caller")
+            .expect("caller must be in the published type env");
+        let rendered = chelis_deep::printer::print_canonical_flat(std::slice::from_ref(caller_ty));
+        // The caller's body is `const_col(spots, ..)`; its annotated type
+        // is the call-site result. A param-bound declared dim narrows the
+        // wildcard, so the caller's batch axis is a `d-var`, never the
+        // shape-erased `(d-name {} *)`.
+        assert!(
+            !rendered.contains("(d-name {} *)"),
+            "const_col's result must not carry a wildcard `*` dim at the call \
+             site; got {rendered}"
+        );
+        assert!(
+            rendered.contains("d-var"),
+            "the const_col call-site batch dim must be a declared dim var; \
+             got {rendered}"
         );
     }
 }

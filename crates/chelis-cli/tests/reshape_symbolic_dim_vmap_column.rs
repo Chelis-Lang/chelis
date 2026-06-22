@@ -1,8 +1,10 @@
-//! WS-3 build ICE — `vmap` over a shape-erased column reshape ICEs in
-//! the IR-to-backend handoff with
+//! WS-3 build ICE (FIXED, chelis#405) — `vmap` over a shape-erased column
+//! reshape USED TO ICE in the IR-to-backend handoff with
 //! `internal compiler error: symbolic dim `_anon_dim_N_0` is referenced
 //! by a non-Load node (Sum ...) but no Load input declares it`
-//! (`crates/chelis-ir/src/dag.rs` `symbolic_occurrences`).
+//! (`crates/chelis-ir/src/dag.rs` `symbolic_occurrences`). The chelis-types
+//! fix (see `## Test status`) closed it; this test now pins the clean
+//! build. The diagnosis below is retained as the history of the root cause.
 //!
 //! ## Minimal repro
 //!
@@ -46,13 +48,18 @@
 //!
 //! ## Test status
 //!
-//! [`vmap_over_symbolic_column_builds_without_symbolic_dim_ice`] pins the
-//! SPEC-TARGET behavior (the build succeeds; no undeclared symbolic dim
-//! reaches cc). It is `#[ignore]`d until the chelis-types return-dim fix
-//! lands — un-ignore it then. The companion
-//! [`vmap_over_symbolic_column_currently_ices_at_the_vmap_kernel`] pins
-//! TODAY's behavior so the diagnosis above is executable and the moment
-//! the ICE changes shape is caught.
+//! The chelis-types return-dim fix has LANDED (chelis#405 / WS-3, the S2
+//! `narrow_wildcards_with` param-bound-dvar narrowing): `const_col` now
+//! publishes `tensor[n, 1]` (the declared return dim `n` is tied to the
+//! `spots` parameter axis-0 dim var) instead of the shape-erased
+//! `tensor[*, 1]`, so the `vmap` lane kernel's batch dim is the
+//! Load-declared `n` and the §345 `symbolic_occurrences` guard no longer
+//! fires. [`vmap_over_symbolic_column_builds_without_symbolic_dim_ice`]
+//! pins that the build now succeeds with no undeclared symbolic dim
+//! reaching cc. The companion `..._currently_ices_at_the_vmap_kernel`
+//! test that pinned the pre-fix ICE has been deleted: it asserted a crash
+//! that no longer happens (the two were mutually exclusive by
+//! construction, one pinning the bug and one the fix).
 
 use assert_cmd::Command;
 use std::fs;
@@ -80,15 +87,12 @@ fn write_repro(dir: &Path) -> std::path::PathBuf {
     path
 }
 
-/// SPEC TARGET (ignored until the chelis-types return-dim fix lands):
-/// the column-reshape `vmap` program must `chelis build` cleanly. An
-/// unresolved `*` / `_anon_dim_*` would emit an undeclared C identifier,
-/// so a successful build is the end-to-end "no undeclared identifier
-/// reaches cc" oracle. Un-ignore when `const_col` returns `tensor[n, 1]`.
+/// SPEC TARGET: the column-reshape `vmap` program must `chelis build`
+/// cleanly. An unresolved `*` / `_anon_dim_*` would emit an undeclared C
+/// identifier, so a successful build is the end-to-end "no undeclared
+/// identifier reaches cc" oracle. This is green since the chelis-types
+/// fix landed (`const_col` returns `tensor[n, 1]`).
 #[test]
-#[ignore = "blocked on chelis-types: const_col returns tensor[*, 1] (shape-erased); \
-            the vmap kernel batch dim is the undeclared `*`. Fix in the checker, \
-            then un-ignore. See module docs for the full trace."]
 fn vmap_over_symbolic_column_builds_without_symbolic_dim_ice() {
     let dir = tempdir().expect("tempdir");
     let path = write_repro(dir.path());
@@ -116,53 +120,5 @@ fn vmap_over_symbolic_column_builds_without_symbolic_dim_ice() {
     assert!(
         output.status.success(),
         "column-reshape vmap program must build cleanly; stderr={stderr}",
-    );
-}
-
-/// TODAY's behavior, pinned so the diagnosis stays executable: the build
-/// fails with the §345 `symbolic dim ... non-Load node (... Sum ...)` ICE
-/// originating in the `vmap` lane kernel. When the spec-target test above
-/// is un-ignored, DELETE this one — the two are mutually exclusive by
-/// construction (one pins the bug, one pins the fix), so they must not
-/// both be live.
-#[test]
-fn vmap_over_symbolic_column_currently_ices_at_the_vmap_kernel() {
-    let dir = tempdir().expect("tempdir");
-    let path = write_repro(dir.path());
-    let out_dir = dir.path().join("out");
-
-    let output = Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args([
-            "build",
-            path.to_str().unwrap(),
-            "--target",
-            "c",
-            "--output",
-            out_dir.to_str().unwrap(),
-        ])
-        .output()
-        .expect("run chelis build");
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !output.status.success(),
-        "expected the WS-3 ICE; if this program now builds, the chelis-types \
-         fix has landed: un-ignore the spec-target test and delete this one. \
-         stderr={stderr}",
-    );
-    // The ICE is the §345 guard rejecting an undeclared symbolic dim on a
-    // non-Load node. Pin both the guard message and that the offending node
-    // is the vmap lane kernel's `Sum` (the diagnosed origin), not some
-    // other producer.
-    assert!(
-        stderr.contains("symbolic dim") && stderr.contains("non-Load node"),
-        "expected the §345 symbolic-dim guard ICE; stderr={stderr}",
-    );
-    assert!(
-        stderr.contains("Sum"),
-        "expected the ICE to originate at the vmap lane kernel's `Sum`; \
-         stderr={stderr}",
     );
 }
