@@ -132,12 +132,20 @@ fn multi_target_gradient_fans_out_to_per_target_goals() {
 }
 
 #[test]
-fn fan_out_targets_have_distinct_roots_sharing_one_gradient_dag_hash() {
+fn structurally_distinct_adjoints_get_distinct_roots_sharing_one_gradient_dag_hash() {
+    // The TWO_INPUT_LOSS fixture (mul(a,a) vs b) has STRUCTURALLY-DISTINCT
+    // adjoints, so the compiler does not CSE-collapse them and each target gets
+    // its OWN gradient root. Distinct roots is a property of THIS fixture, NOT
+    // an invariant the rail enforces; structurally-identical adjoints
+    // legitimately share one root (see
+    // `cse_collapsed_adjoints_share_one_root_soundly`). The shared property the
+    // rail DOES guarantee -- one gradient-DAG hash across the fan-out -- is
+    // asserted below and holds either way.
     let goals =
         grad_goals_from_request(&two_target_request()).expect("a two-target gradient fans out");
 
-    // DISTINCT root indices: d loss / d a and d loss / d b are different
-    // gradient roots.
+    // DISTINCT root indices (fixture-conditioned): d loss / d a and d loss / d b
+    // are structurally-distinct gradients, so they are different gradient roots.
     let a_root = goals[0]
         .extracted
         .goal
@@ -178,6 +186,77 @@ fn fan_out_targets_have_distinct_roots_sharing_one_gradient_dag_hash() {
             parsed.roots.contains(&root),
             "each goal's root index is a real root of the gradient DAG"
         );
+    }
+}
+
+#[test]
+fn cse_collapsed_adjoints_share_one_root_soundly() {
+    // d/dx and d/dy of mean(x + y) are BOTH the constant 1/4 -- structurally
+    // identical adjoints -- so the compiler's CSE legitimately collapses them to
+    // ONE gradient root. The two GradGoals then share root_index AND the one
+    // gradient-DAG hash, differing only by target name and output range. This is
+    // SOUND (both Greeks are genuinely equal, so one interval bounds both) and
+    // never aliases a forward node: the shared index is a gradient root. This
+    // pins the shared-root behavior as explicit + tested, not a surprise.
+    let request = AdRailRequest {
+        source: "x = (x : tensor[4, f32])\n\
+                 y = (y : tensor[4, f32])\n\
+                 loss = (mean(add(x, y), 0) : tensor[f32])\n"
+            .to_string(),
+        source_kind: SourceKind::Surf,
+        output_name: "loss".to_string(),
+        wrt_names: vec!["x".to_string(), "y".to_string()],
+        input_box: input_box(&[("x", -1.0, 1.0), ("y", -1.0, 1.0)]),
+        target_ranges: vec![target_range("x", 0.0, 1.0), target_range("y", 0.0, 1.0)],
+    };
+    let goals = grad_goals_from_request(&request)
+        .expect("a two-target gradient with CSE-collapsed adjoints still fans out");
+
+    // Two goals -- one per target NAME -- even though the adjoints collapsed.
+    assert_eq!(goals.len(), 2, "still one goal per gradient target name");
+    assert_eq!(
+        goals.iter().map(|g| g.target.as_str()).collect::<Vec<_>>(),
+        vec!["x", "y"],
+        "goals are still keyed by distinct target names"
+    );
+
+    // SHARED root index: the CSE collapse maps both targets to the same root.
+    let x_root = goals[0]
+        .extracted
+        .goal
+        .ir
+        .root_index()
+        .expect("x root index");
+    let y_root = goals[1]
+        .extracted
+        .goal
+        .ir
+        .root_index()
+        .expect("y root index");
+    assert_eq!(
+        x_root, y_root,
+        "structurally-identical adjoints (both 1/4) collapse to ONE gradient root"
+    );
+    // SHARED hash: still the one gradient-DAG artifact (lowered once).
+    assert_eq!(
+        goals[0].extracted.dag_hash, goals[1].extracted.dag_hash,
+        "both goals address the one gradient-DAG artifact"
+    );
+
+    // The shared root is a real GRADIENT root of the DAG, never a forward node:
+    // the collapse is sound, not an aliasing bug.
+    let parsed: WireDag = serde_json::from_slice(&goals[0].extracted.wire_dag_bytes)
+        .expect("the gradient bytes parse back as a WireDag");
+    assert!(
+        parsed.roots.contains(&(x_root as usize)),
+        "the shared index is a real root of the gradient DAG"
+    );
+
+    // Still no in-tree fit: each CSE-shared goal is no-fit -> Unsupported, never
+    // green. The collapse does not change the dispatch outcome.
+    let registry = DischargeRegistry::with_builtin_engines();
+    for (_, discharge) in dispatch_grad_goals(&registry, &goals, 1_000) {
+        assert_no_fit_lattice_membership(&discharge);
     }
 }
 

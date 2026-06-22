@@ -32,6 +32,22 @@
 //! range. This mirrors [`crate::graph_extract::box_range_goals_from_source`],
 //! which fans a multi-output FORWARD program out the same way.
 //!
+//! ## When two gradient targets share a root (sound CSE collapse)
+//!
+//! Fan-out goals carry DISTINCT root indices only WHEN their gradients are
+//! structurally distinct. Distinctness is NOT an invariant this rail enforces:
+//! it follows the gradient DAG the compiler emits. When two targets have
+//! structurally-IDENTICAL adjoints, the compiler's common-subexpression
+//! elimination legitimately collapses them to ONE gradient root, so
+//! `grad_nodes_by_name` maps both target names to the SAME index. For example
+//! d/dx and d/dy of `mean(x + y)` are both the constant `1/4`, so
+//! `grad_nodes_by_name == {"x": 8, "y": 8}` and the two [`GradGoal`]s share a
+//! root index AND the one gradient-DAG hash, differing only by target name and
+//! requested output range. This is SOUND -- both Greeks are genuinely equal, so
+//! one bounded interval discharges both -- and it never aliases a FORWARD node:
+//! the shared index is always a gradient root, not a forward value. A consumer
+//! must therefore key goals by target NAME, not by assuming one root per target.
+//!
 //! ## The no-in-tree-fit path (what this wave actually lands)
 //!
 //! There is NO `BoxRange` engine in-tree: cvc5 fits only [`GoalShape::Smt`], and
