@@ -16,6 +16,7 @@ pub use ast::{Atom, Expr, List, MetaExpr, MetaMap};
 pub use lexer::LiteralSuffix;
 pub use path::{
     DeepPath, PathError, PathSegment, ResolveError, ResolvedFunction, function_body,
-    module_excluding_function_def, resolve_function, splice_function_body, spliced_function_def,
+    module_excluding_function_def, module_has_defsig_for, resolve_function, splice_function_body,
+    spliced_function_def,
 };
 pub use span::Span;

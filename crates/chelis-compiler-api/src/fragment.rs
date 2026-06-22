@@ -57,6 +57,20 @@ pub enum ReplacementError {
         message: String,
         location: Option<Span>,
     },
+    /// The target function has no `(defsig ...)` declaration, so its
+    /// signature is inferred from its body rather than declared. The held
+    /// context retains only `(defsig ...)` declarations for the excluded
+    /// target, so an inferred-signature target leaves no binding for its own
+    /// name in scope: a recursive new body would be checked against an absent
+    /// signature, diverging from a full check that re-infers the signature
+    /// from the new body. Rather than risk that silent fragment-vs-full
+    /// divergence, the fragment check rejects inferred-signature targets up
+    /// front. Rendered Deep (from `def f(x: T) -> U = ...`) always emits a
+    /// `(defsig ...)`, so only hand-authored defsig-less defs reach this.
+    UndeclaredSignature {
+        message: String,
+        location: Option<Span>,
+    },
     /// The type pass (`check_ir_with_signature_context`) rejected the spliced
     /// body.
     Type {
@@ -93,6 +107,7 @@ impl ReplacementError {
     pub fn stage(&self) -> &'static str {
         match self {
             ReplacementError::NameResolution { .. } => "name-resolution",
+            ReplacementError::UndeclaredSignature { .. } => "undeclared-signature",
             ReplacementError::Type { .. } => "check",
             ReplacementError::Effect { .. } => "effects",
             ReplacementError::Linearity { .. } => "linearity",
@@ -103,6 +118,7 @@ impl ReplacementError {
     pub fn message(&self) -> &str {
         match self {
             ReplacementError::NameResolution { message, .. }
+            | ReplacementError::UndeclaredSignature { message, .. }
             | ReplacementError::Type { message, .. }
             | ReplacementError::Effect { message, .. }
             | ReplacementError::Linearity { message, .. } => message,
@@ -232,6 +248,24 @@ pub fn check_body_replacement(
     // Resolve first so a name miss is reported before any context work.
     chelis_deep::resolve_function(module, target_qualified_name)
         .map_err(resolve_error_to_replacement_error)?;
+
+    // The held context retains only the target's `(defsig ...)` to keep its
+    // signature in scope. A target with no `(defsig ...)` has its signature
+    // inferred from the body, so the held context would carry no binding for
+    // the target name and a recursive new body would be checked differently
+    // than a full check that re-infers from the new body. Reject up front
+    // rather than risk that silent fragment-vs-full divergence.
+    if !chelis_deep::module_has_defsig_for(module, target_qualified_name) {
+        return Err(ReplacementError::UndeclaredSignature {
+            message: format!(
+                "target `{target_qualified_name}` has no defsig declaration; fragment-scoped \
+                 body replacement requires a declared signature for the target so a recursive \
+                 body resolves against it, and inferred-signature targets are unsupported in \
+                 this run"
+            ),
+            location: None,
+        });
+    }
 
     // Held decls: the module with the target `(def ...)` removed and its
     // `(defsig ...)` retained, so a recursive new body resolves against the
@@ -428,6 +462,45 @@ mod tests {
             "expected NameResolution, got {err:?}",
         );
         assert_eq!(err.stage(), "name-resolution");
+    }
+
+    #[test]
+    fn defsig_less_target_is_rejected_not_diverged() {
+        // A hand-authored Deep module whose target `f` has a `(def ...)` but no
+        // `(defsig ...)`: its signature is inferred from the body. The held
+        // context retains only defsigs for the excluded target, so it would
+        // carry no binding for `f` and a recursive new body would be checked
+        // differently than a full re-infer-from-body check. The fragment check
+        // must reject this with a clear UndeclaredSignature error rather than
+        // silently accept or reject (the cardinal fragment-vs-full divergence).
+        let module = chelis_deep::parser::parse_str(
+            "(module {} m \
+               (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))))",
+        )
+        .expect("deep module parse");
+        // A well-typed identity body that would pass a full check; the point is
+        // it never reaches a pass, because the missing defsig is rejected first.
+        let new_body = render_body("module M\ndef h(x: f32) -> f32 = x\n", "h");
+        let err = check_body_replacement(&module, "f", &new_body)
+            .expect_err("defsig-less target rejected");
+        assert!(
+            matches!(err, ReplacementError::UndeclaredSignature { .. }),
+            "expected UndeclaredSignature, got {err:?}",
+        );
+        assert_eq!(err.stage(), "undeclared-signature");
+    }
+
+    #[test]
+    fn rendered_deep_target_always_has_defsig_and_accepts() {
+        // Rendered Deep (from `def f(x: T) -> U = ...`) always emits a defsig,
+        // so the defsig-less guard never fires on rendered modules: the same
+        // identity replacement that the hand-authored defsig-less module
+        // rejects is accepted here.
+        let module = render_deep(TWO_FN);
+        assert!(chelis_deep::module_has_defsig_for(&module, "f"));
+        let new_body = render_body("module M\ndef h(x: f32) -> f32 = x\n", "h");
+        let report = check_body_replacement(&module, "f", &new_body).expect("accept");
+        assert!(report.checks_clean);
     }
 
     #[test]

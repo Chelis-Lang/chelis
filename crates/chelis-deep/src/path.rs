@@ -236,6 +236,14 @@ pub enum ResolveError {
     #[error("no module declaration found while resolving `{searched}`")]
     NoModule { searched: String },
 
+    /// The program slice contained more than one top-level `(module {}
+    /// <name> ...)` node. Resolution requires exactly one module so a bare
+    /// or prefixed name addresses an unambiguous decl set; with several
+    /// modules a bare name could match in more than one, and silently
+    /// resolving against the first would hide that ambiguity.
+    #[error("expected exactly one module but found {count} while resolving `{searched}`")]
+    MultipleModules { searched: String, count: usize },
+
     /// The requested module prefix did not match the module's own
     /// flattened lowercase dotted name.
     #[error("module `{requested}` not found (module is `{actual}`) while resolving `{searched}`")]
@@ -264,6 +272,14 @@ pub enum ResolveError {
     /// body.
     #[error("`{name}` is a value binding, not a function, while resolving `{searched}`")]
     NotAFunction { searched: String, name: String },
+
+    /// A definition with the requested name carries a `(fn ...)` child but
+    /// that fn has no body slot (e.g. a hand-built `(def {} f (fn {}
+    /// (params {})))`). Such a def is a well-tagged function with nothing to
+    /// splice, so body resolution and splice report this structured error
+    /// instead of indexing past the end of the fn node.
+    #[error("function `{name}` has no body to address while resolving `{searched}`")]
+    MalformedFunction { searched: String, name: String },
 }
 
 /// Find a top-level function definition by a module-qualified name and
@@ -284,6 +300,13 @@ pub fn resolve_function(
     module_exprs: &[Expr],
     qualified_name: &str,
 ) -> Result<ResolvedFunction, ResolveError> {
+    let module_count = count_modules(module_exprs);
+    if module_count > 1 {
+        return Err(ResolveError::MultipleModules {
+            searched: qualified_name.to_string(),
+            count: module_count,
+        });
+    }
     let module = find_module(module_exprs).ok_or_else(|| ResolveError::NoModule {
         searched: qualified_name.to_string(),
     })?;
@@ -319,6 +342,12 @@ pub fn resolve_function(
         [(decl_index, def)] => {
             if !def_is_function(def) {
                 return Err(ResolveError::NotAFunction {
+                    searched: qualified_name.to_string(),
+                    name: bare_name.to_string(),
+                });
+            }
+            if !def_has_body(def) {
+                return Err(ResolveError::MalformedFunction {
                     searched: qualified_name.to_string(),
                     name: bare_name.to_string(),
                 });
@@ -455,6 +484,34 @@ pub fn module_excluding_function_def(
     Ok(program)
 }
 
+/// True when the single module in `module_exprs` declares a `(defsig {}
+/// <name> ...)` for the target named by `qualified_name`.
+///
+/// A fragment-scoped body check holds the target's declared signature in
+/// scope by removing only the `(def ...)` node and retaining its
+/// `(defsig ...)` (see [`module_excluding_function_def`]). A target with no
+/// `(defsig ...)` has its signature inferred from the body, so the held
+/// context would carry no binding for the target name and a recursive new
+/// body would be checked differently than a full check that re-infers from
+/// the new body. Callers query this before building a held context so they
+/// can reject inferred-signature targets rather than silently diverge.
+///
+/// The bare name and any module prefix are matched the same way
+/// [`resolve_function`] matches them. Resolution-shape errors (no module,
+/// more than one module, wrong prefix) are not reported here; a `false`
+/// result means no matching `(defsig ...)` was found in the located module.
+pub fn module_has_defsig_for(module_exprs: &[Expr], qualified_name: &str) -> bool {
+    let Some(module) = find_module(module_exprs) else {
+        return false;
+    };
+    let (_prefix, bare_name) = split_qualified_name(qualified_name);
+    decls(module).iter().any(|decl| {
+        as_tagged_list(decl, "defsig")
+            .map(|sig| def_name(sig) == Some(bare_name))
+            .unwrap_or(false)
+    })
+}
+
 /// Borrow the body subtree of a function `(def ...)` node, if present.
 pub fn function_body(def: &Expr) -> Option<&Expr> {
     let Expr::List(def_list, _) = def else {
@@ -511,6 +568,16 @@ fn find_module(exprs: &[Expr]) -> Option<&Expr> {
     exprs.iter().find(|e| as_tagged_list(e, "module").is_some())
 }
 
+/// The number of top-level `(module {} <name> ...)` nodes in the slice.
+/// Resolution requires exactly one; more than one is a
+/// [`ResolveError::MultipleModules`].
+fn count_modules(exprs: &[Expr]) -> usize {
+    exprs
+        .iter()
+        .filter(|e| as_tagged_list(e, "module").is_some())
+        .count()
+}
+
 /// The flattened lowercase dotted module name. In canonical form
 /// `(module {} <name> decls...)` the module tag is at `elements[0]`, the
 /// metadata map at `elements[1]`, and the name symbol at `elements[2]`.
@@ -549,6 +616,21 @@ fn def_is_function(def: &List) -> bool {
     matches!(
         def.elements.get(DEF_FN_INDEX),
         Some(Expr::List(fn_list, _)) if tag(fn_list) == Some("fn")
+    )
+}
+
+/// True when a function `(def ...)` node has a body slot to splice: its
+/// `(fn {} (params {} ...) BODY)` child carries a body at `FN_BODY_INDEX`.
+/// A hand-built `(def {} f (fn {} (params {})))` is a well-tagged function
+/// with no body, so this returns `false` even though [`def_is_function`]
+/// returns `true`. Resolving such a def reports
+/// [`ResolveError::MalformedFunction`] rather than letting a later body
+/// splice index past the end of the fn node.
+fn def_has_body(def: &List) -> bool {
+    matches!(
+        def.elements.get(DEF_FN_INDEX),
+        Some(Expr::List(fn_list, _))
+            if tag(fn_list) == Some("fn") && fn_list.elements.len() > FN_BODY_INDEX
     )
 }
 
@@ -741,5 +823,111 @@ mod tests {
         .expect("module parse");
         let err = spliced_function_def(&module, "pi", parse_one("(lit {} 1.0)")).unwrap_err();
         assert!(matches!(err, ResolveError::NotAFunction { .. }));
+    }
+
+    /// A body-less function def: a `(fn ...)` child with a `(params {})` node
+    /// but no body slot. It passes the `(fn ...)`-tagged check yet has nothing
+    /// to splice, so resolution must report `MalformedFunction` rather than let
+    /// a later body splice index past the end of the fn node.
+    fn body_less_fn_module() -> Vec<Expr> {
+        parse_str("(module {} m (def {} f (fn {} (params {}))))").expect("module parse")
+    }
+
+    #[test]
+    fn resolve_body_less_function_is_malformed_not_panic() {
+        let module = body_less_fn_module();
+        let err = resolve_function(&module, "f").unwrap_err();
+        assert!(
+            matches!(err, ResolveError::MalformedFunction { ref name, .. } if name == "f"),
+            "expected MalformedFunction for `f`, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn splice_body_less_function_is_malformed_not_panic() {
+        let module = body_less_fn_module();
+        let new_body = parse_one("(var {} replaced)");
+        // Each splice surface routes through resolve_function, so a body-less
+        // target is rejected with a structured error before the body-slot
+        // splice would otherwise panic.
+        let err = splice_function_body(&module, "f", new_body.clone()).unwrap_err();
+        assert!(matches!(err, ResolveError::MalformedFunction { .. }));
+        let err = spliced_function_def(&module, "f", new_body).unwrap_err();
+        assert!(matches!(err, ResolveError::MalformedFunction { .. }));
+        let err = module_excluding_function_def(&module, "f").unwrap_err();
+        assert!(matches!(err, ResolveError::MalformedFunction { .. }));
+    }
+
+    /// A two-module slice with the same bare name `f` in each module. The
+    /// first module's `f` has body `(var {} a)`; the second's has `(var {} b)`.
+    fn two_module_slice() -> Vec<Expr> {
+        parse_str(
+            "(module {} first \
+               (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32))) \
+               (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} a)))) \
+             (module {} second \
+               (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32))) \
+               (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} b))))",
+        )
+        .expect("two-module parse")
+    }
+
+    #[test]
+    fn resolve_with_multiple_modules_is_structured_error() {
+        let module = two_module_slice();
+        let err = resolve_function(&module, "f").unwrap_err();
+        assert!(
+            matches!(err, ResolveError::MultipleModules { count: 2, .. }),
+            "expected MultipleModules count 2, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn second_module_target_does_not_silently_resolve_against_first() {
+        // A prefixed name targeting the second module must not silently
+        // resolve against the first module's same-named `f`; the multi-module
+        // slice is rejected outright rather than picking the first match.
+        let module = two_module_slice();
+        let err = resolve_function(&module, "second.f").unwrap_err();
+        assert!(
+            matches!(err, ResolveError::MultipleModules { count: 2, .. }),
+            "expected MultipleModules, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn resolve_ambiguous_name_is_structured_error() {
+        // Two `(def {} dup ...)` with the same bare name in one module. The
+        // resolver must report Ambiguous, never silently pick the first, so a
+        // future refactor cannot degrade to pick-first.
+        let module = parse_str(
+            "(module {} m \
+               (def {} dup (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))) \
+               (def {} dup (fn {} (params {} (y {type: (t-prim {} f32)})) (var {} y))))",
+        )
+        .expect("module parse");
+        let err = resolve_function(&module, "dup").unwrap_err();
+        assert!(
+            matches!(err, ResolveError::Ambiguous { count: 2, ref name, .. } if name == "dup"),
+            "expected Ambiguous count 2 for `dup`, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn module_has_defsig_for_detects_presence_and_absence() {
+        // `two_fn_module` declares a defsig per function.
+        let with_sig = two_fn_module();
+        assert!(module_has_defsig_for(&with_sig, "f"));
+        assert!(module_has_defsig_for(&with_sig, "g"));
+        // A def with no matching defsig reports false.
+        assert!(!module_has_defsig_for(&with_sig, "absent"));
+
+        // A module whose `f` has a def but no defsig reports false for `f`.
+        let no_sig = parse_str(
+            "(module {} m \
+               (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))))",
+        )
+        .expect("module parse");
+        assert!(!module_has_defsig_for(&no_sig, "f"));
     }
 }

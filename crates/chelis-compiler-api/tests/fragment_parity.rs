@@ -158,6 +158,12 @@ fn fragment_verdict(result: &Result<ReplacementReport, ReplacementError>) -> Ver
         Err(ReplacementError::NameResolution { message, .. }) => {
             panic!("fragment target failed to resolve (gate-author error): {message}")
         }
+        Err(ReplacementError::UndeclaredSignature { message, .. }) => {
+            // Every parity case targets rendered Deep, which always emits a
+            // defsig, so a defsig-less target here is a gate-author error, not
+            // a pass verdict.
+            panic!("fragment target has no defsig (gate-author error): {message}")
+        }
     }
 }
 

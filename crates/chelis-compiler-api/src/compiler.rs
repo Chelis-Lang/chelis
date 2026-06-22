@@ -182,6 +182,9 @@ fn replacement_error_to_compiler_error(error: crate::fragment::ReplacementError)
         ReplacementError::NameResolution { location, .. } => {
             ("name_resolution_error", *location, None)
         }
+        ReplacementError::UndeclaredSignature { location, .. } => {
+            ("undeclared_signature_error", *location, None)
+        }
         ReplacementError::Type {
             location,
             deep_path,
