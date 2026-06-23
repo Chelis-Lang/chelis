@@ -1541,9 +1541,15 @@ fn render_obligation_outcome(
 }
 
 /// Render one obligation outcome as the additive NDJSON `{kind:"obligation"}`
-/// record (or human-readable line). Byte-identical to
-/// `obligation_run::emit` so a `.dp` obligation record is shaped exactly like
-/// a `.ch` one.
+/// record (or human-readable line). Emits the same field set and ordering as
+/// `obligation_run::emit` -- including the `qualifiers` caveat array
+/// (chelis#422) -- so a `.dp` obligation record is shaped exactly like a `.ch`
+/// one. The one remaining difference is the `status` field: this Deep renderer
+/// derives it directly from `outcome.status`, matching its own dispatcher
+/// `render_obligation_outcome`, whereas the Surf path derives status from the
+/// composite verdict via `obligation_display_status`. The two agree for every
+/// outcome where `outcome.status` matches the composite-verdict status, which
+/// is the case for SMT-proved obligations.
 #[cfg(feature = "chelis-prove")]
 fn emit_obligation_record(
     outcome: &chelis_prove::obligation_engine::ObligationOutcome,
@@ -1582,6 +1588,9 @@ fn emit_obligation_record(
             "name": outcome.name,
             "status": status,
             "composite_verdict": outcome.composite_verdict.as_str(),
+            // chelis#422 (D2): full disclosed caveat set alongside the weakest
+            // `composite_verdict` token.
+            "qualifiers": outcome.disclosed_qualifiers(),
             "assumptions": &outcome.assumptions,
             "proof_tier": outcome.proof_tier.as_str(),
             "samples": outcome.samples,
