@@ -2,7 +2,7 @@
 """Bump the workspace version and every coupled compiler pin in lockstep.
 
 Background: when `workspace.package.version` in the root `Cargo.toml`
-changes, three categories of files must change with it:
+changes, five categories of files must change with it:
 
 1. Test fixtures with hardcoded `compiler = "=X.Y.Z"` strings. These are
    already auto-synced via `chelis_compiler_api::COMPILER_VERSION`
@@ -17,11 +17,33 @@ changes, three categories of files must change with it:
 3. The prebuilt `packages/chelis-std/dist/*.chb` and `*.tar.zst` artifacts.
    These are produced by `chelis reef build` and embed the bumped pin.
 
+4. The compile-time-embedded bundle in `crates/chelis-std-bundle/dist/`.
+   These bytes are baked into the chelis binary via `include_bytes!()` and
+   carry chelis-std's `reef.toml` (with its `compiler =` pin) inside the
+   archive. The reef loader reads that embedded `reef.toml` through
+   `validate_manifest`, which rejects any pin other than the running
+   compiler's, so a stale embedded bundle makes every chelis-std-importing
+   program fail at load. They are a copy of category (3), kept in their own
+   crate dir. This is the 0.9.0 release failure: categories (2) and (3)
+   were bumped but the embedded bundle was never regenerated, so the
+   release-only fixture step rejected it.
+
+5. Committed `reef.lock` files that record a `chelis-std` bundled
+   dependency (`packages/chelis-std/reef.lock` and the
+   `release_pipe_stage` fixture). Their dependency `compiler =` pin and
+   `archive_sha256`/`shell_sha256` are synthesized from the embedded
+   bundle, so they go stale the moment category (4) is regenerated. They
+   are NOT auto-synced — they are literal on-disk strings.
+
 This script is the single, scriptable entry point for the release bump.
-The corresponding tripwire test
-(`crates/chelis-cli/tests/compiler_pin_tripwire.rs`) fails loudly when
-category (2) drifts from category (1), pointing future operators at this
-script.
+Two tripwire tests fail loudly when these drift, pointing future operators
+at this script:
+  - `compiler_pin_tripwire.rs::real_toml_compiler_pins_match_workspace_version`
+    (category 2 vs 1)
+  - `compiler_pin_tripwire.rs::real_lock_compiler_pins_match_workspace_version`
+    (category 5)
+  - `chelis-std-bundle::extract_yields_reef_package_layout` asserts the
+    embedded bundle pin (category 4).
 
 Usage:
     python3 scripts/bump_compiler_pins.py 0.3.2
@@ -33,6 +55,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -55,6 +78,21 @@ WORKSPACE_CARGO_TOML = REPO_ROOT / "Cargo.toml"
 # itself is enumerated; the names are checked after rebuild.
 CHELIS_STD_DIR = REPO_ROOT / "packages/chelis-std"
 CHELIS_STD_DIST = CHELIS_STD_DIR / "dist"
+
+# The compile-time-embedded bundle copied into the binary. Refreshed in
+# lockstep with CHELIS_STD_DIST via the canonical bundle pipeline.
+BUNDLE_DIST = REPO_ROOT / "crates/chelis-std-bundle/dist"
+REGEN_BUNDLE_SCRIPT = REPO_ROOT / "scripts/regenerate_chelis_std_bundle.py"
+
+# Package roots whose committed `reef.lock` records a `chelis-std`
+# bundled dependency. Their synthesized pin and sha256s go stale the
+# moment the embedded bundle is regenerated, so re-run `chelis reef build`
+# in each to rewrite the lock. Keep in sync with `pinned_real_lock_files`
+# in `crates/chelis-cli/tests/compiler_pin_tripwire.rs`.
+PINNED_REAL_LOCK_DIRS: list[Path] = [
+    CHELIS_STD_DIR,
+    REPO_ROOT / "crates/chelis-cli/tests/fixtures/release_pipe_stage",
+]
 
 
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?$")
@@ -183,30 +221,100 @@ def find_chelis_binary() -> Path | None:
 
 
 def rebuild_chelis_std_dist(dry_run: bool) -> None:
-    """Rebuild `packages/chelis-std/dist/*.chb` and `*.tar.zst`.
+    """Rebuild the chelis-std artifacts the binary ships, in lockstep.
 
-    Uses `chelis reef build` against the local chelis binary. If no
-    chelis binary is present in `target/`, the user must build it first.
+    The chelis-std runtime exists as two byte-identical copies:
+    `packages/chelis-std/dist/` (the published package) and
+    `crates/chelis-std-bundle/dist/` (the bytes baked into the binary via
+    `include_bytes!()`). A version bump must refresh BOTH or the embedded
+    bundle goes stale and rejects every chelis-std-importing program at
+    load — the 0.9.0 release failure.
+
+    Pipeline (delegated to `regenerate_chelis_std_bundle.py`, the canonical
+    bundle pipeline):
+      1. `cargo build -p chelis-cli --release`
+      2. `chelis reef build packages/chelis-std/`  (-> category 3)
+      3. copy the result into `crates/chelis-std-bundle/dist/` (category 4)
+    Then this function rebuilds the CLI a second time so the binary embeds
+    the freshly-copied bundle bytes, and regenerates the committed
+    `reef.lock` files (category 5) with that binary so their synthesized
+    `chelis-std` pin and `archive_sha256`/`shell_sha256` match the new
+    bundle.
     """
     if dry_run:
-        print(f"[dry-run] would rebuild {CHELIS_STD_DIST}/")
+        print(f"[dry-run] would regenerate {CHELIS_STD_DIST.relative_to(REPO_ROOT)}/")
+        print(f"[dry-run] would regenerate {BUNDLE_DIST.relative_to(REPO_ROOT)}/")
+        for lock in PINNED_REAL_LOCK_DIRS:
+            print(f"[dry-run] would regenerate {(lock / 'reef.lock').relative_to(REPO_ROOT)}")
         return
+
+    # Steps 1-3: build CLI, build chelis-std dist, copy into the bundle
+    # crate. Delegated to the canonical bundle pipeline so the two scripts
+    # cannot drift on how the embedded bytes are produced.
+    print(f"Regenerating chelis-std dist + embedded bundle via {REGEN_BUNDLE_SCRIPT.name} ...")
+    rc = subprocess.run(
+        [sys.executable, str(REGEN_BUNDLE_SCRIPT)],
+        cwd=REPO_ROOT,
+    ).returncode
+    if rc != 0:
+        sys.exit(
+            f"error: {REGEN_BUNDLE_SCRIPT.name} exited {rc}. Fix the build, "
+            "then re-run this script (without --no-rebuild-dist)."
+        )
+
+    # The regen script built the CLI BEFORE copying the new bundle bytes,
+    # so its binary still embeds the prior bundle. Rebuild once more so the
+    # binary's `include_bytes!()` picks up the freshly-copied bytes; the
+    # lockfile sha256s come from those embedded bytes, so the binary must be
+    # current before it writes a lock.
+    print("Rebuilding chelis-cli so the binary embeds the new bundle ...")
+    rc = subprocess.run(
+        ["cargo", "build", "-p", "chelis-cli", "--release"],
+        cwd=REPO_ROOT,
+    ).returncode
+    if rc != 0:
+        sys.exit("error: cargo build -p chelis-cli --release failed after bundle copy")
 
     chelis = find_chelis_binary()
     if chelis is None:
         sys.exit(
-            "error: no chelis binary found in target/release/ or target/debug/. "
-            "Run `cargo build --workspace` first, then re-run this script."
+            "error: no chelis binary found in target/release/ or target/debug/ "
+            "after rebuild."
         )
-    print(f"Rebuilding {CHELIS_STD_DIST.relative_to(REPO_ROOT)} via {chelis} ...")
-    cmd = [str(chelis), "reef", "build"]
-    result = subprocess.run(cmd, cwd=CHELIS_STD_DIR, check=False)
-    if result.returncode != 0:
-        sys.exit(
-            f"error: `chelis reef build` exited {result.returncode} in "
-            f"{CHELIS_STD_DIR}. Fix the build, then re-run this script "
-            "with `--no-rebuild-dist` skipped."
-        )
+
+    # Step 5: regenerate the committed reef.lock files. `chelis reef build`
+    # writes `reef.lock` at the package root, synthesizing the chelis-std
+    # bundled dependency from the now-current embedded bundle.
+    for pkg_dir in PINNED_REAL_LOCK_DIRS:
+        lock = pkg_dir / "reef.lock"
+        print(f"Regenerating {lock.relative_to(REPO_ROOT)} via {chelis} reef build ...")
+        rc = subprocess.run(
+            [str(chelis), "reef", "build"],
+            cwd=pkg_dir,
+        ).returncode
+        if rc != 0:
+            sys.exit(
+                f"error: `chelis reef build` exited {rc} in {pkg_dir}. "
+                "The committed reef.lock could not be regenerated."
+            )
+        # `reef build` also drops a `dist/` next to the package; for the
+        # fixture that dir is not tracked, so leave the source tree clean.
+        _clean_untracked_dist(pkg_dir)
+
+
+def _clean_untracked_dist(pkg_dir: Path) -> None:
+    """Remove a `dist/` that `chelis reef build` writes next to a package
+    whose committed tree does not track build artifacts.
+
+    Only `packages/chelis-std/dist/` is a tracked artifact dir; every other
+    package root (the release fixture) keeps no `dist/`, so the build's
+    output is incidental and must not be left behind.
+    """
+    if pkg_dir == CHELIS_STD_DIR:
+        return
+    dist = pkg_dir / "dist"
+    if dist.is_dir():
+        shutil.rmtree(dist)
 
 
 def main(argv: list[str]) -> int:
