@@ -227,6 +227,139 @@ import Mylib.Math (double)
     assert_eq!(props[0]["arith_model"], "real");
 }
 
+// chelis#422: a top-level call-form comparison predicate
+// (`gte(mul(x, x), 0.0)`) used to return `None` from the predicate-position
+// lowering and silently drop to a Tier C fuzz pass, so a measure-zero-false
+// call-form rendered a false green. The call-form must now lower to SMT
+// exactly like the operator-form.
+#[cfg(feature = "smt")]
+#[test]
+fn call_form_predicate_proves_at_smt_like_operator_form() {
+    let dir = write_prop(
+        r#"
+@property callform_nonneg forall(x: f32):
+  gte(mul(x, x), 0.0)
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--tier",
+            "auto",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let props = property_records(&output.stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    assert_eq!(props[0]["name"], "callform_nonneg");
+    assert_eq!(props[0]["status"], "passed");
+    assert_eq!(
+        props[0]["proof_tier"], "smt",
+        "call-form must lower to SMT, not drop to fuzz: {}",
+        props[0]
+    );
+    assert_eq!(props[0]["composite_verdict"], "proven");
+}
+
+// chelis#422: the operator-form of the same property keeps lowering to SMT
+// unchanged -- the call-form arm must not perturb the operator path.
+#[cfg(feature = "smt")]
+#[test]
+fn operator_form_predicate_still_proves_at_smt() {
+    let dir = write_prop(
+        r#"
+@property operator_nonneg forall(x: f32):
+  (x * x) >= 0.0
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--tier",
+            "auto",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let props = property_records(&output.stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    assert_eq!(props[0]["name"], "operator_nonneg");
+    assert_eq!(props[0]["status"], "passed");
+    assert_eq!(props[0]["proof_tier"], "smt");
+    assert_eq!(props[0]["composite_verdict"], "proven");
+}
+
+// chelis#422 negative test: a measure-zero-false call-form predicate
+// (`(x - 12345.0)^2 > 0.0` under `x > 0`, false at x = 12345.0) used to fuzz
+// to a false green because fuzz never sampled the exact root. It must now be
+// REFUTED at SMT with the exact counterexample, not fuzz-passed.
+#[cfg(feature = "smt")]
+#[test]
+fn measure_zero_false_call_form_is_refuted_at_smt_not_fuzz_passed() {
+    let dir = write_prop(
+        r#"
+@property callform_false forall(x: f32) where gt(x, 0.0):
+  gt(mul(sub(x, 12345.0), sub(x, 12345.0)), 0.0)
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--tier",
+            "auto",
+            "--samples",
+            "100",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a measure-zero-false call-form must be refuted (exit 1), not fuzz-passed: stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let props = property_records(&output.stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    assert_eq!(props[0]["name"], "callform_false");
+    assert_eq!(
+        props[0]["status"], "failed",
+        "must be refuted, not passed: {}",
+        props[0]
+    );
+    assert_eq!(
+        props[0]["proof_tier"], "smt",
+        "refutation must come from SMT, not fuzz: {}",
+        props[0]
+    );
+    assert_eq!(props[0]["composite_verdict"], "failed");
+    assert_eq!(
+        props[0]["counterexample"]["x"], "12345.0",
+        "SMT must report the exact root as counterexample: {}",
+        props[0]
+    );
+}
+
 #[cfg(feature = "smt")]
 #[test]
 fn user_smt_property_json_carries_real_arith_model_and_refutation_model() {

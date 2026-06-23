@@ -169,6 +169,41 @@ fn lookup_fun_body<'a>(decls: &'a [Decl], name: &str) -> Option<(&'a [Param], &'
     })
 }
 
+/// The interpreted arithmetic op a call-form arithmetic primitive lowers to,
+/// so call-form `mul(x, x)` lowers to the same interpreted `SmtExpr::Arith`
+/// node as operator-form `x * x` (chelis#422). A call-form arithmetic op must
+/// NOT fall through to an uninterpreted `SmtExpr::Apply`, which the
+/// inlineability classifier rejects (only the intrinsic whitelist is
+/// inlineable), silently dropping the property to Tier C fuzz.
+fn call_form_arith_op(name: &str) -> Option<crate::solver::ArithOp> {
+    use crate::solver::ArithOp as SA;
+    match name {
+        "add" => Some(SA::Add),
+        "sub" => Some(SA::Sub),
+        "mul" => Some(SA::Mul),
+        "div" => Some(SA::Div),
+        _ => None,
+    }
+}
+
+/// The comparison op a call-form comparison primitive lowers to, so a
+/// top-level call-form predicate (`gte(mul(x, x), 0.0)`) lowers to the same
+/// `SmtExpr::Cmp` node as the operator-form (`(x * x) >= 0.0`) instead of
+/// silently dropping to a fuzz pass (chelis#422). Both the named comparison
+/// primitives and the desugared operator name `cmplt` (`<`) are mapped.
+fn call_form_cmp_op(name: &str) -> Option<crate::solver::CmpOp> {
+    use crate::solver::CmpOp as SC;
+    match name {
+        "gt" => Some(SC::Gt),
+        "gte" => Some(SC::Ge),
+        "lt" | "cmplt" => Some(SC::Lt),
+        "lte" => Some(SC::Le),
+        "eq" => Some(SC::Eq),
+        "neq" => Some(SC::Ne),
+        _ => None,
+    }
+}
+
 pub(super) fn surf_expr_to_smt(expr: &Expr, ctx: &InlineCtx) -> Option<crate::solver::SmtExpr> {
     use crate::solver::{BoolOp as SB, CmpOp as SC, SmtExpr};
     match expr {
@@ -211,6 +246,39 @@ pub(super) fn surf_expr_to_smt(expr: &Expr, ctx: &InlineCtx) -> Option<crate::so
             vec![surf_expr_to_smt(l, ctx)?, surf_expr_to_smt(r, ctx)?],
         )),
         Expr::Lit(Literal::Bool(v), _) => Some(SmtExpr::BoolLit(*v)),
+        // A top-level call-form comparison predicate (`gte(mul(x, x), 0.0)`)
+        // lowers to the same `Cmp` node as its operator-form (chelis#422).
+        // Without this arm such predicates returned `None` and silently
+        // dropped to a Tier C fuzz pass -- a false green on a measure-zero
+        // false call-form. `and`/`or`/`not` connectives also lower call-form.
+        Expr::Apply(func, args, _) => {
+            let name = match func.as_ref() {
+                Expr::Var(n, _) => n.as_str(),
+                _ => return None,
+            };
+            if let Some(op) = call_form_cmp_op(name) {
+                if args.len() != 2 {
+                    return None;
+                }
+                return Some(SmtExpr::Cmp(
+                    op,
+                    Box::new(surf_arith(&args[0], ctx)?),
+                    Box::new(surf_arith(&args[1], ctx)?),
+                ));
+            }
+            match (name, args.as_slice()) {
+                ("and", [l, r]) => Some(SmtExpr::Bool(
+                    SB::And,
+                    vec![surf_expr_to_smt(l, ctx)?, surf_expr_to_smt(r, ctx)?],
+                )),
+                ("or", [l, r]) => Some(SmtExpr::Bool(
+                    SB::Or,
+                    vec![surf_expr_to_smt(l, ctx)?, surf_expr_to_smt(r, ctx)?],
+                )),
+                ("not", [inner]) => Some(SmtExpr::Not(Box::new(surf_expr_to_smt(inner, ctx)?))),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -258,6 +326,20 @@ fn surf_arith(expr: &Expr, ctx: &InlineCtx) -> Option<crate::solver::SmtExpr> {
                     SA::Neg,
                     Box::new(smt_args[0].clone()),
                     Box::new(SmtExpr::IntLit(0)),
+                ));
+            }
+            // Call-form arithmetic (`mul(x, x)`) lowers to the same
+            // interpreted `Arith` node as operator-form (`x * x`), not an
+            // uninterpreted `Apply` the inlineability classifier would reject
+            // (chelis#422).
+            if let Some(op) = call_form_arith_op(&name) {
+                if smt_args.len() != 2 {
+                    return None;
+                }
+                return Some(SmtExpr::Arith(
+                    op,
+                    Box::new(smt_args[0].clone()),
+                    Box::new(smt_args[1].clone()),
                 ));
             }
             if let Some(contracts) = ctx.contracts
@@ -412,6 +494,19 @@ fn surf_arith_subst(
                     Box::new(SmtExpr::IntLit(0)),
                 ));
             }
+            // Call-form arithmetic lowers to an interpreted `Arith` node here
+            // too, so an inlined call body carrying `mul(...)` lowers the same
+            // way the operator-form does (chelis#422).
+            if let Some(op) = call_form_arith_op(&name) {
+                if smt_args.len() != 2 {
+                    return None;
+                }
+                return Some(SmtExpr::Arith(
+                    op,
+                    Box::new(smt_args[0].clone()),
+                    Box::new(smt_args[1].clone()),
+                ));
+            }
             if let Some(contracts) = ctx.contracts
                 && let Some(abs) = contracts.borrow_mut().abstract_call(&name, &smt_args)
             {
@@ -514,6 +609,148 @@ fn surf_expr_to_smt_subst(
             ],
         )),
         Expr::Lit(Literal::Bool(v), _) => Some(SmtExpr::BoolLit(*v)),
+        // Call-form comparison predicates lower under substitution too, so an
+        // inlined predicate body written in call-form lowers to a `Cmp` node
+        // rather than silently dropping to fuzz (chelis#422).
+        Expr::Apply(func, args, _) => {
+            let name = match func.as_ref() {
+                Expr::Var(n, _) => n.as_str(),
+                _ => return None,
+            };
+            if let Some(op) = call_form_cmp_op(name) {
+                if args.len() != 2 {
+                    return None;
+                }
+                return Some(SmtExpr::Cmp(
+                    op,
+                    Box::new(surf_arith_subst(&args[0], subst, ctx)?),
+                    Box::new(surf_arith_subst(&args[1], subst, ctx)?),
+                ));
+            }
+            match (name, args.as_slice()) {
+                ("and", [l, r]) => Some(SmtExpr::Bool(
+                    SB::And,
+                    vec![
+                        surf_expr_to_smt_subst(l, subst, ctx)?,
+                        surf_expr_to_smt_subst(r, subst, ctx)?,
+                    ],
+                )),
+                ("or", [l, r]) => Some(SmtExpr::Bool(
+                    SB::Or,
+                    vec![
+                        surf_expr_to_smt_subst(l, subst, ctx)?,
+                        surf_expr_to_smt_subst(r, subst, ctx)?,
+                    ],
+                )),
+                ("not", [inner]) => Some(SmtExpr::Not(Box::new(surf_expr_to_smt_subst(
+                    inner, subst, ctx,
+                )?))),
+                _ => None,
+            }
+        }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::solver::{ArithOp, CmpOp, SmtExpr};
+    use chelis_deep::Span;
+
+    fn sp() -> Span {
+        Span::new(0, 0)
+    }
+
+    fn var(name: &str) -> Expr {
+        Expr::Var(name.to_string(), sp())
+    }
+
+    fn apply(name: &str, args: Vec<Expr>) -> Expr {
+        Expr::Apply(Box::new(var(name)), args, sp())
+    }
+
+    fn float(v: f64) -> Expr {
+        Expr::Lit(Literal::Float(v), sp())
+    }
+
+    fn ctx<'a>(decls: &'a [Decl]) -> InlineCtx<'a> {
+        InlineCtx {
+            decls,
+            depth: 0,
+            max_depth: 3,
+            call_stack: vec![],
+            contracts: None,
+        }
+    }
+
+    // chelis#422: call-form arithmetic must lower to an interpreted `Arith`
+    // node, identical to operator-form, not an uninterpreted `Apply` that the
+    // inlineability classifier rejects (which silently drops to fuzz).
+    #[test]
+    fn call_form_mul_lowers_to_interpreted_arith() {
+        let decls: Vec<Decl> = Vec::new();
+        let call = apply("mul", vec![var("x"), var("x")]);
+        let lowered = surf_arith(&call, &ctx(&decls)).expect("mul lowers");
+        assert_eq!(
+            lowered,
+            SmtExpr::Arith(
+                ArithOp::Mul,
+                Box::new(SmtExpr::Var("x".into())),
+                Box::new(SmtExpr::Var("x".into())),
+            )
+        );
+    }
+
+    // chelis#422: a top-level call-form comparison predicate lowers to the
+    // same `Cmp` node as operator-form (`gte(mul(x, x), 0.0)` == `x*x >= 0.0`).
+    #[test]
+    fn call_form_comparison_predicate_lowers_to_cmp() {
+        let decls: Vec<Decl> = Vec::new();
+        let pred = apply(
+            "gte",
+            vec![apply("mul", vec![var("x"), var("x")]), float(0.0)],
+        );
+        let lowered = surf_expr_to_smt(&pred, &ctx(&decls)).expect("gte predicate lowers");
+        assert_eq!(
+            lowered,
+            SmtExpr::Cmp(
+                CmpOp::Ge,
+                Box::new(SmtExpr::Arith(
+                    ArithOp::Mul,
+                    Box::new(SmtExpr::Var("x".into())),
+                    Box::new(SmtExpr::Var("x".into())),
+                )),
+                Box::new(SmtExpr::RealLit(0.0)),
+            )
+        );
+    }
+
+    // Every call-form comparison primitive maps to the matching `CmpOp`, with
+    // `cmplt` (the desugared `<`) mapping to `Lt`.
+    #[test]
+    fn every_call_form_comparison_maps_to_its_op() {
+        for (name, op) in [
+            ("gt", CmpOp::Gt),
+            ("gte", CmpOp::Ge),
+            ("lt", CmpOp::Lt),
+            ("cmplt", CmpOp::Lt),
+            ("lte", CmpOp::Le),
+            ("eq", CmpOp::Eq),
+            ("neq", CmpOp::Ne),
+        ] {
+            assert_eq!(call_form_cmp_op(name), Some(op), "{name}");
+        }
+    }
+
+    // Negative parity: a call-form predicate that is NOT a comparison or a
+    // boolean connective must return `None` (so the caller surfaces it rather
+    // than minting a bogus interpreted node). This is the boundary the false
+    // green crossed.
+    #[test]
+    fn non_predicate_call_form_does_not_lower_to_a_predicate() {
+        let decls: Vec<Decl> = Vec::new();
+        let pred = apply("mystery", vec![var("x")]);
+        assert!(surf_expr_to_smt(&pred, &ctx(&decls)).is_none());
     }
 }
