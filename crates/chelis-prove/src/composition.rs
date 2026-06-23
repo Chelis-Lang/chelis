@@ -51,8 +51,23 @@ impl DischargeMethod {
 pub enum CompositeVerdict {
     #[default]
     Proven,
+    /// An SMT base proved over the REALS, disclosing the machine-arithmetic
+    /// gap (chelis#422). Under the current real-sorted lowering every
+    /// `proof_tier:"smt"` green carries this; plain `Proven` is reserved for a
+    /// future exact-machine-arithmetic lowering.
+    ProvenModuloRealArithmetic,
     ProvenModuloFuzzValidatedContract,
     ProvenModuloAssertedAxiom,
+    /// A sound over-approximation backed the base (e.g. Beacon's interval
+    /// engine): a green-exit result that is conservative, strictly below a
+    /// proof. Distinct from the `proven_*` badges (the base was not proved).
+    SoundApproximate,
+    /// The base was established by fuzz sampling only -- no deductive proof
+    /// underneath (chelis#422). A green-exit empirical pass that is NOT proven:
+    /// it must never read as `proven_*`. Distinct from
+    /// [`CompositeVerdict::ProvenModuloFuzzValidatedContract`], where an exact
+    /// SMT base is proven modulo a fuzz-validated contract assumption.
+    FuzzValidatedEmpirical,
     Invalid,
     Unsupported,
     Failed,
@@ -62,10 +77,13 @@ impl CompositeVerdict {
     pub fn as_str(self) -> &'static str {
         match self {
             CompositeVerdict::Proven => "proven",
+            CompositeVerdict::ProvenModuloRealArithmetic => "proven_modulo_real_arithmetic",
             CompositeVerdict::ProvenModuloFuzzValidatedContract => {
                 "proven_modulo_fuzz_validated_contract"
             }
             CompositeVerdict::ProvenModuloAssertedAxiom => "proven_modulo_asserted_axiom",
+            CompositeVerdict::SoundApproximate => "sound_approximate",
+            CompositeVerdict::FuzzValidatedEmpirical => "fuzz_validated",
             CompositeVerdict::Invalid => "invalid",
             CompositeVerdict::Unsupported => "unsupported",
             CompositeVerdict::Failed => "failed",
@@ -85,6 +103,10 @@ impl CompositeVerdict {
                 soundness: Soundness::Exact,
                 qualifiers: QualifierSet::new(),
             },
+            CompositeVerdict::ProvenModuloRealArithmetic => VerdictGuarantee::Green {
+                soundness: Soundness::SoundApproximate,
+                qualifiers: QualifierSet::from_iter_kinds([Qualifier::RealArith]),
+            },
             CompositeVerdict::ProvenModuloFuzzValidatedContract => VerdictGuarantee::Green {
                 soundness: Soundness::Empirical,
                 qualifiers: QualifierSet::from_iter_kinds([Qualifier::Fuzz]),
@@ -92,6 +114,14 @@ impl CompositeVerdict {
             CompositeVerdict::ProvenModuloAssertedAxiom => VerdictGuarantee::Green {
                 soundness: Soundness::Exact,
                 qualifiers: QualifierSet::from_iter_kinds([Qualifier::Axiom]),
+            },
+            CompositeVerdict::SoundApproximate => VerdictGuarantee::Green {
+                soundness: Soundness::SoundApproximate,
+                qualifiers: QualifierSet::from_iter_kinds([Qualifier::SoundOverApproximation]),
+            },
+            CompositeVerdict::FuzzValidatedEmpirical => VerdictGuarantee::Green {
+                soundness: Soundness::Empirical,
+                qualifiers: QualifierSet::from_iter_kinds([Qualifier::FuzzBase]),
             },
             CompositeVerdict::Unsupported => VerdictGuarantee::Unestablished,
             CompositeVerdict::Invalid => VerdictGuarantee::Vacuous,
@@ -213,22 +243,39 @@ impl VerdictRollup {
                 Terminal::Unestablished => CompositeVerdict::Unsupported,
             };
         }
-        // All-green. The qualifier set drives the badge, weakest kind first:
-        // an asserted axiom is a weaker green than a fuzz-validated contract,
-        // which is weaker than an exact proof, matching the legacy precedence.
-        // Covered-or-rejected: only `Exact` soundness with no weaker qualifier
-        // may render `Proven`. A green rollup at sub-`Exact` soundness carrying
-        // a non-fuzz/non-axiom qualifier (`SoundOverApproximation`,
-        // `DeltaComplete`, `SpecialFunctionCertified`, `CertificateBearing`)
-        // has no green badge yet, so it conservatively renders `Unsupported`
-        // rather than laundering into `Proven`. The proper sound-over-
-        // approximation green badge and its lattice projection land with WI-9
-        // when a producer first emits those qualifiers; until then any such
-        // rollup is rejected from the green path here at the rendering point.
-        if self.qualifiers.contains(Qualifier::Axiom) {
+        // All-green. The qualifier set drives the badge, weakest kind first, so
+        // a set that mixes a weak kind with a strong one renders the WEAK badge
+        // and a weaker guarantee can never be laundered into a stronger one.
+        // Precedence, most-dominating first (chelis#422):
+        //   FuzzBase               -> fuzz_validated   (base never proved; dominates all)
+        //   SoundOverApproximation -> sound_approximate (over-approx base, not a proof)
+        //   Axiom                  -> proven_modulo_asserted_axiom
+        //   Fuzz (contract)        -> proven_modulo_fuzz_validated_contract
+        //   RealArith              -> proven_modulo_real_arithmetic (proof over reals)
+        //   Exact, no weaker       -> proven
+        // The `FuzzBase` check is FIRST: a fuzz-only base is the weakest green
+        // and can never read `proven_*`, regardless of what was discharged on
+        // top of it. `SoundOverApproximation` (an over-approximating base, e.g.
+        // Beacon's interval engine) is the next weakest -- a green-exit result
+        // that is not a proof, so it dominates the proven_* badges. The
+        // `Axiom`-before-`Fuzz` order is preserved EXACTLY from the pre-422
+        // lattice so existing rollups stay byte-identical (the wi6 oracle locks
+        // it). `RealArith` is the strongest qualifier below an exact proof: it
+        // discloses the proof is over reals. Covered-or-rejected: a green
+        // rollup at sub-`Exact` soundness carrying only a not-yet-badged
+        // qualifier (`DeltaComplete`, `SpecialFunctionCertified`,
+        // `CertificateBearing`) has no green badge yet, so it conservatively
+        // renders `Unsupported` rather than laundering into a proof.
+        if self.qualifiers.contains(Qualifier::FuzzBase) {
+            CompositeVerdict::FuzzValidatedEmpirical
+        } else if self.qualifiers.contains(Qualifier::SoundOverApproximation) {
+            CompositeVerdict::SoundApproximate
+        } else if self.qualifiers.contains(Qualifier::Axiom) {
             CompositeVerdict::ProvenModuloAssertedAxiom
         } else if self.qualifiers.contains(Qualifier::Fuzz) {
             CompositeVerdict::ProvenModuloFuzzValidatedContract
+        } else if self.qualifiers.contains(Qualifier::RealArith) {
+            CompositeVerdict::ProvenModuloRealArithmetic
         } else if self.soundness == Soundness::Exact {
             CompositeVerdict::Proven
         } else {
@@ -264,9 +311,14 @@ impl AssumptionDischarge {
             .get("status")
             .and_then(serde_json::Value::as_str)
         {
+            // chelis#422: an SMT discharge is over the REALS, so it is a sound
+            // over-approximation of the machine claim -- `SoundApproximate`
+            // carrying `RealArith`, NOT an exact decision. An all-SMT
+            // dependency set therefore rolls up to `proven_modulo_real_arithmetic`,
+            // disclosing the machine-arithmetic gap on every smt green.
             Some("proved") if self.method == DischargeMethod::Smt => VerdictGuarantee::Green {
-                soundness: Soundness::Exact,
-                qualifiers: QualifierSet::from_iter_kinds([Qualifier::Exact]),
+                soundness: Soundness::SoundApproximate,
+                qualifiers: QualifierSet::from_iter_kinds([Qualifier::RealArith]),
             },
             Some("validated") if self.method == DischargeMethod::Fuzz => {
                 if has_fuzz_evidence(&self.evidence) {
@@ -531,6 +583,58 @@ pub fn rollup_composite(
     rollup.badge()
 }
 
+/// Project a deductive engine's discharge `(soundness, qualifiers)` to the
+/// BASE [`CompositeVerdict`] it backs, through the SAME lattice projection
+/// every rollup uses (chelis#422). This is the consumer seam: the dispatch
+/// `Discharge` carries the engine's soundness and qualifiers (cvc5 over reals
+/// -> `SoundApproximate` + `RealArith`; Beacon's interval engine ->
+/// `SoundApproximate` + `SoundOverApproximation`), and threading them here is
+/// what makes those reach the verdict as `proven_modulo_real_arithmetic` /
+/// `sound_approximate` rather than being flattened to a single hardcoded
+/// `proven`. A green discharge whose qualifier set has no badged kind yet
+/// projects to `Unsupported` (covered-or-rejected), never a silent proof.
+pub fn base_verdict_from_discharge(
+    soundness: Soundness,
+    qualifiers: &QualifierSet,
+) -> CompositeVerdict {
+    VerdictRollup::identity()
+        .fold(VerdictGuarantee::Green {
+            soundness,
+            qualifiers: qualifiers.clone(),
+        })
+        .badge()
+}
+
+/// The full DISCLOSED qualifier set of a composed green verdict, as sorted
+/// snake_case strings for the `qualifiers:[...]` JSON array (chelis#422, D2).
+/// The single `composite_verdict` token is the WEAKEST badge; this array
+/// carries every caveat in the union so a consumer sees them all -- e.g. an
+/// over-reals proof modulo a fuzz contract is token
+/// `proven_modulo_fuzz_validated_contract` with
+/// `qualifiers:["fuzz","real_arithmetic"]`. A terminal (non-green) rollup
+/// discloses no qualifiers (an empty array): there is no green guarantee to
+/// qualify. The base re-enters the lattice through the same door every
+/// discharge does, so the array is consistent with the rendered badge.
+pub fn composed_qualifier_strings(
+    base_soundness: Soundness,
+    base_qualifiers: &QualifierSet,
+    assumptions: &[AssumptionRecord],
+) -> Vec<&'static str> {
+    let rollup = assumptions.iter().fold(
+        VerdictRollup::identity().fold(VerdictGuarantee::Green {
+            soundness: base_soundness,
+            qualifiers: base_qualifiers.clone(),
+        }),
+        |acc, a| a.fold_into(acc),
+    );
+    // A terminal outcome dominates: it is not a green, so it carries no
+    // disclosed qualifiers.
+    if rollup.terminal.is_some() {
+        return Vec::new();
+    }
+    rollup.qualifiers.iter().map(|q| q.as_str()).collect()
+}
+
 /// Dependency-sensitivity probe for CONTRACT. A consumer proof names the
 /// assumption keys it depends on; removing or corrupting a registered
 /// discharge must change this probe's verdict.
@@ -610,7 +714,11 @@ mod tests {
     }
 
     #[test]
-    fn c1_all_smt_discharges_roll_up_to_proven() {
+    fn c1_all_smt_discharges_roll_up_to_proven_modulo_real_arithmetic() {
+        // chelis#422: an SMT discharge is over the REALS, so an all-SMT
+        // dependency set rolls up to `proven_modulo_real_arithmetic` --
+        // disclosing the machine-arithmetic gap -- not plain `proven`. (Plain
+        // `proven` is reserved for a future exact-machine-arithmetic lowering.)
         let assumptions = vec![
             assumption(
                 "contract:a",
@@ -625,7 +733,7 @@ mod tests {
         ];
         assert_eq!(
             rollup_composite(CompositeVerdict::Proven, &assumptions),
-            CompositeVerdict::Proven
+            CompositeVerdict::ProvenModuloRealArithmetic
         );
     }
 
@@ -653,11 +761,16 @@ mod tests {
             DischargeMethod::Smt,
             json!({"status": "proved"}),
         ));
+        // chelis#422: the SMT discharge is over reals, so the present-and-green
+        // probe is `proven_modulo_real_arithmetic` (disclosing the gap), not
+        // plain `proven`. The point of the test is that removing or failing the
+        // discharge DEGRADES this green below; the starting green is the
+        // honest over-reals badge.
         assert_eq!(
             registry
                 .probe_consumer("consumer", CompositeVerdict::Proven, ["contract:a"])
                 .composite_verdict,
-            CompositeVerdict::Proven
+            CompositeVerdict::ProvenModuloRealArithmetic
         );
 
         registry.remove("contract:a");
@@ -746,19 +859,34 @@ mod tests {
     /// `guarantee()`) must equal the legacy weakest-of-the-two for every pair.
     fn legacy_weakness_rank(verdict: CompositeVerdict) -> u8 {
         match verdict {
+            // Greens, strongest -> weakest. `proven` is strongest; the
+            // `Fuzz`-before-`Axiom` rank (fuzz stronger than axiom) is preserved
+            // EXACTLY from the pre-422 lattice. The new badges insert without
+            // disturbing that pair: `proven_modulo_real_arithmetic` is the
+            // strongest qualifier below a plain proof (chelis#422), and
+            // `sound_approximate` / `fuzz_validated` are the two weakest greens
+            // (an over-approximation base, then a fuzz-only base).
             CompositeVerdict::Proven => 0,
-            CompositeVerdict::ProvenModuloFuzzValidatedContract => 1,
-            CompositeVerdict::ProvenModuloAssertedAxiom => 2,
-            CompositeVerdict::Unsupported => 3,
-            CompositeVerdict::Invalid => 4,
-            CompositeVerdict::Failed => 5,
+            CompositeVerdict::ProvenModuloRealArithmetic => 1,
+            CompositeVerdict::ProvenModuloFuzzValidatedContract => 2,
+            CompositeVerdict::ProvenModuloAssertedAxiom => 3,
+            CompositeVerdict::SoundApproximate => 4,
+            CompositeVerdict::FuzzValidatedEmpirical => 5,
+            // Terminals are weaker than every green (a terminal dominates a
+            // green in the fold), ordered Unsupported < Invalid < Failed.
+            CompositeVerdict::Unsupported => 6,
+            CompositeVerdict::Invalid => 7,
+            CompositeVerdict::Failed => 8,
         }
     }
 
-    const ALL_VERDICTS: [CompositeVerdict; 6] = [
+    const ALL_VERDICTS: [CompositeVerdict; 9] = [
         CompositeVerdict::Proven,
+        CompositeVerdict::ProvenModuloRealArithmetic,
         CompositeVerdict::ProvenModuloFuzzValidatedContract,
         CompositeVerdict::ProvenModuloAssertedAxiom,
+        CompositeVerdict::SoundApproximate,
+        CompositeVerdict::FuzzValidatedEmpirical,
         CompositeVerdict::Unsupported,
         CompositeVerdict::Invalid,
         CompositeVerdict::Failed,
@@ -766,10 +894,10 @@ mod tests {
 
     #[test]
     fn wi6_lattice_projection_reproduces_legacy_weakest_for_every_badge_pair() {
-        // The lattice rollup must be byte-identical to the retired scalar
-        // `weakest()` fold across the whole 6x6 badge matrix, so the existing
-        // prove corpus stays unchanged. We fold two guarantees directly
-        // through the rollup and compare to the weaker-of-the-two legacy rank.
+        // The lattice rollup must be byte-identical to the scalar weakest-of
+        // fold across the whole NxN badge matrix, so a weaker base or qualifier
+        // can never launder into a stronger badge. We fold two guarantees
+        // directly through the rollup and compare to the weaker-of-the-two rank.
         for a in ALL_VERDICTS {
             for b in ALL_VERDICTS {
                 let rolled = VerdictRollup::identity()
@@ -790,17 +918,37 @@ mod tests {
     }
 
     #[test]
-    fn wi6_homogeneous_exact_set_rolls_up_to_proven() {
-        // Positive twin: an all-exact (SMT-proved) dependency set rolls up to
-        // the strong `proven` badge.
+    fn wi6_homogeneous_smt_set_rolls_up_to_proven_modulo_real_arithmetic() {
+        // chelis#422: an all-SMT (proved over reals) dependency set rolls up to
+        // `proven_modulo_real_arithmetic`, disclosing the machine-arithmetic
+        // gap. Plain `proven` is reserved for a future exact lowering.
         let assumptions = vec![
             assumption("a", DischargeMethod::Smt, json!({"status": "proved"})),
             assumption("b", DischargeMethod::Smt, json!({"status": "proved"})),
         ];
         assert_eq!(
             rollup_composite(CompositeVerdict::Proven, &assumptions),
-            CompositeVerdict::Proven
+            CompositeVerdict::ProvenModuloRealArithmetic
         );
+    }
+
+    #[test]
+    fn wi6_homogeneous_exact_lattice_point_still_rolls_up_to_proven() {
+        // The `proven` badge remains REACHABLE in the lattice: a base and a
+        // discharge that both carry the `Exact` qualifier at `Soundness::Exact`
+        // (a hypothetical future exact-machine engine) roll up to plain
+        // `proven`. This guards the retirement of `proven` from CURRENT output
+        // against accidentally removing it from the lattice entirely.
+        let rolled = VerdictRollup::identity()
+            .fold(VerdictGuarantee::Green {
+                soundness: Soundness::Exact,
+                qualifiers: QualifierSet::from_iter_kinds([Qualifier::Exact]),
+            })
+            .fold(VerdictGuarantee::Green {
+                soundness: Soundness::Exact,
+                qualifiers: QualifierSet::from_iter_kinds([Qualifier::Exact]),
+            });
+        assert_eq!(rolled.badge(), CompositeVerdict::Proven);
     }
 
     #[test]
@@ -876,34 +1024,46 @@ mod tests {
     }
 
     #[test]
-    fn wi6_sub_exact_non_fuzz_non_axiom_green_does_not_launder_into_proven() {
+    fn wi6_sub_exact_green_does_not_launder_into_proven() {
         // Covered-or-rejected at the badge-rendering point: a green rollup at
-        // sub-Exact soundness carrying a qualifier that is neither Fuzz nor
-        // Axiom (here SoundOverApproximation) has no green badge yet, so it must
-        // render Unsupported -- NOT Proven. Previously the terminal-free
-        // projection special-cased only Axiom and Fuzz, then fell through to
-        // Proven, laundering these kinds into the strong badge. The proper
-        // green badge for these lands with WI-9; until then they are rejected
-        // from the green path here.
-        let rollup = VerdictRollup::identity().fold(VerdictGuarantee::Green {
+        // sub-Exact soundness must never launder into the strong `proven`
+        // badge. `SoundOverApproximation` now has its own disclosed green badge
+        // (`sound_approximate`, chelis#422) -- a Beacon-shaped interval
+        // discharge -- and `RealArith` renders `proven_modulo_real_arithmetic`;
+        // both are strictly below `proven` and disclose their approximation.
+        let sound_approx = VerdictRollup::identity().fold(VerdictGuarantee::Green {
             soundness: Soundness::SoundApproximate,
             qualifiers: QualifierSet::from_iter_kinds([Qualifier::SoundOverApproximation]),
         });
         assert_ne!(
-            rollup.badge(),
+            sound_approx.badge(),
             CompositeVerdict::Proven,
             "a sub-Exact sound-over-approximation green must not launder into proven"
         );
         assert_eq!(
-            rollup.badge(),
-            CompositeVerdict::Unsupported,
-            "a sub-Exact non-fuzz/non-axiom green has no green badge yet and must \
-             render Unsupported, not a strong proven"
+            sound_approx.badge(),
+            CompositeVerdict::SoundApproximate,
+            "a SoundOverApproximation green discloses `sound_approximate`, not proven"
         );
 
-        // The other producer qualifiers WI-9 will emit (DeltaComplete,
-        // SpecialFunctionCertified, CertificateBearing) take the same
-        // conservative rejection at sub-Exact soundness rather than laundering.
+        let real_arith = VerdictRollup::identity().fold(VerdictGuarantee::Green {
+            soundness: Soundness::SoundApproximate,
+            qualifiers: QualifierSet::from_iter_kinds([Qualifier::RealArith]),
+        });
+        assert_ne!(
+            real_arith.badge(),
+            CompositeVerdict::Proven,
+            "an over-reals proof must disclose the machine-arith gap, not launder into proven"
+        );
+        assert_eq!(
+            real_arith.badge(),
+            CompositeVerdict::ProvenModuloRealArithmetic,
+        );
+
+        // The producer qualifiers WI-9 will emit (DeltaComplete,
+        // SpecialFunctionCertified, CertificateBearing) still have no green
+        // badge yet, so they take the conservative rejection at sub-Exact
+        // soundness rather than laundering into a proof.
         for qualifier in [
             Qualifier::DeltaComplete,
             Qualifier::SpecialFunctionCertified,

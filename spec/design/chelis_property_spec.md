@@ -168,7 +168,7 @@ that the module type-checked and every obligation was discharged.
 summary record.
 
 ```json
-{"kind":"property","name":"call_price_non_negative","status":"passed","composite_verdict":"proven_modulo_fuzz_validated_contract","assumptions":[],"samples":100,"seed":0}
+{"kind":"property","name":"call_price_non_negative","status":"passed","composite_verdict":"fuzz_validated","qualifiers":["fuzz_base"],"assumptions":[],"samples":100,"seed":0}
 {"kind":"property","name":"req_PRC_001","status":"failed","composite_verdict":"failed","assumptions":[],"samples":1,"seed":0,"source":{"kind":"bridge:c-earchin","spans":"references/pricing_rules.spans.json"}}
 {"kind":"property","name":"tensor_symbolic_shape","status":"unsupported","composite_verdict":"unsupported","assumptions":[],"reason":"symbolic tensor dimensions are not supported in L2 v1"}
 {"kind":"summary","total":3,"passed":1,"failed":1,"unsupported":1,"errors":0}
@@ -176,12 +176,31 @@ summary record.
 
 Every `{kind:"property"}` and `{kind:"obligation"}` result record carries:
 
-- `composite_verdict`: one of `proven`,
-  `proven_modulo_fuzz_validated_contract`,
-  `proven_modulo_asserted_axiom`, `invalid`, `unsupported`, or `failed`.
+- `composite_verdict`: the single WEAKEST badge token, one of `proven`,
+  `proven_modulo_real_arithmetic`, `proven_modulo_fuzz_validated_contract`,
+  `proven_modulo_asserted_axiom`, `sound_approximate`, `fuzz_validated`,
+  `invalid`, `unsupported`, or `failed`.
   `status:"passed"` remains the compatibility bucket; consumers that need
   proof strength must read `composite_verdict`. A fuzz-validated result must
-  not render as `composite_verdict:"proven"`.
+  not render as `composite_verdict:"proven"` or any `proven_*` badge: a
+  property whose BASE was established by fuzz sampling only (no SMT proof
+  underneath -- a non-smt build, or a `--tier auto` fuzz fall-through, or
+  `--tier fuzz-only`) renders `fuzz_validated`, a green-exit empirical pass
+  that is not proven. A base discharged by a sound over-approximation (e.g. an
+  interval engine) renders `sound_approximate`. An SMT proof is over the reals
+  (see the Tier B caveat below), so under the current real-sorted lowering an
+  SMT green renders `proven_modulo_real_arithmetic`, disclosing the
+  machine-arithmetic gap; plain `proven` is reserved for a future
+  exact-machine-arithmetic lowering. The
+  `proven_modulo_fuzz_validated_contract` badge is reserved for an exact SMT
+  base discharged modulo a fuzz-validated CONTRACT assumption -- the base
+  itself is proven there, only a contract is fuzz-validated.
+- `qualifiers`: an array of the FULL disclosed caveat set as snake_case
+  strings (a green's union of every contributing qualifier), e.g.
+  `["fuzz","real_arithmetic"]` for an over-reals proof modulo a fuzz contract.
+  The `composite_verdict` token is the weakest single badge; `qualifiers`
+  carries every caveat so a consumer sees them all. A non-green outcome carries
+  an empty array.
 - `assumptions`: an array of assumption records. Each record has `name`,
   optional `source_type` / `producer`, optional
   `discharge:{method:"smt"|"fuzz"|"axiom", evidence:{...}}`, and optional
@@ -199,7 +218,7 @@ record set deliberately at pin time — it is a new record kind, not a change
 to an existing one.
 
 ```json
-{"kind":"obligation","obligation_kind":"invariant_producer","source_type":"Probability","producer":"probability","name":"invariant:Probability:probability","status":"passed","composite_verdict":"proven","assumptions":[{"name":"invariant:Probability:probability","source_type":"Probability","producer":"probability","discharge":{"method":"smt","evidence":{"status":"proved","obligation":"invariant:Probability:probability","arith_model":"real"}},"non_vacuity":{"status":"established","evidence":{"solver":"cvc5","result":"sat","assumption_count":0,"trivial":true}}}],"proof_tier":"smt","samples":0,"seed":0,"arith_model":"real"}
+{"kind":"obligation","obligation_kind":"invariant_producer","source_type":"Probability","producer":"probability","name":"invariant:Probability:probability","status":"passed","composite_verdict":"proven_modulo_real_arithmetic","qualifiers":["real_arithmetic"],"assumptions":[{"name":"invariant:Probability:probability","source_type":"Probability","producer":"probability","discharge":{"method":"smt","evidence":{"status":"proved","obligation":"invariant:Probability:probability","arith_model":"real"}},"non_vacuity":{"status":"established","evidence":{"solver":"cvc5","result":"sat","assumption_count":0,"trivial":true}}}],"proof_tier":"smt","samples":0,"seed":0,"arith_model":"real"}
 {"kind":"obligation","obligation_kind":"invariant_producer","source_type":"Probability","producer":"bad_prob","name":"invariant:Probability:bad_prob","status":"failed","composite_verdict":"failed","assumptions":[{"name":"invariant:Probability:bad_prob","source_type":"Probability","producer":"bad_prob","discharge":{"method":"smt","evidence":{"status":"failed","obligation":"invariant:Probability:bad_prob","counterexample":{"__arg0":"2.0"}}}}],"proof_tier":"smt","samples":0,"seed":0,"arith_model":"real","counterexample":{"__arg0":"2.0"}}
 {"kind":"obligation","obligation_kind":"invariant_producer","status":"error","composite_verdict":"unsupported","assumptions":[],"reason":"opaque type `Probability`: exported producer `many` returns the type through an unsupported container (generic `List`); decompose-or-reject (RFC D-PRODUCER)"}
 {"kind":"summary","total":1,"passed":1,"failed":0,"unsupported":0,"errors":0,"obligations":1}
@@ -223,13 +242,22 @@ worst-status exit code as user properties (`Passed=0`, `Failed=1`,
 
 ### Composition and non-vacuity
 
-COMPOSE folds each result with the assumption discharges it depends on.
-All-SMT discharges compose to `composite_verdict:"proven"`. Any fuzz
-discharge composes to
-`"proven_modulo_fuzz_validated_contract"` unless a weaker discharge is
-present. Any asserted axiom composes to
-`"proven_modulo_asserted_axiom"`. Missing/unsupported discharges compose to
-`"unsupported"`; counterexample-backed discharges compose to `"failed"`.
+COMPOSE folds each result with the assumption discharges it depends on. A
+fuzz-only BASE (the property/obligation itself established by fuzz, with no
+SMT proof underneath) composes to `composite_verdict:"fuzz_validated"` and can
+never compose to any `proven_*` badge: a base that was not proved is not
+proven-modulo-anything. A base discharged by a sound over-approximation
+composes to `"sound_approximate"`. For an SMT-proved base: all-SMT discharges
+compose to `"proven_modulo_real_arithmetic"` (the proof is over the reals --
+see the Tier B caveat); any fuzz CONTRACT discharge composes to
+`"proven_modulo_fuzz_validated_contract"` unless a weaker discharge is present;
+any asserted axiom composes to `"proven_modulo_asserted_axiom"`.
+Missing/unsupported discharges compose to `"unsupported"`;
+counterexample-backed discharges compose to `"failed"`. The single
+`composite_verdict` token is the weakest badge; the `qualifiers` array carries
+the full disclosed set (e.g. an over-reals proof modulo a fuzz contract is
+token `proven_modulo_fuzz_validated_contract` with
+`qualifiers:["fuzz","real_arithmetic"]`).
 
 For every claimed green result that has assumptions, `chelis prove` checks
 the assumptions alone for satisfiability. SAT establishes non-vacuity. UNSAT
@@ -260,11 +288,17 @@ Generation is deterministic under a fixed seed.
 
 A `proof_tier:"smt"` obligation (or property) is discharged by the SMT
 solver over the **reals**, while runtime arithmetic is IEEE
-floating-point. Such artifacts carry `arith_model:"real"`. No
+floating-point (and integer widths lower to an unbounded integer sort, so
+overflow is not modelled either). The gap is now disclosed ON THE VERDICT:
+such artifacts carry the `real_arithmetic` qualifier and render the
+`proven_modulo_real_arithmetic` token (chelis#422), so a consumer reading
+`composite_verdict` alone sees the caveat rather than only the legacy
+`arith_model:"real"` side field (which is retained as a mirror). No
 float-level soundness is claimed from a Tier B proof; admission policies
-that quote the composed opaque-invariant guarantee must quote this gap
-rather than rediscovering it. Tier C (`proof_tier:"fuzz"`) validates
-concrete float samples and carries no `arith_model` field.
+that quote the composed opaque-invariant guarantee inherit the disclosure
+from the verdict. Tier C (`proof_tier:"fuzz"`) validates concrete float
+samples and renders `fuzz_validated` (or, for a fuzz contract under an SMT
+base, contributes the `fuzz` qualifier); it carries no `arith_model` field.
 
 ## Relationship To `chelis test`
 

@@ -267,7 +267,18 @@ fn call_form_predicate_proves_at_smt_like_operator_form() {
         "call-form must lower to SMT, not drop to fuzz: {}",
         props[0]
     );
-    assert_eq!(props[0]["composite_verdict"], "proven");
+    // chelis#422: an SMT proof is over the reals, so the green discloses the
+    // machine-arithmetic gap as `proven_modulo_real_arithmetic` with
+    // `real_arithmetic` in qualifiers[]. The key invariant for this test is
+    // that call-form matches operator-form exactly (same badge, same SMT tier).
+    assert_eq!(
+        props[0]["composite_verdict"],
+        "proven_modulo_real_arithmetic"
+    );
+    assert_eq!(
+        props[0]["qualifiers"],
+        serde_json::json!(["real_arithmetic"])
+    );
 }
 
 // chelis#422: the operator-form of the same property keeps lowering to SMT
@@ -303,7 +314,15 @@ fn operator_form_predicate_still_proves_at_smt() {
     assert_eq!(props[0]["name"], "operator_nonneg");
     assert_eq!(props[0]["status"], "passed");
     assert_eq!(props[0]["proof_tier"], "smt");
-    assert_eq!(props[0]["composite_verdict"], "proven");
+    // chelis#422: over-reals SMT proof discloses the machine-arith gap.
+    assert_eq!(
+        props[0]["composite_verdict"],
+        "proven_modulo_real_arithmetic"
+    );
+    assert_eq!(
+        props[0]["qualifiers"],
+        serde_json::json!(["real_arithmetic"])
+    );
 }
 
 // chelis#422 negative test: a measure-zero-false call-form predicate
@@ -454,9 +473,27 @@ import Std.Contracts (normal_cdf)
     assert_eq!(prop["name"], "put_call_parity_with_cdf_contract");
     assert_eq!(prop["status"], "passed");
     assert_eq!(prop["proof_tier"], "smt");
+    // chelis#422: the LEGIT contract case is unchanged at the token level -- an
+    // exact SMT base discharged modulo a fuzz-validated CONTRACT keeps the
+    // weakest token `proven_modulo_fuzz_validated_contract`. Additively, the
+    // qualifiers[] array now also discloses `real_arithmetic` (the SMT base is
+    // over reals). This is the case the fuzz-only-base fix must NOT collapse.
     assert_eq!(
         prop["composite_verdict"],
         "proven_modulo_fuzz_validated_contract"
+    );
+    let qualifiers = prop["qualifiers"].as_array().expect("qualifiers array");
+    assert!(
+        qualifiers.iter().any(|q| q == "fuzz"),
+        "the fuzz CONTRACT discharge is disclosed: {prop}"
+    );
+    assert!(
+        qualifiers.iter().any(|q| q == "real_arithmetic"),
+        "the over-reals SMT base is disclosed alongside the fuzz contract: {prop}"
+    );
+    assert!(
+        !qualifiers.iter().any(|q| q == "fuzz_base"),
+        "the BASE was SMT-proved (not fuzz): must not carry fuzz_base: {prop}"
     );
     let assumptions = prop["assumptions"].as_array().expect("assumptions array");
     assert!(
@@ -893,9 +930,26 @@ fn wi7_deep_user_green_with_preconditions_carries_established_non_vacuity() {
     let records = property_records(&output.stdout);
     let record = &records[0];
     assert_eq!(record["status"], "passed");
-    assert_eq!(
-        record["composite_verdict"],
-        "proven_modulo_fuzz_validated_contract"
+    // chelis#422: a fuzz-only base (--tier fuzz-only, no SMT) is empirically
+    // validated, not proven. The honest badge is `fuzz_validated`, NEVER a
+    // `proven_*` badge -- the proven-modulo-fuzz-CONTRACT badge is reserved for
+    // an exact SMT base discharged modulo a fuzz contract.
+    assert_eq!(record["composite_verdict"], "fuzz_validated");
+    assert!(
+        !record["composite_verdict"]
+            .as_str()
+            .unwrap()
+            .starts_with("proven"),
+        "a fuzz-only base must never read as proven_*: {record}"
+    );
+    // The fuzz-only base contributes `fuzz_base` (which dominates the badge to
+    // `fuzz_validated`); the precondition's fuzz discharge may additionally
+    // disclose `fuzz`. The invariant under test: `fuzz_base` is present and the
+    // badge is never proven_* -- a fuzz-only base is not a proof.
+    let qualifiers = record["qualifiers"].as_array().expect("qualifiers array");
+    assert!(
+        qualifiers.iter().any(|q| q == "fuzz_base"),
+        "a fuzz-only base discloses fuzz_base: {record}"
     );
     assert_established_precondition_non_vacuity(record, "deep_pre_green");
 }
@@ -1014,6 +1068,11 @@ fn wi7_vacuous_preconditions_cannot_reach_a_green_on_the_local_path() {
     assert_ne!(
         records[0]["composite_verdict"], "proven_modulo_fuzz_validated_contract",
         "vacuous preconditions cannot render a green badge: {}",
+        records[0]
+    );
+    assert_ne!(
+        records[0]["composite_verdict"], "fuzz_validated",
+        "vacuous preconditions cannot render any green badge, fuzz_validated included: {}",
         records[0]
     );
 }
@@ -1488,6 +1547,96 @@ fn non_smt_prove_does_not_warn_for_plain_property_file() {
         !stderr.contains("obligation verification requires"),
         "a module with no invariant-carrying opaque type must not warn; stderr={stderr}"
     );
+}
+
+// chelis#422 negative test (non-smt build): a measure-zero-false @property
+// (`(x - 12345.0)^2 > 0.0` under `x > 0`, false at x = 12345.0) used to
+// fuzz-pass with the proven-flavored `proven_modulo_fuzz_validated_contract`
+// badge -- a false green, because fuzz never sampled the exact root and the
+// non-smt build has no SMT to refute it. On a non-smt build the run must now
+// be HONEST: the green carries `fuzz_validated` (never `proven_*`) with
+// `qualifiers:["fuzz_base"]`. Exit stays success -- a fuzz pass is still a
+// pass, it just is not proven.
+#[cfg(not(feature = "smt"))]
+#[test]
+fn non_smt_measure_zero_false_property_is_not_a_proven_green() {
+    let dir = write_prop(
+        r#"
+@property always_positive forall(x: f32) where x > 0.0:
+  (x - 12345.0) * (x - 12345.0) > 0.0
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--samples",
+            "100",
+            "--seed",
+            "0",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert!(
+        output.status.success(),
+        "a clean fuzz pass still exits success: stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let records = property_records(&output.stdout);
+    assert_eq!(records.len(), 1, "records: {records:?}");
+    let record = &records[0];
+    assert_eq!(record["status"], "passed");
+    // The core of the fix: the badge is the honest empirical one, NEVER a
+    // proven-flavored badge, for a fuzz-only base on a non-smt build.
+    assert_eq!(record["composite_verdict"], "fuzz_validated");
+    assert!(
+        !record["composite_verdict"]
+            .as_str()
+            .unwrap()
+            .starts_with("proven"),
+        "a measure-zero-false fuzz pass must never read as proven_*: {record}"
+    );
+    let qualifiers = record["qualifiers"].as_array().expect("qualifiers array");
+    assert!(
+        qualifiers.iter().any(|q| q == "fuzz_base"),
+        "a fuzz-only base discloses fuzz_base: {record}"
+    );
+}
+
+// chelis#422 positive twin (non-smt build): an honest fuzz green that happens
+// to be TRUE still carries `fuzz_validated`, not `proven_*` -- the distinction
+// is about the verification METHOD (fuzz vs SMT), not the truth of the
+// property. A non-smt build can never SMT-prove, so it never mints a proven
+// badge even for a true property.
+#[cfg(not(feature = "smt"))]
+#[test]
+fn non_smt_true_property_green_is_empirical_not_proven() {
+    let dir = write_prop(
+        r#"
+@property nonneg forall(x: f32):
+  (x * x) >= 0.0
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--samples",
+            "8",
+            "--seed",
+            "0",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert!(output.status.success());
+    let records = property_records(&output.stdout);
+    assert_eq!(records[0]["status"], "passed");
+    assert_eq!(records[0]["composite_verdict"], "fuzz_validated");
 }
 
 // ===================================================================

@@ -2216,12 +2216,33 @@ fn matches_filter(name: &str, only: Option<&str>) -> bool {
     name.contains(pattern)
 }
 
+/// The CLI-local (no-`chelis-prove`) property path runs Tier C (fuzz) only --
+/// SMT is not compiled in -- so a green here is a fuzz-only BASE pass, never an
+/// SMT proof. It renders `fuzz_validated`, NEVER a `proven_*` badge: a
+/// fuzz-only pass is not proven (chelis#422). The proven-flavored
+/// `proven_modulo_fuzz_validated_contract` badge is reserved for an exact base
+/// discharged modulo a fuzz-validated contract, which this path cannot
+/// produce. Mirrors `chelis_prove::property_runner::base_verdict` for the fuzz
+/// tier so a CLI-local green and a shared-runner fuzz-base green agree on the
+/// same badge string.
 fn simple_composite_verdict(status: &str, samples: usize) -> &'static str {
     match status {
-        "passed" if samples > 0 => "proven_modulo_fuzz_validated_contract",
+        "passed" if samples > 0 => "fuzz_validated",
         "passed" => "unsupported",
         "failed" => "failed",
         _ => "unsupported",
+    }
+}
+
+/// The disclosed `qualifiers:[...]` array for the CLI-local fuzz path (D2). A
+/// fuzz-only green base discloses `fuzz_base`; any non-green outcome discloses
+/// none. Mirrors `PropertyOutcome::disclosed_qualifiers` for the fuzz tier so
+/// the two prove-JSON surfaces agree.
+fn simple_qualifiers(status: &str, samples: usize) -> Vec<&'static str> {
+    if status == "passed" && samples > 0 {
+        vec!["fuzz_base"]
+    } else {
+        Vec::new()
     }
 }
 
@@ -2313,6 +2334,7 @@ fn emit_record(
             "name": property.name,
             "status": status,
             "composite_verdict": simple_composite_verdict(status, samples),
+            "qualifiers": simple_qualifiers(status, samples),
             "assumptions": precondition_non_vacuity_assumptions(
                 &property.name,
                 status,
@@ -2388,6 +2410,7 @@ fn emit_deep_record(
             "name": property.name,
             "status": status,
             "composite_verdict": simple_composite_verdict(status, samples),
+            "qualifiers": simple_qualifiers(status, samples),
             "assumptions": precondition_non_vacuity_assumptions(
                 &property.name,
                 status,

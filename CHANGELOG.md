@@ -6,6 +6,44 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`chelis prove`: honest-verdict taxonomy -- a green now discloses its
+  verification method and approximations on the verdict (chelis#422).** The
+  `composite_verdict` is the single WEAKEST badge token plus a new structured
+  `qualifiers:[...]` array carrying the full disclosed caveat set, on BOTH
+  prove-JSON surfaces (`chelis prove --json` and the tide MCP tool). Three
+  soundness situations are seated on one non-launderable lattice:
+  - A fuzz-only BASE (no SMT proof underneath -- a non-smt build, a `--tier
+    auto` fuzz fall-through, or `--tier fuzz-only`) renders `fuzz_validated`
+    with `qualifiers:["fuzz_base"]`, NEVER a `proven_*` badge. Previously such
+    a pass false-greened as `proven_modulo_fuzz_validated_contract`,
+    misreporting an unsampled measure-zero falsehood as proven.
+  - An SMT proof is over the REALS (int widths -> unbounded integer sort,
+    `f32`/`f64` -> `Real`; no overflow/NaN/rounding), so every
+    `proof_tier:"smt"` green now renders `proven_modulo_real_arithmetic` with
+    `real_arithmetic` in `qualifiers`, disclosing the machine-arithmetic gap on
+    the verdict itself rather than only the legacy `arith_model:"real"` side
+    field (retained as a mirror). Plain `proven` is reserved for a future
+    exact-machine-arithmetic lowering.
+  - A sound over-approximation base (e.g. an out-of-tree interval engine such
+    as Beacon, via `Qualifier::SoundOverApproximation`) renders
+    `sound_approximate`. The consumer seam was fixed so the dispatch
+    `Discharge`'s `(soundness, qualifiers)` is threaded into the verdict
+    instead of being discarded (`property_runner`/`obligation_engine`), which is
+    what lets such a discharge reach `composite_verdict` honestly; the
+    signed-off `DischargeEngine::discharge` trait shape is unchanged.
+
+  The legit `proven_modulo_fuzz_validated_contract` badge (an exact SMT base
+  modulo a fuzz-validated CONTRACT) keeps its token and additively gains
+  `real_arithmetic` in `qualifiers`. Exit codes are unchanged. The `wi6`
+  NxN byte-identity lattice oracle is extended to the new badges and stays
+  green (a weaker base or qualifier can never launder into a stronger badge).
+  NEW accepted `composite_verdict` tokens for downstream allowlists:
+  `proven_modulo_real_arithmetic`, `sound_approximate`, `fuzz_validated`; NEW
+  field: `qualifiers:[...]` (snake_case strings: `real_arithmetic`,
+  `fuzz_base`, `fuzz`, `sound_over_approximation`, `axiom`, ...).
+
 ### Fixed
 
 - **`chelis prove`: call-form predicates lower to SMT instead of silently
