@@ -163,6 +163,27 @@ mod tests {
             "reef.toml must declare name = chelis-std; got: {manifest}"
         );
 
+        // The embedded archive carries chelis-std's own `reef.toml`, and
+        // its `compiler =` pin is read through `validate_manifest` when the
+        // bundled runtime is loaded. `validate_manifest` rejects any pin
+        // other than `=<current compiler version>`, so a stale embedded
+        // pin makes every chelis-std-importing program fail at load with
+        // "package.compiler must be `=X.Y.Z`". That is exactly the failure
+        // mode that broke the 0.9.0 release: the workspace version and
+        // `packages/chelis-std/reef.toml` were bumped, but these embedded
+        // bytes were never regenerated, so they still pinned the prior
+        // version. The bundle crate's `CARGO_PKG_VERSION` marches with the
+        // workspace, so assert the embedded pin equals it; a mismatch means
+        // `scripts/regenerate_chelis_std_bundle.py` was not rerun after the
+        // bump.
+        let expected_compiler_line = format!("compiler = \"={}\"", env!("CARGO_PKG_VERSION"));
+        assert!(
+            manifest.contains(&expected_compiler_line),
+            "embedded chelis-std reef.toml must pin {expected_compiler_line:?}; \
+             rerun scripts/regenerate_chelis_std_bundle.py and commit \
+             crates/chelis-std-bundle/dist/. got:\n{manifest}"
+        );
+
         let src = dir.path().join("src");
         assert!(src.is_dir(), "src/ missing after extract");
         let any_ch = std::fs::read_dir(&src)

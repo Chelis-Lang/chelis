@@ -79,5 +79,84 @@ class BumpWorkspaceVersionTests(unittest.TestCase):
         self.assertEqual(bumped, original)
 
 
+class CleanUntrackedDistTests(unittest.TestCase):
+    """`chelis reef build` drops a `dist/` next to every package root it
+    builds. Only `packages/chelis-std/dist/` is a tracked artifact dir; the
+    release fixture keeps no `dist/`, so regenerating its lock must leave
+    the source tree clean. Lock that the cleanup removes the fixture's
+    `dist/` but never the chelis-std one.
+    """
+
+    def test_removes_dist_for_non_chelis_std_package(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = Path(tmp) / "release_pipe_stage"
+            dist = pkg / "dist"
+            dist.mkdir(parents=True)
+            (dist / "artifact.chb").write_text("x")
+            bump_mod._clean_untracked_dist(pkg)
+            self.assertFalse(dist.exists(), "fixture dist/ must be removed")
+            self.assertTrue(pkg.exists(), "package root must remain")
+
+    def test_preserves_chelis_std_dist(self):
+        # The chelis-std dist dir is tracked; cleanup must skip it even if
+        # it exists. Point the module's CHELIS_STD_DIR at a temp dir so the
+        # guard's identity check fires without touching the real tree.
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = Path(tmp) / "chelis-std"
+            dist = pkg / "dist"
+            dist.mkdir(parents=True)
+            (dist / "chelis-std-0.4.0.chb").write_text("x")
+            saved = bump_mod.CHELIS_STD_DIR
+            bump_mod.CHELIS_STD_DIR = pkg
+            try:
+                bump_mod._clean_untracked_dist(pkg)
+            finally:
+                bump_mod.CHELIS_STD_DIR = saved
+            self.assertTrue(dist.exists(), "chelis-std dist/ must be preserved")
+
+    def test_no_op_when_no_dist_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = Path(tmp) / "pkg"
+            pkg.mkdir()
+            # Must not raise when there is nothing to clean.
+            bump_mod._clean_untracked_dist(pkg)
+            self.assertTrue(pkg.exists())
+
+
+class LockRegenerationWiringTests(unittest.TestCase):
+    """Guard the constants the regeneration path depends on so a future
+    edit cannot silently drop a category-4/5 target. These are the files
+    the 0.9.0 release failure traced to.
+    """
+
+    def test_bundle_dist_and_regen_script_are_wired(self):
+        self.assertTrue(
+            str(bump_mod.BUNDLE_DIST).endswith("crates/chelis-std-bundle/dist"),
+            bump_mod.BUNDLE_DIST,
+        )
+        self.assertTrue(
+            str(bump_mod.REGEN_BUNDLE_SCRIPT).endswith(
+                "scripts/regenerate_chelis_std_bundle.py"
+            ),
+            bump_mod.REGEN_BUNDLE_SCRIPT,
+        )
+        self.assertTrue(
+            bump_mod.REGEN_BUNDLE_SCRIPT.is_file(),
+            "the canonical bundle pipeline script must exist",
+        )
+
+    def test_pinned_lock_dirs_cover_fixture_and_chelis_std(self):
+        names = {p.name for p in bump_mod.PINNED_REAL_LOCK_DIRS}
+        self.assertIn("chelis-std", names)
+        self.assertIn("release_pipe_stage", names)
+        # Every recorded lock dir must currently ship a reef.lock so the
+        # regeneration target is real, not aspirational.
+        for pkg_dir in bump_mod.PINNED_REAL_LOCK_DIRS:
+            self.assertTrue(
+                (pkg_dir / "reef.lock").is_file(),
+                f"{pkg_dir} must ship a reef.lock to regenerate",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
