@@ -6,6 +6,53 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-23
+
+### Added
+
+- **Verification stack Phase 1: substrate + honesty layer (WI-1..WI-8)
+  (#427).** The engine-independent verification substrate every future
+  proof engine plugs into: `WireDag.schema_version` IR op-subset
+  versioning with a typed reject of unknown versions plus the
+  wildcard-free `RiscOp::is_verifier_targetable` classifier (WI-2); the
+  discharge-engine seam with the engine-independent `Goal` / `Discharge`
+  types (WI-4/WI-5); and the verification-stack design-doc cluster. The
+  static-analysis shell `beacon` was renamed `hydrostatic`, freeing the
+  `beacon` name for the verification engine registered as an ecosystem
+  shell.
+- **Verification stack Phase 2 Wave 1: discharge integrity primitive
+  (#428).** `Discharge::new` enforces a per-`Qualifier`
+  minimum-soundness map over all seven guarantee kinds
+  (Exact/CertificateBearing -> Exact;
+  DeltaComplete/SpecialFunctionCertified/SoundOverApproximation ->
+  SoundApproximate; Fuzz -> Empirical; Axiom -> Untrusted), the
+  no-laundering invariant every later guarantee rests on, locked by an
+  exhaustive 7x4 table-driven oracle with a closed-set guard.
+- **WI-3: graph-extraction seam producer (#431).** The content-addressed
+  `IrHandle { dag_hash, root_index }` addressing a serialized WireDag v1
+  by sha256 plus root index, and the box/range `Goal` producer the
+  verification dispatch layer and the out-of-tree Beacon shell build on.
+- **WI-9: discharge-engine registry + fitness-based dispatcher (#432).**
+  `DischargeRegistry` with a public `register(...)` entry point so an
+  out-of-tree shell engine registers without touching the crate; boxed
+  trait objects rather than a closed enum. `dispatch(&Goal, timeout)`
+  scans registered engines in registration order and takes the first
+  whose `fitness(goal)` is true, replacing the hardcoded cvc5 selection.
+- **WI-10: AD-as-verification-target rail (#433).** Makes the gradient
+  (adjoint) graph dispatchable as box/range goals so a
+  verified-bounded-sensitivities goal routes through the WI-9
+  dispatcher: `grad_goals_from_request` calls the public
+  `chelis_compiler_api::compiler::grad(...)` once and emits one scalar
+  box/range goal per requested target.
+- **Deep Authoring L0 + the `chelis_replace_function_body` wedge
+  (#429).** Foundation of the Deep authoring stack (path addressing,
+  fragment-scoped validation, Deep manipulation) plus one vertical edit
+  tool end to end in chelis-tide. Fragment-scoped validation type-checks
+  a single spliced function body against a module context built once,
+  without recompiling the module, at full type + effects + linearity
+  parity with `chelis check`. Deep-native: the tool consumes and
+  produces canonical Deep and persists nothing.
+
 ### Changed
 
 - **`chelis prove`: honest-verdict taxonomy -- a green now discloses its
@@ -45,6 +92,18 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   `fuzz_base`, `fuzz`, `sound_over_approximation`, `axiom`, ...).
 
 ### Fixed
+
+- **`chelis prove`: cvc5 lowers `RealLit` to the exact f64 value, not the
+  decimal string (#444)**: a CRITICAL soundness fix. cvc5 lowered a float
+  literal via `mk_real_from_str(format!("{value}"))`, the exact DECIMAL
+  (`0.1` -> `1/10`), reasoning about a value the runtime f64 never holds, so
+  it could PROVE a float property FALSE at runtime (it proved
+  `0.1 + 0.2 == 0.3`). `RealLit` now lowers to the exact f64 value
+  (`BigRational::from_float` -> num/den -> `mk_real_from_str`), so cvc5, Z3,
+  and the runtime f64 evaluator reason about the same number; the
+  literal-driven prove-false is closed (`0.1 + 0.2 == 0.3` is now Disproved,
+  matching the evaluator) with zero corpus flips. `num-rational` is
+  smt-gated; the non-finite guard is preserved.
 
 - **`chelis prove`: call-form predicates lower to SMT instead of silently
   fuzzing (chelis#422)** — operator-form `(x * x) >= 0.0` lowered to SMT and
@@ -110,6 +169,19 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   `crates/chelis-cli/tests/cli.rs` builds the grad_quadratic reproducer
   to C, gcc-links it, runs it under valgrind with no suppressions, and
   asserts `definitely lost: 0 bytes`.
+
+- **Type system: a body wildcard narrows to a param-bound declared
+  symbolic dim, fixing the `chelis build` reshape ICE (chelis#405, #430)**:
+  `const_col`-style code (`nn = shape(spots, 0)` ->
+  `to_tensor(map(.., range(0, nn)))` -> `reshape([nn, 1])`) returned
+  `tensor[*, 1]` (shape-erased wildcard) at the call site rather than
+  `tensor[n, 1]`. The post-defsig narrowing in `narrow_wildcards_with`
+  narrowed a body `Dim::Wildcard` to a declared dim only when that dim
+  was a `Dim::Lit`, never a `Dim::Var`, so the literal axis narrowed but
+  the symbolic axis stayed `*`; downstream the vmap kernel referenced an
+  undeclared symbolic dim and the lowering guard panicked. Narrowing now
+  also resolves a declared `Dim::Var`, so the symbolic axis is recovered
+  and the build no longer ICEs.
 
 ## [0.7.27] — 2026-06-17
 
