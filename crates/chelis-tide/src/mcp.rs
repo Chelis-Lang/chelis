@@ -482,6 +482,11 @@ fn property_to_json(o: &chelis_prove::property_runner::PropertyOutcome) -> Value
         "kind": "property",
         "name": o.name,
         "status": o.display_status(),
+        // chelis#422 (D2): disclose the verdict on the tide surface too -- the
+        // weakest `composite_verdict` token plus the full `qualifiers` set --
+        // so a tide prove and a CLI prove agree on the honest verdict.
+        "composite_verdict": o.composite_verdict.as_str(),
+        "qualifiers": o.disclosed_qualifiers(),
         "proof_tier": o.proof_tier.as_str(),
         "samples": o.samples,
         "seed": o.seed,
@@ -514,6 +519,9 @@ fn obligation_to_json(o: chelis_prove::obligation_engine::ObligationOutcome) -> 
         "producer": o.meta.producer,
         "name": o.name,
         "status": status,
+        // chelis#422 (D2): disclose the verdict + full qualifier set here too.
+        "composite_verdict": o.composite_verdict.as_str(),
+        "qualifiers": o.disclosed_qualifiers(),
         "proof_tier": o.proof_tier.as_str(),
         "samples": o.samples,
         "seed": o.seed,

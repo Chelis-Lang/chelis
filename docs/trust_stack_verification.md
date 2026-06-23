@@ -39,11 +39,16 @@ properties and dispatches them through three verification tiers:
   or is not amenable.
 
 - **COMPOSE:** Folds each proof with the producer/contract assumptions it
-  depends on. Result JSON carries `composite_verdict` plus per-assumption
-  `discharge:{method,evidence}` records. All-SMT discharges compose to
-  `proven`; fuzz discharges are qualified as
-  `proven_modulo_fuzz_validated_contract`; asserted axioms are qualified as
-  `proven_modulo_asserted_axiom`.
+  depends on. Result JSON carries the weakest-badge `composite_verdict` token,
+  a `qualifiers` array with the full disclosed caveat set, and per-assumption
+  `discharge:{method,evidence}` records. A fuzz-only BASE (no proof underneath)
+  composes to `fuzz_validated` and never to a `proven_*` badge; a
+  sound-over-approximation base composes to `sound_approximate`. For an
+  SMT-proved base: all-SMT discharges compose to `proven_modulo_real_arithmetic`
+  (the proof is over the reals, not machine arithmetic -- chelis#422); a fuzz
+  CONTRACT discharge is qualified `proven_modulo_fuzz_validated_contract`;
+  asserted axioms are qualified `proven_modulo_asserted_axiom`. Plain `proven`
+  is reserved for a future exact-machine-arithmetic lowering.
 
 **chelis prove (existing)** is the per-program runtime verification layer. It
 discovers `@property` declarations and evaluates them with random inputs. The

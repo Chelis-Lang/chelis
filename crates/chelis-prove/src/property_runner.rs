@@ -30,9 +30,10 @@ use smt_lower::{ContractAbstraction, InlineCtx, surf_expr_to_smt};
 mod injection;
 use crate::composition::{
     AssumptionDischarge, AssumptionRecord, CompositeVerdict, DischargeMethod, FUZZ_TOLERANCE,
-    NonVacuityRecord, NonVacuityStatus, rollup_composite,
+    NonVacuityRecord, NonVacuityStatus, base_verdict_from_discharge, rollup_composite,
 };
 use crate::contracts::{NORMAL_CDF_RANGE, NORMAL_CDF_REFLECTION, standard_contract_registry};
+use crate::discharge::QualifierSet;
 
 /// The verification status of one user property.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +79,11 @@ pub struct PropertyOutcome {
     pub injected: bool,
     /// Assumptions used by this proof, with their discharge evidence.
     pub assumptions: Vec<AssumptionRecord>,
+    /// The deductive base discharge's `(soundness, qualifiers)`, when an
+    /// engine discharged the base (chelis#422). Retained so `append_assumptions`
+    /// re-derives the same base badge it was first built with. `None` for a
+    /// fuzz-only or non-green base (the base is derived from `proof_tier`).
+    base_discharge: Option<(crate::discharge::Soundness, QualifierSet)>,
     /// Weakest-link verdict after composing the proof and its assumptions.
     pub composite_verdict: CompositeVerdict,
 }
@@ -95,7 +101,45 @@ impl PropertyOutcome {
         injected: bool,
         assumptions: Vec<AssumptionRecord>,
     ) -> Self {
-        let base = base_verdict(&status, proof_tier, samples, counterexample.as_ref());
+        Self::with_base_discharge(
+            name,
+            status,
+            proof_tier,
+            samples,
+            seed,
+            counterexample,
+            reason,
+            injected,
+            assumptions,
+            None,
+        )
+    }
+
+    /// Like [`PropertyOutcome::new`], but carrying the deductive base
+    /// discharge's `(soundness, qualifiers)` so the SMT/Beacon green base is
+    /// projected from the engine's own guarantee rather than a hardcoded
+    /// `proven` (chelis#422). The SMT-tier Proved sites pass `Some(..)`; every
+    /// other site keeps `new` (fuzz / terminal / unsupported bases).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn with_base_discharge(
+        name: impl Into<String>,
+        status: PropertyStatus,
+        proof_tier: PropertyTier,
+        samples: usize,
+        seed: u64,
+        counterexample: Option<serde_json::Value>,
+        reason: Option<String>,
+        injected: bool,
+        assumptions: Vec<AssumptionRecord>,
+        base_discharge: Option<(crate::discharge::Soundness, QualifierSet)>,
+    ) -> Self {
+        let base = base_verdict(
+            &status,
+            proof_tier,
+            samples,
+            counterexample.as_ref(),
+            base_discharge.as_ref(),
+        );
         let composite_verdict = rollup_composite(base, &assumptions);
         Self {
             name: name.into(),
@@ -108,6 +152,7 @@ impl PropertyOutcome {
             reason,
             injected,
             assumptions,
+            base_discharge,
             composite_verdict,
         }
     }
@@ -115,6 +160,38 @@ impl PropertyOutcome {
     pub(super) fn with_shrink_steps(mut self, shrink_steps: usize) -> Self {
         self.shrink_steps = shrink_steps;
         self
+    }
+
+    /// The base discharge `(soundness, qualifiers)` this outcome's verdict was
+    /// composed from, synthesized to match [`base_verdict`]: a deductive base
+    /// uses the threaded discharge; a fuzz-tier pass synthesizes the `FuzzBase`
+    /// guarantee; everything else has no green base.
+    fn effective_base_discharge(&self) -> Option<(crate::discharge::Soundness, QualifierSet)> {
+        if self.status != PropertyStatus::Passed {
+            return None;
+        }
+        match self.proof_tier {
+            PropertyTier::Smt => self.base_discharge.clone(),
+            PropertyTier::Fuzz if self.samples > 0 => Some((
+                crate::discharge::Soundness::Empirical,
+                QualifierSet::from_iter_kinds([crate::discharge::Qualifier::FuzzBase]),
+            )),
+            _ => None,
+        }
+    }
+
+    /// The full disclosed qualifier set of this outcome's composed verdict, as
+    /// sorted snake_case strings for the `qualifiers:[...]` JSON array
+    /// (chelis#422, D2). A non-green outcome discloses none.
+    pub fn disclosed_qualifiers(&self) -> Vec<&'static str> {
+        match self.effective_base_discharge() {
+            Some((soundness, qualifiers)) => crate::composition::composed_qualifier_strings(
+                soundness,
+                &qualifiers,
+                &self.assumptions,
+            ),
+            None => Vec::new(),
+        }
     }
 
     fn append_assumptions(&mut self, assumptions: Vec<AssumptionRecord>) {
@@ -127,6 +204,7 @@ impl PropertyOutcome {
             self.proof_tier,
             self.samples,
             self.counterexample.as_ref(),
+            self.base_discharge.as_ref(),
         );
         self.composite_verdict = rollup_composite(base, &self.assumptions);
     }
@@ -160,9 +238,17 @@ impl PropertyOutcome {
         match self.composite_verdict {
             CompositeVerdict::Failed => return "failed",
             CompositeVerdict::Invalid | CompositeVerdict::Unsupported => return "unsupported",
+            // Every green badge -- proven, the proven_modulo_* disclosures, the
+            // sound-over-approximation base, and the fuzz-only base -- falls
+            // through to the `is_pass` check below and reports `"passed"`
+            // (chelis#422). The badge, not the status, carries the
+            // not-proven / disclosed-caveat distinction.
             CompositeVerdict::Proven
+            | CompositeVerdict::ProvenModuloRealArithmetic
             | CompositeVerdict::ProvenModuloFuzzValidatedContract
-            | CompositeVerdict::ProvenModuloAssertedAxiom => {}
+            | CompositeVerdict::ProvenModuloAssertedAxiom
+            | CompositeVerdict::SoundApproximate
+            | CompositeVerdict::FuzzValidatedEmpirical => {}
         }
         if self.is_pass() {
             "passed"
@@ -185,13 +271,30 @@ fn base_verdict(
     proof_tier: PropertyTier,
     samples: usize,
     counterexample: Option<&serde_json::Value>,
+    base_discharge: Option<&(crate::discharge::Soundness, QualifierSet)>,
 ) -> CompositeVerdict {
     match status {
         PropertyStatus::Passed => match proof_tier {
-            PropertyTier::Smt => CompositeVerdict::Proven,
-            PropertyTier::Fuzz if samples > 0 => {
-                CompositeVerdict::ProvenModuloFuzzValidatedContract
-            }
+            // chelis#422: a deductive-tier green base is projected from the
+            // DISCHARGE's own (soundness, qualifiers) -- threaded here from the
+            // dispatch instead of being flattened to a hardcoded `proven` --
+            // so cvc5-over-reals reads `proven_modulo_real_arithmetic` and a
+            // Beacon interval discharge reads `sound_approximate`. A green base
+            // MUST carry its discharge; a missing one is a covered-or-rejected
+            // `Unsupported`, never a silent proof.
+            PropertyTier::Smt => match base_discharge {
+                Some((soundness, qualifiers)) => {
+                    base_verdict_from_discharge(*soundness, qualifiers)
+                }
+                None => CompositeVerdict::Unsupported,
+            },
+            // A fuzz-tier base pass is empirically validated, NOT proven: seed
+            // `FuzzBase` so it renders `fuzz_validated` and can never read
+            // `proven_*` (chelis#422).
+            PropertyTier::Fuzz if samples > 0 => base_verdict_from_discharge(
+                crate::discharge::Soundness::Empirical,
+                &QualifierSet::from_iter_kinds([crate::discharge::Qualifier::FuzzBase]),
+            ),
             _ => CompositeVerdict::Unsupported,
         },
         PropertyStatus::Failed => {
@@ -639,20 +742,23 @@ fn try_surf_tier_b(
         return None;
     }
     // Route the solve through the WI-9 discharge-engine registry. The registry
-    // selects the SMT engine for this SMT goal by fitness, and `into_result()`
-    // yields the identical TierBResult so the match arms below are unchanged.
-    // The per-lane engine choice is internal to `with_builtin_engines`: under
-    // `--features smt` it is the cvc5 engine (wrapping the same solve_property
-    // pipeline); in the default build it is the solver-free solve_property
-    // engine (wrapping the same direct solve_property call). Both lanes are
-    // byte-identical to the pre-WI-9 dispatch, and no cvc5-named symbol leaks
-    // into the solver-free default build.
-    let discharge_result = crate::engine_registry::DischargeRegistry::with_builtin_engines()
-        .dispatch(
-            &crate::discharge::Goal::smt(smt_prop.clone()),
-            options.smt_timeout_ms,
-        )
-        .into_result();
+    // selects the SMT engine for this SMT goal by fitness. chelis#422: keep the
+    // FULL `Discharge` -- its `(soundness, qualifiers)` -- instead of
+    // `.into_result()`-discarding it. The per-lane engine choice is internal to
+    // `with_builtin_engines`: under `--features smt` it is the cvc5 engine; in
+    // the default build it is the solver-free solve_property engine; an
+    // out-of-tree engine (Beacon) registered on top owns its goal shape. Both
+    // in-tree lanes classify a proof as over the reals (`SoundApproximate` +
+    // `RealArith`); threading that here is what makes the green base read
+    // `proven_modulo_real_arithmetic` rather than a flattened `proven`, and a
+    // Beacon `SoundApproximate` + `SoundOverApproximation` discharge read
+    // `sound_approximate`.
+    let discharge = crate::engine_registry::DischargeRegistry::with_builtin_engines().dispatch(
+        &crate::discharge::Goal::smt(smt_prop.clone()),
+        options.smt_timeout_ms,
+    );
+    let base_discharge = Some((discharge.soundness(), discharge.qualifier_set().clone()));
+    let discharge_result = discharge.into_result();
     match discharge_result {
         crate::tier_b::TierBResult::Proved => {
             let non_vacuity = smt_non_vacuity_record(&smt_prop, options.smt_timeout_ms);
@@ -680,7 +786,7 @@ fn try_surf_tier_b(
             } else {
                 PropertyStatus::Passed
             };
-            Some(PropertyOutcome::new(
+            Some(PropertyOutcome::with_base_discharge(
                 property.name.clone(),
                 status,
                 PropertyTier::Smt,
@@ -690,6 +796,7 @@ fn try_surf_tier_b(
                 reason,
                 false,
                 assumptions,
+                base_discharge,
             ))
         }
         crate::tier_b::TierBResult::Disproved(model) => Some(PropertyOutcome::new(

@@ -67,9 +67,13 @@ impl ProofArtifact {
         smt_status: Option<SmtStatus>,
     ) -> Self {
         let composite_verdict = match &status {
-            ProofStatus::Proved => CompositeVerdict::Proven,
+            // chelis#422: a Tier-B proof is over the reals, disclosing the
+            // machine-arithmetic gap; a Tier-C statistically-validated pass is
+            // a fuzz-only base, empirically validated but NOT proven. Neither
+            // may read as a plain `proven` / `proven_modulo_fuzz_*` badge.
+            ProofStatus::Proved => CompositeVerdict::ProvenModuloRealArithmetic,
             ProofStatus::StatisticallyValidated { samples } if *samples > 0 => {
-                CompositeVerdict::ProvenModuloFuzzValidatedContract
+                CompositeVerdict::FuzzValidatedEmpirical
             }
             ProofStatus::StatisticallyValidated { .. } => CompositeVerdict::Unsupported,
             ProofStatus::Disproved { .. } => CompositeVerdict::Failed,

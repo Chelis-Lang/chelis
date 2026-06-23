@@ -139,6 +139,62 @@ fn deep_sound_producer_obligation_passes() {
 }
 
 #[test]
+fn deep_smt_obligation_discloses_real_arithmetic_qualifier() {
+    // F1 disclosure parity: the `.dp` producer-obligation record must carry the
+    // SAME structured disclosure as the `.ch` surface (c1 in
+    // prove_invariant_obligations.rs). An all-SMT obligation is proved over the
+    // REALS, so the green token is `proven_modulo_real_arithmetic` AND the
+    // qualifiers[] array discloses `real_arithmetic`. The `.dp` obligation
+    // emitter previously omitted `qualifiers`, shipping a strictly weaker
+    // disclosure than the equivalent `.ch` obligation (chelis#422 D2).
+    let (code, records) = prove_deep_json(SOUND_SURF, &[]);
+    assert_eq!(code, 0);
+    let ob = obligations(&records)[0];
+    assert_eq!(ob["status"], "passed");
+    assert_eq!(ob["proof_tier"], "smt");
+    assert_eq!(ob["composite_verdict"], "proven_modulo_real_arithmetic");
+    assert_eq!(
+        ob["qualifiers"],
+        serde_json::json!(["real_arithmetic"]),
+        "the .dp obligation must disclose real_arithmetic byte-identically to the .ch surface: {ob}"
+    );
+}
+
+#[test]
+fn deep_fuzz_only_obligation_discloses_fuzz_base_qualifier() {
+    // F1 disclosure parity (fuzz tier, mirrors c2). A fuzz-only obligation BASE
+    // is empirically validated, never proven: the token is `fuzz_validated` and
+    // the qualifiers[] array discloses `fuzz_base`. The `.dp` obligation
+    // emitter must surface that disclosure too.
+    let (code, records) = prove_deep_json(
+        SOUND_SURF,
+        &["--tier", "fuzz-only", "--samples", "8", "--seed", "7"],
+    );
+    assert_eq!(code, 0);
+    let ob = obligations(&records)[0];
+    assert_eq!(ob["status"], "passed");
+    assert_eq!(ob["proof_tier"], "fuzz");
+    assert_eq!(ob["composite_verdict"], "fuzz_validated");
+    // The fuzz-only base discloses `fuzz_base`; the non-vacuity check is also
+    // discharged by fuzz, so the union additionally carries `fuzz`. Pin the
+    // full sorted set so the disclosure is locked exactly, and assert the
+    // `fuzz_base` base caveat is present (the F1 contract).
+    assert_eq!(
+        ob["qualifiers"],
+        serde_json::json!(["fuzz", "fuzz_base"]),
+        "the .dp fuzz-only obligation must disclose the full caveat set: {ob}"
+    );
+    assert!(
+        ob["qualifiers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|q| q == "fuzz_base"),
+        "the fuzz-only base caveat fuzz_base must be disclosed: {ob}"
+    );
+}
+
+#[test]
 fn deep_unsound_producer_obligation_fails() {
     // The soundness hole: WITHOUT the fix this `.dp` ran no obligation, so a
     // violating producer passed silently (exit 0, zero obligation records).

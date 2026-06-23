@@ -158,9 +158,16 @@ fn obligation_display_status(outcome: &ObligationOutcome) -> &'static str {
     match outcome.composite_verdict {
         CompositeVerdict::Failed => "failed",
         CompositeVerdict::Invalid | CompositeVerdict::Unsupported => "unsupported",
+        // Every green badge -- proven, the proven_modulo_* disclosures, the
+        // sound-over-approximation base, and the fuzz-only base -- reports
+        // through the obligation status, with the badge carrying the
+        // not-proven / disclosed-caveat distinction (chelis#422).
         CompositeVerdict::Proven
+        | CompositeVerdict::ProvenModuloRealArithmetic
         | CompositeVerdict::ProvenModuloFuzzValidatedContract
-        | CompositeVerdict::ProvenModuloAssertedAxiom => match outcome.status {
+        | CompositeVerdict::ProvenModuloAssertedAxiom
+        | CompositeVerdict::SoundApproximate
+        | CompositeVerdict::FuzzValidatedEmpirical => match outcome.status {
             ObligationStatus::Passed => "passed",
             ObligationStatus::Failed => "failed",
             ObligationStatus::Unsupported => "unsupported",
@@ -197,6 +204,9 @@ fn emit(outcome: &ObligationOutcome, options: &ProveOptions<'_>) {
             "name": outcome.name,
             "status": status,
             "composite_verdict": outcome.composite_verdict.as_str(),
+            // chelis#422 (D2): full disclosed caveat set alongside the weakest
+            // `composite_verdict` token.
+            "qualifiers": outcome.disclosed_qualifiers(),
             "assumptions": &outcome.assumptions,
             "proof_tier": outcome.proof_tier.as_str(),
             "samples": outcome.samples,

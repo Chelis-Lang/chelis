@@ -249,10 +249,26 @@ pub enum Qualifier {
     SpecialFunctionCertified,
     /// Sound over-approximation (e.g. interval/abstract-interpretation bound).
     SoundOverApproximation,
+    /// The SMT base proof is over the REALS, while runtime arithmetic is
+    /// machine arithmetic (int widths lower to an unbounded integer sort,
+    /// `f32`/`f64` to `Real`; no overflow, NaN, or IEEE rounding). The proof
+    /// holds over the reals but is a sound over-approximation of the machine
+    /// claim, so it discloses the gap rather than claiming exact machine
+    /// soundness (chelis#422). The legacy `arith_model:"real"` side field
+    /// mirrors this qualifier.
+    RealArith,
     /// Carries an independently checkable certificate (e.g. an SoS witness).
     CertificateBearing,
     /// Established by randomized fuzz sampling only.
     Fuzz,
+    /// The BASE proof obligation itself was established by randomized fuzz
+    /// sampling only -- no SMT (or other deductive) proof underlies it
+    /// (chelis#422). Distinct from [`Qualifier::Fuzz`], which marks a
+    /// fuzz-validated CONTRACT assumption discharged UNDER an otherwise-exact
+    /// base. A `FuzzBase` rollup can never render a `proven_*` badge: a
+    /// fuzz-only base is not proven, so it must not read as
+    /// proven-modulo-anything.
+    FuzzBase,
     /// Asserted as an axiom (trusted, not derived).
     Axiom,
 }
@@ -264,8 +280,10 @@ impl Qualifier {
             Qualifier::DeltaComplete => "delta_complete",
             Qualifier::SpecialFunctionCertified => "special_function_certified",
             Qualifier::SoundOverApproximation => "sound_over_approximation",
+            Qualifier::RealArith => "real_arithmetic",
             Qualifier::CertificateBearing => "certificate_bearing",
             Qualifier::Fuzz => "fuzz",
+            Qualifier::FuzzBase => "fuzz_base",
             Qualifier::Axiom => "axiom",
         }
     }
@@ -281,11 +299,12 @@ impl Qualifier {
     ///   no-approximation result (an exact decision, or an independently checked
     ///   exact witness), so they demand [`Soundness::Exact`].
     /// - [`Qualifier::DeltaComplete`], [`Qualifier::SpecialFunctionCertified`],
-    ///   and [`Qualifier::SoundOverApproximation`] are sound but conservative
-    ///   (a delta-relaxed decision, a certified envelope, an over-approximating
-    ///   bound), so they demand [`Soundness::SoundApproximate`].
-    /// - [`Qualifier::Fuzz`] is empirical sampling, so it demands
-    ///   [`Soundness::Empirical`].
+    ///   [`Qualifier::SoundOverApproximation`], and [`Qualifier::RealArith`] are
+    ///   sound but conservative (a delta-relaxed decision, a certified envelope,
+    ///   an over-approximating bound, or a proof over the reals standing in for
+    ///   machine arithmetic), so they demand [`Soundness::SoundApproximate`].
+    /// - [`Qualifier::Fuzz`] and [`Qualifier::FuzzBase`] are empirical sampling,
+    ///   so they demand [`Soundness::Empirical`].
     /// - [`Qualifier::Axiom`] is asserted, not established, so it places no
     ///   establishment demand: its floor is [`Soundness::Untrusted`], the bottom
     ///   of the lattice, and it rides any soundness.
@@ -294,8 +313,9 @@ impl Qualifier {
             Qualifier::Exact | Qualifier::CertificateBearing => Soundness::Exact,
             Qualifier::DeltaComplete
             | Qualifier::SpecialFunctionCertified
-            | Qualifier::SoundOverApproximation => Soundness::SoundApproximate,
-            Qualifier::Fuzz => Soundness::Empirical,
+            | Qualifier::SoundOverApproximation
+            | Qualifier::RealArith => Soundness::SoundApproximate,
+            Qualifier::Fuzz | Qualifier::FuzzBase => Soundness::Empirical,
             Qualifier::Axiom => Soundness::Untrusted,
         }
     }
@@ -478,15 +498,21 @@ impl Cvc5Engine {
         Self
     }
 
-    /// Map a tier-B outcome to its `(soundness, qualifier_set)`. A proved or
-    /// disproved cvc5 result is an EXACT decision over the chosen logic; a
-    /// timeout, unknown, or lowering error is untrusted (never a proof) and
-    /// carries no qualifier.
+    /// Map a tier-B outcome to its `(soundness, qualifier_set)`. The cvc5
+    /// decision is over the REALS, not machine arithmetic (chelis#422): int
+    /// widths lower to an unbounded integer sort and `f32`/`f64` to `Real`, so
+    /// a proved result holds over the reals but is a sound over-approximation
+    /// of the machine claim. It is therefore `SoundApproximate` carrying
+    /// [`Qualifier::RealArith`] -- the disclosure that the proof is over reals.
+    /// A timeout, unknown, or lowering error is untrusted (never a proof) and
+    /// carries no qualifier. (A `Disproved` is terminal -- it renders `failed`
+    /// regardless of qualifiers -- but is classified the same way for the
+    /// integrity invariant: a real-arithmetic decision is not exact.)
     fn classify(result: &TierBResult) -> (Soundness, QualifierSet) {
         match result {
             TierBResult::Proved | TierBResult::Disproved(_) => (
-                Soundness::Exact,
-                QualifierSet::from_iter_kinds([Qualifier::Exact]),
+                Soundness::SoundApproximate,
+                QualifierSet::from_iter_kinds([Qualifier::RealArith]),
             ),
             TierBResult::Timeout | TierBResult::Unknown | TierBResult::Error(_) => {
                 (Soundness::Untrusted, QualifierSet::new())
@@ -516,8 +542,9 @@ impl DischargeEngine for Cvc5Engine {
         };
         let (soundness, qualifier_set) = Self::classify(&result);
         let evidence = serde_json::json!({ "solver": "cvc5" });
-        // The classification only ever pairs the `exact` qualifier with
-        // `Soundness::Exact`, so this constructor cannot fail here; surfacing
+        // The classification only ever pairs the `real_arithmetic` qualifier
+        // with `Soundness::SoundApproximate` (its floor) or returns an empty
+        // set at `Untrusted`, so this constructor cannot fail here; surfacing
         // the error as a non-proof discharge keeps the seam total.
         Discharge::new(soundness, qualifier_set, result, evidence).unwrap_or_else(|err| {
             Discharge::new(
@@ -855,23 +882,31 @@ mod tests {
 
     #[cfg(feature = "smt")]
     #[test]
-    fn cvc5_engine_proves_a_trivial_goal_as_exact() {
+    fn cvc5_engine_proves_a_trivial_goal_over_reals() {
+        // chelis#422: the cvc5 decision is over the REALS, not machine
+        // arithmetic, so a proved goal is `SoundApproximate` carrying
+        // `RealArith` -- a sound over-approximation that discloses the gap --
+        // NOT an exact decision.
         let engine = Cvc5Engine::new();
         let goal = Goal::smt(trivially_true_property());
         let discharge = engine.discharge(&goal, 5_000);
         assert_eq!(*discharge.result(), TierBResult::Proved);
-        assert_eq!(discharge.soundness(), Soundness::Exact);
-        assert!(discharge.qualifier_set().contains(Qualifier::Exact));
+        assert_eq!(discharge.soundness(), Soundness::SoundApproximate);
+        assert!(discharge.qualifier_set().contains(Qualifier::RealArith));
+        assert!(
+            !discharge.qualifier_set().contains(Qualifier::Exact),
+            "an over-reals proof must not claim exact machine soundness"
+        );
     }
 
     #[cfg(feature = "smt")]
     #[test]
-    fn cvc5_engine_disproves_a_false_goal_as_exact() {
+    fn cvc5_engine_disproves_a_false_goal_over_reals() {
         let engine = Cvc5Engine::new();
         let goal = Goal::smt(false_property());
         let discharge = engine.discharge(&goal, 5_000);
         assert!(matches!(discharge.result(), TierBResult::Disproved(_)));
-        assert_eq!(discharge.soundness(), Soundness::Exact);
+        assert_eq!(discharge.soundness(), Soundness::SoundApproximate);
     }
 
     #[cfg(feature = "smt")]

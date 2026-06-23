@@ -200,16 +200,18 @@ impl SolvePropertyEngine {
     }
 
     /// Map a tier-B outcome to its `(soundness, qualifier_set)`. This mirrors
-    /// the cvc5 engine's classification: a proved/disproved result is an exact
-    /// decision; a timeout/unknown/error is untrusted and carries no qualifier.
-    /// In the non-smt build `solve_property` only ever returns `Timeout` (or a
+    /// the cvc5 engine's classification: the decision is over the REALS, so a
+    /// proved/disproved result is `SoundApproximate` carrying
+    /// [`crate::discharge::Qualifier::RealArith`] (chelis#422), not exact; a
+    /// timeout/unknown/error is untrusted and carries no qualifier. In the
+    /// non-smt build `solve_property` only ever returns `Timeout` (or a
     /// test-forced result), so in practice this yields the untrusted branch.
     fn classify(result: &TierBResult) -> (Soundness, QualifierSet) {
         use crate::discharge::Qualifier;
         match result {
             TierBResult::Proved | TierBResult::Disproved(_) => (
-                Soundness::Exact,
-                QualifierSet::from_iter_kinds([Qualifier::Exact]),
+                Soundness::SoundApproximate,
+                QualifierSet::from_iter_kinds([Qualifier::RealArith]),
             ),
             TierBResult::Timeout | TierBResult::Unknown | TierBResult::Error(_) => {
                 (Soundness::Untrusted, QualifierSet::new())
@@ -371,6 +373,39 @@ mod tests {
         assert_eq!(*discharge.result(), TierBResult::Proved);
     }
 
+    // chelis#422 / WI-B8 seam: a Beacon-shaped discharge -- `SoundApproximate`
+    // carrying `SoundOverApproximation` -- must project to the `sound_approximate`
+    // verdict through the SAME door the consumer seam uses
+    // (`base_verdict_from_discharge`), never `proven`. This is what makes a
+    // future out-of-tree Beacon interval discharge reach `composite_verdict` as
+    // `sound_approximate` rather than being flattened to a proof.
+    #[test]
+    fn beacon_shaped_discharge_projects_to_sound_approximate_not_proven() {
+        let mut registry = DischargeRegistry::new();
+        registry.register(Box::new(MockEngine::box_range_sound("mock_interval")));
+        let discharge = registry.dispatch(&box_range_goal(), 1_000);
+        let verdict = crate::composition::base_verdict_from_discharge(
+            discharge.soundness(),
+            discharge.qualifier_set(),
+        );
+        assert_eq!(
+            verdict,
+            crate::composition::CompositeVerdict::SoundApproximate,
+            "a Beacon interval discharge discloses `sound_approximate`, never a proof"
+        );
+        assert_ne!(verdict, crate::composition::CompositeVerdict::Proven);
+        assert_ne!(
+            verdict,
+            crate::composition::CompositeVerdict::ProvenModuloRealArithmetic
+        );
+        let qualifiers = crate::composition::composed_qualifier_strings(
+            discharge.soundness(),
+            discharge.qualifier_set(),
+            &[],
+        );
+        assert_eq!(qualifiers, vec!["sound_over_approximation"]);
+    }
+
     // --- no-fit: never a silent pass, never a green ---
 
     #[test]
@@ -465,13 +500,17 @@ mod tests {
         rollup_composite(CompositeVerdict::Proven, &[record])
     }
 
-    /// The prove-flow status a discharge maps to, derived from its soundness and
-    /// result. An exact, green result is `proved`; everything else (an
-    /// untrusted/non-green discharge, i.e. the no-fit case) is `unsupported`.
+    /// The prove-flow status a discharge maps to, derived from its result. A
+    /// determinate green/refutation result is `proved`/`failed`; everything
+    /// else (an untrusted/non-green discharge, i.e. the no-fit case) is
+    /// `unsupported`. chelis#422: a cvc5 decision is over the reals, so a
+    /// proved/disproved result is `SoundApproximate` (not `Exact`); the status
+    /// keys off the result, not the soundness tier.
     fn discharge_status(discharge: &Discharge) -> &'static str {
         match (discharge.soundness(), discharge.result()) {
-            (Soundness::Exact, TierBResult::Proved) => "proved",
-            (Soundness::Exact, TierBResult::Disproved(_)) => "failed",
+            (Soundness::Untrusted, _) => "unsupported",
+            (_, TierBResult::Proved) => "proved",
+            (_, TierBResult::Disproved(_)) => "failed",
             _ => "unsupported",
         }
     }
@@ -537,11 +576,17 @@ mod tests {
         let registry = DischargeRegistry::with_builtin_engines();
         let goal = smt_goal();
         assert_eq!(registry.selected_engine_name(&goal), Some("cvc5"));
-        // Byte-identical to the pre-WI-9 direct cvc5 call: a trivially-true
-        // property proves as exact.
+        // A trivially-true property proves through the cvc5 lane. chelis#422:
+        // the cvc5 decision is over the reals, so the discharge is
+        // `SoundApproximate` carrying `RealArith`, not exact.
         let discharge = registry.dispatch(&goal, 5_000);
         assert_eq!(*discharge.result(), TierBResult::Proved);
-        assert_eq!(discharge.soundness(), Soundness::Exact);
+        assert_eq!(discharge.soundness(), Soundness::SoundApproximate);
+        assert!(
+            discharge
+                .qualifier_set()
+                .contains(crate::discharge::Qualifier::RealArith)
+        );
     }
 
     #[cfg(feature = "smt")]

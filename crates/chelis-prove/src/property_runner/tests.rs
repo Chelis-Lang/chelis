@@ -294,8 +294,11 @@ fn u4_statistically_validated_zero_samples_is_not_pass() {
         Vec::new(),
     );
     assert!(!zero.is_pass(), "Passed with 0 fuzz samples is not a pass");
-    // A Passed SMT proof carries 0 samples but IS a pass.
-    let smt = PropertyOutcome::new(
+    // A Passed SMT proof carries 0 samples but IS a pass. chelis#422: a green
+    // SMT base MUST carry its discharge (covered-or-rejected) -- here the cvc5
+    // over-reals discharge (SoundApproximate + RealArith), which projects to
+    // `proven_modulo_real_arithmetic`.
+    let smt = PropertyOutcome::with_base_discharge(
         "p",
         PropertyStatus::Passed,
         PropertyTier::Smt,
@@ -305,10 +308,21 @@ fn u4_statistically_validated_zero_samples_is_not_pass() {
         None,
         false,
         Vec::new(),
+        Some((
+            crate::discharge::Soundness::SoundApproximate,
+            crate::discharge::QualifierSet::from_iter_kinds([
+                crate::discharge::Qualifier::RealArith,
+            ]),
+        )),
     );
     assert!(
         smt.is_pass(),
         "an SMT-proved property is a pass at 0 samples"
+    );
+    assert_eq!(
+        smt.composite_verdict,
+        CompositeVerdict::ProvenModuloRealArithmetic,
+        "an over-reals SMT proof discloses the machine-arith gap"
     );
 }
 

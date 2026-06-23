@@ -97,13 +97,18 @@ fn flagship_guarded_option_proves_at_smt_tier() {
 }
 
 #[test]
-fn c1_all_smt_discharges_have_composite_proven() {
+fn c1_all_smt_discharges_disclose_real_arithmetic() {
     let (code, records) = prove_json(FLAGSHIP, &[]);
     assert_eq!(code, 0);
     let ob = obligations(&records)[0];
     assert_eq!(ob["status"], "passed");
     assert_eq!(ob["proof_tier"], "smt");
-    assert_eq!(ob["composite_verdict"], "proven");
+    // chelis#422: an all-SMT obligation is proved over the REALS, so the green
+    // discloses the machine-arithmetic gap as `proven_modulo_real_arithmetic`
+    // (token) with `real_arithmetic` in qualifiers[]; plain `proven` is
+    // reserved for a future exact-machine-arithmetic lowering.
+    assert_eq!(ob["composite_verdict"], "proven_modulo_real_arithmetic");
+    assert_eq!(ob["qualifiers"], serde_json::json!(["real_arithmetic"]));
     let assumptions = ob["assumptions"].as_array().expect("assumptions array");
     assert_eq!(assumptions.len(), 1);
     assert_eq!(assumptions[0]["name"], "invariant:Probability:probability");
@@ -113,7 +118,7 @@ fn c1_all_smt_discharges_have_composite_proven() {
 }
 
 #[test]
-fn c2_fuzz_discharge_is_qualified_and_carries_seed_tolerance() {
+fn c2_fuzz_only_obligation_base_is_fuzz_validated_not_proven() {
     let (code, records) = prove_json(
         FLAGSHIP,
         &["--tier", "fuzz-only", "--samples", "8", "--seed", "7"],
@@ -122,11 +127,20 @@ fn c2_fuzz_discharge_is_qualified_and_carries_seed_tolerance() {
     let ob = obligations(&records)[0];
     assert_eq!(ob["status"], "passed");
     assert_eq!(ob["proof_tier"], "fuzz");
-    assert_eq!(
-        ob["composite_verdict"],
-        "proven_modulo_fuzz_validated_contract"
+    // chelis#422: a fuzz-only obligation BASE (proof_tier "fuzz", no SMT) is
+    // empirically validated, NOT proven. The honest badge is `fuzz_validated`,
+    // never a `proven_*` badge -- the proven-modulo-fuzz-CONTRACT badge is
+    // reserved for an exact SMT base discharged modulo a fuzz contract (see
+    // c1, which keeps a proven_* badge). The fuzz discharge evidence below is
+    // the actual subject of this test and is unchanged.
+    assert_eq!(ob["composite_verdict"], "fuzz_validated");
+    assert!(
+        !ob["composite_verdict"]
+            .as_str()
+            .unwrap()
+            .starts_with("proven"),
+        "a fuzz-only base must never read as proven_*: {ob}"
     );
-    assert_ne!(ob["composite_verdict"], "proven");
     let evidence = &ob["assumptions"][0]["discharge"]["evidence"];
     assert_eq!(ob["assumptions"][0]["discharge"]["method"], "fuzz");
     assert_eq!(evidence["status"], "validated");

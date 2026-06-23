@@ -216,6 +216,12 @@ fn emit(
             "name": outcome.name,
             "status": status,
             "composite_verdict": outcome.composite_verdict.as_str(),
+            // chelis#422 (D2): the single `composite_verdict` token is the
+            // WEAKEST badge; `qualifiers` carries the full disclosed caveat set
+            // (e.g. a proof over reals modulo a fuzz contract is token
+            // `proven_modulo_fuzz_validated_contract` with
+            // `qualifiers:["fuzz","real_arithmetic"]`).
+            "qualifiers": outcome.disclosed_qualifiers(),
             "assumptions": &outcome.assumptions,
             "samples": outcome.samples,
             "seed": outcome.seed,

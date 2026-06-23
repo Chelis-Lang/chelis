@@ -22,6 +22,7 @@ use crate::composition::{
     AssumptionDischarge, AssumptionRecord, CompositeVerdict, DischargeMethod, FUZZ_TOLERANCE,
     NonVacuityRecord, NonVacuityStatus, rollup_composite,
 };
+use crate::discharge::QualifierSet;
 use crate::obligations::{ObligationMeta, ObligationProperty, ProducedPosition};
 use crate::opaque::{ConstEnv, OpaqueInvariant};
 use crate::tier_b::TierBResult;
@@ -36,6 +37,10 @@ pub struct ObligationOutcome {
     pub proof_tier: ObligationTier,
     pub samples: usize,
     pub seed: u64,
+    /// The deductive base discharge's `(soundness, qualifiers)` when an engine
+    /// discharged the base (chelis#422); `None` for a fuzz-only or non-green
+    /// base. Retained so the disclosed qualifier set can be recomposed.
+    base_discharge: Option<(crate::discharge::Soundness, QualifierSet)>,
     pub counterexample: Option<serde_json::Value>,
     pub shrink_steps: usize,
     pub reason: Option<String>,
@@ -52,6 +57,7 @@ impl ObligationOutcome {
         proof_tier: ObligationTier,
         samples: usize,
         seed: u64,
+        base_discharge: Option<(crate::discharge::Soundness, QualifierSet)>,
         counterexample: Option<serde_json::Value>,
         reason: Option<String>,
         assumptions: Vec<AssumptionRecord>,
@@ -86,9 +92,27 @@ impl ObligationOutcome {
         };
         let base = match status {
             ObligationStatus::Passed => match proof_tier {
-                ObligationTier::Smt => CompositeVerdict::Proven,
+                // chelis#422: project the SMT/deductive green base from the
+                // discharge's own (soundness, qualifiers) -- threaded from the
+                // dispatch -- so an over-reals proof reads
+                // `proven_modulo_real_arithmetic` and a Beacon interval
+                // discharge reads `sound_approximate`, never a flattened
+                // `proven`. A green base without a discharge is a
+                // covered-or-rejected `Unsupported`, never a silent proof.
+                ObligationTier::Smt => match &base_discharge {
+                    Some((soundness, qualifiers)) => {
+                        crate::composition::base_verdict_from_discharge(*soundness, qualifiers)
+                    }
+                    None => CompositeVerdict::Unsupported,
+                },
+                // A fuzz-tier obligation BASE pass is empirically validated,
+                // not proven: seed `FuzzBase` so it renders `fuzz_validated`
+                // and never `proven_*` (chelis#422).
                 ObligationTier::Fuzz if samples > 0 => {
-                    CompositeVerdict::ProvenModuloFuzzValidatedContract
+                    crate::composition::base_verdict_from_discharge(
+                        crate::discharge::Soundness::Empirical,
+                        &QualifierSet::from_iter_kinds([crate::discharge::Qualifier::FuzzBase]),
+                    )
                 }
                 _ => CompositeVerdict::Unsupported,
             },
@@ -111,6 +135,7 @@ impl ObligationOutcome {
             proof_tier,
             samples,
             seed,
+            base_discharge,
             counterexample,
             shrink_steps: 0,
             reason,
@@ -122,6 +147,35 @@ impl ObligationOutcome {
     fn with_shrink_steps(mut self, shrink_steps: usize) -> Self {
         self.shrink_steps = shrink_steps;
         self
+    }
+
+    /// The base discharge `(soundness, qualifiers)` this outcome's verdict was
+    /// composed from, synthesized to match the base derivation above (chelis#422).
+    fn effective_base_discharge(&self) -> Option<(crate::discharge::Soundness, QualifierSet)> {
+        if self.status != ObligationStatus::Passed {
+            return None;
+        }
+        match self.proof_tier {
+            ObligationTier::Smt => self.base_discharge.clone(),
+            ObligationTier::Fuzz if self.samples > 0 => Some((
+                crate::discharge::Soundness::Empirical,
+                QualifierSet::from_iter_kinds([crate::discharge::Qualifier::FuzzBase]),
+            )),
+            _ => None,
+        }
+    }
+
+    /// The full disclosed qualifier set of this obligation's composed verdict,
+    /// as sorted snake_case strings for the `qualifiers:[...]` JSON array.
+    pub fn disclosed_qualifiers(&self) -> Vec<&'static str> {
+        match self.effective_base_discharge() {
+            Some((soundness, qualifiers)) => crate::composition::composed_qualifier_strings(
+                soundness,
+                &qualifiers,
+                &self.assumptions,
+            ),
+            None => Vec::new(),
+        }
     }
 }
 
@@ -373,6 +427,7 @@ pub fn run_module_obligations(
             0,
             options.seed,
             None,
+            None,
             Some(rej.reason.clone()),
             Vec::new(),
         ));
@@ -393,6 +448,7 @@ pub fn run_module_obligations(
             ObligationTier::None,
             0,
             options.seed,
+            None,
             None,
             Some(err.to_string()),
             Vec::new(),
@@ -439,13 +495,18 @@ fn run_one(
             // same direct solve_property call). Both lanes are byte-identical to
             // the pre-WI-9 dispatch, and no cvc5-named symbol leaks into the
             // solver-free default build.
-            let discharge_result =
-                crate::engine_registry::DischargeRegistry::with_builtin_engines()
-                    .dispatch(
-                        &crate::discharge::Goal::smt(lowered.property.clone()),
-                        options.smt_timeout_ms,
-                    )
-                    .into_result();
+            // chelis#422: keep the full `Discharge` -- its (soundness,
+            // qualifiers) -- so the green base is projected from the engine's
+            // own guarantee (over-reals -> proven_modulo_real_arithmetic; a
+            // Beacon interval discharge -> sound_approximate), not flattened to
+            // a hardcoded `proven`.
+            let discharge = crate::engine_registry::DischargeRegistry::with_builtin_engines()
+                .dispatch(
+                    &crate::discharge::Goal::smt(lowered.property.clone()),
+                    options.smt_timeout_ms,
+                );
+            let base_discharge = Some((discharge.soundness(), discharge.qualifier_set().clone()));
+            let discharge_result = discharge.into_result();
             match discharge_result {
                 TierBResult::Proved => {
                     let non_vacuity =
@@ -479,6 +540,7 @@ fn run_one(
                         ObligationTier::Smt,
                         0,
                         options.seed,
+                        base_discharge,
                         None,
                         reason,
                         assumptions,
@@ -1190,6 +1252,7 @@ fn outcome(
         tier,
         samples,
         seed,
+        None,
         counterexample,
         reason,
         Vec::new(),
@@ -1203,6 +1266,7 @@ fn outcome_with_assumptions(
     tier: ObligationTier,
     samples: usize,
     seed: u64,
+    base_discharge: Option<(crate::discharge::Soundness, QualifierSet)>,
     counterexample: Option<serde_json::Value>,
     reason: Option<String>,
     assumptions: Vec<AssumptionRecord>,
@@ -1214,6 +1278,7 @@ fn outcome_with_assumptions(
         tier,
         samples,
         seed,
+        base_discharge,
         counterexample,
         reason,
         assumptions,
