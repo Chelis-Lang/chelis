@@ -156,7 +156,10 @@ fn obligation_display_status(outcome: &ObligationOutcome) -> &'static str {
         return "error";
     }
     match outcome.composite_verdict {
-        CompositeVerdict::Failed => "failed",
+        // A reals-hedged disproof is a failure (the property did not hold over
+        // the reals); the precise `composite_verdict` field still carries the
+        // hedged badge for a consumer that wants the distinction (chelis#422).
+        CompositeVerdict::Failed | CompositeVerdict::DisprovedModuloRealArithmetic => "failed",
         CompositeVerdict::Invalid | CompositeVerdict::Unsupported => "unsupported",
         // Every green badge -- proven, the proven_modulo_* disclosures, the
         // sound-over-approximation base, and the fuzz-only base -- reports

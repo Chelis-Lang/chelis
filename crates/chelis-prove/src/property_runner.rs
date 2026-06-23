@@ -182,8 +182,17 @@ impl PropertyOutcome {
 
     /// The full disclosed qualifier set of this outcome's composed verdict, as
     /// sorted snake_case strings for the `qualifiers:[...]` JSON array
-    /// (chelis#422, D2). A non-green outcome discloses none.
+    /// (chelis#422, D2). A green outcome discloses its composed union; a
+    /// reals-hedged disproof discloses `real_arithmetic` (symmetric to the proof
+    /// side, so the machine-arithmetic caveat is visible on the failure too);
+    /// every other non-green outcome discloses none.
     pub fn disclosed_qualifiers(&self) -> Vec<&'static str> {
+        if self.composite_verdict == CompositeVerdict::DisprovedModuloRealArithmetic {
+            return crate::composition::disclosed_qualifier_strings_for_base(
+                CompositeVerdict::DisprovedModuloRealArithmetic,
+                &self.assumptions,
+            );
+        }
         match self.effective_base_discharge() {
             Some((soundness, qualifiers)) => crate::composition::composed_qualifier_strings(
                 soundness,
@@ -217,7 +226,10 @@ impl PropertyOutcome {
     pub fn is_pass(&self) -> bool {
         if matches!(
             self.composite_verdict,
-            CompositeVerdict::Failed | CompositeVerdict::Invalid | CompositeVerdict::Unsupported
+            CompositeVerdict::Failed
+                | CompositeVerdict::DisprovedModuloRealArithmetic
+                | CompositeVerdict::Invalid
+                | CompositeVerdict::Unsupported
         ) {
             return false;
         }
@@ -236,7 +248,12 @@ impl PropertyOutcome {
             return "error";
         }
         match self.composite_verdict {
-            CompositeVerdict::Failed => return "failed",
+            // A hedged disproof is a failure (the property did not hold over the
+            // reals); the coarse label is `failed`. The precise
+            // `composite_verdict` field still carries the hedged badge.
+            CompositeVerdict::Failed | CompositeVerdict::DisprovedModuloRealArithmetic => {
+                return "failed";
+            }
             CompositeVerdict::Invalid | CompositeVerdict::Unsupported => return "unsupported",
             // Every green badge -- proven, the proven_modulo_* disclosures, the
             // sound-over-approximation base, and the fuzz-only base -- falls
@@ -299,13 +316,35 @@ fn base_verdict(
         },
         PropertyStatus::Failed => {
             if counterexample.is_some() {
-                CompositeVerdict::Failed
+                // chelis#422 (symmetric to the Proved side): a disproof whose
+                // base discharge is over the reals (carries `RealArith`) is a
+                // HEDGED failure -- the counterexample may be a false
+                // counterexample at machine arithmetic -- so it reads
+                // `disproved_modulo_real_arithmetic`. A disproof with no
+                // real-arithmetic base (a fuzz counterexample is a real
+                // machine-arithmetic witness, threaded with no base_discharge) is
+                // a definite `Failed`.
+                if base_discharge_is_real_arithmetic(base_discharge) {
+                    CompositeVerdict::DisprovedModuloRealArithmetic
+                } else {
+                    CompositeVerdict::Failed
+                }
             } else {
                 CompositeVerdict::Unsupported
             }
         }
         PropertyStatus::Unsupported | PropertyStatus::Error => CompositeVerdict::Unsupported,
     }
+}
+
+/// Whether a threaded base discharge is an over-the-reals decision (carries
+/// [`crate::discharge::Qualifier::RealArith`]). Used to hedge a disproof's
+/// failure badge symmetrically to the proof side.
+fn base_discharge_is_real_arithmetic(
+    base_discharge: Option<&(crate::discharge::Soundness, QualifierSet)>,
+) -> bool {
+    base_discharge
+        .is_some_and(|(_, qualifiers)| qualifiers.contains(crate::discharge::Qualifier::RealArith))
 }
 
 /// Options for a property run, mirroring the prove surface.
@@ -799,17 +838,26 @@ fn try_surf_tier_b(
                 base_discharge,
             ))
         }
-        crate::tier_b::TierBResult::Disproved(model) => Some(PropertyOutcome::new(
-            property.name.clone(),
-            PropertyStatus::Failed,
-            PropertyTier::Smt,
-            0,
-            seed,
-            Some(model),
-            None,
-            false,
-            Vec::new(),
-        )),
+        crate::tier_b::TierBResult::Disproved(model) => {
+            // chelis#422 (symmetric): thread the discharge's `(soundness,
+            // qualifiers)` here too. A disproof over the reals carries
+            // `RealArith`, so the failure base reads
+            // `disproved_modulo_real_arithmetic` -- the counterexample may be a
+            // false counterexample at machine arithmetic -- rather than a
+            // flattened definite `failed`.
+            Some(PropertyOutcome::with_base_discharge(
+                property.name.clone(),
+                PropertyStatus::Failed,
+                PropertyTier::Smt,
+                0,
+                seed,
+                Some(model),
+                None,
+                false,
+                Vec::new(),
+                base_discharge,
+            ))
+        }
         crate::tier_b::TierBResult::Timeout => {
             if options.tier == "smt-only" {
                 Some(PropertyOutcome::new(

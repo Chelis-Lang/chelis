@@ -505,9 +505,13 @@ impl Cvc5Engine {
     /// of the machine claim. It is therefore `SoundApproximate` carrying
     /// [`Qualifier::RealArith`] -- the disclosure that the proof is over reals.
     /// A timeout, unknown, or lowering error is untrusted (never a proof) and
-    /// carries no qualifier. (A `Disproved` is terminal -- it renders `failed`
-    /// regardless of qualifiers -- but is classified the same way for the
-    /// integrity invariant: a real-arithmetic decision is not exact.)
+    /// carries no qualifier. A `Disproved` is classified the same way (a
+    /// real-arithmetic decision is not exact); its `RealArith` qualifier also
+    /// drives the failure side -- the verdict algebra renders a disproof over
+    /// the reals as the hedged `disproved_modulo_real_arithmetic` (a
+    /// counterexample over the reals may be a false counterexample at machine
+    /// arithmetic), symmetric to `proven_modulo_real_arithmetic` on the proof
+    /// side, never a flat definite `failed`.
     fn classify(result: &TierBResult) -> (Soundness, QualifierSet) {
         match result {
             TierBResult::Proved | TierBResult::Disproved(_) => (
