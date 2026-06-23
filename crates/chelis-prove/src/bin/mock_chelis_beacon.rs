@@ -1,0 +1,101 @@
+//! A MOCK `chelis-beacon` binary for the [`crate::beacon_shim`] tests
+//! (chelis#439). It stands in for the real out-of-tree verifier so every §5
+//! mapping row of `docs/design/beacon_subprocess_shim.md` can be exercised in
+//! CI without a real Beacon.
+//!
+//! It accepts the same CLI the shim drives — `dispatch --request -` (stdin) or
+//! `dispatch --request <path>` (temp file) — reads the request (to prove the
+//! shim wrote a well-formed one when asked), and emits a canned `CheckReport`
+//! JSON selected by the `MOCK_BEACON_SCENARIO` env var. It is a test fixture,
+//! not a product binary; it links no chelis crate and contains no verifier
+//! logic.
+//!
+//! Scenarios (`MOCK_BEACON_SCENARIO`):
+//!
+//! - `proved`                       -> `{"verdict":"proved"}` (oracle-verified)
+//! - `proved_oracle_unverified`     -> `{"verdict":"proved_oracle_unverified"}`
+//! - `refuted_verified`             -> `{"verdict":"refuted","oracle_verified":true,...}`
+//! - `refuted_unverified`           -> `{"verdict":"refuted","oracle_verified":false,...}`
+//! - `refuted_no_flag`              -> `{"verdict":"refuted",...}` (no flag)
+//! - `nonzero_exit`                 -> stderr + exit 3
+//! - `unparseable`                  -> non-JSON stdout, exit 0
+//! - `hang`                         -> sleep far past any test timeout (hard-kill arm)
+//! - `echo_request`                 -> echo the received request back on stdout (request-shape arm)
+//! - default / unset                -> `proved`
+//!
+//! The request the shim sends is read from stdin or the `--request <path>` file;
+//! `echo_request` writes it straight back so a test can assert the exact base64
+//! and `expected_dag_sha256` the shim emitted.
+
+use std::io::Read;
+
+fn read_request(args: &[String]) -> String {
+    // Find `--request <value>`; `-` means stdin, anything else is a file path.
+    let mut request_arg = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--request" {
+            request_arg = it.next().cloned();
+            break;
+        }
+    }
+    match request_arg.as_deref() {
+        Some("-") | None => {
+            let mut buf = String::new();
+            let _ = std::io::stdin().read_to_string(&mut buf);
+            buf
+        }
+        Some(path) => std::fs::read_to_string(path).unwrap_or_default(),
+    }
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let scenario = std::env::var("MOCK_BEACON_SCENARIO").unwrap_or_else(|_| "proved".to_string());
+
+    // Always drain the request so the shim's stdin write completes (the shim
+    // closes its stdin pipe; a child that never reads could deadlock a large
+    // write, though these requests are small).
+    let request = read_request(&args);
+
+    match scenario.as_str() {
+        "proved" => {
+            print!(r#"{{"verdict":"proved","oracle_verified":true}}"#);
+        }
+        "proved_oracle_unverified" => {
+            print!(r#"{{"verdict":"proved_oracle_unverified"}}"#);
+        }
+        "refuted_verified" => {
+            print!(
+                r#"{{"verdict":"refuted","oracle_verified":true,"counterexample":{{"s":42.0}}}}"#
+            );
+        }
+        "refuted_unverified" => {
+            print!(
+                r#"{{"verdict":"refuted","oracle_verified":false,"counterexample":{{"s":42.0}}}}"#
+            );
+        }
+        "refuted_no_flag" => {
+            print!(r#"{{"verdict":"refuted","counterexample":{{"s":42.0}}}}"#);
+        }
+        "nonzero_exit" => {
+            eprint!("mock beacon: simulated verifier failure");
+            std::process::exit(3);
+        }
+        "unparseable" => {
+            print!("this is not json at all <<<");
+        }
+        "hang" => {
+            // Sleep far beyond any test timeout so the shim's hard-kill fires.
+            std::thread::sleep(std::time::Duration::from_secs(600));
+        }
+        "echo_request" => {
+            // Echo the received request so a test can assert its exact shape.
+            print!("{request}");
+        }
+        other => {
+            eprint!("mock beacon: unknown scenario `{other}`");
+            std::process::exit(2);
+        }
+    }
+}

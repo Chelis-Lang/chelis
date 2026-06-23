@@ -46,5 +46,23 @@ serde_json = "1"
 sha2 = "0.10"
 bincode = "1"
 thiserror = { workspace = true }
+# Beacon subprocess shim (chelis#439): transport-only deps for the in-tree
+# DischargeEngine that shells to the out-of-tree chelis-beacon binary. base64
+# encodes the EXACT WireDag v1 bytes inline in the request JSON; wait-timeout
+# gives the hard subprocess kill the discharge timeout maps to; tempfile backs
+# the optional temp-file request transport. None link a solver, so the default
+# build stays solver-free. (tempfile is already used elsewhere in the workspace.)
+base64 = "0.22"
+wait-timeout = "0.2"
+tempfile = "3"
 
 [dev-dependencies]
+
+# A compiled mock `chelis-beacon` binary for the shim integration tests: it reads
+# a request and emits a canned CheckReport JSON selected by an env var, so every
+# §5 mapping row (docs/design/beacon_subprocess_shim.md) can be exercised without
+# a real Beacon. The tests reach it via CARGO_BIN_EXE_mock-chelis-beacon (defined
+# for integration tests under tests/).
+[[bin]]
+name = "mock-chelis-beacon"
+path = "src/bin/mock_chelis_beacon.rs"
