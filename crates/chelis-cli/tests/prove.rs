@@ -371,7 +371,24 @@ fn measure_zero_false_call_form_is_refuted_at_smt_not_fuzz_passed() {
         "refutation must come from SMT, not fuzz: {}",
         props[0]
     );
-    assert_eq!(props[0]["composite_verdict"], "failed");
+    // chelis#422 (symmetric Disproved hedge): the disproof is over the REALS
+    // (the goal is Real f32 `sub`/`mul`), so the SMT counterexample may be a
+    // false counterexample at machine arithmetic; the badge is the hedged
+    // failure `disproved_modulo_real_arithmetic`, NOT a definite `failed`. The
+    // coarse `status` is still `failed` and the run still exits 1; the
+    // qualifiers[] array discloses `real_arithmetic` symmetric to the proof
+    // side. (The predicate hedges every over-reals disproof; it does not
+    // separately confirm the counterexample survives machine rounding.)
+    assert_eq!(
+        props[0]["composite_verdict"],
+        "disproved_modulo_real_arithmetic"
+    );
+    let qualifiers = props[0]["qualifiers"].as_array().expect("qualifiers array");
+    assert!(
+        qualifiers.iter().any(|q| q == "real_arithmetic"),
+        "a hedged disproof discloses real_arithmetic symmetric to the proof side: {}",
+        props[0]
+    );
     assert_eq!(
         props[0]["counterexample"]["x"], "12345.0",
         "SMT must report the exact root as counterexample: {}",

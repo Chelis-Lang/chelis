@@ -68,6 +68,18 @@ pub enum CompositeVerdict {
     /// [`CompositeVerdict::ProvenModuloFuzzValidatedContract`], where an exact
     /// SMT base is proven modulo a fuzz-validated contract assumption.
     FuzzValidatedEmpirical,
+    /// An SMT base DISPROVED over the REALS, disclosing the machine-arithmetic
+    /// gap on the failure side (chelis#422, symmetric to
+    /// [`CompositeVerdict::ProvenModuloRealArithmetic`]). The solver found a
+    /// counterexample over exact rationals, but under the real-sorted lowering
+    /// it does not model machine arithmetic, so that counterexample may be a
+    /// FALSE counterexample at runtime (e.g. `0.1 == 1.0 / 10.0` is disproved
+    /// over the reals yet holds at f64). It is a HEDGED failure: it still
+    /// DOMINATES every green (a possible counterexample must never be masked by a
+    /// pass) but is weaker-certainty than a definite [`CompositeVerdict::Failed`]
+    /// (a definite machine-arithmetic counterexample dominates a reals-hedged
+    /// one), so it never overstates a hedged disproof as a definite failure.
+    DisprovedModuloRealArithmetic,
     Invalid,
     Unsupported,
     Failed,
@@ -84,6 +96,7 @@ impl CompositeVerdict {
             CompositeVerdict::ProvenModuloAssertedAxiom => "proven_modulo_asserted_axiom",
             CompositeVerdict::SoundApproximate => "sound_approximate",
             CompositeVerdict::FuzzValidatedEmpirical => "fuzz_validated",
+            CompositeVerdict::DisprovedModuloRealArithmetic => "disproved_modulo_real_arithmetic",
             CompositeVerdict::Invalid => "invalid",
             CompositeVerdict::Unsupported => "unsupported",
             CompositeVerdict::Failed => "failed",
@@ -123,6 +136,7 @@ impl CompositeVerdict {
                 soundness: Soundness::Empirical,
                 qualifiers: QualifierSet::from_iter_kinds([Qualifier::FuzzBase]),
             },
+            CompositeVerdict::DisprovedModuloRealArithmetic => VerdictGuarantee::DisprovedOverReals,
             CompositeVerdict::Unsupported => VerdictGuarantee::Unestablished,
             CompositeVerdict::Invalid => VerdictGuarantee::Vacuous,
             CompositeVerdict::Failed => VerdictGuarantee::Disproved,
@@ -151,6 +165,13 @@ enum VerdictGuarantee {
     /// The assumption set is vacuous (jointly unsatisfiable). Renders
     /// `Invalid`: a proof under contradictory assumptions is unsound.
     Vacuous,
+    /// The property was disproved over the REALS (a counterexample exists over
+    /// exact rationals), but the counterexample may be a false counterexample at
+    /// machine arithmetic (the solver does not model it). A HEDGED failure: it
+    /// dominates every green (a possible counterexample must not be masked by a
+    /// pass) but loses to a definite [`VerdictGuarantee::Disproved`]. Renders
+    /// `DisprovedModuloRealArithmetic`.
+    DisprovedOverReals,
     /// The property was disproved with a counterexample. Renders `Failed`.
     Disproved,
 }
@@ -168,19 +189,26 @@ struct VerdictRollup {
     soundness: Soundness,
     /// Union of every green contribution's qualifier set.
     qualifiers: QualifierSet,
-    /// The strongest-dominating terminal outcome seen, if any. `Disproved`
-    /// dominates `Vacuous` dominates `Unestablished`, matching the legacy
-    /// `Failed > Invalid > Unsupported` precedence.
+    /// The strongest-dominating terminal outcome seen, if any. A definite
+    /// `Disproved` dominates a reals-hedged `DisprovedOverReals`, which dominates
+    /// `Vacuous`, which dominates `Unestablished` -- matching the precedence
+    /// `Failed > DisprovedModuloRealArithmetic > Invalid > Unsupported`.
     terminal: Option<Terminal>,
 }
 
 /// A terminal (non-green) outcome, ordered weakest-dominating last so a fold
-/// can keep the dominating one. `Disproved` dominates `Vacuous` dominates
-/// `Unestablished`.
+/// can keep the dominating one (`max`). The chain is `Unestablished < Vacuous <
+/// DisprovedOverReals < Disproved`: a definite machine-arithmetic counterexample
+/// (`Disproved`) is the strongest failure; a reals-hedged counterexample
+/// (`DisprovedOverReals`) is a weaker-certainty failure that still dominates the
+/// `Vacuous`/`Unestablished` non-failure terminals (a possible counterexample is
+/// a more actionable signal than vacuous assumptions or an unestablished result)
+/// and, like every terminal, dominates all greens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Terminal {
     Unestablished,
     Vacuous,
+    DisprovedOverReals,
     Disproved,
 }
 
@@ -220,6 +248,11 @@ impl VerdictRollup {
                         .map_or(Terminal::Vacuous, |t| t.max(Terminal::Vacuous)),
                 );
             }
+            VerdictGuarantee::DisprovedOverReals => {
+                self.terminal = Some(self.terminal.map_or(Terminal::DisprovedOverReals, |t| {
+                    t.max(Terminal::DisprovedOverReals)
+                }));
+            }
             VerdictGuarantee::Disproved => {
                 self.terminal = Some(
                     self.terminal
@@ -239,6 +272,7 @@ impl VerdictRollup {
         if let Some(terminal) = self.terminal {
             return match terminal {
                 Terminal::Disproved => CompositeVerdict::Failed,
+                Terminal::DisprovedOverReals => CompositeVerdict::DisprovedModuloRealArithmetic,
                 Terminal::Vacuous => CompositeVerdict::Invalid,
                 Terminal::Unestablished => CompositeVerdict::Unsupported,
             };
@@ -342,7 +376,26 @@ impl AssumptionDischarge {
             }
             Some("failed") => {
                 if self.evidence.get("counterexample").is_some() {
-                    VerdictGuarantee::Disproved
+                    // chelis#422 (symmetric to the `proved` branch above): a
+                    // disproof discharged over the REALS (`arith_model:"real"`)
+                    // is a HEDGED failure -- the counterexample may be a false
+                    // counterexample at machine arithmetic -- so it folds as the
+                    // reals-hedged `DisprovedOverReals`, which a definite
+                    // `Disproved` still dominates. A disproof WITHOUT the
+                    // over-reals marker (a fuzz counterexample is a real
+                    // machine-arithmetic witness) folds as the definite
+                    // `Disproved`. This keeps a synthesized self-discharge record
+                    // consistent with its hedged base instead of collapsing it.
+                    if self
+                        .evidence
+                        .get("arith_model")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("real")
+                    {
+                        VerdictGuarantee::DisprovedOverReals
+                    } else {
+                        VerdictGuarantee::Disproved
+                    }
                 } else {
                     // Failed without a counterexample is not a sound
                     // falsification. Degrade to unsupported instead.
@@ -611,10 +664,14 @@ pub fn base_verdict_from_discharge(
 /// carries every caveat in the union so a consumer sees them all -- e.g. an
 /// over-reals proof modulo a fuzz contract is token
 /// `proven_modulo_fuzz_validated_contract` with
-/// `qualifiers:["fuzz","real_arithmetic"]`. A terminal (non-green) rollup
-/// discloses no qualifiers (an empty array): there is no green guarantee to
-/// qualify. The base re-enters the lattice through the same door every
-/// discharge does, so the array is consistent with the rendered badge.
+/// `qualifiers:["fuzz","real_arithmetic"]`. Most terminal (non-green) rollups
+/// disclose no qualifiers (an empty array): there is no green guarantee to
+/// qualify. The ONE exception is a reals-hedged disproof
+/// (`DisprovedModuloRealArithmetic`): it discloses `real_arithmetic`, symmetric
+/// to the proof side, so a consumer sees the same machine-arithmetic caveat on
+/// the failure as on the pass. The base re-enters the lattice through the same
+/// door every discharge does, so the array is consistent with the rendered
+/// badge.
 pub fn composed_qualifier_strings(
     base_soundness: Soundness,
     base_qualifiers: &QualifierSet,
@@ -627,12 +684,41 @@ pub fn composed_qualifier_strings(
         }),
         |acc, a| a.fold_into(acc),
     );
-    // A terminal outcome dominates: it is not a green, so it carries no
-    // disclosed qualifiers.
-    if rollup.terminal.is_some() {
-        return Vec::new();
+    disclosed_from_rollup(&rollup)
+}
+
+/// The disclosed qualifier strings of a rollup, shared by the green-base
+/// (`composed_qualifier_strings`) and badge-base
+/// (`disclosed_qualifier_strings_for_base`) entry points. A green rollup
+/// discloses its union; most terminals disclose nothing; the reals-hedged
+/// disproof discloses `real_arithmetic` so the machine-arithmetic caveat is
+/// visible on the failure side exactly as on the proof side (chelis#422,
+/// symmetric).
+fn disclosed_from_rollup(rollup: &VerdictRollup) -> Vec<&'static str> {
+    match rollup.terminal {
+        Some(Terminal::DisprovedOverReals) => vec![Qualifier::RealArith.as_str()],
+        Some(_) => Vec::new(),
+        None => rollup.qualifiers.iter().map(|q| q.as_str()).collect(),
     }
-    rollup.qualifiers.iter().map(|q| q.as_str()).collect()
+}
+
+/// The disclosed qualifier strings of a verdict that re-enters the lattice from
+/// a base BADGE (rather than a green `(soundness, qualifiers)` discharge). This
+/// is the failure-aware entry point: a hedged-disproof base
+/// (`DisprovedModuloRealArithmetic`) re-enters as the `DisprovedOverReals`
+/// terminal and discloses `real_arithmetic`, where the green-only
+/// `composed_qualifier_strings` cannot express a terminal base. The base
+/// re-enters through `guarantee()` -- the same door `rollup_composite` uses --
+/// so the disclosed array stays consistent with the rendered badge.
+pub fn disclosed_qualifier_strings_for_base(
+    base: CompositeVerdict,
+    assumptions: &[AssumptionRecord],
+) -> Vec<&'static str> {
+    let rollup = assumptions.iter().fold(
+        VerdictRollup::identity().fold(base.guarantee()),
+        |acc, a| a.fold_into(acc),
+    );
+    disclosed_from_rollup(&rollup)
 }
 
 /// Dependency-sensitivity probe for CONTRACT. A consumer proof names the
@@ -873,14 +959,19 @@ mod tests {
             CompositeVerdict::SoundApproximate => 4,
             CompositeVerdict::FuzzValidatedEmpirical => 5,
             // Terminals are weaker than every green (a terminal dominates a
-            // green in the fold), ordered Unsupported < Invalid < Failed.
+            // green in the fold), ordered Unsupported < Invalid <
+            // DisprovedModuloRealArithmetic < Failed. The reals-hedged disproof
+            // is a hedged failure: it dominates greens + the Invalid/Unsupported
+            // non-failure terminals, but loses to a definite Failed (chelis#422,
+            // symmetric to proven_modulo_real_arithmetic on the proof side).
             CompositeVerdict::Unsupported => 6,
             CompositeVerdict::Invalid => 7,
-            CompositeVerdict::Failed => 8,
+            CompositeVerdict::DisprovedModuloRealArithmetic => 8,
+            CompositeVerdict::Failed => 9,
         }
     }
 
-    const ALL_VERDICTS: [CompositeVerdict; 9] = [
+    const ALL_VERDICTS: [CompositeVerdict; 10] = [
         CompositeVerdict::Proven,
         CompositeVerdict::ProvenModuloRealArithmetic,
         CompositeVerdict::ProvenModuloFuzzValidatedContract,
@@ -889,6 +980,7 @@ mod tests {
         CompositeVerdict::FuzzValidatedEmpirical,
         CompositeVerdict::Unsupported,
         CompositeVerdict::Invalid,
+        CompositeVerdict::DisprovedModuloRealArithmetic,
         CompositeVerdict::Failed,
     ];
 
@@ -1079,5 +1171,114 @@ mod tests {
                 "sub-Exact green carrying {qualifier:?} must render Unsupported, not proven"
             );
         }
+    }
+
+    // --- chelis#422 (symmetric): DisprovedModuloRealArithmetic (failure side) ---
+
+    #[test]
+    fn disproved_over_reals_renders_the_hedged_failure_badge() {
+        // The disproof-side terminal projects to the hedged-failure badge --
+        // NOT a definite Failed and NOT a green.
+        let rollup = VerdictRollup::identity().fold(VerdictGuarantee::DisprovedOverReals);
+        assert_eq!(
+            rollup.badge(),
+            CompositeVerdict::DisprovedModuloRealArithmetic
+        );
+        assert_ne!(rollup.badge(), CompositeVerdict::Failed);
+    }
+
+    #[test]
+    fn hedged_disproof_dominates_every_green_and_is_not_masked() {
+        // A reals counterexample must never be masked by a pass: folded with any
+        // green (including the strongest Proven), the hedged failure wins, in
+        // either fold order.
+        for green in [
+            VerdictGuarantee::Green {
+                soundness: Soundness::Exact,
+                qualifiers: QualifierSet::new(),
+            },
+            VerdictGuarantee::Green {
+                soundness: Soundness::SoundApproximate,
+                qualifiers: QualifierSet::from_iter_kinds([Qualifier::RealArith]),
+            },
+            VerdictGuarantee::Green {
+                soundness: Soundness::Empirical,
+                qualifiers: QualifierSet::from_iter_kinds([Qualifier::Fuzz]),
+            },
+            VerdictGuarantee::Green {
+                soundness: Soundness::Empirical,
+                qualifiers: QualifierSet::from_iter_kinds([Qualifier::FuzzBase]),
+            },
+        ] {
+            let a = VerdictRollup::identity()
+                .fold(green.clone())
+                .fold(VerdictGuarantee::DisprovedOverReals)
+                .badge();
+            let b = VerdictRollup::identity()
+                .fold(VerdictGuarantee::DisprovedOverReals)
+                .fold(green)
+                .badge();
+            assert_eq!(a, CompositeVerdict::DisprovedModuloRealArithmetic);
+            assert_eq!(b, CompositeVerdict::DisprovedModuloRealArithmetic);
+        }
+    }
+
+    #[test]
+    fn definite_disproof_dominates_a_hedged_disproof() {
+        // A definite machine-arithmetic counterexample is stronger than a
+        // reals-hedged one: a set carrying both renders the definite Failed.
+        let rolled = VerdictRollup::identity()
+            .fold(VerdictGuarantee::DisprovedOverReals)
+            .fold(VerdictGuarantee::Disproved)
+            .badge();
+        assert_eq!(rolled, CompositeVerdict::Failed);
+        let rolled_rev = VerdictRollup::identity()
+            .fold(VerdictGuarantee::Disproved)
+            .fold(VerdictGuarantee::DisprovedOverReals)
+            .badge();
+        assert_eq!(rolled_rev, CompositeVerdict::Failed);
+    }
+
+    #[test]
+    fn hedged_disproof_dominates_invalid_and_unsupported() {
+        // A possible counterexample is a more actionable signal than a vacuous
+        // assumption set or an unestablished result, so it dominates both.
+        for weaker in [VerdictGuarantee::Vacuous, VerdictGuarantee::Unestablished] {
+            let rolled = VerdictRollup::identity()
+                .fold(weaker)
+                .fold(VerdictGuarantee::DisprovedOverReals)
+                .badge();
+            assert_eq!(rolled, CompositeVerdict::DisprovedModuloRealArithmetic);
+        }
+    }
+
+    #[test]
+    fn disclosed_qualifiers_for_a_hedged_disproof_is_real_arithmetic() {
+        // The hedged-failure rollup discloses `real_arithmetic` (the ONE
+        // terminal that discloses a qualifier), symmetric to the proof side, so
+        // a consumer sees the machine-arithmetic caveat on the failure too. The
+        // rollup's dominating terminal is the hedged disproof (modelled by
+        // re-entering the lattice from the hedged-disproof badge, exactly as the
+        // production base-badge path does).
+        let disclosed = disclosed_qualifier_strings_for_base(
+            CompositeVerdict::DisprovedModuloRealArithmetic,
+            &[],
+        );
+        assert_eq!(disclosed, vec!["real_arithmetic"]);
+        // A definite failure terminal still discloses nothing.
+        let definite = disclosed_qualifier_strings_for_base(CompositeVerdict::Failed, &[]);
+        assert!(definite.is_empty());
+    }
+
+    #[test]
+    fn hedged_disproof_round_trips_and_has_its_canonical_string() {
+        assert_eq!(
+            CompositeVerdict::DisprovedModuloRealArithmetic.as_str(),
+            "disproved_modulo_real_arithmetic"
+        );
+        let json = serde_json::to_string(&CompositeVerdict::DisprovedModuloRealArithmetic).unwrap();
+        assert_eq!(json, "\"disproved_modulo_real_arithmetic\"");
+        let back: CompositeVerdict = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, CompositeVerdict::DisprovedModuloRealArithmetic);
     }
 }

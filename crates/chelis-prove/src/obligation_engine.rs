@@ -86,6 +86,7 @@ impl ObligationOutcome {
                 seed,
                 counterexample.as_ref(),
                 reason.as_deref(),
+                base_discharge_is_real_arithmetic(base_discharge.as_ref()),
             )
         } else {
             assumptions
@@ -118,7 +119,18 @@ impl ObligationOutcome {
             },
             ObligationStatus::Failed => {
                 if counterexample.is_some() {
-                    CompositeVerdict::Failed
+                    // chelis#422 (symmetric): a disproof whose base discharge is
+                    // over the reals (carries `RealArith`) is a HEDGED failure --
+                    // the counterexample may be a false counterexample at machine
+                    // arithmetic -- so it reads `disproved_modulo_real_arithmetic`.
+                    // A disproof with no real-arithmetic base (a fuzz
+                    // counterexample is a real machine-arithmetic witness) is a
+                    // definite `Failed`.
+                    if base_discharge_is_real_arithmetic(base_discharge.as_ref()) {
+                        CompositeVerdict::DisprovedModuloRealArithmetic
+                    } else {
+                        CompositeVerdict::Failed
+                    }
                 } else {
                     CompositeVerdict::Unsupported
                 }
@@ -166,8 +178,16 @@ impl ObligationOutcome {
     }
 
     /// The full disclosed qualifier set of this obligation's composed verdict,
-    /// as sorted snake_case strings for the `qualifiers:[...]` JSON array.
+    /// as sorted snake_case strings for the `qualifiers:[...]` JSON array. A
+    /// reals-hedged disproof discloses `real_arithmetic` (symmetric to the proof
+    /// side); every other non-green outcome discloses none.
     pub fn disclosed_qualifiers(&self) -> Vec<&'static str> {
+        if self.composite_verdict == CompositeVerdict::DisprovedModuloRealArithmetic {
+            return crate::composition::disclosed_qualifier_strings_for_base(
+                CompositeVerdict::DisprovedModuloRealArithmetic,
+                &self.assumptions,
+            );
+        }
         match self.effective_base_discharge() {
             Some((soundness, qualifiers)) => crate::composition::composed_qualifier_strings(
                 soundness,
@@ -189,6 +209,7 @@ fn default_obligation_assumptions(
     seed: u64,
     counterexample: Option<&serde_json::Value>,
     reason: Option<&str>,
+    base_real_arithmetic: bool,
 ) -> Vec<AssumptionRecord> {
     let method = match tier {
         ObligationTier::Smt => DischargeMethod::Smt,
@@ -207,6 +228,19 @@ fn default_obligation_assumptions(
             "samples": samples,
             "seed": seed,
             "tolerance": FUZZ_TOLERANCE,
+        }),
+        // chelis#422 (symmetric to the `proved` branch): a disproof discharged
+        // over the REALS carries `arith_model:"real"`, so the synthesized
+        // self-discharge record folds as the reals-hedged `DisprovedOverReals`
+        // -- consistent with the hedged base -- instead of a definite
+        // `Disproved` that would collapse the hedge to a flat `failed`. A fuzz
+        // disproof (a real machine-arithmetic witness) omits the marker and
+        // stays definite.
+        ObligationStatus::Failed if base_real_arithmetic => serde_json::json!({
+            "status": "failed",
+            "obligation": name,
+            "counterexample": counterexample.cloned(),
+            "arith_model": "real",
         }),
         ObligationStatus::Failed => serde_json::json!({
             "status": "failed",
@@ -547,14 +581,21 @@ fn run_one(
                     );
                 }
                 TierBResult::Disproved(model) => {
-                    return outcome(
+                    // chelis#422 (symmetric): thread the discharge so a disproof
+                    // over the reals (carries `RealArith`) reads
+                    // `disproved_modulo_real_arithmetic` -- the counterexample may
+                    // be a false counterexample at machine arithmetic -- rather
+                    // than a flattened definite `failed`.
+                    return outcome_with_assumptions(
                         ob,
                         ObligationStatus::Failed,
                         ObligationTier::Smt,
                         0,
                         options.seed,
+                        base_discharge,
                         Some(model),
                         None,
+                        Vec::new(),
                     );
                 }
                 TierBResult::Timeout => {
@@ -1234,6 +1275,16 @@ fn generation_producers(
         });
     }
     out
+}
+
+/// Whether a threaded base discharge is an over-the-reals decision (carries
+/// [`crate::discharge::Qualifier::RealArith`]). Used to hedge a disproof's
+/// failure badge symmetrically to the proof side (chelis#422).
+fn base_discharge_is_real_arithmetic(
+    base_discharge: Option<&(crate::discharge::Soundness, QualifierSet)>,
+) -> bool {
+    base_discharge
+        .is_some_and(|(_, qualifiers)| qualifiers.contains(crate::discharge::Qualifier::RealArith))
 }
 
 #[allow(clippy::too_many_arguments)]

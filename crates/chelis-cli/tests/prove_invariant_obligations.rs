@@ -275,6 +275,25 @@ def bad_prob(x: f32) -> Option[Probability] =
     let obs = obligations(&records);
     assert_eq!(obs[0]["status"], "failed");
     assert!(obs[0].get("counterexample").is_some(), "has counterexample");
+    // chelis#422 (symmetric Disproved hedge): the obligation invariant is over
+    // the REALS (f32 `p.value >= 0.0 && p.value <= 1.0`), so the SMT
+    // counterexample may be a false counterexample at machine arithmetic. The
+    // verdict is the hedged failure, NOT a flat definite `failed`, and the
+    // qualifiers[] array discloses `real_arithmetic` -- IDENTICAL to the
+    // property-path disproof (the obligation path must not silently drop the
+    // hedge a `default_obligation_assumptions` synthesis once collapsed). Pin
+    // the verdict, not just the coarse `status`.
+    assert_eq!(
+        obs[0]["composite_verdict"], "disproved_modulo_real_arithmetic",
+        "an over-reals obligation disproof is hedged, symmetric to the property path: {}",
+        obs[0]
+    );
+    assert_eq!(
+        obs[0]["qualifiers"],
+        serde_json::json!(["real_arithmetic"]),
+        "the hedged obligation disproof discloses real_arithmetic: {}",
+        obs[0]
+    );
 }
 
 #[test]
