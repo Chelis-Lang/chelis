@@ -1,7 +1,7 @@
 # The Chelis Verification Stack: Whole-Stack Sketch
 
 Intended location: `spec/design/verification_stack_sketch.md` (chelis repo).
-Companion documents: the master plan (`spec/design/verification_stack_master_plan.md`), the dependency map (`spec/design/verification_stack_dependency_map.md`), the Beacon engine plan (`spec/design/beacon_plan.md`), and the VNN-LIB front-end placeholder (`spec/design/vnnlib_frontend_placeholder.md`).
+Companion documents: the master plan (`spec/design/verification_stack_master_plan.md`), the dependency map (`spec/design/verification_stack_dependency_map.md`), the Beacon engine plan (`spec/design/beacon_plan.md`), the VNN-LIB front-end placeholder (`spec/design/vnnlib_frontend_placeholder.md`), and the composed-verdict evidence-schema contract (`spec/design/composed_verdict_evidence_schema.md`), which fixes the canonical evidence record and honesty requirements a downstream legibility consumer depends on.
 
 A high-level architecture sketch, not a build plan. It states the shape of what we are proposing, what is already shipped versus changing versus new, and the dependency relationships between pieces. Sequencing, and the deeper component-evaluation research, are named as separate passes at the end. The numbered build-of-record is the master plan and the dependency structure is the dependency map; this sketch is the narrative those two formalize.
 
