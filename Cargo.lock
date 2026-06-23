@@ -212,6 +212,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "az"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be5eb007b7cacc6c660343e96f650fedf4b5a77512399eb952ca6642cf8d13f7"
+
+[[package]]
 name = "backtrace"
 version = "0.3.76"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -332,6 +338,17 @@ name = "bytes"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
+
+[[package]]
+name = "carcara"
+version = "1.1.0"
+source = "git+https://github.com/ufmg-smite/carcara?rev=45bfaedce92b31970cc2f8b07966813652aed8b0#45bfaedce92b31970cc2f8b07966813652aed8b0"
+dependencies = [
+ "indexmap",
+ "log",
+ "rug",
+ "thiserror 1.0.69",
+]
 
 [[package]]
 name = "cargo-husky"
@@ -497,7 +514,7 @@ dependencies = [
  "miette",
  "proptest",
  "serde",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -542,7 +559,7 @@ dependencies = [
  "chelis-types",
  "serde",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -582,7 +599,7 @@ dependencies = [
  "chelis-ir",
  "chelis-surf",
  "chelis-types",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -590,7 +607,7 @@ name = "chelis-pred"
 version = "0.9.0"
 dependencies = [
  "chelis-deep",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -598,17 +615,19 @@ name = "chelis-prove"
 version = "0.9.0"
 dependencies = [
  "bincode",
+ "carcara",
  "chelis-compiler-api",
  "chelis-deep",
  "chelis-pred",
  "chelis-surf",
  "chelis-types",
  "cvc5-rs",
+ "gmp-mpfr-sys",
  "num-rational",
  "serde",
  "serde_json",
  "sha2",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -689,7 +708,7 @@ dependencies = [
  "miette",
  "proptest",
  "serde",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -723,7 +742,7 @@ dependencies = [
  "serde",
  "stacker",
  "syn",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -736,7 +755,7 @@ dependencies = [
  "pest",
  "pest_derive",
  "tempfile",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1280,6 +1299,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
+name = "gmp-mpfr-sys"
+version = "1.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7db155b537cb791b133341f99f68371d86ee7fa4c79aacfbc376d72d23c70531"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "h2"
 version = "0.3.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1736,7 +1765,7 @@ checksum = "bde5057d6143cc94e861d90f591b9303d6716c6b9602309150bd068853c10899"
 dependencies = [
  "hashbrown 0.16.1",
  "portable-atomic",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1766,6 +1795,12 @@ dependencies = [
  "cfg-if",
  "windows-link",
 ]
+
+[[package]]
+name = "libm"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "line-clipping"
@@ -2397,7 +2432,7 @@ dependencies = [
  "kasuari",
  "lru",
  "strum",
- "thiserror",
+ "thiserror 2.0.18",
  "unicode-segmentation",
  "unicode-truncate",
  "unicode-width 0.2.2",
@@ -2525,6 +2560,18 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rug"
+version = "1.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07a8857882aec59d27254b02481c709327c13de6fad1da60bfc4f9783eaaa61e"
+dependencies = [
+ "az",
+ "gmp-mpfr-sys",
+ "libc",
+ "libm",
 ]
 
 [[package]]
@@ -3041,11 +3088,31 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
+dependencies = [
+ "thiserror-impl 1.0.69",
+]
+
+[[package]]
+name = "thiserror"
 version = "2.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
 dependencies = [
- "thiserror-impl",
+ "thiserror-impl 2.0.18",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

@@ -96,7 +96,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install C dependencies
-        run: sudo apt-get update && sudo apt-get install -y gcc g++ cmake libclang-dev libopenblas-dev
+        run: sudo apt-get update && sudo apt-get install -y gcc g++ cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -119,6 +119,9 @@ jobs:
 
       - name: Run smt-gated chelis-prove tests
         run: cargo test -p chelis-prove --features smt
+
+      - name: Run carcara-gated chelis-prove tests
+        run: cargo test -p chelis-prove --features carcara
 
   integration:
     name: Integration Tests (Linux)

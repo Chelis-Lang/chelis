@@ -11,6 +11,11 @@
 
 pub mod ad_rail;
 pub mod artifact;
+// WI-16 Carcara auditability: re-check cvc5's Alethe proofs. The SMT-LIB
+// problem renderer and the audit-outcome type are always present (so the
+// renderer is unit-testable without cvc5/carcara linked); the live
+// cvc5 -> Alethe -> Carcara round-trip is gated behind the `carcara` feature.
+pub mod carcara_audit;
 pub mod composition;
 pub mod concrete_eval;
 pub mod contracts;
@@ -32,6 +37,7 @@ pub mod tier_c;
 pub mod worker;
 
 pub use artifact::{ProofArtifact, ProofStatus, ProofTier};
+pub use carcara_audit::{CarcaraAudit, render_smtlib_problem};
 pub use composition::{
     AssumptionDischarge, AssumptionRecord, AssumptionRegistry, CompositeVerdict, CompositionProbe,
     DischargeMethod, DischargeTier, NonVacuityRecord, NonVacuityStatus, rollup_composite,

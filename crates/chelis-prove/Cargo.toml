@@ -8,6 +8,16 @@ description = "Three-tier property verification: type check → SMT (cvc5) → f
 
 [features]
 smt = ["cvc5-rs", "num-rational"]
+# WI-16 Carcara auditability: re-check cvc5's Alethe proofs in-process for
+# independent auditability of the linear-arithmetic / EUF fragment (the
+# SmtExpr/SmtSort surface has no bit-vector representation, so the bit-vector
+# slice of Alethe is not reachable here). It audits cvc5's output, so it
+# implies `smt`. `gmp-mpfr-sys/use-system-libs` forces the
+# transitive `rug -> gmp-mpfr-sys` build to LINK the system GMP/MPFR (needs
+# the `gmp-devel`/`mpfr-devel` headers) instead of compiling GMP+MPFR from C
+# source, keeping the build off the slow from-source path. carcara's `rug`
+# enables only `integer`+`rational`, so only GMP and MPFR are needed (no MPC).
+carcara = ["smt", "dep:carcara", "gmp-mpfr-sys/use-system-libs"]
 
 [dependencies]
 cvc5-rs = { version = "0.3", optional = true }
@@ -17,6 +27,15 @@ cvc5-rs = { version = "0.3", optional = true }
 num-rational = { version = "0.4", default-features = false, features = [
     "num-bigint",
 ], optional = true }
+# Carcara is a Rust project, not a crates.io crate (see the WI-16 master-plan
+# note), so it is a pinned git dependency. Pin a specific rev for build
+# reproducibility and CI-cache stability.
+carcara = { git = "https://github.com/ufmg-smite/carcara", rev = "45bfaedce92b31970cc2f8b07966813652aed8b0", optional = true }
+# Pulled in only so the `carcara` feature can force `use-system-libs` on the
+# transitive `rug -> gmp-mpfr-sys` build (cargo unifies the feature across the
+# graph). `default-features = false` + `mpfr` matches what carcara's `rug`
+# needs (GMP via the implied base, plus MPFR), without MPC.
+gmp-mpfr-sys = { version = "1", default-features = false, features = ["mpfr"], optional = true }
 chelis-surf = { path = "../chelis-surf" }
 chelis-deep = { path = "../chelis-deep" }
 chelis-pred = { path = "../chelis-pred" }
