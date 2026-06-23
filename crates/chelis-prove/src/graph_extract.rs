@@ -54,7 +54,8 @@
 
 use chelis_compiler_api::compiler;
 use chelis_compiler_api::schema::{
-    LowerRequest, SourceKind, WIRE_DAG_SCHEMA_VERSION, WireDag, WireDagSchemaError, WireRiscOp,
+    LowerRequest, LowerResult, SourceKind, WIRE_DAG_SCHEMA_VERSION, WireDag, WireDagSchemaError,
+    WireRiscOp,
 };
 use sha2::{Digest, Sha256};
 
@@ -323,27 +324,74 @@ pub fn box_range_goal_from_wire_dag(
     })
 }
 
+/// Lower `source` to a `WireDag` v1 via the public
+/// [`chelis_compiler_api::compiler::lower`] API, mapping a lowering failure to
+/// [`GraphExtractError::LowerFailed`]. When `entry` is `Some`, lowering is
+/// scoped to the defs reachable from that named entry (the WI-3
+/// entrypoint-isolation path): unrelated top-level functions that reference
+/// unresolved imports are pruned before the type checker runs, so they cannot
+/// block the target's extraction. An unresolved symbol in the entry's OWN
+/// reachable closure still surfaces here as a lowering failure (pruning drops
+/// only genuinely-unreachable defs).
+fn lower_source(
+    source: &str,
+    source_kind: SourceKind,
+    entry: Option<&str>,
+) -> Result<LowerResult, GraphExtractError> {
+    compiler::lower(LowerRequest {
+        source_kind,
+        source: source.to_string(),
+        entry: entry.map(str::to_string),
+    })
+    .map_err(|err| {
+        let messages: Vec<String> = err.errors.iter().map(|d| d.message.clone()).collect();
+        GraphExtractError::LowerFailed(messages.join("; "))
+    })
+}
+
 /// Build a single box/range [`Goal`] from Chelis source, addressing the
 /// goal's ONE scalar output by name.
 ///
-/// Lowers `source` to a `WireDag` v1 via the public
-/// [`chelis_compiler_api::compiler::lower`] API, then delegates to
-/// [`box_range_goal_from_wire_dag`]. The `output_range.output` name must be
-/// a named root of the lowered program.
+/// Lowers the WHOLE `source` to a `WireDag` v1, then delegates to
+/// [`box_range_goal_from_wire_dag`]. The `output_range.output` name must be a
+/// named root of the lowered program. Use
+/// [`box_range_goal_from_source_entry`] to extract one entry from a module
+/// that also defines unrelated, unlowerable functions.
 pub fn box_range_goal_from_source(
     source: &str,
     source_kind: SourceKind,
     input_box: IntervalBox,
     output_range: OutputRange,
 ) -> Result<ExtractedGoal, GraphExtractError> {
-    let lowered = compiler::lower(LowerRequest {
-        source_kind,
-        source: source.to_string(),
-    })
-    .map_err(|err| {
-        let messages: Vec<String> = err.errors.iter().map(|d| d.message.clone()).collect();
-        GraphExtractError::LowerFailed(messages.join("; "))
-    })?;
+    let lowered = lower_source(source, source_kind, None)?;
+    box_range_goal_from_wire_dag(&lowered.dag, &lowered.named_roots, input_box, output_range)
+}
+
+/// Build a single box/range [`Goal`] from Chelis source, scoping lowering to
+/// the defs reachable from `entry`.
+///
+/// This is the entrypoint-isolation form: a real source module may define an
+/// unrelated function whose body references an unresolved import (so the
+/// whole-program lowering [`box_range_goal_from_source`] fails), while
+/// the target entry's own closure lowers cleanly. Pruning to `entry`'s
+/// reachable defs drops the unrelated function before the type checker runs,
+/// so the target extracts. The `entry` is the def whose result becomes a
+/// named root; `output_range.output` is then resolved against that root set
+/// (it is typically `entry` itself, but the producer addresses by output
+/// name, not by the entry name, so a multi-root entry stays addressable).
+///
+/// The safety property (locked by a negative test): if `entry`'s OWN closure
+/// references an unresolved symbol, that error is NOT hidden — pruning keeps
+/// the target's real dependencies, so the lowering still fails with that
+/// error rather than silently extracting a partial graph.
+pub fn box_range_goal_from_source_entry(
+    source: &str,
+    source_kind: SourceKind,
+    entry: &str,
+    input_box: IntervalBox,
+    output_range: OutputRange,
+) -> Result<ExtractedGoal, GraphExtractError> {
+    let lowered = lower_source(source, source_kind, Some(entry))?;
     box_range_goal_from_wire_dag(&lowered.dag, &lowered.named_roots, input_box, output_range)
 }
 
@@ -367,14 +415,22 @@ pub fn box_range_goals_from_source(
     input_box: IntervalBox,
     outputs: Vec<OutputRange>,
 ) -> Result<Vec<ExtractedGoal>, GraphExtractError> {
-    let lowered = compiler::lower(LowerRequest {
-        source_kind,
-        source: source.to_string(),
-    })
-    .map_err(|err| {
-        let messages: Vec<String> = err.errors.iter().map(|d| d.message.clone()).collect();
-        GraphExtractError::LowerFailed(messages.join("; "))
-    })?;
+    box_range_goals_from_source_scoped(source, source_kind, None, input_box, outputs)
+}
+
+/// Entrypoint-scoped form of [`box_range_goals_from_source`]: when `entry` is
+/// `Some`, lowering is restricted to that entry's reachable defs (see
+/// [`box_range_goal_from_source_entry`] for the isolation rationale and the
+/// safety property). Every output is still resolved against the (pruned)
+/// program's named roots and fans out into its own goal.
+pub fn box_range_goals_from_source_scoped(
+    source: &str,
+    source_kind: SourceKind,
+    entry: Option<&str>,
+    input_box: IntervalBox,
+    outputs: Vec<OutputRange>,
+) -> Result<Vec<ExtractedGoal>, GraphExtractError> {
+    let lowered = lower_source(source, source_kind, entry)?;
 
     let mut goals = Vec::with_capacity(outputs.len());
     for output_range in outputs {

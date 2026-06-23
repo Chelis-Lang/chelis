@@ -560,3 +560,181 @@ fn finite_f64_bearing_ops_pass_the_finite_guard() {
         );
     }
 }
+
+// ===========================================================================
+// Entrypoint isolation (chelis#440): extract one entry from a module that
+// also defines an unrelated function which fails to lower.
+//
+// A real source module (Shoals pricing.ch) imports a symbol that is unbound
+// without reef package context and uses it in ONE function, which blocks the
+// WHOLE-program lowering of an unrelated, self-contained target. This mirrors
+// that shape with a minimal but realistic pure-tensor fixture: a target entry
+// `priced` (a pure-elementwise-tensor function -> a real WireDag root) that
+// uses a shared helper `scaled`, plus an `unrelated` function whose body
+// references an unresolved import `missing_sym`. Pruning to `priced` drops
+// `unrelated` (and its unresolvable reference) before the type checker runs,
+// so the target extracts and is addressable; the WHOLE-program form fails.
+// ===========================================================================
+
+/// A module with a self-contained pure-tensor target (`priced`, using helper
+/// `scaled`) plus an `unrelated` function that references an unresolved
+/// import. The whole program does not lower; pruning to `priced` does.
+const ENTRY_ISOLATION_SOURCE: &str = "module Demo.Pricer\n\
+    import Other.Pkg (missing_sym)\n\
+    def scaled[n](v: tensor[n, f32], k: tensor[n, f32]) -> tensor[n, f32] = mul(v, k)\n\
+    def priced[n](v: tensor[n, f32], k: tensor[n, f32], b: tensor[n, f32]) -> tensor[n, f32] = add(scaled(v, k), b)\n\
+    def unrelated[n](v: tensor[n, f32]) -> tensor[n, f32] = missing_sym(v)\n";
+
+#[test]
+fn whole_program_lowering_fails_when_an_unrelated_fn_is_unlowerable() {
+    // The negative baseline: WITHOUT entry scoping, the unrelated
+    // `missing_sym` reference makes the whole-program lowering fail, even
+    // though `priced` itself is self-contained. This is the chelis#440 bug
+    // the entry-scoped path fixes.
+    let err = box_range_goal_from_source(
+        ENTRY_ISOLATION_SOURCE,
+        SourceKind::Surf,
+        input_box(&[("v", -10.0, 10.0)]),
+        output_range("priced", 0.0, 100.0),
+    )
+    .expect_err("the unrelated unlowerable fn blocks whole-program lowering");
+    match err {
+        GraphExtractError::LowerFailed(message) => {
+            assert!(
+                message.contains("missing_sym"),
+                "the failure must be the unrelated import, got {message:?}"
+            );
+        }
+        other => panic!("expected LowerFailed naming missing_sym, got {other:?}"),
+    }
+}
+
+#[test]
+fn entry_scoped_extraction_prunes_the_unrelated_fn_and_yields_a_populated_goal() {
+    // The positive case: scoping to `priced` prunes `unrelated`, so the target
+    // extracts with a populated, name-addressed handle.
+    let extracted = box_range_goal_from_source_entry(
+        ENTRY_ISOLATION_SOURCE,
+        SourceKind::Surf,
+        "priced",
+        input_box(&[("v", -10.0, 10.0)]),
+        output_range("priced", 0.0, 100.0),
+    )
+    .expect("scoping to `priced` prunes the unrelated fn and extracts the target");
+
+    // It is a populated BoxRange goal addressed by a name-resolved root index.
+    assert!(matches!(extracted.goal.shape, GoalShape::BoxRange { .. }));
+    assert!(extracted.goal.ir.is_populated());
+    let hash = extracted
+        .goal
+        .ir
+        .dag_hash()
+        .expect("a populated handle carries a dag hash");
+    let root_index = extracted
+        .goal
+        .ir
+        .root_index()
+        .expect("a populated handle carries a root index");
+
+    // The hash is a lowercase-hex sha256 of EXACTLY the serialized bytes
+    // (the content-address convention Beacon hashes; no reformat step).
+    assert_eq!(hash.len(), 64, "sha256 is 32 bytes = 64 hex chars");
+    assert!(
+        hash.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "hash must be lowercase hex, got {hash}"
+    );
+    assert_eq!(extracted.dag_hash, hash);
+    assert_eq!(
+        expected_sha256_hex(&extracted.wire_dag_bytes),
+        hash,
+        "the handle's hash must be the sha256 of the serialized WireDag bytes"
+    );
+
+    // The serialized artifact is a v1 WireDag that round-trips, and the
+    // name-resolved `priced` root indexes a real root of it.
+    let parsed: WireDag = serde_json::from_slice(&extracted.wire_dag_bytes)
+        .expect("the serialized bytes parse back as a WireDag");
+    assert_eq!(parsed.schema_version, WIRE_DAG_SCHEMA_VERSION);
+    parsed
+        .validate_schema_version()
+        .expect("the produced artifact is a supported version");
+    assert!(
+        (root_index as usize) < parsed.nodes.len(),
+        "the root index addresses a node in the DAG"
+    );
+    assert!(
+        parsed.roots.contains(&(root_index as usize)),
+        "the resolved index is one of the DAG's roots"
+    );
+}
+
+#[test]
+fn entry_scoping_does_not_change_an_already_lowerable_program() {
+    // The control: on a program that ALREADY lowers whole, scoping to the
+    // sole entry produces a populated goal equivalent to the unscoped path.
+    // (The bytes need not be identical to the unscoped form -- pruning may
+    // drop unreachable roots -- but the target entry must still extract.)
+    let scoped = box_range_goal_from_source_entry(
+        "out = (mul(x, x) : tensor[f32])\n\
+         x = (x : tensor[f32])\n",
+        SourceKind::Surf,
+        "out",
+        input_box(&[("x", -1.0, 1.0)]),
+        output_range("out", 0.0, 1.0),
+    )
+    .expect("scoping to the sole entry of a lowerable program extracts it");
+    assert!(scoped.goal.ir.is_populated());
+}
+
+#[test]
+fn entry_scoping_does_not_hide_an_error_in_the_targets_own_closure() {
+    // The safety negative twin: when the ENTRY's OWN reachable closure
+    // references the unresolved symbol, pruning must NOT hide it. Scoping to
+    // `unrelated` (whose body IS `missing_sym(v)`) keeps that reference, so
+    // the lowering still fails with the real error -- pruning drops only
+    // genuinely-unreachable defs, never a real error in the target's deps.
+    let err = box_range_goal_from_source_entry(
+        ENTRY_ISOLATION_SOURCE,
+        SourceKind::Surf,
+        "unrelated",
+        input_box(&[("v", -10.0, 10.0)]),
+        output_range("unrelated", 0.0, 100.0),
+    )
+    .expect_err("scoping to an entry whose own closure is unlowerable must still fail");
+    match err {
+        GraphExtractError::LowerFailed(message) => {
+            assert!(
+                message.contains("missing_sym"),
+                "the entry's own unresolved reference must surface, got {message:?}"
+            );
+        }
+        other => panic!("expected LowerFailed naming missing_sym, got {other:?}"),
+    }
+}
+
+#[test]
+fn entry_scoped_extraction_is_deterministic_within_run() {
+    // Two scoped extractions of the same source + entry within this run
+    // produce byte-identical artifacts (content addressing is the
+    // back-reference Beacon relies on; a reformat/re-serialize step would
+    // break the hash match).
+    let a = box_range_goal_from_source_entry(
+        ENTRY_ISOLATION_SOURCE,
+        SourceKind::Surf,
+        "priced",
+        input_box(&[("v", -1.0, 1.0)]),
+        output_range("priced", 0.0, 1.0),
+    )
+    .expect("first scoped extraction");
+    let b = box_range_goal_from_source_entry(
+        ENTRY_ISOLATION_SOURCE,
+        SourceKind::Surf,
+        "priced",
+        input_box(&[("v", -1.0, 1.0)]),
+        output_range("priced", 0.0, 1.0),
+    )
+    .expect("second scoped extraction");
+    assert_eq!(a.wire_dag_bytes, b.wire_dag_bytes);
+    assert_eq!(a.dag_hash, b.dag_hash);
+}
