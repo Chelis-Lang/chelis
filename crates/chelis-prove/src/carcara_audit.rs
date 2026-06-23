@@ -37,9 +37,12 @@
 //! disclosure boundary, not an unsoundness.
 //!
 //! The audit result is folded into the discharge as an independent-audit
-//! EVIDENCE DIMENSION; it never changes a discharge's soundness or qualifier. A
-//! cvc5 `Proved` stays `Soundness::Exact` carrying `Qualifier::Exact`. A
-//! re-check that FAILS is recorded as a [`CarcaraAudit::Failed`] auditor
+//! EVIDENCE DIMENSION; it never changes a discharge's soundness or qualifier.
+//! Under the chelis#422 honesty taxonomy a cvc5 `Proved` is classified
+//! `Soundness::SoundApproximate` carrying `Qualifier::RealArith` (a decision
+//! over the reals, not exact machine arithmetic); the audit keeps that badge
+//! unchanged. A re-check that FAILS is recorded as a [`CarcaraAudit::Failed`]
+//! auditor
 //! disagreement in the evidence and is never folded into a confirmed state.
 //! NOTE: today this evidence dimension is WRITE-ONLY -- no production consumer
 //! reads `evidence["carcara_audit"]`, and a `Failed` audit does not change the
@@ -313,11 +316,66 @@ fn render_term(expr: &SmtExpr) -> String {
     }
 }
 
-/// Render a finite f64 as an SMT-LIB-2 Real literal. SMT-LIB has no
-/// negative-numeral token, so a negative value is wrapped in `(- ...)`; the
-/// magnitude is rendered with a decimal point so it parses as a Real, not an
-/// Int.
+/// Render a finite f64 as an SMT-LIB-2 Real term.
+///
+/// Under the `smt` feature this renders the literal's EXACT f64 VALUE as the
+/// rational `numerator/denominator` (via `num_rational::BigRational::from_float`,
+/// the SAME lowering `tier_b::lower_to_cvc5` uses for a `RealLit` since
+/// chelis#444). This is load-bearing for the audit: cvc5's Alethe proof terms
+/// carry the exact-f64 rational (e.g. `0.1_f64` is `3602879701896397/2^55`, not
+/// `1/10`), so a decimal rendering here would NOT polyeq-match the proof's term
+/// for a non-representable literal and Carcara would spuriously reject a sound
+/// proof. The rational is emitted as SMT-LIB-2 `(/ n.0 d.0)` (or a bare `n.0`
+/// when the denominator is 1), with a negative value wrapped in `(- ...)` since
+/// SMT-LIB has no negative-numeral token.
+///
+/// Without the `smt` feature (the renderer's shape unit tests, no cvc5 in play)
+/// `num-rational` is absent, so it falls back to the shortest round-tripping
+/// decimal. That path never feeds a live cvc5 proof, so the exact-vs-decimal
+/// distinction is moot there.
+#[cfg(feature = "smt")]
 fn render_real_lit(v: f64) -> String {
+    // `from_float` returns Some for every finite f64 (None only on inf/NaN,
+    // which the caller has already screened out of the fragment). The fallback
+    // to the decimal form keeps this total if that ever changes.
+    let Some(exact) = num_rational::BigRational::from_float(v) else {
+        return render_real_lit_decimal(v);
+    };
+    // `BigRational` normalizes to a positive denominator with the sign carried
+    // on the numerator, and `BigInt`'s `Display` prints a leading `-` for a
+    // negative value. Inspect the printed numerator's sign so the SMT-LIB term
+    // wraps the magnitude in `(- ...)` (SMT-LIB has no negative numeral), then
+    // emit `(/ n.0 d.0)` for a true fraction or a bare `n.0` for an integer.
+    let numer = exact.numer().to_string();
+    let denom = exact.denom().to_string();
+    let (negative, abs_numer) = match numer.strip_prefix('-') {
+        Some(rest) => (true, rest.to_string()),
+        None => (false, numer),
+    };
+    let body = if denom == "1" {
+        format!("{abs_numer}.0")
+    } else {
+        format!("(/ {abs_numer}.0 {denom}.0)")
+    };
+    if negative {
+        format!("(- {body})")
+    } else {
+        body
+    }
+}
+
+/// The decimal fallback for the renderer's shape unit tests (no `smt` feature,
+/// so no `num-rational` and no live cvc5 proof to match). SMT-LIB has no
+/// negative-numeral token, so a negative value is wrapped in `(- ...)`; the
+/// magnitude is rendered with a decimal point so it parses as a Real, not an Int.
+#[cfg(not(feature = "smt"))]
+fn render_real_lit(v: f64) -> String {
+    render_real_lit_decimal(v)
+}
+
+/// The shortest-round-tripping-decimal rendering. Used as the no-`smt` renderer
+/// and as the `smt`-path fallback if `from_float` ever returns `None`.
+fn render_real_lit_decimal(v: f64) -> String {
     let mag = format!("{}", v.abs());
     let mag = if mag.contains('.') || mag.contains('e') || mag.contains('E') {
         mag
@@ -700,8 +758,12 @@ mod tests {
     }
 
     #[test]
-    fn renders_negative_real_literal_as_smtlib_minus_form() {
-        // A bare `-1.5` token is not valid SMT-LIB; it must render as `(- 1.5)`.
+    fn renders_negative_real_literal_in_smtlib_minus_form() {
+        // A bare negative numeral is not valid SMT-LIB; a negative real must be
+        // wrapped in `(- ...)`. -1.5 is exactly representable (-3/2), so under
+        // the `smt` feature it renders as the exact rational `(- (/ 3.0 2.0))`
+        // matching chelis#444's lowering, and without it as the decimal
+        // `(- 1.5)`. Either way, no bare negative numeral appears.
         let prop = SmtProperty {
             variables: vec![("x".to_string(), SmtSort::Real)],
             preconditions: vec![],
@@ -712,8 +774,40 @@ mod tests {
             ),
         };
         let smt = render_smtlib_problem(&prop).expect("renders");
-        assert!(smt.contains("(- 1.5)"), "negative real as (- 1.5): {smt}");
         assert!(!smt.contains("-1.5"), "no bare negative numeral: {smt}");
+        #[cfg(feature = "smt")]
+        assert!(
+            smt.contains("(- (/ 3.0 2.0))"),
+            "exact rational of -1.5 is -3/2: {smt}"
+        );
+        #[cfg(not(feature = "smt"))]
+        assert!(smt.contains("(- 1.5)"), "decimal fallback for -1.5: {smt}");
+    }
+
+    /// chelis#444 fidelity (smt feature): a NON-representable decimal literal
+    /// like 0.1 must render as its EXACT f64 rational, not the decimal `0.1`,
+    /// so the rendered problem matches the exact-f64 term cvc5 puts in the
+    /// Alethe proof (else polyeq would fail and Carcara would spuriously reject
+    /// a sound proof). 0.1_f64 == 3602879701896397 / 2^55.
+    #[cfg(feature = "smt")]
+    #[test]
+    fn renders_non_representable_decimal_as_its_exact_f64_rational() {
+        let rendered = render_real_lit(0.1);
+        // The exact f64 value of 0.1, matching num_rational::BigRational::from_float.
+        let expected = {
+            let exact = num_rational::BigRational::from_float(0.1).unwrap();
+            format!("(/ {}.0 {}.0)", exact.numer(), exact.denom())
+        };
+        assert_eq!(
+            rendered, expected,
+            "0.1 must render as its exact f64 rational"
+        );
+        // It must NOT be the misleading decimal `0.1` (the bug this guards).
+        assert_ne!(rendered, "0.1");
+        assert!(
+            rendered.contains('/'),
+            "a non-integer f64 renders as a fraction"
+        );
     }
 
     #[test]

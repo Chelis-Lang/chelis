@@ -925,8 +925,10 @@ mod tests {
 
     // WI-16: with the carcara feature on, a Proved goal in the audited
     // fragment carries an independent-audit evidence dimension WITHOUT any
-    // change to its soundness/qualifier (cvc5 Exact/Exact is unchanged; the
-    // auditor adds auditability, it does not manufacture a stronger badge).
+    // change to its soundness/qualifier. Under the chelis#422 taxonomy a cvc5
+    // proof is `SoundApproximate` / `RealArith` (a decision over the reals, not
+    // exact machine arithmetic); the auditor adds an audit dimension, it does
+    // not move that badge.
     #[cfg(feature = "carcara")]
     #[test]
     fn cvc5_proved_goal_carries_a_confirmed_carcara_audit_dimension() {
@@ -937,8 +939,12 @@ mod tests {
         // The cvc5 result and its badge are unchanged by the audit: the auditor
         // adds an evidence dimension, it does not move soundness/qualifier.
         assert_eq!(*discharge.result(), TierBResult::Proved);
-        assert_eq!(discharge.soundness(), Soundness::Exact);
-        assert!(discharge.qualifier_set().contains(Qualifier::Exact));
+        assert_eq!(discharge.soundness(), Soundness::SoundApproximate);
+        assert!(discharge.qualifier_set().contains(Qualifier::RealArith));
+        assert!(
+            !discharge.qualifier_set().contains(Qualifier::Exact),
+            "the audit must not promote an over-reals proof to an exact badge"
+        );
         // The audit dimension is present and is a confirmation (either a full
         // `confirmed` or `confirmed_modulo_rewrites` depending on whether cvc5's
         // proof of `x == x` leans on a trusted rewrite leaf; both re-verify the
