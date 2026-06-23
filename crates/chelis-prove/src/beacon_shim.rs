@@ -55,6 +55,24 @@ use crate::tier_b::TierBResult;
 /// The schema version of the request the shim emits. Beacon pins against this.
 const REQUEST_SCHEMA_VERSION: u32 = 1;
 
+/// The request-size ceiling above which the [`RequestTransport::Stdin`] path
+/// auto-falls-back to [`RequestTransport::TempFile`] to stay deadlock-safe.
+///
+/// Writing a request larger than the OS pipe buffer (commonly 64 KiB on Linux)
+/// to a child that has not yet started DRAINING stdin blocks `write_all` on the
+/// full pipe forever: `wait_timeout` is never reached, so the hard-kill
+/// guarantee (`docs/design/beacon_subprocess_shim.md` §6) silently fails and the
+/// call hangs for the child's whole lifetime. A WireDag artifact base64s to well
+/// past this for non-trivial programs, so this is a real path, not a corner.
+///
+/// 32 KiB is comfortably under the typical 64 KiB pipe buffer, so a request at
+/// or below it fits in the buffer and `write_all` returns without the child
+/// having read a byte; anything larger uses the temp-file transport, which the
+/// red team proved deadlock-safe at all sizes (the child reads a file, the
+/// parent writes no pipe). The threshold is a safety floor, not a tuning knob:
+/// it only decides stdin-vs-tempfile, never the soundness mapping.
+const STDIN_REQUEST_MAX_BYTES: usize = 32 * 1024;
+
 /// The environment variable the shim falls back to for the `chelis-beacon`
 /// binary path when no explicit path is supplied at construction (Q2). There is
 /// NO walk-up filesystem detection: an explicit path or this env var, or the
@@ -168,10 +186,30 @@ impl BeaconShim {
         Some(Self::new(path, store))
     }
 
-    /// Set the request transport (stdin vs temp file). Stdin is the default.
+    /// Set the request transport (stdin vs temp file). Stdin is the default for
+    /// small requests; see [`Self::effective_transport`] for the large-request
+    /// auto-fallback.
     pub fn with_transport(mut self, transport: RequestTransport) -> Self {
         self.transport = transport;
         self
+    }
+
+    /// The transport actually used for a request of `request_len` bytes.
+    ///
+    /// Deadlock-safety floor (the red-team HIGH): a [`RequestTransport::Stdin`]
+    /// request larger than [`STDIN_REQUEST_MAX_BYTES`] would block `write_all`
+    /// on a full pipe against a non-draining child and never reach the
+    /// hard-kill, so it auto-falls-back to the proven-deadlock-safe
+    /// [`RequestTransport::TempFile`]. A small Stdin request stays on stdin; an
+    /// explicitly-`TempFile` shim always uses the temp file. This is a transport
+    /// decision ONLY; it never touches the soundness mapping.
+    fn effective_transport(&self, request_len: usize) -> RequestTransport {
+        match self.transport {
+            RequestTransport::Stdin if request_len > STDIN_REQUEST_MAX_BYTES => {
+                RequestTransport::TempFile
+            }
+            other => other,
+        }
     }
 
     /// Build the request JSON for a box/range goal. Q5/Q6: `wire_dag_v1_base64`
@@ -216,7 +254,12 @@ impl BeaconShim {
         let mut command = Command::new(&self.binary);
         command.arg("dispatch");
 
-        let _tempfile_guard = match self.transport {
+        // Auto-fall-back to the temp-file transport for a request too large to
+        // write to a stdin pipe without risking a full-buffer deadlock (the
+        // red-team HIGH). The decision is made ONCE here, off the request size.
+        let transport = self.effective_transport(request_bytes.len());
+
+        let _tempfile_guard = match transport {
             RequestTransport::Stdin => {
                 command.arg("--request").arg("-");
                 command.stdin(Stdio::piped());
@@ -257,7 +300,9 @@ impl BeaconShim {
         };
 
         // Feed the request on stdin, then drop the handle so the child sees EOF.
-        if self.transport == RequestTransport::Stdin
+        // Only the (small-request) stdin transport writes a pipe here; the
+        // large-request fallback already wrote the temp file above.
+        if transport == RequestTransport::Stdin
             && let Some(mut stdin) = child.stdin.take()
         {
             let write_result = stdin.write_all(request_bytes);
@@ -470,6 +515,23 @@ fn map_report(stdout: &str, stderr: &str) -> Discharge {
     match report.verdict {
         // Oracle-verified proof: a sound over-approximation, never an exact
         // proof. SoundApproximate + SoundOverApproximation -> sound_approximate.
+        //
+        // Defense-in-depth (the red-team MED): the proof-side discriminator is
+        // the `proved_oracle_unverified` TOKEN, but a `proved` verdict carrying
+        // an explicit `oracle_verified: false` is SELF-CONTRADICTORY. Rather than
+        // let the asymmetry stand (a regressed Beacon emitting proved+false would
+        // read as SoundApproximate), fail closed to Untrusted, symmetric with the
+        // refuted arm. An absent flag on a `proved` verdict is the normal case
+        // (`proved` already means verified) and stays SoundApproximate.
+        ReportVerdict::Proved if report.oracle_verified == Some(false) => untrusted_error(
+            "beacon reported `proved` with oracle_verified=false (self-contradictory); failing closed",
+            serde_json::json!({
+                "engine": "beacon",
+                "verdict": "proved",
+                "oracle_verified": false,
+                "error": "contradictory_proved_unverified",
+            }),
+        ),
         ReportVerdict::Proved => Discharge::new(
             Soundness::SoundApproximate,
             QualifierSet::from_iter_kinds([Qualifier::SoundOverApproximation]),

@@ -53,9 +53,19 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let scenario = std::env::var("MOCK_BEACON_SCENARIO").unwrap_or_else(|_| "proved".to_string());
 
-    // Always drain the request so the shim's stdin write completes (the shim
-    // closes its stdin pipe; a child that never reads could deadlock a large
-    // write, though these requests are small).
+    // `hang_no_drain` deliberately does NOT read its input: it models a child
+    // that has not yet started draining stdin, so a large stdin write would
+    // block the parent's `write_all` on a full pipe. The shim's large-request
+    // auto-fallback to the temp-file transport is what keeps the hard kill
+    // reachable; this scenario exists to prove that. All other scenarios drain
+    // the request first (a normal child reads its input before responding).
+    if scenario == "hang_no_drain" {
+        std::thread::sleep(std::time::Duration::from_secs(600));
+        return;
+    }
+
+    // Drain the request so the shim's stdin write (small-request path) or its
+    // temp-file write (large-request path) is consumed before we respond.
     let request = read_request(&args);
 
     match scenario.as_str() {
@@ -64,6 +74,17 @@ fn main() {
         }
         "proved_oracle_unverified" => {
             print!(r#"{{"verdict":"proved_oracle_unverified"}}"#);
+        }
+        "proved_no_flag" => {
+            // A `proved` verdict with NO oracle_verified field: the normal
+            // verified case (the discriminator is the proved_oracle_unverified
+            // token, not the flag), so the shim accepts it as SoundApproximate.
+            print!(r#"{{"verdict":"proved"}}"#);
+        }
+        "proved_oracle_false" => {
+            // Self-contradictory: a `proved` verdict that explicitly claims its
+            // oracle did NOT verify. The shim must fail this closed (the MED).
+            print!(r#"{{"verdict":"proved","oracle_verified":false}}"#);
         }
         "refuted_verified" => {
             print!(
@@ -86,7 +107,8 @@ fn main() {
             print!("this is not json at all <<<");
         }
         "hang" => {
-            // Sleep far beyond any test timeout so the shim's hard-kill fires.
+            // Sleep far beyond any test timeout so the shim's hard-kill fires
+            // (this scenario DOES drain its input first).
             std::thread::sleep(std::time::Duration::from_secs(600));
         }
         "echo_request" => {

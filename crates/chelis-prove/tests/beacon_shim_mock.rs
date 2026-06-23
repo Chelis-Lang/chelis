@@ -97,6 +97,39 @@ fn shim() -> BeaconShim {
     BeaconShim::new(MOCK_BIN, populated_store())
 }
 
+/// 256 KiB of synthetic `WireDag` bytes — base64s to ~341 KiB, well past both
+/// the 32 KiB stdin auto-fallback ceiling and the ~64 KiB OS pipe buffer. This
+/// is the payload that triggered the red-team HIGH stdin deadlock.
+fn large_wire_dag_bytes() -> Vec<u8> {
+    vec![b'x'; 256 * 1024]
+}
+
+fn large_dag_hash() -> String {
+    sha256_hex(&large_wire_dag_bytes())
+}
+
+/// A `BoxRange` goal addressing the 256 KiB artifact.
+fn large_box_goal() -> Goal {
+    Goal::box_range(
+        IntervalBox {
+            dims: vec![("s".to_string(), 0.0, 100.0)],
+        },
+        OutputRange {
+            output: "price".to_string(),
+            lo: 0.0,
+            hi: 50.0,
+        },
+    )
+    .expect("well-formed box goal")
+    .with_ir(IrHandle::from_wire_dag(large_dag_hash(), 0))
+}
+
+fn large_populated_store() -> WireDagByteStore {
+    let store = WireDagByteStore::new();
+    store.insert(large_dag_hash(), large_wire_dag_bytes());
+    store
+}
+
 /// A generous timeout for the non-hang scenarios (the mock returns instantly).
 const FAST_TIMEOUT_MS: u64 = 30_000;
 
@@ -585,4 +618,147 @@ fn registered_beacon_shim_is_selected_for_box_range_goal() {
 #[test]
 fn box_goal_is_box_range_shaped() {
     assert!(matches!(box_goal().shape, GoalShape::BoxRange { .. }));
+}
+
+// ===========================================================================
+// RED-TEAM HIGH (pinned regression): a large request (256 KiB WireDag, base64s
+// to ~341 KiB, past the OS pipe buffer) against a NON-DRAINING child must
+// HARD-KILL at the timeout rather than hang on a full stdin pipe. The shim
+// auto-falls-back the Stdin transport to TempFile above the 32 KiB ceiling, so
+// the parent writes a temp file (not a pipe) and `wait_timeout` still fires.
+// Before the fix this hung for the child's full 600s lifetime.
+// ===========================================================================
+
+#[test]
+fn large_request_against_non_draining_child_hard_kills_not_deadlocks() {
+    let _g = with_scenario("hang_no_drain");
+    // Stdin transport configured explicitly: the auto-fallback must override it
+    // for this oversized request, or the write deadlocks.
+    let shim =
+        BeaconShim::new(MOCK_BIN, large_populated_store()).with_transport(RequestTransport::Stdin);
+    let start = std::time::Instant::now();
+    let discharge = shim.discharge(&large_box_goal(), 500);
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(30),
+        "a 256 KiB request must hard-kill at the timeout (took {elapsed:?}), \
+         not block on a full stdin pipe for the child's lifetime"
+    );
+    assert!(matches!(discharge.result(), TierBResult::Error(_)));
+    assert_eq!(discharge.soundness(), Soundness::Untrusted);
+    assert!(discharge.qualifier_set().is_empty());
+    assert_eq!(
+        evidence_error(&discharge).as_deref(),
+        Some("timeout"),
+        "the deadlock-safe path still fails closed as a timeout"
+    );
+}
+
+/// The other half of the HIGH acceptance: a large PROVED verdict is DELIVERED,
+/// not lost. A 256 KiB request that the child actually processes (drains via the
+/// temp file, emits proved) round-trips to a Proved + SoundApproximate discharge.
+#[test]
+fn large_request_proved_verdict_is_delivered_not_lost() {
+    let _g = with_scenario("proved");
+    let shim =
+        BeaconShim::new(MOCK_BIN, large_populated_store()).with_transport(RequestTransport::Stdin); // auto-falls-back to TempFile
+    let discharge = shim.discharge(&large_box_goal(), FAST_TIMEOUT_MS);
+    assert_eq!(
+        *discharge.result(),
+        TierBResult::Proved,
+        "a large request's proved verdict must survive the transport"
+    );
+    assert_eq!(discharge.soundness(), Soundness::SoundApproximate);
+    assert!(
+        discharge
+            .qualifier_set()
+            .contains(Qualifier::SoundOverApproximation)
+    );
+}
+
+/// NEGATIVE/positive twin of the deadlock fix: a SMALL stdin request still uses
+/// the stdin transport (the fallback is a ceiling, not an always-tempfile
+/// switch) and maps proved identically. (Observed indirectly: the small request
+/// proves through the stdin path, which the rest of the suite exercises; this
+/// pins that a small request is NOT forced onto the temp file.)
+#[test]
+fn small_request_stays_on_stdin_and_proves() {
+    let _g = with_scenario("proved");
+    let discharge = shim()
+        .with_transport(RequestTransport::Stdin)
+        .discharge(&box_goal(), FAST_TIMEOUT_MS);
+    assert_eq!(*discharge.result(), TierBResult::Proved);
+    assert_eq!(discharge.soundness(), Soundness::SoundApproximate);
+}
+
+/// A large request against a child that DOES drain stdin but hangs after, via
+/// the temp-file fallback, still hard-kills. (Defends that the fallback's
+/// temp-file child is reaped, not just the stdin one.)
+#[test]
+fn large_request_temp_file_fallback_hard_kills_a_draining_hang() {
+    let _g = with_scenario("hang"); // drains the temp file, then sleeps 600s
+    let shim =
+        BeaconShim::new(MOCK_BIN, large_populated_store()).with_transport(RequestTransport::Stdin);
+    let start = std::time::Instant::now();
+    let discharge = shim.discharge(&large_box_goal(), 500);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(30),
+        "the temp-file fallback child must also hard-kill at the timeout"
+    );
+    assert_eq!(evidence_error(&discharge).as_deref(), Some("timeout"));
+}
+
+// ===========================================================================
+// RED-TEAM MED (pinned regression): a `proved` verdict carrying an explicit
+// `oracle_verified: false` is SELF-CONTRADICTORY and must fail closed to
+// Untrusted, symmetric with the refuted arm. (An ABSENT flag stays proved ->
+// SoundApproximate; the rest of the suite pins that.)
+// ===========================================================================
+
+#[test]
+fn proved_with_oracle_verified_false_fails_closed_to_untrusted() {
+    let _g = with_scenario("proved_oracle_false");
+    let discharge = shim().discharge(&box_goal(), FAST_TIMEOUT_MS);
+    assert!(
+        matches!(discharge.result(), TierBResult::Error(_)),
+        "a self-contradictory proved+false must not be a Proved result"
+    );
+    assert_eq!(
+        discharge.soundness(),
+        Soundness::Untrusted,
+        "proved+oracle_verified=false fails closed, symmetric with unverified refuted"
+    );
+    assert!(
+        discharge.qualifier_set().is_empty(),
+        "the contradictory proof carries NO proof qualifier"
+    );
+    assert_eq!(
+        evidence_error(&discharge).as_deref(),
+        Some("contradictory_proved_unverified")
+    );
+    // And it must NOT project to a green.
+    let verdict = base_verdict_from_discharge(discharge.soundness(), discharge.qualifier_set());
+    assert_ne!(verdict, CompositeVerdict::Proven);
+    assert_ne!(verdict, CompositeVerdict::SoundApproximate);
+}
+
+/// Positive twin: a `proved` verdict with the flag ABSENT is the normal verified
+/// case and stays SoundApproximate. The production gate is `oracle_verified ==
+/// Some(false)`, so an absent (`None`) flag is accepted — pinned here against a
+/// `proved` report that omits the field entirely.
+#[test]
+fn proved_with_absent_oracle_flag_stays_sound_approximate() {
+    let _g = with_scenario("proved_no_flag");
+    let discharge = shim().discharge(&box_goal(), FAST_TIMEOUT_MS);
+    assert_eq!(
+        *discharge.result(),
+        TierBResult::Proved,
+        "a proved verdict with no oracle_verified field is the normal accepted case"
+    );
+    assert_eq!(discharge.soundness(), Soundness::SoundApproximate);
+    assert!(
+        discharge
+            .qualifier_set()
+            .contains(Qualifier::SoundOverApproximation)
+    );
 }
