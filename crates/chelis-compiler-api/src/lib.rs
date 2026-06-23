@@ -4,6 +4,7 @@ pub mod context;
 pub mod decode;
 pub mod fragment;
 pub mod layered;
+pub mod prune;
 pub(crate) mod runtime;
 pub mod schema;
 pub mod stdlib_cache;

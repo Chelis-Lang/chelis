@@ -342,6 +342,21 @@ pub enum WireInferredEffect {
 pub struct LowerRequest {
     pub source_kind: SourceKind,
     pub source: String,
+    /// Optional single-entry scoping: when set, lowering is restricted to the
+    /// defs reachable from this named entry, dropping unrelated top-level
+    /// functions before the type checker runs. This lets a caller extract one
+    /// function from a module that also defines unrelated functions
+    /// referencing unresolved imports, without those unrelated functions
+    /// blocking the target's lowering. `None` lowers the whole program (the
+    /// default, and the only behavior before this field existed). Pruning
+    /// drops only genuinely-unreachable defs, so an unresolved symbol in the
+    /// ENTRY's own closure still surfaces as a lowering error.
+    ///
+    /// `skip_serializing_if` keeps the wire output clean for the common
+    /// whole-program case (no `"entry": null`), matching the other optional
+    /// request fields in this module.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

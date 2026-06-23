@@ -6692,73 +6692,24 @@ fn prune_build_program_to_reachable_defs(
     exprs: &[DeepExpr],
     entry_exprs: &[DeepExpr],
 ) -> Vec<DeepExpr> {
-    use std::collections::{HashMap, HashSet, VecDeque};
-
-    let def_map = exprs
-        .iter()
-        .filter_map(|expr| deep_top_level_expr_name(expr).map(|name| (name.to_string(), expr)))
-        .collect::<HashMap<_, _>>();
-    let reachable_seed = entry_exprs
+    // Delegate to the shared reachable-defs pruner (single source of truth in
+    // chelis-compiler-api, also used by the WI-3 graph-extraction producer).
+    // The build path seeds reachability from the entry program's top-level
+    // def names; an EMPTY seed set drops every named decl, which this path
+    // relies on (see `prune_to_reachable_seeds`).
+    let seeds = entry_exprs
         .iter()
         .filter_map(deep_top_level_expr_name)
         .map(str::to_string)
         .collect::<Vec<_>>();
-
-    let mut reachable = HashSet::<String>::new();
-    let mut queue = VecDeque::from(reachable_seed);
-    while let Some(name) = queue.pop_front() {
-        if !reachable.insert(name.clone()) {
-            continue;
-        }
-        if let Some(expr) = def_map.get(&name) {
-            for reference in deep_referenced_vars(expr) {
-                if def_map.contains_key(reference) && !reachable.contains(reference) {
-                    queue.push_back(reference.to_string());
-                }
-            }
-        }
-    }
-
-    exprs
-        .iter()
-        .filter(|expr| {
-            deep_named_decl_name(expr)
-                .map(|name| reachable.contains(name))
-                .unwrap_or(true)
-        })
-        .cloned()
-        .collect()
+    chelis_compiler_api::prune::prune_to_reachable_seeds(exprs.to_vec(), seeds)
 }
 
+/// Every `var` reference name in `expr`. Delegates to the shared traversal in
+/// chelis-compiler-api so the build path and the WI-3 producer agree on what
+/// "references" means.
 fn deep_referenced_vars(expr: &DeepExpr) -> Vec<&str> {
-    let mut out = Vec::new();
-    collect_deep_referenced_vars(expr, &mut out);
-    out
-}
-
-fn collect_deep_referenced_vars<'a>(expr: &'a DeepExpr, out: &mut Vec<&'a str>) {
-    match expr {
-        DeepExpr::Atom(_, _) => {}
-        DeepExpr::MetaExpr(meta, _) => collect_deep_referenced_vars(&meta.expr, out),
-        DeepExpr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                collect_deep_referenced_vars(value, out);
-            }
-        }
-        DeepExpr::List(list, _) => {
-            if let (
-                Some(DeepExpr::Atom(DeepAtom::Symbol(tag), _)),
-                Some(DeepExpr::Atom(DeepAtom::Symbol(name), _)),
-            ) = (list.elements.first(), list.elements.get(2))
-                && tag == "var"
-            {
-                out.push(name.as_str());
-            }
-            for child in &list.elements {
-                collect_deep_referenced_vars(child, out);
-            }
-        }
-    }
+    chelis_compiler_api::prune::deep_referenced_vars(expr)
 }
 
 fn host_display_root_name(full_name: &str, entry_root_names: &[String]) -> Option<String> {

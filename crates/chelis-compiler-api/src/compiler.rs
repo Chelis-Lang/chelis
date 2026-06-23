@@ -256,7 +256,11 @@ pub fn check(request: crate::schema::CheckRequest) -> Result<CheckResult> {
 }
 
 pub fn lower(request: LowerRequest) -> Result<LowerResult> {
-    let compiled = compile_source(request.source_kind, &request.source)?;
+    let compiled = compile_source_scoped(
+        request.source_kind,
+        &request.source,
+        request.entry.as_deref(),
+    )?;
     let dag = wire_dag(&compiled.dag);
     // WI-2 validate-on-consume: fail closed before this DAG crosses the
     // process edge to the client. A build that emits a `schema_version` it
@@ -1124,6 +1128,22 @@ struct LibraryRuntime {
 }
 
 fn compile_source(source_kind: SourceKind, source: &str) -> Result<CompiledSource> {
+    compile_source_scoped(source_kind, source, None)
+}
+
+/// Like [`compile_source`], but when `entry` is `Some`, prune the expanded
+/// program to the defs reachable from that named entry BEFORE the type
+/// checker runs. This is the WI-3 entrypoint-isolation path: it lets a caller
+/// extract one function from a module that also defines unrelated functions
+/// referencing unresolved imports, without those unrelated functions blocking
+/// the target's lowering. Pruning ([`crate::prune::prune_to_entry`]) drops
+/// only genuinely-unreachable defs, so an unresolved symbol in the ENTRY's
+/// own closure still surfaces here as a `check`-stage error.
+fn compile_source_scoped(
+    source_kind: SourceKind,
+    source: &str,
+    entry: Option<&str>,
+) -> Result<CompiledSource> {
     let deep_exprs: Vec<DeepExpr> = match source_kind {
         SourceKind::Surf => {
             let decls = parse_surf(source)?;
@@ -1135,6 +1155,11 @@ fn compile_source(source_kind: SourceKind, source: &str) -> Result<CompiledSourc
             .into_exprs()
         }
         SourceKind::Deep => parse_deep(source)?,
+    };
+
+    let deep_exprs = match entry {
+        Some(entry) => crate::prune::prune_to_entry(deep_exprs, entry),
+        None => deep_exprs,
     };
 
     let checked = chelis_types::check_ir_program(&deep_exprs).map_err(|report| CompilerError {
@@ -4052,6 +4077,7 @@ bad = shape(scalar_to_tensor(cast(3, int64)), axis)
                      b = (b : tensor[3, 4, f32])\n\
                      out = (matmul(a, b) : tensor[2, 4, f32])\n"
                 .to_string(),
+            entry: None,
         })
         .expect("lower succeeds");
         // The DAG the server hands back is at the supported version, so the

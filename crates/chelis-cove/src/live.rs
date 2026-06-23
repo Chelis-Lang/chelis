@@ -229,6 +229,7 @@ fn zero_bindings(source: &str) -> Result<BTreeMap<String, TensorValue>, String> 
     let lower = compiler::lower(LowerRequest {
         source_kind: SourceKind::Surf,
         source: source.to_string(),
+        entry: None,
     })
     .map_err(|err| format_failure("eval", &err.errors))?;
 
