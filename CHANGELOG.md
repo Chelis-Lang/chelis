@@ -6,6 +6,55 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-06-23
+
+### Added
+
+- **WI-16 Carcara audit of cvc5 Alethe proofs (#450).** A Carcara
+  engine that re-checks cvc5's Alethe proofs in-process
+  (Confirmed / ConfirmedModuloRewrites with trusted-hole disclosure /
+  Failed / Unavailable) as write-only audit evidence that cannot
+  promote a badge: `classify` binds the hedged
+  `SoundApproximate`/`RealArith` before the audit runs and `badge()` is
+  blind to the audit result. `render_real_lit` is aligned to the
+  exact-f64 rational matching the #444 literal rendering. The SMT
+  Feature Build CI job now also builds and tests `--features carcara`
+  (reusing the cvc5 build; gmp/mpfr added to the apt step).
+- **Beacon subprocess discharge-engine shim (#439).** A thin in-tree
+  `DischargeEngine` shim for `GoalShape::BoxRange` that shells out to an
+  out-of-tree `chelis-beacon` binary and maps its `CheckReport` to a
+  `Discharge`, using content-addressed inline `WireDag` byte transport
+  via a dispatch-site-owned `WireDagByteStore` (zero frozen-surface
+  change to `IrHandle` or the trait). The soundness guard is
+  fail-closed: only a Beacon-proved report yields
+  `SoundApproximate`+`SoundOverApproximation` and only a verified-refuted
+  report yields `Disproved`+`SoundApproximate`; every other report
+  (unverified, error, timeout, store-miss, hash-mismatch, or a
+  self-contradictory proved/oracle-unverified report) maps to
+  `Untrusted` with an empty guarantee set. Transport is deadlock-safe
+  (auto-fallback to a temp file above a 32 KiB inline ceiling; a 256 KiB
+  payload hard-kills in ~0.5 s). Registered in tests only for now;
+  production dispatch wiring is a later change.
+- **Symmetric DisprovedModuloRealArithmetic honesty hedge (#447).** An
+  SMT-over-reals disproof now renders
+  `CompositeVerdict::DisprovedModuloRealArithmetic` and discloses
+  `real_arithmetic`, symmetric to the #445 `ProvenModuloRealArithmetic`
+  hedge: a reals counterexample may be a false counterexample at f64, so
+  a definite `Failed` would overclaim — the hedged failure dominates
+  greens but loses to a definite `Failed`. A fuzz disproof (a real f64
+  witness) stays a definite `Failed`. Reuses `Qualifier::RealArith` (no
+  new qualifier); both the `property_runner` and `obligation_engine`
+  paths thread the hedge, and the MCP surface inherits it.
+
+### Changed
+
+- **WI-3 graph extraction scoped to a single entry's reachable defs
+  (#440).** Entry-scoped reachable-defs pruning for the WI-3 producer
+  plus a shared `chelis-compiler-api::prune` module that the CLI build
+  path now delegates to (the duplicate traversal is removed). The
+  entry-scoped DAG is a structurally-identical subgraph of the
+  whole-program DAG and the build-path output is byte-identical.
+
 ## [0.9.0] - 2026-06-23
 
 ### Added

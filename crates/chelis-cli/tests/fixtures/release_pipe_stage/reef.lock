@@ -5,11 +5,11 @@ version = "0.1.0"
 [[dependencies]]
 name = "chelis-std"
 version = "0.4.0"
-compiler = "=0.9.0"
-archive_sha256 = "d690c2b8e30b145a69cb4b63925bce6b85ad0245eb940c533dfd7b278af1d2f4"
-shell_sha256 = "0452fdd31efe15ba4fa51ff53401d77c95c3641b76764e68e656ceb99cd67b84"
+compiler = "=0.10.0"
+archive_sha256 = "cbed98eb23bdc3a79eb04d8c43a267f4a544b92717cb53250b983bf918a01c20"
+shell_sha256 = "a70ffafb6a0e9df2c15a30310548def76b054a743b8109d358af0a932a8a15b3"
 
 [dependencies.source]
 kind = "bundled"
-compiler_version = "0.9.0"
+compiler_version = "0.10.0"
 
