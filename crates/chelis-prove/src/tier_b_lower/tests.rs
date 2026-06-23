@@ -1117,7 +1117,10 @@ fn cvc5_disproves_point_one_eq_one_over_ten_documented_op_rounding_gap() {
             solve_property(&ground_goal(goal), 5000),
             TierBResult::Disproved(_)
         ),
-        "cvc5 disproves 0.1 == 1.0/10.0 (exact-rational division); documented op-rounding gap"
+        "cvc5 DISPROVES 0.1 == 1.0/10.0 -- this DIVERGES FROM f64 runtime (eval_bool_strict says \
+         TRUE above): cvc5 does NOT model the division's IEEE rounding (1.0/10.0 rounds to 0.1_f64 \
+         at runtime but is the exact rational 1/10 in cvc5). Pinned as the documented \
+         operation-rounding limitation, NOT as cvc5 being correct/expected vs runtime"
     );
 }
 
