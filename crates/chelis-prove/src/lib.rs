@@ -11,6 +11,7 @@
 
 pub mod ad_rail;
 pub mod artifact;
+pub mod beacon_shim;
 // WI-16 Carcara auditability: re-check cvc5's Alethe proofs. The SMT-LIB
 // problem renderer and the audit-outcome type are always present (so the
 // renderer is unit-testable without cvc5/carcara linked); the live
@@ -37,6 +38,9 @@ pub mod tier_c;
 pub mod worker;
 
 pub use artifact::{ProofArtifact, ProofStatus, ProofTier};
+// chelis#439: the Beacon subprocess shim (transport-only DischargeEngine for
+// GoalShape::BoxRange) and its dispatch-site-owned content-addressed byte store.
+pub use beacon_shim::{BEACON_BIN_ENV, BeaconShim, RequestTransport, WireDagByteStore};
 pub use carcara_audit::{CarcaraAudit, render_smtlib_problem};
 pub use composition::{
     AssumptionDischarge, AssumptionRecord, AssumptionRegistry, CompositeVerdict, CompositionProbe,
