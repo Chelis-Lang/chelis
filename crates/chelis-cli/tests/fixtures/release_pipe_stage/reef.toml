@@ -1,5 +1,5 @@
 [package]
 name = "release-pipe-stage"
 version = "0.1.0"
-compiler = "=0.9.0"
+compiler = "=0.10.0"
 module_prefix = "ReleasePipe"
