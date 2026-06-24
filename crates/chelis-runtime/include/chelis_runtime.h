@@ -127,6 +127,13 @@ void chelis_fill_f64(chelis_tensor *t, double val);
  * shape mirrors `chelis_fill_bf16` / `chelis_fill_f16`. */
 void chelis_fill_f32_bits(chelis_tensor *t, uint32_t bits);
 void chelis_fill_f64_bits(chelis_tensor *t, uint64_t bits);
+/* Issue #365: bit-pattern fill helper for Bool tensors. A Bool tensor uses
+ * the same 4-byte f32-encoded storage (0.0 / 1.0) the comparison ops write,
+ * but its dtype tag is CHELIS_BOOL. Filling it through
+ * chelis_fill_f32_bits trips the debug-build dtype assertion; this helper
+ * asserts CHELIS_BOOL and fills the f32-encoded storage so a debug-runtime
+ * reduce/softmax/cross-entropy backward mask fill is dtype-correct. */
+void chelis_fill_bool_bits(chelis_tensor *t, uint32_t bits);
 /* Issue #248: scalar bit-pattern reconstruction helpers. The C backend
  * emits `chelis_uniform_sample_f32(..., chelis_f32_from_bits(0xXXXXXXXXu),
  * chelis_f32_from_bits(0xYYYYYYYYu))` so the runtime sees the byte-identical

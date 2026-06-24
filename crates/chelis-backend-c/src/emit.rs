@@ -1343,7 +1343,7 @@ impl CEmitter {
                 let bits = value.to_bits();
                 self.line(&format!("chelis_fill_f64_bits(t{id}, 0x{bits:016x}uLL);"));
             }
-            Prim::F32 | Prim::Bool => {
+            Prim::F32 => {
                 // Issue #189: narrow to f32 (storage width is f32)
                 // then emit the resulting bit pattern. `as f32` is
                 // the intended precision narrowing (kept; explicit
@@ -1356,6 +1356,22 @@ impl CEmitter {
                 let v32 = Self::f64_to_f32_truncate(value);
                 let bits = v32.to_bits();
                 self.line(&format!("chelis_fill_f32_bits(t{id}, 0x{bits:08x}u);"));
+            }
+            Prim::Bool => {
+                // Issue #365: a Bool tensor uses the same 4-byte
+                // f32-encoded storage (0.0 / 1.0) as the comparison
+                // kernels write, but its dtype tag is CHELIS_BOOL.
+                // Filling it through `chelis_fill_f32_bits` trips that
+                // helper's debug-build dtype assertion (it asserts
+                // CHELIS_F32), aborting a debug-runtime reduce/softmax/
+                // cross-entropy backward that materializes a comparison
+                // mask. Use the dtype-correct `chelis_fill_bool_bits`,
+                // which asserts CHELIS_BOOL and fills the identical
+                // f32-encoded layout. The emitted bit pattern is the
+                // same `f32::to_bits()` value as the F32 arm.
+                let v32 = Self::f64_to_f32_truncate(value);
+                let bits = v32.to_bits();
+                self.line(&format!("chelis_fill_bool_bits(t{id}, 0x{bits:08x}u);"));
             }
             // WS-1: bf16 / f16 Const fill. The literal's exact 16-bit
             // pattern is computed at codegen time via the `half` crate
@@ -4458,10 +4474,18 @@ impl CEmitter {
                 let bits = fill.to_bits();
                 self.line(&format!("chelis_fill_f64_bits(t{id}, 0x{bits:016x}uLL);"));
             }
-            Prim::F32 | Prim::Bool => {
+            Prim::F32 => {
                 // Issue #189 sibling sweep: narrow + bit-pattern emit.
                 let bits = (fill as f32).to_bits();
                 self.line(&format!("chelis_fill_f32_bits(t{id}, 0x{bits:08x}u);"));
+            }
+            Prim::Bool => {
+                // Issue #365 sibling sweep: a Bool Pad fill uses the same
+                // f32-encoded storage but its dtype tag is CHELIS_BOOL, so
+                // it must go through the dtype-correct `chelis_fill_bool_bits`
+                // to avoid the debug-runtime dtype assert.
+                let bits = (fill as f32).to_bits();
+                self.line(&format!("chelis_fill_bool_bits(t{id}, 0x{bits:08x}u);"));
             }
             other => panic!(
                 "C backend Pad does not yet support `{}` fill (spec/04-type-system.md §1.1)",
