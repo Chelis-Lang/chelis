@@ -30,15 +30,68 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Same docs-only detector as ci.yml's `changes` job (chelis#419). The
+  # conformance gate lives in its own workflow file, so `needs:` cannot
+  # reach ci.yml's changes job; this replicates it here so the required
+  # `Hull Conformance Gate (Linux)` context skips on a docs-only PR
+  # (skipped required job reports success) while running on every code PR
+  # and push. Kept as a separate file (no required-context move) to avoid
+  # the branch-protection deadlock footgun in chelis#420; the build-once /
+  # shared-artifact fold is escalated separately.
+  changes:
+    name: Detect docs-only changes (conformance)
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.detect.outputs.docs_only }}
+    steps:
+      - name: Checkout PR range
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: ${{ github.event.pull_request.commits + 1 }}
+      - name: Compute docs_only
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "non-PR event ($EVENT_NAME): docs_only=false (full suite)"
+            exit 0
+          fi
+          git fetch --depth=1 origin "$BASE" 2>/dev/null || true
+          git diff --name-only "$BASE..$HEAD" \
+            | python3 scripts/ci_detect_docs_only.py
+
   conformance:
     name: Hull Conformance Gate (Linux)
     runs-on: ubuntu-latest
+    # Skip on docs-only PRs (chelis#419); a skipped required job reports
+    # success, and the `if` fails safe (runs when the changes job did not
+    # succeed) so a broken detector never skips the gate on a code PR.
+    needs: [changes]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     # ~1,500 subprocess calls at ~50-80 ms/call under contention across 2-4
     # cores is ~30-45 s of subprocess wall; the binary build dominates. Allow
     # generous head room for a cold cargo cache.
     timeout-minutes: 20
+    # Strip debuginfo on the build; debuginfo is the dominant target/
+    # disk consumer and the conformance binary needs no symbols
+    # (chelis#392). Release defaults to debug=false, but set it explicitly
+    # so a future profile tweak cannot silently reintroduce the bloat.
+    env:
+      CARGO_PROFILE_RELEASE_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
+
+      # Free ~25-30 GB before the cargo build; see
+      # .github/actions/free-disk-space (scripts/ci_free_disk.py). This
+      # release-build job was missing the reclaim every ci.yml build job
+      # already runs (chelis#392).
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
 
       - name: Install C dependencies
         run: sudo apt-get update && sudo apt-get install -y gcc libopenblas-dev libasan8 libubsan1
