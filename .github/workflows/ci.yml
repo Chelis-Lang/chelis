@@ -281,15 +281,27 @@ jobs:
     name: No AI authorship markers
     runs-on: ubuntu-latest
     steps:
+      # Shallow the clone to the PR's commit range instead of the whole
+      # repo history (chelis#421). The scan only needs `base..head`, so
+      # fetch the PR's commit count + 1 (the `+1` reaches the base tip's
+      # parent so `base..head` resolves at the shallow boundary). On a
+      # push (no pull_request context) depth 2 covers `HEAD~1..HEAD`. The
+      # backstop fetch in the scan step guarantees `base.sha` is present
+      # even if the count expression is stale (e.g. a force-push between
+      # the event and the run).
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 0
+          fetch-depth: ${{ github.event_name == 'pull_request' && github.event.pull_request.commits + 1 || 2 }}
 
       - name: Check commits for AI authorship markers
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             BASE="${{ github.event.pull_request.base.sha }}"
             HEAD="${{ github.event.pull_request.head.sha }}"
+            # Backstop: ensure the base commit is present as an object so
+            # `base..head` resolves even if the shallow depth above did
+            # not quite reach it (a no-op when it is already fetched).
+            git fetch --depth=1 origin "$BASE" 2>/dev/null || true
             RANGE="$BASE..$HEAD"
           else
             RANGE="HEAD~1..HEAD"
