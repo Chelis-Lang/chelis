@@ -1231,6 +1231,55 @@ type error (`DimensionMismatch`).
    declared signature's return-type or the surrounding call context
    imposes via standard unification.
 
+**Sourceless-size rejection (source-tracking).** A runtime `size`
+that is neither form (1) nor a form-(2)/form-(3) shape source has no
+extent the backend can materialize, so the checker rejects it at check
+time with the §4.7.2 sourceless-size diagnostic. The discriminator is
+**provenance, not surface spelling**: a runtime size is accepted iff
+its value provably
+
+- **folds to a compile-time constant** — a literal, a `cast(N, _)`,
+  or integer arithmetic (`add`/`sub`/`mul`/`div`/`mod`/`neg`) over
+  such values — or
+- **derives from an in-scope tensor's shape** — a `shape(t, axis)`
+  read, or a bare `var` naming an in-scope tensor dimension (form 2)
+  — followed transitively through `let` bindings, `cast` wrappers,
+  and integer arithmetic.
+
+Everything else is sourceless: a bare runtime scalar parameter (e.g.
+`a_dim: int64`), a `cast`-wrapped one (`cast(a_dim, int32)`), a `let`
+bound to one (`d = a_dim`), arithmetic that *touches* one
+(`add(a_dim, 1)` — sourceless is absorbing), or **any other
+function-call value** (`ident(a_dim)`, a user `def` — an inline
+non-arithmetic / non-`shape` / non-`cast` `app`-rooted size produces a
+runtime value with no shape source the check layer can see). All of
+these are rejected **uniformly**, whatever the spelling. The provenance
+analysis is per-scope-correct: a name that re-binds to a sourceless RHS
+(`len = shape(x, 0)` then `len = k`) loses its earlier shape provenance,
+and a value parameter that shadows an outer shape-sourced name (a `d:
+int32` parameter shadowing an outer `d = shape(&xs, 0)`) does not
+inherit it. This keeps the "a check-clean program must build" invariant:
+a sourceless runtime expand size (whether a single `expand(g, 0, a_dim)`
+or a chained rank-1 → rank-N broadcast such as `broadcast_to_achw`) is
+rejected identically at `check`, `build`, and `eval`. Source the extent
+from a tensor in scope via the form-(3) `shape(x, cast(axis, int32))`
+read instead — directly or bound to a `let`. Tracked by
+Chelis-Lang/chelis#397 and #469.
+
+The check-time accept set matches what the evaluator and host runtime
+materialize. The C backend's IR lowering currently materializes only
+the *inline* shape source and *literal* size; recovering the extent of
+a **`let`-bound shape read** or **static integer arithmetic** is a
+separate lowering improvement (the `let`-bound-shape recovery is
+Chelis-Lang/chelis#369/#495; static-arithmetic folding is tracked
+alongside it as Chelis-Lang/chelis#528). Until that lands, those two
+materializable forms type-check and evaluate but are rejected at C
+`build` with the same #469 diagnostic — a build-side limitation, never
+a silent miscompile. (The old spelling-based predicate did allow that
+miscompile, for both the `cast`-wrapped and the function-call sourceless
+spellings; closing those is what makes the uniform-rejection claim above
+true at check.)
+
 Form (3) is how the `bias_broadcast` pattern from
 `examples/illustrative/runtime_shape_semantics.ch` preserves the
 symbolic batch dim `n`:

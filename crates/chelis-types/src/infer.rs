@@ -5704,6 +5704,9 @@ fn annotate_fn_children(
             .or_else(|| param_types.get(index).cloned())
             .unwrap_or(Type::Error);
         fn_env.bind(name.clone(), Scheme::mono(ty));
+        // chelis#397/#469: a fresh parameter has no size provenance; clear any
+        // entry inherited from an outer name it shadows (BLOCKER C).
+        fn_env.clear_size_provenance(name);
     }
 
     // Only stamp parameter types when they come from the def's
@@ -8481,6 +8484,22 @@ fn infer_top_level(
         };
 
         let scheme = env.generalize(&scheme_body, subst);
+        // chelis#397/#469: record the size provenance of a top-level value
+        // binding (e.g. `zero_count = sub(cast(0, int32), cast(0, int32))`)
+        // BEFORE binding it, so a later `expand(b, 0, zero_count)` recovers
+        // whether it is a materializable extent (static / shape-sourced) or a
+        // sourceless runtime scalar. Classified against the pre-binding scope.
+        // The `Sourceless`/`Unknown` arm CLEARS any stale provenance so a
+        // re-bind to a sourceless RHS does not inherit an earlier entry.
+        match classify_expand_size(&kids[1], env) {
+            SizeClass::Static => {
+                env.mark_size_provenance(&name, crate::env::SizeProvenance::Static);
+            }
+            SizeClass::ShapeSourced => {
+                env.mark_size_provenance(&name, crate::env::SizeProvenance::ShapeSourced);
+            }
+            SizeClass::Sourceless | SizeClass::Unknown => env.clear_size_provenance(&name),
+        }
         env.bind(name, scheme);
     } else {
         // Any other top-level expression
@@ -10153,11 +10172,23 @@ fn infer_app(
                             symbolic_dim_ref_name(arg)
                                 .is_some_and(|name| env.lookup(name).is_none())
                         });
+                        // chelis#397/#469: classify the size by PROVENANCE
+                        // (static / shape-sourced / sourceless), following
+                        // `let`/`cast`/arithmetic to a tensor shape source.
+                        // A truly sourceless runtime scalar is rejected at
+                        // check so it never reaches the build/eval-only
+                        // rejection (a check-clean program must build).
+                        let size_class = kids
+                            .get(3)
+                            .map(|arg| classify_expand_size(arg, env))
+                            .unwrap_or(SizeClass::Unknown);
                         result_ty = check_expand_signature(
                             &kids[1..],
                             &arg_tys,
                             &result_ty,
                             axis_is_dim_name,
+                            size_class,
+                            env,
                             subst,
                             errors,
                         );
@@ -12857,12 +12888,27 @@ fn infer_expand_app(
     let axis_is_dim_name = kids.get(2).is_some_and(|arg| {
         symbolic_dim_ref_name(arg).is_some_and(|name| env.lookup(name).is_none())
     });
+    // chelis#397/#469: classify the size slot by PROVENANCE, following
+    // `let`/`cast`/arithmetic to a tensor shape source. The positive-rank
+    // path would otherwise stamp a sourceless runtime scalar as a `Dim::Name`,
+    // type-check clean, and then die at build/eval with the §4.7.2 Form-3
+    // sourceless-size rejection (chelis#469: "no tensor in scope carries it").
+    // Rejecting it at CHECK keeps check↔build↔eval in sync (a check-clean
+    // program must build); a literal/static/shape-sourced size is materializable
+    // and accepted, uniformly across the bare-`var`, `cast`-wrapped, `let`-bound,
+    // and arithmetic spellings.
+    let size_class = kids
+        .get(3)
+        .map(|arg| classify_expand_size(arg, env))
+        .unwrap_or(SizeClass::Unknown);
     let result_ty = Type::Var(vg.fresh_tvar());
     check_expand_signature(
         &kids[1..],
         &arg_tys,
         &result_ty,
         axis_is_dim_name,
+        size_class,
+        env,
         subst,
         errors,
     )
@@ -15183,11 +15229,14 @@ fn check_reduction_signature(
     subst.apply(&canonical)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_expand_signature(
     arg_exprs: &[deep::Expr],
     arg_tys: &[Type],
     result_ty: &Type,
     axis_is_dim_name: bool,
+    size_class: SizeClass,
+    env: &Env,
     subst: &mut Subst,
     errors: &mut Vec<CheckError>,
 ) -> Type {
@@ -15316,10 +15365,58 @@ fn check_expand_signature(
             ));
             return Type::Error;
         }
-        None => match arg_exprs.get(2).and_then(symbolic_dim_ref_name) {
-            Some(name) => Dim::Name(name.to_string()),
-            None => return subst.apply(result_ty),
-        },
+        // A non-literal runtime size. chelis#397/#469: discriminate by
+        // PROVENANCE (computed by the caller as `size_class`), not by the
+        // surface spelling. A size whose value provably folds to a constant
+        // (`Static`) or derives from an in-scope tensor's `shape(t, axis)`
+        // read / dimension name (`ShapeSourced`) is materializable; a truly
+        // sourceless runtime scalar (`Sourceless` — a bare `int32`/`int64`
+        // parameter, a `cast`/arithmetic over one, or a `let` bound to such)
+        // has no backend representation and is rejected here so check, build,
+        // and eval all agree (a check-clean program must build). The walk
+        // unifies the four spellings the #397 red team found drifting:
+        // bare-`var`, `cast(var, _)`, `let`-bound, and arithmetic.
+        None => {
+            if size_class == SizeClass::Sourceless {
+                let described = arg_exprs
+                    .get(2)
+                    .and_then(symbolic_dim_ref_name)
+                    .map(|name| format!("the symbolic dimension `{name}`"))
+                    .unwrap_or_else(|| "a runtime scalar".to_string());
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "`expand` size resolves to {described}, but no tensor in scope carries \
+                         it: a \u{00a7}4.7.2 Form-3 runtime size must be a literal/`cast(N, \
+                         int32)`, an in-scope tensor dimension, or a `shape(tensor, axis)` read \
+                         (followed through `let`, `cast`, and integer arithmetic). A bare \
+                         runtime scalar (e.g. an `int32`/`int64` parameter) has no shape source \
+                         the backend can emit, so the extent cannot be materialized. Tracked by \
+                         Chelis-Lang/chelis#469 (spec/04-type-system.md \u{00a7}4.7.2)"
+                    ),
+                    vec![
+                        "Source the extent from a tensor in scope: read it with \
+                         `shape(x, cast(axis, int32))` (the `bias_broadcast` form), bind that \
+                         read to a `let` and pass it, or use a literal/`cast(N, int32)` size."
+                            .to_string(),
+                    ],
+                ));
+                return Type::Error;
+            }
+            // A bare `var` naming a genuine §4.7.2 Form-2 symbolic dim — a
+            // declared dim parameter (not a value binding) or a dim carried
+            // by an in-scope tensor — stamps the named dim into the output so
+            // declared results refer to it by name. Every other materializable
+            // spelling (`shape(...)` reads, static arithmetic, `cast`-wrapped,
+            // and `let`-bound sizes — Form-3) defers the output dim slot to
+            // the declared return-type / call-context via unification.
+            match arg_exprs.get(2).and_then(symbolic_dim_ref_name) {
+                Some(name) if env.lookup(name).is_none() || env.tensor_carries_dim(name) => {
+                    Dim::Name(name.to_string())
+                }
+                _ => return subst.apply(result_ty),
+            }
+        }
     };
 
     let resolved_result = subst.apply(result_ty);
@@ -15789,6 +15886,211 @@ fn symbolic_dim_ref_name(expr: &deep::Expr) -> Option<&str> {
     children(list).first().and_then(symbol_name)
 }
 
+/// chelis#397/#469: the materializability class of a runtime `expand` size
+/// argument, by PROVENANCE rather than surface spelling.
+///
+/// A runtime `expand` size has a backend representation only when its
+/// extent is recoverable. The discriminator must be uniform across the
+/// bare-`var`, `cast`-wrapped, `let`-bound, and arithmetic spellings (the
+/// four that #397's red team found drifting): all reduce to one of these
+/// classes via the same recursive walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SizeClass {
+    /// Folds to a compile-time constant (literal/`cast(N,_)`/arithmetic
+    /// over such values, or a `let` name marked `Static`). The host runtime
+    /// and the evaluator can compute it; a materializable extent.
+    Static,
+    /// Provably derives from an in-scope tensor's `shape(t, axis)` read, or
+    /// names an in-scope tensor dimension (§4.7.2 Form-2) — directly,
+    /// through `cast`, through integer arithmetic, or transitively through a
+    /// `let` name marked `ShapeSourced`. The backend reads the extent from
+    /// the tensor's shape.
+    ShapeSourced,
+    /// A runtime value with no static value and no tensor source — a bare
+    /// `int32`/`int64` parameter, a `cast`/arithmetic over one, or a `let`
+    /// name bound to such. No backend representation; rejected at check
+    /// (#469) so check↔build↔eval agree.
+    Sourceless,
+    /// Not a recognized int-valued size shape (e.g. the input tensor is
+    /// still a type var, or the expr is something the walk does not model).
+    /// The caller leaves the existing non-rejecting behavior in place.
+    Unknown,
+}
+
+/// chelis#397/#469: classify a runtime `expand` size argument by
+/// provenance. Walks `cast`, integer arithmetic (`add`/`sub`/`mul`/`div`),
+/// bare `var` references (resolved against `env` — an in-scope tensor dim
+/// is Form-2 `ShapeSourced`, a recorded `let` provenance is followed, a
+/// bare value binding with neither is `Sourceless`), and `shape(t, axis)`
+/// reads. The recursion mirrors the IR layer's
+/// `extract_dim_expr_value`/`symbol_has_tensor_source`/`shape_dep` triad so
+/// the check-time accept set matches what the backends can materialize.
+fn classify_expand_size(expr: &deep::Expr, env: &Env) -> SizeClass {
+    stack_guard!("classify_expand_size", expr, SizeClass::Unknown);
+    // A statically-extractable literal/`cast(N,_)` size is always Static.
+    if extract_int_for_dim(expr).is_some() {
+        return SizeClass::Static;
+    }
+    // An inline `shape(t, axis)` read (possibly `cast`-wrapped) of an
+    // in-scope tensor is the canonical Form-3 shape source (`bias_broadcast`).
+    if let Some(operand) = shape_read_operand(expr) {
+        return if shape_operand_is_in_scope_tensor(operand, env) {
+            SizeClass::ShapeSourced
+        } else {
+            // `shape(<non-tensor>, ...)` cannot supply an extent.
+            SizeClass::Sourceless
+        };
+    }
+    match expr {
+        deep::Expr::List(list, _) => {
+            match get_tag(list) {
+                // `cast(<inner>, ty)` — provenance is the inner expr's.
+                Some("cast") => children(list)
+                    .first()
+                    .map_or(SizeClass::Unknown, |inner| classify_expand_size(inner, env)),
+                Some("var") => match symbolic_dim_ref_name(expr) {
+                    // A name carried by an in-scope tensor's shape is a
+                    // Form-2 symbolic dim with a real source.
+                    Some(name) if env.tensor_carries_dim(name) => SizeClass::ShapeSourced,
+                    // A recorded `let` provenance (shape-sourced or static).
+                    Some(name) => match env.size_provenance(name) {
+                        Some(crate::env::SizeProvenance::ShapeSourced) => SizeClass::ShapeSourced,
+                        Some(crate::env::SizeProvenance::Static) => SizeClass::Static,
+                        // A bare value binding (a runtime scalar parameter)
+                        // with no tensor source and no static provenance.
+                        None if env.lookup(name).is_some() => SizeClass::Sourceless,
+                        None => SizeClass::Unknown,
+                    },
+                    None => SizeClass::Unknown,
+                },
+                // Integer arithmetic: combine the operands' classes.
+                Some("app") => classify_arith_app(list, env),
+                _ => SizeClass::Unknown,
+            }
+        }
+        _ => SizeClass::Unknown,
+    }
+}
+
+/// Combine the size classes of an integer-arithmetic application's
+/// operands (chelis#397/#469). `Sourceless` is absorbing (a sum/product
+/// touching a sourceless scalar is itself sourceless); a `ShapeSourced`
+/// operand makes the whole expression `ShapeSourced` (the extent is
+/// recoverable from that tensor); all-`Static` operands stay `Static`.
+///
+/// A non-arithmetic `app` — any other function call, e.g. `ident(a_dim)` or
+/// a user `def` — produces a runtime value with NO shape source the backend
+/// can read the extent from, exactly like a bare runtime scalar. It is
+/// `Sourceless`, NOT `Unknown`: returning `Unknown` here let the inline
+/// `expand(b, 0, ident(a_dim))` form (and its `cast`/arith wrappers) reach
+/// the non-rejecting `_` arm of `check_expand_signature` and silently
+/// miscompile in C to a hardcoded extent-1 axis (chelis#397 BLOCKER A — the
+/// same silent-miscompile class #469 exists to prevent). The `shape(t, ..)`,
+/// `cast(..)`, literal, and bare-`var` forms are all recognized BEFORE this
+/// arm, so reaching here means the call is genuinely sourceless at the check
+/// layer (a user `def` wrapping `shape` is opaque here and would be rejected
+/// at lowering too — no `shape_dep`).
+fn classify_arith_app(list: &deep::List, env: &Env) -> SizeClass {
+    const INT_ARITH: &[&str] = &["add", "sub", "mul", "div", "mod", "neg"];
+    let kids = children(list);
+    let Some(callee) = kids.first() else {
+        return SizeClass::Sourceless;
+    };
+    let is_int_arith = INT_ARITH.iter().any(|name| is_builtin_var(callee, name));
+    if !is_int_arith {
+        return SizeClass::Sourceless;
+    }
+    let operand_classes: Vec<SizeClass> = kids[1..]
+        .iter()
+        .map(|arg| classify_expand_size(arg, env))
+        .collect();
+    if operand_classes.contains(&SizeClass::Sourceless) {
+        return SizeClass::Sourceless;
+    }
+    if operand_classes.contains(&SizeClass::Unknown) {
+        return SizeClass::Unknown;
+    }
+    if operand_classes.contains(&SizeClass::ShapeSourced) {
+        return SizeClass::ShapeSourced;
+    }
+    SizeClass::Static
+}
+
+/// Recognize a `shape(operand, axis)` application — possibly wrapped in one
+/// or more `cast(..., int32)` layers — and return its `operand` expr
+/// (chelis#397/#469). The check-layer analog of the IR layer's
+/// `shape_app_operand_axis`. The axis is not validated here (the operand's
+/// presence is what proves a tensor source); a runtime axis is fine.
+fn shape_read_operand(expr: &deep::Expr) -> Option<&deep::Expr> {
+    stack_guard!("shape_read_operand", expr, None);
+    let deep::Expr::List(list, _) = expr else {
+        return None;
+    };
+    // Strip outer `cast(..., ty)` wrappers (tag form and app form).
+    if get_tag(list) == Some("cast") {
+        return children(list).first().and_then(shape_read_operand);
+    }
+    let kids = children(list);
+    let callee = kids.first()?;
+    if get_tag(list) == Some("app") && is_builtin_var(callee, "cast") {
+        return kids.get(1).and_then(shape_read_operand);
+    }
+    if get_tag(list) == Some("app") && is_builtin_var(callee, "shape") {
+        // `(app {} (var shape) <operand> <axis>)`.
+        return kids.get(1);
+    }
+    None
+}
+
+/// True when a `shape(...)` operand expression resolves to an in-scope
+/// tensor (chelis#397/#469). The operand is a bare `var` (`shape(x, 0)`) or
+/// a borrow of one (`shape(&x, 0)`); either way the named binding must have
+/// a tensor type in `env`. A non-tensor operand cannot supply an extent.
+fn shape_operand_is_in_scope_tensor(operand: &deep::Expr, env: &Env) -> bool {
+    // Unwrap a `borrow(x)`/`&x` wrapper to the underlying var.
+    let var_name = shape_operand_var_name(operand);
+    match var_name {
+        Some(name) => env.lookup(name).is_some_and(scheme_is_tensor_carrying),
+        None => false,
+    }
+}
+
+/// The underlying `var` name of a `shape(...)` operand, unwrapping a
+/// `borrow`/`&` layer (chelis#397/#469).
+fn shape_operand_var_name(operand: &deep::Expr) -> Option<&str> {
+    stack_guard!("shape_operand_var_name", operand, None);
+    if let Some(name) = symbolic_dim_ref_name(operand) {
+        return Some(name);
+    }
+    let deep::Expr::List(list, _) = operand else {
+        return None;
+    };
+    // `&x` desugars to the `(borrow {} (var x))` TAG form; `borrow(x)`
+    // may also appear as the `(app {} (var borrow) (var x))` builtin form.
+    if get_tag(list) == Some("borrow") {
+        return children(list).first().and_then(shape_operand_var_name);
+    }
+    let kids = children(list);
+    let callee = kids.first()?;
+    if get_tag(list) == Some("app") && is_builtin_var(callee, "borrow") {
+        return kids.get(1).and_then(shape_operand_var_name);
+    }
+    None
+}
+
+/// True when a scheme's body is (or contains, through `Ref`) a tensor type
+/// (chelis#397/#469).
+fn scheme_is_tensor_carrying(scheme: &Scheme) -> bool {
+    fn is_tensor(ty: &Type) -> bool {
+        match ty {
+            Type::Tensor(..) => true,
+            Type::Ref(inner) => is_tensor(inner),
+            _ => false,
+        }
+    }
+    is_tensor(&scheme.body)
+}
+
 /// Describe a non-literal axis argument for the issue #259 diagnostic.
 ///
 /// When the axis is a `(var name)` (the common case: a function-parameter
@@ -16106,6 +16408,12 @@ fn infer_fn(
     for (pname, ty_ann) in &params {
         let ty = ty_ann.clone().unwrap_or_else(|| vg.fresh_type());
         fn_env.bind(pname.clone(), Scheme::mono(ty.clone()));
+        // chelis#397/#469: a parameter is a fresh runtime binding with no
+        // size provenance. Clear any entry inherited (through the derived
+        // `Clone` of `env`) from an outer name it shadows, so a sourceless
+        // value parameter `d` shadowing an outer shape-sourced `d` (BLOCKER C)
+        // is not wrongly treated as a materializable extent.
+        fn_env.clear_size_provenance(pname);
         param_types.push(ty);
     }
 
@@ -16231,6 +16539,9 @@ fn infer_def_body_with_sig(
         // path in the standard way.
         let ty = ty_ann.clone().unwrap_or_else(|| decl_arg.clone());
         fn_env.bind(pname.clone(), Scheme::mono(ty.clone()));
+        // chelis#397/#469: a fresh parameter has no size provenance; clear any
+        // entry inherited from an outer name it shadows (BLOCKER C).
+        fn_env.clear_size_provenance(pname);
         param_types.push(ty);
     }
 
@@ -16418,6 +16729,29 @@ fn infer_let(
                 };
 
                 let scheme = let_env.generalize(&final_ty, subst);
+                // chelis#397/#469: record the size provenance of this binding
+                // BEFORE binding it (so `classify_expand_size` resolves it
+                // against the binding's RHS, not its own name) so a later
+                // `expand(b, 0, name)` can recover whether `name` is a
+                // materializable extent (static / shape-sourced) or a
+                // sourceless runtime scalar. Bound BEFORE `let_env.bind` so
+                // the RHS is classified against the pre-binding scope, and
+                // transitively through earlier bindings in the same block.
+                // The `Sourceless`/`Unknown` arm CLEARS any stale provenance so
+                // a re-bind to a sourceless RHS — `len = shape(x, 0); len = k`
+                // (BLOCKER B) — does not inherit the earlier shape-sourced entry.
+                match classify_expand_size(rhs_expr, &let_env) {
+                    SizeClass::Static => {
+                        let_env.mark_size_provenance(name, crate::env::SizeProvenance::Static);
+                    }
+                    SizeClass::ShapeSourced => {
+                        let_env
+                            .mark_size_provenance(name, crate::env::SizeProvenance::ShapeSourced);
+                    }
+                    SizeClass::Sourceless | SizeClass::Unknown => {
+                        let_env.clear_size_provenance(name)
+                    }
+                }
                 let_env.bind(name.to_string(), scheme);
             }
             i += 2;
@@ -17191,6 +17525,9 @@ fn infer_pipe_stage_lambda(
 
     let mut fn_env = env.clone();
     fn_env.bind(param_name.to_string(), Scheme::mono(param_ty.clone()));
+    // chelis#397/#469: a fresh parameter has no size provenance; clear any
+    // entry inherited from an outer name it shadows (BLOCKER C).
+    fn_env.clear_size_provenance(param_name);
 
     let body_ty = infer_expr(
         body,
@@ -18333,6 +18670,18 @@ fn infer_def(
         total_nodes,
     );
     let scheme = env.generalize(&body_ty, subst);
+    // chelis#397/#469: record the size provenance (see `infer_top_level` /
+    // `infer_let`) so a later `expand` size built from this binding can be
+    // checked for materializability. Classified against the pre-binding scope.
+    match classify_expand_size(&kids[1], env) {
+        SizeClass::Static => {
+            env.mark_size_provenance(&name, crate::env::SizeProvenance::Static);
+        }
+        SizeClass::ShapeSourced => {
+            env.mark_size_provenance(&name, crate::env::SizeProvenance::ShapeSourced);
+        }
+        SizeClass::Sourceless | SizeClass::Unknown => env.clear_size_provenance(&name),
+    }
     env.bind(name, scheme);
     body_ty
 }

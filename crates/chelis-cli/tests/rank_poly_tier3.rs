@@ -2080,6 +2080,405 @@ fn form3_shape_dep_survives_vmap_rebuild() {
     assert_eval_agrees_with_backend(source, "shape_dep_vmap", &backend);
 }
 
+/// chelis#397 (check↔build symmetry): the EXACT 0.7.26-regression repro —
+/// `bcast_1d_to_2d`, a positional-axis Form-3 `expand` whose size is a bare
+/// runtime scalar parameter (`a_dim: int64`) with no tensor source — must be
+/// rejected at CHECK time, not just at build/eval. Pre-fix, `chelis check`
+/// returned score 1.0 / empty errors while build and eval rejected it with the
+/// #469 sourceless-size diagnostic: a check-clean program that does not build,
+/// the precise invariant violation #397 reports (`rank_poly_tier3.rs:158-161`).
+/// The fix moves the sourceless-runtime-scalar rejection into the type checker
+/// so all three lanes agree by construction. The paired build/eval rejections
+/// are pinned by `form3_scalar_param_expand_size_rejected{,_in_eval}` above.
+#[test]
+fn form3_scalar_param_expand_size_rejected_at_check() {
+    let json = check_json(
+        "def bcast_1d_to_2d[a, n](g: tensor[n, f32], a_dim: int64) -> tensor[a, n, f32] = expand(g, 0, a_dim)\n",
+    );
+    assert_rejected_with(
+        &json,
+        "no tensor in scope carries it",
+        "Form-3 sourceless runtime-scalar expand size at check (rank-1 -> rank-2)",
+    );
+    assert_rejected_with(
+        &json,
+        "chelis#469",
+        "check rejection cites the #469 sourceless-size rule",
+    );
+}
+
+/// chelis#397 (check↔build symmetry, chained rank-1 -> rank-4): the full
+/// `broadcast_to_achw` repro from the issue — three chained positional-axis
+/// Form-3 `expand`s, each sized by a bare runtime `int64` parameter
+/// (`h_dim`/`w_dim`/`a_dim`) with no tensor source, with the explicit
+/// `step1`/`step2`/`step3` type ascriptions. This is the rank-1 -> rank-4 NN
+/// broadcast pattern (school's `broadcast_to_achw`) that previously
+/// type-checked clean but died in build/eval. It must now be rejected at check
+/// time with the same #469 diagnostic — the first chained-expand member of the
+/// "check-clean must build" invariant family.
+#[test]
+fn form3_chained_rank4_expand_rejected_at_check() {
+    let json = check_json(
+        "def broadcast_to_achw[c, h, w, a](v: &tensor[c, f32], h_dim: int64, w_dim: int64, a_dim: int64) -> tensor[a, c, h, w, f32] = {\n\
+        \x20 step1: tensor[c, h, f32] = expand(v, 1, h_dim)\n\
+        \x20 step2: tensor[c, h, w, f32] = expand(step1, 2, w_dim)\n\
+        \x20 step3: tensor[a, c, h, w, f32] = expand(step2, 0, a_dim)\n\
+        \x20 step3\n\
+        }\n",
+    );
+    assert_rejected_with(
+        &json,
+        "no tensor in scope carries it",
+        "chained Form-3 sourceless expand at check (rank-1 -> rank-4)",
+    );
+    assert_rejected_with(
+        &json,
+        "chelis#469",
+        "chained-expand check rejection cites the #469 sourceless-size rule",
+    );
+}
+
+/// chelis#397 (build/eval consistency, chained rank-1 -> rank-4): the chained
+/// `broadcast_to_achw` repro is rejected IDENTICALLY at build and at eval with
+/// the #469 sourceless-size diagnostic — no eval-vs-backend divergence and no
+/// rank-monomorphization ICE (the original 0.7.26 failure mode was the internal
+/// `tensor rank mismatch: 1 dims vs 4 dims`). A call site instantiates the def
+/// so the chained expands are actually lowered. With the check-time rejection
+/// landed, build/eval reject before lowering; this test pins that the loud
+/// #469 reason survives across both lanes regardless of where it fires.
+#[test]
+fn form3_chained_rank4_expand_rejected_in_build_and_eval() {
+    let source = "def broadcast_to_achw[c, h, w, a](v: &tensor[c, f32], h_dim: int64, w_dim: int64, a_dim: int64) -> tensor[a, c, h, w, f32] = {\n\
+        \x20 step1: tensor[c, h, f32] = expand(v, 1, h_dim)\n\
+        \x20 step2: tensor[c, h, w, f32] = expand(step1, 2, w_dim)\n\
+        \x20 step3: tensor[a, c, h, w, f32] = expand(step2, 0, a_dim)\n\
+        \x20 step3\n\
+        }\n\
+        out = broadcast_to_achw(to_tensor([1.0, 2.0]), cast(3, int64), cast(4, int64), cast(5, int64))\n";
+    let build_stderr = build_expecting_failure(source, "issue_397_chained_achw_build");
+    assert!(
+        build_stderr.contains("no tensor in scope carries it")
+            && build_stderr.contains("chelis#469"),
+        "chained rank-1 -> rank-4 expand must reject at build with the #469 \
+         sourceless-size diagnostic, got: {build_stderr}"
+    );
+    assert!(
+        !build_stderr.contains("rank mismatch")
+            && !build_stderr.contains("internal compiler error"),
+        "the chained expand must reject cleanly, never the original \
+         rank-monomorphization ICE: {build_stderr}"
+    );
+    let dir = tempdir().expect("tempdir");
+    let eval_stderr =
+        eval_stderr_expecting_failure(dir.path(), source, "issue_397_chained_achw_eval");
+    assert!(
+        eval_stderr.contains("no tensor in scope carries it") && eval_stderr.contains("chelis#469"),
+        "chained rank-1 -> rank-4 expand must reject at eval with the same #469 \
+         diagnostic as the build lane, got: {eval_stderr}"
+    );
+}
+
+// ── chelis#397 source-tracking: positive (materializable) acceptance ──────
+//
+// The reworked §4.7.2 expand-size predicate discriminates by PROVENANCE, not
+// spelling: a runtime size is accepted at check iff it provably folds to a
+// constant (`Static`) or derives from an in-scope tensor's `shape(t, axis)`
+// read (`ShapeSourced`) — followed transitively through `let`, `cast`, and
+// integer arithmetic — and rejected otherwise. These pin the materializable
+// cases the prior spelling-based predicate over-rejected (#397 BLOCKER 2/3).
+
+/// chelis#397 (BLOCKER 3): a `let`-bound shape-derived expand size is
+/// semantically identical to the inline `shape(x, ...)` form
+/// (`form3_shape_sourced_expand_matches_backend`) and must be ACCEPTED at
+/// check — the prior spelling-based predicate wrongly rejected it ("no tensor
+/// in scope carries it" while `x` plainly does). Source-tracking follows the
+/// `let` binding `a_dim = shape(x, cast(0, int32))` back to `x`'s shape, so
+/// the size is `ShapeSourced`. The evaluator materializes the extent from `x`
+/// (axis 0 = 2), producing `[2, 4]`.
+#[test]
+fn form3_let_bound_shape_sourced_expand_accepted_at_check() {
+    let source = "def f(x: &tensor[n, 4, f32], b: &tensor[4, f32]) -> tensor[n, 4, f32] = {\n\
+        \x20 a_dim: int32 = shape(x, cast(0, int32))\n\
+        \x20 expand(b, 0, a_dim)\n\
+        }\n\
+        xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])\n\
+        out = f(xs, to_tensor([10.0, 20.0, 30.0, 40.0]))\n";
+    let json = check_json(source);
+    assert_clean(
+        &json,
+        "let-bound shape-derived expand size accepted at check (#397 BLOCKER 3)",
+    );
+    // The evaluator materializes the extent from `x`'s axis 0 (=2), NOT `b`.
+    let dir = tempdir().expect("tempdir");
+    let eval = eval_stdout(dir.path(), source, "issue_397_let_bound_shape_eval");
+    let tensors = parse_printed_tensors(&eval);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("eval output missing `out`: {eval}"));
+    assert_eq!(
+        out.1,
+        vec![2, 4],
+        "let-bound shape-derived expand must materialize the extent from `x` (=2), got {eval}"
+    );
+}
+
+/// chelis#397 (BLOCKER 2): an arithmetic-built positive runtime size whose
+/// operands are all compile-time constants (`some_count = sub(cast(4,
+/// int32), cast(1, int32))` = 3) folds to a constant and is therefore a
+/// materializable `Static` extent — it must be ACCEPTED at check, not
+/// rejected as "sourceless". The evaluator computes the arithmetic and
+/// produces shape `[3, 2]`. This is the sibling of the host-runtime defense
+/// path exercised by `chelis-compiler-api`'s
+/// `host_runtime_expand_negative_count_errors` (which builds a non-positive
+/// arithmetic count the SAME way): both rely on static-arithmetic sizes
+/// passing check so the runtime/eval lane can compute them. The C backend
+/// does not yet fold this arithmetic (it still rejects the residual
+/// `DimExpr::Sym` at lowering) — that materialization gap is the separate
+/// C-codegen issue; the check layer's job here is to stop over-rejecting a
+/// materializable extent.
+#[test]
+fn form3_static_arithmetic_expand_size_accepted_at_check() {
+    let source = "b = to_tensor([1.0, 2.0])\n\
+        some_count = sub(cast(4, int32), cast(1, int32))\n\
+        out = expand(b, cast(0, int32), some_count)\n";
+    let json = check_json(source);
+    assert_clean(
+        &json,
+        "static-arithmetic expand size accepted at check (#397 BLOCKER 2)",
+    );
+    let dir = tempdir().expect("tempdir");
+    let eval = eval_stdout(dir.path(), source, "issue_397_static_arith_eval");
+    let tensors = parse_printed_tensors(&eval);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("eval output missing `out`: {eval}"));
+    assert_eq!(
+        out.1,
+        vec![3, 2],
+        "static-arithmetic expand size (4-1=3) must evaluate to shape [3, 2], got {eval}"
+    );
+}
+
+/// chelis#397 (chained rank-1 -> rank-4, shape-sourced): the chained
+/// `broadcast_to_achw`-shaped pattern is ACCEPTED at check when every
+/// inserted-axis size is a `shape(src, axis)` read of an in-scope tensor —
+/// the materializable counterpart to the sourceless chained form rejected by
+/// `form3_chained_rank4_expand_rejected_at_check`. Source-tracking applies
+/// uniformly to each of the three chained expands.
+#[test]
+fn form3_chained_rank4_shape_sourced_expand_accepted_at_check() {
+    let json = check_json(
+        "def bcast4[c, h, w, a](v: &tensor[c, f32], src: &tensor[a, c, h, w, f32]) -> tensor[a, c, h, w, f32] = {\n\
+        \x20 step1: tensor[c, h, f32] = expand(v, 1, shape(src, cast(2, int32)))\n\
+        \x20 step2: tensor[c, h, w, f32] = expand(step1, 2, shape(src, cast(3, int32)))\n\
+        \x20 step3: tensor[a, c, h, w, f32] = expand(step2, 0, shape(src, cast(0, int32)))\n\
+        \x20 step3\n\
+        }\n",
+    );
+    assert_clean(
+        &json,
+        "chained rank-1 -> rank-4 shape-sourced expand accepted at check (#397)",
+    );
+}
+
+// ── chelis#397 source-tracking: negative (sourceless) rejection, uniform ──
+//
+// A truly-sourceless runtime size — a bare `int32`/`int64` parameter, a
+// `cast`/arithmetic over one, or a `let` bound to such — has no backend
+// representation and must be REJECTED at check with the #469 diagnostic,
+// UNIFORMLY across spellings. The bare-`var` spelling is already pinned by
+// `form3_scalar_param_expand_size_rejected_at_check`; these pin the spellings
+// the prior predicate (which keyed on the bare-`(var)` form only) let escape.
+
+/// chelis#397 (MAJOR 4): the `cast`-wrapped sourceless form
+/// `expand(g, 0, cast(a_dim, int32))` — which the prior spelling-based
+/// predicate let ESCAPE check entirely and then silently miscompile in C —
+/// must now be REJECTED at check with the #469 diagnostic. Source-tracking
+/// strips the `cast` and finds the bare runtime scalar `a_dim` underneath.
+#[test]
+fn form3_cast_wrapped_sourceless_expand_rejected_at_check() {
+    let json = check_json(
+        "def g[a, n](b: tensor[n, f32], a_dim: int32) -> tensor[a, n, f32] = expand(b, 0, cast(a_dim, int32))\n",
+    );
+    assert_rejected_with(
+        &json,
+        "no tensor in scope carries it",
+        "cast-wrapped sourceless expand size rejected at check (#397 MAJOR 4)",
+    );
+    assert_rejected_with(
+        &json,
+        "chelis#469",
+        "cast-wrapped sourceless rejection cites the #469 sourceless-size rule",
+    );
+}
+
+/// chelis#397: a `let`-bound sourceless size — `d = a_dim` where `a_dim` is a
+/// bare runtime scalar parameter — must be REJECTED at check, identically to
+/// the bare-`var` form. Source-tracking follows the `let` binding to its
+/// sourceless RHS; binding it to a name does not give it a tensor source.
+#[test]
+fn form3_let_bound_sourceless_expand_rejected_at_check() {
+    let json = check_json(
+        "def g[a, n](b: tensor[n, f32], a_dim: int32) -> tensor[a, n, f32] = {\n\
+        \x20 d: int32 = a_dim\n\
+        \x20 expand(b, 0, d)\n\
+        }\n",
+    );
+    assert_rejected_with(
+        &json,
+        "no tensor in scope carries it",
+        "let-bound sourceless expand size rejected at check (#397)",
+    );
+    assert_rejected_with(
+        &json,
+        "chelis#469",
+        "let-bound sourceless rejection cites the #469 sourceless-size rule",
+    );
+}
+
+/// chelis#397: integer arithmetic that TOUCHES a sourceless runtime scalar is
+/// itself sourceless (`Sourceless` is absorbing) — `add(a_dim, cast(1,
+/// int32))` cannot be materialized because `a_dim` has no shape source. It
+/// must be REJECTED at check, distinguishing it from the all-constant
+/// arithmetic accepted by `form3_static_arithmetic_expand_size_accepted_at_check`.
+#[test]
+fn form3_arithmetic_over_sourceless_expand_rejected_at_check() {
+    let json = check_json(
+        "def g[a, n](b: tensor[n, f32], a_dim: int32) -> tensor[a, n, f32] = expand(b, 0, add(a_dim, cast(1, int32)))\n",
+    );
+    assert_rejected_with(
+        &json,
+        "no tensor in scope carries it",
+        "arithmetic over a sourceless scalar rejected at check (#397)",
+    );
+    assert_rejected_with(
+        &json,
+        "chelis#469",
+        "arithmetic-over-sourceless rejection cites the #469 sourceless-size rule",
+    );
+}
+
+// ── chelis#397 source-tracking: re-review soundness blockers (A/B/C) ──────
+//
+// A fresh issues+soundness re-review found three execution-confirmed holes
+// where the predicate accepted a sourceless size it should reject. Each is a
+// silent-miscompile or check↔build/eval divergence — the exact class #469 /
+// #397 exist to prevent — so each must reject at CHECK with the #469 reason.
+
+/// chelis#397 (BLOCKER A): a function-call-derived inline size
+/// `expand(b, 0, ident(a_dim))` (with `def ident(x: int32) -> int32 = x`)
+/// must be REJECTED at check. Pre-fix it classified as `Unknown` and reached
+/// `check_expand_signature`'s non-rejecting `_` arm: check-clean AND
+/// build-clean, with the C backend emitting a hardcoded extent-1 axis (eval
+/// `[3, 2]` vs compiled-C `[1, 2]`) — the same silent-miscompile class as
+/// MAJOR 4. A non-int-arithmetic `app` is a runtime value with no shape
+/// source, so it is `Sourceless`. The `cast`- and `add`-wrapped forms reduce
+/// to the same call and must reject identically.
+#[test]
+fn form3_function_call_inline_expand_size_rejected_at_check() {
+    let bare = check_json(
+        "def ident(x: int32) -> int32 = x\n\
+        def g[a, n](b: tensor[n, f32], a_dim: int32) -> tensor[a, n, f32] = expand(b, 0, ident(a_dim))\n",
+    );
+    assert_rejected_with(
+        &bare,
+        "no tensor in scope carries it",
+        "function-call inline expand size rejected at check (#397 BLOCKER A)",
+    );
+    assert_rejected_with(&bare, "chelis#469", "BLOCKER A bare form cites #469");
+
+    let cast_wrapped = check_json(
+        "def ident(x: int32) -> int32 = x\n\
+        def g[a, n](b: tensor[n, f32], a_dim: int32) -> tensor[a, n, f32] = expand(b, 0, cast(ident(a_dim), int32))\n",
+    );
+    assert_rejected_with(
+        &cast_wrapped,
+        "no tensor in scope carries it",
+        "cast-wrapped function-call inline expand size rejected at check (#397 BLOCKER A)",
+    );
+
+    let arith_wrapped = check_json(
+        "def ident(x: int32) -> int32 = x\n\
+        def g[a, n](b: tensor[n, f32], a_dim: int32) -> tensor[a, n, f32] = expand(b, 0, add(ident(a_dim), cast(0, int32)))\n",
+    );
+    assert_rejected_with(
+        &arith_wrapped,
+        "no tensor in scope carries it",
+        "arith-wrapped function-call inline expand size rejected at check (#397 BLOCKER A)",
+    );
+}
+
+/// chelis#397 (BLOCKER B): a name that re-binds from a shape source to a
+/// sourceless RHS — `len = shape(x, 0); len = k; expand(b, 0, len)` — must be
+/// REJECTED at check. Pre-fix the provenance map was add-only (no clear on
+/// the sourceless arm), so the stale `ShapeSourced` entry survived the
+/// re-bind: check ACCEPTED, eval materialized a runtime extent from `k` that
+/// contradicts the checked type (a check↔eval divergence and type-soundness
+/// violation). The clear-on-rebind restores add/clear symmetry.
+#[test]
+fn form3_shape_to_sourceless_rebind_expand_rejected_at_check() {
+    let json = check_json(
+        "def f(x: &tensor[n, 4, f32], b: &tensor[4, f32], k: int32) -> tensor[n, 4, f32] = {\n\
+        \x20 len: int32 = shape(x, cast(0, int32))\n\
+        \x20 len: int32 = k\n\
+        \x20 expand(b, 0, len)\n\
+        }\n",
+    );
+    assert_rejected_with(
+        &json,
+        "no tensor in scope carries it",
+        "shape-sourced -> sourceless rebind rejected at check (#397 BLOCKER B)",
+    );
+    assert_rejected_with(&json, "chelis#469", "BLOCKER B cites #469");
+}
+
+/// chelis#397 (BLOCKER C): a sourceless value parameter that SHADOWS an outer
+/// shape-sourced name — `d = shape(&xs, 0)` at top level, then `def f(..., d:
+/// int32) = expand(g, 0, d)` — must be REJECTED at check. Pre-fix `Env`'s
+/// derived `Clone` copied the outer `d`'s `ShapeSourced` provenance into the
+/// function scope and the value parameter did not clear it: check ACCEPTED
+/// while build/eval rejected #469 — the exact check-clean-fails-build #397
+/// class this PR set out to kill. Clearing provenance at every param bind
+/// fixes it.
+#[test]
+fn form3_sourceless_param_shadowing_shape_name_rejected_at_check() {
+    let json = check_json(
+        "xs = to_tensor([[1.0, 2.0], [3.0, 4.0]])\n\
+        d = shape(&xs, cast(0, int32))\n\
+        def f[m, q](g: tensor[q, f32], d: int32) -> tensor[m, q, f32] = expand(g, 0, d)\n",
+    );
+    assert_rejected_with(
+        &json,
+        "no tensor in scope carries it",
+        "sourceless param shadowing an outer shape name rejected at check (#397 BLOCKER C)",
+    );
+    assert_rejected_with(&json, "chelis#469", "BLOCKER C cites #469");
+}
+
+/// chelis#397 (BLOCKER B/C positive parity): the clear-on-rebind /
+/// clear-on-param-bind must NOT over-reject the legitimate inverse. A name
+/// that re-binds the OTHER way — sourceless then shape-sourced — is
+/// materializable, so `expand(b, 0, len)` after `len = shape(x, 0)` (re-bound
+/// over an earlier sourceless `len`) stays ACCEPTED. Pins that the provenance
+/// clear is scoped to the offending arm and does not poison a later valid
+/// shape-source rebind.
+#[test]
+fn form3_sourceless_to_shape_rebind_expand_accepted_at_check() {
+    let json = check_json(
+        "def f(x: &tensor[n, 4, f32], b: &tensor[4, f32], k: int32) -> tensor[n, 4, f32] = {\n\
+        \x20 len: int32 = k\n\
+        \x20 len: int32 = shape(x, cast(0, int32))\n\
+        \x20 expand(b, 0, len)\n\
+        }\n",
+    );
+    assert_clean(
+        &json,
+        "sourceless -> shape-sourced rebind accepted at check (#397 BLOCKER B inverse)",
+    );
+}
+
 /// chelis#364/#319 regression: a NEGATIVE axis literal (`softmax(x, -1)`,
 /// `sum(x, -1)`) must lower to the last axis. The #364 axis-extraction fix
 /// (FATAL on a non-constant axis) initially over-rejected the `-1` form,
