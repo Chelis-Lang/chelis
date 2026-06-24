@@ -1470,7 +1470,8 @@ exactly:
    precision type literal — the literal body adopts `p`
 
 Position 4 applies to a **bare scalar numeric literal** as well as to a
-tensor-literal body (issue #308). `cast(1.1, f64)` binds the decimal `1.1`
+tensor-literal body (issue #308; the end-to-end parse→eval consequence is
+issue #394). `cast(1.1, f64)` binds the decimal `1.1`
 at `f64` — exactly `0x3ff199999999999a` — it does NOT narrow to the §5.3
 `f32` default and then widen (which would yield the f32-truncation value
 `1.100000023841858`). Likewise `cast(3000000000, int64)` binds the literal

@@ -80,7 +80,7 @@ fn uppercase_single_letter_params_and_references_check_clean() {
 #[test]
 fn each_finance_letter_binds_and_resolves() {
     // S, K, T, N, P each bind as a value and resolve when referenced
-    // downstream — `T = S` uses S as a value, not a constructor.
+    // downstream: `T = S` uses S as a value, not a constructor.
     let src = "S = cast(2.0, f32)\n\
                K = cast(3.0, f32)\n\
                T = S\n\
