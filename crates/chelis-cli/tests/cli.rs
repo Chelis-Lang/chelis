@@ -4741,13 +4741,13 @@ fn build_hip_rejects_symbolic_normalized_axis_for_layer_norm() {
 }
 
 #[test]
-fn build_hip_rejects_pad_lowering_without_panic() {
+fn build_hip_emits_pad_kernel() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("pad.ch");
+    let out_dir = dir.path().join("hip-pad-out");
     // Parameterized form `pad(&x, [[lo, hi]], fill)` per spec §2.4 and
-    // issue Chelis-Lang/chelis#187 (the bare 1-arg form is no longer
-    // accepted at type-check; previously it slipped through to the HIP
-    // backend rejection below).
+    // issue Chelis-Lang/chelis#187. WS-8A: the HIP backend now lowers pad
+    // to a typed per-output-element kernel instead of rejecting it.
     write_file(
         &path,
         "def f(x: tensor[4, f32]) -> tensor[6, f32] = pad(&x, [[1, 1]], 0.0)\n",
@@ -4759,10 +4759,57 @@ fn build_hip_rejects_pad_lowering_without_panic() {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap(), "--target", "hip"])
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("does not yet support `pad`"));
+        .success();
+
+    let hip_src = fs::read_to_string(out_dir.join("pad_hip.cpp")).expect("hip source");
+    assert!(
+        hip_src.contains("kernel_pad"),
+        "HIP pad build must emit the pad kernel source"
+    );
+}
+
+#[test]
+fn build_hip_emits_shrink_kernel() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("shrink.ch");
+    let out_dir = dir.path().join("hip-shrink-out");
+    // WS-8A: shrink now lowers to a typed per-output-element kernel on HIP.
+    write_file(
+        &path,
+        "def f(x: tensor[6, f32]) -> tensor[4, f32] = shrink(&x, [[1, 5]])\n",
+    );
+
+    let json = run_json_check(&path);
+    assert_eq!(json["score"].as_f64().unwrap(), 1.0);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let hip_src = fs::read_to_string(out_dir.join("shrink_hip.cpp")).expect("hip source");
+    assert!(
+        hip_src.contains("kernel_shrink"),
+        "HIP shrink build must emit the shrink kernel source"
+    );
 }
 
 #[test]
@@ -5735,11 +5782,13 @@ fn target_metal_unknown_target_message_lists_metal() {
 }
 
 #[test]
-fn target_metal_rejects_pad() {
+fn target_metal_emits_pad_kernel() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("pad.ch");
-    // Parameterized pad per spec §2.4 and issue Chelis-Lang/chelis#187
-    // (the bare 1-arg form is no longer accepted at type-check).
+    let out_dir = dir.path().join("out");
+    // Parameterized pad per spec §2.4 and issue Chelis-Lang/chelis#187.
+    // WS-8A: the Metal backend now lowers pad to a typed MSL kernel
+    // instead of rejecting it.
     write_file(
         &path,
         "def f(x: tensor[4, f32]) -> tensor[6, f32] = pad(&x, [[1, 1]], 0.0)\n",
@@ -5748,20 +5797,33 @@ fn target_metal_rejects_pad() {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap(), "--target", "metal"])
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "metal",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "`chelis build --target metal` does not yet support `pad`",
-        ));
+        .success();
+    let mm_src = fs::read_to_string(out_dir.join("pad_metal.mm")).expect("metal source");
+    assert!(
+        mm_src.contains("k_pad"),
+        "Metal pad build must emit the pad kernel: {mm_src}"
+    );
+    assert!(
+        mm_src.contains("chelis_metal_launch_two_uniforms"),
+        "Metal pad must dispatch with the dims + fill uniform pair"
+    );
 }
 
 #[test]
-fn target_metal_rejects_shrink() {
+fn target_metal_emits_shrink_kernel() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("shrink.ch");
-    // Parameterized shrink per spec §2.4 and issue Chelis-Lang/chelis#187
-    // (the bare 1-arg form is no longer accepted at type-check).
+    let out_dir = dir.path().join("out");
+    // WS-8A: the Metal backend now lowers shrink to a typed MSL kernel.
     write_file(
         &path,
         "def f(x: tensor[4, f32]) -> tensor[2, f32] = shrink(&x, [[1, 3]])\n",
@@ -5770,12 +5832,21 @@ fn target_metal_rejects_shrink() {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap(), "--target", "metal"])
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "metal",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "`chelis build --target metal` does not yet support `shrink`",
-        ));
+        .success();
+    let mm_src = fs::read_to_string(out_dir.join("shrink_metal.mm")).expect("metal source");
+    assert!(
+        mm_src.contains("k_shrink"),
+        "Metal shrink build must emit the shrink kernel: {mm_src}"
+    );
 }
 
 #[test]

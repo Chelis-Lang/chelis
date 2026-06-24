@@ -459,6 +459,134 @@ pub fn reduce_full_kernel(kernel_name: &str, kind: ReduceKind) -> String {
     reduce_full_kernel_for(kernel_name, kind, Prim::F32, Prim::F32)
 }
 
+/// Maximum tensor rank supported by the movement-op uniform structs.
+/// Mirrors the HIP backend's `MAX_DIM` so both GPU paths cap rank
+/// identically. Pad/shrink encode `src_shape`, `out_shape`, and the
+/// per-axis offset vector as fixed-size arrays in the MSL uniform block.
+pub const MOVEMENT_MAX_DIM: usize = 8;
+
+/// Emit the shared MSL `ChelisMovementDims` uniform struct + the
+/// contiguous-stride / flat-index helpers used by the pad and shrink
+/// kernels. The Metal backend materializes every tensor contiguously
+/// (it has no strided-view path), so the kernels reconstruct row-major
+/// strides from the shape inline rather than receiving them as inputs.
+fn movement_helpers() -> String {
+    let max_dim = MOVEMENT_MAX_DIM;
+    format!(
+        "struct ChelisMovementDims {{
+    uint ndim;
+    uint total;
+    uint src_shape[{max_dim}];
+    uint out_shape[{max_dim}];
+    uint offset[{max_dim}];
+}};
+
+// Decompose a flat row-major index into per-axis indices over `shape`.
+static inline void chelis_flat_to_indices(uint flat, constant uint* shape, uint ndim, thread uint* out) {{
+    for (uint d = ndim; d-- > 0; ) {{
+        out[d] = flat % shape[d];
+        flat /= shape[d];
+    }}
+}}
+
+// Row-major flat index of per-axis `indices` over a contiguous `shape`.
+static inline uint chelis_indices_to_flat(thread const uint* indices, constant uint* shape, uint ndim) {{
+    uint flat = 0;
+    for (uint d = 0; d < ndim; d++) {{
+        flat = flat * shape[d] + indices[d];
+    }}
+    return flat;
+}}
+"
+    )
+}
+
+/// MSL `pad` kernel (typed; one thread per output element).
+///
+/// The output buffer is contiguous; thread `tid` is the output flat
+/// index. Recover the per-axis output indices, subtract the per-axis low
+/// padding (`offset[d]`) to get the source index, and copy the source
+/// element when every source index lies in `[0, src_shape[d])`; otherwise
+/// write `fill`. Semantics mirror the C backend `emit_pad`, the evaluator
+/// `pad`, and the HIP `pad_typed` kernel (spec/05-risc-primitives.md
+/// §2.4). bf16 outputs wrap in the `__METAL_VERSION__ >= 320` guard.
+pub fn pad_kernel(kernel_name: &str, prec: Prim) -> String {
+    let ty = msl_type(prec);
+    let max_dim = MOVEMENT_MAX_DIM;
+    let helpers = movement_helpers();
+    let body = format!(
+        "#include <metal_stdlib>
+using namespace metal;
+
+{helpers}
+kernel void {kernel_name}(
+    device const {ty}* a [[buffer(0)]],
+    device {ty}* out [[buffer(1)]],
+    constant ChelisMovementDims& dims [[buffer(2)]],
+    constant {ty}& fill [[buffer(3)]],
+    uint tid [[thread_position_in_grid]]
+) {{
+    if (tid >= dims.total) return;
+    uint out_idx[{max_dim}];
+    chelis_flat_to_indices(tid, dims.out_shape, dims.ndim, out_idx);
+    uint src_idx[{max_dim}];
+    bool in_source = true;
+    for (uint d = 0; d < dims.ndim; d++) {{
+        int s = (int)out_idx[d] - (int)dims.offset[d];
+        if (s < 0 || s >= (int)dims.src_shape[d]) {{
+            in_source = false;
+        }}
+        src_idx[d] = (uint)(s < 0 ? 0 : s);
+    }}
+    if (in_source) {{
+        uint flat = chelis_indices_to_flat(src_idx, dims.src_shape, dims.ndim);
+        out[tid] = a[flat];
+    }} else {{
+        out[tid] = fill;
+    }}
+}}
+"
+    );
+    maybe_wrap_msl_320(body, &[prec])
+}
+
+/// MSL `shrink` kernel (typed; one thread per output element).
+///
+/// One thread per (contiguous) output element reads the source at
+/// `out_index + offset` where `offset[d]` is `bounds[d].0`. The shrink
+/// output is always strictly inside the source, so no bounds margin
+/// exists. Mirrors the C backend `emit_shrink`, the evaluator `shrink`,
+/// and the HIP `shrink_typed` kernel (spec/05-risc-primitives.md §2.4).
+pub fn shrink_kernel(kernel_name: &str, prec: Prim) -> String {
+    let ty = msl_type(prec);
+    let max_dim = MOVEMENT_MAX_DIM;
+    let helpers = movement_helpers();
+    let body = format!(
+        "#include <metal_stdlib>
+using namespace metal;
+
+{helpers}
+kernel void {kernel_name}(
+    device const {ty}* a [[buffer(0)]],
+    device {ty}* out [[buffer(1)]],
+    constant ChelisMovementDims& dims [[buffer(2)]],
+    uint tid [[thread_position_in_grid]]
+) {{
+    if (tid >= dims.total) return;
+    uint out_idx[{max_dim}];
+    chelis_flat_to_indices(tid, dims.out_shape, dims.ndim, out_idx);
+    uint src_idx[{max_dim}];
+    for (uint d = 0; d < dims.ndim; d++) {{
+        src_idx[d] = out_idx[d] + dims.offset[d];
+    }}
+    uint flat = chelis_indices_to_flat(src_idx, dims.src_shape, dims.ndim);
+    out[tid] = a[flat];
+}}
+"
+    );
+    maybe_wrap_msl_320(body, &[prec])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

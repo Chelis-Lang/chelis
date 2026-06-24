@@ -888,3 +888,177 @@ int main(void) {{
         }
     }
 }
+
+// ===========================================================================
+// WS-8A: pad / shrink GPU == evaluator (manual Mac gate). These mirror the
+// HIP `g16_*` oracle cases. Each compiles the emitted .mm against
+// `-framework Metal -framework Foundation`, runs it on the Metal device, and
+// asserts agreement with the `chelis-ir` evaluator within the Metal f32
+// tolerance. `#[ignore]` because they require an Apple Silicon Mac with a
+// usable Metal device (see `spec/08-backends.md` §M6 + §4).
+// ===========================================================================
+
+fn mat_f32(r: usize, c: usize) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(r), DimInfo::Lit(c)],
+        precision: Prim::F32,
+    }
+}
+
+#[test]
+#[ignore]
+fn m6_pad_1d_zero_fill_matches_evaluator() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let p = dag.add_node(
+        RiscOp::Pad {
+            padding: vec![(1, 1)],
+            fill: 0.0,
+        },
+        vec![x],
+        vec_f32(6),
+        None,
+    );
+    dag.add_root(p);
+    let inputs = vec![TestInput::new("x", &[4], &[1.0, 2.0, 3.0, 4.0])];
+    let actual = compile_and_run_single_output(&dag, "pad_1d", &inputs);
+    let expected = evaluator_single_output(&dag, &inputs);
+    assert_close(&actual, &expected, ABS_TOL, REL_TOL, "pad 1d zero fill");
+}
+
+#[test]
+#[ignore]
+fn m6_pad_1d_nonzero_fill_matches_evaluator() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
+    let p = dag.add_node(
+        RiscOp::Pad {
+            padding: vec![(2, 1)],
+            fill: -7.5,
+        },
+        vec![x],
+        vec_f32(6),
+        None,
+    );
+    dag.add_root(p);
+    let inputs = vec![TestInput::new("x", &[3], &[10.0, 20.0, 30.0])];
+    let actual = compile_and_run_single_output(&dag, "pad_1d_nonzero", &inputs);
+    let expected = evaluator_single_output(&dag, &inputs);
+    assert_close(&actual, &expected, ABS_TOL, REL_TOL, "pad 1d nonzero fill");
+}
+
+#[test]
+#[ignore]
+fn m6_pad_2d_asymmetric_matches_evaluator() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        mat_f32(2, 3),
+        None,
+    );
+    let p = dag.add_node(
+        RiscOp::Pad {
+            padding: vec![(1, 0), (0, 2)],
+            fill: 0.0,
+        },
+        vec![x],
+        mat_f32(3, 5),
+        None,
+    );
+    dag.add_root(p);
+    let inputs = vec![TestInput::new(
+        "x",
+        &[2, 3],
+        &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    )];
+    let actual = compile_and_run_single_output(&dag, "pad_2d", &inputs);
+    let expected = evaluator_single_output(&dag, &inputs);
+    assert_close(&actual, &expected, ABS_TOL, REL_TOL, "pad 2d asymmetric");
+}
+
+#[test]
+#[ignore]
+fn m6_shrink_1d_matches_evaluator() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
+    let s = dag.add_node(
+        RiscOp::Shrink {
+            bounds: vec![(1, 5)],
+        },
+        vec![x],
+        vec_f32(4),
+        None,
+    );
+    dag.add_root(s);
+    let inputs = vec![TestInput::new("x", &[6], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])];
+    let actual = compile_and_run_single_output(&dag, "shrink_1d", &inputs);
+    let expected = evaluator_single_output(&dag, &inputs);
+    assert_close(&actual, &expected, ABS_TOL, REL_TOL, "shrink 1d");
+}
+
+#[test]
+#[ignore]
+fn m6_shrink_2d_matches_evaluator() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        mat_f32(3, 4),
+        None,
+    );
+    let s = dag.add_node(
+        RiscOp::Shrink {
+            bounds: vec![(1, 3), (0, 2)],
+        },
+        vec![x],
+        mat_f32(2, 2),
+        None,
+    );
+    dag.add_root(s);
+    let inputs = vec![TestInput::new(
+        "x",
+        &[3, 4],
+        &[
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+        ],
+    )];
+    let actual = compile_and_run_single_output(&dag, "shrink_2d", &inputs);
+    let expected = evaluator_single_output(&dag, &inputs);
+    assert_close(&actual, &expected, ABS_TOL, REL_TOL, "shrink 2d");
+}
+
+#[test]
+#[ignore]
+fn m6_pad_then_shrink_roundtrip_matches_evaluator() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let p = dag.add_node(
+        RiscOp::Pad {
+            padding: vec![(2, 2)],
+            fill: 0.0,
+        },
+        vec![x],
+        vec_f32(8),
+        None,
+    );
+    let s = dag.add_node(
+        RiscOp::Shrink {
+            bounds: vec![(2, 6)],
+        },
+        vec![p],
+        vec_f32(4),
+        None,
+    );
+    dag.add_root(s);
+    let inputs = vec![TestInput::new("x", &[4], &[3.5, -1.0, 2.25, 8.0])];
+    let actual = compile_and_run_single_output(&dag, "pad_shrink_roundtrip", &inputs);
+    let expected = evaluator_single_output(&dag, &inputs);
+    assert_close(
+        &actual,
+        &expected,
+        ABS_TOL,
+        REL_TOL,
+        "pad then shrink roundtrip",
+    );
+}

@@ -316,6 +316,55 @@ static inline void chelis_metal_launch2d(
     [cb waitUntilCompleted];
 }
 
+/* ---- 1D launch with two inline uniform blobs (WS-8A: pad) ----
+ *
+ * Like `chelis_metal_launch` but binds two `setBytes:` uniform blobs at
+ * indices `n_buffers` and `n_buffers + 1`. The pad kernel needs both the
+ * `ChelisMovementDims` struct (axis shapes + offsets) and a typed `fill`
+ * scalar; shrink uses the single-uniform `chelis_metal_launch`. Each blob
+ * is bound only when its byte count is non-zero.
+ */
+
+static inline void chelis_metal_launch_two_uniforms(
+    id<MTLComputePipelineState> pso,
+    NSUInteger grid_x, NSUInteger tg_x,
+    __unsafe_unretained id<MTLBuffer> *buffers, NSUInteger n_buffers,
+    const void *uniforms0, NSUInteger uniforms0_bytes,
+    const void *uniforms1, NSUInteger uniforms1_bytes
+) {
+    id<MTLCommandBuffer> cb = [chelis_metal_queue() commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:pso];
+    for (NSUInteger i = 0; i < n_buffers; ++i) {
+        [enc setBuffer:buffers[i] offset:0 atIndex:i];
+    }
+    if (uniforms0_bytes > 0) {
+        [enc setBytes:uniforms0 length:uniforms0_bytes atIndex:n_buffers];
+    }
+    if (uniforms1_bytes > 0) {
+        [enc setBytes:uniforms1 length:uniforms1_bytes atIndex:n_buffers + 1];
+    }
+    NSUInteger max_tg = [pso maxTotalThreadsPerThreadgroup];
+    if (tg_x > max_tg) tg_x = max_tg;
+    if (tg_x == 0 || grid_x == 0) {
+#ifndef NDEBUG
+        fprintf(stderr, "chelis Metal: chelis_metal_launch_two_uniforms received zero "
+                        "grid_x=%lu / tg_x=%lu; emitter planner bug\n",
+                (unsigned long)grid_x, (unsigned long)tg_x);
+        abort();
+#else
+        if (tg_x == 0) tg_x = 1;
+        if (grid_x == 0) grid_x = 1;
+#endif
+    }
+    MTLSize grid = MTLSizeMake(grid_x, 1, 1);
+    MTLSize tg   = MTLSizeMake(tg_x, 1, 1);
+    [enc dispatchThreads:grid threadsPerThreadgroup:tg];
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+}
+
 /* ---- MPSMatrixMultiplication wrappers (WS-M1) ----
  *
  * Production-quality GEMM via Apple Metal Performance Shaders. Operands

@@ -534,6 +534,13 @@ impl Emitter {
                 self.emit_matmul(node, &info)
             }
 
+            // WS-8A: pad / shrink movement ops. Typed per-output-element
+            // kernels (one thread per output element) over contiguous
+            // buffers, mirroring the HIP path. The GPU==eval numeric proof
+            // is the manual `gpu_correctness` Mac gate.
+            RiscOp::Pad { padding, fill } => self.emit_pad(node, padding, *fill),
+            RiscOp::Shrink { bounds } => self.emit_shrink(node, bounds),
+
             other => Err(format!(
                 "Metal M4 emit: node {id} op {other:?} not yet supported \
                  (axis>0 reductions, fused-elem-into-reduction, matmul, \
@@ -1152,6 +1159,236 @@ impl Emitter {
             shape: vec![info.m, info.n],
         });
         Ok(())
+    }
+
+    /// Resolve a tensor type to `(shape, prec)` for the movement-op path,
+    /// admitting any rank up to `MOVEMENT_MAX_DIM` with literal extents.
+    /// Wider than `require_static_shape` (which caps at rank 2) because
+    /// pad/shrink kernels iterate per-axis at runtime.
+    fn require_movement_shape(
+        &self,
+        ty: &TensorType,
+        ctx: &str,
+    ) -> Result<(Vec<usize>, Prim), String> {
+        Self::require_metal_admissible(ty.precision, ctx)?;
+        if ty.dims.is_empty() {
+            return Err(format!(
+                "Metal emit ({ctx}): rank-0 not supported on the movement-op path"
+            ));
+        }
+        if ty.dims.len() > kernels::MOVEMENT_MAX_DIM {
+            return Err(format!(
+                "Metal emit ({ctx}): rank {} exceeds MOVEMENT_MAX_DIM ({})",
+                ty.dims.len(),
+                kernels::MOVEMENT_MAX_DIM
+            ));
+        }
+        let mut shape = Vec::with_capacity(ty.dims.len());
+        for d in &ty.dims {
+            match d {
+                DimInfo::Lit(n) => shape.push(*n),
+                other => {
+                    return Err(format!(
+                        "Metal emit ({ctx}): symbolic dim {other:?} not yet supported on the \
+                         movement-op path (literal extents only)"
+                    ));
+                }
+            }
+        }
+        Ok((shape, ty.precision))
+    }
+
+    /// Emit the `ChelisMovementDims` uniform initializer for a pad/shrink
+    /// node. `offset[d]` is the per-axis low padding (pad) or start bound
+    /// (shrink); the arrays are zero-padded up to `MOVEMENT_MAX_DIM`.
+    fn movement_dims_initializer(
+        node_id: usize,
+        src_shape: &[usize],
+        out_shape: &[usize],
+        offset: &[usize],
+        total: usize,
+    ) -> String {
+        let max_dim = kernels::MOVEMENT_MAX_DIM;
+        let pad_array = |v: &[usize]| -> String {
+            (0..max_dim)
+                .map(|i| format!("{}u", v.get(i).copied().unwrap_or(0)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        format!(
+            "struct {{ uint ndim; uint total; uint src_shape[{max_dim}]; uint out_shape[{max_dim}]; uint offset[{max_dim}]; }} mv_dims_{node_id} = {{ {ndim}u, {total}u, {{ {src} }}, {{ {out} }}, {{ {off} }} }}",
+            ndim = src_shape.len(),
+            src = pad_array(src_shape),
+            out = pad_array(out_shape),
+            off = pad_array(offset),
+        )
+    }
+
+    fn emit_pad(
+        &mut self,
+        node: &DagNode,
+        padding: &[(usize, usize)],
+        fill: f64,
+    ) -> Result<(), String> {
+        let in_id = *node
+            .inputs
+            .first()
+            .ok_or_else(|| format!("pad node {} has no input", node.id.0))?;
+        let in_plan = self
+            .plan_of(in_id)
+            .ok_or_else(|| format!("pad node {} input {} not materialized", node.id.0, in_id.0))?
+            .clone();
+        let (out_shape, prec) = self.require_movement_shape(&node.output_type, "pad")?;
+        if in_plan.prec != prec {
+            return Err(format!(
+                "Metal emit pad node {}: input precision `{}` != output `{}` (pad preserves precision)",
+                node.id.0,
+                in_plan.prec.name(),
+                prec.name()
+            ));
+        }
+        if padding.len() != out_shape.len() || in_plan.shape.len() != out_shape.len() {
+            return Err(format!(
+                "Metal emit pad node {}: rank mismatch (padding {}, in {:?}, out {:?})",
+                node.id.0,
+                padding.len(),
+                in_plan.shape,
+                out_shape
+            ));
+        }
+        let lo: Vec<usize> = padding.iter().map(|&(before, _)| before).collect();
+        let out_n: usize = out_shape.iter().product();
+        let msl_ty = dtype::msl_type(prec);
+        let suffix = dtype::kernel_suffix(prec);
+        let kernel_name = format!("k_pad{suffix}_{}", node.id.0);
+        let pso_var = format!("pso_{}", node.id.0);
+        let src = kernels::pad_kernel(&kernel_name, prec);
+        let src = Self::prepend_span_comments_to_kernel_source(node, src);
+        self.kernels
+            .push((pso_var.clone(), kernel_name.clone(), src));
+
+        let out_buf = format!("buf_{}", node.id.0);
+        let bytes = format!("{out_n}u * {}", dtype::host_sizeof_expr(prec));
+        self.push_span_comments(node);
+        self.body
+            .push(format!("// node {} = pad {:?}", node.id.0, padding));
+        self.body.push(format!(
+            "id<MTLBuffer> {out_buf} = chelis_metal_alloc({bytes});"
+        ));
+        self.body.push(format!(
+            "id<MTLComputePipelineState> {pso_var} = chelis_metal_get_pipeline({pso_var}_src, @\"{kernel_name}\");"
+        ));
+        self.body.push(format!(
+            "{};",
+            Self::movement_dims_initializer(node.id.0, &in_plan.shape, &out_shape, &lo, out_n)
+        ));
+        // Pad fill is bound as a separate one-element constant buffer so the
+        // dtype matches the buffer element type exactly. Host-side the value
+        // is the typed scalar; MSL reads `constant T& fill`.
+        self.body.push(format!(
+            "{msl_ty} pad_fill_{} = ({msl_ty}){};",
+            node.id.0,
+            Self::host_scalar_literal(prec, fill)
+        ));
+        self.body.push(format!(
+            "{{ __unsafe_unretained id<MTLBuffer> bufs[2] = {{ {}, {out_buf} }}; \
+             chelis_metal_launch_two_uniforms({pso_var}, {out_n}u, MIN((NSUInteger){out_n}u, 256u), bufs, 2, &mv_dims_{}, sizeof(mv_dims_{}), &pad_fill_{}, sizeof({msl_ty})); }}",
+            in_plan.buf, node.id.0, node.id.0, node.id.0,
+        ));
+        self.plans[node.id.0] = Some(TensorPlan {
+            buf: out_buf,
+            prec,
+            n: out_n,
+            shape: out_shape,
+        });
+        Ok(())
+    }
+
+    fn emit_shrink(&mut self, node: &DagNode, bounds: &[(usize, usize)]) -> Result<(), String> {
+        let in_id = *node
+            .inputs
+            .first()
+            .ok_or_else(|| format!("shrink node {} has no input", node.id.0))?;
+        let in_plan = self
+            .plan_of(in_id)
+            .ok_or_else(|| {
+                format!(
+                    "shrink node {} input {} not materialized",
+                    node.id.0, in_id.0
+                )
+            })?
+            .clone();
+        let (out_shape, prec) = self.require_movement_shape(&node.output_type, "shrink")?;
+        if in_plan.prec != prec {
+            return Err(format!(
+                "Metal emit shrink node {}: input precision `{}` != output `{}` (shrink preserves precision)",
+                node.id.0,
+                in_plan.prec.name(),
+                prec.name()
+            ));
+        }
+        if bounds.len() != out_shape.len() || in_plan.shape.len() != out_shape.len() {
+            return Err(format!(
+                "Metal emit shrink node {}: rank mismatch (bounds {}, in {:?}, out {:?})",
+                node.id.0,
+                bounds.len(),
+                in_plan.shape,
+                out_shape
+            ));
+        }
+        let start: Vec<usize> = bounds.iter().map(|&(s, _)| s).collect();
+        let out_n: usize = out_shape.iter().product();
+        let suffix = dtype::kernel_suffix(prec);
+        let kernel_name = format!("k_shrink{suffix}_{}", node.id.0);
+        let pso_var = format!("pso_{}", node.id.0);
+        let src = kernels::shrink_kernel(&kernel_name, prec);
+        let src = Self::prepend_span_comments_to_kernel_source(node, src);
+        self.kernels
+            .push((pso_var.clone(), kernel_name.clone(), src));
+
+        let out_buf = format!("buf_{}", node.id.0);
+        let bytes = format!("{out_n}u * {}", dtype::host_sizeof_expr(prec));
+        self.push_span_comments(node);
+        self.body
+            .push(format!("// node {} = shrink {:?}", node.id.0, bounds));
+        self.body.push(format!(
+            "id<MTLBuffer> {out_buf} = chelis_metal_alloc({bytes});"
+        ));
+        self.body.push(format!(
+            "id<MTLComputePipelineState> {pso_var} = chelis_metal_get_pipeline({pso_var}_src, @\"{kernel_name}\");"
+        ));
+        self.body.push(format!(
+            "{};",
+            Self::movement_dims_initializer(node.id.0, &in_plan.shape, &out_shape, &start, out_n)
+        ));
+        self.body.push(format!(
+            "{{ __unsafe_unretained id<MTLBuffer> bufs[2] = {{ {}, {out_buf} }}; \
+             chelis_metal_launch({pso_var}, {out_n}u, MIN((NSUInteger){out_n}u, 256u), bufs, 2, &mv_dims_{}, sizeof(mv_dims_{})); }}",
+            in_plan.buf, node.id.0, node.id.0,
+        ));
+        self.plans[node.id.0] = Some(TensorPlan {
+            buf: out_buf,
+            prec,
+            n: out_n,
+            shape: out_shape,
+        });
+        Ok(())
+    }
+
+    /// Host-side literal spelling of an `f64` IR scalar for a typed Metal
+    /// constant. Floats keep their decimal form (the M-phase tolerance
+    /// model already accepts f32 fast-math drift; the exact-bit-pattern
+    /// refinement is HIP-side via `chelis_f32_from_bits`); integers and
+    /// bool cast directly.
+    fn host_scalar_literal(prec: Prim, value: f64) -> String {
+        match prec {
+            Prim::F32 => format!("{value:?}f"),
+            Prim::F16 | Prim::Bf16 => format!("{value:?}"),
+            Prim::Bool => (if value != 0.0 { "true" } else { "false" }).to_string(),
+            Prim::Int8 | Prim::Int16 | Prim::Int32 => format!("{}", value as i64),
+            Prim::Int64 => format!("{}LL", value as i64),
+            other => format!("/* unsupported pad fill dtype {} */ 0", other.name()),
+        }
     }
 
     fn emit_store(

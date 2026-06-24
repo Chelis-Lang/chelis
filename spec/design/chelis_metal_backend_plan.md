@@ -642,7 +642,7 @@ M0: Spec sync (no code)
 M1: Scaffolding + CLI dispatch (default-gate)
 ├── crates/chelis-backend-metal/ skeleton (lib.rs stub, empty src/, runtime header)
 ├── --target metal arm in chelis-cli/src/main.rs (stub codegen + cmd_build_metal)
-├── reject_unsupported_metal_ops (deny pad/shrink today; sort/argsort/cumsum/cumprod are not yet IR variants)
+├── reject_unsupported_metal_ops (pad/shrink now implemented as MSL movement kernels, WS-8A; sort/argsort/cumsum/cumprod are not yet IR variants)
 ├── reject_unsupported_metal_precisions per the Metal column of
 │   `spec/04-type-system.md` §1.1.3: admit f32, f16, bf16, int8, int16,
 │   int32, int64, bool; hard-reject f64 with the FP64-ALU diagnostic
