@@ -2886,6 +2886,34 @@ fn extract_int_for_dim(expr: &Expr) -> Option<i64> {
     }
 }
 
+/// Resolve a compile-time-constant AXIS to its (possibly negative) `i64`
+/// value. A reduction/softmax/gather axis is `extract_int_for_dim`'s
+/// literal/`(lit ...)`/`cast(<int>)` forms PLUS the negative-axis literal
+/// `-k`, which Surf desugars to `(app (var neg) <int>)` (issue #218 R1).
+/// A negative axis indexes from the end of the operand rank (`-1` is the
+/// last axis) and is normalized by [`LowerCtx::normalize_axis`] once the
+/// rank is known. Keeping this distinct from `extract_int_for_dim` (which
+/// serves DIM sizes, where a negative value is invalid) preserves the
+/// negative-axis convention for the axis-taking ops. issue #364/#319: the
+/// `cast`-axis fix must not lose the `-1` axis form that `softmax(x, -1)`
+/// (and the SDPA grad path) depend on.
+fn extract_int_axis(expr: &Expr) -> Option<i64> {
+    if let Some(n) = extract_int_for_dim(expr) {
+        return Some(n);
+    }
+    // Negative-axis literal: `-k` desugars to `(app (var neg) <inner>)`.
+    if let Expr::List(list, _) = expr
+        && get_tag(list) == Some("app")
+        && let Some(callee) = children(list).first()
+        && expr_is_var_named(callee, "neg")
+        && let Some(inner) = children(list).get(1)
+        && let Some(n) = extract_int_axis(inner)
+    {
+        return Some(-n);
+    }
+    None
+}
+
 /// Recognize a `shape(operand, axis)` application — possibly wrapped in
 /// one or more `cast(..., int32)` layers — and return its `(operand,
 /// axis)` pair. The axis must be a static literal (bare int, `(lit ...)`,
@@ -7029,7 +7057,7 @@ impl LowerCtx {
     /// axis is an internal contract violation, and a plain diagnostic would
     /// be absorbed by the host-fallback path into garbage C.
     fn extract_axis_raw(&self, expr: &Expr, op: &str) -> i64 {
-        if let Some(n) = extract_int_for_dim(expr) {
+        if let Some(n) = extract_int_axis(expr) {
             return n;
         }
         raise_fatal_lowering_error(

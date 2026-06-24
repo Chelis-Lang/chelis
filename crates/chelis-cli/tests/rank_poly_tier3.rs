@@ -1921,6 +1921,44 @@ fn vmap_two_stage_named_reduce_top_level_binding_builds_and_matches_backend() {
     assert_eval_agrees_with_backend(source, "issue_383_vmap_build", &backend);
 }
 
+/// chelis#383 cross-lane (lowering x C-identifier hygiene, #379/#467): the
+/// vmap-over-two-stage-named-reduce build lane must stay correct when the
+/// captured top-level binding's name is a C KEYWORD (`static`). This
+/// exercises BOTH the #383 IR fix (the vmap dim-symbol remap that removed
+/// the dag.rs symbolic-dim ICE) AND `c_ident`'s `chelis_user__` mangle: the
+/// keyword binding is declared, referenced into the vmap helper's arg slot,
+/// and printed under the mangled name consistently, while the `__tensor_arg*`
+/// temps stay unmangled (no `chelis_user____tensor_` double-prefix). A
+/// regression in either lane breaks compilation or the run, so the
+/// compile-run-eval agreement is the cross-lane guard. (Repro contributed by
+/// WS-2B; verified `chelis_user__static` appears at decl/ref/print with no
+/// double-prefix.)
+#[test]
+fn vmap_two_stage_named_reduce_keyword_binding_builds_and_matches_backend() {
+    let source = "def vinner(x: &tensor[seq, head, f32]) -> f32 = tensor_to_scalar(sum(sum(x, head), seq))\n\
+         static = to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]])\n\
+         out = vmap(vinner)(static)\n";
+    let backend = build_compile_run(source, "issue_383_vmap_keyword_binding");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    assert_eq!(
+        out.1,
+        vec![2],
+        "vmap two-stage reduce over a keyword-named binding ({backend})"
+    );
+    for (i, e) in [10.0, 26.0].iter().enumerate() {
+        assert!(
+            (out.2[i] - e).abs() < 1e-6,
+            "out[{i}]: backend {} != {e} ({backend})",
+            out.2[i]
+        );
+    }
+    assert_eval_agrees_with_backend(source, "issue_383_vmap_keyword_binding", &backend);
+}
+
 /// chelis#384/#397 (A): a §4.7.2 Form-3 runtime `expand` size sourced from a
 /// `shape(tensor, axis)` read must produce C that AGREES with the evaluator.
 /// This is the spec's own canonical example (`bias_broadcast` from
@@ -2040,4 +2078,69 @@ fn form3_shape_dep_survives_vmap_rebuild() {
         );
     }
     assert_eval_agrees_with_backend(source, "shape_dep_vmap", &backend);
+}
+
+/// chelis#364/#319 regression: a NEGATIVE axis literal (`softmax(x, -1)`,
+/// `sum(x, -1)`) must lower to the last axis. The #364 axis-extraction fix
+/// (FATAL on a non-constant axis) initially over-rejected the `-1` form,
+/// which Surf desugars to `(app (var neg) (lit 1))` — `extract_int_for_dim`
+/// returns `None` for that shape — and broke the cross-module SDPA grad
+/// control (`softmax(mul(scores, scale), -1)` in
+/// `issue_319_grad_crossmodule_precision_poly_attn`). `extract_int_axis` now
+/// resolves the negative-axis desugar, so `-1` normalizes to the last axis.
+///
+/// `softmax(x, -1)` over a `[2, 3]` operand must equal `softmax(x, 1)` (the
+/// explicit last axis); a uniform row keeps the result exact across the
+/// eval-f64 / backend-f32 lanes.
+#[test]
+fn negative_axis_softmax_resolves_to_last_axis() {
+    let source = "def sm(x: &tensor[batch, seq, f32]) -> tensor[batch, seq, f32] = softmax(x, -1)\n\
+         src = to_tensor([[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]])\n\
+         out = sm(src)\n";
+    let backend = build_compile_run(source, "neg_axis_softmax");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    assert_eq!(out.1, vec![2, 3], "softmax(-1) shape ({backend})");
+    // Last-axis softmax of a uniform row is uniform 1/3; an axis mislabel
+    // (e.g. -1 -> 0, the pre-#364 silent behavior) would normalize down the
+    // batch axis instead and give a different distribution.
+    for (i, e) in [1.0 / 3.0; 6].iter().enumerate() {
+        assert!(
+            (out.2[i] - e).abs() < 1e-6,
+            "out[{i}]: backend {} != {e} ({backend})",
+            out.2[i]
+        );
+    }
+    assert_eval_agrees_with_backend(source, "neg_axis_softmax", &backend);
+}
+
+/// chelis#364/#319 regression (reduction lane): `sum(x, -1)` lowers to the
+/// last axis in the C backend. (The host evaluator separately rejects a
+/// negative reduction axis — a pre-existing host-interpreter limitation, not
+/// part of this fix — so this pins the BUILD lane only, where the negative
+/// axis must normalize correctly rather than FATAL-error or mis-reduce.)
+#[test]
+fn negative_axis_reduce_lowers_to_last_axis_in_backend() {
+    let source = "def red(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = sum(x, -1)\n\
+         src = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
+         out = red(src)\n";
+    let backend = build_compile_run(source, "neg_axis_reduce");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    // Last-axis sum: row sums [1+2+3, 4+5+6] = [6, 15]. A -1 -> 0 mislabel
+    // would sum down the batch axis to [5, 7, 9].
+    assert_eq!(out.1, vec![2], "sum(-1) reduced the wrong axis ({backend})");
+    for (i, e) in [6.0, 15.0].iter().enumerate() {
+        assert!(
+            (out.2[i] - e).abs() < 1e-6,
+            "out[{i}]: backend {} != {e} ({backend})",
+            out.2[i]
+        );
+    }
 }
