@@ -46,6 +46,12 @@ pub struct ObligationOutcome {
     pub reason: Option<String>,
     pub assumptions: Vec<AssumptionRecord>,
     pub composite_verdict: CompositeVerdict,
+    /// The discharged proposition (the invariant predicate this obligation
+    /// proves over every produced value) in canonical Deep text, so a consumer
+    /// displays exactly what was discharged rather than re-deriving it from the
+    /// type definition (chelis#436). `None` for a producer-set declaration
+    /// error that carries no invariant to render.
+    pub goal: Option<String>,
 }
 
 impl ObligationOutcome {
@@ -153,11 +159,20 @@ impl ObligationOutcome {
             reason,
             assumptions,
             composite_verdict,
+            goal: None,
         }
     }
 
     fn with_shrink_steps(mut self, shrink_steps: usize) -> Self {
         self.shrink_steps = shrink_steps;
+        self
+    }
+
+    /// Attach the discharged proposition's canonical text (chelis#436): the
+    /// invariant predicate this obligation proves, so the goal travels with the
+    /// record.
+    fn with_goal(mut self, goal: impl Into<String>) -> Self {
+        self.goal = Some(goal.into());
         self
     }
 
@@ -498,7 +513,12 @@ pub fn run_module_obligations(
             .iter()
             .find(|i| i.type_name == ob.source_type)
             .expect("obligation references a collected invariant");
-        out.push(run_one(exprs, inv, &invariants, ob, sigs, &consts, options));
+        // chelis#436: the discharged proposition (the invariant predicate) travels
+        // with every obligation outcome, so a consumer displays exactly what was
+        // discharged rather than re-deriving it from the type definition.
+        out.push(
+            run_one(exprs, inv, &invariants, ob, sigs, &consts, options).with_goal(inv.goal_text()),
+        );
     }
     out
 }

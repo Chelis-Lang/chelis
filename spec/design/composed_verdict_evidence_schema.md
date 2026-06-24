@@ -139,11 +139,16 @@ away — and the gaps are de-narrowing targets, not permanent shape.
   and tier rather than presenting a non-SMT result as an SMT proof. The
   first-class special-function layer (sketch §L1) and Beacon's relaxations are
   the path that closes this.
-- **`prove --json` over-claim on pure fuzz** (chelis#435): see §3.1. Until
-  fixed at the source, the verdict string can disagree with the record's tier,
-  and §3.2 (derive from the record) is the consumer's defense.
-- **`prove --json` omits the discharged proposition** (chelis#436): the goal is
-  not yet emitted in the record; see §2 (claim) and §3.4.
+- **`prove --json` over-claim on pure fuzz** (chelis#435): RESOLVED. A
+  pure-fuzz base now renders the honest `fuzz_validated` badge (the
+  `FuzzValidatedEmpirical` verdict carrying `fuzz_base`), never a `proven_*`
+  badge; `proven_modulo_fuzz_validated_contract` is reserved for an SMT base
+  discharged modulo a fuzz-validated contract. See §3.1.
+- **`prove --json` omits the discharged proposition** (chelis#436): RESOLVED.
+  Every property and obligation record now carries a `goal` field with the
+  discharged proposition in canonical text (the property body for a property;
+  the invariant predicate for an obligation), so a consumer never reconstructs
+  it from source. See §2 (claim) and §3.4.
 - **Finance notation in authoring** (chelis#437): the front end rejects
   finance-standard uppercase single-letter value identifiers (`S`, `K`, `T`,
   `N`). This is upstream of the evidence schema — it constrains what models can

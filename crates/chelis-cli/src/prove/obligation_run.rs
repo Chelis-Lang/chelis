@@ -215,6 +215,11 @@ fn emit(outcome: &ObligationOutcome, options: &ProveOptions<'_>) {
             "samples": outcome.samples,
             "seed": outcome.seed,
         });
+        // chelis#436: the discharged proposition (the invariant predicate) travels
+        // with the record so a consumer displays exactly what was discharged.
+        if let Some(goal) = &outcome.goal {
+            value["goal"] = json!(goal);
+        }
         if outcome.proof_tier == ObligationTier::Smt {
             value["arith_model"] = json!("real");
         }

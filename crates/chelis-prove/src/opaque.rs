@@ -133,6 +133,21 @@ impl OpaqueInvariant {
     pub fn scalar_count(&self) -> usize {
         self.fields.iter().map(|(_, f)| f.scalar_count()).sum()
     }
+
+    /// The discharged proposition this invariant stands for, in canonical Deep
+    /// text (chelis#436): the predicate body bound to its binder, rendered flat
+    /// (one line) by the canonical Deep printer. This is the proposition every
+    /// produced value of the opaque type must satisfy, so an obligation record
+    /// carries exactly what it discharged. Falls back to the full predicate fn
+    /// node if the body cannot be isolated (a malformed predicate that never
+    /// reaches a real obligation outcome anyway).
+    pub fn goal_text(&self) -> String {
+        let node = predicate_body(&self.predicate).unwrap_or(&self.predicate);
+        // Strip lowering/producer metadata (spans, types) so the goal is the
+        // bare proposition a consumer can display, not the lowering's internal
+        // annotations (chelis#436).
+        chelis_deep::printer::print_expr_flat(&chelis_deep::ast::strip_metadata(node))
+    }
 }
 
 // ===========================================================================

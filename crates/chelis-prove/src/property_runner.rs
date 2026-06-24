@@ -86,6 +86,13 @@ pub struct PropertyOutcome {
     base_discharge: Option<(crate::discharge::Soundness, QualifierSet)>,
     /// Weakest-link verdict after composing the proof and its assumptions.
     pub composite_verdict: CompositeVerdict,
+    /// The discharged proposition (the property body) in canonical Surf/Deep
+    /// text, so a consumer displays exactly what was discharged rather than
+    /// re-parsing it out of source and risking drift (chelis#436). `None` only
+    /// when the outcome carries no body to render (a declaration/discovery
+    /// error that never reached a property body); a real verification outcome
+    /// always carries its goal.
+    pub goal: Option<String>,
 }
 
 impl PropertyOutcome {
@@ -154,11 +161,20 @@ impl PropertyOutcome {
             assumptions,
             base_discharge,
             composite_verdict,
+            goal: None,
         }
     }
 
     pub(super) fn with_shrink_steps(mut self, shrink_steps: usize) -> Self {
         self.shrink_steps = shrink_steps;
+        self
+    }
+
+    /// Attach the discharged proposition's canonical text (chelis#436). Called
+    /// once per outcome with the property body rendered through the canonical
+    /// Surf/Deep formatter, so the goal travels with the record.
+    pub(super) fn with_goal(mut self, goal: impl Into<String>) -> Self {
+        self.goal = Some(goal.into());
         self
     }
 
@@ -445,13 +461,21 @@ pub fn run_surf_decls_properties_with_contract_decls(
     let properties = collect_surf_properties(entry_decls, options.only.as_deref());
     let mut out = Vec::new();
     for property in &properties {
-        out.push(prove_surf_property(
-            all_decls,
-            module_decls,
-            trusted_contract_decls,
-            property,
-            options,
-        ));
+        // chelis#436: the discharged proposition (the property body) travels
+        // with the record, rendered through the canonical Surf formatter so a
+        // consumer displays exactly what was discharged rather than re-parsing
+        // it from source.
+        let goal = chelis_surf::format::format_expression(&property.body);
+        out.push(
+            prove_surf_property(
+                all_decls,
+                module_decls,
+                trusted_contract_decls,
+                property,
+                options,
+            )
+            .with_goal(goal),
+        );
     }
     Ok(PropertyRunResult::Ran(out))
 }
@@ -466,7 +490,14 @@ pub fn run_deep_source_properties(
     let properties = discover_deep_properties(&exprs, options.only.as_deref())?;
     let mut out = Vec::new();
     for property in &properties {
-        out.push(prove_deep_property(&exprs, property, options));
+        // chelis#436: the discharged proposition (the property body) travels
+        // with the record, rendered through the canonical Deep printer (flat,
+        // one line) with lowering/producer metadata stripped so a consumer
+        // sees the bare proposition, not internal span/type annotations.
+        let goal = chelis_deep::printer::print_expr_flat(&chelis_deep::ast::strip_metadata(
+            &property.body,
+        ));
+        out.push(prove_deep_property(&exprs, property, options).with_goal(goal));
     }
     Ok(PropertyRunResult::Ran(out))
 }

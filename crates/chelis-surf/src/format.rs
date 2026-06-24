@@ -78,6 +78,17 @@ pub fn format_source(source: &str) -> Result<String, FormatError> {
     }
 }
 
+/// Canonically format a single Surf expression to its one-expression
+/// rendering. This is the same renderer the whole-program formatter uses for
+/// expression positions, exposed so a consumer that holds one `Expr` (not a
+/// `Decl`) can produce its canonical text directly. The chelis#436 prove-JSON
+/// `goal` field uses it to emit the discharged proposition (a property body)
+/// in the record, so a consumer displays exactly what was discharged rather
+/// than re-parsing it out of source.
+pub fn format_expression(expr: &Expr) -> String {
+    format_expr(expr)
+}
+
 /// Walk `decls` in source order, emitting each pending comment whose
 /// source offset precedes the current declaration's start before the
 /// declaration itself. `next` is the index of the first not-yet-emitted
@@ -839,6 +850,22 @@ mod tests {
             rendered,
             "value =\n  add(x, y)\n  |> relu\n  |> log\n  |> neg"
         );
+    }
+
+    #[test]
+    fn format_expression_renders_a_property_body_canonically() {
+        // chelis#436: the public expression formatter renders a single Expr
+        // (a property body) to its canonical one-expression text, the goal a
+        // prove-JSON record carries. It must match the whole-program
+        // formatter's expression rendering exactly.
+        let source = "@property p forall(x: f32) where x > 0.0:\n  (x - 1.0) <= x\n";
+        let program = crate::parser::parse_str(source).expect("parse");
+        let Decl::Property { body, .. } = &program[0] else {
+            panic!("expected a property decl");
+        };
+        assert_eq!(format_expression(body), "((x - 1.0) <= x)");
+        // Parity with the internal renderer used in expression positions.
+        assert_eq!(format_expression(body), format_expr(body));
     }
 
     #[test]

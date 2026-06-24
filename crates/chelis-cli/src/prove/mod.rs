@@ -74,7 +74,6 @@ struct Property {
     source: PathBuf,
     params: Vec<Param>,
     preconditions: Vec<Expr>,
-    #[allow(dead_code)]
     body: Expr,
     samples: Option<usize>,
     seed: Option<u64>,
@@ -1596,6 +1595,11 @@ fn emit_obligation_record(
             "samples": outcome.samples,
             "seed": outcome.seed,
         });
+        // chelis#436: the discharged proposition (the invariant predicate) travels
+        // with the record so a consumer displays exactly what was discharged.
+        if let Some(goal) = &outcome.goal {
+            value["goal"] = json!(goal);
+        }
         if outcome.proof_tier == ObligationTier::Smt {
             value["arith_model"] = json!("real");
         }
@@ -2344,6 +2348,11 @@ fn emit_record(
             "status": status,
             "composite_verdict": simple_composite_verdict(status, samples),
             "qualifiers": simple_qualifiers(status, samples),
+            // chelis#436: the discharged proposition (the property body) travels
+            // with the record, rendered through the canonical Surf formatter so
+            // a consumer displays exactly what was discharged rather than
+            // re-parsing it from source.
+            "goal": chelis_surf::format::format_expression(&property.body),
             "assumptions": precondition_non_vacuity_assumptions(
                 &property.name,
                 status,
@@ -2420,6 +2429,11 @@ fn emit_deep_record(
             "status": status,
             "composite_verdict": simple_composite_verdict(status, samples),
             "qualifiers": simple_qualifiers(status, samples),
+            // chelis#436: the discharged proposition (the property body) travels
+            // with the record, rendered through the canonical Deep printer (flat)
+            // with lowering/producer metadata stripped so a consumer sees the
+            // bare proposition, not internal span/type annotations.
+            "goal": chelis_deep::printer::print_expr_flat(&chelis_deep::ast::strip_metadata(&property.body)),
             "assumptions": precondition_non_vacuity_assumptions(
                 &property.name,
                 status,
