@@ -1921,6 +1921,44 @@ fn vmap_two_stage_named_reduce_top_level_binding_builds_and_matches_backend() {
     assert_eval_agrees_with_backend(source, "issue_383_vmap_build", &backend);
 }
 
+/// chelis#383 cross-lane (lowering x C-identifier hygiene, #379/#467): the
+/// vmap-over-two-stage-named-reduce build lane must stay correct when the
+/// captured top-level binding's name is a C KEYWORD (`static`). This
+/// exercises BOTH the #383 IR fix (the vmap dim-symbol remap that removed
+/// the dag.rs symbolic-dim ICE) AND `c_ident`'s `chelis_user__` mangle: the
+/// keyword binding is declared, referenced into the vmap helper's arg slot,
+/// and printed under the mangled name consistently, while the `__tensor_arg*`
+/// temps stay unmangled (no `chelis_user____tensor_` double-prefix). A
+/// regression in either lane breaks compilation or the run, so the
+/// compile-run-eval agreement is the cross-lane guard. (Repro contributed by
+/// WS-2B; verified `chelis_user__static` appears at decl/ref/print with no
+/// double-prefix.)
+#[test]
+fn vmap_two_stage_named_reduce_keyword_binding_builds_and_matches_backend() {
+    let source = "def vinner(x: &tensor[seq, head, f32]) -> f32 = tensor_to_scalar(sum(sum(x, head), seq))\n\
+         static = to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]])\n\
+         out = vmap(vinner)(static)\n";
+    let backend = build_compile_run(source, "issue_383_vmap_keyword_binding");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    assert_eq!(
+        out.1,
+        vec![2],
+        "vmap two-stage reduce over a keyword-named binding ({backend})"
+    );
+    for (i, e) in [10.0, 26.0].iter().enumerate() {
+        assert!(
+            (out.2[i] - e).abs() < 1e-6,
+            "out[{i}]: backend {} != {e} ({backend})",
+            out.2[i]
+        );
+    }
+    assert_eval_agrees_with_backend(source, "issue_383_vmap_keyword_binding", &backend);
+}
+
 /// chelis#384/#397 (A): a §4.7.2 Form-3 runtime `expand` size sourced from a
 /// `shape(tensor, axis)` read must produce C that AGREES with the evaluator.
 /// This is the spec's own canonical example (`bias_broadcast` from
