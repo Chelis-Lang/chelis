@@ -4019,12 +4019,22 @@ impl CEmitter {
             "chelis_argmin_f32"
         };
         self.emit_slot_wrapper(id, ty);
+        // #347: argmax/argmin produce integer INDEX outputs (the result
+        // tensor is allocated at the declared integer dtype, e.g.
+        // `CHELIS_I64`). The index must be stored through a pointer of the
+        // output element type, not into the `float* data` field directly:
+        // a bare `t->data[outer] = (float)best_idx` writes the f32 bit
+        // pattern of the index, which the print path then reads back as the
+        // wrong reinterpreted integer (the `1065353216 == 0x3F800000`
+        // signature). Mirrors `emit_cast`'s `(({dst_et}*)t->data)[i] = ...`
+        // store convention so eval and the C backend agree on the indices.
+        let dst_et = Self::elem_type(ty);
         let output_is_scalar = ty.dims.is_empty();
         if output_is_scalar {
             self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
             self.indent += 1;
             self.line(&format!(
-                "t{id}->data[0] = (float){simd_fn}(t{a}->data, t{a}->size);"
+                "(({dst_et}*)t{id}->data)[0] = ({dst_et}){simd_fn}(t{a}->data, t{a}->size);"
             ));
             self.indent -= 1;
             self.line("} else {");
@@ -4073,7 +4083,9 @@ impl CEmitter {
         self.line("}");
         self.indent -= 1;
         self.line("}");
-        self.line(&format!("t{id}->data[outer] = (float)best_idx;"));
+        self.line(&format!(
+            "(({dst_et}*)t{id}->data)[outer] = ({dst_et})best_idx;"
+        ));
         self.indent -= 1;
         self.line("}");
         if output_is_scalar {
