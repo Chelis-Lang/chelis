@@ -192,6 +192,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::Abs
             | WireRiscOp::Floor
             | WireRiscOp::Ceil
+            | WireRiscOp::Round
             | WireRiscOp::Sum { .. }
             | WireRiscOp::MaxReduce { .. }
             | WireRiscOp::MinReduce { .. }
@@ -216,7 +217,8 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::BlasMatmul { .. }
             | WireRiscOp::Gather { .. }
             | WireRiscOp::ScatterAdd { .. }
-            | WireRiscOp::Scatter { .. } => {}
+            | WireRiscOp::Scatter { .. }
+            | WireRiscOp::ScatterElements { .. } => {}
         }
     }
     Ok(())

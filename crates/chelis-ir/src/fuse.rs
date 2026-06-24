@@ -86,6 +86,7 @@ fn is_fusible_elementwise(op: &RiscOp) -> bool {
             | RiscOp::Abs
             | RiscOp::Floor
             | RiscOp::Ceil
+            | RiscOp::Round
     )
 }
 
@@ -109,6 +110,7 @@ fn to_fused_step_op(op: &RiscOp) -> FusedStepOp {
         RiscOp::Abs => FusedStepOp::Abs,
         RiscOp::Floor => FusedStepOp::Floor,
         RiscOp::Ceil => FusedStepOp::Ceil,
+        RiscOp::Round => FusedStepOp::Round,
         _ => panic!("not a fusible elementwise op: {op:?}"),
     }
 }

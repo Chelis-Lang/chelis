@@ -1913,9 +1913,10 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
         .nodes()
         .iter()
         .filter_map(|node| match node.op {
-            RiscOp::Gather { .. } | RiscOp::ScatterAdd { .. } | RiscOp::Scatter { .. } => {
-                node.inputs.get(1).copied()
-            }
+            RiscOp::Gather { .. }
+            | RiscOp::ScatterAdd { .. }
+            | RiscOp::Scatter { .. }
+            | RiscOp::ScatterElements { .. } => node.inputs.get(1).copied(),
             _ => None,
         })
         .collect();
@@ -2013,7 +2014,7 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                     ));
                 }
             }
-            RiscOp::ScatterAdd { .. } | RiscOp::Scatter { .. } => {
+            RiscOp::ScatterAdd { .. } | RiscOp::Scatter { .. } | RiscOp::ScatterElements { .. } => {
                 let (label, payload_blocker) = match &node.op {
                     RiscOp::ScatterAdd { .. } => (
                         "scatter_add",
@@ -2032,6 +2033,13 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                         // serialized kernel, not an atomics
                         // question.
                         "f64 scatter_replace requires a widened serial last-write-wins kernel and is not in this milestone.",
+                    ),
+                    RiscOp::ScatterElements { .. } => (
+                        "scatter_elements",
+                        // Element-wise scatter shares the serial
+                        // last-write-wins kernel limitation; f64 is a
+                        // future widening, not an atomics question.
+                        "f64 scatter_elements requires a widened serial last-write-wins kernel and is not in this milestone.",
                     ),
                     _ => unreachable!(),
                 };
@@ -2811,6 +2819,7 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
         RiscOp::Abs => WireRiscOp::Abs,
         RiscOp::Floor => WireRiscOp::Floor,
         RiscOp::Ceil => WireRiscOp::Ceil,
+        RiscOp::Round => WireRiscOp::Round,
         RiscOp::UniformLike { low, high, seed } => WireRiscOp::UniformLike {
             low: *low,
             high: *high,
@@ -2911,6 +2920,7 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
                         FusedStepOp::Abs => WireFusedStepOp::Abs,
                         FusedStepOp::Floor => WireFusedStepOp::Floor,
                         FusedStepOp::Ceil => WireFusedStepOp::Ceil,
+                        FusedStepOp::Round => WireFusedStepOp::Round,
                     },
                     input_indices: step
                         .input_indices
@@ -2943,6 +2953,7 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
         RiscOp::Gather { axis } => WireRiscOp::Gather { axis: *axis },
         RiscOp::ScatterAdd { axis } => WireRiscOp::ScatterAdd { axis: *axis },
         RiscOp::Scatter { axis } => WireRiscOp::Scatter { axis: *axis },
+        RiscOp::ScatterElements { axis } => WireRiscOp::ScatterElements { axis: *axis },
     }
 }
 

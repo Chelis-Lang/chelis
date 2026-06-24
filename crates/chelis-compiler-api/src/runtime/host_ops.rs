@@ -2449,6 +2449,52 @@ pub(super) fn tensor_scatter_value(
     })
 }
 
+/// Element-wise replace-scatter with ONNX `ScatterElements` semantics
+/// (`spec/05-risc-primitives.md` §3.5.1). `data`, `indices`, and
+/// `updates` share a rank; `indices.shape == updates.shape`;
+/// `output.shape == data.shape`. Each flat update coordinate `c` writes
+/// `updates[c]` to `output[c with c[axis] := indices[c]]`. Duplicate
+/// writes resolve last-write-wins in updates row-major flat order,
+/// matching the DAG evaluator and the C backend.
+pub(super) fn tensor_scatter_elements_value(
+    data: &RuntimeTensorValue,
+    indices: &RuntimeTensorValue,
+    updates: &RuntimeTensorValue,
+    axis: i64,
+) -> Result<RuntimeTensorValue, String> {
+    let axis = normalize_axis(data.value.shape.len(), axis, "scatter_elements")?;
+    if !indices.precision.is_integer() {
+        return Err("scatter_elements expects integer tensor indices".to_string());
+    }
+    if indices.value.shape != updates.value.shape {
+        return Err("scatter_elements requires indices.shape == updates.shape".to_string());
+    }
+    if indices.value.shape.len() != data.value.shape.len() {
+        return Err(
+            "scatter_elements requires data, indices, and updates to share a rank".to_string(),
+        );
+    }
+    let mut out = data.value.data.clone();
+    for linear in 0..updates.value.data.len() {
+        let coord = linear_to_indices(linear, &updates.value.shape);
+        let value = indices.value.data[linear] as i64;
+        if value < 0 || value as usize >= data.value.shape[axis] {
+            return Err(format!(
+                "scatter_elements index {value} out of bounds at axis {axis}"
+            ));
+        }
+        let mut out_index = coord.clone();
+        out_index[axis] = value as usize;
+        let out_linear = indices_to_linear(&out_index, &data.value.shape);
+        // Last-write-wins: deterministic-order overwrite.
+        out[out_linear] = updates.value.data[linear];
+    }
+    Ok(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(data.value.shape.clone(), out),
+        precision: data.precision,
+    })
+}
+
 pub(super) fn tensor_where_value(
     cond: &RuntimeTensorValue,
     then_tensor: &RuntimeTensorValue,

@@ -449,6 +449,7 @@ pub enum FusedStepOp {
     Abs,
     Floor,
     Ceil,
+    Round,
 }
 
 /// Reducer selector for [`RiscOp::ReduceWindow`].
@@ -516,6 +517,14 @@ pub enum RiscOp {
     Abs,
     Floor,
     Ceil,
+    /// Element-wise round to nearest, ties to even (IEEE-754
+    /// roundTiesToEven / banker's rounding). Backends emit `rintf` (or
+    /// the f64 / mixed-precision analog) which honors the default
+    /// rounding mode; the evaluator uses Rust's `f64::round_ties_even`.
+    /// Non-differentiable (piecewise constant); `grad` rejects it with
+    /// `AdRejectionReason::PiecewiseConstant`. See
+    /// `spec/05-risc-primitives.md` §2.1.
+    Round,
     /// Element-wise IEEE-754 reciprocal `1.0 / x`. Primitive so that
     /// `lower_sigmoid` (and any other reciprocal-shaped lowering)
     /// emits a single op rather than the `exp(neg(log(x)))` chain
@@ -744,6 +753,26 @@ pub enum RiscOp {
     Scatter {
         axis: usize,
     },
+
+    /// Element-wise replace-scatter with ONNX `ScatterElements`
+    /// semantics (`spec/05-risc-primitives.md` §3.5.1). Inputs are
+    /// `data, indices, updates` where `data`, `indices`, and `updates`
+    /// share a rank, `indices.shape == updates.shape`, and
+    /// `output.shape == data.shape`. For each coordinate `c` over
+    /// `indices`, `updates[c]` is written to `output` at `c` with its
+    /// `axis` component replaced by `indices[c]`. This differs from
+    /// `Scatter` (hyperplane semantics: `updates` matches
+    /// `data.dims[..axis] ++ indices.dims ++ data.dims[axis+1..]`).
+    ///
+    /// Duplicate-index semantics and determinism match `Scatter`:
+    /// last-write-wins in updates-tensor row-major flat order.
+    ///
+    /// AD policy: `no_grad`, identical to `Scatter` — rejected via
+    /// `AdError::NotSupported { op: "scatter_elements", reason:
+    /// AdRejectionReason::NonDeterministicAtDuplicateIndices }`.
+    ScatterElements {
+        axis: usize,
+    },
 }
 
 impl RiscOp {
@@ -943,6 +972,7 @@ impl RiscOp {
             | RiscOp::Abs
             | RiscOp::Floor
             | RiscOp::Ceil
+            | RiscOp::Round
             | RiscOp::Recip => true,
 
             // --- Reductions ---
@@ -995,8 +1025,12 @@ impl RiscOp {
             RiscOp::OneHot { .. } => false,
 
             // Sparse gather/scatter index data movement; no real-valued
-            // transformer is pinned, and `Scatter` is `no_grad`.
-            RiscOp::Gather { .. } | RiscOp::ScatterAdd { .. } | RiscOp::Scatter { .. } => false,
+            // transformer is pinned, and `Scatter` / `ScatterElements`
+            // are `no_grad`.
+            RiscOp::Gather { .. }
+            | RiscOp::ScatterAdd { .. }
+            | RiscOp::Scatter { .. }
+            | RiscOp::ScatterElements { .. } => false,
 
             // Linearity / lifecycle markers carry no numeric semantics
             // (backends emit nothing for `Drop`); they are transparent to
@@ -1502,6 +1536,7 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         | RiscOp::Abs
         | RiscOp::Floor
         | RiscOp::Ceil
+        | RiscOp::Round
         | RiscOp::UniformLike { .. }
         | RiscOp::Dropout { .. } => shape_source_for_axis(dag, *node.inputs.first()?, axis),
         RiscOp::Copy | RiscOp::Drop | RiscOp::Realize | RiscOp::Cast { .. } => {
@@ -2144,6 +2179,7 @@ mod tests {
             RiscOp::Abs,
             RiscOp::Floor,
             RiscOp::Ceil,
+            RiscOp::Round,
             RiscOp::Recip,
             RiscOp::UniformLike {
                 low: 0.0,
@@ -2211,6 +2247,7 @@ mod tests {
             RiscOp::Gather { axis: 0 },
             RiscOp::ScatterAdd { axis: 0 },
             RiscOp::Scatter { axis: 0 },
+            RiscOp::ScatterElements { axis: 0 },
         ]
     }
 
@@ -2223,11 +2260,11 @@ mod tests {
     #[test]
     fn every_risc_op_is_classified_for_verifier_subset() {
         let all = one_of_every_risc_op();
-        // 46-variant closed vocabulary (spec WI-2 / dag.rs RiscOp).
+        // 48-variant closed vocabulary (spec WI-2 / dag.rs RiscOp).
         assert_eq!(
             all.len(),
-            46,
-            "one_of_every_risc_op must list all 46 RiscOp variants"
+            48,
+            "one_of_every_risc_op must list all 48 RiscOp variants"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -2236,17 +2273,18 @@ mod tests {
         let excluded = all.len() - targetable;
 
         // Pinned partition per beacon_plan.md §3.1: the elementwise math
-        // (5 binary/cmp + 12 unary), 5 reductions, 6 movement, 3 memory/
-        // blas value nodes, and Cast are targetable (32); stochastic (2),
-        // arg-reductions (2), one_hot (1), sparse gather/scatter (3),
-        // linearity/lifecycle markers + store (4), reduce-window-grad (1),
-        // and fused-elem (1) are excluded (14).
+        // (5 binary/cmp + 13 unary, including `round`), 5 reductions, 6
+        // movement, 3 memory/blas value nodes, and Cast are targetable
+        // (33); stochastic (2), arg-reductions (2), one_hot (1), sparse
+        // gather/scatter (4, including element-wise `ScatterElements`),
+        // linearity/lifecycle markers + store (4), reduce-window-grad
+        // (1), and fused-elem (1) are excluded (15).
         assert_eq!(
-            targetable, 32,
+            targetable, 33,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 14,
+            excluded, 15,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 

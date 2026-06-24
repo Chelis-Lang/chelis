@@ -527,6 +527,52 @@ fn scatter_replace(
     out
 }
 
+/// Element-wise replace-scatter with ONNX `ScatterElements` semantics
+/// (`spec/05-risc-primitives.md` §3.5.1).
+///
+/// Distinct from `scatter_replace` (hyperplane semantics): here
+/// `data`/`indices`/`updates` share a rank, `indices.shape ==
+/// updates.shape`, and `output.shape == data.shape`. For each
+/// coordinate `c` over `indices`, the value `updates[c]` is written to
+/// `output` at the coordinate `c` with its `axis` component replaced by
+/// `indices[c]`. Duplicate writes resolve last-write-wins in
+/// updates-tensor row-major (C order) flat-iteration order, matching
+/// `scatter_replace`'s determinism rule; AD is fail-closed for the same
+/// reason.
+fn scatter_elements(
+    data: &TensorValue,
+    indices: &TensorValue,
+    updates: &TensorValue,
+    axis: usize,
+) -> TensorValue {
+    assert!(axis < data.shape.len());
+    assert_eq!(
+        indices.shape, updates.shape,
+        "scatter_elements requires indices.shape == updates.shape"
+    );
+    assert_eq!(
+        indices.shape.len(),
+        data.shape.len(),
+        "scatter_elements requires data, indices, and updates to share a rank"
+    );
+
+    let mut out = data.clone();
+    for update_linear in 0..updates.data.len() {
+        let coord = linear_to_index(update_linear, &updates.shape);
+        let gathered = indices.data[update_linear] as isize;
+        assert!(
+            gathered >= 0 && (gathered as usize) < data.shape[axis],
+            "scatter_elements index {gathered} out of bounds for axis {axis}"
+        );
+        let mut target_index = coord.clone();
+        target_index[axis] = gathered as usize;
+        let target_linear = index_to_linear(&target_index, &data.shape);
+        // Last-write-wins: deterministic-order overwrite.
+        out.data[target_linear] = updates.data[update_linear];
+    }
+    out
+}
+
 /// Strided windowed reduction over the trailing `window_shape.len()` axes.
 ///
 /// Per `spec/05-risc-primitives.md` §2.3.1 (Valid padding):
@@ -1123,6 +1169,10 @@ where
             RiscOp::Abs => unary_map(&values[&node.inputs[0]], f64::abs),
             RiscOp::Floor => unary_map(&values[&node.inputs[0]], f64::floor),
             RiscOp::Ceil => unary_map(&values[&node.inputs[0]], f64::ceil),
+            // Round-half-to-even (banker's rounding), matching the C
+            // backend's `rintf` under the default rounding mode. NOT
+            // `f64::round`, which rounds half away from zero.
+            RiscOp::Round => unary_map(&values[&node.inputs[0]], f64::round_ties_even),
             RiscOp::UniformLike { low, high, seed } => {
                 uniform_like(&values[&node.inputs[0]].shape, *low, *high, *seed)
             }
@@ -1259,6 +1309,9 @@ where
                             unary_map(resolve(&step.input_indices[0]), f64::floor)
                         }
                         FusedStepOp::Ceil => unary_map(resolve(&step.input_indices[0]), f64::ceil),
+                        FusedStepOp::Round => {
+                            unary_map(resolve(&step.input_indices[0]), f64::round_ties_even)
+                        }
                     };
                     intermediates.push(result);
                 }
@@ -1312,6 +1365,12 @@ where
                 *axis,
             ),
             RiscOp::Scatter { axis } => scatter_replace(
+                &values[&node.inputs[0]],
+                &values[&node.inputs[1]],
+                &values[&node.inputs[2]],
+                *axis,
+            ),
+            RiscOp::ScatterElements { axis } => scatter_elements(
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
                 &values[&node.inputs[2]],

@@ -322,6 +322,10 @@ impl CEmitter {
             RiscOp::Abs => self.emit_unary_func(id, "fabsf", &node.inputs, &node.output_type),
             RiscOp::Floor => self.emit_unary_func(id, "floorf", &node.inputs, &node.output_type),
             RiscOp::Ceil => self.emit_unary_func(id, "ceilf", &node.inputs, &node.output_type),
+            // `rintf` rounds to nearest with the current rounding mode,
+            // which defaults to ties-to-even — matching the evaluator's
+            // `f64::round_ties_even`. (`roundf` would be ties-away-from-zero.)
+            RiscOp::Round => self.emit_unary_func(id, "rintf", &node.inputs, &node.output_type),
             RiscOp::UniformLike { low, high, seed } => {
                 self.emit_uniform_like(id, *low, *high, *seed, &node.output_type)
             }
@@ -515,6 +519,9 @@ impl CEmitter {
             }
             RiscOp::Scatter { axis } => {
                 self.emit_sparse_scatter_replace(id, *axis, &node.inputs, &node.output_type, dag);
+            }
+            RiscOp::ScatterElements { axis } => {
+                self.emit_sparse_scatter_elements(id, *axis, &node.inputs, &node.output_type, dag);
             }
         }
     }
@@ -1111,6 +1118,7 @@ impl CEmitter {
             "fabsf" => "fabs",
             "floorf" => "floor",
             "ceilf" => "ceil",
+            "rintf" => "rint",
             "fmaxf" => "fmax",
             "fminf" => "fmin",
             other => other,
@@ -2224,6 +2232,10 @@ impl CEmitter {
                 let a = resolve(&inputs[0]);
                 format!("ceilf({a})")
             }
+            FusedStepOp::Round => {
+                let a = resolve(&inputs[0]);
+                format!("rintf({a})")
+            }
         }
     }
 
@@ -2309,6 +2321,10 @@ impl CEmitter {
             FusedStepOp::Ceil => {
                 let a = resolve(&inputs[0]);
                 format!("_mm256_set1_ps(ceilf(_mm256_cvtss_f32({a})))")
+            }
+            FusedStepOp::Round => {
+                let a = resolve(&inputs[0]);
+                format!("_mm256_set1_ps(rintf(_mm256_cvtss_f32({a})))")
             }
         }
     }
@@ -3071,6 +3087,125 @@ impl CEmitter {
         self.line("}");
         self.line(&format!(
             "if (t{id}_target != t{target}) chelis_free(t{id}_target);"
+        ));
+        self.line(&format!(
+            "if (t{id}_indices != t{indices}) chelis_free(t{id}_indices);"
+        ));
+        self.line(&format!(
+            "if (t{id}_updates != t{updates}) chelis_free(t{id}_updates);"
+        ));
+    }
+
+    /// Emit C for ONNX `ScatterElements` (spec §3.5.1). Element-wise:
+    /// `data`, `indices`, `updates` share a rank; `indices.dims ==
+    /// updates.dims`; `output.dims == data.dims`. Each flat update
+    /// position is decomposed into a coordinate over the indices shape;
+    /// the `axis` coordinate is replaced by `indices[i]` and the write
+    /// lands at the corresponding linear offset in the (data-shaped)
+    /// output. Last-write-wins under updates row-major order, so the
+    /// loop is single-threaded.
+    fn emit_sparse_scatter_elements(
+        &mut self,
+        id: usize,
+        axis: usize,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: &Dag,
+    ) {
+        let data = inputs[0].0;
+        let indices = inputs[1].0;
+        let updates = inputs[2].0;
+        let data_ty = &dag.get(inputs[0]).unwrap().output_type;
+        let indices_ty = &dag.get(inputs[1]).unwrap().output_type;
+        let updates_ty = &dag.get(inputs[2]).unwrap().output_type;
+        let data_et = Self::elem_type(data_ty);
+        let index_et = Self::elem_type(indices_ty);
+        let update_et = Self::elem_type(updates_ty);
+        let data_elem_size = Self::elem_size_expr(data_ty);
+        let rank = data_ty.dims.len();
+
+        self.line(&format!(
+            "chelis_tensor *t{id}_data = chelis_contiguous(t{data});"
+        ));
+        self.line(&format!(
+            "chelis_tensor *t{id}_indices = chelis_contiguous(t{indices});"
+        ));
+        self.line(&format!(
+            "chelis_tensor *t{id}_updates = chelis_contiguous(t{updates});"
+        ));
+        self.emit_slot_wrapper(id, ty);
+        self.line(&format!(
+            "const {index_et} *t{id}_indices_data = (const {index_et}*)t{id}_indices->data;"
+        ));
+        self.line(&format!(
+            "const {update_et} *t{id}_updates_data = (const {update_et}*)t{id}_updates->data;"
+        ));
+        self.line(&format!(
+            "{data_et} *t{id}_out_data = ({data_et}*)t{id}->data;"
+        ));
+        self.line(&format!(
+            "memcpy(t{id}->data, t{id}_data->data, (size_t)t{id}->size * {data_elem_size});"
+        ));
+        // Per-axis sizes for the indices/updates grid and the data grid,
+        // plus the data row-major strides used to recompute the output
+        // offset after the axis coordinate is replaced by the index.
+        let axis_size = Self::emit_dim_info(&data_ty.dims[axis]);
+        self.line(&format!("int t{id}_axis = {axis};"));
+        self.line(&format!("int t{id}_axis_size = {axis_size};"));
+        self.line(&format!("int t{id}_update_count = t{id}_updates->size;"));
+        for d in 0..rank {
+            let idx_dim = Self::emit_dim_info(&indices_ty.dims[d]);
+            let data_dim = Self::emit_dim_info(&data_ty.dims[d]);
+            self.line(&format!("int t{id}_idim{d} = {idx_dim};"));
+            self.line(&format!("int t{id}_ddim{d} = {data_dim};"));
+        }
+        // Single-threaded sequential loop over the updates tensor in
+        // row-major flat order: deterministic last-write-wins requires
+        // no two writes to the same output cell race.
+        self.line(&format!(
+            "for (int t{id}_i = 0; t{id}_i < t{id}_update_count; t{id}_i++) {{"
+        ));
+        self.indent += 1;
+        // int tensors store their values bit-packed into the float-typed
+        // `->data`, so the index read must go through the dtype-correct
+        // pointer cast. (The hyperplane sparse emits — gather, scatter,
+        // scatter_add — read `(int)t->data[i]` directly, relying on the
+        // specialized-sparse-call path; the element-wise emit reads the
+        // index here in the general path, so it casts explicitly.)
+        self.line(&format!(
+            "int t{id}_g = (t{id}_indices->dtype == CHELIS_I64) ? (int)((const int64_t*)t{id}_indices->data)[t{id}_i] : (int)((const int32_t*)t{id}_indices->data)[t{id}_i];"
+        ));
+        self.line(&format!(
+            "if (t{id}_g < 0 || t{id}_g >= t{id}_axis_size) abort();"
+        ));
+        // Decompose the flat updates index into per-axis coordinates
+        // over the indices/updates shape, then build the output linear
+        // offset over the data shape with the axis coordinate replaced
+        // by the scattered index.
+        self.line(&format!("int t{id}_rem = t{id}_i;"));
+        self.line(&format!("int t{id}_out = 0;"));
+        for d in (0..rank).rev() {
+            self.line(&format!("int t{id}_c{d} = t{id}_rem % t{id}_idim{d};"));
+            self.line(&format!("t{id}_rem /= t{id}_idim{d};"));
+        }
+        // out = sum_d (coord_d or g at axis) * stride_d, computed via a
+        // running row-major fold over the data dims.
+        self.line(&format!("int t{id}_stride = 1;"));
+        for d in (0..rank).rev() {
+            self.line(&format!(
+                "int t{id}_coord{d} = (t{id}_axis == {d}) ? t{id}_g : t{id}_c{d};"
+            ));
+            self.line(&format!("t{id}_out += t{id}_coord{d} * t{id}_stride;"));
+            self.line(&format!("t{id}_stride *= t{id}_ddim{d};"));
+        }
+        // Last-write-wins assignment (NOT accumulation).
+        self.line(&format!(
+            "t{id}_out_data[t{id}_out] = t{id}_updates_data[t{id}_i];"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!(
+            "if (t{id}_data != t{data}) chelis_free(t{id}_data);"
         ));
         self.line(&format!(
             "if (t{id}_indices != t{indices}) chelis_free(t{id}_indices);"
@@ -4317,6 +4452,10 @@ impl CEmitter {
                 FusedStepOp::Ceil => {
                     let a = resolve(&step.input_indices[0]);
                     format!("ceilf({a})")
+                }
+                FusedStepOp::Round => {
+                    let a = resolve(&step.input_indices[0]);
+                    format!("rintf({a})")
                 }
             };
             self.line(&format!("float v{s} = {expr};"));
@@ -5902,6 +6041,21 @@ mod tests {
         dag.add_node(RiscOp::Ceil, vec![a], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("ceilf("), "expected ceilf( in:\n{c}");
+    }
+
+    #[test]
+    fn round_emits_rintf() {
+        // `round` lowers to `rintf` (round-to-nearest-ties-to-even under
+        // the default rounding mode), NOT `roundf` (ties-away-from-zero).
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 2.5 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Round, vec![a], scalar_f32(), None);
+        let c = CEmitter::emit_dag(&dag, "test_fn");
+        assert!(c.contains("rintf("), "expected rintf( in:\n{c}");
+        assert!(
+            !c.contains("roundf("),
+            "round must not emit ties-away-from-zero roundf( in:\n{c}"
+        );
     }
 
     // ---- Numerical correctness: verify via constant folding in the evaluator ----

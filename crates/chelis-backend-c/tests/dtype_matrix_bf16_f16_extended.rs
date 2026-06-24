@@ -735,6 +735,39 @@ fn f16_ceil_agrees_with_evaluator() {
     );
 }
 
+// `round` is round-to-nearest-ties-to-even. The .5 cases (0.5 -> 0,
+// 2.5 -> 2) exercise the tiebreak that distinguishes it from
+// ties-away-from-zero `roundf`; all chosen values are exactly
+// representable in bf16/f16, so the C `rintf` output must agree with
+// the evaluator's `f64::round_ties_even` to the dtype tolerance.
+#[test]
+fn bf16_round_agrees_with_evaluator() {
+    let vals = [0.5_f32, 2.5, -2.5, 2.0];
+    let expected = unary_eval(RiscOp::Round, Prim::Bf16, &vals);
+    run_unary_reduced(
+        "bf16_round",
+        Prim::Bf16,
+        &vals,
+        RiscOp::Round,
+        &expected,
+        BF16_TOL,
+    );
+}
+
+#[test]
+fn f16_round_agrees_with_evaluator() {
+    let vals = [0.5_f32, 2.5, -2.5, 2.0];
+    let expected = unary_eval(RiscOp::Round, Prim::F16, &vals);
+    run_unary_reduced(
+        "f16_round",
+        Prim::F16,
+        &vals,
+        RiscOp::Round,
+        &expected,
+        F16_TOL,
+    );
+}
+
 // ---------------------------------------------------------------------
 // Reductions: MinReduce, ProdReduce
 // ---------------------------------------------------------------------

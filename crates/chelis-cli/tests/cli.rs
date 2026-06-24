@@ -3177,10 +3177,82 @@ def main(
     );
 }
 
+/// Per-primitive eval-vs-backend parity for the `round` (#395) and
+/// `scatter_elements` (#396) RISC primitives: build to C, compile, run,
+/// and assert the binary's stdout is byte-identical to `chelis eval` on
+/// the same source. `round` exercises ties-to-even (0.5 -> 0, 2.5 -> 2,
+/// distinguishing `rintf` from ties-away-from-zero `roundf`);
+/// `scatter_elements` exercises the ONNX element-wise contract with an
+/// int32-index tensor (the index-read path that a float-reinterpret bug
+/// would silently corrupt).
+#[test]
+fn build_c_runs_round_and_scatter_elements_matches_eval_output() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("round_scatter_elements.ch");
+    let out_dir = dir.path().join("round-scatter-elements-build-out");
+    write_file(
+        &path,
+        "data = to_tensor([[cast(0.0, f32), cast(0.0, f32)], \
+         [cast(0.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(0.0, f32)]])\n\
+         indices = to_tensor([[cast(1, int32), cast(0, int32)], \
+         [cast(2, int32), cast(0, int32)]])\n\
+         updates = to_tensor([[cast(5.0, f32), cast(6.0, f32)], \
+         [cast(7.0, f32), cast(8.0, f32)]])\n\
+         scattered = scatter_elements(data, indices, updates, 0)\n\
+         rounded = round(to_tensor([cast(0.5, f32), cast(1.5, f32), \
+         cast(2.5, f32), cast(-2.5, f32)]))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let eval_stdout = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let status = gcc_link_generated(
+        &out_dir,
+        "round_scatter_elements.c",
+        "round_scatter_elements",
+    );
+    assert!(status.success(), "gcc failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("round_scatter_elements"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status
+    );
+    assert_eq!(
+        run_output.stdout, eval_stdout,
+        "round / scatter_elements C-backend output must be byte-identical to eval"
+    );
+}
+
 #[test]
 #[ignore = "manual gate: Phase 3h numeric acceptance oracle exceeds the default inner-loop budget"]
 fn phase3h_numeric_acceptance_oracle() {
     build_c_runs_tensor_structural_ops_and_matches_eval_output();
+    build_c_runs_round_and_scatter_elements_matches_eval_output();
     assert_reef_std_embedding_builds_to_valid_c();
 }
 

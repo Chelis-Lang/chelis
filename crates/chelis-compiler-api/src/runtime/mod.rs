@@ -501,9 +501,27 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     tensor_bindings: &HashMap<String, RuntimeTensorValue>,
     selected_roots: Option<&[String]>,
 ) -> Result<RuntimeOutcome, String> {
-    // Lowered classification: start with library's (if provided), then
-    // overlay the new-code program's. New-code wins on shadow.
-    let new_lowered_names = top_level_lowering_map(program.exprs(), program.type_env());
+    // Lowered classification. A new-code value binding that references a
+    // library function (e.g. `imported_val = lib_add(20, 22)`) must
+    // inherit that function's host-lane-vs-tensor-lane classification —
+    // otherwise the bare `top_level_lowering_map(program.exprs())` walk,
+    // which has no view of the library's defs, sees `lib_add` as an
+    // unknown name and mis-classifies the binding as lowered. That bug
+    // (Chelis-Lang/chelis#423) drops the binding from BOTH lanes: the
+    // host-order filter below skips it (it looks lowered) while the
+    // tensor-root computation in `compile_new_source_in_context`
+    // correctly excludes it (its dependency is host-lane), so it
+    // disappears from eval output entirely. Classify over the COMBINED
+    // library + new-code exprs (with the composed type-env) so both
+    // sides agree, then keep the library's own precomputed entries on
+    // top for names the combined walk doesn't cover.
+    let mut combined_exprs: Vec<Expr> = library_exprs.to_vec();
+    combined_exprs.extend(program.exprs().iter().cloned());
+    let mut combined_type_env: HashMap<String, Expr> = library_type_env.clone();
+    for (name, ty_expr) in program.type_env() {
+        combined_type_env.insert(name.clone(), ty_expr.clone());
+    }
+    let new_lowered_names = top_level_lowering_map(&combined_exprs, &combined_type_env);
     let mut lowered_names: HashMap<String, bool> = HashMap::new();
     if let Some(lib) = library_lowered_names {
         lowered_names.extend(lib.iter().map(|(k, v)| (k.clone(), *v)));

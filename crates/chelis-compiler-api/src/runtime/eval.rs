@@ -849,6 +849,10 @@ impl<'a> EvalContext<'a> {
             "atan" => float_unop_with_tensor(args, f64::atan, f32::atan),
             "floor" => float_unop_with_tensor(args, f64::floor, f32::floor),
             "ceil" => float_unop_with_tensor(args, f64::ceil, f32::ceil),
+            // Round-half-to-even (banker's rounding), matching the DAG
+            // evaluator and the C backend's `rintf`. NOT `round`, which
+            // is ties-away-from-zero.
+            "round" => float_unop_with_tensor(args, f64::round_ties_even, f32::round_ties_even),
             // `abs` accepts ints and floats and is sign-flipping for both;
             // route through `numeric_unop` so scalar Int64/Int32/F32/F64
             // inputs all keep their dtype.
@@ -1604,6 +1608,14 @@ impl<'a> EvalContext<'a> {
                 let axis = expect_int_arg(args, 3)?;
                 let mode = expect_string_arg(args, 4)?;
                 tensor_scatter_value(&base, &indices, &updates, axis, &mode)
+                    .map(RuntimeValue::Tensor)
+            }
+            "scatter_elements" => {
+                let data = expect_tensor_arg(args, 0)?;
+                let indices = expect_tensor_arg(args, 1)?;
+                let updates = expect_tensor_arg(args, 2)?;
+                let axis = expect_int_arg(args, 3)?;
+                tensor_scatter_elements_value(&data, &indices, &updates, axis)
                     .map(RuntimeValue::Tensor)
             }
             "where" => {
