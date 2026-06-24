@@ -397,11 +397,18 @@ class DocsOnlySkipTests(unittest.TestCase):
         "smt-build",
     }
     # Jobs that must ALWAYS run (never gated on docs_only).
+    # smt-build-glibc231 / smt-build-darwin-arm64 were added by chelis#422
+    # (ship-smt) without a docs_only `if`, so today they run unconditionally
+    # and are classified here. Follow-up: give them the same docs-skip `if` +
+    # `needs: [changes]` as smt-build and move them to HEAVY_GATED_JOBS so the
+    # heavy from-source cvc5 builds also skip on docs-only PRs (chelis#419).
     ALWAYS_RUN_JOBS = {
         "lint-and-unit",
         "no-ai-authorship",
         "docs",
         "changes",
+        "smt-build-glibc231",
+        "smt-build-darwin-arm64",
     }
 
     def test_changes_job_exists_and_is_ungated(self):
