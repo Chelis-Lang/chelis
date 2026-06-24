@@ -96,10 +96,6 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
     }
 }
 
-fn c_compiler() -> String {
-    std::env::var("CC").unwrap_or_else(|_| "cc".to_string())
-}
-
 /// Run `chelis build --target c` on `source`, returning the build dir.
 fn chelis_build_c(source: &str, stem: &str) -> tempfile::TempDir {
     let dir = tempdir().expect("tempdir");
@@ -131,23 +127,38 @@ fn compile_emitted(build_dir: &Path, kernel_c: &Path) -> (std::process::Output, 
     let canonical = target_debug_dir().join("libchelis_runtime.a");
     ensure_runtime_static_lib(&canonical).expect("materialize libchelis_runtime.a");
 
+    // Resolve the host toolchain the way `chelis build` and the other CLI test
+    // harnesses (rank_poly_tier3.rs, parity.rs) do, so the link command carries
+    // every platform-required flag. On macOS the transcendental kernels route
+    // through Accelerate's vForce (`vvexpf`/`vvlogf`/...), so
+    // `toolchain.link_flags` includes `-framework Accelerate`; a hand-rolled
+    // `-lm -lpthread -ldl` link omits it and `ld` fails with
+    // `Undefined symbols ... _vvexpf` on arm64 (the softmax-backward program
+    // emits `vvexpf`). `needs_blas` is read from the emitted C so a BLAS kernel
+    // links cblas too.
+    let needs_blas = fs::read_to_string(kernel_c)
+        .map(|t| t.contains("cblas_sgemm(") || t.contains("\"chelis_blas.h\""))
+        .unwrap_or(false);
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
+        chelis_backend_c::toolchain::CodegenRequirements {
+            wants_openmp: true,
+            needs_blas,
+        },
+    );
+
     let bin = build_dir.join("ws2b_bin");
-    let compile = StdCommand::new(c_compiler())
-        .args([
-            "-O0",
-            "-std=c11",
-            "-I",
-            build_dir.to_str().unwrap(),
-            kernel_c.to_str().unwrap(),
-            "-o",
-            bin.to_str().unwrap(),
-            canonical.to_str().unwrap(),
-            "-lm",
-            "-lpthread",
-            "-ldl",
-        ])
-        .output()
-        .expect("invoke C compiler");
+    let mut cmd = StdCommand::new(&toolchain.compiler);
+    cmd.arg("-O0")
+        .arg("-std=c11")
+        .args(&toolchain.compile_flags)
+        .arg("-I")
+        .arg(build_dir.to_str().unwrap())
+        .arg(kernel_c.to_str().unwrap())
+        .arg(canonical.to_str().unwrap())
+        .args(&toolchain.link_flags)
+        .arg("-o")
+        .arg(bin.to_str().unwrap());
+    let compile = cmd.output().expect("invoke C compiler");
     (compile, bin)
 }
 
