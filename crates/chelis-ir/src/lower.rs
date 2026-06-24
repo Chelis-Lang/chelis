@@ -5952,7 +5952,7 @@ impl LowerCtx {
                     .get(data)
                     .map(|n| n.output_type.dims.len())
                     .unwrap_or(0);
-                let axis_raw = self.extract_axis_raw(&args[3]);
+                let axis_raw = self.extract_axis_raw(&args[3], "scatter_elements");
                 let axis = self.normalize_axis(axis_raw, data_rank, "scatter_elements", &args[3]);
                 let out_ty = self
                     .dag
