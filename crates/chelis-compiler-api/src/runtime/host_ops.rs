@@ -468,6 +468,130 @@ pub(super) fn int_binop(
     }
 }
 
+/// Canonical evaluator diagnostic for integer division/remainder by zero
+/// (#387). `div` and `mod` share one message so the two primitives trap
+/// consistently. Per `spec/05-risc-primitives.md` (integer division) a
+/// `1 / 0` (or `% 0`) on integer operands must trap rather than yield a
+/// silently-wrong finite value; the C backend follows the platform's
+/// SIGFPE for the same operands. Returning a clean `Err` halts evaluation
+/// with `error: <message>` (exit 1) instead of an unhandled Rust panic.
+const INT_DIV_ZERO_MSG: &str = "integer division or remainder by zero";
+
+/// True when every operand resolves to an integer precision (scalar dtype
+/// or integer-precision tensor). Integer `div`/`mod` follow C truncating
+/// semantics and trap on a zero divisor; float operands keep IEEE-754
+/// division (`1.0 / 0.0 == inf`), so the integer trap must not fire there.
+fn operand_is_integer(value: &RuntimeValue) -> bool {
+    match value {
+        RuntimeValue::Scalar(payload) => payload.dtype().is_integer(),
+        RuntimeValue::Tensor(tensor) => tensor.precision.is_integer(),
+        _ => false,
+    }
+}
+
+/// `div` evaluator entry: integer operands trap on a zero divisor and use
+/// true integer (truncating, round-toward-zero) division; float operands
+/// fall through to IEEE-754 `numeric_binop` (`1.0 / 0.0 == inf`). Routing
+/// integers through real `i64` division (rather than the f64 round-trip
+/// `lhs / rhs as i64`) also preserves the full `int64` range that the f64
+/// mantissa would otherwise truncate. See #387.
+pub(super) fn eval_div(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
+    let both_integer = args.len() == 2
+        && args.iter().all(operand_is_integer)
+        && args
+            .iter()
+            .any(|v| matches!(v, RuntimeValue::Scalar(_)) || matches!(v, RuntimeValue::Tensor(_)));
+    if both_integer {
+        return checked_int_binop(args, |lhs, rhs| {
+            if rhs == 0 {
+                Err(INT_DIV_ZERO_MSG.to_string())
+            } else {
+                Ok(lhs.wrapping_div(rhs))
+            }
+        });
+    }
+    numeric_binop(args, |lhs, rhs| lhs / rhs)
+}
+
+/// `mod` evaluator entry: integer-only (the surface `mod` primitive),
+/// trapping on a zero divisor with the same diagnostic as `eval_div` so
+/// the two stay consistent (#387). Uses true integer remainder.
+pub(super) fn eval_mod(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
+    checked_int_binop(args, |lhs, rhs| {
+        if rhs == 0 {
+            Err(INT_DIV_ZERO_MSG.to_string())
+        } else {
+            Ok(lhs.wrapping_rem(rhs))
+        }
+    })
+}
+
+/// Integer binop helper whose closure may fail (the failing path is the
+/// zero-divisor trap). Handles integer scalars and integer-precision
+/// tensors element-wise; the closure runs at `i64` precision. A tensor
+/// result keeps the operand precision. Mixed scalar/tensor integer forms
+/// broadcast the scalar across the tensor, mirroring `numeric_binop`.
+fn checked_int_binop(
+    args: &[RuntimeValue],
+    op: impl Fn(i64, i64) -> Result<i64, String>,
+) -> Result<RuntimeValue, String> {
+    match (args.first(), args.get(1)) {
+        (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
+            if lp.dtype().is_integer() && rp.dtype().is_integer() =>
+        {
+            let (ldt, rdt) = (lp.dtype(), rp.dtype());
+            let result_dtype = if ldt == rdt { ldt } else { Prim::Int64 };
+            let value = op(lp.bits().as_i64(), rp.bits().as_i64())?;
+            RuntimeValue::scalar_like_int(result_dtype, value)
+        }
+        (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs)))
+            if lhs.precision.is_integer() && rhs.precision.is_integer() =>
+        {
+            if lhs.value.shape != rhs.value.shape {
+                return Err(format!(
+                    "tensor shapes must match for elementwise op, got {:?} vs {:?}",
+                    lhs.value.shape, rhs.value.shape
+                ));
+            }
+            let mut data = Vec::with_capacity(lhs.value.data.len());
+            for (l, r) in lhs.value.data.iter().zip(&rhs.value.data) {
+                data.push(op(*l as i64, *r as i64)? as f64);
+            }
+            Ok(RuntimeValue::Tensor(RuntimeTensorValue {
+                value: IrTensorValue::from_vec(lhs.value.shape.clone(), data),
+                precision: lhs.precision,
+            }))
+        }
+        (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Scalar(rp)))
+            if lhs.precision.is_integer() && rp.dtype().is_integer() =>
+        {
+            let rhs = rp.bits().as_i64();
+            let mut data = Vec::with_capacity(lhs.value.data.len());
+            for l in &lhs.value.data {
+                data.push(op(*l as i64, rhs)? as f64);
+            }
+            Ok(RuntimeValue::Tensor(RuntimeTensorValue {
+                value: IrTensorValue::from_vec(lhs.value.shape.clone(), data),
+                precision: lhs.precision,
+            }))
+        }
+        (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Tensor(rhs)))
+            if lp.dtype().is_integer() && rhs.precision.is_integer() =>
+        {
+            let lhs = lp.bits().as_i64();
+            let mut data = Vec::with_capacity(rhs.value.data.len());
+            for r in &rhs.value.data {
+                data.push(op(lhs, *r as i64)? as f64);
+            }
+            Ok(RuntimeValue::Tensor(RuntimeTensorValue {
+                value: IrTensorValue::from_vec(rhs.value.shape.clone(), data),
+                precision: rhs.precision,
+            }))
+        }
+        other => Err(format!("integer op expects int args, got {other:?}")),
+    }
+}
+
 pub(super) fn int_shift_binop(
     args: &[RuntimeValue],
     op: impl Fn(i64, u32) -> i64,
