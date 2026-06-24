@@ -1700,3 +1700,181 @@ fn pipe_rewriting_stage_then_named_reduce_is_a_pinned_gap() {
         "the pre-#338 error must not resurface: {stderr}"
     );
 }
+
+/// chelis#388: a named-axis reduction over a *literal-shaped* operand
+/// (`to_tensor([[...]])`) must build and eval, not die in rank
+/// monomorphization. The call site binds the formal parameter
+/// `x: tensor[batch, seq]` to a literal node whose dims are concrete
+/// `[Lit(2), Lit(3)]` — the named axis `seq` is erased — so the by-name
+/// reduce-axis lookup against the operand's dims fails; the fix recovers
+/// the axis from the formal-parameter position recorded at the inline site.
+///
+/// `reduce_seq` reduces `seq` (axis 1, size 3) of a non-square `[2, 3]`
+/// operand, so a position mislabel (reducing axis 0 instead) would yield a
+/// `[3]` shape of column sums `[5, 7, 9]` rather than the correct `[2]`
+/// row sums `[6, 15]`. The shapes differ, so the error cannot hide.
+#[test]
+fn named_reduce_over_literal_operand_builds_runs_evals() {
+    // Two bindings so both lanes print the `out = ` prefix the
+    // parse_printed_tensors / agreement oracle keys on (a single-root
+    // program prints the bare value with no name prefix).
+    let source = "def reduce_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = sum(x, seq)\n\
+         src = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
+         out = reduce_seq(src)\n";
+    let backend = build_compile_run(source, "issue_388_named_reduce_literal");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    assert_eq!(out.1, vec![2], "backend reduced the wrong axis ({backend})");
+    for (i, e) in [6.0, 15.0].iter().enumerate() {
+        assert!(
+            (out.2[i] - e).abs() < 1e-6,
+            "out[{i}]: backend {} != {e} ({backend})",
+            out.2[i]
+        );
+    }
+    // The locked invariant: a check-clean program must build AND the
+    // backend must agree with the evaluator, value-for-value.
+    assert_eval_agrees_with_backend(source, "issue_388_named_reduce_literal", &backend);
+}
+
+/// chelis#388 (eval lane): the exact-line oracle for the named reduction
+/// over a literal operand. A single-root program prints the bare value.
+#[test]
+fn named_reduce_over_literal_operand_eval_exact() {
+    // Single-root program: eval prints the bare value with no name prefix.
+    let source = "def reduce_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = sum(x, seq)\n\
+         out = reduce_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
+    let dir = tempdir().expect("tempdir");
+    let eval = eval_stdout(dir.path(), source, "issue_388_eval_exact");
+    assert_eq!(
+        eval.trim(),
+        "tensor(shape=[2], data=[6.0, 15.0])",
+        "issue #388: named reduce over a literal operand must eval the seq-axis sums"
+    );
+}
+
+/// chelis#388 NEGATIVE: a named axis the operand genuinely lacks is still a
+/// loud failure, never a silent default. `reduce_seq` declares `seq` but the
+/// body reduces an undeclared `chan`; the checker rejects it, so the
+/// position-recovery fix never masks a real missing-axis bug.
+#[test]
+fn named_reduce_unknown_axis_still_rejected() {
+    let json = check_json(
+        "def reduce_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = sum(x, chan)\n",
+    );
+    let errors = json["errors"].as_array().expect("errors array");
+    assert!(
+        !errors.is_empty(),
+        "reducing an undeclared named axis must be rejected: {json}"
+    );
+}
+
+/// chelis#364: a reduction whose axis is `cast(N, int32)` — a form the
+/// checker admits as a compile-time-constant axis — must lower to axis N in
+/// the DAG/backend lane, not silently to axis 0. Pre-fix, `extract_axis_raw`
+/// returned 0 for any non-literal axis expr, so `sum(x, cast(1, int32))`
+/// reduced axis 0 (wrong numerics, a shape contradicting the checked type,
+/// and — under grad — eval and backend agreeing on the SAME wrong gradient).
+///
+/// Non-square `[2, 3]`: axis 1 (`cast(1, int32)`) sums to `[6, 15]`; a
+/// silent axis-0 default would produce a `[3]` shape of `[5, 7, 9]`.
+#[test]
+fn cast_axis_reduction_lowers_to_named_axis_not_zero() {
+    let source = "def f(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = sum(x, cast(1, int32))\n\
+         src = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
+         out = f(src)\n";
+    let backend = build_compile_run(source, "issue_364_cast_axis");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    assert_eq!(
+        out.1,
+        vec![2],
+        "cast-axis reduction lowered the wrong axis ({backend})"
+    );
+    for (i, e) in [6.0, 15.0].iter().enumerate() {
+        assert!(
+            (out.2[i] - e).abs() < 1e-6,
+            "out[{i}]: backend {} != {e} ({backend})",
+            out.2[i]
+        );
+    }
+    // Eval is the reference; the backend must match it byte-for-byte on this
+    // integer-indexed, exact-arithmetic reduction.
+    assert_eval_agrees_with_backend(source, "issue_364_cast_axis", &backend);
+}
+
+/// chelis#364 (axis-2 cross-rank control): a `cast(2, int32)` axis on a
+/// rank-3 operand reduces the *third* axis, proving the fix carries the
+/// constant through rather than clamping to a fixed axis.
+#[test]
+fn cast_axis_reduction_axis_two_rank_three() {
+    let source = "def f(x: &tensor[a, b, c, f32]) -> tensor[a, b, f32] = sum(x, cast(2, int32))\n\
+         src = to_tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]])\n\
+         out = f(src)\n";
+    let backend = build_compile_run(source, "issue_364_cast_axis_two");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    // [1,3,2] reduced over axis 2 -> [1,3] = [[3, 7, 11]].
+    assert_eq!(
+        out.1,
+        vec![1, 3],
+        "cast(2) reduced the wrong axis ({backend})"
+    );
+    for (i, e) in [3.0, 7.0, 11.0].iter().enumerate() {
+        assert!(
+            (out.2[i] - e).abs() < 1e-6,
+            "out[{i}]: backend {} != {e} ({backend})",
+            out.2[i]
+        );
+    }
+    assert_eval_agrees_with_backend(source, "issue_364_cast_axis_two", &backend);
+}
+
+/// chelis#383: `vmap` over a two-stage named reduce-to-scalar with a
+/// *top-level-binding* operand previously tripped the `dag.rs`
+/// symbolic-dim guard at build/eval-lowering time (`symbolic dim `seq` is
+/// referenced by a non-Load node ... but no Load input declares it`). The
+/// root cause was the vmap dim-symbol remap zipping the rank-N formal
+/// parameter type against the rank-(N+1) vmap argument: the `same-rank`
+/// filter dropped the substitution, so the inlined body's named dims
+/// (`seq`, `head`) never resolved to the operand's concrete dims and a
+/// `Named("seq")` dim survived in the vmapped reduce with no declaring
+/// Load. The fix batch-prepends the formal parameter types before the
+/// remap so the ranks align.
+///
+/// This is the EXACT form the prior `variadic_reduce_builds_runs_and_evals`
+/// fixture documented as a workaround (it used an inline-literal operand to
+/// avoid the ICE); the workaround is now obsolete for the eval lane. Pins
+/// the evaluator oracle (the reference lane per the backend-numerics
+/// discipline): `sum(sum(slice, head), seq)` per 2x2 slice = the slice sum,
+/// so `[[[1,2],[3,4]], [[5,6],[7,8]]]` -> `[10, 26]`.
+#[test]
+fn vmap_two_stage_named_reduce_top_level_binding_evals() {
+    let source = "def vinner(x: &tensor[seq, head, f32]) -> f32 = tensor_to_scalar(sum(sum(x, head), seq))\n\
+         y = to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]])\n\
+         out = vmap(vinner)(y)\n";
+    let dir = tempdir().expect("tempdir");
+    let eval = eval_stdout(dir.path(), source, "issue_383_vmap_two_stage");
+    let tensors = parse_printed_tensors(&eval);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("eval output missing `out`: {eval}"));
+    assert_eq!(out.1, vec![2], "vmap two-stage reduce shape ({eval})");
+    for (i, e) in [10.0, 26.0].iter().enumerate() {
+        assert!(
+            (out.2[i] - e).abs() < 1e-6,
+            "out[{i}]: eval {} != {e} ({eval})",
+            out.2[i]
+        );
+    }
+}

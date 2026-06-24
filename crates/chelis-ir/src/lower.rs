@@ -962,6 +962,48 @@ fn tensor_dim_substitutions(
         .collect()
 }
 
+/// Issue #388: record, per call site, the positional index each named
+/// axis occupied in a formal parameter's shape.
+///
+/// When the actual argument is a *literal-shaped* operand (`tensor[2, 3]`
+/// from `to_tensor([[...]])`), `tensor_dim_substitutions` binds the named
+/// axis to a concrete `DimInfo` (`seq -> Lit(3)`), and
+/// [`LowerCtx::lower_expr`]'s binding of the formal parameter name to the
+/// literal node means the inlined body's operand carries the literal dims
+/// (`[Lit(2), Lit(3)]`) — the named axis is gone. A by-name reduction/
+/// expand-anchor lookup against those dims then cannot find `seq`. The
+/// positional index is preserved here so [`LowerCtx::resolve_reduce_axis`]
+/// / [`LowerCtx::resolve_expand_anchor`] can recover the axis a named
+/// reduction targets even after the name was erased by monomorphization.
+///
+/// A name may appear in more than one formal parameter; only a name whose
+/// position is *consistent* across all the formals that mention it gets
+/// recorded (an inconsistent name is ambiguous and is left for the loud
+/// by-name failure path, never silently guessed).
+fn tensor_dim_axis_positions(formal_params: &[TensorType]) -> HashMap<String, usize> {
+    let mut positions: HashMap<String, usize> = HashMap::new();
+    let mut ambiguous: HashSet<String> = HashSet::new();
+    for formal in formal_params {
+        for (index, dim) in formal.dims.iter().enumerate() {
+            if let DimInfo::Named(name, None) = dim {
+                match positions.get(name) {
+                    Some(prev) if *prev != index => {
+                        ambiguous.insert(name.clone());
+                    }
+                    None => {
+                        positions.insert(name.clone(), index);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    for name in ambiguous {
+        positions.remove(&name);
+    }
+    positions
+}
+
 /// WS-A8: build a precision substitution map from formal vs actual
 /// tensor types at a polymorphic-def call site. The formal types come
 /// from the def's annotated parameter signatures and may carry
@@ -3342,6 +3384,18 @@ struct LowerCtx {
     /// the spec's monomorphization invariant; a surviving rank var is a
     /// monomorphization bug, not a backend input.
     rank_substitutions: HashMap<String, Vec<DimInfo>>,
+    /// Issue #388: positional index each named axis occupied in a formal
+    /// parameter shape at the current inlined call site. Populated by
+    /// [`tensor_dim_axis_positions`] in `lower_plain_callable_app`
+    /// alongside `dim_substitutions`. Consulted by
+    /// [`Self::resolve_reduce_axis`] / [`Self::resolve_expand_anchor`] to
+    /// recover the axis a named reduction/expand targets when call-site
+    /// monomorphization erased the named axis from the operand's dims (a
+    /// literal-shaped actual argument carries concrete `Lit` dims). This is
+    /// a *position* recovery, never an extent guess; an ambiguous name (one
+    /// at different positions across formals) is excluded so the loud
+    /// by-name failure path still fires for genuinely unresolvable axes.
+    dim_axis_positions: HashMap<String, usize>,
     /// True only while lowering the body of an AD transform. Host-list
     /// combinator rewrites are an AD bridge, not the general C/backend
     /// lowering for ordinary list programs.
@@ -3375,6 +3429,7 @@ impl LowerCtx {
             dim_substitutions: HashMap::new(),
             prec_substitutions: HashMap::new(),
             rank_substitutions: HashMap::new(),
+            dim_axis_positions: HashMap::new(),
             allow_host_list_ad_rewrites: false,
             current_span_id: None,
         }
@@ -4783,6 +4838,7 @@ impl LowerCtx {
         let saved_dim_substitutions = self.dim_substitutions.clone();
         let saved_prec_substitutions = self.prec_substitutions.clone();
         let saved_rank_substitutions = self.rank_substitutions.clone();
+        let saved_dim_axis_positions = self.dim_axis_positions.clone();
         // WS-A8: capture the raw param-type Deep exprs so we can pull
         // out `(t-var {} p)` precision-var names for monomorphization,
         // and (Tier-2) `(d-rank {} r)` rank-var names for rank
@@ -4850,6 +4906,12 @@ impl LowerCtx {
         }
         self.dim_substitutions
             .extend(tensor_dim_substitutions(&formal_types, &actual_types));
+        // Issue #388: record the positional index of each named axis in the
+        // formal parameter shapes so a named reduction/expand-anchor lookup
+        // can recover the axis even after monomorphization erases the named
+        // axis from a literal-shaped operand's dims.
+        self.dim_axis_positions
+            .extend(tensor_dim_axis_positions(&formal_types));
         // WS-A8: extend the precision-tvar substitution with bindings
         // from this call site's formal-vs-actual precision slots. Walks
         // the raw type-exprs (which preserve `(t-var)` shape) against
@@ -4919,6 +4981,7 @@ impl LowerCtx {
         self.dim_substitutions = saved_dim_substitutions;
         self.prec_substitutions = saved_prec_substitutions;
         self.rank_substitutions = saved_rank_substitutions;
+        self.dim_axis_positions = saved_dim_axis_positions;
         result
     }
 
@@ -5009,6 +5072,12 @@ impl LowerCtx {
             .collect();
 
         let mut canonical_args = Vec::with_capacity(actual_args.len());
+        // Actual argument types with the vmap `axis` permuted to the front
+        // (the batch axis is always at position 0 in these), so the chelis#383
+        // dim-symbol remap below zips them positionally against the
+        // batch-prepended formal parameter types regardless of the original
+        // `axis`.
+        let mut canonical_actual_types = Vec::with_capacity(actual_args.len());
         let mut batch_dim = None;
         for (arg_id, arg_ty) in actual_args.iter().copied().zip(actual_types.iter()) {
             if axis < arg_ty.dims.len() {
@@ -5025,8 +5094,10 @@ impl LowerCtx {
                     )
                 };
                 batch_dim.get_or_insert_with(|| canon_ty.dims[0].clone());
+                canonical_actual_types.push(canon_ty);
                 canonical_args.push(canonical);
             } else {
+                canonical_actual_types.push(arg_ty.clone());
                 canonical_args.push(arg_id);
             }
         }
@@ -5088,8 +5159,34 @@ impl LowerCtx {
         }
         arg_map.extend(captured_bindings);
 
-        let specialized_vmapped =
-            Self::remap_callable_dim_symbols(&vmapped, &param_types, &actual_types);
+        // chelis#383: `vectorize_axis0` prepended the batch dim to EVERY
+        // node type in `vmapped` (including the parameter Loads), so the
+        // formal parameter types must be batch-prepended too before remapping
+        // their named dims onto the actual argument's concrete dims.
+        // `remap_tensor_dim_symbols` only substitutes between same-rank
+        // formal/actual pairs (chelis#258: positional zip across different
+        // ranks is never correct); without this prepend a rank-N parameter
+        // (`vinner`'s `x: tensor[seq, head]`) is rank-mismatched against the
+        // rank-(N+1) vmap argument (`y: tensor[batch, seq, head]`), the
+        // substitution is dropped, and a two-stage named reduce leaves a
+        // `Named("seq")` dim in the vmapped body with no declaring Load —
+        // tripping the `dag::symbolic_occurrences` Bucket-4c guard at build
+        // time even though check and eval are clean. The canonical batch dim
+        // is the one `vectorize_axis0` itself prepended.
+        let vmapped_param_types: Vec<TensorType> = param_types
+            .iter()
+            .map(|ty| TensorType {
+                dims: std::iter::once(batch_dim.clone())
+                    .chain(ty.dims.iter().cloned())
+                    .collect(),
+                precision: ty.precision,
+            })
+            .collect();
+        let specialized_vmapped = Self::remap_callable_dim_symbols(
+            &vmapped,
+            &vmapped_param_types,
+            &canonical_actual_types,
+        );
         let remap = self.splice_dag(&specialized_vmapped, &arg_map);
         let mut flattened = root_value
             .flatten_nodes()
@@ -5735,7 +5832,7 @@ impl LowerCtx {
             "gather" if args.len() == 3 => {
                 let values = self.lower_expr_node(&args[0], "gather values");
                 let indices = self.lower_expr_node(&args[1], "gather indices");
-                let axis_raw = self.extract_axis_raw(&args[2]);
+                let axis_raw = self.extract_axis_raw(&args[2], "gather");
                 // Issue #320: recover the `values` rank from the ascribed
                 // gather-result type when the `values` operand collapsed to
                 // rank-0 (a windowing/stacking intermediate left untyped),
@@ -5773,7 +5870,7 @@ impl LowerCtx {
                     .get(base)
                     .map(|n| n.output_type.dims.len())
                     .unwrap_or(0);
-                let axis_raw = self.extract_axis_raw(&args[3]);
+                let axis_raw = self.extract_axis_raw(&args[3], "scatter_replace");
                 let axis = self.normalize_axis(axis_raw, base_rank, "scatter_replace", &args[3]);
                 let out_ty = self
                     .dag
@@ -5794,7 +5891,7 @@ impl LowerCtx {
                     .get(x)
                     .map(|n| n.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
-                let axis_raw = self.extract_axis_raw(&args[1]);
+                let axis_raw = self.extract_axis_raw(&args[1], "softmax");
                 let rank = self.axis_rank(x, ty);
                 let axis = self.normalize_axis(axis_raw, rank, "softmax", &args[1]);
                 let parent_span = self.current_span_id.clone();
@@ -6806,19 +6903,37 @@ impl LowerCtx {
     /// known. Returning the raw `i64` keeps the negative-axis
     /// convention (`-1` is the last axis) intact instead of wrapping
     /// it to `usize::MAX`.
-    fn extract_axis_raw(&self, expr: &Expr) -> i64 {
-        match expr {
-            Expr::Atom(Atom::Int(n), _) => *n,
-            // Handle (lit {} n) form.
-            Expr::List(list, _) => {
-                if let Some(Expr::Atom(Atom::Int(n), _)) = list.elements.get(2) {
-                    *n
-                } else {
-                    0
-                }
-            }
-            _ => 0,
+    /// Resolve a reduction/gather/scatter/softmax axis expression to its
+    /// compile-time-constant integer value. Recognizes the exact forms the
+    /// checker admits as a constant axis: a bare int, `(lit {} n)`, and any
+    /// number of `cast(<int>, int32)` wrappers (`check_reduction_signature`
+    /// admits `sum(x, cast(1, int32))`) — delegated to the shared
+    /// [`extract_int_for_dim`] walker.
+    ///
+    /// Issue #364: the pre-fix body returned `0` for ANY axis it did not
+    /// statically recognize (including `cast(N, int32)` for N != 0), so a
+    /// `cast`-axis reduction lowered to axis 0 regardless of N — silently
+    /// reducing the wrong axis (and, under `grad`, differentiating the wrong
+    /// reduction with eval/backend agreeing on the SAME wrong answer). A
+    /// silent default-to-0 is exactly the fallback class the repo forbids
+    /// (`CLAUDE.md` "Do Not Trust Green"). Anything not resolvable here is a
+    /// loud, FATAL lowering error: a non-constant axis stays a check-time
+    /// rejection (#259 family), so reaching this site with an unresolvable
+    /// axis is an internal contract violation, and a plain diagnostic would
+    /// be absorbed by the host-fallback path into garbage C.
+    fn extract_axis_raw(&self, expr: &Expr, op: &str) -> i64 {
+        if let Some(n) = extract_int_for_dim(expr) {
+            return n;
         }
+        raise_fatal_lowering_error(
+            format!(
+                "`{op}` axis is not a compile-time integer constant: rank monomorphization \
+                 cannot resolve it to a fixed axis (the checker admits only a literal or a \
+                 `cast(<int>, int32)` axis here; a runtime axis must be rejected at check time)"
+            ),
+            Some(expr.span()),
+            expr.span_id().map(ToOwned::to_owned),
+        );
     }
 
     /// Best-effort operand rank for axis normalization. Prefers the
@@ -7009,6 +7124,23 @@ impl LowerCtx {
             }) {
                 return idx;
             }
+            // Issue #388: when the operand came from a *literal-shaped* actual
+            // argument (`to_tensor([[...]])`), call-site monomorphization
+            // bound the formal parameter name to a literal-dim node, so the
+            // operand's dims are concrete `Lit(_)` and the named axis is gone.
+            // Recover the axis from the formal-parameter position recorded at
+            // the inline site (`dim_axis_positions`), validated against the
+            // operand's actual rank. This is a position recovery the checker
+            // already proved sound (it accepted `sum(x, seq)`), NOT a silent
+            // default — an out-of-range or unrecorded name still fails loudly.
+            if let Some(&idx) = self.dim_axis_positions.get(&name)
+                && self
+                    .dag
+                    .get(operand)
+                    .is_some_and(|node| idx < node.output_type.dims.len())
+            {
+                return idx;
+            }
             raise_lowering_error(
                 format!(
                     "`{op}` reduces named axis `{name}`, but the monomorphized operand has no \
@@ -7018,7 +7150,7 @@ impl LowerCtx {
                 axis_expr.span_id().map(ToOwned::to_owned),
             );
         }
-        let raw = self.extract_axis_raw(axis_expr);
+        let raw = self.extract_axis_raw(axis_expr, op);
         self.normalize_axis(raw, fallback_rank, op, axis_expr)
     }
 
@@ -7036,6 +7168,19 @@ impl LowerCtx {
                 .iter()
                 .position(|d| matches!(d, DimInfo::Named(n, _) if n.as_str() == anchor))
         }) {
+            return idx;
+        }
+        // Issue #388 (expand twin): recover the anchor position from the
+        // formal-parameter index recorded at the inline site when a
+        // literal-shaped operand erased the named anchor from its dims. Same
+        // soundness argument as `resolve_reduce_axis`: position recovery the
+        // checker already validated, never a silent default.
+        if let Some(&idx) = self.dim_axis_positions.get(anchor)
+            && self
+                .dag
+                .get(operand)
+                .is_some_and(|node| idx < node.output_type.dims.len())
+        {
             return idx;
         }
         // FATAL: a plain lowering diagnostic is absorbed by the host-fallback
