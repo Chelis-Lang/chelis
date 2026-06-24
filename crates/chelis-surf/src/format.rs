@@ -89,6 +89,34 @@ pub fn format_expression(expr: &Expr) -> String {
     format_expr(expr)
 }
 
+/// Canonically format a property's discharged PROPOSITION: its body when it
+/// has no preconditions, or the full quantified, guarded form
+/// `forall(<params>) where <preconds>: <body>` when it does (chelis#436,
+/// MED-1). The prover discharges `(/\ preconditions) => body`, so a guarded
+/// property's proposition is NOT its bare body -- emitting only the body
+/// over-claims an unconditional result (`where x > 0.0: x <= x` is not the
+/// unconditional `x <= x`). This renders the same `where`-guarded text the
+/// whole-property formatter produces (minus the `@property name` prefix), so
+/// the `goal` field is exactly what was discharged and re-parses to it. An
+/// unguarded property keeps the bare-body form so the common case stays the
+/// single proposition a consumer displays directly.
+pub fn format_proposition(params: &[Param], preconditions: &[Expr], body: &Expr) -> String {
+    if preconditions.is_empty() {
+        return format_expr(body);
+    }
+    let params = params
+        .iter()
+        .map(format_param)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let preconds = preconditions
+        .iter()
+        .map(format_expr)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("forall({params}) where {preconds}: {}", format_expr(body))
+}
+
 /// Walk `decls` in source order, emitting each pending comment whose
 /// source offset precedes the current declaration's start before the
 /// declaration itself. `next` is the index of the first not-yet-emitted
@@ -474,11 +502,19 @@ fn format_expr(expr: &Expr) -> String {
         Expr::Access(expr, field, _) => format!("{}.{}", wrap_simple(expr), field),
         Expr::TupleGet(expr, index, _) => format!("{}.{}", wrap_simple(expr), index),
         Expr::Binary(op, left, right, _) => {
+            // Operands that are compound, non-self-delimiting expressions
+            // (`if`/`match`/`fn`/`|>`/block) MUST be parenthesized, or the
+            // operator binds into the operand's tail and the formatted text
+            // re-parses to a DIFFERENT proposition than was written
+            // (chelis#461): `(if c then a else b) + 1` would render
+            // `(if c then a else b + 1)`, in which `+ 1` joins the else-branch.
+            // A nested binary already self-parenthesizes, so it stays
+            // single-wrapped.
             format!(
                 "({} {} {})",
-                format_expr(left),
+                wrap_operand(left),
                 format_binop(*op),
-                format_expr(right)
+                wrap_operand(right)
             )
         }
         Expr::Unary(op, expr, _) => format!("{}{}", format_unary(*op), wrap_simple(expr)),
@@ -801,6 +837,42 @@ fn wrap_simple(expr: &Expr) -> String {
     }
 }
 
+/// Render `expr` as a binary operand, parenthesizing it when its formatted
+/// text is NOT self-delimiting -- i.e. a compound expression whose tail would
+/// otherwise absorb the surrounding operator and change the parse
+/// (chelis#461). The self-delimiting forms render as a single bracketed or
+/// atomic token (a literal/var, a `f(...)` / `[...]` / `N { ... }` / `(...)`
+/// form, a postfix `x.f`, an already-parenthesized nested binary, a
+/// keyword-call like `cast(...)`/`grad(...)`, or a `( e : T )` ascription), so
+/// they need no extra wrap and stay byte-identical (no double parens on a
+/// nested binary, which the formatter corpus and idempotency depend on). The
+/// keyword-led / prefix forms (`if`, `match`, `fn`, `|>`, block, `with`,
+/// `par`) are NOT self-delimiting and are wrapped.
+fn wrap_operand(expr: &Expr) -> String {
+    match expr {
+        Expr::Lit(_, _)
+        | Expr::Var(_, _)
+        | Expr::Constructor(_, _)
+        | Expr::Apply(_, _, _)
+        | Expr::List(_, _)
+        | Expr::Record(_, _, _)
+        | Expr::Access(_, _, _)
+        | Expr::TupleGet(_, _, _)
+        | Expr::Tuple(_, _)
+        | Expr::Binary(_, _, _, _)
+        | Expr::Unary(_, _, _)
+        | Expr::Cast(_, _, _)
+        | Expr::Grad(_, _, _)
+        | Expr::Vmap(_, _, _)
+        | Expr::Jit(_, _)
+        | Expr::Realize(_, _)
+        | Expr::Copy(_, _)
+        | Expr::Borrow(_, _)
+        | Expr::Annotate(_, _, _) => format_expr(expr),
+        _ => format!("({})", format_expr(expr)),
+    }
+}
+
 fn format_binop(op: BinOp) -> &'static str {
     match op {
         BinOp::Add => "+",
@@ -866,6 +938,96 @@ mod tests {
         assert_eq!(format_expression(body), "((x - 1.0) <= x)");
         // Parity with the internal renderer used in expression positions.
         assert_eq!(format_expression(body), format_expr(body));
+    }
+
+    fn property_parts(source: &str) -> (Vec<Param>, Vec<Expr>, Expr) {
+        let program = crate::parser::parse_str(source).expect("parse");
+        let Decl::Property {
+            params,
+            preconditions,
+            body,
+            ..
+        } = &program[0]
+        else {
+            panic!("expected a property decl");
+        };
+        (params.clone(), preconditions.clone(), body.clone())
+    }
+
+    #[test]
+    fn compound_expr_as_binary_operand_is_parenthesized_and_round_trips() {
+        // chelis#461 (the bug #436's goal exposed): a non-self-delimiting
+        // compound operand (here an `if`) must be wrapped, or the operator binds
+        // into the operand's tail and the text re-parses to a DIFFERENT
+        // proposition. `(if x>y then x else y) + 1.0 >= x` must NOT render
+        // `((if (x > y) then x else y + 1.0) >= x)` (in which `+ 1.0` joins the
+        // else-branch).
+        let source = "@property p forall(x: f32, y: f32):\n  (if x > y then x else y) + 1.0 >= x\n";
+        let (_, _, body) = property_parts(source);
+        let rendered = format_expression(&body);
+        assert_eq!(rendered, "(((if (x > y) then x else y) + 1.0) >= x)");
+        // Round-trip: the rendered goal re-parses to the SAME AST, so the
+        // displayed proposition equals the discharged one (idempotent formatter).
+        let reparsed = property_parts(&format!(
+            "@property p forall(x: f32, y: f32):\n  {rendered}\n"
+        ))
+        .2;
+        assert_eq!(
+            format_expression(&reparsed),
+            rendered,
+            "the rendered operand-wrapped goal must re-parse to itself"
+        );
+    }
+
+    #[test]
+    fn nested_binary_operand_is_not_double_wrapped() {
+        // A nested binary operand already self-parenthesizes, so it stays
+        // SINGLE-wrapped -- the fix must not regress this into `((x - 1.0))`,
+        // which would break the formatter corpus and idempotency.
+        let (_, _, nested) =
+            property_parts("@property p forall(x: f32):\n  (x - 1.0) + 2.0 >= x\n");
+        assert_eq!(
+            format_expression(&nested),
+            "(((x - 1.0) + 2.0) >= x)",
+            "a nested binary operand is not double-wrapped"
+        );
+    }
+
+    #[test]
+    fn if_in_either_operand_position_is_parenthesized() {
+        // The wrap applies to BOTH operands: an `if` on the right of a
+        // comparison must be wrapped too, or the comparison binds into its
+        // condition/then on re-parse.
+        let (_, _, right) = property_parts(
+            "@property p forall(x: f32, y: f32):\n  x <= (if x > y then y else x)\n",
+        );
+        assert_eq!(
+            format_expression(&right),
+            "(x <= (if (x > y) then y else x))",
+            "an if as the right operand is wrapped: {}",
+            format_expression(&right)
+        );
+    }
+
+    #[test]
+    fn format_proposition_includes_the_guard_but_keeps_unguarded_bare() {
+        // chelis#436 MED-1: a guarded property's discharged proposition is the
+        // full `forall ... where ...: body`, not the bare body (which would
+        // over-claim an unconditional result). An unguarded property keeps the
+        // bare-body form.
+        let (params, pre, body) =
+            property_parts("@property g forall(x: f32) where x > 0.0:\n  x <= x\n");
+        assert_eq!(
+            format_proposition(&params, &pre, &body),
+            "forall(x: f32) where (x > 0.0): (x <= x)"
+        );
+        let (uparams, upre, ubody) = property_parts("@property u forall(x: f32):\n  x <= x\n");
+        assert!(upre.is_empty());
+        assert_eq!(
+            format_proposition(&uparams, &upre, &ubody),
+            "(x <= x)",
+            "an unguarded proposition is the bare body"
+        );
     }
 
     #[test]

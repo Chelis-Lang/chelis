@@ -1928,12 +1928,14 @@ fn obligation_records(output: &[u8]) -> Vec<Value> {
         .collect()
 }
 
-// A fuzz-tier property pass carries its body as the goal, in canonical text.
-// Runs in BOTH lanes: the smt build routes a fuzz-fallback through the shared
-// runner, the default build through the CLI-local fuzz path; both must emit the
-// same goal.
+// A fuzz-tier GUARDED property carries its FULL discharged proposition as the
+// goal -- the `where`-clause is part of what was discharged, so the goal is the
+// guarded form, never the bare body (chelis#436 MED-1: a guarded property whose
+// goal showed only the body over-claims an unconditional result). Runs in BOTH
+// lanes: the smt build routes a fuzz-fallback through the shared runner, the
+// default build through the CLI-local fuzz path; both must emit the same goal.
 #[test]
-fn goal_field_carries_the_property_body_for_a_fuzz_pass() {
+fn goal_field_carries_the_full_proposition_for_a_guarded_fuzz_pass() {
     let dir = write_prop(
         r#"
 @property log_below_self forall(x: f32) where x > 0.0:
@@ -1964,9 +1966,16 @@ fn goal_field_carries_the_property_body_for_a_fuzz_pass() {
     let records = property_records(&output.stdout);
     assert_eq!(records.len(), 1, "records: {records:?}");
     assert_eq!(records[0]["status"], "passed");
+    // The guard travels with the goal: a consumer never sees `(log(x) < x)`
+    // (which would claim it holds unconditionally) but the guarded proposition.
     assert_eq!(
+        records[0]["goal"], "forall(x: f32) where (x > 0.0): (log(x) < x)",
+        "a guarded property's goal is the full discharged proposition: {}",
+        records[0]
+    );
+    assert_ne!(
         records[0]["goal"], "(log(x) < x)",
-        "the goal is the canonical body text: {}",
+        "the bare body would drop the guard and over-claim: {}",
         records[0]
     );
 }
@@ -2007,14 +2016,16 @@ fn goal_field_carries_the_property_body_for_an_smt_proof() {
     );
 }
 
-// A refuted property still carries its goal: the consumer must bind a FAILED
-// verdict to the exact claim that failed, not just a pass.
+// A refuted UNGUARDED property still carries its goal as the bare body: the
+// consumer must bind a FAILED verdict to the exact claim that failed, not just
+// a pass. (Unguarded keeps the body-only form; the guarded full-proposition
+// form is pinned by goal_field_carries_the_full_proposition_for_a_guarded_fuzz_pass.)
 #[cfg(feature = "smt")]
 #[test]
-fn goal_field_carries_the_property_body_for_a_refuted_property() {
+fn goal_field_carries_the_body_for_a_refuted_unguarded_property() {
     let dir = write_prop(
         r#"
-@property false_pos forall(x: f32) where x > 0.0:
+@property false_pos forall(x: f32):
   (x - 12345.0) * (x - 12345.0) > 0.0
 "#,
     );
@@ -2036,7 +2047,7 @@ fn goal_field_carries_the_property_body_for_a_refuted_property() {
     assert_eq!(records[0]["status"], "failed");
     assert_eq!(
         records[0]["goal"], "(((x - 12345.0) * (x - 12345.0)) > 0.0)",
-        "a refuted property binds its FAILED verdict to the exact claim: {}",
+        "a refuted unguarded property binds its FAILED verdict to the exact body claim: {}",
         records[0]
     );
 }
@@ -2091,6 +2102,89 @@ fn goal_field_carries_the_invariant_predicate_for_an_obligation() {
     assert!(
         !goal.contains("surf:") && !goal.contains("span"),
         "the obligation goal must not carry lowering-internal span metadata: {goal}"
+    );
+}
+
+// chelis#461 (the formatter bug #436's goal exposed): a compound expression
+// (here an `if`) used as a BINARY OPERAND must be parenthesized in the goal, or
+// the operator binds into the operand's tail and the goal DISPLAYS A DIFFERENT
+// PROPOSITION than was discharged. The verdict would be honest but the goal a
+// lie -- exactly the §3.4 "displayed == discharged" violation. Runs both lanes.
+#[test]
+fn goal_for_an_if_as_binary_operand_does_not_misparenthesize() {
+    let dir = write_prop(
+        r#"
+@property if_operand forall(x: f32, y: f32):
+  (if x > y then x else y) + 1.0 >= x
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--tier",
+            "fuzz-only",
+            "--samples",
+            "4",
+            "--seed",
+            "0",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    let records = property_records(&output.stdout);
+    assert_eq!(records.len(), 1, "records: {records:?}");
+    let goal = records[0]["goal"].as_str().expect("goal");
+    // The `if` is parenthesized, so `+ 1.0` applies to the whole if-expression
+    // and `>= x` to the sum -- the discharged proposition.
+    assert_eq!(goal, "(((if (x > y) then x else y) + 1.0) >= x)");
+    // The faithfulness invariant, stated directly: the bug rendering (in which
+    // `+ 1.0` is swallowed by the else-branch) must NEVER appear.
+    assert!(
+        !goal.contains("else y + 1.0"),
+        "the operator must not bind into the else-branch: {goal}"
+    );
+}
+
+// chelis#436 MED-1 negative parity: a GUARDED property's goal must carry the
+// guard. The body-only form `(x <= x)` for `where x > 0.0: x <= x` is an
+// unconditional over-claim (the property was only discharged for x > 0) and
+// must NOT be what the goal shows.
+#[test]
+fn goal_for_a_guarded_property_is_not_the_unconditional_body() {
+    let dir = write_prop(
+        r#"
+@property guarded forall(x: f32) where x > 0.0:
+  x <= x
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--tier",
+            "fuzz-only",
+            "--samples",
+            "4",
+            "--seed",
+            "0",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    let records = property_records(&output.stdout);
+    assert_eq!(records.len(), 1, "records: {records:?}");
+    let goal = records[0]["goal"].as_str().expect("goal");
+    assert_eq!(goal, "forall(x: f32) where (x > 0.0): (x <= x)");
+    assert_ne!(
+        goal, "(x <= x)",
+        "a guarded goal must not collapse to the unconditional body: {goal}"
+    );
+    assert!(
+        goal.contains("x > 0.0"),
+        "the discharged guard must travel with the goal: {goal}"
     );
 }
 

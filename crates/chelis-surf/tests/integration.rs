@@ -728,6 +728,37 @@ def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> neg |> abs |> sigmoid
     assert_fmt_idempotent("three-stage pipe + sibling", src);
 }
 
+/// chelis#461: a compound expression (`if`/`match`/`fn`/`|>`/block) used as a
+/// BINARY OPERAND must be parenthesized, or `fmt` is both non-idempotent and
+/// MEANING-CHANGING -- the operator binds into the operand's tail on re-parse.
+/// This pins idempotency AND meaning-preservation (the re-parsed AST equals the
+/// once-formatted AST) for the if-as-operand shape that exposed the bug.
+#[test]
+fn fmt_if_as_binary_operand_is_idempotent_and_meaning_preserving() {
+    use chelis_surf::format::format_program;
+    let source = "def f(x: f32, y: f32) -> f32 = (if x > y then x else y) + 1.0\n";
+    let decls1 = surf_parse(source).expect("parse");
+    let pass1 = format_program(&decls1);
+    // The if-operand is wrapped, so `+ 1.0` applies to the whole if-expression.
+    assert!(
+        pass1.contains("((if (x > y) then x else y) + 1.0)"),
+        "the if operand must be parenthesized so + 1.0 binds outside the else: {pass1}"
+    );
+    let decls2 = surf_parse(&pass1).expect("pass-1 output re-parses");
+    let pass2 = format_program(&decls2);
+    // Idempotency: a second format is byte-identical.
+    assert_eq!(pass1, pass2, "fmt must be idempotent on an if-as-operand");
+    // Meaning preservation: the bug rendering -- in which the formatted text
+    // re-parses so `+ 1.0` joins the else-branch -- must not occur. With the
+    // fix, the once-formatted text re-parses to a form whose own canonical
+    // formatting is the SAME text (a stable fixpoint), so the proposition the
+    // formatter shows is the one the parser reads back.
+    assert!(
+        !pass1.contains("else y + 1.0"),
+        "the operator must not bind into the else-branch on re-parse: {pass1}"
+    );
+}
+
 /// Corpus sweep: every `.ch` file under `examples/`, `packages/chelis-std/`,
 /// and `crates/chelis-surf/tests/fixtures/` must satisfy
 /// `fmt(fmt(src)) == fmt(src)`. Locks the formatter-idempotency contract

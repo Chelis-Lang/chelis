@@ -146,9 +146,15 @@ away — and the gaps are de-narrowing targets, not permanent shape.
   discharged modulo a fuzz-validated contract. See §3.1.
 - **`prove --json` omits the discharged proposition** (chelis#436): RESOLVED.
   Every property and obligation record now carries a `goal` field with the
-  discharged proposition in canonical text (the property body for a property;
-  the invariant predicate for an obligation), so a consumer never reconstructs
-  it from source. See §2 (claim) and §3.4.
+  discharged proposition in canonical text, so a consumer never reconstructs it
+  from source. The goal is the EXACT proposition discharged: an unguarded
+  property's body; a GUARDED property's full `forall(...) where <pre>: <body>`
+  form (the prover discharges `(/\ preconditions) => body`, so the bare body
+  would over-claim an unconditional result); and an obligation's invariant
+  predicate (metadata-stripped). The `goal` text re-parses to what was
+  discharged -- the canonical formatter parenthesizes a compound expression
+  used as a binary operand (chelis#461) so the displayed proposition cannot
+  drift from the discharged one on re-parse. See §2 (claim) and §3.4.
 - **Finance notation in authoring** (chelis#437): the front end rejects
   finance-standard uppercase single-letter value identifiers (`S`, `K`, `T`,
   `N`). This is upstream of the evidence schema — it constrains what models can

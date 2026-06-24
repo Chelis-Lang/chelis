@@ -461,11 +461,16 @@ pub fn run_surf_decls_properties_with_contract_decls(
     let properties = collect_surf_properties(entry_decls, options.only.as_deref());
     let mut out = Vec::new();
     for property in &properties {
-        // chelis#436: the discharged proposition (the property body) travels
-        // with the record, rendered through the canonical Surf formatter so a
-        // consumer displays exactly what was discharged rather than re-parsing
-        // it from source.
-        let goal = chelis_surf::format::format_expression(&property.body);
+        // chelis#436: the discharged proposition travels with the record,
+        // rendered through the canonical Surf formatter so a consumer displays
+        // exactly what was discharged rather than re-parsing it from source.
+        // A guarded property's proposition is its full `where`-guarded form,
+        // not its bare body (MED-1): the prover discharges `pre => body`.
+        let goal = chelis_surf::format::format_proposition(
+            &property.params,
+            &property.preconditions,
+            &property.body,
+        );
         out.push(
             prove_surf_property(
                 all_decls,
@@ -490,12 +495,14 @@ pub fn run_deep_source_properties(
     let properties = discover_deep_properties(&exprs, options.only.as_deref())?;
     let mut out = Vec::new();
     for property in &properties {
-        // chelis#436: the discharged proposition (the property body) travels
-        // with the record, rendered through the canonical Deep printer (flat,
-        // one line) with lowering/producer metadata stripped so a consumer
-        // sees the bare proposition, not internal span/type annotations.
+        // chelis#436: the discharged proposition travels with the record,
+        // rendered through the canonical Deep printer (flat) with
+        // lowering/producer metadata stripped so a consumer sees the bare
+        // proposition. A guarded property's proposition is the implication
+        // `pre => body`, not the bare body (MED-1): the prover discharges
+        // `(/\ preconditions) => body`.
         let goal = chelis_deep::printer::print_expr_flat(&chelis_deep::ast::strip_metadata(
-            &property.body,
+            &deep_proposition(&property.preconditions, &property.body),
         ));
         out.push(prove_deep_property(&exprs, property, options).with_goal(goal));
     }
@@ -2179,6 +2186,24 @@ fn combine_deep_preconditions(preconditions: &[DeepExpr]) -> DeepExpr {
         .cloned()
         .reduce(|left, right| deep_node("app", vec![deep_var("and"), left, right]))
         .unwrap_or_else(|| deep_lit(deep_bool(true), "bool"))
+}
+
+/// The discharged proposition of a Deep property as a Deep term (chelis#436):
+/// the bare `body` when unguarded, or the implication `(implies (/\ pre) body)`
+/// when guarded, so the rendered `goal` is exactly what the prover discharged
+/// and a guarded property never reads as an unconditional claim (MED-1).
+fn deep_proposition(preconditions: &[DeepExpr], body: &DeepExpr) -> DeepExpr {
+    if preconditions.is_empty() {
+        return body.clone();
+    }
+    deep_node(
+        "app",
+        vec![
+            deep_var("implies"),
+            combine_deep_preconditions(preconditions),
+            body.clone(),
+        ],
+    )
 }
 
 // ===========================================================================
