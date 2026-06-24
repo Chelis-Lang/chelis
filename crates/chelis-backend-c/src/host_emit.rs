@@ -804,20 +804,25 @@ fn emit_main(
         emitter.track_owned_alloc(&binding_var, &binding.ty);
         if hoisted.contains(binding.name.as_str()) {
             // Declared at file scope (issue #352); assign, don't shadow.
-            emitter
-                .lines
-                .push(format!("    {} = __binding_{index}_value;", binding.name));
+            // #379: reference the same mangled name the file-scope `static`
+            // declaration used (both route through `c_ident`).
+            emitter.lines.push(format!(
+                "    {} = __binding_{index}_value;",
+                c_ident(&binding.name)
+            ));
         } else {
             emitter.lines.push(format!(
-                "    {} {} = __binding_{index}_value;",
-                c_type(&binding.ty),
-                binding.name
+                "    {} = __binding_{index}_value;",
+                c_decl(&binding.ty, &binding.name)
             ));
         }
     }
     for binding in &program.globals {
         if let Some(display_name) = binding.display_name.as_deref() {
-            emitter.emit_labeled_root(display_name, binding.name.as_str(), &binding.ty);
+            // #379: the display label stays raw (it is a printed string);
+            // the C value identifier routes through `c_ident` so it matches
+            // the (possibly mangled) declaration above.
+            emitter.emit_labeled_root(display_name, &c_ident(&binding.name), &binding.ty);
         }
     }
     // issue #406: free everything `main` owns before returning. Emitted
@@ -1223,8 +1228,12 @@ impl<'a> HostEmitter<'a> {
                     // transferred result to keep the caller's reference
                     // alive; a parameter or outer-scope `name` is left
                     // untouched (the block does not free it).
+                    //
+                    // #379: route the referenced name through `c_ident` so a
+                    // binding/param/let spelled like a C keyword resolves to
+                    // the same mangled identifier its declaration used.
                     self.lines
-                        .push(format!("{}{target} = {name};", self.indent));
+                        .push(format!("{}{target} = {};", self.indent, c_ident(name)));
                     self.retain_transferred_result(target, name, ty);
                 }
             }
@@ -1424,8 +1433,14 @@ impl<'a> HostEmitter<'a> {
                         self.indent,
                         c_decl(&binding.ty, &binding.name)
                     ));
-                    self.lines
-                        .push(format!("{}{} = {};", self.indent, binding.name, temp));
+                    // #379: assign to the same mangled identifier the
+                    // declaration used (both route through `c_ident`).
+                    self.lines.push(format!(
+                        "{}{} = {};",
+                        self.indent,
+                        c_ident(&binding.name),
+                        temp
+                    ));
                     // Track the binding name (not its `__let_N` temp: the
                     // two alias the same allocation, so releasing only the
                     // name frees it exactly once). Add it to the scope's
@@ -4408,6 +4423,11 @@ impl<'a> HostEmitter<'a> {
 /// functions are refcounted, so releasing a container correctly
 /// decrements any retained element without double-freeing it.
 fn release_call(var: &str, ty: &HostType) -> Option<String> {
+    // #379: the var may be a user binding/let name spelled like a C keyword;
+    // route through `c_ident` so the free call names the same (possibly
+    // mangled) identifier the declaration used. Compiler temps
+    // (`__binding_N_value`, `__let_N`) pass through unchanged.
+    let var = c_ident(var);
     match ty {
         HostType::Tensor(_) => Some(format!("chelis_free({var});")),
         HostType::List(_) => Some(format!("chelis_list_release({var});")),
@@ -4441,6 +4461,9 @@ fn release_call(var: &str, ty: &HostType) -> Option<String> {
 /// tensor-helper lane — so tensor `let` bindings are never tracked for
 /// block release in the first place (see `binding_release`).
 fn retain_call(var: &str, ty: &HostType) -> Option<String> {
+    // #379: mirror `release_call` — a user name spelled like a C keyword
+    // routes through `c_ident`; compiler temps pass through unchanged.
+    let var = c_ident(var);
     match ty {
         HostType::List(_) => Some(format!("chelis_list_retain({var});")),
         HostType::Tuple(_) => Some(format!("chelis_tuple_retain({var});")),
@@ -4499,7 +4522,154 @@ fn c_type(ty: &HostType) -> &'static str {
     }
 }
 
+/// The C / C++ reserved words a Chelis identifier must not collide with
+/// when emitted verbatim. `chelis check` accepts user bindings, params,
+/// and `let` names spelled like these (e.g. `register`, `static`, `int`,
+/// or `main`), and emitting them raw produces a syntax error or a symbol
+/// collision with the generated `int main(void)` (#379). The host C/HIP
+/// lane shares this emit, so the list covers C11 keywords plus the C++
+/// keywords hipcc rejects. `main` is included because the generated entry
+/// point is `int main(void)`.
+const C_RESERVED_WORDS: &[&str] = &[
+    // C11 keywords
+    "auto",
+    "break",
+    "case",
+    "char",
+    "const",
+    "continue",
+    "default",
+    "do",
+    "double",
+    "else",
+    "enum",
+    "extern",
+    "float",
+    "for",
+    "goto",
+    "if",
+    "inline",
+    "int",
+    "long",
+    "register",
+    "restrict",
+    "return",
+    "short",
+    "signed",
+    "sizeof",
+    "static",
+    "struct",
+    "switch",
+    "typedef",
+    "union",
+    "unsigned",
+    "void",
+    "volatile",
+    "while",
+    "_Alignas",
+    "_Alignof",
+    "_Atomic",
+    "_Bool",
+    "_Complex",
+    "_Generic",
+    "_Imaginary",
+    "_Noreturn",
+    "_Static_assert",
+    "_Thread_local",
+    // C++ keywords the shared HIP host lane (hipcc) also rejects
+    "alignas",
+    "alignof",
+    "and",
+    "asm",
+    "bool",
+    "catch",
+    "class",
+    "compl",
+    "constexpr",
+    "const_cast",
+    "decltype",
+    "delete",
+    "dynamic_cast",
+    "explicit",
+    "export",
+    "false",
+    "friend",
+    "mutable",
+    "namespace",
+    "new",
+    "nullptr",
+    "operator",
+    "or",
+    "private",
+    "protected",
+    "public",
+    "reinterpret_cast",
+    "static_cast",
+    "template",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeid",
+    "typename",
+    "using",
+    "virtual",
+    "wchar_t",
+    "xor",
+    // The generated entry point
+    "main",
+];
+
+/// Prefix applied to a user identifier that would otherwise be illegal or
+/// colliding in emitted C. The double underscore keeps it distinct from
+/// any plausible user name and from the runtime's `chelis_*` symbols.
+const C_USER_IDENT_PREFIX: &str = "chelis_user__";
+
+/// Map a Chelis identifier to a legal, collision-free C identifier (#379).
+///
+/// Most names pass through byte-identical so the existing C/HIP corpus is
+/// unchanged. A name is rewritten only when emitting it verbatim would
+/// break compilation:
+///   * it is a C/C++ reserved word (`register`, `static`, `main`, ...), or
+///   * it collides with the compiler's emitted-helper naming scheme
+///     (`{fn}__tensor_{n}`, `{prog}__global__...`), which a user binding
+///     can only hit by literally containing `__tensor_` / `__global__`.
+///
+/// The emitter's OWN temporaries (`__binding_N_value`, `__arg...`,
+/// `__result`, `__call_...`, `__let_...`) are generated internally, are
+/// already legal C, and are NOT user-controlled, so they must pass through
+/// untouched — `c_decl` is called with both user names and these temps.
+/// They neither appear in `C_RESERVED_WORDS` nor contain `__tensor_` /
+/// `__global__`, so the rules below leave them alone.
+///
+/// The same mapping must be applied at every site that turns a user name
+/// into a C identifier (declaration AND reference) so the two stay
+/// consistent; `c_decl` and the `Var`/binding/hoist emit paths all route
+/// through here.
+fn c_ident(name: &str) -> std::borrow::Cow<'_, str> {
+    // Every emitter temporary (`__binding_N_value`, `__arg...`, `__result`,
+    // `__call_...`, `__let_...`, `__tensor_argN_M`, `__host_tensor_arg_N`)
+    // begins with `__`. A user identifier from Chelis source never does
+    // (Surf/Deep identifiers cannot start with `__`), so a leading `__`
+    // marks a name as compiler-internal and already-legal: leave it alone.
+    // This is what keeps the helper-scheme check below from rewriting the
+    // `__tensor_arg*` argument temps (which contain `__tensor_`).
+    if name.starts_with("__") {
+        return std::borrow::Cow::Borrowed(name);
+    }
+    // A user binding can only collide with the emitted-helper FUNCTION
+    // naming scheme (`{fn}__tensor_{n}`, `{prog}__global__...`) by literally
+    // containing those infixes; such names do not start with `__`.
+    let collides_with_helper_scheme = name.contains("__tensor_") || name.contains("__global__");
+    if C_RESERVED_WORDS.contains(&name) || collides_with_helper_scheme {
+        std::borrow::Cow::Owned(format!("{C_USER_IDENT_PREFIX}{name}"))
+    } else {
+        std::borrow::Cow::Borrowed(name)
+    }
+}
+
 fn c_decl(ty: &HostType, name: &str) -> String {
+    let name = c_ident(name);
     match ty {
         HostType::Fn(params, ret) => {
             let args = if params.is_empty() {
