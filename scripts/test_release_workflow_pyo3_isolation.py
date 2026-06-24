@@ -37,10 +37,20 @@ def extract_release_targets(workflow_path: Path) -> set[str]:
     return set(pattern.findall(text))
 
 
-def crate_has_pyo3_dep(crate: str) -> bool:
-    """Return True if `cargo tree -p <crate>` contains a pyo3 dependency."""
+def crate_has_pyo3_dep(crate: str, *, features: str | None = None) -> bool:
+    """Return True if `cargo tree -p <crate>` contains a pyo3 dependency.
+
+    `features`, when given, is passed as `--features <features>` so the
+    feature-enabled dep graph is vetted too. chelis#422 (WS-4) makes
+    release.yml build `chelis-cli --features smt`; the smt feature pulls
+    cvc5 (which does not link pyo3), but a future feature edit could, so
+    the smt graph is vetted alongside the default one.
+    """
+    cmd = ["cargo", "tree", "-p", crate, "--edges", "normal", "--prefix", "none"]
+    if features:
+        cmd += ["--features", features]
     result = subprocess.run(
-        ["cargo", "tree", "-p", crate, "--edges", "normal", "--prefix", "none"],
+        cmd,
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
@@ -83,6 +93,27 @@ class ReleaseWorkflowPyo3IsolationTest(unittest.TestCase):
                     "setup (Install uv + scripts/ci_setup_uv_python.py) to "
                     "release.yml's jobs.",
                 )
+
+    @unittest.skipUnless(
+        shutil.which("cargo") is not None,
+        "cargo unavailable; skipping the `cargo tree` pyo3 dep-graph oracle",
+    )
+    def test_chelis_cli_smt_feature_is_pyo3_free(self) -> None:
+        # chelis#422 (WS-4): release.yml builds `chelis-cli --features
+        # smt`. The smt feature pulls cvc5 (no pyo3) plus chelis-tide's
+        # smt forward, but a future feature edit could introduce a
+        # pyo3-pulling crate, which would break the uv-free release build
+        # at link time. Vet the smt graph explicitly, not just the
+        # default one above.
+        if "chelis-cli" not in extract_release_targets(RELEASE_WORKFLOW):
+            self.skipTest("release.yml does not build chelis-cli")
+        self.assertFalse(
+            crate_has_pyo3_dep("chelis-cli", features="smt"),
+            "`cargo tree -p chelis-cli --features smt` reports a pyo3 dep. "
+            "release.yml builds chelis-cli --features smt uv-free; either "
+            "remove pyo3 from the smt dep graph, or add the uv setup to "
+            "release.yml's jobs.",
+        )
 
 
 if __name__ == "__main__":

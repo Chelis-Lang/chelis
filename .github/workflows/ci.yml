@@ -123,6 +123,117 @@ jobs:
       - name: Run carcara-gated chelis-prove tests
         run: cargo test -p chelis-prove --features carcara
 
+  # chelis#422 (WS-4) PROVE-IN-CI lanes. release.yml ships
+  # `chelis-cli --features smt` on three targets; cvc5 builds from
+  # source (cmake/g++/libgmp) and is only PROVEN on ubuntu-latest by the
+  # smt-build job above. These two lanes prove cvc5 also builds on the
+  # other two release targets BEFORE release.yml relies on the feature
+  # there: the glibc-2.31 (debian:11) compat toolchain and macOS-arm64.
+  # Each mirrors its release.yml job's build command exactly
+  # (`cargo build --release -p chelis-cli --features smt`) and runs the
+  # post-build verifier (.github/scripts/verify_release_smt.py) to
+  # confirm the binary actually discharges through cvc5, not the
+  # solver-free fuzz fallback. No uv setup: `cargo build -p chelis-cli`
+  # is pyo3-free on both the default and smt feature graphs (asserted by
+  # scripts/test_release_workflow_pyo3_isolation.py), unlike the
+  # `cargo test -p chelis-prove` step in the Linux smt-build job.
+  smt-build-glibc231:
+    name: SMT Feature Build (Linux, glibc 2.31)
+    runs-on: ubuntu-latest
+    container: debian:11
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # python3-pip provides `tomli` (cvc5's build-time TOML codegen
+      # needs it on Python < 3.11; debian:11 ships Python 3.9, and
+      # python3-tomli is not in the main bullseye suite, only backports).
+      # cmake/g++/libclang for the cvc5 source build; libgmp/libmpfr-dev
+      # are not strictly needed for the smt-only feature (cvc5
+      # auto-downloads and builds its own static GMP) but match the
+      # Linux smt-build recipe. git is needed because cvc5-sys clones the
+      # cvc5 source at build time.
+      - name: Install build prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl git \
+            cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev \
+            python3 python3-pip
+          pip3 install --break-system-packages tomli || pip3 install tomli
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Assert glibc 2.31 build environment
+        run: |
+          set -euo pipefail
+          ldd --version | awk 'NR==1'
+          ldd --version | awk 'NR==1' | grep -F '2.31'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: smt-glibc231
+
+      - name: Build chelis-cli (release, smt)
+        run: cargo build --release -p chelis-cli --features smt
+
+      - name: Assert no glibc requirement above 2.31
+        run: |
+          set -euo pipefail
+          max_req="$(objdump -T target/release/chelis | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
+          echo "max glibc requirement: ${max_req}"
+          test "$(printf 'GLIBC_2.31\n%s\n' "${max_req}" | sort -V | tail -1)" = "GLIBC_2.31"
+
+      - name: Verify cvc5 discharge path (smt feature live)
+        run: python3 .github/scripts/verify_release_smt.py ./target/release/chelis
+
+  smt-build-darwin-arm64:
+    name: SMT Feature Build (darwin-arm64)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Assert Apple Silicon runner
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "arm64"
+
+      # CMake, Python (3.11+, so cvc5's TOML codegen uses stdlib
+      # tomllib), and libclang ship in the macos-latest image and Xcode
+      # CLT; cvc5 auto-downloads and builds its own static GMP, so no
+      # brew installs are required for the cvc5 source build. `cmake` is
+      # installed defensively in case a future image drops it from PATH.
+      - name: Install build prerequisites
+        run: |
+          set -euo pipefail
+          brew list cmake >/dev/null 2>&1 || brew install cmake
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: smt-darwin-arm64
+
+      - name: Build chelis-cli (release, smt)
+        run: cargo build --release -p chelis-cli --features smt
+
+      - name: Verify packaged binary architecture
+        run: |
+          set -euo pipefail
+          file target/release/chelis | grep -E 'arm64|aarch64'
+
+      - name: Verify cvc5 discharge path (smt feature live)
+        run: python3 .github/scripts/verify_release_smt.py ./target/release/chelis
+
   integration:
     name: Integration Tests (Linux)
     runs-on: ubuntu-latest
