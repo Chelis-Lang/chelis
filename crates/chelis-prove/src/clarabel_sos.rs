@@ -17,11 +17,15 @@
 //!   LDL^T) plus the certificate's polynomial-identity check. Independent of the
 //!   float SDP proposer's precision: a bad Gram is rejected here regardless of
 //!   how it was produced.
-//!
-//! The float Markov-Lukacs SDP proposer (Clarabel) and the Peyrl-Parrilo
-//! rational repair land on top of this core once the BLAS-linkage decision for
-//! Clarabel's PSD cone is pinned (escalated to the orchestrator). The exact core
-//! is fully testable without any solver.
+//! - [`encode`] + [`linalg`]: the Markov-Lukacs SoS-to-SDP layout, the exact
+//!   coefficient-matching linear system, and the Peyrl-Parrilo exact rational
+//!   projection. Pure `BigRational`, shared by the float proposer and the repair.
+//! - [`propose`]: the Clarabel float SDP proposer (the only BLAS-linked step;
+//!   present only on targets with the `sdp` backend wired). It PROPOSES a
+//!   candidate; the engine re-verifies it exactly before trusting it.
+//! - [`engine`]: the [`ClarabelSosEngine`] `DischargeEngine` -- the honesty gate
+//!   that maps a verified candidate to `CertificateBearing@Exact` and anything
+//!   else to an honest `Unknown@Untrusted`.
 
 pub mod encode;
 pub mod engine;
@@ -29,5 +33,12 @@ pub mod exact;
 pub mod extract;
 pub mod linalg;
 pub mod poly;
+// The Clarabel float SDP proposer needs the `sdp` BLAS backend, which is wired
+// only for the targets that have it (Linux: OpenBLAS, macOS: Accelerate). On
+// any other target the exact core + the UnwiredProposer engine still build.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod propose;
 
 pub use engine::{ClarabelSosEngine, SosProposer, UnwiredProposer};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use propose::ClarabelProposer;

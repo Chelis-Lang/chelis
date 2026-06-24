@@ -74,11 +74,25 @@ pub struct ClarabelSosEngine<P: SosProposer> {
 
 impl ClarabelSosEngine<UnwiredProposer> {
     /// The standalone engine with the not-yet-wired proposer: every recognized
-    /// goal returns the honest `Unknown@Untrusted` (no false proofs) until the
-    /// SDP proposer lands.
+    /// goal returns the honest `Unknown@Untrusted` (no false proofs). Used on
+    /// targets without the `sdp` backend, and in tests of the honesty logic.
     pub fn unwired() -> Self {
         Self {
             proposer: UnwiredProposer,
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl ClarabelSosEngine<super::propose::ClarabelProposer> {
+    /// The production engine backed by the Clarabel float SDP proposer. The
+    /// proposer is only a heuristic; this engine still re-verifies every
+    /// candidate certificate EXACTLY before claiming `CertificateBearing@Exact`,
+    /// so a numerically-off or boundary-degenerate proposal yields an honest
+    /// `Unknown@Untrusted`, never a false proof.
+    pub fn clarabel() -> Self {
+        Self {
+            proposer: super::propose::ClarabelProposer::new(),
         }
     }
 }
@@ -595,5 +609,68 @@ mod tests {
             .and_then(|row| row.get(0))
             .and_then(|v| v.as_str());
         assert_eq!(g00, Some("3/4"));
+    }
+
+    // --- end-to-end through the PRODUCTION Clarabel proposer (BLAS-linked) ---
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn clarabel_engine_proves_x_squared_nonneg_with_an_exact_certificate() {
+        // The full production path: a recognized SMT goal -> fitness -> the
+        // Clarabel SDP proposer -> Peyrl-Parrilo repair -> exact verify ->
+        // CertificateBearing@Exact. This exercises a live BLAS-linked Clarabel
+        // solve, not an injected certificate.
+        let engine = ClarabelSosEngine::clarabel();
+        let goal = x_sq_nonneg(-1.0, 1.0);
+        assert!(engine.fitness(&goal));
+        let discharge = engine.discharge(&goal, 5_000);
+        assert_eq!(*discharge.result(), TierBResult::Proved);
+        assert_eq!(discharge.soundness(), Soundness::Exact);
+        assert!(
+            discharge
+                .qualifier_set()
+                .contains(Qualifier::CertificateBearing)
+        );
+        assert!(discharge.evidence().get("certificate").is_some());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn clarabel_engine_does_not_prove_a_negative_polynomial() {
+        // p = x^2 - 1 is negative on (-1, 1): NOT nonnegative on [-1, 1]. The
+        // production engine must NOT return a proof (no false Exact). It yields
+        // an honest non-proof (Unknown@Untrusted), never Proved.
+        let x = var("x");
+        // x^2 - 1.
+        let body = SmtExpr::Arith(
+            ArithOp::Sub,
+            Box::new(SmtExpr::Arith(
+                ArithOp::Mul,
+                Box::new(x.clone()),
+                Box::new(x),
+            )),
+            Box::new(SmtExpr::RealLit(1.0)),
+        );
+        let goal = Goal::smt(SmtProperty {
+            variables: vec![("x".to_string(), SmtSort::Real)],
+            preconditions: vec![
+                cmp(CmpOp::Ge, var("x"), SmtExpr::RealLit(-1.0)),
+                cmp(CmpOp::Le, var("x"), SmtExpr::RealLit(1.0)),
+            ],
+            postcondition: cmp(CmpOp::Ge, body, SmtExpr::RealLit(0.0)),
+        });
+        let engine = ClarabelSosEngine::clarabel();
+        let discharge = engine.discharge(&goal, 5_000);
+        assert_ne!(
+            *discharge.result(),
+            TierBResult::Proved,
+            "a polynomial negative on the interval must not be proved nonnegative"
+        );
+        assert_ne!(discharge.soundness(), Soundness::Exact);
+        assert!(
+            !discharge
+                .qualifier_set()
+                .contains(Qualifier::CertificateBearing)
+        );
     }
 }
