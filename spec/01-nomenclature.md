@@ -40,6 +40,32 @@ Surf identifiers split on first-character case at the lexer
 Surf identifier charset is `[A-Za-z_][A-Za-z0-9_]*`. ASCII alphanumeric
 plus underscore. **No hyphens.**
 
+The lexer case-split is the *default* classification. An explicit
+binding context overrides it for a name the user has explicitly bound,
+the same way a def's `[..]` quantifier clause overrides the case-split
+for type variables (`spec/02-surf-syntax.md` §P4a, where a quantified
+PascalCase name such as `P` is a type variable, not a rigid ADT). The
+single value-position override is:
+
+- A **single ASCII-uppercase letter** (`S`, `K`, `T`, `N`, `P`, …) is a
+  **value identifier** when it appears in a position that
+  unambiguously binds or names a value: a top-level value-binding LHS
+  (`S = ...`), a function or lambda parameter (`def payoff(S, K) = ...`),
+  or a block binding (`{ S = expr ; ... }`). This admits finance/math
+  notation as value names (chelis#437) without weakening the PascalCase
+  convention.
+
+The override is **single-letter only**. A multi-letter PascalCase name
+(`Frame`, `Some`, `Foo`) remains a type or constructor everywhere; it is
+never a value-binding LHS, parameter, or block binder, so `Foo = ...` is
+still a parse error. In value-*reference* position a bare single-letter
+uppercase name lexes as a constructor head and resolves to the in-scope
+value binding when one exists (the resolver disambiguates
+constructor-vs-value by environment lookup; see §3.2). Single-letter
+uppercase in *type* position (a quantified `[..]` name, or a type
+annotation) stays a type variable or type name — the value-binding
+override applies only in the value-binding positions enumerated above.
+
 ### 1.2 Module-path lookup
 
 `module Foo.Bar` resolves to `foo/bar.ch` (relative to the package's
@@ -245,18 +271,47 @@ ADT constructors follow the same rule: `Some`, `None`, `Ok`, `Err`,
 
 ### 3.2 Functions and values
 
-**Rule:** snake_case.
+**Rule:** snake_case, with a single-letter math-notation carve-out.
 
 Examples: `predict`, `loss`, `inner_product`, `matvec`, `from_pairs`,
 `with_column`, `rolling_mean`, `golden_section_search`, `simpsons`.
+
+**Single-letter math-notation carve-out (chelis#437).** A value binding
+may be named with a single ASCII-uppercase letter (`S`, `K`, `T`, `N`,
+`P`) in math-heavy code where that letter is the standard notation —
+finance `S` (spot), `K` (strike), `T` (maturity), `N` (normal CDF), `P`
+(probability). This is the value mirror of the §3.3 parameter register
+and of the §P4a `[..]`-clause type-variable override: the explicit
+binding makes the single-letter uppercase name a value. The carve-out is
+single-letter only; multi-letter value names remain snake_case (a
+multi-letter PascalCase name is a type or constructor, §3.1). The parser
+accepts the single-letter uppercase value binder directly; in
+value-*reference* position the name lexes as a constructor head and the
+resolver binds it to the in-scope value
+(`crates/chelis-types/src/infer.rs` resolves `var`/constructor heads by
+environment lookup, so an uppercase reference with a value binding in
+scope is a value, and an uppercase reference with no binding remains an
+unknown-constructor error).
+
+The carve-out does **not** extend to `def`/`sig` function names. An
+*applied* uppercase head — `N(x)` — resolves to a constructor
+application, so a function named `N` would be silently shadowed by
+constructor resolution rather than called. Function names therefore stay
+snake_case; the `surf-value-snake-case` lint keeps flagging an uppercase
+`def` name. (A nullary value *reference* like `S` is unambiguous because
+nothing is applied; an applied head is where the ambiguity bites.)
 
 ### 3.3 Parameters
 
 **Rule:** Bimodal. Two registers, picked by the surrounding code's idiom.
 
 - **Math-heavy code** (Shoals, Nautilus): single-letter parameters
-  match mathematical notation. `s` (spot), `k` (strike), `r` (rate),
-  `sigma`, `t`, `s0`, `mu`, `a`, `b`, `m`, `n`, `i`, `j`, `alpha`.
+  match mathematical notation. Both cases are admitted for the
+  single-letter register: lowercase `s` (spot), `k` (strike), `r`
+  (rate), `sigma`, `t`, `s0`, `mu`, `a`, `b`, `m`, `n`, `i`, `j`,
+  `alpha`; and uppercase `S` (spot), `K` (strike), `T` (maturity), `N`
+  (normal CDF), `P` (probability) where uppercase is the conventional
+  notation (chelis#437). The uppercase form is single-letter only.
 - **Data-processing code** (Coral, Std): descriptive snake_case.
   `col`, `col_name`, `df`, `values`, `entries`, `idx`, `hash`.
 

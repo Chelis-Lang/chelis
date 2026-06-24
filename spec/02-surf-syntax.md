@@ -349,6 +349,17 @@ must therefore type-check both in isolation and at every call site
 (chelis#293). Outside an `[..]` clause the case-split still applies:
 an unquantified PascalCase name is an ADT.
 
+The case-split has a value-position mirror of this type-position
+override. A **single-letter** uppercase name (`S`, `K`, `T`, `N`, `P`)
+in a value-binding position — a top-level value-binding LHS, a function
+or lambda parameter, or a block binder — is a value identifier, not a
+constructor, because the explicit value binding makes it one
+(chelis#437; `spec/01-nomenclature.md` §1.1, §3.2). The two overrides
+are symmetric: a quantified single-letter uppercase name in a `[..]`
+clause is a type variable, and a bound single-letter uppercase name in
+a value position is a value. The override is single-letter only;
+multi-letter PascalCase remains a type or constructor everywhere.
+
 Examples:
 
 ```text
