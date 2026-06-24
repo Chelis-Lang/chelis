@@ -6,6 +6,24 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **SOUNDNESS: two calls of an ITE-bodied def at a goal site no longer
+  false-prove (#426).** A property comparing or subtracting two calls of
+  the same def whose body itself calls an `if`/`then`/`else`-bodied
+  helper (e.g. an `fmax`-based max-over-actions), with different
+  arguments, collapsed to the all-arguments-equal corner during the
+  Surf->SMT property lowering: the nested-call inlining bound the
+  helper's parameters to its raw argument expressions and re-lowered
+  them in the callee scope, dropping the outer call-site's bindings, so
+  both calls produced identical SMT terms and a mathematically false
+  goal reported `passed / smt / proven` with no counterexample. The
+  inline substitution now binds each parameter to its argument already
+  lowered in the caller scope, so two call-sites with different
+  arguments lower to distinct terms: a false goal refutes with a
+  counterexample and a true goal still proves. `let`-bindings lower
+  their values under the same scope discipline.
+
 ## [0.10.0] - 2026-06-23
 
 ### Added

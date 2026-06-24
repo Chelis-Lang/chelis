@@ -1773,3 +1773,133 @@ fn whitelist_corpus_never_aborts_cvc5() {
         );
     }
 }
+
+// chelis#426 SOUNDNESS: a goal comparing two calls of a def whose body CALLS
+// an ITE-bodied helper (an `fmax`-based max-over-actions), with DIFFERENT
+// arguments, used to false-prove. The nested-call inlining lost the outer
+// call-site's argument bindings, so both calls collapsed to identical SMT
+// terms (the all-args-equal corner) and a mathematically FALSE goal reported
+// `passed / smt / proven`. It must now be REFUTED with a counterexample, and
+// that counterexample must bind the swapped `w*` variables (proof the two
+// call-sites lower to DISTINCT terms, not the collapsed corner).
+#[cfg(feature = "smt")]
+#[test]
+fn issue_426_two_calls_of_ite_bodied_def_refute_not_false_prove() {
+    let dir = write_prop(
+        r#"
+def fmax(a: f32, b: f32) -> f32 = if (a >= b) then a else b
+def bs(v0: f32, v1: f32, r0: f32, p00: f32, p01: f32, r1: f32, p10: f32, p11: f32, g: f32) -> f32 =
+  fmax((r0 + (g * ((p00 * v0) + (p01 * v1)))), (r1 + (g * ((p10 * v0) + (p11 * v1)))))
+
+@property cmp_unguarded forall(v0: f32, v1: f32, w0: f32, w1: f32, r0: f32, p00: f32, p01: f32, r1: f32, p10: f32, p11: f32, g: f32):
+  (bs(v0, v1, r0, p00, p01, r1, p10, p11, g) <= bs(w0, w1, r0, p00, p01, r1, p10, p11, g))
+
+@property sub_unguarded forall(v0: f32, v1: f32, w0: f32, w1: f32, r0: f32, p00: f32, p01: f32, r1: f32, p10: f32, p11: f32, g: f32):
+  ((bs(v0, v1, r0, p00, p01, r1, p10, p11, g) - bs(w0, w1, r0, p00, p01, r1, p10, p11, g)) <= 0.0)
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--tier",
+            "smt-only",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a FALSE two-call goal must be refuted (exit 1), not false-proven: stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let props = property_records(&output.stdout);
+    assert_eq!(props.len(), 2, "records: {props:?}");
+    for prop in &props {
+        let name = prop["name"].as_str().unwrap();
+        assert_eq!(
+            prop["status"], "failed",
+            "{name} is FALSE in general and must be refuted, not proven: {prop}"
+        );
+        assert_eq!(
+            prop["proof_tier"], "smt",
+            "{name} refutation must come from SMT (the false-prove tier): {prop}"
+        );
+        // The over-reals disproof discloses the machine-arith gap symmetrically
+        // (chelis#422 hedge); the coarse status stays `failed` and exits 1.
+        assert_eq!(
+            prop["composite_verdict"], "disproved_modulo_real_arithmetic",
+            "{name}: {prop}"
+        );
+        // The counterexample must exist AND bind the swapped `w*` variables:
+        // their presence proves the two call-sites lowered to DISTINCT terms
+        // (the collapse dropped `w*` entirely, so a green carried no model).
+        let cex = prop
+            .get("counterexample")
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| panic!("{name} has no counterexample object: {prop}"));
+        assert!(
+            cex.contains_key("w0") && cex.contains_key("w1"),
+            "{name} counterexample must bind the swapped w0/w1 (proof the calls did not collapse): {prop}"
+        );
+    }
+}
+
+// chelis#426 positive twin: the fix must not over-correct into false-refuting
+// TRUE goals over the same nested-call ITE-bodied shape. A reflexive goal
+// (same args both sides) and the genuine `max >= each-branch` facts of the
+// `fmax`-bodied operator still prove at SMT.
+#[cfg(feature = "smt")]
+#[test]
+fn issue_426_true_goals_over_ite_bodied_def_still_prove() {
+    let dir = write_prop(
+        r#"
+def fmax(a: f32, b: f32) -> f32 = if (a >= b) then a else b
+def bs(v0: f32, v1: f32, r0: f32, p00: f32, p01: f32, r1: f32, p10: f32, p11: f32, g: f32) -> f32 =
+  fmax((r0 + (g * ((p00 * v0) + (p01 * v1)))), (r1 + (g * ((p10 * v0) + (p11 * v1)))))
+
+@property reflexive forall(v0: f32, v1: f32, r0: f32, p00: f32, p01: f32, r1: f32, p10: f32, p11: f32, g: f32):
+  (bs(v0, v1, r0, p00, p01, r1, p10, p11, g) <= bs(v0, v1, r0, p00, p01, r1, p10, p11, g))
+
+@property max_ge_first forall(v0: f32, v1: f32, r0: f32, p00: f32, p01: f32, r1: f32, p10: f32, p11: f32, g: f32):
+  (bs(v0, v1, r0, p00, p01, r1, p10, p11, g) >= (r0 + (g * ((p00 * v0) + (p01 * v1)))))
+
+@property max_ge_second forall(v0: f32, v1: f32, r0: f32, p00: f32, p01: f32, r1: f32, p10: f32, p11: f32, g: f32):
+  (bs(v0, v1, r0, p00, p01, r1, p10, p11, g) >= (r1 + (g * ((p10 * v0) + (p11 * v1)))))
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--tier",
+            "smt-only",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert!(
+        output.status.success(),
+        "all three goals are TRUE and must prove (exit 0): stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let props = property_records(&output.stdout);
+    assert_eq!(props.len(), 3, "records: {props:?}");
+    for prop in &props {
+        let name = prop["name"].as_str().unwrap();
+        assert_eq!(prop["status"], "passed", "{name} is TRUE: {prop}");
+        assert_eq!(
+            prop["proof_tier"], "smt",
+            "{name} must prove at SMT, not drop to fuzz: {prop}"
+        );
+        assert_eq!(
+            prop["composite_verdict"], "proven_modulo_real_arithmetic",
+            "{name}: {prop}"
+        );
+    }
+}
