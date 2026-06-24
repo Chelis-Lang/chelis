@@ -227,6 +227,13 @@ fn emit(
             "seed": outcome.seed,
             "source": json!({ "kind": source_kind, "file": path.display().to_string() }),
         });
+        // chelis#436: the discharged proposition travels with the record so a
+        // consumer displays exactly what was discharged. Emitted only when the
+        // outcome carries a goal (a real verification outcome always does; a
+        // bodiless discovery error does not), kept representable-as-absent.
+        if let Some(goal) = &outcome.goal {
+            value["goal"] = json!(goal);
+        }
         if outcome.proof_tier != PropertyTier::None {
             value["proof_tier"] = json!(outcome.proof_tier.as_str());
         }

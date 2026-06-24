@@ -491,6 +491,11 @@ fn property_to_json(o: &chelis_prove::property_runner::PropertyOutcome) -> Value
         "samples": o.samples,
         "seed": o.seed,
     });
+    // chelis#436: the discharged proposition travels with the record on the
+    // tide surface too, so a tide prove and a CLI prove agree on the goal.
+    if let Some(goal) = &o.goal {
+        value["goal"] = json!(goal);
+    }
     if let Some(cx) = &o.counterexample {
         value["counterexample"] = cx.clone();
         value["shrink_steps"] = json!(o.shrink_steps);
@@ -526,6 +531,11 @@ fn obligation_to_json(o: chelis_prove::obligation_engine::ObligationOutcome) -> 
         "samples": o.samples,
         "seed": o.seed,
     });
+    // chelis#436: the discharged proposition (the invariant predicate) travels
+    // with the record on the tide surface too.
+    if let Some(goal) = &o.goal {
+        value["goal"] = json!(goal);
+    }
     if o.proof_tier == chelis_prove::obligation_engine::ObligationTier::Smt {
         value["arith_model"] = json!("real");
     }

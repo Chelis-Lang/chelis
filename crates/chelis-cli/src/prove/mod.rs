@@ -74,7 +74,6 @@ struct Property {
     source: PathBuf,
     params: Vec<Param>,
     preconditions: Vec<Expr>,
-    #[allow(dead_code)]
     body: Expr,
     samples: Option<usize>,
     seed: Option<u64>,
@@ -868,6 +867,24 @@ fn deep_var(name: &str) -> DeepExpr {
     deep_node("var", vec![deep_symbol(name)])
 }
 
+/// The discharged proposition of a Deep property as a Deep term (chelis#436):
+/// the bare `body` when unguarded, or the implication `(implies (/\ pre) body)`
+/// when guarded, so a guarded property's rendered `goal` is exactly what was
+/// discharged and never reads as an unconditional claim (MED-1). Mirrors the
+/// shared runner's `deep_proposition` so the CLI-local Deep path (bridge
+/// c-earchin + the non-smt deep-user path) and the shared runner agree.
+fn deep_proposition(preconditions: &[DeepExpr], body: &DeepExpr) -> DeepExpr {
+    if preconditions.is_empty() {
+        return body.clone();
+    }
+    let combined = preconditions
+        .iter()
+        .cloned()
+        .reduce(|left, right| deep_node("app", vec![deep_var("and"), left, right]))
+        .unwrap_or_else(|| deep_lit(deep_bool(true), "bool"));
+    deep_node("app", vec![deep_var("implies"), combined, body.clone()])
+}
+
 fn deep_lit(value: DeepExpr, ty_name: &str) -> DeepExpr {
     deep_node_meta(
         "lit",
@@ -1596,6 +1613,11 @@ fn emit_obligation_record(
             "samples": outcome.samples,
             "seed": outcome.seed,
         });
+        // chelis#436: the discharged proposition (the invariant predicate) travels
+        // with the record so a consumer displays exactly what was discharged.
+        if let Some(goal) = &outcome.goal {
+            value["goal"] = json!(goal);
+        }
         if outcome.proof_tier == ObligationTier::Smt {
             value["arith_model"] = json!("real");
         }
@@ -2344,6 +2366,15 @@ fn emit_record(
             "status": status,
             "composite_verdict": simple_composite_verdict(status, samples),
             "qualifiers": simple_qualifiers(status, samples),
+            // chelis#436: the discharged proposition travels with the record,
+            // rendered through the canonical Surf formatter. A guarded property's
+            // proposition is its full `where`-guarded form, not its bare body
+            // (MED-1): the prover discharges `pre => body`.
+            "goal": chelis_surf::format::format_proposition(
+                &property.params,
+                &property.preconditions,
+                &property.body,
+            ),
             "assumptions": precondition_non_vacuity_assumptions(
                 &property.name,
                 status,
@@ -2420,6 +2451,14 @@ fn emit_deep_record(
             "status": status,
             "composite_verdict": simple_composite_verdict(status, samples),
             "qualifiers": simple_qualifiers(status, samples),
+            // chelis#436: the discharged proposition travels with the record,
+            // rendered through the canonical Deep printer (flat) with
+            // lowering/producer metadata stripped so a consumer sees the bare
+            // proposition. A guarded property's proposition is the implication
+            // `pre => body`, not the bare body (MED-1).
+            "goal": chelis_deep::printer::print_expr_flat(&chelis_deep::ast::strip_metadata(
+                &deep_proposition(&property.preconditions, &property.body),
+            )),
             "assumptions": precondition_non_vacuity_assumptions(
                 &property.name,
                 status,

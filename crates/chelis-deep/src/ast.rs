@@ -101,3 +101,99 @@ pub struct MetaExpr {
     /// The expression this metadata is attached to.
     pub expr: Box<Expr>,
 }
+
+/// Return a copy of `expr` with every node's metadata map emptied and every
+/// legacy `MetaExpr` wrapper dropped, so the canonical printer renders the bare
+/// term `(tag {} children...)` with no producer/lowering metadata.
+///
+/// This is the human-display form of a synthesized or lowered term: the
+/// proposition shape without the `span`/`type`/producer keys that a lowering
+/// pass attaches. The chelis#436 prove-JSON obligation `goal` field uses it so
+/// a consumer sees the discharged invariant predicate, not the lowering's
+/// internal span annotations. The 3-tuple shape is preserved (the metadata map
+/// stays present at index 1, just empty), so the result re-parses.
+pub fn strip_metadata(expr: &Expr) -> Expr {
+    match expr {
+        Expr::Atom(..) => expr.clone(),
+        Expr::Map(_, span) => Expr::Map(MetaMap::default(), *span),
+        Expr::MetaExpr(meta, _) => strip_metadata(&meta.expr),
+        Expr::List(list, span) => {
+            let elements = list
+                .elements
+                .iter()
+                .enumerate()
+                .map(|(index, element)| {
+                    // Element 1 of a canonical 3-tuple is the metadata map; empty
+                    // it rather than recursing (its entries are metadata values,
+                    // not children). Everything else recurses.
+                    if index == 1 && matches!(element, Expr::Map(..)) {
+                        Expr::Map(MetaMap::default(), element.span())
+                    } else {
+                        strip_metadata(element)
+                    }
+                })
+                .collect();
+            Expr::List(List { elements }, *span)
+        }
+    }
+}
+
+#[cfg(test)]
+mod strip_metadata_tests {
+    use super::*;
+    use crate::parser::parse_str;
+    use crate::printer::print_expr_flat;
+
+    fn first(source: &str) -> Expr {
+        parse_str(source)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("one expr")
+    }
+
+    #[test]
+    fn strip_metadata_empties_every_meta_map_and_keeps_the_term() {
+        // A node carrying span/type metadata renders bare after stripping: the
+        // 3-tuple shape is preserved (metadata map present but empty), so the
+        // result re-parses and the proposition is unchanged.
+        let with_meta = first(
+            r#"(app {span: "surf:0..3"} (var {} gte) (var {span: "surf:1..2"} x) (lit {type: (t-prim {} f32)} 0.0))"#,
+        );
+        let stripped = strip_metadata(&with_meta);
+        assert_eq!(
+            print_expr_flat(&stripped),
+            "(app {} (var {} gte) (var {} x) (lit {} 0.0))",
+            "every metadata map is emptied; the term and its children survive"
+        );
+        // Negative parity: the original still carries its metadata (strip does
+        // not mutate in place), so a caller that wants the annotated form keeps
+        // it.
+        assert!(
+            print_expr_flat(&with_meta).contains("surf:0..3"),
+            "strip_metadata clones; the source expr is unchanged"
+        );
+    }
+
+    #[test]
+    fn strip_metadata_recurses_into_nested_children() {
+        let nested = first(
+            r#"(app {span: "a"} (var {} and) (app {span: "b"} (var {} gte) (var {span: "c"} x) (lit {span: "d"} 0.0)) (var {span: "e"} y))"#,
+        );
+        let printed = print_expr_flat(&strip_metadata(&nested));
+        assert!(
+            !printed.contains("span"),
+            "no span metadata survives anywhere in the tree: {printed}"
+        );
+        assert_eq!(
+            printed,
+            "(app {} (var {} and) (app {} (var {} gte) (var {} x) (lit {} 0.0)) (var {} y))"
+        );
+    }
+
+    #[test]
+    fn strip_metadata_leaves_bare_atoms_untouched() {
+        let atom = Expr::Atom(Atom::Int(7), crate::span::Span { offset: 3, len: 1 });
+        assert_eq!(strip_metadata(&atom), atom);
+    }
+}

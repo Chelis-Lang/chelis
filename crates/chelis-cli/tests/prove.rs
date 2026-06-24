@@ -1903,3 +1903,382 @@ def bs(v0: f32, v1: f32, r0: f32, p00: f32, p01: f32, r1: f32, p10: f32, p11: f3
         );
     }
 }
+
+// ===================================================================
+// chelis#436: the discharged proposition (goal) travels with the record.
+//
+// A verification UI must bind the verdict to the exact claim it certifies. The
+// prove-JSON property and obligation records now carry a `goal` field with the
+// canonical text of the proposition the prover discharged, so a consumer never
+// reconstructs the claim from source (which can drift). These tests pin the
+// goal's PRESENCE and exact VALUE across the green/refuted/obligation surfaces,
+// with negative parity for the bodiless discovery-error record.
+// ===================================================================
+
+// Obligation records only exist under `--features smt` (the obligation engine
+// is gated on `chelis-prove`); the only consumer is the smt-gated obligation
+// goal test below, so the helper is gated to match.
+#[cfg(feature = "smt")]
+fn obligation_records(output: &[u8]) -> Vec<Value> {
+    String::from_utf8_lossy(output)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).expect("json line"))
+        .filter(|record| record.get("kind").and_then(Value::as_str) == Some("obligation"))
+        .collect()
+}
+
+// A fuzz-tier GUARDED property carries its FULL discharged proposition as the
+// goal -- the `where`-clause is part of what was discharged, so the goal is the
+// guarded form, never the bare body (chelis#436 MED-1: a guarded property whose
+// goal showed only the body over-claims an unconditional result). Runs in BOTH
+// lanes: the smt build routes a fuzz-fallback through the shared runner, the
+// default build through the CLI-local fuzz path; both must emit the same goal.
+#[test]
+fn goal_field_carries_the_full_proposition_for_a_guarded_fuzz_pass() {
+    let dir = write_prop(
+        r#"
+@property log_below_self forall(x: f32) where x > 0.0:
+  log(x) < x
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--tier",
+            "fuzz-only",
+            "--samples",
+            "16",
+            "--seed",
+            "0",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let records = property_records(&output.stdout);
+    assert_eq!(records.len(), 1, "records: {records:?}");
+    assert_eq!(records[0]["status"], "passed");
+    // The guard travels with the goal: a consumer never sees `(log(x) < x)`
+    // (which would claim it holds unconditionally) but the guarded proposition.
+    assert_eq!(
+        records[0]["goal"], "forall(x: f32) where (x > 0.0): (log(x) < x)",
+        "a guarded property's goal is the full discharged proposition: {}",
+        records[0]
+    );
+    assert_ne!(
+        records[0]["goal"], "(log(x) < x)",
+        "the bare body would drop the guard and over-claim: {}",
+        records[0]
+    );
+}
+
+// An SMT-proved property carries its body as the goal too (the proof tier does
+// not change what proposition was discharged).
+#[cfg(feature = "smt")]
+#[test]
+fn goal_field_carries_the_property_body_for_an_smt_proof() {
+    let dir = write_prop(
+        r#"
+@property linear_le forall(x: f32):
+  (x - 1.0) <= x
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--tier",
+            "smt-only",
+            "--seed",
+            "0",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert!(output.status.success());
+    let records = property_records(&output.stdout);
+    assert_eq!(records.len(), 1, "records: {records:?}");
+    assert_eq!(records[0]["proof_tier"], "smt");
+    assert_eq!(records[0]["status"], "passed");
+    assert_eq!(
+        records[0]["goal"], "((x - 1.0) <= x)",
+        "an smt proof still carries the discharged proposition: {}",
+        records[0]
+    );
+}
+
+// A refuted UNGUARDED property still carries its goal as the bare body: the
+// consumer must bind a FAILED verdict to the exact claim that failed, not just
+// a pass. (Unguarded keeps the body-only form; the guarded full-proposition
+// form is pinned by goal_field_carries_the_full_proposition_for_a_guarded_fuzz_pass.)
+#[cfg(feature = "smt")]
+#[test]
+fn goal_field_carries_the_body_for_a_refuted_unguarded_property() {
+    let dir = write_prop(
+        r#"
+@property false_pos forall(x: f32):
+  (x - 12345.0) * (x - 12345.0) > 0.0
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--tier",
+            "smt-only",
+            "--seed",
+            "0",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    let records = property_records(&output.stdout);
+    assert_eq!(records.len(), 1, "records: {records:?}");
+    assert_eq!(records[0]["status"], "failed");
+    assert_eq!(
+        records[0]["goal"], "(((x - 12345.0) * (x - 12345.0)) > 0.0)",
+        "a refuted unguarded property binds its FAILED verdict to the exact body claim: {}",
+        records[0]
+    );
+}
+
+// An obligation record carries its discharged proposition (the invariant
+// predicate) as the goal, in canonical Deep text with lowering/producer
+// metadata stripped, so a consumer sees the bare proposition.
+#[cfg(feature = "smt")]
+#[test]
+fn goal_field_carries_the_invariant_predicate_for_an_obligation() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("inv.ch");
+    std::fs::write(
+        &path,
+        "module Stats.Prob\n\
+         export (probability)\n\
+         @opaque\n\
+         @invariant(p) p.value >= 0.0 && p.value <= 1.0\n\
+         type Probability =\n\
+         \x20 | Probability { value: f32 }\n\
+         def probability(x: f32) -> Option[Probability] =\n\
+         \x20 if x >= 0.0 && x <= 1.0 then Some(Probability { value: x }) else None\n",
+    )
+    .expect("write inv");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "prove",
+            path.to_str().unwrap(),
+            "--tier",
+            "smt-only",
+            "--seed",
+            "0",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    let records = obligation_records(&output.stdout);
+    assert_eq!(records.len(), 1, "obligation records: {records:?}");
+    let goal = records[0]["goal"]
+        .as_str()
+        .unwrap_or_else(|| panic!("obligation record must carry a goal: {}", records[0]));
+    // The bare predicate `p.value >= 0.0 && p.value <= 1.0`, lowered to Deep and
+    // metadata-stripped: an `and` of two comparisons over the binder's `value`.
+    assert_eq!(
+        goal,
+        "(app {} (var {} and) (app {} (var {} gte) (access {} (var {} p) value) (lit {} 0.0)) (app {} (var {} lte) (access {} (var {} p) value) (lit {} 1.0)))",
+        "the obligation goal is the discharged invariant predicate, metadata-stripped"
+    );
+    // Negative: no internal lowering spans leak into the displayed proposition.
+    assert!(
+        !goal.contains("surf:") && !goal.contains("span"),
+        "the obligation goal must not carry lowering-internal span metadata: {goal}"
+    );
+}
+
+// chelis#461 (the formatter bug #436's goal exposed): a compound expression
+// (here an `if`) used as a BINARY OPERAND must be parenthesized in the goal, or
+// the operator binds into the operand's tail and the goal DISPLAYS A DIFFERENT
+// PROPOSITION than was discharged. The verdict would be honest but the goal a
+// lie -- exactly the §3.4 "displayed == discharged" violation. Runs both lanes.
+#[test]
+fn goal_for_an_if_as_binary_operand_does_not_misparenthesize() {
+    let dir = write_prop(
+        r#"
+@property if_operand forall(x: f32, y: f32):
+  (if x > y then x else y) + 1.0 >= x
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--tier",
+            "fuzz-only",
+            "--samples",
+            "4",
+            "--seed",
+            "0",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    let records = property_records(&output.stdout);
+    assert_eq!(records.len(), 1, "records: {records:?}");
+    let goal = records[0]["goal"].as_str().expect("goal");
+    // The `if` is parenthesized, so `+ 1.0` applies to the whole if-expression
+    // and `>= x` to the sum -- the discharged proposition.
+    assert_eq!(goal, "(((if (x > y) then x else y) + 1.0) >= x)");
+    // The faithfulness invariant, stated directly: the bug rendering (in which
+    // `+ 1.0` is swallowed by the else-branch) must NEVER appear.
+    assert!(
+        !goal.contains("else y + 1.0"),
+        "the operator must not bind into the else-branch: {goal}"
+    );
+}
+
+// chelis#436 MED-1 negative parity: a GUARDED property's goal must carry the
+// guard. The body-only form `(x <= x)` for `where x > 0.0: x <= x` is an
+// unconditional over-claim (the property was only discharged for x > 0) and
+// must NOT be what the goal shows.
+#[test]
+fn goal_for_a_guarded_property_is_not_the_unconditional_body() {
+    let dir = write_prop(
+        r#"
+@property guarded forall(x: f32) where x > 0.0:
+  x <= x
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--tier",
+            "fuzz-only",
+            "--samples",
+            "4",
+            "--seed",
+            "0",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    let records = property_records(&output.stdout);
+    assert_eq!(records.len(), 1, "records: {records:?}");
+    let goal = records[0]["goal"].as_str().expect("goal");
+    assert_eq!(goal, "forall(x: f32) where (x > 0.0): (x <= x)");
+    assert_ne!(
+        goal, "(x <= x)",
+        "a guarded goal must not collapse to the unconditional body: {goal}"
+    );
+    assert!(
+        goal.contains("x > 0.0"),
+        "the discharged guard must travel with the goal: {goal}"
+    );
+}
+
+// Negative parity (chelis#436 + schema §3.4 "representable as absent"): a
+// bodiless discovery-error record carries NO goal field rather than a defaulted
+// or empty one, so a consumer renders absent as absent.
+#[cfg(feature = "smt")]
+#[test]
+fn malformed_property_discovery_error_record_has_no_goal() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("bad.dp");
+    // Classified `user` (so the shared runner owns it) but missing
+    // `property_quantifiers`: a discovery error that never reaches a property
+    // body, so its error record has no proposition to carry. (Same fixture
+    // shape as prove_deep_malformed_property.rs.)
+    std::fs::write(
+        &path,
+        r#"
+(def {c_earchin_role: "property_witness",
+      property_source_kind: "user"}
+  malformed_missing_quantifiers
+  (fn {} (params {}) (lit {type: (t-prim {} bool)} true)))
+"#,
+    )
+    .expect("write deep");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["prove", path.to_str().unwrap(), "--json"])
+        .output()
+        .expect("run prove");
+    let error_record = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|record| record.get("kind").and_then(Value::as_str) == Some("error"))
+        .expect("a malformed property emits a discovery-error record");
+    assert!(
+        error_record.get("goal").is_none(),
+        "a bodiless discovery-error record carries no goal (representable-as-absent): {error_record}"
+    );
+}
+
+// ===================================================================
+// chelis#435 honesty contract, locked in the smt lane. The two cases the issue
+// distinguishes must not collapse into each other:
+//   - a PURE-FUZZ base (no SMT-discharged contract) -> `fuzz_validated`,
+//   - an SMT base discharged modulo a FUZZ-VALIDATED CONTRACT
+//     -> `proven_modulo_fuzz_validated_contract`.
+// A pure-fuzz result must never read as a `proven_*` badge. (The fix shipped in
+// chelis#445/#447; this test locks the contract against regression.)
+// ===================================================================
+#[cfg(feature = "smt")]
+#[test]
+fn issue_435_pure_fuzz_base_reads_fuzz_validated_not_proven_modulo_contract() {
+    // A transcendental property with a precondition: under --tier auto on the
+    // smt build it does not lower to SMT and falls through to the fuzz tier, and
+    // its precondition is discharged by fuzz -- the exact pure-fuzz shape the
+    // issue reports. The honest verdict is `fuzz_validated`.
+    let dir = write_prop(
+        r#"
+@property bs_call_positive forall(x: f32) where x > 0.0:
+  log(x) < x
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--tier",
+            "auto",
+            "--samples",
+            "100",
+            "--seed",
+            "0",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert!(output.status.success());
+    let records = property_records(&output.stdout);
+    assert_eq!(records.len(), 1, "records: {records:?}");
+    let record = &records[0];
+    assert_eq!(record["proof_tier"], "fuzz", "the base is a fuzz fallback");
+    assert_eq!(record["status"], "passed");
+    // The only assumption is discharged by fuzz -- nothing SMT-discharged.
+    assert_eq!(record["assumptions"][0]["discharge"]["method"], "fuzz");
+    // The honesty contract: a pure-fuzz base is `fuzz_validated`, NEVER a
+    // `proven_*` badge.
+    assert_eq!(record["composite_verdict"], "fuzz_validated");
+    assert!(
+        !record["composite_verdict"]
+            .as_str()
+            .unwrap()
+            .starts_with("proven"),
+        "a pure-fuzz base must never read as proven_*: {record}"
+    );
+}
