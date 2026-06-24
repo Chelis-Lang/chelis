@@ -6,6 +6,7 @@ use crate::dag::{
     Dag, DimInfo, FusedInput, FusedStepOp, NodeId, ReduceWindowKind, RiscOp, TensorType,
     bind_symbolic_dims, symbolic_bindings,
 };
+use chelis_types::types::Prim;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TensorValue {
@@ -57,6 +58,69 @@ fn default_value(ty: &TensorType) -> TensorValue {
     TensorValue {
         data: vec![0.0; numel(&shape)],
         shape,
+    }
+}
+
+/// Element-wise `cast` conversion for the DAG evaluator (#380), returning the
+/// converted value in this evaluator's `f64` storage. Mirrors
+/// `chelis-compiler-api`'s `runtime::host_ops::convert_scalar_data` and the C
+/// backend's element-wise C cast so all three lanes agree:
+/// float->int truncates toward zero, float->f32 drops precision through f32,
+/// int->float preserves the value, and bool encodes as 0.0 / 1.0 (decoded via
+/// `!= 0.0`). `chelis-ir` sits below `chelis-compiler-api`, so the logic is
+/// duplicated here rather than shared (no upward dependency).
+fn convert_cast_data(x: f64, src: Prim, dst: Prim) -> f64 {
+    if src == dst {
+        return x;
+    }
+    // Project the source storage into a normalized representation: ints route
+    // through i64, bools through 0/1, floats stay floats.
+    let as_int: Option<i64> = match src {
+        Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => Some(x as i64),
+        Prim::Bool => Some(if x != 0.0 { 1 } else { 0 }),
+        _ => None,
+    };
+    // Emit in the target precision's storage convention.
+    match dst {
+        Prim::F64 => match as_int {
+            Some(i) => i as f64,
+            None => x,
+        },
+        Prim::F32 => match as_int {
+            Some(i) => (i as f32) as f64,
+            None => (x as f32) as f64,
+        },
+        Prim::Int8 => match as_int {
+            Some(i) => (i as i8) as f64,
+            None => (x as i8) as f64,
+        },
+        Prim::Int16 => match as_int {
+            Some(i) => (i as i16) as f64,
+            None => (x as i16) as f64,
+        },
+        Prim::Int32 => match as_int {
+            Some(i) => (i as i32) as f64,
+            None => (x as i32) as f64,
+        },
+        Prim::Int64 => match as_int {
+            Some(i) => i as f64,
+            None => (x as i64) as f64,
+        },
+        Prim::Bool => {
+            let nonzero = match as_int {
+                Some(i) => i != 0,
+                None => x != 0.0,
+            };
+            if nonzero { 1.0 } else { 0.0 }
+        }
+        // Reduced floats (bf16/f16) route through f32 storage in this f64
+        // evaluator; string is not a tensor element type. Fall back to the
+        // f32 narrowing for reduced floats and pass other targets through.
+        Prim::Bf16 | Prim::F16 => match as_int {
+            Some(i) => (i as f32) as f64,
+            None => (x as f32) as f64,
+        },
+        _ => x,
     }
 }
 
@@ -1204,7 +1268,31 @@ where
                     .pop()
                     .expect("FusedElem must have at least one step")
             }
-            RiscOp::Cast { .. } => values[&node.inputs[0]].clone(),
+            RiscOp::Cast { new_precision } => {
+                // #380: a `cast` must apply the dtype conversion, not pass the
+                // f64-backed value through unchanged. Float->int truncates
+                // toward zero, float->f32 drops precision through f32, int->
+                // float preserves the value, and bool encodes as 0.0/1.0 — the
+                // same conversion `chelis-compiler-api`'s `convert_scalar_data`
+                // (and the C backend's element-wise C cast) apply. The source
+                // precision comes from the input node's output type; the target
+                // is the cast's `new_precision`. Pre-fix the DAG-evaluator lane
+                // (grad / e2e-train) read `cast(3.7, int32)` as `3.7`.
+                let input = &values[&node.inputs[0]];
+                let src_prec = bound_dag
+                    .get(node.inputs[0])
+                    .map(|n| n.output_type.precision)
+                    .unwrap_or(*new_precision);
+                let converted = input
+                    .data
+                    .iter()
+                    .map(|&x| convert_cast_data(x, src_prec, *new_precision))
+                    .collect();
+                TensorValue {
+                    data: converted,
+                    shape: input.shape.clone(),
+                }
+            }
             RiscOp::BlasMatmul { .. } => {
                 let lhs = &values[&node.inputs[0]];
                 let rhs = &values[&node.inputs[1]];
@@ -1823,6 +1911,60 @@ mod tests {
         let vals = eval_tensor(&dag, &inputs).unwrap();
         let last = vals.get(dag.roots().last().expect("DAG root")).unwrap();
         assert_eq!(*last, TensorValue::from_vec(vec![3], vec![0.0, 0.5, 4.0]));
+    }
+
+    /// #380: the DAG evaluator must apply the dtype conversion for `cast`,
+    /// not pass the f64-backed value through unchanged. Float->int truncates
+    /// toward zero. Pre-fix `cast([2.7, -2.7, 3.0], int32)` evaluated to
+    /// `[2.7, -2.7, 3.0]`; it must be `[2.0, -2.0, 3.0]`.
+    #[test]
+    fn lowered_cast_float_to_int_truncates_toward_zero() {
+        let src = r#"
+            (def {} x (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))
+            (def {} y
+              (cast {type: (t-tensor {} (d-lit {} 3) (t-prim {} int32))}
+                    (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
+                    (t-prim {} int32)))
+        "#;
+        let dag = lower(src);
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            "x".into(),
+            TensorValue::from_vec(vec![3], vec![2.7, -2.7, 3.0]),
+        );
+        let vals = eval_tensor(&dag, &inputs).unwrap();
+        let last = vals.get(dag.roots().last().expect("DAG root")).unwrap();
+        assert_eq!(
+            *last,
+            TensorValue::from_vec(vec![3], vec![2.0, -2.0, 3.0]),
+            "cast to int32 must truncate toward zero in the DAG evaluator (#380)",
+        );
+    }
+
+    /// #380 negative / direction guard: int->float preserves the value
+    /// exactly (no spurious truncation on the int->float direction), and
+    /// float->f32 narrows. Pins that `convert_cast_data` only truncates on
+    /// the float->int direction, not blindly.
+    #[test]
+    fn lowered_cast_int_to_float_preserves_value() {
+        // int32 input carries integral f64 storage; cast to f64 must keep it.
+        let src = r#"
+            (def {} x (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} int32))} x))
+            (def {} y
+              (cast {type: (t-tensor {} (d-lit {} 2) (t-prim {} f64))}
+                    (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} int32))} x)
+                    (t-prim {} f64)))
+        "#;
+        let dag = lower(src);
+        let mut inputs = HashMap::new();
+        inputs.insert("x".into(), TensorValue::from_vec(vec![2], vec![7.0, -3.0]));
+        let vals = eval_tensor(&dag, &inputs).unwrap();
+        let last = vals.get(dag.roots().last().expect("DAG root")).unwrap();
+        assert_eq!(
+            *last,
+            TensorValue::from_vec(vec![2], vec![7.0, -3.0]),
+            "int->float cast must preserve the value (#380)",
+        );
     }
 
     #[test]
