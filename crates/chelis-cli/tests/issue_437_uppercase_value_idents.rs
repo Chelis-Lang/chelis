@@ -19,23 +19,25 @@
 
 use assert_cmd::Command;
 use serde_json::Value;
-use std::io::Write;
+use std::fs;
+use tempfile::tempdir;
 
 /// `chelis check` exit code with a non-empty errors array (#207).
 const CHECK_ERRORS_EXIT_CODE: i32 = 2;
 
+/// Write `src` to a `.ch` file inside a fresh isolated directory and run
+/// `chelis check --json` on it. The isolated dir matters: `chelis check`
+/// scans the input file's containing directory for sibling modules, so a
+/// bare-`/tmp` tempfile is O(dir size) and wedges when `/tmp` is polluted
+/// by concurrent runs. A dedicated tempdir keeps each case to one `.ch`.
 fn check_json(src: &str) -> (Option<i32>, Value) {
-    let mut tmp = tempfile::Builder::new()
-        .prefix("issue437-")
-        .suffix(".ch")
-        .tempfile()
-        .expect("create tempfile");
-    tmp.write_all(src.as_bytes()).expect("write tempfile");
-    tmp.flush().expect("flush tempfile");
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("probe.ch");
+    fs::write(&path, src).expect("write source");
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
-        .args(["check", tmp.path().to_str().expect("path utf8")])
+        .args(["check", path.to_str().expect("path utf8")])
         .output()
         .expect("run chelis check");
     let stdout = String::from_utf8(output.stdout).expect("utf8");
@@ -93,6 +95,71 @@ fn each_finance_letter_binds_and_resolves() {
         "S/K/T/N/P chain must check clean; json={json}"
     );
     assert!(errors(&json).is_empty(), "expected no errors; json={json}");
+}
+
+#[test]
+fn uppercase_reference_resolves_to_value_not_constructor() {
+    // The decisive resolution check (not just a type-check): a bound `S`
+    // referenced as `T = S` must resolve to S's VALUE, not to a
+    // constructor application. In chelis-types this is the
+    // is_constructor_name(S)=true / constructor_out_of_scope(S)=false path
+    // (the name is uppercase but bound in env, so env lookup wins). Eval
+    // is the oracle: if `S` resolved as a constructor, T would read back
+    // as an ADT `{ctor: "S"}` instead of the scalar 2.0, which is exactly
+    // how the (excluded) function-name case fails. Running eval, not just
+    // check, is what distinguishes the two.
+    // Isolated tempdir (see check_json): keeps the eval input the only
+    // `.ch` in its directory so the sibling-module scan stays O(1).
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("probe.ch");
+    // Canonically formatted so the eval gate (fmt + lint) passes.
+    fs::write(&path, "S = cast(2.0, f32)\nT = S\ndef main() -> f32 = T\n").expect("write source");
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "eval",
+            "--file",
+            path.to_str().expect("path utf8"),
+            "--json",
+        ])
+        .output()
+        .expect("run chelis eval");
+    let stdout = String::from_utf8(output.stdout).expect("utf8");
+    assert!(
+        output.status.success(),
+        "eval must succeed; stdout={stdout}, stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|err| panic!("eval stdout must be valid JSON: {err}\n{stdout}"));
+    let roots = json
+        .get("roots")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("expected roots array; json={json}"));
+    let t = roots
+        .iter()
+        .find(|r| r.get("name").and_then(Value::as_str) == Some("T"))
+        .unwrap_or_else(|| panic!("expected a root named T; json={json}"));
+    // T resolved to S's scalar value, not an ADT constructor.
+    let datum = t
+        .get("value")
+        .and_then(|v| v.get("value"))
+        .and_then(|v| v.get("data"))
+        .and_then(Value::as_array)
+        .and_then(|d| d.first())
+        .and_then(Value::as_f64)
+        .unwrap_or_else(|| {
+            panic!("T must be a scalar tensor (S's value), not an ADT; json={json}")
+        });
+    assert_eq!(
+        datum, 2.0,
+        "T = S must evaluate to S's value 2.0; json={json}"
+    );
+    assert!(
+        t.get("value").and_then(|v| v.get("ctor")).is_none(),
+        "T must NOT resolve to a constructor; json={json}"
+    );
 }
 
 #[test]
