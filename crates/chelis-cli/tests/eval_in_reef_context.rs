@@ -398,3 +398,60 @@ fn cmd_eval_raw_file_outside_reef_package_uses_legacy_path() {
         "raw eval must still print the value; got: {stdout:?}"
     );
 }
+
+/// Regression for Chelis-Lang/chelis#423: a top-level VALUE BINDING that
+/// calls an IMPORTED (library) function must be evaluated and printed,
+/// not silently dropped. Pre-fix, the in-context host evaluator
+/// classified `imported_sum = add(20, 22)` as lowered (its bare
+/// lowering-map walk had no view of the library's `add`), so it fell
+/// through both lanes: the host-order filter skipped it and the
+/// tensor-root computation correctly excluded it. The companion
+/// non-imported binding `local_sum` must survive too — the original
+/// symptom was that ONLY the imported binding disappeared.
+///
+/// This asserts the concrete value (42), not a self-referential
+/// `eval_in_context` baseline, so a regression to the silent-drop
+/// behavior cannot pass.
+#[test]
+fn cmd_eval_value_binding_calling_imported_fn_is_not_dropped() {
+    let (_dir, root) = path_dep_package();
+    let entry_path = root.join("src/imported.ch");
+    let snippet = "module App.Imported\n\
+                   import Mylib.Math (add)\n\n\
+                   local_sum: int32 = 1 + 2\n\
+                   imported_sum: int32 = add(20, 22)\n";
+    write_file(&entry_path, snippet);
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", entry_path.to_str().unwrap(), "--json"])
+        .output()
+        .expect("run chelis eval");
+    assert!(
+        output.status.success(),
+        "exit status: {:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("eval --json must emit valid JSON, got {stdout:?}: {e}"));
+    let roots = parsed["roots"].as_array().expect("roots array");
+    let find_value = |name: &str| -> Option<i64> {
+        roots.iter().find_map(|r| {
+            (r["name"].as_str() == Some(name)).then(|| r["value"]["value"].as_i64())?
+        })
+    };
+    assert_eq!(
+        find_value("local_sum"),
+        Some(3),
+        "non-imported value binding must evaluate; got roots: {roots:?}"
+    );
+    assert_eq!(
+        find_value("imported_sum"),
+        Some(42),
+        "value binding calling an imported fn must evaluate (chelis#423), \
+         not be silently dropped; got roots: {roots:?}"
+    );
+}
