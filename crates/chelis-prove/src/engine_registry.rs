@@ -126,24 +126,117 @@ impl DischargeRegistry {
 
     /// The stable name of the engine that WOULD be selected for `goal`, or
     /// `None` if no engine fits. Diagnostic surface; does not discharge.
+    ///
+    /// This names the FIRST fitting engine in registration order -- the engine
+    /// [`Self::dispatch`] tries first. With try-until-discharge a LATER fitting
+    /// engine may actually produce the returned verdict (if the first returns a
+    /// non-verdict and the dispatcher falls through); the engine that did so is
+    /// recorded in the returned discharge's evidence, not here.
     pub fn selected_engine_name(&self, goal: &Goal) -> Option<&'static str> {
         self.select(goal).map(DischargeEngine::name)
     }
 
-    /// Discharge `goal` through the first fitting engine, or take the no-fit
-    /// path if none fits.
+    /// Discharge `goal` with TRY-UNTIL-DISCHARGE over the fitting engines, in
+    /// registration order (WS-5).
     ///
-    /// The no-fit result is the canonical [`no_fit_discharge`]: an
-    /// [`Soundness::Untrusted`] discharge with an empty [`QualifierSet`] and a
-    /// [`TierBResult::Error`], which the WI-6 algebra renders
-    /// [`crate::composition::CompositeVerdict::Unsupported`]. It is never a
-    /// silent pass and never a green.
+    /// The dispatcher tries each fitting engine in turn:
+    ///
+    /// - A DEFINITE verdict ([`TierBResult::Proved`] / [`TierBResult::Disproved`])
+    ///   is returned IMMEDIATELY, with that engine's OWN `(soundness, qualifier)`
+    ///   untouched. The dispatcher NEVER falls through past a definite verdict,
+    ///   and a later engine NEVER upgrades or launders an earlier engine's
+    ///   result -- each discharge carries exactly the guarantee its own engine
+    ///   attached.
+    /// - A NON-VERDICT ([`TierBResult::Timeout`] / [`TierBResult::Unknown`] /
+    ///   [`TierBResult::Error`]) -- the engine fit the goal's SHAPE but could not
+    ///   DISCHARGE it -- falls through to the NEXT fitting engine. This is the
+    ///   cvc5 -> Z3 capability-split consumer: a goal cvc5 returns `Unknown` on
+    ///   can be discharged by Z3 (or vice versa), so a non-verdict is not the
+    ///   end of the line while another fitting engine remains.
+    ///
+    /// If NO engine fits the goal shape at all, the canonical
+    /// [`no_fit_discharge`] is returned (the seam-contract §5 honesty floor). If
+    /// fitting engines exist but EVERY one returns a non-verdict, the result is
+    /// [`exhausted_discharge`]: still [`Soundness::Untrusted`] + empty
+    /// [`QualifierSet`] + [`TierBResult::Error`] -- byte-identical in lattice
+    /// membership to no-fit, projecting to
+    /// [`crate::composition::CompositeVerdict::Unsupported`], never a green --
+    /// but with an honest reason that fitting engines were tried and none
+    /// produced a verdict (rather than the misleading "no engine fits").
+    ///
+    /// The laundering guard is structural: only a non-verdict ever falls
+    /// through, and a non-verdict is always `Untrusted`/empty under
+    /// [`crate::discharge::classify_smt_outcome`], so the exhausted result can
+    /// only ever be `Untrusted` -- it can never carry a badge a fallen-through
+    /// engine did not earn.
     pub fn dispatch(&self, goal: &Goal, timeout_ms: u64) -> Discharge {
-        match self.select(goal) {
-            Some(engine) => engine.discharge(goal, timeout_ms),
-            None => no_fit_discharge(goal),
+        let mut any_fit = false;
+        let mut last_non_verdict: Option<Discharge> = None;
+        for engine in &self.engines {
+            if !engine.fitness(goal) {
+                continue;
+            }
+            any_fit = true;
+            let discharge = engine.discharge(goal, timeout_ms);
+            if is_definite_verdict(discharge.result()) {
+                // Definite verdict: return it as-is, never fall through past it.
+                return discharge;
+            }
+            // Non-verdict: remember it (honest reason) and try the next fitting
+            // engine. It is Untrusted/empty by classification, so keeping it
+            // cannot launder a badge.
+            last_non_verdict = Some(discharge);
         }
+        if !any_fit {
+            return no_fit_discharge(goal);
+        }
+        // Fitting engines existed but none discharged a definite verdict.
+        exhausted_discharge(goal, last_non_verdict.as_ref())
     }
+}
+
+/// Whether a tier-B outcome is a DEFINITE verdict the dispatcher must NOT fall
+/// through past: a [`TierBResult::Proved`] or [`TierBResult::Disproved`]. A
+/// timeout/unknown/error is a non-verdict (the engine fit the shape but could
+/// not discharge), which the dispatcher falls through.
+fn is_definite_verdict(result: &TierBResult) -> bool {
+    matches!(result, TierBResult::Proved | TierBResult::Disproved(_))
+}
+
+/// The discharge for a goal whose fitting engines were ALL exhausted without a
+/// definite verdict (WS-5 try-until-discharge). Like [`no_fit_discharge`] it is
+/// the honesty floor -- [`Soundness::Untrusted`], an empty [`QualifierSet`], a
+/// [`TierBResult::Error`], projecting to
+/// [`crate::composition::CompositeVerdict::Unsupported`] -- but its reason says
+/// the fitting engines were tried and none produced a verdict, which is what
+/// actually happened (no engine MISFIT; they all declined to decide). The
+/// last-tried engine's own non-verdict result is preserved as the carried
+/// result when available, so its honest reason (a timeout vs an unknown vs a
+/// lowering error) is not discarded; otherwise a synthesized Error is used.
+pub fn exhausted_discharge(goal: &Goal, last_non_verdict: Option<&Discharge>) -> Discharge {
+    let reason = format!(
+        "all fitting discharge engines were exhausted without a verdict for goal shape `{}`",
+        goal_shape_label(goal)
+    );
+    // Preserve the last engine's honest non-verdict result (and a note of which
+    // engine it came from) when one is available; otherwise synthesize an
+    // Error. Either way the lattice membership is Untrusted/empty/Error.
+    let (result, evidence) = match last_non_verdict {
+        Some(d) => (
+            d.result().clone(),
+            serde_json::json!({
+                "dispatch": "exhausted_fallthrough",
+                "reason": reason,
+                "last_engine_evidence": d.evidence().clone(),
+            }),
+        ),
+        None => (
+            TierBResult::Error(reason.clone()),
+            serde_json::json!({ "dispatch": "exhausted_fallthrough", "reason": reason }),
+        ),
+    };
+    Discharge::new(Soundness::Untrusted, QualifierSet::new(), result, evidence)
+        .expect("untrusted discharge with an empty qualifier set is always valid")
 }
 
 /// Build the canonical no-fit [`Discharge`] for a goal that no registered engine
@@ -199,24 +292,16 @@ impl SolvePropertyEngine {
         Self
     }
 
-    /// Map a tier-B outcome to its `(soundness, qualifier_set)`. This mirrors
-    /// the cvc5 engine's classification: the decision is over the REALS, so a
-    /// proved/disproved result is `SoundApproximate` carrying
-    /// [`crate::discharge::Qualifier::RealArith`] (chelis#422), not exact; a
-    /// timeout/unknown/error is untrusted and carries no qualifier. In the
-    /// non-smt build `solve_property` only ever returns `Timeout` (or a
-    /// test-forced result), so in practice this yields the untrusted branch.
+    /// Map a tier-B outcome to its `(soundness, qualifier_set)` through the
+    /// shared, engine-agnostic [`crate::discharge::classify_smt_outcome`]: the
+    /// decision is over the REALS, so a proved/disproved result is
+    /// `SoundApproximate` carrying [`crate::discharge::Qualifier::RealArith`]
+    /// (chelis#422), not exact; a timeout/unknown/error is untrusted with no
+    /// qualifier. In the non-smt build `solve_property` only ever returns
+    /// `Timeout` (or a test-forced result), so in practice this yields the
+    /// untrusted branch.
     fn classify(result: &TierBResult) -> (Soundness, QualifierSet) {
-        use crate::discharge::Qualifier;
-        match result {
-            TierBResult::Proved | TierBResult::Disproved(_) => (
-                Soundness::SoundApproximate,
-                QualifierSet::from_iter_kinds([Qualifier::RealArith]),
-            ),
-            TierBResult::Timeout | TierBResult::Unknown | TierBResult::Error(_) => {
-                (Soundness::Untrusted, QualifierSet::new())
-            }
-        }
+        crate::discharge::classify_smt_outcome(result)
     }
 }
 
@@ -322,6 +407,42 @@ mod tests {
                 soundness: Soundness::SoundApproximate,
                 qualifiers: QualifierSet::from_iter_kinds([Qualifier::SoundOverApproximation]),
                 result: TierBResult::Proved,
+            }
+        }
+
+        /// An SMT-fitting engine returning a given non-verdict (Timeout /
+        /// Unknown / Error). Classified Untrusted/empty by
+        /// [`crate::discharge::classify_smt_outcome`] -- the dispatcher falls
+        /// through it (WS-5 try-until-discharge).
+        fn smt_non_verdict(name: &'static str, result: TierBResult) -> Self {
+            debug_assert!(
+                !matches!(result, TierBResult::Proved | TierBResult::Disproved(_)),
+                "smt_non_verdict must carry a NON-verdict result"
+            );
+            Self {
+                name,
+                fits_shape: WhichShape::Smt,
+                soundness: Soundness::Untrusted,
+                qualifiers: QualifierSet::new(),
+                result,
+            }
+        }
+
+        /// An SMT-fitting engine returning a DEFINITE over-reals verdict
+        /// (`Proved` / `Disproved`), classified SoundApproximate + RealArith,
+        /// mirroring how a real SMT engine (cvc5 / Z3) classifies it. The
+        /// dispatcher must NOT fall through past this.
+        fn smt_real_arith_verdict(name: &'static str, result: TierBResult) -> Self {
+            debug_assert!(
+                matches!(result, TierBResult::Proved | TierBResult::Disproved(_)),
+                "smt_real_arith_verdict must carry a DEFINITE verdict result"
+            );
+            Self {
+                name,
+                fits_shape: WhichShape::Smt,
+                soundness: Soundness::SoundApproximate,
+                qualifiers: QualifierSet::from_iter_kinds([Qualifier::RealArith]),
+                result,
             }
         }
     }
@@ -625,5 +746,264 @@ mod tests {
         let registry = DischargeRegistry::with_builtin_engines();
         let discharge = registry.dispatch(&box_range_goal(), 1_000);
         assert_no_fit_lattice_membership(&discharge);
+    }
+
+    // ============================================================
+    // WS-5 try-until-discharge fall-through (feature-free, mock engines)
+    // ============================================================
+
+    /// The cvc5 -> Z3 capability-split consumer, in miniature: a first SMT
+    /// engine returns `Unknown` (a non-verdict), so the dispatcher FALLS THROUGH
+    /// to a second SMT engine that `Proved`s the goal. The returned verdict is
+    /// the SECOND engine's `Proved`, carrying the SECOND engine's own
+    /// `(soundness, qualifier)` -- the first engine's non-verdict does not block
+    /// the discharge, and the second engine's badge is not laundered up from the
+    /// first.
+    #[test]
+    fn falls_through_a_non_verdict_to_the_next_engine_that_discharges() {
+        let mut registry = DischargeRegistry::new();
+        registry.register(Box::new(MockEngine::smt_non_verdict(
+            "first_unknown",
+            TierBResult::Unknown,
+        )));
+        registry.register(Box::new(MockEngine::smt_real_arith_verdict(
+            "second_proves",
+            TierBResult::Proved,
+        )));
+
+        let discharge = registry.dispatch(&smt_goal(), 1_000);
+        assert_eq!(
+            *discharge.result(),
+            TierBResult::Proved,
+            "the fall-through must reach the second engine's Proved"
+        );
+        // The verdict carries the SECOND engine's guarantee, not the first's.
+        assert_eq!(discharge.soundness(), Soundness::SoundApproximate);
+        assert!(discharge.qualifier_set().contains(Qualifier::RealArith));
+        assert_eq!(
+            discharge.evidence().get("engine").and_then(|v| v.as_str()),
+            Some("second_proves"),
+            "the discharging engine is the one that produced the verdict"
+        );
+    }
+
+    /// Each of the three non-verdict kinds (Timeout / Unknown / Error) falls
+    /// through. Pinned as a table so no non-verdict kind is left uncovered: a
+    /// future TierBResult variant that should fall through but does not is
+    /// caught here.
+    #[test]
+    fn every_non_verdict_kind_falls_through() {
+        for first in [
+            TierBResult::Timeout,
+            TierBResult::Unknown,
+            TierBResult::Error("first engine could not lower".to_string()),
+        ] {
+            let mut registry = DischargeRegistry::new();
+            registry.register(Box::new(MockEngine::smt_non_verdict(
+                "first",
+                first.clone(),
+            )));
+            registry.register(Box::new(MockEngine::smt_real_arith_verdict(
+                "second",
+                TierBResult::Disproved(serde_json::json!({"x": "0"})),
+            )));
+            let discharge = registry.dispatch(&smt_goal(), 1_000);
+            assert!(
+                matches!(discharge.result(), TierBResult::Disproved(_)),
+                "first non-verdict {first:?} must fall through to the second's Disproved"
+            );
+            assert_eq!(discharge.soundness(), Soundness::SoundApproximate);
+        }
+    }
+
+    /// LAUNDERING GUARD (critical): a DEFINITE verdict is NEVER fallen through.
+    /// The first SMT engine `Disproved`s the goal; a second SMT engine that
+    /// WOULD `Prove` it is registered AFTER. The dispatcher must stop at the
+    /// first engine's Disproved and NEVER reach the second -- a later engine can
+    /// never overturn (or launder) an earlier engine's definite verdict.
+    #[test]
+    fn never_falls_through_past_a_definite_disproved() {
+        let mut registry = DischargeRegistry::new();
+        registry.register(Box::new(MockEngine::smt_real_arith_verdict(
+            "first_disproves",
+            TierBResult::Disproved(serde_json::json!({"x": "0"})),
+        )));
+        // This engine would Prove the goal, but it must never be consulted.
+        registry.register(Box::new(MockEngine::smt_real_arith_verdict(
+            "second_would_prove",
+            TierBResult::Proved,
+        )));
+
+        let discharge = registry.dispatch(&smt_goal(), 1_000);
+        assert!(
+            matches!(discharge.result(), TierBResult::Disproved(_)),
+            "the first engine's Disproved is final; the dispatcher must not fall through to a Proved"
+        );
+        assert_eq!(
+            discharge.evidence().get("engine").and_then(|v| v.as_str()),
+            Some("first_disproves"),
+            "the first definite verdict wins; the later engine is never consulted"
+        );
+    }
+
+    /// The mirror of the guard: a definite `Proved` is also final and is not
+    /// fallen through to a later engine that would `Disproved`.
+    #[test]
+    fn never_falls_through_past_a_definite_proved() {
+        let mut registry = DischargeRegistry::new();
+        registry.register(Box::new(MockEngine::smt_real_arith_verdict(
+            "first_proves",
+            TierBResult::Proved,
+        )));
+        registry.register(Box::new(MockEngine::smt_real_arith_verdict(
+            "second_would_disprove",
+            TierBResult::Disproved(serde_json::json!({"x": "0"})),
+        )));
+
+        let discharge = registry.dispatch(&smt_goal(), 1_000);
+        assert_eq!(*discharge.result(), TierBResult::Proved);
+        assert_eq!(
+            discharge.evidence().get("engine").and_then(|v| v.as_str()),
+            Some("first_proves")
+        );
+    }
+
+    /// LAUNDERING GUARD: a WEAKER later engine never upgrades an earlier
+    /// engine's result. Here the first engine returns a definite verdict, and
+    /// the dispatcher returns it untouched -- the second engine (even with a
+    /// stronger-looking qualifier) is never reached. This pins that the
+    /// returned discharge's `(soundness, qualifier)` is EXACTLY the producing
+    /// engine's, never a union or upgrade across engines.
+    #[test]
+    fn a_later_engine_never_upgrades_an_earlier_definite_verdict() {
+        let mut registry = DischargeRegistry::new();
+        registry.register(Box::new(MockEngine::smt_real_arith_verdict(
+            "real_arith_first",
+            TierBResult::Proved,
+        )));
+        // A second engine that, if (wrongly) consulted and merged, could try to
+        // attach `Exact`. It must never be reached, and the result must NOT
+        // carry Exact.
+        registry.register(Box::new(MockEngine {
+            name: "exact_second",
+            fits_shape: WhichShape::Smt,
+            soundness: Soundness::Exact,
+            qualifiers: QualifierSet::from_iter_kinds([Qualifier::Exact]),
+            result: TierBResult::Proved,
+        }));
+
+        let discharge = registry.dispatch(&smt_goal(), 1_000);
+        assert_eq!(discharge.soundness(), Soundness::SoundApproximate);
+        assert!(discharge.qualifier_set().contains(Qualifier::RealArith));
+        assert!(
+            !discharge.qualifier_set().contains(Qualifier::Exact),
+            "the earlier verdict's badge must NOT be upgraded by a later engine"
+        );
+    }
+
+    /// When fitting engines exist but ALL return non-verdicts, the dispatcher
+    /// returns the exhausted-fallthrough discharge: Untrusted + empty +
+    /// projecting to Unsupported (never a green), with the honest "exhausted"
+    /// reason -- NOT a fabricated verdict and NOT the misleading "no engine
+    /// fits".
+    #[test]
+    fn all_fitting_engines_non_verdict_is_untrusted_unsupported() {
+        let mut registry = DischargeRegistry::new();
+        registry.register(Box::new(MockEngine::smt_non_verdict(
+            "a",
+            TierBResult::Unknown,
+        )));
+        registry.register(Box::new(MockEngine::smt_non_verdict(
+            "b",
+            TierBResult::Timeout,
+        )));
+
+        let discharge = registry.dispatch(&smt_goal(), 1_000);
+        assert_eq!(discharge.soundness(), Soundness::Untrusted);
+        assert!(discharge.qualifier_set().is_empty());
+        // The lattice membership is the no-fit floor: it projects to
+        // Unsupported and never to a proof.
+        let verdict = composite_with_no_fit_dependency(&discharge);
+        assert_eq!(verdict, CompositeVerdict::Unsupported);
+        assert_ne!(verdict, CompositeVerdict::Proven);
+        // Honest reason: exhausted, not "no engine fits".
+        assert_eq!(
+            discharge
+                .evidence()
+                .get("dispatch")
+                .and_then(|v| v.as_str()),
+            Some("exhausted_fallthrough"),
+            "the exhausted case is distinguished from no-fit in the evidence"
+        );
+    }
+
+    /// A goal NO engine fits still takes the canonical no-fit path (distinct
+    /// from the exhausted-fallthrough case): the dispatcher never confuses
+    /// "shape unfit" with "fit but undecided".
+    #[test]
+    fn no_fitting_engine_takes_the_no_fit_path_not_exhausted() {
+        let mut registry = DischargeRegistry::new();
+        // Only an SMT engine; a BoxRange goal has no fit at all.
+        registry.register(Box::new(MockEngine::smt_non_verdict(
+            "smt_only",
+            TierBResult::Unknown,
+        )));
+        let discharge = registry.dispatch(&box_range_goal(), 1_000);
+        assert_no_fit_lattice_membership(&discharge);
+        assert_eq!(
+            discharge
+                .evidence()
+                .get("dispatch")
+                .and_then(|v| v.as_str()),
+            Some("no_fit"),
+            "an unfit shape is no_fit, never exhausted_fallthrough"
+        );
+    }
+
+    /// A single fitting engine that returns a definite verdict behaves exactly
+    /// as before the fall-through change (no regression): the verdict is
+    /// returned directly, no fall-through, no exhausted path.
+    #[test]
+    fn single_fitting_engine_with_a_verdict_is_unchanged() {
+        let mut registry = DischargeRegistry::new();
+        registry.register(Box::new(MockEngine::smt_real_arith_verdict(
+            "solo",
+            TierBResult::Proved,
+        )));
+        let discharge = registry.dispatch(&smt_goal(), 1_000);
+        assert_eq!(*discharge.result(), TierBResult::Proved);
+        assert_eq!(
+            discharge.evidence().get("engine").and_then(|v| v.as_str()),
+            Some("solo")
+        );
+    }
+
+    /// Fall-through respects the BoxRange lane too: a non-verdict BoxRange
+    /// engine falls through to a later fitting BoxRange engine that discharges.
+    /// (Beacon could register two interval engines; the weaker-first one
+    /// declining must not block the stronger one.)
+    #[test]
+    fn fall_through_works_on_the_box_range_lane() {
+        let mut registry = DischargeRegistry::new();
+        registry.register(Box::new(MockEngine {
+            name: "box_unknown",
+            fits_shape: WhichShape::BoxRange,
+            soundness: Soundness::Untrusted,
+            qualifiers: QualifierSet::new(),
+            result: TierBResult::Unknown,
+        }));
+        registry.register(Box::new(MockEngine::box_range_sound("box_sound")));
+
+        let discharge = registry.dispatch(&box_range_goal(), 1_000);
+        assert_eq!(*discharge.result(), TierBResult::Proved);
+        assert!(
+            discharge
+                .qualifier_set()
+                .contains(Qualifier::SoundOverApproximation)
+        );
+        assert_eq!(
+            discharge.evidence().get("engine").and_then(|v| v.as_str()),
+            Some("box_sound")
+        );
     }
 }

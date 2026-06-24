@@ -36,6 +36,11 @@ pub mod tier_b;
 pub mod tier_b_lower;
 pub mod tier_c;
 pub mod worker;
+// WI-12 (WS-5): the Z3 NRA DischargeEngine over GoalShape::Smt. Gated behind
+// the `z3` feature so it links Z3 only when asked; the default and smt builds
+// carry no z3-named symbols.
+#[cfg(feature = "z3")]
+pub mod z3_engine;
 
 pub use artifact::{ProofArtifact, ProofStatus, ProofTier};
 // chelis#439: the Beacon subprocess shim (transport-only DischargeEngine for
@@ -52,12 +57,16 @@ pub use contracts::{
 };
 pub use discharge::{
     Discharge, DischargeEngine, DischargeError, Goal, GoalError, GoalShape, IntervalBox, IrHandle,
-    OutputRange, Qualifier, QualifierSet, Soundness,
+    OutputRange, Qualifier, QualifierSet, Soundness, classify_smt_outcome,
 };
 // The cvc5 engine exists only when cvc5 is linked (the smt feature); the
 // default build keeps zero cvc5-named symbols (the solver-free gate).
 #[cfg(feature = "smt")]
 pub use discharge::Cvc5Engine;
+// WI-12 (WS-5): the Z3 NRA engine exists only when Z3 is linked (the z3
+// feature); the default and smt builds keep zero z3-named symbols.
+#[cfg(feature = "z3")]
+pub use z3_engine::Z3Engine;
 // WI-9: the discharge-engine registry + fitness-based dispatcher and its no-fit
 // honesty floor. The solver-free SMT engine is the default-build SMT lane and
 // exists only when cvc5 is absent.
