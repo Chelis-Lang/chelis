@@ -5,10 +5,15 @@
 //! snake_case here means: starts with a lowercase ASCII letter, followed
 //! by lowercase ASCII letters, ASCII digits, or `_`. No uppercase letters
 //! anywhere; no leading underscore. Single-letter math-style function
-//! names (`f`, `g`) satisfy this trivially. The §3.3 bimodal *parameter*
-//! carve-out (single-letter math identifiers like `S`, `K`, `T`) is
-//! orthogonal: it applies inside parameter lists, not to the function
-//! name itself.
+//! names (`f`, `g`) satisfy this trivially.
+//!
+//! The §3.2 single-letter math-notation carve-out (chelis#437) admits a
+//! single ASCII-uppercase letter as a value BINDING name (`S = ...`) and
+//! as a parameter, but NOT as a `def`/`sig` function name: an applied
+//! uppercase head `N(x)` resolves to a constructor, so an uppercase
+//! function name would be silently shadowed. This rule therefore keeps
+//! flagging uppercase `def` names; it never sees bare value bindings
+//! (the regex matches only `def name`, which value bindings lack).
 //!
 //! Detects `^def name(...)` and `^def name<...>` lines where `name`
 //! contains an uppercase letter or leading underscore. The regex is
@@ -110,6 +115,16 @@ mod tests {
         assert!(run("def f(x: f32) -> f32 = x\n").is_empty());
         assert!(run("def s0() -> f32 = 1.0\n").is_empty());
         assert!(run("def bs_call_scalar(s: f32) -> f32 = s\n").is_empty());
+    }
+
+    #[test]
+    fn rejects_single_letter_uppercase_function_name() {
+        // The §3.2 carve-out (chelis#437) does NOT extend to function
+        // names: an applied uppercase head resolves to a constructor, so a
+        // `def N` would be silently shadowed. The rule keeps flagging it.
+        let v = run("def N(x: f32) -> f32 = x\n");
+        assert_eq!(v.len(), 1);
+        assert!(v[0].message.contains('N'));
     }
 
     #[test]

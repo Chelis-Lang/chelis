@@ -240,21 +240,26 @@ impl Parser {
     }
 
     fn is_decl_start_at(&self, pos: usize) -> bool {
-        matches!(
-            self.tokens.get(pos).map(|t| &t.kind),
+        match self.tokens.get(pos).map(|t| &t.kind) {
             Some(
                 TokenKind::Def
-                    | TokenKind::Sig
-                    | TokenKind::Ident(_)
-                    | TokenKind::Type
-                    | TokenKind::Dim
-                    | TokenKind::Macro
-                    | TokenKind::Module
-                    | TokenKind::Import
-                    | TokenKind::Export
-                    | TokenKind::At
-            )
-        )
+                | TokenKind::Sig
+                | TokenKind::Ident(_)
+                | TokenKind::Type
+                | TokenKind::Dim
+                | TokenKind::Macro
+                | TokenKind::Module
+                | TokenKind::Import
+                | TokenKind::Export
+                | TokenKind::At,
+            ) => true,
+            // A single-letter uppercase head starts a value binding
+            // (chelis#437: `S = ...`); it must end the prior declaration's
+            // expression so the binding is parsed as its own decl. Keep
+            // this in lockstep with the `parse_decl` dispatch arm.
+            Some(TokenKind::TypeIdent(name)) => is_single_letter_upper(name),
+            _ => false,
+        }
     }
 
     fn decl_expr_end(&self) -> usize {
@@ -433,6 +438,35 @@ impl Parser {
         }
     }
 
+    /// Accept a value identifier: a lowercase-leading `Ident`, or a
+    /// single-letter uppercase `TypeIdent` used in a position that
+    /// unambiguously binds a value (a value-binding LHS, a parameter,
+    /// or a block binding pattern). The lexer's §1.1 case-split classifies a bare
+    /// uppercase identifier as `TypeIdent`; the explicit value-binding
+    /// context overrides that default for single-letter names, the same
+    /// way a def's `[..]` quantifier clause overrides the case-split for
+    /// type variables (spec/02 §P4a). This admits finance/math notation
+    /// (`S`, `K`, `T`, `N`, `P`) as value names (chelis#437) without
+    /// weakening the PascalCase convention for multi-letter type and
+    /// constructor names.
+    fn expect_value_ident(&mut self) -> Result<(String, Span), ParseError> {
+        match self.peek().clone() {
+            TokenKind::Ident(name) => {
+                let tok = self.advance();
+                Ok((name, tok.span))
+            }
+            TokenKind::TypeIdent(name) if is_single_letter_upper(&name) => {
+                let tok = self.advance();
+                Ok((name, tok.span))
+            }
+            _ => Err(ParseError::Expected {
+                expected: "identifier".into(),
+                found: format!("{:?}", self.peek()),
+                offset: self.current_offset(),
+            }),
+        }
+    }
+
     fn expect_type_ident(&mut self) -> Result<(String, Span), ParseError> {
         match self.peek().clone() {
             TokenKind::TypeIdent(name) => {
@@ -520,6 +554,10 @@ impl Parser {
             TokenKind::Def => self.parse_fun_def(),
             TokenKind::Sig => self.parse_sig_decl(),
             TokenKind::Ident(_) => self.parse_let_def(),
+            // A single-letter uppercase head in declaration position binds
+            // a value (chelis#437): `S = ...`. Multi-letter PascalCase is
+            // never a value-binding LHS, so it stays a parse error here.
+            TokenKind::TypeIdent(name) if is_single_letter_upper(name) => self.parse_let_def(),
             TokenKind::Type => self.parse_type_decl(),
             TokenKind::Dim => self.parse_dim_decl(),
             TokenKind::Macro => self.parse_macro_def(),
@@ -921,7 +959,7 @@ impl Parser {
     }
 
     fn parse_param(&mut self) -> Result<Param, ParseError> {
-        let (name, span) = self.expect_ident()?;
+        let (name, span) = self.expect_value_ident()?;
         let ty = if *self.peek() == TokenKind::Colon {
             self.advance();
             Some(self.parse_type()?)
@@ -952,7 +990,7 @@ impl Parser {
     }
 
     fn parse_let_def(&mut self) -> Result<Decl, ParseError> {
-        let (name, start) = self.expect_ident()?;
+        let (name, start) = self.expect_value_ident()?;
         let ty = if *self.peek() == TokenKind::Colon {
             self.advance();
             Some(self.parse_type()?)
@@ -2054,6 +2092,14 @@ impl Parser {
                 let tok = self.advance();
                 Ok(LetPattern::Var(name, tok.span))
             }
+            // Single-letter uppercase binds a value here (chelis#437):
+            // a block binding `{ S = ... }`. A binding pattern is a
+            // binding position, so the §1.1 case-split default yields to
+            // the explicit value binding.
+            TokenKind::TypeIdent(name) if is_single_letter_upper(&name) => {
+                let tok = self.advance();
+                Ok(LetPattern::Var(name, tok.span))
+            }
             TokenKind::Underscore => {
                 let tok = self.advance();
                 Ok(LetPattern::Wildcard(tok.span))
@@ -2624,6 +2670,15 @@ impl Parser {
 // ---------------------------------------------------------------------------
 // Span helpers
 // ---------------------------------------------------------------------------
+
+/// True for a single ASCII-uppercase letter (`S`, `K`, `T`, `N`, `P`,
+/// …). The value-binding case-split override (chelis#437) is limited to
+/// single-letter names so multi-letter PascalCase stays unambiguously a
+/// type or constructor name (§1.1, §3.1).
+fn is_single_letter_upper(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!((chars.next(), chars.next()), (Some(c), None) if c.is_ascii_uppercase())
+}
 
 fn expr_span(e: &Expr) -> Span {
     match e {
@@ -4302,5 +4357,170 @@ mod tests {
             }
             other => panic!("expected Constructor pattern, got {other:?}"),
         }
+    }
+
+    // ===== chelis#437: single-letter uppercase value identifiers =====
+    //
+    // §1.1 value-binding override: a single ASCII-uppercase letter is a
+    // value identifier in a value-binding position (LHS, parameter, let
+    // binder). Multi-letter PascalCase stays a type/constructor.
+
+    #[test]
+    fn single_letter_upper_value_binding_lhs() {
+        // The exact #437 repro: `S = ...` is a value binding, not a parse
+        // error. The lexer classifies `S` as a TypeIdent; the binding
+        // context overrides the default and binds a value named `S`.
+        let decls = p("def f(spot: f32) -> f32 = spot\nS = f(cast(2.0, f32))");
+        assert_eq!(decls.len(), 2);
+        match &decls[1] {
+            Decl::LetDef { name, .. } => assert_eq!(name, "S"),
+            other => panic!("expected LetDef named S, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn single_letter_upper_value_binding_each_letter() {
+        // S, K, T, N, P all bind as values (finance notation).
+        for letter in ["S", "K", "T", "N", "P"] {
+            let src = format!("{letter} = cast(1.0, f32)");
+            let decls = p(&src);
+            match &decls[0] {
+                Decl::LetDef { name, .. } => assert_eq!(name, letter),
+                other => panic!("expected LetDef named {letter}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn single_letter_upper_function_name_rejected() {
+        // A single-letter uppercase FUNCTION name (`def N`) is NOT part of
+        // this carve-out: an applied uppercase head `N(x)` resolves to a
+        // constructor, so a `def N` would be silently shadowed by
+        // constructor resolution. Function names stay snake_case; the
+        // carve-out covers value bindings and parameters only (chelis#437).
+        assert!(
+            parse_str("def N(x: f32) -> f32 = x").is_err(),
+            "single-letter uppercase function name must stay rejected"
+        );
+    }
+
+    #[test]
+    fn single_letter_upper_param_name() {
+        // `def payoff(S, K) = ...` — uppercase single-letter parameters.
+        let decls = p("def payoff(S: f32, K: f32) -> f32 = S");
+        match &decls[0] {
+            Decl::FunDef { params, .. } => {
+                assert_eq!(params.len(), 2);
+                assert_eq!(params[0].name, "S");
+                assert_eq!(params[1].name, "K");
+            }
+            other => panic!("expected FunDef, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn single_letter_upper_param_body_reference_is_var() {
+        // In the body, a single-letter uppercase name that is a bound
+        // parameter must read as a value reference. The parser emits it as
+        // a constructor head (the lexer cannot see the binding); the
+        // resolver later binds it to the parameter. Either way the surface
+        // round-trips, so assert the body parses to a head named `S`.
+        let b = body("def use_spot(S: f32) -> f32 = S");
+        match b {
+            Expr::Var(name, _) | Expr::Constructor(name, _) => assert_eq!(name, "S"),
+            other => panic!("expected Var or Constructor head S, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn single_letter_upper_two_bindings_in_sequence() {
+        // The decl-boundary scan must recognize a single-letter uppercase
+        // head as the start of a new declaration so the prior decl's
+        // expression stops before it (is_decl_start_at parity).
+        let decls = p("S = cast(1.0, f32)\nT = cast(2.0, f32)");
+        assert_eq!(decls.len(), 2);
+        match (&decls[0], &decls[1]) {
+            (Decl::LetDef { name: a, .. }, Decl::LetDef { name: b, .. }) => {
+                assert_eq!(a, "S");
+                assert_eq!(b, "T");
+            }
+            other => panic!("expected two LetDefs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn single_letter_upper_block_binder() {
+        // A block-let binder `{ S = x ; S }` (Surf has no `let` keyword)
+        // binds a value named S. The binder reaches parse_let_pattern,
+        // where the single-letter uppercase override applies.
+        let src = "def f(x: f32) -> f32 = { S = x\n S }";
+        let decls = parse_str(src).expect("block binder S = x should parse");
+        match &decls[0] {
+            Decl::FunDef { body, .. } => match body {
+                Expr::Block(bindings, _, _) => {
+                    assert_eq!(bindings.len(), 1);
+                    match &bindings[0].pattern {
+                        LetPattern::Var(name, _) => assert_eq!(name, "S"),
+                        other => panic!("expected Var binder S, got {other:?}"),
+                    }
+                }
+                other => panic!("expected Block body, got {other:?}"),
+            },
+            other => panic!("expected FunDef, got {other:?}"),
+        }
+    }
+
+    // ----- negative parity: multi-letter PascalCase stays a type/ctor -----
+
+    #[test]
+    fn multi_letter_upper_binding_rejected() {
+        // `Foo = ...` is NOT a value binding — the case-split is preserved
+        // for multi-letter PascalCase names. This must stay a parse error.
+        let err = p_err("Foo = cast(1.0, f32)");
+        match err {
+            ParseError::Expected { found, .. } => {
+                assert!(
+                    found.contains("Foo"),
+                    "expected error mentioning Foo, got {found}"
+                );
+            }
+            other => panic!("expected Expected error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multi_letter_upper_param_rejected() {
+        // A multi-letter PascalCase parameter is rejected — params are
+        // values, and multi-letter uppercase is reserved for types.
+        assert!(
+            parse_str("def f(Spot: f32) -> f32 = Spot").is_err(),
+            "multi-letter uppercase parameter must be rejected"
+        );
+    }
+
+    #[test]
+    fn multi_letter_upper_expr_head_still_constructor() {
+        // In expression position `Some(x)` is still a constructor
+        // application; the value-binding override does not touch it.
+        let b = body("def f(x: f32) -> f32 = Some(x)");
+        match b {
+            Expr::Apply(head, _, _) => match *head {
+                Expr::Constructor(name, _) => assert_eq!(name, "Some"),
+                other => panic!("expected Constructor head, got {other:?}"),
+            },
+            other => panic!("expected Apply, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn is_single_letter_upper_predicate() {
+        assert!(is_single_letter_upper("S"));
+        assert!(is_single_letter_upper("K"));
+        assert!(is_single_letter_upper("Z"));
+        assert!(!is_single_letter_upper("s")); // lowercase
+        assert!(!is_single_letter_upper("Foo")); // multi-letter
+        assert!(!is_single_letter_upper("S1")); // letter+digit
+        assert!(!is_single_letter_upper("")); // empty
+        assert!(!is_single_letter_upper("_")); // underscore
     }
 }
