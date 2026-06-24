@@ -31,7 +31,9 @@ PYO3_PYTHON = { value = ".venv/bin/python", relative = true }
 # Required for cvc5-sys bindgen on Fedora where the ROCm clang doesn't
 # include standard system headers in its search path.
 BINDGEN_EXTRA_CLANG_ARGS = "-I/usr/include"
-# cvc5-sys (smt feature) builds cvc5 from source, which #includes the
+# Two C/C++ build flags share CXXFLAGS below; both are required and combined.
+#
+# (a) cvc5-sys (smt feature) builds cvc5 from source, which #includes the
 # auto-downloaded GMP C++ header `gmpxx.h`. That header declares
 # user-defined-literal operators with a space before the suffix
 # (`operator"" _mpz`), which Apple clang flags under
@@ -40,7 +42,6 @@ BINDGEN_EXTRA_CLANG_ARGS = "-I/usr/include"
 # Apple-Silicon CI runners (`SMT Feature Build (darwin-arm64)`, red
 # since the job was added). cmake seeds `CMAKE_CXX_FLAGS` from this env
 # `CXXFLAGS`, so the flag reaches every cvc5 compile command.
-#
 # Use the plain `-Wno-` (fully disable), NOT `-Wno-error=` (downgrade to
 # warning): the `SMT Feature Build (Linux, glibc 2.31)` lane runs an OLD
 # gcc that predates this warning. gcc is lenient about disabling an
@@ -50,9 +51,36 @@ BINDGEN_EXTRA_CLANG_ARGS = "-I/usr/include"
 # '-Wdeprecated-literal-operator'`). The plain form works on all three
 # SMT lanes: Apple clang disables the warning so the build's `-Werror`
 # has nothing to promote; new gcc applies the suppression; old gcc
-# (glibc231) silently accepts the unknown `-Wno-`. cvc5-sys is the only
-# workspace consumer of CXXFLAGS (no other crate has a C++ build
-# script), and the flag is a harmless no-op where the warning never
-# fires. `force` is left at the default so a developer's own `CXXFLAGS`
-# still takes precedence.
-CXXFLAGS = "-Wno-deprecated-literal-operator"
+# (glibc231) silently accepts the unknown `-Wno-`.
+#
+# (b) WI-14 Arb/FLINT oracle (`chelis-prove` `arb` feature). `arb-sys` /
+# `flint-sys` / `gmp-mpfr-sys` compile their vendored C from source. Two
+# build hazards on a Fedora-style PIE-default toolchain, both fixed durably
+# here so a clean `--features arb` build Just Works without a per-developer
+# step:
+#  1. POSITION-INDEPENDENT CODE. The default toolchain links executables as
+#     PIE, but the vendored C objects are not position-independent unless told,
+#     so the link fails with `relocation R_X86_64_32 cannot be used ...
+#     recompile with -fPIC`. `CFLAGS`/`CXXFLAGS = -fPIC` makes every C object
+#     position-independent. (`-fPIC` is benign for the workspace's other C
+#     builds — cvc5-sys etc. — on a PIE-default target, so setting it globally
+#     is safe.)
+#  2. ISOLATED BUILD CACHES. `gmp-mpfr-sys` / `flint-sys` / `arb-sys` each cache
+#     their compiled archive in a per-user dir (`~/.cache/<crate>`) keyed by
+#     version + compiler but NOT by CFLAGS. A non-`-fPIC` archive built earlier
+#     (e.g. by a sibling probe) would be silently reused and re-trigger hazard
+#     1. Pointing the three `*_CACHE` vars at a workspace-local dir
+#     (`target/arb-cache`, resolved relative to this config) keeps this
+#     checkout's archives PIC and isolated from any shared per-user cache.
+#
+# CXXFLAGS carries BOTH (a) and (b): the cvc5 (smt) and the arb lanes are
+# distinct features that never link in the same build, and each flag is a
+# harmless no-op for the other lane. CFLAGS carries only (b) (cvc5 has no C, only
+# C++). `[env]` defaults to `force = false`, so a developer's own CFLAGS/CXXFLAGS
+# still takes precedence (append these flags if you set your own for the `arb`
+# build).
+CFLAGS = "-fPIC"
+CXXFLAGS = "-fPIC -Wno-deprecated-literal-operator"
+GMP_MPFR_SYS_CACHE = { value = "target/arb-cache/gmp-mpfr-sys", relative = true }
+FLINT_SYS_CACHE = { value = "target/arb-cache/flint-sys", relative = true }
+ARB_SYS_CACHE = { value = "target/arb-cache/arb-sys", relative = true }

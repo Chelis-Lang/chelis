@@ -10,6 +10,7 @@
 //! See `docs/trust_stack_verification.md` for architectural framing.
 
 pub mod ad_rail;
+pub mod arb_oracle;
 pub mod artifact;
 pub mod beacon_shim;
 // WI-15 SoS certificate engine (Clarabel). The whole module is behind the
@@ -46,6 +47,14 @@ pub mod worker;
 #[cfg(feature = "z3")]
 pub mod z3_engine;
 
+// WI-14 Arb/FLINT rigorous-enclosure oracle. The enclosure type and its
+// containment algebra are always present (testable without an Arb link); the
+// live FLINT/Arb computation is gated behind the `arb` feature.
+pub use arb_oracle::ErfEnclosure;
+#[cfg(feature = "arb")]
+pub use arb_oracle::{
+    DEFAULT_PREC, certify_sup_norm_at_samples, rigorous_erf, rigorous_erf_enclosure,
+};
 pub use artifact::{
     Degradation, FailureSummary, ProofArtifact, ProofStatus, ProofTier, PropertyDependency,
 };
