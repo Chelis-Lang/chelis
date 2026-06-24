@@ -51,11 +51,32 @@ def load_manifest() -> dict:
 
 
 # ===========================================================================
-# Assertion A: cvc5 symbol probe (PURE over nm output, unit-tested).
+# Assertion A: solver symbol probes (PURE over nm output, unit-tested).
 # ===========================================================================
 def cvc5_symbol_count(nm_output: str) -> int:
     """Count lines mentioning a cvc5 symbol in `nm -C` output. PURE."""
     return sum(1 for line in nm_output.splitlines() if "cvc5" in line.lower())
+
+
+def z3_symbol_count(nm_output: str) -> int:
+    """Count lines mentioning a Z3 symbol in `nm -C` output. PURE.
+
+    WS-5: the Z3 NRA engine is behind the `z3` feature; the DEFAULT (and smt)
+    `chelis` binary must link ZERO z3 symbols (the engine lives on
+    `chelis-prove` and `chelis-cli` never enables the feature). This is the
+    symmetric counterpart to [`cvc5_symbol_count`].
+
+    GOTCHA (RT finding): a bare lowercase `"z3"` substring FALSE-POSITIVES on
+    ring's `nistz384_*` ECC routines (which contain the substring "z3"). So
+    match Z3's ACTUAL symbol shapes instead:
+      - `Z3_` : the C API prefix, CASE-SENSITIVE (`Z3_mk_solver`, ...). The
+        `nistz384` symbols are lowercase, so the capital `Z3_` excludes them.
+      - `z3::`: a demangled C++ symbol in Z3's namespace (`nm -C`).
+      - `libz3`: a reference to the shared object itself.
+    None of these match `nistz384_*`, while all match a genuinely linked Z3.
+    """
+    markers = ("Z3_", "z3::", "libz3")
+    return sum(1 for line in nm_output.splitlines() if any(m in line for m in markers))
 
 
 def nm_symbols(binary: str) -> str:
@@ -119,6 +140,10 @@ class SolverFreeReport:
     no_link_ok: bool
     nonsmt_cvc5_count: int
     smt_cvc5_count: int | None  # None when the smt binary was not probed
+    # WS-5: the default binary must also link zero z3 symbols. Symmetric to the
+    # cvc5 probe; `no_link_ok` is true only when BOTH counts are zero.
+    nonsmt_z3_count: int
+    smt_z3_count: int | None  # None when the smt binary was not probed
     identity_checked: int
     identity_mismatches: list
     exit_mismatches: list
@@ -134,12 +159,19 @@ def run(
     check_progs = [p for p in manifest["programs"] if p["lane"] == "check"]
     skipped: list = []
 
-    # Assertion A: cvc5 symbol probe.
-    nonsmt_cvc5 = cvc5_symbol_count(nm_symbols(nonsmt_bin))
+    # Assertion A: solver symbol probes (cvc5 AND z3 -- WS-5). nm the non-smt
+    # binary once and run both probes over the same output.
+    nonsmt_nm = nm_symbols(nonsmt_bin)
+    nonsmt_cvc5 = cvc5_symbol_count(nonsmt_nm)
+    nonsmt_z3 = z3_symbol_count(nonsmt_nm)
     smt_cvc5: int | None = None
+    smt_z3: int | None = None
     if smt_bin is not None:
-        smt_cvc5 = cvc5_symbol_count(nm_symbols(smt_bin))
-    no_link_ok = nonsmt_cvc5 == 0
+        smt_nm = nm_symbols(smt_bin)
+        smt_cvc5 = cvc5_symbol_count(smt_nm)
+        smt_z3 = z3_symbol_count(smt_nm)
+    # The default build must be free of BOTH solvers.
+    no_link_ok = nonsmt_cvc5 == 0 and nonsmt_z3 == 0
 
     # Assertion B+C.
     identity_mismatches: list = []
@@ -166,6 +198,8 @@ def run(
         no_link_ok=no_link_ok,
         nonsmt_cvc5_count=nonsmt_cvc5,
         smt_cvc5_count=smt_cvc5,
+        nonsmt_z3_count=nonsmt_z3,
+        smt_z3_count=smt_z3,
         identity_checked=identity_checked,
         identity_mismatches=identity_mismatches,
         exit_mismatches=exit_mismatches,
@@ -175,9 +209,15 @@ def run(
 
 def render(report: SolverFreeReport) -> str:
     lines = ["Solver-free regression report for `chelis check`"]
+    cvc5_ok = report.nonsmt_cvc5_count == 0
     lines.append(
         f"  A. NO-LINK: non-smt binary cvc5 symbols = {report.nonsmt_cvc5_count} "
-        f"({'PASS' if report.no_link_ok else 'FAIL'})"
+        f"({'PASS' if cvc5_ok else 'FAIL'})"
+    )
+    z3_ok = report.nonsmt_z3_count == 0
+    lines.append(
+        f"     non-smt binary z3 symbols = {report.nonsmt_z3_count} "
+        f"({'PASS' if z3_ok else 'FAIL'})"
     )
     if report.smt_cvc5_count is not None:
         lines.append(
@@ -201,11 +241,17 @@ class SolverFreeError(AssertionError):
 
 
 def assert_solver_free(report: SolverFreeReport, require_control: bool) -> None:
-    if not report.no_link_ok:
+    if report.nonsmt_cvc5_count != 0:
         raise SolverFreeError(
             f"SOLVER-FREE GATE FAILED: the non-smt `chelis` binary links "
             f"{report.nonsmt_cvc5_count} cvc5 symbol(s); `chelis check` must be "
             f"solver-free in the default build"
+        )
+    if report.nonsmt_z3_count != 0:
+        raise SolverFreeError(
+            f"SOLVER-FREE GATE FAILED: the non-smt `chelis` binary links "
+            f"{report.nonsmt_z3_count} z3 symbol(s); the Z3 NRA engine (the `z3` "
+            f"feature) must not reach the default build"
         )
     if require_control and (report.smt_cvc5_count is None or report.smt_cvc5_count == 0):
         raise SolverFreeError(

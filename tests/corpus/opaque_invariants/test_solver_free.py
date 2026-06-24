@@ -32,6 +32,49 @@ class SymbolCountTests(unittest.TestCase):
         self.assertEqual(sf.cvc5_symbol_count("0000 T CVC5_init\n"), 1)
 
 
+class Z3SymbolCountTests(unittest.TestCase):
+    """WS-5: the z3 probe is symmetric to cvc5 but must NOT false-positive on
+    ring's nistz384_* ECC routines (the RT gotcha)."""
+
+    def test_zero_for_clean_output(self):
+        nm = "0000 T main\n0000 T che_check_program\n0000 T parse_surf\n"
+        self.assertEqual(sf.z3_symbol_count(nm), 0)
+
+    def test_detects_z3_c_api_symbols(self):
+        nm = (
+            "0000 T main\n"
+            "0000 T Z3_mk_solver\n"
+            "0000 T Z3_mk_real_numeral\n"
+        )
+        self.assertEqual(sf.z3_symbol_count(nm), 2)
+
+    def test_detects_z3_cpp_namespace_symbols(self):
+        nm = "0000 T z3::solver::check()\n0000 T z3::context::context()\n"
+        self.assertEqual(sf.z3_symbol_count(nm), 2)
+
+    def test_detects_libz3_reference(self):
+        self.assertEqual(sf.z3_symbol_count("0000 U some_sym  (libz3.so.4.15)\n"), 1)
+
+    def test_does_not_false_positive_on_nistz384(self):
+        # The RT gotcha: ring's ECC routines contain the substring "z3". A bare
+        # lowercase "z3" grep would wrongly count these as Z3 symbols.
+        nm = (
+            "0000 T ring_core_nistz384_point_mul\n"
+            "0000 T ring_core_nistz384_point_add\n"
+            "0000 T GFp_nistz384_select_w7\n"
+            "0000 T main\n"
+        )
+        self.assertEqual(
+            sf.z3_symbol_count(nm),
+            0,
+            "nistz384_* must NOT be counted as a Z3 symbol",
+        )
+
+    def test_lowercase_z3_token_alone_is_not_a_z3_symbol(self):
+        # A bare lowercase "z3" not in a Z3 shape (Z3_/z3::/libz3) must not count.
+        self.assertEqual(sf.z3_symbol_count("0000 T some_z3_like_helper\n"), 0)
+
+
 class VerdictTests(unittest.TestCase):
     def test_normalize_extracts_sorted_kind_message_pairs(self):
         stdout = (
@@ -67,6 +110,8 @@ def _report(**kw):
         no_link_ok=True,
         nonsmt_cvc5_count=0,
         smt_cvc5_count=32858,
+        nonsmt_z3_count=0,
+        smt_z3_count=0,
         identity_checked=24,
         identity_mismatches=[],
         exit_mismatches=[],
@@ -81,9 +126,18 @@ class GateTests(unittest.TestCase):
         sf.assert_solver_free(_report(), require_control=True)  # no raise
 
     def test_nonsmt_with_cvc5_fails_no_link(self):
-        with self.assertRaises(sf.SolverFreeError):
+        with self.assertRaises(sf.SolverFreeError) as ctx:
             sf.assert_solver_free(_report(no_link_ok=False, nonsmt_cvc5_count=5),
                                   require_control=False)
+        self.assertIn("cvc5", str(ctx.exception))
+
+    def test_nonsmt_with_z3_fails_no_link(self):
+        # WS-5: a z3 symbol in the default binary fails the gate, with a message
+        # that names z3 (not cvc5).
+        with self.assertRaises(sf.SolverFreeError) as ctx:
+            sf.assert_solver_free(_report(no_link_ok=False, nonsmt_z3_count=7),
+                                  require_control=False)
+        self.assertIn("z3", str(ctx.exception))
 
     def test_identity_mismatch_fails(self):
         with self.assertRaises(sf.SolverFreeError):
