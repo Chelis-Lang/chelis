@@ -1697,3 +1697,133 @@ fn sfr4_realize_blocks_fused_kernel_emission() {
         "realize() barrier should leave separate launches for add/copy/neg"
     );
 }
+
+// ---------------------------------------------------------------------------
+// WS-8A: pad / shrink HIP kernel structural coverage. The GPU==eval numeric
+// proof lives in the manual `gpu_correctness` oracle; these CI-default tests
+// pin the codegen shape (kernel source present + real launch, not a
+// metadata-only view) and the dtype-suffix dispatch.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn s8a_pad_emits_kernel_and_launch_not_view() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let p = dag.add_node(
+        RiscOp::Pad {
+            padding: vec![(1, 1)],
+            fill: 0.0,
+        },
+        vec![x],
+        vec_f32(6),
+        None,
+    );
+    dag.add_root(p);
+
+    let result = codegen_hip(&dag, "test_pad");
+    let src = &result.c_source;
+    assert!(
+        src.contains("__global__ void kernel_pad"),
+        "pad must emit a kernel source string"
+    );
+    assert!(
+        src.contains("chelis_launch_kernel"),
+        "pad must launch its kernel, not lower to a metadata-only view"
+    );
+    // The fill value is reconstructed from its exact f32 bit pattern, not a
+    // lossy decimal (sibling of #189/#250).
+    assert!(
+        src.contains("chelis_f32_from_bits"),
+        "pad fill must use exact-bit-pattern reconstruction"
+    );
+}
+
+#[test]
+fn s8a_shrink_emits_kernel_and_launch_not_view() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
+    let s = dag.add_node(
+        RiscOp::Shrink {
+            bounds: vec![(1, 5)],
+        },
+        vec![x],
+        vec_f32(4),
+        None,
+    );
+    dag.add_root(s);
+
+    let result = codegen_hip(&dag, "test_shrink");
+    let src = &result.c_source;
+    assert!(
+        src.contains("__global__ void kernel_shrink"),
+        "shrink must emit a kernel source string"
+    );
+    assert!(
+        src.contains("chelis_launch_kernel"),
+        "shrink must launch its kernel, not lower to a metadata-only view"
+    );
+}
+
+#[test]
+fn s8a_pad_f64_uses_dtype_suffix() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::F64,
+        },
+        None,
+    );
+    let p = dag.add_node(
+        RiscOp::Pad {
+            padding: vec![(1, 1)],
+            fill: 0.0,
+        },
+        vec![x],
+        TensorType {
+            dims: vec![DimInfo::Lit(6)],
+            precision: Prim::F64,
+        },
+        None,
+    );
+    dag.add_root(p);
+
+    let result = codegen_hip(&dag, "test_pad_f64");
+    let src = &result.c_source;
+    assert!(
+        src.contains("kernel_pad_f64"),
+        "f64 pad must dispatch to the dtype-suffixed kernel name"
+    );
+    assert!(
+        src.contains("double fill") || src.contains("double a") || src.contains("double *out"),
+        "f64 pad kernel must use the double C type"
+    );
+}
+
+#[test]
+fn s8a_shrink_i32_uses_dtype_suffix() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_i32(6), None);
+    let s = dag.add_node(
+        RiscOp::Shrink {
+            bounds: vec![(1, 5)],
+        },
+        vec![x],
+        vec_i32(4),
+        None,
+    );
+    dag.add_root(s);
+
+    let result = codegen_hip(&dag, "test_shrink_i32");
+    let src = &result.c_source;
+    assert!(
+        src.contains("kernel_shrink_i32"),
+        "i32 shrink must dispatch to the dtype-suffixed kernel name"
+    );
+    assert!(
+        src.contains("int32_t"),
+        "i32 shrink kernel must use the int32_t C type"
+    );
+}

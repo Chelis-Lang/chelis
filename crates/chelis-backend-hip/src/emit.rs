@@ -976,14 +976,25 @@ impl HipEmitter {
             RiscOp::Const { .. } => Some(format!("kernel_fill_{}", kind_for_node(node).suffix())),
             RiscOp::Realize => Some(Self::cast_kernel_name(node, dag)),
             RiscOp::Cast { .. } => Some(Self::cast_kernel_name(node, dag)),
-            // Movement ops and Load/Store are not kernels
+            // `pad` / `shrink` materialize a fresh buffer via a typed
+            // per-output-element kernel (see `kernels::pad_typed` /
+            // `kernels::shrink_typed`); the kernel name carries the output
+            // dtype suffix so one kernel serves every pad/shrink node of
+            // that dtype regardless of rank.
+            RiscOp::Pad { .. } => Some(format!(
+                "kernel_pad{}",
+                Self::dtype_kernel_suffix(node.output_type.precision)
+            )),
+            RiscOp::Shrink { .. } => Some(format!(
+                "kernel_shrink{}",
+                Self::dtype_kernel_suffix(node.output_type.precision)
+            )),
+            // Pure-metadata movement ops and Load/Store are not kernels
             RiscOp::Load { .. }
             | RiscOp::Store { .. }
             | RiscOp::Reshape { .. }
             | RiscOp::Permute { .. }
             | RiscOp::Expand { .. }
-            | RiscOp::Pad { .. }
-            | RiscOp::Shrink { .. }
             | RiscOp::Stride { .. }
             | RiscOp::BlasMatmul { .. } => None,
             RiscOp::Gather { .. } => {
@@ -1242,6 +1253,16 @@ impl HipEmitter {
                     ),
                 }
             }
+            // `pad` / `shrink` use the typed per-output-element kernels.
+            // Dispatch on the output dtype (the input dtype always matches:
+            // these ops do not change precision) so the full active
+            // dtype set is covered, matching the C backend.
+            RiscOp::Pad { .. } => {
+                kernels::pad_typed(name, Self::dtype_c_type(node.output_type.precision))
+            }
+            RiscOp::Shrink { .. } => {
+                kernels::shrink_typed(name, Self::dtype_c_type(node.output_type.precision))
+            }
             _ => unreachable!("no kernel for op: {op:?}"),
         }
     }
@@ -1470,11 +1491,26 @@ impl HipEmitter {
             RiscOp::Expand { axis, size } => {
                 self.emit_expand(id, *axis, size, &node.inputs, &node.output_type);
             }
-            RiscOp::Pad { .. } => {
-                todo!("Pad on GPU requires a kernel. Deferred to Phase 1a iteration 2")
+            RiscOp::Pad { padding, fill } => {
+                self.emit_pad_launch(
+                    id,
+                    padding,
+                    *fill,
+                    &resolved_kernel_name(),
+                    &node.inputs,
+                    &node.output_type,
+                    dag,
+                );
             }
-            RiscOp::Shrink { .. } => {
-                todo!("Shrink on GPU requires a kernel. Deferred to Phase 1a iteration 2")
+            RiscOp::Shrink { bounds } => {
+                self.emit_shrink_launch(
+                    id,
+                    bounds,
+                    &resolved_kernel_name(),
+                    &node.inputs,
+                    &node.output_type,
+                    dag,
+                );
             }
             RiscOp::Stride { strides } => {
                 self.emit_stride(id, strides, &node.inputs, &node.output_type);
@@ -2609,6 +2645,164 @@ impl HipEmitter {
         }
     }
 
+    /// Emit per-axis `int t{node_id}_{prefix}{0..7} = <val>;` constants
+    /// from a compile-time vector, zero-padding the unused trailing axes.
+    /// Used by `pad`/`shrink` for the low-padding / start-offset vectors,
+    /// which are pinned in the `RiscOp` (not read from runtime metadata).
+    fn emit_axis_const_vars(&mut self, node_id: usize, prefix: &str, values: &[usize]) {
+        for i in 0..kernels::MAX_DIM {
+            let v = values.get(i).copied().unwrap_or(0);
+            self.line(&format!("int t{node_id}_{prefix}{i} = {v};"));
+        }
+    }
+
+    /// Generate `&t{node_id}_{prefix}0, ...` arg references for the
+    /// per-axis constants emitted by [`Self::emit_axis_const_vars`].
+    fn axis_const_arg_refs(&self, node_id: usize, prefix: &str) -> String {
+        (0..kernels::MAX_DIM)
+            .map(|i| format!("&t{node_id}_{prefix}{i}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Launch the typed `pad` kernel. The output slot is materialized
+    /// contiguous; one thread per output element scatters from the source
+    /// (per-axis low offset) or writes the `fill` value when the output
+    /// cell lies in the padded margin. Source shape comes from runtime
+    /// metadata (`d_t{a}->shape`) so a strided/symbolic source still
+    /// bounds-checks correctly; the low offsets are the compile-time
+    /// `padding[d].0`.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_pad_launch(
+        &mut self,
+        id: usize,
+        padding: &[(usize, usize)],
+        fill: f64,
+        kernel_name: &str,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: &Dag,
+    ) {
+        let a = inputs[0].0;
+        let prec = ty.precision;
+        debug_assert_eq!(
+            prec,
+            dag.get(inputs[0]).unwrap().output_type.precision,
+            "pad must preserve precision"
+        );
+        let lo: Vec<usize> = padding.iter().map(|&(before, _)| before).collect();
+        self.emit_slot_wrapper(id, ty);
+        self.line("{");
+        self.indent += 1;
+        self.line(&format!("int t{id}_size = d_t{id}->size;"));
+        self.emit_stride_vars(id, "a", a);
+        self.line(&format!("int t{id}_a_ndim = d_t{a}->ndim;"));
+        self.line(&format!("int t{id}_a_size = d_t{a}->storage_size;"));
+        self.emit_axis_const_vars(id, "lo", &lo);
+        // Source shape is read from runtime metadata so symbolic/strided
+        // inputs bounds-check against their real extents.
+        self.emit_shape_vars(id, "srcsh", a);
+        self.emit_typed_scalar_local(&format!("t{id}_fill"), prec, fill);
+        self.emit_shape_vars(id, "out", id);
+        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
+        self.line(&format!(
+            "void *args[] = {{ &d_t{a}->data, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
+             {lo_refs}, {srcsh_refs}, &t{id}_fill, \
+             &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
+            a_stride_refs = self.stride_arg_refs(id, "a"),
+            lo_refs = self.axis_const_arg_refs(id, "lo"),
+            srcsh_refs = self.shape_arg_refs(id, "srcsh"),
+            out_shape_refs = self.shape_arg_refs(id, "out"),
+        ));
+        self.emit_kernel_launch_expr(
+            &format!("mod_{kernel_name}"),
+            kernel_name,
+            &format!("(t{id}_size + 255) / 256"),
+            "256",
+            "args",
+        );
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// Launch the typed `shrink` kernel. One thread per (contiguous)
+    /// output element reads the source at `out_index + start` where
+    /// `start` is the compile-time `bounds[d].0`. The shrink output is
+    /// always strictly inside the source, so no bounds margin exists.
+    fn emit_shrink_launch(
+        &mut self,
+        id: usize,
+        bounds: &[(usize, usize)],
+        kernel_name: &str,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: &Dag,
+    ) {
+        let a = inputs[0].0;
+        debug_assert_eq!(
+            ty.precision,
+            dag.get(inputs[0]).unwrap().output_type.precision,
+            "shrink must preserve precision"
+        );
+        let start: Vec<usize> = bounds.iter().map(|&(s, _)| s).collect();
+        self.emit_slot_wrapper(id, ty);
+        self.line("{");
+        self.indent += 1;
+        self.line(&format!("int t{id}_size = d_t{id}->size;"));
+        self.emit_stride_vars(id, "a", a);
+        self.line(&format!("int t{id}_a_ndim = d_t{a}->ndim;"));
+        self.line(&format!("int t{id}_a_size = d_t{a}->storage_size;"));
+        self.emit_axis_const_vars(id, "start", &start);
+        self.emit_shape_vars(id, "out", id);
+        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
+        self.line(&format!(
+            "void *args[] = {{ &d_t{a}->data, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
+             {start_refs}, \
+             &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
+            a_stride_refs = self.stride_arg_refs(id, "a"),
+            start_refs = self.axis_const_arg_refs(id, "start"),
+            out_shape_refs = self.shape_arg_refs(id, "out"),
+        ));
+        self.emit_kernel_launch_expr(
+            &format!("mod_{kernel_name}"),
+            kernel_name,
+            &format!("(t{id}_size + 255) / 256"),
+            "256",
+            "args",
+        );
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// Emit a typed scalar local (`<c_type> name = <reconstructed>;`)
+    /// from an `f64` source value, reconstructing floats from their exact
+    /// bit pattern (no lossy decimal round-trip; sibling of the #189/#250
+    /// fixes) and casting integers/bool directly. Used by the `pad` fill.
+    fn emit_typed_scalar_local(&mut self, name: &str, prec: Prim, value: f64) {
+        match prec {
+            Prim::F32 | Prim::Bool => {
+                let bits = (value as f32).to_bits();
+                self.line(&format!(
+                    "float {name} = chelis_f32_from_bits(0x{bits:08x}u);"
+                ));
+            }
+            Prim::F64 => {
+                let bits = value.to_bits();
+                self.line(&format!(
+                    "double {name} = chelis_f64_from_bits(0x{bits:016x}uLL);"
+                ));
+            }
+            Prim::Int8 => self.line(&format!("int8_t {name} = (int8_t){};", value as i64)),
+            Prim::Int16 => self.line(&format!("int16_t {name} = (int16_t){};", value as i64)),
+            Prim::Int32 => self.line(&format!("int32_t {name} = (int32_t){};", value as i64)),
+            Prim::Int64 => self.line(&format!("int64_t {name} = (int64_t){}LL;", value as i64)),
+            other => panic!(
+                "HIP pad fill: dtype `{}` not in the active set (spec/04-type-system.md §1.1)",
+                other.name()
+            ),
+        }
+    }
+
     fn emit_store(&mut self, id: usize, name: &str, inputs: &[NodeId], ty: &TensorType) {
         let a = inputs[0].0;
         self.emit_alias_view(
@@ -2914,15 +3108,17 @@ impl HipEmitter {
             | RiscOp::BlasMatmul { .. }
             | RiscOp::Gather { .. }
             | RiscOp::ScatterAdd { .. }
-            | RiscOp::Scatter { .. } => true,
+            | RiscOp::Scatter { .. }
+            // `pad` / `shrink` now materialize a fresh dense contiguous
+            // slot via their kernels (one thread per output element into
+            // the contiguous output buffer), so the result is statically
+            // contiguous like any other kernel output.
+            | RiscOp::Pad { .. }
+            | RiscOp::Shrink { .. } => true,
             RiscOp::Reshape { .. } | RiscOp::Store { .. } => {
                 Self::node_is_statically_contiguous(dag, dag.get(id).unwrap().inputs[0])
             }
-            RiscOp::Permute { .. }
-            | RiscOp::Expand { .. }
-            | RiscOp::Stride { .. }
-            | RiscOp::Pad { .. }
-            | RiscOp::Shrink { .. } => false,
+            RiscOp::Permute { .. } | RiscOp::Expand { .. } | RiscOp::Stride { .. } => false,
         }
     }
 

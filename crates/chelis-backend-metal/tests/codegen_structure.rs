@@ -886,3 +886,124 @@ fn ws2_emit_const_f32_integer_bool_paths_unchanged() {
         "Bool(1.0) must emit `true`: {block}"
     );
 }
+
+// ===========================================================================
+// WS-8A: pad / shrink MSL kernel structural coverage. CI-default; the
+// GPU==eval numeric proof is the manual Mac `gpu_correctness` oracle.
+// ===========================================================================
+
+#[test]
+fn ws8a_pad_emits_msl_kernel_and_two_uniform_launch() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let p = dag.add_node(
+        RiscOp::Pad {
+            padding: vec![(1, 1)],
+            fill: 0.0,
+        },
+        vec![x],
+        vec_f32(6),
+        None,
+    );
+    let stored = dag.add_node(
+        RiscOp::Store { name: "out".into() },
+        vec![p],
+        vec_f32(6),
+        None,
+    );
+    dag.add_root(stored);
+
+    let result = codegen_metal(&dag, "pad_f");
+    let src = &result.mm_source;
+    assert!(
+        src.contains("kernel void k_pad"),
+        "pad must emit an MSL kernel: {src}"
+    );
+    assert!(
+        src.contains("ChelisMovementDims"),
+        "pad kernel must declare the movement-dims uniform struct"
+    );
+    assert!(
+        src.contains("chelis_metal_launch_two_uniforms"),
+        "pad dispatch must bind dims + fill as two uniforms"
+    );
+    assert!(
+        src.contains("constant float& fill"),
+        "f32 pad kernel must take a typed `constant float& fill` parameter"
+    );
+}
+
+#[test]
+fn ws8a_shrink_emits_msl_kernel_and_single_uniform_launch() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
+    let s = dag.add_node(
+        RiscOp::Shrink {
+            bounds: vec![(1, 5)],
+        },
+        vec![x],
+        vec_f32(4),
+        None,
+    );
+    let stored = dag.add_node(
+        RiscOp::Store { name: "out".into() },
+        vec![s],
+        vec_f32(4),
+        None,
+    );
+    dag.add_root(stored);
+
+    let result = codegen_metal(&dag, "shrink_f");
+    let src = &result.mm_source;
+    assert!(
+        src.contains("kernel void k_shrink"),
+        "shrink must emit an MSL kernel: {src}"
+    );
+    assert!(
+        src.contains("ChelisMovementDims"),
+        "shrink kernel must declare the movement-dims uniform struct"
+    );
+    assert!(
+        src.contains("chelis_metal_launch(pso_"),
+        "shrink dispatch must use the single-uniform launch"
+    );
+}
+
+#[test]
+fn ws8a_pad_2d_uses_movement_dims() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        mat_f32(2, 3),
+        None,
+    );
+    let p = dag.add_node(
+        RiscOp::Pad {
+            padding: vec![(1, 0), (0, 2)],
+            fill: 0.0,
+        },
+        vec![x],
+        mat_f32(3, 5),
+        None,
+    );
+    let stored = dag.add_node(
+        RiscOp::Store { name: "out".into() },
+        vec![p],
+        mat_f32(3, 5),
+        None,
+    );
+    dag.add_root(stored);
+
+    let result = codegen_metal(&dag, "pad2d_f");
+    let src = &result.mm_source;
+    // ndim=2, total=15; the dims initializer encodes both src and out shapes.
+    assert!(
+        src.contains("mv_dims_"),
+        "rank-2 pad must emit the movement-dims initializer: {src}"
+    );
+    assert!(
+        src.contains("2u, 15u"),
+        "rank-2 pad dims must carry ndim=2 and total=15: {src}"
+    );
+}

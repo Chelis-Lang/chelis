@@ -2782,3 +2782,204 @@ fn ws_a4_i8_reduce_sum_emits_promoted_kernel_name() {
         result.c_source
     );
 }
+
+// ===========================================================================
+// G16 (WS-8A): pad / shrink GPU == evaluator. The C backend is the numeric
+// oracle (spec/08 §2); each case asserts the HIP GPU result matches the
+// `chelis-ir` evaluator within tolerance, which is what `assert_gpu_matches_eval`
+// checks. Coverage: rank-1 and rank-2 pad/shrink, non-zero fill, and pad over
+// a strided (non-contiguous) source so the source-strides path is exercised.
+// ===========================================================================
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g16_pad_1d_zero_fill_matches_eval() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let p = dag.add_node(
+        RiscOp::Pad {
+            padding: vec![(1, 1)],
+            fill: 0.0,
+        },
+        vec![x],
+        vec_f32(6),
+        None,
+    );
+    dag.add_root(p);
+    assert_gpu_matches_eval(
+        &dag,
+        "g16_pad_1d",
+        &[TestInput::new("x", &[4], &[1.0, 2.0, 3.0, 4.0])],
+    );
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g16_pad_1d_nonzero_fill_matches_eval() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
+    let p = dag.add_node(
+        RiscOp::Pad {
+            padding: vec![(2, 1)],
+            fill: -7.5,
+        },
+        vec![x],
+        vec_f32(6),
+        None,
+    );
+    dag.add_root(p);
+    assert_gpu_matches_eval(
+        &dag,
+        "g16_pad_1d_nonzero",
+        &[TestInput::new("x", &[3], &[10.0, 20.0, 30.0])],
+    );
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g16_pad_2d_asymmetric_matches_eval() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        mat_f32(2, 3),
+        None,
+    );
+    let p = dag.add_node(
+        RiscOp::Pad {
+            // before/after per axis: row axis (1,0), col axis (0,2) →
+            // output is 3x5.
+            padding: vec![(1, 0), (0, 2)],
+            fill: 0.0,
+        },
+        vec![x],
+        mat_f32(3, 5),
+        None,
+    );
+    dag.add_root(p);
+    assert_gpu_matches_eval(
+        &dag,
+        "g16_pad_2d",
+        &[TestInput::new(
+            "x",
+            &[2, 3],
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        )],
+    );
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g16_pad_over_strided_source_matches_eval() {
+    // The source is a strided view (every other element), so the pad
+    // kernel must read through the source strides, not assume contiguity.
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
+    let s = dag.add_node(
+        RiscOp::Stride { strides: vec![2] },
+        vec![x],
+        vec_f32(3),
+        None,
+    );
+    let p = dag.add_node(
+        RiscOp::Pad {
+            padding: vec![(1, 1)],
+            fill: 9.0,
+        },
+        vec![s],
+        vec_f32(5),
+        None,
+    );
+    dag.add_root(p);
+    assert_gpu_matches_eval(
+        &dag,
+        "g16_pad_strided_src",
+        &[TestInput::new("x", &[6], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])],
+    );
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g16_shrink_1d_matches_eval() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
+    let s = dag.add_node(
+        RiscOp::Shrink {
+            bounds: vec![(1, 5)],
+        },
+        vec![x],
+        vec_f32(4),
+        None,
+    );
+    dag.add_root(s);
+    assert_gpu_matches_eval(
+        &dag,
+        "g16_shrink_1d",
+        &[TestInput::new("x", &[6], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])],
+    );
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g16_shrink_2d_matches_eval() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        mat_f32(3, 4),
+        None,
+    );
+    let s = dag.add_node(
+        RiscOp::Shrink {
+            // keep rows [1,3) and cols [0,2) → 2x2 interior crop.
+            bounds: vec![(1, 3), (0, 2)],
+        },
+        vec![x],
+        mat_f32(2, 2),
+        None,
+    );
+    dag.add_root(s);
+    assert_gpu_matches_eval(
+        &dag,
+        "g16_shrink_2d",
+        &[TestInput::new(
+            "x",
+            &[3, 4],
+            &[
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+            ],
+        )],
+    );
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g16_pad_then_shrink_roundtrip_matches_eval() {
+    // pad then shrink the padded margin back off must recover the input;
+    // composing the two kernels exercises both launch paths in one DAG.
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let p = dag.add_node(
+        RiscOp::Pad {
+            padding: vec![(2, 2)],
+            fill: 0.0,
+        },
+        vec![x],
+        vec_f32(8),
+        None,
+    );
+    let s = dag.add_node(
+        RiscOp::Shrink {
+            bounds: vec![(2, 6)],
+        },
+        vec![p],
+        vec_f32(4),
+        None,
+    );
+    dag.add_root(s);
+    assert_gpu_matches_eval(
+        &dag,
+        "g16_pad_shrink_roundtrip",
+        &[TestInput::new("x", &[4], &[3.5, -1.0, 2.25, 8.0])],
+    );
+}

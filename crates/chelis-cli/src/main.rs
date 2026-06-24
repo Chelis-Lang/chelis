@@ -5167,20 +5167,10 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
 
     for node in dag.nodes() {
         match &node.op {
-            chelis_ir::dag::RiscOp::Pad { .. } => {
-                return Err(format!(
-                    "`chelis build --target hip` does not yet support `pad`; lowered node {} requires it",
-                    node.id.0
-                )
-                .into());
-            }
-            chelis_ir::dag::RiscOp::Shrink { .. } => {
-                return Err(format!(
-                    "`chelis build --target hip` does not yet support `shrink`; lowered node {} requires it",
-                    node.id.0
-                )
-                .into());
-            }
+            // `pad` / `shrink` are implemented on the HIP backend (typed
+            // per-output-element kernels). They fall through to codegen;
+            // no reject arm here.
+
             // `reduce_window_*` HIP codegen is deferred (spec §2.3.1). Reject
             // cleanly here rather than reaching the launch-emit `todo!`, which
             // would abort the build with an `internal error` panic.
@@ -5450,23 +5440,10 @@ fn reject_unsupported_metal_ops(
     // a precise allow-list per spec, reject the rest with a structured
     // CLI diagnostic instead of a panic from the kernel templates.
     for node in dag.nodes() {
-        match &node.op {
-            chelis_ir::dag::RiscOp::Pad { .. } => {
-                return Err(format!(
-                    "`chelis build --target metal` does not yet support `pad`; lowered node {} requires it",
-                    node.id.0
-                )
-                .into());
-            }
-            chelis_ir::dag::RiscOp::Shrink { .. } => {
-                return Err(format!(
-                    "`chelis build --target metal` does not yet support `shrink`; lowered node {} requires it",
-                    node.id.0
-                )
-                .into());
-            }
-            _ => {}
-        }
+        // WS-8A: `pad` / `shrink` are implemented on the Metal backend
+        // (typed per-output-element MSL kernels). They fall through to
+        // codegen; no reject arm here. f64 and any out-of-matrix dtype are
+        // still rejected by the precision gate below.
         match node.output_type.precision {
             chelis_types::types::Prim::F32
             | chelis_types::types::Prim::F16

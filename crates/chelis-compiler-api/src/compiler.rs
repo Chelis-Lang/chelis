@@ -1922,26 +1922,11 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
 
     for node in dag.nodes() {
         match &node.op {
-            RiscOp::Pad { .. } => {
-                return Err(stage_error(
-                    "compile",
-                    format!(
-                        "`chelis build --target hip` does not yet support `pad`; lowered node {} requires it",
-                        node.id.0
-                    ),
-                    "unsupported_feature",
-                ));
-            }
-            RiscOp::Shrink { .. } => {
-                return Err(stage_error(
-                    "compile",
-                    format!(
-                        "`chelis build --target hip` does not yet support `shrink`; lowered node {} requires it",
-                        node.id.0
-                    ),
-                    "unsupported_feature",
-                ));
-            }
+            // `pad` / `shrink` are now implemented on the HIP backend
+            // (typed per-output-element kernels, GPU==eval verified by the
+            // `gpu_correctness` manual oracle). No reject arm: they fall
+            // through to codegen.
+
             // `reduce_window_*` HIP codegen is deferred (spec §2.3.1). Reject
             // it cleanly here rather than letting it reach the launch-emit
             // `todo!`, which would abort the build with an `internal error`

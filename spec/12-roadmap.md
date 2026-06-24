@@ -45,8 +45,10 @@ For Phase 0h specifically, the authoritative milestone validation is the release
 MNIST runner in `crates/chelis-e2e`, not `cargo test --workspace` alone.
 
 Phase 2 begins with the documented carry-forward fixes from the shipped Phase 1
-boundary: the remaining HIP `pad`/`shrink` work, symbolic normalized-axis support for
-`layer_norm`/`mean` when needed, and the Deep dotted-path round-trip gap.
+boundary: symbolic normalized-axis support for `layer_norm`/`mean` when needed,
+and the Deep dotted-path round-trip gap. (HIP `pad`/`shrink` codegen, formerly
+on this list, is implemented — verified by the `gpu_correctness` oracle; see
+`spec/08-backends.md` §3 Phase 1a.)
 
 ## Trust stack expansion and reef distribution
 

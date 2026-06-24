@@ -154,7 +154,6 @@ deliverable is met for the shipped models.
 **Known carried-forward limitations:** these are real debt and must stay documented, but
 they do not block Phase 2 language work.
 
-- HIP codegen still does not implement `pad` / `shrink`; no current Phase 1 benchmark model uses them
 - symbolic dimensions are implemented on the stable tensor ABI in both backends, so
   supported Phase 1 models bind batch/sequence-style dims from input metadata at runtime
 - `layer_norm` still requires a concrete normalized-axis extent; symbolic leading dims
@@ -224,9 +223,10 @@ PyTorch for specific workloads. A researcher should be able to write, type-check
 differentiate, compile, train, and debug a model - with AI assistance - using only the
 Chelis toolchain.
 
-**Carry-forward fixes before Phase 2 proper:** symbolic dimensions in both backends,
-HIP `pad`/`shrink`, and the Deep dotted path round-trip gap. These are explicit debt
-from the shipped Phase 1 boundary, not hidden blockers.
+**Carry-forward fixes before Phase 2 proper:** symbolic dimensions in both backends
+and the Deep dotted path round-trip gap. These are explicit debt from the shipped
+Phase 1 boundary, not hidden blockers. (HIP/Metal `pad`/`shrink`, formerly listed
+here, are implemented and verified by the `gpu_correctness` oracle.)
 
 **Critical path:** 2a -> 2b -> 2c. The Tide tooling track (2e -> 2f -> 2g) can run in
 parallel with the type-system track once 2e has enough compiler API surface.
@@ -235,7 +235,7 @@ parallel with the type-system track once 2e has enough compiler API surface.
 
 | Sub-phase | Doc | Summary |
 |---|---|---|
-| Phase 1 carry-forward fixes | [chelis_phase2_plan.md](chelis_phase2_plan.md) | Symbolic dims, HIP `pad`/`shrink`, dotted Deep round-trip |
+| Phase 1 carry-forward fixes | [chelis_phase2_plan.md](chelis_phase2_plan.md) | Symbolic dims, dotted Deep round-trip (HIP/Metal `pad`/`shrink` done — `gpu_correctness` oracle) |
 | 2a: Algebraic Effects | [chelis_phase2_plan.md](chelis_phase2_plan.md) | shipped subset: `Random` / `Resource(D)` boundary effects, `Diff` as capability, `Accum` internal-only |
 | 2b: Linear Types | [chelis_phase2_plan.md](chelis_phase2_plan.md) | Lightweight uniqueness, borrowing, explicit `copy`, safe buffer reuse |
 | 2c: Macro System | [chelis_phase2_plan.md](chelis_phase2_plan.md) | Hygienic expansion before all LLM-facing operations, provenance metadata |

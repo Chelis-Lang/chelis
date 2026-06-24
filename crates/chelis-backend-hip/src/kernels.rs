@@ -189,6 +189,21 @@ fn build_array(var_name: &str, prefix: &str, suffix: &str) -> String {
     format!("  int {var_name}[] = {{ {} }};", elems.join(", "))
 }
 
+/// Generic per-axis `int` parameter list `{prefix}_{suffix}0 .. {suffix}7`.
+/// Used by `pad`/`shrink` for the per-axis low-padding / start-offset /
+/// source-shape vectors that are not strides or output shapes.
+fn int_params(prefix: &str, suffix: &str) -> String {
+    (0..MAX_DIM)
+        .map(|i| format!("int {prefix}_{suffix}{i}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Build a local `int[]` array from the [`int_params`] declarations.
+fn build_int_array(var_name: &str, prefix: &str, suffix: &str) -> String {
+    build_array(var_name, prefix, suffix)
+}
+
 /// WS-A2 + WS-A4: dtype-parameterized binary elementwise op (add, mul).
 /// `elem_c_ty` is the C++ type spelling (e.g. `float`, `double`,
 /// `int8_t`, `int16_t`) used for both operand pointers and the result
@@ -384,6 +399,106 @@ extern \"C\" __global__ void {kernel_name}(
         a_strides = stride_params("a"),
         out_shape = shape_params("out"),
         build_a_s = build_array("a_s", "a", "s"),
+        build_out_sh = build_array("out_sh", "out", "sh"),
+    )
+}
+
+/// Generate kernel source for `pad` (typed; full active dtype set).
+///
+/// One thread per output element. The output buffer is the materialized
+/// contiguous slot, so thread `i` is the output flat index. Decompose it
+/// into per-axis output indices over the output shape, subtract the
+/// per-axis low padding to recover the source index, and copy the source
+/// element if every source index is in `[0, src_shape[d])`. Otherwise
+/// write the `fill` value. Mirrors the C backend's `emit_pad` semantics
+/// and the evaluator's `pad` (spec/05-risc-primitives.md), but expressed
+/// as a scatter-free per-output-element gather so concurrent threads
+/// never race.
+///
+/// `elem_c_ty` is the C++ scalar spelling (`float`, `double`, `int8_t`,
+/// …) chosen by the launch site via `dtype_c_type`. The kernel takes the
+/// source strides + source shape + per-axis low offsets as runtime
+/// arguments, so a single kernel per dtype serves every pad node of that
+/// dtype regardless of rank or padding amounts.
+pub fn pad_typed(kernel_name: &str, elem_c_ty: &str) -> String {
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const {elem_c_ty} *a, {a_strides}, int a_ndim, int a_size,
+    {pad_lo}, {src_sh},
+    {elem_c_ty} fill,
+    {elem_c_ty} *out, {out_shape}, int out_ndim, int out_size) {{
+{build_a_s}
+{build_pad_lo}
+{build_src_sh}
+{build_out_sh}
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+  int out_indices[{MAX_DIM}];
+  chelis_flat_to_indices(i, out_sh, out_ndim, out_indices);
+  int src_indices[{MAX_DIM}];
+  int in_source = 1;
+  for (int d = 0; d < out_ndim; d++) {{
+    int s = out_indices[d] - pad_lo[d];
+    src_indices[d] = s;
+    if (s < 0 || s >= src_sh[d]) {{
+      in_source = 0;
+    }}
+  }}
+  if (in_source) {{
+    int idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(src_indices, a_s, a_ndim), a_size, 1);
+    out[i] = a[idx];
+  }} else {{
+    out[i] = fill;
+  }}
+}}
+",
+        a_strides = stride_params("a"),
+        pad_lo = int_params("pad", "lo"),
+        src_sh = int_params("src", "sh"),
+        out_shape = shape_params("out"),
+        build_a_s = build_array("a_s", "a", "s"),
+        build_pad_lo = build_int_array("pad_lo", "pad", "lo"),
+        build_src_sh = build_int_array("src_sh", "src", "sh"),
+        build_out_sh = build_array("out_sh", "out", "sh"),
+    )
+}
+
+/// Generate kernel source for `shrink` (typed; full active dtype set).
+///
+/// One thread per output element over the materialized contiguous output
+/// slot. The shrink output is always strictly inside the source, so every
+/// output index maps to a valid source element: `src_index[d] =
+/// out_index[d] + start[d]` (the `start` of each axis bound). Mirrors the
+/// C backend's `emit_shrink` and the evaluator's `shrink`
+/// (spec/05-risc-primitives.md).
+pub fn shrink_typed(kernel_name: &str, elem_c_ty: &str) -> String {
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const {elem_c_ty} *a, {a_strides}, int a_ndim, int a_size,
+    {shrink_start},
+    {elem_c_ty} *out, {out_shape}, int out_ndim, int out_size) {{
+{build_a_s}
+{build_start}
+{build_out_sh}
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+  int out_indices[{MAX_DIM}];
+  chelis_flat_to_indices(i, out_sh, out_ndim, out_indices);
+  int src_indices[{MAX_DIM}];
+  for (int d = 0; d < out_ndim; d++) {{
+    src_indices[d] = out_indices[d] + shrink_start[d];
+  }}
+  int idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(src_indices, a_s, a_ndim), a_size, 1);
+  out[i] = a[idx];
+}}
+",
+        a_strides = stride_params("a"),
+        shrink_start = int_params("shrink", "start"),
+        out_shape = shape_params("out"),
+        build_a_s = build_array("a_s", "a", "s"),
+        build_start = build_int_array("shrink_start", "shrink", "start"),
         build_out_sh = build_array("out_sh", "out", "sh"),
     )
 }

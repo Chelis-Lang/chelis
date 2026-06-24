@@ -77,7 +77,10 @@ Current implementation:
 - naive reductions (one thread per output element, inner loop over axis)
 - `chelis_gpu_free` for allocations, `chelis_gpu_free_view` for views
 - `chelis build app.ch --target hip` emits compilable `*_hip.cpp` host output
-- `pad` and `shrink` remain deferred to a later Phase 1 iteration
+- `pad` and `shrink` are implemented as typed per-output-element kernels
+  (`kernel_pad{_dtype}` / `kernel_shrink{_dtype}`); GPU output is verified
+  equal to the `chelis-ir` evaluator by the `g16_pad_*` / `g16_shrink_*`
+  cases in the `gpu_correctness` manual oracle
 
 ### Phase 1b: Kernel Fusion
 
@@ -190,7 +193,6 @@ The shipped fixed-workload Phase 1 deliverable is met: the benchmark models used
 Phase 1e compile and run on both backends, and the executable-grammar surface from 1f
 is shipped. Known carried-forward limitations remain explicit:
 
-- HIP does not yet implement `pad` / `shrink`; no current Phase 1 benchmark model uses them
 - symbolic dimensions are implemented on the stable tensor ABI for both backends:
   generated functions bind symbolic names from input tensor metadata at runtime and
   validate repeated occurrences across all participating inputs
@@ -259,8 +261,9 @@ model that mirrors HIP.
 `tests/{codegen_structure,codegen_adversarial,gpu_correctness}.rs`.
 
 `chelis build --target metal` is wired in `crates/chelis-cli/src/main.rs` alongside
-`--target c` and `--target hip`. Reject passes deny `pad`/`shrink` (the IR ops
-the M-phase emitter doesn't yet handle). Per-dtype admit/reject decisions for
+`--target c` and `--target hip`. `pad`/`shrink` are implemented as typed MSL
+movement kernels (WS-8A) and pass through to codegen; the reject pass no longer
+denies them. Per-dtype admit/reject decisions for
 the Metal backend are pinned in `spec/04-type-system.md` §1.1.3 (the
 per-backend dtype matrix); the CLI gate, the IR validation pass, and the
 codegen entry point each consult that matrix. f64 is **hard-rejected** on
@@ -359,6 +362,30 @@ This is the single oracle for M2–M6 GPU correctness. MSL fast-math semantics m
 require widened tolerance versus HIP for `exp`/`log`/`sqrt`-heavy kernels;
 specific kernels needing higher precision use `precise::*` qualifiers per-call.
 
+#### Metal numeric-agreement gate (cross-backend oracle)
+
+The C backend is the numeric oracle for every GPU backend (§2). The Metal
+numeric-agreement contract is: for each kernel under test, the Metal GPU
+result must equal the `chelis-ir` evaluator (which the C backend is verified
+against) within the Metal f32 tolerance (`ABS_TOL`/`REL_TOL` in
+`tests/gpu_correctness.rs`, `1e-4` each, widened per fast-math note above).
+`assert_close` in that file is the agreement check.
+
+This gate is **manual and workstation-only** — it is NOT part of default CI,
+because `MTLCreateSystemDefaultDevice` returns null on the macos-latest CI VMs
+(only the compile-and-link `macos-smoke` job, Phase M3, runs in CI). Mirrors
+how the HIP `gpu_correctness` oracle is gated (manual, requires a HIP GPU).
+
+- Owning phase: Phase M6.
+- Command (Apple Silicon Mac with a usable Metal device):
+  `cargo test -p chelis-backend-metal --test gpu_correctness -- --ignored --test-threads=1`
+- Success condition: every `#[ignore]` test passes (exit 0); each asserts
+  Metal GPU == evaluator within tolerance.
+
+WS-8A added `m6_pad_*` / `m6_shrink_*` cases (1-D and 2-D pad/shrink, non-zero
+fill, and a pad→shrink roundtrip) to this gate, mirroring the HIP `g16_*`
+cases one-for-one.
+
 ### Phase M7: Adversarial test surface
 
 `tests/codegen_adversarial.rs` mirrors `crates/chelis-backend-hip/tests/codegen_adversarial.rs`.
@@ -374,7 +401,6 @@ cargo test -p chelis-backend-metal --test codegen_adversarial
 
 ### Carried-forward limitations
 
-- `pad` and `shrink` deferred (mirrors HIP's deferral); enforce via the reject pass
 - `sort`, `argsort`, `cumsum`, `cumprod`, `diagonal`, `trace` not on the GPU path
 - f64 is **hard-rejected** on Metal because Apple Silicon GPUs have no FP64 ALUs;
   software emulation is out of scope. The diagnostic and rationale are pinned in
