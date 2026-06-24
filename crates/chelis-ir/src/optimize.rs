@@ -62,6 +62,7 @@ pub fn constant_fold(dag: &mut Dag) {
                     RiscOp::Abs => Some(v.abs()),
                     RiscOp::Floor => Some(v.floor()),
                     RiscOp::Ceil => Some(v.ceil()),
+                    RiscOp::Round => Some(v.round_ties_even()),
                     _ => None,
                 };
                 if let Some(val) = result {

@@ -873,6 +873,7 @@ impl HipEmitter {
             RiscOp::Abs => Some(format!("kernel_abs_{}", kind_for_node(node).suffix())),
             RiscOp::Floor => Some(format!("kernel_floor_{}", kind_for_node(node).suffix())),
             RiscOp::Ceil => Some(format!("kernel_ceil_{}", kind_for_node(node).suffix())),
+            RiscOp::Round => Some(format!("kernel_round_{}", kind_for_node(node).suffix())),
             RiscOp::UniformLike { .. } => Some(format!(
                 "kernel_uniform_like_{}",
                 kind_for_node(node).suffix()
@@ -1023,6 +1024,14 @@ impl HipEmitter {
                     _ => "kernel_scatter_replace_invalid".into(),
                 })
             }
+            RiscOp::ScatterElements { .. } => {
+                let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
+                Some(match indices_ty.precision {
+                    Prim::Int32 => "kernel_scatter_elements_i32".into(),
+                    Prim::Int64 => "kernel_scatter_elements_i64".into(),
+                    _ => "kernel_scatter_elements_invalid".into(),
+                })
+            }
             RiscOp::FusedElem { .. } => Some(format!("kernel_fused_{}", node.id.0)),
         }
     }
@@ -1122,6 +1131,7 @@ impl HipEmitter {
             RiscOp::Abs => kernels::unary_func(name, "fabsf", elem_for_unary()),
             RiscOp::Floor => kernels::unary_func(name, "floorf", elem_for_unary()),
             RiscOp::Ceil => kernels::unary_func(name, "ceilf", elem_for_unary()),
+            RiscOp::Round => kernels::unary_func(name, "rintf", elem_for_unary()),
             RiscOp::UniformLike { .. } => kernels::uniform_like(name, elem_for_unary()),
             // WS-A4: bind `accumulator` instead of `..`. The fused
             // reduction path is f32-only today (its source kernel
@@ -1249,6 +1259,17 @@ impl HipEmitter {
                     Prim::Int64 => kernels::scatter_replace(name, "long long"),
                     other => panic!(
                         "HIP backend sparse scatter_replace requires int32/int64 indices, got {}",
+                        other.name()
+                    ),
+                }
+            }
+            RiscOp::ScatterElements { .. } => {
+                let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
+                match indices_ty.precision {
+                    Prim::Int32 => kernels::scatter_elements(name, "int"),
+                    Prim::Int64 => kernels::scatter_elements(name, "long long"),
+                    other => panic!(
+                        "HIP backend sparse scatter_elements requires int32/int64 indices, got {}",
                         other.name()
                     ),
                 }
@@ -1398,6 +1419,9 @@ impl HipEmitter {
                 self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
             }
             RiscOp::Ceil => {
+                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
+            }
+            RiscOp::Round => {
                 self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
             }
             RiscOp::UniformLike { low, high, seed } => {
@@ -1576,6 +1600,9 @@ impl HipEmitter {
             }
             RiscOp::Scatter { axis } => {
                 self.emit_scatter_replace_launch(id, *axis, &node.inputs, &node.output_type, dag)
+            }
+            RiscOp::ScatterElements { axis } => {
+                self.emit_scatter_elements_launch(id, *axis, &node.inputs, &node.output_type, dag)
             }
         }
     }
@@ -2084,6 +2111,69 @@ impl HipEmitter {
         self.line(&format!("int t{id}_total = d_t{updates}->size;"));
         self.line(&format!(
             "void *args[] = {{ &d_t{indices}->data, &d_t{updates}->data, &d_t{id}->data, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total }};"
+        ));
+        // Single-thread serial launch preserves last-write-wins order.
+        self.emit_kernel_launch_expr(&format!("mod_{kernel_name}"), kernel_name, "1", "1", "args");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// Launch for ONNX `ScatterElements` (spec §3.5.1). Passes the
+    /// indices shape and the (data-shaped) output shape as `MAX_DIM`
+    /// scalar ints each, plus `ndim`/`axis`/`axis_size`/`total`. Like
+    /// `Scatter`, it launches a single-thread serial kernel to keep
+    /// last-write-wins deterministic.
+    fn emit_scatter_elements_launch(
+        &mut self,
+        id: usize,
+        axis: usize,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: &Dag,
+    ) {
+        let data = inputs[0].0;
+        let indices = inputs[1].0;
+        let updates = inputs[2].0;
+        let data_ty = &dag.get(inputs[0]).unwrap().output_type;
+        let indices_ty = &dag.get(inputs[1]).unwrap().output_type;
+        let updates_ty = &dag.get(inputs[2]).unwrap().output_type;
+        if data_ty.precision != Prim::F32
+            || updates_ty.precision != Prim::F32
+            || ty.precision != Prim::F32
+        {
+            panic!("HIP backend sparse scatter_elements currently supports f32 payloads only");
+        }
+        if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
+            panic!(
+                "HIP backend sparse scatter_elements requires int32/int64 indices, got {}",
+                indices_ty.precision.name()
+            );
+        }
+        let axis_size = Self::emit_dim_info(&data_ty.dims[axis]);
+        let kernel_name = match indices_ty.precision {
+            Prim::Int32 => "kernel_scatter_elements_i32",
+            Prim::Int64 => "kernel_scatter_elements_i64",
+            _ => unreachable!(),
+        };
+
+        self.emit_slot_wrapper(id, ty);
+        self.line("{");
+        self.indent += 1;
+        // Initialize the output from `data`; the kernel overwrites only
+        // the scattered cells, so the remainder must equal `data`.
+        self.line(&format!(
+            "CHELIS_HIP_CHECK(hipMemcpy(d_t{id}->data, d_t{data}->data, d_t{id}->size * chelis_gpu_dtype_size(d_t{id}->dtype), hipMemcpyDeviceToDevice));"
+        ));
+        self.emit_shape_vars(id, "idx", indices);
+        self.emit_shape_vars(id, "out", id);
+        self.line(&format!("int t{id}_ndim = d_t{id}->ndim;"));
+        self.line(&format!("int t{id}_axis = {axis};"));
+        self.line(&format!("int t{id}_axis_size = {axis_size};"));
+        self.line(&format!("int t{id}_total = d_t{updates}->size;"));
+        let idx_sh_refs = self.shape_arg_refs(id, "idx");
+        let out_sh_refs = self.shape_arg_refs(id, "out");
+        self.line(&format!(
+            "void *args[] = {{ &d_t{indices}->data, &d_t{updates}->data, &d_t{id}->data, {idx_sh_refs}, {out_sh_refs}, &t{id}_ndim, &t{id}_axis, &t{id}_axis_size, &t{id}_total }};"
         ));
         // Single-thread serial launch preserves last-write-wins order.
         self.emit_kernel_launch_expr(&format!("mod_{kernel_name}"), kernel_name, "1", "1", "args");
@@ -3089,6 +3179,7 @@ impl HipEmitter {
             | RiscOp::Abs
             | RiscOp::Floor
             | RiscOp::Ceil
+            | RiscOp::Round
             | RiscOp::UniformLike { .. }
             | RiscOp::Dropout { .. }
             | RiscOp::Copy
@@ -3109,6 +3200,7 @@ impl HipEmitter {
             | RiscOp::Gather { .. }
             | RiscOp::ScatterAdd { .. }
             | RiscOp::Scatter { .. }
+            | RiscOp::ScatterElements { .. }
             // `pad` / `shrink` now materialize a fresh dense contiguous
             // slot via their kernels (one thread per output element into
             // the contiguous output buffer), so the result is statically

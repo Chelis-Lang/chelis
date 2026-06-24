@@ -1182,6 +1182,7 @@ pub enum WireFusedStepOp {
     Abs,
     Floor,
     Ceil,
+    Round,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1211,6 +1212,7 @@ pub enum WireRiscOp {
     Abs,
     Floor,
     Ceil,
+    Round,
     UniformLike {
         low: f64,
         high: f64,
@@ -1318,6 +1320,9 @@ pub enum WireRiscOp {
         axis: usize,
     },
     Scatter {
+        axis: usize,
+    },
+    ScatterElements {
         axis: usize,
     },
 }

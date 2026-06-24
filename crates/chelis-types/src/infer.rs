@@ -6209,6 +6209,7 @@ fn is_ir_unary_shape_passthrough_builtin(name: &str) -> bool {
             | "atan"
             | "floor"
             | "ceil"
+            | "round"
             | "not"
             | "softmax"
     )
@@ -6768,7 +6769,7 @@ fn derive_ir_builtin_output_type(expr: &deep::Expr, type_env: &IrTypeEnv) -> Opt
         // equals the input tensor's shape, so it fits the unary
         // passthrough path (positional [3] is the tensor).
         "relu" | "tanh" | "sigmoid" | "gelu" | "silu" | "exp" | "log" | "neg" | "recip"
-        | "sqrt" | "abs" | "sin" | "cos" | "tan" | "atan" | "floor" | "ceil" | "not"
+        | "sqrt" | "abs" | "sin" | "cos" | "tan" | "atan" | "floor" | "ceil" | "round" | "not"
         | "softmax" => derive_unary_shape_passthrough(list, type_env),
         // Shape-preserving binary point-wise: output type == first
         // operand's type. Broadcasting cases are caught by HM

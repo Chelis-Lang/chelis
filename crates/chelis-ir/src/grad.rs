@@ -190,6 +190,12 @@ pub fn grad_dag_checked(
                     reason: AdRejectionReason::PiecewiseConstant,
                 });
             }
+            RiscOp::Round => {
+                return Err(AdError::NotSupported {
+                    op: "round",
+                    reason: AdRejectionReason::PiecewiseConstant,
+                });
+            }
             RiscOp::Scatter { .. } => {
                 // Last-write-wins replace-scatter is fail-closed for
                 // AD: the forward result depends on iteration order at
@@ -198,6 +204,16 @@ pub fn grad_dag_checked(
                 // `spec/05-risc-primitives.md` §3.5.
                 return Err(AdError::NotSupported {
                     op: "scatter_replace",
+                    reason: AdRejectionReason::NonDeterministicAtDuplicateIndices,
+                });
+            }
+            RiscOp::ScatterElements { .. } => {
+                // Element-wise replace-scatter is fail-closed for AD for
+                // the same reason as `Scatter` (last-write-wins at
+                // duplicate indices). See `spec/05-risc-primitives.md`
+                // §3.5.1.
+                return Err(AdError::NotSupported {
+                    op: "scatter_elements",
                     reason: AdRejectionReason::NonDeterministicAtDuplicateIndices,
                 });
             }
@@ -237,6 +253,7 @@ fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Abs => "abs",
         RiscOp::Floor => "floor",
         RiscOp::Ceil => "ceil",
+        RiscOp::Round => "round",
         RiscOp::UniformLike { .. } => "uniform_like",
         RiscOp::Dropout { .. } => "dropout",
         RiscOp::Sum { .. } => "sum",
@@ -266,6 +283,7 @@ fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Gather { .. } => "gather",
         RiscOp::ScatterAdd { .. } => "scatter_add",
         RiscOp::Scatter { .. } => "scatter_replace",
+        RiscOp::ScatterElements { .. } => "scatter_elements",
     }
 }
 
@@ -705,6 +723,14 @@ fn compute_adjoints(
         }
         RiscOp::Ceil => {
             // ceil is non-differentiable — grad_dag_checked will have already
+            // rejected this; this arm is a safety net returning zero gradient.
+            let x = node.inputs[0];
+            let ty = forward.get(x).unwrap().output_type.clone();
+            let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], ty, None);
+            Some(vec![(x, zero)])
+        }
+        RiscOp::Round => {
+            // round is non-differentiable — grad_dag_checked will have already
             // rejected this; this arm is a safety net returning zero gradient.
             let x = node.inputs[0];
             let ty = forward.get(x).unwrap().output_type.clone();
@@ -1390,6 +1416,13 @@ fn compute_adjoints(
             // fail-closed (rather than synthesizing a silent-zero or
             // arbitrary adjoint) for any caller that still uses the
             // un-checked entry point.
+            None
+        }
+        RiscOp::ScatterElements { .. } => {
+            // Element-wise replace-scatter is non-differentiable for the
+            // same reason as `Scatter`; `grad_dag_checked` rejects it
+            // before reaching here. `None` keeps the legacy path
+            // fail-closed.
             None
         }
         RiscOp::BlasMatmul {
@@ -3563,6 +3596,28 @@ mod tests {
             ),
             "ceil must be rejected with structured AdError::NotSupported \
              {{ op: \"ceil\", reason: PiecewiseConstant }}; got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn round_on_grad_path_errors_cleanly() {
+        // round is non-differentiable: grad_dag_checked must return a clean error.
+        let (dag, x, out) =
+            build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Round, vec![a], ty.clone(), None));
+        let err = match grad_dag_checked(&dag, out, &[x]) {
+            Err(e) => e,
+            Ok(_) => panic!("round on the gradient path must error, not succeed"),
+        };
+        assert!(
+            matches!(
+                err,
+                AdError::NotSupported {
+                    op: "round",
+                    reason: AdRejectionReason::PiecewiseConstant,
+                }
+            ),
+            "round must be rejected with structured AdError::NotSupported \
+             {{ op: \"round\", reason: PiecewiseConstant }}; got: {err:?}"
         );
     }
 

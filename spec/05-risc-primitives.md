@@ -112,6 +112,7 @@ runtime reject them during execution; compiled C exits non-zero rather than abor
 | `abs` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise absolute value | `g * sign(x)` (sign = `(x > 0) - (x < 0)`; 0 at x = 0) |
 | `floor` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise floor | non-differentiable (piecewise constant); `grad` rejects it |
 | `ceil` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise ceil | non-differentiable (piecewise constant); `grad` rejects it |
+| `round` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise round to nearest, ties to even (IEEE-754 roundTiesToEven / banker's rounding) | non-differentiable (piecewise constant); `grad` rejects it |
 
 **`recip`.** Native IEEE-754 reciprocal, used inside
 `lower_sigmoid` (and any other reciprocal-shaped lowering) to
@@ -517,9 +518,10 @@ first-class unary primitive `RiscOp::Cos` — see §2.2 — alongside `tan`,
 | `where(cond, a, b)` | `add(mul(cond, a), mul(neg(cond), b))` assuming bool 0/1 |
 
 Implementation note: the compiler now also has first-class specialized sparse
-IR nodes `RiscOp::Gather { axis }`, `RiscOp::ScatterAdd { axis }`, and
-`RiscOp::Scatter { axis }`, with evaluator, verifier, AD, C/HIP backend, and
-wire-schema support. Tensor-lane Surf `gather(values, indices, axis)` lowers
+IR nodes `RiscOp::Gather { axis }`, `RiscOp::ScatterAdd { axis }`,
+`RiscOp::Scatter { axis }`, and `RiscOp::ScatterElements { axis }` (the
+element-wise ONNX `ScatterElements`, §3.5.1), with evaluator, verifier, AD,
+C/HIP backend, and wire-schema support. Tensor-lane Surf `gather(values, indices, axis)` lowers
 directly to `RiscOp::Gather` in the current implementation, avoiding the host
 runtime call and the dense one-hot materialization. The tensor-lane Surf
 builtin `scatter_replace(base, indices, updates, axis)` lowers directly to
@@ -583,6 +585,62 @@ rendered `Display` string is for human consumption only. Programs
 that need a differentiable variant must use `ScatterAdd` (whose
 adjoint is well-defined as `Gather`) or wrap `Scatter` in a
 stop-gradient.
+
+#### 3.5.1 Element-wise scatter (`ScatterElements`)
+
+`Scatter` / `ScatterAdd` above have **hyperplane** semantics: each
+scattered index fans out a whole trailing hyperplane (the inverse of
+`Gather`). ONNX `ScatterElements` instead writes **one element per
+index**, so a third primitive `RiscOp::ScatterElements { axis }`
+exists for it. (ONNX `ScatterND` is the N-D generalization and is not
+covered by this primitive.)
+
+`ScatterElements` takes inputs `(data, indices, updates)` with the
+**element-wise** shape contract:
+
+```
+rank(data) == rank(indices) == rank(updates)
+indices.shape == updates.shape          (NOT data.shape)
+output.shape == data.shape
+```
+
+Precision constraints match the hyperplane scatters: `indices` is
+`int32` or `int64`; `data`, `updates`, and `output` share one
+precision. `axis` is in `0..rank(data)`; on every axis other than
+`axis`, `indices.shape[d] <= data.shape[d]`.
+
+**Semantics.** Initialize `output = data`. Then for each coordinate
+`c` over `indices` (equivalently over `updates`, same shape), let
+`j = indices[c]` and write
+
+```
+output[c[0], ..., c[axis-1], j, c[axis+1], ..., c[rank-1]] = updates[c]
+```
+
+`j` must satisfy `0 <= j < data.shape[axis]`. Note that the index
+substitutes only the `axis` component of `c`; every other component
+of the write coordinate comes from `c` directly. (In the 1-D case the
+element-wise and hyperplane contracts coincide, which is why a 1-D
+`scatter` already round-trips ONNX `ScatterElements`.)
+
+**Duplicate-index semantics.** Last-write-wins under the same
+deterministic order as `Scatter`: updates-tensor row-major (C order)
+flat iteration. The C backend emits a single-threaded sequential loop
+and the HIP backend a `<<<1, 1>>>` serial kernel, for the same
+race-freedom reason given for `Scatter`.
+
+**AD policy.** Fail-closed, identical to `Scatter`:
+
+```rust
+AdError::NotSupported {
+    op: "scatter_elements",
+    reason: AdRejectionReason::NonDeterministicAtDuplicateIndices,
+}
+```
+
+The tensor-lane Surf builtin
+`scatter_elements(data, indices, updates, axis)` lowers directly to
+`RiscOp::ScatterElements`.
 
 ### 3.6 Host-Runtime Builders
 
@@ -843,7 +901,7 @@ Lowering:
 Every RISC primitive has a defined adjoint rule (§2). This means `grad` can differentiate through any composition of RISC primitives.
 
 **Non-differentiable primitives:** `cmplt`, `const`, `load` have zero gradient.
-`floor` and `ceil` are piecewise constant and `grad` rejects them with an
+`floor`, `ceil`, and `round` are piecewise constant and `grad` rejects them with an
 `AdRejectionReason::PiecewiseConstant` error rather than silently returning a zero
 gradient. The type system (Phase 2, via the `Diff` effect) will detect when `grad` is
 applied to a function containing non-differentiable operations and report which

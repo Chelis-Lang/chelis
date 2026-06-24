@@ -653,6 +653,7 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         | RiscOp::Abs
         | RiscOp::Floor
         | RiscOp::Ceil
+        | RiscOp::Round
         | RiscOp::UniformLike { .. }
         | RiscOp::Dropout { .. }
         | RiscOp::Copy
@@ -672,7 +673,8 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         | RiscOp::OneHot { .. }
         | RiscOp::Gather { .. }
         | RiscOp::ScatterAdd { .. }
-        | RiscOp::Scatter { .. } => true,
+        | RiscOp::Scatter { .. }
+        | RiscOp::ScatterElements { .. } => true,
         RiscOp::Reshape { .. } | RiscOp::Store { .. } => node
             .inputs
             .first()

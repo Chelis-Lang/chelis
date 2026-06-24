@@ -1923,6 +1923,7 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                         | "abs"
                         | "floor"
                         | "ceil"
+                        | "round"
                         | "relu"
                         | "sigmoid"
                         | "tanh"
@@ -5578,6 +5579,11 @@ impl LowerCtx {
                 let node = self.lower_transcendental(RiscOp::Ceil, x, ty);
                 self.attach_reuse_hint(node, app_span, &[x])
             }
+            "round" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "round input");
+                let node = self.lower_transcendental(RiscOp::Round, x, ty);
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
             "uniform_like" if args.len() == 3 => {
                 let template = self.lower_expr_node(&args[0], "uniform_like template");
                 let low = self.extract_f64_value(&args[1]).unwrap_or(0.0);
@@ -5783,6 +5789,33 @@ impl LowerCtx {
                 self.dag.add_node(
                     RiscOp::Scatter { axis },
                     vec![base, indices, updates],
+                    out_ty,
+                    self.current_span_id.clone(),
+                )
+            }
+            "scatter_elements" if args.len() == 4 => {
+                // Tensor-lane element-wise scatter (ONNX ScatterElements,
+                // spec §3.5.1): lowers directly to
+                // RiscOp::ScatterElements (last-write-wins). The output
+                // type equals the data tensor's type.
+                let data = self.lower_expr_node(&args[0], "scatter_elements data");
+                let indices = self.lower_expr_node(&args[1], "scatter_elements indices");
+                let updates = self.lower_expr_node(&args[2], "scatter_elements updates");
+                let data_rank = self
+                    .dag
+                    .get(data)
+                    .map(|n| n.output_type.dims.len())
+                    .unwrap_or(0);
+                let axis_raw = self.extract_axis_raw(&args[3]);
+                let axis = self.normalize_axis(axis_raw, data_rank, "scatter_elements", &args[3]);
+                let out_ty = self
+                    .dag
+                    .get(data)
+                    .map(|n| n.output_type.clone())
+                    .unwrap_or_else(|| ty.clone());
+                self.dag.add_node(
+                    RiscOp::ScatterElements { axis },
+                    vec![data, indices, updates],
                     out_ty,
                     self.current_span_id.clone(),
                 )
@@ -7484,6 +7517,7 @@ impl LowerCtx {
                         | "abs"
                         | "floor"
                         | "ceil"
+                        | "round"
                         | "relu"
                         | "sigmoid"
                         | "tanh"
@@ -7566,6 +7600,12 @@ impl LowerCtx {
                     )),
                     "ceil" => LoweredValue::Node(self.dag.add_node(
                         RiscOp::Ceil,
+                        vec![current_node],
+                        ty,
+                        self.current_span_id.clone(),
+                    )),
+                    "round" => LoweredValue::Node(self.dag.add_node(
+                        RiscOp::Round,
                         vec![current_node],
                         ty,
                         self.current_span_id.clone(),

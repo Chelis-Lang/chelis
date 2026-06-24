@@ -1617,6 +1617,7 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
                 | "abs"
                 | "floor"
                 | "ceil"
+                | "round"
                 | "uniform_like"
                 | "cmplt"
                 | "not"

@@ -189,6 +189,41 @@ fn issue_197_ceil_in_grad_path_emits_ad_error_not_supported() {
 }
 
 // =====================================================================
+// Negative: round in a grad path emits AdError::NotSupported.
+//
+// round is piecewise-constant like floor/ceil; pre-fix this would
+// silently zero-grad. The non-zero exit is what catches that mode.
+// =====================================================================
+
+#[test]
+fn round_in_grad_path_emits_ad_error_not_supported() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("round_grad.ch");
+    write_file(
+        &path,
+        "def loss(theta: tensor[2, f32]) -> f32 =\n\
+           tensor_to_scalar(sum(round(copy(theta)), 0))\n\
+         grad_loss = grad(loss, wrt=(theta))\n\
+         out = grad_loss(to_tensor([1.5, 2.5]))\n",
+    );
+    let output = run_build(&path);
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        !output.status.success(),
+        "round in a grad path must reject the build instead of silently zero-grading; \
+         got success with stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("round"),
+        "round rejection must name the op; got stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("non-differentiable"),
+        "round rejection must include the non-differentiable diagnostic; got stderr={stderr}"
+    );
+}
+
+// =====================================================================
 // Positive: a differentiable body (matmul + sum reductions) still
 // builds cleanly after the switch to `grad_dag_checked`. No regression
 // on the happy path.

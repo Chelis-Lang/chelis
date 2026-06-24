@@ -99,6 +99,7 @@ torch/JAX float upcast.
 | `abs` | `g*sign(x)` (0 at x=0) |
 | `floor` | **non-differentiable** — `grad` rejects (`PiecewiseConstant`) |
 | `ceil` | **non-differentiable** — `grad` rejects (`PiecewiseConstant`) |
+| `round` | round-to-nearest-ties-to-even (banker's rounding); **non-differentiable** — `grad` rejects (`PiecewiseConstant`) |
 
 ### 1.3 Reduction — `spec/05` §2.3
 
@@ -167,10 +168,14 @@ First-class `RiscOp`s with evaluator/verifier/AD/C+HIP support:
 |---|---|---|---|
 | `gather` | `RiscOp::Gather{axis}` | `(&values, &indices, axis) -> tensor` | `ScatterAdd` |
 | `scatter_replace` | `RiscOp::Scatter{axis}` | `(&base, &indices, &updates, axis) -> tensor` | **no_grad** (`NonDeterministicAtDuplicateIndices`) |
+| `scatter_elements` | `RiscOp::ScatterElements{axis}` | `(&data, &indices, &updates, axis) -> tensor` | **no_grad** (`NonDeterministicAtDuplicateIndices`) |
 | _(scatter-add internal)_ | `RiscOp::ScatterAdd{axis}` | — | `Gather` |
 
-`scatter_replace` is last-write-wins with a deterministic row-major order rule; every
-backend (eval/C/HIP) observes it. Distinct from the host-lane `scatter` (§3).
+`scatter_replace` is last-write-wins (hyperplane shape) with a deterministic row-major
+order rule; `scatter_elements` is the ONNX element-wise variant (`indices.shape ==
+updates.shape`, `output.shape == data.shape`, `spec/05` §3.5.1) with the same
+determinism and AD policy. Every backend (eval/C/HIP) observes it. Distinct from the
+host-lane `scatter` (§3).
 
 ---
 
@@ -301,10 +306,10 @@ undefined).
 
 ```
 Tier-1 DAG:   add mul div max_elem cmplt neg recip exp log sin cos tan atan sqrt
-              abs floor ceil sum max_reduce min_reduce prod_reduce argmax_reduce
+              abs floor ceil round sum max_reduce min_reduce prod_reduce argmax_reduce
               argmin_reduce reduce_window_max reduce_window_min reduce_window_sum
               reduce_window_mean reshape permute expand pad shrink stride
-              uniform_like gather scatter_replace
+              uniform_like gather scatter_replace scatter_elements
 Tier-2 DAG:   sub eq neq lt gt lte gte and or not relu sigmoid tanh silu gelu
               softmax normalize mean matmul min_elem layer_norm conv2d
 Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
@@ -341,9 +346,9 @@ primitives (Tier-2 inherit via decomposition).
 - **Differentiable:** all Tier-1 except those below; all Tier-2 except comparisons/logicals.
 - **Zero-gradient by design:** `cmplt` + comparisons (`eq`/`neq`/`lt`/`gt`/`lte`/`gte`),
   `and`/`or`/`not`, `const`, `load`, `uniform_like`.
-- **Non-differentiable — `grad` rejects with a structured `AdError`:** `floor`, `ceil`
-  (`PiecewiseConstant`); `argmax_reduce`, `argmin_reduce` (index output);
-  `scatter_replace` (`NonDeterministicAtDuplicateIndices`).
+- **Non-differentiable — `grad` rejects with a structured `AdError`:** `floor`, `ceil`,
+  `round` (`PiecewiseConstant`); `argmax_reduce`, `argmin_reduce` (index output);
+  `scatter_replace`, `scatter_elements` (`NonDeterministicAtDuplicateIndices`).
 - **No AD (host lane):** every op in §3 — `cumsum`, `sort`, `einsum`, `fold`, `scan`,
   `tensor_scan`, etc. A differentiable path must stay in the DAG lane.
 - `if/then/else` differentiates (chosen branch); loops/recursion do not differentiate

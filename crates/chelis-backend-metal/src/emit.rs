@@ -500,7 +500,8 @@ impl Emitter {
             | RiscOp::Atan
             | RiscOp::Abs
             | RiscOp::Floor
-            | RiscOp::Ceil => self.emit_unary(dag, node),
+            | RiscOp::Ceil
+            | RiscOp::Round => self.emit_unary(dag, node),
 
             // Binary elementwise (M2 first cut: add, mul).
             RiscOp::Add | RiscOp::Mul => self.emit_binary(dag, node),

@@ -268,6 +268,13 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                 // concern not a structural one.
                 verify_scatter_like(node, dag, *axis, "scatter_replace", &mut errors);
             }
+            RiscOp::ScatterElements { axis } => {
+                // Element-wise scatter (ONNX `ScatterElements`,
+                // spec §3.5.1) has a distinct shape contract
+                // (indices.dims == updates.dims; output.dims ==
+                // data.dims; shared rank), so it verifies separately.
+                verify_scatter_elements(node, dag, *axis, &mut errors);
+            }
             RiscOp::Neg
             | RiscOp::Recip
             | RiscOp::Exp
@@ -280,6 +287,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             | RiscOp::Abs
             | RiscOp::Floor
             | RiscOp::Ceil
+            | RiscOp::Round
             | RiscOp::UniformLike { .. }
             | RiscOp::Dropout { .. }
             | RiscOp::Copy
@@ -509,7 +517,8 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             | RiscOp::Atan
             | RiscOp::Abs
             | RiscOp::Floor
-            | RiscOp::Ceil => {
+            | RiscOp::Ceil
+            | RiscOp::Round => {
                 if arity == 1
                     && let Some(input) = dag.get(node.inputs[0])
                     && !input.output_type.precision.is_float()
@@ -1004,6 +1013,75 @@ fn verify_scatter_like(
                     node.id.0, updates.output_type.dims, expected_updates
                 ));
             }
+        }
+    }
+}
+
+/// Verify the ONNX `ScatterElements` structural contract
+/// (`spec/05-risc-primitives.md` §3.5.1). Distinct from
+/// [`verify_scatter_like`]: `data`, `indices`, and `updates` share a
+/// rank, `indices.dims == updates.dims`, and `output.dims ==
+/// data.dims`.
+fn verify_scatter_elements(
+    node: &crate::dag::DagNode,
+    dag: &Dag,
+    axis: usize,
+    errors: &mut Vec<String>,
+) {
+    let label = "scatter_elements";
+    let arity = node.inputs.len();
+    if arity != 3 {
+        errors.push(format!(
+            "{label} at node {} has {} inputs (expected 3)",
+            node.id.0, arity
+        ));
+        return;
+    }
+    if let (Some(data), Some(indices), Some(updates)) = (
+        dag.get(node.inputs[0]),
+        dag.get(node.inputs[1]),
+        dag.get(node.inputs[2]),
+    ) {
+        if !matches!(indices.output_type.precision, Prim::Int32 | Prim::Int64) {
+            errors.push(format!(
+                "{label} at node {} requires int32/int64 indices, got {:?}",
+                node.id.0, indices.output_type.precision
+            ));
+        }
+        if updates.output_type.precision != data.output_type.precision {
+            errors.push(format!(
+                "{label} at node {} update precision {:?} must match data precision {:?}",
+                node.id.0, updates.output_type.precision, data.output_type.precision
+            ));
+        }
+        if node.output_type != data.output_type {
+            errors.push(format!(
+                "{label} at node {} output type must match data",
+                node.id.0
+            ));
+        }
+        if indices.output_type.dims != updates.output_type.dims {
+            errors.push(format!(
+                "{label} at node {} requires indices.dims == updates.dims, got {:?} vs {:?}",
+                node.id.0, indices.output_type.dims, updates.output_type.dims
+            ));
+        }
+        if indices.output_type.dims.len() != data.output_type.dims.len() {
+            errors.push(format!(
+                "{label} at node {} requires data, indices, and updates to share a rank: \
+                 data rank {} vs indices rank {}",
+                node.id.0,
+                data.output_type.dims.len(),
+                indices.output_type.dims.len()
+            ));
+        }
+        if axis >= data.output_type.dims.len() {
+            errors.push(format!(
+                "{label} at node {} has axis {} out of bounds for rank {}",
+                node.id.0,
+                axis,
+                data.output_type.dims.len()
+            ));
         }
     }
 }

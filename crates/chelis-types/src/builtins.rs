@@ -27,6 +27,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "abs",
     "floor",
     "ceil",
+    "round",
     "uniform_like",
     "cmplt",
     "sub",
@@ -148,6 +149,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "gather",
     "scatter",
     "scatter_replace",
+    "scatter_elements",
     "where",
     "cumsum",
     "sort",
@@ -195,9 +197,9 @@ pub fn shape_class(name: &str) -> ShapeClass {
         // for comparisons/logical). No axis argument, no reordering.
         "add" | "mul" | "sub" | "div" | "mod" | "max_elem" | "min_elem" | "neg" | "recip"
         | "exp" | "log" | "sin" | "sqrt" | "cos" | "tan" | "atan" | "abs" | "floor" | "ceil"
-        | "relu" | "sigmoid" | "tanh" | "silu" | "gelu" | "not" | "clamp" | "uniform_like"
-        | "where" | "eq" | "neq" | "lt" | "gt" | "lte" | "gte" | "cmplt" | "bitand" | "bitor"
-        | "bitxor" | "shl" | "shr" | "and" | "or" => ShapeClass::Identity,
+        | "round" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu" | "not" | "clamp"
+        | "uniform_like" | "where" | "eq" | "neq" | "lt" | "gt" | "lte" | "gte" | "cmplt"
+        | "bitand" | "bitor" | "bitxor" | "shl" | "shr" | "and" | "or" => ShapeClass::Identity,
         // Named-axis reductions: address the reduced axis by name and drop
         // exactly it, carrying the surviving named axes through (Tier-3 §4.5.3).
         // Restricted to `sum`/`mean`: these lower through the tensor-DAG backend
@@ -716,6 +718,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_unop("abs", &mut env, &mut vg);
     tensor_unop("floor", &mut env, &mut vg);
     tensor_unop("ceil", &mut env, &mut vg);
+    tensor_unop("round", &mut env, &mut vg);
     tensor_with_bounds("uniform_like", &mut env, &mut vg);
 
     cmplt_sig("cmplt", &mut env, &mut vg);
@@ -1076,6 +1079,11 @@ pub fn builtin_env() -> (Env, VarGen) {
     // host-lane `scatter(base, indices, updates, axis, mode)` which
     // remains the pentaop form with a string mode argument.
     generic_quadop("scatter_replace", &mut env, &mut vg);
+    // scatter_elements is the tensor-lane sparse builtin that lowers to
+    // RiscOp::ScatterElements (ONNX ScatterElements, spec §3.5.1):
+    // (data, indices, updates, axis). Same arity as scatter_replace but
+    // with the element-wise shape contract enforced at IR verify time.
+    generic_quadop("scatter_elements", &mut env, &mut vg);
     generic_triop_all_borrow("where", &mut env, &mut vg);
     generic_binop_first_borrow("cumsum", &mut env, &mut vg);
     generic_binop_first_borrow("sort", &mut env, &mut vg);
@@ -1233,6 +1241,7 @@ mod tests {
             "abs",
             "floor",
             "ceil",
+            "round",
             "relu",
             "sigmoid",
             "tanh",

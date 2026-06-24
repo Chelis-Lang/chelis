@@ -146,6 +146,10 @@ pub fn unary_func(op: &chelis_ir::dag::RiscOp) -> Option<&'static str> {
         RiscOp::Abs => Some("fabs"),
         RiscOp::Floor => Some("floor"),
         RiscOp::Ceil => Some("ceil"),
+        // MSL `rint` rounds to nearest, ties to even, matching the
+        // evaluator's `f64::round_ties_even` (not `round`, which is
+        // ties-away-from-zero).
+        RiscOp::Round => Some("rint"),
         _ => None,
     }
 }

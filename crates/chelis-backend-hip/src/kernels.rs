@@ -157,6 +157,7 @@ impl ElemKind {
                 "fabsf" => "fabs".into(),
                 "floorf" => "floor".into(),
                 "ceilf" => "ceil".into(),
+                "rintf" => "rint".into(),
                 "fmaxf" => "fmax".into(),
                 "fminf" => "fmin".into(),
                 other => other.to_string(),
@@ -952,6 +953,11 @@ fn fused_step_lines(
                 let f = kind.func("ceilf");
                 format!("{f}({a})")
             }
+            FusedStepOp::Round => {
+                let a = resolve_fused_input(&step.input_indices[0]);
+                let f = kind.func("rintf");
+                format!("{f}({a})")
+            }
         };
         step_lines.push(format!("{indent}{ty} v{si} = {expr};"));
     }
@@ -1324,6 +1330,58 @@ extern \"C\" __global__ void {kernel_name}(
   }}
 }}
 "
+    )
+}
+
+/// ONNX `ScatterElements` (spec §3.5.1). Element-wise: `indices` and
+/// `updates` share a shape (`idx_sh`), `out` has the data shape
+/// (`out_sh`), all sharing a rank. For each flat update index `i`, the
+/// kernel decomposes `i` over `idx_sh`, replaces the `axis` coordinate
+/// with `indices[i]`, and writes `updates[i]` at the corresponding
+/// `out_sh` row-major offset. Single-thread serial (`<<<1,1>>>`) to
+/// preserve deterministic last-write-wins at duplicate indices. The two
+/// shapes are passed as `MAX_DIM` scalar ints each (the launch site
+/// reads `d_t->shape[d]`), matching the scalar-param convention used by
+/// the elementwise kernels.
+pub fn scatter_elements(kernel_name: &str, index_ty: &str) -> String {
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const {index_ty} *indices,
+    const float *updates,
+    float *out,
+    {idx_shape},
+    {out_shape},
+    int ndim,
+    int axis,
+    int axis_size,
+    int total) {{
+{build_idx_sh}
+{build_out_sh}
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  int coord[{MAX_DIM}];
+  for (int i = 0; i < total; i++) {{
+    int g = (int)indices[i];
+    if (g < 0 || g >= axis_size) {{
+      CHELIS_GUARD_INDEX(g, axis_size, 4);
+      return;
+    }}
+    chelis_flat_to_indices(i, idx_sh, ndim, coord);
+    coord[axis] = g;
+    int dst = 0;
+    int stride = 1;
+    for (int d = ndim - 1; d >= 0; d--) {{
+      dst += coord[d] * stride;
+      stride *= out_sh[d];
+    }}
+    out[dst] = updates[i];
+  }}
+}}
+",
+        idx_shape = shape_params("idx"),
+        out_shape = shape_params("out"),
+        build_idx_sh = build_array("idx_sh", "idx", "sh"),
+        build_out_sh = build_array("out_sh", "out", "sh"),
     )
 }
 

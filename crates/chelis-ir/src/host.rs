@@ -6666,6 +6666,7 @@ fn actualize_tensor_helper_types(
             | crate::dag::RiscOp::Abs
             | crate::dag::RiscOp::Floor
             | crate::dag::RiscOp::Ceil
+            | crate::dag::RiscOp::Round
             | crate::dag::RiscOp::UniformLike { .. }
             | crate::dag::RiscOp::Dropout { .. }
             | crate::dag::RiscOp::Copy
@@ -7704,7 +7705,8 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
             )))),
             _ => Some(HostType::Unknown),
         },
-        "scatter" | "where" | "cumsum" | "diagonal" | "trace" | "clamp" => arg_tys.first().cloned(),
+        "scatter" | "scatter_replace" | "scatter_elements" | "where" | "cumsum" | "diagonal"
+        | "trace" | "clamp" => arg_tys.first().cloned(),
         "sort" => match arg_tys.first() {
             Some(HostType::Tensor(tensor_ty)) => Some(HostType::Tuple(vec![
                 HostType::Tensor(tensor_ty.clone()),
