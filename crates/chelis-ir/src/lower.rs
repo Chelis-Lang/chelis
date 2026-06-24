@@ -2927,6 +2927,26 @@ fn extract_int_axis(expr: &Expr) -> Option<i64> {
 /// type checker collapses the `expand` *output* dim to `Lit(1)` via
 /// size-1 broadcasting, so the extent must be read from this `shape`
 /// argument's operand, not from the expand node's type.
+/// Strip any chain of `(cast {} <inner> (t-prim {} ...))` wrappers,
+/// returning the innermost non-cast expression. The expand size argument
+/// in the `tensor_full_like` idiom is `cast(var len, int32)`; peeling the
+/// cast reaches the bare `var len` so [`bare_var_name`] /
+/// [`shape_app_operand_axis`] can match it (chelis#369, mirroring the
+/// `cast`-strip already in [`shape_app_operand_axis`]).
+fn strip_cast_wrappers(expr: &Expr) -> &Expr {
+    let mut current = expr;
+    while let Expr::List(list, _) = current {
+        if get_tag(list) == Some("cast")
+            && let Some(inner) = list.elements.get(2)
+        {
+            current = inner;
+        } else {
+            break;
+        }
+    }
+    current
+}
+
 fn shape_app_operand_axis(expr: &Expr) -> Option<(&Expr, usize)> {
     let Expr::List(list, _) = expr else {
         return None;
@@ -3389,6 +3409,17 @@ struct LowerCtx {
     dag: Dag,
     bindings: HashMap<String, LoweredValue>,
     list_bindings: HashMap<String, Expr>,
+    /// chelis#369: `let`-bound names whose value is a `shape(operand,
+    /// axis)` application, keyed by the bound name and holding the raw
+    /// `shape(...)` Deep `Expr`. The canonical `tensor_full_like` idiom
+    /// writes `len = shape(x, 0)` then `expand(s, 0, cast(len, int32))`,
+    /// so the `expand` size argument is a `var len` reference, not a
+    /// direct `shape(...)` app. Without this map the size-recovery path
+    /// [`Self::shape_app_operand_axis_resolved`] cannot see through the
+    /// `let` indirection and the extent silently defaults to `Lit(1)`,
+    /// producing the `Lit(n) vs Lit(1)` backward-DAG verification failure.
+    /// Saved/restored across binding scopes exactly like `list_bindings`.
+    shape_bindings: HashMap<String, Expr>,
     local_callables: HashMap<String, Expr>,
     program_types: HashMap<String, TensorType>,
     program_defs: HashMap<String, Expr>,
@@ -3464,6 +3495,7 @@ impl LowerCtx {
             dag: Dag::new(),
             bindings: HashMap::new(),
             list_bindings: HashMap::new(),
+            shape_bindings: HashMap::new(),
             local_callables: HashMap::new(),
             program_types,
             program_defs,
@@ -4301,6 +4333,7 @@ impl LowerCtx {
         }
         let saved = self.bindings.clone();
         let saved_list_bindings = self.list_bindings.clone();
+        let saved_shape_bindings = self.shape_bindings.clone();
         let saved_callables = self.local_callables.clone();
         let saved_fn_typed_params = self.fn_typed_params.clone();
 
@@ -4322,6 +4355,19 @@ impl LowerCtx {
                         self.list_bindings
                             .insert(name.clone(), bind_kids[i + 1].clone());
                     }
+                    // chelis#369: remember a `len = shape(operand, axis)`
+                    // binding so a later `expand(s, axis, cast(len, int32))`
+                    // can recover the broadcast extent through the `let`
+                    // indirection (the `tensor_full_like` idiom). A
+                    // re-binding of `name` to anything else must drop any
+                    // stale shape entry so shadowing never recovers a wrong
+                    // extent.
+                    if shape_app_operand_axis(&bind_kids[i + 1]).is_some() {
+                        self.shape_bindings
+                            .insert(name.clone(), bind_kids[i + 1].clone());
+                    } else {
+                        self.shape_bindings.remove(name);
+                    }
                     if let Some(callable) = self.callable_binding_expr(&bind_kids[i + 1]) {
                         self.local_callables.insert(name.clone(), callable);
                     } else {
@@ -4336,6 +4382,7 @@ impl LowerCtx {
         let result = self.lower_expr(&elems[3]);
         self.bindings = saved; // Restore scope
         self.list_bindings = saved_list_bindings;
+        self.shape_bindings = saved_shape_bindings;
         self.local_callables = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
         result
@@ -4878,6 +4925,7 @@ impl LowerCtx {
         };
         let saved = self.bindings.clone();
         let saved_list_bindings = self.list_bindings.clone();
+        let saved_shape_bindings = self.shape_bindings.clone();
         let saved_callables = self.local_callables.clone();
         let saved_fn_typed_params = self.fn_typed_params.clone();
         let saved_dim_substitutions = self.dim_substitutions.clone();
@@ -5021,6 +5069,7 @@ impl LowerCtx {
         }
         self.bindings = saved;
         self.list_bindings = saved_list_bindings;
+        self.shape_bindings = saved_shape_bindings;
         self.local_callables = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
         self.dim_substitutions = saved_dim_substitutions;
@@ -5041,6 +5090,7 @@ impl LowerCtx {
         };
         let saved = self.bindings.clone();
         let saved_list_bindings = self.list_bindings.clone();
+        let saved_shape_bindings = self.shape_bindings.clone();
         let saved_callables = self.local_callables.clone();
         let saved_fn_typed_params = self.fn_typed_params.clone();
         for (name, arg_id) in param_names.iter().zip(args.iter().cloned()) {
@@ -5059,6 +5109,7 @@ impl LowerCtx {
         }
         self.bindings = saved;
         self.list_bindings = saved_list_bindings;
+        self.shape_bindings = saved_shape_bindings;
         self.local_callables = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
         result
@@ -7470,11 +7521,44 @@ impl LowerCtx {
     /// the symbolic dim it declares loses its source (silent wrong shape in
     /// the backend).
     fn dim_expr_from_shape_arg_with_source(&mut self, expr: &Expr) -> Option<(DimExpr, NodeId)> {
-        let (operand, axis) = shape_app_operand_axis(expr)?;
-        let operand_id = self.lower_expr(operand).as_single_node()?;
+        let (operand, axis) = self.shape_app_operand_axis_resolved(expr)?;
+        let operand_id = self.lower_expr(&operand).as_single_node()?;
         let operand_ty = self.dag.get(operand_id)?.output_type.clone();
         let dim = operand_ty.dims.get(axis)?;
         Some((DimExpr::from(dim), operand_id))
+    }
+
+    /// chelis#369: like the free [`shape_app_operand_axis`], but also
+    /// resolves a `let`-bound shape name. The canonical `tensor_full_like`
+    /// idiom is
+    ///
+    /// ```text
+    ///   len  = shape(x, 0)
+    ///   twos = expand(scalar_to_tensor(c), 0, cast(len, int32))
+    /// ```
+    ///
+    /// so the `expand` size argument is `cast(var len, int32)`, NOT a
+    /// direct `shape(...)` app. The bare [`shape_app_operand_axis`] strips
+    /// the `cast`, reaches `var len`, fails to match a `shape` builtin, and
+    /// returns `None` — at which point the caller silently defaults the
+    /// extent to `Lit(1)`, the `Lit(n) vs Lit(1)` backward-DAG failure this
+    /// issue tracks. Here, when the stripped expression is a `var <name>`
+    /// recorded in [`Self::shape_bindings`] as a `shape(operand, axis)`
+    /// binding, recover the operand/axis from that bound app instead.
+    ///
+    /// Returns the *operand* `Expr` by value (cloned from the binding when
+    /// the indirection fired) so a single signature covers both the direct
+    /// and the `let`-bound forms.
+    fn shape_app_operand_axis_resolved(&self, expr: &Expr) -> Option<(Expr, usize)> {
+        if let Some((operand, axis)) = shape_app_operand_axis(expr) {
+            return Some((operand.clone(), axis));
+        }
+        // Strip any `cast(..., int32)` wrappers to reach a bare `var name`,
+        // then follow the recorded `let len = shape(...)` binding.
+        let name = bare_var_name(strip_cast_wrappers(expr))?;
+        let bound = self.shape_bindings.get(&name)?;
+        let (operand, axis) = shape_app_operand_axis(bound)?;
+        Some((operand.clone(), axis))
     }
 
     fn lower_handle_effect(&mut self, elems: &[Expr]) -> LoweredValue {
@@ -7659,6 +7743,7 @@ impl LowerCtx {
         }
         let saved = self.bindings.clone();
         let saved_list_bindings = self.list_bindings.clone();
+        let saved_shape_bindings = self.shape_bindings.clone();
         let saved_callables = self.local_callables.clone();
         let saved_fn_typed_params = self.fn_typed_params.clone();
 
@@ -7685,6 +7770,7 @@ impl LowerCtx {
         let result = self.lower_expr(&elems[3]);
         self.bindings = saved; // Restore scope
         self.list_bindings = saved_list_bindings;
+        self.shape_bindings = saved_shape_bindings;
         self.local_callables = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
         result
@@ -8695,6 +8781,142 @@ mod tests {
             dims,
             vec![DimInfo::Lit(2)],
             "literal expand output must be tensor[2]; got {dims:?}"
+        );
+    }
+
+    /// Build a `LowerCtx` with `x: tensor[<size>, f32]` pre-bound, lower
+    /// the multi-statement Deep `body_src` (a `let`/`bind` chain), and
+    /// return the resulting DAG. Mirrors how the body of a `def f(x) = {
+    /// len = shape(x, 0); ... }` lowers with `x` already a parameter
+    /// binding — the chelis#369 context where the `expand` size argument is
+    /// a `var len` reference, not a direct `shape(...)` app.
+    fn lower_body_with_bound_x(size: usize, body_src: &str) -> Dag {
+        let x_ty = TensorType {
+            dims: vec![DimInfo::Lit(size)],
+            precision: chelis_types::types::Prim::F32,
+        };
+        let mut ctx = LowerCtx::new(
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            LinearityInfo::default(),
+        );
+        let x = ctx
+            .dag
+            .add_node(RiscOp::Load { name: "x".into() }, vec![], x_ty, None);
+        ctx.bindings.insert("x".into(), LoweredValue::Node(x));
+        let expr = chelis_deep::parser::parse_str(body_src).expect("parse body");
+        let _ = ctx.lower_expr(&expr[0]);
+        ctx.dag
+    }
+
+    /// chelis#369 (the fix): the `tensor_full_like` idiom binds the shape
+    /// read to `len` first — `len = shape(x, 0)` — then uses `cast(len,
+    /// int32)` as the `expand` size. The size recovery must follow the
+    /// `let` indirection back to the bound `shape(x, 0)` and recover the
+    /// concrete extent `3`, NOT silently default to `Concrete(1)` (which
+    /// is what produced the `Lit(3) vs Lit(1)` backward-DAG failure).
+    #[test]
+    fn issue_369_expand_let_bound_shape_recovers_extent() {
+        // (let {} (bind {} len (shape x 0))
+        //   (expand (scalar_to_tensor 3.0) 0 (cast len int32)))
+        let body = r#"
+            (let {}
+                 (bind {}
+                       len
+                       (app {}
+                            (var {} shape)
+                            (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
+                            (cast {} (lit {} 0) (t-prim {} int32))))
+                 (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
+                      (var {} expand)
+                      (app {type: (t-prim {} f32)}
+                           (var {} scalar_to_tensor)
+                           (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
+                      (cast {} (lit {} 0) (t-prim {} int32))
+                      (cast {} (var {} len) (t-prim {} int32))))
+        "#;
+        let dag = lower_body_with_bound_x(3, body);
+        let (size, dims) = only_expand(&dag);
+        assert_eq!(
+            size,
+            DimExpr::Concrete(3),
+            "a `let len = shape(x, 0)`-bound extent must recover x's axis-0 \
+             size 3 through the `let` indirection, not the default 1 \
+             (chelis#369); got {size:?}",
+        );
+        assert_eq!(
+            dims,
+            vec![DimInfo::Lit(3)],
+            "rank-0-source expand output must be tensor[3], not the collapsed \
+             tensor[1] (chelis#369); got {dims:?}",
+        );
+    }
+
+    /// chelis#369 negative parity: the recovery must follow ONLY a genuine
+    /// `let len = shape(...)` binding. A `len` bound to something that is
+    /// NOT a `shape(...)` app must NOT fabricate an extent — the size has
+    /// no static/shape source, so it stays the size-1 default. This proves
+    /// the fix does not blindly trust any `var` in the expand size slot.
+    #[test]
+    fn issue_369_expand_let_bound_non_shape_does_not_recover() {
+        // len is bound to a literal int, not a shape read.
+        let body = r#"
+            (let {}
+                 (bind {} len (cast {} (lit {} 7) (t-prim {} int32)))
+                 (app {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
+                      (var {} expand)
+                      (app {type: (t-prim {} f32)}
+                           (var {} scalar_to_tensor)
+                           (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
+                      (cast {} (lit {} 0) (t-prim {} int32))
+                      (cast {} (var {} len) (t-prim {} int32))))
+        "#;
+        let dag = lower_body_with_bound_x(3, body);
+        let (size, _dims) = only_expand(&dag);
+        // `len` resolves as a symbolic dim name (no shape source), NOT a
+        // recovered concrete extent. The point is that the chelis#369 path
+        // did NOT mis-recover `x`'s size 3 for a non-shape binding.
+        assert_ne!(
+            size,
+            DimExpr::Concrete(3),
+            "a non-shape `let` binding must NOT recover x's size 3; got {size:?}",
+        );
+    }
+
+    /// chelis#369 negative parity: re-binding a name that WAS a shape
+    /// binding to a non-shape value must drop the stale shape entry, so a
+    /// later expand size referencing the re-bound name does not recover the
+    /// old extent. Guards the shadowing path in `lower_let`.
+    #[test]
+    fn issue_369_expand_shadowed_let_binding_does_not_leak_stale_shape() {
+        // len = shape(x, 0)   -- shape binding
+        // len = scalar_to_tensor(2.0)  -- re-bound to a non-shape value
+        // expand(s, 0, cast(len, int32))  -- must NOT recover size 3
+        let body = r#"
+            (let {}
+                 (bind {}
+                       len
+                       (app {}
+                            (var {} shape)
+                            (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
+                            (cast {} (lit {} 0) (t-prim {} int32)))
+                       len
+                       (cast {} (lit {} 5) (t-prim {} int32)))
+                 (app {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
+                      (var {} expand)
+                      (app {type: (t-prim {} f32)}
+                           (var {} scalar_to_tensor)
+                           (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
+                      (cast {} (lit {} 0) (t-prim {} int32))
+                      (cast {} (var {} len) (t-prim {} int32))))
+        "#;
+        let dag = lower_body_with_bound_x(3, body);
+        let (size, _dims) = only_expand(&dag);
+        assert_ne!(
+            size,
+            DimExpr::Concrete(3),
+            "a re-bound (shadowed) `len` must not recover the stale shape \
+             extent 3; got {size:?}",
         );
     }
 
@@ -9922,6 +10144,126 @@ mod tests {
             vec![0.0, 0.0, 1.0, 1.0],
             "subgradient must route to each column's argmax (issue #320)",
         );
+    }
+
+    /// chelis#369 end-to-end: the `tensor_full_like` loss body — `len =
+    /// shape(x, 0); twos = expand(scalar_to_tensor(2.0), 0, cast(len,
+    /// int32)); sum(mul(x, twos), 0)` — must construct a valid backward DAG
+    /// and eval to the analytic gradient. `loss(x) = sum(2*x)`, so `df/dx =
+    /// [2, 2, 2]`. Before the fix the `let`-bound `len` defaulted the expand
+    /// extent to `Lit(1)`, so the forward `mul(x, twos)` mixed `tensor[3]`
+    /// with `tensor[1]` and `grad_dag_checked` rejected with the `Lit(3) vs
+    /// Lit(1)` verification failure. This drives the REAL front-end lowerer
+    /// (where the bug lives), then grad + eval.
+    #[test]
+    fn issue_369_grad_eval_let_bound_fulllike_end_to_end() {
+        use crate::eval::{TensorValue, eval_tensor};
+        use crate::grad::grad_dag_checked;
+
+        // `def loss(x: tensor[3, f32]) = {
+        //    len  = shape(x, 0)
+        //    twos = expand(scalar_to_tensor(2.0), 0, cast(len, int32))
+        //    sum(mul(x, twos), 0) }`  -- the exact `tensor_full_like` shape.
+        let body = r#"
+            (let {}
+                 (bind {}
+                       len
+                       (app {}
+                            (var {} shape)
+                            (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
+                            (cast {} (lit {} 0) (t-prim {} int32))))
+                 (let {}
+                      (bind {}
+                            twos
+                            (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
+                                 (var {} expand)
+                                 (app {type: (t-prim {} f32)}
+                                      (var {} scalar_to_tensor)
+                                      (cast {type: (t-prim {} f32)} (lit {} 2.0) (t-prim {} f32)))
+                                 (cast {} (lit {} 0) (t-prim {} int32))
+                                 (cast {} (var {} len) (t-prim {} int32))))
+                      (app {type: (t-tensor {} (t-prim {} f32))}
+                           (var {} sum)
+                           (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
+                                (var {} mul)
+                                (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
+                                (var {} twos))
+                           (cast {} (lit {} 0) (t-prim {} int32)))))
+        "#;
+        let dag = lower_body_with_bound_x(3, body);
+        // The loss is the scalar `Sum` over `mul(x, twos)`.
+        let loss = dag
+            .nodes()
+            .iter()
+            .find(|n| matches!(n.op, RiscOp::Sum { .. }))
+            .expect("loss sum node")
+            .id;
+        let x_node = dag
+            .nodes()
+            .iter()
+            .find(|n| matches!(&n.op, RiscOp::Load { name } if name.as_str() == "x"))
+            .expect("x load")
+            .id;
+        let result = grad_dag_checked(&dag, loss, &[x_node]).unwrap_or_else(|e| {
+            panic!("grad through let-bound tensor_full_like must construct (chelis#369); got {e:?}")
+        });
+        let grad_x = result.grad_nodes[&x_node];
+
+        // Analytic: df/dx = [2, 2, 2] for any x.
+        let mut inputs = std::collections::HashMap::new();
+        inputs.insert(
+            "x".to_string(),
+            TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
+        );
+        let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
+        assert_eq!(
+            vals[&grad_x].data,
+            vec![2.0, 2.0, 2.0],
+            "d sum(2x) / dx must be [2, 2, 2] (chelis#369)",
+        );
+        assert_eq!(
+            vals[&grad_x].shape,
+            vec![3],
+            "gradient must be tensor[3] (chelis#369)",
+        );
+
+        // Finite-difference cross-check of the analytic gradient against the
+        // forward loss DAG (backend-numerics discipline).
+        let base = [0.7f64, -1.3, 2.1];
+        let analytic = {
+            let mut ip = std::collections::HashMap::new();
+            ip.insert(
+                "x".to_string(),
+                TensorValue::from_vec(vec![3], base.to_vec()),
+            );
+            eval_tensor(&result.dag, &ip).expect("analytic grad eval")[&grad_x]
+                .data
+                .clone()
+        };
+        let h = 1e-3;
+        for (j, a) in analytic.iter().enumerate() {
+            let mut plus = base;
+            let mut minus = base;
+            plus[j] += h;
+            minus[j] -= h;
+            let mut ip = std::collections::HashMap::new();
+            ip.insert(
+                "x".to_string(),
+                TensorValue::from_vec(vec![3], plus.to_vec()),
+            );
+            let mut im = std::collections::HashMap::new();
+            im.insert(
+                "x".to_string(),
+                TensorValue::from_vec(vec![3], minus.to_vec()),
+            );
+            let fp = eval_tensor(&dag, &ip).expect("plus eval")[&loss].data[0];
+            let fm = eval_tensor(&dag, &im).expect("minus eval")[&loss].data[0];
+            let numerical = (fp - fm) / (2.0 * h);
+            assert!(
+                (a - numerical).abs() < 1e-3,
+                "finite-diff mismatch at {j}: analytic {a}, numerical {numerical}",
+            );
+        }
     }
 
     /// Issue #320 end-to-end (gather): a windowed `values` operand that
