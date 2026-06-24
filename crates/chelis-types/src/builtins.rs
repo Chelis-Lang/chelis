@@ -1293,6 +1293,71 @@ mod tests {
         assert_eq!(shape_class("expand"), ShapeClass::NameTracked);
     }
 
+    /// Lock the §4 "Complete closed vocabulary" block of
+    /// `docs/CHELIS_SURFACE.md` to `BUILTIN_NAMES`. That section bills
+    /// itself as the audit surface ("diff `BUILTIN_NAMES` against this
+    /// block") and promises to list every name verbatim, so any drift in
+    /// either direction is a documentation bug: a builtin missing from the
+    /// doc (an op that silently fell out of the inventory) or a doc entry
+    /// that is not in the array (`const`/`load`/`dropout` live outside it by
+    /// design — see the §4 preamble — and must not appear in the block).
+    /// `include_str!` makes the doc a compile-time dependency of this test,
+    /// so a moved or deleted file fails loudly instead of skipping.
+    #[test]
+    fn doc_surface_section_4_mirrors_builtin_names() {
+        use std::collections::BTreeSet;
+
+        const DOC: &str = include_str!("../../../docs/CHELIS_SURFACE.md");
+
+        // Isolate the single fenced code block under the "## 4." heading.
+        let after_heading = DOC
+            .split_once("## 4. Complete closed vocabulary")
+            .expect("docs/CHELIS_SURFACE.md must contain the '## 4.' section")
+            .1;
+        let fence_open = after_heading
+            .find("```")
+            .expect("§4 must contain a fenced code block");
+        // Skip the rest of the opening fence line (any info string).
+        let body = &after_heading[fence_open + 3..];
+        let body = &body[body.find('\n').map(|i| i + 1).unwrap_or(0)..];
+        let block = body
+            .split_once("```")
+            .expect("§4 fenced code block must be closed")
+            .0;
+
+        // The block is bare builtin names plus three fixed category labels;
+        // strip the labels and every remaining token is a builtin name.
+        let cleaned = block
+            .replace("Tier-1 DAG:", " ")
+            .replace("Tier-2 DAG:", " ")
+            .replace("Host lane:", " ");
+        let doc_names: BTreeSet<&str> = cleaned.split_whitespace().collect();
+
+        // Fail loudly if the extractor silently produced garbage rather than
+        // comparing a malformed set against the array.
+        assert!(
+            doc_names.contains("add")
+                && doc_names.contains("matmul")
+                && doc_names.contains("read_file")
+                && doc_names.len() > 100,
+            "§4 vocabulary parse looks wrong ({} tokens); the block format \
+             under '## 4.' likely changed and this extractor needs updating",
+            doc_names.len()
+        );
+
+        let array_names: BTreeSet<&str> = BUILTIN_NAMES.iter().copied().collect();
+        let missing_from_doc: Vec<&str> = array_names.difference(&doc_names).copied().collect();
+        let extra_in_doc: Vec<&str> = doc_names.difference(&array_names).copied().collect();
+
+        assert!(
+            missing_from_doc.is_empty() && extra_in_doc.is_empty(),
+            "docs/CHELIS_SURFACE.md §4 has drifted from BUILTIN_NAMES \
+             (crates/chelis-types/src/builtins.rs).\n  in BUILTIN_NAMES but \
+             missing from §4: {missing_from_doc:?}\n  in §4 but not a \
+             builtin: {extra_in_doc:?}"
+        );
+    }
+
     #[test]
     fn builtin_env_has_matmul() {
         let (env, _) = builtin_env();

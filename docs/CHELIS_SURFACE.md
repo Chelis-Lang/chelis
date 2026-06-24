@@ -286,18 +286,27 @@ The host lane is eager (no lazy list fusion).
 
 ## 4. Complete closed vocabulary (completeness check)
 
-Every name in `BUILTIN_NAMES` (`crates/chelis-types/src/builtins.rs`). If a name is
-not here, it is not a builtin (it's `chelis-std`, a shell library, or undefined). This
-list is the audit surface — when bumping, diff `BUILTIN_NAMES` against this block.
+Every name in `BUILTIN_NAMES` (`crates/chelis-types/src/builtins.rs`), verbatim. The
+block below mirrors the array exactly and is locked to it by the
+`doc_surface_section_4_mirrors_builtin_names` test (`crates/chelis-types/src/builtins.rs`),
+so it cannot silently drift. This is the audit surface — when bumping, diff
+`BUILTIN_NAMES` against this block.
+
+Three capabilities live *outside* the array and are intentionally absent below: `const`
+and `load` are `RiscOp` memory nodes produced during lowering (not name-callable
+builtins), and `dropout` is registered straight into the builtin type env (`builtin_env`)
+rather than the array. All three are documented in §1.6. With those exceptions: if a name
+is not in the block, it is not a builtin (it's `chelis-std`, a shell library, or
+undefined).
 
 ```
-Tier-1 DAG:   add mul div max_elem cmplt neg recip exp log sin cos tan atan abs
-              floor ceil sum max_reduce min_reduce prod_reduce argmax_reduce
+Tier-1 DAG:   add mul div max_elem cmplt neg recip exp log sin cos tan atan sqrt
+              abs floor ceil sum max_reduce min_reduce prod_reduce argmax_reduce
               argmin_reduce reduce_window_max reduce_window_min reduce_window_sum
-              reduce_window_mean reshape permute expand pad shrink stride const load
-              dropout uniform_like gather scatter_replace
+              reduce_window_mean reshape permute expand pad shrink stride
+              uniform_like gather scatter_replace
 Tier-2 DAG:   sub eq neq lt gt lte gte and or not relu sigmoid tanh silu gelu
-              softmax mean matmul min_elem layer_norm conv2d  (normalize: unstable)
+              softmax normalize mean matmul min_elem layer_norm conv2d
 Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
               pad_sequences pad_sequences_to tensor_scan
               map filter fold scan partition flat_map flatten zip enumerate chunk
@@ -315,6 +324,9 @@ Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
               test_assert_eq_tensor_int64
               mod bitand bitor bitxor shl shr
 ```
+
+`normalize` is listed because it is in `BUILTIN_NAMES`, but it has **no specified
+lowering** (`spec/05` §3.4) — treat it as unstable, not a stable builtin (see §2).
 
 Prelude ADTs/constructors (also in scope): `Option`/`Some`/`None`,
 `List`/`Cons`/`Nil`, `MappedFile`.
