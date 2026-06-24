@@ -531,43 +531,42 @@ out = f(to_tensor([3.0, 4.0]))\n";
     );
 }
 
-/// KNOWN GAP (pre-existing #352 residue, found by the #376 review; NOT
-/// introduced or fixed by #376): a host-lane def capturing a top-level
-/// SCALAR binding still emits uncompilable C. Root cause differs from the
-/// tensor case #376 fixed: the DAG lane claims the binding
-/// (`skip_for_lowered` in `chelis-ir`'s host lowering), so it never reaches
-/// `HostProgram::globals` and the hoist pass never sees it -- generated
-/// `main()` contains no binding for `c` at all and the def body's bare name
-/// dangles. `chelis eval` computes the same program correctly, so this is
-/// the remaining backend-side eval-vs-backend parity hole of the #352
-/// class. When the lowering fix lands this pin fails; replace it with a
-/// compile-run-eval agreement assertion like the tensor arms above.
+/// chelis#378 (was a pinned #352-residue gap; fixed in the WS-2A lowering
+/// pass): a host-lane def capturing a top-level SCALAR binding now emits
+/// compilable C that runs and agrees with eval. Root cause was that the DAG
+/// lane claimed the scalar binding (`skip_for_lowered` in `chelis-ir`'s host
+/// lowering, because a `(lit ...)` body is DAG-lowerable), so it never
+/// reached `HostProgram::globals` and the host function body referenced an
+/// undeclared `c`. The fix keeps a value binding captured by a host-lane
+/// function in `host.globals` (the C emitter's `captured_global_names` then
+/// declares it at file scope). `f(x) = x + c` with `c = 2.5` and `x = 1.0`
+/// yields `3.5`, matching eval.
 #[test]
-fn issue_352_scalar_capture_still_uncompilable_gap() {
+fn issue_378_scalar_capture_compiles_runs_and_evals() {
     let source = "c = 2.5\n\
 def f(x: f32) -> f32 = (x + c)\n\
 out = f(1.0)\n";
 
     let build = chelis_build_c(source, "scalarcap");
-    let (compile, _) = compile_emitted(build.path(), &build.path().join("scalarcap.c"));
-    assert!(
-        !compile.status.success(),
-        "pinned gap unexpectedly fixed: scalar-capture C now compiles; \
-         promote this pin to a compile-run-eval agreement assertion",
-    );
-    let stderr = String::from_utf8_lossy(&compile.stderr);
-    assert!(
-        stderr.contains("undeclared"),
-        "pinned gap changed shape: expected an undeclared-identifier \
-         diagnostic for the captured scalar `c`; compiler stderr={stderr:?}",
+    let stdout = compile_and_run_emitted(build.path(), &build.path().join("scalarcap.c"));
+    // The C backend prints a rank-0 scalar in its bare scalar form
+    // (`out = 3.5`); the evaluator wraps it as `tensor(shape=[], ...)`.
+    // That display difference is a separate, pre-existing scalar-print
+    // divergence, not part of #378 (which is about the captured binding
+    // reaching the backend at all). Pin the C value exactly and assert the
+    // evaluator agrees on the numeric value.
+    assert_eq!(
+        binding_line(&stdout, "out"),
+        "out = 3.5",
+        "issue #378 acceptance: scalar capture compiles, runs, and the C \
+         backend prints the captured-binding result; full stdout={stdout:?}",
     );
 
-    // The eval side of the parity gap is already correct.
     let eval_out = chelis_eval(source, "scalarcap");
     assert_eq!(
         binding_line(&eval_out, "out"),
         "out = tensor(shape=[], data=[3.5])",
-        "eval must keep computing the scalar-capture program correctly",
+        "evaluator must compute the same scalar-capture value (issue #378)",
     );
 }
 
