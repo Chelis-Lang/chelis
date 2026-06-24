@@ -25,6 +25,16 @@ smt = ["cvc5-rs", "num-rational"]
 # libz3 on this workstation). See `docs/local_z3_environment.md` for the link
 # recipe and `scripts/z3_test.py` for the wrapper that sets it.
 z3 = ["dep:z3", "num-rational"]
+# WI-15 SoS certificate engine: a univariate-polynomial-nonneg-on-interval
+# DischargeEngine that proves p(x) >= 0 on [a,b] via a Markov-Lukacs
+# sum-of-squares SDP (Clarabel as the float SDP core) followed by a
+# Peyrl-Parrilo EXACT RATIONAL repair + exact certificate verification. The
+# certificate trust anchor is pure rational arithmetic (num-rational over
+# num-bigint), independent of Clarabel's float precision: a float SDP solution
+# is only a proposal; the exact-verified rational cert is the proof. The
+# discharge is CertificateBearing@Exact ONLY when the exact cert verifies. The
+# default / smt / solver-free builds link none of this.
+clarabel = ["dep:clarabel", "num-rational", "dep:num-bigint", "dep:num-traits"]
 # WI-16 Carcara auditability: re-check cvc5's Alethe proofs in-process for
 # independent auditability of the linear-arithmetic / EUF fragment (the
 # SmtExpr/SmtSort surface has no bit-vector representation, so the bit-vector
@@ -59,6 +69,18 @@ carcara = { git = "https://github.com/ufmg-smite/carcara", rev = "45bfaedce92b31
 # graph). `default-features = false` + `mpfr` matches what carcara's `rug`
 # needs (GMP via the implied base, plus MPFR), without MPC.
 gmp-mpfr-sys = { version = "1", default-features = false, features = ["mpfr"], optional = true }
+# WI-15 SoS certificate engine (behind `clarabel`). clarabel is the pure-Rust
+# SDP core that PROPOSES a float Gram matrix; num-bigint/num-traits back the
+# exact-rational repair + verification that turns the proposal into a checked
+# certificate (num-rational's BigRational over num-bigint's BigInt, with
+# num-traits for Zero/One/Signed). The repair is the proof; clarabel is only the
+# heuristic. clarabel's default feature is `serde` (its solver references
+# serde_json unconditionally), so the default set is kept; the heavy SDP
+# backends (sdp-openblas / pardiso / faer) are NOT default and stay off here.
+# The BLAS-linkage decision for the PSD cone is pinned separately.
+clarabel = { version = "0.11", optional = true }
+num-bigint = { version = "0.4", default-features = false, optional = true }
+num-traits = { version = "0.2", default-features = false, optional = true }
 chelis-surf = { path = "../chelis-surf" }
 chelis-deep = { path = "../chelis-deep" }
 chelis-pred = { path = "../chelis-pred" }

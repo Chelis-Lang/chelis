@@ -12,6 +12,10 @@
 pub mod ad_rail;
 pub mod artifact;
 pub mod beacon_shim;
+// WI-15 SoS certificate engine (Clarabel). The whole module is behind the
+// `clarabel` feature so the default / smt / solver-free builds link none of it.
+#[cfg(feature = "clarabel")]
+pub mod clarabel_sos;
 // WI-16 Carcara auditability: re-check cvc5's Alethe proofs. The SMT-LIB
 // problem renderer and the audit-outcome type are always present (so the
 // renderer is unit-testable without cvc5/carcara linked); the live
