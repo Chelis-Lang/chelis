@@ -5,12 +5,16 @@
 *.swo
 .DS_Store
 data/
-data/
 *.c
 *.h
 !crates/
 !crates/**/*.c
 !crates/**/*.h
+# WI-13 committed, Arb-certified erf envelope: it is source-of-truth data
+# embedded via include_str!, so it must be tracked despite the broad `data/`
+# ignore above (mirrors the !crates/**/*.c re-inclusion idiom).
+!crates/chelis-prove/data/
+!crates/chelis-prove/data/*.json
 !grammars/**/*.c
 !grammars/**/*.h
 bindings/python/chelis/_native.abi3.so

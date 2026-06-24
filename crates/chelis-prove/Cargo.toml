@@ -145,3 +145,11 @@ clarabel = { version = "0.11", optional = true, features = ["sdp-accelerate"] }
 [[bin]]
 name = "mock-chelis-beacon"
 path = "src/bin/mock_chelis_beacon.rs"
+
+# WI-13 envelope certifier: the offline Arb trust-anchor that stamps each
+# envelope box's certified sup-norm `eps`. Requires the `arb` feature (links
+# FLINT/Arb); never part of a deployed build.
+[[bin]]
+name = "certify_erf_envelope"
+path = "src/bin/certify_erf_envelope.rs"
+required-features = ["arb"]

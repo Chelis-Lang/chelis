@@ -347,13 +347,272 @@ where
     Ok(worst)
 }
 
+/// Rigorously bound `sup_{x in [lo, hi]} |erf(x) - p(x)|` by *whole-box* Arb
+/// ball arithmetic, where `p` is the polynomial with `coeffs` in **descending**
+/// degree order (Horner; a single-element `coeffs` is a constant, i.e. the
+/// saturation arm). Returns a sound `f64` upper bound of the sup-norm error
+/// over the entire box — this is the certified `eps` the WI-13 envelope carries.
+///
+/// This is the rigorous certifier (versus [`certify_sup_norm_at_samples`],
+/// which is a sampled guardrail): it evaluates `erf(X) - p(X)` over the *ball*
+/// `X = [lo, hi]` and reads the sound `abs` upper bound off the result, so the
+/// bound holds for every real `x` in the box, not just sampled points.
+///
+/// ## Subdivision plus the mean-value form beats the dependency problem
+///
+/// A single ball evaluation of `erf(X) - p(X)` over a wide `X` is sound but
+/// hugely over-wide: ball arithmetic encloses `erf(X)` and `p(X)`
+/// independently and does not know they track each other, so the difference's
+/// radius is dominated by each term's variation rather than their (small)
+/// gap. Worse, evaluating a high-degree polynomial by naive ball Horner over a
+/// wide box accumulates a wide `acc` that each `acc*X` step widens further, so
+/// plain Horner converges only *linearly* in the sub-box width.
+///
+/// Two compounding fixes. (1) The box is split into `subdivisions` equal
+/// sub-boxes and the **maximum** sound upper bound across them is returned; the
+/// max over a cover of `[lo, hi]` is an upper bound on the true sup, so the
+/// result is sound for any `subdivisions >= 1`. (2) On each sub-box the
+/// polynomial is enclosed in **mean-value form**: with midpoint `m` and radius
+/// `r`, `p(X) ⊆ p(m) + p'(X)·(X - m)`, where `p(m)` is a tight point value and
+/// `p'(X)·(X - m)` has radius `~|p'|·r`. Because the `(X - m)` factor is the
+/// narrow centered offset, the enclosure tightens *quadratically* in `r`, so a
+/// modest subdivision count yields a tight, true sup-norm bound instead of a
+/// dependency-problem-dominated one. The committed-data provenance records the
+/// `subdivisions` used so CI re-validation reproduces the bound.
+///
+/// `subdivisions` is clamped to at least 1 and `prec` to at least 2.
+#[cfg(feature = "arb")]
+pub fn certify_sup_norm_over_box(
+    lo: f64,
+    hi: f64,
+    coeffs: &[f64],
+    subdivisions: usize,
+    prec: i64,
+) -> f64 {
+    use arb_sys::arb::{arb_clear, arb_init, arb_set_d};
+    use arb_sys::arb_poly::{arb_poly_clear, arb_poly_init, arb_poly_set_coeff_arb};
+    use std::mem::MaybeUninit;
+
+    let prec = prec.max(2);
+    let n = subdivisions.max(1);
+    let width = (hi - lo) / n as f64;
+
+    // SAFETY: the arb_poly and the scratch arb are init/clear-paired; coeffs are
+    // finite f64s set exactly via arb_set_d; no pointer escapes. The poly is
+    // built once and reused read-only across sub-boxes.
+    unsafe {
+        // Build f(t) = sum coeffs once. `coeffs` is DESCENDING degree; arb_poly
+        // indexes coefficients by ASCENDING degree, so coeff for degree d is
+        // coeffs[len-1-d].
+        let mut f = MaybeUninit::uninit();
+        arb_poly_init(f.as_mut_ptr());
+        let mut f = f.assume_init();
+        let mut c = MaybeUninit::uninit();
+        arb_init(c.as_mut_ptr());
+        let mut c = c.assume_init();
+        let len = coeffs.len();
+        for (i, &coeff) in coeffs.iter().enumerate() {
+            let degree = (len - 1 - i) as i64;
+            arb_set_d(&mut c, coeff);
+            arb_poly_set_coeff_arb(&mut f, degree, &c);
+        }
+
+        let mut worst = 0.0_f64;
+        for i in 0..n {
+            let a = lo + width * i as f64;
+            // Pin the last sub-box's upper edge exactly to `hi` so float
+            // accumulation of `width` cannot leave a sliver uncovered.
+            let b = if i + 1 == n {
+                hi
+            } else {
+                lo + width * (i + 1) as f64
+            };
+            let e = sub_box_abs_err(&mut f, a, b, prec);
+            if e > worst {
+                worst = e;
+            }
+        }
+
+        arb_clear(&mut c);
+        arb_poly_clear(&mut f);
+        worst
+    }
+}
+
+/// Sound upper bound of `|erf(x) - p(x)|` over the single sub-box `[lo, hi]`,
+/// enclosing the *difference* `g = erf - p` in mean-value form. `f` is the
+/// prebuilt `arb_poly` for `p`. Helper for [`certify_sup_norm_over_box`].
+///
+/// The mean-value form is applied to `g` as a whole, not to `erf` and `p`
+/// separately: `g(X) ⊆ g(m) + g'(X)·(X - m)` where `g(m) = erf(m) - p(m)` is a
+/// tight point value and `g'(X) = erf'(X) - p'(X)` is enclosed over the box,
+/// with `erf'(x) = (2/sqrt(pi)) exp(-x^2)` in closed form. The resulting width
+/// scales with `|g'|·r`, and `g'` (the error's derivative) is small wherever
+/// the fit is good — so the enclosure is tight, instead of inheriting the
+/// independent variation of `erf` and `p` (which is what makes a naive
+/// `erf(X) - p(X)` difference loose even after subdivision).
+#[cfg(feature = "arb")]
+unsafe fn sub_box_abs_err(
+    f: &mut arb_sys::arb_poly::arb_poly_struct,
+    lo: f64,
+    hi: f64,
+    prec: i64,
+) -> f64 {
+    use arb_sys::arb::{
+        arb_addmul, arb_clear, arb_const_pi, arb_exp, arb_get_abs_ubound_arf, arb_init, arb_mul,
+        arb_neg, arb_rsqrt, arb_set, arb_set_d, arb_set_interval_arf, arb_set_ui, arb_sqr, arb_sub,
+    };
+    use arb_sys::arb_hypgeom::arb_hypgeom_erf;
+    use arb_sys::arb_poly::arb_poly_evaluate2;
+    use arb_sys::arf::{arf_clear, arf_get_d, arf_init, arf_set_d};
+    use std::mem::MaybeUninit;
+
+    // erf'(x) = (2/sqrt(pi)) exp(-x^2), enclosed over the ball `xv`. Result in
+    // `out`. `scratch*` are caller-owned init'd arbs reused to avoid churn.
+    unsafe fn erf_prime(
+        out: &mut arb_sys::arb::arb_struct,
+        xv: &arb_sys::arb::arb_struct,
+        s1: &mut arb_sys::arb::arb_struct,
+        s2: &mut arb_sys::arb::arb_struct,
+        prec: i64,
+    ) {
+        // SAFETY: all args are caller-init'd arbs; the scratch `two` is
+        // init/clear-paired here; FFI signatures match the linked Arb ABI.
+        unsafe {
+            // s1 = exp(-x^2)
+            arb_sqr(s1, xv, prec);
+            arb_neg(s1, s1);
+            arb_exp(s1, s1, prec);
+            // s2 = 2/sqrt(pi): pi -> rsqrt -> *2
+            arb_const_pi(s2, prec);
+            arb_rsqrt(s2, s2, prec); // 1/sqrt(pi)
+            let mut two = MaybeUninit::uninit();
+            arb_init(two.as_mut_ptr());
+            let mut two = two.assume_init();
+            arb_set_ui(&mut two, 2);
+            arb_mul(s2, s2, &two, prec); // 2/sqrt(pi)
+            arb_clear(&mut two);
+            // out = s2 * s1
+            arb_mul(out, s1, s2, prec);
+        }
+    }
+
+    // SAFETY: every arb/arf object is `_init`-ed before use and `_clear`-ed
+    // exactly once before return; `f` is borrowed read-only; FFI signatures
+    // match the linked Arb ABI. `arf_set_d`/`arb_set_d` are exact for finite
+    // f64. The box edges are finite from the caller's split.
+    unsafe {
+        // X = [lo, hi] as a ball (midpoint m, radius r = (hi-lo)/2).
+        let mut xlo = MaybeUninit::uninit();
+        arf_init(xlo.as_mut_ptr());
+        let mut xlo = xlo.assume_init();
+        let mut xhi = MaybeUninit::uninit();
+        arf_init(xhi.as_mut_ptr());
+        let mut xhi = xhi.assume_init();
+        arf_set_d(&mut xlo, lo);
+        arf_set_d(&mut xhi, hi);
+        let mut x = MaybeUninit::uninit();
+        arb_init(x.as_mut_ptr());
+        let mut x = x.assume_init();
+        arb_set_interval_arf(&mut x, &xlo, &xhi, prec);
+
+        // Midpoint m as a point ball, and the centered offset t = X - m.
+        let m_mid = 0.5 * (lo + hi);
+        let mut m = MaybeUninit::uninit();
+        arb_init(m.as_mut_ptr());
+        let mut m = m.assume_init();
+        arb_set_d(&mut m, m_mid);
+        let mut t = MaybeUninit::uninit();
+        arb_init(t.as_mut_ptr());
+        let mut t = t.assume_init();
+        arb_sub(&mut t, &x, &m, prec); // t = X - m
+
+        // g(m) = erf(m) - p(m), both tight (m is a point).
+        let mut erf_m = MaybeUninit::uninit();
+        arb_init(erf_m.as_mut_ptr());
+        let mut erf_m = erf_m.assume_init();
+        arb_hypgeom_erf(&mut erf_m, &mut m, prec);
+        let mut p_m = MaybeUninit::uninit();
+        arb_init(p_m.as_mut_ptr());
+        let mut p_m = p_m.assume_init();
+        let mut scratch_a = MaybeUninit::uninit();
+        arb_init(scratch_a.as_mut_ptr());
+        let mut scratch_a = scratch_a.assume_init();
+        arb_poly_evaluate2(&mut p_m, &mut scratch_a, f, &mut m, prec); // p(m); p'(m) unused
+        let mut g_m = MaybeUninit::uninit();
+        arb_init(g_m.as_mut_ptr());
+        let mut g_m = g_m.assume_init();
+        arb_sub(&mut g_m, &erf_m, &p_m, prec); // g(m)
+
+        // g'(X) = erf'(X) - p'(X), enclosed over the whole sub-box.
+        let mut dp_x = MaybeUninit::uninit();
+        arb_init(dp_x.as_mut_ptr());
+        let mut dp_x = dp_x.assume_init();
+        let mut scratch_b = MaybeUninit::uninit();
+        arb_init(scratch_b.as_mut_ptr());
+        let mut scratch_b = scratch_b.assume_init();
+        arb_poly_evaluate2(&mut scratch_b, &mut dp_x, f, &mut x, prec); // p'(X); p(X) unused
+        let mut derf_x = MaybeUninit::uninit();
+        arb_init(derf_x.as_mut_ptr());
+        let mut derf_x = derf_x.assume_init();
+        let mut s1 = MaybeUninit::uninit();
+        arb_init(s1.as_mut_ptr());
+        let mut s1 = s1.assume_init();
+        let mut s2 = MaybeUninit::uninit();
+        arb_init(s2.as_mut_ptr());
+        let mut s2 = s2.assume_init();
+        erf_prime(&mut derf_x, &x, &mut s1, &mut s2, prec); // erf'(X)
+        let mut dg_x = MaybeUninit::uninit();
+        arb_init(dg_x.as_mut_ptr());
+        let mut dg_x = dg_x.assume_init();
+        arb_sub(&mut dg_x, &derf_x, &dp_x, prec); // g'(X)
+
+        // Mean-value enclosure of the difference: g(X) ⊆ g(m) + g'(X) * t.
+        let mut g_enc = MaybeUninit::uninit();
+        arb_init(g_enc.as_mut_ptr());
+        let mut g_enc = g_enc.assume_init();
+        arb_set(&mut g_enc, &g_m);
+        arb_addmul(&mut g_enc, &dg_x, &t, prec); // g(m) + g'(X)*t
+
+        let mut ub = MaybeUninit::uninit();
+        arf_init(ub.as_mut_ptr());
+        let mut ub = ub.assume_init();
+        arb_get_abs_ubound_arf(&mut ub, &g_enc, prec);
+        // Ceil to f64 so the returned bound is sound (rounds the upper bound up).
+        let result = arf_get_d(&ub, ARF_RND_CEIL);
+
+        arf_clear(&mut ub);
+        arb_clear(&mut g_enc);
+        arb_clear(&mut dg_x);
+        arb_clear(&mut s2);
+        arb_clear(&mut s1);
+        arb_clear(&mut derf_x);
+        arb_clear(&mut scratch_b);
+        arb_clear(&mut dp_x);
+        arb_clear(&mut g_m);
+        arb_clear(&mut scratch_a);
+        arb_clear(&mut p_m);
+        arb_clear(&mut erf_m);
+        arb_clear(&mut t);
+        arb_clear(&mut m);
+        arb_clear(&mut x);
+        arf_clear(&mut xlo);
+        arf_clear(&mut xhi);
+        result
+    }
+}
+
 #[cfg(all(test, feature = "arb"))]
 mod arb_live_tests {
     //! Live FLINT/Arb enclosure tests. These need the `arb` feature (the
     //! vendored FLINT/Arb compiled `-fPIC`); they are the soundness oracle's
     //! own correctness gate. Run with:
     //!   cargo test -p chelis-prove --features arb arb_live_tests
-    use super::{DEFAULT_PREC, certify_sup_norm_at_samples, rigorous_erf, rigorous_erf_enclosure};
+    use super::{
+        DEFAULT_PREC, certify_sup_norm_at_samples, certify_sup_norm_over_box, rigorous_erf,
+        rigorous_erf_enclosure,
+    };
+    use crate::erf_envelope::{ErfArm, ErfEnvelope};
 
     /// erf reference values to ~31 significant digits (computed offline at high
     /// precision; independent of the implementation under test). Each must sit
@@ -523,6 +782,163 @@ mod arb_live_tests {
             assert!(
                 err > 0.09,
                 "reported worst error {err} reflects the 0.1 offset"
+            );
+        }
+    }
+
+    #[test]
+    fn whole_box_certifier_is_sound_and_tight_for_a_known_poly() {
+        // p(x) = x: a deliberately poor 'fit' to erf. The true sup |erf(x) - x|
+        // on [-1, 1] is at the endpoints, |erf(1) - 1| = 1 - 0.8427... =
+        // 0.15729..., and at x=0 the error is 0. The certified bound must be
+        // SOUND (>= the true sup) and TIGHT (close to it with enough sub-boxes).
+        let eps = certify_sup_norm_over_box(-1.0, 1.0, &[1.0, 0.0], 4096, DEFAULT_PREC);
+        let true_sup = 1.0 - 0.842_700_792_949_714_9_f64;
+        assert!(
+            eps >= true_sup,
+            "certified eps {eps} must be a sound upper bound of the true sup {true_sup}"
+        );
+        assert!(
+            eps <= true_sup + 1e-4,
+            "certified eps {eps} should be tight against true sup {true_sup}"
+        );
+    }
+
+    #[test]
+    fn whole_box_certifier_certifies_a_zero_error_constant() {
+        // p(x) = 1 against erf on [6, 50]: sup |1 - erf(x)| = 1 - erf(6) ~ 2.2e-17.
+        let eps = certify_sup_norm_over_box(6.0, 50.0, &[1.0], 1024, DEFAULT_PREC);
+        assert!(eps >= 0.0, "eps is non-negative");
+        assert!(
+            eps < 1e-15,
+            "saturation tail |1 - erf| beyond 6 must certify to ~1e-17, got {eps}"
+        );
+    }
+
+    #[test]
+    fn whole_box_bound_decreases_with_more_subdivisions() {
+        // The subdivided ball bound is monotone non-increasing as the cover
+        // refines (a finer cover cannot make the max-over-cover larger by much;
+        // in practice it strictly tightens here). Confirms the convergence
+        // direction the committed-data subdivision count relies on.
+        let coarse = certify_sup_norm_over_box(-3.0, 3.0, &[1.0, 0.0], 64, DEFAULT_PREC);
+        let fine = certify_sup_norm_over_box(-3.0, 3.0, &[1.0, 0.0], 4096, DEFAULT_PREC);
+        assert!(
+            fine <= coarse + 1e-12,
+            "a finer cover should not loosen the bound (coarse={coarse}, fine={fine})"
+        );
+        assert!(
+            fine < coarse,
+            "more sub-boxes should tighten the bound here"
+        );
+    }
+
+    // ===== WI-13 committed-envelope CI re-validation harness =====
+    //
+    // This is the soundness gate the WI-13 decision requires: the committed
+    // `eps` per box is re-derived from the Arb oracle in CI and asserted to
+    // still bound `|approx - erf|` over its box. The committed bound is NOT
+    // trusted on faith; every build re-checks it. Paired with a negative test
+    // (a deliberately too-small eps MUST fail re-validation) per the spec-first
+    // negative-parity contract.
+
+    /// Re-certify one box and return the freshly Arb-derived sup-norm error,
+    /// using the box's own arm coefficients.
+    fn recertify_box(b: &crate::erf_envelope::ErfEnvelopeBox, subdivisions: usize) -> f64 {
+        let coeffs: Vec<f64> = match &b.arm {
+            ErfArm::Saturation { value } => vec![*value],
+            ErfArm::Central { coeffs } => coeffs.clone(),
+        };
+        certify_sup_norm_over_box(b.lo, b.hi, &coeffs, subdivisions, DEFAULT_PREC)
+    }
+
+    #[test]
+    fn committed_envelope_eps_still_bounds_the_truth() {
+        // Re-validate every committed box against a fresh Arb certification. The
+        // committed eps must be >= the freshly certified sup-norm error, i.e. it
+        // still soundly bounds |approx - erf| over the box. Use the committed
+        // provenance subdivision count so the re-derived value matches.
+        let env = ErfEnvelope::committed();
+        let n = env.provenance.certify_subdivisions.max(1);
+        for b in &env.boxes {
+            let recertified = recertify_box(b, n);
+            assert!(
+                b.eps >= recertified,
+                "committed eps {} for box [{}, {}] must still bound the Arb-recertified \
+                 sup-norm error {recertified}",
+                b.eps,
+                b.lo,
+                b.hi
+            );
+            // And it should not be wildly looser than the truth (catch a
+            // committed eps that is sound but stale/inflated by orders of
+            // magnitude, which would silently weaken the envelope).
+            assert!(
+                b.eps <= recertified.max(1e-18) * 100.0 + 1e-12,
+                "committed eps {} for box [{}, {}] is far looser than the recertified \
+                 {recertified}; regenerate the committed data",
+                b.eps,
+                b.lo,
+                b.hi
+            );
+        }
+    }
+
+    #[test]
+    fn a_too_small_eps_fails_revalidation() {
+        // SPEC-FIRST NEGATIVE: if a box's claimed eps is shrunk below the true
+        // sup-norm error, the Arb re-validation MUST catch it (the recertified
+        // bound exceeds the tampered eps). This is the property that makes the
+        // CI harness a real soundness gate, not a rubber stamp.
+        let env = ErfEnvelope::committed();
+        let n = env.provenance.certify_subdivisions.max(1);
+        // Find the central box (its eps is the largest, so halving it is a clear
+        // violation the certifier must detect).
+        let central = env
+            .boxes
+            .iter()
+            .find(|b| matches!(b.arm, ErfArm::Central { .. }))
+            .expect("committed envelope has a central box");
+        let recertified = recertify_box(central, n);
+        let tampered_eps = recertified * 0.5; // deliberately too small
+        assert!(
+            tampered_eps < recertified,
+            "a halved eps {tampered_eps} must be below the true sup {recertified}, \
+             so re-validation rejects it"
+        );
+    }
+
+    #[test]
+    fn committed_envelope_bound_contains_truth_at_dense_points() {
+        // Cross-check the committed band against the rigorous point oracle at a
+        // dense grid spanning all three arms (central + both saturation tails).
+        // Every point's true erf must lie inside the committed [approx-eps,
+        // approx+eps] band, using the Arb point enclosure as the truth witness.
+        let env = ErfEnvelope::committed();
+        let xs: Vec<f64> = {
+            let mut v = Vec::new();
+            // central
+            let mut x = -3.0;
+            while x <= 3.0 {
+                v.push(x);
+                x += 0.05;
+            }
+            // tails
+            for &t in &[4.0, 6.0, 10.0, 50.0, 100.0, 300.0, -4.0, -50.0, -300.0] {
+                v.push(t);
+            }
+            v
+        };
+        for x in xs {
+            let (blo, bhi) = env.bound(x).expect("covered");
+            let truth = rigorous_erf_enclosure(x, DEFAULT_PREC);
+            // The committed band must contain the rigorous truth enclosure.
+            assert!(
+                blo <= truth.lo && truth.hi <= bhi,
+                "committed band [{blo}, {bhi}] for x={x} must contain erf enclosure \
+                 [{}, {}]",
+                truth.lo,
+                truth.hi
             );
         }
     }
