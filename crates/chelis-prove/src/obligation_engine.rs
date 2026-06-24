@@ -646,10 +646,12 @@ fn run_one(
                 }
                 TierBResult::Error(reason) => {
                     // The obligation did not lower to a valid SMT term (a
-                    // wrong-arity intrinsic, RT5-F1). Surface it as
-                    // Unsupported with the reason rather than letting the
-                    // bad term abort cvc5. In `auto` mode fall through to
-                    // Tier C; in `smt-only` it is terminal.
+                    // wrong-arity intrinsic, RT5-F1; a transcendental cvc5 has
+                    // no kind for, chelis#434). Surface it as Unsupported with
+                    // the reason rather than letting the bad term abort cvc5.
+                    // In `auto` mode fall through to Tier C; in `smt-only` it
+                    // is terminal, so frame it as an honest capability boundary
+                    // ("does not lower to the SMT tier"), not an internal bug.
                     if options.tier == "smt-only" {
                         return outcome(
                             ob,
@@ -658,7 +660,9 @@ fn run_one(
                             0,
                             options.seed,
                             None,
-                            Some(format!("smt lowering error: {reason}")),
+                            Some(format!(
+                                "obligation does not lower to the SMT tier: {reason}"
+                            )),
                         );
                     }
                 }

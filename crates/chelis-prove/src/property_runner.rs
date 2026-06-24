@@ -932,6 +932,12 @@ fn try_surf_tier_b(
         }
         crate::tier_b::TierBResult::Error(reason) => {
             if options.tier == "smt-only" {
+                // smt-only is terminal: there is no Tier C to route to, so a
+                // term that does not lower (a wrong-arity intrinsic, a
+                // mixed-sort comparison, a transcendental cvc5 has no kind for
+                // -- chelis#434) is an HONEST Unsupported, not a bug. Frame it
+                // as a capability boundary ("does not lower to the SMT tier"),
+                // not an internal "smt lowering error".
                 Some(PropertyOutcome::new(
                     property.name.clone(),
                     PropertyStatus::Unsupported,
@@ -939,7 +945,7 @@ fn try_surf_tier_b(
                     0,
                     seed,
                     None,
-                    Some(format!("smt lowering error: {reason}")),
+                    Some(format!("property does not lower to the SMT tier: {reason}")),
                     false,
                     Vec::new(),
                 ))

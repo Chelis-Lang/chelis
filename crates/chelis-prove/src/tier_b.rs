@@ -185,6 +185,41 @@ fn cvc5_lowerable_arity(name: &str) -> Option<usize> {
         .map(|(_, a)| *a)
 }
 
+/// The reason an `Apply` of `name` cannot lower to a cvc5 term (chelis#434).
+///
+/// A function reaches the lowering only after [`classify_inlineability`]
+/// admits it, which uses the BROADER predicate grammar whitelist
+/// ([`chelis_pred::INTRINSIC_WHITELIST`], includes `log`) -- not the
+/// narrower cvc5-buildable set ([`CVC5_LOWERABLE`], excludes `log`). So a
+/// transcendental that is a legitimate Tier-C predicate intrinsic but has no
+/// cvc5 kind (today only `log`) lands here. Distinguishing it from a
+/// truly-unknown symbol turns the smt-only diagnostic from an internal-
+/// looking generic "unsupported function `log`" into an HONEST capability
+/// boundary: the SMT tier does not model this transcendental, so the goal is
+/// Unsupported, not broken.
+///
+/// SEAM (WS-7 / Beacon): the faithful discharge of a transcendental finance
+/// goal (e.g. Black-Scholes positivity through `normal_cdf`/`exp`/`log`) is
+/// an envelope-plus-polynomial bound (Sollya-generated) discharged by the
+/// out-of-tree Beacon engine, NOT in-tree cvc5 NRA. Until that lands a
+/// transcendental cvc5 cannot lower is honestly Unsupported here.
+#[cfg(feature = "smt")]
+fn unsupported_apply_reason(name: &str) -> String {
+    // A predicate-grammar transcendental with no cvc5 kind (today `log`): a
+    // capability boundary, not a bug. Keep `log` in the text -- the
+    // CR2-1 regression test pins that the reason names the function.
+    if chelis_pred::TRANSCENDENTAL_WHITELIST.contains(&name) && cvc5_lowerable_arity(name).is_none()
+    {
+        return format!(
+            "transcendental function `{name}` is not supported by the SMT tier \
+             (cvc5 has no kind for it); the goal is Unsupported. A faithful \
+             discharge via a Sollya envelope-plus-polynomial bound is tracked \
+             by WS-7 (Beacon engine)"
+        );
+    }
+    format!("unsupported function `{name}` in cvc5 lowering (routes to Tier C)")
+}
+
 /// Require a sort to be numeric (`Int` or `Real`); a `Bool` in an
 /// arithmetic or numeric-comparison position aborts cvc5, so it routes to
 /// Tier C instead.
@@ -664,9 +699,7 @@ pub fn lower_to_cvc5(
             (tm.mk_term(kind, &[bound_list, body_term]), SmtSort::Bool)
         }
         SmtExpr::Apply(name, args) => {
-            let arity = cvc5_lowerable_arity(name).ok_or_else(|| {
-                format!("unsupported function `{name}` in cvc5 lowering (routes to Tier C)")
-            })?;
+            let arity = cvc5_lowerable_arity(name).ok_or_else(|| unsupported_apply_reason(name))?;
             if args.len() != arity {
                 return Err(format!(
                     "intrinsic `{name}` expects {arity} argument(s), got {} (routes to Tier C)",
@@ -732,9 +765,7 @@ pub fn lower_to_cvc5(
                 // returns Err rather than panicking if it is ever hit (e.g.
                 // CVC5_LOWERABLE gains a name with no match arm).
                 other => {
-                    return Err(format!(
-                        "unsupported function `{other}` in cvc5 lowering (routes to Tier C)"
-                    ));
+                    return Err(unsupported_apply_reason(other));
                 }
             }
         }
@@ -1034,6 +1065,79 @@ mod tests {
                 assert!(reason.contains("log"), "names the unsupported fn: {reason}");
             }
             other => panic!("expected Error for log(x), got {other:?}"),
+        }
+    }
+
+    // chelis#434: a transcendental that is a legitimate predicate intrinsic
+    // (in chelis_pred::TRANSCENDENTAL_WHITELIST) but has no cvc5 kind (today
+    // `log`) must produce an HONEST capability-boundary reason -- it names the
+    // function, says "transcendental ... not supported by the SMT tier", says
+    // the goal is Unsupported, and cites the WS-7/Beacon faithful-discharge
+    // seam -- NOT the generic internal-looking "unsupported function" text.
+    #[test]
+    fn issue434_transcendental_log_reason_is_an_honest_capability_boundary() {
+        let reason = unsupported_apply_reason("log");
+        assert!(reason.contains("log"), "names the fn: {reason}");
+        assert!(
+            reason.contains("transcendental"),
+            "frames it as a transcendental: {reason}"
+        );
+        assert!(
+            reason.contains("not supported by the SMT tier"),
+            "states the capability boundary: {reason}"
+        );
+        assert!(
+            reason.contains("Unsupported"),
+            "states the goal is Unsupported, not broken: {reason}"
+        );
+        assert!(
+            reason.contains("WS-7") && reason.contains("Beacon"),
+            "cites the faithful-discharge seam: {reason}"
+        );
+    }
+
+    // Negative parity: a truly-unknown symbol (NOT a whitelisted
+    // transcendental) keeps the generic "unsupported function" reason -- the
+    // honest-transcendental framing must NOT launder an arbitrary unknown
+    // callee into a "transcendental" capability boundary.
+    #[test]
+    fn issue434_unknown_symbol_keeps_generic_unsupported_reason() {
+        let reason = unsupported_apply_reason("mystery_fn");
+        assert!(reason.contains("mystery_fn"), "names the fn: {reason}");
+        assert!(
+            reason.contains("unsupported function"),
+            "generic unsupported-function reason: {reason}"
+        );
+        assert!(
+            !reason.contains("transcendental"),
+            "must NOT mislabel an unknown symbol as a transcendental: {reason}"
+        );
+    }
+
+    // Every whitelisted-but-not-cvc5-lowerable transcendental (the set
+    // difference TRANSCENDENTAL_WHITELIST minus CVC5_LOWERABLE) gets the
+    // honest capability-boundary reason -- so adding e.g. `tan`/`atan` to the
+    // predicate grammar later cannot silently regress to the generic text.
+    #[test]
+    fn issue434_all_non_lowerable_transcendentals_are_honest() {
+        let non_lowerable: Vec<&&str> = chelis_pred::TRANSCENDENTAL_WHITELIST
+            .iter()
+            .filter(|name| cvc5_lowerable_arity(name).is_none())
+            .collect();
+        // Today this is exactly {log}; the assertion locks the invariant, not
+        // the cardinality, so it survives whitelist growth.
+        assert!(
+            non_lowerable.iter().any(|n| ***n == *"log"),
+            "log is the known non-lowerable transcendental"
+        );
+        for name in non_lowerable {
+            let reason = unsupported_apply_reason(name);
+            assert!(
+                reason.contains("transcendental")
+                    && reason.contains("not supported by the SMT tier")
+                    && reason.contains("Unsupported"),
+                "transcendental `{name}` must get the honest reason: {reason}"
+            );
         }
     }
 
