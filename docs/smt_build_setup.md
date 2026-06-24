@@ -52,6 +52,42 @@ and runs the smt-gated chelis-prove suite (`cargo test -p chelis-prove
 like the sanitizer job, because cvc5 builds from source and is not a
 per-PR developer-loop prerequisite.
 
+Two companion prove-in-CI lanes, `smt-build-glibc231` (a `debian:11`
+container) and `smt-build-darwin-arm64` (`macos-latest`), build
+`chelis-cli --features smt` on the other two release targets and run
+the post-build verifier. They prove cvc5 builds on those toolchains
+before `release.yml` ships the feature there (chelis#422). The
+`debian:11` lane additionally installs `python3-pip` and `pip install
+tomli`, because cvc5's build-time TOML codegen imports `tomli` on
+Python < 3.11 and `python3-tomli` is not in the main bullseye suite.
+
+## Release builds (chelis#422)
+
+`release.yml` builds all three release artifacts (linux-x86_64,
+linux-x86_64-glibc2.31, darwin-arm64) with `cargo build --release -p
+chelis-cli --features smt`, so the shipped `chelis` binary discharges
+property obligations through cvc5 instead of degrading to the
+solver-free fuzz path. Each release job:
+
+- installs the cvc5 build prerequisites for its platform (the
+  `debian:11` job adds `tomli` as above; macOS relies on the image's
+  CMake/Python/Xcode CLT plus an idempotent `brew install cmake`), and
+- runs `.github/scripts/verify_release_smt.py` against the freshly
+  built binary, which proves a known producer obligation discharges
+  via cvc5 (`proof_tier=smt`, `discharge_tier.engine=cvc5`). A binary
+  accidentally built without `--features smt` fails this step (the
+  feature-inert regression that motivated chelis#422), and
+- after staging the `.tar.gz`, runs the verifier once more in
+  `--tarball` mode against the EXTRACTED (stripped) `bin/chelis` inside
+  the packaged artifact. This is the most faithful guard: it checks the
+  exact binary users download, not a pre-staging proxy, and would also
+  catch a staging step that packaged the wrong binary.
+
+WI-11 (license): the `cvc5-sys` build forces GMP and disables the GPL
+CLN path (the cvc5 CMake cache records `ENABLE_GPL=OFF` and
+`USE_CLN=OFF`; only `libgmp.a` is linked, never `libcln.a`), so the
+shipped artifact is distributable.
+
 ## Downstream Impact
 
 Shell repos consuming the chelis workspace (Shoals, Coral, Nautilus, Hull) do

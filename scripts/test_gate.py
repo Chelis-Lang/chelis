@@ -57,6 +57,14 @@ NON_GATE_JOBS = {
     # scope by design, like backend-sanitizers. Runbook:
     # docs/smt_build_setup.md.
     "smt-build",
+    # Rule-id: GATE-SCOPE-SMT -- the chelis#422 prove-in-CI lanes that
+    # build `chelis-cli --features smt` (cvc5 from source) on the two
+    # release targets release.yml ships the feature to but ubuntu's
+    # smt-build does not cover: the glibc-2.31 (debian:11) compat
+    # toolchain and macOS-arm64. Same from-source cvc5 cost as smt-build,
+    # so out of the per-PR gate scope by design.
+    "smt-build-glibc231",
+    "smt-build-darwin-arm64",
 }
 
 # Whole WORKFLOW FILES that are out-of-scope-by-design for the per-PR developer
