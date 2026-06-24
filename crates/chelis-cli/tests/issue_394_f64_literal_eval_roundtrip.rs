@@ -97,6 +97,11 @@ fn f64_literal_subtraction_yields_f64_epsilon_not_zero() {
     assert_ne!(diff, 0.0, "an f32-quantized literal would cancel to 0.0");
 }
 
+// The f32-rounded value of 0.1 is written out to full f32 precision on
+// purpose: the assert below must compare against exactly that value, so
+// clippy::excessive_precision (which would have us drop the "meaningless"
+// digits) is intentionally allowed here.
+#[allow(clippy::excessive_precision)]
 #[test]
 fn f64_tenth_literal_is_exact_dyadic_not_f32_rounded() {
     // `0.1` cast to f64 is the f64-nearest value to one tenth. The f32
