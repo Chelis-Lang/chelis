@@ -17,8 +17,11 @@ a producer (`scale_half`) whose obligation -- "given `u.value` in
 real domain that only Tier B (cvc5) certifies; the fuzz tier cannot.
 
 Pass condition (smt-enabled binary):
-  * at least one emitted record has `proof_tier == "smt"` AND
-    `discharge_tier.engine == "cvc5"`, and
+  * at least one emitted record has `proof_tier == "smt"` AND a
+    `discharge_tier` with both `engine == "cvc5"` AND
+    `guarantee == "smt"` (all three are required by
+    `record_is_cvc5_smt`; the `guarantee` field pins the discharge to
+    the SMT guarantee level, not just the cvc5 engine name), and
   * no record is the "requires the smt-enabled build" warning the
     default (feature-less) binary emits for the same input.
 
@@ -28,10 +31,17 @@ Fail condition (feature-less binary, i.e. the regression we guard):
 
 Usage:
   verify_release_smt.py <path-to-chelis-binary>
+  verify_release_smt.py --tarball <path-to-staged-release.tar.gz>
+
+The `--tarball` form unpacks a staged release `.tar.gz` and verifies the
+EXTRACTED (stripped) `bin/chelis` -- the most faithful chelis#422 guard,
+since it checks the exact artifact shipped to users rather than a
+pre-staging binary. It also catches a staging bug that copies the wrong
+binary into the tarball.
 
 Exit codes:
   0  binary discharges via cvc5 (smt feature live)
-  2  binary not found
+  2  binary (or tarball, or bin/chelis inside it) not found
   3  `chelis prove` did not run cleanly
   4  no cvc5/smt discharge record found (feature inert -- the regression)
   5  smt-disabled warning emitted (feature inert -- the regression)
@@ -43,6 +53,7 @@ import argparse
 import json
 import subprocess
 import sys
+import tarfile
 import tempfile
 from pathlib import Path
 
@@ -118,23 +129,13 @@ def record_is_cvc5_smt(record: dict) -> bool:
     return False
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "chelis",
-        type=Path,
-        help="path to the `chelis` binary (e.g. ./target/release/chelis)",
-    )
-    args = parser.parse_args()
+def verify_binary(chelis: Path) -> int:
+    """Run the cvc5-discharge probe against `chelis` and return an exit code.
 
-    chelis = args.chelis.resolve()
-    if not chelis.exists():
-        print(
-            f"verify_release_smt: chelis binary not found at {chelis}",
-            file=sys.stderr,
-        )
-        return 2
-
+    See the module docstring for the exit-code meanings (0 pass; 3 no
+    output; 4 no cvc5/smt record; 5 smt-disabled warning). Callers
+    resolve/existence-check the path; this assumes `chelis` is runnable.
+    """
     with tempfile.TemporaryDirectory(prefix="chelis_smt_verify_") as tmp:
         src = Path(tmp) / "probe.ch"
         src.write_text(PROBE_PROGRAM)
@@ -178,6 +179,77 @@ def main() -> int:
         file=sys.stderr,
     )
     return 4
+
+
+def find_chelis_in_tree(root: Path) -> Path | None:
+    """Locate the `bin/chelis` binary under an extracted release staging
+    tree. The release tarball stages it at `<staging>/bin/chelis`."""
+    matches = sorted(root.glob("*/bin/chelis"))
+    if matches:
+        return matches[0]
+    # Fall back to any `chelis` file (defensive; tarball layout is fixed).
+    any_chelis = sorted(p for p in root.rglob("chelis") if p.is_file())
+    return any_chelis[0] if any_chelis else None
+
+
+def extract_and_verify_tarball(tarball: Path) -> int:
+    """Unpack a staged release `.tar.gz` and verify the EXTRACTED
+    (stripped) `bin/chelis` discharges via cvc5 -- the most faithful
+    chelis#422 guard (verify the artifact actually shipped, not a
+    pre-staging proxy). Returns 2 if the tarball or its binary is
+    missing, else delegates to `verify_binary`."""
+    if not tarball.exists():
+        print(
+            f"verify_release_smt: tarball not found at {tarball}",
+            file=sys.stderr,
+        )
+        return 2
+    with tempfile.TemporaryDirectory(prefix="chelis_smt_tarball_") as tmp:
+        root = Path(tmp)
+        with tarfile.open(tarball, "r:gz") as tf:
+            tf.extractall(root)
+        chelis = find_chelis_in_tree(root)
+        if chelis is None:
+            print(
+                f"verify_release_smt: no bin/chelis found inside {tarball}",
+                file=sys.stderr,
+            )
+            return 2
+        chelis.chmod(0o755)
+        print(f"verify_release_smt: verifying extracted artifact {chelis}")
+        return verify_binary(chelis.resolve())
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
+        "chelis",
+        type=Path,
+        nargs="?",
+        help="path to the `chelis` binary (e.g. ./target/release/chelis)",
+    )
+    group.add_argument(
+        "--tarball",
+        type=Path,
+        help=(
+            "path to a staged release .tar.gz; the EXTRACTED bin/chelis is "
+            "verified (the most faithful chelis#422 guard)"
+        ),
+    )
+    args = parser.parse_args()
+
+    if args.tarball is not None:
+        return extract_and_verify_tarball(args.tarball.resolve())
+
+    chelis = args.chelis.resolve()
+    if not chelis.exists():
+        print(
+            f"verify_release_smt: chelis binary not found at {chelis}",
+            file=sys.stderr,
+        )
+        return 2
+    return verify_binary(chelis)
 
 
 if __name__ == "__main__":

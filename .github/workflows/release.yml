@@ -83,6 +83,18 @@ jobs:
           sha256sum "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
           ls -la "${staging}.tar.gz"*
 
+      # Verify the SHIPPED artifact: unpack the staged tarball and run
+      # the cvc5-discharge check on the extracted (stripped) bin/chelis.
+      # The earlier verify step runs on target/release/chelis before
+      # staging; this one proves the exact binary inside the .tar.gz
+      # users download still discharges via cvc5 (chelis#422), and would
+      # also catch a staging step that copied the wrong binary.
+      - name: Verify shipped tarball discharges via cvc5
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/verify_release_smt.py \
+            --tarball "chelis-${{ steps.version.outputs.version }}-linux-x86_64.tar.gz"
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
@@ -117,15 +129,16 @@ jobs:
       # configure.sh otherwise). m4 is required by GMP's configure: cvc5
       # builds its own static GMP from source under --auto-download, and
       # GMP's ./configure aborts with "No usable m4 in $PATH" without it
-      # (debian:11's slim image omits m4). libgmp/libmpfr-dev mirror the
-      # ci.yml smt-build recipe.
+      # (debian:11's slim image omits m4). libgmp/libmpfr-dev and
+      # libopenblas-dev mirror the ci.yml smt-build-glibc231 lane so the
+      # prove-in-CI lane builds with the same system libs this job ships.
       - name: Install build prerequisites
         run: |
           set -euo pipefail
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential ca-certificates curl git m4 \
-            cmake libclang-dev libgmp-dev libmpfr-dev \
+            cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev \
             python3 python3-pip python3-venv
           pip3 install --break-system-packages tomli || pip3 install tomli
 
@@ -204,6 +217,16 @@ jobs:
           tar czf "${staging}.tar.gz" "$staging"
           sha256sum "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
           ls -la "${staging}.tar.gz"*
+
+      # Verify the SHIPPED artifact (the stripped binary inside the
+      # tarball) discharges via cvc5 -- see the linux-x86_64 job. Here the
+      # staged binary is already stripped (strip runs above), so this
+      # proves the stripped, packaged cvc5 build still works.
+      - name: Verify shipped tarball discharges via cvc5
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/verify_release_smt.py \
+            --tarball "chelis-${{ steps.version.outputs.version }}-linux-x86_64-glibc2.31.tar.gz"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
@@ -299,6 +322,14 @@ jobs:
           tar czf "${staging}.tar.gz" "$staging"
           shasum -a 256 "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
           ls -la "${staging}.tar.gz"*
+
+      # Verify the SHIPPED artifact (the binary inside the tarball)
+      # discharges via cvc5 -- see the linux-x86_64 job.
+      - name: Verify shipped tarball discharges via cvc5
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/verify_release_smt.py \
+            --tarball "chelis-${{ steps.version.outputs.version }}-darwin-arm64.tar.gz"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v7

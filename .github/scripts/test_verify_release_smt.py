@@ -150,5 +150,45 @@ class MarkerTest(unittest.TestCase):
         self.assertNotIn(VRS.SMT_DISABLED_MARKER, json.dumps(CVC5_OBLIGATION))
 
 
+class FindChelisInTreeTest(unittest.TestCase):
+    """The --tarball mode extracts a staged release .tar.gz and locates
+    `<staging>/bin/chelis`. Cover the locator without a real binary."""
+
+    def test_finds_staging_bin_chelis(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "chelis-0.10.0-linux-x86_64" / "bin" / "chelis"
+            target.parent.mkdir(parents=True)
+            target.write_text("#!/bin/sh\n")
+            found = VRS.find_chelis_in_tree(root)
+            self.assertEqual(found, target)
+
+    def test_returns_none_when_no_chelis(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "staging" / "lib").mkdir(parents=True)
+            (root / "staging" / "lib" / "libchelis_runtime.a").write_text("x")
+            self.assertIsNone(VRS.find_chelis_in_tree(root))
+
+    def test_prefers_bin_chelis_over_stray_file(self) -> None:
+        # A stray file literally named `chelis` elsewhere must not win
+        # over the canonical `*/bin/chelis` staging path.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stray = root / "docs" / "chelis"
+            stray.parent.mkdir(parents=True)
+            stray.write_text("not the binary")
+            canonical = root / "chelis-x" / "bin" / "chelis"
+            canonical.parent.mkdir(parents=True)
+            canonical.write_text("#!/bin/sh\n")
+            self.assertEqual(VRS.find_chelis_in_tree(root), canonical)
+
+
 if __name__ == "__main__":
     unittest.main()

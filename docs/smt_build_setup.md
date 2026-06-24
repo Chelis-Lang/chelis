@@ -76,7 +76,12 @@ solver-free fuzz path. Each release job:
   built binary, which proves a known producer obligation discharges
   via cvc5 (`proof_tier=smt`, `discharge_tier.engine=cvc5`). A binary
   accidentally built without `--features smt` fails this step (the
-  feature-inert regression that motivated chelis#422).
+  feature-inert regression that motivated chelis#422), and
+- after staging the `.tar.gz`, runs the verifier once more in
+  `--tarball` mode against the EXTRACTED (stripped) `bin/chelis` inside
+  the packaged artifact. This is the most faithful guard: it checks the
+  exact binary users download, not a pre-staging proxy, and would also
+  catch a staging step that packaged the wrong binary.
 
 WI-11 (license): the `cvc5-sys` build forces GMP and disables the GPL
 CLN path (the cvc5 CMake cache records `ENABLE_GPL=OFF` and
