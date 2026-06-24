@@ -1174,11 +1174,11 @@ fn eval_resolves_named_axis_issue_repro() {
 /// which resolves `seq` against the declared (named) param dims. `max_reduce`,
 /// `min_reduce`, and `prod_reduce` are included because at concrete rank they
 /// are checkable and buildable (the chelis#340 Body-Discipline rejection
-/// applies only inside `..r` bodies). `argmax_reduce`/`argmin_reduce` are
-/// deliberately absent: the C backend mis-prints their int64 output as a
-/// reinterpreted f32 bit pattern (chelis#347, pre-existing and orthogonal;
-/// eval is correct), so the agreement oracle cannot include them yet. Fold
-/// them in when #347 closes.
+/// applies only inside `..r` bodies). `argmax_reduce`/`argmin_reduce` are now
+/// folded in too: chelis#347 closed (the C backend prints their int64 output
+/// correctly instead of as a reinterpreted f32 bit pattern), so the agreement
+/// oracle covers them — `argmax`/`argmin` over a row return the index of the
+/// extreme element (eval and backend now agree).
 /// Operand is non-square (batch=2, seq=3) per the #258 red-team finding.
 #[test]
 fn concrete_rank_named_reduce_eval_matches_backend() {
@@ -1186,10 +1186,14 @@ fn concrete_rank_named_reduce_eval_matches_backend() {
          def max_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = max_reduce(x, seq)\n\
          def min_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = min_reduce(x, seq)\n\
          def prod_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = prod_reduce(x, seq)\n\
+         def amax_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, int64] = argmax_reduce(x, seq)\n\
+         def amin_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, int64] = argmin_reduce(x, seq)\n\
          outs = sum_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
          outx = max_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
          outn = min_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
-         outp = prod_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
+         outp = prod_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
+         outax = amax_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
+         outan = amin_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
     let backend = build_compile_run(source, "concrete_named_reduce");
     let tensors = parse_printed_tensors(&backend);
     let expected: &[(&str, &[usize], &[f64])] = &[
@@ -1197,6 +1201,11 @@ fn concrete_rank_named_reduce_eval_matches_backend() {
         ("outx", &[2], &[3.0, 6.0]),
         ("outn", &[2], &[1.0, 4.0]),
         ("outp", &[2], &[6.0, 120.0]),
+        // argmax/argmin over each row: both rows are ascending, so the max
+        // is at index 2 and the min at index 0 (chelis#347 closed — int64
+        // indices now print correctly in the C backend).
+        ("outax", &[2], &[2.0, 2.0]),
+        ("outan", &[2], &[0.0, 0.0]),
     ];
     for (name, shape, data) in expected {
         let got = tensors
@@ -1960,8 +1969,10 @@ fn form3_scalar_param_expand_size_rejected() {
          out = f(to_tensor([1.0, 2.0]), 3)\n";
     let stderr = build_expecting_failure(source, "issue_384_scalar_param_expand");
     assert!(
-        stderr.contains("expand") && stderr.contains("no tensor in scope carries it"),
-        "expected the Form-3 sourceless-size reject diagnostic, got: {stderr}"
+        stderr.contains("expand")
+            && stderr.contains("no tensor in scope carries it")
+            && stderr.contains("chelis#469"),
+        "expected the Form-3 sourceless-size reject diagnostic citing #469, got: {stderr}"
     );
     // The reject must be a clean diagnostic, never the internal-compiler-error
     // ICE the sourceless symbol previously triggered downstream.
@@ -1982,8 +1993,51 @@ fn form3_scalar_param_expand_size_rejected_in_eval() {
     let dir = tempdir().expect("tempdir");
     let stderr = eval_stderr_expecting_failure(dir.path(), source, "issue_397_eval_reject");
     assert!(
-        stderr.contains("expand") && stderr.contains("no tensor in scope carries it"),
+        stderr.contains("expand")
+            && stderr.contains("no tensor in scope carries it")
+            && stderr.contains("chelis#469"),
         "eval must reject the sourceless Form-3 expand size with the same \
-         diagnostic as the backend, got: {stderr}"
+         #469 diagnostic as the backend, got: {stderr}"
     );
+}
+
+/// chelis#384/#397 (A) liveness lock: a `shape(x, axis)`-sourced Form-3
+/// expand inside a `vmap`ped def must STILL bind the extent to the correct
+/// tensor after `vmap`'s `vectorize_axis0` rebuild. The fix records the
+/// shape source as a `DagNode::shape_deps` liveness edge; every DAG-rebuild
+/// pass (DCE, copy/drop insertion, BLAS specialization, fusion, grad, vmap,
+/// splice, CSE) must preserve it, or the source `Load` is dead-code-
+/// eliminated and the wrong-shape regression returns SILENTLY. This test
+/// drives the dep through the vmap rebuild specifically; `bias_broadcast`
+/// already drives it through specialization. Per-slice: `x` row is rank-1
+/// `[3]` (n=3), `b` is a scalar broadcast to `[3]`, so the extent is read
+/// from `x`'s shape — out `[2, 3]`, C == eval.
+#[test]
+fn form3_shape_dep_survives_vmap_rebuild() {
+    let source = "def bcast(x: &tensor[n, f32], b: &tensor[f32]) -> tensor[n, f32] = expand(b, 0, shape(x, cast(0, int32)))\n\
+         xs = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
+         bs = to_tensor([10.0, 20.0])\n\
+         out = vmap(bcast)(xs, bs)\n";
+    let backend = build_compile_run(source, "shape_dep_vmap");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    // n (=3) comes from each x-slice's shape; a dropped shape_dep would
+    // mis-bind it (the original silent wrong-shape bug) or fail to build.
+    assert_eq!(
+        out.1,
+        vec![2, 3],
+        "shape_dep was dropped across the vmap rebuild ({backend})"
+    );
+    let expected = [10.0, 10.0, 10.0, 20.0, 20.0, 20.0];
+    for (i, e) in expected.iter().enumerate() {
+        assert!(
+            (out.2[i] - e).abs() < 1e-6,
+            "out[{i}]: backend {} != {e} ({backend})",
+            out.2[i]
+        );
+    }
+    assert_eval_agrees_with_backend(source, "shape_dep_vmap", &backend);
 }

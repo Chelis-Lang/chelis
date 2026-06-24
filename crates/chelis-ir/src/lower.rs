@@ -6515,7 +6515,8 @@ impl LowerCtx {
                              literal/`cast(N, int32)`, an in-scope tensor dimension, or a \
                              `shape(tensor, axis)` read. A bare runtime scalar (e.g. an `int32`/\
                              `int64` parameter) has no shape source the backend can emit, so the \
-                             extent cannot be materialized (spec/04-type-system.md \u{00a7}4.7.2)"
+                             extent cannot be materialized. Tracked by Chelis-Lang/chelis#469 \
+                             (spec/04-type-system.md \u{00a7}4.7.2)"
                         ),
                         Some(app_span),
                         self.current_span_id.clone(),

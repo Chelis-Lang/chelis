@@ -243,7 +243,7 @@ pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId
 pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
     let mut new_dag = Dag::new();
     let mut id_map: HashMap<usize, NodeId> = HashMap::new();
-    let mut seen: HashMap<(String, Vec<NodeId>), NodeId> = HashMap::new();
+    let mut seen: HashMap<(String, Vec<NodeId>, Vec<NodeId>), NodeId> = HashMap::new();
 
     for node in dag.nodes() {
         let remapped_inputs: Vec<NodeId> = node
@@ -251,9 +251,18 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
             .iter()
             .map(|&old| *id_map.get(&old.0).unwrap_or(&old))
             .collect();
+        // chelis#384/#397: two otherwise-identical nodes that depend on
+        // DIFFERENT shape sources (a Form-3 `expand` extent) are NOT
+        // interchangeable — merging them would drop one source. Fold the
+        // remapped shape-deps into the CSE key so such nodes stay distinct.
+        let remapped_shape_deps: Vec<NodeId> = node
+            .shape_deps
+            .iter()
+            .map(|&old| *id_map.get(&old.0).unwrap_or(&old))
+            .collect();
 
         let op_key = format!("{:?}", node.op);
-        let cse_key = (op_key, remapped_inputs.clone());
+        let cse_key = (op_key, remapped_inputs.clone(), remapped_shape_deps.clone());
 
         if let Some(&existing) = seen.get(&cse_key) {
             // Duplicate: its full provenance (canonical + merged) folds
@@ -279,6 +288,13 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
                 && let Some(new_node) = new_dag.node_mut(new_id)
             {
                 new_node.merged_spans = node.merged_spans.clone();
+            }
+            // chelis#384/#397: preserve the (remapped) Form-3 `expand`
+            // shape-deps so CSE does not drop the liveness edge.
+            if !remapped_shape_deps.is_empty()
+                && let Some(new_node) = new_dag.node_mut(new_id)
+            {
+                new_node.shape_deps = remapped_shape_deps;
             }
             if let Some(reusable_input) = node.reusable_input
                 && let Some(&mapped_input) = id_map.get(&reusable_input.0)
