@@ -23,7 +23,7 @@ import io
 import re
 import sys
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 
@@ -373,6 +373,87 @@ class NoAiAuthorshipTests(unittest.TestCase):
                 ),
                 f"identity example was not banned by AI_IDENTITY_PATTERNS: {example!r}",
             )
+
+
+class TomllibImportGuardTests(unittest.TestCase):
+    """chelis#366: `tomllib` is stdlib only from Python 3.11. A top-level
+    import crashed EVERY gate.py invocation under the macOS system
+    `python3` (3.9), including `--list` and the per-stage CI forms that
+    never parse TOML. The import is deferred into
+    `workspace_member_packages()` and guarded with a guidance message."""
+
+    def test_module_has_no_top_level_tomllib_import(self):
+        # The deferred import must NOT be reintroduced at module top.
+        source = (REPO_ROOT / "scripts" / "gate.py").read_text()
+        lines = source.splitlines()
+        in_func = False
+        for line in lines:
+            # Any line that starts a top-level def/class ends the import
+            # region we care about; function-local `import tomllib` is fine.
+            if line and not line[0].isspace() and (
+                line.startswith("def ") or line.startswith("class ")
+            ):
+                in_func = True
+            stripped = line.strip()
+            if stripped == "import tomllib" and not in_func and (
+                line == stripped  # zero indentation == module top
+            ):
+                self.fail(
+                    "gate.py imports tomllib at module top; defer it into "
+                    "workspace_member_packages() so --list works under "
+                    "Python <3.11 (chelis#366)"
+                )
+
+    def test_list_works_without_tomllib(self):
+        # Import the module and run `--list` with tomllib hidden, proving
+        # neither the import nor `--list` touches tomllib. We exec the
+        # module source in a namespace whose __import__ raises for tomllib.
+        source = (REPO_ROOT / "scripts" / "gate.py").read_text()
+        real_import = __import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "tomllib":
+                raise ModuleNotFoundError("No module named 'tomllib'")
+            return real_import(name, *args, **kwargs)
+
+        ns: dict = {"__name__": "gate_under_test", "__file__": str(
+            REPO_ROOT / "scripts" / "gate.py"
+        ), "__builtins__": dict(__builtins__) if isinstance(
+            __builtins__, dict
+        ) else dict(vars(__builtins__))}
+        ns["__builtins__"]["__import__"] = fake_import
+        # exec must not raise: the top-level import block has no tomllib.
+        exec(compile(source, "gate.py", "exec"), ns)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ns["main"](["--list"])
+        self.assertEqual(rc, 0)
+        self.assertIn("cargo nextest run --workspace", buf.getvalue())
+
+    def test_workspace_member_packages_gives_guidance_without_tomllib(self):
+        # The deferred import path must raise SystemExit with the guidance
+        # string (not a raw ModuleNotFoundError traceback) under <3.11.
+        source = (REPO_ROOT / "scripts" / "gate.py").read_text()
+        real_import = __import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "tomllib":
+                raise ModuleNotFoundError("No module named 'tomllib'")
+            return real_import(name, *args, **kwargs)
+
+        ns: dict = {"__name__": "gate_under_test", "__file__": str(
+            REPO_ROOT / "scripts" / "gate.py"
+        ), "__builtins__": dict(__builtins__) if isinstance(
+            __builtins__, dict
+        ) else dict(vars(__builtins__))}
+        ns["__builtins__"]["__import__"] = fake_import
+        exec(compile(source, "gate.py", "exec"), ns)
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as cm, redirect_stderr(err):
+            ns["workspace_member_packages"]()
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("Python 3.11+", err.getvalue())
+        self.assertIn(".venv/bin/python", err.getvalue())
 
 
 if __name__ == "__main__":
