@@ -2282,3 +2282,262 @@ fn issue_435_pure_fuzz_base_reads_fuzz_validated_not_proven_modulo_contract() {
         "a pure-fuzz base must never read as proven_*: {record}"
     );
 }
+
+// chelis#417 regression lock (stale-fixed by chelis#442): a property whose
+// body uses the builtin function-call form (mul/add/sub/div) must lower to the
+// SMT tier and PROVE, identically to the infix form. The bug was that
+// call-form arithmetic fell through to an uninterpreted Apply the inlineability
+// classifier rejected, silently dropping the property to fuzz.
+#[cfg(feature = "smt")]
+#[test]
+fn issue_417_builtin_call_form_arith_lowers_and_proves_at_smt() {
+    // square(x) = mul(x, x); the call-form must prove >= 0 at SMT.
+    let dir = write_prop(
+        r#"
+def square(x: f32) -> f32 = mul(x, x)
+@property sq_call forall(x: f32):
+  (square(x) >= 0.0)
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--tier",
+            "smt-only",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert!(
+        output.status.success(),
+        "call-form mul(x, x) >= 0 is TRUE and must prove at SMT: stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let props = property_records(&output.stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    assert_eq!(props[0]["status"], "passed", "{}", props[0]);
+    assert_eq!(
+        props[0]["proof_tier"], "smt",
+        "must prove at SMT, not drop to fuzz: {}",
+        props[0]
+    );
+    assert_eq!(
+        props[0]["composite_verdict"], "proven_modulo_real_arithmetic",
+        "{}",
+        props[0]
+    );
+}
+
+// chelis#417 negative parity: a property whose body MIXES the builtin call
+// forms (add/sub/mul/div all together) at a goal site still lowers and yields a
+// determinate SMT counterexample for a FALSE goal -- not a silent fuzz pass.
+#[cfg(feature = "smt")]
+#[test]
+fn issue_417_mixed_call_form_arith_false_goal_disproves_at_smt() {
+    // div(add(x, y), 2.0) <= sub(mul(x, x), y): a false algebraic claim; SMT
+    // must disprove it (status failed, proof_tier smt), proving the call forms
+    // lowered to interpreted arithmetic rather than dropping to fuzz.
+    let dir = write_prop(
+        r#"
+@property mixed_false forall(x: f32, y: f32):
+  (div(add(x, y), 2.0) <= sub(mul(x, x), y))
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--tier",
+            "smt-only",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    let props = property_records(&output.stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    assert_eq!(
+        props[0]["status"], "failed",
+        "false call-form goal must disprove at SMT, not fuzz-pass: {}",
+        props[0]
+    );
+    assert_eq!(
+        props[0]["proof_tier"], "smt",
+        "disproof must come from SMT: {}",
+        props[0]
+    );
+}
+
+// chelis#425 regression lock (stale-fixed by chelis#426): a NESTED helper call
+// written DIRECTLY at the property goal site -- not pushed into a def body --
+// must lower to the SMT tier and prove a TRUE goal. The bug was that nested
+// fmax(fabs(..), fmax(fabs(..), fabs(..))) at the goal site returned
+// `unsupported` ("does not lower to Tier B") while a single fmax lowered.
+#[cfg(feature = "smt")]
+#[test]
+fn issue_425_nested_helper_calls_at_goal_site_lower_and_prove() {
+    let dir = write_prop(
+        r#"
+def fmax(a: f32, b: f32) -> f32 = if (a >= b) then a else b
+def fabs(x: f32) -> f32 = if (x >= 0.0) then x else (0.0 - x)
+@property nested_max_dominates_first forall(a: f32, b: f32, c: f32):
+  (fmax(fabs(a), fmax(fabs(b), fabs(c))) >= fabs(a))
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--tier",
+            "smt-only",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert!(
+        output.status.success(),
+        "nested fmax sup-norm dominance is TRUE and must prove at SMT: stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let props = property_records(&output.stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    assert_eq!(props[0]["status"], "passed", "{}", props[0]);
+    assert_eq!(
+        props[0]["proof_tier"], "smt",
+        "nested goal-site fmax must lower to SMT, not return unsupported: {}",
+        props[0]
+    );
+    assert_ne!(
+        props[0]["status"], "unsupported",
+        "the chelis#425 symptom (does not lower to Tier B) must be gone: {}",
+        props[0]
+    );
+}
+
+// chelis#434: a transcendental finance property (Black-Scholes positivity
+// through log/exp/sqrt) cannot be discharged by cvc5 NRA. The handling must be
+// HONEST in both tiers:
+//   * smt-only -> Unsupported with a CLEAR capability-boundary reason (names
+//     the transcendental, says it is not supported by the SMT tier, cites the
+//     WS-7/Beacon faithful-discharge seam), NOT an internal-looking "smt
+//     lowering error" and NOT proven.
+//   * auto -> a fuzz outcome that reads `fuzz_validated`, NEVER `proven`.
+// The faithful SMT discharge (Sollya envelope-plus-polynomial via Beacon) is
+// WS-7, out of scope here; this test pins the honesty, not the proof.
+#[cfg(feature = "smt")]
+const ISSUE_434_BLACK_SCHOLES: &str = r#"
+def normal_cdf(x: f32) -> f32 = {
+  ax = if (x >= 0.0) then x else -x
+  t = 1.0 / (1.0 + 0.2316419 * ax)
+  d = 0.3989423 * exp(-(x * x) / 2.0)
+  p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))))
+  if (x >= 0.0) then 1.0 - p else p
+}
+def bs_call(s: f32, k: f32, r: f32, sigma: f32, t: f32) -> f32 = {
+  sqrt_t = sqrt(t)
+  sig_sqrt_t = sigma * sqrt_t
+  log_sk = log(s / k)
+  drift = (r + 0.5 * sigma * sigma) * t
+  d1 = (log_sk + drift) / sig_sqrt_t
+  d2 = d1 - sig_sqrt_t
+  s * normal_cdf(d1) - k * exp(-r * t) * normal_cdf(d2)
+}
+@property bs_call_positive forall(s: f32, k: f32, r: f32, sigma: f32, t: f32) where (s > 0.0), (k > 0.0), (sigma > 0.0), (t > 0.0), (r >= 0.0):
+  (bs_call(s, k, r, sigma, t) > 0.0)
+"#;
+
+#[cfg(feature = "smt")]
+#[test]
+fn issue_434_transcendental_smt_only_is_honest_unsupported_not_internal_error() {
+    let dir = write_prop(ISSUE_434_BLACK_SCHOLES);
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--tier",
+            "smt-only",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    let props = property_records(&output.stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    let prop = &props[0];
+    // Verdict: Unsupported, never proven, never a passed fuzz-as-proven.
+    assert_eq!(
+        prop["status"], "unsupported",
+        "transcendental BS goal must be Unsupported under smt-only: {prop}"
+    );
+    assert_eq!(
+        prop["composite_verdict"], "unsupported",
+        "must not read as proven: {prop}"
+    );
+    assert_ne!(prop["status"], "passed", "must not silently pass: {prop}");
+    // Reason: an HONEST capability boundary, not an internal-looking bug.
+    let reason = prop["reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains("does not lower to the SMT tier"),
+        "reason must frame it as a capability boundary, not an internal error: {reason}"
+    );
+    assert!(
+        reason.contains("transcendental") && reason.contains("log"),
+        "reason must name the transcendental cause: {reason}"
+    );
+    assert!(
+        reason.contains("WS-7") && reason.contains("Beacon"),
+        "reason must cite the faithful-discharge seam: {reason}"
+    );
+    assert!(
+        !reason.contains("no declared cvc5 term"),
+        "the old internal d1-leak message must be gone: {reason}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn issue_434_transcendental_auto_is_fuzz_validated_never_proven() {
+    let dir = write_prop(ISSUE_434_BLACK_SCHOLES);
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--tier",
+            "auto",
+            "--json",
+            // A small sample count keeps the Tier C fuzz loop over this
+            // transcendental-heavy body inside the default test budget; the
+            // assertion is on the VERDICT label (fuzz_validated, never
+            // proven), not statistical coverage.
+            "--samples",
+            "5",
+            "--seed",
+            "0",
+        ])
+        .output()
+        .expect("run prove");
+    let props = property_records(&output.stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    let prop = &props[0];
+    // auto falls to Tier C (fuzz); the verdict must read fuzz_validated, NEVER
+    // any proven_* form. This is the no-silent-fuzz-as-proven invariant.
+    assert_eq!(
+        prop["proof_tier"], "fuzz",
+        "auto must fall to fuzz for a transcendental cvc5 cannot lower: {prop}"
+    );
+    assert_eq!(
+        prop["composite_verdict"], "fuzz_validated",
+        "auto must read fuzz_validated, never proven: {prop}"
+    );
+    let verdict = prop["composite_verdict"].as_str().unwrap_or("");
+    assert!(
+        !verdict.starts_with("proven"),
+        "a transcendental fuzz pass must NEVER read as proven: {prop}"
+    );
+}
