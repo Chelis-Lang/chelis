@@ -20,6 +20,11 @@
 //!   results as the integer indices, not the reinterpreted f32 bit pattern.
 //! * #379 — top-level bindings spelled like C keywords or the emitted
 //!   helper scheme must produce compilable C (identifier mangling).
+//! * #365 — a `Bool` comparison-mask const (max-reduce / softmax backward)
+//!   must fill through the dtype-correct `chelis_fill_bool_bits`, not
+//!   `chelis_fill_f32_bits`, so a debug-runtime build does not abort on the
+//!   dtype assertion. (The test links the debug `libchelis_runtime.a`, whose
+//!   `debug_assert` is active.)
 //!
 //! #378 (a captured *scalar* top-level binding still emits uncompilable C)
 //! is a chelis-ir host-lowering gap outside this change's surface: the
@@ -686,4 +691,81 @@ out = add(w, to_tensor([1.0, 2.0]))\n";
         "out = tensor(shape=[2], data=[11.0, 22.0])",
         "stdout={stdout:?}",
     );
+}
+
+// -----------------------------------------------------------------------------
+// #365 — Bool comparison-mask const fills through the dtype-correct helper
+// -----------------------------------------------------------------------------
+
+/// POSITIVE + emit-shape: a `max_reduce` backward materializes a `Bool`
+/// comparison mask. The mask const must fill through `chelis_fill_bool_bits`
+/// (dtype-correct for CHELIS_BOOL), NOT `chelis_fill_f32_bits` (which asserts
+/// CHELIS_F32). The build links the debug `libchelis_runtime.a`, so the
+/// debug-build dtype assertion is active: a regression aborts the run.
+/// Pre-fix the Bool const used `chelis_fill_f32_bits` and aborted here.
+#[test]
+fn issue_365_max_reduce_backward_bool_mask_fill_is_dtype_correct() {
+    let source = "def f(x: tensor[3, f32]) -> f32 = tensor_to_scalar(max_reduce(x, 0))\n\
+def df(x: tensor[3, f32]) -> tensor[3, f32] = grad(f)(x)\n\
+out = df(to_tensor([1.0, 5.0, 3.0]))\n";
+
+    let build = chelis_build_c(source, "maxback");
+    let kernel_c = build.path().join("maxback.c");
+
+    // Emit-shape: the Bool mask const must use the dtype-correct fill.
+    let c_source = fs::read_to_string(&kernel_c).expect("read emitted C");
+    assert!(
+        c_source.contains("chelis_fill_bool_bits("),
+        "a Bool mask const must fill through chelis_fill_bool_bits (#365); \
+         emitted C=\n{c_source}",
+    );
+
+    // Compile + run against the (debug) runtime; a dtype-assert abort would
+    // make the binary exit non-zero. d/dx max([1,5,3]) routes the gradient
+    // to the max element (index 1): [0, 1, 0].
+    let stdout = compile_and_run_emitted(build.path(), &kernel_c);
+    assert_eq!(
+        binding_line(&stdout, "out"),
+        "out = tensor(shape=[3], data=[0.0, 1.0, 0.0])",
+        "max-reduce backward gradient flows to the max element; stdout={stdout:?}",
+    );
+
+    let eval_out = chelis_eval_ok(source, "maxback");
+    assert_eq!(
+        tensor_value(&stdout, "out"),
+        tensor_value(&eval_out, "out"),
+        "eval and C backend must agree on the max-reduce backward (#365)",
+    );
+}
+
+/// POSITIVE: a softmax backward composition (reachable Bool mask) also
+/// builds and runs to completion under the debug runtime without a dtype
+/// abort. d/dx sum(softmax(x)) is mathematically zero (softmax sums to 1);
+/// assert the run completes and the values are near zero rather than pinning
+/// an exact f32-noise vector.
+#[test]
+fn issue_365_softmax_backward_runs_under_debug_runtime() {
+    let source = "def f(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(softmax(x, 0), 0))\n\
+def df(x: tensor[3, f32]) -> tensor[3, f32] = grad(f)(x)\n\
+out = df(to_tensor([1.0, 2.0, 3.0]))\n";
+
+    let build = chelis_build_c(source, "softmaxback");
+    let stdout = compile_and_run_emitted(build.path(), &build.path().join("softmaxback.c"));
+    // The run completing (compile_and_run_emitted asserts a zero exit) is the
+    // #365 acceptance: no dtype-assert abort. sum(softmax) is constant, so
+    // every gradient element is ~0 (f32 rounding noise around zero).
+    let line = binding_line(&stdout, "out");
+    let data = line
+        .split_once("data=[")
+        .and_then(|(_, rest)| rest.strip_suffix("])"))
+        .unwrap_or_else(|| panic!("could not parse data from {line:?}"));
+    for elem in data.split(", ") {
+        let v: f64 = elem
+            .parse()
+            .unwrap_or_else(|_| panic!("bad element {elem:?}"));
+        assert!(
+            v.abs() < 1e-4,
+            "d/dx sum(softmax(x)) must be ~0; got {v} in {line:?}",
+        );
+    }
 }
