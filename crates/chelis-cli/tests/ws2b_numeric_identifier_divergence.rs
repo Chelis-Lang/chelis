@@ -26,13 +26,11 @@
 //!   dtype assertion. (The test links the debug `libchelis_runtime.a`, whose
 //!   `debug_assert` is active.)
 //!
-//! #378 (a captured *scalar* top-level binding still emits uncompilable C)
-//! is a chelis-ir host-lowering gap outside this change's surface: the
-//! scalar binding is dropped by `skip_for_lowered` before the C backend
-//! receives it, so the backend cannot emit a value it never gets. The
-//! eval-vs-C parity arm for #381 is gated on that lowering fix and is
-//! therefore an eval-only oracle here; the #347/#379 arms exercise full
-//! eval-vs-C agreement.
+//! #378 (route a captured top-level scalar binding into `HostProgram::globals`)
+//! landed in chelis-ir, so the #381 program now compiles on the C backend and
+//! its arm is a full eval-vs-C parity oracle (the captured f64 scalar is packed
+//! into a `CHELIS_F64` rank-0 tensor for the tensor-helper input). All arms
+//! here exercise eval-vs-C agreement.
 
 use assert_cmd::Command;
 use std::fs;
@@ -474,27 +472,62 @@ out = d(1.0, 5.0)\n";
 // #381 — scalar_to_tensor of a captured top-level scalar (eval lane)
 // -----------------------------------------------------------------------------
 
-/// POSITIVE: a top-level f64 scalar binding captured by a def and fed to
-/// `scalar_to_tensor` evaluates correctly. The DAG lane materializes the
-/// captured scalar as a rank-0 tensor; the host runtime's
-/// `scalar_to_tensor` must accept that rank-0 tensor as the identity rather
-/// than erroring "expects scalar input". Pre-fix this failed at runtime.
+/// POSITIVE + eval-vs-C parity: a top-level f64 scalar binding captured by a
+/// def and fed to `scalar_to_tensor` evaluates correctly AND agrees with the
+/// C backend. The DAG lane materializes the captured scalar as a rank-0
+/// tensor; the host runtime's `scalar_to_tensor` accepts that rank-0 tensor
+/// as the identity rather than erroring "expects scalar input".
 ///
-/// (eval-only oracle: the eval-vs-C parity arm is gated on #378, the
-/// chelis-ir host-lowering gap that drops a captured *scalar* binding
-/// before the C backend can emit it.)
+/// The C-backend arm is now live: #378 (chelis-ir, merged) routes the
+/// captured scalar binding into `HostProgram::globals` so the C emitter
+/// declares it, and #381 (this PR) packs that captured f64 scalar into a
+/// `CHELIS_F64` rank-0 tensor for the tensor-helper input (the pre-fix
+/// catch-all packed it as `CHELIS_F32`, storing only the low 4 bytes, so the
+/// f64 kernel read garbage and silently dropped the value -- the eval-vs-C
+/// divergence this arm exists to lock). `out` is a rank-1 f64 tensor, so
+/// both lanes render it identically; the comparison uses the value to stay
+/// robust to the pre-existing rank-0-scalar bare-vs-`tensor(shape=[])`
+/// display divergence noted by WS-2A.
 #[test]
-fn issue_381_scalar_to_tensor_on_captured_scalar_evals() {
+fn issue_381_scalar_to_tensor_on_captured_scalar_evals_and_matches_backend() {
     let source = "c = cast(1.1, f64)\n\
 def make(n: tensor[2, f64]) -> tensor[2, f64] = \
 add(n, expand(scalar_to_tensor(c), cast(0, int32), cast(2, int32)))\n\
 out = make(to_tensor([cast(1.0, f64), cast(2.0, f64)]))\n";
 
+    // Eval lane (the reference): 1.1 broadcast-added to [1.0, 2.0].
     let eval_out = chelis_eval_ok(source, "s2t_capture");
     assert_eq!(
         binding_line(&eval_out, "out"),
         "out = tensor(shape=[2], data=[2.1, 3.1])",
-        "1.1 broadcast-added to [1.0, 2.0] is [2.1, 3.1]; eval stdout={eval_out:?}",
+        "eval: 1.1 + [1.0, 2.0] = [2.1, 3.1]; stdout={eval_out:?}",
+    );
+
+    // C-backend lane: must compile (needs #378's captured-binding global),
+    // run, and produce the same value. Pre-#381 the f64 scalar was packed as
+    // f32 and the C output was [1.0, 2.0] (the captured 1.1 dropped to ~0).
+    let build = chelis_build_c(source, "s2t_capture");
+    let kernel_c = build.path().join("s2t_capture.c");
+    // Emit-shape: the captured f64 scalar packs into a CHELIS_F64 rank-0
+    // tensor through a double*, not CHELIS_F32.
+    let c_source = fs::read_to_string(&kernel_c).expect("read emitted C");
+    assert!(
+        c_source.contains("chelis_alloc(0, NULL, CHELIS_F64)") && c_source.contains("((double*)"),
+        "captured f64 scalar must pack into a CHELIS_F64 rank-0 tensor (#381); \
+         emitted C=\n{c_source}",
+    );
+    let stdout = compile_and_run_emitted(build.path(), &kernel_c);
+    assert_eq!(
+        tensor_value(&stdout, "out"),
+        tensor_value(&eval_out, "out"),
+        "eval and C backend must agree on the captured-f64-scalar program \
+         (#381 x #378); C stdout={stdout:?}",
+    );
+    // Pin the exact value too, so a both-lanes-wrong regression can't pass.
+    assert_eq!(
+        binding_line(&stdout, "out"),
+        "out = tensor(shape=[2], data=[2.1, 3.1])",
+        "C: captured 1.1 must survive as f64; stdout={stdout:?}",
     );
 }
 
