@@ -750,6 +750,32 @@ pub unsafe extern "C" fn chelis_fill_f32_bits(t: *mut chelis_tensor, bits: u32) 
     f32::fill(t, f32::from_bits(bits));
 }
 
+/// Issue #365: bit-pattern fill helper for `Prim::Bool` tensors. A `Bool`
+/// tensor stores its elements in the same 4-byte f32-encoded layout the
+/// comparison ops write (`0.0` / `1.0`), but its dtype tag is
+/// `CHELIS_BOOL`, not `CHELIS_F32`. Filling a `Bool` tensor through
+/// `chelis_fill_f32_bits` trips that helper's debug-build dtype assertion
+/// (`f32::data_ptr_unchecked` asserts the tag is `CHELIS_F32`), aborting a
+/// debug-runtime max-reduce / softmax / cross-entropy backward that
+/// materializes a comparison mask. Fill through the non-asserting
+/// `data_as_f32` view (the same path the comparison kernels use) after
+/// asserting the dtype is `CHELIS_BOOL`, so the storage layout is identical
+/// while the dtype contract is correct.
+///
+/// # Safety
+///
+/// `t` must point to a live `chelis_tensor` whose dtype is `CHELIS_BOOL`.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_fill_bool_bits(t: *mut chelis_tensor, bits: u32) {
+    debug_assert_eq!(unsafe { (*t).dtype }, CHELIS_BOOL);
+    let value = f32::from_bits(bits);
+    let buf = unsafe { data_as_f32(t) };
+    let size = unsafe { (*t).size } as isize;
+    for i in 0..size {
+        unsafe { *buf.offset(i) = value };
+    }
+}
+
 /// Issue #189: bit-pattern fill helper for `Prim::F64` tensors. Same
 /// contract as `chelis_fill_f32_bits` but for f64 storage; the
 /// `{:.17}` format string the pre-fix emitter used dropped values
