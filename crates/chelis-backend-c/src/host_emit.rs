@@ -2674,6 +2674,18 @@ impl<'a> HostEmitter<'a> {
                                 "((float*){tensor_name}->data)[0] = {value_name} ? 1.0f : 0.0f;"
                             ),
                         ),
+                        // #381: an f64 captured scalar (e.g. `cast(1.1, f64)`)
+                        // fed to a tensor helper via `scalar_to_tensor` must be
+                        // packed into a `CHELIS_F64` rank-0 tensor and written
+                        // through a `double*`. The pre-fix catch-all packed it
+                        // as `CHELIS_F32` and stored only the low 4 bytes; the
+                        // f64 kernel then read 8 bytes (the high 4 garbage),
+                        // collapsing the value to ~0 and silently disagreeing
+                        // with the evaluator. Float32 still uses the f32 arm.
+                        HostType::Float64 => (
+                            "CHELIS_F64",
+                            format!("((double*){tensor_name}->data)[0] = (double)({value_name});"),
+                        ),
                         _ => (
                             "CHELIS_F32",
                             format!("((float*){tensor_name}->data)[0] = (float)({value_name});"),
