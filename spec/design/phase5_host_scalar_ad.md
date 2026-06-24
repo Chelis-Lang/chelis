@@ -7,13 +7,33 @@ to C. The previous `__unresolved_grad` rejection is retained for the cases
 the dual transform does not cover (container `wrt`, unsupported scalar ops);
 the tensor-lane reverse-mode AD path is untouched.
 
-Implementation: `try_lower_scalar_grad_app` / `dual_eval` in
-`crates/chelis-ir/src/host.rs` (forward-mode dual transform at host-IR
-lowering time, emitting parallel value/derivative trees over the existing
-host scalar builtins — no new runtime struct or C builtin). Oracle:
-`build_c_scalar_grad_builds_and_is_numerically_correct` in
-`crates/chelis-cli/tests/cli.rs`, with multi-param and container-rejection
-parity tests beside it.
+The dual transform now follows the full shape of the canonical driver:
+
+- single-expression scalar bodies (the original push);
+- `let`-block bodies (`{ d1 = ...; mul(s, d1) }`) — bindings are
+  dual-evaluated in sequence and threaded through the environment;
+- calls to user-defined scalar defs (`d1(...)`, `normal_cdf(...)`) — the
+  callee's body is inlined into the dual tree, with the chain rule carried by
+  the argument derivatives;
+- the host scalar builtins listed in `dual_eval_app`
+  (`add`/`sub`/`mul`/`div`/`neg`/`exp`/`log`/`sin`/`cos`/`tanh`/`sqrt`,
+  constant-exponent `pow`, scalar `cast`).
+
+This is enough to differentiate the Black-Scholes scalar Greeks named in the
+issue (`delta`, `vega` over a `call_price` built from `d1`/`d2`/`normal_cdf`,
+`let`-blocks, and `log`/`sqrt`/`exp`). A `(mutually) recursive scalar callee
+fails closed at `MAX_DUAL_INLINE_DEPTH` — the transform returns `None` and the
+build falls through to the same `__unresolved_grad` rejection rather than
+looping.
+
+Implementation: `try_lower_scalar_grad_app` / `dual_eval` / `dual_eval_let` /
+`dual_eval_user_call` in `crates/chelis-ir/src/host.rs` (forward-mode dual
+transform at host-IR lowering time, emitting parallel value/derivative trees
+over the existing host scalar builtins — no new runtime struct or C builtin).
+Oracle: `build_c_scalar_grad_builds_and_is_numerically_correct` in
+`crates/chelis-cli/tests/cli.rs`, with multi-param, container-rejection,
+block-body, user-call, recursion-fail-closed, and Black-Scholes-Greeks parity
+tests beside it.
 
 The original deferral rationale and design analysis are preserved below for
 context.
@@ -72,14 +92,23 @@ This shape covers every active use case downstream:
 - **Coral** — frame-aggregation runtime; `grad` appears in docs as a
   documented future capability, not a runtime path.
 
-## What does NOT work
+## What does NOT work (current boundary)
 
-- `grad(top_level_scalar_fn)(scalar_arg)` — the canonical
-  `dsquare(x: f32) -> f32 = grad(square)(x)` shape.
-- `grad(local_fn_with_mixed_params)` where `wrt` is a scalar parameter and
-  the body uses host-lane operations.
-- `grad` through host-lane combinators (`fold`, `map`, `filter`) on
-  scalar/list/ADT values — the ad transform doesn't have rules for these.
+The two sections above describe the original deferral. With the implementation
+shipped, the canonical `grad(top_level_scalar_fn)(scalar_arg)` shape — and the
+`let`-block / user-defined-call composition the Black-Scholes Greeks need —
+now lower. The remaining gaps the dual transform does not cover (it returns
+`None`, falling through to the `__unresolved_grad` rejection):
+
+- `grad` where `wrt` is a host container (`List`/`dict`/ADT/tuple) parameter —
+  the genuine container-AD escalation in step 5 below. Rejected, with a test.
+- `grad` through host-lane combinators (`fold`, `map`, `filter`, `scan`) or
+  control flow (`if`/`match`) in the differentiated body — the dual transform
+  has no rules for these constructs.
+- `grad` through a scalar op not in the `dual_eval_app` table, or a
+  non-constant `pow` exponent (rejected to stay correct, see the `pow` arm).
+- a (mutually) recursive scalar callee — bounded by `MAX_DUAL_INLINE_DEPTH`
+  and rejected rather than inlined.
 
 ## Design decision (locked when implementation starts)
 

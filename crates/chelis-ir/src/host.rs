@@ -5000,6 +5000,7 @@ fn lower_tuple_get_host_expr(
 
 /// A dual value: the primal value expression and its derivative expression,
 /// both ordinary scalar (`Float64`) host expressions.
+#[derive(Clone)]
 struct Dual {
     value: HostExpr,
     deriv: HostExpr,
@@ -5159,7 +5160,7 @@ fn try_lower_scalar_grad_app(
                 },
             );
         }
-        let dual = dual_eval(body, &env, program)?;
+        let dual = dual_eval(body, &env, program, 0)?;
         derivs.push(dual.deriv);
     }
 
@@ -5225,17 +5226,33 @@ fn collect_wrt_names(expr: &Expr, out: &mut Vec<String>) -> Option<()> {
     }
 }
 
+/// Maximum nesting of inlined user-defined scalar calls and `let` blocks the
+/// dual transform will follow. A non-recursive scalar def nests shallowly;
+/// the cap exists so a (mutually) recursive scalar callee fails closed —
+/// falling through to the `__unresolved_grad` rejection — instead of looping
+/// forever or producing an unbounded dual tree.
+const MAX_DUAL_INLINE_DEPTH: usize = 64;
+
 /// Forward-mode dual evaluation of a pure-scalar Deep body. Returns `None`
 /// for any construct this pass does not support (non-scalar op, unresolved
 /// var, control flow) so the caller falls through to the rejection path.
-fn dual_eval(expr: &Expr, env: &HashMap<String, Dual>, program: &CheckedProgram) -> Option<Dual> {
+/// `depth` tracks inlined-call / `let` nesting against `MAX_DUAL_INLINE_DEPTH`.
+fn dual_eval(
+    expr: &Expr,
+    env: &HashMap<String, Dual>,
+    program: &CheckedProgram,
+    depth: usize,
+) -> Option<Dual> {
+    if depth > MAX_DUAL_INLINE_DEPTH {
+        return None;
+    }
     match expr {
         Expr::Atom(Atom::Float(v), _) => Some(dual_float(*v, 0.0)),
         Expr::Atom(Atom::Int(v), _) => Some(dual_float(*v as f64, 0.0)),
         Expr::List(list, _) => match tag(list) {
             Some("lit") => {
                 let inner = children(list).first()?;
-                dual_eval(inner, env, program)
+                dual_eval(inner, env, program, depth)
             }
             Some("var") => {
                 let name = children(list).first().and_then(symbol_name)?;
@@ -5245,18 +5262,60 @@ fn dual_eval(expr: &Expr, env: &HashMap<String, Dual>, program: &CheckedProgram)
                     deriv: dual.deriv.clone(),
                 })
             }
-            Some("app") => dual_eval_app(list, env, program),
+            Some("app") => dual_eval_app(list, env, program, depth),
+            // `(let (bind n0 v0 n1 v1 ...) body)`: forward-mode through a
+            // block body. Each binding's value is dual-evaluated in the
+            // environment built so far (sequential scoping — a later binding
+            // may reference an earlier one), then added to a cloned
+            // environment under which the body is evaluated. The value and
+            // derivative trees are substituted at each use site rather than
+            // bound to host-let variables; this is correct because the dual
+            // trees are pure `Float64` arithmetic with no side effects. The
+            // canonical scalar-AD shapes (single-variable derivatives,
+            // Black-Scholes Greeks) reuse each intermediate a small number of
+            // times, so the substituted trees stay small.
+            Some("let") => dual_eval_let(list, env, program, depth),
             _ => None,
         },
-        Expr::MetaExpr(meta, _) => dual_eval(&meta.expr, env, program),
+        Expr::MetaExpr(meta, _) => dual_eval(&meta.expr, env, program, depth),
         _ => None,
     }
+}
+
+/// Forward-mode dual evaluation of a `(let (bind ...) body)` block. Returns
+/// `None` if the binding structure is unexpected or any bound value / the
+/// body contains a construct `dual_eval` does not support.
+fn dual_eval_let(
+    list: &List,
+    env: &HashMap<String, Dual>,
+    program: &CheckedProgram,
+    depth: usize,
+) -> Option<Dual> {
+    let kids = children(list);
+    let bind_list = kids.first().and_then(as_list)?;
+    if tag(bind_list) != Some("bind") {
+        return None;
+    }
+    let body = kids.get(1)?;
+    let bind_kids = children(bind_list);
+    // Bindings are alternating `name value` pairs; an odd count is malformed.
+    if !bind_kids.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut local_env = env.clone();
+    for pair in bind_kids.chunks_exact(2) {
+        let name = symbol_name(&pair[0])?;
+        let dual = dual_eval(&pair[1], &local_env, program, depth + 1)?;
+        local_env.insert(name.to_string(), dual);
+    }
+    dual_eval(body, &local_env, program, depth + 1)
 }
 
 fn dual_eval_app(
     list: &List,
     env: &HashMap<String, Dual>,
     program: &CheckedProgram,
+    depth: usize,
 ) -> Option<Dual> {
     let kids = children(list);
     let callee = kids.first().and_then(as_list)?;
@@ -5267,7 +5326,7 @@ fn dual_eval_app(
     let arg_exprs = &kids[1..];
     let mut args: Vec<Dual> = Vec::new();
     for a in arg_exprs {
-        args.push(dual_eval(a, env, program)?);
+        args.push(dual_eval(a, env, program, depth)?);
     }
 
     // Helper closures over scalar builtins.
@@ -5381,8 +5440,40 @@ fn dual_eval_app(
             value: v(&args[0]),
             deriv: dv(&args[0]),
         }),
-        _ => None,
+        // A call to a user-defined scalar def (`d1(...)`, `normal_cdf(...)`):
+        // inline the callee's body into the dual tree. The callee must be a
+        // top-level scalar def with scalar parameters; its body is
+        // dual-evaluated in a fresh environment binding each parameter to the
+        // corresponding already-computed dual argument (the chain rule is
+        // carried by the argument derivatives). `resolve_scalar_def` rejects
+        // non-scalar parameters, and `dual_eval` rejects any body construct
+        // this pass does not support, so an unsupported callee falls through
+        // to `None` (the `__unresolved_grad` rejection path).
+        _ => dual_eval_user_call(op, &args, program, depth),
     }
+}
+
+/// Inline a call to a user-defined scalar def into the dual tree. Returns
+/// `None` when the callee is not a resolvable scalar def, its arity does not
+/// match, or its body uses an unsupported construct.
+fn dual_eval_user_call(
+    op: &str,
+    args: &[Dual],
+    program: &CheckedProgram,
+    depth: usize,
+) -> Option<Dual> {
+    let (param_names, param_tys, body) = resolve_scalar_def(program, op)?;
+    if param_names.len() != args.len() {
+        return None;
+    }
+    if param_tys.iter().any(|ty| !is_dual_scalar_type(ty)) {
+        return None;
+    }
+    let mut call_env: HashMap<String, Dual> = HashMap::new();
+    for (name, arg) in param_names.iter().zip(args.iter()) {
+        call_env.insert(name.clone(), arg.clone());
+    }
+    dual_eval(body, &call_env, program, depth + 1)
 }
 
 /// Extract a compile-time float constant from a HostExpr if it is a literal.
