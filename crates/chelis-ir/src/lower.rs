@@ -585,6 +585,14 @@ fn insert_copy_nodes_for_consuming_fanout(dag: &Dag) -> (Dag, HashMap<NodeId, No
                 .reusable_input
                 .and_then(|old| id_map.get(&old).copied());
             new_node.merged_spans = node.merged_spans.clone();
+            // chelis#384/#397: preserve (remapped) shape-only deps so a
+            // Form-3 `expand` extent source survives this rebuild. Deps are
+            // earlier in topo order, so already remapped in `id_map`.
+            new_node.shape_deps = node
+                .shape_deps
+                .iter()
+                .filter_map(|old| id_map.get(old).copied())
+                .collect();
         }
         id_map.insert(node.id, new_id);
     }
@@ -666,6 +674,14 @@ fn strip_drop_nodes(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId>) {
                 .reusable_input
                 .and_then(|old| id_map.get(&old).copied());
             new_node.merged_spans = node.merged_spans.clone();
+            // chelis#384/#397: preserve (remapped) shape-only deps so a
+            // Form-3 `expand` extent source survives this rebuild. Deps are
+            // earlier in topo order, so already remapped in `id_map`.
+            new_node.shape_deps = node
+                .shape_deps
+                .iter()
+                .filter_map(|old| id_map.get(old).copied())
+                .collect();
         }
         id_map.insert(node.id, new_id);
     }
@@ -5487,6 +5503,11 @@ impl LowerCtx {
                     {
                         self.dag.set_reusable_input(new_id, *mapped_input);
                     }
+                    // chelis#384/#397: preserve (remapped) Form-3 `expand`
+                    // shape-deps across the splice. Deps are earlier nodes,
+                    // already in `remap`.
+                    self.dag
+                        .preserve_shape_deps(new_id, &node.shape_deps, &remap);
                     new_id
                 }
             };
@@ -6415,9 +6436,23 @@ impl LowerCtx {
                 //      verification failure under `grad`.
                 //
                 //   3. Otherwise default to size 1.
+                //
+                // chelis#384/#397: when the extent comes from a
+                // `shape(src, axis)` argument, capture `src`'s lowered node so
+                // it can be recorded as a `shape_dep` on the Expand below. The
+                // extent symbol is declared by `src`'s shape; without the dep,
+                // a `src` referenced only via `shape(src, ...)` is DCE'd and
+                // the symbol loses its source (silent wrong shape in C).
+                let mut shape_source: Option<NodeId> = None;
                 let size = if args.len() >= 3 {
                     self.extract_dim_expr_value(&args[2])
-                        .or_else(|| self.dim_expr_from_shape_arg(&args[2]))
+                        .or_else(|| {
+                            self.dim_expr_from_shape_arg_with_source(&args[2])
+                                .map(|(dim, src)| {
+                                    shape_source = Some(src);
+                                    dim
+                                })
+                        })
                         .unwrap_or(DimExpr::Concrete(1))
                 } else {
                     DimExpr::Concrete(1)
@@ -6443,12 +6478,50 @@ impl LowerCtx {
                         t
                     })
                     .unwrap_or_else(|| ty.clone());
-                self.dag.add_node(
+                let expand_id = self.dag.add_node(
                     RiscOp::Expand { axis, size },
                     vec![x],
                     out_ty,
                     self.current_span_id.clone(),
-                )
+                );
+                // chelis#384/#397: keep the `shape(src, ...)` extent source
+                // alive through DCE so the symbolic dim it declares binds from
+                // the correct tensor input.
+                if let Some(src) = shape_source {
+                    self.dag.add_shape_dep(expand_id, src);
+                }
+                // chelis#384/#397 (B): a §4.7.2 Form-3 runtime expand size that
+                // resolves to a symbolic dim with NO tensor source — neither a
+                // `shape(tensor, ...)` argument (which the shape_dep above
+                // keeps live) nor a dim carried by any tensor in scope — has no
+                // representation the backend can emit. The C codegen would read
+                // the extent from a fabricated/out-of-range operand axis
+                // (silent wrong shape — the original bug) or emit an undeclared
+                // identifier. Reject loudly at lowering with a clean diagnostic
+                // rather than the downstream `symbolic_occurrences` ICE. The
+                // size of `expand(x, 1, k)` where `k` is a scalar `int32`
+                // parameter (or a rank-var output dim like #397's `a`, sourced
+                // from a scalar `int64`) is exactly this case.
+                if shape_source.is_none()
+                    && let Some(RiscOp::Expand { size, .. }) =
+                        self.dag.get(expand_id).map(|n| &n.op)
+                    && let DimExpr::Sym(name) = size.clone()
+                    && !self.symbol_has_tensor_source(&name)
+                {
+                    raise_fatal_lowering_error(
+                        format!(
+                            "`expand` size resolves to the symbolic dimension `{name}`, but no \
+                             tensor in scope carries it: a §4.7.2 Form-3 runtime size must be a \
+                             literal/`cast(N, int32)`, an in-scope tensor dimension, or a \
+                             `shape(tensor, axis)` read. A bare runtime scalar (e.g. an `int32`/\
+                             `int64` parameter) has no shape source the backend can emit, so the \
+                             extent cannot be materialized (spec/04-type-system.md \u{00a7}4.7.2)"
+                        ),
+                        Some(app_span),
+                        self.current_span_id.clone(),
+                    );
+                }
+                expand_id
             }
             "pad" if !args.is_empty() => {
                 let x = self.lower_expr_node(&args[0], "pad input");
@@ -7310,12 +7383,36 @@ impl LowerCtx {
     /// Returns `None` when the argument is not a `shape(...)` application,
     /// the axis is out of range, or the operand has no resolvable type —
     /// in which case the caller falls back to its other recovery paths.
-    fn dim_expr_from_shape_arg(&mut self, expr: &Expr) -> Option<DimExpr> {
+    /// chelis#384/#397 (B): true when some tensor `Load` already in the DAG
+    /// carries the named dimension `name` in its shape — i.e. the symbol has a
+    /// real tensor source the backend can read the extent from. Used to
+    /// distinguish a valid §4.7.2 Form-2 symbolic `expand` size (an in-scope
+    /// tensor dim) from a sourceless Form-3 scalar-parameter size that the
+    /// backend cannot materialize.
+    fn symbol_has_tensor_source(&self, name: &str) -> bool {
+        self.dag.nodes().iter().any(|node| {
+            matches!(node.op, RiscOp::Load { .. })
+                && node
+                    .output_type
+                    .dims
+                    .iter()
+                    .any(|dim| matches!(dim, DimInfo::Named(n, _) if n == name))
+        })
+    }
+
+    /// Recover an `expand` extent from a `shape(operand, axis)` size
+    /// argument, returning BOTH the dim and the lowered node whose runtime
+    /// shape supplies the extent. chelis#384/#397: the caller records the
+    /// source node as a `shape_dep` on the consuming `Expand` so it survives
+    /// DCE — otherwise a `shape(x, ...)`-only-referenced `x` is eliminated and
+    /// the symbolic dim it declares loses its source (silent wrong shape in
+    /// the backend).
+    fn dim_expr_from_shape_arg_with_source(&mut self, expr: &Expr) -> Option<(DimExpr, NodeId)> {
         let (operand, axis) = shape_app_operand_axis(expr)?;
         let operand_id = self.lower_expr(operand).as_single_node()?;
         let operand_ty = self.dag.get(operand_id)?.output_type.clone();
         let dim = operand_ty.dims.get(axis)?;
-        Some(DimExpr::from(dim))
+        Some((DimExpr::from(dim), operand_id))
     }
 
     fn lower_handle_effect(&mut self, elems: &[Expr]) -> LoweredValue {

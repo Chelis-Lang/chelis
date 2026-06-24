@@ -1117,6 +1117,17 @@ pub struct DagNode {
     /// ID present on any input Deep node appears on at least one IR node.
     #[serde(default)]
     pub merged_spans: Vec<String>,
+    /// chelis#384/#397: nodes this node depends on ONLY for their shape, not
+    /// their data. A Form-3 `expand(b, axis, shape(x, k))` reads the
+    /// broadcast extent from `x`'s runtime shape but does not consume `x`'s
+    /// data, so `x` is not in `inputs`. Without recording the dependency,
+    /// `x`'s `Load` is dead-code-eliminated and the symbolic dim it declares
+    /// loses its only source. DCE keeps the shape source live through this
+    /// edge; eval and the backends never read it (op/inputs/output_type are
+    /// unchanged), so it does not alter the Expand operator's arity or
+    /// codegen.
+    #[serde(default)]
+    pub shape_deps: Vec<NodeId>,
 }
 
 /// The RISC DAG — an append-only, topologically-ordered vector of [`DagNode`]s.
@@ -1155,6 +1166,7 @@ impl Dag {
             reusable_input: None,
             span_id,
             merged_spans: Vec::new(),
+            shape_deps: Vec::new(),
         });
         id
     }
@@ -1162,6 +1174,45 @@ impl Dag {
     pub fn set_reusable_input(&mut self, id: NodeId, input: NodeId) {
         if let Some(node) = self.nodes.get_mut(id.0) {
             node.reusable_input = Some(input);
+        }
+    }
+
+    /// chelis#384/#397: record that `id` depends on `dep` only for its shape
+    /// (a Form-3 `expand(..., shape(x, ...))` extent source). DCE keeps `dep`
+    /// live through this edge; eval/backends ignore it. See
+    /// [`DagNode::shape_deps`].
+    pub fn add_shape_dep(&mut self, id: NodeId, dep: NodeId) {
+        if let Some(node) = self.nodes.get_mut(id.0)
+            && !node.shape_deps.contains(&dep)
+        {
+            node.shape_deps.push(dep);
+        }
+    }
+
+    /// chelis#384/#397: copy `source_deps` (an old node's `shape_deps`) onto
+    /// node `new_id` in this DAG, remapping each through `remap`. Every
+    /// DAG-rebuild pass (DCE, copy/drop insertion, BLAS specialization,
+    /// fusion, vmap, grad, splice) must call this alongside its
+    /// `merged_spans` preservation so a Form-3 `expand` extent source is not
+    /// silently dropped on the rebuild — losing it reintroduces the
+    /// wrong-shape regression. Deps that don't survive the rebuild's remap
+    /// are dropped (the consuming node was itself eliminated, so the dep is
+    /// moot).
+    pub fn preserve_shape_deps(
+        &mut self,
+        new_id: NodeId,
+        source_deps: &[NodeId],
+        remap: &HashMap<NodeId, NodeId>,
+    ) {
+        if source_deps.is_empty() {
+            return;
+        }
+        let mapped: Vec<NodeId> = source_deps
+            .iter()
+            .filter_map(|old| remap.get(old).copied())
+            .collect();
+        if let Some(node) = self.nodes.get_mut(new_id.0) {
+            node.shape_deps = mapped;
         }
     }
 
@@ -1456,9 +1507,33 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         RiscOp::Copy | RiscOp::Drop | RiscOp::Realize | RiscOp::Cast { .. } => {
             shape_source_for_axis(dag, *node.inputs.first()?, axis)
         }
+        // chelis#384/#397: an Expand INSERTS a new axis (rank+1) or SETS an
+        // existing size-1 axis (rank unchanged) at `expand_axis`. The newly
+        // inserted/set axis's extent comes from the Expand's `size`, NOT from
+        // the operand — recursing into the operand at that output index reads
+        // the wrong dim (a size-1 axis in the set case, or an out-of-range /
+        // shifted index in the insert case). Map the query axis back to the
+        // correct operand axis, and return `None` for the inserted/set axis
+        // itself so the symbol is declared by the real shape source (the
+        // `shape_deps`-kept Load) or surfaces loudly via the sourceless-symbol
+        // diagnostic, rather than binding to a fabricated operand source.
+        RiscOp::Expand {
+            axis: expand_axis, ..
+        } => {
+            let operand = *node.inputs.first()?;
+            let operand_rank = dag.get(operand)?.output_type.dims.len();
+            let inserts = node.output_type.dims.len() == operand_rank + 1;
+            if axis == *expand_axis {
+                return None;
+            }
+            if inserts && axis > *expand_axis {
+                shape_source_for_axis(dag, operand, axis - 1)
+            } else {
+                shape_source_for_axis(dag, operand, axis)
+            }
+        }
         RiscOp::Reshape { .. }
         | RiscOp::Permute { .. }
-        | RiscOp::Expand { .. }
         | RiscOp::Pad { .. }
         | RiscOp::Shrink { .. }
         | RiscOp::Stride { .. }

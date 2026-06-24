@@ -474,6 +474,17 @@ fn prune_to_requested_outputs(
             {
                 new_node.merged_spans = node.merged_spans.clone();
             }
+            // chelis#384/#397: preserve (remapped) Form-3 `expand` shape-deps.
+            if !node.shape_deps.is_empty() {
+                let mapped: Vec<NodeId> = node
+                    .shape_deps
+                    .iter()
+                    .filter_map(|old| id_map.get(&old.0).copied())
+                    .collect();
+                if let Some(new_node) = new_dag.node_mut(new_id) {
+                    new_node.shape_deps = mapped;
+                }
+            }
             id_map.insert(node.id.0, new_id);
         }
     }

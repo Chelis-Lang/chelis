@@ -63,10 +63,13 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
         // §2.3 vmap row, span_id and merged_spans are cloned unchanged
         // — every input span survives the pass.
         let new_id = out.add_node(op, node.inputs.clone(), output_type, node.span_id.clone());
-        if !node.merged_spans.is_empty()
-            && let Some(new_node) = out.node_mut(new_id)
-        {
-            new_node.merged_spans = node.merged_spans.clone();
+        if let Some(new_node) = out.node_mut(new_id) {
+            if !node.merged_spans.is_empty() {
+                new_node.merged_spans = node.merged_spans.clone();
+            }
+            // chelis#384/#397: vmap is a 1:1 id-preserving clone, so a
+            // Form-3 `expand` shape-dep maps to the same id verbatim.
+            new_node.shape_deps = node.shape_deps.clone();
         }
         if let Some(reusable_input) = node.reusable_input {
             out.set_reusable_input(new_id, reusable_input);

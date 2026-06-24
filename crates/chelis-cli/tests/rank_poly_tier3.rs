@@ -1878,3 +1878,112 @@ fn vmap_two_stage_named_reduce_top_level_binding_evals() {
         );
     }
 }
+
+/// chelis#383 (build lane): the vmap-over-two-stage-named-reduce that
+/// previously tripped the `dag.rs` symbolic-dim ICE at build time now builds,
+/// runs, and the C backend agrees with the evaluator. The IR-level fix (the
+/// vmap dim-symbol remap batch-prepend) removed the ICE; once the downstream
+/// C-identifier hygiene landed on main the build lane completes end to end.
+/// Pins the full compile-run-eval agreement so the IR fix cannot silently
+/// regress the build lane.
+#[test]
+fn vmap_two_stage_named_reduce_top_level_binding_builds_and_matches_backend() {
+    let source = "def vinner(x: &tensor[seq, head, f32]) -> f32 = tensor_to_scalar(sum(sum(x, head), seq))\n\
+         y = to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]])\n\
+         out = vmap(vinner)(y)\n";
+    let backend = build_compile_run(source, "issue_383_vmap_build");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    assert_eq!(
+        out.1,
+        vec![2],
+        "vmap two-stage reduce build shape ({backend})"
+    );
+    for (i, e) in [10.0, 26.0].iter().enumerate() {
+        assert!(
+            (out.2[i] - e).abs() < 1e-6,
+            "out[{i}]: backend {} != {e} ({backend})",
+            out.2[i]
+        );
+    }
+    assert_eval_agrees_with_backend(source, "issue_383_vmap_build", &backend);
+}
+
+/// chelis#384/#397 (A): a §4.7.2 Form-3 runtime `expand` size sourced from a
+/// `shape(tensor, axis)` read must produce C that AGREES with the evaluator.
+/// This is the spec's own canonical example (`bias_broadcast` from
+/// `examples/illustrative/runtime_shape_semantics.ch`), which the C backend
+/// previously mis-compiled: it read the new axis extent from the expand
+/// OPERAND (`b`, size 4) instead of the `shape(x, 0)` source (`x`, size 2),
+/// emitting `[4, 4]` against the evaluator's `[2, 4]`. The fix keeps the
+/// shape-source operand `x` live (a `shape_dep`) so the symbolic dim `n`
+/// binds from `x`'s shape. Non-square `[2, 4]` so an operand/source mixup
+/// changes the shape and cannot hide.
+#[test]
+fn form3_shape_sourced_expand_matches_backend() {
+    let source = "def bias_broadcast(x: &tensor[n, 4, f32], b: &tensor[4, f32]) -> tensor[n, 4, f32] = expand(b, 0, shape(x, cast(0, int32)))\n\
+         xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])\n\
+         bs = to_tensor([10.0, 20.0, 30.0, 40.0])\n\
+         out = bias_broadcast(xs, bs)\n";
+    let backend = build_compile_run(source, "issue_397_shape_sourced_expand");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    // The broadcast extent `n` comes from `x`'s axis 0 (=2), NOT from `b`
+    // (=4); a source mixup would print shape `[4, 4]`.
+    assert_eq!(
+        out.1,
+        vec![2, 4],
+        "Form-3 shape-sourced expand bound the extent to the wrong tensor ({backend})"
+    );
+    // The backend must agree with the evaluator, value-for-value AND
+    // shape-for-shape (the #338 oracle): the original divergence was a
+    // shape disagreement, so assert_eval_agrees_with_backend pins it.
+    assert_eval_agrees_with_backend(source, "issue_397_shape_sourced_expand", &backend);
+}
+
+/// chelis#384 (B): a §4.7.2 Form-3 runtime `expand` size that is a bare
+/// runtime scalar parameter (`k: int32`) with NO tensor source is rejected
+/// loudly at lowering, not silently mis-compiled. Pre-fix the C backend read
+/// the extent from an out-of-range operand axis (`x` is rank 1; the codegen
+/// read `inputs[0]->shape[1]`), emitting a garbage shape that disagreed with
+/// the evaluator's `[2, 3]`. There is no tensor whose shape carries the
+/// extent, so the form has no backend representation and must reject.
+#[test]
+fn form3_scalar_param_expand_size_rejected() {
+    let source = "def f(x: &tensor[seq, f32], k: int32) -> tensor[seq, chan, f32] = expand(x, 1, k)\n\
+         out = f(to_tensor([1.0, 2.0]), 3)\n";
+    let stderr = build_expecting_failure(source, "issue_384_scalar_param_expand");
+    assert!(
+        stderr.contains("expand") && stderr.contains("no tensor in scope carries it"),
+        "expected the Form-3 sourceless-size reject diagnostic, got: {stderr}"
+    );
+    // The reject must be a clean diagnostic, never the internal-compiler-error
+    // ICE the sourceless symbol previously triggered downstream.
+    assert!(
+        !stderr.contains("internal compiler error"),
+        "sourceless Form-3 expand size must reject cleanly, not ICE: {stderr}"
+    );
+}
+
+/// chelis#384/#397 (B): the eval lane rejects the sourceless Form-3 expand
+/// size identically to the backend — no eval-vs-backend divergence. Pre-fix
+/// eval computed a (correct) result while the backend silently diverged;
+/// both lanes now reject the unsupported form with the same diagnostic.
+#[test]
+fn form3_scalar_param_expand_size_rejected_in_eval() {
+    let source = "def bcast[a, n](g: tensor[n, f32], a_dim: int64) -> tensor[a, n, f32] = expand(g, 0, a_dim)\n\
+         out = bcast(to_tensor([1.0, 2.0]), cast(3, int64))\n";
+    let dir = tempdir().expect("tempdir");
+    let stderr = eval_stderr_expecting_failure(dir.path(), source, "issue_397_eval_reject");
+    assert!(
+        stderr.contains("expand") && stderr.contains("no tensor in scope carries it"),
+        "eval must reject the sourceless Form-3 expand size with the same \
+         diagnostic as the backend, got: {stderr}"
+    );
+}
