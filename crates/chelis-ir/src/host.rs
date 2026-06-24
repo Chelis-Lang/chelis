@@ -8277,6 +8277,73 @@ mod tests {
         );
     }
 
+    /// chelis#336: restore the guard that a function-typed parameter survives
+    /// as `HostType::Fn` through `lower_compiled_program`. #331 deleted the
+    /// only test asserting this (it relied on a reef-package HOF). A
+    /// *same-module* HOF like `def apply(f, x) = f(x)` is inlined away, so a
+    /// surviving fn-param needs a non-inlined HOF: here `apply_each` is kept
+    /// as a real host function because it is called with a fn argument and
+    /// uses the `map` combinator. The lowered `apply_each` must keep its
+    /// `f: f32 -> f32` parameter typed `HostType::Fn`, not collapsed to a
+    /// value type.
+    #[test]
+    fn host_program_preserves_fn_typed_param_through_lowering() {
+        let checked = surf_check(
+            "def apply_each(f: f32 -> f32, xs: List[f32]) -> List[f32] = map(fn (v: f32) -> f(v), xs)\n\
+             def double(x: f32) -> f32 = mul(x, 2.0)\n\
+             out = apply_each(double, [1.0, 2.0, 3.0])\n",
+        );
+        let compiled = lower_compiled_program(&checked);
+        let host = compiled.host.expect("host program present");
+        let apply_each = host
+            .functions
+            .iter()
+            .find(|f| f.name == "apply_each")
+            .expect("apply_each must survive as a host function (not inlined)");
+        let f_param = apply_each
+            .params
+            .iter()
+            .find(|p| p.name == "f")
+            .expect("apply_each must keep its `f` parameter");
+        match &f_param.ty {
+            HostType::Fn(params, ret) => {
+                assert_eq!(params.len(), 1, "f takes one scalar arg, got {params:?}");
+                assert!(
+                    matches!(params[0], HostType::Float32 | HostType::Float64),
+                    "f's arg must be a scalar, got {:?}",
+                    params[0]
+                );
+                assert!(
+                    matches!(**ret, HostType::Float32 | HostType::Float64),
+                    "f's return must be a scalar, got {ret:?}"
+                );
+            }
+            other => panic!("fn-typed param `f` must lower to HostType::Fn, got {other:?}"),
+        }
+    }
+
+    /// chelis#336 negative parity: a program with no higher-order parameter
+    /// must produce no `HostType::Fn` parameter, so the positive guard above
+    /// is not vacuously satisfied by some unrelated fn-typed param.
+    #[test]
+    fn host_program_has_no_fn_typed_param_without_hof() {
+        let checked = surf_check(
+            "def double(x: f32) -> f32 = mul(x, 2.0)\n\
+             out = double(2.0)\n",
+        );
+        let compiled = lower_compiled_program(&checked);
+        let host = compiled.host.expect("host program present");
+        let has_fn_param = host
+            .functions
+            .iter()
+            .flat_map(|f| f.params.iter())
+            .any(|p| matches!(p.ty, HostType::Fn(_, _)));
+        assert!(
+            !has_fn_param,
+            "a non-HOF program must not lower any HostType::Fn parameter"
+        );
+    }
+
     // ── Issue #308: scalar_to_tensor operand-precision plumbing ──
     //
     // `HostType::Float64` collapses f32 and f64, so the Deep-level
