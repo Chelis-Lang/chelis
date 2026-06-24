@@ -45,8 +45,16 @@ import argparse
 import os
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
+
+# NB: `tomllib` is intentionally NOT imported at module top. It is stdlib
+# only from Python 3.11, and on macOS the system `python3` is 3.9, so a
+# top-level import crashed EVERY gate.py invocation — including `--list`
+# and the per-stage CI forms that never touch TOML — under the system
+# interpreter (chelis#366). Only the `--local` changed-crate derivation
+# parses Cargo.toml, so the import is deferred into
+# `workspace_member_packages()` and guarded with a one-line guidance
+# message instead of a raw traceback.
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -145,6 +153,19 @@ def workspace_member_packages(repo_root: Path = REPO_ROOT) -> dict[str, str]:
     the root `Cargo.toml` members list) to its `[package].name` from the
     member's own `Cargo.toml`. The directory name is NOT assumed to be
     the package name; `cargo nextest run -p` needs the package name."""
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        # `tomllib` is stdlib only from Python 3.11. The repo policy is to
+        # run gate.py via the uv-managed `.venv/bin/python` (>=3.11); the
+        # macOS system `python3` is 3.9. Surface that as guidance, not a
+        # raw traceback (chelis#366).
+        print(
+            "gate.py --local needs Python 3.11+ (tomllib); run via "
+            ".venv/bin/python per AGENTS.md",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
     manifest = tomllib.loads((repo_root / "Cargo.toml").read_text())
     members: list[str] = manifest["workspace"]["members"]
     packages: dict[str, str] = {}

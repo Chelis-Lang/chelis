@@ -16,9 +16,71 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Detect docs-only pull requests so the heavy jobs (Integration, macOS
+  # Smoke, SMT Feature Build, Backend Sanitizers, Hull Conformance Gate)
+  # can skip them via a job-level `if` (chelis#419). This MUST be a job
+  # output consumed by each heavy job's `if`, never a workflow-level
+  # `paths-ignore`: a required check filtered out by `paths-ignore` never
+  # reports its status context, so branch protection waits on it forever
+  # and the PR can never merge; a required check whose JOB is skipped by
+  # an `if` reports its context as success, satisfying branch protection.
+  #
+  # This job itself is intentionally NOT a required status check, is
+  # cheap (no toolchain, no build), and runs on every event. On push (no
+  # pull_request context) it emits docs_only=false so push-to-main always
+  # runs the full suite, per the WS-7 spend-trim scope.
+  changes:
+    name: Detect docs-only changes
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.detect.outputs.docs_only }}
+    steps:
+      # Shallow checkout (depth 1); the detect step deepens to the PR
+      # commit range. GitHub Actions expressions have no arithmetic, so
+      # `commits + 1` is computed in bash, not in the YAML `fetch-depth`.
+      # On push the detect step short-circuits without needing history.
+      - name: Checkout
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+      - name: Compute docs_only
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          COMMITS: ${{ github.event.pull_request.commits }}
+        run: |
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            # push-to-main (or any non-PR event) always runs the full
+            # suite; do not skip heavy jobs off a PR diff.
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "non-PR event ($EVENT_NAME): docs_only=false (full suite)"
+            exit 0
+          fi
+          # Deepen head to the PR commit count + 1 (the +1 reaches the
+          # base tip's parent so base..head resolves), then backstop-fetch
+          # the base commit so it is present as an object even on a stale
+          # count (force-push between the event and the run).
+          git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
+          git fetch --depth=1 origin "$BASE" 2>/dev/null || true
+          git diff --name-only "$BASE..$HEAD" \
+            | python3 scripts/ci_detect_docs_only.py
+
   lint-and-unit:
     name: Lint and Unit Tests (Linux)
     runs-on: ubuntu-latest
+    # Strip debuginfo from the dev/test build. Debuginfo is the dominant
+    # disk consumer in target/; dropping it (alongside the free-disk step
+    # below) is what keeps the Linux workspace build off "No space left on
+    # device" / the mid-link ld bus-error (signal 7) — chelis#392. Symbols
+    # only affect backtraces, never what is tested. Set per-job (not
+    # workflow-wide) so macos-smoke, the authoritative oracle, is byte-for-
+    # byte unchanged; the disk pressure is Linux-only.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
 
@@ -92,8 +154,24 @@ jobs:
   smt-build:
     name: SMT Feature Build (Linux)
     runs-on: ubuntu-latest
+    # Skip on docs-only PRs (chelis#419); a skipped required job reports
+    # success. Runs on every code PR and push.
+    needs: [changes]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    # cvc5 builds from source into target/ on top of the workspace build —
+    # the heaviest disk consumer of any Linux job — so it gets both the
+    # free-disk reclaim and the debuginfo strip (chelis#392). It was the
+    # only Linux build job missing the free-disk step.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
+
+      # Free ~25-30 GB before the cargo + cvc5 build; see
+      # .github/actions/free-disk-space (scripts/ci_free_disk.py).
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
 
       - name: Install C dependencies
         run: sudo apt-get update && sudo apt-get install -y gcc g++ cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev
@@ -243,6 +321,15 @@ jobs:
   integration:
     name: Integration Tests (Linux)
     runs-on: ubuntu-latest
+    # Skip on docs-only PRs (chelis#419). A skipped required job reports
+    # success, so branch protection stays satisfied; on push docs_only is
+    # always false. `needs: [changes]` is what makes the output readable.
+    needs: [changes]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    # Strip debuginfo; see lint-and-unit for the chelis#392 rationale.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
 
@@ -307,6 +394,11 @@ jobs:
     name: macOS Smoke
     runs-on: macos-latest
     timeout-minutes: 20
+    # Skip on docs-only PRs (chelis#419); a skipped required job reports
+    # success. macOS Smoke is the authoritative workspace oracle, so it
+    # runs on every code PR and every push; only a pure-prose PR skips it.
+    needs: [changes]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     steps:
       - uses: actions/checkout@v6
 
@@ -367,10 +459,19 @@ jobs:
   backend-sanitizers:
     name: Backend Sanitizers
     runs-on: ubuntu-latest
+    # Skip on docs-only PRs (chelis#419); a skipped required job reports
+    # success. Runs on every code PR and push.
+    needs: [changes]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     env:
       CHELIS_C_TEST_EXTRA_FLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer
       ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
       UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+      # Strip debuginfo; see lint-and-unit for the chelis#392 rationale.
+      # ASan/UBSan still report file:line from the C side; the Rust
+      # debuginfo dropped here does not affect the sanitizer findings.
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
 
@@ -398,17 +499,32 @@ jobs:
     name: No AI authorship markers
     runs-on: ubuntu-latest
     steps:
+      # Shallow the clone to the PR's commit range instead of the whole
+      # repo history (chelis#421). GitHub Actions expressions have no
+      # arithmetic, so the depth-1 checkout is deepened to the PR commit
+      # count + 1 in bash below (the `+1` reaches the base tip's parent so
+      # `base..head` resolves). A backstop fetch guarantees `base.sha` is
+      # present even if the count is stale (a force-push between the event
+      # and the run). On push, depth 2 covers `HEAD~1..HEAD`.
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Check commits for AI authorship markers
+        env:
+          COMMITS: ${{ github.event.pull_request.commits }}
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             BASE="${{ github.event.pull_request.base.sha }}"
             HEAD="${{ github.event.pull_request.head.sha }}"
+            # Deepen head to the PR commit range, then backstop-fetch the
+            # base commit so `base..head` resolves at the shallow boundary
+            # (both no-ops if already present).
+            git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
+            git fetch --depth=1 origin "$BASE" 2>/dev/null || true
             RANGE="$BASE..$HEAD"
           else
+            git fetch --depth=2 origin "$GITHUB_SHA" 2>/dev/null || true
             RANGE="HEAD~1..HEAD"
           fi
           FOUND=0
@@ -450,6 +566,11 @@ jobs:
   docs:
     name: Docs
     runs-on: ubuntu-latest
+    # Strip debuginfo; see lint-and-unit for the chelis#392 rationale.
+    # This job compiles the chelis-e2e skill-suite test binary.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
 

@@ -23,7 +23,7 @@ import io
 import re
 import sys
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 
@@ -50,6 +50,11 @@ NON_GATE_JOBS = {
     "backend-sanitizers",
     "no-ai-authorship",
     "docs",
+    # Rule-id: GATE-SCOPE-CHANGES -- the changes job computes the
+    # docs_only output that gates the heavy jobs' `if` (chelis#419). It
+    # runs scripts/ci_detect_docs_only.py, no cargo/chelis command, so it
+    # is out of gate.py scope by design.
+    "changes",
     # Rule-id: GATE-SCOPE-SMT -- the smt-build job compiles the
     # cvc5-backed `smt` feature and runs the smt-gated chelis-prove
     # suite. cvc5 builds from source (cmake/g++/libclang) and is not a
@@ -340,6 +345,151 @@ class CiParityTests(unittest.TestCase):
             )
 
 
+def _parse_job_attrs() -> dict[str, dict[str, str]]:
+    """Parse `.github/workflows/ci.yml` and return, per job, its
+    top-level `needs:` and `if:` lines (the first occurrence at the
+    job's own indent). Line-based to match the existing parser style and
+    avoid a PyYAML dependency the CI venv may not carry."""
+    text = CI_YML.read_text()
+    lines = text.splitlines()
+    current_job: str | None = None
+    attrs: dict[str, dict[str, str]] = {}
+    job_header = re.compile(r"^  ([a-z0-9-]+):\s*$")
+    attr_line = re.compile(r"^    (needs|if):\s*(.+?)\s*$")
+    # Only parse headers inside the `jobs:` block; `on:` triggers like
+    # `  push:` share the two-space indent and would otherwise read as
+    # jobs.
+    in_jobs = False
+    for line in lines:
+        if line.rstrip() == "jobs:":
+            in_jobs = True
+            continue
+        if not in_jobs:
+            continue
+        m = job_header.match(line)
+        if m is not None:
+            current_job = m.group(1)
+            attrs.setdefault(current_job, {})
+            continue
+        if current_job is None:
+            continue
+        am = attr_line.match(line)
+        if am is not None:
+            key, value = am.group(1), am.group(2)
+            attrs[current_job].setdefault(key, value)
+    return attrs
+
+
+class DocsOnlySkipTests(unittest.TestCase):
+    """chelis#419: heavy jobs skip on docs-only PRs via a JOB-LEVEL `if`
+    keyed on the `changes` job output, never `paths-ignore` (a path-
+    filtered required check hangs pending forever -> merge deadlock). A
+    skipped required job reports its context as success, so the skip
+    direction is safe; the `if` must also fail SAFE (run the heavy job)
+    when the `changes` job did not succeed, or a broken detector would
+    silently skip the gate on a code PR."""
+
+    # Jobs that must skip on a docs-only PR.
+    HEAVY_GATED_JOBS = {
+        "integration",
+        "macos-smoke",
+        "backend-sanitizers",
+        "smt-build",
+    }
+    # Jobs that must ALWAYS run (never gated on docs_only).
+    ALWAYS_RUN_JOBS = {
+        "lint-and-unit",
+        "no-ai-authorship",
+        "docs",
+        "changes",
+    }
+
+    def test_changes_job_exists_and_is_ungated(self):
+        attrs = _parse_job_attrs()
+        self.assertIn(
+            "changes", attrs, "the docs-only detector job must exist"
+        )
+        # The changes job itself must not be gated on its own output and
+        # must always run so its result/output are well-defined.
+        self.assertNotIn("if", attrs["changes"])
+        self.assertNotIn("needs", attrs["changes"])
+
+    def test_no_paths_ignore_in_workflow(self):
+        # paths-ignore / paths on a required check deadlocks branch
+        # protection; the whole point of #419 is to use job-level `if`
+        # instead. Match real YAML keys, not the explanatory comment that
+        # names `paths-ignore` to warn against it.
+        for raw in CI_YML.read_text().splitlines():
+            stripped = raw.strip()
+            if stripped.startswith("#"):
+                continue
+            self.assertFalse(
+                stripped.startswith("paths-ignore:")
+                or stripped.startswith("paths:"),
+                f"ci.yml uses a path filter ({stripped!r}); a path-filtered "
+                f"required check hangs pending forever. Use a job-level `if` "
+                f"on the changes output instead (chelis#419)",
+            )
+
+    def test_heavy_jobs_gate_on_changes_failsafe(self):
+        attrs = _parse_job_attrs()
+        for job in self.HEAVY_GATED_JOBS:
+            self.assertIn(job, attrs, f"heavy job '{job}' missing")
+            self.assertEqual(
+                attrs[job].get("needs"),
+                "[changes]",
+                f"'{job}' must `needs: [changes]` to read docs_only",
+            )
+            cond = attrs[job].get("if", "")
+            # Must reference the docs_only output ...
+            self.assertIn(
+                "needs.changes.outputs.docs_only != 'true'",
+                cond,
+                f"'{job}' if must skip only when docs_only == 'true': {cond!r}",
+            )
+            # ... fail SAFE when the changes job did not succeed ...
+            self.assertIn(
+                "needs.changes.result != 'success'",
+                cond,
+                f"'{job}' if must run when the changes job failed: {cond!r}",
+            )
+            # ... and not run on cancellation.
+            self.assertIn(
+                "!cancelled()",
+                cond,
+                f"'{job}' if must include !cancelled(): {cond!r}",
+            )
+
+    def test_always_run_jobs_are_not_gated(self):
+        attrs = _parse_job_attrs()
+        for job in self.ALWAYS_RUN_JOBS:
+            self.assertIn(job, attrs, f"always-run job '{job}' missing")
+            self.assertNotIn(
+                "needs",
+                attrs[job],
+                f"always-run job '{job}' must not gate on changes",
+            )
+            self.assertNotIn(
+                "if",
+                attrs[job],
+                f"always-run job '{job}' must not carry a docs_only `if`",
+            )
+
+    def test_every_job_is_classified(self):
+        # Every ci.yml job is either heavy-gated or always-run; a new job
+        # forces a deliberate classification (mirrors the workflow-file
+        # scope test).
+        attrs = _parse_job_attrs()
+        classified = self.HEAVY_GATED_JOBS | self.ALWAYS_RUN_JOBS
+        unclassified = set(attrs) - classified
+        self.assertEqual(
+            unclassified,
+            set(),
+            f"ci.yml job(s) {unclassified} are not classified docs-only-"
+            f"skip vs always-run; decide explicitly (chelis#419)",
+        )
+
+
 class NoAiAuthorshipTests(unittest.TestCase):
     def test_kiro_is_banned_in_authorship_patterns(self):
         message_patterns = _extract_ci_bash_array("AI_MSG_PATTERNS")
@@ -381,6 +531,87 @@ class NoAiAuthorshipTests(unittest.TestCase):
                 ),
                 f"identity example was not banned by AI_IDENTITY_PATTERNS: {example!r}",
             )
+
+
+class TomllibImportGuardTests(unittest.TestCase):
+    """chelis#366: `tomllib` is stdlib only from Python 3.11. A top-level
+    import crashed EVERY gate.py invocation under the macOS system
+    `python3` (3.9), including `--list` and the per-stage CI forms that
+    never parse TOML. The import is deferred into
+    `workspace_member_packages()` and guarded with a guidance message."""
+
+    def test_module_has_no_top_level_tomllib_import(self):
+        # The deferred import must NOT be reintroduced at module top.
+        source = (REPO_ROOT / "scripts" / "gate.py").read_text()
+        lines = source.splitlines()
+        in_func = False
+        for line in lines:
+            # Any line that starts a top-level def/class ends the import
+            # region we care about; function-local `import tomllib` is fine.
+            if line and not line[0].isspace() and (
+                line.startswith("def ") or line.startswith("class ")
+            ):
+                in_func = True
+            stripped = line.strip()
+            if stripped == "import tomllib" and not in_func and (
+                line == stripped  # zero indentation == module top
+            ):
+                self.fail(
+                    "gate.py imports tomllib at module top; defer it into "
+                    "workspace_member_packages() so --list works under "
+                    "Python <3.11 (chelis#366)"
+                )
+
+    def test_list_works_without_tomllib(self):
+        # Import the module and run `--list` with tomllib hidden, proving
+        # neither the import nor `--list` touches tomllib. We exec the
+        # module source in a namespace whose __import__ raises for tomllib.
+        source = (REPO_ROOT / "scripts" / "gate.py").read_text()
+        real_import = __import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "tomllib":
+                raise ModuleNotFoundError("No module named 'tomllib'")
+            return real_import(name, *args, **kwargs)
+
+        ns: dict = {"__name__": "gate_under_test", "__file__": str(
+            REPO_ROOT / "scripts" / "gate.py"
+        ), "__builtins__": dict(__builtins__) if isinstance(
+            __builtins__, dict
+        ) else dict(vars(__builtins__))}
+        ns["__builtins__"]["__import__"] = fake_import
+        # exec must not raise: the top-level import block has no tomllib.
+        exec(compile(source, "gate.py", "exec"), ns)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ns["main"](["--list"])
+        self.assertEqual(rc, 0)
+        self.assertIn("cargo nextest run --workspace", buf.getvalue())
+
+    def test_workspace_member_packages_gives_guidance_without_tomllib(self):
+        # The deferred import path must raise SystemExit with the guidance
+        # string (not a raw ModuleNotFoundError traceback) under <3.11.
+        source = (REPO_ROOT / "scripts" / "gate.py").read_text()
+        real_import = __import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "tomllib":
+                raise ModuleNotFoundError("No module named 'tomllib'")
+            return real_import(name, *args, **kwargs)
+
+        ns: dict = {"__name__": "gate_under_test", "__file__": str(
+            REPO_ROOT / "scripts" / "gate.py"
+        ), "__builtins__": dict(__builtins__) if isinstance(
+            __builtins__, dict
+        ) else dict(vars(__builtins__))}
+        ns["__builtins__"]["__import__"] = fake_import
+        exec(compile(source, "gate.py", "exec"), ns)
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as cm, redirect_stderr(err):
+            ns["workspace_member_packages"]()
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("Python 3.11+", err.getvalue())
+        self.assertIn(".venv/bin/python", err.getvalue())
 
 
 if __name__ == "__main__":
