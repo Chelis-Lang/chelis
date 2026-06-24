@@ -1,6 +1,9 @@
 # Clarabel SoS certificate engine (WI-15)
 
-Status: design approved (team-lead, WS-6). Option (i): no frozen-seam change.
+Status: IMPLEMENTED (WS-6). Option (i): no frozen-seam change. BLAS decision
+(A): `clarabel/sdp` with a cfg-gated backend (sdp-openblas on Linux,
+sdp-accelerate on macOS), opt-in dev/CI feature only -- the shipped release
+binary (`--features smt`) links zero BLAS.
 
 This is the design for the sum-of-squares (SoS) certificate `DischargeEngine`
 (`ClarabelSosEngine`), gated behind the `clarabel` cargo feature. It proves that
@@ -203,12 +206,35 @@ until WS-5 lands.
 
 ## Feature gating
 
-`clarabel` is a new cargo feature: `clarabel = ["dep:clarabel", "num-rational",
-"num-bigint", "num-traits"]`. The default, `smt`, `z3`, and solver-free builds
-are unaffected: the engine, the Clarabel dependency, and the registration are all
-behind `#[cfg(feature = "clarabel")]`. The solver-free gate
+`clarabel` is a cargo feature: `clarabel = ["dep:clarabel", "num-rational",
+"dep:num-bigint", "dep:num-traits"]`. The default, `smt`, `z3`, and solver-free
+builds are unaffected: the engine, the Clarabel dependency, and the registration
+are all behind `#[cfg(feature = "clarabel")]`. The solver-free gate
 (`check_is_solver_free_on_the_corpus`) stays green because nothing on the default
 path links Clarabel.
+
+The PSD cone needs Clarabel's `sdp` feature, which needs a BLAS/LAPACK backend
+(decision A). The per-OS backend is selected in target-specific dependency
+tables that reference the SAME optional `clarabel` dep, so cargo unifies the
+feature onto it:
+
+```toml
+[target.'cfg(target_os = "linux")'.dependencies]
+clarabel = { version = "0.11", optional = true, features = ["sdp-openblas"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+clarabel = { version = "0.11", optional = true, features = ["sdp-accelerate"] }
+```
+
+Linux links OpenBLAS (the CI clarabel lane installs `libopenblas-dev`; without
+it, `openblas-src` falls back to building OpenBLAS from source, which also
+works but is slower on a cold cache); macOS uses the OS-bundled Accelerate
+framework. The Clarabel float proposer (`propose.rs`) is itself gated to
+`cfg(any(target_os = "linux", target_os = "macos"))` -- the targets with a
+backend wired; on any other target the exact core and the `UnwiredProposer`
+engine still build. Because `clarabel` is opt-in and the shipped release binary
+ships `--features smt` only, the product and downstream shells link zero BLAS;
+only chelis's own `clarabel` CI lane and dev builds pull OpenBLAS.
 
 ## Acceptance (spec-first negatives)
 
