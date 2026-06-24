@@ -2228,6 +2228,226 @@ fn build_c_scalar_grad_rejects_container_wrt() {
     );
 }
 
+/// Build a scalar-grad program, link, run, and return the scalar value parsed
+/// from the printed `out = <f64>` line. Asserts the build emits no fallback /
+/// unresolved markers. Shared by the scalar-AD block-body, user-call, and
+/// Black-Scholes Greeks tests below.
+fn build_run_scalar_grad(stem: &str, source: &str) -> f64 {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join(format!("{stem}.ch"));
+    let out_dir = dir.path().join(format!("{stem}-build-out"));
+    write_file(&path, source);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let c_source = fs::read_to_string(out_dir.join(format!("{stem}.c"))).expect("generated c");
+    assert!(
+        !c_source.contains("__result = call(")
+            && !c_source.contains("unsupported builtin")
+            && !c_source.contains("__unresolved_grad")
+            && !c_source.contains("__unresolved_vmap"),
+        "scalar grad lowering must not degrade to fallback / unresolved markers:\n{c_source}"
+    );
+
+    let status = gcc_link_generated(&out_dir, &format!("{stem}.c"), stem);
+    assert!(status.success(), "gcc link failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join(stem))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status
+    );
+    let stdout = String::from_utf8(run_output.stdout).expect("utf-8 stdout");
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("out = "))
+        .and_then(|rhs| rhs.trim().parse::<f64>().ok())
+        .unwrap_or_else(|| panic!("could not parse `out = <f64>` from:\n{stdout}"))
+}
+
+/// chelis#405 negative parity: a (self-)recursive scalar def used as a `grad`
+/// target must fail closed. The dual transform inlines user-defined calls;
+/// without a depth bound a recursive callee would loop forever. The
+/// `MAX_DUAL_INLINE_DEPTH` cap makes the transform return `None` at depth, so
+/// the build falls through to the `__unresolved_grad` rejection with a clear
+/// diagnostic rather than hanging or emitting wrong C.
+#[test]
+fn build_c_scalar_grad_recursive_callee_fails_closed() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("scalar_grad_recursive.ch");
+    let out_dir = dir.path().join("scalar-grad-recursive-build-out");
+    write_file(
+        &path,
+        "def f(x: f32) -> f32 = mul(x, f(x))\n\
+         def df(x: f32) -> f32 = grad(f, wrt=(x))(x)\n\
+         out = df(cast(2.0, f32))\n",
+    );
+
+    let assert = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .timeout(std::time::Duration::from_secs(60))
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("can't lower these defs"),
+        "recursive scalar grad target must reject cleanly, got:\n{stderr}"
+    );
+}
+
+/// chelis#405: host-lane scalar forward-mode AD through a `let`-block body.
+/// The original implementation only handled single-expression scalar defs;
+/// the canonical real driver (Black-Scholes Greeks) binds intermediates in a
+/// block. `h(x) = { y = mul(x, x); add(y, x) } = x^2 + x`, so
+/// `grad(h)(3.0) = 2*3 + 1 = 7.0`. Locks let-binding threading in `dual_eval`.
+#[test]
+fn build_c_scalar_grad_block_body_builds_and_is_numerically_correct() {
+    let value = build_run_scalar_grad(
+        "scalar_grad_block",
+        "def h(x: f32) -> f32 = {\n\
+         \x20 y = mul(x, x)\n\
+         \x20 add(y, x)\n\
+         }\n\
+         def dh(x: f32) -> f32 = grad(h, wrt=(x))(x)\n\
+         out = dh(3.0)\n",
+    );
+    // d/dx(x^2 + x) at x = 3.0 is 2*3 + 1 = 7.0.
+    let f = |x: f64| x * x + x;
+    let x = 3.0_f64;
+    let fd = (f(x + 1e-4) - f(x - 1e-4)) / (2.0 * 1e-4);
+    assert!(
+        (value - fd).abs() < 1e-4,
+        "dh(3.0) = {value}, finite-difference reference = {fd}"
+    );
+    assert!(
+        (value - 7.0).abs() < 1e-5,
+        "dh(3.0) must equal 7.0, got {value}"
+    );
+}
+
+/// chelis#405: host-lane scalar AD must differentiate through a call to a
+/// user-defined scalar def (inlined into the dual tree). `outer(x) =
+/// add(inner(x), x)` with `inner(x) = mul(x, x)`, so `outer(x) = x^2 + x` and
+/// `grad(outer)(3.0) = 7.0`. Locks `dual_eval_user_call`.
+#[test]
+fn build_c_scalar_grad_through_user_defined_call_is_numerically_correct() {
+    let value = build_run_scalar_grad(
+        "scalar_grad_usercall",
+        "def inner(x: f32) -> f32 = mul(x, x)\n\
+         def outer(x: f32) -> f32 = add(inner(x), x)\n\
+         def douter(x: f32) -> f32 = grad(outer, wrt=(x))(x)\n\
+         out = douter(3.0)\n",
+    );
+    assert!(
+        (value - 7.0).abs() < 1e-5,
+        "douter(3.0) must equal 7.0 (grad of x^2 + x at 3), got {value}"
+    );
+}
+
+/// chelis#405 real-world driver: Black-Scholes scalar Greeks. `delta` and
+/// `vega` differentiate a `call_price` that combines `let`-block bodies,
+/// nested user-defined scalar calls (`d1`, `d2`, `normal_cdf`), and
+/// transcendentals (`log`, `sqrt`, `exp`). This is the hello-chelis capstone
+/// pattern named in the issue. A self-contained `normal_cdf` (Abramowitz &
+/// Stegun rational approximation) stands in for the Nautilus import so the
+/// test needs no reef dependency. The AD output is checked against a
+/// high-accuracy `f64` central finite difference of the same formula.
+#[test]
+fn build_c_scalar_grad_black_scholes_greeks_are_numerically_correct() {
+    const PRELUDE: &str = "def normal_cdf(x: f32) -> f32 = {\n\
+         \x20 k = div(1.0, add(1.0, mul(0.2316419, x)))\n\
+         \x20 poly = mul(k, add(0.319381530, mul(k, sub(0.356563782, mul(k, add(1.781477937, mul(k, sub(-1.821255978, mul(k, 1.330274429)))))))))\n\
+         \x20 pdf = mul(0.3989422804014327, exp(neg(div(mul(x, x), 2.0))))\n\
+         \x20 sub(1.0, mul(pdf, poly))\n\
+         }\n\
+         def d1(s: f32, k: f32, r: f32, sigma: f32, t: f32) -> f32 = {\n\
+         \x20 num = add(log(div(s, k)), mul(add(r, mul(0.5, mul(sigma, sigma))), t))\n\
+         \x20 den = mul(sigma, sqrt(t))\n\
+         \x20 div(num, den)\n\
+         }\n\
+         def d2(s: f32, k: f32, r: f32, sigma: f32, t: f32) -> f32 = sub(d1(s, k, r, sigma, t), mul(sigma, sqrt(t)))\n\
+         def call_price(s: f32, k: f32, r: f32, sigma: f32, t: f32) -> f32 = {\n\
+         \x20 d_1 = d1(s, k, r, sigma, t)\n\
+         \x20 d_2 = d2(s, k, r, sigma, t)\n\
+         \x20 discount = exp(neg(mul(r, t)))\n\
+         \x20 sub(mul(s, normal_cdf(d_1)), mul(mul(k, discount), normal_cdf(d_2)))\n\
+         }\n";
+
+    // delta = d(call_price)/ds at (s, k, r, sigma, t) = (100, 100, 0.05, 0.2, 1).
+    let delta = build_run_scalar_grad(
+        "bs_delta",
+        &format!(
+            "{PRELUDE}\
+             def delta(s: f32, k: f32, r: f32, sigma: f32, t: f32) -> f32 = grad(call_price, wrt=s)(s, k, r, sigma, t)\n\
+             out = delta(cast(100.0, f32), cast(100.0, f32), cast(0.05, f32), cast(0.2, f32), cast(1.0, f32))\n"
+        ),
+    );
+    // vega = d(call_price)/dsigma at the same point.
+    let vega = build_run_scalar_grad(
+        "bs_vega",
+        &format!(
+            "{PRELUDE}\
+             def vega(s: f32, k: f32, r: f32, sigma: f32, t: f32) -> f32 = grad(call_price, wrt=sigma)(s, k, r, sigma, t)\n\
+             out = vega(cast(100.0, f32), cast(100.0, f32), cast(0.05, f32), cast(0.2, f32), cast(1.0, f32))\n"
+        ),
+    );
+
+    // f64 reference of the same Horner-nested formula chelis evaluates.
+    let normal_cdf = |x: f64| -> f64 {
+        let k = 1.0 / (1.0 + 0.2316419 * x);
+        let poly = k
+            * (0.319381530
+                + k * (0.356563782 - k * (1.781477937 + k * (-1.821255978 - k * 1.330274429))));
+        let pdf = 0.3989422804014327 * (-x * x / 2.0).exp();
+        1.0 - pdf * poly
+    };
+    let call_price = |s: f64, k: f64, r: f64, sigma: f64, t: f64| -> f64 {
+        let d1 = (f64::ln(s / k) + (r + 0.5 * sigma * sigma) * t) / (sigma * t.sqrt());
+        let d2 = d1 - sigma * t.sqrt();
+        s * normal_cdf(d1) - k * (-r * t).exp() * normal_cdf(d2)
+    };
+    let (s, k, r, sigma, t) = (100.0_f64, 100.0, 0.05, 0.2, 1.0);
+    let h = 1e-4_f64;
+    let fd_delta =
+        (call_price(s + h, k, r, sigma, t) - call_price(s - h, k, r, sigma, t)) / (2.0 * h);
+    let fd_vega =
+        (call_price(s, k, r, sigma + h, t) - call_price(s, k, r, sigma - h, t)) / (2.0 * h);
+
+    // f32 AD vs f64 central difference: relative tolerance covers f32 rounding.
+    assert!(
+        (delta - fd_delta).abs() < 1e-3 * (1.0 + fd_delta.abs()),
+        "delta = {delta}, finite-difference reference = {fd_delta}"
+    );
+    assert!(
+        (vega - fd_vega).abs() < 1e-3 * (1.0 + fd_vega.abs()),
+        "vega = {vega}, finite-difference reference = {fd_vega}"
+    );
+}
+
 /// Regression test for the Coral UPSTREAM_BUGS.md pattern:
 /// `grad(loss, wrt=theta)(theta, x)` applied to a multi-param named top-level def
 /// (two tensor arguments, differentiating w.r.t. the first).

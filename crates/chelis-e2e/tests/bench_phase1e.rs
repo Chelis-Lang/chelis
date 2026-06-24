@@ -74,12 +74,11 @@ fn bench_phase1e_all_emits_structured_json_for_real_scope() {
     );
 
     // linreg carries its own deterministic data, so its CPU lane must
-    // actually execute and emit a structured verdict — never a silent skip.
-    // Full-profile training currently diverges (loss -> inf/nan); that
-    // numerical regression is tracked by chelis#389, so this gate asserts
-    // the lane ran and reported, not that it converged. The green linreg
-    // oracle is the smoke lane (`bench_phase1e_linreg_smoke_emits_structured_json`),
-    // which asserts `cpu.status == "ok"`.
+    // actually execute, converge, and emit a structured verdict — never a
+    // silent skip or a divergence. chelis#389 (full-profile training diverged
+    // to inf/nan) was a mean->sum loss regression in `examples/linreg.ch`, not
+    // an AD bug; restoring `mean` recovered the converged 2026-04-07 capture
+    // (final_loss 1.292e-05), so this gate now requires `ok`.
     let linreg = models
         .iter()
         .find(|model| model["name"].as_str() == Some("linreg"))
@@ -87,10 +86,11 @@ fn bench_phase1e_all_emits_structured_json_for_real_scope() {
     let linreg_status = linreg["cpu"]["status"]
         .as_str()
         .expect("linreg cpu status string");
-    assert!(
-        matches!(linreg_status, "ok" | "failed"),
-        "linreg CPU lane must run (it has its own data), got status {linreg_status:?}; \
-         see chelis#389 for the full-profile training divergence"
+    assert_eq!(
+        linreg_status, "ok",
+        "linreg CPU full-profile lane must converge (it has its own data), got status {linreg_status:?} \
+         reason {:?}; chelis#389 was the mean->sum loss regression, so a divergence here is a re-regression",
+        linreg["cpu"]["reason"]
     );
 }
 

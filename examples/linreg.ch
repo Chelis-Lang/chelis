@@ -11,7 +11,7 @@ def loss(x: tensor[64, 64, f32], y: tensor[64, 1, f32], w: tensor[64, 1, f32], b
   neg_y = neg(y)
   err = add(pred, neg_y)
   sq = mul(err, err)
-  per_col = sum(sq, 1)
-  out = sum(per_col, 0)
+  per_col = mean(sq, 1)
+  out = mean(per_col, 0)
   out
 }
