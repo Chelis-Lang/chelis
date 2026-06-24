@@ -23,6 +23,9 @@
 //! Clarabel's PSD cone is pinned (escalated to the orchestrator). The exact core
 //! is fully testable without any solver.
 
+pub mod engine;
 pub mod exact;
 pub mod extract;
 pub mod poly;
+
+pub use engine::{ClarabelSosEngine, SosProposer, UnwiredProposer};
