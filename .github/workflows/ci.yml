@@ -174,7 +174,13 @@ jobs:
         uses: ./.github/actions/free-disk-space
 
       - name: Install C dependencies
-        run: sudo apt-get update && sudo apt-get install -y gcc g++ cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev
+        # libz3-dev installs an unversioned libz3 on the default linker +
+        # loader paths, so the z3-sys `#[link(name = "z3")]` resolves with
+        # no Z3_LIBRARY_PATH_OVERRIDE / LD_LIBRARY_PATH needed (unlike the
+        # local dev path documented in docs/local_z3_environment.md). The
+        # z3 lane is co-located in this job so the cross-engine oracle has
+        # both cvc5 and Z3 present in one build.
+        run: sudo apt-get update && sudo apt-get install -y gcc g++ cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev libz3-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -200,6 +206,12 @@ jobs:
 
       - name: Run carcara-gated chelis-prove tests
         run: cargo test -p chelis-prove --features carcara
+
+      - name: Run z3-gated chelis-prove tests
+        run: cargo test -p chelis-prove --features z3
+
+      - name: Run cross-engine oracle (cvc5 + Z3 agreement)
+        run: cargo test -p chelis-prove --features "smt z3" --test cross_engine_oracle
 
   # chelis#422 (WS-4) PROVE-IN-CI lanes. release.yml ships
   # `chelis-cli --features smt` on three targets; cvc5 builds from

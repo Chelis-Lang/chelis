@@ -8,6 +8,23 @@ description = "Three-tier property verification: type check → SMT (cvc5) → f
 
 [features]
 smt = ["cvc5-rs", "num-rational"]
+# WI-12 Z3 NRA engine (WS-5): a second SMT DischargeEngine over the SAME
+# GoalShape::Smt the cvc5 engine fits, backed by Z3's nonlinear-real-arithmetic
+# decision procedure. It is the cvc5->Z3 capability-split consumer of the
+# try-until-discharge dispatcher: a goal cvc5 returns Unknown on can fall
+# through to Z3. The two engines lower the SAME SmtExpr to the SAME exact-f64
+# rationals (num-rational's BigRational::from_float, matching the #444 cvc5
+# RealLit fix), so they reason about identical numbers and a cross-engine
+# oracle can require they agree. Independent of `smt`: the `z3` feature can be
+# built WITHOUT cvc5, and the default build links neither.
+#
+# z3 = 0.20 / z3-sys = 0.11 with `default-features = false` so z3-sys does NOT
+# build a bundled Z3 from source (no cmake): its build.rs takes the
+# pkg-config/`Z3_LIBRARY_PATH_OVERRIDE` branch and `#[link(name = "z3")]`
+# links a PREBUILT libz3 (the system `libz3-dev` in CI; the python-shipped
+# libz3 on this workstation). See `docs/local_z3_environment.md` for the link
+# recipe and `scripts/z3_test.py` for the wrapper that sets it.
+z3 = ["dep:z3", "num-rational"]
 # WI-16 Carcara auditability: re-check cvc5's Alethe proofs in-process for
 # independent auditability of the linear-arithmetic / EUF fragment (the
 # SmtExpr/SmtSort surface has no bit-vector representation, so the bit-vector
@@ -21,12 +38,18 @@ carcara = ["smt", "dep:carcara", "gmp-mpfr-sys/use-system-libs"]
 
 [dependencies]
 cvc5-rs = { version = "0.3", optional = true }
-# Used only on the smt path: a RealLit lowers to its EXACT f64 value as a
-# rational `n/d` (BigRational::from_float), so cvc5 reasons about the same
-# number the runtime f64 evaluator does, not the literal's exact decimal.
+# On the smt AND z3 paths: a RealLit lowers to its EXACT f64 value as a
+# rational `n/d` (BigRational::from_float), so the solver reasons about the
+# same number the runtime f64 evaluator does, not the literal's exact decimal.
+# cvc5 and Z3 share this lowering so they reason about identical numbers.
 num-rational = { version = "0.4", default-features = false, features = [
     "num-bigint",
 ], optional = true }
+# WI-12 Z3 NRA engine (the `z3` feature). `default-features = false` so
+# z3-sys does NOT vendor/build Z3 from source: it links a PREBUILT libz3 via
+# `#[link(name = "z3")]` (the build.rs pkg-config/Z3_LIBRARY_PATH_OVERRIDE
+# branch). Keep this OFF for the default and smt builds so neither links z3.
+z3 = { version = "0.20", default-features = false, optional = true }
 # Carcara is a Rust project, not a crates.io crate (see the WI-16 master-plan
 # note), so it is a pinned git dependency. Pin a specific rev for build
 # reproducibility and CI-cache stability.

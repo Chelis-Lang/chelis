@@ -471,6 +471,37 @@ impl Discharge {
     }
 }
 
+/// The ENGINE-AGNOSTIC classification of an SMT [`TierBResult`] into its
+/// `(soundness, qualifier_set)` (chelis#422, WS-5).
+///
+/// Every SMT engine that lowers a goal to an over-the-reals decision procedure
+/// shares this map, because the soundness story is the SAME regardless of which
+/// solver produced the result: ints lower to an unbounded integer sort and
+/// `f32`/`f64` to `Real`, so a `Proved`/`Disproved` holds over the REALS but is
+/// a sound over-approximation of the machine claim. It is therefore
+/// [`Soundness::SoundApproximate`] carrying [`Qualifier::RealArith`] (the
+/// disclosure that the proof is over reals), and a timeout/unknown/lowering
+/// error is [`Soundness::Untrusted`] with no qualifier (never a proof).
+///
+/// cvc5 ([`Cvc5Engine`]) and Z3 (the `z3`-feature engine) both route through
+/// this function, so a Z3 `Proved` and a cvc5 `Proved` carry byte-identical
+/// `(soundness, qualifier_set)` and project through the verdict algebra to the
+/// same `proven_modulo_real_arithmetic` / `disproved_modulo_real_arithmetic`.
+/// This is what lets the dispatcher fall through cvc5 -> Z3 without one engine
+/// laundering the other's guarantee: neither can mint a stronger badge than
+/// this shared classification allows.
+pub fn classify_smt_outcome(result: &TierBResult) -> (Soundness, QualifierSet) {
+    match result {
+        TierBResult::Proved | TierBResult::Disproved(_) => (
+            Soundness::SoundApproximate,
+            QualifierSet::from_iter_kinds([Qualifier::RealArith]),
+        ),
+        TierBResult::Timeout | TierBResult::Unknown | TierBResult::Error(_) => {
+            (Soundness::Untrusted, QualifierSet::new())
+        }
+    }
+}
+
 /// An engine that can discharge [`Goal`]s. cvc5 is one impl; later engines
 /// (Z3, Clarabel, Beacon, ...) plug in here without touching callers.
 pub trait DischargeEngine {
@@ -498,30 +529,21 @@ impl Cvc5Engine {
         Self
     }
 
-    /// Map a tier-B outcome to its `(soundness, qualifier_set)`. The cvc5
-    /// decision is over the REALS, not machine arithmetic (chelis#422): int
-    /// widths lower to an unbounded integer sort and `f32`/`f64` to `Real`, so
-    /// a proved result holds over the reals but is a sound over-approximation
-    /// of the machine claim. It is therefore `SoundApproximate` carrying
-    /// [`Qualifier::RealArith`] -- the disclosure that the proof is over reals.
-    /// A timeout, unknown, or lowering error is untrusted (never a proof) and
-    /// carries no qualifier. A `Disproved` is classified the same way (a
-    /// real-arithmetic decision is not exact); its `RealArith` qualifier also
-    /// drives the failure side -- the verdict algebra renders a disproof over
-    /// the reals as the hedged `disproved_modulo_real_arithmetic` (a
-    /// counterexample over the reals may be a false counterexample at machine
-    /// arithmetic), symmetric to `proven_modulo_real_arithmetic` on the proof
-    /// side, never a flat definite `failed`.
+    /// Map a tier-B outcome to its `(soundness, qualifier_set)` through the
+    /// shared, engine-agnostic [`classify_smt_outcome`]. The cvc5 decision is
+    /// over the REALS, not machine arithmetic (chelis#422): int widths lower to
+    /// an unbounded integer sort and `f32`/`f64` to `Real`, so a proved result
+    /// holds over the reals but is a sound over-approximation of the machine
+    /// claim -- `SoundApproximate` carrying [`Qualifier::RealArith`]. A
+    /// timeout/unknown/lowering error is untrusted with no qualifier. A
+    /// `Disproved` is classified the same way (a real-arithmetic decision is
+    /// not exact); its `RealArith` qualifier drives the verdict algebra to the
+    /// hedged `disproved_modulo_real_arithmetic`, symmetric to
+    /// `proven_modulo_real_arithmetic`, never a flat definite `failed`. Z3
+    /// shares this exact map, so the two engines' discharges are
+    /// interchangeable under the verdict algebra.
     fn classify(result: &TierBResult) -> (Soundness, QualifierSet) {
-        match result {
-            TierBResult::Proved | TierBResult::Disproved(_) => (
-                Soundness::SoundApproximate,
-                QualifierSet::from_iter_kinds([Qualifier::RealArith]),
-            ),
-            TierBResult::Timeout | TierBResult::Unknown | TierBResult::Error(_) => {
-                (Soundness::Untrusted, QualifierSet::new())
-            }
-        }
+        classify_smt_outcome(result)
     }
 }
 
