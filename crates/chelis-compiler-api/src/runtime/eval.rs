@@ -814,7 +814,12 @@ impl<'a> EvalContext<'a> {
             "add" => numeric_binop(args, |lhs, rhs| lhs + rhs),
             "sub" => numeric_binop(args, |lhs, rhs| lhs - rhs),
             "mul" => numeric_binop(args, |lhs, rhs| lhs * rhs),
-            "div" => numeric_binop(args, |lhs, rhs| lhs / rhs),
+            // #387: integer `div`/`mod` trap on a zero divisor with one
+            // shared diagnostic instead of returning a silently-wrong value
+            // (`f64` div round-trip yielded `i64::MAX`/`-1`); float `div`
+            // keeps IEEE-754 (`1.0 / 0.0 == inf`). The C backend follows the
+            // platform SIGFPE for the same integer operands.
+            "div" => eval_div(args),
             // Tier-1 `max_elem` and Tier-2 `min_elem` are element-wise
             // binary ops. The IR evaluator emits
             // `binary_map(.., f64::max)` for `RiscOp::MaxElem` and
@@ -825,7 +830,7 @@ impl<'a> EvalContext<'a> {
             // Chelis-Lang/chelis#185.
             "max_elem" => numeric_binop(args, f64::max),
             "min_elem" => numeric_binop(args, f64::min),
-            "mod" => int_binop(args, |lhs, rhs| lhs % rhs),
+            "mod" => eval_mod(args),
             "neg" => numeric_unop(args, |value| -value),
             "recip" => numeric_unop(args, |value| 1.0 / value),
             "exp" => float_unop_with_tensor(args, f64::exp, f32::exp),
@@ -1705,8 +1710,21 @@ impl<'a> EvalContext<'a> {
                     value: IrTensorValue::scalar(if *value { 1.0 } else { 0.0 }),
                     precision: Prim::Bool,
                 })),
+                // #381: a top-level scalar binding (e.g. `c = cast(1.1, f64)`)
+                // captured by a def body is pre-evaluated through the DAG lane
+                // and arrives here as an already rank-0 (0-d) tensor, not a
+                // `Scalar`. `scalar_to_tensor` of a scalar produces a rank-0
+                // tensor, so applying it to a rank-0 tensor is the identity;
+                // accept it and pass the value through (preserving precision).
+                // This matches the C backend, where the captured binding stays
+                // a scalar C value and `scalar_to_tensor` materializes the same
+                // rank-0 tensor, and the DAG lowering, where `scalar_to_tensor`
+                // is a pass-through on its input node.
+                Some(RuntimeValue::Tensor(tensor)) if tensor.value.shape.is_empty() => {
+                    Ok(RuntimeValue::Tensor(tensor.clone()))
+                }
                 other => Err(format!(
-                    "scalar_to_tensor expects scalar input, got {other:?}"
+                    "scalar_to_tensor expects a scalar or rank-0 tensor input, got {other:?}"
                 )),
             },
             "print" => {

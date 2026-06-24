@@ -631,34 +631,34 @@ out = fv(to_tensor([[1.0, 1.0], [2.0, 2.0], [0.0, 1.0]]))\n";
     );
 }
 
-/// KNOWN GAP (pre-existing class, found by the #376 review; NOT introduced
-/// by #376): top-level binding names are emitted verbatim into C with no
-/// sanitization layer. A binding named `main` passes `chelis check`, and
-/// when captured by a def the #376 hoist emits `static chelis_tensor* main;`
-/// which collides with the generated `int main(void)`. This is NOT a
-/// regression: pre-#376 the same program failed cc with the undeclared-
-/// identifier break instead, and a binding named a C keyword (`register`)
-/// breaks even uncaptured on both sides of #376 (`main()` locals also use
-/// verbatim names). Pinned so a future identifier-sanitization or
-/// check-time rejection surfaces here.
+/// FIXED (#379): top-level binding names spelled like a C keyword or the
+/// generated entry point are mangled at C-emit time (`c_ident` in
+/// `chelis-backend-c/src/host_emit.rs`), so a binding named `main` captured
+/// by a def no longer collides with `int main(void)` — the emitted C
+/// compiles, runs, and agrees with `chelis eval`. This was the promoted
+/// form of the former `..._emits_illegal_c_gap` pin (the pin's own
+/// instruction). The full compile-run-eval agreement oracle lives in
+/// `ws2b_numeric_identifier_divergence::issue_379_binding_named_main_compiles_and_matches_eval`;
+/// this arm keeps the regression guard local to the #352 capture corpus.
 #[test]
-fn issue_352_captured_binding_named_main_emits_illegal_c_gap() {
+fn issue_352_captured_binding_named_main_compiles_and_runs() {
     let source = "main = to_tensor([10.0, 20.0])\n\
 def f(x: tensor[2, f32]) -> tensor[2, f32] = add(x, main)\n\
 out = f(to_tensor([1.0, 2.0]))\n";
 
     let build = chelis_build_c(source, "mainname");
-    let (compile, _) = compile_emitted(build.path(), &build.path().join("mainname.c"));
-    assert!(
-        !compile.status.success(),
-        "pinned gap unexpectedly fixed: a captured binding named `main` now \
-         compiles; promote this pin to a compile-run-eval agreement \
-         assertion (or to a check-time rejection assertion)",
+    let stdout = compile_and_run_emitted(build.path(), &build.path().join("mainname.c"));
+    assert_eq!(
+        binding_line(&stdout, "out"),
+        "out = tensor(shape=[2], data=[11.0, 22.0])",
+        "a captured binding named `main` must mangle and run (#379); \
+         full stdout={stdout:?}",
     );
-    assert!(
-        String::from_utf8_lossy(&compile.stderr).contains("main"),
-        "pinned gap changed shape: expected the `main` symbol collision in \
-         the compiler diagnostic; stderr={:?}",
-        String::from_utf8_lossy(&compile.stderr),
+
+    let eval_out = chelis_eval(source, "mainname");
+    assert_eq!(
+        binding_line(&stdout, "out"),
+        binding_line(&eval_out, "out"),
+        "eval and compiled C must agree for a binding named `main` (#379)",
     );
 }

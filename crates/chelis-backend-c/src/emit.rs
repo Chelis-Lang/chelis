@@ -1391,6 +1391,23 @@ impl CEmitter {
         let a = inputs[0].0;
         let b = inputs[1].0;
         let et = Self::elem_type(ty);
+        // #387: an INTEGER `div` (`op == "/"` on an integer dtype) must trap
+        // portably on a zero divisor. Hardware behavior is not portable --
+        // x86 raises SIGFPE on integer #DE, but ARM64 (macOS arm64) defines
+        // integer div-by-zero to return a value and does NOT fault, so the
+        // binary would silently compute a wrong answer. Wrap the divisor in
+        // `chelis_int_div_guard`, which aborts with the same clean diagnostic
+        // the evaluator emits. Float `/` is IEEE-754 (`1.0/0.0 == inf`) and
+        // is never guarded; `+`/`*`/`fmaxf` never divide.
+        let guard_int_div = op == "/" && ty.precision.is_integer();
+        // Build the divisor sub-expression for each lane, guarded when needed.
+        let guarded = |divisor: String| -> String {
+            if guard_int_div {
+                format!("({et})chelis_int_div_guard((int64_t)({divisor}))")
+            } else {
+                divisor
+            }
+        };
         self.emit_slot_wrapper(id, ty);
         self.line(&format!(
             "if (chelis_is_contiguous(t{a}) && chelis_is_contiguous(t{b}) && t{a}->size == t{id}->size && t{b}->size == t{id}->size) {{"
@@ -1404,11 +1421,19 @@ impl CEmitter {
         self.line(&format!(
             "const {et}* restrict __in_b_{id} = (const {et}*)t{b}->data;"
         ));
-        self.line("#pragma omp parallel for simd");
+        // An integer-div guard introduces a function call with side effects,
+        // which is not safely vectorizable; only the non-guarded ops keep the
+        // `simd` clause.
+        if guard_int_div {
+            self.line("#pragma omp parallel for");
+        } else {
+            self.line("#pragma omp parallel for simd");
+        }
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
         self.line(&format!(
-            "__out_{id}[i] = __in_a_{id}[i] {op} __in_b_{id}[i];"
+            "__out_{id}[i] = __in_a_{id}[i] {op} {};",
+            guarded(format!("__in_b_{id}[i]"))
         ));
         self.indent -= 1;
         self.line("}");
@@ -1429,7 +1454,8 @@ impl CEmitter {
             "int idx_b = chelis_indices_to_flat(indices, t{b}->strides, t{b}->ndim);"
         ));
         self.line(&format!(
-            "(({et}*)t{id}->data)[i] = (({et}*)t{a}->data)[idx_a] {op} (({et}*)t{b}->data)[idx_b];"
+            "(({et}*)t{id}->data)[i] = (({et}*)t{a}->data)[idx_a] {op} {};",
+            guarded(format!("(({et}*)t{b}->data)[idx_b]"))
         ));
         self.indent -= 1;
         self.line("}");
@@ -4019,12 +4045,22 @@ impl CEmitter {
             "chelis_argmin_f32"
         };
         self.emit_slot_wrapper(id, ty);
+        // #347: argmax/argmin produce integer INDEX outputs (the result
+        // tensor is allocated at the declared integer dtype, e.g.
+        // `CHELIS_I64`). The index must be stored through a pointer of the
+        // output element type, not into the `float* data` field directly:
+        // a bare `t->data[outer] = (float)best_idx` writes the f32 bit
+        // pattern of the index, which the print path then reads back as the
+        // wrong reinterpreted integer (the `1065353216 == 0x3F800000`
+        // signature). Mirrors `emit_cast`'s `(({dst_et}*)t->data)[i] = ...`
+        // store convention so eval and the C backend agree on the indices.
+        let dst_et = Self::elem_type(ty);
         let output_is_scalar = ty.dims.is_empty();
         if output_is_scalar {
             self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
             self.indent += 1;
             self.line(&format!(
-                "t{id}->data[0] = (float){simd_fn}(t{a}->data, t{a}->size);"
+                "(({dst_et}*)t{id}->data)[0] = ({dst_et}){simd_fn}(t{a}->data, t{a}->size);"
             ));
             self.indent -= 1;
             self.line("} else {");
@@ -4073,7 +4109,9 @@ impl CEmitter {
         self.line("}");
         self.indent -= 1;
         self.line("}");
-        self.line(&format!("t{id}->data[outer] = (float)best_idx;"));
+        self.line(&format!(
+            "(({dst_et}*)t{id}->data)[outer] = ({dst_et})best_idx;"
+        ));
         self.indent -= 1;
         self.line("}");
         if output_is_scalar {
