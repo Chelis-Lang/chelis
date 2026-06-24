@@ -1174,11 +1174,11 @@ fn eval_resolves_named_axis_issue_repro() {
 /// which resolves `seq` against the declared (named) param dims. `max_reduce`,
 /// `min_reduce`, and `prod_reduce` are included because at concrete rank they
 /// are checkable and buildable (the chelis#340 Body-Discipline rejection
-/// applies only inside `..r` bodies). `argmax_reduce`/`argmin_reduce` are
-/// deliberately absent: the C backend mis-prints their int64 output as a
-/// reinterpreted f32 bit pattern (chelis#347, pre-existing and orthogonal;
-/// eval is correct), so the agreement oracle cannot include them yet. Fold
-/// them in when #347 closes.
+/// applies only inside `..r` bodies). `argmax_reduce`/`argmin_reduce` are now
+/// folded in too: chelis#347 closed (the C backend prints their int64 output
+/// correctly instead of as a reinterpreted f32 bit pattern), so the agreement
+/// oracle covers them — `argmax`/`argmin` over a row return the index of the
+/// extreme element (eval and backend now agree).
 /// Operand is non-square (batch=2, seq=3) per the #258 red-team finding.
 #[test]
 fn concrete_rank_named_reduce_eval_matches_backend() {
@@ -1186,10 +1186,14 @@ fn concrete_rank_named_reduce_eval_matches_backend() {
          def max_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = max_reduce(x, seq)\n\
          def min_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = min_reduce(x, seq)\n\
          def prod_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = prod_reduce(x, seq)\n\
+         def amax_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, int64] = argmax_reduce(x, seq)\n\
+         def amin_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, int64] = argmin_reduce(x, seq)\n\
          outs = sum_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
          outx = max_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
          outn = min_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
-         outp = prod_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
+         outp = prod_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
+         outax = amax_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
+         outan = amin_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
     let backend = build_compile_run(source, "concrete_named_reduce");
     let tensors = parse_printed_tensors(&backend);
     let expected: &[(&str, &[usize], &[f64])] = &[
@@ -1197,6 +1201,11 @@ fn concrete_rank_named_reduce_eval_matches_backend() {
         ("outx", &[2], &[3.0, 6.0]),
         ("outn", &[2], &[1.0, 4.0]),
         ("outp", &[2], &[6.0, 120.0]),
+        // argmax/argmin over each row: both rows are ascending, so the max
+        // is at index 2 and the min at index 0 (chelis#347 closed — int64
+        // indices now print correctly in the C backend).
+        ("outax", &[2], &[2.0, 2.0]),
+        ("outan", &[2], &[0.0, 0.0]),
     ];
     for (name, shape, data) in expected {
         let got = tensors
@@ -1699,4 +1708,336 @@ fn pipe_rewriting_stage_then_named_reduce_is_a_pinned_gap() {
         !stderr.contains("unknown runtime name"),
         "the pre-#338 error must not resurface: {stderr}"
     );
+}
+
+/// chelis#388: a named-axis reduction over a *literal-shaped* operand
+/// (`to_tensor([[...]])`) must build and eval, not die in rank
+/// monomorphization. The call site binds the formal parameter
+/// `x: tensor[batch, seq]` to a literal node whose dims are concrete
+/// `[Lit(2), Lit(3)]` — the named axis `seq` is erased — so the by-name
+/// reduce-axis lookup against the operand's dims fails; the fix recovers
+/// the axis from the formal-parameter position recorded at the inline site.
+///
+/// `reduce_seq` reduces `seq` (axis 1, size 3) of a non-square `[2, 3]`
+/// operand, so a position mislabel (reducing axis 0 instead) would yield a
+/// `[3]` shape of column sums `[5, 7, 9]` rather than the correct `[2]`
+/// row sums `[6, 15]`. The shapes differ, so the error cannot hide.
+#[test]
+fn named_reduce_over_literal_operand_builds_runs_evals() {
+    // Two bindings so both lanes print the `out = ` prefix the
+    // parse_printed_tensors / agreement oracle keys on (a single-root
+    // program prints the bare value with no name prefix).
+    let source = "def reduce_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = sum(x, seq)\n\
+         src = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
+         out = reduce_seq(src)\n";
+    let backend = build_compile_run(source, "issue_388_named_reduce_literal");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    assert_eq!(out.1, vec![2], "backend reduced the wrong axis ({backend})");
+    for (i, e) in [6.0, 15.0].iter().enumerate() {
+        assert!(
+            (out.2[i] - e).abs() < 1e-6,
+            "out[{i}]: backend {} != {e} ({backend})",
+            out.2[i]
+        );
+    }
+    // The locked invariant: a check-clean program must build AND the
+    // backend must agree with the evaluator, value-for-value.
+    assert_eval_agrees_with_backend(source, "issue_388_named_reduce_literal", &backend);
+}
+
+/// chelis#388 (eval lane): the exact-line oracle for the named reduction
+/// over a literal operand. A single-root program prints the bare value.
+#[test]
+fn named_reduce_over_literal_operand_eval_exact() {
+    // Single-root program: eval prints the bare value with no name prefix.
+    let source = "def reduce_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = sum(x, seq)\n\
+         out = reduce_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
+    let dir = tempdir().expect("tempdir");
+    let eval = eval_stdout(dir.path(), source, "issue_388_eval_exact");
+    assert_eq!(
+        eval.trim(),
+        "tensor(shape=[2], data=[6.0, 15.0])",
+        "issue #388: named reduce over a literal operand must eval the seq-axis sums"
+    );
+}
+
+/// chelis#388 NEGATIVE: a named axis the operand genuinely lacks is still a
+/// loud failure, never a silent default. `reduce_seq` declares `seq` but the
+/// body reduces an undeclared `chan`; the checker rejects it, so the
+/// position-recovery fix never masks a real missing-axis bug.
+#[test]
+fn named_reduce_unknown_axis_still_rejected() {
+    let json = check_json(
+        "def reduce_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = sum(x, chan)\n",
+    );
+    let errors = json["errors"].as_array().expect("errors array");
+    assert!(
+        !errors.is_empty(),
+        "reducing an undeclared named axis must be rejected: {json}"
+    );
+}
+
+/// chelis#364: a reduction whose axis is `cast(N, int32)` — a form the
+/// checker admits as a compile-time-constant axis — must lower to axis N in
+/// the DAG/backend lane, not silently to axis 0. Pre-fix, `extract_axis_raw`
+/// returned 0 for any non-literal axis expr, so `sum(x, cast(1, int32))`
+/// reduced axis 0 (wrong numerics, a shape contradicting the checked type,
+/// and — under grad — eval and backend agreeing on the SAME wrong gradient).
+///
+/// Non-square `[2, 3]`: axis 1 (`cast(1, int32)`) sums to `[6, 15]`; a
+/// silent axis-0 default would produce a `[3]` shape of `[5, 7, 9]`.
+#[test]
+fn cast_axis_reduction_lowers_to_named_axis_not_zero() {
+    let source = "def f(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = sum(x, cast(1, int32))\n\
+         src = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
+         out = f(src)\n";
+    let backend = build_compile_run(source, "issue_364_cast_axis");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    assert_eq!(
+        out.1,
+        vec![2],
+        "cast-axis reduction lowered the wrong axis ({backend})"
+    );
+    for (i, e) in [6.0, 15.0].iter().enumerate() {
+        assert!(
+            (out.2[i] - e).abs() < 1e-6,
+            "out[{i}]: backend {} != {e} ({backend})",
+            out.2[i]
+        );
+    }
+    // Eval is the reference; the backend must match it byte-for-byte on this
+    // integer-indexed, exact-arithmetic reduction.
+    assert_eval_agrees_with_backend(source, "issue_364_cast_axis", &backend);
+}
+
+/// chelis#364 (axis-2 cross-rank control): a `cast(2, int32)` axis on a
+/// rank-3 operand reduces the *third* axis, proving the fix carries the
+/// constant through rather than clamping to a fixed axis.
+#[test]
+fn cast_axis_reduction_axis_two_rank_three() {
+    let source = "def f(x: &tensor[a, b, c, f32]) -> tensor[a, b, f32] = sum(x, cast(2, int32))\n\
+         src = to_tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]])\n\
+         out = f(src)\n";
+    let backend = build_compile_run(source, "issue_364_cast_axis_two");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    // [1,3,2] reduced over axis 2 -> [1,3] = [[3, 7, 11]].
+    assert_eq!(
+        out.1,
+        vec![1, 3],
+        "cast(2) reduced the wrong axis ({backend})"
+    );
+    for (i, e) in [3.0, 7.0, 11.0].iter().enumerate() {
+        assert!(
+            (out.2[i] - e).abs() < 1e-6,
+            "out[{i}]: backend {} != {e} ({backend})",
+            out.2[i]
+        );
+    }
+    assert_eval_agrees_with_backend(source, "issue_364_cast_axis_two", &backend);
+}
+
+/// chelis#383: `vmap` over a two-stage named reduce-to-scalar with a
+/// *top-level-binding* operand previously tripped the `dag.rs`
+/// symbolic-dim guard at build/eval-lowering time (`symbolic dim `seq` is
+/// referenced by a non-Load node ... but no Load input declares it`). The
+/// root cause was the vmap dim-symbol remap zipping the rank-N formal
+/// parameter type against the rank-(N+1) vmap argument: the `same-rank`
+/// filter dropped the substitution, so the inlined body's named dims
+/// (`seq`, `head`) never resolved to the operand's concrete dims and a
+/// `Named("seq")` dim survived in the vmapped reduce with no declaring
+/// Load. The fix batch-prepends the formal parameter types before the
+/// remap so the ranks align.
+///
+/// This is the EXACT form the prior `variadic_reduce_builds_runs_and_evals`
+/// fixture documented as a workaround (it used an inline-literal operand to
+/// avoid the ICE); the workaround is now obsolete for the eval lane. Pins
+/// the evaluator oracle (the reference lane per the backend-numerics
+/// discipline): `sum(sum(slice, head), seq)` per 2x2 slice = the slice sum,
+/// so `[[[1,2],[3,4]], [[5,6],[7,8]]]` -> `[10, 26]`.
+#[test]
+fn vmap_two_stage_named_reduce_top_level_binding_evals() {
+    let source = "def vinner(x: &tensor[seq, head, f32]) -> f32 = tensor_to_scalar(sum(sum(x, head), seq))\n\
+         y = to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]])\n\
+         out = vmap(vinner)(y)\n";
+    let dir = tempdir().expect("tempdir");
+    let eval = eval_stdout(dir.path(), source, "issue_383_vmap_two_stage");
+    let tensors = parse_printed_tensors(&eval);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("eval output missing `out`: {eval}"));
+    assert_eq!(out.1, vec![2], "vmap two-stage reduce shape ({eval})");
+    for (i, e) in [10.0, 26.0].iter().enumerate() {
+        assert!(
+            (out.2[i] - e).abs() < 1e-6,
+            "out[{i}]: eval {} != {e} ({eval})",
+            out.2[i]
+        );
+    }
+}
+
+/// chelis#383 (build lane): the vmap-over-two-stage-named-reduce that
+/// previously tripped the `dag.rs` symbolic-dim ICE at build time now builds,
+/// runs, and the C backend agrees with the evaluator. The IR-level fix (the
+/// vmap dim-symbol remap batch-prepend) removed the ICE; once the downstream
+/// C-identifier hygiene landed on main the build lane completes end to end.
+/// Pins the full compile-run-eval agreement so the IR fix cannot silently
+/// regress the build lane.
+#[test]
+fn vmap_two_stage_named_reduce_top_level_binding_builds_and_matches_backend() {
+    let source = "def vinner(x: &tensor[seq, head, f32]) -> f32 = tensor_to_scalar(sum(sum(x, head), seq))\n\
+         y = to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]])\n\
+         out = vmap(vinner)(y)\n";
+    let backend = build_compile_run(source, "issue_383_vmap_build");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    assert_eq!(
+        out.1,
+        vec![2],
+        "vmap two-stage reduce build shape ({backend})"
+    );
+    for (i, e) in [10.0, 26.0].iter().enumerate() {
+        assert!(
+            (out.2[i] - e).abs() < 1e-6,
+            "out[{i}]: backend {} != {e} ({backend})",
+            out.2[i]
+        );
+    }
+    assert_eval_agrees_with_backend(source, "issue_383_vmap_build", &backend);
+}
+
+/// chelis#384/#397 (A): a §4.7.2 Form-3 runtime `expand` size sourced from a
+/// `shape(tensor, axis)` read must produce C that AGREES with the evaluator.
+/// This is the spec's own canonical example (`bias_broadcast` from
+/// `examples/illustrative/runtime_shape_semantics.ch`), which the C backend
+/// previously mis-compiled: it read the new axis extent from the expand
+/// OPERAND (`b`, size 4) instead of the `shape(x, 0)` source (`x`, size 2),
+/// emitting `[4, 4]` against the evaluator's `[2, 4]`. The fix keeps the
+/// shape-source operand `x` live (a `shape_dep`) so the symbolic dim `n`
+/// binds from `x`'s shape. Non-square `[2, 4]` so an operand/source mixup
+/// changes the shape and cannot hide.
+#[test]
+fn form3_shape_sourced_expand_matches_backend() {
+    let source = "def bias_broadcast(x: &tensor[n, 4, f32], b: &tensor[4, f32]) -> tensor[n, 4, f32] = expand(b, 0, shape(x, cast(0, int32)))\n\
+         xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])\n\
+         bs = to_tensor([10.0, 20.0, 30.0, 40.0])\n\
+         out = bias_broadcast(xs, bs)\n";
+    let backend = build_compile_run(source, "issue_397_shape_sourced_expand");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    // The broadcast extent `n` comes from `x`'s axis 0 (=2), NOT from `b`
+    // (=4); a source mixup would print shape `[4, 4]`.
+    assert_eq!(
+        out.1,
+        vec![2, 4],
+        "Form-3 shape-sourced expand bound the extent to the wrong tensor ({backend})"
+    );
+    // The backend must agree with the evaluator, value-for-value AND
+    // shape-for-shape (the #338 oracle): the original divergence was a
+    // shape disagreement, so assert_eval_agrees_with_backend pins it.
+    assert_eval_agrees_with_backend(source, "issue_397_shape_sourced_expand", &backend);
+}
+
+/// chelis#384 (B): a §4.7.2 Form-3 runtime `expand` size that is a bare
+/// runtime scalar parameter (`k: int32`) with NO tensor source is rejected
+/// loudly at lowering, not silently mis-compiled. Pre-fix the C backend read
+/// the extent from an out-of-range operand axis (`x` is rank 1; the codegen
+/// read `inputs[0]->shape[1]`), emitting a garbage shape that disagreed with
+/// the evaluator's `[2, 3]`. There is no tensor whose shape carries the
+/// extent, so the form has no backend representation and must reject.
+#[test]
+fn form3_scalar_param_expand_size_rejected() {
+    let source = "def f(x: &tensor[seq, f32], k: int32) -> tensor[seq, chan, f32] = expand(x, 1, k)\n\
+         out = f(to_tensor([1.0, 2.0]), 3)\n";
+    let stderr = build_expecting_failure(source, "issue_384_scalar_param_expand");
+    assert!(
+        stderr.contains("expand")
+            && stderr.contains("no tensor in scope carries it")
+            && stderr.contains("chelis#469"),
+        "expected the Form-3 sourceless-size reject diagnostic citing #469, got: {stderr}"
+    );
+    // The reject must be a clean diagnostic, never the internal-compiler-error
+    // ICE the sourceless symbol previously triggered downstream.
+    assert!(
+        !stderr.contains("internal compiler error"),
+        "sourceless Form-3 expand size must reject cleanly, not ICE: {stderr}"
+    );
+}
+
+/// chelis#384/#397 (B): the eval lane rejects the sourceless Form-3 expand
+/// size identically to the backend — no eval-vs-backend divergence. Pre-fix
+/// eval computed a (correct) result while the backend silently diverged;
+/// both lanes now reject the unsupported form with the same diagnostic.
+#[test]
+fn form3_scalar_param_expand_size_rejected_in_eval() {
+    let source = "def bcast[a, n](g: tensor[n, f32], a_dim: int64) -> tensor[a, n, f32] = expand(g, 0, a_dim)\n\
+         out = bcast(to_tensor([1.0, 2.0]), cast(3, int64))\n";
+    let dir = tempdir().expect("tempdir");
+    let stderr = eval_stderr_expecting_failure(dir.path(), source, "issue_397_eval_reject");
+    assert!(
+        stderr.contains("expand")
+            && stderr.contains("no tensor in scope carries it")
+            && stderr.contains("chelis#469"),
+        "eval must reject the sourceless Form-3 expand size with the same \
+         #469 diagnostic as the backend, got: {stderr}"
+    );
+}
+
+/// chelis#384/#397 (A) liveness lock: a `shape(x, axis)`-sourced Form-3
+/// expand inside a `vmap`ped def must STILL bind the extent to the correct
+/// tensor after `vmap`'s `vectorize_axis0` rebuild. The fix records the
+/// shape source as a `DagNode::shape_deps` liveness edge; every DAG-rebuild
+/// pass (DCE, copy/drop insertion, BLAS specialization, fusion, grad, vmap,
+/// splice, CSE) must preserve it, or the source `Load` is dead-code-
+/// eliminated and the wrong-shape regression returns SILENTLY. This test
+/// drives the dep through the vmap rebuild specifically; `bias_broadcast`
+/// already drives it through specialization. Per-slice: `x` row is rank-1
+/// `[3]` (n=3), `b` is a scalar broadcast to `[3]`, so the extent is read
+/// from `x`'s shape — out `[2, 3]`, C == eval.
+#[test]
+fn form3_shape_dep_survives_vmap_rebuild() {
+    let source = "def bcast(x: &tensor[n, f32], b: &tensor[f32]) -> tensor[n, f32] = expand(b, 0, shape(x, cast(0, int32)))\n\
+         xs = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
+         bs = to_tensor([10.0, 20.0])\n\
+         out = vmap(bcast)(xs, bs)\n";
+    let backend = build_compile_run(source, "shape_dep_vmap");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    // n (=3) comes from each x-slice's shape; a dropped shape_dep would
+    // mis-bind it (the original silent wrong-shape bug) or fail to build.
+    assert_eq!(
+        out.1,
+        vec![2, 3],
+        "shape_dep was dropped across the vmap rebuild ({backend})"
+    );
+    let expected = [10.0, 10.0, 10.0, 20.0, 20.0, 20.0];
+    for (i, e) in expected.iter().enumerate() {
+        assert!(
+            (out.2[i] - e).abs() < 1e-6,
+            "out[{i}]: backend {} != {e} ({backend})",
+            out.2[i]
+        );
+    }
+    assert_eval_agrees_with_backend(source, "shape_dep_vmap", &backend);
 }

@@ -1116,6 +1116,33 @@ fn lower_host_program(
             is_fn_body && lowered_names.get(def_name).copied().unwrap_or(false)
         })
         .count();
+    // Issue #378: names referenced by any `fn`-body top-level def. A
+    // captured top-level *scalar* (or other value) binding is classified
+    // `lowered` by `def_is_lowered` (a `(lit ...)` body materializes into
+    // the DAG `main()`), so `skip_for_lowered` would drop it from
+    // `host.globals` entirely — but a host-lane function that captures it
+    // then emits `__arg = c;` against an undeclared `c`. The #376 hoist
+    // already serves *tensor* captures because tensor bindings reach
+    // `host.globals`; this set lets a captured value binding stay in
+    // `host.globals` too (the C emitter's `captured_global_names` only
+    // declares globals a function actually references, so a non-captured
+    // binding still costs nothing in the pure-DAG case).
+    let mut names_captured_by_fn_defs: HashSet<String> = HashSet::new();
+    for expr in top_level_items(program.exprs()) {
+        let Expr::List(list, _) = expr else {
+            continue;
+        };
+        if tag(list) != Some("def") {
+            continue;
+        }
+        let kids = children(list);
+        let Some(body) = kids.get(1) else {
+            continue;
+        };
+        if matches!(body, Expr::List(body_list, _) if tag(body_list) == Some("fn")) {
+            collect_deep_var_names(body, &mut names_captured_by_fn_defs);
+        }
+    }
     for expr in top_level_items(program.exprs()) {
         let Expr::List(list, _) = expr else {
             continue;
@@ -1251,8 +1278,16 @@ fn lower_host_program(
             && (has_non_dag_tensor
                 || scalar_only_callable_signature
                 || (!has_callable_params && (has_any_host_lane_def || lowered_fn_def_count > 1)));
-        let skip_for_lowered =
-            lowered_names.get(name).copied().unwrap_or(false) && !needs_host_wrapper;
+        // Issue #378: a non-`fn` value binding (a `(def name (lit ...))`)
+        // that a host-lane function captures must reach `host.globals` so
+        // the emitted C declares it; otherwise the function body references
+        // an undeclared identifier. Do not skip it even though the DAG lane
+        // also claims it (the DAG lane inlines its own copy for tensor
+        // roots; the global is emitted only when a function references it).
+        let captured_value_binding = !is_fn_body && names_captured_by_fn_defs.contains(name);
+        let skip_for_lowered = lowered_names.get(name).copied().unwrap_or(false)
+            && !needs_host_wrapper
+            && !captured_value_binding;
         if skip_for_lowered {
             continue;
         }
@@ -8201,6 +8236,33 @@ fn symbol_name(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::Atom(Atom::Symbol(name), _) => Some(name.as_str()),
         _ => None,
+    }
+}
+
+/// Collect every `(var {} <name>)` reference reachable in a Deep `expr`
+/// into `out`. Issue #378: used to decide whether a top-level *value*
+/// binding (a non-`fn` `def` body) is captured by a host-lane function
+/// body and must therefore be materialized into `HostProgram::globals`
+/// rather than dropped via `skip_for_lowered`. A bound parameter and a
+/// captured global both appear as the same `(var ...)` form here; the
+/// caller narrows to top-level binding names, so the over-approximation
+/// is harmless (the C emitter's `captured_global_names` is the final
+/// gate — an emitted global is only declared if a function actually
+/// references it).
+fn collect_deep_var_names(expr: &Expr, out: &mut HashSet<String>) {
+    match expr {
+        Expr::List(list, _) => {
+            if tag(list) == Some("var")
+                && let Some(name) = children(list).first().and_then(symbol_name)
+            {
+                out.insert(name.to_string());
+            }
+            for child in &list.elements {
+                collect_deep_var_names(child, out);
+            }
+        }
+        Expr::MetaExpr(meta, _) => collect_deep_var_names(&meta.expr, out),
+        _ => {}
     }
 }
 

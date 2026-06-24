@@ -152,6 +152,14 @@ pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId
             if let Some(reusable_input) = dag.nodes()[i].reusable_input {
                 live[reusable_input.0] = true;
             }
+            // chelis#384/#397: a shape-only dependency (the `x` whose runtime
+            // shape supplies a Form-3 `expand` extent) is consumed for its
+            // shape, not its data, so it is not in `inputs`. Keep it live so
+            // its `Load` survives and the symbolic dim it declares retains its
+            // source. See `DagNode::shape_deps`.
+            for &dep in &dag.nodes()[i].shape_deps {
+                live[dep.0] = true;
+            }
         }
     }
 
@@ -191,6 +199,19 @@ pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId
             {
                 new_node.merged_spans = node.merged_spans.clone();
             }
+            // chelis#384/#397: preserve (remapped) shape-only deps. Each was
+            // marked live above and has a lower id in the topo-ordered DAG, so
+            // it is already in `node_remap` by the time this node is rebuilt.
+            if !node.shape_deps.is_empty() {
+                let mapped: Vec<NodeId> = node
+                    .shape_deps
+                    .iter()
+                    .filter_map(|old| id_map.get(&old.0).copied())
+                    .collect();
+                if let Some(new_node) = new_dag.node_mut(new_id) {
+                    new_node.shape_deps = mapped;
+                }
+            }
             id_map.insert(old_id, new_id);
         }
     }
@@ -222,7 +243,7 @@ pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId
 pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
     let mut new_dag = Dag::new();
     let mut id_map: HashMap<usize, NodeId> = HashMap::new();
-    let mut seen: HashMap<(String, Vec<NodeId>), NodeId> = HashMap::new();
+    let mut seen: HashMap<(String, Vec<NodeId>, Vec<NodeId>), NodeId> = HashMap::new();
 
     for node in dag.nodes() {
         let remapped_inputs: Vec<NodeId> = node
@@ -230,9 +251,18 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
             .iter()
             .map(|&old| *id_map.get(&old.0).unwrap_or(&old))
             .collect();
+        // chelis#384/#397: two otherwise-identical nodes that depend on
+        // DIFFERENT shape sources (a Form-3 `expand` extent) are NOT
+        // interchangeable — merging them would drop one source. Fold the
+        // remapped shape-deps into the CSE key so such nodes stay distinct.
+        let remapped_shape_deps: Vec<NodeId> = node
+            .shape_deps
+            .iter()
+            .map(|&old| *id_map.get(&old.0).unwrap_or(&old))
+            .collect();
 
         let op_key = format!("{:?}", node.op);
-        let cse_key = (op_key, remapped_inputs.clone());
+        let cse_key = (op_key, remapped_inputs.clone(), remapped_shape_deps.clone());
 
         if let Some(&existing) = seen.get(&cse_key) {
             // Duplicate: its full provenance (canonical + merged) folds
@@ -258,6 +288,13 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
                 && let Some(new_node) = new_dag.node_mut(new_id)
             {
                 new_node.merged_spans = node.merged_spans.clone();
+            }
+            // chelis#384/#397: preserve the (remapped) Form-3 `expand`
+            // shape-deps so CSE does not drop the liveness edge.
+            if !remapped_shape_deps.is_empty()
+                && let Some(new_node) = new_dag.node_mut(new_id)
+            {
+                new_node.shape_deps = remapped_shape_deps;
             }
             if let Some(reusable_input) = node.reusable_input
                 && let Some(&mapped_input) = id_map.get(&reusable_input.0)

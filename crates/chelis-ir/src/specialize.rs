@@ -66,6 +66,8 @@ pub fn eliminate_closed_list_noops(dag: &Dag) -> Dag {
         {
             new_node.merged_spans = node.merged_spans.clone();
         }
+        // chelis#384/#397: preserve Form-3 `expand` shape-only deps.
+        out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
         id_map.insert(node.id, new_id);
     }
 
@@ -157,6 +159,8 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
         {
             new_node.merged_spans = node.merged_spans.clone();
         }
+        // chelis#384/#397: preserve Form-3 `expand` shape-only deps.
+        out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
         id_map.insert(node.id, new_id);
     }
 
@@ -204,6 +208,8 @@ fn replace_dense_gather_patterns(dag: &Dag) -> Dag {
         {
             new_node.merged_spans = node.merged_spans.clone();
         }
+        // chelis#384/#397: preserve Form-3 `expand` shape-only deps.
+        out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
         id_map.insert(node.id, new_id);
     }
 
@@ -244,6 +250,8 @@ fn lower_unmatched_one_hot(dag: &Dag) -> Dag {
         {
             new_node.merged_spans = node.merged_spans.clone();
         }
+        // chelis#384/#397: preserve Form-3 `expand` shape-only deps.
+        out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
         id_map.insert(node.id, new_id);
     }
 
