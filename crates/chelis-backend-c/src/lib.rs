@@ -687,6 +687,26 @@ mod tests {
         }
     }
 
+    /// Host-arch SIMD ISA flag for SIMD-exercising compile-run tests.
+    ///
+    /// `chelis_simd.h` and the generated math kernels are arch-aware:
+    /// `#ifdef __AVX2__` on x86, `#elif defined(__ARM_NEON)` on ARM, with
+    /// a scalar fallback. On x86_64 we pass `-mavx2` to guarantee the AVX2
+    /// path is exercised regardless of the host's `-march=native` baseline.
+    /// On aarch64 (e.g. Apple Silicon CI runners) NEON is part of the
+    /// architecture baseline, so `__ARM_NEON` is already defined and the
+    /// NEON path activates with no extra flag; passing `-mavx2` there is an
+    /// `unsupported option` clang error. Returning `&[]` keeps the build
+    /// portable and lets the kernel run via NEON. Other arches fall through
+    /// to the scalar path with no ISA flag.
+    fn simd_isa_test_flags() -> &'static [&'static str] {
+        if cfg!(target_arch = "x86_64") {
+            &["-mavx2"]
+        } else {
+            &[]
+        }
+    }
+
     fn test_toolchain(
         requirements: crate::toolchain::CodegenRequirements,
     ) -> crate::toolchain::NativeToolchain {
@@ -2673,7 +2693,8 @@ int main(void) {{
             let toolchain = test_toolchain(result.requirements);
             let mut cmd = Command::new(&toolchain.compiler);
             apply_c_test_flags(&mut cmd);
-            cmd.args(["-O2", "-mavx2"]);
+            cmd.arg("-O2");
+            cmd.args(simd_isa_test_flags());
             cmd.args(&toolchain.compile_flags);
             cmd.arg(tmp.path().join("main.c").to_str().unwrap());
             cmd.arg(tmp.path().join("model.c").to_str().unwrap());
@@ -2782,7 +2803,8 @@ int main(void) {{
         let toolchain = test_toolchain(result.requirements);
         let mut cmd = Command::new(&toolchain.compiler);
         apply_c_test_flags(&mut cmd);
-        cmd.args(["-O2", "-mavx2"]);
+        cmd.arg("-O2");
+        cmd.args(simd_isa_test_flags());
         cmd.args(&toolchain.compile_flags);
         cmd.arg(tmp.path().join("main.c").to_str().unwrap());
         cmd.arg(tmp.path().join("model.c").to_str().unwrap());
@@ -2924,7 +2946,8 @@ int main(void) {{
         let toolchain = test_toolchain(result.requirements);
         let mut cmd = Command::new(&toolchain.compiler);
         apply_c_test_flags(&mut cmd);
-        cmd.args(["-O2", "-mavx2"]);
+        cmd.arg("-O2");
+        cmd.args(simd_isa_test_flags());
         cmd.args(&toolchain.compile_flags);
         cmd.arg(tmp.path().join("main.c").to_str().unwrap());
         cmd.arg(tmp.path().join("model.c").to_str().unwrap());

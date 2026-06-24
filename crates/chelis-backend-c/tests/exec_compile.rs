@@ -26,6 +26,25 @@ fn runtime_include_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
 }
 
+/// Host-arch SIMD ISA flag(s) for the compile-run probes.
+///
+/// `chelis_simd.h` and the generated kernels are arch-aware (`#ifdef
+/// __AVX2__` on x86, `#elif defined(__ARM_NEON)` on ARM, scalar
+/// fallback otherwise). On x86_64 we pass `-mavx2` to exercise the AVX2
+/// path; on aarch64 NEON is a baseline ISA feature (so `__ARM_NEON` is
+/// already defined and the NEON path activates with no flag), and
+/// `-mavx2` is an `unsupported option` clang error there. Returning an
+/// empty vector on non-x86 keeps the probe portable so it runs via NEON
+/// (Apple Silicon CI) or the scalar fallback rather than failing the
+/// build.
+fn simd_isa_flags() -> Vec<String> {
+    if cfg!(target_arch = "x86_64") {
+        vec!["-mavx2".to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Locate `target/debug/` for this workspace by walking up from the test binary's
 /// own location. The test binary lives at `<target>/debug/deps/<binary>`, so
 /// the parent of its parent is the debug directory we want.
@@ -167,9 +186,9 @@ fn compile_and_run_kernel(test_name: &str, c_source: &str, harness: &str) -> Opt
     let runtime_lib = runtime_lib_path();
 
     let compile = Command::new("gcc")
+        .arg("-O2")
+        .args(simd_isa_flags())
         .args([
-            "-O2",
-            "-mavx2",
             "-std=c11",
             "-I",
             dir.to_str().unwrap(),
@@ -1091,9 +1110,9 @@ int main() {
     let bin = dir.join("nan_bin");
 
     let compile = Command::new("gcc")
+        .arg("-O2")
+        .args(simd_isa_flags())
         .args([
-            "-O2",
-            "-mavx2",
             "-std=c11",
             "-I",
             dir.to_str().unwrap(),
@@ -1146,10 +1165,9 @@ int main() { return 0; }
     fs::write(dir.join("test.cpp"), cxx_src).unwrap();
 
     let output = Command::new("g++")
+        .args(["-std=c++17", "-O2"])
+        .args(simd_isa_flags())
         .args([
-            "-std=c++17",
-            "-O2",
-            "-mavx2",
             "-I",
             dir.to_str().unwrap(),
             dir.join("test.cpp").to_str().unwrap(),
@@ -1284,9 +1302,9 @@ fn compile_and_run_kernel_with_blas(
     let runtime_lib = runtime_lib_path();
     let blas_flags = blas_link_flags().unwrap_or_default();
 
-    let mut args: Vec<String> = vec![
-        "-O2".into(),
-        "-mavx2".into(),
+    let mut args: Vec<String> = vec!["-O2".into()];
+    args.extend(simd_isa_flags());
+    args.extend([
         "-std=c11".into(),
         "-I".into(),
         dir.to_str().unwrap().into(),
@@ -1295,7 +1313,7 @@ fn compile_and_run_kernel_with_blas(
         "-o".into(),
         bin.to_str().unwrap().into(),
         runtime_lib.to_str().unwrap().into(),
-    ];
+    ]);
     args.extend(blas_flags);
     args.push("-lm".into());
     args.push("-lpthread".into());
