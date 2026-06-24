@@ -301,25 +301,39 @@ fn scalar_to_tensor_coercion_bool_uses_typed_pointer() {
 }
 
 #[test]
-fn scalar_to_tensor_coercion_f32_uses_typed_pointer() {
+fn scalar_to_tensor_coercion_f64_uses_f64_typed_pointer() {
+    // #381: a captured f64 scalar fed to a tensor helper must pack into a
+    // CHELIS_F64 rank-0 tensor written through a `(double*)`. The pre-fix
+    // code packed an f64 scalar into a CHELIS_F32 tensor via `(float)value`
+    // (only 4 bytes), so the f64 kernel read garbage and the value collapsed
+    // to ~0. The dtype tag and the typed-pointer width must match the f64
+    // operand.
     let program = make_tensor_call_with_scalar_arg(
         HostType::Float64,
         HostExpr::new(HostExprKind::Float(7.5)),
     );
-    let src = emit_host_program(&program, "scalar_f32");
-    // The legacy f32-default arm writes `tensor_name->data[0] =
-    // (float)(value);` against `float *data`.  The migrated code must
-    // cast `->data` through a typed pointer first.
+    let src = emit_host_program(&program, "scalar_f64");
     assert!(
-        src.contains("(float*)") && src.contains("->data"),
-        "f32-default scalar-to-tensor coercion must cast `->data` to typed pointer; got:\n{src}"
+        src.contains("chelis_alloc(0, NULL, CHELIS_F64)"),
+        "f64 scalar-to-tensor coercion must allocate a CHELIS_F64 rank-0 tensor (#381); got:\n{src}"
     );
+    assert!(
+        src.contains("(double*)") && src.contains("->data"),
+        "f64 scalar-to-tensor coercion must cast `->data` to a `(double*)` (#381); got:\n{src}"
+    );
+    // Must NOT pack an f64 scalar through the f32 path (the pre-fix bug).
     assert!(
         !src.lines()
-            .any(|l| l.contains("->data[0] = (float)(") && !l.contains("(float*)")),
-        "f32-default scalar-to-tensor coercion must not emit bare `->data[0] = (float)(...)`; got:\n{src}"
+            .any(|l| l.contains("->data[0] = (float)(") && !l.contains("(double*)")),
+        "f64 scalar-to-tensor coercion must not pack through the f32 `(float)(...)` path (#381); got:\n{src}"
     );
 }
+
+// Note: the host lane classifies every float literal as `Float64`
+// (`host_type(HostExprKind::Float)` is coarse per issue #308), so a bare
+// f32 scalar arg cannot be synthesized through `make_tensor_call_with_scalar_arg`;
+// the f32 packing arm is exercised end-to-end by the eval-vs-C parity test
+// `ws2b_numeric_identifier_divergence` (f32 captured-scalar programs) instead.
 
 #[test]
 fn scalar_to_tensor_coercion_int64_keeps_typed_pointer() {
