@@ -144,6 +144,24 @@ static inline double chelis_f64_from_bits(uint64_t bits) {
     memcpy(&v, &bits, sizeof(double));
     return v;
 }
+/* Issue #387: portable integer division/remainder by-zero trap. The
+ * evaluator halts with a clean diagnostic; the C backend must do the same
+ * on every platform. Relying on the hardware fault is NOT portable: x86
+ * raises SIGFPE on integer #DE, but ARM64 (e.g. macOS arm64) defines
+ * integer division by zero to return a value and does NOT fault, so the
+ * binary would silently compute a wrong answer -- the exact eval-vs-backend
+ * divergence #387 exists to kill. Codegen calls this guard before every
+ * INTEGER `div` / `mod`; it returns the divisor so the call composes inline
+ * (`a / chelis_int_div_guard(b)`). Float division is IEEE-754 (`1.0/0.0 ==
+ * inf`) and is never guarded. The message matches the evaluator's
+ * `integer division or remainder by zero` exactly. */
+static inline int64_t chelis_int_div_guard(int64_t divisor) {
+    if (divisor == 0) {
+        fprintf(stderr, "integer division or remainder by zero\n");
+        abort();
+    }
+    return divisor;
+}
 /* WS-1 (dtype + Metal cleanup cycle): two-byte fill helpers for bf16
  * and f16 tensors. Codegen computes the exact 16-bit pattern from the
  * IR literal at compile time (the `half` crate's `to_bits()`) and

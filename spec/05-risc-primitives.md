@@ -73,18 +73,24 @@ runtime reject them during execution; compiled C exits non-zero rather than abor
 
 - **Integer operands** (int8, int16, int32, int64) — C/Rust
   truncating division (round toward zero). `7 / 2 == 3`,
-  `-7 / 2 == -3`, `1 / 0` traps (implementation-defined per C).
-  The evaluator halts with a clean diagnostic
+  `-7 / 2 == -3`, `1 / 0` traps. Both the evaluator and the C
+  backend halt with the same clean diagnostic
   (`integer division or remainder by zero`, the same message
   `mod`'s zero-divisor path emits, so the two primitives are
-  consistent); the C backend follows the platform's signal
-  (SIGFPE). Neither side returns a finite value. This differs
-  from torch's `true_divide` and JAX's default `jnp.divide`, both
-  of which upcast integers to float and return float. Chelis
-  matches the C-language convention because chelis-std's
-  `Std.Decimal` arithmetic uses `div(int64, int64)` for scale
-  shifts; float-only would force a separate `int_div` primitive
-  without benefit.
+  consistent across both lanes). The C backend emits an explicit
+  zero-divisor guard (`chelis_int_div_guard`) before every
+  integer `div`/`mod` rather than relying on a hardware fault:
+  x86 raises `SIGFPE` on integer division by zero, but AArch64
+  (e.g. Apple silicon) defines it to return a value and does not
+  fault, so a signal-dependent trap would silently compute a
+  wrong answer there. The explicit guard traps deterministically
+  on every target. Neither side returns a finite value. This
+  differs from torch's `true_divide` and JAX's default
+  `jnp.divide`, both of which upcast integers to float and return
+  float. Chelis matches the C-language convention because
+  chelis-std's `Std.Decimal` arithmetic uses `div(int64, int64)`
+  for scale shifts; float-only would force a separate `int_div`
+  primitive without benefit.
 
 **Dimension rule:** Both inputs must have identical dimension lists. Output has the same dimensions. No broadcasting.
 

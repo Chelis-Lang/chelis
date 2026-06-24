@@ -2135,8 +2135,20 @@ impl<'a> HostEmitter<'a> {
             "add" => format!("{} + {}", arg_vars[0].0, arg_vars[1].0),
             "sub" => format!("{} - {}", arg_vars[0].0, arg_vars[1].0),
             "mul" => format!("{} * {}", arg_vars[0].0, arg_vars[1].0),
+            // #387: integer scalar `div`/`mod` trap portably on a zero
+            // divisor (ARM64 does not fault on integer div-by-zero), using the
+            // same clean diagnostic the evaluator emits. `chelis_int_div_guard`
+            // returns the (nonzero) divisor so it composes inline. Float `div`
+            // is IEEE-754 and is never guarded; `mod` is integer-only.
+            "div" if matches!(arg_vars[0].1, HostType::Int64) => format!(
+                "{} / chelis_int_div_guard({})",
+                arg_vars[0].0, arg_vars[1].0
+            ),
             "div" => format!("{} / {}", arg_vars[0].0, arg_vars[1].0),
-            "mod" => format!("{} % {}", arg_vars[0].0, arg_vars[1].0),
+            "mod" => format!(
+                "{} % chelis_int_div_guard({})",
+                arg_vars[0].0, arg_vars[1].0
+            ),
             "cmplt" if matches!(arg_vars[0].1, HostType::Tensor(_)) => {
                 format!("chelis_tensor_cmplt({}, {})", arg_vars[0].0, arg_vars[1].0)
             }

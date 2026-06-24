@@ -8,8 +8,11 @@
 //!
 //! * #387 — integer `div`/`mod` by zero must TRAP, not return a finite
 //!   wrong value. The evaluator halts with one clean diagnostic shared
-//!   between `div` and `mod`; the C backend follows the platform's SIGFPE.
-//!   Float `div` keeps IEEE-754 (`1.0 / 0.0 == inf`).
+//!   between `div` and `mod`; the C backend emits an EXPLICIT, PORTABLE
+//!   `chelis_int_div_guard` (`abort()` with the same diagnostic) rather than
+//!   relying on a hardware fault — x86 raises SIGFPE on integer #DE but ARM64
+//!   does not fault, so a SIGFPE-dependent trap silently returned a wrong
+//!   value on macOS arm64. Float `div` keeps IEEE-754 (`1.0 / 0.0 == inf`).
 //! * #381 — `scalar_to_tensor` of a top-level scalar binding that a def
 //!   captures (and that the DAG lane materializes as a rank-0 tensor) must
 //!   evaluate, matching the C backend / the DAG pass-through.
@@ -321,34 +324,144 @@ fn issue_387_integer_mod_by_zero_traps_with_same_diagnostic() {
     );
 }
 
-/// NEGATIVE parity: the C backend follows the platform signal (SIGFPE) for
-/// integer division by zero — it must NOT print a finite wrong value. Both
-/// lanes trap; neither yields a silently-wrong integer.
+/// NEGATIVE parity: the C backend must trap integer division by zero with
+/// an EXPLICIT, PORTABLE guard (`chelis_int_div_guard` -> `abort()` with the
+/// clean diagnostic), not by relying on a hardware fault. The divisor is
+/// computed at RUNTIME (`sub(y, z)`), so the compiler cannot constant-fold it
+/// to a literal `0` and elide the division. This is the regression that
+/// macOS arm64 surfaced: ARM64 does not fault on integer div-by-zero, so a
+/// SIGFPE-dependent trap silently returned a wrong value there.
 #[test]
 fn issue_387_integer_div_by_zero_traps_in_backend() {
-    let source = "def d(x: tensor[2, int64], y: tensor[2, int64]) -> tensor[2, int64] = div(x, y)\n\
-out = d(cast(to_tensor([7, 8]), int64), cast(to_tensor([2, 0]), int64))\n";
+    // y - z = [2, 0]: the second divisor is zero, computed at runtime.
+    let source = "def d(x: tensor[2, int64], y: tensor[2, int64], z: tensor[2, int64]) -> tensor[2, int64] = div(x, sub(y, z))\n\
+out = d(cast(to_tensor([7, 8]), int64), cast(to_tensor([3, 5]), int64), cast(to_tensor([1, 5]), int64))\n";
 
     let build = chelis_build_c(source, "intdivtrap");
-    let (compile, bin) = compile_emitted(build.path(), &build.path().join("intdivtrap.c"));
+    let kernel_c = build.path().join("intdivtrap.c");
+
+    // Emit-shape: the integer divisor must be wrapped in the portable guard.
+    let c_source = fs::read_to_string(&kernel_c).expect("read emitted C");
+    assert!(
+        c_source.contains("chelis_int_div_guard("),
+        "integer div must emit the portable zero-divisor guard (#387); \
+         emitted C=\n{c_source}",
+    );
+
+    let (compile, bin) = compile_emitted(build.path(), &kernel_c);
     assert!(
         compile.status.success(),
-        "the program must compile; the trap is a runtime signal, not a compile \
+        "the program must compile; the trap is a runtime abort, not a compile \
          error; compiler stderr=\n{}",
         String::from_utf8_lossy(&compile.stderr),
     );
     let run = StdCommand::new(&bin).output().expect("run emitted binary");
     assert!(
         !run.status.success(),
-        "C backend integer div by zero must trap (platform SIGFPE), not print \
+        "C backend integer div by zero must trap (portable abort), not print \
          a finite value; stdout={}",
         String::from_utf8_lossy(&run.stdout),
+    );
+    // The trap emits the SAME clean diagnostic the evaluator does (stronger
+    // than the old SIGFPE silent exit).
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains(INT_DIV_ZERO_DIAGNOSTIC),
+        "C backend trap must emit the canonical diagnostic on stderr (#387); \
+         stderr={stderr:?}",
     );
     // The result tensor must never have been printed.
     assert!(
         !String::from_utf8_lossy(&run.stdout).contains("out ="),
         "no `out = ...` line may be printed when the program traps; stdout={}",
         String::from_utf8_lossy(&run.stdout),
+    );
+}
+
+/// NEGATIVE parity: a SCALAR (host-lane) integer division by zero traps via
+/// the same portable guard. The divisor is runtime-computed (`sub(b, b)`).
+/// Covers the host-emit `div` path (distinct from the DAG tensor path above).
+#[test]
+fn issue_387_scalar_integer_div_by_zero_traps_in_backend() {
+    let source = "def d(a: int64, b: int64) -> int64 = div(a, sub(b, b))\n\
+out = d(cast(7, int64), cast(5, int64))\n";
+
+    let build = chelis_build_c(source, "scalardivtrap");
+    let kernel_c = build.path().join("scalardivtrap.c");
+    let c_source = fs::read_to_string(&kernel_c).expect("read emitted C");
+    assert!(
+        c_source.contains("chelis_int_div_guard("),
+        "scalar integer div must emit the portable guard (#387); emitted C=\n{c_source}",
+    );
+
+    let (compile, bin) = compile_emitted(build.path(), &kernel_c);
+    assert!(
+        compile.status.success(),
+        "must compile: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = StdCommand::new(&bin).output().expect("run emitted binary");
+    assert!(
+        !run.status.success(),
+        "scalar integer div by zero must trap; stdout={}",
+        String::from_utf8_lossy(&run.stdout),
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains(INT_DIV_ZERO_DIAGNOSTIC),
+        "scalar trap must emit the canonical diagnostic; stderr={:?}",
+        String::from_utf8_lossy(&run.stderr),
+    );
+}
+
+/// NEGATIVE parity: a SCALAR (host-lane) integer remainder by zero traps via
+/// the same portable guard and diagnostic — `div` and `mod` stay consistent
+/// on the backend as well as in eval.
+#[test]
+fn issue_387_scalar_integer_mod_by_zero_traps_in_backend() {
+    let source = "def d(a: int64, b: int64) -> int64 = mod(a, sub(b, b))\n\
+out = d(cast(7, int64), cast(5, int64))\n";
+
+    let build = chelis_build_c(source, "scalarmodtrap");
+    let kernel_c = build.path().join("scalarmodtrap.c");
+    let (compile, bin) = compile_emitted(build.path(), &kernel_c);
+    assert!(
+        compile.status.success(),
+        "must compile: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = StdCommand::new(&bin).output().expect("run emitted binary");
+    assert!(
+        !run.status.success(),
+        "scalar integer mod by zero must trap; stdout={}",
+        String::from_utf8_lossy(&run.stdout),
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains(INT_DIV_ZERO_DIAGNOSTIC),
+        "scalar mod trap must emit the canonical diagnostic; stderr={:?}",
+        String::from_utf8_lossy(&run.stderr),
+    );
+}
+
+/// POSITIVE parity: a SCALAR (host-lane) FLOAT division by zero must NOT trap
+/// — it stays IEEE-754 (`1.0 / 0.0 == inf`). Guards the integer trap from
+/// leaking into the float lane on the backend side.
+#[test]
+fn issue_387_scalar_float_div_by_zero_is_ieee_in_backend() {
+    let source = "def d(a: f32, b: f32) -> f32 = div(a, sub(b, b))\n\
+out = d(1.0, 5.0)\n";
+
+    let build = chelis_build_c(source, "scalarfdiv");
+    let kernel_c = build.path().join("scalarfdiv.c");
+    let c_source = fs::read_to_string(&kernel_c).expect("read emitted C");
+    assert!(
+        !c_source.contains("chelis_int_div_guard("),
+        "float div must NOT emit the integer trap guard (#387); emitted C=\n{c_source}",
+    );
+    let stdout = compile_and_run_emitted(build.path(), &kernel_c);
+    assert_eq!(
+        binding_line(&stdout, "out"),
+        "out = inf",
+        "scalar float 1.0/0.0 must be +inf, not a trap; stdout={stdout:?}",
     );
 }
 
