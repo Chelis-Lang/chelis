@@ -111,8 +111,11 @@ jobs:
       # cvc5-sys clone. python3-pip provides `tomli` for cvc5's
       # build-time TOML codegen, which on Python < 3.11 imports `tomli`
       # (debian:11 ships Python 3.9, and python3-tomli is not in the main
-      # bullseye suite, only backports). libgmp/libmpfr-dev mirror the
-      # ci.yml smt-build recipe (cvc5 auto-downloads its own static GMP).
+      # bullseye suite, only backports). python3-venv provides the `venv`
+      # module cvc5's cmake create_venv step uses for its codegen venv
+      # (debian:11's slim image omits it, so create_venv fails
+      # configure.sh otherwise). libgmp/libmpfr-dev mirror the ci.yml
+      # smt-build recipe (cvc5 auto-downloads its own static GMP).
       - name: Install build prerequisites
         run: |
           set -euo pipefail
@@ -120,7 +123,7 @@ jobs:
           apt-get install -y --no-install-recommends \
             build-essential ca-certificates curl git \
             cmake libclang-dev libgmp-dev libmpfr-dev \
-            python3 python3-pip
+            python3 python3-pip python3-venv
           pip3 install --break-system-packages tomli || pip3 install tomli
 
       - name: Checkout
