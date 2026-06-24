@@ -357,10 +357,16 @@ fn surf_arith(expr: &Expr, ctx: &InlineCtx) -> Option<crate::solver::SmtExpr> {
                 if params.len() != args.len() {
                     return None;
                 }
-                let subst: std::collections::HashMap<String, &Expr> = params
+                // Bind each parameter to its argument ALREADY LOWERED in the
+                // caller's scope (`smt_args`), so a nested call inside `body`
+                // sees fully-ground operands. Re-lowering the raw argument
+                // Expr inside the callee body would resolve its free vars in
+                // the WRONG (callee) scope -- the chelis#426 collapse, where
+                // two call-sites with different args produced identical SMT.
+                let subst: std::collections::HashMap<String, SmtExpr> = params
                     .iter()
-                    .zip(args.iter())
-                    .map(|(p, a)| (p.name.clone(), a))
+                    .zip(smt_args.iter())
+                    .map(|(p, a)| (p.name.clone(), a.clone()))
                     .collect();
                 let deeper = InlineCtx {
                     decls: ctx.decls,
@@ -388,14 +394,16 @@ fn surf_arith(expr: &Expr, ctx: &InlineCtx) -> Option<crate::solver::SmtExpr> {
 
 fn surf_arith_subst(
     expr: &Expr,
-    subst: &std::collections::HashMap<String, &Expr>,
+    subst: &std::collections::HashMap<String, SmtExpr>,
     ctx: &InlineCtx,
 ) -> Option<crate::solver::SmtExpr> {
     use crate::solver::{ArithOp as SA, BoolOp as SB, CmpOp as SC, SmtExpr};
     match expr {
         Expr::Var(name, _) => {
             if let Some(replacement) = subst.get(name.as_str()) {
-                surf_arith(replacement, ctx)
+                // The replacement is already lowered in the binding scope;
+                // return it verbatim (do NOT re-lower in this scope).
+                Some(replacement.clone())
             } else {
                 Some(SmtExpr::Var(name.clone()))
             }
@@ -522,10 +530,15 @@ fn surf_arith_subst(
                 if params.len() != args.len() {
                     return None;
                 }
-                let inner_subst: std::collections::HashMap<String, &Expr> = params
+                // Bind each parameter to its argument ALREADY LOWERED under the
+                // CURRENT substitution (`smt_args`), so the parent scope's
+                // bindings flow into the nested callee body. Binding the raw
+                // argument Expr and re-lowering it inside the callee would lose
+                // the parent bindings -- the chelis#426 nested-call collapse.
+                let inner_subst: std::collections::HashMap<String, SmtExpr> = params
                     .iter()
-                    .zip(args.iter())
-                    .map(|(p, a)| (p.name.clone(), a))
+                    .zip(smt_args.iter())
+                    .map(|(p, a)| (p.name.clone(), a.clone()))
                     .collect();
                 let deeper = InlineCtx {
                     decls: ctx.decls,
@@ -543,10 +556,15 @@ fn surf_arith_subst(
             Some(SmtExpr::Apply(name, smt_args))
         }
         Expr::Block(bindings, body, _) => {
+            // A let-binding's value lowers under the CURRENT substitution (the
+            // same scope-correctness the call path needs): a binding RHS that
+            // references an outer-scope param must resolve through `subst`, not
+            // be re-lowered later in a scope that has lost it.
             let mut extended_subst = subst.clone();
             for binding in bindings {
                 if let LetPattern::Var(name, _) = &binding.pattern {
-                    extended_subst.insert(name.clone(), &binding.value);
+                    let value = surf_arith_subst(&binding.value, &extended_subst, ctx)?;
+                    extended_subst.insert(name.clone(), value);
                 } else {
                     return None;
                 }
@@ -559,7 +577,7 @@ fn surf_arith_subst(
 
 fn surf_expr_to_smt_subst(
     expr: &Expr,
-    subst: &std::collections::HashMap<String, &Expr>,
+    subst: &std::collections::HashMap<String, SmtExpr>,
     ctx: &InlineCtx,
 ) -> Option<crate::solver::SmtExpr> {
     use crate::solver::{BoolOp as SB, CmpOp as SC, SmtExpr};
@@ -752,5 +770,101 @@ mod tests {
         let decls: Vec<Decl> = Vec::new();
         let pred = apply("mystery", vec![var("x")]);
         assert!(surf_expr_to_smt(&pred, &ctx(&decls)).is_none());
+    }
+
+    fn param(name: &str) -> Param {
+        Param {
+            name: name.to_string(),
+            ty: None,
+            span: sp(),
+        }
+    }
+
+    fn fun_def(name: &str, params: &[&str], body: Expr) -> Decl {
+        Decl::FunDef {
+            name: name.to_string(),
+            dim_params: Vec::new(),
+            params: params.iter().map(|p| param(p)).collect(),
+            ret_ty: None,
+            effects: None,
+            body,
+            span: sp(),
+        }
+    }
+
+    fn binop(op: BinOp, l: Expr, r: Expr) -> Expr {
+        Expr::Binary(op, Box::new(l), Box::new(r), sp())
+    }
+
+    // chelis#426: two calls of a def whose body CALLS an ITE-bodied helper,
+    // with DIFFERENT arguments, must lower to DISTINCT SMT terms. The bug:
+    // inlining the nested helper call lost the outer call-site's argument
+    // bindings, so both calls collapsed to the same term (`<=` then trivially
+    // true => false-prove). The two `Cmp` operands must NOT be structurally
+    // equal, and the RHS must mention the swapped `w*` vars.
+    #[test]
+    fn two_calls_of_ite_bodied_def_lower_to_distinct_terms() {
+        // fmax(a, b) = if a >= b then a else b
+        let fmax = fun_def(
+            "fmax",
+            &["a", "b"],
+            Expr::If(
+                Box::new(binop(BinOp::Ge, var("a"), var("b"))),
+                Box::new(var("a")),
+                Box::new(var("b")),
+                sp(),
+            ),
+        );
+        // bs(x, y) = fmax(x, y)  -- a def that CALLS the ITE-bodied helper
+        let bs = fun_def("bs", &["x", "y"], apply("fmax", vec![var("x"), var("y")]));
+        let decls = vec![fmax, bs];
+
+        // Goal body: bs(v0, v1) <= bs(w0, w1)
+        let body = binop(
+            BinOp::Le,
+            apply("bs", vec![var("v0"), var("v1")]),
+            apply("bs", vec![var("w0"), var("w1")]),
+        );
+        let lowered = surf_expr_to_smt(&body, &ctx(&decls)).expect("goal lowers");
+        let (lhs, rhs) = match &lowered {
+            SmtExpr::Cmp(CmpOp::Le, l, r) => (l.as_ref(), r.as_ref()),
+            other => panic!("expected a <= comparison, got {other:?}"),
+        };
+        // The collapse made lhs == rhs; faithful lowering keeps them distinct.
+        assert_ne!(
+            lhs, rhs,
+            "two call-sites with different args collapsed to identical terms (chelis#426)"
+        );
+        // The first call lowers over v0/v1, the second over w0/w1: confirm the
+        // swapped vars actually reach the RHS rather than being dropped.
+        assert!(
+            term_mentions(lhs, "v0") && term_mentions(lhs, "v1"),
+            "lhs lost its own call-site bindings: {lhs:?}"
+        );
+        assert!(
+            term_mentions(rhs, "w0") && term_mentions(rhs, "w1"),
+            "rhs collapsed onto the first call-site's vars instead of w0/w1: {rhs:?}"
+        );
+        assert!(
+            !term_mentions(rhs, "v0") && !term_mentions(rhs, "v1"),
+            "rhs leaked the first call-site's vars (collapse): {rhs:?}"
+        );
+    }
+
+    fn term_mentions(expr: &SmtExpr, name: &str) -> bool {
+        match expr {
+            SmtExpr::Var(n) => n == name,
+            SmtExpr::Arith(_, l, r) | SmtExpr::Cmp(_, l, r) => {
+                term_mentions(l, name) || term_mentions(r, name)
+            }
+            SmtExpr::Ite(c, t, e) => {
+                term_mentions(c, name) || term_mentions(t, name) || term_mentions(e, name)
+            }
+            SmtExpr::Not(inner) => term_mentions(inner, name),
+            SmtExpr::Bool(_, parts) | SmtExpr::Apply(_, parts) => {
+                parts.iter().any(|p| term_mentions(p, name))
+            }
+            _ => false,
+        }
     }
 }
