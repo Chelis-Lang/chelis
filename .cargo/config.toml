@@ -31,3 +31,28 @@ PYO3_PYTHON = { value = ".venv/bin/python", relative = true }
 # Required for cvc5-sys bindgen on Fedora where the ROCm clang doesn't
 # include standard system headers in its search path.
 BINDGEN_EXTRA_CLANG_ARGS = "-I/usr/include"
+# cvc5-sys (smt feature) builds cvc5 from source, which #includes the
+# auto-downloaded GMP C++ header `gmpxx.h`. That header declares
+# user-defined-literal operators with a space before the suffix
+# (`operator"" _mpz`), which Apple clang flags under
+# `-Wdeprecated-literal-operator`; cvc5 compiles its own sources with
+# that warning promoted to an error, so the cvc5 build aborts on
+# Apple-Silicon CI runners (`SMT Feature Build (darwin-arm64)`, red
+# since the job was added). cmake seeds `CMAKE_CXX_FLAGS` from this env
+# `CXXFLAGS`, so the flag reaches every cvc5 compile command.
+#
+# Use the plain `-Wno-` (fully disable), NOT `-Wno-error=` (downgrade to
+# warning): the `SMT Feature Build (Linux, glibc 2.31)` lane runs an OLD
+# gcc that predates this warning. gcc is lenient about disabling an
+# unknown warning (`-Wno-<unknown>` is silently accepted), but
+# `-Wno-error=<unknown>` is a HARD ERROR there
+# (`cc1plus: error: '-Wno-error=deprecated-literal-operator': no option
+# '-Wdeprecated-literal-operator'`). The plain form works on all three
+# SMT lanes: Apple clang disables the warning so the build's `-Werror`
+# has nothing to promote; new gcc applies the suppression; old gcc
+# (glibc231) silently accepts the unknown `-Wno-`. cvc5-sys is the only
+# workspace consumer of CXXFLAGS (no other crate has a C++ build
+# script), and the flag is a harmless no-op where the warning never
+# fires. `force` is left at the default so a developer's own `CXXFLAGS`
+# still takes precedence.
+CXXFLAGS = "-Wno-deprecated-literal-operator"
