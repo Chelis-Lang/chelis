@@ -35,20 +35,22 @@ jobs:
     outputs:
       docs_only: ${{ steps.detect.outputs.docs_only }}
     steps:
-      # Only the pull_request path needs the working tree + history to
-      # diff base..head. On push the detect step short-circuits to
-      # docs_only=false without a checkout, so the full suite always runs.
-      - name: Checkout PR range
+      # Shallow checkout (depth 1); the detect step deepens to the PR
+      # commit range. GitHub Actions expressions have no arithmetic, so
+      # `commits + 1` is computed in bash, not in the YAML `fetch-depth`.
+      # On push the detect step short-circuits without needing history.
+      - name: Checkout
         if: github.event_name == 'pull_request'
         uses: actions/checkout@v6
         with:
-          fetch-depth: ${{ github.event.pull_request.commits + 1 }}
+          fetch-depth: 1
       - name: Compute docs_only
         id: detect
         env:
           EVENT_NAME: ${{ github.event_name }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
+          COMMITS: ${{ github.event.pull_request.commits }}
         run: |
           if [ "$EVENT_NAME" != "pull_request" ]; then
             # push-to-main (or any non-PR event) always runs the full
@@ -57,8 +59,11 @@ jobs:
             echo "non-PR event ($EVENT_NAME): docs_only=false (full suite)"
             exit 0
           fi
-          # Backstop: ensure the base commit is an object so base..head
-          # resolves at the shallow boundary (no-op if already fetched).
+          # Deepen head to the PR commit count + 1 (the +1 reaches the
+          # base tip's parent so base..head resolves), then backstop-fetch
+          # the base commit so it is present as an object even on a stale
+          # count (force-push between the event and the run).
+          git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
           git fetch --depth=1 origin "$BASE" 2>/dev/null || true
           git diff --name-only "$BASE..$HEAD" \
             | python3 scripts/ci_detect_docs_only.py
@@ -378,28 +383,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # Shallow the clone to the PR's commit range instead of the whole
-      # repo history (chelis#421). The scan only needs `base..head`, so
-      # fetch the PR's commit count + 1 (the `+1` reaches the base tip's
-      # parent so `base..head` resolves at the shallow boundary). On a
-      # push (no pull_request context) depth 2 covers `HEAD~1..HEAD`. The
-      # backstop fetch in the scan step guarantees `base.sha` is present
-      # even if the count expression is stale (e.g. a force-push between
-      # the event and the run).
+      # repo history (chelis#421). GitHub Actions expressions have no
+      # arithmetic, so the depth-1 checkout is deepened to the PR commit
+      # count + 1 in bash below (the `+1` reaches the base tip's parent so
+      # `base..head` resolves). A backstop fetch guarantees `base.sha` is
+      # present even if the count is stale (a force-push between the event
+      # and the run). On push, depth 2 covers `HEAD~1..HEAD`.
       - uses: actions/checkout@v6
         with:
-          fetch-depth: ${{ github.event_name == 'pull_request' && github.event.pull_request.commits + 1 || 2 }}
+          fetch-depth: 1
 
       - name: Check commits for AI authorship markers
+        env:
+          COMMITS: ${{ github.event.pull_request.commits }}
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             BASE="${{ github.event.pull_request.base.sha }}"
             HEAD="${{ github.event.pull_request.head.sha }}"
-            # Backstop: ensure the base commit is present as an object so
-            # `base..head` resolves even if the shallow depth above did
-            # not quite reach it (a no-op when it is already fetched).
+            # Deepen head to the PR commit range, then backstop-fetch the
+            # base commit so `base..head` resolves at the shallow boundary
+            # (both no-ops if already present).
+            git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
             git fetch --depth=1 origin "$BASE" 2>/dev/null || true
             RANGE="$BASE..$HEAD"
           else
+            git fetch --depth=2 origin "$GITHUB_SHA" 2>/dev/null || true
             RANGE="HEAD~1..HEAD"
           fi
           FOUND=0

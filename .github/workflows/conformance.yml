@@ -44,23 +44,27 @@ jobs:
     outputs:
       docs_only: ${{ steps.detect.outputs.docs_only }}
     steps:
-      - name: Checkout PR range
+      # Shallow checkout (depth 1); deepen in bash since GitHub Actions
+      # expressions have no arithmetic. See ci.yml's changes job.
+      - name: Checkout
         if: github.event_name == 'pull_request'
         uses: actions/checkout@v6
         with:
-          fetch-depth: ${{ github.event.pull_request.commits + 1 }}
+          fetch-depth: 1
       - name: Compute docs_only
         id: detect
         env:
           EVENT_NAME: ${{ github.event_name }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
+          COMMITS: ${{ github.event.pull_request.commits }}
         run: |
           if [ "$EVENT_NAME" != "pull_request" ]; then
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
             echo "non-PR event ($EVENT_NAME): docs_only=false (full suite)"
             exit 0
           fi
+          git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
           git fetch --depth=1 origin "$BASE" 2>/dev/null || true
           git diff --name-only "$BASE..$HEAD" \
             | python3 scripts/ci_detect_docs_only.py
