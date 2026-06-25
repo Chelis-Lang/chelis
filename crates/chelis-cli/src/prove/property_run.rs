@@ -234,6 +234,13 @@ fn emit(
         if let Some(goal) = &outcome.goal {
             value["goal"] = json!(goal);
         }
+        // chelis#490: the property's dependency / attached-target set (the
+        // top-level symbols its body + preconditions reference) travels with
+        // the record so an admission policy can confirm the property mentions
+        // its target without regex-scanning the body. Always emitted (an empty
+        // array means the body references only its own quantifier params), so a
+        // consumer can rely on the key being present on every property record.
+        value["dependencies"] = json!(outcome.dependencies);
         if outcome.proof_tier != PropertyTier::None {
             value["proof_tier"] = json!(outcome.proof_tier.as_str());
         }

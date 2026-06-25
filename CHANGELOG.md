@@ -8,6 +8,16 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`chelis prove --json` exposes each property's dependency /
+  attached-target set (#490).** Every `{kind:"property"}` record now carries
+  a `dependencies` array: the free top-level symbols the property's
+  preconditions + body reference (its quantifier params and any
+  `let`/lambda/match binders are excluded; an empty array means the body
+  references only its own params). An admission policy intersects this with
+  an export set to confirm a property mentions the target it claims to
+  constrain WITHOUT regex-scanning the body. The tide `chelis_prove`
+  surface emits the same field, so a CLI prove and a tide prove agree.
+
 - **`chelis prove --project-root <DIR>` and `chelis eval --project-root
   <DIR>`: a package proof / package eval mode (#487, #423).** `prove`
   already resolved imports for a file inside a reef package; a standalone

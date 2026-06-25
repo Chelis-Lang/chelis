@@ -2,6 +2,11 @@
 
 use super::*;
 
+/// A zero-width span for synthesizing Surf AST nodes in unit tests.
+fn sp() -> chelis_deep::Span {
+    chelis_deep::Span::new(0, 0)
+}
+
 fn run_surf(source: &str, tier: &str) -> Vec<PropertyOutcome> {
     let opts = PropertyRunOptions {
         tier: tier.to_string(),
@@ -592,5 +597,169 @@ fn wi8_smt_precondition_discharge_site_stamps_discharge_tier() {
     assert!(
         none.is_empty(),
         "no preconditions => no assumption record to tier"
+    );
+}
+
+// ===========================================================================
+// chelis#490: property dependency / attached-target metadata.
+// ===========================================================================
+
+/// A property whose body calls a top-level def lists that def as a
+/// dependency. The quantifier param is NOT a dependency.
+#[test]
+fn dependencies_list_a_referenced_top_level_def() {
+    let source = "module M
+def helper(x: f32) -> f32 = x * x
+@property uses_helper forall(x: f32):
+  (helper(x) >= 0.0)
+";
+    let outcomes = run_surf(source, "auto");
+    assert_eq!(outcomes.len(), 1, "one property: {outcomes:?}");
+    assert_eq!(
+        outcomes[0].dependencies,
+        vec!["helper".to_string()],
+        "the body's call to `helper` is the only dependency (x is a param)"
+    );
+}
+
+/// NEGATIVE twin: a property whose body references ONLY its quantifier
+/// params has an EMPTY dependency set -- a param is never an attached target.
+#[test]
+fn dependencies_are_empty_when_only_params_are_referenced() {
+    let source = "module M
+@property only_param forall(x: f32):
+  (x * x >= 0.0)
+";
+    let outcomes = run_surf(source, "auto");
+    assert_eq!(outcomes.len(), 1, "one property: {outcomes:?}");
+    assert!(
+        outcomes[0].dependencies.is_empty(),
+        "a body referencing only its param has no dependencies: {:?}",
+        outcomes[0].dependencies
+    );
+}
+
+/// A `let`/lambda/match binder inside the body SHADOWS a top-level name, so
+/// the shadowed reference is NOT a dependency -- only genuinely-free
+/// references are reported.
+#[test]
+fn dependencies_exclude_shadowing_block_binders() {
+    // `helper` is bound by the block's `let`, so the call to `helper` resolves
+    // to the local binding, not a top-level def: it is NOT a dependency.
+    // `real_dep` is free, so it IS.
+    let params = vec![Param {
+        name: "x".to_string(),
+        ty: Some(TypeExpr::Named("f32".to_string(), sp())),
+        span: sp(),
+    }];
+    // body: { helper = real_dep(x); (helper >= 0.0) }
+    let body = Expr::Block(
+        vec![LetBinding {
+            pattern: LetPattern::Var("helper".to_string(), sp()),
+            ty: None,
+            value: Expr::Apply(
+                Box::new(Expr::Var("real_dep".to_string(), sp())),
+                vec![Expr::Var("x".to_string(), sp())],
+                sp(),
+            ),
+        }],
+        Box::new(Expr::Binary(
+            BinOp::Ge,
+            Box::new(Expr::Var("helper".to_string(), sp())),
+            Box::new(Expr::Lit(Literal::Float(0.0), sp())),
+            sp(),
+        )),
+        sp(),
+    );
+    let deps = property_dependencies(&params, &[], &body);
+    assert_eq!(
+        deps,
+        vec!["real_dep".to_string()],
+        "the block-bound `helper` is shadowed; only the free `real_dep` is a dependency"
+    );
+}
+
+/// A lambda parameter shadows a top-level name only inside the lambda body.
+#[test]
+fn dependencies_exclude_lambda_param_shadowing() {
+    // body: ((fn (g) -> g(x))(outer_fn) >= 0.0) -- `g` is the lambda param
+    // (not a dependency); `outer_fn` and `x`(param) are the operands. `x` is a
+    // property param. So the only dependency is `outer_fn`.
+    let params = vec![Param {
+        name: "x".to_string(),
+        ty: Some(TypeExpr::Named("f32".to_string(), sp())),
+        span: sp(),
+    }];
+    let lambda = Expr::Lambda(
+        vec![Param {
+            name: "g".to_string(),
+            ty: None,
+            span: sp(),
+        }],
+        Box::new(Expr::Apply(
+            Box::new(Expr::Var("g".to_string(), sp())),
+            vec![Expr::Var("x".to_string(), sp())],
+            sp(),
+        )),
+        sp(),
+    );
+    let body = Expr::Binary(
+        BinOp::Ge,
+        Box::new(Expr::Apply(
+            Box::new(lambda),
+            vec![Expr::Var("outer_fn".to_string(), sp())],
+            sp(),
+        )),
+        Box::new(Expr::Lit(Literal::Float(0.0), sp())),
+        sp(),
+    );
+    let deps = property_dependencies(&params, &[], &body);
+    assert_eq!(
+        deps,
+        vec!["outer_fn".to_string()],
+        "the lambda param `g` is bound, not a dependency; `outer_fn` is free"
+    );
+}
+
+/// Preconditions contribute dependencies too (the prover discharges
+/// `pre => body`), and the set is sorted + de-duplicated across both.
+#[test]
+fn dependencies_cover_preconditions_sorted_and_deduped() {
+    let params = vec![Param {
+        name: "x".to_string(),
+        ty: Some(TypeExpr::Named("f32".to_string(), sp())),
+        span: sp(),
+    }];
+    // precondition: (guard_fn(x) >= 0.0); body: (zfn(x) >= afn(x)) and reuse
+    // guard_fn so the dedup + sort is exercised.
+    let pre = Expr::Binary(
+        BinOp::Ge,
+        Box::new(Expr::Apply(
+            Box::new(Expr::Var("guard_fn".to_string(), sp())),
+            vec![Expr::Var("x".to_string(), sp())],
+            sp(),
+        )),
+        Box::new(Expr::Lit(Literal::Float(0.0), sp())),
+        sp(),
+    );
+    let body = Expr::Binary(
+        BinOp::Ge,
+        Box::new(Expr::Apply(
+            Box::new(Expr::Var("zfn".to_string(), sp())),
+            vec![Expr::Var("x".to_string(), sp())],
+            sp(),
+        )),
+        Box::new(Expr::Apply(
+            Box::new(Expr::Var("guard_fn".to_string(), sp())),
+            vec![Expr::Var("x".to_string(), sp())],
+            sp(),
+        )),
+        sp(),
+    );
+    let deps = property_dependencies(&params, std::slice::from_ref(&pre), &body);
+    assert_eq!(
+        deps,
+        vec!["guard_fn".to_string(), "zfn".to_string()],
+        "deps span precondition + body, sorted, with guard_fn de-duplicated"
     );
 }

@@ -496,6 +496,10 @@ fn property_to_json(o: &chelis_prove::property_runner::PropertyOutcome) -> Value
     if let Some(goal) = &o.goal {
         value["goal"] = json!(goal);
     }
+    // chelis#490: the property's dependency / attached-target set travels with
+    // the record on the tide surface too, so a tide prove and a CLI prove agree
+    // on the dependency metadata an admission policy reads.
+    value["dependencies"] = json!(o.dependencies);
     if let Some(cx) = &o.counterexample {
         value["counterexample"] = cx.clone();
         value["shrink_steps"] = json!(o.shrink_steps);

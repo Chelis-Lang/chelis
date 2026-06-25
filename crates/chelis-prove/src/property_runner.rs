@@ -21,7 +21,7 @@ use std::{cell::RefCell, collections::BTreeMap};
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind, TensorValue};
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, List as DeepList, MetaMap};
 use chelis_surf::ast::{
-    BinOp, Decl, Expr, LetBinding, LetPattern, Literal, Param, PropertyOption, TypeExpr,
+    BinOp, Decl, Expr, LetBinding, LetPattern, Literal, Param, Pattern, PropertyOption, TypeExpr,
 };
 
 mod smt_lower;
@@ -93,6 +93,16 @@ pub struct PropertyOutcome {
     /// error that never reached a property body); a real verification outcome
     /// always carries its goal.
     pub goal: Option<String>,
+    /// The top-level symbols this property's body (and preconditions)
+    /// references -- its dependency / attached-target set (chelis#490). These
+    /// are the free identifiers used in function-application head or value
+    /// position that are NOT bound by the property's own quantifier params,
+    /// `let`/lambda/match binders. A consumer's admission policy intersects
+    /// this with its export set to confirm a property actually mentions the
+    /// target it claims to constrain, WITHOUT re-parsing the body or scanning
+    /// it with a regex. Sorted, de-duplicated. Empty for an outcome with no
+    /// body (a discovery error) or a body that references only its own params.
+    pub dependencies: Vec<String>,
 }
 
 impl PropertyOutcome {
@@ -162,6 +172,7 @@ impl PropertyOutcome {
             base_discharge,
             composite_verdict,
             goal: None,
+            dependencies: Vec::new(),
         }
     }
 
@@ -175,6 +186,14 @@ impl PropertyOutcome {
     /// Surf/Deep formatter, so the goal travels with the record.
     pub(super) fn with_goal(mut self, goal: impl Into<String>) -> Self {
         self.goal = Some(goal.into());
+        self
+    }
+
+    /// Attach the property's dependency / attached-target set (chelis#490):
+    /// the top-level symbols the body + preconditions reference. Called once
+    /// per outcome with the set computed by [`property_dependencies`].
+    pub(super) fn with_dependencies(mut self, dependencies: Vec<String>) -> Self {
+        self.dependencies = dependencies;
         self
     }
 
@@ -471,6 +490,11 @@ pub fn run_surf_decls_properties_with_contract_decls(
             &property.preconditions,
             &property.body,
         );
+        // chelis#490: the property's dependency / attached-target set travels
+        // with the record so an admission policy can confirm the property
+        // mentions its target without regex-scanning the body.
+        let dependencies =
+            property_dependencies(&property.params, &property.preconditions, &property.body);
         out.push(
             prove_surf_property(
                 all_decls,
@@ -479,7 +503,8 @@ pub fn run_surf_decls_properties_with_contract_decls(
                 property,
                 options,
             )
-            .with_goal(goal),
+            .with_goal(goal)
+            .with_dependencies(dependencies),
         );
     }
     Ok(PropertyRunResult::Ran(out))
@@ -562,6 +587,188 @@ fn collect_surf_properties(decls: &[Decl], only: Option<&str>) -> Vec<Property> 
             _ => None,
         })
         .collect()
+}
+
+/// The property's dependency / attached-target set (chelis#490): the
+/// top-level symbols its preconditions + body reference. These are the FREE
+/// identifiers (in value or function-application-head position) that are NOT
+/// bound by the property's own quantifier params, nor by a `let` / lambda /
+/// match binder inside the body. An admission policy intersects this with an
+/// export set to confirm the property mentions the target it claims to
+/// constrain, without re-parsing or regex-scanning the body. The result is
+/// sorted and de-duplicated.
+fn property_dependencies(params: &[Param], preconditions: &[Expr], body: &Expr) -> Vec<String> {
+    let mut bound: std::collections::HashSet<String> =
+        params.iter().map(|p| p.name.clone()).collect();
+    let mut free: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for precondition in preconditions {
+        collect_free_idents(precondition, &mut bound, &mut free);
+    }
+    collect_free_idents(body, &mut bound, &mut free);
+    free.into_iter().collect()
+}
+
+/// Walk `expr`, adding every FREE identifier (a `Var` not in `bound`) to
+/// `free`. `bound` is the lexical scope: binders introduced by `let` /
+/// lambda / match patterns are added for the extent of their body and
+/// removed afterwards, so shadowing a free name inside a sub-scope does not
+/// leak the binder out, and a name used both bound and free elsewhere is
+/// still reported free at the free site.
+fn collect_free_idents(
+    expr: &Expr,
+    bound: &mut std::collections::HashSet<String>,
+    free: &mut std::collections::BTreeSet<String>,
+) {
+    match expr {
+        Expr::Var(name, _) => {
+            if !bound.contains(name) {
+                free.insert(name.clone());
+            }
+        }
+        // A constructor is a type/data constructor, not a function dependency
+        // an admission policy attaches to; literals carry no identifier.
+        Expr::Constructor(_, _) | Expr::Lit(_, _) => {}
+        Expr::Apply(func, args, _) => {
+            collect_free_idents(func, bound, free);
+            for arg in args {
+                collect_free_idents(arg, bound, free);
+            }
+        }
+        Expr::List(items, _) | Expr::Tuple(items, _) | Expr::Par(items, _) => {
+            for item in items {
+                collect_free_idents(item, bound, free);
+            }
+        }
+        Expr::Record(_, fields, _) => {
+            for (_, value) in fields {
+                collect_free_idents(value, bound, free);
+            }
+        }
+        Expr::Access(inner, _, _)
+        | Expr::TupleGet(inner, _, _)
+        | Expr::Unary(_, inner, _)
+        | Expr::Cast(inner, _, _)
+        | Expr::Grad(inner, _, _)
+        | Expr::Vmap(inner, _, _)
+        | Expr::Jit(inner, _)
+        | Expr::Realize(inner, _)
+        | Expr::Copy(inner, _)
+        | Expr::Borrow(inner, _)
+        | Expr::Annotate(inner, _, _) => collect_free_idents(inner, bound, free),
+        Expr::Binary(_, left, right, _)
+        | Expr::WithSeed(left, right, _)
+        | Expr::WithDevice(left, right, _) => {
+            collect_free_idents(left, bound, free);
+            collect_free_idents(right, bound, free);
+        }
+        Expr::Pipe(head, stages, _) => {
+            collect_free_idents(head, bound, free);
+            for stage in stages {
+                collect_free_idents(stage, bound, free);
+            }
+        }
+        Expr::If(cond, then_e, else_e, _) => {
+            collect_free_idents(cond, bound, free);
+            collect_free_idents(then_e, bound, free);
+            collect_free_idents(else_e, bound, free);
+        }
+        Expr::Lambda(lambda_params, lambda_body, _) => {
+            // Lambda params bind only inside the body.
+            let added: Vec<String> = lambda_params
+                .iter()
+                .filter(|p| bound.insert(p.name.clone()))
+                .map(|p| p.name.clone())
+                .collect();
+            collect_free_idents(lambda_body, bound, free);
+            for name in added {
+                bound.remove(&name);
+            }
+        }
+        Expr::Match(scrutinee, arms, _) => {
+            collect_free_idents(scrutinee, bound, free);
+            for arm in arms {
+                // Pattern binders are in scope for the arm's guard + body.
+                let mut arm_bound = Vec::new();
+                collect_pattern_binders(&arm.pattern, bound, &mut arm_bound);
+                if let Some(guard) = &arm.guard {
+                    collect_free_idents(guard, bound, free);
+                }
+                collect_free_idents(&arm.body, bound, free);
+                for name in arm_bound {
+                    bound.remove(&name);
+                }
+            }
+        }
+        Expr::Block(bindings, tail, _) => {
+            // A block's `let` bindings are sequential: each binding's value is
+            // in the scope BEFORE that binding's pattern binds (no recursion),
+            // and the pattern is in scope for every later binding + the tail.
+            let mut added: Vec<String> = Vec::new();
+            for LetBinding { pattern, value, .. } in bindings {
+                collect_free_idents(value, bound, free);
+                collect_let_pattern_binders(pattern, bound, &mut added);
+            }
+            collect_free_idents(tail, bound, free);
+            for name in added {
+                bound.remove(&name);
+            }
+        }
+    }
+}
+
+/// Add the value binders a match `Pattern` introduces to `bound`, recording
+/// the names actually newly-inserted in `added` so the caller can restore the
+/// scope. Constructor / record names are NOT binders (they reference types).
+fn collect_pattern_binders(
+    pattern: &Pattern,
+    bound: &mut std::collections::HashSet<String>,
+    added: &mut Vec<String>,
+) {
+    match pattern {
+        Pattern::Wildcard(_) | Pattern::Lit(_, _) => {}
+        Pattern::Var(name, _) => {
+            if bound.insert(name.clone()) {
+                added.push(name.clone());
+            }
+        }
+        Pattern::As(name, inner, _) => {
+            if bound.insert(name.clone()) {
+                added.push(name.clone());
+            }
+            collect_pattern_binders(inner, bound, added);
+        }
+        Pattern::Constructor(_, sub, _) | Pattern::Tuple(sub, _) => {
+            for pattern in sub {
+                collect_pattern_binders(pattern, bound, added);
+            }
+        }
+        Pattern::Record(_, fields, _) => {
+            for (_, pattern) in fields {
+                collect_pattern_binders(pattern, bound, added);
+            }
+        }
+    }
+}
+
+/// Add the value binders a `let`-binding `LetPattern` introduces to `bound`.
+fn collect_let_pattern_binders(
+    pattern: &LetPattern,
+    bound: &mut std::collections::HashSet<String>,
+    added: &mut Vec<String>,
+) {
+    match pattern {
+        LetPattern::Wildcard(_) => {}
+        LetPattern::Var(name, _) => {
+            if bound.insert(name.clone()) {
+                added.push(name.clone());
+            }
+        }
+        LetPattern::Tuple(sub, _) => {
+            for pattern in sub {
+                collect_let_pattern_binders(pattern, bound, added);
+            }
+        }
+    }
 }
 
 fn property_samples(options: &[PropertyOption]) -> Option<usize> {
