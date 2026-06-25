@@ -180,6 +180,28 @@ impl<P: SosProposer> DischargeEngine for ClarabelSosEngine<P> {
             );
         }
 
+        // SOUNDNESS-CRITICAL goal<->cert binding. `cert.verify()` only checks the
+        // certificate is INTERNALLY self-consistent: its SoS form equals
+        // `cert.poly` on `[cert.lo, cert.hi]` and its Grams are PSD. It says
+        // NOTHING about whether `cert.poly` / the interval are the GOAL's. Without
+        // this guard a genuine valid certificate for a DIFFERENT polynomial (or a
+        // different interval) would stamp `Exact` for this goal -- e.g. a valid
+        // cert for `x^2` discharging the FALSE goal `x^2 - 1 >= 0 on [-1, 1]`, or
+        // a `[0, 1]`-valid cert discharging a `[-1, 2]` goal. Reject unless the
+        // certificate proves EXACTLY the normalized goal polynomial on EXACTLY the
+        // goal interval. This is what makes the "equals the goal polynomial"
+        // claim below true; it is the regression lock the red team requires.
+        if cert.poly != poly_goal.poly || cert.lo != poly_goal.lo || cert.hi != poly_goal.hi {
+            return Self::unknown(
+                "certificate proves a different polynomial or interval than the goal",
+                json!({
+                    "cert_matches_goal_poly": cert.poly == poly_goal.poly,
+                    "cert_matches_goal_lo": cert.lo == poly_goal.lo,
+                    "cert_matches_goal_hi": cert.hi == poly_goal.hi,
+                }),
+            );
+        }
+
         // VERIFY the candidate EXACTLY. This is the single gate to Exact.
         match cert.verify() {
             Ok(()) => {
@@ -669,6 +691,117 @@ mod tests {
         assert_ne!(discharge.soundness(), Soundness::Exact);
         assert!(
             !discharge
+                .qualifier_set()
+                .contains(Qualifier::CertificateBearing)
+        );
+    }
+
+    // --- RED-TEAM regression lock: the goal<->certificate binding ---
+    //
+    // `cert.verify()` only proves a certificate is INTERNALLY self-consistent
+    // (its SoS form == cert.poly on [cert.lo, cert.hi], Grams PSD). It says
+    // NOTHING about whether cert.poly / the interval are the GOAL's. Without the
+    // goal<->cert guard in discharge(), a GENUINE valid certificate for a
+    // DIFFERENT polynomial or interval would stamp Exact for this goal. These two
+    // witnesses (the red-team repros) must return NOT-Exact. They are the
+    // regression lock; do not weaken them.
+
+    #[test]
+    fn valid_cert_for_a_different_polynomial_does_not_prove_the_goal() {
+        // GOAL: x^2 - 1 >= 0 on [-1, 1]. This is FALSE (it equals -1 at x = 0).
+        // PROPOSER hands back a GENUINE, self-verifying certificate for x^2
+        // (Gram diag(0,1), multiplier 1) over the same interval. The cert itself
+        // verifies (it is a real SoS cert for x^2), but it proves x^2 >= 0, NOT
+        // the goal x^2 - 1 >= 0. The engine MUST reject it: NOT Exact, no
+        // CertificateBearing, never Proved.
+        let goal = {
+            let x = var("x");
+            // x^2 - 1.
+            let body = SmtExpr::Arith(
+                ArithOp::Sub,
+                Box::new(SmtExpr::Arith(
+                    ArithOp::Mul,
+                    Box::new(x.clone()),
+                    Box::new(x),
+                )),
+                Box::new(SmtExpr::RealLit(1.0)),
+            );
+            Goal::smt(SmtProperty {
+                variables: vec![("x".to_string(), SmtSort::Real)],
+                preconditions: vec![
+                    cmp(CmpOp::Ge, var("x"), SmtExpr::RealLit(-1.0)),
+                    cmp(CmpOp::Le, var("x"), SmtExpr::RealLit(1.0)),
+                ],
+                postcondition: cmp(CmpOp::Ge, body, SmtExpr::RealLit(0.0)),
+            })
+        };
+        // A genuine, self-verifying cert for x^2 on [-1, 1].
+        let cert = good_cert_for_x_squared(-1, 1);
+        assert_eq!(
+            cert.verify(),
+            Ok(()),
+            "the witness cert must itself be internally valid (for x^2) -- the \
+             point is the engine must still reject it for the x^2-1 GOAL"
+        );
+        let engine = ClarabelSosEngine::with_proposer(FixedProposer(cert));
+        let discharge = engine.discharge(&goal, 1_000);
+        assert_ne!(
+            discharge.soundness(),
+            Soundness::Exact,
+            "a valid cert for x^2 must NOT prove the goal x^2 - 1 >= 0"
+        );
+        assert_ne!(*discharge.result(), TierBResult::Proved);
+        assert!(
+            !discharge
+                .qualifier_set()
+                .contains(Qualifier::CertificateBearing)
+        );
+        assert!(discharge.qualifier_set().is_empty());
+    }
+
+    #[test]
+    fn valid_cert_for_a_different_interval_does_not_prove_the_goal() {
+        // GOAL: x^2 >= 0 on [-1, 2]. PROPOSER hands back a genuine, self-verifying
+        // cert for x^2 but over the WRONG interval [0, 1]. The cert verifies (the
+        // polynomial identity + PSD hold), and its polynomial matches the goal,
+        // but it certifies nonnegativity on [0, 1], NOT on the goal's [-1, 2].
+        // The engine MUST reject it on the interval mismatch: NOT Exact.
+        let goal = x_sq_nonneg(-1.0, 2.0);
+        // A genuine cert for x^2, but with lo/hi = 0/1 (the wrong interval).
+        let cert = good_cert_for_x_squared(0, 1);
+        assert_eq!(
+            cert.verify(),
+            Ok(()),
+            "the witness cert is internally valid"
+        );
+        let engine = ClarabelSosEngine::with_proposer(FixedProposer(cert));
+        let discharge = engine.discharge(&goal, 1_000);
+        assert_ne!(
+            discharge.soundness(),
+            Soundness::Exact,
+            "a cert valid on [0,1] must NOT prove the goal on [-1,2]"
+        );
+        assert_ne!(*discharge.result(), TierBResult::Proved);
+        assert!(
+            !discharge
+                .qualifier_set()
+                .contains(Qualifier::CertificateBearing)
+        );
+        assert!(discharge.qualifier_set().is_empty());
+    }
+
+    #[test]
+    fn matched_cert_for_the_true_goal_still_proves_exact() {
+        // The guard must NOT over-reject: a cert whose poly AND interval match the
+        // goal, for a TRUE goal (x^2 >= 0 on [-1, 1]), still proves Exact.
+        let goal = x_sq_nonneg(-1.0, 1.0);
+        let cert = good_cert_for_x_squared(-1, 1);
+        let engine = ClarabelSosEngine::with_proposer(FixedProposer(cert));
+        let discharge = engine.discharge(&goal, 1_000);
+        assert_eq!(*discharge.result(), TierBResult::Proved);
+        assert_eq!(discharge.soundness(), Soundness::Exact);
+        assert!(
+            discharge
                 .qualifier_set()
                 .contains(Qualifier::CertificateBearing)
         );
