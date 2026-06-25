@@ -696,6 +696,70 @@ fn host_runtime_trace_f32_matches_torch_stride4_cascade() {
     );
 }
 
+/// #170 DECISION-LOCK: f32 `matmul` deliberately keeps an f64 eval
+/// accumulator and does NOT take the #163 `sum` cascade nor downcast to
+/// strict f32. torch's CPU f32 matmul is a BLAS GEMM (strict-f32-left-fold
+/// order, NOT the cascade), and the eval reference intentionally stays at
+/// HIGHER precision (f64): it is the reference, the shipped C backend uses
+/// `cblas_sgemm`, and the matmul eval-vs-C parity oracle uses a TOLERANCE,
+/// not bit-identity, for exactly this expected gap. Downcasting eval to
+/// strict f32 would lower precision, couple the reference to torch's BLAS
+/// version, and still not win bit-identity — so it is rejected.
+///
+/// The absorption probe `[2^24, 1×40, -2^24] · [1×42]` pins this: under the
+/// retained f64 accumulator the forty `1.0`s are preserved (`-> 40.0`);
+/// under a strict-f32 fold they would be absorbed by `2^24` (`-> 0.0`).
+/// This test FAILS if someone "fixes" matmul into strict f32 (or the
+/// cascade), guarding the documented decision.
+#[test]
+fn host_runtime_matmul_f32_keeps_f64_accumulator_not_strict_f32() {
+    let mut lhs_row = vec![16_777_216.0_f64];
+    lhs_row.extend(std::iter::repeat_n(1.0_f64, 40));
+    lhs_row.push(-16_777_216.0_f64);
+    let k = lhs_row.len(); // 42
+    let lhs = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![1, k], lhs_row),
+        precision: Prim::F32,
+    };
+    let rhs = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![k, 1], vec![1.0_f64; k]),
+        precision: Prim::F32,
+    };
+    let out = tensor_matmul_host(&lhs, &rhs).expect("matmul must evaluate");
+    assert_eq!(
+        out.value.data,
+        vec![40.0_f64],
+        "f32 matmul keeps the higher-precision f64 eval accumulator (#170 decision): \
+         the forty 1.0s survive (=> 40.0); a strict-f32 fold would absorb them (=> 0.0)"
+    );
+}
+
+/// #170 DECISION-LOCK: f32 `einsum` shares matmul's disposition — f64 eval
+/// accumulator retained, no cascade, no strict-f32 downcast. Same
+/// absorption probe; FAILS if einsum is downcast to strict f32.
+#[test]
+fn host_runtime_einsum_f32_keeps_f64_accumulator_not_strict_f32() {
+    let mut lhs_row = vec![16_777_216.0_f64];
+    lhs_row.extend(std::iter::repeat_n(1.0_f64, 40));
+    lhs_row.push(-16_777_216.0_f64);
+    let k = lhs_row.len();
+    let lhs = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![1, k], lhs_row),
+        precision: Prim::F32,
+    };
+    let rhs = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![k, 1], vec![1.0_f64; k]),
+        precision: Prim::F32,
+    };
+    let out = tensor_einsum_value("ik,kj->ij", &lhs, &rhs).expect("einsum must evaluate");
+    assert_eq!(
+        out.value.data,
+        vec![40.0_f64],
+        "f32 einsum keeps the f64 eval accumulator (#170 decision); got {:?}",
+        out.value.data
+    );
+}
+
 // PR #168 review LOW #5: NaN/Inf/n<4 edge-case coverage for the
 // stride-4 ILP cascade. Tail handling (n < 4 where the lane-fill
 // doesn't complete a full cycle) and special-value propagation

@@ -1627,6 +1627,20 @@ pub(super) fn tensor_matmul_host(
             "matmul shared-axis mismatch: lhs has {k_lhs}, rhs has {k_rhs}"
         ));
     }
+    // #170 (DO NOT "fix" this into the stride-4 cascade): matmul does NOT
+    // take the #163 `sum` cascade, and its f64 accumulator is intentional.
+    // torch's CPU f32 matmul is a BLAS GEMM whose rounding is bit-exact
+    // with a strict-f32 left-fold (verified k=20..257), NOT the cascade
+    // (which is `sum`'s order — applying it here would CREATE a k>=128
+    // divergence). The eval reference deliberately keeps a HIGHER-precision
+    // f64 accumulator: it is the reference, the shipped C backend trades
+    // precision for speed via `cblas_sgemm`, and the matmul eval-vs-C
+    // parity tests use a TOLERANCE (not bit-identity) for exactly this
+    // expected eval(f64)-vs-backend(BLAS) gap. Matching torch's f32-GEMM
+    // bit pattern by downcasting eval to strict-f32 would lower precision,
+    // couple the reference to torch's specific BLAS version, and still not
+    // buy eval-vs-C bit-identity — net worse, no soundness win. So this is
+    // a documented, expected precision characteristic, not a divergence.
     let mut out = vec![0.0_f64; m * n];
     for i in 0..m {
         for j in 0..n {
@@ -2801,6 +2815,14 @@ pub(super) fn tensor_einsum_value(
         .iter()
         .map(|label| dims.get(label).copied().unwrap_or(1))
         .collect::<Vec<_>>();
+    // #170 (DO NOT "fix" into the cascade): einsum is a contraction sum,
+    // same shape as matmul, and shares matmul's disposition. torch's f32
+    // einsum follows its GEMM order (strict-f32 left-fold), NOT the #163
+    // `sum` cascade. The eval reference keeps the higher-precision f64
+    // accumulator deliberately — same rationale as `tensor_matmul_host`:
+    // the eval(f64)-vs-C(BLAS) gap at large k is an expected, tolerance-
+    // covered precision characteristic, not a divergence. See the comment
+    // in `tensor_matmul_host`.
     let mut out = vec![0.0; tensor_numel(&out_shape)];
     for (out_linear, slot) in out.iter_mut().enumerate() {
         let out_index = linear_to_indices(out_linear, &out_shape);
@@ -2809,7 +2831,7 @@ pub(super) fn tensor_einsum_value(
             label_values.insert(*label, *value);
         }
         let reduction_total = tensor_numel(&reduction_shape);
-        let mut acc = 0.0;
+        let mut acc = 0.0_f64;
         for reduction_linear in 0..reduction_total {
             let reduction_index = linear_to_indices(reduction_linear, &reduction_shape);
             for (label, value) in reduction_labels.iter().zip(reduction_index.iter()) {
