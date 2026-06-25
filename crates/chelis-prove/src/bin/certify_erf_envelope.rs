@@ -1,21 +1,22 @@
-//! WI-13 envelope certifier: the Arb trust-anchor half of the generator.
+//! WI-13 envelope Arb certifier / cross-check.
 //!
-//! Reads a coefficients-only DRAFT envelope (produced by
-//! `scripts/generate_erf_envelope.py`, `eps` fields null), certifies each box's
-//! sup-norm error rigorously with the WI-14 Arb oracle by whole-box ball
-//! arithmetic, stamps the certified `eps` and provenance, and writes the
-//! committed envelope JSON.
+//! Two modes, both backed by the WI-14 Arb oracle (whole-box ball arithmetic):
+//!
+//! - `stamp <draft.json> <out.json>`: reads a draft envelope, Arb-certifies each
+//!   box's sup-norm error, stamps `eps` + provenance, and writes the result.
+//!   Used to fill the saturation-tail `eps` of the committed envelope.
+//!
+//! - `validate <envelope.json>`: the independent every-build CROSS-CHECK. Reads
+//!   the committed envelope and asserts, for EVERY box (Gappa-proved central and
+//!   Arb-enclosure tails alike), that the committed `eps` is `>=` the freshly
+//!   Arb-certified sup-norm error -- i.e. the committed bound still soundly
+//!   bounds `|approx - erf|`. This is the belt-and-suspenders guard the Option-B
+//!   design keeps from Option A: the Gappa proof is the central arm's proof
+//!   term, and Arb re-validates the actual numeric bound of every box on every
+//!   CI run. Exits non-zero if any committed `eps` is below the Arb bound.
 //!
 //! This binary requires the `arb` feature (it links FLINT/Arb). It runs offline
-//! and in the regen pipeline only — it is not part of any deployed build.
-//!
-//! Usage:
-//!   cargo run -p chelis-prove --features arb --bin certify_erf_envelope \
-//!     -- <draft.json> <out.json>
-//!
-//! The certified `eps` is `sup_{x in box} |arm.approx(x) - erf(x)|` bounded by
-//! [`chelis_prove::certify_sup_norm_over_box`] (subdivided ball arithmetic), so
-//! a poor proposed polynomial only yields a larger, still-sound `eps`.
+//! and in CI only -- it is not part of any deployed build.
 
 use chelis_prove::{DEFAULT_PREC, ErfArm, ErfEnvelope, certify_sup_norm_over_box};
 use std::process::ExitCode;
@@ -40,61 +41,45 @@ fn subdivisions() -> usize {
         .unwrap_or(CERTIFY_SUBDIVISIONS)
 }
 
-fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() != 3 {
-        eprintln!("usage: certify_erf_envelope <draft.json> <out.json>");
-        return ExitCode::from(2);
+fn arm_coeffs(b: &chelis_prove::ErfEnvelopeBox) -> Vec<f64> {
+    match &b.arm {
+        ErfArm::Saturation { value } => vec![*value],
+        ErfArm::Central { coeffs } => coeffs.clone(),
     }
-    let draft_path = &args[1];
-    let out_path = &args[2];
+}
 
-    let draft_src = match std::fs::read_to_string(draft_path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot read draft {draft_path}: {e}");
-            return ExitCode::from(2);
-        }
-    };
-    let mut env: ErfEnvelope = match serde_json::from_str(&draft_src) {
+fn read_env(path: &str) -> Result<ErfEnvelope, ExitCode> {
+    let src = std::fs::read_to_string(path).map_err(|e| {
+        eprintln!("error: cannot read {path}: {e}");
+        ExitCode::from(2)
+    })?;
+    serde_json::from_str(&src).map_err(|e| {
+        eprintln!("error: {path} is not a valid envelope: {e}");
+        ExitCode::from(2)
+    })
+}
+
+/// `stamp`: Arb-certify every box's eps and write the result.
+fn stamp(draft_path: &str, out_path: &str) -> ExitCode {
+    let mut env = match read_env(draft_path) {
         Ok(e) => e,
-        Err(e) => {
-            eprintln!("error: draft is not a valid envelope: {e}");
-            return ExitCode::from(2);
-        }
+        Err(c) => return c,
     };
-
     let subdivisions = subdivisions();
-    // Certify each box's eps with Arb (whole-box, subdivided).
     for b in &mut env.boxes {
-        let coeffs: Vec<f64> = match &b.arm {
-            ErfArm::Saturation { value } => vec![*value],
-            ErfArm::Central { coeffs } => coeffs.clone(),
-        };
+        let coeffs = arm_coeffs(b);
         let eps = certify_sup_norm_over_box(b.lo, b.hi, &coeffs, subdivisions, CERTIFY_PREC);
-        eprintln!(
-            "certified box [{}, {}] ({}): eps = {:.6e}",
-            b.lo,
-            b.hi,
-            match &b.arm {
-                ErfArm::Saturation { .. } => "saturation",
-                ErfArm::Central { .. } => "central",
-            },
-            eps
-        );
+        eprintln!("certified box [{}, {}]: eps = {:.6e}", b.lo, b.hi, eps);
         b.eps = eps;
     }
-
     env.provenance.certify_prec = CERTIFY_PREC;
     env.provenance.certify_subdivisions = subdivisions;
     env.provenance.method =
         "Arb whole-box ball arithmetic (sup |approx - erf| over each subdivided box)".to_string();
-
     if !env.is_well_formed() {
         eprintln!("error: certified envelope is not well formed (gap, eps<0, or bad saturation)");
         return ExitCode::from(1);
     }
-
     let out = match serde_json::to_string_pretty(&env) {
         Ok(s) => s,
         Err(e) => {
@@ -106,6 +91,57 @@ fn main() -> ExitCode {
         eprintln!("error: cannot write {out_path}: {e}");
         return ExitCode::from(1);
     }
-    eprintln!("wrote committed envelope to {out_path}");
+    eprintln!("wrote envelope to {out_path}");
     ExitCode::SUCCESS
+}
+
+/// `validate`: the independent every-build cross-check. Assert every committed
+/// box's eps is `>=` the freshly Arb-certified sup-norm error.
+fn validate(env_path: &str) -> ExitCode {
+    let env = match read_env(env_path) {
+        Ok(e) => e,
+        Err(c) => return c,
+    };
+    let subdivisions = env.provenance.certify_subdivisions.max(1);
+    let mut ok = true;
+    for b in &env.boxes {
+        let coeffs = arm_coeffs(b);
+        let arb_eps = certify_sup_norm_over_box(b.lo, b.hi, &coeffs, subdivisions, CERTIFY_PREC);
+        let sound = b.eps >= arb_eps;
+        eprintln!(
+            "box [{}, {}] ({:?}): committed eps {:.6e} {} Arb eps {:.6e}",
+            b.lo,
+            b.hi,
+            b.proof_kind,
+            b.eps,
+            if sound { ">=" } else { "<  !! UNSOUND" },
+            arb_eps
+        );
+        if !sound {
+            ok = false;
+        }
+    }
+    if !ok {
+        eprintln!(
+            "error: a committed eps is below the Arb-certified bound -- the envelope is unsound."
+        );
+        return ExitCode::from(1);
+    }
+    eprintln!("Arb cross-check passed: every committed eps bounds the Arb sup-norm error.");
+    ExitCode::SUCCESS
+}
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().collect();
+    match args.get(1).map(String::as_str) {
+        Some("stamp") if args.len() == 4 => stamp(&args[2], &args[3]),
+        Some("validate") if args.len() == 3 => validate(&args[2]),
+        _ => {
+            eprintln!(
+                "usage:\n  certify_erf_envelope stamp <draft.json> <out.json>\n  \
+                 certify_erf_envelope validate <envelope.json>"
+            );
+            ExitCode::from(2)
+        }
+    }
 }

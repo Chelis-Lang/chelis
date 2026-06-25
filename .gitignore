@@ -1,4 +1,8 @@
 /target
+# WI-13 Option B: the no-sudo local prefix where the dep-setup script builds
+# Sollya + fplll from source. A build artifact, never committed (the committed
+# proof bundle under crates/chelis-prove/data is the source of truth).
+/.local
 .env
 .claude/scheduled_tasks.lock
 *.swp
@@ -10,11 +14,18 @@ data/
 !crates/
 !crates/**/*.c
 !crates/**/*.h
-# WI-13 committed, Arb-certified erf envelope: it is source-of-truth data
-# embedded via include_str!, so it must be tracked despite the broad `data/`
-# ignore above (mirrors the !crates/**/*.c re-inclusion idiom).
+# WI-13 committed, certified erf envelope + its Sollya/Gappa proof bundle: all
+# source-of-truth data (the envelope is embedded via include_str!; the .gappa
+# proof + .sollya generator are the committed machine-checkable proof term), so
+# they must be tracked despite the broad `data/` ignore above (mirrors the
+# !crates/**/*.c re-inclusion idiom).
 !crates/chelis-prove/data/
 !crates/chelis-prove/data/*.json
+!crates/chelis-prove/data/**/*.json
+!crates/chelis-prove/data/**/*.gappa
+!crates/chelis-prove/data/**/*.sollya
+!crates/chelis-prove/data/**/*.sha256
+!crates/chelis-prove/data/**/*.md
 !grammars/**/*.c
 !grammars/**/*.h
 bindings/python/chelis/_native.abi3.so

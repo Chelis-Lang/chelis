@@ -1,114 +1,148 @@
-# erf Envelope Regeneration and CI Re-validation (WI-13)
+# erf Envelope: Sollya + Gappa Proof, Arb Cross-check, Regeneration (WI-13)
 
-The `chelis-prove` crate ships a committed, Arb-certified `erf` envelope —
+The `chelis-prove` crate ships a committed, certified `erf` envelope —
 `crates/chelis-prove/data/erf_envelope.json` — that the runtime discharge and
-Beacon's `erf` relaxation (WI-B6) consume to bound `erf` soundly without any
-runtime Arb dependency. This document covers how the data is generated, how CI
-re-validates it, and the environment each step needs.
+Beacon's `erf` relaxation (WI-B6) consume to bound `erf` soundly with **no
+runtime dependency** on Sollya, Gappa, or Arb. This document covers what is
+committed, how it is proved and cross-checked, how CI re-validates it, and the
+environment each step needs.
 
 ## What the committed data is
 
 A piecewise envelope of contiguous boxes covering `[-300, 300]`:
 
-| Box          | Arm                          | Certified `eps` |
-|--------------|------------------------------|-----------------|
-| `[-300, -3]` | saturation `-1`              | `~2.2e-5`       |
-| `[-3, 3]`    | central degree-21 polynomial | `~6.5e-7`       |
-| `[3, 300]`   | saturation `+1`              | `~2.2e-5`       |
+| Box          | Arm                          | `eps`     | `proof_kind`    |
+|--------------|------------------------------|-----------|-----------------|
+| `[-300, -3]` | saturation `-1`              | `~2.2e-5` | `arb_enclosure` |
+| `[-3, 3]`    | central degree-21 polynomial | `~5.7e-7` | `gappa`         |
+| `[3, 300]`   | saturation `+1`              | `~2.2e-5` | `arb_enclosure` |
 
-Each box's `eps` is a rigorous sup-norm bound `sup_{x in box} |approx(x) -
-erf(x)| <= eps`, certified by the WI-14 Arb oracle (whole-box ball arithmetic,
-not sampling). The runtime evaluates `approx(x) +- eps` in pure `f64`; it never
-calls Arb. A release binary that consumes the envelope gains **no** FLINT/Arb
-link (the `arb` feature is off by default and absent from the `default` and
-`smt` dependency trees).
+Each box's `eps` is a sound sup-norm bound `sup_{x in box} |approx(x) - erf(x)|
+<= eps`. The `proof_kind` field records how it is certified and is **machine
+visible** (not a silent split):
 
-## Trust model: float proposer, Arb certifier
+- **Central arm — `gappa`.** A machine-checkable proof term. The committed
+  bundle under `crates/chelis-prove/data/erf_proof/` is a set of Gappa scripts
+  (`central_<k>.gappa`) that an auditor re-runs through `gappa` to confirm the
+  bound. The runtime evaluates the degree-21 polynomial in `f64`; the polynomial
+  coefficients are rounded to `f64` **before** the proof, so the proof is about
+  the exact polynomial the runtime uses.
+- **Saturation tails — `arb_enclosure`.** A rigorous Arb enclosure of the `erfc`
+  tail `|+-1 - erf(x)|`. Gappa has no `erf`/`exp` (it reasons about `+ - * /
+  sqrt fma` only), so the tail fact **cannot** be a Gappa proof term; the Arb
+  oracle, which computes `erf` rigorously, certifies it instead.
 
-The Python generator is only a **proposer** — it fits the central polynomial in
-floating point. The Arb certifier is the **trust anchor** — it stamps each
-`eps` by rigorous ball arithmetic. A poor proposed polynomial cannot make the
-envelope unsound; it only yields a larger (still sound) `eps`. This mirrors the
-Clarabel SoS engine's float-proposer / rational-exact-verifier split.
+The committed envelope evaluates in pure `f64`. A deployed release binary gains
+no FLINT/Arb/Sollya/Gappa link (`arb` is off by default and absent from the
+`default` and `smt` dependency trees; Sollya and Gappa are offline tools).
+
+## Trust model: proof term + independent cross-check
+
+- **Central proof.** Sollya computes the remez polynomial and a *certified local
+  Taylor model* of `erf` per sub-interval; Gappa machine-checks
+  `|p(x) - T(x)| <= bound`, which with the certified Taylor remainder gives
+  `|p - erf| <= eps`. The polynomial is evaluated in a per-sub-interval centered
+  variable so the high-degree difference stays well conditioned and Gappa proves
+  each sub-interval in well under a second.
+- **Arb cross-check (belt + suspenders).** The WI-14 Arb whole-box certifier
+  re-validates **every** box's committed `eps` on every CI build — both the
+  Gappa central arm and the Arb tails — by asserting the committed `eps` bounds
+  the Arb sup-norm bound. The central arm thus has both a Gappa proof term and an
+  independent Arb confirmation.
+- **Consistency.** Tests (Rust and Python) lock the committed central polynomial
+  and `eps` to the Gappa proof bundle's manifest, so the proved bound and the
+  consumed bound cannot drift apart, and the envelope provenance pins the
+  bundle's sha256.
 
 ## Regeneration pipeline
 
 ```sh
-# 1. Propose coefficients (float; emits a draft with eps placeholders).
-.venv/bin/python scripts/generate_erf_envelope.py > /tmp/erf_envelope_draft.json
+# 0. one-time: build the Sollya + Gappa toolchain (see Environment below)
+.venv/bin/python scripts/setup_proof_toolchain.py
 
-# 2. Certify eps with Arb and write the committed data.
+# 1. central Gappa proof bundle (Sollya remez + per-sub-interval Gappa proofs)
+.venv/bin/python scripts/generate_erf_proof.py
+
+# 2. assemble the committed envelope: Gappa central arm + Arb-stamped tails
+.venv/bin/python scripts/assemble_erf_envelope.py
+
+# 3. independent Arb cross-check of every committed eps
 cargo run -p chelis-prove --features arb --bin certify_erf_envelope \
-  -- /tmp/erf_envelope_draft.json crates/chelis-prove/data/erf_envelope.json
+  -- validate crates/chelis-prove/data/erf_envelope.json
 
-# 3. Inspect the diff and commit the regenerated data.
-git diff crates/chelis-prove/data/erf_envelope.json
+# 4. review and commit
+git diff crates/chelis-prove/data/
 ```
 
-Step 2 takes roughly ten seconds (the central box is certified with 524288
-sub-boxes at 128-bit precision; the count is recorded in the data's
-`provenance.certify_subdivisions`).
+## CI re-validation (the gate)
+
+CI re-checks the committed artifacts without trusting them:
+
+```sh
+# re-run every committed Gappa proof + verify the bundle sha256
+.venv/bin/python scripts/generate_erf_proof.py --check-only
+
+# independently re-validate every committed eps against the Arb oracle
+cargo run -p chelis-prove --features arb --bin certify_erf_envelope \
+  -- validate crates/chelis-prove/data/erf_envelope.json
+```
+
+The Rust `arb` test lane additionally re-derives every box's `eps` from Arb
+(`committed_envelope_eps_still_bounds_the_truth`), with a negative partner that
+confirms a shrunk `eps` is caught, and locks the envelope to the proof bundle.
+None of this touches the `default`/`smt` lanes, which neither link Arb nor
+re-validate — they consume the committed data as-is.
 
 ## Environment
 
-### Proposer (step 1) — Python
+### Proof toolchain (Sollya + Gappa) — `scripts/setup_proof_toolchain.py`
 
-- the uv-managed Python at `.venv/bin/python` (`>= 3.11`)
-- `numpy` (least-squares polynomial solve)
-- `mpmath` (arbitrary-precision `erf` truth for the fit targets)
+Only three base libraries need root; everything else is built from source with
+no sudo into a workspace-local `.local/` prefix.
 
-```sh
-uv venv --python 3.11    # if not already present
-uv pip install numpy mpmath
-```
-
-### Certifier (step 2) and CI re-validation — Rust `arb` feature
-
-The `arb` feature links `arb-sys`, which vendors FLINT + Arb C source and
-compiles it (and pulls `gmp-mpfr-sys`, which compiles GMP/MPFR). It does **not**
-use a system FLINT.
-
-| Tool         | Purpose                          | Install (Debian/Ubuntu) |
-|--------------|----------------------------------|-------------------------|
-| C compiler   | compile vendored FLINT/Arb/GMP/MPFR | `apt install gcc`    |
-| make         | vendored build driver            | `apt install make`      |
-| m4           | GMP build prerequisite           | `apt install m4`        |
-
-Two build hazards on a PIE-default toolchain (e.g. Fedora), both fixed durably
-in `.cargo/config.toml` so a clean `--features arb` build needs no per-developer
-step:
-
-1. **`-fPIC`** — the vendored C must be position-independent or the link fails
-   with `relocation R_X86_64_32 ... recompile with -fPIC`. `CFLAGS`/`CXXFLAGS`
-   are set to `-fPIC`.
-2. **Isolated build caches** — `gmp-mpfr-sys` / `flint-sys` / `arb-sys` cache
-   their compiled archives in a per-user dir keyed by version + compiler but
-   **not** by CFLAGS, so a stale non-PIC archive would be silently reused. The
-   `GMP_MPFR_SYS_CACHE` / `FLINT_SYS_CACHE` / `ARB_SYS_CACHE` vars point at a
-   workspace-local `target/arb-cache` dir.
-
-A cold `--features arb` build compiles the C stack once (~1-2 minutes); it is
-cached thereafter.
-
-### License
-
-`arb-sys` / `flint-sys` are MIT/Apache, but the vendored FLINT/Arb C and
-`gmp-mpfr-sys` are LGPL. The obligation attaches only to a binary built with the
-`arb` feature, which is offline/CI tooling that never ships in a deployed build.
-Recorded and deferred per master-plan WI-19.
-
-## CI re-validation (the soundness gate)
-
-The committed `eps` is **not** trusted on faith. The `arb`-gated test
-`committed_envelope_eps_still_bounds_the_truth` (in `arb_oracle.rs`) re-runs the
-Arb certification for every committed box and asserts the committed `eps` still
-bounds the recertified sup-norm error. Its negative partner
-`a_too_small_eps_fails_revalidation` confirms a shrunk `eps` would be caught, so
-the harness is a real gate rather than a rubber stamp. Run:
+| Need              | Fedora                | Debian/Ubuntu        |
+|-------------------|-----------------------|----------------------|
+| MPFI headers      | `mpfi-devel`          | `libmpfi-dev`        |
+| libxml2 headers   | `libxml2-devel`       | `libxml2-dev`        |
+| Gappa binary      | `gappa`               | `gappa`              |
 
 ```sh
-cargo test -p chelis-prove --features arb committed_envelope
+# Fedora
+sudo dnf install -y mpfi-devel libxml2-devel gappa
+# Debian/Ubuntu
+sudo apt-get install -y libmpfi-dev libxml2-dev gappa
 ```
 
-This runs in the `arb` CI lane only; the `default` and `smt` lanes neither link
-Arb nor re-validate (they consume the committed data as-is).
+`setup_proof_toolchain.py` then downloads (with pinned sha256) and builds
+**fplll 5.4.5** and **Sollya 8.0** from source into `.local/`, linking the
+system gmp/mpfr/mpfi/libxml2. Two portability fixes are applied automatically
+because Sollya 8.0 predates the GCC 14/15 C23 default:
+
+- `CFLAGS` carries `-std=gnu17` (under GCC 15's gnu23 default, Sollya's K&R
+  empty-paren prototypes are hard `conflicting types` errors), and
+- a one-line idempotent patch gives `miniyyparse` a prototype matching the
+  bison-generated definition.
+
+The build needs a C/C++ toolchain (`gcc`, `g++`, `make`, `m4`, `autoconf`,
+`libtool`, `bison`, `flex`) and `gmp-devel`/`mpfr-devel`. Run sollya with
+`LD_LIBRARY_PATH=.local/lib`.
+
+Licensing (tracked, not a blocker): Sollya is CeCILL-C, fplll is LGPL-2.1+. Both
+are offline build tooling that produce the committed proof bundle; neither links
+into any shipped chelis binary.
+
+### Arb certifier / cross-check — the `arb` cargo feature
+
+`arb-sys` vendors and compiles FLINT/Arb (and `gmp-mpfr-sys` compiles
+GMP/MPFR). It does **not** use a system FLINT.
+
+| Tool       | Purpose                             | Install (Debian/Ubuntu) |
+|------------|-------------------------------------|-------------------------|
+| C compiler | compile vendored FLINT/Arb/GMP/MPFR | `apt install gcc`       |
+| make, m4   | vendored build drivers              | `apt install make m4`   |
+
+`.cargo/config.toml` bakes `CFLAGS=-fPIC` (Fedora PIE) and isolated
+`GMP_MPFR_SYS_CACHE`/`FLINT_SYS_CACHE`/`ARB_SYS_CACHE` dirs so a clean
+`--features arb` build is position-independent with no per-developer step. The
+LGPL obligation attaches only to a binary built with the `arb` feature
+(offline/CI tooling, never shipped); recorded and deferred per master WI-19.

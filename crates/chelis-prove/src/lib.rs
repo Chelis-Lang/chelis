@@ -64,7 +64,7 @@ pub use artifact::{
     Degradation, FailureSummary, ProofArtifact, ProofStatus, ProofTier, PropertyDependency,
 };
 // WI-13 committed erf-envelope consumer surface (always present, no Arb link).
-pub use erf_envelope::{ErfArm, ErfEnvelope, ErfEnvelopeBox, ErfEnvelopeProvenance};
+pub use erf_envelope::{ErfArm, ErfEnvelope, ErfEnvelopeBox, ErfEnvelopeProvenance, ProofKind};
 // chelis#439: the Beacon subprocess shim (transport-only DischargeEngine for
 // GoalShape::BoxRange) and its dispatch-site-owned content-addressed byte store.
 pub use beacon_shim::{BEACON_BIN_ENV, BeaconShim, RequestTransport, WireDagByteStore};

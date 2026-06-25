@@ -1,0 +1,128 @@
+/* WI-13 Option B: Sollya driver for the erf central-arm Gappa proof bundle.
+ *
+ * Produces, for the central box [CENTRAL_LO, CENTRAL_HI]:
+ *   - a remez polynomial p of degree CENTRAL_DEGREE approximating erf,
+ *   - per sub-interval (the box split into N_SUBINTERVALS pieces):
+ *       * a local Taylor model T of erf (degree TAYLOR_DEGREE) with a CERTIFIED
+ *         remainder R bounding |erf - T| over the sub-interval,
+ *       * q = p - T, and a numeric bound qb on |q| over the sub-interval,
+ *       * a self-contained Gappa file proving   x in [lo,hi] -> |q| <= qb*(1+MARGIN),
+ *         which (with the certified R) machine-checks |p - erf| <= qb*(1+MARGIN)+R.
+ *
+ * The committed central eps is the maximum over sub-intervals of
+ * (proved bound + R). Because each sub-interval is narrow, q varies little and
+ * Gappa proves the bound quickly with a bisection hint.
+ *
+ * This is the float-PROPOSER + machine-checkable-PROOF half of the envelope
+ * generator. An independent Arb whole-box certifier (the kept Option-A path)
+ * re-validates the same eps every CI build as a cross-check.
+ *
+ * Variables CENTRAL_LO/HI/DEGREE, N_SUBINTERVALS, TAYLOR_DEGREE, MARGIN,
+ * BISECT, OUTDIR are prepended by the Python regen script
+ * (scripts/generate_erf_proof.py) so the parameters are recorded with the run.
+ */
+
+prec = 300;
+f = erf(x);
+dom = [CENTRAL_LO; CENTRAL_HI];
+
+/* The central approximation polynomial, with coefficients ROUNDED TO f64
+ * (double). This is the exact polynomial the runtime evaluates, so the Gappa
+ * proof and the committed coefficients are about the same object -- the bound
+ * |p - erf| covers the f64-coefficient polynomial directly, folding the
+ * coefficient-rounding error into the proved sup-norm rather than leaving it as
+ * a separate untracked term. (Evaluating p in f64 at runtime still incurs a
+ * per-operation rounding error; that is bounded separately and is ~1 ULP of the
+ * f64 output, far below the committed eps.) */
+p = roundcoefficients(remez(f, CENTRAL_DEGREE, dom), [|D ...|]);
+
+/* Global certified sup-norm of |p - erf| (an independent witness recorded in
+ * the manifest; the per-interval Gappa proofs are the actual proof term). */
+globalSup = sup(supnorm(p, f, dom, absolute, 2^(-60)));
+
+/* Emit the polynomial coefficients (descending degree, to match the Rust
+ * ErfArm::Central Horner convention) into the manifest fragment. */
+coeffsList = "";
+for i from CENTRAL_DEGREE to 0 by -1 do {
+  c = coeff(p, i);
+  coeffsList = coeffsList @ "    \"" @ c @ "\"";
+  if (i > 0) then coeffsList = coeffsList @ ",\n" else coeffsList = coeffsList @ "\n";
+};
+
+w = (CENTRAL_HI - CENTRAL_LO) / N_SUBINTERVALS;
+centralEps = 0;
+intervalsJson = "";
+
+for k from 0 to N_SUBINTERVALS - 1 do {
+  lo = CENTRAL_LO + k * w;
+  hi = CENTRAL_LO + (k + 1) * w;
+  ctr = (lo + hi) / 2;
+
+  /* Local certified Taylor model of erf, shifted into the global variable x. */
+  tf = taylorform(f, TAYLOR_DEGREE, ctr, [lo; hi], absolute);
+  T = substitute(tf[0], x - ctr);
+  R = sup(abs(tf[2]));
+
+  /* q = p - T; tight numeric estimate of the bound on |q| over the
+   * sub-interval. dirtyinfnorm (not the rigorous infnorm) is used on purpose:
+   * it is a tight TARGET bound, and Gappa supplies the rigorous proof that |q|
+   * actually stays under it. (The rigorous infnorm over the degree-(p+T)
+   * polynomial is loose at the edge sub-intervals -- it returns a huge upper
+   * bound -- so using it would inflate the asserted bound and the committed
+   * eps by orders of magnitude for no soundness gain, since Gappa is the
+   * certifier.) The MARGIN gives Gappa headroom to terminate quickly. */
+  q = p - T;
+  qb = dirtyinfnorm(q, [lo; hi]);
+  provedBound = qb * (1 + MARGIN);
+  localEps = provedBound + R;
+  if (localEps > centralEps) then centralEps = localEps;
+
+  /* Emit q in the CENTERED variable t = x - ctr (qc(t) = q(t + ctr)). Over the
+   * narrow sub-interval t is small, so qc's coefficients are well scaled and
+   * Gappa's interval evaluation does not suffer the catastrophic cancellation
+   * that a degree-(deg p + deg T) polynomial in x near the box edges otherwise
+   * causes (which makes Gappa time out). Sollya prints in `x`; the manifest
+   * generator rewrites that printed `x` to `t` so the Gappa body is in t, and
+   * Gappa bisects on t. This is the same centering that keeps the Arb
+   * mean-value certifier tight. */
+  qc = substitute(q, x + ctr);
+
+  /* Self-contained Gappa proof for this sub-interval. The polynomial body is
+   * printed in `x` by Sollya; the regen script rewrites it to `t`. */
+  gfn = OUTDIR @ "/central_" @ k @ ".gappa";
+  print("# WI-13 erf central-arm sub-interval", k, "of", N_SUBINTERVALS) > gfn;
+  print("# proves: x in [", lo, ",", hi, "] -> |p(x) - T(x)| <= provedBound,") >> gfn;
+  print("# with certified |erf - T| <= R =", R, ", so |p - erf| <= provedBound + R.") >> gfn;
+  print("# q is written in the centered variable t = x - ctr.") >> gfn;
+  write("t = x - (", ctr, ");\n") >> gfn;
+  write("qc = ", horner(qc), ";\n") >> gfn;
+  write("{ x in [", lo, ", ", hi, "] -> qc in [-", provedBound, ", ", provedBound, "] }\n") >> gfn;
+  write("$ t in ", BISECT, ";\n") >> gfn;
+
+  intervalsJson = intervalsJson @ "    {\"index\": " @ k @ ", \"lo\": \"" @ lo @ "\", \"hi\": \"" @ hi
+    @ "\", \"center\": \"" @ ctr @ "\", \"taylor_remainder\": \"" @ R @ "\", \"proved_bound\": \""
+    @ provedBound @ "\", \"local_eps\": \"" @ localEps @ "\", \"gappa\": \"central_" @ k @ ".gappa\"}";
+  if (k < N_SUBINTERVALS - 1) then intervalsJson = intervalsJson @ ",\n" else intervalsJson = intervalsJson @ "\n";
+};
+
+/* Emit the manifest fragment (the Python script wraps/validates it). */
+mfn = OUTDIR @ "/manifest_fragment.json";
+print("{") > mfn;
+write("  \"central_degree\": ", CENTRAL_DEGREE, ",\n") >> mfn;
+write("  \"central_lo\": \"", CENTRAL_LO, "\",\n") >> mfn;
+write("  \"central_hi\": \"", CENTRAL_HI, "\",\n") >> mfn;
+write("  \"n_subintervals\": ", N_SUBINTERVALS, ",\n") >> mfn;
+write("  \"taylor_degree\": ", TAYLOR_DEGREE, ",\n") >> mfn;
+write("  \"bisect\": ", BISECT, ",\n") >> mfn;
+write("  \"global_supnorm\": \"", globalSup, "\",\n") >> mfn;
+write("  \"central_eps\": \"", centralEps, "\",\n") >> mfn;
+write("  \"coeffs\": [\n") >> mfn;
+write(coeffsList) >> mfn;
+write("  ],\n") >> mfn;
+write("  \"intervals\": [\n") >> mfn;
+write(intervalsJson) >> mfn;
+write("  ]\n") >> mfn;
+print("}") >> mfn;
+
+print("central_eps:", centralEps);
+print("global_supnorm:", globalSup);

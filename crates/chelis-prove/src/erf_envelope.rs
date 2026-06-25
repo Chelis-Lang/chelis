@@ -81,8 +81,31 @@ impl ErfArm {
     }
 }
 
-/// One box of the piecewise envelope: an interval, an approximation arm, and a
-/// certified sup-norm error for that arm over that interval.
+/// How a box's `eps` bound is certified. This makes the proof-vs-enclosure
+/// split across the envelope **machine-visible**, not silent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProofKind {
+    /// A machine-checkable Gappa proof term: `eps` is proved by a committed
+    /// bundle of Gappa scripts (under `data/erf_proof/`) that an auditor
+    /// re-runs through `gappa`. This is the central polynomial arm, where the
+    /// Sollya remez polynomial's approximation error is bounded per
+    /// sub-interval via a certified local Taylor model and Gappa machine-checks
+    /// the polynomial bound.
+    Gappa,
+    /// A rigorous Arb enclosure: `eps` is certified by the WI-14 Arb oracle
+    /// (whole-box ball arithmetic), an independently-checkable bound but not a
+    /// machine-checkable *proof term*. This is the saturation tails, where the
+    /// bound is an `erfc` fact (`|+-1 - erf(x)|`); Gappa cannot model `erf`/`exp`
+    /// (it has no transcendental functions), so the tails carry the Arb
+    /// enclosure rather than a Gappa proof. The Arb certifier re-validates every
+    /// box's `eps` (both kinds) on every CI build regardless.
+    ArbEnclosure,
+}
+
+/// One box of the piecewise envelope: an interval, an approximation arm, a
+/// certified sup-norm error for that arm over that interval, and how that error
+/// is certified.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ErfEnvelopeBox {
     /// Inclusive lower edge of the box.
@@ -91,9 +114,12 @@ pub struct ErfEnvelopeBox {
     pub hi: f64,
     /// The approximation used on this box.
     pub arm: ErfArm,
-    /// Certified sup-norm error: `sup_{x in [lo,hi]} |arm.approx(x) - erf(x)| <= eps`,
-    /// rigorously certified by the WI-14 Arb oracle (whole-box ball arithmetic).
+    /// Certified sup-norm error: `sup_{x in [lo,hi]} |arm.approx(x) - erf(x)| <= eps`.
+    /// How it is certified is recorded in `proof_kind`; the Arb oracle
+    /// re-validates it on every CI build either way.
     pub eps: f64,
+    /// Whether `eps` is backed by a Gappa proof term or an Arb enclosure.
+    pub proof_kind: ProofKind,
 }
 
 impl ErfEnvelopeBox {
@@ -141,9 +167,16 @@ pub struct ErfEnvelope {
 }
 
 /// The committed, certified envelope, embedded at compile time. The bytes are
-/// the source of truth; the generator script reproduces them and CI re-checks
-/// each `eps` against the Arb oracle.
+/// the source of truth; the generator scripts reproduce them and CI re-checks
+/// the central arm's eps against its committed Gappa proof bundle and every
+/// box's eps against the Arb oracle.
 const ERF_ENVELOPE_JSON: &str = include_str!("../data/erf_envelope.json");
+
+/// The committed Gappa proof-bundle manifest, embedded so a test can lock the
+/// envelope's central eps to the value the Gappa proof actually machine-checks
+/// (the proof term and the consumed bound must not drift apart).
+#[cfg(test)]
+const ERF_PROOF_MANIFEST_JSON: &str = include_str!("../data/erf_proof/manifest.json");
 
 impl ErfEnvelope {
     /// The canonical committed envelope.
@@ -286,6 +319,103 @@ mod tests {
     }
 
     #[test]
+    fn committed_proof_kind_split_is_machine_visible() {
+        // Option B: the central polynomial arm carries a machine-checkable Gappa
+        // proof term; the saturation tails carry an Arb enclosure (Gappa cannot
+        // model erf/exp). This split must be explicit per box, not silent.
+        let env = ErfEnvelope::committed();
+        for b in &env.boxes {
+            match &b.arm {
+                ErfArm::Central { .. } => assert_eq!(
+                    b.proof_kind,
+                    ProofKind::Gappa,
+                    "the central arm must carry the Gappa proof term"
+                ),
+                ErfArm::Saturation { .. } => assert_eq!(
+                    b.proof_kind,
+                    ProofKind::ArbEnclosure,
+                    "the saturation tails carry the Arb enclosure (no Gappa erf/exp)"
+                ),
+            }
+        }
+        // Exactly one Gappa box (the central arm) and at least one Arb tail.
+        let gappa = env
+            .boxes
+            .iter()
+            .filter(|b| b.proof_kind == ProofKind::Gappa)
+            .count();
+        let arb = env
+            .boxes
+            .iter()
+            .filter(|b| b.proof_kind == ProofKind::ArbEnclosure)
+            .count();
+        assert_eq!(gappa, 1, "one Gappa-proved central arm");
+        assert!(arb >= 1, "at least one Arb-enclosure tail");
+    }
+
+    #[test]
+    fn central_eps_matches_the_committed_gappa_proof_bundle() {
+        // The central arm's committed eps must be exactly the value the Gappa
+        // proof bundle machine-checks (manifest central_eps). If they drift, the
+        // committed band is no longer the proved bound -- the proof term would
+        // certify a different number than the runtime uses.
+        let env = ErfEnvelope::committed();
+        let manifest: serde_json::Value =
+            serde_json::from_str(ERF_PROOF_MANIFEST_JSON).expect("proof manifest parses");
+        let manifest_eps: f64 = manifest["central_eps"]
+            .as_str()
+            .expect("central_eps is a string")
+            .parse()
+            .expect("central_eps parses as f64");
+        let central = env
+            .boxes
+            .iter()
+            .find(|b| matches!(b.arm, ErfArm::Central { .. }))
+            .expect("a central box");
+        assert_eq!(
+            central.eps, manifest_eps,
+            "committed central eps {} must equal the Gappa-proved manifest eps {manifest_eps}",
+            central.eps
+        );
+        assert_eq!(
+            manifest["proof_kind"].as_str(),
+            Some("gappa"),
+            "the proof bundle must declare proof_kind gappa"
+        );
+    }
+
+    #[test]
+    fn central_coeffs_match_the_committed_gappa_proof_bundle() {
+        // The committed central polynomial must be the exact polynomial the
+        // Gappa proof is about (the manifest coeffs), or the proof certifies a
+        // different polynomial than the runtime evaluates.
+        let env = ErfEnvelope::committed();
+        let manifest: serde_json::Value =
+            serde_json::from_str(ERF_PROOF_MANIFEST_JSON).expect("proof manifest parses");
+        let manifest_coeffs: Vec<f64> = manifest["coeffs"]
+            .as_array()
+            .expect("coeffs array")
+            .iter()
+            // Read as JSON numbers (the manifest stores the exact doubles as
+            // numbers), through the same serde_json parser the envelope uses, so
+            // the comparison is bit-exact.
+            .map(|c| c.as_f64().unwrap())
+            .collect();
+        let central = env
+            .boxes
+            .iter()
+            .find_map(|b| match &b.arm {
+                ErfArm::Central { coeffs } => Some(coeffs),
+                _ => None,
+            })
+            .expect("a central box");
+        assert_eq!(
+            central, &manifest_coeffs,
+            "committed central coeffs must equal the Gappa-proved manifest coeffs"
+        );
+    }
+
+    #[test]
     fn arm_approx_horner_matches_manual() {
         // p(x) = 2x^2 + 3x + 5, coeffs descending [2,3,5].
         let arm = ErfArm::Central {
@@ -312,6 +442,7 @@ mod tests {
                 coeffs: vec![1.0, 0.0],
             },
             eps: 0.01,
+            proof_kind: ProofKind::Gappa,
         };
         let (lo, hi) = b.bound(0.5);
         assert!((lo - 0.49).abs() < 1e-12);
@@ -327,6 +458,7 @@ mod tests {
                     hi: 1.0,
                     arm: ErfArm::Central { coeffs: vec![0.0] },
                     eps: 0.1,
+                    proof_kind: ProofKind::Gappa,
                 },
                 // gap: starts at 2.0, not 1.0
                 ErfEnvelopeBox {
@@ -334,6 +466,7 @@ mod tests {
                     hi: 3.0,
                     arm: ErfArm::Central { coeffs: vec![0.0] },
                     eps: 0.1,
+                    proof_kind: ProofKind::Gappa,
                 },
             ],
             provenance: dummy_provenance(),
@@ -349,6 +482,7 @@ mod tests {
                 hi: 1.0,
                 arm: ErfArm::Saturation { value: 0.9 },
                 eps: 0.1,
+                proof_kind: ProofKind::ArbEnclosure,
             }],
             provenance: dummy_provenance(),
         };
@@ -363,6 +497,7 @@ mod tests {
                 hi: 1.0,
                 arm: ErfArm::Central { coeffs: vec![0.0] },
                 eps: -0.1,
+                proof_kind: ProofKind::Gappa,
             }],
             provenance: dummy_provenance(),
         };
