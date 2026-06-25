@@ -2538,5 +2538,102 @@ impl Lcg {
     }
 }
 
+// =========================================================================
+// Property dependency extraction (chelis#490)
+// =========================================================================
+
+/// Extract dependency edges from every `@property` in `decls`: for each
+/// property, collect the set of module-level function/value names its body
+/// references (excluding the property's own parameter names and built-in
+/// operators).
+pub fn property_dependency_edges(
+    source: &str,
+) -> Result<Vec<crate::artifact::PropertyDependency>, String> {
+    let parsed = chelis_surf::parser::parse_str(source).map_err(|e| format!("parse: {e}"))?;
+    let flat = flatten_module_decls(&parsed);
+    let module_names: std::collections::BTreeSet<String> = flat
+        .iter()
+        .filter_map(|d| match d {
+            Decl::FunDef { name, .. } | Decl::LetDef { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    let properties = collect_surf_properties(&flat, None);
+    let mut edges = Vec::new();
+    for property in &properties {
+        let param_names: std::collections::BTreeSet<&str> =
+            property.params.iter().map(|p| p.name.as_str()).collect();
+        let mut refs = std::collections::BTreeSet::new();
+        collect_expr_refs(&property.body, &param_names, &module_names, &mut refs);
+        for pre in &property.preconditions {
+            collect_expr_refs(pre, &param_names, &module_names, &mut refs);
+        }
+        edges.push(crate::artifact::PropertyDependency {
+            property: property.name.clone(),
+            references: refs.into_iter().collect(),
+        });
+    }
+    Ok(edges)
+}
+
+fn collect_expr_refs(
+    expr: &Expr,
+    params: &std::collections::BTreeSet<&str>,
+    module_names: &std::collections::BTreeSet<String>,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    match expr {
+        Expr::Var(name, _) => {
+            if !params.contains(name.as_str()) && module_names.contains(name) {
+                out.insert(name.clone());
+            }
+        }
+        Expr::Apply(callee, args, _) => {
+            if let Expr::Var(name, _) = callee.as_ref() {
+                if !params.contains(name.as_str()) && module_names.contains(name) {
+                    out.insert(name.clone());
+                }
+            } else {
+                collect_expr_refs(callee, params, module_names, out);
+            }
+            for arg in args {
+                collect_expr_refs(arg, params, module_names, out);
+            }
+        }
+        Expr::Binary(_, l, r, _) => {
+            collect_expr_refs(l, params, module_names, out);
+            collect_expr_refs(r, params, module_names, out);
+        }
+        Expr::Unary(_, e, _) => collect_expr_refs(e, params, module_names, out),
+        Expr::If(c, t, f, _) => {
+            collect_expr_refs(c, params, module_names, out);
+            collect_expr_refs(t, params, module_names, out);
+            collect_expr_refs(f, params, module_names, out);
+        }
+        Expr::Pipe(head, stages, _) => {
+            collect_expr_refs(head, params, module_names, out);
+            for s in stages {
+                collect_expr_refs(s, params, module_names, out);
+            }
+        }
+        Expr::Block(bindings, body, _) => {
+            for b in bindings {
+                collect_expr_refs(&b.value, params, module_names, out);
+            }
+            collect_expr_refs(body, params, module_names, out);
+        }
+        Expr::Lambda(_, body, _) => collect_expr_refs(body, params, module_names, out),
+        Expr::Tuple(elems, _) | Expr::List(elems, _) => {
+            for e in elems {
+                collect_expr_refs(e, params, module_names, out);
+            }
+        }
+        Expr::Access(e, _, _) | Expr::TupleGet(e, _, _) | Expr::Annotate(e, _, _) => {
+            collect_expr_refs(e, params, module_names, out);
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests;

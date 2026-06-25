@@ -135,13 +135,25 @@ pub fn cmd_prove(options: ProveOptions<'_>) -> Result<i32, String> {
 
     let mut totals = Summary::default();
     let mut worst = Status::Passed;
-    for input in inputs {
+    let mut all_dependency_edges: Vec<serde_json::Value> = Vec::new();
+    for input in &inputs {
         let status = match input.extension().and_then(|ext| ext.to_str()) {
-            Some("ch") => prove_surf_file(&input, &options, &mut totals)?,
-            Some("dp") => prove_deep_file(&input, &options, &mut totals)?,
+            Some("ch") => prove_surf_file(input, &options, &mut totals)?,
+            Some("dp") => prove_deep_file(input, &options, &mut totals)?,
             _ => Status::Passed,
         };
         worst = combine_status(worst, status);
+        // chelis#490: collect dependency edges for each input.
+        if options.json {
+            if let Ok(edges) = compute_dependency_edges(input) {
+                for edge in edges {
+                    all_dependency_edges.push(json!({
+                        "property": edge.0,
+                        "references": edge.1,
+                    }));
+                }
+            }
+        }
     }
 
     if options.json {
@@ -155,6 +167,7 @@ pub fn cmd_prove(options: ProveOptions<'_>) -> Result<i32, String> {
                 "unsupported": totals.unsupported,
                 "errors": totals.errors,
                 "obligations": totals.obligations,
+                "dependency_edges": all_dependency_edges,
             })
         );
     } else {
@@ -164,6 +177,185 @@ pub fn cmd_prove(options: ProveOptions<'_>) -> Result<i32, String> {
         );
     }
     Ok(worst.exit_code())
+}
+
+/// Compute property dependency edges for a single input file (chelis#490).
+/// Returns (property_name, referenced_exports) pairs.
+fn compute_dependency_edges(path: &Path) -> Result<Vec<(String, Vec<String>)>, String> {
+    let source = fs::read_to_string(path).map_err(|e| e.to_string())?;
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("ch") => compute_surf_dependency_edges(&source),
+        Some("dp") => compute_deep_dependency_edges(&source),
+        _ => Ok(Vec::new()),
+    }
+}
+
+fn compute_surf_dependency_edges(source: &str) -> Result<Vec<(String, Vec<String>)>, String> {
+    #[cfg(feature = "chelis-prove")]
+    {
+        let edges = chelis_prove::property_runner::property_dependency_edges(source)?;
+        Ok(edges
+            .into_iter()
+            .map(|e| (e.property, e.references))
+            .collect())
+    }
+    #[cfg(not(feature = "chelis-prove"))]
+    {
+        use std::collections::BTreeSet;
+        let parsed =
+            chelis_surf::parser::parse_str(source).map_err(|e| format!("parse: {e}"))?;
+        let flat = flatten_module_decls(&parsed);
+        let module_names: BTreeSet<String> = flat
+            .iter()
+            .filter_map(|d| match d {
+                Decl::FunDef { name, .. } | Decl::LetDef { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut edges = Vec::new();
+        for decl in &flat {
+            if let Decl::Property {
+                name,
+                params,
+                preconditions,
+                body,
+                ..
+            } = decl
+            {
+                let param_names: BTreeSet<&str> =
+                    params.iter().map(|p| p.name.as_str()).collect();
+                let mut refs = BTreeSet::new();
+                collect_surf_refs(body, &param_names, &module_names, &mut refs);
+                for pre in preconditions {
+                    collect_surf_refs(pre, &param_names, &module_names, &mut refs);
+                }
+                edges.push((name.clone(), refs.into_iter().collect()));
+            }
+        }
+        Ok(edges)
+    }
+}
+
+#[cfg(not(feature = "chelis-prove"))]
+fn collect_surf_refs(
+    expr: &Expr,
+    params: &std::collections::BTreeSet<&str>,
+    module_names: &std::collections::BTreeSet<String>,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    match expr {
+        Expr::Var(name, _) => {
+            if !params.contains(name.as_str()) && module_names.contains(name) {
+                out.insert(name.clone());
+            }
+        }
+        Expr::Apply(callee, args, _) => {
+            if let Expr::Var(name, _) = callee.as_ref() {
+                if !params.contains(name.as_str()) && module_names.contains(name) {
+                    out.insert(name.clone());
+                }
+            } else {
+                collect_surf_refs(callee, params, module_names, out);
+            }
+            for arg in args {
+                collect_surf_refs(arg, params, module_names, out);
+            }
+        }
+        Expr::Binary(_, l, r, _) => {
+            collect_surf_refs(l, params, module_names, out);
+            collect_surf_refs(r, params, module_names, out);
+        }
+        Expr::Unary(_, e, _) => collect_surf_refs(e, params, module_names, out),
+        Expr::If(c, t, f, _) => {
+            collect_surf_refs(c, params, module_names, out);
+            collect_surf_refs(t, params, module_names, out);
+            collect_surf_refs(f, params, module_names, out);
+        }
+        Expr::Pipe(head, stages, _) => {
+            collect_surf_refs(head, params, module_names, out);
+            for s in stages {
+                collect_surf_refs(s, params, module_names, out);
+            }
+        }
+        Expr::Block(bindings, body, _) => {
+            for b in bindings {
+                collect_surf_refs(&b.value, params, module_names, out);
+            }
+            collect_surf_refs(body, params, module_names, out);
+        }
+        Expr::Lambda(_, body, _) => collect_surf_refs(body, params, module_names, out),
+        Expr::Tuple(elems, _) | Expr::List(elems, _) => {
+            for e in elems {
+                collect_surf_refs(e, params, module_names, out);
+            }
+        }
+        Expr::Access(e, _, _) | Expr::TupleGet(e, _, _) | Expr::Annotate(e, _, _) => {
+            collect_surf_refs(e, params, module_names, out);
+        }
+        _ => {}
+    }
+}
+
+fn compute_deep_dependency_edges(source: &str) -> Result<Vec<(String, Vec<String>)>, String> {
+    use std::collections::BTreeSet;
+    let exprs = chelis_deep::parser::parse_str(source).map_err(|e| format!("parse: {e}"))?;
+    // Collect module-level def names (exports).
+    let mut module_names = BTreeSet::new();
+    for expr in &exprs {
+        if list_tag(expr) == Some("def") {
+            if let DeepExpr::List(list, _) = expr {
+                if let Some(name) = list.elements.get(2).and_then(symbol_text) {
+                    module_names.insert(name.to_string());
+                }
+            }
+        }
+    }
+    // Discover properties and extract their references.
+    let properties =
+        discover_deep_properties(Path::new("<dep-scan>"), &exprs, None).unwrap_or_default();
+    let mut edges = Vec::new();
+    for prop in &properties {
+        let mut refs = BTreeSet::new();
+        let param_names: BTreeSet<&str> = prop.params.iter().map(|p| p.name.as_str()).collect();
+        collect_deep_refs(&prop.body, &param_names, &module_names, &mut refs);
+        for pre in &prop.preconditions {
+            collect_deep_refs(pre, &param_names, &module_names, &mut refs);
+        }
+        // Exclude the property's own name.
+        refs.remove(&prop.name);
+        edges.push((prop.name.clone(), refs.into_iter().collect()));
+    }
+    Ok(edges)
+}
+
+fn collect_deep_refs(
+    expr: &DeepExpr,
+    params: &std::collections::BTreeSet<&str>,
+    module_names: &std::collections::BTreeSet<String>,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    match expr {
+        DeepExpr::List(list, _) => {
+            let tag = list_tag_from_list(list);
+            if tag == Some("var") {
+                if let Some(name) = list.elements.get(2).and_then(symbol_text) {
+                    if !params.contains(name) && module_names.contains(name) {
+                        out.insert(name.to_string());
+                    }
+                }
+            } else if tag == Some("app") {
+                // First child after tag+meta is the callee.
+                for child in list.elements.iter().skip(2) {
+                    collect_deep_refs(child, params, module_names, out);
+                }
+            } else {
+                for child in list.elements.iter().skip(2) {
+                    collect_deep_refs(child, params, module_names, out);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn is_single_explicit_deep_input(path: Option<&Path>, inputs: &[PathBuf]) -> bool {
@@ -2393,12 +2585,24 @@ fn emit_record(
             "seed": seed,
             "source": source_json(property, options),
         });
-        if let Some(counterexample) = counterexample {
-            value["counterexample"] = counterexample;
+        if let Some(ref cx) = counterexample {
+            value["counterexample"] = cx.clone();
             value["shrink_steps"] = json!(shrink_steps);
         }
-        if let Some(reason) = reason {
-            value["reason"] = json!(reason);
+        if let Some(ref r) = reason {
+            value["reason"] = json!(r);
+        }
+        // chelis#489: structured failure summary for non-passing properties.
+        if status != "passed" {
+            value["failure_summary"] = json!({
+                "status": status,
+                "actual_tier": "fuzz",
+                "seed": seed,
+                "samples": samples,
+            });
+            if let Some(cx) = counterexample {
+                value["failure_summary"]["counterexample"] = cx;
+            }
         }
         println!("{value}");
     } else {
@@ -2477,12 +2681,24 @@ fn emit_deep_record(
             "seed": seed,
             "source": source_json_deep(property, options),
         });
-        if let Some(counterexample) = counterexample {
-            value["counterexample"] = counterexample;
+        if let Some(ref cx) = counterexample {
+            value["counterexample"] = cx.clone();
             value["shrink_steps"] = json!(shrink_steps);
         }
-        if let Some(reason) = reason {
-            value["reason"] = json!(reason);
+        if let Some(ref r) = reason {
+            value["reason"] = json!(r);
+        }
+        // chelis#489: structured failure summary for non-passing properties.
+        if status != "passed" {
+            value["failure_summary"] = json!({
+                "status": status,
+                "actual_tier": "fuzz",
+                "seed": seed,
+                "samples": samples,
+            });
+            if let Some(cx) = counterexample {
+                value["failure_summary"]["counterexample"] = cx;
+            }
         }
         println!("{value}");
     } else {
