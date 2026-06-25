@@ -339,6 +339,15 @@ enum Command {
         /// disables the classifier (legacy exhaustion => error path).
         #[clap(long, default_value = "0.01")]
         invariant_min_rate: f64,
+        /// Resolve imports through the reef package rooted at this path.
+        /// If not set, auto-detects by walking ancestor directories for
+        /// reef.toml.
+        #[clap(long)]
+        package: Option<PathBuf>,
+        /// Print machine-readable JSON describing prove capabilities
+        /// (supported tiers, SMT availability, engine status) and exit.
+        #[clap(long)]
+        capabilities: bool,
     },
     /// Lint naming conventions per `spec/01-nomenclature.md`
     Lint {
@@ -687,24 +696,34 @@ fn main() {
             tier: _tier,
             smt_timeout: _smt_timeout,
             invariant_min_rate,
-        }) => match prove::cmd_prove(prove::ProveOptions {
-            path: path.as_deref(),
-            only: only.as_deref(),
-            samples,
-            seed,
-            max_attempts,
-            json,
-            spans: spans.as_deref(),
-            tier: &_tier,
-            smt_timeout_ms: _smt_timeout,
-            invariant_min_rate,
-        }) {
-            Ok(code) => std::process::exit(code),
-            Err(err) => {
-                eprintln!("error: {err}");
-                std::process::exit(3);
+            package,
+            capabilities,
+        }) => {
+            if capabilities {
+                let caps = prove::prove_capabilities();
+                println!("{}", serde_json::to_string_pretty(&caps).unwrap());
+                std::process::exit(0);
             }
-        },
+            match prove::cmd_prove(prove::ProveOptions {
+                path: path.as_deref(),
+                only: only.as_deref(),
+                samples,
+                seed,
+                max_attempts,
+                json,
+                spans: spans.as_deref(),
+                tier: &_tier,
+                smt_timeout_ms: _smt_timeout,
+                invariant_min_rate,
+                package: package.as_deref(),
+            }) {
+                Ok(code) => std::process::exit(code),
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    std::process::exit(3);
+                }
+            }
+        }
         Some(Command::Lint {
             paths,
             check,

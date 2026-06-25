@@ -40,6 +40,9 @@ pub struct ProveOptions<'a> {
     /// classifier and preserves the legacy exhaustion => Error path.
     #[allow(dead_code)]
     pub invariant_min_rate: f64,
+    /// Explicit reef package root for import resolution.
+    #[allow(dead_code)]
+    pub package: Option<&'a Path>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -281,7 +284,11 @@ fn prove_surf_file(
     #[cfg(feature = "chelis-prove")]
     {
         let _ = (&flat, &parsed);
-        let linked_program = chelis_reef::prepare_program_for_file(path);
+        let package_root = resolve_package_root(path, options.package);
+        let linked_program = match &package_root {
+            Some(root) => chelis_reef::prepare_program_for_eval_file(path, root),
+            None => chelis_reef::prepare_program_for_file(path),
+        };
         let prop_status = match &linked_program {
             Ok(Some(prepared)) => {
                 let display_names = linked_property_display_names(&flat, &prepared.entry_decls);
@@ -2664,6 +2671,42 @@ impl Lcg {
         let unit = (self.next_u64() >> 11) as f64 / ((1u64 << 53) as f64);
         min + (max - min) * unit
     }
+}
+
+/// Resolve the effective package root: explicit `--package` wins, otherwise
+/// auto-detect by walking ancestor directories of the input file.
+#[cfg(feature = "chelis-prove")]
+fn resolve_package_root(input: &Path, explicit: Option<&Path>) -> Option<PathBuf> {
+    if let Some(root) = explicit {
+        return Some(root.to_path_buf());
+    }
+    let start = if input.is_file() {
+        input.parent().unwrap_or(input)
+    } else {
+        input
+    };
+    chelis_reef::find_package_root_for_dir(start)
+        .ok()
+        .flatten()
+}
+
+/// Emit JSON describing this binary's prove capabilities (#488).
+pub fn prove_capabilities() -> serde_json::Value {
+    let smt_available = cfg!(feature = "smt");
+    let beacon_available = std::env::var("CHELIS_BEACON_BIN").is_ok();
+    let dispatcher_available = cfg!(feature = "chelis-prove");
+    let obligation_engine_available = cfg!(feature = "chelis-prove");
+    json!({
+        "schema_version": 1,
+        "prove_json_schema_version": 1,
+        "supported_tiers": ["type_system", "smt", "fuzz"],
+        "smt_available": smt_available,
+        "beacon_available": beacon_available,
+        "dispatcher_available": dispatcher_available,
+        "obligation_engine_available": obligation_engine_available,
+        "supported_flags": ["--json", "--only", "--samples", "--seed", "--tier", "--smt-timeout", "--package"],
+        "engine_registry": ["tier_a_type_system", "tier_b_smt", "tier_c_fuzz", "beacon_shim"]
+    })
 }
 
 #[cfg(test)]
