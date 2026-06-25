@@ -528,6 +528,31 @@ enum ReefCommand {
         #[arg(value_name = "NAME[=VERSION]")]
         packages: Vec<String>,
     },
+    /// Export a hermetic bundle of pinned dependencies for agent sandboxes.
+    ///
+    /// Reads `reef.toml` + `reef.lock`, materializes all pinned dependency
+    /// sources into a directory bundle with preserved hashes and metadata.
+    /// The bundle contains `bundle.json` (metadata), `root/` (the root
+    /// package source), and `<dep>-<version>/` directories for each
+    /// dependency.
+    ExportBundle {
+        /// Package root (defaults to `.`).
+        #[arg(long, short)]
+        path: Option<PathBuf>,
+        /// Output directory for the bundle.
+        #[arg(long, short)]
+        output: PathBuf,
+    },
+    /// Emit a machine-readable ABI/package schema (JSON).
+    ///
+    /// Describes exported functions (name, params, return type), types
+    /// (variants, opaque status), and constructors (partial/total).
+    /// Stable enough for authoring harnesses to validate authored modules
+    /// without duplicating compiler facts.
+    Schema {
+        /// Package root (defaults to `.`).
+        path: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -2913,6 +2938,24 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
             }
+        }
+        ReefCommand::ExportBundle { path, output } => {
+            let root = path.unwrap_or_else(|| PathBuf::from("."));
+            let manifest = chelis_reef::export_bundle(&root, &output)?;
+            println!(
+                "Exported bundle for {} {} to {}",
+                manifest.root_package.name,
+                manifest.root_package.version,
+                output.display()
+            );
+            println!("Dependencies: {}", manifest.dependencies.len());
+        }
+        ReefCommand::Schema { path } => {
+            let root = path.unwrap_or_else(|| PathBuf::from("."));
+            let schema = chelis_reef::package_schema(&root)?;
+            let json = serde_json::to_string_pretty(&schema)
+                .map_err(|e| format!("serialize schema: {e}"))?;
+            println!("{json}");
         }
     }
     Ok(())
