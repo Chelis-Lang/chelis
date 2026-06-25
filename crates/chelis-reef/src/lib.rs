@@ -2974,6 +2974,336 @@ pub fn install_bootstrap(
     Ok(installed)
 }
 
+// ─── Issue #491: Export pinned package bundles for hermetic agent sandboxes ───
+
+/// Metadata written into the bundle alongside the materialized sources.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BundleManifest {
+    pub root_package: PackageId,
+    pub dependencies: Vec<BundledDependency>,
+}
+
+/// One dependency materialized into the bundle directory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BundledDependency {
+    pub name: String,
+    pub version: String,
+    pub source: LockSource,
+    pub archive_sha256: String,
+    pub shell_sha256: String,
+}
+
+/// Export a hermetic bundle of the package and all its pinned dependencies
+/// into `output_dir`. The bundle contains:
+/// - `bundle.json` — metadata with module identity, source hashes, dep metadata
+/// - `<name>-<version>/` — extracted source trees for each dependency
+/// - `root/` — the root package source
+///
+/// Reads `reef.toml` + `reef.lock` from `package_root`.
+pub fn export_bundle(package_root: &Path, output_dir: &Path) -> Result<BundleManifest, String> {
+    let root = canonical_root(package_root)?;
+    let lock_path = root.join("reef.lock");
+    if !lock_path.exists() {
+        return Err(format!(
+            "no reef.lock found at {}; run `chelis reef build` first",
+            lock_path.display()
+        ));
+    }
+    let lock = read_lockfile(&lock_path)?;
+    fs::create_dir_all(output_dir)
+        .map_err(|e| format!("create bundle dir {}: {e}", output_dir.display()))?;
+
+    // Copy root package source into bundle/root/
+    let root_dir = output_dir.join("root");
+    copy_package_source(&root, &root_dir)?;
+
+    // Materialize each dependency
+    let mut bundled_deps = Vec::new();
+    for dep in &lock.dependencies {
+        match &dep.source {
+            LockSource::Path { path } => {
+                let dep_root = root.join(path).canonicalize().map_err(|e| {
+                    format!("resolve path dep `{}`: {e}", dep.name)
+                })?;
+                let dep_dir = output_dir.join(format!("{}-{}", dep.name, dep.version));
+                copy_package_source(&dep_root, &dep_dir)?;
+            }
+            LockSource::LocalRegistry { .. } => {
+                // Load from registry cache and copy extracted source
+                let installed = load_registry_package(&dep.name, &dep.version).map_err(|e| {
+                    match e {
+                        LoadRegistryError::Other(s) => s,
+                        LoadRegistryError::MissingFromIndex
+                        | LoadRegistryError::MissingPackageDir => {
+                            format!(
+                                "dependency `{}` `{}` not in local registry; \
+                                 run `chelis reef install` first",
+                                dep.name, dep.version
+                            )
+                        }
+                    }
+                })?;
+                let dep_dir = output_dir.join(format!("{}-{}", dep.name, dep.version));
+                copy_package_source(&installed.root, &dep_dir)?;
+            }
+            LockSource::Bundled { .. } => {
+                // chelis-std is compiler-bundled; extract embedded bytes
+                let installed = load_bundled_chelis_std().map_err(|e| match e {
+                    LoadRegistryError::Other(s) => s,
+                    _ => "failed to load bundled chelis-std".to_string(),
+                })?;
+                let dep_dir = output_dir.join(format!("{}-{}", dep.name, dep.version));
+                copy_package_source(&installed.root, &dep_dir)?;
+            }
+        }
+        bundled_deps.push(BundledDependency {
+            name: dep.name.clone(),
+            version: dep.version.clone(),
+            source: dep.source.clone(),
+            archive_sha256: dep.archive_sha256.clone(),
+            shell_sha256: dep.shell_sha256.clone(),
+        });
+    }
+
+    let manifest = BundleManifest {
+        root_package: lock.package.clone(),
+        dependencies: bundled_deps,
+    };
+    let manifest_json =
+        serde_json::to_string_pretty(&manifest).map_err(|e| format!("serialize bundle.json: {e}"))?;
+    fs::write(output_dir.join("bundle.json"), manifest_json)
+        .map_err(|e| format!("write bundle.json: {e}"))?;
+    Ok(manifest)
+}
+
+/// Copy a package's source tree (reef.toml, src/, additional_sources) into `dst`.
+fn copy_package_source(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(|e| format!("create {}: {e}", dst.display()))?;
+    // Copy reef.toml
+    let manifest_path = src.join("reef.toml");
+    if manifest_path.exists() {
+        fs::copy(&manifest_path, dst.join("reef.toml"))
+            .map_err(|e| format!("copy reef.toml: {e}"))?;
+    }
+    // Copy reef.lock if present
+    let lock_path = src.join("reef.lock");
+    if lock_path.exists() {
+        fs::copy(&lock_path, dst.join("reef.lock"))
+            .map_err(|e| format!("copy reef.lock: {e}"))?;
+    }
+    // Copy src/ and any additional source roots
+    let manifest = if manifest_path.exists() {
+        read_manifest(&manifest_path).ok()
+    } else {
+        None
+    };
+    let roots: Vec<&str> = if let Some(ref m) = manifest {
+        std::iter::once("src")
+            .chain(m.package.additional_sources.iter().map(|s| s.as_str()))
+            .collect()
+    } else {
+        vec!["src"]
+    };
+    for root_name in roots {
+        let abs_root = src.join(root_name);
+        if !abs_root.exists() {
+            continue;
+        }
+        for entry in WalkDir::new(&abs_root).into_iter().filter_map(Result::ok) {
+            let rel = entry.path().strip_prefix(src).map_err(|e| e.to_string())?;
+            let target = dst.join(rel);
+            if entry.file_type().is_dir() {
+                fs::create_dir_all(&target)
+                    .map_err(|e| format!("create dir {}: {e}", target.display()))?;
+            } else {
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(|e| format!("create parent {}: {e}", parent.display()))?;
+                }
+                fs::copy(entry.path(), &target)
+                    .map_err(|e| format!("copy {}: {e}", entry.path().display()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+// ─── Issue #492: Machine-readable ABI/package schema ───
+
+/// Machine-readable package schema describing exported functions, types,
+/// constructors, and required authoring signatures.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageSchema {
+    pub package: PackageId,
+    pub compiler: String,
+    pub modules: Vec<ModuleSchema>,
+}
+
+/// Schema for one module's exports.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleSchema {
+    pub module: String,
+    pub functions: Vec<FunctionSchema>,
+    pub types: Vec<TypeSchema>,
+}
+
+/// Exported function signature.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionSchema {
+    pub name: String,
+    pub type_repr: Option<String>,
+    pub effects: Vec<String>,
+    pub has_body: bool,
+}
+
+/// Exported type descriptor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TypeSchema {
+    pub name: String,
+    pub opaque: bool,
+    pub constructors: Vec<ConstructorSchema>,
+}
+
+/// Constructor (variant) of an exported type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConstructorSchema {
+    pub name: String,
+    /// "partial" if the type has an invariant, "total" otherwise.
+    pub kind: String,
+    pub type_repr: Option<String>,
+}
+
+/// Generate a machine-readable ABI/package schema for the package at `root`.
+/// Builds the package (type-checks it) and extracts schema from the shell.
+pub fn package_schema(root: &Path) -> Result<PackageSchema, String> {
+    let root = canonical_root(root)?;
+    let manifest = read_manifest(&root.join("reef.toml"))?;
+    let graph = resolve_package_graph(&root, LoadOptions::default_for_load())?;
+    let lock = build_lockfile(&graph);
+    write_lockfile(&root.join("reef.lock"), &lock)?;
+
+    let root_pkg = graph
+        .packages
+        .get(&graph.root_package)
+        .ok_or_else(|| "root package missing from graph".to_string())?;
+    let entry_modules = root_pkg.modules.keys().cloned().collect::<Vec<_>>();
+    let linked = link_graph(&graph, &entry_modules)?;
+    let linked_decls: Vec<_> = linked.into_iter().flat_map(|m| m.decls).collect();
+    let deep = expanded_desugared_program(&linked_decls)?;
+    let checked = checked_program_with_effects(&deep)?;
+
+    let mut modules = Vec::new();
+    for module_source in root_pkg.modules.values() {
+        let mut functions = Vec::new();
+        let mut types = Vec::new();
+
+        for export_name in &module_source.exports {
+            let kind = module_source.symbols.get(export_name);
+            let internal = internal_name(
+                &root_pkg.id.name,
+                &module_source.module_name,
+                export_name,
+            );
+            match kind {
+                Some(chelis_shell::SymbolKind::Value) => {
+                    let type_repr = checked
+                        .type_env()
+                        .get(&internal)
+                        .map(|expr| {
+                            chelis_deep::printer::print_canonical(std::slice::from_ref(expr))
+                                .trim()
+                                .to_string()
+                        })
+                        .or_else(|| sig_type_repr(module_source, export_name));
+                    let effects = symbol_effects(module_source, export_name);
+                    let has_body = module_source.decls.iter().any(|d| {
+                        matches!(d,
+                            Decl::FunDef { name, .. } | Decl::LetDef { name, .. }
+                            if name == export_name
+                        )
+                    });
+                    functions.push(FunctionSchema {
+                        name: export_name.clone(),
+                        type_repr,
+                        effects,
+                        has_body,
+                    });
+                }
+                Some(chelis_shell::SymbolKind::Type) => {
+                    // Find the type definition to extract constructors
+                    let type_def = module_source.decls.iter().find_map(|d| match d {
+                        Decl::TypeDef {
+                            name,
+                            variants,
+                            opaque,
+                            invariant,
+                            ..
+                        } if name == export_name => Some((variants, *opaque, invariant.is_some())),
+                        _ => None,
+                    });
+                    let (constructors, opaque) = if let Some((variants, is_opaque, has_invariant)) =
+                        type_def
+                    {
+                        let ctors = variants
+                            .iter()
+                            .map(|v| {
+                                let ctor_internal = internal_name(
+                                    &root_pkg.id.name,
+                                    &module_source.module_name,
+                                    &v.name,
+                                );
+                                let ctor_type = checked
+                                    .type_env()
+                                    .get(&ctor_internal)
+                                    .map(|expr| {
+                                        chelis_deep::printer::print_canonical(
+                                            std::slice::from_ref(expr),
+                                        )
+                                        .trim()
+                                        .to_string()
+                                    });
+                                ConstructorSchema {
+                                    name: v.name.clone(),
+                                    kind: if has_invariant {
+                                        "partial".to_string()
+                                    } else {
+                                        "total".to_string()
+                                    },
+                                    type_repr: ctor_type,
+                                }
+                            })
+                            .collect();
+                        (ctors, is_opaque)
+                    } else {
+                        (Vec::new(), false)
+                    };
+                    types.push(TypeSchema {
+                        name: export_name.clone(),
+                        opaque,
+                        constructors,
+                    });
+                }
+                _ => {}
+            }
+        }
+        modules.push(ModuleSchema {
+            module: module_source.module_name.clone(),
+            functions,
+            types,
+        });
+    }
+    modules.sort_by(|a, b| a.module.cmp(&b.module));
+
+    Ok(PackageSchema {
+        package: PackageId {
+            name: manifest.package.name.clone(),
+            version: manifest.package.version.clone(),
+        },
+        compiler: manifest.package.compiler.clone(),
+        modules,
+    })
+}
+
 fn canonical_root(root: &Path) -> Result<PathBuf, String> {
     let root = root
         .canonicalize()
@@ -8331,6 +8661,79 @@ module_prefix = "Atomic"
             leftover.is_empty(),
             "no .extract-*.tmp staging dir must remain; found: {leftover:?}"
         );
+    }
+
+    #[test]
+    fn export_bundle_writes_bundle_json_and_root_sources() {
+        let _g = lock_reef_home_env();
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("mypkg");
+        fs::create_dir_all(root.join("src")).expect("mkdir");
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "mypkg"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "My"
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/main.ch"),
+            "module My.Main\ndef main(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)\n",
+        );
+        // Create a lockfile (no deps other than the implicit chelis-std)
+        let lock = ReefLock {
+            package: PackageId {
+                name: "mypkg".to_string(),
+                version: "0.1.0".to_string(),
+            },
+            dependencies: vec![],
+        };
+        write_lockfile(&root.join("reef.lock"), &lock).expect("write lock");
+
+        let bundle_dir = dir.path().join("bundle");
+        let manifest = export_bundle(&root, &bundle_dir).expect("export_bundle");
+        assert_eq!(manifest.root_package.name, "mypkg");
+        assert!(bundle_dir.join("bundle.json").exists());
+        assert!(bundle_dir.join("root/reef.toml").exists());
+        assert!(bundle_dir.join("root/src/main.ch").exists());
+
+        // bundle.json is valid JSON
+        let json_str =
+            fs::read_to_string(bundle_dir.join("bundle.json")).expect("read bundle.json");
+        let parsed: BundleManifest =
+            serde_json::from_str(&json_str).expect("parse bundle.json");
+        assert_eq!(parsed.root_package.name, "mypkg");
+    }
+
+    #[test]
+    fn export_bundle_fails_without_lockfile() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("nolockpkg");
+        fs::create_dir_all(root.join("src")).expect("mkdir");
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "nolockpkg"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Nl"
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/main.ch"),
+            "module Nl.Main\ndef f(x: f32) -> f32 = x\n",
+        );
+        let bundle_dir = dir.path().join("bundle");
+        let err = export_bundle(&root, &bundle_dir).expect_err("should fail");
+        assert!(err.contains("reef.lock"), "error should mention reef.lock: {err}");
     }
 
     /// Concurrent-write contract: many threads extracting the same
