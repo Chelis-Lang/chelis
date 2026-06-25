@@ -1988,12 +1988,24 @@ pub(super) fn tensor_softmax_host(
 
     for slice_linear in 0..reduced_numel {
         let mut base_indices = linear_to_indices(slice_linear, &reduced_shape);
-        // First pass: max over the axis. Track positive-Inf positions
-        // separately — `exp(+Inf - +Inf) = exp(NaN) = NaN` would otherwise
-        // silently corrupt mask-style attention usage where the ones-hot
-        // position is set to +Inf (red-team v0.2.6 HIGH).
+        // First pass: max over the axis.
+        //
+        // #173: a slice that contains `+Inf` (then `exp(+Inf - +Inf) =
+        // exp(NaN) = NaN`) or that is all `-Inf` (then `exp(-Inf - -Inf) =
+        // exp(NaN) = NaN`) must yield NaN, exactly as torch's
+        // `torch.softmax` does (verified against torch 2.x CPU: every
+        // `+Inf`-containing or all-`-Inf` slice returns NaN). The C
+        // backend, the IR evaluator, and the spec'd lowering
+        // (`tier2::lower_softmax`: max/sub/exp/sum/div) already produce
+        // NaN via the standard formula; the host runtime previously
+        // special-cased these to "natural limits" (uniform `1/N` for
+        // all-`-Inf`, `1/K` one-hot for `+Inf`), silently diverging from
+        // torch and from every other Chelis lane. The special-cases are
+        // removed so the standard formula runs and NaN propagates. The
+        // ONLY non-finite case the standard formula handles cleanly is a
+        // mixed slice with `-Inf` but no `+Inf` (the finite max makes
+        // `exp(-Inf - max) = 0`); that path is preserved below.
         let mut max_val = f64::NEG_INFINITY;
-        let mut pos_inf_count = 0usize;
         for k in 0..axis_size {
             base_indices[axis_usize] = k;
             let in_linear = indices_to_linear(&base_indices, &in_shape);
@@ -2011,9 +2023,6 @@ pub(super) fn tensor_softmax_host(
                 max_val = f64::NAN;
                 break;
             }
-            if v == f64::INFINITY {
-                pos_inf_count += 1;
-            }
             if v > max_val {
                 max_val = v;
             }
@@ -2022,36 +2031,12 @@ pub(super) fn tensor_softmax_host(
             // NaN propagation handled above; nothing else to do for this slice.
             continue;
         }
-        if pos_inf_count > 0 {
-            // Standard formula yields exp(+Inf - +Inf) = NaN. Define the
-            // softmax of a slice containing K positive-Inf values as
-            // 1/K at each +Inf position and 0 elsewhere — the natural
-            // limit as the input approaches the multi-Inf configuration.
-            let share = 1.0_f64 / (pos_inf_count as f64);
-            for k in 0..axis_size {
-                base_indices[axis_usize] = k;
-                let in_linear = indices_to_linear(&base_indices, &in_shape);
-                out[in_linear] = if tensor.value.data[in_linear] == f64::INFINITY {
-                    share
-                } else {
-                    0.0
-                };
-            }
-            continue;
-        }
-        if max_val == f64::NEG_INFINITY {
-            // All entries were -Inf. The standard formula yields
-            // exp(-Inf - -Inf) = exp(NaN) = NaN; define this case as
-            // uniform 1/N over the slice (the natural limit).
-            let share = 1.0_f64 / (axis_size as f64);
-            for k in 0..axis_size {
-                base_indices[axis_usize] = k;
-                let in_linear = indices_to_linear(&base_indices, &in_shape);
-                out[in_linear] = share;
-            }
-            continue;
-        }
-        // Second pass: sum of exp(x - max).
+        // Second pass: sum of exp(x - max). When the slice contains a
+        // `+Inf` the max is `+Inf` and `exp(+Inf - +Inf) = exp(NaN) =
+        // NaN`; when the slice is all `-Inf` the max is `-Inf` and
+        // `exp(-Inf - -Inf) = exp(NaN) = NaN`. The NaN flows through the
+        // sum and the normalize below, so every output element of that
+        // slice is NaN — matching torch (#173).
         let mut sum_exp = 0.0_f64;
         for k in 0..axis_size {
             base_indices[axis_usize] = k;
