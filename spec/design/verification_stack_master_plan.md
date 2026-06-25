@@ -1,7 +1,7 @@
 # Chelis Verification Stack: Master Implementation Plan
 
 Intended location: `spec/design/verification_stack_master_plan.md` (chelis repo).
-Companion documents: the whole-stack sketch (`spec/design/verification_stack_sketch.md`), the dependency map (`spec/design/verification_stack_dependency_map.md`), the Beacon engine plan (`spec/design/beacon_plan.md`), and the VNN-LIB front-end placeholder (`spec/design/vnnlib_frontend_placeholder.md`).
+Companion documents: the whole-stack sketch (`spec/design/verification_stack_sketch.md`), the dependency map (`spec/design/verification_stack_dependency_map.md`), the goal transformation layer (`spec/design/transformation_layer.md`), the Beacon engine plan (`spec/design/beacon_plan.md`), and the VNN-LIB front-end placeholder (`spec/design/vnnlib_frontend_placeholder.md`).
 
 ## 1. Purpose and scope
 
