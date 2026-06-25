@@ -1691,10 +1691,19 @@ int main(void) {{
     inputs[SLOT] = values;"#
                         .replace("SLOT", &slot.to_string()),
                 ),
+                // #476: a CHELIS_I32 index tensor stores int32 values
+                // bit-packed into the float-typed `data` buffer; they MUST be
+                // written through an `(int32_t*)` cast, not as floats. The
+                // pre-fix fixture wrote `indices->data[i] = 2.0f` (the FLOAT
+                // 2.0, whose int32 reinterpretation is 0x40000000), which only
+                // round-tripped because the buggy reader did `(int)data[i]` and
+                // truncated the float back. Writing the int32 value directly is
+                // what real generated input code and the runtime do.
                 "indices" => input_lines.push(
                     r#"int shape_indices[1] = { 3 };
     chelis_tensor *indices = chelis_alloc(1, shape_indices, CHELIS_I32);
-    indices->data[0] = 0.0f; indices->data[1] = 2.0f; indices->data[2] = 0.0f;
+    int32_t *indices_i32 = (int32_t*)indices->data;
+    indices_i32[0] = 0; indices_i32[1] = 2; indices_i32[2] = 0;
     inputs[SLOT] = indices;"#
                         .replace("SLOT", &slot.to_string()),
                 ),

@@ -813,3 +813,152 @@ out = df(to_tensor([1.0, 2.0, 3.0]))\n";
         );
     }
 }
+
+// -----------------------------------------------------------------------------
+// #476 — inline sparse gather/scatter read int32 indices through the
+// dtype-correct pointer, not `(int)t->data[i]`. Same #347 class as the
+// argmax/argmin index prints above: int tensors bit-pack their values into
+// the float-typed `->data`, so `(int)t->data[i]` on a CHELIS_I32 index
+// `(int)`-truncates the FLOAT reinterpretation of the int32 bits (index `2`
+// → `(int)2.8e-45f` → `0`), silently gathering the WRONG row. The user
+// surface defaults integer literals to int32 (`to_tensor([2, 0, 1])` is a
+// CHELIS_I32 tensor), so this fires on ordinary index code; the pre-fix
+// corpus never reproduced it because every gather fixture cast indices to
+// int64 (`cast(_, int64)`), which took the always-correct CHELIS_I64 branch.
+//
+// The acceptance oracle is BIT-IDENTITY eval-vs-C on the integer/index path
+// (no float summation here — indices are exact), PLUS a negative assertion
+// that the pre-fix reinterpreted-float corruption (every index → row 0) is
+// rejected. An int64-index control proves the i64 branch is untouched.
+// -----------------------------------------------------------------------------
+
+/// POSITIVE + parity: `gather` with the DEFAULT int32 index dtype agrees
+/// byte-for-byte between eval and the C backend. The gather is the program
+/// root, so it lowers to the inline WireDag tensor-lane emit
+/// (`emit_sparse_gather`), which is the buggy path — NOT the runtime helper
+/// `chelis_tensor_gather` (that path always read indices at the correct
+/// width via `read_index_slot`).
+#[test]
+fn issue_476_gather_int32_indices_backend_matches_eval() {
+    // indices [2, 0, 1] over a 3x2 table → rows [30,31],[10,11],[20,21].
+    let source = "table = to_tensor([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]])\n\
+embed = gather(table, to_tensor([2, 0, 1]), 0)\n";
+
+    let build = chelis_build_c(source, "gatheri32");
+    let stdout = compile_and_run_emitted(build.path(), &build.path().join("gatheri32.c"));
+    assert_eq!(
+        binding_line(&stdout, "embed"),
+        "embed = tensor(shape=[3, 2], data=[30.0, 31.0, 10.0, 11.0, 20.0, 21.0])",
+        "int32-index gather must select rows 2,0,1; stdout={stdout:?}",
+    );
+    // NEGATIVE: the pre-fix corruption read every int32 index as 0 (the
+    // float reinterpretation of small ints rounds toward zero), so every
+    // output row was row 0 (`[10,11]`). That signature must never appear.
+    assert_ne!(
+        binding_line(&stdout, "embed"),
+        "embed = tensor(shape=[3, 2], data=[10.0, 11.0, 10.0, 11.0, 10.0, 11.0])",
+        "pre-fix #476 read every int32 index as row 0; that corruption must \
+         not recur; stdout={stdout:?}",
+    );
+
+    let eval_out = chelis_eval_ok(source, "gatheri32");
+    assert_eq!(
+        binding_line(&stdout, "embed"),
+        binding_line(&eval_out, "embed"),
+        "eval and C backend must agree byte-for-byte on int32-index gather (#476)",
+    );
+}
+
+/// POSITIVE / control: the same gather with indices cast to int64 still
+/// agrees. The int64 branch was always correct; this proves the fix did not
+/// regress it.
+#[test]
+fn issue_476_gather_int64_indices_unchanged() {
+    let source = "table = to_tensor([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]])\n\
+embed = gather(table, cast(to_tensor([2, 0, 1]), int64), 0)\n";
+
+    let build = chelis_build_c(source, "gatheri64");
+    let stdout = compile_and_run_emitted(build.path(), &build.path().join("gatheri64.c"));
+    assert_eq!(
+        binding_line(&stdout, "embed"),
+        "embed = tensor(shape=[3, 2], data=[30.0, 31.0, 10.0, 11.0, 20.0, 21.0])",
+        "int64-index gather must select rows 2,0,1; stdout={stdout:?}",
+    );
+
+    let eval_out = chelis_eval_ok(source, "gatheri64");
+    assert_eq!(
+        binding_line(&stdout, "embed"),
+        binding_line(&eval_out, "embed"),
+        "eval and C backend must agree on int64-index gather (control)",
+    );
+}
+
+/// POSITIVE + parity: `scatter(..., "replace")` over an int32-index path
+/// agrees byte-for-byte. Routed through the runtime helper at the program
+/// root, but the int32 read there is the same #347 class; the
+/// `read_index_slot` width-correct path keeps it honest. This guards the
+/// user-facing scatter surface in addition to the inline emit.
+#[test]
+fn issue_476_scatter_replace_int32_indices_backend_matches_eval() {
+    // base 3x2 zeros; updates rows written at indices [2,0,1].
+    let source = "base = to_tensor([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]])\n\
+out = scatter(base, to_tensor([2, 0, 1]), to_tensor([[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]]), 0, \"replace\")\n";
+
+    let build = chelis_build_c(source, "scatteri32");
+    let stdout = compile_and_run_emitted(build.path(), &build.path().join("scatteri32.c"));
+    assert_eq!(
+        binding_line(&stdout, "out"),
+        "out = tensor(shape=[3, 2], data=[2.0, 2.0, 3.0, 3.0, 1.0, 1.0])",
+        "scatter_replace at int32 indices [2,0,1] places update row 0→pos2, \
+         1→pos0, 2→pos1; stdout={stdout:?}",
+    );
+
+    let eval_out = chelis_eval_ok(source, "scatteri32");
+    assert_eq!(
+        binding_line(&stdout, "out"),
+        binding_line(&eval_out, "out"),
+        "eval and C backend must agree byte-for-byte on int32 scatter_replace (#476)",
+    );
+}
+
+/// POSITIVE + parity: the inline `emit_sparse_scatter_add` path — reached as
+/// the gather ADJOINT (grad of gather scatter-adds the upstream grad back to
+/// the gathered rows) — agrees byte-for-byte at int32 indices. This exercises
+/// BOTH inline sparse emits in one program: `emit_sparse_gather` (forward)
+/// and `emit_sparse_scatter_add` (backward). Index 2 appears twice → its row
+/// accumulates grad 2; index 0 once → grad 1; index 1 never → grad 0.
+#[test]
+fn issue_476_gather_grad_scatter_add_int32_backend_matches_eval() {
+    let source = "def f(table: tensor[3, 2, f32]) -> f32 = tensor_to_scalar(sum(sum(gather(table, to_tensor([2, 0, 2]), 0), 0), 0))\n\
+def df(table: tensor[3, 2, f32]) -> tensor[3, 2, f32] = grad(f)(table)\n\
+out = df(to_tensor([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]]))\n";
+
+    let build = chelis_build_c(source, "gathergradi32");
+    let stdout = compile_and_run_emitted(build.path(), &build.path().join("gathergradi32.c"));
+    assert_eq!(
+        binding_line(&stdout, "out"),
+        "out = tensor(shape=[3, 2], data=[1.0, 1.0, 0.0, 0.0, 2.0, 2.0])",
+        "grad of gather([2,0,2]) accumulates 1 at row0, 0 at row1, 2 at row2; \
+         stdout={stdout:?}",
+    );
+    // NEGATIVE: the pre-fix corruption read every index as 0, so the ENTIRE
+    // gradient (3 gather positions) would pile onto row 0 (`[3,3]`) and rows
+    // 1,2 would be zero. That signature must never appear.
+    assert_ne!(
+        binding_line(&stdout, "out"),
+        "out = tensor(shape=[3, 2], data=[3.0, 3.0, 0.0, 0.0, 0.0, 0.0])",
+        "pre-fix #476 piled the whole gather grad onto row 0; that corruption \
+         must not recur; stdout={stdout:?}",
+    );
+
+    // `chelis eval` prints a single-root program's value WITHOUT a label;
+    // the C backend labels it `out = ...`. `tensor_value` normalizes that
+    // asymmetry so the comparison is value-vs-value.
+    let eval_out = chelis_eval_ok(source, "gathergradi32");
+    assert_eq!(
+        tensor_value(&stdout, "out"),
+        tensor_value(&eval_out, "out"),
+        "eval and C backend must agree byte-for-byte on int32 gather-grad \
+         (scatter_add adjoint) (#476)",
+    );
+}

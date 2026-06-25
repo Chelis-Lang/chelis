@@ -2866,7 +2866,7 @@ impl CEmitter {
         ));
         self.indent += 1;
         self.line(&format!(
-            "int t{id}_g = (t{id}_indices->dtype == CHELIS_I64) ? (int)((const int64_t*)t{id}_indices->data)[t{id}_i] : (int)t{id}_indices->data[t{id}_i];"
+            "int t{id}_g = (t{id}_indices->dtype == CHELIS_I64) ? (int)((const int64_t*)t{id}_indices->data)[t{id}_i] : (int)t{id}_indices_data[t{id}_i];"
         ));
         self.line(&format!(
             "if (t{id}_g < 0 || t{id}_g >= t{id}_axis_size) abort();"
@@ -2954,7 +2954,7 @@ impl CEmitter {
         ));
         self.indent += 1;
         self.line(&format!(
-            "int t{id}_g = (t{id}_indices->dtype == CHELIS_I64) ? (int)((const int64_t*)t{id}_indices->data)[t{id}_i] : (int)t{id}_indices->data[t{id}_i];"
+            "int t{id}_g = (t{id}_indices->dtype == CHELIS_I64) ? (int)((const int64_t*)t{id}_indices->data)[t{id}_i] : (int)t{id}_indices_data[t{id}_i];"
         ));
         self.line(&format!(
             "if (t{id}_g < 0 || t{id}_g >= t{id}_axis_size) abort();"
@@ -3060,7 +3060,7 @@ impl CEmitter {
         ));
         self.indent += 1;
         self.line(&format!(
-            "int t{id}_g = (t{id}_indices->dtype == CHELIS_I64) ? (int)((const int64_t*)t{id}_indices->data)[t{id}_i] : (int)t{id}_indices->data[t{id}_i];"
+            "int t{id}_g = (t{id}_indices->dtype == CHELIS_I64) ? (int)((const int64_t*)t{id}_indices->data)[t{id}_i] : (int)t{id}_indices_data[t{id}_i];"
         ));
         self.line(&format!(
             "if (t{id}_g < 0 || t{id}_g >= t{id}_axis_size) abort();"
@@ -3166,12 +3166,17 @@ impl CEmitter {
             "for (int t{id}_i = 0; t{id}_i < t{id}_update_count; t{id}_i++) {{"
         ));
         self.indent += 1;
-        // int tensors store their values bit-packed into the float-typed
-        // `->data`, so the index read must go through the dtype-correct
-        // pointer cast. (The hyperplane sparse emits — gather, scatter,
-        // scatter_add — read `(int)t->data[i]` directly, relying on the
-        // specialized-sparse-call path; the element-wise emit reads the
-        // index here in the general path, so it casts explicitly.)
+        // #476: int tensors store their values bit-packed into the
+        // float-typed `->data`, so reading `(int)t->data[i]` on a
+        // CHELIS_I32 index tensor would `(int)`-truncate the FLOAT
+        // reinterpretation of the int32 bits (e.g. index `2` →
+        // `(int)2.8e-45f` → `0`), silently gathering the wrong row.
+        // The read must go through the dtype-correct pointer cast on
+        // BOTH dtype branches. The hyperplane sparse emits (gather,
+        // scatter_replace, scatter_add) do the same via their
+        // already-declared `t{id}_indices_data` (`const {index_et}*`)
+        // pointer; the element-wise emit casts inline here because it
+        // has no such pre-declared pointer in scope.
         self.line(&format!(
             "int t{id}_g = (t{id}_indices->dtype == CHELIS_I64) ? (int)((const int64_t*)t{id}_indices->data)[t{id}_i] : (int)((const int32_t*)t{id}_indices->data)[t{id}_i];"
         ));
