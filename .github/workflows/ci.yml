@@ -89,8 +89,13 @@ jobs:
       - name: Free disk space (Ubuntu)
         uses: ./.github/actions/free-disk-space
 
+      # apt-get under retry (scripts/ci_apt_get.py): the hosted runner's apt
+      # mirror intermittently resets the connection mid-download, flaking the
+      # job with no code change. The helper retries the update+install pair on
+      # a transient failure; a genuine packaging error still fails after the
+      # attempts are exhausted.
       - name: Install C dependencies
-        run: sudo apt-get update && sudo apt-get install -y gcc libopenblas-dev libasan8 libubsan1
+        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -179,8 +184,10 @@ jobs:
         # no Z3_LIBRARY_PATH_OVERRIDE / LD_LIBRARY_PATH needed (unlike the
         # local dev path documented in docs/local_z3_environment.md). The
         # z3 lane is co-located in this job so the cross-engine oracle has
-        # both cvc5 and Z3 present in one build.
-        run: sudo apt-get update && sudo apt-get install -y gcc g++ cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev libz3-dev
+        # both cvc5 and Z3 present in one build. apt-get under retry
+        # (scripts/ci_apt_get.py) so a transient mirror reset does not flake
+        # the cvc5 build job.
+        run: python3 scripts/ci_apt_get.py gcc g++ cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev libz3-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -259,18 +266,37 @@ jobs:
       # the smt-only feature (cvc5 builds its own static GMP) but match
       # the Linux smt-build recipe. git is needed because cvc5-sys clones
       # the cvc5 source at build time.
-      - name: Install build prerequisites
+      # Bootstrap the few packages `actions/checkout@v6` itself needs in the
+      # slim debian:11 container (git for the clone, ca-certificates + curl
+      # for TLS) BEFORE checkout, so the in-repo retry helper below can run.
+      # This split is what lets the heavy prereq install (the one that
+      # actually flakes on a mirror reset) go through scripts/ci_apt_get.py:
+      # the helper lives in the repo, so it cannot be invoked until the repo
+      # is checked out. Kept inline and minimal; a reset on these three tiny
+      # packages is far rarer than on the full cvc5 toolchain set.
+      - name: Bootstrap checkout prerequisites
         run: |
           set -euo pipefail
           apt-get update
-          apt-get install -y --no-install-recommends \
-            build-essential ca-certificates curl git m4 \
-            cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev \
-            python3 python3-pip python3-venv
-          pip3 install --break-system-packages tomli || pip3 install tomli
+          apt-get install -y --no-install-recommends git ca-certificates curl
 
       - name: Checkout
         uses: actions/checkout@v6
+
+      # apt-get under retry: debian:11's mirrors intermittently reset the
+      # connection mid-download (`deb.debian.org ... Connection reset by
+      # peer`), flaking this job with no code change. ci_apt_get.py retries
+      # the update+install pair on a transient failure; a genuine packaging
+      # error still fails after the attempts are exhausted. --no-sudo: the
+      # container already runs as root and has no sudo. See scripts/ci_apt_get.py.
+      - name: Install build prerequisites
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_apt_get.py --no-sudo --no-install-recommends \
+            build-essential m4 \
+            cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev \
+            python3 python3-pip python3-venv
+          pip3 install --break-system-packages tomli || pip3 install tomli
 
       - name: Assert glibc 2.31 build environment
         run: |
@@ -324,6 +350,20 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # ROBUSTNESS NOTE (darwin SMT warm-cache masks cold build): Swatinem's
+      # cache restores a previously-built cvc5 from target/, so on a warm
+      # cache this job can pass WITHOUT ever re-running the cold cvc5 source
+      # build (cmake configure + the C++ compile). A break that only manifests
+      # on a cold compile -- a cvc5/cvc5-sys bump, a new flag, a toolchain
+      # change on the macos-latest image -- would then stay green here until a
+      # cache-key change or a cache eviction forces the cold path. The
+      # release.yml darwin job uses a DIFFERENT cache key (no `key:` override),
+      # so it does not share this cache and is the authoritative cold-build
+      # proof for the SHIPPED artifact; treat a release-job cvc5 failure as
+      # real even when this per-PR lane is green. If a cvc5/toolchain bump is
+      # in the diff, force a cold build by bumping this `key:` (e.g.
+      # `smt-darwin-arm64-v2`) in the same PR so the cold path is proven
+      # before release relies on it.
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
@@ -360,8 +400,10 @@ jobs:
       - name: Free disk space (Ubuntu)
         uses: ./.github/actions/free-disk-space
 
+      # apt-get under retry (scripts/ci_apt_get.py); see the lint-and-unit
+      # job for the transient-mirror-reset rationale.
       - name: Install C dependencies
-        run: sudo apt-get update && sudo apt-get install -y gcc libopenblas-dev libasan8 libubsan1
+        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -502,8 +544,10 @@ jobs:
       - name: Free disk space (Ubuntu)
         uses: ./.github/actions/free-disk-space
 
+      # apt-get under retry (scripts/ci_apt_get.py); see the lint-and-unit
+      # job for the transient-mirror-reset rationale.
       - name: Install C dependencies
-        run: sudo apt-get update && sudo apt-get install -y gcc libopenblas-dev libasan8 libubsan1
+        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

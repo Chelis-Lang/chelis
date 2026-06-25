@@ -57,8 +57,10 @@ jobs:
       - name: Checkout chelis (HEAD)
         uses: actions/checkout@v6
 
+      # apt-get under retry (scripts/ci_apt_get.py): a transient apt mirror
+      # reset would otherwise flake this scheduled canary with no code change.
       - name: Install C dependencies
-        run: sudo apt-get update && sudo apt-get install -y gcc libopenblas-dev
+        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -375,6 +377,10 @@ jobs:
         if: matrix.type == 'reef' || matrix.type == 'cargo'
         run: echo "$CHELIS_TOOLCHAIN/bin" >> "$GITHUB_PATH"
 
+      # Kept as inline apt-get (no scripts/ci_apt_get.py retry): this drift
+      # leg checks out the SHELL repo (path: shell) and pulls chelis as a
+      # built ARTIFACT, not a chelis checkout, so the in-repo helper is not on
+      # disk here. Only two small packages; a scheduled canary, not a gate.
       - name: Install C dependencies
         if: matrix.type == 'reef' || matrix.type == 'cargo'
         run: sudo apt-get update && sudo apt-get install -y gcc libopenblas-dev
