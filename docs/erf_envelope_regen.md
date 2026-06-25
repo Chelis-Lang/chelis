@@ -34,6 +34,21 @@ re-runs through `gappa` to confirm each bound:
   computes (`P_f64`), not just the real-arithmetic polynomial. A math-only bound
   would be unsound by ~1 ULP. The tails evaluate the exact constant `+-1`, so
   their f64-eval rounding is zero and no rounding proof is needed for them.
+
+  The central coefficients are committed (in the envelope and the manifest) as
+  exact **C99 hex-float strings** (`0x1.MMMp±E`), not JSON decimal numbers, and
+  the proofs embed the same hex-float literals. A hex-float names the exact f64
+  bit pattern, so the committed proof, the manifest, the consumer envelope, and
+  an auditor all recover bit-identically the same f64 — with **no decimal float
+  parser on the coefficient path**. This is deliberate: a decimal can round to a
+  1-ULP-different f64 across parsers (`serde_json`'s float parser is not always
+  correctly rounded, and can fail to round-trip its own output), which would let
+  the proof certify a polynomial 1 ULP off from the one the runtime evaluates.
+  With hex floats the proof certifies *exactly* the runtime polynomial. The
+  consumer (`ErfArm::Central`) parses the hex strings with an exact in-crate hex
+  parser; a Rust test re-parses the coefficients embedded in
+  `central_rounding.gappa` and asserts they are bit-identical to the consumer's,
+  binding consumer == manifest == proven.
 - **Saturation tails.** `tail_pos_<k>.gappa` / `tail_neg_<k>.gappa` — the same
   machinery with the constant `+-1` as the approximation. Gappa proves
   `|+-1 - T(x)| <= bound` where `T` is the certified local Taylor model of `erf`;

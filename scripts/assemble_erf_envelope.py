@@ -52,9 +52,12 @@ def build_envelope(manifest: dict) -> dict:
     central_lo = float(manifest["central_lo"])
     central_hi = float(manifest["central_hi"])
     sat_hi = float(manifest["sat_hi"])
-    # Coeffs as JSON numbers (the manifest already stores the exact doubles as
-    # numbers), so the envelope and manifest read back bit-identically.
-    coeffs = [float(c) for c in manifest["coeffs"]]
+    # Coeffs are committed as exact C99 hex-float STRINGS (not JSON numbers); the
+    # consumer parses them with an exact hex parser, so serde's decimal float
+    # parser is never on the coefficient path and the runtime evaluates exactly
+    # the f64 the Gappa proof certifies. Pass the manifest's hex strings through
+    # unchanged so the envelope and manifest are bit-identical by construction.
+    coeffs = list(manifest["coeffs"])
 
     boxes = [
         {

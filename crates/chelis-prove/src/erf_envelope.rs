@@ -45,6 +45,115 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Exact, parser-independent f64 <-> C99 hex-float string conversion for the
+/// central polynomial coefficients.
+///
+/// The coefficients are stored in the committed envelope as C99 hex-float string
+/// literals (`[-]0x1.MMMMMp±E`), NOT JSON decimal numbers. A hex-float names the
+/// EXACT f64 bit pattern, so every reader -- this consumer, the committed Gappa
+/// proofs, and a third-party auditor -- recovers bit-identically the same f64,
+/// independent of any decimal float parser. This deliberately removes the
+/// (not-always-correctly-rounded) `serde_json` decimal float parser from the
+/// coefficient trust path: a decimal can round to a 1-ULP-different f64 across
+/// parsers, so the proof and the runtime could otherwise evaluate slightly
+/// different polynomials. With hex floats the proof certifies *exactly* the f64
+/// the runtime evaluates.
+mod hex_f64 {
+    /// Format an f64 as a canonical C99 hex-float literal that round-trips
+    /// exactly (`0x1.<13 hex frac digits>p<exp>`, sign prefix for negatives,
+    /// `0x0p+0` for zero). The 13 fractional hex digits hold all 52 mantissa
+    /// bits, so the value is exact.
+    pub fn format(v: f64) -> String {
+        if v == 0.0 {
+            // Preserve the sign of zero for a faithful round-trip.
+            return if v.is_sign_negative() {
+                "-0x0p+0".to_string()
+            } else {
+                "0x0p+0".to_string()
+            };
+        }
+        let bits = v.to_bits();
+        let sign = if bits >> 63 == 1 { "-" } else { "" };
+        let exp_field = ((bits >> 52) & 0x7ff) as i64;
+        let mantissa = bits & 0x000f_ffff_ffff_ffff;
+        // Normal numbers only (the coefficients are all normal). Implicit
+        // leading 1, unbiased exponent.
+        assert!(
+            exp_field != 0 && exp_field != 0x7ff,
+            "hex_f64::format expects a finite normal f64, got {v}"
+        );
+        let unbiased = exp_field - 1023;
+        // 13 hex digits == 52 bits of fractional mantissa, zero-padded.
+        format!("{sign}0x1.{mantissa:013x}p{unbiased:+}")
+    }
+
+    /// Parse a C99 hex-float literal (`[-]0x<int>.<frac>p±E`) to its EXACT f64.
+    /// Rust's `f64::from_str` does not accept hex floats, so this is a small
+    /// explicit parser. The mantissa (int ++ frac hex digits) fits in a u64 for
+    /// our coefficients, so `mantissa as f64` is lossless and the single
+    /// power-of-two scaling is exact -- the parse introduces no rounding.
+    pub fn parse(lit: &str) -> Result<f64, String> {
+        let s = lit.trim();
+        let (neg, s) = match s.strip_prefix('-') {
+            Some(r) => (true, r),
+            None => (false, s),
+        };
+        let s = s
+            .strip_prefix("0x")
+            .or_else(|| s.strip_prefix("0X"))
+            .ok_or_else(|| format!("hex-float must start with 0x: {lit:?}"))?;
+        let (mantissa, exp) = s
+            .split_once(['p', 'P'])
+            .ok_or_else(|| format!("hex-float missing 'p' exponent: {lit:?}"))?;
+        let exp: i32 = exp
+            .parse()
+            .map_err(|_| format!("bad hex-float exponent: {lit:?}"))?;
+        let (int_part, frac_part) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+        let digits: String = int_part.chars().chain(frac_part.chars()).collect();
+        let mantissa_int = u64::from_str_radix(&digits, 16)
+            .map_err(|_| format!("bad hex-float mantissa: {lit:?}"))?;
+        // Each fractional hex digit is 4 binary places.
+        let scale_exp = exp - 4 * frac_part.len() as i32;
+        // Scale by 2^scale_exp. A single `mantissa * 2.0.powi(scale_exp)` can
+        // underflow the `powi` intermediate to a subnormal/zero for very small
+        // exponents (e.g. parsing f64::MIN_POSITIVE) even though the final value
+        // is representable. Splitting the power of two in halves keeps each
+        // factor in range, and each `* 2^k` is exact (no rounding), so the parse
+        // stays bit-exact across the whole f64 range.
+        let mut result = mantissa_int as f64;
+        let mut e = scale_exp;
+        while e != 0 {
+            let step = e.clamp(-512, 512);
+            result *= 2.0_f64.powi(step);
+            e -= step;
+        }
+        if neg {
+            result = -result;
+        }
+        Ok(result)
+    }
+
+    /// Serde: a `Vec<f64>` serialized as a list of hex-float strings.
+    pub fn serialize_vec<S: serde::Serializer>(v: &[f64], s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = s.serialize_seq(Some(v.len()))?;
+        for c in v {
+            seq.serialize_element(&format(*c))?;
+        }
+        seq.end()
+    }
+
+    /// Serde: deserialize a list of hex-float strings into `Vec<f64>`. The
+    /// strings are the exact authoritative coefficients; serde's decimal float
+    /// parser is never involved.
+    pub fn deserialize_vec<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<f64>, D::Error> {
+        let raw: Vec<String> = serde::Deserialize::deserialize(d)?;
+        raw.iter()
+            .map(|s| parse(s).map_err(serde::de::Error::custom))
+            .collect()
+    }
+}
+
 /// The approximation used on one envelope box.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -58,8 +167,18 @@ pub enum ErfArm {
     /// A polynomial approximation, coefficients in **descending** degree order
     /// (`coeffs[0]` is the highest-degree term, the last is the constant term),
     /// evaluated by Horner's method. The box's `eps` bounds `|p(x) - erf(x)|`.
+    ///
+    /// In the committed JSON the coefficients are C99 hex-float STRINGS, parsed
+    /// here to the exact f64 (see [`hex_f64`]); the in-memory type is `Vec<f64>`
+    /// so consumers are unchanged, but serde's decimal float parser is never on
+    /// the coefficient path -- the runtime evaluates exactly the f64 the Gappa
+    /// proof certifies.
     Central {
         /// Polynomial coefficients, highest degree first.
+        #[serde(
+            serialize_with = "hex_f64::serialize_vec",
+            deserialize_with = "hex_f64::deserialize_vec"
+        )]
         coeffs: Vec<f64>,
     },
 }
@@ -481,10 +600,10 @@ mod tests {
             .as_array()
             .expect("coeffs array")
             .iter()
-            // Read as JSON numbers (the manifest stores the exact doubles as
-            // numbers), through the same serde_json parser the envelope uses, so
-            // the comparison is bit-exact.
-            .map(|c| c.as_f64().unwrap())
+            // The manifest stores coeffs as exact hex-float strings; parse them
+            // with the same exact hex parser the consumer envelope uses, so the
+            // comparison is bit-exact and no decimal float parser is involved.
+            .map(|c| super::hex_f64::parse(c.as_str().unwrap()).unwrap())
             .collect();
         let central = env
             .boxes
@@ -500,23 +619,13 @@ mod tests {
         );
     }
 
-    /// Parse a Gappa numeric literal to the SAME f64 the consumer envelope's
-    /// coefficients are read as. The envelope coeffs come through serde_json's
-    /// number parser; Rust's `str::parse::<f64>` can disagree with it by one ULP
-    /// on some 16-17 digit decimals. To compare bit-exactly we route the Gappa
-    /// literal through serde_json too (the literals are plain decimals serde
-    /// accepts as JSON numbers).
-    #[cfg(test)]
-    fn parse_like_consumer(lit: &str) -> f64 {
-        serde_json::from_str::<f64>(lit.trim())
-            .unwrap_or_else(|_| panic!("gappa numeric literal {lit:?} parses as f64"))
-    }
-
     /// Parse the central coefficients (descending degree) literally embedded in
     /// the committed f64-Horner rounding proof's Horner chain:
     ///   `a{deg} = <coeff[0]>;`
     ///   `a{deg-i} rnd= a{deg-i+1} * x + <coeff[i]>;`  for i = 1..deg
-    /// These are the exact doubles the Gappa rounding proof is over.
+    /// The coefficients are C99 hex-float literals -- the exact f64s the Gappa
+    /// rounding proof is over -- parsed with the same exact hex parser the
+    /// consumer envelope uses, so the binding comparison is bit-exact.
     #[cfg(test)]
     fn proven_central_coeffs() -> Vec<f64> {
         let text = ERF_CENTRAL_ROUNDING_GAPPA;
@@ -531,7 +640,7 @@ mod tests {
                 let deg: usize = rest[..eq].parse().expect("a{deg} index");
                 let c = rest[eq + 3..].trim_end_matches(';').trim();
                 head_deg = Some(deg);
-                head_c = Some(parse_like_consumer(c));
+                head_c = Some(super::hex_f64::parse(c).unwrap());
                 break;
             }
         }
@@ -540,15 +649,21 @@ mod tests {
         for i in 1..=deg {
             let idx = deg - i;
             // line: `a{idx} rnd= a{idx+1} * x + <c>;`
+            // Split on the term separator `* x +`, not the last `+`: a hex-float
+            // coeff with a positive exponent (e.g. 0x1.2p+0) contains its own `+`.
             let needle = format!("a{idx} rnd=");
             let line = text
                 .lines()
                 .map(str::trim)
                 .find(|l| l.starts_with(&needle))
                 .unwrap_or_else(|| panic!("a{idx} rnd= line"));
-            let plus = line.rfind('+').expect("+ <coeff>");
-            let c = line[plus + 1..].trim_end_matches(';').trim();
-            coeffs.push(parse_like_consumer(c));
+            let c = line
+                .split("* x +")
+                .nth(1)
+                .unwrap_or_else(|| panic!("a{idx} rnd= line has `* x +`"))
+                .trim_end_matches(';')
+                .trim();
+            coeffs.push(super::hex_f64::parse(c).unwrap());
         }
         coeffs
     }
@@ -586,6 +701,59 @@ mod tests {
                  Gappa rounding proof certifies ({p:?})"
             );
         }
+    }
+
+    #[test]
+    fn hex_f64_round_trips_exactly() {
+        // The hex-float codec must be a bit-exact f64 round trip for arbitrary
+        // doubles (unlike serde_json's decimal float parse, which can land on a
+        // 1-ULP-different f64 and even fail to round-trip its own output).
+        let samples = [
+            0.0f64,
+            -0.0,
+            1.0,
+            -1.0,
+            std::f64::consts::PI,
+            3.187204274654472e-10,
+            f64::from_bits(4464728580760816491),
+            f64::from_bits(4464728580760816492),
+            1.1283746991712225,
+            -3.210159820319384e-17,
+            f64::MIN_POSITIVE,
+            1e300,
+            -1e-300,
+        ];
+        for v in samples {
+            let s = super::hex_f64::format(v);
+            let back = super::hex_f64::parse(&s).expect("parse own format");
+            assert_eq!(
+                v.to_bits(),
+                back.to_bits(),
+                "hex round-trip changed {v} (via {s:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn committed_coeffs_serde_round_trip_is_bit_exact() {
+        // The committed envelope's central coeffs (loaded by the runtime via the
+        // hex codec) must serialize back to hex strings that re-parse to the SAME
+        // f64 -- the round-trip stability serde_json's decimal float parser lacks
+        // for some doubles (which is why the coeffs are hex strings, not JSON
+        // numbers). Guards against the coeff trust path silently depending on a
+        // decimal parser again.
+        let env = ErfEnvelope::committed();
+        let json = serde_json::to_string(&env).expect("serialize");
+        let reparsed: ErfEnvelope = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            env, reparsed,
+            "committed envelope must serde round-trip exactly"
+        );
+        // And the JSON encodes the central coeffs as hex strings, not numbers.
+        assert!(
+            json.contains("0x1."),
+            "central coeffs must be encoded as hex-float strings"
+        );
     }
 
     #[test]

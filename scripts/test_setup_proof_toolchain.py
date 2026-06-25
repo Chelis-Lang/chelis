@@ -76,7 +76,11 @@ def test_committed_manifest_matches_committed_envelope():
     central = [b for b in env["boxes"] if b["arm"]["kind"] == "central"][0]
     assert central["proof_kind"] == "gappa"
     assert float(central["eps"]) == float(manifest["central_eps"])
-    assert central["arm"]["coeffs"] == [float(c) for c in manifest["coeffs"]]
+    # Coeffs are committed as exact hex-float strings; compare the parsed f64s
+    # bit-exactly (the envelope and manifest must name the same doubles).
+    env_coeffs = [float.fromhex(c) for c in central["arm"]["coeffs"]]
+    man_coeffs = [float.fromhex(c) for c in manifest["coeffs"]]
+    assert [c.hex() for c in env_coeffs] == [c.hex() for c in man_coeffs]
     # All three arms are Gappa-proved now (tails too).
     sats = [b for b in env["boxes"] if b["arm"]["kind"] == "saturation"]
     assert sats and all(b["proof_kind"] == "gappa" for b in sats)

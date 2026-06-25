@@ -210,13 +210,21 @@ def parse_proven_central_coeffs() -> list[float]:
     These are the EXACT doubles the Gappa proof certifies; binding them to the
     manifest/consumer coeffs closes the chain consumer == manifest == proven."""
     text = (PROOF_DIR / "central_rounding.gappa").read_text()
+
+    def parse_lit(s: str) -> float:
+        # Coefficients are emitted as C99 hex-float literals (exact f64).
+        s = s.strip()
+        return float.fromhex(s) if s.lower().lstrip("-").startswith("0x") else float(s)
+
     # Highest-degree coeff: the `aN = <c>;` line (no `rnd=`, no `* x`).
     head = re.search(r"^a(\d+)\s*=\s*([^;]+);", text, re.MULTILINE)
     if not head:
         raise SystemExit("error: central_rounding.gappa missing the leading a{deg} = c line")
     deg = int(head.group(1))
-    coeffs = [float(head.group(2).strip())]
-    # Remaining coeffs: the `+ <c>` term of each `a{deg-i} rnd= a.. * x + <c>;`.
+    coeffs = [parse_lit(head.group(2))]
+    # Remaining coeffs: the coeff term of each `a{deg-i} rnd= a.. * x + <c>;`.
+    # Anchor on `* x +` (not the last `+`): a hex-float with a positive exponent
+    # (e.g. 0x1.2p+0) contains its own `+`.
     for i in range(1, deg + 1):
         idx = deg - i
         m = re.search(
@@ -226,7 +234,7 @@ def parse_proven_central_coeffs() -> list[float]:
         )
         if not m:
             raise SystemExit(f"error: central_rounding.gappa missing the a{idx} rnd= line")
-        coeffs.append(float(m.group(1).strip()))
+        coeffs.append(parse_lit(m.group(1)))
     return coeffs
 
 
@@ -237,7 +245,9 @@ def assert_proof_binds_coeffs(manifest: dict) -> None:
     per-sub-interval central_<k>.gappa prove |p - T| but embed q = p - T, not p,
     so they do not pin p on their own; central_rounding.gappa embeds p directly)."""
     proven = parse_proven_central_coeffs()
-    committed = [float(c) for c in manifest["coeffs"]]
+    # Manifest coeffs are committed as exact hex-float strings (parser-
+    # independent); parse them the same exact way the consumer does.
+    committed = [float.fromhex(c) for c in manifest["coeffs"]]
     if len(proven) != len(committed):
         sys.stderr.write(
             f"error: proven coeff count {len(proven)} != manifest {len(committed)}\n"
@@ -267,10 +277,13 @@ def sha256_bundle(manifest_coeffs: list[float], central_eps: str) -> str:
     for f in sorted([DRIVER, *_gappa_files()], key=lambda p: p.name):
         h.update(f.name.encode())
         h.update(f.read_bytes())
-    # Canonical, bit-exact coeff + eps contribution.
+    # Canonical, bit-exact coeff + eps contribution. Coeffs are hex-float
+    # strings; re-canonicalize through float.hex() so the hash is stable
+    # regardless of incidental string formatting.
     h.update(b"central_coeffs")
     for c in manifest_coeffs:
-        h.update(float(c).hex().encode())
+        f64 = float.fromhex(c) if isinstance(c, str) else float(c)
+        h.update(f64.hex().encode())
     h.update(b"central_eps")
     h.update(str(central_eps).encode())
     return h.hexdigest()
@@ -291,26 +304,38 @@ ROUNDING_BISECT = 200
 def generate_central_rounding_proof(coeffs: list[float], central_lo, central_hi) -> None:
     """Emit central_rounding.gappa proving the f64-Horner evaluation rounding
     |P_f64(x) - P_exact(x)| <= CENTRAL_ROUNDING_BOUND over the central box, and
-    verify Gappa proves it. `coeffs` is descending-degree (Horner order)."""
+    verify Gappa proves it. `coeffs` is descending-degree (Horner order).
+
+    Coefficients are emitted as C99 hex-float literals (float.hex()): the EXACT
+    f64, parser-independent. So the polynomial the proof is over is bit-identical
+    to the f64 polynomial the runtime evaluates (the committed envelope stores
+    the same hex strings, parsed by the consumer's exact hex parser, never by a
+    decimal float parser). No exact-decimal vs nearest-f64 representation seam."""
     deg = len(coeffs) - 1
+
+    def hx(c: float) -> str:
+        return float(c).hex()
+
     lines = [
         "# WI-13 erf central-arm f64-Horner evaluation rounding bound.",
         "# Proves |P_f64(x) - P_exact(x)| <= bound, where P_f64 is the degree-"
         f"{deg} polynomial evaluated by f64 Horner (what the runtime does) and",
         "# P_exact is the same Horner without rounding. This term is added to the",
         "# committed central eps so it bounds the real f64-evaluated polynomial.",
+        "# Coefficients are exact-f64 hex-float literals so the proof is about the",
+        "# bit-exact runtime polynomial (no decimal float-parser in the path).",
         "@rnd = float<ieee_64,ne>;",
         "x = rnd(xx);",
         # rounded f64 Horner: a_deg = c_deg (exact f64 constant); a_i rnd= a_{i+1}*x + c_i
-        f"a{deg} = {coeffs[0]!r};",
+        f"a{deg} = {hx(coeffs[0])};",
     ]
     for i in range(1, deg + 1):
-        lines.append(f"a{deg - i} rnd= a{deg - i + 1} * x + {coeffs[i]!r};")
+        lines.append(f"a{deg - i} rnd= a{deg - i + 1} * x + {hx(coeffs[i])};")
     lines.append("P = a0;")
     # exact (un-rounded) Horner of the same f64 coefficients
-    lines.append(f"e{deg} = {coeffs[0]!r};")
+    lines.append(f"e{deg} = {hx(coeffs[0])};")
     for i in range(1, deg + 1):
-        lines.append(f"e{deg - i} = e{deg - i + 1} * x + {coeffs[i]!r};")
+        lines.append(f"e{deg - i} = e{deg - i + 1} * x + {hx(coeffs[i])};")
     lines.append("Pexact = e0;")
     lines.append(
         f"{{ x in [{central_lo}, {central_hi}] -> |P - Pexact| in "
@@ -330,18 +355,17 @@ def generate_central_rounding_proof(coeffs: list[float], central_lo, central_hi)
 
 def assemble_manifest(params: dict) -> None:
     frag = json.loads((PROOF_DIR / "manifest_fragment.json").read_text())
-    # Store the central coefficients as JSON NUMBERS (the exact doubles the
-    # Sollya driver produced via roundcoefficients(..., [|D ...|])). Emitting
-    # them as numbers -- the same representation the committed envelope uses --
-    # means the envelope and the manifest are read back through the identical
-    # serde_json number parser, so the proof-bundle consistency test compares
-    # bit-identical f64s. (Sollya prints the full ~90-digit exact decimal as a
-    # string; parsing that long decimal can disagree by a ULP with serde_json's
-    # number parser, so we re-emit through Python's float, which round-trips the
-    # double losslessly as the shortest decimal.)
-    frag["coeffs"] = [float(c) for c in frag["coeffs"]]
+    # Store the central coefficients as exact C99 hex-float STRINGS (float.hex()
+    # of the f64 the Sollya driver produced via roundcoefficients(..., [|D ...|])
+    # and Python's correctly-rounded float() of the printed decimal). A hex-float
+    # names the exact f64 bit pattern, so every reader -- the committed Gappa
+    # proofs, this manifest, the consumer envelope, an auditor -- recovers the
+    # SAME f64 with no decimal float parser in the path. This removes the
+    # (not-always-correctly-rounded) serde_json float parser from the coefficient
+    # trust path: the proof certifies exactly the f64 the runtime evaluates.
+    frag["coeffs"] = [float(c).hex() for c in frag["coeffs"]]
     frag["proof_kind"] = "gappa"
-    frag["generator"] = "wi13-erf-proof-4"
+    frag["generator"] = "wi13-erf-proof-5"
 
     # Fold the Gappa-proved f64-Horner evaluation rounding into the committed
     # central eps so it bounds the ACTUAL runtime-evaluated polynomial, not just
@@ -359,9 +383,8 @@ def assemble_manifest(params: dict) -> None:
     # --check-only), so a generation bug cannot ship a drifted bundle.
     assert_proof_binds_coeffs(frag)
 
-    frag["bundle_sha256"] = sha256_bundle(
-        [float(c) for c in frag["coeffs"]], frag["central_eps"]
-    )
+    # frag["coeffs"] are now hex-float strings; sha256_bundle canonicalizes them.
+    frag["bundle_sha256"] = sha256_bundle(frag["coeffs"], frag["central_eps"])
     (PROOF_DIR / "manifest.json").write_text(
         json.dumps(frag, indent=2) + "\n"
     )
@@ -375,9 +398,7 @@ def revalidate_committed() -> None:
     check_all_proofs()
     # Bind the committed coeffs to the polynomial the rounding proof certifies.
     assert_proof_binds_coeffs(manifest)
-    recomputed = sha256_bundle(
-        [float(c) for c in manifest["coeffs"]], manifest["central_eps"]
-    )
+    recomputed = sha256_bundle(manifest["coeffs"], manifest["central_eps"])
     if recomputed != manifest["bundle_sha256"]:
         sys.stderr.write(
             "error: committed bundle sha256 mismatch -- a .gappa file, the "

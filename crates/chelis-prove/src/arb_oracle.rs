@@ -942,4 +942,49 @@ mod arb_live_tests {
             );
         }
     }
+
+    #[test]
+    fn committed_eps_bounds_the_runtime_f64_evaluated_polynomial() {
+        // The decisive end-to-end soundness check on the AUTHORITATIVE runtime
+        // coefficients: at a dense grid over the central box, the runtime's
+        // actual f64-Horner evaluation of the committed polynomial -- env.bound,
+        // which calls ErfArm::approx, the exact Horner the deployed runtime runs,
+        // over the coeffs loaded from the committed hex-float strings (no decimal
+        // float parser) -- must keep the rigorous Arb erf enclosure inside the
+        // committed [approx - eps, approx + eps] band. This is run on the f64 the
+        // runtime really uses, not a re-derived or Python-parsed polynomial.
+        let env = ErfEnvelope::committed();
+        let central = env
+            .boxes
+            .iter()
+            .find(|b| matches!(b.arm, ErfArm::Central { .. }))
+            .expect("central box");
+        // ~6000-point grid over [-3, 3], plus the exact sub-interval edges where
+        // the worst case tends to sit.
+        let mut xs: Vec<f64> = (0..=6000).map(|i| -3.0 + 6.0 * i as f64 / 6000.0).collect();
+        for k in 0..=16 {
+            xs.push(-3.0 + 6.0 * k as f64 / 16.0);
+        }
+        let mut worst_margin = f64::INFINITY;
+        for x in xs {
+            let approx = central.arm.approx(x); // the runtime's f64 Horner
+            let (blo, bhi) = (approx - central.eps, approx + central.eps);
+            let truth = rigorous_erf_enclosure(x, DEFAULT_PREC);
+            assert!(
+                blo <= truth.lo && truth.hi <= bhi,
+                "runtime f64 band [{blo}, {bhi}] for x={x} must contain erf \
+                 enclosure [{}, {}] (eps={})",
+                truth.lo,
+                truth.hi,
+                central.eps
+            );
+            // Track how much headroom remains (committed eps vs the actual gap).
+            let gap = (approx - truth.lo).abs().max((approx - truth.hi).abs());
+            worst_margin = worst_margin.min(central.eps - gap);
+        }
+        assert!(
+            worst_margin >= 0.0,
+            "committed eps must bound the worst runtime gap; margin={worst_margin}"
+        );
+    }
 }
