@@ -1389,6 +1389,17 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
                     named_dims_in_loads.insert(symbol.clone());
                     bound = true;
                 }
+                // Issue #368: the symbolic-stride adjoint emits a fresh
+                // merged-axis Reshape extent (`_w368_stride_merge_*`) that
+                // is deliberately NOT input-sourced — it is the lone unknown
+                // of a Reshape and is recovered by numel conservation in
+                // `bind_symbolic_dims` (`resolve_reshape_shape`). Such a
+                // symbol needs no Load source and no per-input binding (the
+                // C backend never sees it; it is resolved before any
+                // backend lowering), so it is not a sourceless-symbol bug.
+                if !bound && is_bind_inferred_reshape_dim(symbol) {
+                    continue;
+                }
                 if !bound {
                     panic!(
                         "internal compiler error: symbolic dim `{symbol}` is referenced by a \
@@ -1423,6 +1434,12 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
         }
         for symbol in op_internal_symbolic_dims(&node.op) {
             if named_dims_in_loads.contains(&symbol) {
+                continue;
+            }
+            // Issue #368: the symbolic-stride adjoint's merged-axis Reshape
+            // extent is numel-inferred at bind time and needs no Load
+            // source (see the Bucket 4c note above and `resolve_reshape_shape`).
+            if is_bind_inferred_reshape_dim(&symbol) {
                 continue;
             }
             if !bind_symbol_from_any_load(dag, &symbol, &mut occurrences, &mut named_dims_in_loads)
@@ -1610,6 +1627,32 @@ pub fn symbolic_params(dag: &Dag) -> Vec<String> {
         .collect()
 }
 
+/// Issue #368: prefix of the fresh symbolic dim the symbolic-stride adjoint
+/// (`grad::compute_adjoints`) puts on its merged-axis Reshape extent. Such a
+/// dim is the lone unknown of a Reshape and is resolved by numel
+/// conservation in `bind_symbolic_dims`, so it is deliberately not
+/// input-sourced and must be exempt from the `symbolic_occurrences`
+/// sourceless-symbol guard.
+pub(crate) const BIND_INFERRED_RESHAPE_DIM_PREFIX: &str = "_w368_stride_merge_";
+
+/// Whether `symbol` is a bind-time-inferred merged-axis Reshape dim (see
+/// [`BIND_INFERRED_RESHAPE_DIM_PREFIX`]).
+fn is_bind_inferred_reshape_dim(symbol: &str) -> bool {
+    symbol.starts_with(BIND_INFERRED_RESHAPE_DIM_PREFIX)
+}
+
+/// Concrete extent of a dim, or `None` for a runtime-symbolic
+/// `Named(_, None)`. Local mirror of `verify::dim_known_size` (private to
+/// that module), used by `bind_symbolic_dims` to recompute `Shrink`/`Pad`
+/// movement bounds from resolved shapes (issue #368).
+fn dim_known_size(dim: &DimInfo) -> Option<usize> {
+    match dim {
+        DimInfo::Lit(n) => Some(*n),
+        DimInfo::Named(_, Some(n)) => Some(*n),
+        DimInfo::Named(_, None) => None,
+    }
+}
+
 pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Result<Dag, String> {
     fn bind_dim(dim: &DimInfo, bindings: &HashMap<String, usize>) -> Result<DimInfo, String> {
         match dim {
@@ -1629,26 +1672,120 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
 
     let mut rebound = Dag::new();
     for node in dag.nodes() {
-        let output_type = TensorType {
-            dims: node
-                .output_type
-                .dims
-                .iter()
-                .map(|dim| bind_dim(dim, bindings))
-                .collect::<Result<_, _>>()?,
-            precision: node.output_type.precision,
+        // Issue #368: a Reshape's `new_shape` may carry a fresh
+        // `Named(_, None)` merged-axis extent emitted by the symbolic
+        // stride adjoint that is NOT a named input dim (so it has no
+        // `bindings` entry). Resolve such a Reshape's shape by numel
+        // conservation: the single unknown = input_numel / product(known
+        // dims). The resolved shape is also this node's output_type. This
+        // is the only path that infers a dim not in `bindings`; everything
+        // else resolves strictly (an unbound symbol elsewhere still errors
+        // loudly — no silent guess).
+        let rebound_reshape_shape: Option<Vec<DimInfo>> = match &node.op {
+            RiscOp::Reshape { new_shape } => {
+                resolve_reshape_shape(new_shape, &rebound, node.inputs.first().copied(), bindings)
+            }
+            _ => None,
         };
+
+        let output_type = match (&node.op, &rebound_reshape_shape) {
+            (RiscOp::Reshape { .. }, Some(shape)) => TensorType {
+                dims: shape.clone(),
+                precision: node.output_type.precision,
+            },
+            _ => TensorType {
+                dims: node
+                    .output_type
+                    .dims
+                    .iter()
+                    .map(|dim| bind_dim(dim, bindings))
+                    .collect::<Result<_, _>>()?,
+                precision: node.output_type.precision,
+            },
+        };
+
         let op = match &node.op {
             RiscOp::Expand { axis, size } => RiscOp::Expand {
                 axis: *axis,
                 size: size.bind(bindings)?,
             },
-            RiscOp::Reshape { new_shape } => RiscOp::Reshape {
-                new_shape: new_shape
-                    .iter()
-                    .map(|dim| bind_dim(dim, bindings))
-                    .collect::<Result<_, _>>()?,
+            RiscOp::Reshape { new_shape } => match &rebound_reshape_shape {
+                Some(shape) => RiscOp::Reshape {
+                    new_shape: shape.clone(),
+                },
+                None => RiscOp::Reshape {
+                    new_shape: new_shape
+                        .iter()
+                        .map(|dim| bind_dim(dim, bindings))
+                        .collect::<Result<_, _>>()?,
+                },
             },
+            // Issue #368: `Shrink`/`Pad` bounds are static `usize` and so
+            // cannot carry a symbolic axis extent. The `grad` movement
+            // adjoints (`grad.rs` Pad/Shrink arms) emit a placeholder bound
+            // for any axis whose extent was a runtime-symbolic
+            // `Named(_, None)` at construction time. Now that this node's
+            // input and output shapes are resolved, recompute the bounds
+            // exactly — preserving the `start`/`before` offset (which
+            // encodes *where* in the axis) and deriving the other endpoint
+            // from the concrete shapes. Concrete-extent axes recompute to
+            // their existing value, so this is a no-op for any DAG that did
+            // not go through the symbolic-placeholder path.
+            RiscOp::Shrink { bounds } => {
+                let input_dims = rebound
+                    .get(node.inputs[0])
+                    .map(|n| n.output_type.dims.clone())
+                    .unwrap_or_default();
+                let rebound_bounds = bounds
+                    .iter()
+                    .zip(output_type.dims.iter())
+                    .zip(input_dims.iter())
+                    .map(|(((start, end), out_dim), in_dim)| {
+                        // Shrink output extent = end - start, so
+                        // end = start + concrete output extent. Fall back to
+                        // the input extent, then the original `end`, when the
+                        // shapes are unresolved (no symbolic placeholder was
+                        // involved on this axis).
+                        match dim_known_size(out_dim)
+                            .map(|n| start + n)
+                            .or_else(|| dim_known_size(in_dim))
+                        {
+                            Some(new_end) => (*start, new_end),
+                            None => (*start, *end),
+                        }
+                    })
+                    .collect();
+                RiscOp::Shrink {
+                    bounds: rebound_bounds,
+                }
+            }
+            RiscOp::Pad { padding, fill } => {
+                let input_dims = rebound
+                    .get(node.inputs[0])
+                    .map(|n| n.output_type.dims.clone())
+                    .unwrap_or_default();
+                let rebound_padding = padding
+                    .iter()
+                    .zip(output_type.dims.iter())
+                    .zip(input_dims.iter())
+                    .map(|((&(before, after), out_dim), in_dim)| {
+                        // Pad output extent = before + input_extent + after,
+                        // so after = out_extent - before - in_extent. Fall
+                        // back to the original `after` when either shape is
+                        // unresolved (no symbolic placeholder was involved).
+                        match (dim_known_size(out_dim), dim_known_size(in_dim)) {
+                            (Some(out), Some(inp)) => {
+                                (before, out.saturating_sub(before).saturating_sub(inp))
+                            }
+                            _ => (before, after),
+                        }
+                    })
+                    .collect();
+                RiscOp::Pad {
+                    padding: rebound_padding,
+                    fill: *fill,
+                }
+            }
             RiscOp::BlasMatmul {
                 batch_dims,
                 m,
@@ -1673,6 +1810,53 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
         }
     }
     Ok(rebound)
+}
+
+/// Issue #368: resolve a `Reshape`'s `new_shape` against `bindings`, and,
+/// when exactly one axis is an unbound `Named(_, None)`, infer it by numel
+/// conservation (`input_numel / product(known dims)`). Returns `None`
+/// (caller falls back to strict per-dim binding, which errors loudly on an
+/// unbound symbol) when the shape is fully strict-bindable, when more than
+/// one axis is unknown, or when the input numel / known product cannot
+/// support an exact inference — so an unrecoverable shape is never silently
+/// guessed.
+fn resolve_reshape_shape(
+    new_shape: &[DimInfo],
+    rebound: &Dag,
+    input: Option<NodeId>,
+    bindings: &HashMap<String, usize>,
+) -> Option<Vec<DimInfo>> {
+    let resolved: Vec<Option<usize>> = new_shape
+        .iter()
+        .map(|dim| {
+            dim_known_size(dim).or_else(|| match dim {
+                DimInfo::Named(name, None) => bindings.get(name).copied(),
+                _ => None,
+            })
+        })
+        .collect();
+    let unknowns = resolved.iter().filter(|r| r.is_none()).count();
+    if unknowns != 1 {
+        return None;
+    }
+    let input_numel: usize = input.and_then(|id| rebound.get(id)).and_then(|n| {
+        n.output_type
+            .dims
+            .iter()
+            .map(dim_known_size)
+            .try_fold(1usize, |acc, d| d.map(|v| acc * v))
+    })?;
+    let known_product: usize = resolved.iter().flatten().product();
+    if known_product == 0 || !input_numel.is_multiple_of(known_product) {
+        return None;
+    }
+    let inferred = input_numel / known_product;
+    Some(
+        resolved
+            .iter()
+            .map(|r| DimInfo::Lit(r.unwrap_or(inferred)))
+            .collect(),
+    )
 }
 
 #[cfg(test)]

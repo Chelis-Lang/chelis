@@ -2705,6 +2705,18 @@ fn concrete_dim_len(dim: &DimInfo) -> Option<usize> {
     }
 }
 
+/// Two dims are concat-compatible on a non-concat axis when both concrete
+/// extents are equal, or at least one is a runtime-symbolic `Named(_, None)`
+/// (extent unknown until eval). Mirrors `verify::dims_compatible` for the
+/// `lower_ad_concat` (issue #368) per-row shape check, kept local because
+/// the verify helper is private to that module.
+fn dims_equal_or_symbolic(a: &DimInfo, b: &DimInfo) -> bool {
+    match (concrete_dim_len(a), concrete_dim_len(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => true,
+    }
+}
+
 /// Helper: is `expr` an `app` of a `var` whose name equals `expected`?
 fn is_app_of_builtin(expr: &Expr, expected: &str) -> bool {
     let Expr::List(list, _) = expr else {
@@ -5983,13 +5995,39 @@ impl LowerCtx {
             }
             "mean" if args.len() == 2 => {
                 let x = self.lower_expr_node(&args[0], "mean input");
+                // Issue #368 (post-#320 residue): when the mean operand is a
+                // windowing/stacking intermediate that collapsed to a rank-0
+                // `default_type()` IR node (e.g. an un-lowered `concat` of
+                // windowed rows behind a symbolic-dim callee), recover the
+                // operand's rank/extent from the ascribed mean-RESULT type
+                // and patch the collapsed node, exactly as the `max_reduce`
+                // arm does. Without this, `tier2::lower_mean` is handed a
+                // rank-0 operand, builds a rank-0 ones divisor, and emits
+                // `sum(ones, axis=0)` over a rank-0 tensor — an ill-formed
+                // reduce whose Sum adjoint then index-panics on
+                // `input_ty.dims[axis]` (grad.rs `dim_size`/Expand site).
+                // `axis_rank` (result rank verbatim) undercounts a reduction
+                // by one, so use `reduction_operand_rank` (result rank + 1).
+                let operand_rank = self.reduction_operand_rank(x, ty);
+                let axis = self.resolve_reduce_axis(&args[1], x, operand_rank, "mean");
+                let precision = {
+                    let x_prec = self
+                        .dag
+                        .get(x)
+                        .map(|node| node.output_type.precision)
+                        .unwrap_or(ty.precision);
+                    if *ty == Self::default_type() {
+                        x_prec
+                    } else {
+                        ty.precision
+                    }
+                };
+                self.recover_collapsed_operand_type(x, axis, &ty.dims, precision);
                 let x_ty = self
                     .dag
                     .get(x)
                     .map(|n| n.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
-                let rank = self.axis_rank(x, ty);
-                let axis = self.resolve_reduce_axis(&args[1], x, rank, "mean");
                 let parent_span = self.current_span_id.clone();
                 let node = tier2::lower_mean(&mut self.dag, x, axis, &x_ty, parent_span.as_deref());
                 self.attach_reuse_hint(node, app_span, &[x])
@@ -6216,6 +6254,49 @@ impl LowerCtx {
                     }
                 }
                 sum_id
+            }
+            // Issue #368: `shape(operand, axis)` reads one axis extent as a
+            // runtime scalar. The host runtime evaluates it natively, but in
+            // the differentiable IR lane (reached through `grad`, e.g. the
+            // `n = cast(shape(x, 0), int64)` window guard) it otherwise falls
+            // through to the unknown-builtin `Load { "shape" }` placeholder,
+            // which then demands a nonexistent `shape` input at eval. When
+            // the operand's axis extent is statically CONCRETE, lower it to
+            // a scalar `Const` of that extent. A runtime-symbolic
+            // `Named(_, None)` extent stays on the host-placeholder path
+            // (no silent fabricated size). Gated to the AD lane so the
+            // forward host path is unchanged.
+            "shape"
+                if self.allow_host_list_ad_rewrites
+                    && args.len() == 2
+                    && let Some(axis) = self.extract_usize_value(&args[1])
+                    && let Some(extent) = {
+                        let operand = self.lower_expr_node(&args[0], "shape operand");
+                        self.dag
+                            .get(operand)
+                            .and_then(|n| n.output_type.dims.get(axis).cloned())
+                            .and_then(|d| concrete_dim_len(&d))
+                    } =>
+            {
+                // `shape` yields an int32 axis size (spec §builtins). Use
+                // int32 unless the ascribed type pins a concrete integer
+                // precision, so a downstream `cast` sees the right source.
+                let precision = if ty.precision.is_integer() {
+                    ty.precision
+                } else {
+                    Prim::Int32
+                };
+                self.dag.add_node(
+                    RiscOp::Const {
+                        value: extent as f64,
+                    },
+                    vec![],
+                    TensorType {
+                        dims: vec![],
+                        precision,
+                    },
+                    self.current_span_id.clone(),
+                )
             }
             "tensor_to_scalar" if args.len() == 1 => {
                 self.lower_expr_node(&args[0], "tensor_to_scalar input")
@@ -6611,6 +6692,37 @@ impl LowerCtx {
                 } else {
                     vec![]
                 };
+                // Issue #368: a `shrink` whose bounds are runtime-derived
+                // (e.g. a windowed-pool extent computed from `shape(x, 0)`)
+                // cannot be extracted to the static `Shrink { bounds }`
+                // form, leaving `bounds` empty. The host runtime evaluates
+                // such a shrink natively, but the differentiable IR lane
+                // (`grad`) requires static bounds. Previously the empty
+                // bounds slipped through to backward-DAG `verify`, which
+                // rejected it with the opaque "bounds len 0 != input rank"
+                // message. Reject loudly *here* with a specific, actionable
+                // diagnostic instead. Only fires when the operand actually
+                // has rank (a rank-0 / already-collapsed operand is a
+                // different, separately-handled path).
+                let operand_rank = self
+                    .dag
+                    .get(x)
+                    .map(|n| n.output_type.dims.len())
+                    .unwrap_or(0);
+                if self.allow_host_list_ad_rewrites && bounds.is_empty() && operand_rank > 0 {
+                    raise_fatal_lowering_error(
+                        "`grad` through `shrink` requires statically-known bounds, but this \
+                         `shrink`'s bounds are runtime-derived (e.g. a window extent computed \
+                         from `shape(...)`). The forward path evaluates it via the host runtime, \
+                         but the differentiable IR lane has no runtime-bounded `shrink`. Tracked \
+                         by Chelis-Lang/chelis#368: windowed-reduce grad works for \
+                         statically-bounded windows; runtime-bounded windows are not yet \
+                         differentiable."
+                            .to_string(),
+                        None,
+                        self.current_span_id.clone(),
+                    );
+                }
                 self.dag.add_node(
                     RiscOp::Shrink { bounds },
                     vec![x],
@@ -6629,6 +6741,37 @@ impl LowerCtx {
                     RiscOp::Stride { strides },
                     vec![x],
                     ty.clone(),
+                    self.current_span_id.clone(),
+                )
+            }
+            // Issue #368: `concat(rows, axis)` over a *literal list* of
+            // tensor rows. The host runtime evaluates `concat` natively, but
+            // it has no RISC DAG lowering, so reaching it through `grad`
+            // (where the AD lane requires a fully-lowered forward DAG) used
+            // to emit a rank-0 `Load { "concat" }` placeholder with NO
+            // inputs — severing the data dependency from the windowed rows
+            // back to the differentiated parameter, so the gradient had no
+            // path to flow (and the downstream reduce saw a collapsed
+            // operand). When the AD lane is active and the list argument
+            // resolves to a literal `Cons` chain of tensor rows, lower each
+            // row and concatenate along `axis` via Pad + Add (the same
+            // differentiable strategy `stack_scalar_nodes` uses; Pad's
+            // adjoint is Shrink). Falls through to the host-placeholder path
+            // for anything this does not recognize, so non-AD lowering and
+            // non-literal list sources are unaffected.
+            "concat" if args.len() == 2 && self.allow_host_list_ad_rewrites => {
+                if let Some(node) = self.lower_ad_concat(&args[0], &args[1], ty) {
+                    return node;
+                }
+                for arg in args {
+                    self.lower_expr(arg);
+                }
+                self.dag.add_node(
+                    RiscOp::Load {
+                        name: func_name.into(),
+                    },
+                    vec![],
+                    Self::default_type(),
                     self.current_span_id.clone(),
                 )
             }
@@ -6825,6 +6968,14 @@ impl LowerCtx {
             .as_deref()
             .is_some_and(|name| self.list_bindings.contains_key(name))
         {
+            return true;
+        }
+        // Issue #368: a literal list `[a, b, ...]` desugars to a `Cons`
+        // chain. Registering it as a list binding lets `concat(rows, axis)`
+        // (lowered through `lower_ad_concat` in the AD lane) recover the row
+        // exprs via `resolved_list_expr`. `list_bindings` is consumed only by
+        // the host-list AD rewrites, so this is a no-op for forward lowering.
+        if collect_cons_chain(expr).is_some() {
             return true;
         }
         matches!(
@@ -7026,6 +7177,123 @@ impl LowerCtx {
                 ),
                 None => padded,
             });
+        }
+        accumulator
+    }
+
+    /// Issue #368: lower `concat(rows, axis)` over a literal `Cons` chain of
+    /// tensor rows into a differentiable Pad + Add tree (the AD lane only).
+    ///
+    /// Each row is placed at its running offset along `axis` (padded with
+    /// `fill = 0` before and after) and the placed rows are summed, so the
+    /// output is their concatenation along `axis`. `Pad`'s reverse-mode
+    /// adjoint is `Shrink`, so the gradient flows back through each row's
+    /// producer chain to the differentiated parameter — exactly what the
+    /// host-placeholder `Load { "concat" }` severed.
+    ///
+    /// Returns `None` (caller falls back to the host placeholder) when the
+    /// list argument is not a recognizable literal `Cons` chain, when any
+    /// row's rank/extent along `axis` is not statically known, or when the
+    /// rows disagree on rank/precision/non-concat extents — i.e. anything we
+    /// cannot prove well-formed stays on the existing path rather than
+    /// fabricating a shape.
+    fn lower_ad_concat(
+        &mut self,
+        list_expr: &Expr,
+        axis_expr: &Expr,
+        ty: &TensorType,
+    ) -> Option<NodeId> {
+        let resolved = self.resolved_list_expr(list_expr);
+        let rows = collect_cons_chain(&resolved)?;
+        if rows.is_empty() {
+            return None;
+        }
+        let row_exprs: Vec<Expr> = rows.into_iter().cloned().collect();
+        let row_nodes: Vec<NodeId> = row_exprs
+            .iter()
+            .map(|row| self.lower_expr_node(row, "concat row"))
+            .collect();
+        let row_types: Vec<TensorType> = row_nodes
+            .iter()
+            .map(|&n| self.dag.get(n).map(|node| node.output_type.clone()))
+            .collect::<Option<Vec<_>>>()?;
+
+        let rank = row_types[0].dims.len();
+        if rank == 0 {
+            return None;
+        }
+        let raw_axis = self.extract_axis_raw(axis_expr, "concat");
+        let axis = usize::try_from(if raw_axis < 0 {
+            raw_axis + rank as i64
+        } else {
+            raw_axis
+        })
+        .ok()
+        .filter(|&a| a < rank)?;
+        let precision = row_types[0].precision;
+
+        // Every row must share rank + precision and agree on all non-concat
+        // axes; the concat-axis extents must all be statically known so we
+        // can compute offsets. Otherwise bail to the host placeholder.
+        let mut extents = Vec::with_capacity(row_types.len());
+        for rt in &row_types {
+            if rt.dims.len() != rank || rt.precision != precision {
+                return None;
+            }
+            for (ax, (a, b)) in row_types[0].dims.iter().zip(rt.dims.iter()).enumerate() {
+                if ax != axis && !dims_equal_or_symbolic(a, b) {
+                    return None;
+                }
+            }
+            extents.push(concrete_dim_len(&rt.dims[axis])?);
+        }
+        let total: usize = extents.iter().sum();
+
+        // Output non-concat dims come from row 0; the concat axis carries the
+        // summed extent. Prefer the ascribed `ty` only when it is concrete
+        // and rank-matching, else build from the rows.
+        let mut out_dims = row_types[0].dims.clone();
+        out_dims[axis] = DimInfo::Lit(total);
+        if ty.dims.len() == rank && ty.precision == precision {
+            for (ax, dim) in ty.dims.iter().enumerate() {
+                if ax != axis && concrete_dim_len(dim).is_some() {
+                    out_dims[ax] = dim.clone();
+                }
+            }
+        }
+        let out_ty = TensorType {
+            dims: out_dims,
+            precision,
+        };
+
+        let mut offset = 0usize;
+        let mut accumulator: Option<NodeId> = None;
+        for (&row, &extent) in row_nodes.iter().zip(extents.iter()) {
+            let padding: Vec<(usize, usize)> = (0..rank)
+                .map(|ax| {
+                    if ax == axis {
+                        (offset, total - offset - extent)
+                    } else {
+                        (0, 0)
+                    }
+                })
+                .collect();
+            let padded = self.dag.add_node(
+                RiscOp::Pad { padding, fill: 0.0 },
+                vec![row],
+                out_ty.clone(),
+                self.current_span_id.clone(),
+            );
+            accumulator = Some(match accumulator {
+                Some(prev) => self.dag.add_node(
+                    RiscOp::Add,
+                    vec![prev, padded],
+                    out_ty.clone(),
+                    self.current_span_id.clone(),
+                ),
+                None => padded,
+            });
+            offset += extent;
         }
         accumulator
     }
@@ -8082,7 +8350,7 @@ impl LowerCtx {
         let cond = self.lower_expr_node(cond_expr, "if condition");
         let then_node = self.lower_expr_node(then_expr, "if then branch");
         let else_node = self.lower_expr_node(else_expr, "if else branch");
-        let out_ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
+        let meta_out_ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
             self.type_from_meta(&meta.entries)
         } else {
             self.dag
@@ -8090,11 +8358,37 @@ impl LowerCtx {
                 .map(|node| node.output_type.clone())
                 .unwrap_or_else(Self::default_type)
         };
+        // Issue #368: the `if`'s metadata type is the checker's branch-join
+        // type, which for a symbolic-dim callee is the abstract sig return
+        // (e.g. `tensor[m]` -> `[Named("*", None)]`). But a non-`fail`
+        // branch frequently lowers to a CONCRETE shape (`[Lit(2)]`) once the
+        // window dims are resolved. The masked-select blend builds a mask by
+        // `Expand`ing the scalar condition to the blend shape; an abstract
+        // `Named("*", None)` blend dim there is an `Expand { size: Sym }`
+        // with no Load shape-source, which trips the `symbolic_occurrences`
+        // sourceless-symbol guard. Prefer a same-rank CONCRETE branch shape
+        // (a `fail` branch is rank-0 / scalar and is skipped) so the blend
+        // uses real extents and the mask Expand is declarable. Falls back to
+        // the metadata type when no branch is more concrete.
+        let out_ty = self
+            .concrete_branch_shape(then_node, &meta_out_ty)
+            .or_else(|| self.concrete_branch_shape(else_node, &meta_out_ty))
+            .unwrap_or(meta_out_ty);
         if !out_ty.precision.is_float() {
             return self.lower_unrepresentable("if", elems);
         }
 
         let mask = self.lower_if_mask(cond, &out_ty);
+        // Issue #368: the masked-select blend multiplies the rank-`out_ty`
+        // mask against each branch. A SCALAR branch — canonically a
+        // `fail(...)` guard, which lowers to a rank-0 placeholder — must be
+        // broadcast up to the blend rank first, or the `mul` mixes a
+        // rank-`out_ty` operand with a rank-0 operand. That ill-formed
+        // binary op evaluates fine (forward broadcast) but trips IR
+        // `verify`, which `grad`'s backward-DAG construction runs
+        // ("binary op ... mismatched dimension count: 1 vs 0").
+        let then_node = self.broadcast_scalar_to_rank(then_node, &out_ty);
+        let else_node = self.broadcast_scalar_to_rank(else_node, &out_ty);
         let one = self.dag.add_node(
             RiscOp::Const { value: 1.0 },
             vec![],
@@ -8356,27 +8650,72 @@ impl LowerCtx {
                 self.current_span_id.clone(),
             );
         }
-        if cond_ty.dims.is_empty() && !out_ty.dims.is_empty() {
-            let mut expanded = mask;
-            let mut dims = Vec::new();
-            for (axis, dim) in out_ty.dims.iter().enumerate() {
-                dims.push(dim.clone());
-                expanded = self.dag.add_node(
-                    RiscOp::Expand {
-                        axis,
-                        size: DimExpr::from(dim),
-                    },
-                    vec![expanded],
-                    TensorType {
-                        dims: dims.clone(),
-                        precision: out_ty.precision,
-                    },
-                    self.current_span_id.clone(),
-                );
-            }
-            return expanded;
+        self.broadcast_scalar_to_rank(mask, out_ty)
+    }
+
+    /// Broadcast a rank-0 (scalar) node up to `out_ty`'s shape by inserting
+    /// one `Expand` per axis, mirroring eval-time scalar broadcast. No-op
+    /// when `node` already carries a non-empty shape or when `out_ty` is
+    /// itself rank-0.
+    ///
+    /// This is the structural reconciliation an `if`/`then`/`else` blend
+    /// needs: the masked-select lowering multiplies a rank-`out_ty` mask
+    /// against each branch, so a SCALAR branch (the canonical case being a
+    /// `fail(...)` guard, which lowers to a rank-0 placeholder) must first
+    /// be broadcast to the blend rank. Without it the blend emits a binary
+    /// `mul` mixing a rank-`out_ty` operand with a rank-0 operand; that
+    /// survives forward eval (which broadcasts) but fails IR `verify` —
+    /// which `grad`'s backward-DAG construction runs — with
+    /// "binary op ... mismatched dimension count" (issue #368).
+    ///
+    /// Deliberately scalar-only: a non-scalar branch whose rank genuinely
+    /// disagrees with `out_ty` is NOT silently reshaped here — that is a
+    /// real shape error and must surface downstream, not be papered over.
+    /// Issue #368: a branch's lowered type, returned only when it is a
+    /// better basis for the `if`-blend shape than the metadata join type
+    /// `meta` — i.e. same rank, float, non-scalar, and carrying at least one
+    /// MORE concrete dim than `meta` (a `Lit`/sized axis where `meta` has a
+    /// runtime-symbolic `Named(_, None)`). A scalar (`fail`) branch returns
+    /// `None`. This lets the blend use the resolved window extents instead
+    /// of an undeclarable abstract symbol.
+    fn concrete_branch_shape(&self, node: NodeId, meta: &TensorType) -> Option<TensorType> {
+        let ty = self.dag.get(node)?.output_type.clone();
+        if ty.dims.is_empty() || !ty.precision.is_float() || ty.dims.len() != meta.dims.len() {
+            return None;
         }
-        mask
+        let more_concrete = ty.dims.iter().zip(meta.dims.iter()).any(|(b, m)| {
+            matches!(m, DimInfo::Named(_, None)) && !matches!(b, DimInfo::Named(_, None))
+        });
+        more_concrete.then_some(ty)
+    }
+
+    fn broadcast_scalar_to_rank(&mut self, node: NodeId, out_ty: &TensorType) -> NodeId {
+        let node_dims = self
+            .dag
+            .get(node)
+            .map(|n| n.output_type.dims.clone())
+            .unwrap_or_default();
+        if !node_dims.is_empty() || out_ty.dims.is_empty() {
+            return node;
+        }
+        let mut expanded = node;
+        let mut dims = Vec::new();
+        for (axis, dim) in out_ty.dims.iter().enumerate() {
+            dims.push(dim.clone());
+            expanded = self.dag.add_node(
+                RiscOp::Expand {
+                    axis,
+                    size: DimExpr::from(dim),
+                },
+                vec![expanded],
+                TensorType {
+                    dims: dims.clone(),
+                    precision: out_ty.precision,
+                },
+                self.current_span_id.clone(),
+            );
+        }
+        expanded
     }
 }
 

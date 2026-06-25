@@ -1176,11 +1176,27 @@ fn compute_adjoints(
         RiscOp::Pad { padding, .. } => {
             let x = node.inputs[0];
             let input_ty = forward.get(x).unwrap().output_type.clone();
-            // Shrink: bounds = [(before, before + dim_size), ...] for each axis
+            // The adjoint of Pad is Shrink back to the input window:
+            // bounds = [(before, before + input_extent), ...] per axis.
+            //
+            // Issue #368: when an input axis is a runtime-symbolic
+            // `Named(_, None)` extent (e.g. a windowed-pooling row carried
+            // behind a symbolic-dim callee), the extent is unknown at
+            // grad-construction time. The Shrink's *output_type* still
+            // carries that symbolic dim, and `bind_symbolic_dims` resolves
+            // both the input and output shapes at eval time, after which
+            // `rebind_movement_bounds` recomputes this Shrink's `end` from
+            // the now-concrete output extent (preserving `start`). So emit a
+            // placeholder `end = start` for the symbolic axis here rather
+            // than panicking; bind fixes it before eval. Concrete axes get
+            // the exact bound and bind recomputes to the same value.
             let bounds: Vec<(usize, usize)> = padding
                 .iter()
                 .zip(input_ty.dims.iter())
-                .map(|((before, _after), dim)| (*before, *before + dim_size(dim)))
+                .map(|((before, _after), dim)| match concrete_dim(dim) {
+                    Some(n) => (*before, *before + n),
+                    None => (*before, *before),
+                })
                 .collect();
             let dx = dag.add_node(RiscOp::Shrink { bounds }, vec![g], input_ty, None);
             Some(vec![(x, dx)])
@@ -1188,11 +1204,24 @@ fn compute_adjoints(
         RiscOp::Shrink { bounds } => {
             let x = node.inputs[0];
             let input_ty = forward.get(x).unwrap().output_type.clone();
-            // Pad: for each axis, before = start, after = original_size - end
+            // The adjoint of Shrink is Pad back to the original window:
+            // padding = [(start, original_size - end), ...] per axis.
+            //
+            // Issue #368: a symbolic original extent (`Named(_, None)`) is
+            // unknown at construction time. The Pad's *output_type* carries
+            // it, `bind_symbolic_dims` resolves the shapes at eval time, and
+            // `rebind_movement_bounds` recomputes this Pad's `after` from the
+            // now-concrete output extent (preserving `before`). Emit a
+            // placeholder `after = 0` for the symbolic axis rather than
+            // panicking; bind fixes it. Concrete axes get the exact pad and
+            // bind recomputes to the same value.
             let padding: Vec<(usize, usize)> = bounds
                 .iter()
                 .zip(input_ty.dims.iter())
-                .map(|((start, end), dim)| (*start, dim_size(dim) - end))
+                .map(|((start, end), dim)| match concrete_dim(dim) {
+                    Some(n) => (*start, n.saturating_sub(*end)),
+                    None => (*start, 0),
+                })
                 .collect();
             let dx = dag.add_node(RiscOp::Pad { padding, fill: 0.0 }, vec![g], input_ty, None);
             Some(vec![(x, dx)])
@@ -1227,21 +1256,31 @@ fn compute_adjoints(
             let x = node.inputs[0];
             let input_ty = forward.get(x).unwrap().output_type.clone();
             let precision = input_ty.precision;
-            // Source sizes per axis; symbolic (unsized) dims cannot be
-            // upsampled because the trim size is unknown, so fail closed.
-            let source_sizes: Vec<usize> = input_ty.dims.iter().map(dim_size).collect();
 
             // Running cotangent; its dims mutate axis-by-axis from the
             // strided shape back toward the source shape.
             let mut cur = g;
             let mut cur_dims: Vec<DimInfo> = node.output_type.dims.clone();
 
-            for (axis, (&step, &n_a)) in strides.iter().zip(source_sizes.iter()).enumerate() {
+            for (axis, &step) in strides.iter().enumerate() {
                 if step <= 1 {
                     // Identity stride on this axis: m_a == n_a already.
                     continue;
                 }
-                let m_a = dim_size(&cur_dims[axis]);
+                // Issue #368: the source extent `n_a` and strided extent
+                // `m_a` may be runtime-symbolic `Named(_, None)` (a window
+                // carried behind a symbolic-dim callee). Movement-op bounds
+                // are static `usize`, so emit symbolic-tolerant placeholders
+                // here and let `bind_symbolic_dims`/`rebind_movement_bounds`
+                // recompute the Shrink bound from the resolved shapes at
+                // eval time. The merged-axis Reshape extent (`m_a * step`)
+                // is left as a fresh `Named(_, None)` that `bind`'s reshape
+                // numel-inference resolves from the padded input's concrete
+                // numel. The source dim `n_a` is taken from `input_ty`
+                // verbatim, so it stays the same symbol the forward shrink
+                // carries and resolves through the same `shape_source`.
+                let source_dim = input_ty.dims[axis].clone();
+                let n_a = concrete_dim(&source_dim);
 
                 // reshape: insert a size-1 axis after `axis`.
                 let mut split_dims = cur_dims.clone();
@@ -1273,10 +1312,23 @@ fn compute_adjoints(
                     None,
                 );
 
-                // reshape: merge axis and axis+1 back into one axis of
-                // size m_a * step.
+                // reshape: merge axis and axis+1 back into one axis of size
+                // m_a * step. Concrete when `m_a` is known; a fresh
+                // bind-inferred symbol otherwise.
+                let merged_extent = match concrete_dim(&cur_dims[axis]) {
+                    Some(m_a) => DimInfo::Lit(m_a * step),
+                    None => DimInfo::Named(
+                        format!(
+                            "{}{}_{}",
+                            crate::dag::BIND_INFERRED_RESHAPE_DIM_PREFIX,
+                            node.id.0,
+                            axis
+                        ),
+                        None,
+                    ),
+                };
                 let mut merged_dims = cur_dims.clone();
-                merged_dims[axis] = DimInfo::Lit(m_a * step);
+                merged_dims[axis] = merged_extent;
                 let merged = dag.add_node(
                     RiscOp::Reshape {
                         new_shape: merged_dims.clone(),
@@ -1290,13 +1342,23 @@ fn compute_adjoints(
                 );
 
                 // shrink axis back to [0, n_a). m_a * step >= n_a always
-                // (ceil), so this is a valid trim of the trailing
-                // overshoot from the final group.
-                let mut bounds: Vec<(usize, usize)> =
-                    merged_dims.iter().map(|d| (0usize, dim_size(d))).collect();
-                bounds[axis] = (0, n_a);
+                // (ceil), so this is a valid trim of the trailing overshoot
+                // from the final group. The trimmed-axis bound is a
+                // placeholder when `n_a` is symbolic; `rebind_movement_bounds`
+                // recomputes `end` from the resolved output extent.
+                let bounds: Vec<(usize, usize)> = merged_dims
+                    .iter()
+                    .enumerate()
+                    .map(|(d, dim)| {
+                        if d == axis {
+                            (0, n_a.unwrap_or(0))
+                        } else {
+                            (0, concrete_dim(dim).unwrap_or(0))
+                        }
+                    })
+                    .collect();
                 let mut trimmed_dims = merged_dims.clone();
-                trimmed_dims[axis] = DimInfo::Lit(n_a);
+                trimmed_dims[axis] = source_dim.clone();
                 let trimmed = dag.add_node(
                     RiscOp::Shrink { bounds },
                     vec![merged],
@@ -1554,6 +1616,19 @@ fn dim_size(dim: &DimInfo) -> usize {
         DimInfo::Named(name, None) => {
             panic!("cannot determine size for symbolic dimension `{name}`")
         }
+    }
+}
+
+/// Concrete extent of a dim, or `None` for a runtime-symbolic
+/// `Named(_, None)`. Used by the `Pad`/`Shrink` movement adjoints
+/// (issue #368) to emit placeholder bounds for symbolic axes that
+/// `bind_symbolic_dims` (`rebind_movement_bounds`) later recomputes from
+/// the resolved shapes, instead of panicking like `dim_size`.
+fn concrete_dim(dim: &DimInfo) -> Option<usize> {
+    match dim {
+        DimInfo::Lit(n) => Some(*n),
+        DimInfo::Named(_, Some(n)) => Some(*n),
+        DimInfo::Named(_, None) => None,
     }
 }
 

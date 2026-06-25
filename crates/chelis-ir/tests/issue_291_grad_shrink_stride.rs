@@ -491,25 +491,29 @@ fn issue_291_grad_stride_supports_higher_order_ad() {
     assert_eq!(vals[&grad2_x].shape, vec![4]);
 }
 
-// --- STRIDE: negative parity ---
+// --- STRIDE: symbolic (runtime-extent) source axis ---
 
-/// Negative parity: a stride over a SYMBOLIC (unsized) axis cannot be
-/// upsampled because the trim size is unknown. The adjoint relies on a
-/// concrete source size (`dim_size`), matching the existing Pad/Shrink
-/// adjoints. This pins that the construction does not silently fabricate
-/// a wrong shape; the symbolic source dim is unrepresentable here.
+/// Issue #368 (behavior change): a `stride` over a SYMBOLIC (unsized)
+/// source axis used to be UNREPRESENTABLE — the adjoint `dim_size`-panicked
+/// on the `Named(_, None)` source extent. It now CONSTRUCTS: the movement
+/// adjoints emit placeholder Shrink/Pad bounds for symbolic axes and
+/// `bind_symbolic_dims` (`rebind_movement_bounds` + the Reshape numel
+/// inference) recomputes them from the resolved shapes at eval time. The
+/// source symbol `n` is carried on the `Load`, so it binds from the
+/// concrete input shape and the gradient evaluates exactly.
+///
+/// `f(x) = sum(stride(x, 2)) = x0 + x2`, so `df/dx = [1, 0, 1, 0]`.
 #[test]
-#[should_panic(expected = "symbolic dimension")]
-fn issue_291_grad_stride_symbolic_axis_is_unrepresentable() {
+fn issue_368_grad_stride_symbolic_axis_constructs_and_evals() {
     let mut dag = Dag::new();
+    // The strided axis carries the SAME source symbol `n` the forward
+    // checker assigns (it cannot compute the post-stride extent), exactly
+    // as the windowed-pool lowering produces.
     let in_ty = TensorType {
         dims: vec![DimInfo::Named("n".into(), None)],
         precision: Prim::F32,
     };
-    let strided_ty = TensorType {
-        dims: vec![DimInfo::Named("m".into(), None)],
-        precision: Prim::F32,
-    };
+    let strided_ty = in_ty.clone();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
     let s = dag.add_node(
         RiscOp::Stride { strides: vec![2] },
@@ -523,10 +527,25 @@ fn issue_291_grad_stride_symbolic_axis_is_unrepresentable() {
         scalar_f32(),
         None,
     );
-    // The Stride adjoint must read concrete source sizes; a symbolic
-    // unsized source dim panics in `dim_size` (same fail-mode as the
-    // existing Pad/Shrink adjoints).
-    let _ = grad_dag_checked(&dag, out, &[x]);
+    // Construction must now SUCCEED (no panic, valid backward DAG).
+    let result = grad_dag_checked(&dag, out, &[x])
+        .expect("symbolic-axis stride grad must construct (issue #368)");
+    let grad_x = result.grad_nodes[&x];
+
+    // And it must evaluate to the exact gradient once the symbol resolves
+    // from the concrete input shape.
+    let mut inputs = HashMap::new();
+    inputs.insert(
+        "x".into(),
+        TensorValue::from_vec(vec![4], vec![10.0, 20.0, 30.0, 40.0]),
+    );
+    let vals = eval_tensor(&result.dag, &inputs).expect("symbolic stride grad eval");
+    assert_close(
+        "grad_symbolic_stride",
+        &vals[&grad_x].data,
+        &[1.0, 0.0, 1.0, 0.0],
+    );
+    assert_eq!(vals[&grad_x].shape, vec![4]);
 }
 
 // --- SHRINK: IR-level controls (the adjoint itself was already
