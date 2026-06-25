@@ -31,3 +31,4 @@ crates/chelis-cli/pad_hip.h
 
 # Lean proof work-in-progress (tracked separately)
 proof/
+.venv
