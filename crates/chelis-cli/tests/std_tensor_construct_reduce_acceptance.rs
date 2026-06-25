@@ -161,107 +161,14 @@ bad = arange(cast(0.0, f32), cast(4.0, f32))
         .stdout(predicate::str::contains("\"score\": 1").not());
 }
 
-#[test]
-#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
-fn phase3j_pre_batch2_reduce_min_and_prod_match_reference() {
-    let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-reduce-min-prod");
-    write_file(
-        &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
-
-import Std.Tensor.Reduce (min, prod)
-
-mat = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, int64), cast(0.0, f32))
-row_min = min(copy(mat), cast(1, int32))
-row_prod = prod(mat, cast(1, int32))
-"#,
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .env("CHELIS_REEF_HOME", &reef_home)
-        .current_dir(&app_pkg)
-        .args([
-            "eval",
-            "--file",
-            app_pkg.join("src/main.ch").to_str().unwrap(),
-        ])
-        .assert()
-        .success()
-        // min along axis 1: [min(1,2,3), min(4,5,6)] = [1, 4]
-        .stdout(predicate::str::contains(
-            "row_min = tensor(shape=[2], data=[1.0, 4.0])",
-        ))
-        // prod along axis 1: [1*2*3, 4*5*6] = [6, 120]
-        .stdout(predicate::str::contains(
-            "row_prod = tensor(shape=[2], data=[6.0, 120.0])",
-        ));
-}
-
-#[test]
-#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
-fn phase3j_pre_batch2_reduce_argmax_and_argmin_match_reference() {
-    let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-reduce-argmax-argmin");
-    write_file(
-        &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
-
-import Std.Tensor.Reduce (argmax, argmin)
-
-mat = pad_sequences_to([[cast(1.0, f32), cast(5.0, f32), cast(3.0, f32)], [cast(7.0, f32), cast(2.0, f32), cast(4.0, f32)]], cast(3, int64), cast(0.0, f32))
-row_am = argmax(copy(mat), cast(1, int32))
-row_ai = argmin(mat, cast(1, int32))
-"#,
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .env("CHELIS_REEF_HOME", &reef_home)
-        .current_dir(&app_pkg)
-        .args([
-            "eval",
-            "--file",
-            app_pkg.join("src/main.ch").to_str().unwrap(),
-        ])
-        .assert()
-        .success()
-        // Indices stored as integer-valued F32 per documented Batch 1 caveat.
-        // argmax row0: 5 at idx 1; row1: 7 at idx 0 -> [1.0, 0.0]
-        .stdout(predicate::str::contains(
-            "row_am = tensor(shape=[2], data=[1.0, 0.0])",
-        ))
-        // argmin row0: 1 at idx 0; row1: 2 at idx 1 -> [0.0, 1.0]
-        .stdout(predicate::str::contains(
-            "row_ai = tensor(shape=[2], data=[0.0, 1.0])",
-        ));
-}
-
-#[test]
-#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
-fn phase3j_pre_batch2_reduce_min_rejects_scalar_input() {
-    let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-reduce-bad");
-    write_file(
-        &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
-
-import Std.Tensor.Reduce (min)
-
-bad = min(cast(1.0, f32), cast(0, int32))
-"#,
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .env("CHELIS_REEF_HOME", &reef_home)
-        .current_dir(&app_pkg)
-        .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
-        .assert()
-        // Issue #207: type errors produce exit 2; assert on stdout content only.
-        .stdout(predicate::str::contains("\"score\": 1").not());
-}
+// chelis#333: the three `phase3j_pre_batch2_reduce_*` acceptance tests
+// (min/prod, argmax/argmin, and the scalar-input rejection) were removed
+// with the Std.Tensor.Reduce module. The four functions were bodyless sigs
+// taking a runtime int32 axis that could not forward to the const-axis
+// `*_reduce` builtins, so they never had a runtime implementation and these
+// import-and-eval tests could not have passed. Reductions are exercised
+// directly through the `*_reduce` builtins with a compile-time-constant axis
+// (e.g. `min_reduce(x, cast(1, int32))`).
 
 #[test]
 #[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]

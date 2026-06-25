@@ -6,6 +6,20 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed
+
+- **`Std.Tensor.Reduce` (`min`, `prod`, `argmax`, `argmin`) removed
+  (#333).** The four were bodyless sigs declaring a *runtime* `int32`
+  axis, but the `*_reduce` builtins they would forward to require a
+  *compile-time-constant* axis, so the module was unimplementable as
+  declared and never had a runtime function — calling any of them was an
+  `unknown runtime name` at eval. Shipping a std signature the repo
+  cannot honor violates the honesty invariant, so the module and its
+  (quarantined) corpus test are removed rather than faked. Migration:
+  call the builtins directly with a const axis —
+  `min_reduce(x, cast(1, int32))`, `prod_reduce`, `argmax_reduce`,
+  `argmin_reduce`.
+
 ### Fixed
 
 - **SOUNDNESS: two calls of an ITE-bodied def at a goal site no longer

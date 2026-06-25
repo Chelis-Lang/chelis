@@ -118,11 +118,14 @@ const FLOAT_DTYPES: &[&str] = &["f32", "f64", "bf16", "f16"];
 //    and exercise each at every active dtype.
 // ---------------------------------------------------------------
 
-/// Std.Tensor.Reduce.min: arithmetic reduction; precision tvar admits
-/// every active arithmetic dtype. The stub sig has no def in
-/// production stdlib; we replicate that here and exercise it through a
-/// caller. Calling a stub would fail at runtime but type-check
-/// succeeds, which is what this test pins.
+/// Reduction-shaped sig `&tensor[a, b, p] -> int32 -> tensor[b, p]`:
+/// the precision tvar `p` admits every active arithmetic dtype. This
+/// pins the precision-generalization of that sig SHAPE in isolation — it
+/// is self-contained (the sig is replicated inline, not imported). The
+/// production Std.Tensor.Reduce.min that motivated this shape was removed
+/// in chelis#333 (bodyless sig with an unimplementable runtime axis), but
+/// the sig-shape generalization behavior remains valid and is still
+/// exercised here.
 #[test]
 fn stub_sig_min_shape_accepts_all_arithmetic_dtypes() {
     for dtype in ARITHMETIC_DTYPES {
@@ -140,7 +143,8 @@ def call_min(xs: &tensor[2, 3, {dtype}]) -> tensor[3, {dtype}] =
     }
 }
 
-/// Std.Tensor.Reduce.prod: same shape as min.
+/// Same reduction sig shape as the min-shape test above (the production
+/// Std.Tensor.Reduce.prod it mirrored was removed in chelis#333).
 #[test]
 fn stub_sig_prod_shape_accepts_all_arithmetic_dtypes() {
     for dtype in ARITHMETIC_DTYPES {
@@ -158,11 +162,13 @@ def call_prod(xs: &tensor[2, 3, {dtype}]) -> tensor[3, {dtype}] =
     }
 }
 
-/// Std.Tensor.Reduce.argmax / argmin: input precision is generalized;
-/// output is always int64 indices (changed in WS-C from spec-misaligned
-/// f32). The two ops share an identical sig shape, so they are
-/// exercised by one table-driven test over `[argmax, argmin]`
-/// (consolidated in the e2e parsimony pass).
+/// Index-reduction sig shape `&tensor[a, b, p] -> int32 -> tensor[b,
+/// int64]`: input precision is generalized; output is always int64
+/// indices (changed in WS-C from spec-misaligned f32). The two ops share
+/// an identical sig shape, so they are exercised by one table-driven test
+/// over `[argmax, argmin]` (consolidated in the e2e parsimony pass). The
+/// production Std.Tensor.Reduce.argmax/argmin that motivated this shape
+/// were removed in chelis#333; the sig-shape generalization remains.
 #[test]
 fn stub_sig_argmax_argmin_shape_returns_int64_indices_at_all_arithmetic_input_dtypes() {
     for op in ["argmax", "argmin"] {
