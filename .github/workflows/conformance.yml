@@ -97,8 +97,10 @@ jobs:
       - name: Free disk space (Ubuntu)
         uses: ./.github/actions/free-disk-space
 
+      # apt-get under retry (scripts/ci_apt_get.py): a transient apt mirror
+      # reset would otherwise flake this required gate with no code change.
       - name: Install C dependencies
-        run: sudo apt-get update && sudo apt-get install -y gcc libopenblas-dev libasan8 libubsan1
+        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

@@ -84,8 +84,11 @@ jobs:
           path: hull
           token: ${{ steps.app-token.outputs.token }}
 
+      # apt-get under retry (scripts/ci_apt_get.py): a transient apt mirror
+      # reset would otherwise flake this nightly with no code change. chelis
+      # is checked out under chelis/ (path:), so the helper is invoked there.
       - name: Install C dependencies
-        run: sudo apt-get update && sudo apt-get install -y gcc libopenblas-dev libasan8 libubsan1
+        run: python3 chelis/scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -105,6 +108,22 @@ jobs:
       - name: Build chelis (release)
         working-directory: chelis
         run: cargo build --release -p chelis-cli --bin chelis
+
+      # FAIL FAST on a cross-repo cascade lag (chelis#341/#335). The fresh
+      # campaign runs Hull's `chelis reef build`, which rejects any manifest
+      # whose `compiler = "=X.Y.Z"` pin is not byte-equal to the live binary.
+      # When chelis is released ahead of a Hull cascade (e.g. live 0.10.0 vs a
+      # pinned Hull whose deps pin =0.8.0) EVERY shard dies with an opaque
+      # `missing report (rc=2)` / `package.compiler must be =X.Y.Z`. This step
+      # diagnoses that up front with a single actionable line. It still exits
+      # nonzero on a skew -- the nightly stays red until Hull is cascaded and
+      # `hull_commit` in tests/conformance/hull/manifest.json is bumped in
+      # lockstep -- it just replaces four cryptic shard crashes with the cause.
+      - name: Check Hull pin vs live chelis version (cascade-skew guard)
+        run: |
+          python3 chelis/scripts/ci_check_hull_pin_skew.py \
+            --chelis-bin "$GITHUB_WORKSPACE/chelis/target/release/chelis" \
+            --hull-reef-toml "$GITHUB_WORKSPACE/hull/reef.toml"
 
       # FRESH (LIGHTENED) CAMPAIGN. Run Hull's OWN authoritative live differential
       # campaign against the freshly-built binary with a FRESH date-derived seed,
