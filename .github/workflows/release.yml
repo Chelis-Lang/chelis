@@ -135,19 +135,20 @@ jobs:
       # libopenblas-dev mirror the ci.yml smt-build-glibc231 lane so the
       # prove-in-CI lane builds with the same system libs this job ships.
       #
-      # Bootstrap the few packages `actions/checkout@v6` itself needs in the
-      # slim debian:11 container (git + ca-certificates + curl) BEFORE
-      # checkout, so the in-repo retry helper (scripts/ci_apt_get.py) can run
-      # for the heavy prereq install below; the helper lives in the repo and
-      # cannot be invoked before checkout. The full cvc5 toolchain set is the
-      # one that actually flakes on a mirror reset, so that is what goes
-      # through the retry; a reset on the three tiny bootstrap packages is
-      # rare. See the matching ci.yml smt-build-glibc231 job.
+      # Bootstrap the few packages needed BEFORE the in-repo retry helper can
+      # run, on the slim debian:11 image: git + ca-certificates + curl for
+      # `actions/checkout@v6`, and python3 to run scripts/ci_apt_get.py itself
+      # (debian:11-slim ships no python3, and the helper installs python3 among
+      # the heavy set -- chicken-and-egg, so python3 must exist first). The
+      # full cvc5 toolchain set is the one that actually flakes on a mirror
+      # reset, so that is what goes through the retry; a reset on these four
+      # tiny bootstrap packages is rare. See the matching ci.yml
+      # smt-build-glibc231 job.
       - name: Bootstrap checkout prerequisites
         run: |
           set -euo pipefail
           apt-get update
-          apt-get install -y --no-install-recommends git ca-certificates curl
+          apt-get install -y --no-install-recommends git ca-certificates curl python3
 
       - name: Checkout
         uses: actions/checkout@v6
