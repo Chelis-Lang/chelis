@@ -247,6 +247,10 @@ fn emit(
         if let Some(r) = &outcome.reason {
             value["reason"] = json!(r);
         }
+        // chelis#489: structured failure summary for non-passing properties.
+        if status != "passed" {
+            value["failure_summary"] = build_failure_summary_json(outcome, status, options);
+        }
         println!("{value}");
     } else {
         match status {
@@ -274,4 +278,41 @@ fn emit(
             ),
         }
     }
+}
+
+/// Build the `failure_summary` JSON value for a non-passing property (chelis#489).
+fn build_failure_summary_json(
+    outcome: &PropertyOutcome,
+    status: &str,
+    options: &ProveOptions<'_>,
+) -> serde_json::Value {
+    let requested_tier = options.tier;
+    let actual_tier = outcome.proof_tier.as_str();
+    let degradation = if requested_tier != actual_tier && actual_tier != "none" {
+        Some(json!({
+            "degraded": true,
+            "reason": format!("requested tier '{}' fell back to '{}'", requested_tier, actual_tier),
+            "from_tier": requested_tier,
+            "to_tier": actual_tier,
+        }))
+    } else {
+        None
+    };
+    let mut summary = json!({
+        "status": status,
+        "actual_tier": actual_tier,
+    });
+    if requested_tier != actual_tier {
+        summary["requested_tier"] = json!(requested_tier);
+    }
+    if let Some(d) = degradation {
+        summary["degradation"] = d;
+    }
+    if let Some(cx) = &outcome.counterexample {
+        summary["counterexample"] = cx.clone();
+    }
+    summary["seed"] = json!(outcome.seed);
+    summary["samples"] = json!(outcome.samples);
+    summary["timeout_ms"] = json!(options.smt_timeout_ms);
+    summary
 }

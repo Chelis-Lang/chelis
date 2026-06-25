@@ -2541,3 +2541,102 @@ fn issue_434_transcendental_auto_is_fuzz_validated_never_proven() {
         "a transcendental fuzz pass must NEVER read as proven: {prop}"
     );
 }
+
+#[test]
+fn prove_json_failure_summary_present_on_failed_property() {
+    let dir = write_prop(
+        r#"
+@property always_positive forall(x: f32):
+  x > 0.0
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--samples",
+            "10",
+            "--seed",
+            "0",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert_eq!(output.status.code(), Some(1));
+    let records = property_records(&output.stdout);
+    assert!(!records.is_empty(), "must have at least one property record");
+    let prop = &records[0];
+    assert_eq!(prop["status"], "failed");
+    let fs = &prop["failure_summary"];
+    assert!(fs.is_object(), "failure_summary must be an object: {prop}");
+    assert_eq!(fs["status"], "failed");
+    assert!(
+        fs.get("actual_tier").is_some(),
+        "failure_summary must have actual_tier"
+    );
+    assert!(
+        fs.get("seed").is_some(),
+        "failure_summary must have seed"
+    );
+    assert!(
+        fs.get("samples").is_some(),
+        "failure_summary must have samples"
+    );
+}
+
+#[test]
+fn prove_json_dependency_edges_in_summary() {
+    let dir = write_prop(
+        r#"
+def my_add(x: f32, y: f32) -> f32 = x + y
+
+@property test_my_add forall(x: f32, y: f32):
+  my_add(x, y) == my_add(y, x)
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--samples",
+            "5",
+            "--seed",
+            "0",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines = String::from_utf8(output.stdout).expect("utf8");
+    let records: Vec<Value> = lines
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("json"))
+        .collect();
+    let summary = records
+        .iter()
+        .find(|r| r.get("kind").and_then(Value::as_str) == Some("summary"))
+        .expect("must have summary record");
+    let edges = summary
+        .get("dependency_edges")
+        .expect("summary must have dependency_edges");
+    assert!(edges.is_array(), "dependency_edges must be an array");
+    let edges_arr = edges.as_array().unwrap();
+    assert!(
+        !edges_arr.is_empty(),
+        "dependency_edges must not be empty for a property referencing my_add"
+    );
+    let edge = &edges_arr[0];
+    assert_eq!(edge["property"], "test_my_add");
+    let refs = edge["references"].as_array().unwrap();
+    assert!(
+        refs.contains(&Value::String("my_add".to_string())),
+        "references must contain 'my_add': {refs:?}"
+    );
+}
