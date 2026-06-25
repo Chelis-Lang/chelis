@@ -1425,6 +1425,16 @@ pub(super) fn tensor_reduce_host(
             ReduceOp::Argmin => f64::INFINITY,
         };
         let mut best_index: usize = 0;
+        // #172: Min/Max must PROPAGATE NaN to match torch (`torch.max`/
+        // `torch.min` of any slice containing NaN return NaN, at every
+        // position). A naive `value > best` / `value < best` silently
+        // DROPS NaN (all NaN comparisons are false), which made the C
+        // backend's SIMD `chelis_max_f32` position-dependent and diverged
+        // from torch on both lanes. Track whether any NaN was seen and
+        // force the Min/Max result to NaN if so. (Prod already propagates
+        // via `*=`; Sum has its own IEEE accumulation; Argmax/Argmin index
+        // semantics are unchanged.)
+        let mut saw_nan = false;
         for k in 0..axis_len {
             let mut in_indices = Vec::with_capacity(rank);
             let mut oi = 0;
@@ -1438,6 +1448,9 @@ pub(super) fn tensor_reduce_host(
             }
             let in_linear = indices_to_linear(&in_indices, &tensor.value.shape);
             let value = tensor.value.data[in_linear];
+            if value.is_nan() {
+                saw_nan = true;
+            }
             match op {
                 ReduceOp::Sum => {
                     if sum_in_f32 {
@@ -1482,6 +1495,9 @@ pub(super) fn tensor_reduce_host(
                     (sum_lanes[0] + sum_lanes[1]) + (sum_lanes[2] + sum_lanes[3])
                 }
             }
+            // #172: Min/Max propagate NaN (torch parity). Prod already
+            // propagates through `best_value *= NaN`.
+            ReduceOp::Min | ReduceOp::Max if saw_nan => f64::NAN,
             ReduceOp::Min | ReduceOp::Max | ReduceOp::Prod => best_value,
             // Argmax/Argmin: write the integer index into the f64 storage
             // slot. The surrounding `precision` tag is `Prim::Int64`

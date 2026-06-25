@@ -962,3 +962,168 @@ out = df(to_tensor([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]]))\n";
          (scatter_add adjoint) (#476)",
     );
 }
+
+// -----------------------------------------------------------------------------
+// #172 — max/min reductions PROPAGATE NaN (torch parity), consistently across
+// eval and the C backend (contiguous SIMD + strided). Pre-fix, the SIMD
+// `chelis_max_f32` dropped NaN position-dependently and the `value > best`
+// reductions silently dropped it everywhere, so `max_reduce([NaN,..]) = a
+// finite value` on both lanes — diverging from `torch.max` (always NaN).
+// -----------------------------------------------------------------------------
+
+/// POSITIVE + parity: `max_reduce` of a slice containing a runtime NaN
+/// (`0.0 / 0.0`) yields NaN on the C backend, matching eval and torch. The
+/// divisor is runtime-derived so the compiler cannot constant-fold the NaN
+/// away. Uses `is_nan` semantics, not bit-identity (NaN has many encodings).
+#[test]
+fn issue_172_max_reduce_propagates_nan_backend_matches_eval() {
+    // Row 0: a/b = [0/0, 1/1] = [NaN, 1] -> max NaN. Row 1: [2/1, 3/1] =
+    // [2, 3] -> max 3. The output is a `tensor[2]` (both lanes label it),
+    // and the non-NaN row proves the fix doesn't blanket-NaN the result.
+    let source = "def f(a: tensor[2, 2, f32], b: tensor[2, 2, f32]) -> tensor[2, f32] = max_reduce(div(a, b), 1)\n\
+out = f(to_tensor([[0.0, 1.0], [2.0, 3.0]]), to_tensor([[0.0, 1.0], [1.0, 1.0]]))\n";
+
+    let build = chelis_build_c(source, "maxnan");
+    let stdout = compile_and_run_emitted(build.path(), &build.path().join("maxnan.c"));
+    let val = binding_line(&stdout, "out");
+    assert!(
+        val.to_ascii_lowercase().contains("nan"),
+        "max_reduce of a NaN row must be NaN on the C backend (#172 torch parity), \
+         not a finite value; got {val:?}",
+    );
+    // The non-NaN row must still reduce to 3 — the fix propagates NaN only
+    // for the slice that actually contains one.
+    assert!(
+        val.contains("3.0"),
+        "the NaN-free row must still reduce to 3 (#172 must not blanket-NaN); \
+         got {val:?}",
+    );
+
+    let eval_out = chelis_eval_ok(source, "maxnan");
+    assert!(
+        tensor_value(&eval_out, "out")
+            .to_ascii_lowercase()
+            .contains("nan"),
+        "eval must also propagate NaN through max_reduce (#172); got {eval_out:?}",
+    );
+}
+
+/// POSITIVE + parity: `min_reduce` propagates NaN identically.
+#[test]
+fn issue_172_min_reduce_propagates_nan_backend_matches_eval() {
+    let source = "def f(a: tensor[2, 2, f32], b: tensor[2, 2, f32]) -> tensor[2, f32] = min_reduce(div(a, b), 1)\n\
+out = f(to_tensor([[0.0, 1.0], [2.0, 3.0]]), to_tensor([[0.0, 1.0], [1.0, 1.0]]))\n";
+
+    let build = chelis_build_c(source, "minnan");
+    let stdout = compile_and_run_emitted(build.path(), &build.path().join("minnan.c"));
+    let val = binding_line(&stdout, "out");
+    assert!(
+        val.to_ascii_lowercase().contains("nan"),
+        "min_reduce of a NaN row must be NaN on the C backend (#172); got {val:?}",
+    );
+    assert!(
+        val.contains("2.0"),
+        "the NaN-free row min must still be 2 (#172 must not blanket-NaN); got {val:?}",
+    );
+
+    let eval_out = chelis_eval_ok(source, "minnan");
+    assert!(
+        tensor_value(&eval_out, "out")
+            .to_ascii_lowercase()
+            .contains("nan"),
+        "eval must propagate NaN through min_reduce (#172)",
+    );
+}
+
+/// POSITIVE control: a NaN-FREE max_reduce still agrees byte-for-byte; the
+/// NaN-propagation fix must not perturb ordinary reductions.
+#[test]
+fn issue_172_max_reduce_no_nan_unchanged_backend_matches_eval() {
+    let source = "def f(x: tensor[2, 3, f32]) -> tensor[2, f32] = max_reduce(x, 1)\n\
+out = f(to_tensor([[1.0, 3.0, 2.0], [6.0, 4.0, 5.0]]))\n";
+
+    let build = chelis_build_c(source, "maxok");
+    let stdout = compile_and_run_emitted(build.path(), &build.path().join("maxok.c"));
+    assert_eq!(
+        binding_line(&stdout, "out"),
+        "out = tensor(shape=[2], data=[3.0, 6.0])",
+        "NaN-free max_reduce must be unchanged; stdout={stdout:?}",
+    );
+    let eval_out = chelis_eval_ok(source, "maxok");
+    assert_eq!(
+        tensor_value(&stdout, "out"),
+        tensor_value(&eval_out, "out"),
+        "eval and C backend must agree on NaN-free max_reduce (#172 control)",
+    );
+}
+
+/// FORWARD-through-grad: a `max_reduce` whose forward value is NaN keeps that
+/// NaN when the function is differentiated (the traced forward still
+/// propagates). This guards the forward half of the grad path; the exact
+/// NaN gradient ROUTING (torch sends grad to the NaN slot) is a separate
+/// grad-NaN-semantics question tracked as a #172 follow-up.
+#[test]
+fn issue_172_max_reduce_grad_forward_propagates_nan() {
+    // `df` differentiates `f` (a `max_reduce` over a NaN slice); `fout` is
+    // the forward value of the SAME function. The grad def must lower/run
+    // (no internal error), and the forward of a NaN slice must be NaN — the
+    // traced forward propagates the NaN exactly like the standalone forward.
+    // Two roots so eval labels both with a `name = ` prefix.
+    let source = "def f(a: tensor[3, f32]) -> f32 = tensor_to_scalar(max_reduce(div(a, to_tensor([1.0, 0.0, 1.0])), 0))\n\
+def df(a: tensor[3, f32]) -> tensor[3, f32] = grad(f)(a)\n\
+gout = df(to_tensor([1.0, 0.0, 2.0]))\n\
+fout = f(to_tensor([1.0, 0.0, 2.0]))\n";
+
+    let eval_out = chelis_eval_ok(source, "maxgradfwd");
+    assert!(
+        binding_line(&eval_out, "fout")
+            .to_ascii_lowercase()
+            .contains("nan"),
+        "the forward of a max_reduce over a NaN slice must be NaN (#172); \
+         eval={eval_out:?}",
+    );
+    // The grad def must have produced a value (it ran without an internal
+    // error); we don't pin the exact NaN gradient routing here (separate
+    // grad-NaN-semantics follow-up).
+    assert!(
+        eval_out.contains("gout ="),
+        "grad of a max_reduce over a NaN slice must still produce a gradient \
+         tensor (no internal error); eval={eval_out:?}",
+    );
+}
+
+/// REGRESSION-LOCK (#172 tanh parity): Chelis `tanh` (lowered as
+/// `2*sigmoid(2x) - 1`) is bit-identical to `torch.tanh` on the probe set.
+/// Pinning the exact f32 values guards against the lowering drifting away
+/// from torch parity. Reference values from torch 2.x CPU:
+/// `tanh([0.5, -0.5, 1.0, -2.0]) = [0.46211717, -0.46211717, 0.7615942,
+/// -0.96402758]`. The values render through the shared f32 printer.
+#[test]
+fn issue_172_tanh_matches_torch_reference() {
+    let source = "def f(x: tensor[4, f32]) -> tensor[4, f32] = tanh(x)\n\
+out = f(to_tensor([0.5, -0.5, 1.0, -2.0]))\n";
+
+    let eval_out = chelis_eval_ok(source, "tanhparity");
+    let val = tensor_value(&eval_out, "out");
+    let data = val
+        .split_once("data=[")
+        .and_then(|(_, rest)| rest.strip_suffix("])"))
+        .unwrap_or_else(|| panic!("could not parse tanh data from {val:?}"));
+    let got: Vec<f64> = data
+        .split(", ")
+        .map(|e| e.parse().unwrap_or_else(|_| panic!("bad element {e:?}")))
+        .collect();
+    let torch_ref = [
+        0.462_117_165_327_072_14,
+        -0.462_117_165_327_072_14,
+        0.761_594_176_292_419_4,
+        -0.964_027_583_599_090_6,
+    ];
+    assert_eq!(got.len(), 4, "tanh must return 4 elements; got {got:?}");
+    for (i, (&g, &r)) in got.iter().zip(torch_ref.iter()).enumerate() {
+        assert!(
+            (g - r).abs() < 1e-6,
+            "tanh[{i}] = {g} must match torch reference {r} (#172 parity)",
+        );
+    }
+}

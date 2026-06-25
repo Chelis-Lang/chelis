@@ -1046,7 +1046,10 @@ fn host_runtime_softmax_mixed_negative_infinity_is_finite_like_torch() {
         "mixed -Inf (no +Inf) softmax must be finite, not NaN; got {:?}",
         out.value.data
     );
-    assert!(out.value.data[1].abs() < 1e-9, "the -Inf position must be 0");
+    assert!(
+        out.value.data[1].abs() < 1e-9,
+        "the -Inf position must be 0"
+    );
     assert!(
         (out.value.data[0] - 0.268_941_4).abs() < 1e-5
             && (out.value.data[2] - 0.731_058_6).abs() < 1e-5,
@@ -1100,6 +1103,67 @@ y = softmax(x, cast(5, int32))
         joined.contains("softmax") && joined.contains("out of bounds"),
         "expected softmax axis-bounds diagnostic, got: {joined}"
     );
+}
+
+// ----------------------------------------------------------------
+// #172: Max/Min reductions PROPAGATE NaN, matching torch
+// (`torch.max`/`torch.min` of any NaN-containing slice return NaN, at
+// every position). A naive `value > best` drops NaN, which made the C
+// backend's SIMD `chelis_max_f32` position-dependent and diverged from
+// torch on both lanes. The eval lane is the reference, so it must agree.
+// ----------------------------------------------------------------
+
+#[test]
+fn host_runtime_max_reduce_propagates_nan_like_torch() {
+    let nan = f64::NAN;
+    // NaN at each position must still yield NaN (position-independent).
+    for pos in 0..3 {
+        let mut data = vec![1.0, 2.0, 3.0];
+        data[pos] = nan;
+        let tensor = RuntimeTensorValue {
+            value: IrTensorValue::from_vec(vec![3], data),
+            precision: Prim::F32,
+        };
+        let out = tensor_reduce_host(&tensor, 0, ReduceOp::Max).expect("max reduce");
+        assert!(
+            out.value.data[0].is_nan(),
+            "max_reduce of a slice with NaN@{pos} must be NaN (torch parity, #172); got {:?}",
+            out.value.data
+        );
+    }
+}
+
+#[test]
+fn host_runtime_min_reduce_propagates_nan_like_torch() {
+    let nan = f64::NAN;
+    for pos in 0..3 {
+        let mut data = vec![1.0, 2.0, 3.0];
+        data[pos] = nan;
+        let tensor = RuntimeTensorValue {
+            value: IrTensorValue::from_vec(vec![3], data),
+            precision: Prim::F32,
+        };
+        let out = tensor_reduce_host(&tensor, 0, ReduceOp::Min).expect("min reduce");
+        assert!(
+            out.value.data[0].is_nan(),
+            "min_reduce of a slice with NaN@{pos} must be NaN (torch parity, #172); got {:?}",
+            out.value.data
+        );
+    }
+}
+
+#[test]
+fn host_runtime_max_reduce_no_nan_is_unchanged() {
+    // POSITIVE control: a NaN-free slice still reduces normally — the
+    // NaN-propagation fix must not perturb ordinary max/min.
+    let tensor = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![3], vec![1.0, 3.0, 2.0]),
+        precision: Prim::F32,
+    };
+    let max = tensor_reduce_host(&tensor, 0, ReduceOp::Max).expect("max reduce");
+    let min = tensor_reduce_host(&tensor, 0, ReduceOp::Min).expect("min reduce");
+    assert_eq!(max.value.data, vec![3.0]);
+    assert_eq!(min.value.data, vec![1.0]);
 }
 
 // ----------------------------------------------------------------

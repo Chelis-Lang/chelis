@@ -393,7 +393,9 @@ impl CEmitter {
                     &node.output_type,
                     dag,
                     "INFINITY",
-                    "acc = fminf(acc, t{a}->data[src_idx]);",
+                    // #172: propagate NaN (torch parity) in the strided
+                    // path, matching the contiguous `chelis_min_f32`.
+                    "acc = chelis_fmin_propnan_f32(acc, t{a}->data[src_idx]);",
                     Some("chelis_min_f32"),
                 );
             }
@@ -3711,7 +3713,10 @@ impl CEmitter {
         self.line(&format!(
             "int src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->ndim);"
         ));
-        self.line(&format!("acc = fmaxf(acc, t{a}->data[src_idx]);"));
+        // #172: propagate NaN (torch parity), matching `chelis_max_f32`.
+        self.line(&format!(
+            "acc = chelis_fmax_propnan_f32(acc, t{a}->data[src_idx]);"
+        ));
         self.indent -= 1;
         self.line("}");
         self.line(&format!("t{id}->data[outer] = acc;"));
@@ -3777,8 +3782,9 @@ impl CEmitter {
         self.line(&format!(
             "int src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->ndim);"
         ));
+        // #172: propagate NaN (torch parity), matching `chelis_max_f32`.
         self.line(&format!(
-            "acc = fmaxf(acc, {load}(((uint16_t*)t{a}->data)[src_idx]));"
+            "acc = chelis_fmax_propnan_f32(acc, {load}(((uint16_t*)t{a}->data)[src_idx]));"
         ));
         self.indent -= 1;
         self.line("}");
@@ -3957,6 +3963,13 @@ impl CEmitter {
         }
         let window_volume: usize = window_shape.iter().product();
         self.emit_slot_wrapper(id, ty);
+        // NOTE (#172 sibling, intentionally NOT changed here): windowed
+        // Max/Min keep C99 `fmaxf`/`fminf` (NaN-dropping). The #172 fix
+        // scopes NaN propagation to the `max_reduce` / `min_reduce`
+        // reductions; flipping reduce_window forward without also defining
+        // the NaN gradient-routing in the windowed backward (the `ext`
+        // recompute below) would introduce a fwd/bwd inconsistency. Tracked
+        // as a follow-up; reduce_window has its own parity gate (spec §2.3).
         let (init_literal, combine_template) = match reducer {
             ReduceWindowKind::Max => ("-INFINITY", "acc = fmaxf(acc, t{a}->data[src_idx]);"),
             ReduceWindowKind::Min => ("INFINITY", "acc = fminf(acc, t{a}->data[src_idx]);"),
@@ -4476,7 +4489,9 @@ impl CEmitter {
             self.line(&format!("  default: acc3 += v{last}; break;"));
             self.line("}");
         } else {
-            self.line(&format!("acc = fmaxf(acc, v{last});"));
+            // #172: fused max_reduce propagates NaN (torch parity),
+            // matching the non-fused `chelis_max_f32` path.
+            self.line(&format!("acc = chelis_fmax_propnan_f32(acc, v{last});"));
         }
         self.indent -= 1;
         self.line("}");
@@ -5025,12 +5040,23 @@ mod tests {
     }
 
     #[test]
-    fn max_reduce_emits_fmaxf() {
+    fn max_reduce_emits_nan_propagating_max() {
         let mut dag = Dag::new();
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
         dag.add_node(RiscOp::MaxReduce { axis: 0 }, vec![a], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
-        assert!(c.contains("fmaxf(acc"));
+        // #172: the contiguous fast path uses the NaN-propagating SIMD
+        // helper; the strided fallback uses the NaN-propagating scalar
+        // helper. Plain C99 `fmaxf` (which DROPS NaN) must not appear in
+        // the reduction — it would diverge from torch.
+        assert!(
+            c.contains("chelis_max_f32(") && c.contains("chelis_fmax_propnan_f32(acc"),
+            "max_reduce must emit the NaN-propagating max helpers (#172):\n{c}"
+        );
+        assert!(
+            !c.contains("fmaxf(acc"),
+            "max_reduce must not use NaN-dropping fmaxf on the accumulator (#172):\n{c}"
+        );
         assert!(c.contains("-INFINITY"));
     }
 
