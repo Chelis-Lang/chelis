@@ -329,6 +329,108 @@ def bad(x: tensor[f32]): tensor[f32] =
 }
 
 #[test]
+fn len_does_not_consume_list_argument() {
+    // chelis#527: `len` reads a `List`'s length via `chelis_list_len`
+    // (a `const *` that never frees), so the caller still owns the
+    // list afterwards.  The parameter is named `params` — a
+    // Deep-tag-colliding identifier that desugars through the MetaExpr
+    // param form #343 began consume-tracking — so this is a faithful
+    // regression for the School `_step_list` read-then-reuse shape.
+    check_surf(
+        r#"
+def ok(params: List[tensor[k, f32]]): List[tensor[k, f32]] =
+  {
+    n: int64 = len(params)
+    params
+  }
+"#,
+    )
+    .expect("len reads the list without freeing it, so params must remain live (chelis#527)");
+}
+
+#[test]
+fn index_does_not_consume_list_argument() {
+    // chelis#527: `index` retains the element it returns and reads the
+    // list via a `const *` (`chelis_list_index`), never freeing it.
+    check_surf(
+        r#"
+def ok(params: List[tensor[k, f32]]): List[tensor[k, f32]] =
+  {
+    first: tensor[k, f32] = index(params, 0)
+    _ = drop(first)
+    params
+  }
+"#,
+    )
+    .expect(
+        "index reads an element without freeing the list, so params must remain live (chelis#527)",
+    );
+}
+
+#[test]
+fn list_len_then_index_then_reuse_compiles() {
+    // The full School `_step_list` read-then-reuse shape: read the
+    // length and an element, then hand the list onward.  Compiled
+    // clean at 0.10.0, regressed at 0.10.1 (chelis#527).
+    check_surf(
+        r#"
+def step(params: List[tensor[k, f32]]): List[tensor[k, f32]] =
+  {
+    n: int64 = len(params)
+    first: tensor[k, f32] = index(params, 0)
+    _ = drop(first)
+    params
+  }
+"#,
+    )
+    .expect("read length + element then reuse the list must compile (chelis#527)");
+}
+
+#[test]
+fn len_still_flags_use_after_genuine_consume() {
+    // Negative parity: borrowing on `len` must not blind the checker
+    // to a real prior consume.  An explicit `drop` frees `params`, so
+    // the later `len(params)` borrow-read is a use-after-consume.
+    let errors = check_surf(
+        r#"
+def bad(params: List[tensor[k, f32]]): int64 =
+  {
+    _ = drop(params)
+    n: int64 = len(params)
+    n
+  }
+"#,
+    )
+    .expect_err("len after dropping params should still be rejected");
+
+    assert!(errors.iter().any(|error| {
+        matches!(error.kind, CheckErrorKind::UseAfterConsume)
+            && error.message.contains("variable `params`")
+    }));
+}
+
+#[test]
+fn index_still_flags_use_after_genuine_consume() {
+    // Negative parity for `index`, mirroring the `len` case above.
+    let errors = check_surf(
+        r#"
+def bad(params: List[tensor[k, f32]]): tensor[k, f32] =
+  {
+    _ = drop(params)
+    first: tensor[k, f32] = index(params, 0)
+    first
+  }
+"#,
+    )
+    .expect_err("index after dropping params should still be rejected");
+
+    assert!(errors.iter().any(|error| {
+        matches!(error.kind, CheckErrorKind::UseAfterConsume)
+            && error.message.contains("variable `params`")
+    }));
+}
+
+#[test]
 fn grad_accepts_function_with_borrowed_tensor_parameter() {
     check_surf(
         r#"
