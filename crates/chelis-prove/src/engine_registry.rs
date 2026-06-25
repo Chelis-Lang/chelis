@@ -86,6 +86,19 @@ impl DischargeRegistry {
     /// from here and [`register`](Self::register)s its own engine on top.
     pub fn with_builtin_engines() -> Self {
         let mut registry = Self::new();
+        // WI-15: the Clarabel SoS certificate engine registers AHEAD of cvc5 so a
+        // univariate-poly-nonneg-on-interval goal is tried by Clarabel FIRST (its
+        // narrow fitness matches exactly that subset). On a verified exact
+        // certificate it returns a definite `Proved` -- the try-until-discharge
+        // dispatcher returns it immediately at `CertificateBearing@Exact`. On
+        // `Unknown` (no certificate / failed repair / boundary degeneracy) it is a
+        // non-verdict, so the dispatcher FALLS THROUGH to cvc5, whose NRA may
+        // still decide the goal. Only registered when the Clarabel SDP proposer is
+        // present (the targets with the `sdp` backend wired); elsewhere there is
+        // no production proposer, so registering would only add an always-Unknown
+        // fall-through hop.
+        #[cfg(all(feature = "clarabel", any(target_os = "linux", target_os = "macos")))]
+        registry.register(Box::new(crate::clarabel_sos::ClarabelSosEngine::clarabel()));
         #[cfg(feature = "smt")]
         registry.register(Box::new(crate::discharge::Cvc5Engine::new()));
         #[cfg(not(feature = "smt"))]
@@ -1005,5 +1018,158 @@ mod tests {
             discharge.evidence().get("engine").and_then(|v| v.as_str()),
             Some("box_sound")
         );
+    }
+
+    // --- WI-15: the Clarabel SoS engine through the DISPATCHED try-until-discharge
+    // path (clarabel feature + the targets with the sdp backend) ---
+
+    #[cfg(all(feature = "clarabel", any(target_os = "linux", target_os = "macos")))]
+    mod clarabel_dispatch {
+        use super::*;
+        use crate::clarabel_sos::ClarabelSosEngine;
+
+        fn var(name: &str) -> SmtExpr {
+            SmtExpr::Var(name.to_string())
+        }
+
+        fn cmp(op: CmpOp, l: SmtExpr, r: SmtExpr) -> SmtExpr {
+            SmtExpr::Cmp(op, Box::new(l), Box::new(r))
+        }
+
+        fn mul(l: SmtExpr, r: SmtExpr) -> SmtExpr {
+            SmtExpr::Arith(crate::solver::ArithOp::Mul, Box::new(l), Box::new(r))
+        }
+
+        fn sub(l: SmtExpr, r: SmtExpr) -> SmtExpr {
+            SmtExpr::Arith(crate::solver::ArithOp::Sub, Box::new(l), Box::new(r))
+        }
+
+        /// `<body> >= 0` for `x in [lo, hi]`.
+        fn poly_goal(body: SmtExpr, lo: f64, hi: f64) -> Goal {
+            Goal::smt(SmtProperty {
+                variables: vec![("x".to_string(), SmtSort::Real)],
+                preconditions: vec![
+                    cmp(CmpOp::Ge, var("x"), SmtExpr::RealLit(lo)),
+                    cmp(CmpOp::Le, var("x"), SmtExpr::RealLit(hi)),
+                ],
+                postcondition: cmp(CmpOp::Ge, body, SmtExpr::RealLit(0.0)),
+            })
+        }
+
+        /// A registry with Clarabel ahead of a MOCK SMT engine (the cvc5 stand-in
+        /// on the fall-through), so the dispatched try-until-discharge path is
+        /// exercised without needing the `smt` feature in this lane. The mock
+        /// returns a chosen definite verdict for an SMT goal.
+        fn clarabel_then_mock(mock_result: TierBResult) -> DischargeRegistry {
+            let mut registry = DischargeRegistry::new();
+            registry.register(Box::new(ClarabelSosEngine::clarabel()));
+            registry.register(Box::new(MockEngine {
+                name: "mock_cvc5",
+                fits_shape: WhichShape::Smt,
+                soundness: Soundness::SoundApproximate,
+                qualifiers: QualifierSet::from_iter_kinds([Qualifier::RealArith]),
+                result: mock_result,
+            }));
+            registry
+        }
+
+        #[test]
+        fn matched_poly_is_proved_by_clarabel_at_exact_no_fallthrough() {
+            // x^2 >= 0 on [-1, 1]: Clarabel certifies it, returns a DEFINITE
+            // Proved -> the dispatcher returns it immediately at
+            // CertificateBearing@Exact, never reaching the mock fall-through.
+            let goal = poly_goal(mul(var("x"), var("x")), -1.0, 1.0);
+            // The mock would Disprove if reached; proving Clarabel short-circuits.
+            let registry = clarabel_then_mock(TierBResult::Disproved(serde_json::json!({})));
+            assert_eq!(registry.selected_engine_name(&goal), Some("clarabel_sos"));
+            let discharge = registry.dispatch(&goal, 5_000);
+            assert_eq!(*discharge.result(), TierBResult::Proved);
+            assert_eq!(discharge.soundness(), Soundness::Exact);
+            assert!(
+                discharge
+                    .qualifier_set()
+                    .contains(Qualifier::CertificateBearing)
+            );
+            // The verdict is Clarabel's, not the mock's (no laundered fall-through).
+            assert_eq!(
+                discharge.evidence().get("engine").and_then(|v| v.as_str()),
+                Some("clarabel_sos")
+            );
+        }
+
+        #[test]
+        fn clarabel_unknown_falls_through_to_the_next_smt_engine() {
+            // A goal Clarabel cannot certify but is still in its fitness subset:
+            // a cubic x^3 on [0, 1] is nonnegative but ODD-degree handling here
+            // may not produce a verifying cert for every such goal -> Clarabel
+            // returns Unknown (a non-verdict), so the dispatcher FALLS THROUGH to
+            // the mock SMT engine, which here Proves it. The returned verdict is
+            // the MOCK's, proving the fall-through actually occurred.
+            //
+            // To make the fall-through deterministic regardless of whether
+            // Clarabel happens to certify x^3, use a goal OUTSIDE Clarabel's
+            // certifiable reach but still a recognized poly: the constant FALSE
+            // sub-case is covered separately; here we force the Clarabel-Unknown
+            // arm with a goal whose proposer returns no cert, then assert the mock
+            // verdict is returned. x^3 - x on [0,1] is NEGATIVE in part of (0,1)
+            // (e.g. x=1/2 -> -3/8), so Clarabel finds no nonneg cert -> Unknown,
+            // and the mock (forced to Prove) supplies the dispatched verdict.
+            let goal = poly_goal(
+                sub(mul(mul(var("x"), var("x")), var("x")), var("x")),
+                0.0,
+                1.0,
+            );
+            let registry = clarabel_then_mock(TierBResult::Proved);
+            // Clarabel is tried first (it fits the poly subset)...
+            assert_eq!(registry.selected_engine_name(&goal), Some("clarabel_sos"));
+            let discharge = registry.dispatch(&goal, 5_000);
+            // ...but it returns Unknown (the goal is not nonneg on [0,1]), so the
+            // dispatcher falls through to the mock, whose Proved is returned. The
+            // verdict carries the MOCK's badge (RealArith), NOT Clarabel's
+            // CertificateBearing -- no laundering across the fall-through.
+            assert_eq!(*discharge.result(), TierBResult::Proved);
+            assert!(discharge.qualifier_set().contains(Qualifier::RealArith));
+            assert!(
+                !discharge
+                    .qualifier_set()
+                    .contains(Qualifier::CertificateBearing),
+                "the fall-through verdict must carry the mock's badge, not Clarabel's"
+            );
+            assert_eq!(
+                discharge.evidence().get("engine").and_then(|v| v.as_str()),
+                Some("mock_cvc5")
+            );
+        }
+
+        #[test]
+        fn false_goal_is_not_proved_through_the_dispatched_path() {
+            // x^2 - 1 >= 0 on [-1, 1] is FALSE (-1 at x=0). Clarabel finds no
+            // cert -> Unknown -> falls through to the mock. The mock here returns
+            // Unknown too (a sound cvc5 would Disprove or Unknown, never Prove a
+            // false goal), so the WHOLE dispatch is EXHAUSTED: Untrusted, empty,
+            // Error -> Unsupported, NEVER Proved. The soundness-critical end-to-end
+            // negative: a false goal is never proved through the dispatched path.
+            let goal = poly_goal(
+                sub(mul(var("x"), var("x")), SmtExpr::RealLit(1.0)),
+                -1.0,
+                1.0,
+            );
+            let registry = clarabel_then_mock(TierBResult::Unknown);
+            let discharge = registry.dispatch(&goal, 5_000);
+            assert_ne!(
+                *discharge.result(),
+                TierBResult::Proved,
+                "a false goal must never be proved through the dispatched path"
+            );
+            assert_ne!(discharge.soundness(), Soundness::Exact);
+            assert!(
+                !discharge
+                    .qualifier_set()
+                    .contains(Qualifier::CertificateBearing)
+            );
+            // Exhausted (both engines non-verdict) -> the Unsupported honesty floor.
+            assert_eq!(discharge.soundness(), Soundness::Untrusted);
+            assert!(discharge.qualifier_set().is_empty());
+        }
     }
 }

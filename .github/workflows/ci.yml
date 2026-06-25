@@ -213,6 +213,16 @@ jobs:
       - name: Run cross-engine oracle (cvc5 + Z3 agreement)
         run: cargo test -p chelis-prove --features "smt z3" --test cross_engine_oracle
 
+      - name: Run clarabel-gated chelis-prove tests
+        # libopenblas-dev (installed above) backs clarabel's sdp-openblas
+        # backend on Linux; the engine is opt-in and never in the release.
+        run: cargo test -p chelis-prove --features clarabel
+
+      - name: Run the production solver config (cvc5 + Clarabel, both live)
+        # The shipped-feature-superset lane: Clarabel registered ahead of
+        # cvc5, the fall-through composition exercised end-to-end.
+        run: cargo test -p chelis-prove --features "smt clarabel"
+
   # chelis#422 (WS-4) PROVE-IN-CI lanes. release.yml ships
   # `chelis-cli --features smt` on three targets; cvc5 builds from
   # source (cmake/g++/libgmp) and is only PROVEN on ubuntu-latest by the
