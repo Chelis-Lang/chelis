@@ -1010,6 +1010,39 @@ mod tests {
     }
 
     #[test]
+    fn pipe_and_block_operands_are_parenthesized_and_round_trip() {
+        // chelis#461 is not specific to `if`: every non-self-delimiting
+        // compound form (`|>` pipe, block, `match`, `fn`, `with`, `par`) must
+        // be wrapped as a binary operand, or its tail absorbs the operator on
+        // re-parse. The existing tests cover `if`; this pins the pipe and block
+        // arms of `wrap_operand` so a future trim of that match cannot silently
+        // re-open the soundness gap for them.
+        for (source, expected) in [
+            (
+                "@property p forall(x: f32):\n  (x |> neg) + 1.0 >= x\n",
+                "(((x |> neg) + 1.0) >= x)",
+            ),
+            (
+                "@property p forall(x: f32):\n  { y = x; y } + 1.0 >= x\n",
+                "((({\n  y = x\n  y\n}) + 1.0) >= x)",
+            ),
+        ] {
+            let (_, _, body) = property_parts(source);
+            let rendered = format_expression(&body);
+            assert_eq!(rendered, expected, "operand wrap for: {source}");
+            // The wrapped operand must re-parse to itself (idempotent + meaning
+            // preserving): the operator stays outside the compound's tail.
+            let reparsed =
+                property_parts(&format!("@property p forall(x: f32):\n  {rendered}\n")).2;
+            assert_eq!(
+                format_expression(&reparsed),
+                rendered,
+                "rendered operand-wrapped goal must re-parse to itself: {source}"
+            );
+        }
+    }
+
+    #[test]
     fn format_proposition_includes_the_guard_but_keeps_unguarded_bare() {
         // chelis#436 MED-1: a guarded property's discharged proposition is the
         // full `forall ... where ...: body`, not the bare body (which would
