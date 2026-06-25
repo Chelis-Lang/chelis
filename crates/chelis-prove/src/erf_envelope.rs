@@ -181,6 +181,13 @@ const ERF_ENVELOPE_JSON: &str = include_str!("../data/erf_envelope.json");
 #[cfg(test)]
 const ERF_PROOF_MANIFEST_JSON: &str = include_str!("../data/erf_proof/manifest.json");
 
+/// The committed f64-Horner rounding proof, embedded so a test can parse the
+/// coefficients the proof is LITERALLY over and bind them to the consumer
+/// polynomial (consumer == manifest == proven). Without this, a coefficient
+/// could drift from the proven polynomial and ship undetected.
+#[cfg(test)]
+const ERF_CENTRAL_ROUNDING_GAPPA: &str = include_str!("../data/erf_proof/central_rounding.gappa");
+
 impl ErfEnvelope {
     /// The canonical committed envelope.
     ///
@@ -491,6 +498,94 @@ mod tests {
             central, &manifest_coeffs,
             "committed central coeffs must equal the Gappa-proved manifest coeffs"
         );
+    }
+
+    /// Parse a Gappa numeric literal to the SAME f64 the consumer envelope's
+    /// coefficients are read as. The envelope coeffs come through serde_json's
+    /// number parser; Rust's `str::parse::<f64>` can disagree with it by one ULP
+    /// on some 16-17 digit decimals. To compare bit-exactly we route the Gappa
+    /// literal through serde_json too (the literals are plain decimals serde
+    /// accepts as JSON numbers).
+    #[cfg(test)]
+    fn parse_like_consumer(lit: &str) -> f64 {
+        serde_json::from_str::<f64>(lit.trim())
+            .unwrap_or_else(|_| panic!("gappa numeric literal {lit:?} parses as f64"))
+    }
+
+    /// Parse the central coefficients (descending degree) literally embedded in
+    /// the committed f64-Horner rounding proof's Horner chain:
+    ///   `a{deg} = <coeff[0]>;`
+    ///   `a{deg-i} rnd= a{deg-i+1} * x + <coeff[i]>;`  for i = 1..deg
+    /// These are the exact doubles the Gappa rounding proof is over.
+    #[cfg(test)]
+    fn proven_central_coeffs() -> Vec<f64> {
+        let text = ERF_CENTRAL_ROUNDING_GAPPA;
+        let mut head_deg = None;
+        let mut head_c = None;
+        // The leading `aN = <c>;` line (no `rnd=`).
+        for line in text.lines() {
+            let l = line.trim();
+            if let Some(rest) = l.strip_prefix('a')
+                && let Some(eq) = rest.find(" = ")
+            {
+                let deg: usize = rest[..eq].parse().expect("a{deg} index");
+                let c = rest[eq + 3..].trim_end_matches(';').trim();
+                head_deg = Some(deg);
+                head_c = Some(parse_like_consumer(c));
+                break;
+            }
+        }
+        let deg = head_deg.expect("leading a{deg} = c line");
+        let mut coeffs = vec![head_c.unwrap()];
+        for i in 1..=deg {
+            let idx = deg - i;
+            // line: `a{idx} rnd= a{idx+1} * x + <c>;`
+            let needle = format!("a{idx} rnd=");
+            let line = text
+                .lines()
+                .map(str::trim)
+                .find(|l| l.starts_with(&needle))
+                .unwrap_or_else(|| panic!("a{idx} rnd= line"));
+            let plus = line.rfind('+').expect("+ <coeff>");
+            let c = line[plus + 1..].trim_end_matches(';').trim();
+            coeffs.push(parse_like_consumer(c));
+        }
+        coeffs
+    }
+
+    #[test]
+    fn committed_coeffs_are_bound_to_the_proven_polynomial() {
+        // Proof-integrity guard: the consumer's central coefficients must be
+        // bit-identical to the polynomial the committed Gappa rounding proof is
+        // literally over. This closes the chain consumer == manifest == PROVEN:
+        // without it, a coefficient could drift from the proven polynomial (the
+        // per-sub-interval proofs embed q = p - T, not p, so they do not pin p;
+        // central_rounding.gappa embeds p's coefficients directly).
+        let proven = proven_central_coeffs();
+        let env = ErfEnvelope::committed();
+        let consumer = env
+            .boxes
+            .iter()
+            .find_map(|b| match &b.arm {
+                ErfArm::Central { coeffs } => Some(coeffs.clone()),
+                _ => None,
+            })
+            .expect("a central box");
+        assert_eq!(
+            proven.len(),
+            consumer.len(),
+            "proven coeff count {} != consumer {}",
+            proven.len(),
+            consumer.len()
+        );
+        for (i, (p, c)) in proven.iter().zip(consumer.iter()).enumerate() {
+            assert_eq!(
+                p.to_bits(),
+                c.to_bits(),
+                "central coeff[{i}] in the consumer ({c:?}) is not the value the \
+                 Gappa rounding proof certifies ({p:?})"
+            );
+        }
     }
 
     #[test]

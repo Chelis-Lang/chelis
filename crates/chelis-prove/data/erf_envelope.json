@@ -60,7 +60,7 @@
     "certify_subdivisions": 2097152,
     "central_eps_math": "5.683485754194293e-07",
     "central_eps_f64_rounding": "2e-13",
-    "method": "all arms Sollya + Gappa-proved (bundle sha256 05e23b90e99107df...); central = remez polynomial with committed eps = approx-error + f64-eval-rounding (both Gappa-proved); tails = constant +-1, proved by subdivision + certified Taylor model + Gappa; Arb whole-box certifier is the independent every-build cross-check of the math term",
-    "gappa_bundle_sha256": "05e23b90e99107df6c2751c2e883d299d1a5a0355a4782a25124fc3b7f4ca2bb"
+    "method": "all arms Sollya + Gappa-proved (bundle sha256 d1b28cedd09656e4...); central = remez polynomial with committed eps = approx-error + f64-eval-rounding (both Gappa-proved); tails = constant +-1, proved by subdivision + certified Taylor model + Gappa; Arb whole-box certifier is the independent every-build cross-check of the math term",
+    "gappa_bundle_sha256": "d1b28cedd09656e4d663432b33901e0f1ea727e55eef3586abe247cdc37844b4"
   }
 }

@@ -199,12 +199,80 @@ def check_all_proofs() -> None:
         raise SystemExit(3)
 
 
-def sha256_bundle() -> str:
-    """Stable sha256 over the sorted .gappa proof files + the driver."""
+def parse_proven_central_coeffs() -> list[float]:
+    """Parse the central polynomial coefficients (descending degree) that
+    central_rounding.gappa LITERALLY proves over. The rounding proof embeds the
+    coefficients in its f64-Horner chain:
+
+        a{deg} = <coeff[0]>;
+        a{deg-i} rnd= a{deg-i+1} * x + <coeff[i]>;   for i = 1..deg
+
+    These are the EXACT doubles the Gappa proof certifies; binding them to the
+    manifest/consumer coeffs closes the chain consumer == manifest == proven."""
+    text = (PROOF_DIR / "central_rounding.gappa").read_text()
+    # Highest-degree coeff: the `aN = <c>;` line (no `rnd=`, no `* x`).
+    head = re.search(r"^a(\d+)\s*=\s*([^;]+);", text, re.MULTILINE)
+    if not head:
+        raise SystemExit("error: central_rounding.gappa missing the leading a{deg} = c line")
+    deg = int(head.group(1))
+    coeffs = [float(head.group(2).strip())]
+    # Remaining coeffs: the `+ <c>` term of each `a{deg-i} rnd= a.. * x + <c>;`.
+    for i in range(1, deg + 1):
+        idx = deg - i
+        m = re.search(
+            rf"^a{idx}\s+rnd=\s*a{idx + 1}\s*\*\s*x\s*\+\s*([^;]+);",
+            text,
+            re.MULTILINE,
+        )
+        if not m:
+            raise SystemExit(f"error: central_rounding.gappa missing the a{idx} rnd= line")
+        coeffs.append(float(m.group(1).strip()))
+    return coeffs
+
+
+def assert_proof_binds_coeffs(manifest: dict) -> None:
+    """Assert the coefficients the rounding proof is over are bit-identical to
+    the committed manifest coeffs. This is the proof-integrity guard: without it,
+    a coeff could drift from the proven polynomial and ship undetected (the
+    per-sub-interval central_<k>.gappa prove |p - T| but embed q = p - T, not p,
+    so they do not pin p on their own; central_rounding.gappa embeds p directly)."""
+    proven = parse_proven_central_coeffs()
+    committed = [float(c) for c in manifest["coeffs"]]
+    if len(proven) != len(committed):
+        sys.stderr.write(
+            f"error: proven coeff count {len(proven)} != manifest {len(committed)}\n"
+        )
+        raise SystemExit(3)
+    for i, (p, c) in enumerate(zip(proven, committed)):
+        # bit-exact: the proof must be over the SAME doubles the consumer uses.
+        if p.hex() != c.hex():
+            sys.stderr.write(
+                f"error: central coeff[{i}] drifted from the proven polynomial.\n"
+                f"  proven (central_rounding.gappa): {p!r}\n"
+                f"  committed (manifest):            {c!r}\n"
+                "The committed coefficients are not the polynomial the Gappa proof "
+                "certifies. consumer == manifest == proven is broken.\n"
+            )
+            raise SystemExit(3)
+
+
+def sha256_bundle(manifest_coeffs: list[float], central_eps: str) -> str:
+    """Stable sha256 over the sorted .gappa proof files + the driver, AND the
+    committed central coefficients + central eps. Hashing the coeffs+eps (not
+    just the .gappa text) means a coeff/eps drift from the committed bundle
+    changes the sha256, so the `--check-only` sha256 guard fires on it -- closing
+    the proof-integrity gap where a coeff could be perturbed while the .gappa
+    files (and thus the old hash) stayed unchanged."""
     h = hashlib.sha256()
     for f in sorted([DRIVER, *_gappa_files()], key=lambda p: p.name):
         h.update(f.name.encode())
         h.update(f.read_bytes())
+    # Canonical, bit-exact coeff + eps contribution.
+    h.update(b"central_coeffs")
+    for c in manifest_coeffs:
+        h.update(float(c).hex().encode())
+    h.update(b"central_eps")
+    h.update(str(central_eps).encode())
     return h.hexdigest()
 
 
@@ -273,7 +341,7 @@ def assemble_manifest(params: dict) -> None:
     # double losslessly as the shortest decimal.)
     frag["coeffs"] = [float(c) for c in frag["coeffs"]]
     frag["proof_kind"] = "gappa"
-    frag["generator"] = "wi13-erf-proof-3"
+    frag["generator"] = "wi13-erf-proof-4"
 
     # Fold the Gappa-proved f64-Horner evaluation rounding into the committed
     # central eps so it bounds the ACTUAL runtime-evaluated polynomial, not just
@@ -286,7 +354,14 @@ def assemble_manifest(params: dict) -> None:
     frag["central_eps_f64_rounding"] = repr(CENTRAL_ROUNDING_BOUND)
     frag["central_eps"] = repr(central_eps_math + CENTRAL_ROUNDING_BOUND)
 
-    frag["bundle_sha256"] = sha256_bundle()
+    # Proof-integrity guard: the committed coeffs MUST be the polynomial the
+    # rounding proof is over. Assert it at generation time too (not only in
+    # --check-only), so a generation bug cannot ship a drifted bundle.
+    assert_proof_binds_coeffs(frag)
+
+    frag["bundle_sha256"] = sha256_bundle(
+        [float(c) for c in frag["coeffs"]], frag["central_eps"]
+    )
     (PROOF_DIR / "manifest.json").write_text(
         json.dumps(frag, indent=2) + "\n"
     )
@@ -294,14 +369,20 @@ def assemble_manifest(params: dict) -> None:
 
 
 def revalidate_committed() -> None:
-    """The CI gate: re-check the committed bundle's proofs and its sha256."""
+    """The CI gate: re-check the committed bundle's proofs, the coeff binding,
+    and the sha256."""
     manifest = json.loads((PROOF_DIR / "manifest.json").read_text())
     check_all_proofs()
-    recomputed = sha256_bundle()
+    # Bind the committed coeffs to the polynomial the rounding proof certifies.
+    assert_proof_binds_coeffs(manifest)
+    recomputed = sha256_bundle(
+        [float(c) for c in manifest["coeffs"]], manifest["central_eps"]
+    )
     if recomputed != manifest["bundle_sha256"]:
         sys.stderr.write(
-            "error: committed bundle sha256 mismatch -- a .gappa file or the "
-            f"driver changed without regenerating the manifest.\n"
+            "error: committed bundle sha256 mismatch -- a .gappa file, the "
+            "driver, the committed coeffs, or the central eps changed without "
+            "regenerating the manifest.\n"
             f"  manifest: {manifest['bundle_sha256']}\n"
             f"  computed: {recomputed}\n"
         )

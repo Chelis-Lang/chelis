@@ -723,8 +723,8 @@
     }
   ],
   "proof_kind": "gappa",
-  "generator": "wi13-erf-proof-3",
+  "generator": "wi13-erf-proof-4",
   "central_eps_math": "5.683485754194293e-07",
   "central_eps_f64_rounding": "2e-13",
-  "bundle_sha256": "05e23b90e99107df6c2751c2e883d299d1a5a0355a4782a25124fc3b7f4ca2bb"
+  "bundle_sha256": "d1b28cedd09656e4d663432b33901e0f1ea727e55eef3586abe247cdc37844b4"
 }
