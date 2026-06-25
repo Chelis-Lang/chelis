@@ -424,6 +424,45 @@ mod tests {
     }
 
     #[test]
+    fn central_eps_includes_the_f64_evaluation_rounding() {
+        // Soundness: the committed central eps must bound the ACTUAL f64-evaluated
+        // polynomial, so it is the math approximation error PLUS the Gappa-proved
+        // f64-Horner evaluation rounding -- not a math-only bound (which would be
+        // unsound by ~1 ULP). Lock central_eps == central_eps_math +
+        // central_eps_f64_rounding, both recorded in the manifest.
+        let manifest: serde_json::Value =
+            serde_json::from_str(ERF_PROOF_MANIFEST_JSON).expect("proof manifest parses");
+        let eps: f64 = manifest["central_eps"].as_str().unwrap().parse().unwrap();
+        let math: f64 = manifest["central_eps_math"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let rounding: f64 = manifest["central_eps_f64_rounding"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            eps,
+            math + rounding,
+            "central eps must be math ({math}) + f64-eval rounding ({rounding})"
+        );
+        assert!(
+            rounding > 0.0,
+            "the f64-eval rounding term must be positive"
+        );
+        // The committed envelope's central box carries this rounding-inclusive eps.
+        let env = ErfEnvelope::committed();
+        let central = env
+            .boxes
+            .iter()
+            .find(|b| matches!(b.arm, ErfArm::Central { .. }))
+            .unwrap();
+        assert_eq!(central.eps, eps);
+    }
+
+    #[test]
     fn central_coeffs_match_the_committed_gappa_proof_bundle() {
         // The committed central polynomial must be the exact polynomial the
         // Gappa proof is about (the manifest coeffs), or the proof certifies a

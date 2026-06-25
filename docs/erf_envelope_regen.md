@@ -24,9 +24,16 @@ Each box's `eps` is a sound sup-norm bound `sup_{x in box} |approx(x) - erf(x)|
 re-runs through `gappa` to confirm each bound:
 
 - **Central arm.** `central_<k>.gappa` — the degree-21 remez polynomial's
-  approximation error, bounded per sub-interval. The coefficients are rounded to
-  `f64` **before** the proof, so the proof is about the exact polynomial the
-  runtime uses.
+  approximation error `|p - erf|`, bounded per sub-interval. The coefficients are
+  rounded to `f64` **before** the proof, so the proof is about the exact
+  polynomial the runtime uses. Plus `central_rounding.gappa` — the f64-Horner
+  **evaluation rounding** `|P_f64(x) - P_exact(x)|` over the whole central box
+  (Gappa's `float<ieee_64,ne>` model). The committed central `eps` is the sum
+  `central_eps = central_eps_math + central_eps_f64_rounding` (both recorded in
+  the manifest and provenance), so it bounds the value the runtime *actually*
+  computes (`P_f64`), not just the real-arithmetic polynomial. A math-only bound
+  would be unsound by ~1 ULP. The tails evaluate the exact constant `+-1`, so
+  their f64-eval rounding is zero and no rounding proof is needed for them.
 - **Saturation tails.** `tail_pos_<k>.gappa` / `tail_neg_<k>.gappa` — the same
   machinery with the constant `+-1` as the approximation. Gappa proves
   `|+-1 - T(x)| <= bound` where `T` is the certified local Taylor model of `erf`;

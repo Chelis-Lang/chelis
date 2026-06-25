@@ -40,7 +40,7 @@
           -3.210159820319384e-17
         ]
       },
-      "eps": 5.683485754194293e-07,
+      "eps": 5.683487754194293e-07,
       "proof_kind": "gappa"
     },
     {
@@ -55,10 +55,12 @@
     }
   ],
   "provenance": {
-    "generator_version": "wi13-erf-envelope-optionb-2",
+    "generator_version": "wi13-erf-envelope-optionb-3",
     "certify_prec": 128,
     "certify_subdivisions": 2097152,
-    "method": "all arms Sollya + Gappa-proved (bundle sha256 cbb52c57a08d92c9...); central = remez polynomial, tails = constant +-1, each proved by subdivision + certified Taylor model + Gappa; Arb whole-box certifier is the independent every-build cross-check",
-    "gappa_bundle_sha256": "cbb52c57a08d92c99f253418ecfad805a05b469971b49568143d9c4cbcb77aa1"
+    "central_eps_math": "5.683485754194293e-07",
+    "central_eps_f64_rounding": "2e-13",
+    "method": "all arms Sollya + Gappa-proved (bundle sha256 05e23b90e99107df...); central = remez polynomial with committed eps = approx-error + f64-eval-rounding (both Gappa-proved); tails = constant +-1, proved by subdivision + certified Taylor model + Gappa; Arb whole-box certifier is the independent every-build cross-check of the math term",
+    "gappa_bundle_sha256": "05e23b90e99107df6c2751c2e883d299d1a5a0355a4782a25124fc3b7f4ca2bb"
   }
 }

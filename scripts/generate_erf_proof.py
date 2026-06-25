@@ -208,6 +208,58 @@ def sha256_bundle() -> str:
     return h.hexdigest()
 
 
+# The committed f64-Horner evaluation-rounding bound for the central polynomial,
+# proved over the whole central box by central_rounding.gappa. The runtime
+# evaluates the degree-21 polynomial by f64 Horner, so |P_f64 - P_exact| must be
+# folded into the committed central eps for it to bound the ACTUAL runtime value
+# (a math-only |p - erf| bound is unsound by ~1 ULP). Gappa proves the whole-box
+# bound below this value (~1.4e-13); the committed bound is this conservative
+# round number. The saturation tails evaluate the exact constant +-1, so their
+# f64-eval rounding is zero -- no rounding proof is needed for them.
+CENTRAL_ROUNDING_BOUND = 2e-13
+ROUNDING_BISECT = 200
+
+
+def generate_central_rounding_proof(coeffs: list[float], central_lo, central_hi) -> None:
+    """Emit central_rounding.gappa proving the f64-Horner evaluation rounding
+    |P_f64(x) - P_exact(x)| <= CENTRAL_ROUNDING_BOUND over the central box, and
+    verify Gappa proves it. `coeffs` is descending-degree (Horner order)."""
+    deg = len(coeffs) - 1
+    lines = [
+        "# WI-13 erf central-arm f64-Horner evaluation rounding bound.",
+        "# Proves |P_f64(x) - P_exact(x)| <= bound, where P_f64 is the degree-"
+        f"{deg} polynomial evaluated by f64 Horner (what the runtime does) and",
+        "# P_exact is the same Horner without rounding. This term is added to the",
+        "# committed central eps so it bounds the real f64-evaluated polynomial.",
+        "@rnd = float<ieee_64,ne>;",
+        "x = rnd(xx);",
+        # rounded f64 Horner: a_deg = c_deg (exact f64 constant); a_i rnd= a_{i+1}*x + c_i
+        f"a{deg} = {coeffs[0]!r};",
+    ]
+    for i in range(1, deg + 1):
+        lines.append(f"a{deg - i} rnd= a{deg - i + 1} * x + {coeffs[i]!r};")
+    lines.append("P = a0;")
+    # exact (un-rounded) Horner of the same f64 coefficients
+    lines.append(f"e{deg} = {coeffs[0]!r};")
+    for i in range(1, deg + 1):
+        lines.append(f"e{deg - i} = e{deg - i + 1} * x + {coeffs[i]!r};")
+    lines.append("Pexact = e0;")
+    lines.append(
+        f"{{ x in [{central_lo}, {central_hi}] -> |P - Pexact| in "
+        f"[0, {CENTRAL_ROUNDING_BOUND!r}] }}"
+    )
+    lines.append(f"$ x in {ROUNDING_BISECT};")
+    gp = PROOF_DIR / "central_rounding.gappa"
+    gp.write_text("\n".join(lines) + "\n")
+    proc = subprocess.run(["gappa", str(gp)], capture_output=True, text=True, timeout=300)
+    if proc.returncode != 0:
+        sys.stderr.write(
+            "error: the central f64-Horner rounding proof did not check "
+            f"(bound {CENTRAL_ROUNDING_BOUND} too tight?):\n{proc.stderr[-1500:]}\n"
+        )
+        raise SystemExit(3)
+
+
 def assemble_manifest(params: dict) -> None:
     frag = json.loads((PROOF_DIR / "manifest_fragment.json").read_text())
     # Store the central coefficients as JSON NUMBERS (the exact doubles the
@@ -221,7 +273,19 @@ def assemble_manifest(params: dict) -> None:
     # double losslessly as the shortest decimal.)
     frag["coeffs"] = [float(c) for c in frag["coeffs"]]
     frag["proof_kind"] = "gappa"
-    frag["generator"] = "wi13-erf-proof-2"
+    frag["generator"] = "wi13-erf-proof-3"
+
+    # Fold the Gappa-proved f64-Horner evaluation rounding into the committed
+    # central eps so it bounds the ACTUAL runtime-evaluated polynomial, not just
+    # the real-arithmetic |p - erf|. Record both terms for the audit trail.
+    # central_eps_math is the Sollya/Gappa sup-norm of |p - erf|; the committed
+    # central_eps adds the f64-eval rounding bound. The tails evaluate the exact
+    # constant +-1 (zero eval rounding), so their eps is unchanged.
+    central_eps_math = float(frag["central_eps"])
+    frag["central_eps_math"] = repr(central_eps_math)
+    frag["central_eps_f64_rounding"] = repr(CENTRAL_ROUNDING_BOUND)
+    frag["central_eps"] = repr(central_eps_math + CENTRAL_ROUNDING_BOUND)
+
     frag["bundle_sha256"] = sha256_bundle()
     (PROOF_DIR / "manifest.json").write_text(
         json.dumps(frag, indent=2) + "\n"
@@ -244,8 +308,11 @@ def revalidate_committed() -> None:
         raise SystemExit(3)
     n = len(_gappa_files())
     print(
-        f"re-validated {n} Gappa proofs (central + both tails); bundle sha256 "
-        f"matches; central_eps={manifest['central_eps']}, "
+        f"re-validated {n} Gappa proofs (central + both tails + the central "
+        f"f64-Horner rounding proof); bundle sha256 matches; "
+        f"central_eps={manifest['central_eps']} "
+        f"(math {manifest['central_eps_math']} + f64-rounding "
+        f"{manifest['central_eps_f64_rounding']}), "
         f"tail_pos_eps={manifest['tail_pos_eps']}, tail_neg_eps={manifest['tail_neg_eps']}"
     )
 
@@ -295,6 +362,13 @@ def main(argv: list[str] | None = None) -> int:
         old.unlink()
     run_sollya_driver(params)
     center_qc_lines()
+    # The central f64-Horner evaluation-rounding proof (over the whole central
+    # box). Generated from the coefficients the driver just emitted, before the
+    # bundle check + sha256 so it is included in both.
+    frag = json.loads((PROOF_DIR / "manifest_fragment.json").read_text())
+    generate_central_rounding_proof(
+        [float(c) for c in frag["coeffs"]], params["central_lo"], params["central_hi"]
+    )
     check_all_proofs()
     assemble_manifest(params)
     manifest = json.loads((PROOF_DIR / "manifest.json").read_text())

@@ -82,17 +82,26 @@ def build_envelope(manifest: dict) -> dict:
     return {
         "boxes": boxes,
         "provenance": {
-            "generator_version": "wi13-erf-envelope-optionb-2",
-            # Arb cross-check parameters (the validate step re-derives the bound
-            # at this precision/subdivision and asserts committed eps >= it).
+            "generator_version": "wi13-erf-envelope-optionb-3",
+            # Arb cross-check parameters (the validate step re-derives the
+            # math sup-norm at this precision/subdivision and asserts committed
+            # eps >= it). The Arb check covers the math |p - erf| term; the
+            # f64-evaluation rounding term is covered by the Gappa rounding proof.
             "certify_prec": 128,
             "certify_subdivisions": ARB_SUBDIVISIONS,
+            # The committed CENTRAL eps bounds the actual f64-evaluated
+            # polynomial: it is the math approximation error plus the f64-Horner
+            # evaluation rounding, BOTH Gappa-proved. (The tails evaluate the
+            # exact constant +-1, so their eval rounding is zero.)
+            "central_eps_math": manifest["central_eps_math"],
+            "central_eps_f64_rounding": manifest["central_eps_f64_rounding"],
             "method": (
                 "all arms Sollya + Gappa-proved (bundle sha256 "
-                f"{manifest['bundle_sha256'][:16]}...); central = remez polynomial, "
-                "tails = constant +-1, each proved by subdivision + certified "
-                "Taylor model + Gappa; Arb whole-box certifier is the independent "
-                "every-build cross-check"
+                f"{manifest['bundle_sha256'][:16]}...); central = remez polynomial "
+                "with committed eps = approx-error + f64-eval-rounding (both "
+                "Gappa-proved); tails = constant +-1, proved by subdivision + "
+                "certified Taylor model + Gappa; Arb whole-box certifier is the "
+                "independent every-build cross-check of the math term"
             ),
             "gappa_bundle_sha256": manifest["bundle_sha256"],
         },
