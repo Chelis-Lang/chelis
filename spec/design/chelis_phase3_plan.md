@@ -974,6 +974,13 @@ tag push. Release history:
         bodies through the tensor-helper path using the declared return
         type, so the four reduction wrappers (and `Std.Nn.Linear.forward`)
         emit real C definitions and link cleanly.
+        (Superseded — the four `Std.Tensor.Reduce` wrappers were later
+        REMOVED in chelis#333: they were bodyless sigs taking a runtime
+        `int32` axis but the `*_reduce` builtins require a const axis, so
+        they were unimplementable as declared and never had a runtime
+        function. Consumers call `min_reduce`/`prod_reduce`/`argmax_reduce`/
+        `argmin_reduce` directly with a const axis. `Std.Nn.Linear.forward`
+        is unaffected.)
       - `Std.Nn.Attention.scaled_dot_product_attention` import — Batch
         5b removed the duplicate `chelis_uniform_sample_f32` emission
         so a downstream package can import the symbol and build a
