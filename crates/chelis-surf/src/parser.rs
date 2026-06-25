@@ -901,7 +901,24 @@ impl Parser {
         let effects = self.parse_optional_effects()?;
 
         self.expect(&TokenKind::Eq)?;
-        let body = self.parse_expr_until_decl_separator()?;
+        let body = self.parse_expr_until_decl_separator().map_err(|e| {
+            if matches!(e, ParseError::UnexpectedEof) {
+                // Check if the next token after the boundary is 'if' — a common
+                // mistake of splitting if/then/else onto a separate line after '='.
+                let remaining = &self.tokens[self.pos..];
+                let next_meaningful = remaining.iter().find(|t| {
+                    !matches!(t.kind, TokenKind::Newline | TokenKind::Semicolon)
+                });
+                if matches!(next_meaningful.map(|t| &t.kind), Some(TokenKind::If)) {
+                    return ParseError::Expected {
+                        expected: "expression after `=`".into(),
+                        found: "unexpected end of expression; did you mean to write the if/then/else on the same line or use braces?".into(),
+                        offset: self.current_offset(),
+                    };
+                }
+            }
+            e
+        })?;
         let span = start.merge(expr_span(&body));
 
         Ok(Decl::FunDef {
@@ -1779,8 +1796,22 @@ impl Parser {
     fn parse_match(&mut self) -> Result<Expr, ParseError> {
         let start = self.advance().span; // consume Match
         let scrutinee = self.parse_expr(0)?;
-        self.expect(&TokenKind::With)?;
-        self.expect(&TokenKind::LBrace)?;
+        if *self.peek() != TokenKind::With {
+            return Err(ParseError::Expected {
+                expected: "match ... with { | pattern => expr }".into(),
+                found: format!("{:?}; expected `with` keyword followed by braced arms", self.peek()),
+                offset: self.current_offset(),
+            });
+        }
+        self.advance(); // consume With
+        if *self.peek() != TokenKind::LBrace {
+            return Err(ParseError::Expected {
+                expected: "`{` after `match ... with`; arms must be enclosed in braces: match expr with { | pattern => body }".into(),
+                found: format!("{:?}", self.peek()),
+                offset: self.current_offset(),
+            });
+        }
+        self.advance(); // consume LBrace
 
         let mut arms = Vec::new();
         while *self.peek() == TokenKind::Bar {
