@@ -1417,15 +1417,19 @@ mod tests {
         let result_node = dag.get(result).unwrap();
         assert_eq!(result_node.op, RiscOp::Div);
         assert_eq!(result_node.inputs, vec![a, b]);
-        // Regression guard: a Log/Exp/Neg trio would indicate the
-        // recip-via-log decomposition has crept back in. That path
-        // NaNs on non-positive divisors; none of those ops should
-        // appear in the DAG.
+        // Regression guard (#172 div-via-recip parity): `div` must lower
+        // to NATIVE IEEE `RiscOp::Div`, never `a * recip(b)` nor the
+        // `a * exp(neg(log(b)))` recip-via-log decomposition. The
+        // mul/recip form differs from torch's direct division by ~1 ULP
+        // on ~30% of f32 operand pairs, and the log form NaNs on
+        // non-positive divisors. None of Log/Exp/Neg/Recip/Mul should
+        // appear in a bare `div` lowering.
         assert!(
-            dag.nodes()
-                .iter()
-                .all(|n| !matches!(n.op, RiscOp::Log | RiscOp::Exp | RiscOp::Neg)),
-            "div lowering must not contain Log/Exp/Neg"
+            dag.nodes().iter().all(|n| !matches!(
+                n.op,
+                RiscOp::Log | RiscOp::Exp | RiscOp::Neg | RiscOp::Recip | RiscOp::Mul
+            )),
+            "div lowering must be native Div, not a recip/log/mul decomposition (#172)"
         );
     }
 

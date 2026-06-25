@@ -813,3 +813,317 @@ out = df(to_tensor([1.0, 2.0, 3.0]))\n";
         );
     }
 }
+
+// -----------------------------------------------------------------------------
+// #476 — inline sparse gather/scatter read int32 indices through the
+// dtype-correct pointer, not `(int)t->data[i]`. Same #347 class as the
+// argmax/argmin index prints above: int tensors bit-pack their values into
+// the float-typed `->data`, so `(int)t->data[i]` on a CHELIS_I32 index
+// `(int)`-truncates the FLOAT reinterpretation of the int32 bits (index `2`
+// → `(int)2.8e-45f` → `0`), silently gathering the WRONG row. The user
+// surface defaults integer literals to int32 (`to_tensor([2, 0, 1])` is a
+// CHELIS_I32 tensor), so this fires on ordinary index code; the pre-fix
+// corpus never reproduced it because every gather fixture cast indices to
+// int64 (`cast(_, int64)`), which took the always-correct CHELIS_I64 branch.
+//
+// The acceptance oracle is BIT-IDENTITY eval-vs-C on the integer/index path
+// (no float summation here — indices are exact), PLUS a negative assertion
+// that the pre-fix reinterpreted-float corruption (every index → row 0) is
+// rejected. An int64-index control proves the i64 branch is untouched.
+// -----------------------------------------------------------------------------
+
+/// POSITIVE + parity: `gather` with the DEFAULT int32 index dtype agrees
+/// byte-for-byte between eval and the C backend. The gather is the program
+/// root, so it lowers to the inline WireDag tensor-lane emit
+/// (`emit_sparse_gather`), which is the buggy path — NOT the runtime helper
+/// `chelis_tensor_gather` (that path always read indices at the correct
+/// width via `read_index_slot`).
+#[test]
+fn issue_476_gather_int32_indices_backend_matches_eval() {
+    // indices [2, 0, 1] over a 3x2 table → rows [30,31],[10,11],[20,21].
+    let source = "table = to_tensor([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]])\n\
+embed = gather(table, to_tensor([2, 0, 1]), 0)\n";
+
+    let build = chelis_build_c(source, "gatheri32");
+    let stdout = compile_and_run_emitted(build.path(), &build.path().join("gatheri32.c"));
+    assert_eq!(
+        binding_line(&stdout, "embed"),
+        "embed = tensor(shape=[3, 2], data=[30.0, 31.0, 10.0, 11.0, 20.0, 21.0])",
+        "int32-index gather must select rows 2,0,1; stdout={stdout:?}",
+    );
+    // NEGATIVE: the pre-fix corruption read every int32 index as 0 (the
+    // float reinterpretation of small ints rounds toward zero), so every
+    // output row was row 0 (`[10,11]`). That signature must never appear.
+    assert_ne!(
+        binding_line(&stdout, "embed"),
+        "embed = tensor(shape=[3, 2], data=[10.0, 11.0, 10.0, 11.0, 10.0, 11.0])",
+        "pre-fix #476 read every int32 index as row 0; that corruption must \
+         not recur; stdout={stdout:?}",
+    );
+
+    let eval_out = chelis_eval_ok(source, "gatheri32");
+    assert_eq!(
+        binding_line(&stdout, "embed"),
+        binding_line(&eval_out, "embed"),
+        "eval and C backend must agree byte-for-byte on int32-index gather (#476)",
+    );
+}
+
+/// POSITIVE / control: the same gather with indices cast to int64 still
+/// agrees. The int64 branch was always correct; this proves the fix did not
+/// regress it.
+#[test]
+fn issue_476_gather_int64_indices_unchanged() {
+    let source = "table = to_tensor([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]])\n\
+embed = gather(table, cast(to_tensor([2, 0, 1]), int64), 0)\n";
+
+    let build = chelis_build_c(source, "gatheri64");
+    let stdout = compile_and_run_emitted(build.path(), &build.path().join("gatheri64.c"));
+    assert_eq!(
+        binding_line(&stdout, "embed"),
+        "embed = tensor(shape=[3, 2], data=[30.0, 31.0, 10.0, 11.0, 20.0, 21.0])",
+        "int64-index gather must select rows 2,0,1; stdout={stdout:?}",
+    );
+
+    let eval_out = chelis_eval_ok(source, "gatheri64");
+    assert_eq!(
+        binding_line(&stdout, "embed"),
+        binding_line(&eval_out, "embed"),
+        "eval and C backend must agree on int64-index gather (control)",
+    );
+}
+
+/// POSITIVE + parity: `scatter(..., "replace")` over an int32-index path
+/// agrees byte-for-byte. Routed through the runtime helper at the program
+/// root, but the int32 read there is the same #347 class; the
+/// `read_index_slot` width-correct path keeps it honest. This guards the
+/// user-facing scatter surface in addition to the inline emit.
+#[test]
+fn issue_476_scatter_replace_int32_indices_backend_matches_eval() {
+    // base 3x2 zeros; updates rows written at indices [2,0,1].
+    let source = "base = to_tensor([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]])\n\
+out = scatter(base, to_tensor([2, 0, 1]), to_tensor([[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]]), 0, \"replace\")\n";
+
+    let build = chelis_build_c(source, "scatteri32");
+    let stdout = compile_and_run_emitted(build.path(), &build.path().join("scatteri32.c"));
+    assert_eq!(
+        binding_line(&stdout, "out"),
+        "out = tensor(shape=[3, 2], data=[2.0, 2.0, 3.0, 3.0, 1.0, 1.0])",
+        "scatter_replace at int32 indices [2,0,1] places update row 0→pos2, \
+         1→pos0, 2→pos1; stdout={stdout:?}",
+    );
+
+    let eval_out = chelis_eval_ok(source, "scatteri32");
+    assert_eq!(
+        binding_line(&stdout, "out"),
+        binding_line(&eval_out, "out"),
+        "eval and C backend must agree byte-for-byte on int32 scatter_replace (#476)",
+    );
+}
+
+/// POSITIVE + parity: the inline `emit_sparse_scatter_add` path — reached as
+/// the gather ADJOINT (grad of gather scatter-adds the upstream grad back to
+/// the gathered rows) — agrees byte-for-byte at int32 indices. This exercises
+/// BOTH inline sparse emits in one program: `emit_sparse_gather` (forward)
+/// and `emit_sparse_scatter_add` (backward). Index 2 appears twice → its row
+/// accumulates grad 2; index 0 once → grad 1; index 1 never → grad 0.
+#[test]
+fn issue_476_gather_grad_scatter_add_int32_backend_matches_eval() {
+    let source = "def f(table: tensor[3, 2, f32]) -> f32 = tensor_to_scalar(sum(sum(gather(table, to_tensor([2, 0, 2]), 0), 0), 0))\n\
+def df(table: tensor[3, 2, f32]) -> tensor[3, 2, f32] = grad(f)(table)\n\
+out = df(to_tensor([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]]))\n";
+
+    let build = chelis_build_c(source, "gathergradi32");
+    let stdout = compile_and_run_emitted(build.path(), &build.path().join("gathergradi32.c"));
+    assert_eq!(
+        binding_line(&stdout, "out"),
+        "out = tensor(shape=[3, 2], data=[1.0, 1.0, 0.0, 0.0, 2.0, 2.0])",
+        "grad of gather([2,0,2]) accumulates 1 at row0, 0 at row1, 2 at row2; \
+         stdout={stdout:?}",
+    );
+    // NEGATIVE: the pre-fix corruption read every index as 0, so the ENTIRE
+    // gradient (3 gather positions) would pile onto row 0 (`[3,3]`) and rows
+    // 1,2 would be zero. That signature must never appear.
+    assert_ne!(
+        binding_line(&stdout, "out"),
+        "out = tensor(shape=[3, 2], data=[3.0, 3.0, 0.0, 0.0, 0.0, 0.0])",
+        "pre-fix #476 piled the whole gather grad onto row 0; that corruption \
+         must not recur; stdout={stdout:?}",
+    );
+
+    // `chelis eval` prints a single-root program's value WITHOUT a label;
+    // the C backend labels it `out = ...`. `tensor_value` normalizes that
+    // asymmetry so the comparison is value-vs-value.
+    let eval_out = chelis_eval_ok(source, "gathergradi32");
+    assert_eq!(
+        tensor_value(&stdout, "out"),
+        tensor_value(&eval_out, "out"),
+        "eval and C backend must agree byte-for-byte on int32 gather-grad \
+         (scatter_add adjoint) (#476)",
+    );
+}
+
+// -----------------------------------------------------------------------------
+// #172 — max/min reductions PROPAGATE NaN (torch parity), consistently across
+// eval and the C backend (contiguous SIMD + strided). Pre-fix, the SIMD
+// `chelis_max_f32` dropped NaN position-dependently and the `value > best`
+// reductions silently dropped it everywhere, so `max_reduce([NaN,..]) = a
+// finite value` on both lanes — diverging from `torch.max` (always NaN).
+// -----------------------------------------------------------------------------
+
+/// POSITIVE + parity: `max_reduce` of a slice containing a runtime NaN
+/// (`0.0 / 0.0`) yields NaN on the C backend, matching eval and torch. The
+/// divisor is runtime-derived so the compiler cannot constant-fold the NaN
+/// away. Uses `is_nan` semantics, not bit-identity (NaN has many encodings).
+#[test]
+fn issue_172_max_reduce_propagates_nan_backend_matches_eval() {
+    // Row 0: a/b = [0/0, 1/1] = [NaN, 1] -> max NaN. Row 1: [2/1, 3/1] =
+    // [2, 3] -> max 3. The output is a `tensor[2]` (both lanes label it),
+    // and the non-NaN row proves the fix doesn't blanket-NaN the result.
+    let source = "def f(a: tensor[2, 2, f32], b: tensor[2, 2, f32]) -> tensor[2, f32] = max_reduce(div(a, b), 1)\n\
+out = f(to_tensor([[0.0, 1.0], [2.0, 3.0]]), to_tensor([[0.0, 1.0], [1.0, 1.0]]))\n";
+
+    let build = chelis_build_c(source, "maxnan");
+    let stdout = compile_and_run_emitted(build.path(), &build.path().join("maxnan.c"));
+    let val = binding_line(&stdout, "out");
+    assert!(
+        val.to_ascii_lowercase().contains("nan"),
+        "max_reduce of a NaN row must be NaN on the C backend (#172 torch parity), \
+         not a finite value; got {val:?}",
+    );
+    // The non-NaN row must still reduce to 3 — the fix propagates NaN only
+    // for the slice that actually contains one.
+    assert!(
+        val.contains("3.0"),
+        "the NaN-free row must still reduce to 3 (#172 must not blanket-NaN); \
+         got {val:?}",
+    );
+
+    let eval_out = chelis_eval_ok(source, "maxnan");
+    assert!(
+        tensor_value(&eval_out, "out")
+            .to_ascii_lowercase()
+            .contains("nan"),
+        "eval must also propagate NaN through max_reduce (#172); got {eval_out:?}",
+    );
+}
+
+/// POSITIVE + parity: `min_reduce` propagates NaN identically.
+#[test]
+fn issue_172_min_reduce_propagates_nan_backend_matches_eval() {
+    let source = "def f(a: tensor[2, 2, f32], b: tensor[2, 2, f32]) -> tensor[2, f32] = min_reduce(div(a, b), 1)\n\
+out = f(to_tensor([[0.0, 1.0], [2.0, 3.0]]), to_tensor([[0.0, 1.0], [1.0, 1.0]]))\n";
+
+    let build = chelis_build_c(source, "minnan");
+    let stdout = compile_and_run_emitted(build.path(), &build.path().join("minnan.c"));
+    let val = binding_line(&stdout, "out");
+    assert!(
+        val.to_ascii_lowercase().contains("nan"),
+        "min_reduce of a NaN row must be NaN on the C backend (#172); got {val:?}",
+    );
+    assert!(
+        val.contains("2.0"),
+        "the NaN-free row min must still be 2 (#172 must not blanket-NaN); got {val:?}",
+    );
+
+    let eval_out = chelis_eval_ok(source, "minnan");
+    assert!(
+        tensor_value(&eval_out, "out")
+            .to_ascii_lowercase()
+            .contains("nan"),
+        "eval must propagate NaN through min_reduce (#172)",
+    );
+}
+
+/// POSITIVE control: a NaN-FREE max_reduce still agrees byte-for-byte; the
+/// NaN-propagation fix must not perturb ordinary reductions.
+#[test]
+fn issue_172_max_reduce_no_nan_unchanged_backend_matches_eval() {
+    let source = "def f(x: tensor[2, 3, f32]) -> tensor[2, f32] = max_reduce(x, 1)\n\
+out = f(to_tensor([[1.0, 3.0, 2.0], [6.0, 4.0, 5.0]]))\n";
+
+    let build = chelis_build_c(source, "maxok");
+    let stdout = compile_and_run_emitted(build.path(), &build.path().join("maxok.c"));
+    assert_eq!(
+        binding_line(&stdout, "out"),
+        "out = tensor(shape=[2], data=[3.0, 6.0])",
+        "NaN-free max_reduce must be unchanged; stdout={stdout:?}",
+    );
+    let eval_out = chelis_eval_ok(source, "maxok");
+    assert_eq!(
+        tensor_value(&stdout, "out"),
+        tensor_value(&eval_out, "out"),
+        "eval and C backend must agree on NaN-free max_reduce (#172 control)",
+    );
+}
+
+/// FORWARD-through-grad: a `max_reduce` whose forward value is NaN keeps that
+/// NaN when the function is differentiated (the traced forward still
+/// propagates). This guards the forward half of the grad path; the exact
+/// NaN gradient ROUTING (torch sends grad to the NaN slot) is a separate
+/// grad-NaN-semantics question tracked as a #172 follow-up.
+#[test]
+fn issue_172_max_reduce_grad_forward_propagates_nan() {
+    // `df` differentiates `f` (a `max_reduce` over a NaN slice); `fout` is
+    // the forward value of the SAME function. The grad def must lower/run
+    // (no internal error), and the forward of a NaN slice must be NaN — the
+    // traced forward propagates the NaN exactly like the standalone forward.
+    // Two roots so eval labels both with a `name = ` prefix.
+    let source = "def f(a: tensor[3, f32]) -> f32 = tensor_to_scalar(max_reduce(div(a, to_tensor([1.0, 0.0, 1.0])), 0))\n\
+def df(a: tensor[3, f32]) -> tensor[3, f32] = grad(f)(a)\n\
+gout = df(to_tensor([1.0, 0.0, 2.0]))\n\
+fout = f(to_tensor([1.0, 0.0, 2.0]))\n";
+
+    let eval_out = chelis_eval_ok(source, "maxgradfwd");
+    assert!(
+        binding_line(&eval_out, "fout")
+            .to_ascii_lowercase()
+            .contains("nan"),
+        "the forward of a max_reduce over a NaN slice must be NaN (#172); \
+         eval={eval_out:?}",
+    );
+    // The grad def must have produced a value (it ran without an internal
+    // error); we don't pin the exact NaN gradient routing here (separate
+    // grad-NaN-semantics follow-up).
+    assert!(
+        eval_out.contains("gout ="),
+        "grad of a max_reduce over a NaN slice must still produce a gradient \
+         tensor (no internal error); eval={eval_out:?}",
+    );
+}
+
+/// REGRESSION-LOCK (#172 tanh parity): Chelis `tanh` (lowered as
+/// `2*sigmoid(2x) - 1`) is bit-identical to `torch.tanh` on the probe set.
+/// Pinning the exact f32 values guards against the lowering drifting away
+/// from torch parity. Reference values from torch 2.x CPU:
+/// `tanh([0.5, -0.5, 1.0, -2.0]) = [0.46211717, -0.46211717, 0.7615942,
+/// -0.96402758]`. The values render through the shared f32 printer.
+#[test]
+fn issue_172_tanh_matches_torch_reference() {
+    let source = "def f(x: tensor[4, f32]) -> tensor[4, f32] = tanh(x)\n\
+out = f(to_tensor([0.5, -0.5, 1.0, -2.0]))\n";
+
+    let eval_out = chelis_eval_ok(source, "tanhparity");
+    let val = tensor_value(&eval_out, "out");
+    let data = val
+        .split_once("data=[")
+        .and_then(|(_, rest)| rest.strip_suffix("])"))
+        .unwrap_or_else(|| panic!("could not parse tanh data from {val:?}"));
+    let got: Vec<f64> = data
+        .split(", ")
+        .map(|e| e.parse().unwrap_or_else(|_| panic!("bad element {e:?}")))
+        .collect();
+    let torch_ref = [
+        0.462_117_165_327_072_14,
+        -0.462_117_165_327_072_14,
+        0.761_594_176_292_419_4,
+        -0.964_027_583_599_090_6,
+    ];
+    assert_eq!(got.len(), 4, "tanh must return 4 elements; got {got:?}");
+    for (i, (&g, &r)) in got.iter().zip(torch_ref.iter()).enumerate() {
+        assert!(
+            (g - r).abs() < 1e-6,
+            "tanh[{i}] = {g} must match torch reference {r} (#172 parity)",
+        );
+    }
+}

@@ -189,8 +189,9 @@ fn c_fused_reduce_max_no_intermediate() {
         "Fused max-reduce should contain step variable"
     );
     assert!(
-        src.contains("fmaxf(acc, v"),
-        "Fused max-reduce should use fmaxf to accumulate"
+        src.contains("chelis_fmax_propnan_f32(acc, v"),
+        "Fused max-reduce should accumulate via the NaN-propagating max \
+         helper (#172 torch parity), not NaN-dropping fmaxf"
     );
 
     let alloc_count = src.matches("chelis_alloc(").count();

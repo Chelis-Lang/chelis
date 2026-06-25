@@ -967,12 +967,15 @@ y = softmax(x, cast(0, int32))
 }
 
 #[test]
-fn host_runtime_softmax_positive_infinity_promotes_to_one_hot() {
-    // Red-team v0.2.6 HIGH: `softmax([+Inf, 0, 0])` previously returned
-    // `[NaN, 0, 0]` because the standard max-shift formula computes
-    // `exp(+Inf - +Inf) = exp(NaN) = NaN`. Mask-style users (who set
-    // ones-hot positions to +Inf) silently corrupted to NaN downstream.
-    // The fix detects +Inf in the slice and emits 1/K at +Inf positions.
+fn host_runtime_softmax_positive_infinity_yields_nan_like_torch() {
+    // #173: `softmax([+Inf, 0, 0])` must return all-NaN, matching torch
+    // (verified: torch 2.x CPU `torch.softmax([inf,1,2]) == [nan,nan,nan]`).
+    // The standard max-shift formula computes `exp(+Inf - +Inf) = exp(NaN)
+    // = NaN`, which is what the C backend, IR evaluator, and spec'd
+    // lowering all already produce. The host runtime previously
+    // special-cased +Inf to a `1/K` one-hot ("natural limit"), silently
+    // diverging from torch and every other Chelis lane; that special-case
+    // is removed.
     let inf = f64::INFINITY;
     let tensor = RuntimeTensorValue {
         value: IrTensorValue::from_vec(vec![3], vec![inf, 0.0, 0.0]),
@@ -980,37 +983,79 @@ fn host_runtime_softmax_positive_infinity_promotes_to_one_hot() {
     };
     let out = tensor_softmax_host(&tensor, 0).expect("+Inf softmax must not error in host runtime");
     assert_eq!(out.value.data.len(), 3);
-    assert!(out.value.data.iter().all(|v| !v.is_nan()), "no NaN allowed");
-    assert!((out.value.data[0] - 1.0).abs() < 1e-9);
-    assert!(out.value.data[1].abs() < 1e-9);
-    assert!(out.value.data[2].abs() < 1e-9);
+    assert!(
+        out.value.data.iter().all(|v| v.is_nan()),
+        "softmax of a slice containing +Inf must be all-NaN (torch parity, #173); got {:?}",
+        out.value.data
+    );
 }
 
 #[test]
-fn host_runtime_softmax_two_positive_infinities_split_uniformly() {
+fn host_runtime_softmax_two_positive_infinities_yield_nan_like_torch() {
+    // #173: torch returns all-NaN for any +Inf-containing slice, including
+    // multiple +Inf (`torch.softmax([inf,inf,2]) == [nan,nan,nan]`). The
+    // prior `1/K`-split special-case is removed.
     let inf = f64::INFINITY;
     let tensor = RuntimeTensorValue {
         value: IrTensorValue::from_vec(vec![3], vec![inf, inf, 0.0]),
         precision: Prim::F32,
     };
     let out = tensor_softmax_host(&tensor, 0).expect("two +Inf softmax must not error");
-    assert!((out.value.data[0] - 0.5).abs() < 1e-9);
-    assert!((out.value.data[1] - 0.5).abs() < 1e-9);
-    assert!(out.value.data[2].abs() < 1e-9);
+    assert!(
+        out.value.data.iter().all(|v| v.is_nan()),
+        "softmax of a slice with multiple +Inf must be all-NaN (torch parity, #173); got {:?}",
+        out.value.data
+    );
 }
 
 #[test]
-fn host_runtime_softmax_all_negative_infinity_yields_uniform() {
-    // All -Inf collapses to NaN under the standard formula too. Define
-    // the natural limit: uniform 1/N (same as if all values were equal).
+fn host_runtime_softmax_all_negative_infinity_yields_nan_like_torch() {
+    // #173: an all-`-Inf` slice yields `exp(-Inf - -Inf) = exp(NaN) = NaN`
+    // under the standard formula, which is what torch returns
+    // (`torch.softmax([-inf,-inf,-inf]) == [nan,nan,nan]`) and what the C
+    // backend / IR evaluator already produce. The host runtime previously
+    // special-cased this to uniform `1/N`; that special-case is removed.
     let neg_inf = f64::NEG_INFINITY;
     let tensor = RuntimeTensorValue {
         value: IrTensorValue::from_vec(vec![3], vec![neg_inf, neg_inf, neg_inf]),
         precision: Prim::F32,
     };
     let out = tensor_softmax_host(&tensor, 0).expect("all -Inf softmax must not error");
-    let third = 1.0 / 3.0;
-    assert!(out.value.data.iter().all(|v| (*v - third).abs() < 1e-9));
+    assert!(
+        out.value.data.iter().all(|v| v.is_nan()),
+        "softmax of an all-(-Inf) slice must be all-NaN (torch parity, #173); got {:?}",
+        out.value.data
+    );
+}
+
+#[test]
+fn host_runtime_softmax_mixed_negative_infinity_is_finite_like_torch() {
+    // #173 positive control: a slice with `-Inf` but NO `+Inf` has a
+    // finite max, so `exp(-Inf - max) = 0` at the masked position and the
+    // standard formula produces a valid (non-NaN) distribution. This is
+    // the legitimate attention-masking case and must NOT regress to NaN.
+    // torch: `torch.softmax([1, -inf, 2]) == [0.2689, 0.0, 0.7311]`.
+    let neg_inf = f64::NEG_INFINITY;
+    let tensor = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![3], vec![1.0, neg_inf, 2.0]),
+        precision: Prim::F32,
+    };
+    let out = tensor_softmax_host(&tensor, 0).expect("mixed -Inf softmax must not error");
+    assert!(
+        out.value.data.iter().all(|v| !v.is_nan()),
+        "mixed -Inf (no +Inf) softmax must be finite, not NaN; got {:?}",
+        out.value.data
+    );
+    assert!(
+        out.value.data[1].abs() < 1e-9,
+        "the -Inf position must be 0"
+    );
+    assert!(
+        (out.value.data[0] - 0.268_941_4).abs() < 1e-5
+            && (out.value.data[2] - 0.731_058_6).abs() < 1e-5,
+        "mixed -Inf softmax must match torch [0.2689, 0, 0.7311]; got {:?}",
+        out.value.data
+    );
 }
 
 #[test]
@@ -1058,6 +1103,67 @@ y = softmax(x, cast(5, int32))
         joined.contains("softmax") && joined.contains("out of bounds"),
         "expected softmax axis-bounds diagnostic, got: {joined}"
     );
+}
+
+// ----------------------------------------------------------------
+// #172: Max/Min reductions PROPAGATE NaN, matching torch
+// (`torch.max`/`torch.min` of any NaN-containing slice return NaN, at
+// every position). A naive `value > best` drops NaN, which made the C
+// backend's SIMD `chelis_max_f32` position-dependent and diverged from
+// torch on both lanes. The eval lane is the reference, so it must agree.
+// ----------------------------------------------------------------
+
+#[test]
+fn host_runtime_max_reduce_propagates_nan_like_torch() {
+    let nan = f64::NAN;
+    // NaN at each position must still yield NaN (position-independent).
+    for pos in 0..3 {
+        let mut data = vec![1.0, 2.0, 3.0];
+        data[pos] = nan;
+        let tensor = RuntimeTensorValue {
+            value: IrTensorValue::from_vec(vec![3], data),
+            precision: Prim::F32,
+        };
+        let out = tensor_reduce_host(&tensor, 0, ReduceOp::Max).expect("max reduce");
+        assert!(
+            out.value.data[0].is_nan(),
+            "max_reduce of a slice with NaN@{pos} must be NaN (torch parity, #172); got {:?}",
+            out.value.data
+        );
+    }
+}
+
+#[test]
+fn host_runtime_min_reduce_propagates_nan_like_torch() {
+    let nan = f64::NAN;
+    for pos in 0..3 {
+        let mut data = vec![1.0, 2.0, 3.0];
+        data[pos] = nan;
+        let tensor = RuntimeTensorValue {
+            value: IrTensorValue::from_vec(vec![3], data),
+            precision: Prim::F32,
+        };
+        let out = tensor_reduce_host(&tensor, 0, ReduceOp::Min).expect("min reduce");
+        assert!(
+            out.value.data[0].is_nan(),
+            "min_reduce of a slice with NaN@{pos} must be NaN (torch parity, #172); got {:?}",
+            out.value.data
+        );
+    }
+}
+
+#[test]
+fn host_runtime_max_reduce_no_nan_is_unchanged() {
+    // POSITIVE control: a NaN-free slice still reduces normally — the
+    // NaN-propagation fix must not perturb ordinary max/min.
+    let tensor = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![3], vec![1.0, 3.0, 2.0]),
+        precision: Prim::F32,
+    };
+    let max = tensor_reduce_host(&tensor, 0, ReduceOp::Max).expect("max reduce");
+    let min = tensor_reduce_host(&tensor, 0, ReduceOp::Min).expect("min reduce");
+    assert_eq!(max.value.data, vec![3.0]);
+    assert_eq!(min.value.data, vec![1.0]);
 }
 
 // ----------------------------------------------------------------
