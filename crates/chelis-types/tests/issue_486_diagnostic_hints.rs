@@ -10,12 +10,11 @@ use chelis_types::errors::enrich_type_mismatch_suggestions;
 #[test]
 fn opaque_type_vs_primitive_suggests_accessor() {
     let mut suggestions = Vec::new();
-    enrich_type_mismatch_suggestions(
-        "type mismatch: Probability vs f32",
-        &mut suggestions,
-    );
+    enrich_type_mismatch_suggestions("type mismatch: Probability vs f32", &mut suggestions);
     assert!(
-        suggestions.iter().any(|s| s.contains("probability_value(...)") && s.contains("extract the inner f32")),
+        suggestions
+            .iter()
+            .any(|s| s.contains("probability_value(...)") && s.contains("extract the inner f32")),
         "expected opaque accessor hint; got: {suggestions:?}"
     );
 }
@@ -23,12 +22,11 @@ fn opaque_type_vs_primitive_suggests_accessor() {
 #[test]
 fn primitive_vs_opaque_type_suggests_accessor() {
     let mut suggestions = Vec::new();
-    enrich_type_mismatch_suggestions(
-        "type mismatch: f32 vs Price",
-        &mut suggestions,
-    );
+    enrich_type_mismatch_suggestions("type mismatch: f32 vs Price", &mut suggestions);
     assert!(
-        suggestions.iter().any(|s| s.contains("price_value(...)") && s.contains("extract the inner f32")),
+        suggestions
+            .iter()
+            .any(|s| s.contains("price_value(...)") && s.contains("extract the inner f32")),
         "expected opaque accessor hint; got: {suggestions:?}"
     );
 }
@@ -36,10 +34,7 @@ fn primitive_vs_opaque_type_suggests_accessor() {
 #[test]
 fn non_opaque_adt_no_accessor_hint() {
     let mut suggestions = Vec::new();
-    enrich_type_mismatch_suggestions(
-        "type mismatch: Option[f32] vs f32",
-        &mut suggestions,
-    );
+    enrich_type_mismatch_suggestions("type mismatch: Option[f32] vs f32", &mut suggestions);
     // Should NOT suggest accessor for Option (it's not opaque)
     assert!(
         !suggestions.iter().any(|s| s.contains("_value(...)")),
@@ -52,12 +47,11 @@ fn non_opaque_adt_no_accessor_hint() {
 #[test]
 fn option_t_vs_t_suggests_match_unwrap() {
     let mut suggestions = Vec::new();
-    enrich_type_mismatch_suggestions(
-        "type mismatch: Option[f32] vs f32",
-        &mut suggestions,
-    );
+    enrich_type_mismatch_suggestions("type mismatch: Option[f32] vs f32", &mut suggestions);
     assert!(
-        suggestions.iter().any(|s| s.contains("Option[f32]") && s.contains("match ... with")),
+        suggestions
+            .iter()
+            .any(|s| s.contains("Option[f32]") && s.contains("match ... with")),
         "expected Option unwrap hint; got: {suggestions:?}"
     );
 }
@@ -65,12 +59,11 @@ fn option_t_vs_t_suggests_match_unwrap() {
 #[test]
 fn t_vs_option_t_suggests_match_unwrap() {
     let mut suggestions = Vec::new();
-    enrich_type_mismatch_suggestions(
-        "type mismatch: int32 vs Option[int32]",
-        &mut suggestions,
-    );
+    enrich_type_mismatch_suggestions("type mismatch: int32 vs Option[int32]", &mut suggestions);
     assert!(
-        suggestions.iter().any(|s| s.contains("Option[int32]") && s.contains("match ... with")),
+        suggestions
+            .iter()
+            .any(|s| s.contains("Option[int32]") && s.contains("match ... with")),
         "expected Option unwrap hint; got: {suggestions:?}"
     );
 }
@@ -78,10 +71,7 @@ fn t_vs_option_t_suggests_match_unwrap() {
 #[test]
 fn option_mismatch_with_different_inner_type_no_hint() {
     let mut suggestions = Vec::new();
-    enrich_type_mismatch_suggestions(
-        "type mismatch: Option[f32] vs int32",
-        &mut suggestions,
-    );
+    enrich_type_mismatch_suggestions("type mismatch: Option[f32] vs int32", &mut suggestions);
     // inner type f32 != int32, so no option hint
     assert!(
         !suggestions.iter().any(|s| s.contains("match ... with")),

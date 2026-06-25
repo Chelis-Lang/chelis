@@ -50,7 +50,10 @@ fn split_if_after_eq_suggests_same_line_or_braces() {
 fn match_without_with_keyword_gives_helpful_error() {
     let src = "def f(x: int32) = match x { | 0 => 1 | _ => 2 }\n";
     let result = parse_str(src);
-    assert!(result.is_err(), "expected parse error for match without 'with'");
+    assert!(
+        result.is_err(),
+        "expected parse error for match without 'with'"
+    );
     let msg = result.unwrap_err().to_string();
     assert!(
         msg.contains("with") && msg.contains("match"),
@@ -62,7 +65,10 @@ fn match_without_with_keyword_gives_helpful_error() {
 fn match_without_braces_gives_helpful_error() {
     let src = "def f(x: int32) = match x with | 0 => 1 | _ => 2\n";
     let result = parse_str(src);
-    assert!(result.is_err(), "expected parse error for match without braces");
+    assert!(
+        result.is_err(),
+        "expected parse error for match without braces"
+    );
     let msg = result.unwrap_err().to_string();
     assert!(
         msg.contains("{") || msg.contains("brace"),
@@ -74,5 +80,9 @@ fn match_without_braces_gives_helpful_error() {
 fn match_with_braces_parses_correctly() {
     let src = "def f(x: int32) = match x with { | 0 => 1 | _ => 2 }\n";
     let result = parse_str(src);
-    assert!(result.is_ok(), "valid match should parse; got: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "valid match should parse; got: {:?}",
+        result.err()
+    );
 }

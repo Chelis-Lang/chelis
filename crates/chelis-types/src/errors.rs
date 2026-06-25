@@ -221,19 +221,19 @@ fn option_unwrap_hint(message: &str) -> Option<String> {
     }
     let (left, right) = (sides[0].trim(), sides[1].trim());
     // Check if left is Option[T] and right is T, or vice versa
-    if let Some(inner) = strip_option_wrapper(left) {
-        if inner == right {
-            return Some(format!(
-                "this expression returns Option[{inner}]; use `match ... with {{ | Some(value) => ... | None => ... }}` to unwrap"
-            ));
-        }
+    if let Some(inner) = strip_option_wrapper(left)
+        && inner == right
+    {
+        return Some(format!(
+            "this expression returns Option[{inner}]; use `match ... with {{ | Some(value) => ... | None => ... }}` to unwrap"
+        ));
     }
-    if let Some(inner) = strip_option_wrapper(right) {
-        if inner == left {
-            return Some(format!(
-                "this expression returns Option[{inner}]; use `match ... with {{ | Some(value) => ... | None => ... }}` to unwrap"
-            ));
-        }
+    if let Some(inner) = strip_option_wrapper(right)
+        && inner == left
+    {
+        return Some(format!(
+            "this expression returns Option[{inner}]; use `match ... with {{ | Some(value) => ... | None => ... }}` to unwrap"
+        ));
     }
     None
 }

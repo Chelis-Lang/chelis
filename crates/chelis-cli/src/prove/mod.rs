@@ -144,14 +144,14 @@ pub fn cmd_prove(options: ProveOptions<'_>) -> Result<i32, String> {
         };
         worst = combine_status(worst, status);
         // chelis#490: collect dependency edges for each input.
-        if options.json {
-            if let Ok(edges) = compute_dependency_edges(input) {
-                for edge in edges {
-                    all_dependency_edges.push(json!({
-                        "property": edge.0,
-                        "references": edge.1,
-                    }));
-                }
+        if options.json
+            && let Ok(edges) = compute_dependency_edges(input)
+        {
+            for edge in edges {
+                all_dependency_edges.push(json!({
+                    "property": edge.0,
+                    "references": edge.1,
+                }));
             }
         }
     }
@@ -202,8 +202,7 @@ fn compute_surf_dependency_edges(source: &str) -> Result<Vec<(String, Vec<String
     #[cfg(not(feature = "chelis-prove"))]
     {
         use std::collections::BTreeSet;
-        let parsed =
-            chelis_surf::parser::parse_str(source).map_err(|e| format!("parse: {e}"))?;
+        let parsed = chelis_surf::parser::parse_str(source).map_err(|e| format!("parse: {e}"))?;
         let flat = flatten_module_decls(&parsed);
         let module_names: BTreeSet<String> = flat
             .iter()
@@ -222,8 +221,7 @@ fn compute_surf_dependency_edges(source: &str) -> Result<Vec<(String, Vec<String
                 ..
             } = decl
             {
-                let param_names: BTreeSet<&str> =
-                    params.iter().map(|p| p.name.as_str()).collect();
+                let param_names: BTreeSet<&str> = params.iter().map(|p| p.name.as_str()).collect();
                 let mut refs = BTreeSet::new();
                 collect_surf_refs(body, &param_names, &module_names, &mut refs);
                 for pre in preconditions {
@@ -302,12 +300,11 @@ fn compute_deep_dependency_edges(source: &str) -> Result<Vec<(String, Vec<String
     // Collect module-level def names (exports).
     let mut module_names = BTreeSet::new();
     for expr in &exprs {
-        if list_tag(expr) == Some("def") {
-            if let DeepExpr::List(list, _) = expr {
-                if let Some(name) = list.elements.get(2).and_then(symbol_text) {
-                    module_names.insert(name.to_string());
-                }
-            }
+        if list_tag(expr) == Some("def")
+            && let DeepExpr::List(list, _) = expr
+            && let Some(name) = list.elements.get(2).and_then(symbol_text)
+        {
+            module_names.insert(name.to_string());
         }
     }
     // Discover properties and extract their references.
@@ -334,27 +331,25 @@ fn collect_deep_refs(
     module_names: &std::collections::BTreeSet<String>,
     out: &mut std::collections::BTreeSet<String>,
 ) {
-    match expr {
-        DeepExpr::List(list, _) => {
-            let tag = list_tag_from_list(list);
-            if tag == Some("var") {
-                if let Some(name) = list.elements.get(2).and_then(symbol_text) {
-                    if !params.contains(name) && module_names.contains(name) {
-                        out.insert(name.to_string());
-                    }
-                }
-            } else if tag == Some("app") {
-                // First child after tag+meta is the callee.
-                for child in list.elements.iter().skip(2) {
-                    collect_deep_refs(child, params, module_names, out);
-                }
-            } else {
-                for child in list.elements.iter().skip(2) {
-                    collect_deep_refs(child, params, module_names, out);
-                }
+    if let DeepExpr::List(list, _) = expr {
+        let tag = list_tag_from_list(list);
+        if tag == Some("var") {
+            if let Some(name) = list.elements.get(2).and_then(symbol_text)
+                && !params.contains(name)
+                && module_names.contains(name)
+            {
+                out.insert(name.to_string());
+            }
+        } else if tag == Some("app") {
+            // First child after tag+meta is the callee.
+            for child in list.elements.iter().skip(2) {
+                collect_deep_refs(child, params, module_names, out);
+            }
+        } else {
+            for child in list.elements.iter().skip(2) {
+                collect_deep_refs(child, params, module_names, out);
             }
         }
-        _ => {}
     }
 }
 
@@ -2901,9 +2896,7 @@ fn resolve_package_root(input: &Path, explicit: Option<&Path>) -> Option<PathBuf
     } else {
         input
     };
-    chelis_reef::find_package_root_for_dir(start)
-        .ok()
-        .flatten()
+    chelis_reef::find_package_root_for_dir(start).ok().flatten()
 }
 
 /// Emit JSON describing this binary's prove capabilities (#488).

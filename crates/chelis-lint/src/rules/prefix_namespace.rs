@@ -114,7 +114,9 @@ impl Rule for PrefixNamespace {
             };
             let group_size = occurrences.len();
             for (func_name, line) in &occurrences {
-                let stripped_name = func_name.strip_prefix(&format!("{prefix}_")).unwrap_or(func_name);
+                let stripped_name = func_name
+                    .strip_prefix(&format!("{prefix}_"))
+                    .unwrap_or(func_name);
                 out.push(Violation {
                     rule_id: self.id().to_string(),
                     spec_ref: self.spec_ref().to_string(),

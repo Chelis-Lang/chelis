@@ -2565,7 +2565,10 @@ fn prove_json_failure_summary_present_on_failed_property() {
         .expect("run prove");
     assert_eq!(output.status.code(), Some(1));
     let records = property_records(&output.stdout);
-    assert!(!records.is_empty(), "must have at least one property record");
+    assert!(
+        !records.is_empty(),
+        "must have at least one property record"
+    );
     let prop = &records[0];
     assert_eq!(prop["status"], "failed");
     let fs = &prop["failure_summary"];
@@ -2575,10 +2578,7 @@ fn prove_json_failure_summary_present_on_failed_property() {
         fs.get("actual_tier").is_some(),
         "failure_summary must have actual_tier"
     );
-    assert!(
-        fs.get("seed").is_some(),
-        "failure_summary must have seed"
-    );
+    assert!(fs.get("seed").is_some(), "failure_summary must have seed");
     assert!(
         fs.get("samples").is_some(),
         "failure_summary must have samples"

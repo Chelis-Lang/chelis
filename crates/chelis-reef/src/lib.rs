@@ -3022,16 +3022,17 @@ pub fn export_bundle(package_root: &Path, output_dir: &Path) -> Result<BundleMan
     for dep in &lock.dependencies {
         match &dep.source {
             LockSource::Path { path } => {
-                let dep_root = root.join(path).canonicalize().map_err(|e| {
-                    format!("resolve path dep `{}`: {e}", dep.name)
-                })?;
+                let dep_root = root
+                    .join(path)
+                    .canonicalize()
+                    .map_err(|e| format!("resolve path dep `{}`: {e}", dep.name))?;
                 let dep_dir = output_dir.join(format!("{}-{}", dep.name, dep.version));
                 copy_package_source(&dep_root, &dep_dir)?;
             }
             LockSource::LocalRegistry { .. } => {
                 // Load from registry cache and copy extracted source
-                let installed = load_registry_package(&dep.name, &dep.version).map_err(|e| {
-                    match e {
+                let installed =
+                    load_registry_package(&dep.name, &dep.version).map_err(|e| match e {
                         LoadRegistryError::Other(s) => s,
                         LoadRegistryError::MissingFromIndex
                         | LoadRegistryError::MissingPackageDir => {
@@ -3041,8 +3042,7 @@ pub fn export_bundle(package_root: &Path, output_dir: &Path) -> Result<BundleMan
                                 dep.name, dep.version
                             )
                         }
-                    }
-                })?;
+                    })?;
                 let dep_dir = output_dir.join(format!("{}-{}", dep.name, dep.version));
                 copy_package_source(&installed.root, &dep_dir)?;
             }
@@ -3069,8 +3069,8 @@ pub fn export_bundle(package_root: &Path, output_dir: &Path) -> Result<BundleMan
         root_package: lock.package.clone(),
         dependencies: bundled_deps,
     };
-    let manifest_json =
-        serde_json::to_string_pretty(&manifest).map_err(|e| format!("serialize bundle.json: {e}"))?;
+    let manifest_json = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| format!("serialize bundle.json: {e}"))?;
     fs::write(output_dir.join("bundle.json"), manifest_json)
         .map_err(|e| format!("write bundle.json: {e}"))?;
     Ok(manifest)
@@ -3088,8 +3088,7 @@ fn copy_package_source(src: &Path, dst: &Path) -> Result<(), String> {
     // Copy reef.lock if present
     let lock_path = src.join("reef.lock");
     if lock_path.exists() {
-        fs::copy(&lock_path, dst.join("reef.lock"))
-            .map_err(|e| format!("copy reef.lock: {e}"))?;
+        fs::copy(&lock_path, dst.join("reef.lock")).map_err(|e| format!("copy reef.lock: {e}"))?;
     }
     // Copy src/ and any additional source roots
     let manifest = if manifest_path.exists() {
@@ -3199,11 +3198,8 @@ pub fn package_schema(root: &Path) -> Result<PackageSchema, String> {
 
         for export_name in &module_source.exports {
             let kind = module_source.symbols.get(export_name);
-            let internal = internal_name(
-                &root_pkg.id.name,
-                &module_source.module_name,
-                export_name,
-            );
+            let internal =
+                internal_name(&root_pkg.id.name, &module_source.module_name, export_name);
             match kind {
                 Some(chelis_shell::SymbolKind::Value) => {
                     let type_repr = checked
@@ -3241,42 +3237,39 @@ pub fn package_schema(root: &Path) -> Result<PackageSchema, String> {
                         } if name == export_name => Some((variants, *opaque, invariant.is_some())),
                         _ => None,
                     });
-                    let (constructors, opaque) = if let Some((variants, is_opaque, has_invariant)) =
-                        type_def
-                    {
-                        let ctors = variants
-                            .iter()
-                            .map(|v| {
-                                let ctor_internal = internal_name(
-                                    &root_pkg.id.name,
-                                    &module_source.module_name,
-                                    &v.name,
-                                );
-                                let ctor_type = checked
-                                    .type_env()
-                                    .get(&ctor_internal)
-                                    .map(|expr| {
-                                        chelis_deep::printer::print_canonical(
-                                            std::slice::from_ref(expr),
-                                        )
-                                        .trim()
-                                        .to_string()
-                                    });
-                                ConstructorSchema {
-                                    name: v.name.clone(),
-                                    kind: if has_invariant {
-                                        "partial".to_string()
-                                    } else {
-                                        "total".to_string()
-                                    },
-                                    type_repr: ctor_type,
-                                }
-                            })
-                            .collect();
-                        (ctors, is_opaque)
-                    } else {
-                        (Vec::new(), false)
-                    };
+                    let (constructors, opaque) =
+                        if let Some((variants, is_opaque, has_invariant)) = type_def {
+                            let ctors = variants
+                                .iter()
+                                .map(|v| {
+                                    let ctor_internal = internal_name(
+                                        &root_pkg.id.name,
+                                        &module_source.module_name,
+                                        &v.name,
+                                    );
+                                    let ctor_type =
+                                        checked.type_env().get(&ctor_internal).map(|expr| {
+                                            chelis_deep::printer::print_canonical(
+                                                std::slice::from_ref(expr),
+                                            )
+                                            .trim()
+                                            .to_string()
+                                        });
+                                    ConstructorSchema {
+                                        name: v.name.clone(),
+                                        kind: if has_invariant {
+                                            "partial".to_string()
+                                        } else {
+                                            "total".to_string()
+                                        },
+                                        type_repr: ctor_type,
+                                    }
+                                })
+                                .collect();
+                            (ctors, is_opaque)
+                        } else {
+                            (Vec::new(), false)
+                        };
                     types.push(TypeSchema {
                         name: export_name.clone(),
                         opaque,
@@ -8720,8 +8713,7 @@ module_prefix = "My"
         // bundle.json is valid JSON
         let json_str =
             fs::read_to_string(bundle_dir.join("bundle.json")).expect("read bundle.json");
-        let parsed: BundleManifest =
-            serde_json::from_str(&json_str).expect("parse bundle.json");
+        let parsed: BundleManifest = serde_json::from_str(&json_str).expect("parse bundle.json");
         assert_eq!(parsed.root_package.name, "mypkg");
     }
 
@@ -8748,7 +8740,10 @@ module_prefix = "Nl"
         );
         let bundle_dir = dir.path().join("bundle");
         let err = export_bundle(&root, &bundle_dir).expect_err("should fail");
-        assert!(err.contains("reef.lock"), "error should mention reef.lock: {err}");
+        assert!(
+            err.contains("reef.lock"),
+            "error should mention reef.lock: {err}"
+        );
     }
 
     /// Concurrent-write contract: many threads extracting the same

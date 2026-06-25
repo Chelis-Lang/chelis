@@ -1799,7 +1799,10 @@ impl Parser {
         if *self.peek() != TokenKind::With {
             return Err(ParseError::Expected {
                 expected: "match ... with { | pattern => expr }".into(),
-                found: format!("{:?}; expected `with` keyword followed by braced arms", self.peek()),
+                found: format!(
+                    "{:?}; expected `with` keyword followed by braced arms",
+                    self.peek()
+                ),
                 offset: self.current_offset(),
             });
         }
