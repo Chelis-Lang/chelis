@@ -1247,6 +1247,24 @@ expression itself. If the call site does not impose a known dim at
 the expanded axis (for example, an unannotated `let` binding), the
 output dim at that axis falls back to `(d-name {} *)`.
 
+The above is the **typer's** behavior. IR lowering separately
+recovers the concrete broadcast *extent* for codegen and autodiff:
+when the `size` argument reads `shape(operand, axis)` — whether the
+`shape(...)` call sits directly in the `size` slot or is bound to a
+`let` name and referenced as `cast(len, int32)` — lowering reads the
+extent from `operand`'s already-resolved axis dim rather than
+defaulting to size 1. The `let`-indirection case is the canonical
+`tensor_full_like` / scalar-broadcast helper idiom (`len = shape(x,
+0)` then `expand(s, 0, cast(len, int32))`); without the recovery the
+expand lowers to a size-1 axis, the size-1 broadcast that the typer
+accepts is rejected by the no-implicit-broadcasting IR, and
+`grad` fails to construct the backward DAG (Chelis-Lang/chelis#318,
+#369). A `size` argument that is neither a recognized literal/symbol
+nor a `shape(...)` read of an in-scope tensor (a bare runtime scalar)
+has no shape source the backend can materialize and is rejected
+loudly at lowering, not silently defaulted (§4.7.2 Form-3,
+Chelis-Lang/chelis#469).
+
 #### 4.7.3 `reshape` with runtime sizes from `shape(x, ...)`
 
 `reshape` recognizes one specific syntactic source for each element
