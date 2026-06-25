@@ -1785,6 +1785,16 @@ pub(super) fn tensor_reduce_window_host(
             }
             let src_linear = indices_to_linear(&src_indices, in_shape);
             let value = tensor.value.data[src_linear];
+            // #172 sibling (intentionally NOT NaN-propagating here, mirrors the
+            // C-emit note in `chelis-backend-c/src/emit.rs` ~3963): windowed
+            // Max/Min use Rust `f64::max`/`f64::min`, which DROP NaN (return
+            // the non-NaN operand) — the same NaN-dropping semantics as the C
+            // backend's `fmaxf`/`fminf`, so eval and the backend stay
+            // CONSISTENT here. The #172 NaN-propagation fix scoped itself to
+            // `max_reduce` / `min_reduce`; flipping reduce_window forward
+            // without also defining the NaN gradient-routing in the windowed
+            // backward would create a fwd/bwd inconsistency. Tracked as a
+            // follow-up; reduce_window has its own parity gate (spec §2.3).
             acc = match reducer {
                 ReduceWindowOp::Max => acc.max(value),
                 ReduceWindowOp::Min => acc.min(value),
