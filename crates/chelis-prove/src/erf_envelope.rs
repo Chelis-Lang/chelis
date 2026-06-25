@@ -704,6 +704,136 @@ mod tests {
     }
 
     #[test]
+    fn rt_ws7b_adversarial_codec_and_committed_coeffs() {
+        // RT-WS7b: hammer the hex codec on adversarial doubles and EVERY committed
+        // coeff. The codec is the trust path now (proof certifies the f64 the
+        // runtime evaluates), so format->parse must be bit-exact, and parse of the
+        // committed hex must equal float.fromhex semantics (exact IEEE).
+
+        // 1. Structured adversarial normals (codec::format asserts normal; these
+        //    are all normal). Near powers of 2, large/small exponents, the
+        //    extremes of the normal range, and randomized mantissas/exponents.
+        let mut samples: Vec<f64> = vec![
+            1.0,
+            -1.0,
+            2.0,
+            -2.0,
+            0.5,
+            f64::MIN_POSITIVE, // smallest normal
+            -f64::MIN_POSITIVE,
+            f64::MAX,
+            f64::MIN,                              // most negative finite
+            f64::from_bits(0x3ff0_0000_0000_0001), // 1.0 + 1 ulp
+            f64::from_bits(0x3fef_ffff_ffff_ffff), // 1.0 - 1 ulp
+            std::f64::consts::PI,
+            std::f64::consts::E,
+            1e300,
+            1e-300,
+            -1e-300,
+        ];
+        // near every power of two across the exponent range (only the normal
+        // neighbors: the codec's domain is finite normals, asserted in #2 test).
+        for e in -1022i32..=1023 {
+            let v = 2.0_f64.powi(e);
+            for cand in [
+                v,
+                f64::from_bits(v.to_bits() + 1),
+                f64::from_bits(v.to_bits() - 1),
+            ] {
+                if cand.is_normal() {
+                    samples.push(cand);
+                }
+            }
+        }
+        // a deterministic LCG over the full normal bit space
+        let mut state: u64 = 0x1234_5678_9abc_def0;
+        for _ in 0..200_000 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let bits = state;
+            let v = f64::from_bits(bits);
+            if v.is_normal() {
+                samples.push(v);
+            }
+        }
+        for v in samples {
+            let s = super::hex_f64::format(v);
+            let back = super::hex_f64::parse(&s).expect("parse own format");
+            assert_eq!(
+                v.to_bits(),
+                back.to_bits(),
+                "codec round-trip changed {v:e} (bits {:#018x}) via {s:?}",
+                v.to_bits()
+            );
+        }
+
+        // 2. Every committed coeff: codec::parse of the raw committed hex string
+        //    (read straight from the JSON, not via serde's f64) must recover
+        //    exactly the f64 the runtime holds, and format->parse must be a stable
+        //    fixpoint.
+        let env = ErfEnvelope::committed();
+        let central = env
+            .boxes
+            .iter()
+            .find_map(|b| match &b.arm {
+                ErfArm::Central { coeffs } => Some(coeffs.clone()),
+                _ => None,
+            })
+            .expect("central box");
+        let raw: serde_json::Value = serde_json::from_str(ERF_ENVELOPE_JSON).unwrap();
+        let raw_coeffs = raw["boxes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|b| b["arm"]["coeffs"].as_array())
+            .expect("central coeffs array in json");
+        assert_eq!(raw_coeffs.len(), central.len());
+        for (i, (rawc, runtime_c)) in raw_coeffs.iter().zip(central.iter()).enumerate() {
+            let s = rawc.as_str().unwrap();
+            let parsed = super::hex_f64::parse(s).unwrap();
+            assert_eq!(
+                parsed.to_bits(),
+                runtime_c.to_bits(),
+                "committed coeff[{i}] {s:?}: codec parse {parsed:e} != runtime f64 {runtime_c:e}"
+            );
+            // format(parse(s)) must be a fixpoint that re-parses identically.
+            let reformatted = super::hex_f64::format(parsed);
+            let reparsed = super::hex_f64::parse(&reformatted).unwrap();
+            assert_eq!(parsed.to_bits(), reparsed.to_bits());
+        }
+    }
+
+    #[test]
+    fn rt_ws7b_codec_format_panics_on_subnormal() {
+        // Document the codec's domain: format() asserts the value is a finite
+        // NORMAL f64 (the committed coeffs are all normal). A subnormal would
+        // panic rather than silently mis-encode. This pins that boundary so a
+        // future change that admits subnormals must consciously revisit it.
+        let subnormal = f64::from_bits(1); // smallest positive subnormal
+        assert!(!subnormal.is_normal() && subnormal != 0.0);
+        let r = std::panic::catch_unwind(|| super::hex_f64::format(subnormal));
+        assert!(
+            r.is_err(),
+            "format() must reject subnormals (it asserts normal), got {:?}",
+            r.ok()
+        );
+        // No committed coeff is subnormal, so this domain restriction is safe.
+        let env = ErfEnvelope::committed();
+        if let Some(coeffs) = env.boxes.iter().find_map(|b| match &b.arm {
+            ErfArm::Central { coeffs } => Some(coeffs),
+            _ => None,
+        }) {
+            for c in coeffs {
+                assert!(
+                    c.is_normal(),
+                    "committed coeff {c:e} must be normal (codec domain)"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn hex_f64_round_trips_exactly() {
         // The hex-float codec must be a bit-exact f64 round trip for arbitrary
         // doubles (unlike serde_json's decimal float parse, which can land on a
