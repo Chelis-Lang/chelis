@@ -121,19 +121,38 @@ operands.
 (`crates/chelis-ir/src/host.rs` ~6330 host-type inference + ~6878;
 `crates/chelis-backend-c/src/host_emit.rs` ~1617 "unsupported builtin"). A
 rank-poly callee with max/min/prod is force-inlined into the host lane and hits
-the stub (the axis name leaks as a bare C identifier). Currently mitigated:
-`shape_class` (`crates/chelis-types/src/builtins.rs`) admits only `sum`/`mean`
-among the reductions as `NameTracked` (`expand` is also `NameTracked` since
-chelis#339); the other reductions are rejected at check time in a `..r` body
-(`rank_poly_tier3.rs::max_reduce_in_rank_poly_body_rejected`). The variadic
-form (chelis#339) desugars to the 2-arg composition, so re-admitting these
-ops automatically extends to their variadic calls in a `..r` body.
+the stub (the axis name leaks as a bare C identifier). Mitigated in two layers
+(defense-in-depth):
 
-**Approach.** Either (a) route the rank-poly reduce through the DAG lane (likely
-free if #338 does this), or (b) extend the host lane's reduce coverage to
-max/min/prod/argmax/argmin with named-axis→index resolution. Then **re-admit**
-them as `NameTracked` in `shape_class` (update the `shape_class` pin test) and
-**convert** `max_reduce_in_rank_poly_body_rejected` into a build+run test.
+1. **Check-time** — `shape_class` (`crates/chelis-types/src/builtins.rs`) admits
+   only `sum`/`mean` among the reductions as `NameTracked` (`expand` is also
+   `NameTracked` since chelis#339); the other reductions are rejected at check
+   time in a `..r` body
+   (`rank_poly_tier3.rs::max_reduce_in_rank_poly_body_rejected`).
+2. **Backend guard** — `reject_unsupported_host_lane_reductions` in the CLI
+   build pipeline (`crates/chelis-cli/src/main.rs`), backed by
+   `chelis_ir::host::host_program_unsupported_host_reduce` /
+   `UNSUPPORTED_HOST_LANE_REDUCTIONS`, fails the build LOUDLY if any of
+   `max_reduce`/`min_reduce`/`prod_reduce`/`argmax_reduce`/`argmin_reduce`
+   reaches the host program, instead of emitting the silent
+   `/* unsupported builtin {name} */ 0` escape. This backs up the check-time
+   gate if it is ever loosened. Locks:
+   `rank_poly_tier3.rs::max_reduce_rank_poly_repro_rejected_at_build`,
+   `host::tests::host_program_unsupported_host_reduce_*`, with the
+   `concrete_rank_max_reduce_builds_runs_and_evals` positive control proving the
+   guard does not touch the working tensor-DAG path.
+
+The variadic form (chelis#339) desugars to the 2-arg composition, so
+re-admitting these ops automatically extends to their variadic calls in a `..r`
+body.
+
+**Approach (re-admission, the remaining follow-up).** Either (a) route the
+rank-poly reduce through the DAG lane (likely free if #338 does this), or (b)
+extend the host lane's reduce coverage to max/min/prod/argmax/argmin with
+named-axis→index resolution. Then **re-admit** them as `NameTracked` in
+`shape_class` (update the `shape_class` pin test), **convert**
+`max_reduce_in_rank_poly_body_rejected` into a build+run test, and remove the
+now-redundant backend guard (or keep it as a structural backstop).
 
 ## #339 — expand (`R+1`) + variadic reduction surface — SHIPPED
 

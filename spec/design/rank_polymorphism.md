@@ -123,10 +123,18 @@ a square-shaped corpus test masked**:
   mislabel would fail loudly (`named_reduce_builds_and_runs_nonsquare_at_ranks_2_3_4`).
 - **HIGH — `max_reduce`/`min_reduce`/`prod_reduce` in a `..r` body don't compile
   (mitigated by restriction; chelis#340).** They route through the host scalar
-  lane, which only special-cases `sum`/`mean`. Mitigation: only `sum`/`mean` are
-  admitted as `NameTracked`; the others are **rejected at check time** in a `..r`
-  body so a check-clean program always builds. They remain usable at concrete
-  rank. Re-admission is tracked as chelis#340.
+  lane, which only special-cases `sum`/`mean`. Mitigation (two layers,
+  defense-in-depth): (1) only `sum`/`mean` are admitted as `NameTracked`; the
+  others — plus `argmax_reduce`/`argmin_reduce` — are **rejected at check time**
+  in a `..r` body so a check-clean program always builds; (2) a **backend
+  guard** (`reject_unsupported_host_lane_reductions` in the CLI build pipeline,
+  backed by `chelis_ir::host::host_program_unsupported_host_reduce`) fails the
+  build LOUDLY if any of those five reductions ever reaches the host program,
+  rather than emitting the silent `/* unsupported builtin {name} */ 0` escape
+  with a leaked axis name. Concrete-rank named reductions are unaffected: they
+  lower through the tensor-DAG lane (a `*__tensor_*` helper), not the host
+  program the guard scans. They remain usable at concrete rank. Re-admission
+  (teaching the host lane to lower these) is tracked as chelis#340.
 
 *Eval support (chelis#338, FIXED).* The tree-walking `chelis eval` interpreter
 operates on nameless runtime tensors, so it cannot resolve a named axis by

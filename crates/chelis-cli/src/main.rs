@@ -2390,6 +2390,7 @@ fn cmd_build(
                     .into());
                 }
                 reject_eval_only_builtins_host(host_program)?;
+                reject_unsupported_host_lane_reductions(host_program)?;
                 reject_unsupported_c_precisions_host(host_program)?;
                 reject_symbolic_windowed_reduce_host(host_program, "c")?;
                 reject_unsupported_reduce_window_precision_host(host_program, "c")?;
@@ -2408,6 +2409,7 @@ fn cmd_build(
         "hip" => {
             if let Some(host_program) = compiled_program.host.as_ref() {
                 reject_eval_only_builtins_host(host_program)?;
+                reject_unsupported_host_lane_reductions(host_program)?;
             }
             let host_requires_host_backend = compiled_program
                 .host
@@ -2450,6 +2452,7 @@ fn cmd_build(
         "metal" => {
             if let Some(host_program) = compiled_program.host.as_ref() {
                 reject_eval_only_builtins_host(host_program)?;
+                reject_unsupported_host_lane_reductions(host_program)?;
             }
             let host_requires_host_backend = compiled_program
                 .host
@@ -2635,6 +2638,7 @@ fn cmd_build_deep(
                     .into());
                 }
                 reject_eval_only_builtins_host(host_program)?;
+                reject_unsupported_host_lane_reductions(host_program)?;
                 reject_unsupported_c_precisions_host(host_program)?;
                 reject_symbolic_windowed_reduce_host(host_program, "c")?;
                 reject_unsupported_reduce_window_precision_host(host_program, "c")?;
@@ -2653,6 +2657,7 @@ fn cmd_build_deep(
         "hip" => {
             if let Some(host_program) = compiled_program.host.as_ref() {
                 reject_eval_only_builtins_host(host_program)?;
+                reject_unsupported_host_lane_reductions(host_program)?;
             }
             let host_requires_host_backend = compiled_program
                 .host
@@ -2690,6 +2695,7 @@ fn cmd_build_deep(
         "metal" => {
             if let Some(host_program) = compiled_program.host.as_ref() {
                 reject_eval_only_builtins_host(host_program)?;
+                reject_unsupported_host_lane_reductions(host_program)?;
             }
             let host_requires_host_backend = compiled_program
                 .host
@@ -5597,6 +5603,38 @@ fn reject_eval_only_builtins_host(
             )
             .into());
         }
+    }
+    Ok(())
+}
+
+/// chelis#340: a named-axis `max_reduce`/`min_reduce`/`prod_reduce`/
+/// `argmax_reduce`/`argmin_reduce` reaching the host scalar lane has no
+/// lowering — the host emitter special-cases only `sum`/`mean`, so the
+/// reduce falls through to `/* unsupported builtin {name} */ 0` and the
+/// axis NAME leaks as a bare C identifier (`__arg1_1 = seq;`), producing a
+/// silently wrong-shaped tensor (the issue's `tensor[2, 0]`) or a
+/// `use of undeclared identifier 'seq'` compile break.
+///
+/// The front-end already keeps these off the host lane: at concrete rank
+/// every named reduction is tensor-DAG lowered, and the Tier-3
+/// Body-Discipline check bars them inside a `..r` body (`sum`/`mean` only,
+/// spec/04-type-system.md §4.5.3). This backend guard is defense-in-depth:
+/// if either gate is ever loosened, the build must fail LOUDLY here instead
+/// of mis-routing. The C/HIP/Metal host lanes share `codegen_host_program`,
+/// so the guard runs on every host-lane build path. See
+/// `chelis_ir::host::UNSUPPORTED_HOST_LANE_REDUCTIONS`.
+fn reject_unsupported_host_lane_reductions(
+    program: &chelis_ir::host::HostProgram,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(builtin) = chelis_ir::host::host_program_unsupported_host_reduce(program) {
+        return Err(format!(
+            "named-axis `{builtin}` has no compiled host-lane lowering; only \
+             `sum`/`mean` are lowered over a named axis in the host scalar lane \
+             (spec/04-type-system.md §4.5.3). Use `{builtin}` at concrete rank \
+             (it lowers through the tensor-DAG lane there), or compose the \
+             reduction so it stays on the tensor path. chelis#340."
+        )
+        .into());
     }
     Ok(())
 }

@@ -1476,6 +1476,45 @@ pub fn host_program_uses_builtin(program: &HostProgram, builtin: &str) -> bool {
             .any(|function| host_body_uses_builtin(&function.body, builtin))
 }
 
+/// Value/index reductions that have **no host-scalar-lane lowering** in any
+/// build backend: the host emitter's `assign_builtin` special-cases only
+/// `sum`/`mean` over a resolved axis, so these fall through to the silent
+/// `/* unsupported builtin {name} */ 0` escape (and leak the axis-NAME as a
+/// bare C identifier, e.g. `__arg1_1 = seq;`). chelis#340.
+///
+/// At concrete rank every named-axis reduction is routed through the
+/// **tensor-DAG lane** (a `*__tensor_*` helper), so none of these names ever
+/// reaches the host program for a check-clean concrete program; the Tier-3
+/// Body-Discipline check (`chelis_types::shape_class` → `Rewriting`) further
+/// bars them inside a `..r` body (spec/04-type-system.md §4.5.3, "sum/mean
+/// only"). This list backs a backend defense-in-depth guard
+/// ([`host_program_unsupported_host_reduce`]) so that if either of those
+/// front-end gates is ever loosened, the build fails LOUDLY instead of
+/// emitting a silently wrong-shaped tensor.
+pub const UNSUPPORTED_HOST_LANE_REDUCTIONS: &[&str] = &[
+    "max_reduce",
+    "min_reduce",
+    "prod_reduce",
+    "argmax_reduce",
+    "argmin_reduce",
+];
+
+/// Returns the first [`UNSUPPORTED_HOST_LANE_REDUCTIONS`] builtin applied
+/// anywhere in `program`'s host bodies, or `None` if none appears. The host
+/// scalar lane has no lowering for these, so a build backend must reject the
+/// program rather than emit `/* unsupported builtin */ 0`. chelis#340.
+///
+/// This scans only the host program (global bindings + function bodies +
+/// their callbacks via [`host_body_uses_builtin`]); concrete-rank named
+/// reductions live in the embedded tensor-helper DAGs, not the host bodies,
+/// so they are correctly NOT flagged here.
+pub fn host_program_unsupported_host_reduce(program: &HostProgram) -> Option<&'static str> {
+    UNSUPPORTED_HOST_LANE_REDUCTIONS
+        .iter()
+        .copied()
+        .find(|builtin| host_program_uses_builtin(program, builtin))
+}
+
 fn host_callback_uses_builtin(callback: &HostCallback, builtin: &str) -> bool {
     match &callback.kind {
         HostCallbackKind::Inline { body, .. } => host_body_uses_builtin(body, builtin),
@@ -8338,6 +8377,136 @@ mod tests {
         assert!(
             !host_program_uses_builtin(&host, "process_run"),
             "host_program_uses_builtin must be false for a read_file-only program"
+        );
+    }
+
+    /// chelis#340 backend defense-in-depth: a host program whose body applies a
+    /// named-axis `max_reduce` (the axis carried as a bare `Var` — the leaked
+    /// `seq` from the issue repro) is detected by
+    /// `host_program_unsupported_host_reduce`, so the build backends can reject
+    /// it instead of emitting `/* unsupported builtin max_reduce */ 0`.
+    ///
+    /// The front-end gates (concrete-rank → tensor-DAG lane; Tier-3
+    /// Body-Discipline bars max_reduce in a `..r` body) keep this off the host
+    /// lane today, so the detector is exercised against a directly-constructed
+    /// `HostProgram` that models exactly the silent-mis-route shape.
+    #[test]
+    fn host_program_unsupported_host_reduce_detects_max_reduce() {
+        let body = HostExpr::new(HostExprKind::Builtin {
+            name: "max_reduce".to_string(),
+            args: vec![
+                HostExpr::new(HostExprKind::Var(
+                    "x".to_string(),
+                    HostType::Tensor(TensorType {
+                        dims: vec![],
+                        precision: Prim::F32,
+                    }),
+                )),
+                // The axis NAME (`seq`) carried as a bare Var: the exact shape
+                // that leaks as `__arg1_1 = seq;` in the emitted C.
+                HostExpr::new(HostExprKind::Var("seq".to_string(), HostType::Int64)),
+            ],
+            ty: HostType::Tensor(TensorType {
+                dims: vec![],
+                precision: Prim::F32,
+            }),
+        });
+        let program = HostProgram {
+            functions: vec![HostFunction {
+                name: "reduce_seq".to_string(),
+                params: vec![HostParam {
+                    name: "x".to_string(),
+                    ty: HostType::Tensor(TensorType {
+                        dims: vec![],
+                        precision: Prim::F32,
+                    }),
+                }],
+                ret_ty: HostType::Tensor(TensorType {
+                    dims: vec![],
+                    precision: Prim::F32,
+                }),
+                body,
+                tensor_helpers: Vec::new(),
+                specialization: None,
+                summary_rejections: Vec::new(),
+            }],
+            ..HostProgram::default()
+        };
+        assert_eq!(
+            host_program_unsupported_host_reduce(&program),
+            Some("max_reduce"),
+            "a host body applying named-axis max_reduce must be flagged (chelis#340)"
+        );
+    }
+
+    /// chelis#340 coverage for the full unsupported set: each of the five
+    /// reductions with no host-scalar lowering is detected.
+    #[test]
+    fn host_program_unsupported_host_reduce_detects_each_unsupported_reduction() {
+        for name in UNSUPPORTED_HOST_LANE_REDUCTIONS {
+            let program = HostProgram {
+                globals: vec![HostBinding {
+                    name: "out".to_string(),
+                    display_name: None,
+                    ty: HostType::Tensor(TensorType {
+                        dims: vec![],
+                        precision: Prim::F32,
+                    }),
+                    value: HostExpr::new(HostExprKind::Builtin {
+                        name: (*name).to_string(),
+                        args: vec![HostExpr::new(HostExprKind::Var(
+                            "seq".to_string(),
+                            HostType::Int64,
+                        ))],
+                        ty: HostType::Tensor(TensorType {
+                            dims: vec![],
+                            precision: Prim::F32,
+                        }),
+                    }),
+                }],
+                ..HostProgram::default()
+            };
+            assert_eq!(
+                host_program_unsupported_host_reduce(&program),
+                Some(*name),
+                "the unsupported host reduction `{name}` must be flagged (chelis#340)"
+            );
+        }
+    }
+
+    /// chelis#340 negative parity: `sum` IS lowered over a named axis in the
+    /// host scalar lane, so a host program using only `sum` must NOT be flagged
+    /// — otherwise the guard would false-positive a buildable program. (`mean`
+    /// shares the same lowered arm.) This keeps the positive assertions above
+    /// from being vacuous.
+    #[test]
+    fn host_program_unsupported_host_reduce_allows_sum() {
+        let program = HostProgram {
+            globals: vec![HostBinding {
+                name: "out".to_string(),
+                display_name: None,
+                ty: HostType::Tensor(TensorType {
+                    dims: vec![],
+                    precision: Prim::F32,
+                }),
+                value: HostExpr::new(HostExprKind::Builtin {
+                    name: "sum".to_string(),
+                    args: vec![HostExpr::new(HostExprKind::Var(
+                        "seq".to_string(),
+                        HostType::Int64,
+                    ))],
+                    ty: HostType::Tensor(TensorType {
+                        dims: vec![],
+                        precision: Prim::F32,
+                    }),
+                }),
+            }],
+            ..HostProgram::default()
+        };
+        assert_eq!(
+            host_program_unsupported_host_reduce(&program),
+            None,
+            "a host body using only `sum` must not be flagged (chelis#340)"
         );
     }
 

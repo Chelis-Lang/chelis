@@ -737,6 +737,67 @@ out = add(w, to_tensor([1.0, 2.0]))\n";
     );
 }
 
+/// #379 (helper-scheme collision arm — the second namespace the issue names,
+/// distinct from the C-keyword/`main` arms above): a binding name that
+/// literally contains the emitted tensor-helper infix `__tensor_` (e.g.
+/// `f__tensor_0`, the exact shape of a generated helper symbol) must be
+/// mangled at C-emit time so it cannot collide with a real helper. Pre-fix it
+/// was emitted verbatim and could duplicate-define a `{fn}__tensor_{n}`
+/// symbol. The binding mangles to `chelis_user__f__tensor_0`, the helper for
+/// `g` stays `g__tensor_0`, and the program compiles, runs, and agrees with
+/// eval.
+#[test]
+fn issue_379_helper_scheme_collision_binding_name_compiles_and_matches_eval() {
+    let source = "f__tensor_0 = to_tensor([10.0, 20.0])\n\
+def g(x: tensor[2, f32]) -> tensor[2, f32] = add(x, f__tensor_0)\n\
+out = g(to_tensor([1.0, 2.0]))\n";
+
+    let build = chelis_build_c(source, "helpercol");
+    let kernel_c = build.path().join("helpercol.c");
+    let c_source = fs::read_to_string(&kernel_c).expect("read emitted C");
+
+    // Emit-shape invariant: the colliding binding is mangled, and no
+    // file-scope declaration emits the raw `f__tensor_0` (which would risk a
+    // duplicate symbol against the generated-helper namespace).
+    assert!(
+        c_source.contains("chelis_user__f__tensor_0"),
+        "a binding spelled like the helper scheme (`f__tensor_0`) must be \
+         mangled (#379); emitted C=\n{c_source}",
+    );
+    assert!(
+        !c_source
+            .lines()
+            .any(|line| line.trim() == "static chelis_tensor* f__tensor_0;"),
+        "the raw helper-scheme-colliding name must not be declared verbatim \
+         (#379); emitted C=\n{c_source}",
+    );
+    // The generated helper for `g` keeps its own `g__tensor_0` symbol, which
+    // the mangled binding must not shadow or duplicate.
+    assert!(
+        c_source.contains("g__tensor_0"),
+        "the generated tensor helper `g__tensor_0` must still be emitted; \
+         emitted C=\n{c_source}",
+    );
+
+    let stdout = compile_and_run_emitted(build.path(), &kernel_c);
+    assert_eq!(
+        binding_line(&stdout, "out"),
+        "out = tensor(shape=[2], data=[11.0, 22.0])",
+        "helper-scheme-colliding capture must run (#379); stdout={stdout:?}",
+    );
+
+    // eval-vs-backend agreement on the computed binding `out`. (The captured
+    // binding's own display label is derived identically in both lanes — a
+    // shared display-name behavior, not a backend divergence — so `out` is
+    // the agreement oracle here.)
+    let eval_out = chelis_eval_ok(source, "helpercol");
+    assert_eq!(
+        binding_line(&stdout, "out"),
+        binding_line(&eval_out, "out"),
+        "eval and compiled C must agree for a helper-scheme-colliding name (#379)",
+    );
+}
+
 // -----------------------------------------------------------------------------
 // #365 — Bool comparison-mask const fills through the dtype-correct helper
 // -----------------------------------------------------------------------------

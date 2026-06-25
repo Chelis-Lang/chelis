@@ -167,6 +167,70 @@ fn max_reduce_in_rank_poly_body_rejected() {
     assert_rejected_with(&json, "name-trackable", "max_reduce in a ..r body");
 }
 
+/// chelis#340 build-rejection lock: the FULL repro from the issue
+/// (`reduce_seq` reduces the named `seq` axis with `max_reduce` in a `..r`
+/// body, called from a concrete `r3`) must be rejected by `chelis build`,
+/// never silently emit a wrong-shaped tensor. The user-facing protection is
+/// the Tier-3 Body-Discipline check; the C-backend defense-in-depth guard
+/// (`reject_unsupported_host_lane_reductions` →
+/// `chelis_ir::host::host_program_unsupported_host_reduce`) backs it up if
+/// that check is ever loosened. Pre-fix the emitted C carried
+/// `/* unsupported builtin max_reduce */ 0` and a bare `= seq;`.
+#[test]
+fn max_reduce_rank_poly_repro_rejected_at_build() {
+    let source = "def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = max_reduce(x, seq)\n\
+         def r3(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, f32] = reduce_seq(x)\n\
+         out = r3(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n";
+    let stderr = build_expecting_failure(source, "max_reduce_rank_poly_repro");
+    assert!(
+        stderr.contains("max_reduce"),
+        "the rejection must name `max_reduce`; got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("unsupported builtin"),
+        "the build must be rejected BEFORE codegen, not via the silent \
+         `/* unsupported builtin */ 0` host-lane escape; got: {stderr}"
+    );
+}
+
+/// chelis#340 positive control (the guard must not false-positive a buildable
+/// program): a named-axis `max_reduce` at CONCRETE rank lowers through the
+/// tensor-DAG lane, so it builds, runs, and agrees with eval. This is the
+/// working path the host-lane reduction guard must never touch — concrete-rank
+/// named reductions live in a `*__tensor_*` helper DAG, not in the host
+/// program body the guard scans.
+#[test]
+fn concrete_rank_max_reduce_builds_runs_and_evals() {
+    // Two bindings so both lanes print the `name = ` prefix the agreement
+    // oracle keys on (a single trailing binding prints bare in the eval lane,
+    // a general display behavior unrelated to #340).
+    let source = "def f(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = max_reduce(x, seq)\n\
+         a = f(to_tensor([[1.0, 5.0, 3.0], [4.0, 2.0, 6.0]]))\n\
+         out = f(to_tensor([[7.0, 1.0], [2.0, 9.0]]))\n";
+    let backend = build_compile_run(source, "concrete_max_reduce");
+    let tensors = parse_printed_tensors(&backend);
+    // max over the `seq` axis.
+    let expected: &[(&str, &[usize], &[f64])] = &[
+        ("a", &[2], &[5.0, 6.0]),   // row maxima of [[1,5,3],[4,2,6]]
+        ("out", &[2], &[7.0, 9.0]), // row maxima of [[7,1],[2,9]]
+    ];
+    for (name, shape, data) in expected {
+        let got = tensors
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .unwrap_or_else(|| panic!("backend output missing `{name}`: {backend}"));
+        assert_eq!(&got.1, shape, "{name}: backend shape mismatch ({backend})");
+        assert_eq!(got.2.len(), data.len(), "{name}: backend len ({backend})");
+        for (i, (g, e)) in got.2.iter().zip(data.iter()).enumerate() {
+            assert!(
+                (g - e).abs() < 1e-6,
+                "{name}[{i}]: backend {g} != expected {e} ({backend})"
+            );
+        }
+    }
+    assert_eval_agrees_with_backend(source, "concrete_max_reduce", &backend);
+}
+
 /// Concrete-rank control: a named reduction on a fully-concrete shape (no
 /// spread) drops the named axis and keeps the rest — the feature does not
 /// require a spread, and does not regress ordinary defs.
