@@ -184,11 +184,55 @@ impl<'a> EvalContext<'a> {
                 "host runtime: `{kind_label}(...)` lowering produced no roots"
             ));
         }
+        // chelis#377: a transform target may capture a top-level tensor
+        // binding (`w = to_tensor([...]); def f(x) = sum(mul(x, w), 0);
+        // grad(f)(x)`). The captured `w` lowers to a `Load { name: "w" }`
+        // in the inner DAG. It is delivered in `captured_env` (NOT
+        // `tensor_bindings`, which only carries the host program's own
+        // top-level tensors), so the load callback must also serve captured
+        // tensor values or the grad/vmap lane fails with `missing required
+        // input \`w\``. The C backend already compiles+runs this (it hoists
+        // the capture into a file-scope global); this closes the eval-side
+        // parity gap pinned by `issue_352_grad_over_capturing_def_eval_gap`.
+        // Only `Tensor` captures are served; non-tensor captures (closures,
+        // scalars routed elsewhere) are not load inputs here.
+        let mut captured_tensors: HashMap<String, IrTensorValue> = captured_env
+            .iter()
+            .filter_map(|(name, value)| match value {
+                RuntimeValue::Tensor(tensor) => Some((name.clone(), tensor.value.clone())),
+                _ => None,
+            })
+            .collect();
+
+        // chelis#377 (vmap-inside-a-def): when the transform is applied
+        // inside another def's body (`def fv(xs) = xs |> vmap(dot_w)`), the
+        // `captured_env` is that body's local scope (`xs`), so a TOP-LEVEL
+        // tensor binding the inner fn captures (`dot_w` referencing top-level
+        // `w`) is in neither `captured_env` nor `tensor_bindings`. Walk the
+        // lowered DAG's still-unsatisfied `Load` names and resolve each as a
+        // top-level binding, so the captured `w` Load is served. This reuses
+        // the same `resolve_top_level` path a plain reference would take.
+        for node in dag.nodes() {
+            let chelis_ir::dag::RiscOp::Load { name } = &node.op else {
+                continue;
+            };
+            let name = name.as_str();
+            if placeholder_tensors.contains_key(name)
+                || tensor_bindings.contains_key(name)
+                || captured_tensors.contains_key(name)
+            {
+                continue;
+            }
+            if let Ok(RuntimeValue::Tensor(tensor)) = self.resolve_top_level(name) {
+                captured_tensors.insert(name.to_string(), tensor.value.clone());
+            }
+        }
         let values = chelis_ir::eval::eval_tensor_roots_with_strict(&dag, &roots, |name| {
             placeholder_tensors
                 .get(name)
                 .cloned()
                 .or_else(|| tensor_bindings.get(name).map(|t| t.value.clone()))
+                .or_else(|| captured_tensors.get(name).cloned())
         })
         .map_err(|err| {
             let kind_label = match kind {
