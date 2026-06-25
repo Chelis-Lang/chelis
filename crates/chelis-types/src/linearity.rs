@@ -1413,6 +1413,10 @@ fn param_names(expr: &Expr) -> Vec<String> {
                 .first()
                 .and_then(symbol_name)
                 .map(str::to_string),
+            // chelis#343: a typed param whose name collides with a Deep tag
+            // is desugared to the caret-metadata wrapper `^{:type T} name`
+            // (a `MetaExpr`); recover the name from its inner symbol.
+            Expr::MetaExpr(meta, _) => symbol_name(meta.expr.as_ref()).map(str::to_string),
             _ => None,
         })
         .collect()
@@ -1718,6 +1722,28 @@ fn param_name_and_type(param: &Expr) -> Option<(&str, Option<&Expr>)> {
                 .and_then(|meta| meta.entries.iter().find(|(k, _)| k == "type"))
                 .map(|(_, value)| value),
         )),
+        // chelis#343: a typed param whose name collides with a Deep tag
+        // (`params`, `fn`, `let`, ...) cannot use the `(name {type: T})`
+        // list form — `(params {type: T})` is indistinguishable from a
+        // `params` tag list — so the desugarer emits the caret-metadata
+        // wrapper `^{:type T} name` (a `MetaExpr`) instead
+        // (`typed_param_needs_meta_wrapper`). `extract_params` in infer.rs
+        // already reads this form; linearity must too, or the param is
+        // declared with NO type and a borrow of it (`&params`) trips a
+        // spurious "borrowed arguments must be tensor or tensor-carrying
+        // values". Mirrors infer.rs `extract_params`'s MetaExpr arm.
+        Expr::MetaExpr(meta, _) => {
+            let Expr::Atom(Atom::Symbol(name), _) = meta.expr.as_ref() else {
+                return None;
+            };
+            Some((
+                name.as_str(),
+                meta.entries
+                    .iter()
+                    .find(|(k, _)| k == "type")
+                    .map(|(_, value)| value),
+            ))
+        }
         _ => None,
     }
 }
