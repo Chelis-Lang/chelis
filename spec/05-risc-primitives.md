@@ -66,45 +66,81 @@ runtime reject them during execution; compiled C exits non-zero rather than abor
 |---|---|---|---|
 | `add` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise addition | `(g, g)` |
 | `mul` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise multiplication | `(g * y, g * x)` |
-| `div` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise IEEE-754 division `a / b` | `(g / b, -g * (a/b) / b)` (= `(g/b, -g*y/b)` using `y = a/b`) |
+| `div` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise IEEE-754 division `a / b` (**float operands only**) | `(g / b, -g * (a/b) / b)` (= `(g/b, -g*y/b)` using `y = a/b`) |
+| `floor_div` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise floor division: `floor(a / b)`, rounding toward −∞ | Non-differentiable (piecewise constant); `grad` rejects it |
+| `trunc_div` | `(&tensor[D,p_int], &tensor[D,p_int]) -> tensor[D,p_int]` | Element-wise truncating division (round toward zero), **integer operands only** | Non-differentiable (piecewise constant); `grad` rejects it |
 | `cmplt` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,bool]` | Element-wise less-than comparison | Non-differentiable (zero gradient) |
 | `max_elem` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise maximum | `(g * (x >= y), g * (x < y))` — gradient flows to the max input |
 
-**`div` semantics.** `div(a, b)` lowers to the target's native
-`/` operator.
+**`div` semantics (float-only since chelis#178).** `div(a, b)`
+is **restricted to float operands** (f32, f64, f16, bf16) and
+lowers to the target's native floating `/` operator with IEEE-754
+semantics. Corner cases follow IEEE: `1/0 = +inf`, `1/-0 = -inf`,
+`0/0 = NaN`, `1/-1 = -1`, `(any non-NaN) / -2.0` yields the
+algebraic value. A historical `mul(a, exp(neg(log(b))))`
+decomposition returned NaN for any `b ≤ 0` because `log(b)` is
+undefined there; that decomposition is not reachable from any
+Tier 2 op.
 
-- **Float operands** (f32, f64, f16, bf16) — IEEE-754 division.
-  Corner cases follow IEEE: `1/0 = +inf`, `1/-0 = -inf`,
-  `0/0 = NaN`, `1/-1 = -1`, `(any non-NaN) / -2.0` yields the
-  algebraic value. A historical `mul(a, exp(neg(log(b))))`
-  decomposition returned NaN for any `b ≤ 0` because `log(b)` is
-  undefined there; that decomposition is not reachable from any
-  Tier 2 op.
+`div(int_tensor, int_tensor)` is a **type error** (the `/`
+operator on integer operands is likewise rejected, because `/`
+desugars to `div`). The diagnostic cites this section and points
+at `floor_div` / `trunc_div`. This is a deliberate breaking change
+from the pre-chelis#178 behavior, where `div` on integer operands
+performed C/Rust truncating division. The single-op-two-semantics
+overload (`div(7, 2) == 3` for ints, `== 3.5` for floats) was a
+footgun and matched none of torch / JAX / numpy: their default
+`divide` upcasts integers to float, and their integer division op
+is `floor_divide` (round toward −∞), which the old C-truncating
+behavior also did not match. Integer division now has two explicit,
+named primitives below.
 
-- **Integer operands** (int8, int16, int32, int64) — C/Rust
-  truncating division (round toward zero). `7 / 2 == 3`,
-  `-7 / 2 == -3`, `1 / 0` traps. Both the evaluator and the C
-  backend halt with the same clean diagnostic
-  (`integer division or remainder by zero`, the same message
-  `mod`'s zero-divisor path emits, so the two primitives are
-  consistent across both lanes). The C backend emits an explicit
-  zero-divisor guard (`chelis_int_div_guard`) before every
-  integer `div`/`mod` rather than relying on a hardware fault:
-  x86 raises `SIGFPE` on integer division by zero, but AArch64
-  (e.g. Apple silicon) defines it to return a value and does not
-  fault, so a signal-dependent trap would silently compute a
-  wrong answer there. The explicit guard traps deterministically
-  on every target. Neither side returns a finite value. This
-  differs from torch's `true_divide` and JAX's default
-  `jnp.divide`, both of which upcast integers to float and return
-  float. Chelis matches the C-language convention because
-  chelis-std's `Std.Decimal` arithmetic uses `div(int64, int64)`
-  for scale shifts; float-only would force a separate `int_div`
-  primitive without benefit.
+**`floor_div` semantics.** `floor_div(a, b)` computes
+`floor(a / b)` element-wise, rounding the quotient toward −∞.
+
+- **Integer operands** (int8, int16, int32, int64) — the result is
+  the largest integer `q` with `q * b ≤ a` (for `b > 0`). It is
+  realized as native truncating `/` plus a sign correction:
+  `q = a / b; r = a % b; if (r != 0 && ((r < 0) != (b < 0))) q -= 1`.
+  Floor and truncate agree when the operands share a sign; they
+  differ on a mixed-sign exact-fraction case:
+  `floor_div(-7, 2) == -4` (truncate gives `-3`),
+  `floor_div(7, -2) == -4`, `floor_div(-8, 2) == -4`. Matches
+  Python `//`, torch `floor_divide`, JAX `floor_divide`, numpy
+  `floor_divide`.
+- **Float operands** (f32, f64, f16, bf16) — `floor(a / b)` under
+  IEEE division (so `floor_div(7.0, 2.0) == 3.0`,
+  `floor_div(-7.0, 2.0) == -4.0`); `b == 0` follows IEEE and is not
+  guarded (`floor(+inf) == +inf`).
+- **Zero divisor (integer operands)** — traps with the same clean
+  diagnostic as `mod` (`integer division or remainder by zero`).
+  Both the evaluator and the C backend halt; the C backend emits
+  the explicit `chelis_int_div_guard` zero-divisor guard (see the
+  `trunc_div` note below for the portability rationale).
+
+**`trunc_div` semantics (integer-only).** `trunc_div(a, b)`
+computes the quotient rounded toward zero — the exact C/Rust
+integer `/` operator — and is **valid on integer operands only**
+(applying it to floats is a type error; use `floor_div` plus
+`floor`, or a `cast`, for a float truncating quotient).
+`trunc_div(7, 2) == 3`, `trunc_div(-7, 2) == -3`,
+`trunc_div(7, -2) == -3`, `trunc_div(-8, 2) == -4`. This is the
+exact quotient semantics chelis-std's `Std.Decimal` arithmetic
+needs for scale shifts and quotient computation. `1 / 0` traps with
+the `integer division or remainder by zero` diagnostic (the same
+message `mod`'s zero-divisor path emits, so the two primitives are
+consistent across both lanes). The C backend emits an explicit
+zero-divisor guard (`chelis_int_div_guard`) before every integer
+`trunc_div` / `floor_div` / `mod` rather than relying on a hardware
+fault: x86 raises `SIGFPE` on integer division by zero, but AArch64
+(e.g. Apple silicon) defines it to return a value and does not
+fault, so a signal-dependent trap would silently compute a wrong
+answer there. The explicit guard traps deterministically on every
+target.
 
 **Dimension rule:** Both inputs must have identical dimension lists. Output has the same dimensions. No broadcasting.
 
-**Precision rule:** Both inputs must have the same precision `p`. Output has the same precision. Exception: `cmplt` returns `bool` regardless of input precision.
+**Precision rule:** Both inputs must have the same precision `p`. Output has the same precision. Exception: `cmplt` returns `bool` regardless of input precision. Additional restrictions: `div` admits only float precisions (integer operands are a type error citing this section); `trunc_div` admits only integer precisions (float operands are a type error); `floor_div` admits both integer and float precisions.
 
 ### 2.2 Elementwise Unary
 

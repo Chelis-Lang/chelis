@@ -7665,9 +7665,9 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
         _ => None,
     });
     match name {
-        "add" | "sub" | "mul" | "div" | "neg" | "exp" | "log" | "sin" | "sqrt" | "relu"
-        | "sigmoid" | "tanh" | "silu" | "gelu" | "max_elem" | "min_elem" | "copy"
-        | "uniform_like" | "dropout" | "softmax" => {
+        "add" | "sub" | "mul" | "div" | "floor_div" | "trunc_div" | "neg" | "exp" | "log"
+        | "sin" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu" | "max_elem"
+        | "min_elem" | "copy" | "uniform_like" | "dropout" | "softmax" => {
             if let Some(tensor_ty) = tensor_arg {
                 Some(HostType::Tensor(tensor_ty))
             } else if arg_tys.iter().any(|ty| matches!(ty, HostType::Float64)) {

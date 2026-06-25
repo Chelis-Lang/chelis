@@ -1157,6 +1157,23 @@ where
                 &values[&node.inputs[1]],
                 |a, b| a / b,
             ),
+            // chelis#178: floor division rounds the quotient toward -inf.
+            // Tensor values are stored as f64; for integer-valued operands
+            // `(a / b).floor()` yields the integer floored quotient, and
+            // for float operands it is `floor(a / b)` directly.
+            RiscOp::FloorDiv => binary_map(
+                &values[&node.inputs[0]],
+                &values[&node.inputs[1]],
+                |a, b| (a / b).floor(),
+            ),
+            // chelis#178: truncating (round-toward-zero) integer division.
+            // `(a / b).trunc()` matches C/Rust integer `/` for the
+            // integer-valued f64 operands this op is restricted to.
+            RiscOp::TruncDiv => binary_map(
+                &values[&node.inputs[0]],
+                &values[&node.inputs[1]],
+                |a, b| (a / b).trunc(),
+            ),
             RiscOp::Neg => unary_map(&values[&node.inputs[0]], |x| -x),
             RiscOp::Recip => unary_map(&values[&node.inputs[0]], |x| 1.0 / x),
             RiscOp::Exp => unary_map(&values[&node.inputs[0]], f64::exp),
@@ -1281,6 +1298,18 @@ where
                             resolve(&step.input_indices[0]),
                             resolve(&step.input_indices[1]),
                             |a, b| a / b,
+                        ),
+                        // chelis#178: floor / truncating integer division
+                        // fused steps. See the standalone `RiscOp` arms.
+                        FusedStepOp::FloorDiv => binary_map(
+                            resolve(&step.input_indices[0]),
+                            resolve(&step.input_indices[1]),
+                            |a, b| (a / b).floor(),
+                        ),
+                        FusedStepOp::TruncDiv => binary_map(
+                            resolve(&step.input_indices[0]),
+                            resolve(&step.input_indices[1]),
+                            |a, b| (a / b).trunc(),
                         ),
                         FusedStepOp::MaxElem => binary_map(
                             resolve(&step.input_indices[0]),

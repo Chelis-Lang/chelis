@@ -526,6 +526,49 @@ pub(super) fn eval_mod(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
     })
 }
 
+/// Integer floor division (round toward −∞). The quotient is the
+/// truncating `/` corrected down by one when the remainder is nonzero and
+/// the operands have opposite signs. Matches Python `//` / the C-backend
+/// remainder-sign correction. Traps on a zero divisor. See chelis#178.
+fn floor_div_i64(lhs: i64, rhs: i64) -> Result<i64, String> {
+    if rhs == 0 {
+        return Err(INT_DIV_ZERO_MSG.to_string());
+    }
+    let q = lhs.wrapping_div(rhs);
+    let r = lhs.wrapping_rem(rhs);
+    if r != 0 && ((r < 0) != (rhs < 0)) {
+        Ok(q - 1)
+    } else {
+        Ok(q)
+    }
+}
+
+/// `floor_div` evaluator entry (chelis#178): integer operands round the
+/// quotient toward −∞ (and trap on a zero divisor); float operands compute
+/// `floor(a / b)` under IEEE division (a zero divisor follows IEEE,
+/// `floor(+inf) == +inf`, never traps).
+pub(super) fn eval_floor_div(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
+    let both_integer = args.len() == 2 && args.iter().all(operand_is_integer);
+    if both_integer {
+        return checked_int_binop(args, floor_div_i64);
+    }
+    numeric_binop(args, |lhs, rhs| (lhs / rhs).floor())
+}
+
+/// `trunc_div` evaluator entry (chelis#178): integer-only truncating
+/// (round-toward-zero) division — the C/Rust integer `/` quotient. Traps
+/// on a zero divisor with the shared diagnostic. The type checker rejects
+/// float operands; this entry handles the integer (scalar/tensor) lanes.
+pub(super) fn eval_trunc_div(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
+    checked_int_binop(args, |lhs, rhs| {
+        if rhs == 0 {
+            Err(INT_DIV_ZERO_MSG.to_string())
+        } else {
+            Ok(lhs.wrapping_div(rhs))
+        }
+    })
+}
+
 /// Integer binop helper whose closure may fail (the failing path is the
 /// zero-divisor trap). Handles integer scalars and integer-precision
 /// tensors element-wise; the closure runs at `i64` precision. A tensor

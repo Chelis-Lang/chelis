@@ -71,7 +71,7 @@ def decimal_to_string(value: Decimal) -> string = {
   rendered = render_decimal_digits(normalized.scale, digits)
   if and(negative, neq(coeff, cast(0, int64))) then string_concat("-", rendered) else rendered
 }
-def normalize(value: Decimal) -> Decimal = { if and(gt(value.scale, cast(0, int64)), eq(mod(abs_int(value.coefficient), cast(10, int64)), cast(0, int64))) then normalize(Decimal { coefficient: div(value.coefficient, cast(10, int64)), scale: sub(value.scale, cast(1, int64)) }) else value }
+def normalize(value: Decimal) -> Decimal = { if and(gt(value.scale, cast(0, int64)), eq(mod(abs_int(value.coefficient), cast(10, int64)), cast(0, int64))) then normalize(Decimal { coefficient: trunc_div(value.coefficient, cast(10, int64)), scale: sub(value.scale, cast(1, int64)) }) else value }
 def parse_decimal_chars(text: string, idx: int64, coefficient: int64, scale: int64, seen_dot: bool, seen_digit: bool) -> Option[(int64, int64, bool)] = {
   if gte(idx, string_len(text)) then Some((coefficient, scale, seen_digit)) else {
     ch = char_at(text, idx)
@@ -112,7 +112,7 @@ def decimal_div_nonzero(lhs: Decimal, rhs: Decimal, result_scale: int64, mode: R
 }
 def divide_round(numerator: int64, denominator: int64, mode: RoundingMode) -> int64 = {
   same_sign = eq(gte(numerator, cast(0, int64)), gte(denominator, cast(0, int64)))
-  q = div(abs_int(numerator), abs_int(denominator))
+  q = trunc_div(abs_int(numerator), abs_int(denominator))
   r = mod(abs_int(numerator), abs_int(denominator))
   rounded = round_abs(q, r, abs_int(denominator), mode)
   if same_sign then rounded else sub(cast(0, int64), rounded)

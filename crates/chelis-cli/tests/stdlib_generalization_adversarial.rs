@@ -302,17 +302,21 @@ def call(q: &tensor[4, 4, {dtype}], k: &tensor[4, 4, {dtype}], v: &tensor[4, 4, 
 }
 
 // =================================================================
-// `div` is admitted on integer operands with C/Rust truncating
-// semantics per spec/05-risc-primitives.md §2.1 (used by
-// `Std.Decimal` for scale shifts). `recip` is float-only per §2.2
-// because an integer reciprocal has no useful IEEE-754
-// interpretation. These tests pin both sides: polymorphic `div`
-// wrappers must accept integer instantiations; polymorphic `recip`
-// wrappers must reject them.
+// `div` is FLOAT-ONLY since chelis#178: applying it to integer
+// operands is a type error citing spec/05-risc-primitives.md §2.1
+// and pointing at `floor_div` / `trunc_div`. `recip` is likewise
+// float-only per §2.2 (an integer reciprocal has no useful IEEE-754
+// interpretation). These tests pin both sides: polymorphic `div`
+// AND `recip` wrappers must reject integer instantiations; the new
+// integer-division ops `floor_div` / `trunc_div` accept them.
 // =================================================================
 
 #[test]
-fn polymorphic_div_wrapper_accepts_integer_call_site() {
+fn polymorphic_div_wrapper_rejects_integer_call_site() {
+    // chelis#178: integer `div` is no longer admitted. A polymorphic
+    // `div` wrapper instantiated at an integer dtype must reject at
+    // the call site with a §2.1 citation pointing at the integer
+    // division ops.
     for dtype in INTEGER_DTYPES {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("div_wrapper_int.ch");
@@ -326,10 +330,69 @@ def call(x: tensor[4, {dtype}], y: tensor[4, {dtype}]) -> tensor[4, {dtype}] = m
         let json = run_check(&path);
         let errs = errors(&json);
         assert!(
+            !errs.is_empty(),
+            "chelis#178: polymorphic `div` wrapper at integer dtype \
+             `{dtype}` must reject (div is float-only per \
+             spec/05-risc-primitives.md \u{00a7}2.1); got clean. errs={errs:?}"
+        );
+        let messages = error_messages(&json);
+        assert!(
+            messages.iter().any(|m| {
+                m.contains("div") && (m.contains("floor_div") || m.contains("trunc_div"))
+            }),
+            "chelis#178: rejection of `div({dtype})` wrapper must name \
+             `div` and point at `floor_div` / `trunc_div`; got {messages:?}"
+        );
+    }
+}
+
+#[test]
+fn polymorphic_floor_div_wrapper_accepts_integer_call_site() {
+    // chelis#178: `floor_div` is the integer-admissible replacement.
+    // A polymorphic wrapper instantiated at an integer dtype must
+    // type-check clean.
+    for dtype in INTEGER_DTYPES {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("floor_div_wrapper_int.ch");
+        let src = format!(
+            r#"sig my_fd: tensor[4, p] -> tensor[4, p] -> tensor[4, p]
+def my_fd(a, b) = floor_div(a, b)
+def call(x: tensor[4, {dtype}], y: tensor[4, {dtype}]) -> tensor[4, {dtype}] = my_fd(x, y)
+"#
+        );
+        write_file(&path, &src);
+        let json = run_check(&path);
+        let errs = errors(&json);
+        assert!(
             errs.is_empty(),
-            "polymorphic `div` wrapper at integer dtype `{dtype}` must \
-             type-check clean (C/Rust truncating semantics per \
-             spec/05-risc-primitives.md \u{00a7}2.1); got {errs:?}"
+            "chelis#178: polymorphic `floor_div` wrapper at integer dtype \
+             `{dtype}` must type-check clean per \
+             spec/05-risc-primitives.md \u{00a7}2.1; got {errs:?}"
+        );
+    }
+}
+
+#[test]
+fn polymorphic_trunc_div_wrapper_accepts_integer_call_site() {
+    // chelis#178: `trunc_div` is integer-only and admissible at every
+    // integer dtype.
+    for dtype in INTEGER_DTYPES {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("trunc_div_wrapper_int.ch");
+        let src = format!(
+            r#"sig my_td: tensor[4, p] -> tensor[4, p] -> tensor[4, p]
+def my_td(a, b) = trunc_div(a, b)
+def call(x: tensor[4, {dtype}], y: tensor[4, {dtype}]) -> tensor[4, {dtype}] = my_td(x, y)
+"#
+        );
+        write_file(&path, &src);
+        let json = run_check(&path);
+        let errs = errors(&json);
+        assert!(
+            errs.is_empty(),
+            "chelis#178: polymorphic `trunc_div` wrapper at integer dtype \
+             `{dtype}` must type-check clean per \
+             spec/05-risc-primitives.md \u{00a7}2.1; got {errs:?}"
         );
     }
 }
@@ -382,10 +445,10 @@ fn tensor_exp_log_sin_sqrt_softmax_now_reject_int32() {
         ("sqrt", "sqrt(x)"),
         // `recip` is float-only per spec/05-risc-primitives.md §2.2
         // because integer reciprocal has no useful IEEE-754 meaning.
-        // `div` is NOT in this list — integer div is admitted with
-        // C/Rust truncating semantics per spec §2.1, used by
-        // `Std.Decimal` for scale shifts; that case is locked by the
-        // positive-parity tests below.
+        // `div` is float-only too (chelis#178), but its integer
+        // rejection cites §2.1 (not §5.4) and points at `floor_div` /
+        // `trunc_div`, so it is locked by `tensor_div_rejects_int32`
+        // below rather than asserted against the §5.4 citation here.
         ("recip", "recip(x)"),
     ];
     for (name, body) in probes {
@@ -432,6 +495,77 @@ fn tensor_exp_log_sin_sqrt_softmax_now_reject_int32() {
         messages.iter().any(|m| m.contains("5.4")),
         "WS-A8: rejection of softmax(int32) must cite spec section 5.4; \
          got messages {messages:?}"
+    );
+}
+
+#[test]
+fn tensor_div_rejects_int32() {
+    // chelis#178: the direct tensor form `div(int32, int32)` is a type
+    // error. The diagnostic cites spec/05-risc-primitives.md §2.1 and
+    // names the migration ops `floor_div` / `trunc_div`.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("div_int.ch");
+    write_file(
+        &path,
+        r#"def call(x: tensor[3, int32], y: tensor[3, int32]) -> tensor[3, int32] = div(x, y)
+"#,
+    );
+    let json = run_check(&path);
+    let errs = errors(&json);
+    assert!(
+        !errs.is_empty(),
+        "chelis#178: tensor `div(int32, int32)` must be rejected; got clean. errs={errs:?}"
+    );
+    let messages = error_messages(&json);
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("2.1") && m.contains("floor_div") && m.contains("trunc_div")),
+        "chelis#178: rejection of div(int32) must cite \u{00a7}2.1 and name \
+         `floor_div` and `trunc_div`; got messages {messages:?}"
+    );
+}
+
+#[test]
+fn tensor_floor_div_trunc_div_accept_int32() {
+    // chelis#178 positive parity: the integer division replacement ops
+    // type-check clean on integer tensors.
+    for (name, body) in &[
+        ("floor_div", "floor_div(x, y)"),
+        ("trunc_div", "trunc_div(x, y)"),
+    ] {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join(format!("{name}_int.ch"));
+        let src = format!(
+            r#"def call(x: tensor[3, int32], y: tensor[3, int32]) -> tensor[3, int32] = {body}
+"#
+        );
+        write_file(&path, &src);
+        let json = run_check(&path);
+        let errs = errors(&json);
+        assert!(
+            errs.is_empty(),
+            "chelis#178: tensor `{name}(int32, int32)` must type-check clean; got {errs:?}"
+        );
+    }
+}
+
+#[test]
+fn tensor_trunc_div_rejects_f32() {
+    // chelis#178: `trunc_div` is integer-only. Applying it to a float
+    // tensor is a type error.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("trunc_div_f32.ch");
+    write_file(
+        &path,
+        r#"def call(x: tensor[3, f32], y: tensor[3, f32]) -> tensor[3, f32] = trunc_div(x, y)
+"#,
+    );
+    let json = run_check(&path);
+    let errs = errors(&json);
+    assert!(
+        !errs.is_empty(),
+        "chelis#178: `trunc_div(f32, f32)` must be rejected (integer-only); got clean. errs={errs:?}"
     );
 }
 

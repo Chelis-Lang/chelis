@@ -147,6 +147,8 @@ fn classify_nodes(dag: &Dag, reduction_inlined: &HashSet<NodeId>) -> Vec<NodeMem
                 | RiscOp::Add
                 | RiscOp::Mul
                 | RiscOp::Div
+                | RiscOp::FloorDiv
+                | RiscOp::TruncDiv
                 | RiscOp::CmpLt
                 | RiscOp::MaxElem
                 | RiscOp::Neg

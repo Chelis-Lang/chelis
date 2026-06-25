@@ -55,7 +55,13 @@ pub fn verify(dag: &Dag) -> Vec<String> {
         // Check arity.
         let arity = node.inputs.len();
         match &node.op {
-            RiscOp::Add | RiscOp::Mul | RiscOp::Div | RiscOp::CmpLt | RiscOp::MaxElem => {
+            RiscOp::Add
+            | RiscOp::Mul
+            | RiscOp::Div
+            | RiscOp::FloorDiv
+            | RiscOp::TruncDiv
+            | RiscOp::CmpLt
+            | RiscOp::MaxElem => {
                 if arity != 2 {
                     errors.push(format!(
                         "binary op at node {} has {} inputs (expected 2)",

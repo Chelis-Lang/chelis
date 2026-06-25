@@ -10,8 +10,10 @@
 //!
 //! ## Why content addressing, not a Dag handle
 //!
-//! Beacon consumes the SERIALIZED `WireDag` v1 JSON bytes out of process:
-//! it parses the slice, asserts `schema_version == 1`, sha256s the bytes,
+//! Beacon consumes the SERIALIZED `WireDag` JSON bytes out of process:
+//! it parses the slice, validates `schema_version <= WIRE_DAG_SCHEMA_VERSION`
+//! (currently `2`; a lower version is forward-compatible via additive
+//! defaults, a higher one fails closed), sha256s the bytes,
 //! and selects the output by root index. So this producer addresses that
 //! artifact by its content hash (lowercase hex sha256) plus a root index,
 //! and [`ExtractedGoal`] also carries the serialized bytes so nothing
@@ -178,6 +180,8 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             WireRiscOp::Add
             | WireRiscOp::Mul
             | WireRiscOp::Div
+            | WireRiscOp::FloorDiv
+            | WireRiscOp::TruncDiv
             | WireRiscOp::CmpLt
             | WireRiscOp::MaxElem
             | WireRiscOp::Neg
@@ -451,7 +455,14 @@ const _: () = {
     // The producer hashes against the version this build supports; if the
     // schema ceiling ever moves, the boundary assertion + the contract doc
     // must move with it. This is a compile-time tripwire on the constant.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 1);
+    //
+    // Moved to `2` for chelis#178: the wire surface gained
+    // `WireRiscOp::FloorDiv` / `TruncDiv` (integer floor/truncating
+    // division). Both are added to the f64-free op group in
+    // `reject_non_finite_floats` above — they carry no float field, so they
+    // do not change the box/range float-bound extraction contract; the
+    // version moves only because a producer may now emit the new ops.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 2);
 };
 
 #[cfg(test)]

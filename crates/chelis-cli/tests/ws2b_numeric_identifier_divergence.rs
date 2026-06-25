@@ -250,27 +250,55 @@ fn tensor_value<'a>(stdout: &'a str, name: &str) -> &'a str {
 /// `mod` (the consistency requirement: the two must agree).
 const INT_DIV_ZERO_DIAGNOSTIC: &str = "integer division or remainder by zero";
 
-/// POSITIVE: valid integer division is truncating (round toward zero) and
+/// POSITIVE: integer `trunc_div` is truncating (round toward zero) and
 /// agrees byte-for-byte between eval and the C backend. `7/2 == 3`,
-/// `-7/2 == -3` per spec/05-risc-primitives.md.
+/// `-7/2 == -3` per spec/05-risc-primitives.md §2.1. (chelis#178: integer
+/// `div` is now a type error; `trunc_div` carries the old C-truncating
+/// semantics.)
 #[test]
-fn issue_387_integer_div_truncates_eval_matches_backend() {
-    let source = "def d(x: tensor[2, int64], y: tensor[2, int64]) -> tensor[2, int64] = div(x, y)\n\
+fn issue_387_integer_trunc_div_truncates_eval_matches_backend() {
+    let source = "def d(x: tensor[2, int64], y: tensor[2, int64]) -> tensor[2, int64] = trunc_div(x, y)\n\
 out = d(cast(to_tensor([7, -7]), int64), cast(to_tensor([2, 2]), int64))\n";
 
-    let build = chelis_build_c(source, "intdiv");
-    let stdout = compile_and_run_emitted(build.path(), &build.path().join("intdiv.c"));
+    let build = chelis_build_c(source, "inttruncdiv");
+    let stdout = compile_and_run_emitted(build.path(), &build.path().join("inttruncdiv.c"));
     assert_eq!(
         binding_line(&stdout, "out"),
         "out = tensor(shape=[2], data=[3.0, -3.0])",
-        "integer div must truncate toward zero (7/2=3, -7/2=-3); stdout={stdout:?}",
+        "integer trunc_div must truncate toward zero (7/2=3, -7/2=-3); stdout={stdout:?}",
     );
 
-    let eval_out = chelis_eval_ok(source, "intdiv");
+    let eval_out = chelis_eval_ok(source, "inttruncdiv");
     assert_eq!(
         tensor_value(&stdout, "out"),
         tensor_value(&eval_out, "out"),
-        "eval and C backend must agree byte-for-byte on integer division",
+        "eval and C backend must agree byte-for-byte on integer trunc_div",
+    );
+}
+
+/// POSITIVE: integer `floor_div` rounds the quotient toward −∞ and agrees
+/// byte-for-byte between eval and the C backend. It differs from
+/// `trunc_div` on the mixed-sign case: `7 floor_div 2 == 3` but
+/// `-7 floor_div 2 == -4` (truncate gives `-3`). Per
+/// spec/05-risc-primitives.md §2.1; matches Python `//`.
+#[test]
+fn chelis_178_integer_floor_div_rounds_toward_neg_inf_eval_matches_backend() {
+    let source = "def d(x: tensor[2, int64], y: tensor[2, int64]) -> tensor[2, int64] = floor_div(x, y)\n\
+out = d(cast(to_tensor([7, -7]), int64), cast(to_tensor([2, 2]), int64))\n";
+
+    let build = chelis_build_c(source, "intfloordiv");
+    let stdout = compile_and_run_emitted(build.path(), &build.path().join("intfloordiv.c"));
+    assert_eq!(
+        binding_line(&stdout, "out"),
+        "out = tensor(shape=[2], data=[3.0, -4.0])",
+        "integer floor_div must round toward -inf (7/2=3, -7/2=-4); stdout={stdout:?}",
+    );
+
+    let eval_out = chelis_eval_ok(source, "intfloordiv");
+    assert_eq!(
+        tensor_value(&stdout, "out"),
+        tensor_value(&eval_out, "out"),
+        "eval and C backend must agree byte-for-byte on integer floor_div",
     );
 }
 
@@ -291,15 +319,55 @@ fn issue_387_float_div_by_zero_is_ieee_inf() {
     );
 }
 
-/// NEGATIVE: integer `div` by zero traps with the clean diagnostic instead
-/// of returning a finite wrong value (pre-fix: `i64::MAX`). Exit 1, not a
-/// silently-wrong scalar.
+/// chelis#178 POSITIVE: scalar (host-lane) `floor_div` / `trunc_div` produce
+/// the exact sign-rounding values per spec/05-risc-primitives.md §2.1. The
+/// two ops differ on the mixed-sign exact-fraction cases — floor rounds
+/// toward −∞, truncate toward zero — so every sign combination is asserted
+/// with an exact expected value. This is the acceptance-oracle assertion that
+/// the migration is *exercised*, not merely compiled.
 #[test]
-fn issue_387_integer_div_by_zero_traps_in_eval() {
-    let out = chelis_eval_expr("div(cast(7, int64), cast(0, int64))");
+fn chelis_178_scalar_floor_trunc_div_exact_sign_rounding() {
+    // (op, lhs, rhs, expected)
+    let cases = &[
+        // trunc_div: round toward zero
+        ("trunc_div", 7, 2, "3"),
+        ("trunc_div", -7, 2, "-3"),
+        ("trunc_div", 7, -2, "-3"),
+        ("trunc_div", -7, -2, "3"),
+        ("trunc_div", -8, 2, "-4"),
+        // floor_div: round toward -inf (differs on mixed sign)
+        ("floor_div", 7, 2, "3"),
+        ("floor_div", -7, 2, "-4"),
+        ("floor_div", 7, -2, "-4"),
+        ("floor_div", -7, -2, "3"),
+        ("floor_div", -8, 2, "-4"),
+    ];
+    for (op, lhs, rhs, expected) in cases {
+        let expr = format!("{op}(cast({lhs}, int64), cast({rhs}, int64))");
+        let out = chelis_eval_expr(&expr);
+        assert!(
+            out.status.success(),
+            "`{expr}` must evaluate; stderr={}",
+            String::from_utf8_lossy(&out.stderr),
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim_end(),
+            *expected,
+            "`{expr}` must equal {expected} (spec/05 §2.1 sign-rounding)",
+        );
+    }
+}
+
+/// NEGATIVE: integer `trunc_div` by zero traps with the clean diagnostic
+/// instead of returning a finite wrong value (pre-fix: `i64::MAX`). Exit 1,
+/// not a silently-wrong scalar. (chelis#178: `div` on ints is a type error;
+/// the zero-divisor trap moved to `trunc_div` / `floor_div`.)
+#[test]
+fn issue_387_integer_trunc_div_by_zero_traps_in_eval() {
+    let out = chelis_eval_expr("trunc_div(cast(7, int64), cast(0, int64))");
     assert!(
         !out.status.success(),
-        "integer div by zero must trap, not return a value; stdout={}",
+        "integer trunc_div by zero must trap, not return a value; stdout={}",
         String::from_utf8_lossy(&out.stdout),
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -315,8 +383,9 @@ fn issue_387_integer_div_by_zero_traps_in_eval() {
 }
 
 /// NEGATIVE / consistency: integer `mod` by zero traps with the SAME clean
-/// diagnostic as `div` (pre-fix: a raw Rust remainder panic). `div` and
-/// `mod` must agree.
+/// diagnostic as `trunc_div` (pre-fix: a raw Rust remainder panic). The
+/// integer division/remainder family (`trunc_div`, `floor_div`, `mod`) must
+/// agree.
 #[test]
 fn issue_387_integer_mod_by_zero_traps_with_same_diagnostic() {
     let out = chelis_eval_expr("mod(cast(7, int64), cast(0, int64))");
@@ -328,8 +397,8 @@ fn issue_387_integer_mod_by_zero_traps_with_same_diagnostic() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains(INT_DIV_ZERO_DIAGNOSTIC),
-        "integer mod by zero must emit the SAME canonical diagnostic as div \
-         (div/mod consistency); stderr={stderr:?}",
+        "integer mod by zero must emit the SAME canonical diagnostic as trunc_div \
+         (integer division/remainder consistency); stderr={stderr:?}",
     );
     assert!(
         !stderr.contains("attempt to calculate the remainder"),
@@ -348,7 +417,9 @@ fn issue_387_integer_mod_by_zero_traps_with_same_diagnostic() {
 #[test]
 fn issue_387_integer_div_by_zero_traps_in_backend() {
     // y - z = [2, 0]: the second divisor is zero, computed at runtime.
-    let source = "def d(x: tensor[2, int64], y: tensor[2, int64], z: tensor[2, int64]) -> tensor[2, int64] = div(x, sub(y, z))\n\
+    // chelis#178: integer division is `trunc_div`; the zero-divisor guard
+    // applies to it identically.
+    let source = "def d(x: tensor[2, int64], y: tensor[2, int64], z: tensor[2, int64]) -> tensor[2, int64] = trunc_div(x, sub(y, z))\n\
 out = d(cast(to_tensor([7, 8]), int64), cast(to_tensor([3, 5]), int64), cast(to_tensor([1, 5]), int64))\n";
 
     let build = chelis_build_c(source, "intdivtrap");
@@ -358,7 +429,7 @@ out = d(cast(to_tensor([7, 8]), int64), cast(to_tensor([3, 5]), int64), cast(to_
     let c_source = fs::read_to_string(&kernel_c).expect("read emitted C");
     assert!(
         c_source.contains("chelis_int_div_guard("),
-        "integer div must emit the portable zero-divisor guard (#387); \
+        "integer trunc_div must emit the portable zero-divisor guard (#387); \
          emitted C=\n{c_source}",
     );
 
@@ -394,10 +465,11 @@ out = d(cast(to_tensor([7, 8]), int64), cast(to_tensor([3, 5]), int64), cast(to_
 
 /// NEGATIVE parity: a SCALAR (host-lane) integer division by zero traps via
 /// the same portable guard. The divisor is runtime-computed (`sub(b, b)`).
-/// Covers the host-emit `div` path (distinct from the DAG tensor path above).
+/// Covers the host-emit `trunc_div` path (distinct from the DAG tensor path
+/// above). chelis#178: scalar integer division is `trunc_div`.
 #[test]
 fn issue_387_scalar_integer_div_by_zero_traps_in_backend() {
-    let source = "def d(a: int64, b: int64) -> int64 = div(a, sub(b, b))\n\
+    let source = "def d(a: int64, b: int64) -> int64 = trunc_div(a, sub(b, b))\n\
 out = d(cast(7, int64), cast(5, int64))\n";
 
     let build = chelis_build_c(source, "scalardivtrap");
@@ -405,7 +477,7 @@ out = d(cast(7, int64), cast(5, int64))\n";
     let c_source = fs::read_to_string(&kernel_c).expect("read emitted C");
     assert!(
         c_source.contains("chelis_int_div_guard("),
-        "scalar integer div must emit the portable guard (#387); emitted C=\n{c_source}",
+        "scalar integer trunc_div must emit the portable guard (#387); emitted C=\n{c_source}",
     );
 
     let (compile, bin) = compile_emitted(build.path(), &kernel_c);

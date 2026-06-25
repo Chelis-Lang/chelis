@@ -4201,12 +4201,23 @@ const TRANSCENDENTAL_FLOAT_ONLY_OPS: &[&str] = &[
     // `recip` is float-only per spec/05-risc-primitives.md §2.2: an
     // integer reciprocal has no meaningful IEEE-754 interpretation
     // (would always be 0 for |x| > 1 and undefined for x = 0).
-    // `div` is intentionally absent — integer division is admitted with
-    // C/Rust truncating semantics per spec §2.1, so chelis-std's
-    // Decimal arithmetic (`div(int64, int64)` for scale shifts) keeps
-    // type-checking through polymorphic wrappers.
+    // `div` is NOT here — it is float-only too (chelis#178) but carries
+    // a §2.1 citation pointing at `floor_div` / `trunc_div`, so it is
+    // handled by `FLOAT_ONLY_DIV_OPS` with a tailored diagnostic.
     "recip",
 ];
+
+/// Float-only ops whose integer-operand rejection cites
+/// spec/05-risc-primitives.md §2.1 and points at the integer-division
+/// replacements (chelis#178). Kept separate from
+/// `TRANSCENDENTAL_FLOAT_ONLY_OPS` so the diagnostic names the migration
+/// ops rather than the generic transcendental §5.4 rule.
+const FLOAT_ONLY_DIV_OPS: &[&str] = &["div"];
+
+/// Integer-only ops whose float-operand rejection cites
+/// spec/05-risc-primitives.md §2.1 (chelis#178). `trunc_div` is the
+/// C/Rust truncating quotient and is not defined on float operands.
+const INTEGER_ONLY_DIV_OPS: &[&str] = &["trunc_div"];
 
 const INTEGER_REJECTED_OPS: &[&str] = &["matmul"];
 
@@ -4219,7 +4230,10 @@ fn check_restricted_op_in_body(
     call_site_list: &deep::List,
     errors: &mut Vec<CheckError>,
 ) {
-    if !INTEGER_REJECTED_OPS.contains(&op_name) && !TRANSCENDENTAL_FLOAT_ONLY_OPS.contains(&op_name)
+    if !INTEGER_REJECTED_OPS.contains(&op_name)
+        && !TRANSCENDENTAL_FLOAT_ONLY_OPS.contains(&op_name)
+        && !FLOAT_ONLY_DIV_OPS.contains(&op_name)
+        && !INTEGER_ONLY_DIV_OPS.contains(&op_name)
     {
         return;
     }
@@ -4272,6 +4286,47 @@ fn check_restricted_op_in_body(
                     "spec/04-type-system.md \u{00a7}5.4: cast to a float precision \
                      before applying `{op_name}`, or pick a float instantiation of \
                      `{callee_name}`."
+                )],
+            ));
+            return;
+        }
+        if FLOAT_ONLY_DIV_OPS.contains(&op_name) && prim.is_integer() {
+            // chelis#178: integer `div` reached through a polymorphic
+            // wrapper instantiated at an integer dtype.
+            errors.push(CheckError::new(
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "div on integer operand precision `{prim_name}` is not admitted per \
+                     spec/05-risc-primitives.md \u{00a7}2.1: `div` is float-only \
+                     (IEEE-754). Use `floor_div` (round toward -inf) or `trunc_div` \
+                     (round toward zero) for integers. Reached through the polymorphic \
+                     sig for `{callee_name}` instantiated at `{prim_name}`; the \
+                     restriction fires on every integer instantiation, including via \
+                     stdlib wrappers."
+                ),
+                vec![format!(
+                    "spec/05-risc-primitives.md \u{00a7}2.1: integer division uses \
+                     `floor_div` or `trunc_div`; pick a float instantiation of \
+                     `{callee_name}` for `div`."
+                )],
+            ));
+            return;
+        }
+        if INTEGER_ONLY_DIV_OPS.contains(&op_name) && prim.is_float() {
+            // chelis#178: `trunc_div` reached through a polymorphic
+            // wrapper instantiated at a float dtype.
+            errors.push(CheckError::new(
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "trunc_div on float operand precision `{prim_name}` is not admitted \
+                     per spec/05-risc-primitives.md \u{00a7}2.1: `trunc_div` is \
+                     integer-only. Use `div` for IEEE-754 float division, or `floor_div` \
+                     for a floored float quotient. Reached through the polymorphic sig \
+                     for `{callee_name}` instantiated at `{prim_name}`."
+                ),
+                vec![format!(
+                    "spec/05-risc-primitives.md \u{00a7}2.1: `trunc_div` requires integer \
+                     operands; pick an integer instantiation of `{callee_name}`."
                 )],
             ));
             return;
@@ -9648,6 +9703,8 @@ fn infer_app(
         "mul",
         "sub",
         "div",
+        "floor_div",
+        "trunc_div",
         "neg",
         "recip",
         "exp",
@@ -9694,18 +9751,44 @@ fn infer_app(
                         "matmul" | "layer_norm" | "normalize" => {
                             matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
                         }
-                        "add" | "mul" | "sub" | "div" | "max_elem" | "min_elem" | "neg" => {
-                            // `div` is numeric (not float-only) so that
-                            // integer Decimal arithmetic in chelis-std
-                            // (e.g. `Std.Decimal::normalize` doing
-                            // `div(coefficient, cast(10, int64))` for
-                            // scale shifts) continues to type-check.
-                            // The IEEE-754 semantics in
-                            // spec/05-risc-primitives.md §2.1 apply
-                            // for float operands; integer operands use
-                            // C/Rust native truncating division.
+                        "add" | "mul" | "sub" | "max_elem" | "min_elem" | "neg" => {
                             matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
                                 || matches!(resolved, Type::Prim(prec) if prec.is_numeric())
+                        }
+                        "floor_div" => {
+                            // chelis#178: `floor_div` accepts both integer
+                            // and float operands (round toward -inf for
+                            // ints, `floor(a/b)` for floats), so any
+                            // numeric precision is admissible.
+                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
+                                || matches!(resolved, Type::Prim(prec) if prec.is_numeric())
+                        }
+                        "div" => {
+                            // chelis#178: `div` is float-only. Integer
+                            // operands are a type error pointing at
+                            // `floor_div` / `trunc_div` (see the rejection
+                            // diagnostic below). An unresolved
+                            // `TensorPrec::Var(_)` is accepted so a
+                            // polymorphic body type-checks; the cross-row
+                            // pass `validate_polymorphic_op_constraints`
+                            // catches integer instantiations at the call
+                            // site.
+                            matches!(
+                                resolved,
+                                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error
+                            ) || matches!(resolved, Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_float())
+                                || matches!(resolved, Type::Prim(prec) if prec.is_float())
+                        }
+                        "trunc_div" => {
+                            // chelis#178: `trunc_div` is integer-only (the
+                            // C/Rust truncating quotient). Float operands
+                            // are a type error. Unresolved precision vars
+                            // are accepted for polymorphic bodies.
+                            matches!(
+                                resolved,
+                                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error
+                            ) || matches!(resolved, Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_integer())
+                                || matches!(resolved, Type::Prim(prec) if prec.is_integer())
                         }
                         "exp" | "log" | "sin" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu"
                         | "gelu" | "recip" => {
@@ -9762,6 +9845,20 @@ fn infer_app(
                                 | "gelu"
                                 | "recip"
                         );
+                        let resolved_int_prec = match &resolved {
+                            Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_integer() => {
+                                Some(p.name())
+                            }
+                            Type::Prim(p) if p.is_integer() => Some(p.name()),
+                            _ => None,
+                        };
+                        let resolved_float_prec = match &resolved {
+                            Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_float() => {
+                                Some(p.name())
+                            }
+                            Type::Prim(p) if p.is_float() => Some(p.name()),
+                            _ => None,
+                        };
                         let (kind, message, hints) = if is_transcendental
                             && let Type::Tensor(_, TensorPrec::Concrete(p)) = &resolved
                             && !p.is_float()
@@ -9779,6 +9876,44 @@ fn infer_app(
                                     "spec/04-type-system.md \u{00a7}5.4: cast to a float \
                                      precision before applying `{fname}`."
                                 )],
+                            )
+                        } else if fname == "div"
+                            && let Some(pname) = resolved_int_prec
+                        {
+                            // chelis#178: integer `div` is rejected; point
+                            // the user at the integer-division ops.
+                            (
+                                CheckErrorKind::PrecisionMismatch,
+                                format!(
+                                    "div on integer operand precision `{pname}` is not admitted \
+                                     per spec/05-risc-primitives.md \u{00a7}2.1: `div` is \
+                                     float-only (IEEE-754). Use `floor_div` (round toward -inf) \
+                                     or `trunc_div` (round toward zero) for integers."
+                                ),
+                                vec![
+                                    "spec/05-risc-primitives.md \u{00a7}2.1: integer division \
+                                     uses `floor_div` or `trunc_div`; `div` requires float \
+                                     operands."
+                                        .to_string(),
+                                ],
+                            )
+                        } else if fname == "trunc_div"
+                            && let Some(pname) = resolved_float_prec
+                        {
+                            // chelis#178: `trunc_div` is integer-only.
+                            (
+                                CheckErrorKind::PrecisionMismatch,
+                                format!(
+                                    "trunc_div on float operand precision `{pname}` is not \
+                                     admitted per spec/05-risc-primitives.md \u{00a7}2.1: \
+                                     `trunc_div` is integer-only. Use `div` for IEEE-754 float \
+                                     division, or `floor_div` for a floored float quotient."
+                                ),
+                                vec![
+                                    "spec/05-risc-primitives.md \u{00a7}2.1: `trunc_div` requires \
+                                     integer operands."
+                                        .to_string(),
+                                ],
                             )
                         } else {
                             (

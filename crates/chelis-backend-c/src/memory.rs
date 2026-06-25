@@ -116,6 +116,8 @@ fn classify_nodes(dag: &Dag, skipped: &HashSet<NodeId>) -> Vec<NodeMemoryKind> {
                 | RiscOp::Add
                 | RiscOp::Mul
                 | RiscOp::Div
+                | RiscOp::FloorDiv
+                | RiscOp::TruncDiv
                 | RiscOp::CmpLt
                 | RiscOp::MaxElem
                 | RiscOp::Neg

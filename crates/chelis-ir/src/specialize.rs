@@ -647,6 +647,8 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         | RiscOp::Add
         | RiscOp::Mul
         | RiscOp::Div
+        | RiscOp::FloorDiv
+        | RiscOp::TruncDiv
         | RiscOp::MaxElem
         | RiscOp::CmpLt
         | RiscOp::Neg

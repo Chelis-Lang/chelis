@@ -435,6 +435,11 @@ pub enum FusedStepOp {
     Add,
     Mul,
     Div,
+    /// Floor division step (chelis#178); see [`RiscOp::FloorDiv`].
+    FloorDiv,
+    /// Truncating (round-toward-zero) division step, integer-only
+    /// (chelis#178); see [`RiscOp::TruncDiv`].
+    TruncDiv,
     MaxElem,
     CmpLt,
     Neg,
@@ -501,7 +506,23 @@ pub enum RiscOp {
     /// algebraic rewrite `mul(a, exp(neg(log(b))))` is NaN for
     /// `b ≤ 0` (`log(b)` is undefined there). Backends emit native
     /// `/`; the Rust evaluator uses native `f32`/`f64` division.
+    /// **Float operands only since chelis#178** — integer division
+    /// uses [`RiscOp::FloorDiv`] / [`RiscOp::TruncDiv`].
     Div,
+    /// Element-wise floor division: `floor(a / b)`, rounding the
+    /// quotient toward −∞ (chelis#178). Integer operands round toward
+    /// −∞ (native `/` plus a remainder-sign correction); float
+    /// operands compute `floor(a / b)`. Matches Python `//` / torch /
+    /// JAX / numpy `floor_divide`. Non-differentiable (piecewise
+    /// constant); `grad` rejects it. See `spec/05-risc-primitives.md`
+    /// §2.1.
+    FloorDiv,
+    /// Element-wise truncating division (round toward zero) — the
+    /// C/Rust integer `/` quotient (chelis#178). **Integer operands
+    /// only.** This is the exact quotient semantics chelis-std's
+    /// `Std.Decimal` arithmetic relies on. Non-differentiable;
+    /// `grad` rejects it. See `spec/05-risc-primitives.md` §2.1.
+    TruncDiv,
     CmpLt,
     MaxElem,
 
@@ -1017,6 +1038,13 @@ impl RiscOp {
             // Argmax/argmin return discrete indices, not a numeric
             // envelope over the reals; outside the forward-bound story.
             RiscOp::Argmax { .. } | RiscOp::Argmin { .. } => false,
+
+            // Floor/truncating integer division (chelis#178) are
+            // piecewise-constant, non-differentiable rounding ops; like
+            // `Floor`/`Ceil`/`Round` they have a step-function envelope,
+            // but the integer-quotient semantics are not part of the
+            // pinned real-valued forward-bound surface today.
+            RiscOp::FloorDiv | RiscOp::TruncDiv => false,
 
             // `OneHot` produces a discrete 0/1 indicator from an integer
             // index; it is an internal lowering marker (dag.rs) consumed

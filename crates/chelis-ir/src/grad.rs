@@ -196,6 +196,23 @@ pub fn grad_dag_checked(
                     reason: AdRejectionReason::PiecewiseConstant,
                 });
             }
+            // chelis#178: floor / truncating integer division are
+            // piecewise-constant (the quotient jumps at integer
+            // boundaries), so the analytic derivative is zero almost
+            // everywhere and undefined at the jumps. `grad` rejects them,
+            // same treatment as `floor` / `ceil` / `round`.
+            RiscOp::FloorDiv => {
+                return Err(AdError::NotSupported {
+                    op: "floor_div",
+                    reason: AdRejectionReason::PiecewiseConstant,
+                });
+            }
+            RiscOp::TruncDiv => {
+                return Err(AdError::NotSupported {
+                    op: "trunc_div",
+                    reason: AdRejectionReason::PiecewiseConstant,
+                });
+            }
             RiscOp::Scatter { .. } => {
                 // Last-write-wins replace-scatter is fail-closed for
                 // AD: the forward result depends on iteration order at
@@ -239,6 +256,8 @@ fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Add => "add",
         RiscOp::Mul => "mul",
         RiscOp::Div => "div",
+        RiscOp::FloorDiv => "floor_div",
+        RiscOp::TruncDiv => "trunc_div",
         RiscOp::CmpLt => "cmplt",
         RiscOp::MaxElem => "max_elem",
         RiscOp::Neg => "neg",
@@ -747,6 +766,19 @@ fn compute_adjoints(
             let ty = forward.get(x).unwrap().output_type.clone();
             let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], ty, None);
             Some(vec![(x, zero)])
+        }
+        RiscOp::FloorDiv | RiscOp::TruncDiv => {
+            // chelis#178: floor / truncating integer division are
+            // non-differentiable (piecewise constant) — grad_dag_checked
+            // will have already rejected these; this arm is a safety net
+            // returning zero gradient to both operands.
+            let a = node.inputs[0];
+            let b = node.inputs[1];
+            let ty_a = forward.get(a).unwrap().output_type.clone();
+            let ty_b = forward.get(b).unwrap().output_type.clone();
+            let za = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], ty_a, None);
+            let zb = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], ty_b, None);
+            Some(vec![(a, za), (b, zb)])
         }
         RiscOp::UniformLike { .. } => {
             let x = node.inputs[0];

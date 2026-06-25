@@ -32,6 +32,8 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "cmplt",
     "sub",
     "div",
+    "floor_div",
+    "trunc_div",
     "mod",
     "eq",
     "neq",
@@ -195,11 +197,12 @@ pub fn shape_class(name: &str) -> ShapeClass {
     match name {
         // Pure elementwise — output shape == input shape (precision may change
         // for comparisons/logical). No axis argument, no reordering.
-        "add" | "mul" | "sub" | "div" | "mod" | "max_elem" | "min_elem" | "neg" | "recip"
-        | "exp" | "log" | "sin" | "sqrt" | "cos" | "tan" | "atan" | "abs" | "floor" | "ceil"
-        | "round" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu" | "not" | "clamp"
-        | "uniform_like" | "where" | "eq" | "neq" | "lt" | "gt" | "lte" | "gte" | "cmplt"
-        | "bitand" | "bitor" | "bitxor" | "shl" | "shr" | "and" | "or" => ShapeClass::Identity,
+        "add" | "mul" | "sub" | "div" | "floor_div" | "trunc_div" | "mod" | "max_elem"
+        | "min_elem" | "neg" | "recip" | "exp" | "log" | "sin" | "sqrt" | "cos" | "tan"
+        | "atan" | "abs" | "floor" | "ceil" | "round" | "relu" | "sigmoid" | "tanh" | "silu"
+        | "gelu" | "not" | "clamp" | "uniform_like" | "where" | "eq" | "neq" | "lt" | "gt"
+        | "lte" | "gte" | "cmplt" | "bitand" | "bitor" | "bitxor" | "shl" | "shr" | "and"
+        | "or" => ShapeClass::Identity,
         // Named-axis reductions: address the reduced axis by name and drop
         // exactly it, carrying the surviving named axes through (Tier-3 §4.5.3).
         // Restricted to `sum`/`mean`: these lower through the tensor-DAG backend
@@ -702,8 +705,15 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_binop("mul", &mut env, &mut vg);
     // `div` and `recip` were promoted from a Tier 2
     // `exp(neg(log(_)))` decomposition to native Tier 1 primitives
-    // (IEEE-754 semantics, correct on the full real line).
+    // (IEEE-754 semantics, correct on the full real line). Since
+    // chelis#178 `div` is float-only; integer division uses the
+    // dedicated `floor_div` / `trunc_div` primitives below. The
+    // signature templates are fully precision-polymorphic; the
+    // precision restrictions (div float-only, trunc_div int-only,
+    // floor_div both) are enforced in `infer.rs`.
     tensor_binop("div", &mut env, &mut vg);
+    tensor_binop("floor_div", &mut env, &mut vg);
+    tensor_binop("trunc_div", &mut env, &mut vg);
     tensor_binop("max_elem", &mut env, &mut vg);
 
     tensor_unop("neg", &mut env, &mut vg);
@@ -1226,6 +1236,8 @@ mod tests {
             "mul",
             "sub",
             "div",
+            "floor_div",
+            "trunc_div",
             "mod",
             "max_elem",
             "min_elem",

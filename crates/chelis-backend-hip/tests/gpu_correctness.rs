@@ -2685,6 +2685,67 @@ fn ws_a4_i16_reduce_sum_gpu_promotes_to_i32() {
     );
 }
 
+/// chelis#178: integer `trunc_div` on GPU rounds the quotient toward
+/// zero (the native C `/`). Operands `{7, 7, -7, -7} / {2, -2, 2, -2}`
+/// ⇒ `{3, -3, -3, 3}`. Every sign combination is exercised so the
+/// GPU result is pinned against the spec/05 §2.1 sign-rounding rule.
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn chelis_178_trunc_div_i32_gpu_rounds_toward_zero() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i32(4), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i32(4), None);
+    let out = dag.add_node(RiscOp::TruncDiv, vec![a, b], vec_i32(4), None);
+    dag.add_root(out);
+
+    let actual = compile_and_run_single_output_typed_i64(
+        &dag,
+        "chelis_178_trunc_div_i32",
+        &[
+            TestInput::int32("a", &[4], &[7, 7, -7, -7]),
+            TestInput::int32("b", &[4], &[2, -2, 2, -2]),
+        ],
+        "int32_t",
+        "%lld",
+    );
+    assert_eq!(
+        actual,
+        vec![3, -3, -3, 3],
+        "trunc_div must round toward zero on GPU"
+    );
+}
+
+/// chelis#178: integer `floor_div` on GPU rounds the quotient toward
+/// −∞ (native `/` plus a remainder-sign correction). The same operands
+/// `{7, 7, -7, -7} / {2, -2, 2, -2}` ⇒ `{3, -4, -4, 3}` — differing
+/// from trunc on the two mixed-sign cases. Confirms the device
+/// sign-correction kernel agrees with the C backend and evaluator.
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn chelis_178_floor_div_i32_gpu_rounds_toward_neg_inf() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i32(4), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i32(4), None);
+    let out = dag.add_node(RiscOp::FloorDiv, vec![a, b], vec_i32(4), None);
+    dag.add_root(out);
+
+    let actual = compile_and_run_single_output_typed_i64(
+        &dag,
+        "chelis_178_floor_div_i32",
+        &[
+            TestInput::int32("a", &[4], &[7, 7, -7, -7]),
+            TestInput::int32("b", &[4], &[2, -2, 2, -2]),
+        ],
+        "int32_t",
+        "%lld",
+    );
+    assert_eq!(
+        actual,
+        vec![3, -4, -4, 3],
+        "floor_div must round toward -inf on GPU"
+    );
+}
+
 /// WS-A4 codegen-shape test (no GPU required): the dtype-suffixed
 /// kernel name appears in the generated HIP source for an i8 add.
 /// Runs by default so a kernel-name regression is caught without a

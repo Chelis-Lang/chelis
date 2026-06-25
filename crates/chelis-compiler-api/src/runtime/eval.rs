@@ -820,6 +820,12 @@ impl<'a> EvalContext<'a> {
             // keeps IEEE-754 (`1.0 / 0.0 == inf`). The C backend follows the
             // platform SIGFPE for the same integer operands.
             "div" => eval_div(args),
+            // chelis#178: integer-division primitives. `floor_div` rounds
+            // the quotient toward -inf (ints and floats); `trunc_div`
+            // rounds toward zero (integer-only). Both trap on an integer
+            // zero divisor with the shared diagnostic.
+            "floor_div" => eval_floor_div(args),
+            "trunc_div" => eval_trunc_div(args),
             // Tier-1 `max_elem` and Tier-2 `min_elem` are element-wise
             // binary ops. The IR evaluator emits
             // `binary_map(.., f64::max)` for `RiscOp::MaxElem` and

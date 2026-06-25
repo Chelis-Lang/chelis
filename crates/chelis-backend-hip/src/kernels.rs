@@ -248,6 +248,52 @@ pub fn binary_elementwise(kernel_name: &str, op: &str, kind: ElemKind) -> String
     binary_elementwise_typed(kernel_name, op, kind.c_type())
 }
 
+/// chelis#178: floor-division kernel (round quotient toward −∞).
+///
+/// - `is_int == true` (integer dtype): native `/` plus a remainder-sign
+///   correction, matching the C backend and evaluator.
+/// - `is_int == false` (float dtype): `floorf(a / b)` (the device `floorf`
+///   handles the f32/f64 promotion through the C type).
+pub fn binary_floor_div_typed(kernel_name: &str, elem_c_ty: &str, is_int: bool) -> String {
+    let compute = if is_int {
+        format!(
+            "  {elem_c_ty} an = a[idx_a];\n  \
+             {elem_c_ty} bn = b[idx_b];\n  \
+             {elem_c_ty} q = an / bn;\n  \
+             {elem_c_ty} r = an % bn;\n  \
+             if (r != 0 && ((r < 0) != (bn < 0))) q -= 1;\n  \
+             out[i] = q;"
+        )
+    } else {
+        "  out[i] = floorf(a[idx_a] / b[idx_b]);".to_string()
+    };
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const {elem_c_ty} *a, {a_strides}, int a_ndim, int a_size,
+    const {elem_c_ty} *b, {b_strides}, int b_ndim, int b_size,
+    {elem_c_ty} *out, {out_shape}, int out_ndim, int out_size) {{
+{build_a_s}
+{build_b_s}
+{build_out_sh}
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+  int indices[{MAX_DIM}];
+  chelis_flat_to_indices(i, out_sh, out_ndim, indices);
+  int idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  int idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
+{compute}
+}}
+",
+        a_strides = stride_params("a"),
+        b_strides = stride_params("b"),
+        out_shape = shape_params("out"),
+        build_a_s = build_array("a_s", "a", "s"),
+        build_b_s = build_array("b_s", "b", "s"),
+        build_out_sh = build_array("out_sh", "out", "sh"),
+    )
+}
+
 /// Generate kernel source for a binary function op (fmaxf for max_elem).
 /// `func` is the f32-suffixed libm name (e.g. `fmaxf`); for f64 the
 /// f-suffix is dropped per [`ElemKind::func`].
@@ -883,6 +929,22 @@ fn fused_step_lines(
                 let a = resolve_fused_input(&step.input_indices[0]);
                 let b = resolve_fused_input(&step.input_indices[1]);
                 format!("{a} / {b}")
+            }
+            // chelis#178: the fused-elem path is float (`ElemKind`) only, so
+            // only float `floor_div` reaches here — `floor(a / b)` via the
+            // kind-resolved math fn. `trunc_div` is integer-only and cannot
+            // fuse to this float path.
+            FusedStepOp::FloorDiv => {
+                let a = resolve_fused_input(&step.input_indices[0]);
+                let b = resolve_fused_input(&step.input_indices[1]);
+                let floor = kind.func("floorf");
+                format!("{floor}({a} / {b})")
+            }
+            FusedStepOp::TruncDiv => {
+                unreachable!(
+                    "trunc_div is integer-only (chelis#178); the HIP fused-elem path is \
+                     float-only and cannot carry an integer trunc_div step"
+                )
             }
             FusedStepOp::MaxElem => {
                 let a = resolve_fused_input(&step.input_indices[0]);
