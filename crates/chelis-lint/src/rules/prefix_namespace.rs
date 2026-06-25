@@ -114,6 +114,7 @@ impl Rule for PrefixNamespace {
             };
             let group_size = occurrences.len();
             for (func_name, line) in &occurrences {
+                let stripped_name = func_name.strip_prefix(&format!("{prefix}_")).unwrap_or(func_name);
                 out.push(Violation {
                     rule_id: self.id().to_string(),
                     spec_ref: self.spec_ref().to_string(),
@@ -121,7 +122,7 @@ impl Rule for PrefixNamespace {
                     line: Some(*line),
                     col: None,
                     message: format!(
-                        "function `{func_name}` uses prefix `{prefix}_` shared by {} other def(s) in `{module_path}`, but `{prefix}` does not match the module's domain shorthand ({allowed_hint}). Closer-read needed: either drop the prefix per §7.1 or document the prefix as a model/algorithm sub-namespace per §7.1.1",
+                        "function `{func_name}` uses prefix `{prefix}_` shared by {} other def(s) in `{module_path}`, but `{prefix}` does not match the module's domain shorthand ({allowed_hint}). Consider renaming to `{stripped_name}` since the module `{module_path}` already provides namespace. Closer-read needed: either drop the prefix per §7.1 or document the prefix as a model/algorithm sub-namespace per §7.1.1",
                         group_size - 1
                     ),
                 });

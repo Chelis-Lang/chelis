@@ -174,10 +174,14 @@ impl From<TypeError> for CheckError {
             CheckErrorKind::UnboundVariable => 0.6,
             _ => 0.5,
         };
-        let suggestions = match &kind {
+        let mut suggestions = match &kind {
             CheckErrorKind::PrecisionMismatch => vec!["Insert explicit cast".to_string()],
             _ => vec![],
         };
+        // Enrich TypeMismatch with opaque/option hints.
+        if matches!(kind, CheckErrorKind::TypeMismatch) {
+            enrich_type_mismatch_suggestions(&te.message, &mut suggestions);
+        }
         CheckError {
             kind,
             message: te.message,
@@ -187,4 +191,117 @@ impl From<TypeError> for CheckError {
             got: None,
         }
     }
+}
+
+/// Enrich TypeMismatch suggestions by detecting common patterns:
+/// - Opaque type used where a primitive is expected
+/// - Option[T] used where T is expected
+pub fn enrich_type_mismatch_suggestions(message: &str, suggestions: &mut Vec<String>) {
+    // Detect Option[T] vs T pattern: "type mismatch: Option[X] vs X" or "X vs Option[X]"
+    if let Some(hint) = option_unwrap_hint(message) {
+        suggestions.push(hint);
+    }
+    // Detect opaque type vs primitive pattern
+    if let Some(hint) = opaque_accessor_hint(message) {
+        suggestions.push(hint);
+    }
+}
+
+/// If the mismatch is `Option[T]` vs `T`, suggest pattern matching.
+fn option_unwrap_hint(message: &str) -> Option<String> {
+    // The unify message has form "type mismatch: A vs B"
+    let parts: Vec<&str> = message.splitn(2, ": ").collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let type_part = parts[1];
+    let sides: Vec<&str> = type_part.splitn(2, " vs ").collect();
+    if sides.len() < 2 {
+        return None;
+    }
+    let (left, right) = (sides[0].trim(), sides[1].trim());
+    // Check if left is Option[T] and right is T, or vice versa
+    if let Some(inner) = strip_option_wrapper(left) {
+        if inner == right {
+            return Some(format!(
+                "this expression returns Option[{inner}]; use `match ... with {{ | Some(value) => ... | None => ... }}` to unwrap"
+            ));
+        }
+    }
+    if let Some(inner) = strip_option_wrapper(right) {
+        if inner == left {
+            return Some(format!(
+                "this expression returns Option[{inner}]; use `match ... with {{ | Some(value) => ... | None => ... }}` to unwrap"
+            ));
+        }
+    }
+    None
+}
+
+fn strip_option_wrapper(s: &str) -> Option<&str> {
+    let s = s.strip_prefix("Option[")?;
+    let s = s.strip_suffix(']')?;
+    Some(s)
+}
+
+/// If the mismatch involves an opaque type vs a primitive, suggest the accessor.
+fn opaque_accessor_hint(message: &str) -> Option<String> {
+    let parts: Vec<&str> = message.splitn(2, ": ").collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let type_part = parts[1];
+    let sides: Vec<&str> = type_part.splitn(2, " vs ").collect();
+    if sides.len() < 2 {
+        return None;
+    }
+    let (left, right) = (sides[0].trim(), sides[1].trim());
+    let primitives = ["f32", "f64", "int32", "int64", "bool"];
+    // Opaque type (PascalCase, no brackets) vs primitive
+    if is_opaque_candidate(left) && primitives.contains(&right) {
+        let accessor = format!("{}_value", to_snake_case(left));
+        return Some(format!(
+            "use `{accessor}(...)` to extract the inner {right} before numeric operations"
+        ));
+    }
+    if is_opaque_candidate(right) && primitives.contains(&left) {
+        let accessor = format!("{}_value", to_snake_case(right));
+        return Some(format!(
+            "use `{accessor}(...)` to extract the inner {left} before numeric operations"
+        ));
+    }
+    None
+}
+
+/// Heuristic: a type name that starts with uppercase, has no brackets/parens,
+/// and isn't a known non-opaque ADT like Option/List/Result is likely opaque.
+fn is_opaque_candidate(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let first = s.chars().next().unwrap();
+    if !first.is_ascii_uppercase() {
+        return false;
+    }
+    // Must not contain brackets (that would be a parameterized ADT display)
+    if s.contains('[') || s.contains('(') {
+        return false;
+    }
+    // Exclude well-known non-opaque ADTs
+    !matches!(s, "Option" | "List" | "Result" | "String")
+}
+
+fn to_snake_case(s: &str) -> String {
+    let mut result = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i > 0 {
+                result.push('_');
+            }
+            result.push(c.to_ascii_lowercase());
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }

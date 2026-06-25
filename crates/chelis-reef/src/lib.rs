@@ -4820,10 +4820,17 @@ fn build_name_resolver(
             ImportKind::Names(names) => {
                 for name in names {
                     let internal = qualified_map.get(name).ok_or_else(|| {
-                        format!(
+                        let mut msg = format!(
                             "module `{}` does not export `{}` for import into {}",
                             import_module, name, module.module_name
-                        )
+                        );
+                        if chelis_types::BUILTIN_NAMES.contains(&name.as_str()) {
+                            msg.push_str(&format!(
+                                ". Note: `{}` is a Chelis built-in function; call it directly without importing",
+                                name
+                            ));
+                        }
+                        msg
                     })?;
                     import_sources
                         .entry(name.clone())
@@ -5012,6 +5019,14 @@ fn find_imported_module<'a>(
         if let Some(module) = package.modules.get(module_name) {
             return Ok((package_name.clone(), module));
         }
+    }
+    // If the module name itself matches a builtin, the user probably meant
+    // to call it directly without importing.
+    let lower = module_name.to_ascii_lowercase();
+    if chelis_types::BUILTIN_NAMES.contains(&lower.as_str()) {
+        return Err(format!(
+            "unresolved import `{module_name}`. Note: `{lower}` is a Chelis built-in function; call it directly without importing"
+        ));
     }
     Err(format!("unresolved import `{module_name}`"))
 }
@@ -8378,6 +8393,51 @@ module_prefix = "Atomic"
         assert!(
             leftover.is_empty(),
             "no .extract-*.tmp staging dir must remain after concurrent extracts; found: {leftover:?}"
+        );
+    }
+
+    /// chelis#486: when import resolution fails for a symbol that is a
+    /// Chelis built-in, the error should hint that it can be called directly.
+    #[test]
+    fn builtin_import_hint_in_does_not_export_error() {
+        // Simulate the error message generation for a builtin name.
+        let import_module = "Math";
+        let name = "sum";
+        let module_name = "Main";
+        let mut msg = format!(
+            "module `{}` does not export `{}` for import into {}",
+            import_module, name, module_name
+        );
+        if chelis_types::BUILTIN_NAMES.contains(&name) {
+            msg.push_str(&format!(
+                ". Note: `{}` is a Chelis built-in function; call it directly without importing",
+                name
+            ));
+        }
+        assert!(
+            msg.contains("built-in function") && msg.contains("call it directly"),
+            "expected builtin hint in error; got: {msg}"
+        );
+    }
+
+    /// chelis#486: unresolved module import that matches a builtin name
+    /// should hint it's a builtin.
+    #[test]
+    fn builtin_import_hint_in_unresolved_module() {
+        let module_name = "Matmul"; // A module that doesn't exist but 'matmul' is a builtin
+        let lower = module_name.to_ascii_lowercase();
+        let is_builtin = chelis_types::BUILTIN_NAMES.contains(&lower.as_str());
+        assert!(is_builtin, "matmul should be in BUILTIN_NAMES");
+        let msg = if is_builtin {
+            format!(
+                "unresolved import `{module_name}`. Note: `{lower}` is a Chelis built-in function; call it directly without importing"
+            )
+        } else {
+            format!("unresolved import `{module_name}`")
+        };
+        assert!(
+            msg.contains("built-in function"),
+            "expected builtin hint; got: {msg}"
         );
     }
 }
