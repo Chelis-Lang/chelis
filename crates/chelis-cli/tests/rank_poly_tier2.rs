@@ -154,6 +154,41 @@ fn identity_rank_poly_def_callable_at_ranks_1_and_2() {
     assert_clean(&json, "identity rank-poly callable at rank 1 and rank 2");
 }
 
+/// chelis#258 option (b) lock: the LEGACY same-name rank-distinct overload
+/// pattern — two `def relu_forward`s whose sigs differ only in rank — is
+/// rejected with a `DuplicateDefinition` diagnostic, not silently accepted and
+/// then mis-dispatched. The issue offered two resolutions: (a) a single
+/// rank-polymorphic `..r` def (the positive above) and (b) reject the duplicate
+/// `def` with a clear "Chelis does not dispatch same-name defs by rank"
+/// diagnostic. Both ship; this pins (b) so the legacy overload form cannot
+/// silently start type-checking again (which would re-open the mis-dispatch the
+/// issue describes).
+#[test]
+fn same_name_rank_distinct_def_overloads_rejected_as_duplicate() {
+    let json = check_json(
+        "module ReproOverload\n\
+         sig relu_forward: &tensor[a, f32] -> tensor[a, f32]\n\
+         def relu_forward(x) = relu(x)\n\
+         sig relu_forward: &tensor[a, b, f32] -> tensor[a, b, f32]\n\
+         def relu_forward(x) = relu(x)\n",
+    );
+    assert_rejected_with(
+        &json,
+        "duplicate definition: `relu_forward`",
+        "same-name rank-distinct def overloads must reject as DuplicateDefinition",
+    );
+    let kinds: Vec<&str> = json["errors"]
+        .as_array()
+        .expect("errors array")
+        .iter()
+        .filter_map(|e| e["kind"].as_str())
+        .collect();
+    assert!(
+        kinds.contains(&"DuplicateDefinition"),
+        "the rejection must be a DuplicateDefinition (option b), got {kinds:?}"
+    );
+}
+
 /// Also callable at rank 3 and rank 4 — the full activation-family range.
 #[test]
 fn identity_rank_poly_def_callable_at_ranks_3_and_4() {
