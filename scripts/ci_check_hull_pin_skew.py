@@ -113,14 +113,14 @@ def check_skew(live_version: str, hull_pin: str) -> int:
     equality, so this is a string compare, not semver-range matching."""
     if live_version == hull_pin:
         print(
-            f"ci_check_hull_pin_skew: OK — live chelis {live_version} "
+            f"ci_check_hull_pin_skew: OK -- live chelis {live_version} "
             f"matches the checked-out Hull compiler pin =={hull_pin}; "
             f"the fresh campaign can run."
         )
         return 0
 
     print(
-        "ci_check_hull_pin_skew: SKEW — the Hull Conformance fresh campaign "
+        "ci_check_hull_pin_skew: SKEW -- the Hull Conformance fresh campaign "
         "cannot pass.\n"
         f"  live chelis binary : {live_version}\n"
         f"  Hull reef.toml pin : ={hull_pin}\n"
