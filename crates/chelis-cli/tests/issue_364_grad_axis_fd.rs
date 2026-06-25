@@ -175,6 +175,22 @@ fn parse_out_tensor(stdout: &str) -> (Vec<usize>, Vec<f64>) {
         .lines()
         .find(|l| l.contains("tensor(shape="))
         .unwrap_or_else(|| panic!("no `tensor(shape=...)` line in eval stdout: {stdout}"));
+    // Defensive guard: `format_execution_value` truncates tensors larger
+    // than 32 elements by replacing the tail with `+ ...`, leaving the
+    // `data=[..]` field incomplete. This parser splits the data field on
+    // the first `]`, which on a truncated render would silently parse a
+    // PREFIX of the gradient as if it were the whole vector. No fixture in
+    // this file is large enough to truncate (max 6 elements), but a future
+    // larger-tensor reuse would parse a partial gradient and assert against
+    // it. Fail LOUDLY here instead so that latent reuse is caught.
+    assert!(
+        !line.contains("+ ..."),
+        "tensor render is truncated (`+ ...`): this parser would parse only \
+         a prefix of the gradient. The fixture exceeds the 32-element \
+         truncation threshold of `format_execution_value`; this helper must \
+         be taught to assemble the full vector before it can be reused at \
+         that size. line={line}",
+    );
     let shape_str = line
         .split("shape=[")
         .nth(1)

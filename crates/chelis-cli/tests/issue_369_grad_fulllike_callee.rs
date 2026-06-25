@@ -87,12 +87,57 @@ def loss_direct(x: tensor[3, f32]) -> f32 = {\n\
 def df(x: tensor[3, f32]) -> tensor[3, f32] = grad(loss_direct)(x)\n\
 out = df(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))\n";
 
+/// CROSS-DEF / callee-boundary shadow: the existing tests all keep the
+/// `len = shape(...)` binding inside a SINGLE scope (the callee's body, or
+/// an inline `let`). This fixture pins that the `shape_bindings` recovery
+/// does NOT leak a stale entry ACROSS the def boundary. Both defs bind the
+/// SAME name `len` to a `shape(...)` read, at DIFFERENT extents:
+///
+/// * caller `loss_cross(x: tensor[5])` binds `len = shape(&guide, 0)` where
+///   `guide: tensor[3]` — caller's `len` is 3 — and uses it to build a
+///   grad-neutral `tensor[3]` of zeros, so the caller's `shape_bindings`
+///   genuinely carries `len -> 3`.
+/// * the `tensor_full_like(&x, ...)` callee independently binds its OWN
+///   `len = shape(x, 0)` where `x: tensor[5]` — callee's `len` is 5 — and
+///   that inner `len` MUST win when its `expand` extent is recovered.
+///
+/// If the caller's `len -> 3` leaked into the callee, the callee's `expand`
+/// would build a `tensor[3]` and `mul(x: tensor[5], twos: tensor[3])` would
+/// fail the backward DAG with `Lit(5) vs Lit(3)` — the exact #369 symptom.
+/// `loss = sum(2*x) + sum(zeros3)`, so `df(x) = [2, 2, 2, 2, 2]` (the
+/// `tensor[5]` shape itself is the discriminator: a leaked caller extent
+/// would have produced a tensor[3]-shaped failure, not a wrong gradient).
+const REPRO_CROSS_DEF_SHADOW: &str = "module Repro.GradCrossDefShadow\n\
+def tensor_full_like[n](y: &tensor[n, f32], value: f32) -> tensor[n, f32] = {\n\
+  len = shape(y, cast(0, int32))\n\
+  scalar_t = scalar_to_tensor(value)\n\
+  expand(scalar_t, cast(0, int32), cast(len, int32))\n\
+}\n\
+def loss_cross(x: tensor[5, f32]) -> f32 = {\n\
+  guide = to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)])\n\
+  len = shape(&guide, cast(0, int32))\n\
+  zeros3 = expand(scalar_to_tensor(cast(0.0, f32)), cast(0, int32), cast(len, int32))\n\
+  caller_contrib = sum(zeros3, cast(0, int32)) |> tensor_to_scalar\n\
+  twos = tensor_full_like(&x, cast(2.0, f32))\n\
+  main = sum(mul(x, twos), cast(0, int32)) |> tensor_to_scalar\n\
+  add(main, caller_contrib)\n\
+}\n\
+def df(x: tensor[5, f32]) -> tensor[5, f32] = grad(loss_cross)(x)\n\
+out = df(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32), cast(5.0, f32)]))\n";
+
 /// NEGATIVE PARITY: a `tensor[k]` output whose `expand` size is a bare
 /// `int32` SCALAR PARAMETER (no `shape(...)` read, no in-scope tensor dim)
 /// must STILL be rejected loudly — the fix recovers extents only from
 /// genuine `shape(...)` reads (direct or `let`-bound), never from an
 /// arbitrary runtime scalar. Guards that the size-1-default removal did
 /// not weaken the §4.7.2 Form-3 sourceless-size rejection (chelis#469).
+///
+/// SCOPE: this verifies the rejection only for the BARE `expand(s, 0, k)`
+/// spelling (the size slot is the scalar parameter directly). The
+/// cast-wrapped form `expand(s, 0, cast(k, int32))` is a SEPARATE,
+/// pre-existing gap that this fixture does NOT cover; it is tracked as
+/// chelis#521. Do not read this test as a broad §4.7.2 sourceless-size
+/// guarantee.
 const REPRO_BARE_SCALAR_REJECTS: &str = "module Repro.BareScalarRejects\n\
 def bad(x: tensor[3, f32], k: int32) -> tensor[k, f32] = {\n\
   scalar_t = scalar_to_tensor(cast(2.0, f32))\n\
@@ -197,11 +242,50 @@ fn issue_369_inline_direct_control_still_works() {
     );
 }
 
+/// CROSS-DEF / callee-boundary shadow coverage: the caller and the
+/// `tensor_full_like` callee both bind `len = shape(...)` at DIFFERENT
+/// extents (caller 3, callee 5). The callee's inner `len` must win — its
+/// `expand` recovers extent 5 (its own param), not the caller's 3 — so
+/// `df(x)` is the `tensor[5]` gradient `[2, 2, 2, 2, 2]`. A stale
+/// `shape_bindings` entry leaking across the def boundary would build a
+/// `tensor[3]` inside the callee and fail the backward DAG with `Lit(5) vs
+/// Lit(3)`; the `shape=[5]` + non-zero gradient assertion below is the
+/// numeric oracle that the inner scope is honored. NOTE: this MUST run
+/// through the full checked CLI pipeline — the unchecked unit lower path
+/// has empty `program_defs`, so callee inlining does not resolve there.
+#[test]
+fn issue_369_eval_cross_def_callee_shadow_inner_len_wins() {
+    let output = run_eval(REPRO_CROSS_DEF_SHADOW, "cross_def_shadow");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "cross-def shadow: `chelis eval` must succeed (callee's inner `len` \
+         resolves to extent 5); a leaked caller `len -> 3` would fail with \
+         `Lit(5) vs Lit(3)`. stdout={stdout} stderr={stderr}",
+    );
+    assert!(
+        stdout.contains("shape=[5]"),
+        "cross-def shadow: gradient must be tensor[5] (the callee's param \
+         extent, not the caller's 3); got stdout={stdout}",
+    );
+    assert!(
+        stdout.contains("data=[2, 2, 2, 2, 2]")
+            || stdout.contains("data=[2.0, 2.0, 2.0, 2.0, 2.0]"),
+        "cross-def shadow: df(x) must equal [2, 2, 2, 2, 2]; got stdout={stdout}",
+    );
+}
+
 /// NEGATIVE PARITY: a genuinely sourceless `expand` size (a bare `int32`
 /// scalar parameter) must STILL be rejected loudly. The fix must not have
 /// turned the size-1 default into a silent extent guess for arbitrary
 /// runtime scalars — only `shape(...)` reads (direct or `let`-bound)
 /// recover an extent.
+///
+/// SCOPE: verified ONLY for the bare `expand(s, 0, k)` spelling. The
+/// cast-wrapped form `expand(s, 0, cast(k, int32))` is a separate
+/// pre-existing gap tracked as chelis#521 and is NOT asserted here; this
+/// is not a broad §4.7.2 sourceless-size guarantee.
 #[test]
 fn issue_369_bare_scalar_expand_size_still_rejects() {
     let output = run_eval(REPRO_BARE_SCALAR_REJECTS, "bare_scalar");
