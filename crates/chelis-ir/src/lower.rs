@@ -8852,6 +8852,53 @@ mod tests {
         );
     }
 
+    /// chelis#369 non-hardcoding guard: the same `let len = shape(x, 0)`
+    /// idiom at a DIFFERENT extent (`x: tensor[5]`) must recover
+    /// `Concrete(5)`. `issue_369_expand_let_bound_shape_recovers_extent`
+    /// pins only the `tensor[3]` case, which a buggy implementation that
+    /// hardcoded `Concrete(3)` (or echoed back the literal `3` annotation)
+    /// would still satisfy. Exercising a second, distinct extent proves the
+    /// recovery actually reads `x`'s axis-0 size rather than emitting a
+    /// fixed constant.
+    #[test]
+    fn issue_369_expand_let_bound_shape_recovers_distinct_extent_5() {
+        // Identical structure to the extent-3 test, but `x: tensor[5]` and
+        // the expand output is annotated `tensor[5]`. A recovery that
+        // reads x's dim yields Concrete(5); a hardcoded Concrete(3) fails.
+        let body = r#"
+            (let {}
+                 (bind {}
+                       len
+                       (app {}
+                            (var {} shape)
+                            (var {type: (t-tensor {} (d-lit {} 5) (t-prim {} f32))} x)
+                            (cast {} (lit {} 0) (t-prim {} int32))))
+                 (app {type: (t-tensor {} (d-lit {} 5) (t-prim {} f32))}
+                      (var {} expand)
+                      (app {type: (t-prim {} f32)}
+                           (var {} scalar_to_tensor)
+                           (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
+                      (cast {} (lit {} 0) (t-prim {} int32))
+                      (cast {} (var {} len) (t-prim {} int32))))
+        "#;
+        let dag = lower_body_with_bound_x(5, body);
+        let (size, dims) = only_expand(&dag);
+        assert_eq!(
+            size,
+            DimExpr::Concrete(5),
+            "a `let len = shape(x, 0)`-bound extent on `x: tensor[5]` must \
+             recover Concrete(5), not a hardcoded 3 or the default 1 \
+             (chelis#369 non-hardcoding); got {size:?}",
+        );
+        assert_eq!(
+            dims,
+            vec![DimInfo::Lit(5)],
+            "rank-0-source expand output must be tensor[5] at this extent, \
+             proving the recovered size is x's axis-0 dim, not a constant; \
+             got {dims:?}",
+        );
+    }
+
     /// chelis#369 negative parity: the recovery must follow ONLY a genuine
     /// `let len = shape(...)` binding. A `len` bound to something that is
     /// NOT a `shape(...)` app must NOT fabricate an extent — the size has
