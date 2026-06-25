@@ -4353,7 +4353,18 @@ impl LowerCtx {
                     // `bindings` entry, not through the outer fn's
                     // `Parameter` classification.
                     self.fn_typed_params.remove(name);
-                    if self.is_host_list_expr(&bind_kids[i + 1]) {
+                    // Issue #368: a `let`-bound list LITERAL (`rows = [r0, r1]`,
+                    // a closed `Cons` chain) is recorded so `concat(rows, axis)`
+                    // can resolve the elements back to the underlying tensor
+                    // exprs and lower them through the differentiable Pad+Add
+                    // cascade. Without this the name only resolves to the eager
+                    // (degenerate) lowering of the list literal, and concat
+                    // falls back to the rank-0 host placeholder. Gated on the
+                    // non-host check so it does not change `is_host_list_expr`
+                    // routing for `to_list`/`map`/`filter` bindings.
+                    if self.is_host_list_expr(&bind_kids[i + 1])
+                        || collect_cons_chain(&bind_kids[i + 1]).is_some()
+                    {
                         self.list_bindings
                             .insert(name.clone(), bind_kids[i + 1].clone());
                     }
@@ -6759,6 +6770,47 @@ impl LowerCtx {
                 )
             }
 
+            // Issue #368: `concat` of a statically-enumerable list of
+            // tensors along a constant axis. `concat` is otherwise a
+            // host-runtime op with no RISC DAG lowering and no adjoint, so
+            // a `grad` through `mean`/`max_reduce` over a concat'd window
+            // stack hit the fallback below, which emits a rank-0
+            // `Load { name: "concat" }` placeholder. The reduce then ran on
+            // a rank-0 operand: `mean` panicked indexing `dims[axis]` of the
+            // empty shape, and `max_reduce` built a backward node pairing a
+            // rank-1 cotangent with the rank-0 collapse (verify "1 vs 0").
+            //
+            // Lower the differentiable case to the existing Pad+Add cascade
+            // (the same construction `emit_literal_tensor` uses): pad each
+            // element to the full concat shape with zeros before/after on the
+            // concat axis, then sum. `Pad` and `Add` both carry reverse-mode
+            // adjoints (Pad -> Shrink, Add routes the cotangent to each
+            // input), so `grad` reaches the windowed inputs and finite-diff
+            // validates. Non-concat axes (including symbolic dims) ride
+            // through untouched because their padding is `(0, 0)`.
+            //
+            // Falls through to the host fallback when the list is not
+            // statically enumerable, the axis is not a constant, an element
+            // is not a recognized tensor node, or an element's concat-axis
+            // extent is not a concrete literal (a ragged/runtime concat,
+            // which still needs the host lane).
+            "concat" if args.len() == 2 => {
+                if let Some(node) = self.lower_tensor_concat(&args[0], &args[1]) {
+                    return node;
+                }
+                for arg in args {
+                    self.lower_expr(arg);
+                }
+                self.dag.add_node(
+                    RiscOp::Load {
+                        name: func_name.into(),
+                    },
+                    vec![],
+                    Self::default_type(),
+                    self.current_span_id.clone(),
+                )
+            }
+
             // Fallback: unknown function.
             _ => {
                 for arg in args {
@@ -6885,6 +6937,117 @@ impl LowerCtx {
                 self.current_span_id.clone(),
             )
         })
+    }
+
+    /// Issue #368: lower `concat([t0, t1, ...], axis)` of a
+    /// statically-enumerable list of tensors along a constant axis into a
+    /// Pad+Add cascade so the result is a differentiable RISC sub-tree.
+    ///
+    /// Each element is padded to the full concat shape (zeros before its
+    /// slice and after it along the concat axis, `(0, 0)` on every other
+    /// axis) and the padded elements are summed. Returns `None` (so the
+    /// caller falls through to the host-runtime `concat` fallback) when the
+    /// list is not a closed `Cons` chain, the axis is not a compile-time
+    /// constant, an element does not lower to a usable rank>=1 tensor node,
+    /// the elements disagree on rank or on a non-concat axis, or an
+    /// element's concat-axis extent is not a concrete literal (a ragged or
+    /// runtime-extent concat, which the host lane still owns).
+    fn lower_tensor_concat(&mut self, list_expr: &Expr, axis_expr: &Expr) -> Option<NodeId> {
+        let resolved = self.resolved_list_expr(list_expr);
+        let elements = collect_cons_chain(&resolved)?;
+        if elements.is_empty() {
+            return None;
+        }
+        let raw_axis = extract_int_axis(axis_expr)?;
+
+        // Lower each element and snapshot its type. Bail out (fall through
+        // to the host fallback) if any element collapses to rank-0 — that
+        // is exactly the degenerate placeholder we are trying to avoid, and
+        // a Pad over it would be unsound.
+        let mut nodes = Vec::with_capacity(elements.len());
+        let mut elem_types = Vec::with_capacity(elements.len());
+        for elem in &elements {
+            let node = self.lower_expr(elem).as_single_node()?;
+            let ty = self.dag.get(node)?.output_type.clone();
+            if ty.dims.is_empty() {
+                return None;
+            }
+            nodes.push(node);
+            elem_types.push(ty);
+        }
+
+        let rank = elem_types[0].dims.len();
+        let precision = elem_types[0].precision;
+        if elem_types
+            .iter()
+            .any(|ty| ty.dims.len() != rank || ty.precision != precision)
+        {
+            return None;
+        }
+        let axis = {
+            let normalized = if raw_axis < 0 {
+                raw_axis + rank as i64
+            } else {
+                raw_axis
+            };
+            if normalized < 0 || normalized as usize >= rank {
+                return None;
+            }
+            normalized as usize
+        };
+
+        // Every non-concat axis must agree across elements (concat does not
+        // broadcast); the concat-axis extent of each element must be a
+        // concrete literal so the per-element padding amounts are known.
+        let mut concat_extents = Vec::with_capacity(elem_types.len());
+        for ty in &elem_types {
+            for (ax, (d, d0)) in ty.dims.iter().zip(elem_types[0].dims.iter()).enumerate() {
+                if ax != axis && d != d0 {
+                    return None;
+                }
+            }
+            concat_extents.push(concrete_dim_len(&ty.dims[axis])?);
+        }
+        let total: usize = concat_extents.iter().sum();
+
+        // Output dims: the first element's dims with the concat axis
+        // widened to the summed extent.
+        let mut out_dims = elem_types[0].dims.clone();
+        out_dims[axis] = DimInfo::Lit(total);
+        let out_ty = TensorType {
+            dims: out_dims,
+            precision,
+        };
+
+        // Pad each element to the full shape and sum. `offset` tracks the
+        // start of the current element's slice along the concat axis.
+        let mut accumulator: Option<NodeId> = None;
+        let mut offset = 0usize;
+        for (node, extent) in nodes.iter().zip(concat_extents.iter()) {
+            let before = offset;
+            let after = total - offset - extent;
+            offset += extent;
+            // `(0, 0)` everywhere except the concat axis, so symbolic
+            // non-concat dims need no concrete extent.
+            let mut padding = vec![(0usize, 0usize); rank];
+            padding[axis] = (before, after);
+            let padded = self.dag.add_node(
+                RiscOp::Pad { padding, fill: 0.0 },
+                vec![*node],
+                out_ty.clone(),
+                self.current_span_id.clone(),
+            );
+            accumulator = Some(match accumulator {
+                None => padded,
+                Some(prev) => self.dag.add_node(
+                    RiscOp::Add,
+                    vec![prev, padded],
+                    out_ty.clone(),
+                    self.current_span_id.clone(),
+                ),
+            });
+        }
+        accumulator
     }
 
     fn resolved_list_expr(&self, expr: &Expr) -> Expr {
