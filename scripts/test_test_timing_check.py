@@ -122,6 +122,79 @@ class EvaluateTests(unittest.TestCase):
         flags = tc.evaluate(timings, baseline, tolerance=2.0, absolute_ceiling=30.0)
         self.assertEqual(flags, [])
 
+    def test_near_zero_jitter_not_flagged_under_floor(self):
+        # THE jitter scenario: a 0.01s baseline test observed at 0.02s is
+        # over the 2.0x multiplier (budget 0.02s, strict > would need 0.021,
+        # but say it lands at 0.03s) yet the absolute slowdown (0.02s) is
+        # below a 0.05s floor -> NOT flagged. This is the chelis CI flake
+        # (sub-10ms delta on a contended runner false-redding unrelated
+        # tests) the floor is built to stop.
+        timings = {"bin_a::tiny": 0.03}
+        baseline = {"bin_a::tiny": 0.01}
+        flags = tc.evaluate(
+            timings,
+            baseline,
+            tolerance=2.0,
+            absolute_ceiling=30.0,
+            min_regression_delta=0.05,
+        )
+        self.assertEqual(flags, [])
+
+    def test_real_regression_above_floor_still_flagged(self):
+        # The floor must NOT mask a genuine regression: a 5s baseline test
+        # that jumps to 12s clears BOTH the 2.0x multiplier (budget 10s) and
+        # the 0.05s absolute floor (slowdown 7s), so it is still flagged.
+        timings = {"bin_a::real": 12.0}
+        baseline = {"bin_a::real": 5.0}
+        flags = tc.evaluate(
+            timings,
+            baseline,
+            tolerance=2.0,
+            absolute_ceiling=30.0,
+            min_regression_delta=0.05,
+        )
+        self.assertEqual(len(flags), 1)
+        self.assertEqual(flags[0].kind, tc.Flag.REGRESSED)
+
+    def test_floor_requires_both_gates(self):
+        # Over the absolute floor but NOT over the multiplier -> not flagged
+        # (a 1.0s baseline observed at 1.04s is +0.04s, but well under the
+        # 2.0x budget). Confirms the floor is an ADDITIONAL gate, not a
+        # replacement for the multiplier.
+        timings = {"bin_a::slow_abs_small_rel": 1.04}
+        baseline = {"bin_a::slow_abs_small_rel": 1.0}
+        flags = tc.evaluate(
+            timings,
+            baseline,
+            tolerance=2.0,
+            absolute_ceiling=30.0,
+            min_regression_delta=0.02,
+        )
+        self.assertEqual(flags, [])
+
+    def test_zero_floor_reproduces_pre_floor_behavior(self):
+        # min_regression_delta=0.0 (the default / legacy config) keeps the
+        # old pure-multiplier behavior: a tiny baseline over the multiplier
+        # IS flagged.
+        timings = {"bin_a::tiny": 0.03}
+        baseline = {"bin_a::tiny": 0.01}
+        flags = tc.evaluate(
+            timings,
+            baseline,
+            tolerance=2.0,
+            absolute_ceiling=30.0,
+            min_regression_delta=0.0,
+        )
+        self.assertEqual(len(flags), 1)
+
+    def test_default_floor_is_zero(self):
+        # Calling evaluate without the floor arg behaves as floor=0.0, so
+        # existing callers/tests are unchanged.
+        timings = {"bin_a::tiny": 0.03}
+        baseline = {"bin_a::tiny": 0.01}
+        flags = tc.evaluate(timings, baseline, tolerance=2.0, absolute_ceiling=30.0)
+        self.assertEqual(len(flags), 1)
+
     def test_new_test_over_absolute_ceiling_is_flagged(self):
         # Not in baseline + over the 30s ceiling -> flagged as new.
         timings = {"bin_a::brand_new": 45.0}
@@ -159,9 +232,36 @@ class ConfigTests(unittest.TestCase):
 
     def test_loads_valid_config(self):
         with tempfile.TemporaryDirectory() as tmp:
+            p = self._write_config(
+                tmp,
+                {
+                    "tolerance": 2.0,
+                    "absolute_ceiling": 30.0,
+                    "min_regression_delta": 0.05,
+                },
+            )
+            tolerance, ceiling, floor = tc.load_config(p)
+            self.assertEqual((tolerance, ceiling, floor), (2.0, 30.0, 0.05))
+
+    def test_min_regression_delta_defaults_to_zero_when_absent(self):
+        # An older config without the key keeps the pre-floor behavior.
+        with tempfile.TemporaryDirectory() as tmp:
             p = self._write_config(tmp, {"tolerance": 2.0, "absolute_ceiling": 30.0})
-            tolerance, ceiling = tc.load_config(p)
-            self.assertEqual((tolerance, ceiling), (2.0, 30.0))
+            _, _, floor = tc.load_config(p)
+            self.assertEqual(floor, 0.0)
+
+    def test_negative_min_regression_delta_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write_config(
+                tmp,
+                {
+                    "tolerance": 2.0,
+                    "absolute_ceiling": 30.0,
+                    "min_regression_delta": -0.1,
+                },
+            )
+            with self.assertRaises(tc.TimingError):
+                tc.load_config(p)
 
     def test_missing_config_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -188,9 +288,18 @@ class ConfigTests(unittest.TestCase):
 
     def test_committed_config_is_valid(self):
         # The committed scripts/test_timing_config.json must load.
-        tolerance, ceiling = tc.load_config()
+        tolerance, ceiling, floor = tc.load_config()
         self.assertGreaterEqual(tolerance, 1.0)
         self.assertGreater(ceiling, 0.0)
+        self.assertGreaterEqual(floor, 0.0)
+
+    def test_committed_config_has_jitter_floor(self):
+        # The committed config must carry a non-trivial absolute floor so a
+        # near-zero baseline test cannot false-red on millisecond jitter
+        # (chelis CI-reliability: the sub-10ms-delta flake). If this drops to
+        # 0 the jitter guard is gone -- catch that here.
+        _, _, floor = tc.load_config()
+        self.assertGreaterEqual(floor, 0.02)
 
 
 class BaselineTests(unittest.TestCase):

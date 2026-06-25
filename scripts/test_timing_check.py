@@ -7,12 +7,26 @@ grown too slow:
 
   - a test that is NEW relative to the committed baseline AND runs
     longer than `absolute_ceiling` seconds, or
-  - a test that REGRESSED past `tolerance` x its baseline time.
+  - a test that REGRESSED past `tolerance` x its baseline time AND by
+    at least `min_regression_delta` seconds in absolute terms.
+
+The absolute-delta floor exists because most of the baseline is
+near-zero: a 0.01s test against a 2.0x multiplier flags at >0.02s, so a
+few-millisecond scheduler jitter -- routine on a contended CI runner --
+false-reds tests that did not change. Requiring the slowdown to ALSO be a
+meaningful number of wall-clock seconds (default 0.05s) means tiny
+baselines need a real jump, not noise, while large baselines are
+unaffected (a 5s -> 12s regression clears both gates easily). This is the
+"several unrelated tests fail at near-identical times = CPU starvation,
+not code" pattern; the floor stops that starvation from gating PRs while
+keeping genuine, sustained regressions blocking.
 
 Thresholds are config, never hardcoded:
 
-  - `scripts/test_timing_config.json` holds `tolerance` (a multiplier)
-    and `absolute_ceiling` (seconds).
+  - `scripts/test_timing_config.json` holds `tolerance` (a multiplier),
+    `absolute_ceiling` (seconds), and `min_regression_delta` (seconds,
+    the absolute slowdown floor below which a multiplicative "regression"
+    is treated as jitter; optional, defaults to 0.0 for back-compat).
   - `scripts/test_timing_baseline.json` maps `binary::test` -> seconds.
 
 The baseline is hand-curated and explicitly regenerated, NOT
@@ -52,8 +66,12 @@ class TimingError(Exception):
     """Raised for usage / IO / parse errors; mapped to exit code 2."""
 
 
-def load_config(path: Path = CONFIG_PATH) -> tuple[float, float]:
-    """Return `(tolerance, absolute_ceiling)` from the config JSON."""
+def load_config(path: Path = CONFIG_PATH) -> tuple[float, float, float]:
+    """Return `(tolerance, absolute_ceiling, min_regression_delta)` from
+    the config JSON.
+
+    `min_regression_delta` is optional and defaults to 0.0 so an older
+    config without the key keeps the pre-floor behavior."""
     if not path.is_file():
         raise TimingError(f"missing timing config: {path}")
     try:
@@ -68,6 +86,13 @@ def load_config(path: Path = CONFIG_PATH) -> tuple[float, float]:
             f"timing config {path} must have numeric `tolerance` and "
             f"`absolute_ceiling`: {exc}"
         ) from exc
+    try:
+        min_regression_delta = float(data.get("min_regression_delta", 0.0))
+    except (TypeError, ValueError) as exc:
+        raise TimingError(
+            f"timing config {path} `min_regression_delta` must be numeric: "
+            f"{exc}"
+        ) from exc
     if tolerance < 1.0:
         raise TimingError(
             f"timing config `tolerance` must be >= 1.0, got {tolerance}"
@@ -77,7 +102,12 @@ def load_config(path: Path = CONFIG_PATH) -> tuple[float, float]:
             f"timing config `absolute_ceiling` must be > 0, got "
             f"{absolute_ceiling}"
         )
-    return tolerance, absolute_ceiling
+    if min_regression_delta < 0.0:
+        raise TimingError(
+            f"timing config `min_regression_delta` must be >= 0, got "
+            f"{min_regression_delta}"
+        )
+    return tolerance, absolute_ceiling, min_regression_delta
 
 
 def load_baseline(path: Path = BASELINE_PATH) -> dict[str, float]:
@@ -183,13 +213,24 @@ def evaluate(
     baseline: dict[str, float],
     tolerance: float,
     absolute_ceiling: float,
+    min_regression_delta: float = 0.0,
 ) -> list[Flag]:
-    """Return the list of over-budget findings, sorted slowest first."""
+    """Return the list of over-budget findings, sorted slowest first.
+
+    A baselined test is flagged REGRESSED only when it is BOTH over its
+    `tolerance x baseline` budget AND slower than baseline by at least
+    `min_regression_delta` seconds. The absolute-delta floor keeps
+    millisecond scheduler jitter against a near-zero baseline (the bulk of
+    the suite) from false-flagging an unchanged test; it does not weaken
+    detection of a real, multi-second regression, which clears both gates.
+    `min_regression_delta=0.0` reproduces the pre-floor behavior."""
     flags: list[Flag] = []
     for key, observed in timings.items():
         if key in baseline:
             budget = baseline[key] * tolerance
-            if observed > budget:
+            over_multiplier = observed > budget
+            over_absolute = (observed - baseline[key]) >= min_regression_delta
+            if over_multiplier and over_absolute:
                 flags.append(Flag(key, Flag.REGRESSED, observed, budget))
         else:
             # New test (not in baseline): only flag if it is also over
@@ -281,13 +322,15 @@ def main(argv: list[str]) -> int:
     try:
         if args.update_baseline:
             return update_baseline(args.junit)
-        tolerance, absolute_ceiling = load_config()
+        tolerance, absolute_ceiling, min_regression_delta = load_config()
         baseline = load_baseline()
         timings = parse_junit(args.junit)
     except TimingError as exc:
         print(f"test-timing budget: error: {exc}", file=sys.stderr)
         return 2
-    flags = evaluate(timings, baseline, tolerance, absolute_ceiling)
+    flags = evaluate(
+        timings, baseline, tolerance, absolute_ceiling, min_regression_delta
+    )
     print_report(flags, timings, tolerance)
     return 1 if flags else 0
 
