@@ -6,7 +6,33 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **`chelis prove --project-root <DIR>` and `chelis eval --project-root
+  <DIR>`: a package proof / package eval mode (#487, #423).** `prove`
+  already resolved imports for a file inside a reef package; a standalone
+  property file living OUTSIDE any package could not be proved against a
+  package's exported functions (the import did not resolve, the call was
+  unbound, the property fell to unsupported/error). `--project-root`
+  resolves the file's imports against the package rooted at that directory,
+  so a standalone property proves against the real dependency graph. `eval`
+  gains the same flag for both `--file` and inline-expression forms, and
+  both surfaces now route import resolution through the ONE
+  `chelis_reef::prepare_program_for_eval_source` path (the #423
+  unification). An unresolvable import under `--project-root` is an honest
+  `import resolution failed` error, never a false pass.
+
 ### Fixed
+
+- **`chelis_reef::compile_with_reef_graph` returned RAW (un-rewritten)
+  entry decls (#487).** The `entry_decls` field carried the user's
+  pre-resolution decls while `decls` carried the linked program with
+  imports resolved to internal names, so a consumer discovering and
+  inlining a property (or any def) from `entry_decls` against the library
+  names in `decls` saw a name mismatch (`square` vs `pkg__..__square`)
+  and could not lower it. `entry_decls` now carries the REWRITTEN decls,
+  consistent with `prepare_program_for_file`; entry binding NAMES are
+  unchanged by the rewrite (RFC v6), so root-name selection is unaffected.
 
 - **SOUNDNESS: two calls of an ITE-bodied def at a goal site no longer
   false-prove (#426).** A property comparing or subtracting two calls of

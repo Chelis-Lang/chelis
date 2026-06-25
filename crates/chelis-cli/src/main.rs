@@ -192,6 +192,14 @@ enum Command {
         /// `{"roots":[]}`.
         #[arg(long, action = ArgAction::SetTrue)]
         json: bool,
+        /// Resolve package imports against the Reef package rooted at this
+        /// directory (or its nearest `reef.toml` ancestor), instead of
+        /// discovering the package from the input file / current directory.
+        /// Lets a standalone file or an inline expression that imports an
+        /// exported package function be evaluated against the real package
+        /// dependency graph (chelis#423).
+        #[arg(long)]
+        project_root: Option<PathBuf>,
         /// Bypass `chelis fmt --check` and `chelis lint --check` gates.
         /// Emergency use only; CI must not pass this flag.
         #[arg(long, action = ArgAction::SetTrue)]
@@ -331,6 +339,13 @@ enum Command {
         /// Verification tier: auto (A→B→C), fuzz-only, smt-only, type-only
         #[clap(long, default_value = "auto")]
         tier: String,
+        /// Resolve package imports against the Reef package rooted at this
+        /// directory (or its nearest `reef.toml` ancestor), instead of
+        /// discovering the package from the input file. Lets a standalone
+        /// property file outside any package be proved against the real
+        /// package dependency graph — the package proof mode (chelis#487).
+        #[clap(long)]
+        project_root: Option<PathBuf>,
         /// SMT solver timeout in milliseconds (default 5000)
         #[clap(long, default_value = "5000")]
         smt_timeout: u64,
@@ -560,11 +575,13 @@ fn main() {
             file,
             expr,
             json,
+            project_root,
             allow_style_violations,
         }) => cmd_eval(
             file.as_deref(),
             expr.as_deref(),
             json,
+            project_root.as_deref(),
             allow_style_violations,
         ),
         Some(Command::Check {
@@ -660,6 +677,7 @@ fn main() {
             json,
             spans,
             tier: _tier,
+            project_root,
             smt_timeout: _smt_timeout,
             invariant_min_rate,
         }) => match prove::cmd_prove(prove::ProveOptions {
@@ -671,6 +689,7 @@ fn main() {
             json,
             spans: spans.as_deref(),
             tier: &_tier,
+            project_root: project_root.as_deref(),
             smt_timeout_ms: _smt_timeout,
             invariant_min_rate,
         }) {
@@ -799,6 +818,7 @@ fn cmd_eval(
     file: Option<&std::path::Path>,
     expr: Option<&str>,
     json: bool,
+    project_root: Option<&std::path::Path>,
     allow_style_violations: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // The style gate runs only on the `--file` form (a real on-disk
@@ -858,7 +878,14 @@ fn cmd_eval(
             // linker name format for the rest of this arm. The raw `.dp`
             // case returned above, so it keeps the flag FALSE and rejects
             // mangled names as a forge.
-            let eval_package_root = detect_eval_package_root(path)?;
+            //
+            // chelis#423: an explicit `--project-root` overrides package
+            // discovery so a standalone `.ch` file living OUTSIDE any reef
+            // package can still resolve its imports against the package
+            // rooted there. Without the flag, the package is discovered
+            // from the file (module file) or the cwd (loose file) exactly
+            // as before.
+            let eval_package_root = detect_eval_package_root(path, project_root)?;
             let _linked_guard = eval_package_root
                 .is_some()
                 .then(chelis_types::install_linked_program_guard);
@@ -884,8 +911,10 @@ fn cmd_eval(
             }
             // Raw `--file foo.ch` outside any reef package, or a reef
             // package whose graph the new context-builder can't yet
-            // hash: fall back to the legacy `prepare_eval` path.
-            let (decls, entry_decls) = load_eval_decls(path)?;
+            // hash: fall back to the legacy `prepare_eval` path. The
+            // `--project-root` (if any) is the resolution context so a
+            // standalone file still resolves package imports.
+            let (decls, entry_decls) = load_eval_decls(path, project_root)?;
             let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
             let checked = checked_program_with_effects(&deep_exprs).map_err(boxed_string_error)?;
             let source = chelis_surf::format::format_program(&decls);
@@ -901,10 +930,52 @@ fn cmd_eval(
             }
         }
         (None, Some(e)) => {
-            // `--expr` is by construction a one-line snippet with no reef
-            // resolution — keep the legacy path.
+            // `--expr` is a one-line snippet wrapped as a single value
+            // binding. chelis#423: when a reef package is in scope — either
+            // an explicit `--project-root` or one discoverable from the cwd
+            // — resolve the snippet's imports against that package's
+            // dependency graph, so an inline expression can call an exported
+            // package function (the same resolution `chelis prove` and
+            // `chelis eval --file` already do). With no package in scope, the
+            // snippet stays a standalone expression with no import
+            // resolution, exactly as before.
             let source = format!("__eval_result = {e}");
-            if json {
+            let context_dir = match project_root {
+                Some(root) => Some(root.to_path_buf()),
+                None => env::current_dir().ok(),
+            };
+            let prepared = match context_dir.as_deref() {
+                Some(dir) => {
+                    let decls = chelis_surf::parser::parse_str(&source)
+                        .map_err(|err| boxed_string_error(err.to_string()))?;
+                    chelis_reef::prepare_program_for_eval_source(dir, &decls)
+                        .map_err(boxed_string_error)?
+                }
+                None => None,
+            };
+            if let Some(prepared) = prepared {
+                let _linked_guard = chelis_types::install_linked_program_guard();
+                let deep_exprs =
+                    expanded_desugared_program(&prepared.decls).map_err(boxed_string_error)?;
+                let checked =
+                    checked_program_with_effects(&deep_exprs).map_err(boxed_string_error)?;
+                let linked_source = chelis_surf::format::format_program(&prepared.decls);
+                let selected_roots =
+                    root_names_from_decls(&prepared.entry_decls, checked.type_env());
+                if json {
+                    run_eval_json_emit(try_eval_result(
+                        SourceKind::Surf,
+                        &linked_source,
+                        Some(&selected_roots),
+                    ))
+                } else {
+                    run_eval_emit(try_eval(
+                        SourceKind::Surf,
+                        &linked_source,
+                        Some(&selected_roots),
+                    ))
+                }
+            } else if json {
                 run_eval_json_emit(try_eval_result(SourceKind::Surf, &source, None))
             } else {
                 run_eval_emit(try_eval(SourceKind::Surf, &source, None))
@@ -927,7 +998,17 @@ fn cmd_eval(
 /// back to the legacy `prepare_eval` path), and `Err` only on
 /// canonicalize/IO errors that would have surfaced during the legacy path
 /// anyway.
-fn detect_eval_package_root(file: &Path) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+fn detect_eval_package_root(
+    file: &Path,
+    project_root: Option<&Path>,
+) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+    // chelis#423: an explicit `--project-root` is authoritative. The
+    // package root is the nearest `reef.toml` at or above that directory,
+    // independent of where the input file lives — so a standalone file
+    // outside the package resolves against it.
+    if let Some(root) = project_root {
+        return chelis_reef::find_package_root_for_dir(root).map_err(boxed_string_error);
+    }
     let source = fs::read_to_string(file)?;
     // A parse failure here is non-fatal for routing: fall back to the
     // legacy path so the user sees the same parse error they would have
@@ -5141,9 +5222,20 @@ fn flatten_module_decls(decls: &[Decl]) -> Vec<Decl> {
     out
 }
 
-fn load_eval_decls(file: &Path) -> Result<(Vec<Decl>, Vec<Decl>), Box<dyn std::error::Error>> {
-    let current_dir = env::current_dir()?;
-    if let Some(prepared) = chelis_reef::prepare_program_for_eval_file(file, &current_dir)
+fn load_eval_decls(
+    file: &Path,
+    project_root: Option<&Path>,
+) -> Result<(Vec<Decl>, Vec<Decl>), Box<dyn std::error::Error>> {
+    // chelis#423: resolve package imports against `--project-root` when
+    // given, else the current directory (the legacy context). The context
+    // dir is where `prepare_program_for_eval_file` walks for a `reef.toml`,
+    // so an explicit root lets a standalone file outside the package
+    // resolve its imports.
+    let context_dir = match project_root {
+        Some(root) => root.to_path_buf(),
+        None => env::current_dir()?,
+    };
+    if let Some(prepared) = chelis_reef::prepare_program_for_eval_file(file, &context_dir)
         .map_err(boxed_string_error)?
     {
         return Ok((prepared.decls, prepared.entry_decls));

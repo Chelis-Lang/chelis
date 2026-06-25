@@ -33,6 +33,12 @@ pub struct ProveOptions<'a> {
     pub spans: Option<&'a Path>,
     #[allow(dead_code)]
     pub tier: &'a str,
+    /// Resolve package imports against the Reef package rooted at this
+    /// directory (or its nearest `reef.toml` ancestor) when the input file
+    /// is not itself inside a discoverable package — the package proof mode
+    /// (chelis#487). `None` keeps the default file-relative discovery.
+    #[allow(dead_code)]
+    pub project_root: Option<&'a Path>,
     #[allow(dead_code)]
     pub smt_timeout_ms: u64,
     /// Floor for invariant rejection-sampling acceptance rate before the
@@ -281,7 +287,23 @@ fn prove_surf_file(
     #[cfg(feature = "chelis-prove")]
     {
         let _ = (&flat, &parsed);
-        let linked_program = chelis_reef::prepare_program_for_file(path);
+        // Default: discover the package from the input file. chelis#487: when
+        // the file is NOT inside a discoverable package (`Ok(None)`) and the
+        // user passed `--project-root`, resolve the file's imports against the
+        // package rooted there instead — the package proof mode, so a
+        // standalone property file outside the package proves against the real
+        // dependency graph. The same `prepare_program_for_eval_source` resolver
+        // backs `chelis eval` (chelis#423), so prove and eval share ONE import
+        // resolution path. A genuine resolution failure under the explicit root
+        // (a bad import, a missing dep) still surfaces as `Err` -> a clean
+        // property-discovery error, never a silent unverified pass.
+        let linked_program = match chelis_reef::prepare_program_for_file(path) {
+            Ok(None) => match options.project_root {
+                Some(root) => chelis_reef::prepare_program_for_eval_source(root, &parsed),
+                None => Ok(None),
+            },
+            other => other,
+        };
         let prop_status = match &linked_program {
             Ok(Some(prepared)) => {
                 let display_names = linked_property_display_names(&flat, &prepared.entry_decls);

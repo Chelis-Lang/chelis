@@ -809,11 +809,22 @@ pub fn compile_with_reef_graph(
     // partition. `stdlib_decls` is the graph's already-partitioned
     // chelis-std slice.
     let mut non_stdlib_decls = graph.linked_non_stdlib_library_decls.clone();
-    non_stdlib_decls.extend(rewritten_entry_decls);
+    non_stdlib_decls.extend(rewritten_entry_decls.iter().cloned());
 
     Ok(PreparedProgram {
         decls,
-        entry_decls: entry_decls.to_vec(),
+        // `entry_decls` carries the REWRITTEN entry decls (imported
+        // references resolved to their internal linked names), consistent
+        // with `prepare_program_for_file`, whose `entry_decls` are the
+        // linked module decls. A consumer that discovers + inlines a
+        // property (or any def) from `entry_decls` against the library
+        // names in `decls` needs the SAME name on both sides; handing back
+        // the RAW entry decls left `square(x)` unresolved while the library
+        // def was `pkg__..__square`, so the property could not lower
+        // (chelis#487). The entry binding NAMES are unchanged by the
+        // rewrite (RFC v6 keeps user-authored top-level names), so
+        // root-name selection (`root_names_from_decls`) is unaffected.
+        entry_decls: rewritten_entry_decls,
         package_root: graph.package_root.clone(),
         stdlib_decls: graph.linked_stdlib_decls.clone(),
         non_stdlib_decls,
