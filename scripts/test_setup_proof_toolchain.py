@@ -66,9 +66,9 @@ def test_pinned_source_checksums_are_present():
 
 
 def test_committed_manifest_matches_committed_envelope():
-    # The committed Gappa manifest's central eps + coeffs must equal the
-    # committed envelope's central box (the proof term and the consumed bound do
-    # not drift). Mirrors the Rust consistency tests, guarding the data files
+    # The committed Gappa manifest's central eps + coeffs + tail eps must equal
+    # the committed envelope (the proof term and the consumed bound do not
+    # drift). Mirrors the Rust consistency tests, guarding the data files
     # directly so a hand-edit is caught in the Python suite too.
     data = REPO_ROOT / "crates" / "chelis-prove" / "data"
     env = json.loads((data / "erf_envelope.json").read_text())
@@ -77,9 +77,13 @@ def test_committed_manifest_matches_committed_envelope():
     assert central["proof_kind"] == "gappa"
     assert float(central["eps"]) == float(manifest["central_eps"])
     assert central["arm"]["coeffs"] == [float(c) for c in manifest["coeffs"]]
-    # tails are arb_enclosure
-    tails = [b for b in env["boxes"] if b["arm"]["kind"] == "saturation"]
-    assert tails and all(b["proof_kind"] == "arb_enclosure" for b in tails)
+    # All three arms are Gappa-proved now (tails too).
+    sats = [b for b in env["boxes"] if b["arm"]["kind"] == "saturation"]
+    assert sats and all(b["proof_kind"] == "gappa" for b in sats)
+    upper = [b for b in sats if b["arm"]["value"] == 1.0][0]
+    lower = [b for b in sats if b["arm"]["value"] == -1.0][0]
+    assert float(upper["eps"]) == float(manifest["tail_pos_eps"])
+    assert float(lower["eps"]) == float(manifest["tail_neg_eps"])
 
 
 def test_envelope_provenance_pins_the_gappa_bundle():

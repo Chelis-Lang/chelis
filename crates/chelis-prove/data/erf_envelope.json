@@ -7,8 +7,8 @@
         "kind": "saturation",
         "value": -1.0
       },
-      "eps": 2.2090499093364886e-05,
-      "proof_kind": "arb_enclosure"
+      "eps": 2.2263079006386892e-05,
+      "proof_kind": "gappa"
     },
     {
       "lo": -3.0,
@@ -16,31 +16,31 @@
       "arm": {
         "kind": "central",
         "coeffs": [
-          3.187204274579089e-10,
-          -8.43661891965259e-20,
-          -1.8685195178872028e-08,
-          3.1905105521618165e-18,
-          4.990777724289522e-07,
-          -5.077544898870994e-17,
-          -8.129139979378279e-06,
-          4.424572181980151e-16,
-          9.156706693482712e-05,
-          -2.301076038505484e-15,
-          -0.0007689498958744032,
-          7.3024422388714e-15,
-          0.0050546677461391675,
-          -1.3880794520879413e-14,
-          -0.026657687646042198,
-          1.4872773117454412e-14,
-          0.1126933063532425,
-          -7.916374546538343e-15,
-          -0.3760797147057435,
-          1.5923115912250818e-15,
+          3.187204274654472e-10,
+          -5.2946356220005737e-20,
+          -1.8685195179135938e-08,
+          2.0023608143005825e-18,
+          4.990777724327155e-07,
+          -3.1867004669555156e-17,
+          -8.129139979406011e-06,
+          2.776862324063681e-16,
+          9.156706693493515e-05,
+          -1.4441074453212768e-15,
+          -0.0007689498958745813,
+          4.582595555766381e-15,
+          0.00505466774613903,
+          -8.710056237596624e-15,
+          -0.02665768764604121,
+          9.331421121525063e-15,
+          0.11269330635324112,
+          -4.966052682140992e-15,
+          -0.3760797147057428,
+          9.986302309394355e-16,
           1.1283746991712225,
-          -5.121099013918094e-17
+          -3.210159820319384e-17
         ]
       },
-      "eps": 5.683485838110961e-07,
+      "eps": 5.683485754194293e-07,
       "proof_kind": "gappa"
     },
     {
@@ -50,15 +50,15 @@
         "kind": "saturation",
         "value": 1.0
       },
-      "eps": 2.2090499093364886e-05,
-      "proof_kind": "arb_enclosure"
+      "eps": 2.2263079006386892e-05,
+      "proof_kind": "gappa"
     }
   ],
   "provenance": {
-    "generator_version": "wi13-erf-envelope-optionb-1",
+    "generator_version": "wi13-erf-envelope-optionb-2",
     "certify_prec": 128,
     "certify_subdivisions": 2097152,
-    "method": "central arm: Sollya remez + Gappa-proved sup-norm (bundle sha256 e005be424163c89d...); tails: Arb-certified erfc enclosure",
-    "gappa_bundle_sha256": "e005be424163c89d8140a926a0eedaf8cbdd8e5834f32ca8f720c63e08ec728a"
+    "method": "all arms Sollya + Gappa-proved (bundle sha256 cbb52c57a08d92c9...); central = remez polynomial, tails = constant +-1, each proved by subdivision + certified Taylor model + Gappa; Arb whole-box certifier is the independent every-build cross-check",
+    "gappa_bundle_sha256": "cbb52c57a08d92c99f253418ecfad805a05b469971b49568143d9c4cbcb77aa1"
   }
 }

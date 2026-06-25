@@ -58,10 +58,14 @@ DRIVER = PROOF_DIR / "generate_erf_proof.sollya"
 LOCAL_PREFIX = REPO_ROOT / ".local"
 SOLLYA_BIN = LOCAL_PREFIX / "bin" / "sollya"
 
-# Defaults: degree-21 remez over [-3, 3], 16 sub-intervals, degree-24 local
-# Taylor models, 40-way bisection per sub-interval, 2^-7 Gappa headroom. These
-# give a committed central eps of ~5.7e-7 with every sub-interval proved in well
-# under a second.
+# Defaults.
+#  Central: degree-21 remez over [-3, 3], 16 sub-intervals, degree-24 local
+#  Taylor models -> committed central eps ~5.7e-7.
+#  Tails: saturate at +-1 out to +-300. An "active zone" [3, 6] (and mirror) is
+#  finely subdivided (where |1 - erf| is largest, ~2.2e-5 at x=3) to find the
+#  committed tail eps; the far zone [6, 300] is covered by wider pieces all
+#  proving the bound stays under that tail eps. The far Taylor models are
+#  low-degree (erf is flat there).
 DEFAULTS = dict(
     central_lo=-3,
     central_hi=3,
@@ -70,6 +74,12 @@ DEFAULTS = dict(
     taylor_degree=24,
     bisect=40,
     margin_exp=7,
+    sat_hi=300,
+    tail_active_hi=6,
+    tail_active_n=12,
+    tail_far_n=14,
+    tail_degree=16,
+    tail_far_degree=6,
 )
 
 
@@ -114,6 +124,12 @@ def run_sollya_driver(params: dict) -> None:
         f"TAYLOR_DEGREE = {params['taylor_degree']};\n"
         f"MARGIN = {margin};\n"
         f"BISECT = {params['bisect']};\n"
+        f"SAT_HI = {params['sat_hi']};\n"
+        f"TAIL_ACTIVE_HI = {params['tail_active_hi']};\n"
+        f"TAIL_ACTIVE_N = {params['tail_active_n']};\n"
+        f"TAIL_FAR_N = {params['tail_far_n']};\n"
+        f"TAIL_DEGREE = {params['tail_degree']};\n"
+        f"TAIL_FAR_DEGREE = {params['tail_far_degree']};\n"
         f'OUTDIR = "{PROOF_DIR}";\n'
     )
     script = header + DRIVER.read_text()
@@ -135,13 +151,17 @@ def run_sollya_driver(params: dict) -> None:
         raise SystemExit(3)
 
 
-def center_qc_lines(n_subintervals: int) -> None:
+def _gappa_files() -> list[Path]:
+    """All committed .gappa proof files (central + both tails), name-sorted."""
+    return sorted(PROOF_DIR.glob("*.gappa"), key=lambda p: p.name)
+
+
+def center_qc_lines() -> None:
     """Rewrite the `qc = ...` line of each emitted .gappa from the variable `x`
     to the centered variable `t` (Sollya prints in x; Gappa bisects on t). Only
     the qc-definition line is rewritten; the `t = x - ...` line and the goal's
     `x in [...]` stay in x."""
-    for k in range(n_subintervals):
-        gp = PROOF_DIR / f"central_{k}.gappa"
+    for gp in _gappa_files():
         lines = gp.read_text().splitlines()
         out = []
         for line in lines:
@@ -152,22 +172,26 @@ def center_qc_lines(n_subintervals: int) -> None:
         gp.write_text("\n".join(out) + "\n")
 
 
-def check_all_proofs(n_subintervals: int) -> None:
-    """Run gappa on every committed sub-interval proof; raise if any fails."""
+def check_all_proofs() -> None:
+    """Run gappa on every committed sub-interval proof (all arms); raise if any
+    fails. Every arm -- central and both saturation tails -- is a real Gappa
+    proof term, so every .gappa must machine-check."""
+    files = _gappa_files()
+    if not files:
+        sys.stderr.write("error: no .gappa proof files were emitted.\n")
+        raise SystemExit(3)
     failures = []
-    for k in range(n_subintervals):
-        gp = PROOF_DIR / f"central_{k}.gappa"
-        if not gp.exists():
-            failures.append((k, "missing"))
-            continue
+    for gp in files:
         proc = subprocess.run(
             ["gappa", str(gp)], capture_output=True, text=True, timeout=300
         )
         if proc.returncode != 0:
-            failures.append((k, proc.stderr.strip().splitlines()[-1:] or ["timeout"]))
+            failures.append(
+                (gp.name, proc.stderr.strip().splitlines()[-1:] or ["timeout"])
+            )
     if failures:
-        for k, why in failures:
-            sys.stderr.write(f"  central_{k}.gappa FAILED: {why}\n")
+        for name, why in failures:
+            sys.stderr.write(f"  {name} FAILED: {why}\n")
         sys.stderr.write(
             "error: at least one Gappa proof did not check. The bundle is not a "
             "valid proof term; do not commit it.\n"
@@ -175,13 +199,10 @@ def check_all_proofs(n_subintervals: int) -> None:
         raise SystemExit(3)
 
 
-def sha256_bundle(n_subintervals: int) -> str:
+def sha256_bundle() -> str:
     """Stable sha256 over the sorted .gappa proof files + the driver."""
     h = hashlib.sha256()
-    files = [DRIVER] + [
-        PROOF_DIR / f"central_{k}.gappa" for k in range(n_subintervals)
-    ]
-    for f in sorted(files, key=lambda p: p.name):
+    for f in sorted([DRIVER, *_gappa_files()], key=lambda p: p.name):
         h.update(f.name.encode())
         h.update(f.read_bytes())
     return h.hexdigest()
@@ -200,8 +221,8 @@ def assemble_manifest(params: dict) -> None:
     # double losslessly as the shortest decimal.)
     frag["coeffs"] = [float(c) for c in frag["coeffs"]]
     frag["proof_kind"] = "gappa"
-    frag["generator"] = "wi13-erf-proof-1"
-    frag["bundle_sha256"] = sha256_bundle(params["subintervals"])
+    frag["generator"] = "wi13-erf-proof-2"
+    frag["bundle_sha256"] = sha256_bundle()
     (PROOF_DIR / "manifest.json").write_text(
         json.dumps(frag, indent=2) + "\n"
     )
@@ -211,9 +232,8 @@ def assemble_manifest(params: dict) -> None:
 def revalidate_committed() -> None:
     """The CI gate: re-check the committed bundle's proofs and its sha256."""
     manifest = json.loads((PROOF_DIR / "manifest.json").read_text())
-    n = manifest["n_subintervals"]
-    check_all_proofs(n)
-    recomputed = sha256_bundle(n)
+    check_all_proofs()
+    recomputed = sha256_bundle()
     if recomputed != manifest["bundle_sha256"]:
         sys.stderr.write(
             "error: committed bundle sha256 mismatch -- a .gappa file or the "
@@ -222,9 +242,11 @@ def revalidate_committed() -> None:
             f"  computed: {recomputed}\n"
         )
         raise SystemExit(3)
+    n = len(_gappa_files())
     print(
-        f"re-validated {n} Gappa proofs; bundle sha256 matches; "
-        f"central_eps={manifest['central_eps']}"
+        f"re-validated {n} Gappa proofs (central + both tails); bundle sha256 "
+        f"matches; central_eps={manifest['central_eps']}, "
+        f"tail_pos_eps={manifest['tail_pos_eps']}, tail_neg_eps={manifest['tail_neg_eps']}"
     )
 
 
@@ -259,23 +281,27 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     require_tools()
-    params = dict(
-        central_lo=DEFAULTS["central_lo"],
-        central_hi=DEFAULTS["central_hi"],
+    params = dict(DEFAULTS)
+    params.update(
         degree=args.degree,
         subintervals=args.subintervals,
         taylor_degree=args.taylor_degree,
         bisect=args.bisect,
         margin_exp=args.margin_exp,
     )
+    # Stale .gappa files from a previous run with a different interval count
+    # would otherwise be globbed into the bundle; clear them first.
+    for old in PROOF_DIR.glob("*.gappa"):
+        old.unlink()
     run_sollya_driver(params)
-    center_qc_lines(params["subintervals"])
-    check_all_proofs(params["subintervals"])
+    center_qc_lines()
+    check_all_proofs()
     assemble_manifest(params)
     manifest = json.loads((PROOF_DIR / "manifest.json").read_text())
     print(
-        f"generated + proved {params['subintervals']} sub-intervals; "
-        f"central_eps={manifest['central_eps']}; "
+        f"generated + proved {len(_gappa_files())} sub-intervals "
+        f"(central + both tails); central_eps={manifest['central_eps']}; "
+        f"tail_pos_eps={manifest['tail_pos_eps']}; tail_neg_eps={manifest['tail_neg_eps']}; "
         f"bundle_sha256={manifest['bundle_sha256'][:16]}..."
     )
     return 0

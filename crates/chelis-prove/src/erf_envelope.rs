@@ -7,29 +7,31 @@
 //! constant (the tails) or a polynomial (the central region) and `eps` is a
 //! *rigorously certified* sup-norm error bound for that box.
 //!
-//! ## Trust anchor
+//! ## Trust model: Gappa proof term + Arb cross-check
 //!
-//! `eps` is certified by the WI-14 Arb oracle ([`crate::arb_oracle`]) — the
-//! single rigorous trust anchor for the special-function fragment. The
-//! generator ([`scripts/generate_erf_envelope.py`]) *proposes* the polynomial
-//! coefficients (a float computation: Remez / least-squares), and the Arb
-//! certifier *stamps* `eps` as a sound upper bound of
-//! `sup_{x in box} |approx(x) - erf(x)|` computed by whole-box ball arithmetic
-//! (not sampling). So a wrong proposed polynomial cannot produce an unsound
-//! envelope: it only produces a *larger* certified `eps`. This proposer /
-//! exact-verifier split mirrors the Clarabel SoS engine's float-proposer with
-//! a rational-exact verifier.
+//! Every box's `eps` carries a machine-checkable **Gappa proof term**
+//! (`proof_kind = Gappa`). Sollya proposes the approximation (the central remez
+//! polynomial; the constant `+-1` for the tails) and a certified local Taylor
+//! model of `erf` per sub-interval; Gappa machine-checks `|approx - T| <= bound`
+//! (pure polynomial arithmetic — Gappa never sees `erf`/`exp`), which with the
+//! certified Taylor remainder gives `|approx - erf| <= eps`. The committed proof
+//! bundle (`data/erf_proof/`) is a set of Gappa scripts an auditor re-runs
+//! through `gappa` to confirm the bound. See `docs/erf_envelope_regen.md`.
 //!
-//! ## No runtime Arb dependency
+//! Independently, the WI-14 Arb oracle ([`crate::arb_oracle`]) is the every-build
+//! **cross-check**: it re-derives each box's `eps` by whole-box ball arithmetic
+//! and confirms the committed `eps` bounds it. So each arm has both a Gappa proof
+//! term and an Arb confirmation.
 //!
-//! This module is always compiled and links nothing — the committed envelope
-//! is embedded via `include_str!` and evaluated with pure `f64` arithmetic. The
-//! Arb oracle is used only *offline* (to generate `eps`) and in *CI* (to
-//! re-validate that each committed `eps` still bounds the truth, behind the
-//! `arb` feature). A deployed release binary that evaluates the envelope gains
-//! no FLINT/Arb link. The CI re-validation harness lives in
-//! [`crate::arb_oracle`] tests; the committed-data round-trip and the bound
-//! algebra are tested here without Arb.
+//! ## No runtime Arb/Sollya/Gappa dependency
+//!
+//! This module is always compiled and links nothing — the committed envelope is
+//! embedded via `include_str!` and evaluated with pure `f64` arithmetic. Sollya
+//! and Gappa are *offline* tools; the Arb oracle is used only offline (to
+//! generate the cross-check) and in *CI* (behind the `arb` feature). A deployed
+//! release binary that evaluates the envelope gains no FLINT/Arb/Sollya/Gappa
+//! link. The committed-data round-trip and the bound algebra are tested here
+//! without any of them; the proof re-check and Arb cross-check are CI gates.
 //!
 //! ## Why saturation is mandatory
 //!
@@ -38,8 +40,8 @@
 //! of `+-1`, so a single central polynomial over `[-300, 300]` would be
 //! absurdly loose. The tails are therefore *saturating constant* arms (`erf`
 //! is `+-1` to a tiny certified `eps`), and only the central box carries a
-//! polynomial. The saturation arm's `eps` is certified the same way (whole-box
-//! Arb bound of `|+-1 - erf(x)|` over the tail).
+//! polynomial. The tails are proved by the same machinery: Gappa checks
+//! `|+-1 - T(x)| <= eps` with `T` the certified Taylor model of `erf`.
 
 use serde::{Deserialize, Serialize};
 
@@ -81,25 +83,26 @@ impl ErfArm {
     }
 }
 
-/// How a box's `eps` bound is certified. This makes the proof-vs-enclosure
-/// split across the envelope **machine-visible**, not silent.
+/// How a box's `eps` bound is certified. Recorded per box so the certification
+/// basis of every arm is **machine-visible**, not implicit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProofKind {
     /// A machine-checkable Gappa proof term: `eps` is proved by a committed
-    /// bundle of Gappa scripts (under `data/erf_proof/`) that an auditor
-    /// re-runs through `gappa`. This is the central polynomial arm, where the
-    /// Sollya remez polynomial's approximation error is bounded per
-    /// sub-interval via a certified local Taylor model and Gappa machine-checks
-    /// the polynomial bound.
+    /// bundle of Gappa scripts (under `data/erf_proof/`) that an auditor re-runs
+    /// through `gappa`. Every committed arm uses this: the central polynomial
+    /// (the remez approximation error bounded per sub-interval via a certified
+    /// local Taylor model) AND both saturation tails (the constant `+-1`
+    /// approximation, `|+-1 - T(x)|` bounded the same way). Gappa proves the
+    /// polynomial bound; it never sees `erf`/`exp`, which it cannot model.
     Gappa,
     /// A rigorous Arb enclosure: `eps` is certified by the WI-14 Arb oracle
     /// (whole-box ball arithmetic), an independently-checkable bound but not a
-    /// machine-checkable *proof term*. This is the saturation tails, where the
-    /// bound is an `erfc` fact (`|+-1 - erf(x)|`); Gappa cannot model `erf`/`exp`
-    /// (it has no transcendental functions), so the tails carry the Arb
-    /// enclosure rather than a Gappa proof. The Arb certifier re-validates every
-    /// box's `eps` (both kinds) on every CI build regardless.
+    /// machine-checkable *proof term*. No committed arm uses this today (all
+    /// three are Gappa-proved); it is the honest fallback for any future arm a
+    /// tool genuinely cannot prove, so the basis stays machine-visible rather
+    /// than a silent gap. The Arb certifier cross-checks every box's `eps` on
+    /// every CI build regardless of `proof_kind`.
     ArbEnclosure,
 }
 
@@ -319,38 +322,74 @@ mod tests {
     }
 
     #[test]
-    fn committed_proof_kind_split_is_machine_visible() {
-        // Option B: the central polynomial arm carries a machine-checkable Gappa
-        // proof term; the saturation tails carry an Arb enclosure (Gappa cannot
-        // model erf/exp). This split must be explicit per box, not silent.
+    fn committed_proof_kind_is_gappa_for_every_arm() {
+        // Option B: EVERY arm -- central polynomial and both saturation tails --
+        // carries a machine-checkable Gappa proof term. The tails are proved by
+        // the same subdivision + certified-Taylor-model + Gappa machinery as the
+        // central arm (the constant +-1 approximation needs no erf/exp), so there
+        // is no proof-vs-enclosure split: all three boxes are proof_kind = gappa.
+        // (ProofKind::ArbEnclosure remains a valid variant for any future arm a
+        // tool genuinely cannot prove; the Arb certifier still cross-checks every
+        // box's eps on every build regardless of proof_kind.)
         let env = ErfEnvelope::committed();
         for b in &env.boxes {
-            match &b.arm {
-                ErfArm::Central { .. } => assert_eq!(
-                    b.proof_kind,
-                    ProofKind::Gappa,
-                    "the central arm must carry the Gappa proof term"
-                ),
-                ErfArm::Saturation { .. } => assert_eq!(
-                    b.proof_kind,
-                    ProofKind::ArbEnclosure,
-                    "the saturation tails carry the Arb enclosure (no Gappa erf/exp)"
-                ),
-            }
+            assert_eq!(
+                b.proof_kind,
+                ProofKind::Gappa,
+                "every committed arm [{}, {}] must carry the Gappa proof term",
+                b.lo,
+                b.hi
+            );
         }
-        // Exactly one Gappa box (the central arm) and at least one Arb tail.
         let gappa = env
             .boxes
             .iter()
             .filter(|b| b.proof_kind == ProofKind::Gappa)
             .count();
-        let arb = env
+        assert_eq!(
+            gappa,
+            env.boxes.len(),
+            "all committed boxes are Gappa-proved"
+        );
+        assert!(gappa >= 3, "central + two tails");
+    }
+
+    #[test]
+    fn tail_eps_matches_the_committed_gappa_proof_bundle() {
+        // Each saturation tail's committed eps must equal the value its Gappa
+        // proof bundle machine-checks (manifest tail_pos_eps / tail_neg_eps), so
+        // the proved tail bound and the consumed tail bound cannot drift.
+        let env = ErfEnvelope::committed();
+        let manifest: serde_json::Value =
+            serde_json::from_str(ERF_PROOF_MANIFEST_JSON).expect("proof manifest parses");
+        let pos: f64 = manifest["tail_pos_eps"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .expect("tail_pos_eps f64");
+        let neg: f64 = manifest["tail_neg_eps"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .expect("tail_neg_eps f64");
+        let upper = env
             .boxes
             .iter()
-            .filter(|b| b.proof_kind == ProofKind::ArbEnclosure)
-            .count();
-        assert_eq!(gappa, 1, "one Gappa-proved central arm");
-        assert!(arb >= 1, "at least one Arb-enclosure tail");
+            .find(|b| matches!(b.arm, ErfArm::Saturation { value } if value == 1.0))
+            .expect("a +1 saturation box");
+        let lower = env
+            .boxes
+            .iter()
+            .find(|b| matches!(b.arm, ErfArm::Saturation { value } if value == -1.0))
+            .expect("a -1 saturation box");
+        assert_eq!(
+            upper.eps, pos,
+            "+1 tail eps must equal manifest tail_pos_eps"
+        );
+        assert_eq!(
+            lower.eps, neg,
+            "-1 tail eps must equal manifest tail_neg_eps"
+        );
     }
 
     #[test]

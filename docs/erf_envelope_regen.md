@@ -11,26 +11,33 @@ environment each step needs.
 
 A piecewise envelope of contiguous boxes covering `[-300, 300]`:
 
-| Box          | Arm                          | `eps`     | `proof_kind`    |
-|--------------|------------------------------|-----------|-----------------|
-| `[-300, -3]` | saturation `-1`              | `~2.2e-5` | `arb_enclosure` |
-| `[-3, 3]`    | central degree-21 polynomial | `~5.7e-7` | `gappa`         |
-| `[3, 300]`   | saturation `+1`              | `~2.2e-5` | `arb_enclosure` |
+| Box          | Arm                          | `eps`     | `proof_kind` |
+|--------------|------------------------------|-----------|--------------|
+| `[-300, -3]` | saturation `-1`              | `~2.2e-5` | `gappa`      |
+| `[-3, 3]`    | central degree-21 polynomial | `~5.7e-7` | `gappa`      |
+| `[3, 300]`   | saturation `+1`              | `~2.2e-5` | `gappa`      |
 
 Each box's `eps` is a sound sup-norm bound `sup_{x in box} |approx(x) - erf(x)|
-<= eps`. The `proof_kind` field records how it is certified and is **machine
-visible** (not a silent split):
+<= eps`, and **every arm carries a machine-checkable Gappa proof term**
+(`proof_kind = gappa`). The committed bundle under
+`crates/chelis-prove/data/erf_proof/` is a set of Gappa scripts an auditor
+re-runs through `gappa` to confirm each bound:
 
-- **Central arm — `gappa`.** A machine-checkable proof term. The committed
-  bundle under `crates/chelis-prove/data/erf_proof/` is a set of Gappa scripts
-  (`central_<k>.gappa`) that an auditor re-runs through `gappa` to confirm the
-  bound. The runtime evaluates the degree-21 polynomial in `f64`; the polynomial
-  coefficients are rounded to `f64` **before** the proof, so the proof is about
-  the exact polynomial the runtime uses.
-- **Saturation tails — `arb_enclosure`.** A rigorous Arb enclosure of the `erfc`
-  tail `|+-1 - erf(x)|`. Gappa has no `erf`/`exp` (it reasons about `+ - * /
-  sqrt fma` only), so the tail fact **cannot** be a Gappa proof term; the Arb
-  oracle, which computes `erf` rigorously, certifies it instead.
+- **Central arm.** `central_<k>.gappa` — the degree-21 remez polynomial's
+  approximation error, bounded per sub-interval. The coefficients are rounded to
+  `f64` **before** the proof, so the proof is about the exact polynomial the
+  runtime uses.
+- **Saturation tails.** `tail_pos_<k>.gappa` / `tail_neg_<k>.gappa` — the same
+  machinery with the constant `+-1` as the approximation. Gappa proves
+  `|+-1 - T(x)| <= bound` where `T` is the certified local Taylor model of `erf`;
+  this is pure polynomial arithmetic (Gappa never sees `erf`/`exp`, which it
+  cannot model). Each tail is covered by a fine "active zone" near the inner edge
+  (where `|+-1 - erf|` is largest, `~2.2e-5` at `x = 3`) plus wider far
+  sub-intervals out to `+-300`, all proving the bound stays under the committed
+  tail `eps`.
+
+`ProofKind::ArbEnclosure` is the honest fallback for any future arm a tool
+genuinely cannot prove; no committed arm uses it today.
 
 The committed envelope evaluates in pure `f64`. A deployed release binary gains
 no FLINT/Arb/Sollya/Gappa link (`arb` is off by default and absent from the
