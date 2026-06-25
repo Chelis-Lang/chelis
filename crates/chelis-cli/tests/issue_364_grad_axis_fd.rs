@@ -360,10 +360,11 @@ fn issue_364_grad_softmax_col_axis_qgrad_is_zero_wrong_control() {
         neg_sum.abs() < 1e-3,
         "softmax(-1) q-grad row-sum should be ~0 (softmax backward), got {neg_sum}",
     );
-    let col_sum: f64 = [0.0_f64, 0.0, 0.0, 0.0].iter().sum();
+    let col = parse_out_tensor(&eval_stdout(SDPA_COL_AXIS_QGRAD, "sdpa_col_vac")).1;
+    let col_sum: f64 = col.iter().sum();
     assert!(
         col_sum.abs() < 1e-3,
-        "the WRONG (column) q-grad also sums to ~0, exactly why sum-of-q-grad is vacuous",
+        "the WRONG (column) q-grad also sums to ~0 ({col:?}), exactly why sum-of-q-grad is vacuous",
     );
     // The correct gradient must NOT be the all-zero wrong one.
     assert!(
