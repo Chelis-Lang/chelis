@@ -2120,6 +2120,21 @@ pub(super) fn tensor_softmax_host(
         // `exp(-Inf - -Inf) = exp(NaN) = NaN`. The NaN flows through the
         // sum and the normalize below, so every output element of that
         // slice is NaN — matching torch (#173).
+        //
+        // #170 (DO NOT "fix" this sum into the stride-4 cascade): the f64
+        // accumulator here is intentional and is NOT a torch-parity gap.
+        // (a) This host-eval softmax is already BIT-IDENTICAL to the lowered
+        //     path (`tier2::lower_softmax` -> `RiscOp::Sum`, which DOES use
+        //     the #163 f32 cascade) — verified at n=20/64/128 across seeds.
+        //     The exp/sum/div composition is well-conditioned enough that
+        //     the f64-sum-then-f64-div and the f32-cascade-then-f32-div
+        //     round to the same f32 output, so the two lanes agree.
+        // (b) torch's softmax is a FUSED kernel; neither the cascade nor an
+        //     f64 fold reliably bit-matches it (same situation as matmul —
+        //     see `tensor_matmul_host`). Switching to the cascade here would
+        //     only coincidentally chase torch while RISKING the host==lowered
+        //     bit-identity that currently holds. So softmax is DOCUMENTED, not
+        //     cascaded; only `sum`/`trace` take the cascade.
         let mut sum_exp = 0.0_f64;
         for k in 0..axis_size {
             base_indices[axis_usize] = k;
@@ -2613,6 +2628,11 @@ pub(super) fn tensor_cumsum_value(
         .product::<usize>()
         .max(1);
     let outer: usize = tensor.value.shape[..axis].iter().product::<usize>().max(1);
+    // #170: cumsum is an inherently sequential prefix scan, NOT a reducible
+    // tree — the stride-4 cascade does not apply. The f64 running accumulator
+    // already matches `torch.cumsum` (verified: torch's cumsum is a
+    // step-by-step prefix whose f32 result equals this f64 prefix rounded to
+    // f32). No change needed; left as-is.
     for outer_idx in 0..outer {
         for inner_idx in 0..inner {
             let mut running = 0.0;
