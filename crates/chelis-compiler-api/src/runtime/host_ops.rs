@@ -2701,38 +2701,14 @@ pub(super) fn tensor_trace_value(
     let diagonal = tensor_diagonal_value(tensor, axis1, axis2)?;
     let rank = diagonal.value.shape.len();
     let axis = normalize_axis(rank, axis1.min(axis2), "trace").unwrap_or(rank.saturating_sub(1));
-    let axis_size = diagonal.value.shape[axis];
-    let inner: usize = diagonal.value.shape[axis + 1..]
-        .iter()
-        .product::<usize>()
-        .max(1);
-    let outer: usize = diagonal.value.shape[..axis]
-        .iter()
-        .product::<usize>()
-        .max(1);
-    let out_shape = diagonal
-        .value
-        .shape
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, size)| (idx != axis).then_some(*size))
-        .collect::<Vec<_>>();
-    let mut out = vec![0.0; tensor_numel(&out_shape)];
-    for outer_idx in 0..outer {
-        for inner_idx in 0..inner {
-            let mut sum = 0.0;
-            for axis_idx in 0..axis_size {
-                let linear = (outer_idx * axis_size + axis_idx) * inner + inner_idx;
-                sum += diagonal.value.data[linear];
-            }
-            let out_linear = outer_idx * inner + inner_idx;
-            out[out_linear] = sum;
-        }
-    }
-    Ok(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(out_shape, out),
-        precision: tensor.precision,
-    })
+    // #170: trace = sum over the diagonal. Route the diagonal reduction
+    // through `tensor_reduce_host`'s `Sum` path so it uses the SAME
+    // stride-4 ILP f32 cascade as `RiscOp::Sum` (issue #163, torch
+    // `row_sum` parity). The prior hand-rolled `sum += ...` left-fold in
+    // f64 diverged from `torch.trace` (== `torch.sum(diagonal)`) by ~1 ULP
+    // for diagonals longer than 16 f32 elements. Reusing the one verified
+    // cascade also prevents the two summation orders from drifting apart.
+    tensor_reduce_host(&diagonal, axis as i64, ReduceOp::Sum)
 }
 
 pub(super) fn tensor_clamp_value(

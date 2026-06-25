@@ -3078,8 +3078,35 @@ pub unsafe extern "C" fn chelis_tensor_trace(
             }
         }
     }
+    // #170: f32 trace must sum the diagonal in the SAME stride-4 ILP
+    // cascade order as `RiscOp::Sum` / `chelis_sum_f32` (issue #163, torch
+    // `row_sum` parity), since `torch.trace == torch.sum(diagonal)`. A
+    // strict f32 left-fold diverges from torch by ~1 ULP for diagonals
+    // longer than 16. The cascade is inlined here because the diagonal
+    // elements are strided by `inner` (not contiguous in the batched
+    // case), so `chelis_sum_f32` (contiguous-only) does not apply directly.
+    unsafe fn trace_cascade_f32(
+        diag: *mut chelis_tensor,
+        out: *mut chelis_tensor,
+        outer: usize,
+        axis_size: usize,
+        inner: usize,
+    ) {
+        let dp = f32::data_ptr_unchecked(diag);
+        let op = f32::data_ptr_unchecked(out);
+        for outer_idx in 0..outer {
+            for inner_idx in 0..inner {
+                let mut acc = [0.0f32; 4];
+                for axis_idx in 0..axis_size {
+                    let linear = (outer_idx * axis_size + axis_idx) * inner + inner_idx;
+                    acc[axis_idx & 3] += *dp.add(linear);
+                }
+                *op.add(outer_idx * inner + inner_idx) = (acc[0] + acc[1]) + (acc[2] + acc[3]);
+            }
+        }
+    }
     match (*diag).dtype {
-        CHELIS_F32 => trace_loop::<f32>(diag, out, outer, axis_size, inner),
+        CHELIS_F32 => trace_cascade_f32(diag, out, outer, axis_size, inner),
         CHELIS_F64 => trace_loop::<f64>(diag, out, outer, axis_size, inner),
         CHELIS_I64 => trace_loop::<i64>(diag, out, outer, axis_size, inner),
         CHELIS_I32 => {

@@ -634,6 +634,68 @@ y = sum(seq, cast(0, int32))
     );
 }
 
+/// #170: `trace` (= sum over the diagonal) must use the SAME stride-4 ILP
+/// f32 cascade as `RiscOp::Sum`, so `chelis trace` is bit-exact with
+/// `torch.trace` (== `torch.sum(diagonal)`). The 20-element diagonal below
+/// (torch.rand, manual_seed(7)) is longer than 16, so the cascade and the
+/// prior f32 left-fold differ by 1 ULP: torch trace = `0x4125e023`
+/// (10.367220878601074), the old left-fold = `0x4125e024`. Pinning the
+/// torch bit pattern catches a regression back to a left-fold (or to f64
+/// accumulation, which would also miss torch's f32 rounding).
+#[test]
+fn host_runtime_trace_f32_matches_torch_stride4_cascade() {
+    // Diagonal values as f64 literals that round-trip to the same f32.
+    let diag: [f64; 20] = [
+        0.5349225401878357,
+        0.41317272186279297,
+        0.23315048217773438,
+        0.10808825492858887,
+        0.2942635416984558,
+        0.18491309881210327,
+        0.06628626585006714,
+        0.47317826747894287,
+        0.8760198354721069,
+        0.6712021827697754,
+        0.4092898368835449,
+        0.6157153248786926,
+        0.35706937313079834,
+        0.7855499386787415,
+        0.5738610625267029,
+        0.9782199859619141,
+        0.11917394399642944,
+        0.8441763520240784,
+        0.9919543266296387,
+        0.8370135426521301,
+    ];
+    // Build a 20x20 matrix whose diagonal is `diag` and off-diagonals are 0,
+    // so `trace` sums exactly `diag` in the same order torch does.
+    let mut m = vec![0.0_f64; 20 * 20];
+    for (i, &v) in diag.iter().enumerate() {
+        m[i * 20 + i] = v;
+    }
+    let tensor = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![20, 20], m),
+        precision: Prim::F32,
+    };
+    let out = tensor_trace_value(&tensor, 0, 1).expect("trace must evaluate");
+    assert_eq!(out.value.shape, Vec::<usize>::new(), "trace is a scalar");
+    // torch.trace bit pattern (stride-4 cascade in f32).
+    let torch_bits = 0x4125e023_u32;
+    let left_fold_bits = 0x4125e024_u32;
+    assert_eq!(
+        (out.value.data[0] as f32).to_bits(),
+        torch_bits,
+        "trace must be bit-exact with torch.trace (stride-4 cascade, #170); got {} (bits {:#x})",
+        out.value.data[0],
+        (out.value.data[0] as f32).to_bits(),
+    );
+    assert_ne!(
+        (out.value.data[0] as f32).to_bits(),
+        left_fold_bits,
+        "regression: trace matches the old f32 left-fold value the cascade replaced (#170)",
+    );
+}
+
 // PR #168 review LOW #5: NaN/Inf/n<4 edge-case coverage for the
 // stride-4 ILP cascade. Tail handling (n < 4 where the lane-fill
 // doesn't complete a full cycle) and special-value propagation
