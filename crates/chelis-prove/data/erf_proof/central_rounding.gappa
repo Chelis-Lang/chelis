@@ -1,0 +1,56 @@
+# WI-13 erf central-arm f64-Horner evaluation rounding bound.
+# Proves |P_f64(x) - P_exact(x)| <= bound, where P_f64 is the degree-21 polynomial evaluated by f64 Horner (what the runtime does) and
+# P_exact is the same Horner without rounding. This term is added to the
+# committed central eps so it bounds the real f64-evaluated polynomial.
+# Coefficients are exact-f64 hex-float literals so the proof is about the
+# bit-exact runtime polynomial (no decimal float-parser in the path).
+@rnd = float<ieee_64,ne>;
+x = rnd(xx);
+a21 = 0x1.5e6fd32c84b6cp-32;
+a20 rnd= a21 * x + -0x1.f4106f2646037p-65;
+a19 rnd= a20 * x + -0x1.41025b82f3542p-26;
+a18 rnd= a19 * x + 0x1.277f0d823ccf5p-59;
+a17 rnd= a18 * x + 0x1.0bf0ba0be9eb8p-21;
+a16 rnd= a17 * x + -0x1.25ebd65e912b1p-55;
+a15 rnd= a16 * x + -0x1.10c4c7dcc30e7p-17;
+a14 rnd= a15 * x + 0x1.40268281b8982p-52;
+a13 rnd= a14 * x + 0x1.800f63b43e553p-14;
+a12 rnd= a13 * x + -0x1.a03c5263c954ep-50;
+a11 rnd= a12 * x + -0x1.9326b53d87ac5p-11;
+a10 rnd= a11 * x + 0x1.4a35f7a8379c5p-48;
+a9 rnd= a10 * x + 0x1.4b4340a96c966p-8;
+a8 rnd= a9 * x + -0x1.39d016d1f6879p-47;
+a7 rnd= a8 * x + -0x1.b4c272281c591p-6;
+a6 rnd= a7 * x + 0x1.50332b2bc1254p-47;
+a5 rnd= a6 * x + 0x1.cd977f143e95ep-4;
+a4 rnd= a5 * x + -0x1.65d780bd01b8dp-48;
+a3 rnd= a4 * x + -0x1.811b0a6d66947p-2;
+a2 rnd= a3 * x + 0x1.1fd5e7b9b8bbbp-50;
+a1 rnd= a2 * x + 0x1.20dd2a0e93015p+0;
+a0 rnd= a1 * x + -0x1.2815c17599210p-55;
+P = a0;
+e21 = 0x1.5e6fd32c84b6cp-32;
+e20 = e21 * x + -0x1.f4106f2646037p-65;
+e19 = e20 * x + -0x1.41025b82f3542p-26;
+e18 = e19 * x + 0x1.277f0d823ccf5p-59;
+e17 = e18 * x + 0x1.0bf0ba0be9eb8p-21;
+e16 = e17 * x + -0x1.25ebd65e912b1p-55;
+e15 = e16 * x + -0x1.10c4c7dcc30e7p-17;
+e14 = e15 * x + 0x1.40268281b8982p-52;
+e13 = e14 * x + 0x1.800f63b43e553p-14;
+e12 = e13 * x + -0x1.a03c5263c954ep-50;
+e11 = e12 * x + -0x1.9326b53d87ac5p-11;
+e10 = e11 * x + 0x1.4a35f7a8379c5p-48;
+e9 = e10 * x + 0x1.4b4340a96c966p-8;
+e8 = e9 * x + -0x1.39d016d1f6879p-47;
+e7 = e8 * x + -0x1.b4c272281c591p-6;
+e6 = e7 * x + 0x1.50332b2bc1254p-47;
+e5 = e6 * x + 0x1.cd977f143e95ep-4;
+e4 = e5 * x + -0x1.65d780bd01b8dp-48;
+e3 = e4 * x + -0x1.811b0a6d66947p-2;
+e2 = e3 * x + 0x1.1fd5e7b9b8bbbp-50;
+e1 = e2 * x + 0x1.20dd2a0e93015p+0;
+e0 = e1 * x + -0x1.2815c17599210p-55;
+Pexact = e0;
+{ x in [-3, 3] -> |P - Pexact| in [0, 2e-13] }
+$ x in 200;

@@ -113,6 +113,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "arb-sys"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e01e94dbcd294bbde22903b17f30bd7c5c732a0625db037919dde3a26ad890db"
+dependencies = [
+ "derivative",
+ "flint-sys",
+ "gmp-mpfr-sys",
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "assert-json-diff"
 version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -659,6 +672,7 @@ dependencies = [
 name = "chelis-prove"
 version = "0.11.0"
 dependencies = [
+ "arb-sys",
  "base64 0.22.1",
  "bincode",
  "carcara",
@@ -1122,6 +1136,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "derivative"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fcc3dd5e9e9c0b295d6e1e4d811fb6f157d5ffd784b8d202fc62eac8035a770b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
 name = "derive_builder"
 version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1310,6 +1335,17 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
+]
+
+[[package]]
+name = "flint-sys"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd39a21fba2a1dd249af52d118f5b6cc8f1a98c87732de386dc5e8e53d22a24b"
+dependencies = [
+ "gmp-mpfr-sys",
+ "libc",
+ "winapi",
 ]
 
 [[package]]

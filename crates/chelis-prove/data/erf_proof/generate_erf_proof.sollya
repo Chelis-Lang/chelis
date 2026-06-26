@@ -1,0 +1,186 @@
+/* WI-13 Option B: Sollya driver for the erf Gappa proof bundle (all three arms).
+ *
+ * Produces a machine-checkable Gappa proof of |approx(x) - erf(x)| <= eps for
+ * each envelope arm, via the same subdivision + certified-Taylor-model + Gappa
+ * machinery:
+ *
+ *   - CENTRAL arm over [CENTRAL_LO, CENTRAL_HI]: a remez polynomial p of degree
+ *     CENTRAL_DEGREE (coefficients rounded to f64). Split into N_SUBINTERVALS;
+ *     per sub-interval a local certified Taylor model T of erf (degree
+ *     TAYLOR_DEGREE, certified remainder R) and Gappa proves |p - T| <= bound,
+ *     so |p - erf| <= bound + R. The committed central eps is the max over
+ *     sub-intervals.
+ *
+ *   - SATURATION tails [CENTRAL_HI, SAT_HI] (approx +1) and [-SAT_HI, CENTRAL_LO]
+ *     (approx -1): the SAME machinery with the constant approximation s in place
+ *     of p. Gappa proves |s - T| <= bound (pure polynomial -- it needs no
+ *     erf/exp), so |s - erf| <= bound + R. The tail is covered by a fine "active
+ *     zone" near the inner edge (where |s - erf| is largest -- |1 - erf(3)| ~
+ *     2.2e-5) plus wider far sub-intervals out to SAT_HI, each proving the bound
+ *     stays under the committed tail eps (the active-zone max).
+ *
+ * All proofs are emitted in the centered variable t = x - ctr so the high-degree
+ * difference stays well conditioned and Gappa proves each sub-interval fast.
+ *
+ * Parameters (CENTRAL_LO/HI/DEGREE, N_SUBINTERVALS, TAYLOR_DEGREE, MARGIN,
+ * BISECT, SAT_HI, TAIL_ACTIVE_HI, TAIL_ACTIVE_N, TAIL_FAR_N, TAIL_DEGREE,
+ * OUTDIR) are prepended by scripts/generate_erf_proof.py.
+ */
+
+prec = 400;
+f = erf(x);
+
+/* ===== shared helpers ===== */
+
+/* Emit one Gappa sub-interval proof: prove |approxExpr(x) - T(x)| <= bound over
+ * [lo,hi], centered in t = x - ctr. `tag` names the output file. Returns nothing;
+ * the caller records the JSON. */
+procedure emitGappa(tag, k, lo, hi, ctr, q, bound) {
+  var gfn, qc, a, b;
+  qc = substitute(q, x + ctr); /* q in t, printed in x; regen rewrites x->t */
+  /* Order the Gappa interval bounds ascending: the negative tail subdivides
+   * from the inner edge outward, so its (lo, hi) come in descending order; a
+   * Gappa range must be [min, max] or it is the empty interval. */
+  a = min(lo, hi); b = max(lo, hi);
+  gfn = OUTDIR @ "/" @ tag @ "_" @ k @ ".gappa";
+  print("# WI-13 erf ", tag, " sub-interval ", k) > gfn;
+  print("# proves: x in [", a, ",", b, "] -> |approx(x) - T(x)| <= ", bound) >> gfn;
+  print("# q is written in the centered variable t = x - ctr.") >> gfn;
+  write("t = x - (", ctr, ");\n") >> gfn;
+  write("qc = ", horner(qc), ";\n") >> gfn;
+  write("{ x in [", a, ", ", b, "] -> qc in [-", bound, ", ", bound, "] }\n") >> gfn;
+  write("$ t in ", BISECT, ";\n") >> gfn;
+};
+
+/* JSON for one interval record. */
+procedure ivJson(k, lo, hi, ctr, R, bound, le, tag) {
+  return "    {\"index\": " @ k @ ", \"lo\": \"" @ lo @ "\", \"hi\": \"" @ hi
+    @ "\", \"center\": \"" @ ctr @ "\", \"taylor_remainder\": \"" @ R @ "\", \"proved_bound\": \""
+    @ bound @ "\", \"local_eps\": \"" @ le @ "\", \"gappa\": \"" @ tag @ "_" @ k @ ".gappa\"}";
+};
+
+/* ===== central arm ===== */
+
+dom = [CENTRAL_LO; CENTRAL_HI];
+p = roundcoefficients(remez(f, CENTRAL_DEGREE, dom), [|D ...|]);
+globalSup = sup(supnorm(p, f, dom, absolute, 2^(-60)));
+
+coeffsList = "";
+for i from CENTRAL_DEGREE to 0 by -1 do {
+  c = coeff(p, i);
+  coeffsList = coeffsList @ "    \"" @ c @ "\"";
+  if (i > 0) then coeffsList = coeffsList @ ",\n" else coeffsList = coeffsList @ "\n";
+};
+
+wC = (CENTRAL_HI - CENTRAL_LO) / N_SUBINTERVALS;
+centralEps = 0;
+centralJson = "";
+for k from 0 to N_SUBINTERVALS - 1 do {
+  lo = CENTRAL_LO + k * wC; hi = CENTRAL_LO + (k + 1) * wC; ctr = (lo + hi) / 2;
+  tf = taylorform(f, TAYLOR_DEGREE, ctr, [lo; hi], absolute);
+  T = substitute(tf[0], x - ctr); R = sup(abs(tf[2]));
+  q = p - T;
+  qb = dirtyinfnorm(q, [lo; hi]);
+  bound = qb * (1 + MARGIN);
+  le = bound + R;
+  if (le > centralEps) then centralEps = le;
+  emitGappa("central", k, lo, hi, ctr, q, bound);
+  centralJson = centralJson @ ivJson(k, lo, hi, ctr, R, bound, le, "central");
+  if (k < N_SUBINTERVALS - 1) then centralJson = centralJson @ ",\n" else centralJson = centralJson @ "\n";
+};
+
+/* ===== a saturation tail =====
+ * tag: "tail_pos" or "tail_neg"; satVal: +1 or -1; the tail spans
+ * [innerEdge, outerEdge] with |x| increasing away from innerEdge. We subdivide
+ * an active zone [innerEdge, activeEdge] finely (where |satVal - erf| is largest)
+ * and the far zone [activeEdge, outerEdge] into wider pieces. The committed tail
+ * eps is the active-zone max; the far pieces prove |satVal - T| <= tailEps.
+ * Returns the JSON; sets the global tailEps via a 1-element list result. */
+procedure emitTail(tag, satVal, innerEdge, activeEdge, outerEdge) {
+  var wA, k, lo, hi, ctr, iv, tf, T, R, q, qb, bound, le, tailEps, jsn, wF, nrec;
+  tailEps = 0; jsn = ""; nrec = 0;
+  /* pass 1: active zone, fine, to find the tail eps (max local eps). The
+   * negative tail runs from innerEdge toward more-negative x, so lo/hi descend;
+   * iv = [min;max] keeps every Sollya range well formed. */
+  wA = (activeEdge - innerEdge) / TAIL_ACTIVE_N;
+  for k from 0 to TAIL_ACTIVE_N - 1 do {
+    lo = innerEdge + k * wA; hi = innerEdge + (k + 1) * wA; ctr = (lo + hi) / 2;
+    iv = [min(lo, hi); max(lo, hi)];
+    tf = taylorform(f, TAIL_DEGREE, ctr, iv, absolute);
+    T = substitute(tf[0], x - ctr); R = sup(abs(tf[2]));
+    q = satVal - T;
+    qb = dirtyinfnorm(q, iv);
+    bound = qb * (1 + MARGIN);
+    le = bound + R;
+    if (le > tailEps) then tailEps = le;
+  };
+  /* active intervals are emitted in pass 2 asserting tailEps (uniform bound), so
+   * every active+far interval proves the SAME committed tail eps. */
+  for k from 0 to TAIL_ACTIVE_N - 1 do {
+    lo = innerEdge + k * wA; hi = innerEdge + (k + 1) * wA; ctr = (lo + hi) / 2;
+    iv = [min(lo, hi); max(lo, hi)];
+    tf = taylorform(f, TAIL_DEGREE, ctr, iv, absolute);
+    T = substitute(tf[0], x - ctr); R = sup(abs(tf[2]));
+    q = satVal - T;
+    emitGappa(tag, nrec, lo, hi, ctr, q, tailEps - R);
+    jsn = jsn @ ivJson(nrec, inf(iv), sup(iv), ctr, R, tailEps - R, tailEps, tag) @ ",\n";
+    nrec = nrec + 1;
+  };
+  /* far zone: wide pieces, each proving |satVal - T| <= tailEps - R */
+  wF = (outerEdge - activeEdge) / TAIL_FAR_N;
+  for k from 0 to TAIL_FAR_N - 1 do {
+    lo = activeEdge + k * wF; hi = activeEdge + (k + 1) * wF; ctr = (lo + hi) / 2;
+    iv = [min(lo, hi); max(lo, hi)];
+    tf = taylorform(f, TAIL_FAR_DEGREE, ctr, iv, absolute);
+    T = substitute(tf[0], x - ctr); R = sup(abs(tf[2]));
+    q = satVal - T;
+    emitGappa(tag, nrec, lo, hi, ctr, q, tailEps - R);
+    jsn = jsn @ ivJson(nrec, inf(iv), sup(iv), ctr, R, tailEps - R, tailEps, tag);
+    if (k < TAIL_FAR_N - 1) then jsn = jsn @ ",\n" else jsn = jsn @ "\n";
+    nrec = nrec + 1;
+  };
+  return [| tailEps, jsn, nrec |];
+};
+
+/* positive tail [CENTRAL_HI, SAT_HI], approx +1 */
+posRes = emitTail("tail_pos", 1, CENTRAL_HI, TAIL_ACTIVE_HI, SAT_HI);
+tailPosEps = posRes[0]; tailPosJson = posRes[1]; tailPosN = posRes[2];
+
+/* negative tail [-SAT_HI, CENTRAL_LO], approx -1; inner edge is CENTRAL_LO,
+ * active zone runs toward -TAIL_ACTIVE_HI, outer edge is -SAT_HI */
+negRes = emitTail("tail_neg", -1, CENTRAL_LO, -TAIL_ACTIVE_HI, -SAT_HI);
+tailNegEps = negRes[0]; tailNegJson = negRes[1]; tailNegN = negRes[2];
+
+/* ===== manifest fragment ===== */
+mfn = OUTDIR @ "/manifest_fragment.json";
+print("{") > mfn;
+write("  \"central_degree\": ", CENTRAL_DEGREE, ",\n") >> mfn;
+write("  \"central_lo\": \"", CENTRAL_LO, "\",\n") >> mfn;
+write("  \"central_hi\": \"", CENTRAL_HI, "\",\n") >> mfn;
+write("  \"sat_hi\": \"", SAT_HI, "\",\n") >> mfn;
+write("  \"n_subintervals\": ", N_SUBINTERVALS, ",\n") >> mfn;
+write("  \"taylor_degree\": ", TAYLOR_DEGREE, ",\n") >> mfn;
+write("  \"bisect\": ", BISECT, ",\n") >> mfn;
+write("  \"global_supnorm\": \"", globalSup, "\",\n") >> mfn;
+write("  \"central_eps\": \"", centralEps, "\",\n") >> mfn;
+write("  \"tail_pos_eps\": \"", tailPosEps, "\",\n") >> mfn;
+write("  \"tail_neg_eps\": \"", tailNegEps, "\",\n") >> mfn;
+write("  \"tail_pos_n\": ", tailPosN, ",\n") >> mfn;
+write("  \"tail_neg_n\": ", tailNegN, ",\n") >> mfn;
+write("  \"coeffs\": [\n") >> mfn;
+write(coeffsList) >> mfn;
+write("  ],\n") >> mfn;
+write("  \"central_intervals\": [\n") >> mfn;
+write(centralJson) >> mfn;
+write("  ],\n") >> mfn;
+write("  \"tail_pos_intervals\": [\n") >> mfn;
+write(tailPosJson) >> mfn;
+write("  ],\n") >> mfn;
+write("  \"tail_neg_intervals\": [\n") >> mfn;
+write(tailNegJson) >> mfn;
+write("  ]\n") >> mfn;
+print("}") >> mfn;
+
+print("central_eps:", centralEps);
+print("tail_pos_eps:", tailPosEps);
+print("tail_neg_eps:", tailNegEps);

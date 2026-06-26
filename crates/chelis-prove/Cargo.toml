@@ -45,9 +45,25 @@ clarabel = ["dep:clarabel", "num-rational", "dep:num-bigint", "dep:num-traits"]
 # source, keeping the build off the slow from-source path. carcara's `rug`
 # enables only `integer`+`rational`, so only GMP and MPFR are needed (no MPC).
 carcara = ["smt", "dep:carcara", "gmp-mpfr-sys/use-system-libs"]
+# WI-14 Arb/FLINT rigorous-enclosure oracle. `arb-sys` vendors FLINT + Arb C
+# source and compiles them (and pulls `gmp-mpfr-sys`, which compiles GMP/MPFR),
+# so a clean build compiles the C stack from source (~1 min cold). The oracle is
+# validation/build-time tooling that never ships in a deployed slim build, so it
+# is off by default; the default + smt builds keep zero FLINT/Arb symbols. The
+# vendored FLINT/Arb C and `gmp-mpfr-sys` are LGPL, so the LGPL obligation
+# attaches to a binary built with this feature (recorded + deferred, master
+# WI-19). The Fedora PIE-default toolchain requires the vendored C be compiled
+# `-fPIC`; `.cargo/config.toml` sets `CFLAGS`/`CXXFLAGS` and isolated build
+# caches so a clean build is position-independent without a per-developer step.
+arb = ["dep:arb-sys"]
 
 [dependencies]
 cvc5-rs = { version = "0.3", optional = true }
+# WI-14 oracle: FFI to FLINT/Arb. 0.3.6 vendors FLINT 2.8.5 + Arb c2b7e36 (it
+# does NOT link a system FLINT) and exposes `arb_hypgeom_erf` plus the interval
+# extraction (`arb_get_lbound_arf`/`ubound_arf`) and directed-rounding f64
+# projection (`arf_get_d` with `ARF_RND_FLOOR`/`ARF_RND_CEIL`) the oracle needs.
+arb-sys = { version = "0.3.6", optional = true }
 # On the smt AND z3 paths: a RealLit lowers to its EXACT f64 value as a
 # rational `n/d` (BigRational::from_float), so the solver reasons about the
 # same number the runtime f64 evaluator does, not the literal's exact decimal.
@@ -129,3 +145,11 @@ clarabel = { version = "0.11", optional = true, features = ["sdp-accelerate"] }
 [[bin]]
 name = "mock-chelis-beacon"
 path = "src/bin/mock_chelis_beacon.rs"
+
+# WI-13 envelope certifier: the offline Arb trust-anchor that stamps each
+# envelope box's certified sup-norm `eps`. Requires the `arb` feature (links
+# FLINT/Arb); never part of a deployed build.
+[[bin]]
+name = "certify_erf_envelope"
+path = "src/bin/certify_erf_envelope.rs"
+required-features = ["arb"]

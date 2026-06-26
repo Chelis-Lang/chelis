@@ -10,12 +10,17 @@
 //! See `docs/trust_stack_verification.md` for architectural framing.
 
 pub mod ad_rail;
+pub mod arb_oracle;
 pub mod artifact;
 pub mod beacon_shim;
 // WI-15 SoS certificate engine (Clarabel). The whole module is behind the
 // `clarabel` feature so the default / smt / solver-free builds link none of it.
 #[cfg(feature = "clarabel")]
 pub mod clarabel_sos;
+// WI-13 special-function envelope library: the committed, Arb-certified erf
+// envelopes (saturation tails + central polynomial). Always present (pure f64,
+// no Arb link); the runtime / Beacon relaxation consume it without linking Arb.
+pub mod erf_envelope;
 // WI-16 Carcara auditability: re-check cvc5's Alethe proofs. The SMT-LIB
 // problem renderer and the audit-outcome type are always present (so the
 // renderer is unit-testable without cvc5/carcara linked); the live
@@ -46,9 +51,20 @@ pub mod worker;
 #[cfg(feature = "z3")]
 pub mod z3_engine;
 
+// WI-14 Arb/FLINT rigorous-enclosure oracle. The enclosure type and its
+// containment algebra are always present (testable without an Arb link); the
+// live FLINT/Arb computation is gated behind the `arb` feature.
+pub use arb_oracle::ErfEnclosure;
+#[cfg(feature = "arb")]
+pub use arb_oracle::{
+    DEFAULT_PREC, certify_sup_norm_at_samples, certify_sup_norm_over_box, rigorous_erf,
+    rigorous_erf_enclosure,
+};
 pub use artifact::{
     Degradation, FailureSummary, ProofArtifact, ProofStatus, ProofTier, PropertyDependency,
 };
+// WI-13 committed erf-envelope consumer surface (always present, no Arb link).
+pub use erf_envelope::{ErfArm, ErfEnvelope, ErfEnvelopeBox, ErfEnvelopeProvenance, ProofKind};
 // chelis#439: the Beacon subprocess shim (transport-only DischargeEngine for
 // GoalShape::BoxRange) and its dispatch-site-owned content-addressed byte store.
 pub use beacon_shim::{BEACON_BIN_ENV, BeaconShim, RequestTransport, WireDagByteStore};
