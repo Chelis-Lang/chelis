@@ -327,8 +327,10 @@ fn issue_272_join_wildcard_head_erases_concrete_tail_rejects() {
 // element axis as a uniformity promise, and rejects a wildcard-element
 // body against it -- even a single-element list, which is trivially
 // "uniform". The escape hatch is an explicit `tensor[*, ..]` element
-// annotation. The check is also scoped to a single `List[tensor[..]]`
-// level; it does NOT recurse into nested `List[List[tensor[..]]]`.
+// annotation. The check recurses through nested `List[...]` wrappers
+// down to the tensor element (chelis#276), so the inner rigid dim under
+// `List[List[tensor[..]]]` is protected at any depth too (see the
+// issue_276_* group below).
 // =================================================================
 
 #[test]
@@ -398,16 +400,24 @@ fn issue_272_wildcard_elem_satisfies_explicit_wildcard_annotation() {
     );
 }
 
+// =================================================================
+// chelis#276: the uniformity check now recurses through nested `List`
+// wrappers down to the tensor element, so an inner rigid/named dim under
+// `List[List[tensor[k, f32]]]` (at any depth) is protected too. The
+// first test below was the documented single-level boundary canary; it
+// has flipped from ACCEPT to REJECT.
+// =================================================================
+
 #[test]
-fn issue_272_nested_list_wildcard_under_rigid_dim_not_checked() {
-    // Documented boundary: `check_list_elem_rigid_dim_vs_wildcard` matches
-    // a single `List[tensor[..]]` level and does NOT recurse into the
-    // element when it is itself a `List`. A wildcard tensor nested under
-    // `List[List[tensor[k, f32]]]` is therefore NOT protected.
-    //   BEFORE: ACCEPT.   AFTER: ACCEPT (the check does not reach the inner
-    //   rigid dim).
-    // If nested-list rigidity ever needs enforcing, this test is the
-    // canary: it should flip to REJECT and be moved to the rejecting group.
+fn issue_276_nested_list_wildcard_under_rigid_dim_rejects() {
+    // chelis#276 (follow-up to #272): a wildcard tensor nested one `List`
+    // deeper than the #272 single-level case.
+    //   BEFORE #276: ACCEPT (the check matched only a single
+    //           `List[tensor[..]]` level and bailed on a `List` element).
+    //   AFTER #276:  REJECT (DimensionMismatch) -- the recursion reaches
+    //           the inner rigid `k` and the same wildcard-element guard
+    //           fires. `List[List[tensor[k]]]` still promises every
+    //           innermost element shares length `k`.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("nested_list_wildcard.ch");
     write_file(
@@ -415,10 +425,95 @@ fn issue_272_nested_list_wildcard_under_rigid_dim_not_checked() {
         "def f[k](b: tensor[*, f32]) -> List[List[tensor[k, f32]]] = [[b]]\n",
     );
     let json = run_check(&path);
+    let kinds = error_kinds(&json);
+    assert!(
+        kinds.iter().any(|k| k == "DimensionMismatch"),
+        "a wildcard tensor nested under `List[List[tensor[k]]]` must not \
+         satisfy the inner rigid `k`; must reject with DimensionMismatch; \
+         got {:?}",
+        error_messages(&json),
+    );
+}
+
+#[test]
+fn issue_276_triply_nested_list_wildcard_under_rigid_dim_rejects() {
+    // The recursion is depth-unbounded: a wildcard three `List` levels
+    // deep is still checked against the inner rigid `k`.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("triply_nested_list_wildcard.ch");
+    write_file(
+        &path,
+        "def f[k](b: tensor[*, f32]) -> List[List[List[tensor[k, f32]]]] = [[[b]]]\n",
+    );
+    let json = run_check(&path);
+    let kinds = error_kinds(&json);
+    assert!(
+        kinds.iter().any(|k| k == "DimensionMismatch"),
+        "a wildcard tensor nested three `List` levels deep must still be \
+         checked against the inner rigid `k`; must reject with \
+         DimensionMismatch; got {:?}",
+        error_messages(&json),
+    );
+}
+
+#[test]
+fn issue_276_nested_list_wildcard_under_named_dim_rejects() {
+    // The recursion treats a `Dim::Name` inner element as a uniformity
+    // promise too (parity with the single-level named-dim case).
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("nested_list_wildcard_named.ch");
+    write_file(
+        &path,
+        "def f(b: tensor[*, f32]) -> List[List[tensor[batch, f32]]] = [[b]]\n",
+    );
+    let json = run_check(&path);
+    let kinds = error_kinds(&json);
+    assert!(
+        kinds.iter().any(|k| k == "DimensionMismatch"),
+        "a wildcard tensor nested under `List[List[tensor[batch]]]` must \
+         not satisfy the inner named dim `batch`; must reject with \
+         DimensionMismatch; got {:?}",
+        error_messages(&json),
+    );
+}
+
+#[test]
+fn issue_276_nested_list_uniform_rigid_dim_type_checks() {
+    // Positive parity: a genuinely uniform inner element still type-checks
+    // through the nesting -- the recursion only bites on a wildcard inner
+    // element, not on a matching rigid `k`.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("nested_list_uniform.ch");
+    write_file(
+        &path,
+        "def f[k](b: tensor[k, f32]) -> List[List[tensor[k, f32]]] = [[b]]\n",
+    );
+    let json = run_check(&path);
     let errs = error_messages(&json);
     assert!(
         errs.is_empty(),
-        "documented gap: nested-list element rigidity is not checked, so \
-         this currently type-checks; got {errs:?}",
+        "a uniform inner element (`tensor[k]`) under `List[List[..]]` must \
+         still type-check; got {errs:?}",
+    );
+}
+
+#[test]
+fn issue_276_nested_list_wildcard_under_explicit_wildcard_annotation_type_checks() {
+    // The escape hatch survives the nesting: declaring the inner element
+    // axis as an explicit wildcard makes no uniformity promise, so a
+    // wildcard inner element is accepted at any depth.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("nested_list_wildcard_annot.ch");
+    write_file(
+        &path,
+        "def f(b: tensor[*, f32]) -> List[List[tensor[*, f32]]] = [[b]]\n",
+    );
+    let json = run_check(&path);
+    let errs = error_messages(&json);
+    assert!(
+        errs.is_empty(),
+        "an explicit `List[List[tensor[*, f32]]]` annotation makes no \
+         uniformity promise, so a wildcard inner element must type-check; \
+         got {errs:?}",
     );
 }

@@ -67,7 +67,7 @@ fn stdlib_corpus(scratch: &Path) -> Vec<PathBuf> {
         "src/init/xavier.ch",
         "src/init/random.ch",
         "src/init/xavierext.ch",
-        "src/tensor/reduce.ch",
+        "src/tensor/construct.ch",
         "src/test.ch",
     ]
     .iter()
@@ -285,14 +285,14 @@ fn stale_stdlib_byte_mutation_misses_not_stale_hit() {
         .expect("chelis-std package");
     let local_std = work.path().join("chelis-std");
     copy_dir_recursive(&std_src, &local_std);
-    let target = local_std.join("src/tensor/reduce.ch");
-    let original = fs::read_to_string(&target).expect("read reduce.ch");
+    let target = local_std.join("src/tensor/construct.ch");
+    let original = fs::read_to_string(&target).expect("read construct.ch");
     let mutated = mutate_one_identifier(&original);
     assert_ne!(
         original, mutated,
-        "test setup: mutation must actually change reduce.ch bytes"
+        "test setup: mutation must actually change construct.ch bytes"
     );
-    fs::write(&target, &mutated).expect("write mutated reduce.ch");
+    fs::write(&target, &mutated).expect("write mutated construct.ch");
 
     let (_guard_b, cache_home_b) = fresh_cache_home();
     publish(&local_std, &cache_home_b);
@@ -397,7 +397,7 @@ fn publish(pkg: &Path, cache_home: &Path) {
         .success();
 }
 
-/// Append a trailing line comment to `src/tensor/reduce.ch` so the file
+/// Append a trailing line comment to a chelis-std source file so the file
 /// still parses and type-checks clean but its bytes (and therefore its
 /// content hash, and therefore the chelis-std cache key) change.
 fn mutate_one_identifier(source: &str) -> String {

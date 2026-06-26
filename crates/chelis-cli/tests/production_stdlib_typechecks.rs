@@ -84,10 +84,13 @@ fn production_stdlib_init_xavierext_typechecks() {
     assert_stdlib_clean("src/init/xavierext.ch");
 }
 
-#[test]
-fn production_stdlib_tensor_reduce_typechecks() {
-    assert_stdlib_clean("src/tensor/reduce.ch");
-}
+// chelis#333: src/tensor/reduce.ch (Std.Tensor.Reduce.{min,prod,argmax,
+// argmin}) was removed — the four bodyless sigs took a runtime int32 axis
+// but the *_reduce builtins they would forward to require a compile-time
+// constant axis, so the module was unimplementable as declared and never
+// had a runtime function. Consumers call the `*_reduce` builtins with a
+// const axis directly. No `production_stdlib_tensor_reduce_typechecks`
+// remains because there is no module to type-check.
 
 #[test]
 fn production_stdlib_test_typechecks() {
