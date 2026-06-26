@@ -1,5 +1,6 @@
 {
-  "_comment": "Test-timing budget thresholds for scripts/test_timing_check.py. tolerance: a test in the baseline is flagged when it runs slower than tolerance x its baseline time. absolute_ceiling: a NEW test (not in the baseline) is flagged only when it runs longer than this many seconds. Both are config so the budget moves without code changes.",
+  "_comment": "Test-timing budget thresholds for scripts/test_timing_check.py. tolerance: a baselined test is flagged when it runs slower than tolerance x its baseline time AND by at least min_regression_delta seconds in absolute terms. absolute_ceiling: a NEW test (not in the baseline) is flagged only when it runs longer than this many seconds. min_regression_delta: the absolute slowdown floor (seconds) below which a multiplicative 'regression' is treated as scheduler/contention jitter and not flagged -- most of the baseline is near-zero (~0.00-0.01s), so without this floor a few-millisecond jitter false-reds unchanged tests on a contended runner. All three are config so the budget moves without code changes.",
   "tolerance": 2.0,
-  "absolute_ceiling": 30.0
+  "absolute_ceiling": 30.0,
+  "min_regression_delta": 0.05
 }
