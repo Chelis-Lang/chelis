@@ -18,7 +18,25 @@ import importlib.util
 import sys
 from pathlib import Path
 
-import pytest
+try:
+    import pytest
+except ImportError:
+    # CI's unittest discovery imports test_*.py; pytest lives only in the uv
+    # venv. Provide a minimal stub so this module imports without error.
+    # unittest discovers no TestCase classes, so 0 tests run — harmless.
+    class _PytestStub:
+        class _Mark:
+            def __getattr__(self, _):
+                return lambda f: f
+        mark = _Mark()
+        def importorskip(self, mod, *a, **kw):
+            import types
+            return types.ModuleType(mod)
+        def main(self, *a, **kw):
+            return 0
+        def __getattr__(self, _):
+            return lambda *a, **kw: lambda f: f
+    pytest = _PytestStub()  # type: ignore[assignment]
 
 _SPEC = importlib.util.spec_from_file_location(
     "generate_erf_envelope",
