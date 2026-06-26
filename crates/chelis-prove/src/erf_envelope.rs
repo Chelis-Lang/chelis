@@ -312,7 +312,7 @@ impl ErfEnvelope {
     ///
     /// # Panics
     /// Panics if the embedded data fails to parse, which would mean a corrupt
-    /// committed artifact — a build-time invariant, caught by tests.
+    /// committed artifact -- a build-time invariant, caught by tests.
     pub fn committed() -> Self {
         serde_json::from_str(ERF_ENVELOPE_JSON)
             .expect("committed erf envelope data must be valid JSON")
@@ -988,7 +988,7 @@ mod tests {
     // Closes the HIGH finding from RT-WS7b: independently re-derive the
     // committed central_eps from the .gappa goal lines so that shrinking eps
     // below the proved bound (while keeping the sha256 consistent) is caught
-    // by the DEFAULT cargo test lane — no `--features arb` required.
+    // by the DEFAULT cargo test lane -- no `--features arb` required.
 
     const GAPPA_CENTRAL_0: &str = include_str!("../data/erf_proof/central_0.gappa");
     const GAPPA_CENTRAL_1: &str = include_str!("../data/erf_proof/central_1.gappa");
@@ -1104,7 +1104,7 @@ mod tests {
             central_eps_math >= max_proved,
             "PROOF-INTEGRITY VIOLATION: committed central_eps_math ({central_eps_math:e}) \
              is BELOW the max Gappa-proved bound ({max_proved:e}). The envelope claims a \
-             tighter bound than the proofs support — this is unsound."
+             tighter bound than the proofs support -- this is unsound."
         );
     }
 
