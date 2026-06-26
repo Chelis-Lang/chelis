@@ -230,6 +230,23 @@ jobs:
         # cvc5, the fall-through composition exercised end-to-end.
         run: cargo test -p chelis-prove --features "smt clarabel"
 
+      # WI-13/WI-14 Arb/FLINT oracle lane. Vendors GMP/MPFR/FLINT/Arb from
+      # C source (~1-2 min cold); .cargo/config.toml supplies CFLAGS=-fPIC
+      # and the *_CACHE redirects. gappa is needed for --check-only.
+      - name: Install arb lane prerequisites (m4, make, gappa)
+        run: python3 scripts/ci_apt_get.py m4 make gappa
+
+      - name: Re-validate committed Gappa proofs (--check-only)
+        run: .venv/bin/python scripts/generate_erf_proof.py --check-only
+
+      - name: Arb cross-check (certify_erf_envelope validate)
+        run: |
+          cargo run -p chelis-prove --features arb --bin certify_erf_envelope \
+            -- validate crates/chelis-prove/data/erf_envelope.json
+
+      - name: Run arb-gated chelis-prove tests
+        run: cargo test -p chelis-prove --features arb
+
   # chelis#422 (WS-4) PROVE-IN-CI lanes. release.yml ships
   # `chelis-cli --features smt` on three targets; cvc5 builds from
   # source (cmake/g++/libgmp) and is only PROVEN on ubuntu-latest by the
