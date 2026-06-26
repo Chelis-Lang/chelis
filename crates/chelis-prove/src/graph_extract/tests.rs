@@ -585,6 +585,15 @@ const ENTRY_ISOLATION_SOURCE: &str = "module Demo.Pricer\n\
     def priced[n](v: tensor[n, f32], k: tensor[n, f32], b: tensor[n, f32]) -> tensor[n, f32] = add(scaled(v, k), b)\n\
     def unrelated[n](v: tensor[n, f32]) -> tensor[n, f32] = missing_sym(v)\n";
 
+/// chelis#506 decision fixture: scalar host entries are not WireDag roots.
+/// Beacon's seam is tensor-DAG-root based, so the scalar path must fail with a
+/// clear named-root diagnostic rather than fabricating a rank-0 root.
+const SCALAR_HOST_ENTRY_SOURCE: &str = "module Demo.ScalarHost\n\
+    def scalar_price(s: f32, k: f32) -> f32 = add(s, k)\n";
+
+const ISSUE_506_TENSOR_ENTRY_SOURCE: &str = "module Demo.TensorEntry\n\
+    def tensor_price(x: tensor[3, f32]) -> tensor[3, f32] = add(x, x)\n";
+
 #[test]
 fn whole_program_lowering_fails_when_an_unrelated_fn_is_unlowerable() {
     // The negative baseline: WITHOUT entry scoping, the unrelated
@@ -666,6 +675,68 @@ fn entry_scoped_extraction_prunes_the_unrelated_fn_and_yields_a_populated_goal()
     assert!(
         parsed.roots.contains(&(root_index as usize)),
         "the resolved index is one of the DAG's roots"
+    );
+}
+
+#[test]
+fn scalar_host_entry_is_not_a_wire_dag_root_and_reports_available_roots() {
+    let err = box_range_goal_from_source_entry(
+        SCALAR_HOST_ENTRY_SOURCE,
+        SourceKind::Surf,
+        "scalar_price",
+        input_box(&[("k", 90.0, 110.0), ("s", 80.0, 120.0)]),
+        output_range("scalar_price", 0.0, 250.0),
+    )
+    .expect_err("scalar host entries stay non-root; Shoals must provide a tensor entry");
+    let message = err.to_string();
+    assert!(
+        message.contains("output `scalar_price` is not a named root"),
+        "UnknownOutput diagnostic must name the missing scalar output, got {message:?}"
+    );
+    assert!(
+        message.contains("available roots: []"),
+        "UnknownOutput diagnostic must make the empty tensor-root set explicit, got {message:?}"
+    );
+    match err {
+        GraphExtractError::UnknownOutput { output, available } => {
+            assert_eq!(output, "scalar_price");
+            assert!(
+                available.is_empty(),
+                "a scalar host entry should not be silently exposed as a WireDag root; available roots were {available:?}"
+            );
+        }
+        other => panic!("expected UnknownOutput for scalar host non-root, got {other:?}"),
+    }
+}
+
+#[test]
+fn tensor_entry_is_a_wire_dag_root_for_issue_506_positive_control() {
+    let extracted = box_range_goal_from_source_entry(
+        ISSUE_506_TENSOR_ENTRY_SOURCE,
+        SourceKind::Surf,
+        "tensor_price",
+        input_box(&[("x", -10.0, 10.0)]),
+        output_range("tensor_price", 0.0, 250.0),
+    )
+    .expect("tensor/root-shaped entries should produce a WireDag root");
+
+    assert!(matches!(extracted.goal.shape, GoalShape::BoxRange { .. }));
+    assert!(extracted.goal.ir.is_populated());
+    let root_index = extracted
+        .goal
+        .ir
+        .root_index()
+        .expect("tensor entry carries a root index");
+    let parsed: WireDag = serde_json::from_slice(&extracted.wire_dag_bytes)
+        .expect("the serialized bytes parse back as a WireDag");
+    assert_eq!(
+        parsed.roots.len(),
+        1,
+        "the tensor entry should produce exactly one root"
+    );
+    assert!(
+        parsed.roots.contains(&(root_index as usize)),
+        "the name-resolved root index must address the WireDag root list"
     );
 }
 

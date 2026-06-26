@@ -67,7 +67,9 @@ pub use artifact::{
 pub use erf_envelope::{ErfArm, ErfEnvelope, ErfEnvelopeBox, ErfEnvelopeProvenance, ProofKind};
 // chelis#439: the Beacon subprocess shim (transport-only DischargeEngine for
 // GoalShape::BoxRange) and its dispatch-site-owned content-addressed byte store.
-pub use beacon_shim::{BEACON_BIN_ENV, BeaconShim, RequestTransport, WireDagByteStore};
+pub use beacon_shim::{
+    BEACON_BIN_ENV, BeaconOracleMode, BeaconShim, RequestTransport, WireDagByteStore,
+};
 pub use carcara_audit::{CarcaraAudit, render_smtlib_problem};
 pub use composition::{
     AssumptionDischarge, AssumptionRecord, AssumptionRegistry, CompositeVerdict, CompositionProbe,

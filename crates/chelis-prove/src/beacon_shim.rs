@@ -79,6 +79,29 @@ const STDIN_REQUEST_MAX_BYTES: usize = 32 * 1024;
 /// shim does not fit.
 pub const BEACON_BIN_ENV: &str = "CHELIS_BEACON_BIN";
 
+/// Which Beacon oracle lane the subprocess shim asks the out-of-tree binary to
+/// use. The default intentionally preserves the #439 request contract:
+/// `oracle: null` means "Beacon's verified default" (currently Arb box). The
+/// zonotope mode is an explicit selector and must only be enabled by a caller
+/// that has checked the binary's protocol capabilities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BeaconOracleMode {
+    /// Emit `oracle: null`.
+    #[default]
+    VerifiedDefaultArbBox,
+    /// Emit `oracle: "zonotope_verified"`.
+    VerifiedZonotope,
+}
+
+impl BeaconOracleMode {
+    fn request_value(self) -> serde_json::Value {
+        match self {
+            Self::VerifiedDefaultArbBox => serde_json::Value::Null,
+            Self::VerifiedZonotope => serde_json::json!("zonotope_verified"),
+        }
+    }
+}
+
 /// A content-addressed store mapping a `WireDag` v1 artifact's content hash
 /// (lowercase-hex sha256, the same key the WI-3 producer computes) to the EXACT
 /// serialized bytes.
@@ -157,6 +180,8 @@ pub struct BeaconShim {
     store: WireDagByteStore,
     /// How the request reaches the child (stdin by default).
     transport: RequestTransport,
+    /// Which verified Beacon lane to request from the subprocess.
+    oracle_mode: BeaconOracleMode,
 }
 
 impl BeaconShim {
@@ -168,6 +193,7 @@ impl BeaconShim {
             binary: binary.into(),
             store,
             transport: RequestTransport::default(),
+            oracle_mode: BeaconOracleMode::default(),
         }
     }
 
@@ -191,6 +217,14 @@ impl BeaconShim {
     /// auto-fallback.
     pub fn with_transport(mut self, transport: RequestTransport) -> Self {
         self.transport = transport;
+        self
+    }
+
+    /// Select the Beacon oracle lane requested from the subprocess. This only
+    /// changes the request JSON; the report-to-discharge mapping remains the
+    /// same fail-closed #439 CheckReport mapping.
+    pub fn with_oracle_mode(mut self, oracle_mode: BeaconOracleMode) -> Self {
+        self.oracle_mode = oracle_mode;
         self
     }
 
@@ -221,7 +255,7 @@ impl BeaconShim {
         inputs: &IntervalBox,
         output: &OutputRange,
         bytes: &[u8],
-        oracle: Option<bool>,
+        oracle: BeaconOracleMode,
     ) -> serde_json::Value {
         let input_dims: Vec<serde_json::Value> = inputs
             .dims
@@ -239,7 +273,7 @@ impl BeaconShim {
                 "lo": output.lo,
                 "hi": output.hi,
             },
-            "oracle": oracle,
+            "oracle": oracle.request_value(),
             "split_max_depth": serde_json::Value::Null,
             "split_max_boxes": serde_json::Value::Null,
         })
@@ -473,7 +507,14 @@ impl DischargeEngine for BeaconShim {
             );
         }
 
-        let request = Self::build_request(dag_hash, root_index, inputs, output, &bytes, None);
+        let request = Self::build_request(
+            dag_hash,
+            root_index,
+            inputs,
+            output,
+            &bytes,
+            self.oracle_mode,
+        );
         let request_bytes = serde_json::to_vec(&request)
             .expect("a serde_json::Value built from owned data serializes");
 
