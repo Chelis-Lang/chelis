@@ -73,11 +73,16 @@ no FLINT/Arb/Sollya/Gappa link (`arb` is off by default and absent from the
   `|p - erf| <= eps`. The polynomial is evaluated in a per-sub-interval centered
   variable so the high-degree difference stays well conditioned and Gappa proves
   each sub-interval in well under a second.
+- **Default-lane eps-backing gate (always-on, no external deps).** A Rust test
+  in the default feature set independently parses every committed `.gappa` goal
+  line, extracts its asserted bound, and asserts `central_eps_math >= max(bounds)`
+  and `central_eps_f64_rounding >= rounding_proof_bound`. This closes the
+  eps-to-proof link on every PR without requiring Arb, Gappa, or Sollya.
 - **Arb cross-check (belt + suspenders).** The WI-14 Arb whole-box certifier
-  re-validates **every** box's committed `eps` on every CI build — both the
-  Gappa central arm and the Arb tails — by asserting the committed `eps` bounds
-  the Arb sup-norm bound. The central arm thus has both a Gappa proof term and an
-  independent Arb confirmation.
+  re-validates every box's committed `eps` in the **arb CI lane** (the
+  `smt-build` job's `--features arb` steps) by asserting the committed `eps`
+  bounds the Arb sup-norm bound. The central arm thus has both a Gappa proof term
+  and an independent Arb confirmation.
 - **Consistency.** Tests (Rust and Python) lock the committed central polynomial
   and `eps` to the Gappa proof bundle's manifest, so the proved bound and the
   consumed bound cannot drift apart, and the envelope provenance pins the
@@ -119,8 +124,12 @@ cargo run -p chelis-prove --features arb --bin certify_erf_envelope \
 The Rust `arb` test lane additionally re-derives every box's `eps` from Arb
 (`committed_envelope_eps_still_bounds_the_truth`), with a negative partner that
 confirms a shrunk `eps` is caught, and locks the envelope to the proof bundle.
-None of this touches the `default`/`smt` lanes, which neither link Arb nor
-re-validate — they consume the committed data as-is.
+
+The `default` lane (no `--features arb`) runs the **eps-backing gate**: it parses
+the committed `.gappa` goal lines directly and asserts the committed `eps` values
+are at least as large as what the proofs certify. This catches the exploit of
+shrinking `eps` below the proved bound while keeping the sha256 consistent. The
+`arb` lane provides an independent numerical cross-check on top of that.
 
 ## Environment
 

@@ -6,14 +6,17 @@
 //!   box's sup-norm error, stamps `eps` + provenance, and writes the result.
 //!   Used to fill the saturation-tail `eps` of the committed envelope.
 //!
-//! - `validate <envelope.json>`: the independent every-build CROSS-CHECK. Reads
-//!   the committed envelope and asserts, for EVERY box (Gappa-proved central and
-//!   Arb-enclosure tails alike), that the committed `eps` is `>=` the freshly
-//!   Arb-certified sup-norm error -- i.e. the committed bound still soundly
-//!   bounds `|approx - erf|`. This is the belt-and-suspenders guard the Option-B
+//! - `validate <envelope.json>`: the independent Arb CROSS-CHECK (runs in the
+//!   `arb` CI lane, not the default lane). Reads the committed envelope and
+//!   asserts, for EVERY box (Gappa-proved central and Arb-enclosure tails
+//!   alike), that the committed `eps` is `>=` the freshly Arb-certified
+//!   sup-norm error -- i.e. the committed bound still soundly bounds
+//!   `|approx - erf|`. This is the belt-and-suspenders guard the Option-B
 //!   design keeps from Option A: the Gappa proof is the central arm's proof
-//!   term, and Arb re-validates the actual numeric bound of every box on every
-//!   CI run. Exits non-zero if any committed `eps` is below the Arb bound.
+//!   term, and Arb re-validates the actual numeric bound of every box in the
+//!   `--features arb` CI lane. Exits non-zero if any committed `eps` is below
+//!   the Arb bound. The default lane has a separate eps-backing gate that
+//!   parses the Gappa goal lines directly (no Arb dependency).
 //!
 //! This binary requires the `arb` feature (it links FLINT/Arb). It runs offline
 //! and in CI only -- it is not part of any deployed build.

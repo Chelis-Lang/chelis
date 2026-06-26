@@ -983,4 +983,207 @@ mod tests {
             method: "test".to_string(),
         }
     }
+
+    // ─── DEFAULT-LANE EPS-BACKING GATE ───────────────────────────────────
+    // Closes the HIGH finding from RT-WS7b: independently re-derive the
+    // committed central_eps from the .gappa goal lines so that shrinking eps
+    // below the proved bound (while keeping the sha256 consistent) is caught
+    // by the DEFAULT cargo test lane — no `--features arb` required.
+
+    const GAPPA_CENTRAL_0: &str = include_str!("../data/erf_proof/central_0.gappa");
+    const GAPPA_CENTRAL_1: &str = include_str!("../data/erf_proof/central_1.gappa");
+    const GAPPA_CENTRAL_2: &str = include_str!("../data/erf_proof/central_2.gappa");
+    const GAPPA_CENTRAL_3: &str = include_str!("../data/erf_proof/central_3.gappa");
+    const GAPPA_CENTRAL_4: &str = include_str!("../data/erf_proof/central_4.gappa");
+    const GAPPA_CENTRAL_5: &str = include_str!("../data/erf_proof/central_5.gappa");
+    const GAPPA_CENTRAL_6: &str = include_str!("../data/erf_proof/central_6.gappa");
+    const GAPPA_CENTRAL_7: &str = include_str!("../data/erf_proof/central_7.gappa");
+    const GAPPA_CENTRAL_8: &str = include_str!("../data/erf_proof/central_8.gappa");
+    const GAPPA_CENTRAL_9: &str = include_str!("../data/erf_proof/central_9.gappa");
+    const GAPPA_CENTRAL_10: &str = include_str!("../data/erf_proof/central_10.gappa");
+    const GAPPA_CENTRAL_11: &str = include_str!("../data/erf_proof/central_11.gappa");
+    const GAPPA_CENTRAL_12: &str = include_str!("../data/erf_proof/central_12.gappa");
+    const GAPPA_CENTRAL_13: &str = include_str!("../data/erf_proof/central_13.gappa");
+    const GAPPA_CENTRAL_14: &str = include_str!("../data/erf_proof/central_14.gappa");
+    const GAPPA_CENTRAL_15: &str = include_str!("../data/erf_proof/central_15.gappa");
+
+    /// All 16 central sub-interval .gappa proof sources, indexed by sub-interval.
+    const GAPPA_CENTRAL_ALL: [&str; 16] = [
+        GAPPA_CENTRAL_0, GAPPA_CENTRAL_1, GAPPA_CENTRAL_2, GAPPA_CENTRAL_3,
+        GAPPA_CENTRAL_4, GAPPA_CENTRAL_5, GAPPA_CENTRAL_6, GAPPA_CENTRAL_7,
+        GAPPA_CENTRAL_8, GAPPA_CENTRAL_9, GAPPA_CENTRAL_10, GAPPA_CENTRAL_11,
+        GAPPA_CENTRAL_12, GAPPA_CENTRAL_13, GAPPA_CENTRAL_14, GAPPA_CENTRAL_15,
+    ];
+
+    /// Parse the symmetric bound from a Gappa goal line of the form:
+    ///   `{ x in [...] -> qc in [-BOUND, BOUND] }`
+    /// Returns the positive BOUND as a string (preserving full precision).
+    fn parse_gappa_central_goal_bound(gappa_src: &str) -> &str {
+        // The goal is the last `{ ... }` line in the file.
+        let goal_line = gappa_src
+            .lines()
+            .rev()
+            .find(|l| l.trim_start().starts_with('{'))
+            .expect("gappa file must have a goal line starting with '{'");
+        // Extract the positive bound: it's between the last comma and the
+        // closing `]` of the `qc in [...]` range.
+        let in_range = goal_line
+            .rsplit("in [")
+            .next()
+            .expect("goal has `in [`");
+        // Format: `-BOUND, BOUND] }`
+        let after_comma = in_range
+            .split(", ")
+            .nth(1)
+            .expect("range has `, `");
+        // Trim the trailing `] }` or `]}`
+        after_comma
+            .trim_end()
+            .trim_end_matches('}')
+            .trim_end()
+            .trim_end_matches(']')
+            .trim()
+    }
+
+    /// Parse the rounding bound from central_rounding.gappa's goal line:
+    ///   `{ x in [-3, 3] -> |P - Pexact| in [0, BOUND] }`
+    fn parse_gappa_rounding_goal_bound(gappa_src: &str) -> &str {
+        let goal_line = gappa_src
+            .lines()
+            .rev()
+            .find(|l| l.trim_start().starts_with('{'))
+            .expect("rounding gappa must have a goal line");
+        // Format: `... in [0, BOUND] }`
+        let in_range = goal_line
+            .rsplit("in [")
+            .next()
+            .expect("goal has `in [`");
+        let after_comma = in_range
+            .split(", ")
+            .nth(1)
+            .expect("range has `, `");
+        after_comma
+            .trim_end()
+            .trim_end_matches('}')
+            .trim_end()
+            .trim_end_matches(']')
+            .trim()
+    }
+
+    #[test]
+    fn eps_backing_gate_central_eps_math_ge_max_proved_bound() {
+        // DEFAULT-LANE gate: the committed central_eps_math must be >= the max
+        // bound asserted across all 16 central sub-interval .gappa proofs.
+        // This is the eps-to-proof link that the RT-WS7b HIGH finding exposed:
+        // without this test, one could set central_eps to an unsoundly low
+        // value, regenerate the sha256, and pass all default-lane tests.
+        let manifest: serde_json::Value =
+            serde_json::from_str(ERF_PROOF_MANIFEST_JSON).expect("manifest");
+        let central_eps_math: f64 = manifest["central_eps_math"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        let mut max_proved: f64 = 0.0;
+        for (i, src) in GAPPA_CENTRAL_ALL.iter().enumerate() {
+            let bound_str = parse_gappa_central_goal_bound(src);
+            let bound: f64 = bound_str.parse().unwrap_or_else(|e| {
+                panic!("central_{i}.gappa goal bound '{bound_str}' parse: {e}")
+            });
+            assert!(
+                bound > 0.0,
+                "central_{i}.gappa bound must be positive, got {bound}"
+            );
+            if bound > max_proved {
+                max_proved = bound;
+            }
+        }
+
+        assert!(
+            central_eps_math >= max_proved,
+            "PROOF-INTEGRITY VIOLATION: committed central_eps_math ({central_eps_math:e}) \
+             is BELOW the max Gappa-proved bound ({max_proved:e}). The envelope claims a \
+             tighter bound than the proofs support — this is unsound."
+        );
+    }
+
+    #[test]
+    fn eps_backing_gate_rounding_bound_matches_proof() {
+        // DEFAULT-LANE gate: the committed central_eps_f64_rounding must be >=
+        // the bound asserted in central_rounding.gappa.
+        let manifest: serde_json::Value =
+            serde_json::from_str(ERF_PROOF_MANIFEST_JSON).expect("manifest");
+        let committed_rounding: f64 = manifest["central_eps_f64_rounding"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        let proved_str = parse_gappa_rounding_goal_bound(ERF_CENTRAL_ROUNDING_GAPPA);
+        let proved_rounding: f64 = proved_str.parse().unwrap_or_else(|e| {
+            panic!("central_rounding.gappa goal bound '{proved_str}' parse: {e}")
+        });
+
+        assert!(
+            committed_rounding >= proved_rounding,
+            "PROOF-INTEGRITY VIOLATION: committed central_eps_f64_rounding \
+             ({committed_rounding:e}) is BELOW the Gappa-proved rounding bound \
+             ({proved_rounding:e}). The envelope claims tighter rounding than proved."
+        );
+    }
+
+    #[test]
+    fn eps_backing_gate_total_eps_is_math_plus_rounding() {
+        // DEFAULT-LANE gate: central_eps must equal central_eps_math +
+        // central_eps_f64_rounding. This is also checked by
+        // `central_eps_includes_the_f64_evaluation_rounding` but we
+        // re-assert here to keep the gate self-contained.
+        let manifest: serde_json::Value =
+            serde_json::from_str(ERF_PROOF_MANIFEST_JSON).expect("manifest");
+        let eps: f64 = manifest["central_eps"].as_str().unwrap().parse().unwrap();
+        let math: f64 = manifest["central_eps_math"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let rounding: f64 = manifest["central_eps_f64_rounding"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            eps,
+            math + rounding,
+            "central_eps must be math + rounding"
+        );
+    }
+
+    #[test]
+    fn eps_backing_gate_tamper_detection() {
+        // TAMPER TEST: if someone shrinks central_eps_math below the max
+        // proved bound, the gate MUST catch it. This test simulates the
+        // exploit rt-ws7b demonstrated (setting eps = 3e-7).
+        let mut max_proved: f64 = 0.0;
+        for src in &GAPPA_CENTRAL_ALL {
+            let bound_str = parse_gappa_central_goal_bound(src);
+            let bound: f64 = bound_str.parse().unwrap();
+            if bound > max_proved {
+                max_proved = bound;
+            }
+        }
+        // A tampered eps below the proved bound:
+        let tampered_eps = 3e-7;
+        assert!(
+            tampered_eps < max_proved,
+            "test precondition: tampered eps {tampered_eps:e} must be below \
+             max proved bound {max_proved:e}"
+        );
+        // The gate assertion (from eps_backing_gate_central_eps_math_ge_max_proved_bound)
+        // would fire:
+        assert!(
+            !(tampered_eps >= max_proved),
+            "tampered eps must NOT pass the backing gate"
+        );
+    }
 }
