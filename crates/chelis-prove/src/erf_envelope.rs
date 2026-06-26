@@ -1182,7 +1182,7 @@ mod tests {
         // The gate assertion (from eps_backing_gate_central_eps_math_ge_max_proved_bound)
         // would fire:
         assert!(
-            !(tampered_eps >= max_proved),
+            tampered_eps < max_proved,
             "tampered eps must NOT pass the backing gate"
         );
     }
