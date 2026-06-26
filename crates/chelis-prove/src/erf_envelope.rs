@@ -1009,10 +1009,22 @@ mod tests {
 
     /// All 16 central sub-interval .gappa proof sources, indexed by sub-interval.
     const GAPPA_CENTRAL_ALL: [&str; 16] = [
-        GAPPA_CENTRAL_0, GAPPA_CENTRAL_1, GAPPA_CENTRAL_2, GAPPA_CENTRAL_3,
-        GAPPA_CENTRAL_4, GAPPA_CENTRAL_5, GAPPA_CENTRAL_6, GAPPA_CENTRAL_7,
-        GAPPA_CENTRAL_8, GAPPA_CENTRAL_9, GAPPA_CENTRAL_10, GAPPA_CENTRAL_11,
-        GAPPA_CENTRAL_12, GAPPA_CENTRAL_13, GAPPA_CENTRAL_14, GAPPA_CENTRAL_15,
+        GAPPA_CENTRAL_0,
+        GAPPA_CENTRAL_1,
+        GAPPA_CENTRAL_2,
+        GAPPA_CENTRAL_3,
+        GAPPA_CENTRAL_4,
+        GAPPA_CENTRAL_5,
+        GAPPA_CENTRAL_6,
+        GAPPA_CENTRAL_7,
+        GAPPA_CENTRAL_8,
+        GAPPA_CENTRAL_9,
+        GAPPA_CENTRAL_10,
+        GAPPA_CENTRAL_11,
+        GAPPA_CENTRAL_12,
+        GAPPA_CENTRAL_13,
+        GAPPA_CENTRAL_14,
+        GAPPA_CENTRAL_15,
     ];
 
     /// Parse the symmetric bound from a Gappa goal line of the form:
@@ -1027,15 +1039,9 @@ mod tests {
             .expect("gappa file must have a goal line starting with '{'");
         // Extract the positive bound: it's between the last comma and the
         // closing `]` of the `qc in [...]` range.
-        let in_range = goal_line
-            .rsplit("in [")
-            .next()
-            .expect("goal has `in [`");
+        let in_range = goal_line.rsplit("in [").next().expect("goal has `in [`");
         // Format: `-BOUND, BOUND] }`
-        let after_comma = in_range
-            .split(", ")
-            .nth(1)
-            .expect("range has `, `");
+        let after_comma = in_range.split(", ").nth(1).expect("range has `, `");
         // Trim the trailing `] }` or `]}`
         after_comma
             .trim_end()
@@ -1054,14 +1060,8 @@ mod tests {
             .find(|l| l.trim_start().starts_with('{'))
             .expect("rounding gappa must have a goal line");
         // Format: `... in [0, BOUND] }`
-        let in_range = goal_line
-            .rsplit("in [")
-            .next()
-            .expect("goal has `in [`");
-        let after_comma = in_range
-            .split(", ")
-            .nth(1)
-            .expect("range has `, `");
+        let in_range = goal_line.rsplit("in [").next().expect("goal has `in [`");
+        let after_comma = in_range.split(", ").nth(1).expect("range has `, `");
         after_comma
             .trim_end()
             .trim_end_matches('}')
@@ -1152,11 +1152,7 @@ mod tests {
             .unwrap()
             .parse()
             .unwrap();
-        assert_eq!(
-            eps,
-            math + rounding,
-            "central_eps must be math + rounding"
-        );
+        assert_eq!(eps, math + rounding, "central_eps must be math + rounding");
     }
 
     #[test]
