@@ -46,7 +46,9 @@ pub mod worker;
 #[cfg(feature = "z3")]
 pub mod z3_engine;
 
-pub use artifact::{ProofArtifact, ProofStatus, ProofTier};
+pub use artifact::{
+    Degradation, FailureSummary, ProofArtifact, ProofStatus, ProofTier, PropertyDependency,
+};
 // chelis#439: the Beacon subprocess shim (transport-only DischargeEngine for
 // GoalShape::BoxRange) and its dispatch-site-owned content-addressed byte store.
 pub use beacon_shim::{BEACON_BIN_ENV, BeaconShim, RequestTransport, WireDagByteStore};

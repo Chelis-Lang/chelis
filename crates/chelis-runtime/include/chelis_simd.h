@@ -54,18 +54,49 @@ static inline float chelis_sum_f32(const float * CHELIS_RESTRICT data, int n) {
 }
 
 /* ------------------------------------------------------------------ */
+/* chelis_fmax_propnan_f32 / chelis_fmin_propnan_f32                    */
+/*                                                                      */
+/* #172: scalar max/min that PROPAGATE NaN, unlike C99 `fmaxf`/`fminf`  */
+/* (which return the non-NaN argument). Used by the strided / windowed  */
+/* reduction loops so they match `chelis_max_f32` / `chelis_min_f32`    */
+/* (and torch) on a NaN input — `max(a, NaN) == NaN` regardless of      */
+/* operand order. The contiguous fast path uses the SIMD helpers above; */
+/* these keep the slow path consistent.                                 */
+/* ------------------------------------------------------------------ */
+static inline float chelis_fmax_propnan_f32(float a, float b) {
+    if (a != a || b != b) return __builtin_nanf("");
+    return a > b ? a : b;
+}
+static inline float chelis_fmin_propnan_f32(float a, float b) {
+    if (a != a || b != b) return __builtin_nanf("");
+    return a < b ? a : b;
+}
+
+/* ------------------------------------------------------------------ */
 /* chelis_max_f32                                                       */
-/* NaN in input produces implementation-defined results: AVX2           */
-/* _mm256_max_ps returns the second operand when the first is NaN,      */
-/* which makes NaN propagation position-dependent.                      */
+/*                                                                      */
+/* #172: PROPAGATES NaN, matching `torch.max` (a slice containing any   */
+/* NaN returns NaN, at every position). The SIMD `_mm256_max_ps` /      */
+/* `vmaxq_f32` drop NaN in a position-dependent way (the hardware max    */
+/* returns the non-NaN operand), so we detect NaN separately with an    */
+/* unordered-compare accumulator and force the result to NaN if any     */
+/* lane was unordered. This is deterministic across positions and       */
+/* across the AVX2 / NEON / scalar paths, and matches the position-     */
+/* independent NaN propagation of `torch.max`. The scalar `>` reduction */
+/* never sets `result` to NaN (NaN compares false), so the explicit     */
+/* NaN scan is also what makes the scalar path propagate.               */
 /* ------------------------------------------------------------------ */
 static inline float chelis_max_f32(const float * CHELIS_RESTRICT data, int n) {
     if (n <= 0) return -__builtin_inff();
 #ifdef __AVX2__
     __m256 vacc = _mm256_set1_ps(-__builtin_inff());
+    __m256 vnan = _mm256_setzero_ps();
     int i = 0;
     for (; i + 7 < n; i += 8) {
-        vacc = _mm256_max_ps(vacc, _mm256_loadu_ps(data + i));
+        __m256 v = _mm256_loadu_ps(data + i);
+        vacc = _mm256_max_ps(vacc, v);
+        /* unordered compare: lane is all-ones iff v != v (NaN) */
+        vnan = _mm256_or_ps(vnan, _mm256_cmp_ps(v, v, _CMP_UNORD_Q));
     }
     /* extract 8 floats and take scalar max */
     float buf[8];
@@ -74,42 +105,58 @@ static inline float chelis_max_f32(const float * CHELIS_RESTRICT data, int n) {
     for (int k = 1; k < 8; k++) {
         if (buf[k] > result) result = buf[k];
     }
+    int saw_nan = _mm256_movemask_ps(vnan) != 0;
     /* scalar tail */
     for (; i < n; i++) {
+        if (data[i] != data[i]) saw_nan = 1;
         if (data[i] > result) result = data[i];
     }
-    return result;
+    return saw_nan ? __builtin_nanf("") : result;
 #elif defined(__ARM_NEON)
     float32x4_t vacc = vdupq_n_f32(-__builtin_inff());
+    int saw_nan = 0;
     int i = 0;
     for (; i + 3 < n; i += 4) {
-        vacc = vmaxq_f32(vacc, vld1q_f32(data + i));
+        float32x4_t v = vld1q_f32(data + i);
+        vacc = vmaxq_f32(vacc, v);
+        /* vceqq_f32(v, v) is 0 in any NaN lane; reduce-min of the mask is 0 */
+        if (vminvq_u32(vceqq_f32(v, v)) == 0) saw_nan = 1;
     }
     float result = vmaxvq_f32(vacc);
     for (; i < n; i++) {
+        if (data[i] != data[i]) saw_nan = 1;
         if (data[i] > result) result = data[i];
     }
-    return result;
+    return saw_nan ? __builtin_nanf("") : result;
 #else
     float result = -__builtin_inff();
+    int saw_nan = 0;
     for (int i = 0; i < n; i++) {
+        if (data[i] != data[i]) saw_nan = 1;
         if (data[i] > result) result = data[i];
     }
-    return result;
+    return saw_nan ? __builtin_nanf("") : result;
 #endif
 }
 
 /* ------------------------------------------------------------------ */
 /* chelis_min_f32                                                       */
-/* NaN behavior is implementation-defined (same as chelis_max_f32).    */
+/*                                                                      */
+/* #172: PROPAGATES NaN, matching `torch.min` (same rationale as        */
+/* chelis_max_f32 above). The SIMD min drops NaN position-dependently;  */
+/* an unordered-compare accumulator detects NaN and forces the result   */
+/* to NaN.                                                              */
 /* ------------------------------------------------------------------ */
 static inline float chelis_min_f32(const float * CHELIS_RESTRICT data, int n) {
     if (n <= 0) return __builtin_inff();
 #ifdef __AVX2__
     __m256 vacc = _mm256_set1_ps(__builtin_inff());
+    __m256 vnan = _mm256_setzero_ps();
     int i = 0;
     for (; i + 7 < n; i += 8) {
-        vacc = _mm256_min_ps(vacc, _mm256_loadu_ps(data + i));
+        __m256 v = _mm256_loadu_ps(data + i);
+        vacc = _mm256_min_ps(vacc, v);
+        vnan = _mm256_or_ps(vnan, _mm256_cmp_ps(v, v, _CMP_UNORD_Q));
     }
     float buf[8];
     _mm256_storeu_ps(buf, vacc);
@@ -117,27 +164,35 @@ static inline float chelis_min_f32(const float * CHELIS_RESTRICT data, int n) {
     for (int k = 1; k < 8; k++) {
         if (buf[k] < result) result = buf[k];
     }
+    int saw_nan = _mm256_movemask_ps(vnan) != 0;
     for (; i < n; i++) {
+        if (data[i] != data[i]) saw_nan = 1;
         if (data[i] < result) result = data[i];
     }
-    return result;
+    return saw_nan ? __builtin_nanf("") : result;
 #elif defined(__ARM_NEON)
     float32x4_t vacc = vdupq_n_f32(__builtin_inff());
+    int saw_nan = 0;
     int i = 0;
     for (; i + 3 < n; i += 4) {
-        vacc = vminq_f32(vacc, vld1q_f32(data + i));
+        float32x4_t v = vld1q_f32(data + i);
+        vacc = vminq_f32(vacc, v);
+        if (vminvq_u32(vceqq_f32(v, v)) == 0) saw_nan = 1;
     }
     float result = vminvq_f32(vacc);
     for (; i < n; i++) {
+        if (data[i] != data[i]) saw_nan = 1;
         if (data[i] < result) result = data[i];
     }
-    return result;
+    return saw_nan ? __builtin_nanf("") : result;
 #else
     float result = __builtin_inff();
+    int saw_nan = 0;
     for (int i = 0; i < n; i++) {
+        if (data[i] != data[i]) saw_nan = 1;
         if (data[i] < result) result = data[i];
     }
-    return result;
+    return saw_nan ? __builtin_nanf("") : result;
 #endif
 }
 

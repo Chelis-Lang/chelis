@@ -16014,6 +16014,13 @@ fn check_return_only_dvars_rigid(
 /// whose wildcard axes legitimately flow from `expand`/`reshape`/`shape`
 /// (§4.7), where the declared return's named dim binds the result tvar
 /// directly rather than being absorbed by a heterogeneous-list wildcard.
+///
+/// chelis#276: the descent through `List` wrappers is *recursive*, so a
+/// wildcard tensor nested under `List[List[tensor[k, f32]]]` (or any
+/// deeper nesting) is checked against the inner rigid `k` too. `List[L]`
+/// is statically homogeneous in `L`, so the uniformity promise of an
+/// inner `List[tensor[k]]` holds at every depth; a single-level check
+/// left the same #272 soundness gap one `List` deeper.
 fn check_list_elem_rigid_dim_vs_wildcard(
     decl_ty: &Type,
     body_ty: &Type,
@@ -16025,38 +16032,48 @@ fn check_list_elem_rigid_dim_vs_wildcard(
             check_list_elem_rigid_dim_vs_wildcard(decl_ret, body_ret, errors);
         }
         // `List[T]`: check the element type. The list element is where
-        // the uniformity promise lives.
+        // the uniformity promise lives. When the element is a tensor we
+        // compare its declared vs body axes here; when it is itself a
+        // `List` (or any further nesting), we recurse so the inner rigid
+        // dim is protected at arbitrary depth (chelis#276).
         (Type::Adt(dn, dargs), Type::Adt(bn, bargs))
             if dn == "List" && bn == "List" && dargs.len() == 1 && bargs.len() == 1 =>
         {
-            if let (Type::Tensor(ddims, _), Type::Tensor(bdims, _)) = (&dargs[0], &bargs[0])
-                && ddims.len() == bdims.len()
-            {
-                for (dd, bd) in ddims.iter().zip(bdims.iter()) {
-                    let rigid = matches!(dd, Dim::Var(_) | Dim::Name(_));
-                    if rigid && matches!(bd, Dim::Wildcard) {
-                        let promised = match dd {
-                            Dim::Var(v) => format!("dim parameter d{}", v.0),
-                            Dim::Name(n) => format!("named dimension `{n}`"),
-                            _ => unreachable!(),
-                        };
-                        errors.push(CheckError::new(
-                            CheckErrorKind::DimensionMismatch,
-                            format!(
-                                "list element dimension is unknown (wildcard) in the function \
-                                 body but the declared element type promises a uniform {promised}: \
-                                 a heterogeneous list literal cannot satisfy a declared \
-                                 List[tensor[..]] whose element dimension names a rigid/named axis"
-                            ),
-                            vec![
-                                "Every element of a `List[tensor[k, ..]]` must share the same \
-                                 length `k`. Either give the elements a uniform dimension, or \
-                                 declare the element axis as a concrete literal / wildcard \
-                                 (`tensor[*, ..]`) if the lengths genuinely differ"
-                                    .to_string(),
-                            ],
-                        ));
+            match (&dargs[0], &bargs[0]) {
+                (Type::Tensor(ddims, _), Type::Tensor(bdims, _)) if ddims.len() == bdims.len() => {
+                    for (dd, bd) in ddims.iter().zip(bdims.iter()) {
+                        let rigid = matches!(dd, Dim::Var(_) | Dim::Name(_));
+                        if rigid && matches!(bd, Dim::Wildcard) {
+                            let promised = match dd {
+                                Dim::Var(v) => format!("dim parameter d{}", v.0),
+                                Dim::Name(n) => format!("named dimension `{n}`"),
+                                _ => unreachable!(),
+                            };
+                            errors.push(CheckError::new(
+                                CheckErrorKind::DimensionMismatch,
+                                format!(
+                                    "list element dimension is unknown (wildcard) in the function \
+                                     body but the declared element type promises a uniform \
+                                     {promised}: a heterogeneous list literal cannot satisfy a \
+                                     declared List[tensor[..]] whose element dimension names a \
+                                     rigid/named axis"
+                                ),
+                                vec![
+                                    "Every element of a `List[tensor[k, ..]]` must share the same \
+                                     length `k`. Either give the elements a uniform dimension, or \
+                                     declare the element axis as a concrete literal / wildcard \
+                                     (`tensor[*, ..]`) if the lengths genuinely differ"
+                                        .to_string(),
+                                ],
+                            ));
+                        }
                     }
+                }
+                // Nested `List[...]`: recurse into the element so an inner
+                // rigid dim under `List[List[tensor[k]]]` is still checked
+                // (chelis#276).
+                (decl_elem, body_elem) => {
+                    check_list_elem_rigid_dim_vs_wildcard(decl_elem, body_elem, errors);
                 }
             }
         }

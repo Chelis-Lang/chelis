@@ -1136,13 +1136,30 @@ int main() {
     let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
     eprintln!("NaN probe output:\n{stdout}");
 
-    // Document that inconsistency exists — this is a real bug.
-    // NaN in pos=0 of AVX2 chunk propagates; NaN in pos=1 does NOT.
-    // The test PASSES to document the finding, but we print the inconsistency.
-    // A future fix should make this consistent (either always propagate or never).
-    println!("NaN probe output:\n{stdout}");
-    // We do NOT assert it passes — we assert it ran.
-    assert!(!stdout.is_empty(), "NaN probe produced no output");
+    // #172: `chelis_max_f32` now PROPAGATES NaN consistently, regardless of
+    // whether the NaN lands in an AVX2 lane or the scalar tail, matching
+    // `torch.max` (which returns NaN for any NaN-containing slice, at every
+    // position). Previously this probe only DOCUMENTED the position-dependent
+    // inconsistency (the SIMD max dropped NaN); it now ASSERTS the fixed,
+    // torch-aligned behavior: all three positions yield NaN, and the run
+    // reports CONSISTENT propagation.
+    assert!(
+        stdout.contains("max(NaN@pos0,  n=8): is_nan=1"),
+        "NaN at AVX2 lane 0 must propagate (#172); probe output:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("max(NaN@pos1,  n=8): is_nan=1"),
+        "NaN at AVX2 lane 1 must propagate (#172); probe output:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("max(NaN@tail,  n=9): is_nan=1"),
+        "NaN in the scalar tail must propagate (#172); probe output:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("CONSISTENT: propagation=1"),
+        "NaN propagation must be position-independent and always-propagate \
+         (#172 torch parity); probe output:\n{stdout}"
+    );
 }
 
 // ---- Test 9: chelis_simd.h compiles as C++ ----
