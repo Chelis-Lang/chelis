@@ -98,7 +98,7 @@ fn stamp(draft_path: &str, out_path: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `validate`: the independent every-build cross-check. Assert every committed
+/// `validate`: the independent Arb CI-lane cross-check. Assert every committed
 /// box's eps is `>=` the freshly Arb-certified sup-norm error.
 fn validate(env_path: &str) -> ExitCode {
     let env = match read_env(env_path) {
