@@ -81,7 +81,7 @@ is:
   "root_index": <goal.ir.root_index()>,
   "inputs": [{"name": "...", "lo": <f64>, "hi": <f64>}, ...],
   "output": {"output": "...", "lo": <f64>, "hi": <f64>},
-  "oracle": <bool|null>,
+  "oracle": <string|null>,
   "split_max_depth": null,
   "split_max_boxes": null
 }
@@ -98,6 +98,10 @@ INVARIANTS:
   This round-trips by construction (the store key IS the producer's hash); the
   recompute is defense-in-depth against store corruption / a wrong-keyed insert.
 - `inputs` / `output` are the goal's `IntervalBox` / `OutputRange` bounds.
+- `oracle` defaults to `null`, preserving the original #439 request contract.
+  The verified zonotope dispatch mode is opt-in and emits exactly
+  `"zonotope_verified"`; selecting it does not change the fail-closed
+  CheckReport mapping in §5.
 
 Byte-store-over-path is the Phase 2E choice; a byte-STORE on disk (rather than
 inline base64) is the documented future contract IF a request-size ceiling is

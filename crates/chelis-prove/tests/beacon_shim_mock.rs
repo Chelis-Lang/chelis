@@ -24,7 +24,8 @@ use chelis_prove::discharge::{
 };
 use chelis_prove::tier_b::TierBResult;
 use chelis_prove::{
-    BEACON_BIN_ENV, BeaconShim, DischargeEngine, RequestTransport, WireDagByteStore,
+    BEACON_BIN_ENV, BeaconOracleMode, BeaconShim, DischargeEngine, RequestTransport,
+    WireDagByteStore,
 };
 
 /// The compiled mock binary path (cargo sets this for integration tests).
@@ -527,11 +528,59 @@ fn request_carries_exact_base64_bytes_and_expected_hash() {
         "the decoded buffer's sha256 is the round-trip identity"
     );
     assert_eq!(
+        request.get("oracle"),
+        Some(&serde_json::Value::Null),
+        "default shim requests preserve the #439 `oracle: null` contract"
+    );
+    assert_eq!(
         request
             .get("output")
             .and_then(|o| o.get("output"))
             .and_then(|v| v.as_str()),
         Some("price")
+    );
+}
+
+#[test]
+fn verified_zonotope_mode_emits_exact_selector_string() {
+    let _g = with_scenario("echo_request");
+    let discharge = shim()
+        .with_oracle_mode(BeaconOracleMode::VerifiedZonotope)
+        .discharge(&box_goal(), FAST_TIMEOUT_MS);
+    let echoed = discharge
+        .evidence()
+        .get("stdout")
+        .and_then(|v| v.as_str())
+        .expect("echoed request is captured as the unparseable-report stdout");
+    let request: serde_json::Value =
+        serde_json::from_str(echoed).expect("the echoed request is valid JSON the shim sent");
+
+    assert_eq!(
+        request.get("oracle").and_then(|v| v.as_str()),
+        Some("zonotope_verified"),
+        "the dispatch selector is the underscore wire-contract spelling"
+    );
+    assert_eq!(
+        request.get("expected_dag_sha256").and_then(|v| v.as_str()),
+        Some(fake_dag_hash().as_str()),
+        "selector mode must not alter exact-byte identity"
+    );
+}
+
+#[test]
+fn verified_zonotope_mode_does_not_launder_unverified_proof() {
+    let _g = with_scenario("proved_oracle_unverified");
+    let discharge = shim()
+        .with_oracle_mode(BeaconOracleMode::VerifiedZonotope)
+        .discharge(&box_goal(), FAST_TIMEOUT_MS);
+    assert!(
+        matches!(discharge.result(), TierBResult::Error(_)),
+        "an unverified zonotope proof is not a Proved result"
+    );
+    assert_eq!(discharge.soundness(), Soundness::Untrusted);
+    assert!(
+        discharge.qualifier_set().is_empty(),
+        "verified-zonotope selector cannot launder oracle-unverified reports into proof qualifiers"
     );
 }
 
@@ -761,4 +810,48 @@ fn proved_with_absent_oracle_flag_stays_sound_approximate() {
             .qualifier_set()
             .contains(Qualifier::SoundOverApproximation)
     );
+}
+
+#[test]
+fn verified_zonotope_mode_does_not_launder_unverified_transport_or_invalid_reports() {
+    let cases = [
+        (
+            "proved_oracle_unverified",
+            "oracle-unverified",
+            FAST_TIMEOUT_MS,
+        ),
+        ("proved_oracle_false", "oracle-unverified", FAST_TIMEOUT_MS),
+        ("refuted_unverified", "oracle-unverified", FAST_TIMEOUT_MS),
+        ("refuted_no_flag", "oracle-unverified", FAST_TIMEOUT_MS),
+        ("nonzero_exit", "transport", FAST_TIMEOUT_MS),
+        ("hang", "transport", 500),
+        ("unparseable", "invalid", FAST_TIMEOUT_MS),
+    ];
+
+    for (scenario, class, timeout_ms) in cases {
+        let _g = with_scenario(scenario);
+        let discharge = shim()
+            .with_oracle_mode(BeaconOracleMode::VerifiedZonotope)
+            .discharge(&box_goal(), timeout_ms);
+        assert_eq!(
+            discharge.soundness(),
+            Soundness::Untrusted,
+            "{class} scenario `{scenario}` must not map to sound with zonotope_verified selected"
+        );
+        assert!(
+            discharge.qualifier_set().is_empty(),
+            "{class} scenario `{scenario}` must carry no soundness qualifier"
+        );
+        let verdict = base_verdict_from_discharge(discharge.soundness(), discharge.qualifier_set());
+        assert_ne!(
+            verdict,
+            CompositeVerdict::SoundApproximate,
+            "{class} scenario `{scenario}` must not project to sound_approximate"
+        );
+        assert_ne!(
+            verdict,
+            CompositeVerdict::Proven,
+            "{class} scenario `{scenario}` must not project to proven"
+        );
+    }
 }
