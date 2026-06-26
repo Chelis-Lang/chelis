@@ -1008,11 +1008,16 @@ and are locked by dedicated tests so a future change is a conscious one:
   guard's param-position scope.) Genuinely-mismatched *concrete*
   heads/tails still widen to `*` regardless of order (the ragged-axis
   arm).
-- **The uniformity check is single-level.** It compares the declared and
-  body element axes of one `List[tensor[..]]`; it does **not** recurse
-  into a nested element. A wildcard tensor under
-  `List[List[tensor[k, f32]]]` is *not* checked against the inner `k` and
-  currently type-checks.
+- **The uniformity check recurses through nested `List` wrappers**
+  (chelis#276). It compares the declared and body element axes of a
+  `List[tensor[..]]`, and when the element is itself a `List` it descends
+  into it, so an inner rigid/named dim under `List[List[tensor[k, f32]]]`
+  — at any nesting depth — is checked too. A wildcard tensor nested under
+  `List[List[tensor[k, f32]]]` is therefore rejected, the same as the
+  single-level `List[tensor[k, f32]]` case: `List[List[tensor[k]]]` still
+  promises every innermost element shares length `k`. (The earlier
+  single-level check left this same #272 soundness gap one `List`
+  deeper.)
 
 The enforcement is in `crates/chelis-types/src/infer.rs`
 (`infer_app`'s `Cons` join and `check_list_elem_rigid_dim_vs_wildcard`,

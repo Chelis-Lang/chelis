@@ -476,7 +476,6 @@ chelis-std 0.4.0 — there is no upstream NN fallback. Use these; do not reimple
 
 | Module | Key exports |
 |---|---|
-| `Std.Tensor.Reduce` | `min`, `prod`, `argmax`, `argmin` (axis-indexed) |
 | `Std.Tensor.Construct` | `linspace`, `arange`, `stack`, `squeeze`, `unsqueeze` |
 | `Std.Tensor.Mask` | `where_indices` |
 | `Std.Init.{Random,Xavier,Kaiming,XavierExt}` | `normal_like`, `kaiming_*`, `xavier_*`, `trunc_normal` (seeded, Box-Muller) |
@@ -486,6 +485,13 @@ chelis-std 0.4.0 — there is no upstream NN fallback. Use these; do not reimple
 | `Std.Io.{Csv,Json,Parquet,Safetensors}` | `read_csv`, `save_tensors`/`load_tensors`, … |
 | `Std.Test` | `assert_*`, `assert_close*`, `assert_shape`, `fail` |
 | `Std.Time`, `Std.Decimal`, `Std.Tokenizer`, `Std.Process`, `Std.Contracts` | dates, fixed-point, tokenization, `run`/`run_chelis`, contract predicates |
+
+`Std.Tensor.Reduce` was removed in chelis#333: its `min`/`prod`/`argmax`/`argmin`
+were bodyless sigs taking a *runtime* `int32` axis, but the `*_reduce` builtins they
+would forward to require a *compile-time-constant* axis, so they were unimplementable
+as declared and never had a runtime function. Call the builtins directly with a const
+axis instead: `min_reduce(x, cast(1, int32))`, `prod_reduce`, `argmax_reduce`,
+`argmin_reduce`.
 
 ---
 
