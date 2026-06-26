@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.11.1] — 2026-06-26
+
+### Added
+
+- **WI-13 Sollya+Gappa erf proof-term envelope (#533).** Machine-checkable
+  polynomial approximation of `erf` for the central arm (16 sub-interval
+  Gappa proofs + whole-box f64-Horner rounding proof) and Arb-certified
+  saturation tails. Unblocks transcendental finance property discharge.
+- **WI-14 Arb/FLINT rigorous erf-enclosure oracle** (`--features arb`).
+  Independent numerical cross-check of the committed envelope.
+- **Default-lane eps-backing gate.** The committed envelope `eps` is now
+  independently verified against `.gappa` goal lines in every default CI
+  run (no `--features arb` required). Closes the RT-WS7b proof-integrity
+  HIGH finding.
+- **Arb CI lane** in the SMT Feature Build job.
+
 ## [0.11.0] — 2026-06-26
 
 ### Removed
