@@ -47,3 +47,11 @@ crates/chelis-cli/pad_hip.h
 # Lean proof work-in-progress (tracked separately)
 proof/
 .venv
+HANDOVER.md
+libchelis_runtime.a
+bs_vec.c
+bs_vec.h
+const_vec.c
+const_vec.h
+chelis_runtime.h
+chelis_blas.h
