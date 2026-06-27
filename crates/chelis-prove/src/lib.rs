@@ -46,6 +46,7 @@ pub mod tier_b_lower;
 pub mod tier_c;
 pub mod transformation;
 pub mod transformation_harness;
+pub mod transformations;
 pub mod worker;
 // WI-12 (WS-5): the Z3 NRA DischargeEngine over GoalShape::Smt. Gated behind
 // the `z3` feature so it links Z3 only when asked; the default and smt builds
