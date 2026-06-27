@@ -44,6 +44,8 @@ pub mod tier_a;
 pub mod tier_b;
 pub mod tier_b_lower;
 pub mod tier_c;
+pub mod transformation;
+pub mod transformation_harness;
 pub mod worker;
 // WI-12 (WS-5): the Z3 NRA DischargeEngine over GoalShape::Smt. Gated behind
 // the `z3` feature so it links Z3 only when asked; the default and smt builds
@@ -110,4 +112,6 @@ pub use inlineability::{Fuzzability, Inlineability, classify_fuzzability, classi
 pub use tier_b::{
     AssumptionSatisfiability, SmtProperty, check_assumptions_satisfiable, solve_property,
 };
+pub use transformation::{Transformation, TransformationPipeline, TransformationRecord};
+pub use transformation_harness::{CorpusEntry, HarnessResult, harness_is_sound, run_harness};
 pub use worker::{enable_isolation, run_worker_if_requested};

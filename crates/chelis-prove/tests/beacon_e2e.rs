@@ -34,10 +34,7 @@ fn output_range(name: &str, lo: f64, hi: f64) -> OutputRange {
 /// Build a simple forward DAG: f(x) = x * x (scalar), then extract a BoxRange goal.
 /// x in [0,1], output in [0,1] but Beacon's interval arithmetic over-approximates
 /// so we use wider claimed ranges for provability.
-fn simple_square_goal(
-    output_lo: f64,
-    output_hi: f64,
-) -> chelis_prove::ExtractedGoal {
+fn simple_square_goal(output_lo: f64, output_hi: f64) -> chelis_prove::ExtractedGoal {
     let source = "x = (x : tensor[f32])\nout = (mul(x, x) : tensor[f32])\n";
     box_range_goal_from_source(
         source,
@@ -94,7 +91,10 @@ fn beacon_e2e_forward_goal_wrong_range_not_green() {
     // a wrong range. A verified refutation is still SoundApproximate (it's a
     // sound over-approximation that disproves containment), so check the result.
     assert!(
-        !matches!(discharge.result(), chelis_prove::tier_b::TierBResult::Proved),
+        !matches!(
+            discharge.result(),
+            chelis_prove::tier_b::TierBResult::Proved
+        ),
         "a wrong-range goal must NOT be Proved by Beacon, got {:?}",
         discharge
     );
