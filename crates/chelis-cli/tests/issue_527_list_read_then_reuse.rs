@@ -19,98 +19,10 @@
 //! tag-colliding identifier #343 began consume-tracking) — compiles
 //! the generated C, runs it, and checks the numeric output.
 
-use assert_cmd::Command;
-use std::fs;
-use std::path::Path;
-use std::process::Command as StdCommand;
-use tempfile::tempdir;
+#[path = "common/mod.rs"]
+mod common;
 
-fn generated_source_needs_blas(out_dir: &Path, source: &str) -> bool {
-    fs::read_to_string(out_dir.join(source))
-        .map(|text| text.contains("cblas_sgemm(") || text.contains("\"chelis_blas.h\""))
-        .unwrap_or(false)
-}
-
-/// Link the chelis-generated C against the platform host toolchain.
-/// Mirrors `link_generated` from `issue_218_numerical_correctness.rs`.
-fn link_generated(out_dir: &Path, source: &str, binary: &str) -> std::process::ExitStatus {
-    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
-        chelis_backend_c::toolchain::CodegenRequirements {
-            wants_openmp: true,
-            needs_blas: generated_source_needs_blas(out_dir, source),
-        },
-    );
-    let mut cmd = StdCommand::new(&toolchain.compiler);
-    cmd.current_dir(out_dir);
-    cmd.arg("-O2");
-    cmd.args(&toolchain.compile_flags);
-    cmd.arg(source);
-    cmd.args(["-L.", "-lchelis_runtime"]);
-    cmd.args(&toolchain.link_flags);
-    cmd.args(["-o", binary]);
-    cmd.status().expect("host compiler should run")
-}
-
-/// Parse a printed Chelis tensor of the form
-/// `name = tensor(shape=[..], data=[v0, v1, ...])` into its flat data.
-fn parse_tensor_data(stdout: &str, name: &str) -> Vec<f64> {
-    let prefix = format!("{name} = tensor(");
-    let line = stdout
-        .lines()
-        .find(|l| l.starts_with(&prefix))
-        .unwrap_or_else(|| panic!("output does not contain `{prefix}` line:\n{stdout}"));
-    let marker = "data=[";
-    let start = line.find(marker).expect("data marker") + marker.len();
-    let end = line[start..].find(']').expect("closing bracket");
-    line[start..start + end]
-        .split(',')
-        .map(|s| s.trim().parse::<f64>().expect("numeric"))
-        .collect()
-}
-
-fn gcc_available() -> bool {
-    StdCommand::new(chelis_backend_c::toolchain::c_compiler())
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn build_and_run(source: &str, name: &str) -> String {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join(format!("{name}.ch"));
-    let out_dir = dir.path().join(format!("{name}-out"));
-    fs::write(&path, source).expect("write source");
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args([
-            "build",
-            path.to_str().unwrap(),
-            "--target",
-            "c",
-            "--output",
-            out_dir.to_str().unwrap(),
-        ])
-        .assert()
-        .success();
-
-    let source_file = format!("{name}.c");
-    let status = link_generated(&out_dir, &source_file, name);
-    assert!(status.success(), "link failed: {status}");
-
-    let run = StdCommand::new(out_dir.join(name))
-        .output()
-        .expect("compiled binary should run");
-    assert!(
-        run.status.success(),
-        "binary failed: {}\nstderr: {}",
-        run.status,
-        String::from_utf8_lossy(&run.stderr),
-    );
-    String::from_utf8(run.stdout).expect("utf-8 stdout")
-}
+use common::{build_and_run, gcc_available, parse_tensor_data};
 
 /// Faithful replica of School's `adamw_step_list` + `adamw_step_walk`
 /// read-then-reuse shape: `len(params)` then a recursive
