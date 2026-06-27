@@ -55,6 +55,7 @@
 //!   away), so this introduces NO cvc5-named symbol into the default binary and
 //!   returns the byte-identical `TierBResult` the direct call returned.
 
+use crate::beacon_shim::{BeaconShim, WireDagByteStore};
 use crate::discharge::{Discharge, DischargeEngine, Goal, QualifierSet, Soundness};
 use crate::tier_b::TierBResult;
 
@@ -104,6 +105,18 @@ impl DischargeRegistry {
         #[cfg(not(feature = "smt"))]
         registry.register(Box::new(SolvePropertyEngine::new()));
         registry
+    }
+
+    /// Extend this registry with the Beacon subprocess shim, using the given
+    /// content-addressed byte store. The shim is registered only if a binary
+    /// is discoverable (explicit path or `CHELIS_BEACON_BIN` env). If no binary
+    /// is found, the registry is unchanged and BoxRange goals take the existing
+    /// no-fit path.
+    pub fn with_beacon(mut self, store: WireDagByteStore) -> Self {
+        if let Some(shim) = BeaconShim::from_env(store) {
+            self.register(Box::new(shim));
+        }
+        self
     }
 
     /// Register an engine. PUBLIC entry point for out-of-tree engines (the
