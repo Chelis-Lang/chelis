@@ -4,9 +4,9 @@
 //! content-addressed byte seam, and produces a deterministic hash.
 
 use chelis_compiler_api::schema::SourceKind;
-use chelis_prove::discharge::{IrHandle, IntervalBox, OutputRange};
-use chelis_prove::graph_extract::box_range_goal_from_source_entry;
 use chelis_prove::WireDagByteStore;
+use chelis_prove::discharge::{IntervalBox, IrHandle, OutputRange};
+use chelis_prove::graph_extract::box_range_goal_from_source_entry;
 use sha2::{Digest, Sha256};
 
 /// The vectorized BS pricer source (pure-tensor-DAG, no vmap/host ops).
@@ -74,7 +74,10 @@ fn bs_call_vec_is_wire_dag_root() {
         extracted.goal.ir.is_populated(),
         "IrHandle must be populated"
     );
-    assert!(!extracted.wire_dag_bytes.is_empty(), "WireDag bytes non-empty");
+    assert!(
+        !extracted.wire_dag_bytes.is_empty(),
+        "WireDag bytes non-empty"
+    );
     assert!(!extracted.dag_hash.is_empty(), "dag_hash non-empty");
     assert!(
         extracted
@@ -156,7 +159,10 @@ fn bs_call_vec_deterministic_hash() {
     .expect("run 2");
 
     assert_eq!(r1.dag_hash, r2.dag_hash, "hash must be deterministic");
-    assert_eq!(r1.wire_dag_bytes, r2.wire_dag_bytes, "bytes must be identical");
+    assert_eq!(
+        r1.wire_dag_bytes, r2.wire_dag_bytes,
+        "bytes must be identical"
+    );
 }
 
 /// No non-finite floats in the WireDag (content-address precondition).
