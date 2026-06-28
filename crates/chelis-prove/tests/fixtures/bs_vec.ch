@@ -8,26 +8,26 @@ export (bs_call_vec, bs_put_vec)
 
 -- Elementwise select: where mask=1 return a, else b
 -- mask is f32 (0.0 or 1.0 from cast(lt(...), f32))
-def sel[n](mask: &tensor[n, f32], a: tensor[n, f32], b: tensor[n, f32]) -> tensor[n, f32] = {
-  one = div(copy(mask), copy(mask))
+def sel[n](mask: &tensor[n, f32], a: tensor[n, f32], b: tensor[n, f32], half: &tensor[n, f32]) -> tensor[n, f32] = {
+  one = add(copy(half), copy(half))
   inv = sub(one, copy(mask))
   add(mul(copy(mask), a), mul(inv, b))
 }
 
 -- Elementwise abs via sign-fold mask
-def abs_v[n](x: &tensor[n, f32]) -> tensor[n, f32] = {
+def abs_v[n](x: &tensor[n, f32], half: &tensor[n, f32]) -> tensor[n, f32] = {
   zero = sub(copy(x), copy(x))
   mask = cast(lt(copy(x), zero), f32)
-  sel(&mask, neg(copy(x)), copy(x))
+  sel(&mask, neg(copy(x)), copy(x), half)
 }
 
 -- erf (Abramowitz-Stegun 7.1.26) with coefficients as parameters.
 -- a1..a5, p are the standard A-S constants; twosqrtpi = 2/sqrt(pi).
 -- small_thresh is the small-x guard threshold (1e-5).
-def erf_vec[n](x: &tensor[n, f32], a1: &tensor[n, f32], a2: &tensor[n, f32], a3: &tensor[n, f32], a4: &tensor[n, f32], a5: &tensor[n, f32], p: &tensor[n, f32], twosqrtpi: &tensor[n, f32], small_thresh: &tensor[n, f32]) -> tensor[n, f32] = {
-  one = div(copy(x), copy(x))
+def erf_vec[n](x: &tensor[n, f32], a1: &tensor[n, f32], a2: &tensor[n, f32], a3: &tensor[n, f32], a4: &tensor[n, f32], a5: &tensor[n, f32], p: &tensor[n, f32], twosqrtpi: &tensor[n, f32], small_thresh: &tensor[n, f32], half: &tensor[n, f32]) -> tensor[n, f32] = {
+  one = add(copy(half), copy(half))
   zero = sub(copy(x), copy(x))
-  ax = abs_v(x)
+  ax = abs_v(x, half)
   -- small-x linear: erf(x) ~ x * 2/sqrt(pi)
   small_result = mul(copy(x), copy(twosqrtpi))
   -- main polynomial
@@ -37,17 +37,17 @@ def erf_vec[n](x: &tensor[n, f32], a1: &tensor[n, f32], a2: &tensor[n, f32], a3:
   y_pos = sub(one, mul(poly, e))
   -- sign fold
   neg_mask = cast(lt(copy(x), zero), f32)
-  y_signed = sel(&neg_mask, neg(copy(&y_pos)), y_pos)
+  y_signed = sel(&neg_mask, neg(copy(&y_pos)), y_pos, half)
   -- small-x guard
   is_small = cast(lt(ax, copy(small_thresh)), f32)
-  sel(&is_small, small_result, y_signed)
+  sel(&is_small, small_result, y_signed, half)
 }
 
 -- Normal CDF: N(x) = 0.5 * (1 + erf(x / sqrt(2)))
 def n_cdf_vec[n](x: &tensor[n, f32], half: &tensor[n, f32], inv_sqrt2: &tensor[n, f32], a1: &tensor[n, f32], a2: &tensor[n, f32], a3: &tensor[n, f32], a4: &tensor[n, f32], a5: &tensor[n, f32], p: &tensor[n, f32], twosqrtpi: &tensor[n, f32], small_thresh: &tensor[n, f32]) -> tensor[n, f32] = {
-  one = div(copy(x), copy(x))
+  one = add(copy(half), copy(half))
   scaled = mul(copy(x), copy(inv_sqrt2))
-  erf_val = erf_vec(&scaled, a1, a2, a3, a4, a5, p, twosqrtpi, small_thresh)
+  erf_val = erf_vec(&scaled, a1, a2, a3, a4, a5, p, twosqrtpi, small_thresh, half)
   mul(copy(half), add(one, erf_val))
 }
 
