@@ -50,7 +50,7 @@ Status legend:
 | 2b | `cargo test -p chelis-types --test linearity` | `spec/design/chelis_phase2_plan.md` §2b Acceptance Gate | default gate |
 | 2c | `cargo test -p chelis-macros --test expansion` | `spec/design/chelis_phase2_plan.md` §2c Acceptance Gate | default gate |
 | 2d | `cargo test -p chelis-ir --test vmap` + `cargo test -p chelis-e2e --test spec_suite` + `cargo test -p chelis-e2e --test pipeline` | `spec/design/chelis_phase2_plan.md` §2d Acceptance Gate | default gate |
-| 2e | `cargo test -p chelis-tide --test api` | `spec/design/chelis_phase2_plan.md` §2e Acceptance Gate | default gate |
+| 2e | `cargo test -p chelis-tide --test api` + `cargo test -p chelis-tide --test mcp` | `spec/design/chelis_phase2_plan.md` §2e Acceptance Gate | default gate |
 | 2f | `cargo test -p chelis-lsp` plus a documented manual editor gate (open `.ch` in VS Code; observe live diagnostics, hover, Deep toggle) | `spec/design/chelis_phase2_plan.md` §2f Acceptance Gate | default gate (library) + manual gate (editor host) |
 | 2g | Manual: `cargo run -p chelis-cli -- cove --file examples/mnist.ch`; user (not developer) confirms live Deep + diagnostics + compile/eval inside the TUI | `spec/design/chelis_phase2_plan.md` §2g Acceptance Gate | manual gate |
 | 2s | Deferred to Phase 4a (per phase2 plan); no Phase 2 oracle | `spec/design/chelis_phase2_plan.md` §Deferred: Seed Corpus | aspirational (deferred) |
@@ -82,6 +82,7 @@ Status legend:
 
 | Campaign | Oracle command | Owning spec doc | Status |
 |---|---|---|---|
+| Deep substrate hardening | `cargo test -p chelis-tide --test mcp replace_function_body` + `cargo test -p chelis-tide --test api replace_function_body` + `cargo test -p chelis-types duplicate_defsig` + `cargo test -p chelis-validate duplicate_defsig` + `cargo test -p chelis-cli --test surf_round_trip` | `spec/design/chelis_agent_editing_surface.md` | default gate |
 | Compiler-vs-interpreter closure follow-up | `cargo test -p chelis-cli --test cli cross_function_seed_local_wrapper_uses_handler_seed_in_c_backend -- --exact` + `cargo test -p chelis-cli --test cli build_c_mnist_loss_tail_tensor_pipeline_compiles_object -- --exact` + `cargo test -p chelis-cli --test parity parity_mnist_library_only -- --exact --nocapture` (the `std_nn_build_acceptance cross_function_seed_stdlib` leg was removed with the ML-module cut to School, #331) | `spec/upstream-bugs/compiler-vs-interpreter-closure-2026-05-07.md` §Follow-up work | default gate |
 
 ## Phase A (Reef Distribution Unblock)

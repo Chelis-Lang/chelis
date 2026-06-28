@@ -1,6 +1,8 @@
 use chelis_tide::mcp::handle_message;
 use serde_json::json;
 
+mod replace_fixtures;
+
 const HELLO_TENSOR: &str = include_str!("../../../examples/hello_tensor.ch");
 const MATMUL_PROGRAM: &str = r#"a = (a : tensor[2, 3, f32])
 b = (b : tensor[3, 4, f32])
@@ -91,6 +93,34 @@ fn call_replace(arguments: serde_json::Value) -> serde_json::Value {
     .expect("replace_function_body response")
 }
 
+fn assert_replace_rejection(
+    module: &str,
+    new_body: &str,
+    expected_stage: &str,
+    expected_kind: &str,
+) {
+    let response = call_replace(json!({
+        "module": module,
+        "function_name": "passthrough",
+        "new_body": new_body,
+    }));
+    assert_eq!(
+        response["result"]["isError"], true,
+        "rejected replacement must set MCP isError: {}",
+        response["result"]["structuredContent"]
+    );
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["ok"], false);
+    assert_eq!(structured["stage"], expected_stage);
+    assert!(
+        structured.get("result").is_none(),
+        "failed replacements must not surface a replacement result: {structured}"
+    );
+    let errors = structured["errors"].as_array().expect("errors array");
+    assert!(!errors.is_empty());
+    assert_eq!(errors[0]["kind"], expected_kind);
+}
+
 /// Success case: replacing `gordon_pv`'s body with a well-typed expression
 /// returns the changed def and the rewritten module as canonical Deep. The
 /// returned `module_deep` is asserted to round-trip (parse_str_strict +
@@ -147,6 +177,35 @@ fn replace_function_body_accepts_well_typed_replacement() {
     assert!(
         check.errors.is_empty(),
         "full check of the rewritten module is clean: {:?}",
+        check.errors
+    );
+}
+
+#[test]
+fn replace_function_body_tensor_fixture_accepts_well_typed_replacement() {
+    let response = call_replace(json!({
+        "module": replace_fixtures::TENSOR_DEEP,
+        "function_name": "passthrough",
+        "new_body": replace_fixtures::TENSOR_WELL_TYPED_BODY,
+    }));
+    assert_eq!(
+        response["result"]["isError"], false,
+        "well-typed tensor replacement is not an error: {}",
+        response["result"]["structuredContent"]
+    );
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["ok"], true);
+    let module_deep = structured["result"]["module_deep"]
+        .as_str()
+        .expect("module_deep string");
+    let check = chelis_compiler_api::compiler::check(chelis_compiler_api::schema::CheckRequest {
+        source_kind: chelis_compiler_api::schema::SourceKind::Deep,
+        source: module_deep.to_string(),
+    })
+    .expect("full check after replacement");
+    assert!(
+        check.errors.is_empty(),
+        "replacement success must match full module check: {:?}",
         check.errors
     );
 }
@@ -292,6 +351,36 @@ fn replace_function_body_cross_def_base_case_drop_is_rejected() {
         elapsed < std::time::Duration::from_secs(30),
         "tool path returns promptly (the fitness pass precedes any wedging \
          whole-module inference), took {elapsed:?}"
+    );
+}
+
+#[test]
+fn replace_function_body_live_malformed_cast_body_is_parse_error() {
+    assert_replace_rejection(
+        replace_fixtures::TENSOR_DEEP,
+        replace_fixtures::LIVE_MALFORMED_CAST_BODY,
+        "replace",
+        "deep_parse_error",
+    );
+}
+
+#[test]
+fn replace_function_body_effecting_body_is_effect_error() {
+    assert_replace_rejection(
+        replace_fixtures::TENSOR_DEEP,
+        replace_fixtures::TENSOR_EFFECTING_BODY,
+        "effects",
+        "effect_error",
+    );
+}
+
+#[test]
+fn replace_function_body_linearity_body_is_linearity_error() {
+    assert_replace_rejection(
+        replace_fixtures::TENSOR_DEEP,
+        replace_fixtures::TENSOR_LINEARITY_BODY,
+        "linearity",
+        "linearity_error",
     );
 }
 
@@ -467,6 +556,18 @@ fn each_tool_dispatches_successfully() {
         }))
         .expect("tool response");
         assert_eq!(response["result"]["isError"], false, "tool {name}");
+        if name == "chelis_decompile" {
+            let surf_text = response["result"]["structuredContent"]["result"]["surf_text"]
+                .as_str()
+                .expect("decompile surf_text");
+            let reparsed =
+                chelis_surf::parser::parse_str(surf_text).expect("MCP decompile returns Surf");
+            assert_eq!(
+                chelis_surf::format::format_program(&reparsed),
+                surf_text,
+                "MCP decompile returns formatter-canonical Surf"
+            );
+        }
     }
 }
 

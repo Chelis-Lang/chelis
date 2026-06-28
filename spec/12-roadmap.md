@@ -172,20 +172,22 @@ orthogonal to Phase 5c (RISC DAG → Triton IR backend, which emits
 whole-program tensor IR to Triton). The two operate at different layers
 and do not conflate.
 
-## Exploratory: Agent Editing Surface
+## Agent Editing Surface
 
-**Status:** Exploratory. One bounded proof-of-concept tool, then evaluate.
-Detailed design in `spec/design/chelis_agent_editing_surface.md`.
+**Status:** L0 shipped in v0.11.1 and hardening. Detailed design and oracle:
+`spec/design/chelis_agent_editing_surface.md`.
 
 The agent-first design of Chelis (small Deep vocabulary, fast compiler with
-fitness-oracle output, dual Surf/Deep syntax) suggests structural editing
-primitives could be more reliable than text-based file editing for AI
-coding agents. This direction explores whether that hypothesis holds
-empirically with one bounded proof-of-concept tool
-(`chelis_replace_body`), followed by a comparative benchmark. The full
-toolset (`chelis_define`, `chelis_change_signature`, `chelis_rename`,
-transactions) is gated on those two items succeeding.
+fitness-oracle output, dual Surf/Deep syntax) supports structural editing
+primitives that operate on Deep ASTs rather than text patches. The current
+tool is `chelis_replace_function_body` on Tide MCP and HTTP. It returns a
+rewritten module only after the post-splice whole-module check is clean; parse,
+splice, type, effect, and linearity failures are structured rejections.
 
-Independent of the language phases and of the trust-stack/reef tracks
-above. Rides on top of shipped Tide MCP infrastructure and the in-flight
-span survival work.
+The next capability frontier is replace-whole-function, add-function, and
+add-property tooling. Those tools are not shipped yet and need their own
+oracles before any implementation claims land.
+
+Independent of the language phases and of the trust-stack/reef tracks above.
+Rides on top of shipped Tide MCP infrastructure. L2 deep-path provenance
+remains blocked on span-survival work.

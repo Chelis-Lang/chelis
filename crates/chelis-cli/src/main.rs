@@ -796,6 +796,11 @@ fn cmd_surf(file: &Path, verbose: bool) -> Result<(), Box<dyn std::error::Error>
             &options,
             synthetic_name,
         );
+        let surf = if verbose {
+            surf
+        } else {
+            canonicalize_decompiled_surf(&surf)?
+        };
         print!("{surf}");
     } else {
         // For .ch files, round-trip through deep and back
@@ -806,9 +811,20 @@ fn cmd_surf(file: &Path, verbose: bool) -> Result<(), Box<dyn std::error::Error>
             &options,
             synthetic_name,
         );
+        let surf = if verbose {
+            surf
+        } else {
+            canonicalize_decompiled_surf(&surf)?
+        };
         print!("{surf}");
     }
     Ok(())
+}
+
+fn canonicalize_decompiled_surf(surf: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let decls = chelis_surf::parser::parse_str(surf)
+        .map_err(|err| format!("decompiler emitted Surf that the parser rejected: {err}"))?;
+    Ok(chelis_surf::format::format_program(&decls))
 }
 
 fn cmd_fmt(file: &Path, inplace: bool, check: bool) -> Result<(), Box<dyn std::error::Error>> {

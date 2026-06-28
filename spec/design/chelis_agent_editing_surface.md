@@ -1,15 +1,16 @@
-# Agent Editing Surface (Exploratory)
+# Agent Editing Surface
 
-**Status:** Exploratory. One bounded proof-of-concept tool, followed by a
-comparative benchmark. Expansion to a full toolset is gated on those two
-items demonstrating value.
+**Status:** L0 shipped in v0.11.1 and hardening. The shipped tool is
+`chelis_replace_function_body` on the Tide MCP and HTTP surfaces. It is the
+only current structural editing tool; expansion to a broader toolset remains
+future work.
 
 **Owning surface:** Tide (MCP tool layer). Operates on Deep AST in
 `chelis-deep`. Validates via the existing compiler API.
 
 **Cross-references:**
 
-- `spec/12-roadmap.md` — exploratory section pointer
+- `spec/12-roadmap.md` — agent editing surface pointer
 - `spec/design/chelis_trust_stack.md` — Trust Stack Implications for Editing Tools
 - `spec/design/chelis_canonical_reference.md` §4 (Deep), §12 (AI Coding Assistance) — architectural framing
 - `spec/03-deep-syntax.md` §1.3 — Deep as an editing target
@@ -29,101 +30,87 @@ beyond character matching.
 Chelis's architectural properties (small Deep vocabulary, fast compiler with
 structured fitness output, dual Surf/Deep syntax, agent-first design) suggest
 structural editing primitives could be more reliable than text-based editing.
-This direction explores whether that hypothesis holds empirically with one
-bounded proof-of-concept tool.
+The L0 replacement tool establishes the first trust boundary: an agent may ask
+for a Deep function body splice, but success is reported only after the
+rewritten whole module validates through the compiler-owned checks.
 
 The architectural foundation is real: Deep is a 62-tag closed vocabulary
 with 3-tuple uniformity and a metadata slot for provenance. Structural
 operations on that substrate (replace a function body, rename a symbol,
 change a signature) are well-defined in a way they are not on plain text.
 Whether that translates to measurably better edit success rates for AI
-agents is the empirical question this direction sets out to answer.
+agents is the reason this surface exists. The shipped measurement path is
+downstream usage by authoring campaigns that consume the tool; this spec does
+not require a text-vs-Deep benchmark before further hardening work.
 
 ---
 
-## Item 1: `chelis_replace_body` proof-of-concept
+## L0: `chelis_replace_function_body`
 
-The simplest workhorse structural edit. Operates on Deep AST: take a function
-name and a new body, produce a new file state with that function's body
-replaced. Compiler validates the result and returns fitness + diagnostics.
+The first workhorse structural edit. It operates on Deep AST strings: take a
+module, a function name, and a new Deep body expression; return the rewritten
+module only if the post-splice whole-module check is clean.
 
 **Scope:**
 
-- New Tide MCP tool: `chelis_replace_body(file, name, new_body)` returning
-  `{file_state, fitness, diagnostics}`
-- Operates on Deep AST in `chelis-deep`, not on text
-- Uses existing compiler API for validation (already exposed via Tide)
-- Surf rendering of the result for human-readable diff display
+- Tide MCP tool: `chelis_replace_function_body`
+- Tide HTTP endpoint: `/replace_function_body`
+- Request shape: `{module, function_name, new_body}`, all strings
+- `module` and `new_body` are Deep; `new_body` must parse to exactly one Deep
+  expression
+- Success shape: `{changed_def_deep, module_deep}`, both canonical Deep
+- Failure shape: the normal Tide structured error envelope with `ok:false`,
+  `stage`, and typed diagnostics
+- No file I/O and no persisted state; callers own applying returned text
+- No Surf edit surface; Surf rendering remains separate CLI/API behavior
 
-**Effort:** ~1 week of focused work after the dependencies (compiler API
-surface for body-replacement, Surf rendering of partial Deep changes) are
-exposed. The dependencies themselves may add scope.
+**Soundness rule:** `ok:true` is written only when the post-splice
+whole-module check is clean. Internal parse, splice, type, effect, or
+linearity failures are hard rejections: `ok:false`, no replacement result, and
+the diagnostic for the rejecting stage is surfaced.
 
-**Acceptance oracle:** Tool replaces a function body in a Chelis file,
-returns the new state, fitness and diagnostics match what `chelis check`
-would produce on the new file.
+**Acceptance oracle:** `cargo test -p chelis-tide --test mcp
+replace_function_body` and `cargo test -p chelis-tide --test api
+replace_function_body` exercise success, malformed-body rejection, type
+rejection, effect rejection, linearity rejection, name-resolution rejection,
+and the no-result-on-failure envelope over the shipped wire surfaces.
 
-**Value:** Demonstrates the structural-editing-tool category. If it works
-and shows measurably better edit success rates than text-based editing on
-equivalent tasks, it justifies expanding to the full toolset.
-
----
-
-## Item 2: Comparative benchmark
-
-To validate the structural-editing hypothesis empirically, run a benchmark:
-
-- Corpus of editing tasks (function body replacement, signature change,
-  rename, etc.)
-- Compare success rates across:
-  - Generic `str_replace` on Python
-  - Generic `str_replace` on Chelis
-  - Structural Chelis tools (after Item 1 ships)
-
-The expected result is structural tools winning decisively on success rate
-even though models have less Chelis familiarity. This anchors the
-structural-tool advantage against an industrial baseline.
-
-**Effort:** Benchmark design and execution: ~1 week.
-
-**Acceptance oracle:** Benchmark numbers published with methodology;
-structural-tool advantage measured.
-
-**Value:** Provides empirical grounding for the structural-editing claim.
-Either confirms the direction is worth investing in further, or surfaces
-the actual magnitude of the advantage.
+**Value:** Gives authoring agents one compiler-owned edit primitive whose
+success verdict is tied to the same whole-module checks users trust elsewhere
+in the CLI/API.
 
 ---
 
-## Item 3 onward: full toolset (gated on Items 1-2 succeeding)
+## Substrate hardening
 
-If Items 1 and 2 demonstrate the structural-editing advantage, the full
-toolset becomes worth building:
+The L0 tool sits on language and compiler invariants that must fail closed:
 
-- `chelis_define(file, definition_block)` — adds a function
-- `chelis_change_signature(name, new_sig)` — modifies signature, cascades
-  to callers automatically using the compiler's call graph
-- `chelis_rename(symbol, new_name)` — updates every reference, fails on
-  collision
-- `chelis_property_check(file, function)` — runs `chelis prove` on the
-  function, requires `@property` upstream first
-- `chelis_view(file, mode="surf"|"deep")` — rendering for human or agent
-- Transactional grouping (`begin/commit/abort`) for multi-step refactors
+- Duplicate `defsig` declarations for the same function are rejected. Chelis
+  does not dispatch user functions by arity, type, or rank; the valid same-name
+  pair is exactly one `defsig` plus one `def`.
+- The Tide MCP and HTTP envelopes are locked for parse/type/effect/linearity
+  failures so model-facing clients can branch on `stage` and diagnostic
+  `kind`.
+- Default `chelis surf` output is formatter-canonical before it is returned.
+  If idiomatic decompile output cannot parse or format, that is a
+  decompiler-vs-formatter divergence to fix, not a documentation fallback.
 
-**Effort:** Each tool is ~1-2 weeks of focused work. The transactional
-layer is ~2 weeks on top of individual tools.
-
-**Status:** Gated on Items 1-2 succeeding. Don't start building speculatively.
+**Acceptance oracle:** see `docs/phase_oracles.md` for the Deep substrate
+hardening campaign row.
 
 ---
 
-## Item 4: Deferred — comparative paper / external positioning
+## Next capability frontier
 
-If the empirical benchmark from Item 2 produces strong results, this
-direction has external positioning value (research paper on structural
-editing reliability, technical blog post, demo for evaluations). External
-positioning work is not part of OSS technical priorities; it's a separate
-non-repo channel.
+After L0 hardening, the next structural-edit increment is a small set of
+high-leverage authoring tools:
+
+- replace a whole function
+- add a function
+- add a property
+
+Those tools are not shipped by v0.11.1. They must each get an owning oracle
+before implementation claims land in active docs.
 
 ---
 
@@ -133,8 +120,9 @@ non-repo channel.
 - **Compiler call graph as a queryable surface** — probably exists internally,
   not yet exposed. Required for `chelis_change_signature` and `chelis_rename`
   cascade behavior.
-- **Surf rendering of arbitrary Deep changes** — high-quality enough for human
-  diff review; separate work, may need refinement.
+- **Surf rendering of arbitrary Deep changes** — default `chelis surf` output
+  is canonical for the supported round-trip path; richer diff display remains
+  separate work.
 - **`@property` upstream** — required for `chelis_property_check`.
 - **Span survival** (`spec/design/chelis_span_survival.md`) — required for
   cross-tool provenance in diff display once edits propagate through the
@@ -161,22 +149,10 @@ non-repo channel.
 
 ## Status framing discipline
 
-This direction is exploratory. Until Item 1 ships and Item 2 produces
-empirical results:
-
-- No doc anywhere claims structural editing tools as a current capability.
-- No doc claims category-defining novelty for the structural-editing
-  approach. The substrate-vs-model framing is correct internally but
-  remains overclaim until empirical evidence backs it.
-- Skill files (`AGENTS.md` / `CLAUDE.md`, `.cursorrules`, `agent-skills/`) and Tide MCP
-  tool docs are NOT updated to mention structural tools — those updates
-  land when tools ship, not before.
-- The full toolset (Items 3+) is named for design completeness, not
-  committed for build. Adding `chelis_define`, `chelis_rename`, etc. to
-  the canonical reference as planned features before Item 1 ships
-  overcommits to a direction that hasn't been validated.
-
-If the proof-of-concept succeeds, the docs already have the framing in
-place to expand to the full toolset. If it doesn't, the docs cleanly
-contain the exploration without misleading future readers about what was
-actually built.
+- Docs may claim only `chelis_replace_function_body` as shipped.
+- Docs may claim whole-module validation only for builds that enforce the
+  soundness rule and pass the wire-surface oracle above.
+- Future tools must remain explicitly future until their implementation and
+  oracle land in the same change set.
+- No doc should imply that downstream authoring campaigns, skeleton design,
+  ABI reconciliation, or model-field design are owned by this surface.

@@ -8,6 +8,8 @@ use serde_json::{Value, json};
 use tempfile::tempdir;
 use tower::ServiceExt;
 
+mod replace_fixtures;
+
 const HELLO_TENSOR: &str = include_str!("../../../examples/hello_tensor.ch");
 const MATMUL_PROGRAM: &str = r#"a = (a : tensor[2, 3, f32])
 b = (b : tensor[3, 4, f32])
@@ -575,16 +577,99 @@ async fn decompile_endpoint_round_trips_and_rejects_bad_deep() {
 
     let (_, ok) = post_json(router(), "/decompile", json!({"source":deep_text})).await;
     assert!(ok["ok"].as_bool().unwrap());
-    assert!(
-        ok["result"]["surf_text"]
-            .as_str()
-            .unwrap()
-            .contains("def main")
+    let surf_text = ok["result"]["surf_text"].as_str().unwrap();
+    assert!(surf_text.contains("def main"));
+    let reparsed = chelis_surf::parser::parse_str(surf_text)
+        .expect("decompile endpoint returns parseable Surf");
+    assert_eq!(
+        chelis_surf::format::format_program(&reparsed),
+        surf_text,
+        "decompile endpoint returns formatter-canonical Surf"
     );
 
     let (_, bad) = post_json(router(), "/decompile", json!({"source":"(def {}"})).await;
     assert!(!bad["ok"].as_bool().unwrap());
     assert_eq!(bad["stage"], "parse");
+}
+
+#[tokio::test]
+async fn replace_function_body_endpoint_accepts_well_typed_replacement() {
+    let (status, ok) = post_json(
+        router(),
+        "/replace_function_body",
+        json!({
+            "module": replace_fixtures::TENSOR_DEEP,
+            "function_name": "passthrough",
+            "new_body": replace_fixtures::TENSOR_WELL_TYPED_BODY,
+        }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(ok["ok"].as_bool().unwrap(), "replacement should pass: {ok}");
+    let module_deep = ok["result"]["module_deep"]
+        .as_str()
+        .expect("module_deep string");
+    let reparsed =
+        chelis_deep::parser::parse_str_strict(module_deep).expect("module_deep reparses");
+    assert_eq!(
+        chelis_deep::printer::print_canonical(&reparsed),
+        module_deep
+    );
+    let check = chelis_compiler_api::compiler::check(chelis_compiler_api::schema::CheckRequest {
+        source_kind: chelis_compiler_api::schema::SourceKind::Deep,
+        source: module_deep.to_string(),
+    })
+    .expect("rewritten module checks");
+    assert!(check.errors.is_empty(), "rewritten module is clean");
+}
+
+async fn assert_http_replace_rejection(new_body: &str, expected_stage: &str, expected_kind: &str) {
+    let (status, bad) = post_json(
+        router(),
+        "/replace_function_body",
+        json!({
+            "module": replace_fixtures::TENSOR_DEEP,
+            "function_name": "passthrough",
+            "new_body": new_body,
+        }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(bad["ok"], false, "replacement should reject: {bad}");
+    assert_eq!(bad["stage"], expected_stage);
+    assert!(
+        bad.get("result").is_none(),
+        "failed replacement must not include result: {bad}"
+    );
+    let errors = bad["errors"].as_array().expect("errors array");
+    assert!(!errors.is_empty());
+    assert_eq!(errors[0]["kind"], expected_kind);
+}
+
+#[tokio::test]
+async fn replace_function_body_endpoint_rejects_malformed_cast_body() {
+    assert_http_replace_rejection(
+        replace_fixtures::LIVE_MALFORMED_CAST_BODY,
+        "replace",
+        "deep_parse_error",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn replace_function_body_endpoint_locks_effect_and_linearity_envelopes() {
+    assert_http_replace_rejection(
+        replace_fixtures::TENSOR_EFFECTING_BODY,
+        "effects",
+        "effect_error",
+    )
+    .await;
+    assert_http_replace_rejection(
+        replace_fixtures::TENSOR_LINEARITY_BODY,
+        "linearity",
+        "linearity_error",
+    )
+    .await;
 }
 
 #[tokio::test]
