@@ -1,0 +1,178 @@
+[
+  {
+    "name": "put_call_parity_reflection",
+    "shell": "shoals",
+    "label": "Shoals composites",
+    "source_file": "/home/jeff/Documents/scratch/shoals/properties/composites.ch",
+    "composite_verdict": "proven_modulo_fuzz_validated_contract",
+    "status": "passed",
+    "coverage_bucket": "proved",
+    "reason": null,
+    "goal_expr": "forall(s: f32, k: f32, d1: f32, d2: f32, disc: f32) where (s >= 0.0), (k >= 0.0), (disc >= 0.0), (disc <= 1.0): ((((s * pkg__chelis__std__Std__Contracts__normal_cdf(d1)) - (k * (disc * pkg__chelis__std__Std__Contracts__normal_cdf(d2)))) - ((k * (disc * pkg__chelis__std__Std__Contracts__normal_cdf(neg(d2)))) - (s * pkg__chelis__std__Std__Contracts__normal_cdf(neg(d1))))) == (s - (k * disc)))",
+    "qualifiers": [
+      "real_arithmetic",
+      "fuzz"
+    ],
+    "actual_tier": null
+  },
+  {
+    "name": "call_upper_bounded_by_spot",
+    "shell": "shoals",
+    "label": "Shoals composites",
+    "source_file": "/home/jeff/Documents/scratch/shoals/properties/composites.ch",
+    "composite_verdict": "proven_modulo_fuzz_validated_contract",
+    "status": "passed",
+    "coverage_bucket": "proved",
+    "reason": null,
+    "goal_expr": "forall(s: f32, k: f32, d1: f32, d2: f32, disc: f32) where (s >= 0.0), (k >= 0.0), (disc >= 0.0), (disc <= 1.0): (((s * pkg__chelis__std__Std__Contracts__normal_cdf(d1)) - (k * (disc * pkg__chelis__std__Std__Contracts__normal_cdf(d2)))) <= s)",
+    "qualifiers": [
+      "real_arithmetic",
+      "fuzz"
+    ],
+    "actual_tier": null
+  },
+  {
+    "name": "delta_in_unit_interval",
+    "shell": "shoals",
+    "label": "Shoals composites",
+    "source_file": "/home/jeff/Documents/scratch/shoals/properties/composites.ch",
+    "composite_verdict": "proven_modulo_fuzz_validated_contract",
+    "status": "passed",
+    "coverage_bucket": "proved",
+    "reason": null,
+    "goal_expr": "((pkg__chelis__std__Std__Contracts__normal_cdf(d1) >= 0.0) && (pkg__chelis__std__Std__Contracts__normal_cdf(d1) <= 1.0))",
+    "qualifiers": [
+      "real_arithmetic",
+      "fuzz"
+    ],
+    "actual_tier": null
+  },
+  {
+    "name": "put_call_parity_corrupted",
+    "shell": "shoals",
+    "label": "Shoals composites",
+    "source_file": "/home/jeff/Documents/scratch/shoals/properties/composites.ch",
+    "composite_verdict": "disproved_modulo_real_arithmetic",
+    "status": "failed",
+    "coverage_bucket": "disproved",
+    "reason": null,
+    "goal_expr": "forall(s: f32, k: f32, d1: f32, d2: f32, disc: f32) where (s >= 0.0), (k >= 0.0), (disc >= 0.0), (disc <= 1.0): ((((s * pkg__chelis__std__Std__Contracts__normal_cdf(d1)) - (k * (disc * pkg__chelis__std__Std__Contracts__normal_cdf(d2)))) - ((k * (disc * pkg__chelis__std__Std__Contracts__normal_cdf(neg(d2)))) - ((2.0 * s) * pkg__chelis__std__Std__Contracts__normal_cdf(neg(d1))))) == (s - (k * disc)))",
+    "qualifiers": [
+      "real_arithmetic"
+    ],
+    "actual_tier": "smt"
+  },
+  {
+    "name": "delta_unknown_contract",
+    "shell": "shoals",
+    "label": "Shoals composites",
+    "source_file": "/home/jeff/Documents/scratch/shoals/properties/composites.ch",
+    "composite_verdict": "unsupported",
+    "status": "unsupported",
+    "coverage_bucket": "fuzz_engine_failed",
+    "reason": "unknown contract `std.normal_cdf.not_a_contract`",
+    "goal_expr": "((pkg__chelis__std__Std__Contracts__normal_cdf(d1) >= 0.0) && (pkg__chelis__std__Std__Contracts__normal_cdf(d1) <= 1.0))",
+    "qualifiers": [],
+    "actual_tier": "none"
+  },
+  {
+    "name": "prob_value_in_unit_interval",
+    "shell": "chelis",
+    "label": "chelis opaque_invariants",
+    "source_file": "/home/jeff/Documents/scratch/chelis-tooling/examples/opaque_invariants.ch",
+    "composite_verdict": "fuzz_validated",
+    "status": "passed",
+    "coverage_bucket": "fuzz_unsupported",
+    "reason": "passed",
+    "goal_expr": "((prob_value(p) >= 0.0) && (prob_value(p) <= 1.0))",
+    "qualifiers": [
+      "fuzz",
+      "fuzz_base"
+    ],
+    "actual_tier": null
+  },
+  {
+    "name": "simplex_binder_is_generated",
+    "shell": "chelis",
+    "label": "chelis opaque_invariants_simplex",
+    "source_file": "/home/jeff/Documents/scratch/chelis-tooling/examples/opaque_invariants_simplex.ch",
+    "composite_verdict": "fuzz_validated",
+    "status": "passed",
+    "coverage_bucket": "fuzz_unsupported",
+    "reason": "passed",
+    "goal_expr": "true",
+    "qualifiers": [
+      "fuzz",
+      "fuzz_base"
+    ],
+    "actual_tier": null
+  },
+  {
+    "name": "too_strong",
+    "shell": "chelis",
+    "label": "chelis corpus/prove_inject_false_fails",
+    "source_file": "/home/jeff/Documents/scratch/chelis-tooling/tests/corpus/opaque_invariants/programs/prove_inject_false_fails.ch",
+    "composite_verdict": "failed",
+    "status": "failed",
+    "coverage_bucket": "fuzz_engine_failed",
+    "reason": "fell to fuzz",
+    "goal_expr": "(prob_value(p) <= 0.5)",
+    "qualifiers": [],
+    "actual_tier": "fuzz"
+  },
+  {
+    "name": "tok_bounded",
+    "shell": "chelis",
+    "label": "chelis corpus/prove_inject_free_not_injected",
+    "source_file": "/home/jeff/Documents/scratch/chelis-tooling/tests/corpus/opaque_invariants/programs/prove_inject_free_not_injected.ch",
+    "composite_verdict": "unsupported",
+    "status": "unsupported",
+    "coverage_bucket": "fuzz_shape",
+    "reason": "t: type is not supported in L2 v1",
+    "goal_expr": "(token_value(t) <= 1.0)",
+    "qualifiers": [],
+    "actual_tier": "none"
+  },
+  {
+    "name": "bounded",
+    "shell": "chelis",
+    "label": "chelis corpus/prove_inject_pass",
+    "source_file": "/home/jeff/Documents/scratch/chelis-tooling/tests/corpus/opaque_invariants/programs/prove_inject_pass.ch",
+    "composite_verdict": "fuzz_validated",
+    "status": "passed",
+    "coverage_bucket": "fuzz_unsupported",
+    "reason": "passed",
+    "goal_expr": "(prob_value(p) <= 1.0)",
+    "qualifiers": [
+      "fuzz",
+      "fuzz_base"
+    ],
+    "actual_tier": null
+  },
+  {
+    "name": "always",
+    "shell": "chelis",
+    "label": "chelis corpus/prove_starve_exact_eq",
+    "source_file": "/home/jeff/Documents/scratch/chelis-tooling/tests/corpus/opaque_invariants/programs/prove_starve_exact_eq.ch",
+    "composite_verdict": "unsupported",
+    "status": "unsupported",
+    "coverage_bucket": "fuzz_unsupported",
+    "reason": "generator starvation for opaque type `Exact`: rejection sampling accepted 0/300 (0.0000), constructor-based generation accepted 0/0 (0.0000, 0 distinct), both below the floor 0.0100; predicate shape `equality-atoms`; recommended route: Tier B (real semantics): exact float `==` starves both fuzz tiers by design; use a tolerance band over a module constant",
+    "goal_expr": "(exact_value(p) >= 0.0)",
+    "qualifiers": [],
+    "actual_tier": "none"
+  },
+  {
+    "name": "always",
+    "shell": "chelis",
+    "label": "chelis corpus/prove_starve_min_rate_zero",
+    "source_file": "/home/jeff/Documents/scratch/chelis-tooling/tests/corpus/opaque_invariants/programs/prove_starve_min_rate_zero.ch",
+    "composite_verdict": "unsupported",
+    "status": "unsupported",
+    "coverage_bucket": "fuzz_unsupported",
+    "reason": "generator starvation for opaque type `Exact`: rejection sampling accepted 0/300 (0.0000), constructor-based generation accepted 0/0 (0.0000, 0 distinct), both below the floor 0.0100; predicate shape `equality-atoms`; recommended route: Tier B (real semantics): exact float `==` starves both fuzz tiers by design; use a tolerance band over a module constant",
+    "goal_expr": "(exact_value(p) >= 0.0)",
+    "qualifiers": [],
+    "actual_tier": "none"
+  }
+]
