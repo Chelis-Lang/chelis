@@ -380,7 +380,7 @@ sig avgpool1d: tensor[n, f32] -> tensor[m, f32]\n\
 def avgpool1d(x) = {\n\
   n = cast(shape(x, cast(0, int32)), int64)\n\
   if gt(cast(2, int64), n) then fail(\"kernel exceeds input length\") else {\n\
-    m = add(div(sub(n, cast(2, int64)), cast(2, int64)), cast(1, int64))\n\
+    m = add(floor_div(sub(n, cast(2, int64)), cast(2, int64)), cast(1, int64))\n\
     rows = [window_row(&x, m, cast(0, int64)), window_row(&x, m, cast(1, int64))]\n\
     mean(concat(rows, cast(0, int32)), cast(0, int32))\n\
   }\n\
