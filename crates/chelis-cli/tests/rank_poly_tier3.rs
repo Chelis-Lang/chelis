@@ -155,16 +155,89 @@ fn mean_is_name_tracked() {
     assert_clean(&json, "mean name-tracked in a ..r body");
 }
 
-/// `max_reduce`/`min_reduce`/`prod_reduce` are NOT yet admitted in a `..r` body:
-/// they route through the host lane in a rank-poly inline and don't compile
-/// (chelis#340), so they are rejected at check time to keep check↔backend in
-/// sync (a check-clean program must build). They remain usable at concrete rank.
+/// chelis#340: the whole named-axis reduction family
+/// (`max_reduce`/`min_reduce`/`prod_reduce`/`argmax_reduce`/`argmin_reduce`)
+/// is now name-tracked in a `..r` body, exactly like `sum`/`mean`. Each
+/// routes through the tensor-DAG kernel lane (the host-type inference in
+/// `chelis-ir::host` types the call as a tensor so the wrapper extracts a
+/// `__tensor_` helper instead of falling through to the host-emit
+/// "unsupported builtin" path), so a `chelis check`-clean program builds.
+/// This pins the check side; `max_reduce_family_builds_runs_in_rank_poly_body`
+/// is the build+run eval-vs-C oracle that the host-lane gap is closed.
 #[test]
-fn max_reduce_in_rank_poly_body_rejected() {
-    let json = check_json(
-        "def m(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = max_reduce(x, seq)\n",
-    );
-    assert_rejected_with(&json, "name-trackable", "max_reduce in a ..r body");
+fn max_reduce_family_name_tracked_in_rank_poly_body() {
+    for op in ["max_reduce", "min_reduce", "prod_reduce"] {
+        let json = check_json(&format!(
+            "def m(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = {op}(x, seq)\n",
+        ));
+        assert_clean(&json, &format!("{op} name-tracked in a ..r body"));
+    }
+    // argmax/argmin return an int64 index tensor.
+    for op in ["argmax_reduce", "argmin_reduce"] {
+        let json = check_json(&format!(
+            "def m(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, int64] = {op}(x, seq)\n",
+        ));
+        assert_clean(&json, &format!("{op} name-tracked in a ..r body"));
+    }
+}
+
+/// chelis#340 build+run oracle (the converted ex-rejection test): the issue's
+/// `reduce_seq`/`r3` program with `max_reduce`/`min_reduce`/`prod_reduce`/
+/// `argmax_reduce`/`argmin_reduce` in a rank-poly body builds, compiles, runs,
+/// and the C backend agrees with the `chelis eval` oracle value-for-value.
+/// Before the fix these emitted non-compiling C via the host scalar lane
+/// (`/* unsupported builtin max_reduce */ 0`, with the axis name `seq` leaking
+/// as a bare identifier). Operands are NON-SQUARE (batch=2, seq=2, hidden=3 →
+/// every distinct axis size) per the #258 red-team finding that a square
+/// operand masks an axis-mislabel bug. The argmax/argmin index outputs are
+/// pinned too (extreme element is in the second `seq` row, index 1, for the
+/// monotone-increasing input; min is index 0).
+#[test]
+fn max_reduce_family_builds_runs_in_rank_poly_body() {
+    let source = "def max_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = max_reduce(x, seq)\n\
+         def min_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = min_reduce(x, seq)\n\
+         def prod_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = prod_reduce(x, seq)\n\
+         def amax_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, int64] = argmax_reduce(x, seq)\n\
+         def amin_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, int64] = argmin_reduce(x, seq)\n\
+         def rmax(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, f32] = max_seq(x)\n\
+         def rmin(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, f32] = min_seq(x)\n\
+         def rprod(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, f32] = prod_seq(x)\n\
+         def ramax(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, int64] = amax_seq(x)\n\
+         def ramin(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, int64] = amin_seq(x)\n\
+         ox = rmax(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n\
+         on = rmin(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n\
+         op = rprod(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n\
+         oax = ramax(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n\
+         oan = ramin(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n";
+    let backend = build_compile_run(source, "rank_poly_reduce_family");
+    let tensors = parse_printed_tensors(&backend);
+
+    // seq(=2) reduced from [batch=2, seq=2, hidden=3]:
+    //   b0 [[1,2,3],[4,5,6]];  b1 [[7,8,9],[10,11,12]].
+    let expected: &[(&str, &[usize], &[f64])] = &[
+        ("ox", &[2, 3], &[4.0, 5.0, 6.0, 10.0, 11.0, 12.0]),
+        ("on", &[2, 3], &[1.0, 2.0, 3.0, 7.0, 8.0, 9.0]),
+        ("op", &[2, 3], &[4.0, 10.0, 18.0, 70.0, 88.0, 108.0]),
+        ("oax", &[2, 3], &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
+        ("oan", &[2, 3], &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+    ];
+    for (name, shape, data) in expected {
+        let got = tensors
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .unwrap_or_else(|| panic!("backend output missing `{name}`: {backend}"));
+        assert_eq!(&got.1, shape, "{name}: backend shape mismatch ({backend})");
+        assert_eq!(got.2.len(), data.len(), "{name}: backend len ({backend})");
+        for (i, (g, e)) in got.2.iter().zip(data.iter()).enumerate() {
+            assert!(
+                (g - e).abs() < 1e-6,
+                "{name}[{i}]: backend {g} != expected {e} ({backend})"
+            );
+        }
+    }
+
+    // Backend must agree with the evaluator oracle, value-for-value (#338).
+    assert_eval_agrees_with_backend(source, "rank_poly_reduce_family", &backend);
 }
 
 /// Concrete-rank control: a named reduction on a fully-concrete shape (no

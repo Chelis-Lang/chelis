@@ -7052,15 +7052,33 @@ fn infer_app_expr_host_type(
             .collect::<Option<Vec<_>>>()?;
         return infer_einsum_tensor_type(equation, &tensors).map(HostType::Tensor);
     }
-    if matches!(name, "sum" | "mean")
-        && let (Some(input), Some(axis_expr)) = (kids.get(1), kids.get(2))
+    // chelis#340: the whole named-axis reduction family is type-inferred
+    // here (the positional/int-literal axis form), not only `sum`/`mean`.
+    // Each drops the reduced axis; `argmax_reduce`/`argmin_reduce` return an
+    // int64 index tensor while the value reductions keep the operand
+    // precision. Recovering the tensor type lets the host lane route the
+    // call through `try_lower_tensor_helper_call` (the tensor-DAG kernel
+    // lane the C backend uses) instead of falling through to the
+    // host-emit "unsupported builtin" path when the checker's `type`
+    // annotation is absent or carries synthetic rank-poly dims.
+    if matches!(
+        name,
+        "sum"
+            | "mean"
+            | "max_reduce"
+            | "min_reduce"
+            | "prod_reduce"
+            | "argmax_reduce"
+            | "argmin_reduce"
+    ) && let (Some(input), Some(axis_expr)) = (kids.get(1), kids.get(2))
         && let HostType::Tensor(tensor_ty) = expr_host_type(input, program, scope)
         && let Some(axis) = expr_int_literal(axis_expr)
     {
-        return Some(HostType::Tensor(reduce_axis_tensor_type(
-            &tensor_ty,
-            axis as usize,
-        )));
+        let mut reduced = reduce_axis_tensor_type(&tensor_ty, axis as usize);
+        if matches!(name, "argmax_reduce" | "argmin_reduce") {
+            reduced.precision = chelis_types::types::Prim::Int64;
+        }
+        return Some(HostType::Tensor(reduced));
     }
     if name == "expand"
         && let (Some(input), Some(axis_expr), Some(size_expr)) =
@@ -7682,8 +7700,23 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
                 Some(HostType::Int64)
             }
         }
-        "sum" | "mean" => match arg_tys.first() {
+        // chelis#340: the named-axis reduction family classifies as a
+        // tensor in the coarse host lane (the real output shape — the
+        // reduced axis dropped — is recomputed inside the tensor-helper
+        // DAG; this coarse type only needs to keep the result classified as
+        // a Tensor so the call routes through the tensor-DAG kernel lane).
+        // `max_reduce`/`min_reduce`/`prod_reduce` keep the operand
+        // precision; `argmax_reduce`/`argmin_reduce` return an int64 index
+        // tensor.
+        "sum" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce" => match arg_tys.first() {
             Some(HostType::Tensor(tensor_ty)) => Some(HostType::Tensor(tensor_ty.clone())),
+            _ => Some(HostType::Unknown),
+        },
+        "argmax_reduce" | "argmin_reduce" => match arg_tys.first() {
+            Some(HostType::Tensor(tensor_ty)) => Some(HostType::Tensor(TensorType {
+                dims: tensor_ty.dims.clone(),
+                precision: chelis_types::types::Prim::Int64,
+            })),
             _ => Some(HostType::Unknown),
         },
         "mod" | "bitand" | "bitor" | "bitxor" | "shl" | "shr" | "string_len" | "rank" | "shape"
