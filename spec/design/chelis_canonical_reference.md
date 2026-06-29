@@ -790,12 +790,13 @@ current step toward it.
 
 Tracks 1 and 2 above cover code *generation*. A separate structural
 *editing* surface modifies existing Chelis source through Deep-AST operations
-rather than text patches. The shipped L0 tool is
-`chelis_replace_function_body` on Tide MCP and HTTP. It accepts Deep strings
-for `{module, function_name, new_body}` and returns canonical Deep
-`{changed_def_deep, module_deep}` only after the post-splice whole-module
-check is clean. Any parse, splice, type, effect, or linearity failure returns
-the normal structured failure envelope and no replacement result.
+rather than text patches. The shipped Tide MCP and HTTP editing tools are
+`chelis_replace_function_body` and `chelis_add_function`. Both accept Deep
+strings at the public boundary, perform structured Deep AST edits internally,
+and return canonical Deep only after the rewritten whole module passes the
+compiler-owned validation pipeline. Any parse, edit-shape, name-resolution,
+type, effect, or linearity failure returns the normal structured failure
+envelope and no edit result.
 
 Detailed design and the current oracle live in
 `spec/design/chelis_agent_editing_surface.md`. The broader structural-edit

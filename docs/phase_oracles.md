@@ -82,7 +82,7 @@ Status legend:
 
 | Campaign | Oracle command | Owning spec doc | Status |
 |---|---|---|---|
-| Deep substrate hardening | `cargo test -p chelis-tide --test mcp replace_function_body` + `cargo test -p chelis-tide --test api replace_function_body` + `cargo test -p chelis-types duplicate_defsig` + `cargo test -p chelis-validate duplicate_defsig` + `cargo test -p chelis-cli --test surf_round_trip` | `spec/design/chelis_agent_editing_surface.md` | default gate |
+| Deep substrate handover | `cargo test -p chelis-compiler-api --test deep_authoring` + `cargo test -p chelis-tide --test mcp replace_function_body` + `cargo test -p chelis-tide --test mcp add_function` + `cargo test -p chelis-tide --test api replace_function_body` + `cargo test -p chelis-tide --test api add_function` + `cargo test -p chelis-types duplicate_defsig` + `cargo test -p chelis-validate duplicate_defsig` + `cargo test -p chelis-cli --test surf_round_trip` | `spec/design/chelis_agent_editing_surface.md` | default gate |
 | Compiler-vs-interpreter closure follow-up | `cargo test -p chelis-cli --test cli cross_function_seed_local_wrapper_uses_handler_seed_in_c_backend -- --exact` + `cargo test -p chelis-cli --test cli build_c_mnist_loss_tail_tensor_pipeline_compiles_object -- --exact` + `cargo test -p chelis-cli --test parity parity_mnist_library_only -- --exact --nocapture` (the `std_nn_build_acceptance cross_function_seed_stdlib` leg was removed with the ML-module cut to School, #331) | `spec/upstream-bugs/compiler-vs-interpreter-closure-2026-05-07.md` §Follow-up work | default gate |
 
 ## Phase A (Reef Distribution Unblock)

@@ -5,8 +5,8 @@ use serde_json::{Value, json};
 
 use crate::compiler;
 use crate::schema::{
-    CheckRequest, CompileRequest, DecompileRequest, DesugarRequest, EvalRequest, GradRequest,
-    ReplaceFunctionBodyRequest, ValidateRequest,
+    AddFunctionRequest, CheckRequest, CompileRequest, DecompileRequest, DesugarRequest,
+    EvalRequest, GradRequest, ReplaceFunctionBodyRequest, ValidateRequest,
 };
 
 pub fn run_stdio() -> io::Result<()> {
@@ -81,6 +81,9 @@ fn handle_tool_call(id: Option<Value>, params: Option<&Value>) -> Value {
             &args,
             compiler::replace_function_body,
         ),
+        "chelis_add_function" => {
+            deserialize_and_run::<AddFunctionRequest, _, _>(&args, compiler::add_function)
+        }
         "chelis_prove" => handle_prove_tool(&args),
         other => {
             return error(id, -32601, format!("unknown tool `{other}`"));
@@ -151,6 +154,10 @@ fn tool_list() -> Vec<Value> {
         tool::<ReplaceFunctionBodyRequest>(
             "chelis_replace_function_body",
             "Replace one function's body in a Deep module and return the canonical Deep of the changed def and the rewritten module",
+        ),
+        tool::<AddFunctionRequest>(
+            "chelis_add_function",
+            "Add one Deep function declaration bundle to a module and return the canonical rewritten module",
         ),
         prove_tool_schema(),
     ]

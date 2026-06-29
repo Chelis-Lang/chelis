@@ -55,8 +55,8 @@ path is available.
 
 Launch the HTTP/JSON compiler service.
 The shipped surface includes `/parse`, `/desugar`, `/check`, `/lower`, `/compile`,
-`/eval`, `/grad`, `/validate`, `/decompile`, `/replace_function_body`, and
-`/batch`.
+`/eval`, `/grad`, `/validate`, `/decompile`, `/replace_function_body`,
+`/add_function`, and `/batch`.
 The public contract uses explicit wire-model types rather than serialized compiler
 internals.
 
@@ -71,9 +71,10 @@ The shipped MCP tool surface is:
 - `chelis_decompile`
 - `chelis_eval`
 - `chelis_grad`
-- `chelis_replace_function_body`
-- `chelis_prove`
 - `chelis_validate`
+- `chelis_replace_function_body`
+- `chelis_add_function`
+- `chelis_prove`
 
 `chelis_replace_function_body` accepts Deep strings for
 `{module, function_name, new_body}` and returns canonical Deep
@@ -81,6 +82,16 @@ The shipped MCP tool surface is:
 check is clean. Parse, splice, type, effect, and linearity failures return the
 normal structured failure envelope with `ok:false`, `stage`, and typed
 diagnostics; failed replacements do not carry a replacement result.
+
+`chelis_add_function` accepts Deep strings for
+`{module, new_decls, insert_after_function?}` and returns canonical Deep
+`{added_def_deep, added_defsig_deep?, module_deep}` only after the
+post-insertion whole-module check is clean. `new_decls` is a declaration
+bundle containing exactly one `(def ...)` and an optional matching
+`(defsig ...)`; existing exports are preserved unchanged. Request-shape,
+insertion-target, type, effect, and linearity failures return the normal
+structured failure envelope with `ok:false`; failed additions do not carry a
+result.
 
 `chelis_prove` runs the same property + derived producer-obligation
 verification as the CLI `chelis prove` on the same module source — the

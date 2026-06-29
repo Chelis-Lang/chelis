@@ -406,6 +406,86 @@ pub fn splice_function_body(
     Ok(program)
 }
 
+/// An error inserting a function declaration bundle into a module.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum InsertFunctionError {
+    /// No top-level `(module {} <name> ...)` node was found in the program
+    /// slice.
+    #[error("no module declaration found while inserting function declarations")]
+    NoModule,
+
+    /// The program slice contained more than one top-level module.
+    #[error("expected exactly one module but found {count} while inserting function declarations")]
+    MultipleModules { count: usize },
+
+    /// The requested insertion target could not be resolved as a function.
+    #[error("{0}")]
+    InsertionTarget(#[from] ResolveError),
+}
+
+/// Insert `new_decls` into the single module's top-level declaration list.
+///
+/// With no `insert_after_function`, the declarations are appended at the end of
+/// the module declaration list. With a target, the declarations are inserted
+/// immediately after that function's existing declaration bundle: the resolved
+/// `(def ...)` and any same-name `(defsig ...)` declaration present in the
+/// module. The input declarations are inserted in the order provided.
+///
+/// This is a structural operation only. It deliberately does not reject
+/// duplicate definitions, duplicate signatures, bad types, effects, or
+/// linearity violations; callers must run the whole-module validation pipeline
+/// before reporting success.
+pub fn insert_function_decls(
+    module_exprs: &[Expr],
+    new_decls: &[Expr],
+    insert_after_function: Option<&str>,
+) -> Result<Vec<Expr>, InsertFunctionError> {
+    let module_count = count_modules(module_exprs);
+    if module_count == 0 {
+        return Err(InsertFunctionError::NoModule);
+    }
+    if module_count > 1 {
+        return Err(InsertFunctionError::MultipleModules {
+            count: module_count,
+        });
+    }
+
+    let insert_index = if let Some(target) = insert_after_function {
+        let resolved = resolve_function(module_exprs, target)?;
+        let module = find_module(module_exprs).ok_or(InsertFunctionError::NoModule)?;
+        let (_, bare_name) = split_qualified_name(&resolved.qualified_name);
+        let last_bundle_decl_index = decls(module)
+            .iter()
+            .enumerate()
+            .filter_map(|(index, decl)| {
+                let list =
+                    as_tagged_list(decl, "def").or_else(|| as_tagged_list(decl, "defsig"))?;
+                (def_name(list) == Some(bare_name)).then_some(index)
+            })
+            .max()
+            .unwrap_or(resolved.decl_index);
+        MODULE_DECLS_START + last_bundle_decl_index + 1
+    } else {
+        let module = find_module(module_exprs).ok_or(InsertFunctionError::NoModule)?;
+        match module {
+            Expr::List(list, _) => list.elements.len(),
+            _ => MODULE_DECLS_START,
+        }
+    };
+
+    let mut program = module_exprs.to_vec();
+    let module = program
+        .iter_mut()
+        .find_map(|expr| as_tagged_list_mut(expr, "module"))
+        .ok_or(InsertFunctionError::NoModule)?;
+
+    for (offset, decl) in new_decls.iter().cloned().enumerate() {
+        module.elements.insert(insert_index + offset, decl);
+    }
+
+    Ok(program)
+}
+
 /// Return only the named function's rewritten `(def {meta} <name> (fn {}
 /// (params {} ...) <new_body>))` node, with the body subtree replaced by
 /// `new_body` and the def metadata, name, fn metadata, and params left
