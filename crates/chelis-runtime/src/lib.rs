@@ -3078,9 +3078,45 @@ pub unsafe extern "C" fn chelis_tensor_trace(
             }
         }
     }
+    // #170: f32 AND f64 trace must sum the diagonal in the SAME stride-4 ILP
+    // cascade order as the emitted `RiscOp::Sum` (issue #163, torch `row_sum`
+    // parity), since `torch.trace == torch.sum(diagonal)` and the C backend
+    // emits `sum` as a stride-4 cascade at the accumulator width — f32 and
+    // f64 alike (`chelis-backend-c/src/emit.rs` ~3398, `acc_et` is `double`
+    // for an f64 sum). A strict left-fold diverges from torch by ~1 ULP for
+    // diagonals longer than 16 (and far more under cancellation). Because the
+    // eval reference (`tensor_reduce_host`) cascades BOTH widths, cascading
+    // both here is what keeps `chelis eval` and the compiled binary in
+    // lock-step — a left-fold for f64 here would re-open the eval-vs-compiled
+    // drift this fix exists to prevent. The cascade is inlined (not delegated
+    // to `chelis_sum_*`) because the diagonal elements are strided by `inner`
+    // (not contiguous in the batched case). Integer dtypes (i64/i32) are exact
+    // under any addition order, so they keep the plain left-fold.
+    unsafe fn trace_cascade<T>(
+        diag: *mut chelis_tensor,
+        out: *mut chelis_tensor,
+        outer: usize,
+        axis_size: usize,
+        inner: usize,
+    ) where
+        T: TensorElement + Copy + Default + core::ops::AddAssign + core::ops::Add<Output = T>,
+    {
+        let dp = T::data_ptr_unchecked(diag);
+        let op = T::data_ptr_unchecked(out);
+        for outer_idx in 0..outer {
+            for inner_idx in 0..inner {
+                let mut acc: [T; 4] = [T::default(); 4];
+                for axis_idx in 0..axis_size {
+                    let linear = (outer_idx * axis_size + axis_idx) * inner + inner_idx;
+                    acc[axis_idx & 3] += *dp.add(linear);
+                }
+                *op.add(outer_idx * inner + inner_idx) = (acc[0] + acc[1]) + (acc[2] + acc[3]);
+            }
+        }
+    }
     match (*diag).dtype {
-        CHELIS_F32 => trace_loop::<f32>(diag, out, outer, axis_size, inner),
-        CHELIS_F64 => trace_loop::<f64>(diag, out, outer, axis_size, inner),
+        CHELIS_F32 => trace_cascade::<f32>(diag, out, outer, axis_size, inner),
+        CHELIS_F64 => trace_cascade::<f64>(diag, out, outer, axis_size, inner),
         CHELIS_I64 => trace_loop::<i64>(diag, out, outer, axis_size, inner),
         CHELIS_I32 => {
             // f32-encoded i32: accumulate as f32 (pre-migration semantics).
@@ -3836,6 +3872,104 @@ mod tests {
     fn tensor_layout_stays_stable() {
         assert_eq!(std::mem::size_of::<chelis_tensor>(), 88);
         assert_eq!(std::mem::align_of::<chelis_tensor>(), 8);
+    }
+
+    /// #170: the C-runtime `chelis_tensor_trace` f32 path must sum the
+    /// diagonal in the SAME stride-4 ILP cascade as the emitted `RiscOp::Sum`
+    /// (`trace_cascade_f32`), so a compiled `trace` is bit-exact with
+    /// `torch.trace`. The only executable `trace` example is 2x2 (diagonal
+    /// length 2, where the cascade degenerates to the old left-fold), so this
+    /// pins the behavior on a 20-element diagonal where the two orders differ:
+    /// the cascade gives torch's `0x4125e023`, the prior `trace_loop::<f32>`
+    /// left-fold gave `0x4125e024`. Mirrors the eval-side
+    /// `host_runtime_trace_f32_matches_torch_stride4_cascade`.
+    #[test]
+    fn chelis_tensor_trace_f32_matches_torch_stride4_cascade() {
+        // Diagonal values (torch.rand, manual_seed(7)) as f64 literals that
+        // round-trip to the intended f32 (matches the eval-side test).
+        let diag: [f64; 20] = [
+            0.5349225401878357,
+            0.41317272186279297,
+            0.23315048217773438,
+            0.10808825492858887,
+            0.2942635416984558,
+            0.18491309881210327,
+            0.06628626585006714,
+            0.47317826747894287,
+            0.8760198354721069,
+            0.6712021827697754,
+            0.4092898368835449,
+            0.6157153248786926,
+            0.35706937313079834,
+            0.7855499386787415,
+            0.5738610625267029,
+            0.9782199859619141,
+            0.11917394399642944,
+            0.8441763520240784,
+            0.9919543266296387,
+            0.8370135426521301,
+        ];
+        unsafe {
+            let shape = [20i32, 20i32];
+            let matrix = chelis_alloc(2, shape.as_ptr(), CHELIS_F32);
+            let data = data_as_f32(matrix);
+            for (i, &v) in diag.iter().enumerate() {
+                *data.add(i * 20 + i) = v as f32;
+            }
+            let out = chelis_tensor_trace(matrix, 0, 1);
+            assert_eq!(chelis_tensor_rank(out), 0, "trace is a scalar");
+            let got = *data_as_f32(out);
+            assert_eq!(
+                got.to_bits(),
+                0x4125e023_u32,
+                "compiled trace must be bit-exact with torch.trace (stride-4 \
+                 cascade, #170); got {got} (bits {:#x})",
+                got.to_bits(),
+            );
+            assert_ne!(
+                got.to_bits(),
+                0x4125e024_u32,
+                "regression: trace matches the old f32 left-fold the cascade replaced (#170)",
+            );
+            chelis_free(out);
+            chelis_free(matrix);
+        }
+    }
+
+    /// #170 eval-vs-compiled parity (compiled lane): the C-runtime f64 `trace`
+    /// must agree with the eval reference (`tensor_trace_value`), which sums
+    /// the diagonal in the stride-4 cascade. The catastrophic diagonal
+    /// `[2^53.. , 1.0x18, -2^53..]` makes the two summation orders disagree
+    /// dramatically: the cascade keeps the eighteen `1.0`s (`-> 12.0`, matching
+    /// torch), while the prior `trace_loop::<f64>` left-fold absorbed then
+    /// cancelled them (`-> 0.0`). The matching eval-lane assertion lives in
+    /// `chelis-compiler-api` (`host_runtime_trace_f64_matches_eval_cascade`);
+    /// both lanes pin `12.0`.
+    #[test]
+    fn chelis_tensor_trace_f64_cascade_matches_eval_not_left_fold() {
+        let mut diag = vec![1e16_f64];
+        diag.extend(std::iter::repeat_n(1.0_f64, 18));
+        diag.push(-1e16_f64);
+        let k = diag.len(); // 20
+        unsafe {
+            let shape = [k as i32, k as i32];
+            let matrix = chelis_alloc(2, shape.as_ptr(), CHELIS_F64);
+            let data = (*matrix).data as *mut f64;
+            for (i, &v) in diag.iter().enumerate() {
+                *data.add(i * k + i) = v;
+            }
+            let out = chelis_tensor_trace(matrix, 0, 1);
+            assert_eq!(chelis_tensor_rank(out), 0, "trace is a scalar");
+            let got = *((*out).data as *const f64);
+            assert_eq!(
+                got, 12.0,
+                "compiled f64 trace must use the stride-4 cascade (== eval, == torch); \
+                 got {got}. A left-fold here gives 0.0 and re-opens the eval-vs-compiled \
+                 drift (#170)."
+            );
+            chelis_free(out);
+            chelis_free(matrix);
+        }
     }
 
     #[test]

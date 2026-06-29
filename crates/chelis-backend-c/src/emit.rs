@@ -5264,6 +5264,43 @@ mod tests {
     }
 
     #[test]
+    fn reduce_window_max_min_drop_nan() {
+        // #172 sibling (C lane): windowed Max/Min keep C99 `fmaxf`/`fminf`,
+        // which DROP NaN (return the non-NaN operand) — the SAME semantics as
+        // eval's `f64::max`/`min` (locked by
+        // `host_runtime_reduce_window_max_min_drop_nan` in chelis-compiler-api).
+        // Unlike `max_reduce`/`min_reduce`, reduce_window must NOT use the
+        // NaN-propagating reduce helper. This pins the documented
+        // drop-vs-propagate asymmetry on the backend side.
+        for (reducer, op) in [
+            (ReduceWindowKind::Max, "fmaxf(acc"),
+            (ReduceWindowKind::Min, "fminf(acc"),
+        ] {
+            let mut dag = Dag::new();
+            let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+            dag.add_node(
+                RiscOp::ReduceWindow {
+                    reducer,
+                    window_shape: vec![2],
+                    strides: vec![2],
+                },
+                vec![a],
+                vec_f32(2),
+                None,
+            );
+            let c = CEmitter::emit_dag(&dag, "test_fn");
+            assert!(
+                c.contains(op),
+                "reduce_window {reducer:?} must use the NaN-dropping `{op}` (#172):\n{c}"
+            );
+            assert!(
+                !c.contains("propnan"),
+                "reduce_window must NOT use a NaN-propagating reduce helper (#172):\n{c}"
+            );
+        }
+    }
+
+    #[test]
     fn mul_emits_star_op() {
         let mut dag = Dag::new();
         let a = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);

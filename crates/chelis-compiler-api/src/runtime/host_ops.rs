@@ -1627,6 +1627,20 @@ pub(super) fn tensor_matmul_host(
             "matmul shared-axis mismatch: lhs has {k_lhs}, rhs has {k_rhs}"
         ));
     }
+    // #170 (DO NOT "fix" this into the stride-4 cascade): matmul does NOT
+    // take the #163 `sum` cascade, and its f64 accumulator is intentional.
+    // torch's CPU f32 matmul is a BLAS GEMM whose rounding is bit-exact
+    // with a strict-f32 left-fold (verified k=20..257), NOT the cascade
+    // (which is `sum`'s order — applying it here would CREATE a k>=128
+    // divergence). The eval reference deliberately keeps a HIGHER-precision
+    // f64 accumulator: it is the reference, the shipped C backend trades
+    // precision for speed via `cblas_sgemm`, and the matmul eval-vs-C
+    // parity tests use a TOLERANCE (not bit-identity) for exactly this
+    // expected eval(f64)-vs-backend(BLAS) gap. Matching torch's f32-GEMM
+    // bit pattern by downcasting eval to strict-f32 would lower precision,
+    // couple the reference to torch's specific BLAS version, and still not
+    // buy eval-vs-C bit-identity — net worse, no soundness win. So this is
+    // a documented, expected precision characteristic, not a divergence.
     let mut out = vec![0.0_f64; m * n];
     for i in 0..m {
         for j in 0..n {
@@ -1771,6 +1785,16 @@ pub(super) fn tensor_reduce_window_host(
             }
             let src_linear = indices_to_linear(&src_indices, in_shape);
             let value = tensor.value.data[src_linear];
+            // #172 sibling (intentionally NOT NaN-propagating here, mirrors the
+            // C-emit note in `chelis-backend-c/src/emit.rs` ~3963): windowed
+            // Max/Min use Rust `f64::max`/`f64::min`, which DROP NaN (return
+            // the non-NaN operand) — the same NaN-dropping semantics as the C
+            // backend's `fmaxf`/`fminf`, so eval and the backend stay
+            // CONSISTENT here. The #172 NaN-propagation fix scoped itself to
+            // `max_reduce` / `min_reduce`; flipping reduce_window forward
+            // without also defining the NaN gradient-routing in the windowed
+            // backward would create a fwd/bwd inconsistency. Tracked as a
+            // follow-up; reduce_window has its own parity gate (spec §2.3).
             acc = match reducer {
                 ReduceWindowOp::Max => acc.max(value),
                 ReduceWindowOp::Min => acc.min(value),
@@ -2096,6 +2120,24 @@ pub(super) fn tensor_softmax_host(
         // `exp(-Inf - -Inf) = exp(NaN) = NaN`. The NaN flows through the
         // sum and the normalize below, so every output element of that
         // slice is NaN — matching torch (#173).
+        //
+        // #170 (DO NOT "fix" this sum into the stride-4 cascade): the f64
+        // accumulator here is intentional and is NOT a torch-parity gap.
+        // (a) This host-eval softmax computes exp/sum/div in f64, whereas the
+        //     lowered path (`tier2::lower_softmax` -> `RiscOp::Sum`) uses f32
+        //     `expf` + the #163 f32 cascade. The two lanes are NOT guaranteed
+        //     bit-identical: the f64 `exp` is more accurate than f32 `expf`
+        //     (cf. #172), so per-element exponentials can differ before the
+        //     sum even runs. What the repo actually proves is agreement within
+        //     the 1e-6 relative parity tolerance the corpus oracle enforces
+        //     (`chelis-cli/tests/parity.rs`) — not bit-identity. Swapping the
+        //     f64 fold for the f32 cascade would not buy bit-identity (the
+        //     exp mismatch remains) and would only lower the host lane's
+        //     precision.
+        // (b) torch's softmax is a FUSED kernel; neither the cascade nor an
+        //     f64 fold reliably bit-matches it (same situation as matmul —
+        //     see `tensor_matmul_host`). So softmax is DOCUMENTED, not
+        //     cascaded; only `sum`/`trace` take the cascade.
         let mut sum_exp = 0.0_f64;
         for k in 0..axis_size {
             base_indices[axis_usize] = k;
@@ -2589,6 +2631,11 @@ pub(super) fn tensor_cumsum_value(
         .product::<usize>()
         .max(1);
     let outer: usize = tensor.value.shape[..axis].iter().product::<usize>().max(1);
+    // #170: cumsum is an inherently sequential prefix scan, NOT a reducible
+    // tree — the stride-4 cascade does not apply. The f64 running accumulator
+    // already matches `torch.cumsum` (verified: torch's cumsum is a
+    // step-by-step prefix whose f32 result equals this f64 prefix rounded to
+    // f32). No change needed; left as-is.
     for outer_idx in 0..outer {
         for inner_idx in 0..inner {
             let mut running = 0.0;
@@ -2701,38 +2748,14 @@ pub(super) fn tensor_trace_value(
     let diagonal = tensor_diagonal_value(tensor, axis1, axis2)?;
     let rank = diagonal.value.shape.len();
     let axis = normalize_axis(rank, axis1.min(axis2), "trace").unwrap_or(rank.saturating_sub(1));
-    let axis_size = diagonal.value.shape[axis];
-    let inner: usize = diagonal.value.shape[axis + 1..]
-        .iter()
-        .product::<usize>()
-        .max(1);
-    let outer: usize = diagonal.value.shape[..axis]
-        .iter()
-        .product::<usize>()
-        .max(1);
-    let out_shape = diagonal
-        .value
-        .shape
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, size)| (idx != axis).then_some(*size))
-        .collect::<Vec<_>>();
-    let mut out = vec![0.0; tensor_numel(&out_shape)];
-    for outer_idx in 0..outer {
-        for inner_idx in 0..inner {
-            let mut sum = 0.0;
-            for axis_idx in 0..axis_size {
-                let linear = (outer_idx * axis_size + axis_idx) * inner + inner_idx;
-                sum += diagonal.value.data[linear];
-            }
-            let out_linear = outer_idx * inner + inner_idx;
-            out[out_linear] = sum;
-        }
-    }
-    Ok(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(out_shape, out),
-        precision: tensor.precision,
-    })
+    // #170: trace = sum over the diagonal. Route the diagonal reduction
+    // through `tensor_reduce_host`'s `Sum` path so it uses the SAME
+    // stride-4 ILP f32 cascade as `RiscOp::Sum` (issue #163, torch
+    // `row_sum` parity). The prior hand-rolled `sum += ...` left-fold in
+    // f64 diverged from `torch.trace` (== `torch.sum(diagonal)`) by ~1 ULP
+    // for diagonals longer than 16 f32 elements. Reusing the one verified
+    // cascade also prevents the two summation orders from drifting apart.
+    tensor_reduce_host(&diagonal, axis as i64, ReduceOp::Sum)
 }
 
 pub(super) fn tensor_clamp_value(
@@ -2825,6 +2848,14 @@ pub(super) fn tensor_einsum_value(
         .iter()
         .map(|label| dims.get(label).copied().unwrap_or(1))
         .collect::<Vec<_>>();
+    // #170 (DO NOT "fix" into the cascade): einsum is a contraction sum,
+    // same shape as matmul, and shares matmul's disposition. torch's f32
+    // einsum follows its GEMM order (strict-f32 left-fold), NOT the #163
+    // `sum` cascade. The eval reference keeps the higher-precision f64
+    // accumulator deliberately — same rationale as `tensor_matmul_host`:
+    // the eval(f64)-vs-C(BLAS) gap at large k is an expected, tolerance-
+    // covered precision characteristic, not a divergence. See the comment
+    // in `tensor_matmul_host`.
     let mut out = vec![0.0; tensor_numel(&out_shape)];
     for (out_linear, slot) in out.iter_mut().enumerate() {
         let out_index = linear_to_indices(out_linear, &out_shape);
@@ -2833,7 +2864,7 @@ pub(super) fn tensor_einsum_value(
             label_values.insert(*label, *value);
         }
         let reduction_total = tensor_numel(&reduction_shape);
-        let mut acc = 0.0;
+        let mut acc = 0.0_f64;
         for reduction_linear in 0..reduction_total {
             let reduction_index = linear_to_indices(reduction_linear, &reduction_shape);
             for (label, value) in reduction_labels.iter().zip(reduction_index.iter()) {
