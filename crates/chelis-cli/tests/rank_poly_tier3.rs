@@ -2543,3 +2543,190 @@ fn negative_axis_reduce_lowers_to_last_axis_in_backend() {
         );
     }
 }
+
+/// Parse the bare `tensor(shape=[...], data=[...])` line `eval` prints for the
+/// final unnamed top-level expression (e.g. `out = grad(...)(...)`, whose value
+/// is printed without the `out = ` prefix).
+fn parse_bare_tensor(stdout: &str) -> (Vec<usize>, Vec<f64>) {
+    let line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("tensor(shape="))
+        .unwrap_or_else(|| panic!("eval printed no bare tensor line:\n{stdout}"));
+    let parse_usize_list = |s: &str| {
+        s.split(',')
+            .filter_map(|p| p.trim().parse::<usize>().ok())
+            .collect::<Vec<_>>()
+    };
+    let shape = line
+        .split_once("shape=[")
+        .and_then(|(_, s)| s.split_once(']'))
+        .map(|(s, _)| parse_usize_list(s))
+        .unwrap_or_default();
+    let data = line
+        .split_once("data=[")
+        .and_then(|(_, s)| s.split_once(']'))
+        .map(|(s, _)| {
+            s.split(',')
+                .filter_map(|p| p.trim().parse::<f64>().ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    (shape, data)
+}
+
+// ── chelis#373: grad through a Tier-3 named-axis reduction via a concrete-rank
+//    intermediate def ───────────────────────────────────────────────────────
+
+/// chelis#373: `grad` through a TWO-LEVEL call chain into a Tier-3 rank-spread
+/// named reduce. `loss_t3`'s concrete-rank parameter (`tensor[2, 3]`) flows
+/// into `sum_rows` (concrete-rank formal `[b, seq]`) which calls `sum_seq`
+/// (rank-spread formal `[..pre, seq, ..post]`).
+///
+/// In the FORWARD lane each nested def call routes through
+/// `try_named_axis_def_call`, which re-stamps the callee's declared formal
+/// named dims onto the staged placeholder, so the operand reaching `sum_seq`'s
+/// `extract_rank_var_bindings` still carries `Named("seq")`. In the GRAD lane
+/// the whole body is inlined into one DAG, the operand monomorphizes to
+/// `[Lit(2), Lit(3)]`, and the by-name anchor split in
+/// `extract_rank_var_bindings` could not find `seq` — it tripped the
+/// `rank-spread anchor \`seq\` absent from monomorphized actual` lowering error.
+///
+/// `loss_t3` reduces ALL elements (`sum_rows` over `seq`, then `sum` over the
+/// surviving axis), so the gradient w.r.t. every input is exactly 1. A shape of
+/// [2, 3] with all-ones is the analytic gradient of sum-of-all-elements; an
+/// axis-mislabel in the recovered split would surface here as a wrong shape.
+#[test]
+fn grad_through_concrete_then_spread_named_reduce() {
+    let source = "def sum_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
+         def sum_rows(x: &tensor[b, seq, f32]) -> tensor[b, f32] = sum_seq(x)\n\
+         def loss_t3(x: tensor[2, 3, f32]) -> f32 = tensor_to_scalar(sum(sum_rows(&x), 0))\n\
+         out = grad(loss_t3)(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
+    assert_clean(&check_json(source), "#373 grad chain checks clean");
+    let dir = tempdir().expect("tempdir");
+    let eval = eval_stdout(dir.path(), source, "grad_concrete_then_spread");
+    let (shape, data) = parse_bare_tensor(&eval);
+    assert_eq!(
+        shape,
+        vec![2, 3],
+        "#373: grad of sum-of-all must keep the [2, 3] input shape ({eval})"
+    );
+    assert_eq!(data.len(), 6, "#373: grad has 6 elements ({eval})");
+    for (i, g) in data.iter().enumerate() {
+        assert!(
+            (g - 1.0).abs() < 1e-9,
+            "#373: grad[{i}] = {g}, expected 1.0 (sum-of-all gradient is ones) ({eval})"
+        );
+    }
+}
+
+/// chelis#373 forward control (negative parity): the SAME two-level call chain
+/// evaluated WITHOUT `grad` must still reduce over the correct (named `seq`)
+/// axis. Row sums of [[1,2,3],[4,5,6]] over `seq`(=axis 1) are [6, 15]; an
+/// axis-mislabel in the spread-aware anchor recovery would sum the batch axis
+/// to [5, 7, 9] (rank 3) instead. Pins that the fix does not regress forward.
+#[test]
+fn forward_through_concrete_then_spread_named_reduce_control() {
+    let source = "def sum_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
+         def sum_rows(x: &tensor[b, seq, f32]) -> tensor[b, f32] = sum_seq(x)\n\
+         def fwd_ok(x: tensor[2, 3, f32]) -> tensor[2, f32] = sum_rows(&x)\n\
+         out = fwd_ok(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
+    assert_clean(&check_json(source), "#373 forward control checks clean");
+    let dir = tempdir().expect("tempdir");
+    let eval = eval_stdout(dir.path(), source, "forward_concrete_then_spread");
+    let (shape, data) = parse_bare_tensor(&eval);
+    assert_eq!(
+        shape,
+        vec![2],
+        "#373 control: forward must reduce seq, yielding shape [2] ({eval})"
+    );
+    assert_eq!(data, vec![6.0, 15.0], "#373 control: row sums ({eval})");
+}
+
+/// chelis#373 grad asymmetry guard: a NON-square chain where reducing the
+/// wrong (recovered) axis would change the GRADIENT SHAPE, so an unsound
+/// positional guess is caught even though sum-of-all gradients are all ones.
+/// `sum_cols` reduces the LEADING named axis (`row`) via a spread formal
+/// `[row, ..rest]`; the concrete intermediate `pick(x: tensor[4, 2])` pins
+/// `row` at position 0. The gradient w.r.t. the [4, 2] input is all ones; a
+/// mislabel recovering `row` at the wrong index would mis-shape the reduce and
+/// surface as a non-[4, 2] gradient.
+#[test]
+fn grad_through_leading_spread_named_reduce() {
+    let source = "def sum_first(x: &tensor[row, ..rest, f32]) -> tensor[..rest, f32] = sum(x, row)\n\
+         def pick(x: &tensor[row, col, f32]) -> tensor[col, f32] = sum_first(x)\n\
+         def loss(x: tensor[4, 2, f32]) -> f32 = tensor_to_scalar(sum(pick(&x), 0))\n\
+         out = grad(loss)(to_tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]]))\n";
+    assert_clean(&check_json(source), "#373 leading-spread grad checks clean");
+    let dir = tempdir().expect("tempdir");
+    let eval = eval_stdout(dir.path(), source, "grad_leading_spread");
+    let (shape, data) = parse_bare_tensor(&eval);
+    assert_eq!(
+        shape,
+        vec![4, 2],
+        "#373: grad must keep the [4, 2] input shape ({eval})"
+    );
+    for (i, g) in data.iter().enumerate() {
+        assert!(
+            (g - 1.0).abs() < 1e-9,
+            "#373: grad[{i}] = {g}, expected 1.0 ({eval})"
+        );
+    }
+}
+
+/// chelis#373 negative parity: a Tier-3 named-reduce whose reduced axis name is
+/// NOT a real axis of the operand stays rejected. `sum(x, ghost)` names an axis
+/// that the signature never declares, so the checker must reject it — the
+/// spread-aware anchor recovery must not paper over a genuinely-absent axis
+/// into a silent (wrong) positional guess.
+#[test]
+fn reduce_unknown_named_axis_still_rejected() {
+    let json = check_json(
+        "def bad(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, ghost)\n",
+    );
+    assert_rejected_with(&json, "ghost", "#373: unknown reduced axis rejected");
+}
+
+/// chelis#373 grad-VALUE guard: the sibling sum-of-all grad tests above all
+/// produce an all-ones gradient, which is axis-INSENSITIVE in value — a reduce
+/// over the wrong (recovered) axis would still pass as long as the gradient
+/// keeps the input shape. This test pins the recovered axis by an axis-sensitive
+/// gradient: `loss` is `sum((sum_rows x)^2)`, so the gradient w.r.t. each input
+/// is `2 * rowsum[row]`, NOT a constant. Row sums of [[1,2,3],[4,5,6]] over the
+/// named `seq` axis are [6, 15], so the analytic (and finite-difference) grad is
+/// [[12, 12, 12], [30, 30, 30]]. If the spread-aware anchor recovery reduced the
+/// batch axis instead, the column sums [5, 7, 9] would yield different values
+/// (and a different intermediate shape), so a wrong-axis-but-right-shape
+/// regression surfaces here even though the shape stays [2, 3].
+#[test]
+fn grad_through_concrete_then_spread_named_reduce_values_are_axis_sensitive() {
+    let source = "def sum_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
+         def sum_rows(x: &tensor[b, seq, f32]) -> tensor[b, f32] = sum_seq(x)\n\
+         def loss(x: tensor[2, 3, f32]) -> f32 = {\n\
+           r = sum_rows(&x)\n\
+           sq = r * r\n\
+           tensor_to_scalar(sum(sq, 0))\n\
+         }\n\
+         out = grad(loss)(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
+    assert_clean(&check_json(source), "#373 axis-sensitive grad checks clean");
+    let dir = tempdir().expect("tempdir");
+    let eval = eval_stdout(dir.path(), source, "grad_axis_sensitive_values");
+    let (shape, data) = parse_bare_tensor(&eval);
+    assert_eq!(
+        shape,
+        vec![2, 3],
+        "#373: grad must keep the [2, 3] input shape ({eval})"
+    );
+    // 2 * rowsum: row 0 sum = 6 -> 12; row 1 sum = 15 -> 30.
+    let expected = [12.0, 12.0, 12.0, 30.0, 30.0, 30.0];
+    assert_eq!(
+        data.len(),
+        expected.len(),
+        "#373: grad has 6 elements ({eval})"
+    );
+    for (i, (g, e)) in data.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (g - e).abs() < 1e-6,
+            "#373: grad[{i}] = {g}, expected {e} (2*rowsum, reduced over named `seq`) ({eval})"
+        );
+    }
+}

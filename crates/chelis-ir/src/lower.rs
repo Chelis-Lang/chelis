@@ -957,6 +957,83 @@ pub(crate) fn apply_dim_substitutions(dag: &Dag, substitutions: &HashMap<String,
     specialized
 }
 
+/// Classification of one dim slot in a raw tensor-type formal: a rank spread
+/// (`(d-rank {} r)`), a named anchor (`(d-name {} seq)`), or "other" — a
+/// `d-lit`/`d-var` slot that consumes exactly one positional dim and is never
+/// used to locate a split. Shared by [`extract_rank_var_bindings`] (which walks
+/// these against an actual shape to bind each spread) and
+/// [`tensor_dim_axis_positions`] (which records the fixed offset of each named
+/// anchor). Keeping one classifier avoids the two paths drifting on what counts
+/// as an anchor vs a spread.
+enum DimSlot {
+    Spread(String),
+    /// A `(d-name {} seq)` anchor: used to locate a spread split AND to record
+    /// a fixed reduce/expand position.
+    Named(String),
+    /// A `(d-var {} a)` dim variable (surf desugars single-letter dims to this):
+    /// it consumes exactly one positional dim like an `Other` slot for spread
+    /// splitting, but its name still indexes a fixed reduce/expand position
+    /// (chelis#388/#351), so it is kept distinct from `Other`.
+    DimVar(String),
+    Other,
+}
+
+/// Strip a leading `(t-ref {} ...)` wrapper and classify a raw tensor-type
+/// formal's dim slots in order (Spread/Named/Other), excluding the trailing
+/// precision child. Returns `None` when the expr is not a `(t-tensor ...)` type
+/// (so a non-tensor or malformed formal contributes no slots). The borrow
+/// wrapper is irrelevant to rank/anchor analysis, mirroring
+/// [`extract_precision_var_name`].
+fn tensor_formal_dim_slots(expr: &Expr) -> Option<Vec<DimSlot>> {
+    let stripped = if let Expr::List(list, _) = expr
+        && list.elements.len() >= 3
+        && let Expr::Atom(Atom::Symbol(tag), _) = &list.elements[0]
+        && tag == "t-ref"
+    {
+        list.elements.get(2)?
+    } else {
+        expr
+    };
+    let Expr::List(list, _) = stripped else {
+        return None;
+    };
+    let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first() else {
+        return None;
+    };
+    if tag != "t-tensor" || list.elements.len() < 3 {
+        return None;
+    }
+    // Children after tag+meta are dim nodes followed by the precision node.
+    let children = &list.elements[2..];
+    if children.len() < 2 {
+        return None;
+    }
+    let dim_nodes = &children[..children.len() - 1];
+    Some(
+        dim_nodes
+            .iter()
+            .map(|d| {
+                let Expr::List(dl, _) = d else {
+                    return DimSlot::Other;
+                };
+                let Some(Expr::Atom(Atom::Symbol(dtag), _)) = dl.elements.first() else {
+                    return DimSlot::Other;
+                };
+                let payload = match dl.elements.get(2) {
+                    Some(Expr::Atom(Atom::Symbol(s), _)) => Some(s.clone()),
+                    _ => None,
+                };
+                match (dtag.as_str(), payload) {
+                    ("d-rank", Some(n)) => DimSlot::Spread(n),
+                    ("d-name", Some(n)) => DimSlot::Named(n),
+                    ("d-var", Some(n)) => DimSlot::DimVar(n),
+                    _ => DimSlot::Other,
+                }
+            })
+            .collect(),
+    )
+}
+
 fn tensor_dim_substitutions(
     formal_params: &[TensorType],
     actual_args: &[TensorType],
@@ -996,12 +1073,37 @@ fn tensor_dim_substitutions(
 /// position is *consistent* across all the formals that mention it gets
 /// recorded (an inconsistent name is ambiguous and is left for the loud
 /// by-name failure path, never silently guessed).
-fn tensor_dim_axis_positions(formal_params: &[TensorType]) -> HashMap<String, usize> {
+///
+/// chelis#373: walks the *raw* formal type-exprs (not the collapsed
+/// `TensorType.dims`) so a Tier-3 rank-spread formal (`[..pre, seq, ..post]`)
+/// is handled soundly. A named anchor that sits behind a `(d-rank ..)` spread
+/// has a caller-dependent absolute offset (the leading spread's length is
+/// unknown from the formal alone), so its position is NOT fixed and is NOT
+/// recorded. Recording the collapsed-dims index there would emit a wrong index
+/// (e.g. `seq -> 0` for `[..pre, seq, ..post]`) and, via the `.extend(..)` at
+/// the call site, CLOBBER a correct fixed index recorded by an outer
+/// concrete-rank caller (`[b, seq]` -> `seq -> 1`). Only a named slot with no
+/// preceding spread contributes a position; a leading anchor before a trailing
+/// spread (`[row, ..rest]` -> `row -> 0`) is still fixed and is recorded.
+fn tensor_dim_axis_positions(formal_param_exprs: &[Option<Expr>]) -> HashMap<String, usize> {
     let mut positions: HashMap<String, usize> = HashMap::new();
     let mut ambiguous: HashSet<String> = HashSet::new();
-    for formal in formal_params {
-        for (index, dim) in formal.dims.iter().enumerate() {
-            if let DimInfo::Named(name, None) = dim {
+    for formal_expr in formal_param_exprs.iter().flatten() {
+        let Some(slots) = tensor_formal_dim_slots(formal_expr) else {
+            continue;
+        };
+        let mut index = 0usize;
+        let mut saw_spread = false;
+        for slot in &slots {
+            // A `d-name` or `d-var` slot before any spread has a FIXED absolute
+            // offset and indexes a reduce/expand position; record it. Behind a
+            // spread the offset is caller-dependent and is not recorded (so it
+            // never clobbers a fixed index from a concrete-rank caller).
+            let named_here = match slot {
+                DimSlot::Named(name) | DimSlot::DimVar(name) if !saw_spread => Some(name),
+                _ => None,
+            };
+            if let Some(name) = named_here {
                 match positions.get(name) {
                     Some(prev) if *prev != index => {
                         ambiguous.insert(name.clone());
@@ -1011,6 +1113,15 @@ fn tensor_dim_axis_positions(formal_params: &[TensorType]) -> HashMap<String, us
                     }
                     _ => {}
                 }
+            }
+            match slot {
+                DimSlot::Spread(_) => {
+                    // A spread absorbs a caller-dependent run; once seen, no
+                    // later slot has a fixed offset, so stop advancing.
+                    saw_spread = true;
+                }
+                _ if !saw_spread => index += 1,
+                _ => {}
             }
         }
     }
@@ -1355,9 +1466,27 @@ fn collect_body_precision_var_names(expr: &Expr, out: &mut HashSet<String>) {
 /// `TensorType` value) so the `(d-rank {} r)` shape — and the rank-var name —
 /// is preserved. The actual types come from the lowered DAG so their dims are
 /// concrete.
+///
+/// `dim_axis_positions` (chelis#373/#388) is the by-position anchor oracle for
+/// the case where call-site monomorphization erased a named anchor from the
+/// actual dims (a literal-shaped operand reaching a Tier-3 callee through a
+/// concrete-rank intermediate, e.g. the grad lane that inlines the whole body
+/// into one DAG). When the by-name split fails, the anchor is located at the
+/// recorded fixed index instead. The map carries only positions a concrete-rank
+/// caller pinned, and an out-of-range/unrecorded anchor still fails loudly.
+///
+/// NOT yet fully sound: the recorded index is the anchor's offset in that
+/// caller's *formal parameter*. An axis-reordering op (e.g. `permute`) between
+/// that parameter and this use site can leave the recorded index valid-but-stale
+/// — in range but pointing at the wrong axis — so the split lands on the wrong
+/// axis (a silent wrong gradient under grad; the range check below does NOT
+/// catch this). The by-name path above tracks the moved anchor and is
+/// unaffected; only the by-position fallback is. Tracked as chelis#549
+/// (axis-reorder staleness; spans #373/#388/#339).
 fn tensor_rank_substitutions(
     formal_param_exprs: &[Option<Expr>],
     actual_args: &[TensorType],
+    dim_axis_positions: &HashMap<String, usize>,
 ) -> HashMap<String, Vec<DimInfo>> {
     let mut subst = HashMap::new();
     for (formal_expr, actual) in formal_param_exprs.iter().zip(actual_args.iter()) {
@@ -1371,7 +1500,9 @@ fn tensor_rank_substitutions(
         // a rank var appearing in more than one param binds to the same run
         // because the checker already unified them; the debug_assert is the
         // tripwire for a checker regression that let two positions diverge.
-        for (var_name, run) in extract_rank_var_bindings(formal_expr, &actual.dims) {
+        for (var_name, run) in
+            extract_rank_var_bindings(formal_expr, &actual.dims, dim_axis_positions)
+        {
             match subst.entry(var_name) {
                 std::collections::hash_map::Entry::Occupied(existing) => {
                     debug_assert_eq!(
@@ -1401,72 +1532,32 @@ fn tensor_rank_substitutions(
 /// Strips a leading `(t-ref {} ...)` wrapper so a `&tensor[..]` parameter is
 /// treated the same as `tensor[..]` (the borrow is irrelevant to rank
 /// monomorphization, mirroring [`extract_precision_var_name`]).
-fn extract_rank_var_bindings(expr: &Expr, actual_dims: &[DimInfo]) -> Vec<(String, Vec<DimInfo>)> {
-    let stripped = if let Expr::List(list, _) = expr
-        && list.elements.len() >= 3
-        && let Expr::Atom(Atom::Symbol(tag), _) = &list.elements[0]
-        && tag == "t-ref"
-    {
-        match list.elements.get(2) {
-            Some(inner) => inner,
-            None => return Vec::new(),
-        }
-    } else {
-        expr
-    };
-    let Expr::List(list, _) = stripped else {
+///
+/// `dim_axis_positions` is the chelis#373 by-position anchor oracle: when the
+/// monomorphized actual no longer carries the anchor as a `Named` dim (the
+/// literal-shaped-operand-through-a-concrete-rank-callee case, e.g. the grad
+/// lane inlining the whole body into one DAG), the anchor's split index is
+/// recovered from the fixed position a concrete-rank caller recorded. This is
+/// the rank-spread analogue of the #388 recovery in
+/// [`LowerCtx::resolve_reduce_axis`]; both rely on the same map.
+fn extract_rank_var_bindings(
+    expr: &Expr,
+    actual_dims: &[DimInfo],
+    dim_axis_positions: &HashMap<String, usize>,
+) -> Vec<(String, Vec<DimInfo>)> {
+    let Some(slots) = tensor_formal_dim_slots(expr) else {
         return Vec::new();
     };
-    let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first() else {
-        return Vec::new();
-    };
-    if tag != "t-tensor" || list.elements.len() < 3 {
-        return Vec::new();
-    }
-    // Children after tag+meta are dim nodes followed by the precision node.
-    let children = &list.elements[2..];
-    if children.len() < 2 {
-        return Vec::new();
-    }
-    let dim_nodes = &children[..children.len() - 1];
 
-    // Classify each dim slot: a spread (`d-rank`), a named anchor (`d-name`),
-    // or "other" (`d-lit`/`d-var` — positional anchors matched element-wise,
-    // never used to locate a split).
-    enum Slot {
-        Spread(String),
-        Named(String),
-        Other,
-    }
-    let slots: Vec<Slot> = dim_nodes
-        .iter()
-        .map(|d| {
-            let Expr::List(dl, _) = d else {
-                return Slot::Other;
-            };
-            let Some(Expr::Atom(Atom::Symbol(dtag), _)) = dl.elements.first() else {
-                return Slot::Other;
-            };
-            let payload = match dl.elements.get(2) {
-                Some(Expr::Atom(Atom::Symbol(s), _)) => Some(s.clone()),
-                _ => None,
-            };
-            match (dtag.as_str(), payload) {
-                ("d-rank", Some(n)) => Slot::Spread(n),
-                ("d-name", Some(n)) => Slot::Named(n),
-                _ => Slot::Other,
-            }
-        })
-        .collect();
-
-    if !slots.iter().any(|s| matches!(s, Slot::Spread(_))) {
+    if !slots.iter().any(|s| matches!(s, DimSlot::Spread(_))) {
         return Vec::new();
     }
 
     // Walk the slots against the actual dims, exactly as the checker's
     // `unify_row_against_ground` does: a spread followed by a named anchor binds
-    // to the run up to that anchor (located by name); a trailing spread absorbs
-    // the rest; other dims consume one actual dim positionally.
+    // to the run up to that anchor (located by name, with a by-position
+    // fallback); a trailing spread absorbs the rest; other dims consume one
+    // actual dim positionally.
     let n = actual_dims.len();
     let mut out: Vec<(String, Vec<DimInfo>)> = Vec::new();
     let mut gi = 0usize;
@@ -1476,31 +1567,54 @@ fn extract_rank_var_bindings(expr: &Expr, actual_dims: &[DimInfo]) -> Vec<(Strin
             return out;
         }
         match &slots[ri] {
-            Slot::Spread(name) => {
+            DimSlot::Spread(name) => {
                 let rest = &slots[ri + 1..];
-                match rest.iter().position(|s| !matches!(s, Slot::Spread(_))) {
+                match rest.iter().position(|s| !matches!(s, DimSlot::Spread(_))) {
                     Some(0) => {
-                        let Slot::Named(anchor) = &rest[0] else {
-                            // Anchor not a `d-name` — unlocatable. The checker
-                            // requires a named anchor, so this is unreachable for
-                            // a checked program; fail loud in debug, bail in release.
+                        let (DimSlot::Named(anchor) | DimSlot::DimVar(anchor)) = &rest[0] else {
+                            // Anchor is a `d-lit`/`Other` — unlocatable by name.
+                            // The checker requires a named anchor after a spread,
+                            // so this is unreachable for a checked program; fail
+                            // loud in debug, bail in release.
                             debug_assert!(
                                 false,
                                 "rank-spread anchor is not a named dim at lowering"
                             );
                             return out;
                         };
-                        let split = actual_dims[gi..]
+                        // Primary: locate the anchor by name in the (possibly
+                        // still-symbolic) actual dims, exactly as the forward
+                        // lane does when each nested call re-stamps the callee's
+                        // declared named dims onto its placeholder.
+                        let by_name = actual_dims[gi..]
                             .iter()
                             .position(|d| matches!(d, DimInfo::Named(g, _) if g == anchor))
                             .map(|p| gi + p);
+                        // chelis#373 fallback: the actual was monomorphized to
+                        // concrete `Lit` dims and the name is gone. Recover the
+                        // split index from the fixed position a concrete-rank
+                        // caller recorded; accept it only when it lies in the
+                        // remaining run `[gi, n)`. The range check rejects an
+                        // out-of-range/unrecorded anchor (it falls through to the
+                        // loud path below) but does NOT catch a valid-but-stale
+                        // in-range index: if an axis-reorder (e.g. `permute`)
+                        // moved the anchor between the recording parameter and
+                        // here, this splits at the wrong axis (silent wrong
+                        // gradient under grad). Tracked as chelis#549
+                        // (axis-reorder staleness).
+                        let split = by_name.or_else(|| {
+                            dim_axis_positions
+                                .get(anchor)
+                                .copied()
+                                .filter(|&pos| pos >= gi && pos < n)
+                        });
                         match split {
                             Some(s) => {
                                 out.push((name.clone(), actual_dims[gi..s].to_vec()));
                                 gi = s;
                             }
                             None => {
-                                // Anchor absent from the monomorphized actual —
+                                // Anchor absent by name AND no recorded position —
                                 // the checker located it (Name↔Lit etc. were
                                 // rejected), so unreachable for a checked program.
                                 debug_assert!(
@@ -4789,6 +4903,7 @@ impl LowerCtx {
         grad_rank_subst.extend(tensor_rank_substitutions(
             &grad_param_type_exprs,
             &actual_types,
+            &self.dim_axis_positions,
         ));
         // Formal parameter shapes for the differentiated function. Use the
         // call-site-tolerant variant so a precision var that the grad call
@@ -5017,7 +5132,7 @@ impl LowerCtx {
         // can recover the axis even after monomorphization erases the named
         // axis from a literal-shaped operand's dims.
         self.dim_axis_positions
-            .extend(tensor_dim_axis_positions(&formal_types));
+            .extend(tensor_dim_axis_positions(&formal_type_exprs));
         // WS-A8: extend the precision-tvar substitution with bindings
         // from this call site's formal-vs-actual precision slots. Walks
         // the raw type-exprs (which preserve `(t-var)` shape) against
@@ -5063,8 +5178,9 @@ impl LowerCtx {
         // dim vector, so the inlined rank-poly body resolves its `..r`
         // tensors to concrete ranks before any backend sees them. The
         // rank analogue of the `prec_substitutions.extend(...)` above.
-        self.rank_substitutions
-            .extend(tensor_rank_substitutions(&formal_type_exprs, &actual_types));
+        let rank_subst =
+            tensor_rank_substitutions(&formal_type_exprs, &actual_types, &self.dim_axis_positions);
+        self.rank_substitutions.extend(rank_subst);
         // Inlining-F1: install the recursion guard *here*, after argument
         // evaluation, so legitimate nested calls passed as arguments to
         // the same fn-typed-parameter alias (e.g. `outer(doubler, seed)`
@@ -7501,9 +7617,14 @@ impl LowerCtx {
             // operand's dims are concrete `Lit(_)` and the named axis is gone.
             // Recover the axis from the formal-parameter position recorded at
             // the inline site (`dim_axis_positions`), validated against the
-            // operand's actual rank. This is a position recovery the checker
-            // already proved sound (it accepted `sum(x, seq)`), NOT a silent
-            // default — an out-of-range or unrecorded name still fails loudly.
+            // operand's actual rank. This recovers the axis the checker accepted
+            // (`sum(x, seq)`); an out-of-range or unrecorded name still fails
+            // loudly rather than defaulting to 0. NOT yet fully sound: the
+            // recorded index is the anchor's offset in the formal parameter, so
+            // an axis-reorder (e.g. `permute`) between that parameter and here
+            // can leave it valid-but-stale (in range, wrong axis) and silently
+            // reduce the wrong axis under grad. Tracked as chelis#549
+            // (axis-reorder staleness).
             if let Some(&idx) = self.dim_axis_positions.get(&name)
                 && self
                     .dag
@@ -10643,22 +10764,76 @@ mod tests {
     #[test]
     fn extract_rank_var_bindings_sole_spread() {
         let actual = vec![DimInfo::Named("a".into(), None), DimInfo::Lit(4)];
+        let no_positions = HashMap::new();
 
         let bare = parse_type_expr("(t-tensor {} (d-rank {} r) (t-prim {} f32))");
         assert_eq!(
-            extract_rank_var_bindings(&bare, &actual),
+            extract_rank_var_bindings(&bare, &actual, &no_positions),
             vec![("r".to_string(), actual.clone())]
         );
 
         let borrowed = parse_type_expr("(t-ref {} (t-tensor {} (d-rank {} rr) (t-prim {} f32)))");
         assert_eq!(
-            extract_rank_var_bindings(&borrowed, &actual),
+            extract_rank_var_bindings(&borrowed, &actual, &no_positions),
             vec![("rr".to_string(), actual.clone())]
         );
 
         let concrete =
             parse_type_expr("(t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} f32))");
-        assert!(extract_rank_var_bindings(&concrete, &actual).is_empty());
+        assert!(extract_rank_var_bindings(&concrete, &actual, &no_positions).is_empty());
+    }
+
+    /// chelis#373: a `(d-rank pre) (d-name seq) (d-rank post)` formal whose
+    /// actual was monomorphized to all-`Lit` dims (the name `seq` is gone) still
+    /// splits correctly when `dim_axis_positions` records `seq`'s fixed index —
+    /// the by-position fallback the grad lane needs. WITHOUT the recorded
+    /// position the split fails (the empty-map case returns no binding rather
+    /// than guessing), proving the fallback is the load-bearing recovery.
+    #[test]
+    fn extract_rank_var_bindings_by_position_when_name_erased() {
+        let formal = parse_type_expr(
+            "(t-ref {} (t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-prim {} f32)))",
+        );
+        // Monomorphized actual: seq erased to a concrete Lit at index 1.
+        let actual = vec![DimInfo::Lit(2), DimInfo::Lit(3)];
+
+        let positions = HashMap::from([("seq".to_string(), 1usize)]);
+        let bindings = extract_rank_var_bindings(&formal, &actual, &positions);
+        assert_eq!(
+            bindings,
+            vec![
+                ("pre".to_string(), vec![DimInfo::Lit(2)]),
+                ("post".to_string(), vec![]),
+            ],
+            "by-position fallback must split at the recorded anchor index"
+        );
+
+        // A LEADING-spread variant: `(d-rank rest) (d-name seq)` reducing the
+        // trailing axis. `seq` at recorded index 1 splits `rest = [Lit(2)]`.
+        let leading =
+            parse_type_expr("(t-tensor {} (d-rank {} rest) (d-name {} seq) (t-prim {} f32))");
+        let leading_bindings = extract_rank_var_bindings(&leading, &actual, &positions);
+        assert_eq!(
+            leading_bindings,
+            vec![("rest".to_string(), vec![DimInfo::Lit(2)])],
+            "by-position fallback works with a trailing anchor too"
+        );
+    }
+
+    /// chelis#373: an out-of-range recorded position is NOT trusted — the
+    /// fallback only accepts a position inside the remaining actual run, so a
+    /// stale/wrong index falls through to the loud "anchor absent" path rather
+    /// than splitting at a bogus index. The panic message pins that the right
+    /// failure (not a silent wrong split) is reached.
+    #[test]
+    #[should_panic(expected = "absent from monomorphized actual")]
+    fn extract_rank_var_bindings_rejects_out_of_range_position() {
+        let formal = parse_type_expr(
+            "(t-ref {} (t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-prim {} f32)))",
+        );
+        let actual = vec![DimInfo::Lit(2), DimInfo::Lit(3)];
+        let bad_positions = HashMap::from([("seq".to_string(), 9usize)]);
+        let _ = extract_rank_var_bindings(&formal, &actual, &bad_positions);
     }
 
     /// Tier-3: a `(d-rank {} pre) (d-name {} seq) (d-rank {} post)` formal splits
@@ -10674,7 +10849,7 @@ mod tests {
             DimInfo::Named("seq".into(), None),
             DimInfo::Named("hidden".into(), None),
         ];
-        let bindings = extract_rank_var_bindings(&formal, &actual);
+        let bindings = extract_rank_var_bindings(&formal, &actual, &HashMap::new());
         assert_eq!(
             bindings,
             vec![
@@ -10705,7 +10880,7 @@ mod tests {
             ],
             precision: Prim::F32,
         }];
-        let subst = tensor_rank_substitutions(&formals, &actuals);
+        let subst = tensor_rank_substitutions(&formals, &actuals, &HashMap::new());
         assert_eq!(
             subst.get("r"),
             Some(&vec![
@@ -10713,6 +10888,62 @@ mod tests {
                 DimInfo::Named("b".into(), None)
             ]),
             "rank var `r` must bind to the actual arg's full shape vector"
+        );
+    }
+
+    /// chelis#373: `tensor_dim_axis_positions` records a fixed anchor offset
+    /// ONLY for a slot with no preceding spread, and never records (so never
+    /// clobbers) a named anchor that sits behind a spread.
+    #[test]
+    fn tensor_dim_axis_positions_skips_post_spread_anchors() {
+        // Concrete-rank formal `[b, seq]`: both fixed; `seq` at index 1.
+        let concrete = Some(parse_type_expr(
+            "(t-ref {} (t-tensor {} (d-name {} b) (d-name {} seq) (t-prim {} f32)))",
+        ));
+        // Spread formal `[..pre, seq, ..post]`: `seq` is behind a spread — no
+        // fixed offset, must NOT be recorded.
+        let spread = Some(parse_type_expr(
+            "(t-ref {} (t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-prim {} f32)))",
+        ));
+
+        // Concrete formal alone: seq -> 1.
+        let from_concrete = tensor_dim_axis_positions(std::slice::from_ref(&concrete));
+        assert_eq!(from_concrete.get("seq"), Some(&1));
+
+        // Spread formal alone: seq is post-spread, recorded nowhere.
+        let from_spread = tensor_dim_axis_positions(std::slice::from_ref(&spread));
+        assert!(
+            !from_spread.contains_key("seq"),
+            "a post-spread anchor has no fixed offset; got {from_spread:?}"
+        );
+
+        // A leading anchor before a trailing spread (`[row, ..rest]`) IS fixed.
+        let leading = Some(parse_type_expr(
+            "(t-tensor {} (d-name {} row) (d-rank {} rest) (t-prim {} f32))",
+        ));
+        let from_leading = tensor_dim_axis_positions(&[leading]);
+        assert_eq!(from_leading.get("row"), Some(&0));
+    }
+
+    /// chelis#373 anti-clobber: when the SAME named axis appears in a
+    /// concrete-rank formal (fixed offset) and a spread formal (no fixed
+    /// offset), `.extend()`-ing the spread result must not overwrite the
+    /// concrete offset. This mirrors the two-level grad call chain
+    /// (`sum_rows[b, seq]` then `sum_seq[..pre, seq, ..post]`).
+    #[test]
+    fn tensor_dim_axis_positions_concrete_survives_spread_extend() {
+        let concrete = Some(parse_type_expr(
+            "(t-ref {} (t-tensor {} (d-name {} b) (d-name {} seq) (t-prim {} f32)))",
+        ));
+        let spread = Some(parse_type_expr(
+            "(t-ref {} (t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-prim {} f32)))",
+        ));
+        let mut positions = tensor_dim_axis_positions(&[concrete]);
+        positions.extend(tensor_dim_axis_positions(&[spread]));
+        assert_eq!(
+            positions.get("seq"),
+            Some(&1),
+            "the concrete-rank `seq -> 1` must survive the spread formal's extend"
         );
     }
 
