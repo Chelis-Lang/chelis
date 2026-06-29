@@ -179,15 +179,18 @@ and do not conflate.
 
 The agent-first design of Chelis (small Deep vocabulary, fast compiler with
 fitness-oracle output, dual Surf/Deep syntax) supports structural editing
-primitives that operate on Deep ASTs rather than text patches. The current
-tool is `chelis_replace_function_body` on Tide MCP and HTTP. It returns a
-rewritten module only after the post-splice whole-module check is clean; parse,
-splice, type, effect, and linearity failures are structured rejections.
+primitives that operate on Deep ASTs rather than text patches. The shipped
+tools are `chelis_replace_function_body` and `chelis_add_function` on Tide MCP
+and HTTP. They return a rewritten module only after the post-edit
+whole-module check is clean; parse, edit-shape, name-resolution, type, effect,
+and linearity failures are structured rejections.
 
-The next capability frontier is replace-whole-function, add-function, and
-add-property tooling. Those tools are not shipped yet and need their own
-oracles before any implementation claims land.
+The next capability frontier is replace-whole-function, add-property, rename,
+and signature-change tooling. `chelis_add_function` is the worked extension
+reference; the remaining tools are not shipped yet and need their own oracles
+before any implementation claims land.
 
 Independent of the language phases and of the trust-stack/reef tracks above.
-Rides on top of shipped Tide MCP infrastructure. L2 deep-path provenance
-remains blocked on span-survival work.
+Rides on top of shipped Tide MCP infrastructure. L2 deep-path diagnostics and
+rename/signature-change cascades remain blocked on public provenance and
+reference/call-graph seams.

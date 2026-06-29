@@ -23,13 +23,17 @@ out = (add(copy(x), x) : tensor[4, f32])
 "#;
 
 async fn post_json(app: Router, path: &str, value: Value) -> (u16, Value) {
+    post_raw_json(app, path, value.to_string()).await
+}
+
+async fn post_raw_json(app: Router, path: &str, body: impl Into<String>) -> (u16, Value) {
     let response = app
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri(path)
                 .header("content-type", "application/json")
-                .body(Body::from(value.to_string()))
+                .body(Body::from(body.into()))
                 .expect("request"),
         )
         .await
@@ -646,6 +650,40 @@ async fn assert_http_replace_rejection(new_body: &str, expected_stage: &str, exp
     assert_eq!(errors[0]["kind"], expected_kind);
 }
 
+async fn assert_http_add_rejection(new_decls: &str, expected_stage: &str, expected_kind: &str) {
+    let (status, bad) = post_json(
+        router(),
+        "/add_function",
+        json!({
+            "module": replace_fixtures::TENSOR_DEEP,
+            "new_decls": new_decls,
+        }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(bad["ok"], false, "add_function should reject: {bad}");
+    assert_eq!(bad["stage"], expected_stage);
+    assert!(
+        bad.get("result").is_none(),
+        "failed add_function must not include result: {bad}"
+    );
+    let errors = bad["errors"].as_array().expect("errors array");
+    assert!(!errors.is_empty());
+    assert_eq!(errors[0]["kind"], expected_kind);
+}
+
+fn assert_invalid_http_request_envelope(bad: &Value) {
+    assert_eq!(bad["ok"], false, "request should reject: {bad}");
+    assert_eq!(bad["stage"], "http");
+    assert!(
+        bad.get("result").is_none(),
+        "invalid HTTP authoring request must not include result: {bad}"
+    );
+    let errors = bad["errors"].as_array().expect("errors array");
+    assert!(!errors.is_empty());
+    assert_eq!(errors[0]["kind"], "invalid_request");
+}
+
 #[tokio::test]
 async fn replace_function_body_endpoint_rejects_malformed_cast_body() {
     assert_http_replace_rejection(
@@ -670,6 +708,96 @@ async fn replace_function_body_endpoint_locks_effect_and_linearity_envelopes() {
         "linearity_error",
     )
     .await;
+}
+
+#[tokio::test]
+async fn add_function_endpoint_accepts_well_typed_function_bundle() {
+    let (status, ok) = post_json(
+        router(),
+        "/add_function",
+        json!({
+            "module": replace_fixtures::TENSOR_DEEP,
+            "new_decls": replace_fixtures::ADD_TENSOR_IDENTITY,
+            "insert_after_function": "passthrough",
+        }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(
+        ok["ok"].as_bool().unwrap(),
+        "add_function should pass: {ok}"
+    );
+    assert!(
+        ok["result"]["added_def_deep"]
+            .as_str()
+            .expect("added_def_deep")
+            .contains("added_passthrough")
+    );
+    let module_deep = ok["result"]["module_deep"]
+        .as_str()
+        .expect("module_deep string");
+    let reparsed =
+        chelis_deep::parser::parse_str_strict(module_deep).expect("module_deep reparses");
+    assert_eq!(
+        chelis_deep::printer::print_canonical(&reparsed),
+        module_deep
+    );
+}
+
+#[tokio::test]
+async fn add_function_endpoint_rejects_structured_failure_without_result() {
+    assert_http_add_rejection(
+        replace_fixtures::ADD_DECL_SHAPE_ERROR,
+        "add-function",
+        "deep_decl_error",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn add_function_endpoint_locks_effect_and_linearity_envelopes() {
+    assert_http_add_rejection(
+        replace_fixtures::ADD_TENSOR_EFFECTING,
+        "effects",
+        "effect_error",
+    )
+    .await;
+    assert_http_add_rejection(
+        replace_fixtures::ADD_TENSOR_LINEARITY,
+        "linearity",
+        "linearity_error",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn authoring_endpoints_surface_wire_shape_failures_as_structured_json() {
+    let (status, missing_body) = post_json(
+        router(),
+        "/replace_function_body",
+        json!({
+            "module": replace_fixtures::TENSOR_DEEP,
+            "function_name": "passthrough",
+        }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_invalid_http_request_envelope(&missing_body);
+
+    let (status, missing_decls) = post_json(
+        router(),
+        "/add_function",
+        json!({
+            "module": replace_fixtures::TENSOR_DEEP,
+        }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_invalid_http_request_envelope(&missing_decls);
+
+    let (status, malformed_json) = post_raw_json(router(), "/add_function", "{").await;
+    assert_eq!(status, 200);
+    assert_invalid_http_request_envelope(&malformed_json);
 }
 
 #[tokio::test]

@@ -25,20 +25,20 @@ pub enum ValidateMode {
     Desugar,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ApiSuccess<T> {
     pub ok: bool,
     pub result: T,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ApiFailure {
     pub ok: bool,
     pub stage: String,
     pub errors: Vec<Diagnostic>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum ApiEnvelope<T> {
     Success(ApiSuccess<T>),
@@ -59,7 +59,7 @@ impl<T> ApiEnvelope<T> {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Diagnostic {
     pub kind: String,
     pub message: String,
@@ -89,7 +89,7 @@ pub struct Diagnostic {
 /// shape does not couple the wire surface to the internal `DeepPath` type. It
 /// is never emitted in L0 (the inner `deep_path` is always `None` there); the
 /// type exists so populating it in L2 adds no new field to [`Diagnostic`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WireDeepErrorPath {
     /// The qualified name of the def the address is relative to.
     pub def_qualified_name: String,
@@ -198,10 +198,43 @@ pub struct ReplaceFunctionBodyRequest {
 /// validation (caller-ward effect closure, the def's SCC for termination,
 /// per-def for type) is the future optimization, not a fragment-scoped path that
 /// could disagree.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReplaceFunctionBodyResult {
     /// Canonical Deep of just the changed `(def ...)` node.
     pub changed_def_deep: String,
+    /// Canonical Deep of the full rewritten module.
+    pub module_deep: String,
+}
+
+/// Request for `chelis_add_function`: insert a new Deep function declaration
+/// bundle into a Deep module and return canonical Deep only if the rewritten
+/// whole module validates. The bundle is Deep text containing exactly one
+/// `(def ...)` and an optional matching `(defsig ...)`; no export declaration is
+/// accepted here and the tool preserves existing exports unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AddFunctionRequest {
+    /// The full module as canonical Deep (`.dp`) text.
+    pub module: String,
+    /// Deep text containing the function declaration bundle to insert.
+    pub new_decls: String,
+    /// Optional qualified (or bare) function name. When present, the new bundle
+    /// is inserted immediately after that function's existing def/defsig
+    /// declaration bundle; otherwise it is appended to the module decl list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insert_after_function: Option<String>,
+}
+
+/// Result of a clean `chelis_add_function`: the inserted declarations and the
+/// full rewritten module, all in canonical Deep. A returned result means the
+/// post-insertion whole-module pipeline accepted the module.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AddFunctionResult {
+    /// Canonical Deep of the inserted `(def ...)` node.
+    pub added_def_deep: String,
+    /// Canonical Deep of the inserted `(defsig ...)` node, when one was
+    /// authored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub added_defsig_deep: Option<String>,
     /// Canonical Deep of the full rewritten module.
     pub module_deep: String,
 }
@@ -492,14 +525,14 @@ pub struct BatchResultEnvelope {
     pub results: Vec<BatchResult>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WireDeepExpr {
     pub kind: WireDeepExprKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub span: Option<Span>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WireDeepExprKind {
     Atom {
@@ -517,7 +550,7 @@ pub enum WireDeepExprKind {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WireDeepAtom {
     Symbol { value: String },
@@ -528,7 +561,7 @@ pub enum WireDeepAtom {
     Bool { value: bool },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WireMetaEntry {
     pub key: String,
     pub value: WireDeepExpr,

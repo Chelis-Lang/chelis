@@ -10,11 +10,11 @@ pub mod schema;
 pub mod stdlib_cache;
 
 pub use chelis_types::{LinkedProgramGuard, install_linked_program_guard};
-pub use compiler::replace_function_body;
 pub use compiler::{
     PreparedEvalInContext, check_in_context, eval_in_context, eval_many_in_context,
     prepare_eval_in_context,
 };
+pub use compiler::{add_function, replace_function_body};
 pub use context::{
     CacheError, CacheIdentity, CompiledContext, ContextHash, compile_reef_context,
     load_or_compile_for_package,
@@ -23,7 +23,10 @@ pub use context::{
 /// (RFC `opaque_invariants_rfc.md` D-DECODE). No production codec consumes
 /// it in V1 -- see `decode` module docs.
 pub use decode::{DecodeError, decode_adt_value, try_decode_adt_value};
-pub use fragment::{DeepErrorPath, ReplacementError, ReplacementReport, check_body_replacement};
+pub use fragment::{
+    DeepErrorPath, EditValidationError, EditValidationReport, ReplacementError, ReplacementReport,
+    check_body_replacement, check_whole_module_edit,
+};
 pub use layered::{LayeredCheck, check_layered, check_layered_for_build, stdlib_structural_stats};
 /// The host-runtime value type returned by the decode chokepoint.
 /// Experimental: surfaced for the decode contract point; its shape is not

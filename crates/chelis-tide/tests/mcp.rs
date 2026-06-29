@@ -93,6 +93,16 @@ fn call_replace(arguments: serde_json::Value) -> serde_json::Value {
     .expect("replace_function_body response")
 }
 
+fn call_add(arguments: serde_json::Value) -> serde_json::Value {
+    handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":100,
+        "method":"tools/call",
+        "params":{"name":"chelis_add_function","arguments":arguments}
+    }))
+    .expect("add_function response")
+}
+
 fn assert_replace_rejection(
     module: &str,
     new_body: &str,
@@ -119,6 +129,87 @@ fn assert_replace_rejection(
     let errors = structured["errors"].as_array().expect("errors array");
     assert!(!errors.is_empty());
     assert_eq!(errors[0]["kind"], expected_kind);
+}
+
+fn assert_add_rejection(new_decls: &str, expected_stage: &str, expected_kind: &str) {
+    let response = call_add(json!({
+        "module": replace_fixtures::TENSOR_DEEP,
+        "new_decls": new_decls,
+    }));
+    assert_eq!(
+        response["result"]["isError"], true,
+        "rejected add_function must set MCP isError: {}",
+        response["result"]["structuredContent"]
+    );
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["ok"], false);
+    assert_eq!(structured["stage"], expected_stage);
+    assert!(
+        structured.get("result").is_none(),
+        "failed add_function must not surface a result: {structured}"
+    );
+    let errors = structured["errors"].as_array().expect("errors array");
+    assert!(!errors.is_empty());
+    assert_eq!(errors[0]["kind"], expected_kind);
+}
+
+#[test]
+fn add_function_accepts_well_typed_function_bundle() {
+    let response = call_add(json!({
+        "module": replace_fixtures::TENSOR_DEEP,
+        "new_decls": replace_fixtures::ADD_TENSOR_IDENTITY,
+        "insert_after_function": "passthrough",
+    }));
+    assert_eq!(
+        response["result"]["isError"], false,
+        "well-typed add_function is not an error: {}",
+        response["result"]["structuredContent"]
+    );
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["ok"], true);
+    let result = &structured["result"];
+    assert!(
+        result["added_def_deep"]
+            .as_str()
+            .expect("added_def_deep")
+            .contains("added_passthrough")
+    );
+    assert!(
+        result["added_defsig_deep"]
+            .as_str()
+            .expect("added_defsig_deep")
+            .contains("added_passthrough")
+    );
+    let module_deep = result["module_deep"].as_str().expect("module_deep");
+    let reparsed =
+        chelis_deep::parser::parse_str_strict(module_deep).expect("module_deep reparses");
+    assert_eq!(
+        chelis_deep::printer::print_canonical(&reparsed),
+        module_deep
+    );
+}
+
+#[test]
+fn add_function_decl_shape_failure_has_no_result_payload() {
+    assert_add_rejection(
+        replace_fixtures::ADD_DECL_SHAPE_ERROR,
+        "add-function",
+        "deep_decl_error",
+    );
+}
+
+#[test]
+fn add_function_effect_and_linearity_failures_have_no_result_payload() {
+    assert_add_rejection(
+        replace_fixtures::ADD_TENSOR_EFFECTING,
+        "effects",
+        "effect_error",
+    );
+    assert_add_rejection(
+        replace_fixtures::ADD_TENSOR_LINEARITY,
+        "linearity",
+        "linearity_error",
+    );
 }
 
 /// Success case: replacing `gordon_pv`'s body with a well-typed expression
@@ -419,6 +510,7 @@ fn initialize_and_tool_discovery_work() {
             "chelis_grad",
             "chelis_validate",
             "chelis_replace_function_body",
+            "chelis_add_function",
             "chelis_prove",
         ]
     );
@@ -443,6 +535,43 @@ fn initialize_and_tool_discovery_work() {
             "replace tool requires `{property}`"
         );
     }
+
+    let add_tool = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "chelis_add_function")
+        .expect("add_function tool");
+    for property in ["module", "new_decls"] {
+        assert_eq!(
+            add_tool["inputSchema"]["properties"][property]["type"], "string",
+            "add tool exposes `{property}` as a string"
+        );
+        assert!(
+            add_tool["inputSchema"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == property),
+            "add tool requires `{property}`"
+        );
+    }
+    assert!(
+        add_tool["inputSchema"]["properties"]["insert_after_function"]["type"]
+            .as_array()
+            .expect("optional string type array")
+            .iter()
+            .any(|value| value == "string"),
+        "insert_after_function accepts strings"
+    );
+    assert!(
+        !add_tool["inputSchema"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "insert_after_function"),
+        "insert_after_function is optional"
+    );
 
     let check_tool = tools["result"]["tools"]
         .as_array()
@@ -544,6 +673,13 @@ fn each_tool_dispatches_successfully() {
         (
             "chelis_validate",
             json!({"mode":"surf","source":HELLO_TENSOR}),
+        ),
+        (
+            "chelis_add_function",
+            json!({
+                "module": replace_fixtures::TENSOR_DEEP,
+                "new_decls": replace_fixtures::ADD_TENSOR_IDENTITY,
+            }),
         ),
     ];
 

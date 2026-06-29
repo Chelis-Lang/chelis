@@ -1,13 +1,18 @@
 use std::net::SocketAddr;
 
-use axum::{Json, Router, extract::State, routing::post};
+use axum::{
+    Json, Router,
+    extract::{State, rejection::JsonRejection},
+    routing::post,
+};
+use serde_json::Value;
 use tokio::net::TcpListener;
 
 use crate::compiler;
 use crate::schema::{
-    ApiEnvelope, BatchRequestEnvelope, BatchResultEnvelope, CheckRequest, CompileRequest,
-    DecompileRequest, DesugarRequest, EvalRequest, GradRequest, LowerRequest, ParseRequest,
-    ReplaceFunctionBodyRequest, ValidateRequest,
+    AddFunctionRequest, ApiEnvelope, BatchRequestEnvelope, BatchResultEnvelope, CheckRequest,
+    CompileRequest, DecompileRequest, DesugarRequest, Diagnostic, EvalRequest, GradRequest,
+    LowerRequest, ParseRequest, ReplaceFunctionBodyRequest, ValidateRequest,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -25,6 +30,7 @@ pub fn router() -> Router {
         .route("/validate", post(validate))
         .route("/decompile", post(decompile))
         .route("/replace_function_body", post(replace_function_body))
+        .route("/add_function", post(add_function))
         .route("/batch", post(batch))
         .with_state(AppState)
 }
@@ -103,11 +109,58 @@ async fn decompile(
 
 async fn replace_function_body(
     State(_state): State<AppState>,
-    Json(request): Json<ReplaceFunctionBodyRequest>,
+    body: Result<Json<Value>, JsonRejection>,
 ) -> Json<ApiEnvelope<crate::schema::ReplaceFunctionBodyResult>> {
-    Json(compiler::result_envelope(compiler::replace_function_body(
-        request,
-    )))
+    Json(authoring_request_envelope::<
+        ReplaceFunctionBodyRequest,
+        crate::schema::ReplaceFunctionBodyResult,
+        _,
+    >(body, compiler::replace_function_body))
+}
+
+async fn add_function(
+    State(_state): State<AppState>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Json<ApiEnvelope<crate::schema::AddFunctionResult>> {
+    Json(authoring_request_envelope::<
+        AddFunctionRequest,
+        crate::schema::AddFunctionResult,
+        _,
+    >(body, compiler::add_function))
+}
+
+fn authoring_request_envelope<T, R, F>(
+    body: Result<Json<Value>, JsonRejection>,
+    f: F,
+) -> ApiEnvelope<R>
+where
+    T: serde::de::DeserializeOwned,
+    F: FnOnce(T) -> Result<R, compiler::CompilerError>,
+{
+    let value = match body {
+        Ok(Json(value)) => value,
+        Err(err) => return invalid_http_request(err.to_string()),
+    };
+    match serde_json::from_value::<T>(value) {
+        Ok(request) => compiler::result_envelope(f(request)),
+        Err(err) => invalid_http_request(err.to_string()),
+    }
+}
+
+fn invalid_http_request<T>(message: String) -> ApiEnvelope<T> {
+    ApiEnvelope::failure(
+        "http",
+        vec![Diagnostic {
+            kind: "invalid_request".to_string(),
+            message,
+            severity: 1.0,
+            expected: None,
+            got: None,
+            suggestions: Vec::new(),
+            span: None,
+            deep_path: None,
+        }],
+    )
 }
 
 async fn batch(

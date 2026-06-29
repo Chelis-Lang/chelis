@@ -59,6 +59,60 @@ use chelis_deep::Expr;
 
 use crate::schema::Span;
 
+/// A whole-module edit rejected by the compiler-owned validation pipeline.
+///
+/// Edit tools may do structural prechecks (parse the request, resolve an
+/// insertion target, locate a body slot), but `ok:true` is reserved for this
+/// pipeline accepting the full rewritten module.
+#[derive(Debug, Clone)]
+pub enum EditValidationError {
+    /// The fitness or type pass (`check_ir_fitness` or `check_typed_program`)
+    /// rejected the rewritten module.
+    Type {
+        message: String,
+        location: Option<Span>,
+        /// Reserved for the L2 Deep-address of the offending node. Always
+        /// `None` in L0.
+        deep_path: Option<DeepErrorPath>,
+    },
+    /// The effect pass (`check_program`) rejected the rewritten module.
+    Effect {
+        message: String,
+        location: Option<Span>,
+        /// Reserved for the L2 Deep-address of the offending node. Always
+        /// `None` in L0.
+        deep_path: Option<DeepErrorPath>,
+    },
+    /// The linearity pass (`check_linearity`) rejected the rewritten module.
+    Linearity {
+        message: String,
+        location: Option<Span>,
+        /// Reserved for the L2 Deep-address of the offending node. Always
+        /// `None` in L0.
+        deep_path: Option<DeepErrorPath>,
+    },
+}
+
+impl EditValidationError {
+    /// The pass that produced this error, as a stable lowercase stage tag.
+    pub fn stage(&self) -> &'static str {
+        match self {
+            EditValidationError::Type { .. } => "check",
+            EditValidationError::Effect { .. } => "effects",
+            EditValidationError::Linearity { .. } => "linearity",
+        }
+    }
+
+    /// The diagnostic text the underlying pass produced.
+    pub fn message(&self) -> &str {
+        match self {
+            EditValidationError::Type { message, .. }
+            | EditValidationError::Effect { message, .. }
+            | EditValidationError::Linearity { message, .. } => message,
+        }
+    }
+}
+
 /// The pass that rejected a body replacement, with its human-readable
 /// diagnostics.
 ///
@@ -162,6 +216,67 @@ pub struct ReplacementReport {
     pub checks_clean: bool,
 }
 
+/// A clean whole-module edit.
+///
+/// `rewritten_module` is the exact Deep program the validation pipeline
+/// accepted. `checks_clean` is always `true` on `Ok` and exists as an explicit
+/// success marker for edit-tool callers.
+#[derive(Debug, Clone)]
+pub struct EditValidationReport {
+    /// The full rewritten module accepted by the compiler-owned pipeline.
+    pub rewritten_module: Vec<Expr>,
+    /// Always `true`: full validation of `rewritten_module` accepted.
+    pub checks_clean: bool,
+}
+
+/// Run the compiler-owned whole-module validation pipeline over an edited Deep
+/// module.
+///
+/// The pass order matches `cmd_check_one_deep`: `check_ir_fitness` ->
+/// `check_typed_program` -> `check_program` (effects) -> `check_linearity`.
+/// The first failing pass is returned as a tagged error.
+pub fn check_whole_module_edit(
+    rewritten_module: Vec<Expr>,
+) -> Result<EditValidationReport, EditValidationError> {
+    // Pass 1: structural/type fitness. Runs first because it rejects a
+    // base-case-free recursion group promptly, before the whole-module
+    // inference that can wedge on such a module.
+    let fitness = chelis_types::check_ir_fitness(&rewritten_module);
+    if !fitness.errors.is_empty() {
+        return Err(EditValidationError::Type {
+            message: join_messages(fitness.errors.iter().map(|error| error.message.as_str())),
+            location: None,
+            deep_path: None,
+        });
+    }
+
+    // Pass 2: whole-module HM type inference.
+    let typed = chelis_types::check_typed_program(&rewritten_module)
+        .map_err(|report| infer_result_to_type_error(&report))?;
+
+    // Pass 3: effects. The validators descend into the `(module ...)` wrapper,
+    // so a declared-pure body that performs `Random`/`Io` is rejected, and so
+    // is an effect that propagates to a held caller declared not to perform it.
+    let effected =
+        chelis_effects::check_program(&typed).map_err(|errors| EditValidationError::Effect {
+            message: join_messages(errors.iter().map(|error| error.message.as_str())),
+            location: None,
+            deep_path: None,
+        })?;
+
+    // Pass 4: linearity.
+    chelis_types::check_linearity(&effected).map_err(|errors| EditValidationError::Linearity {
+        message: join_messages(errors.iter().map(|error| error.message.as_str())),
+        location: None,
+        deep_path: None,
+    })?;
+
+    Ok(EditValidationReport {
+        rewritten_module,
+        checks_clean: true,
+    })
+}
+
 /// Check replacing the body of `target_qualified_name` in `module` with
 /// `new_body` by running full `chelis check` over the rewritten module.
 ///
@@ -192,45 +307,12 @@ pub fn check_body_replacement(
         chelis_deep::splice_function_body(module, target_qualified_name, new_body.clone())
             .map_err(resolve_error_to_replacement_error)?;
 
-    // Whole-module check pipeline, in the same order `cmd_check_one_deep` runs
-    // it. Return the FIRST failing pass as a tagged error.
-    //
-    // Pass 1: structural/type fitness. Runs first because it rejects a
-    // base-case-free recursion group promptly, before the whole-module
-    // inference that can wedge on such a module.
-    let fitness = chelis_types::check_ir_fitness(&rewritten_module);
-    if !fitness.errors.is_empty() {
-        return Err(ReplacementError::Type {
-            message: join_messages(fitness.errors.iter().map(|error| error.message.as_str())),
-            location: None,
-            deep_path: None,
-        });
-    }
-
-    // Pass 2: whole-module HM type inference.
-    let typed = chelis_types::check_typed_program(&rewritten_module)
-        .map_err(|report| infer_result_to_type_error(&report))?;
-
-    // Pass 3: effects. The validators descend into the `(module ...)` wrapper,
-    // so a declared-pure body that performs `Random`/`Io` is rejected, and so
-    // is an effect that propagates to a held caller declared not to perform it.
-    let effected =
-        chelis_effects::check_program(&typed).map_err(|errors| ReplacementError::Effect {
-            message: join_messages(errors.iter().map(|error| error.message.as_str())),
-            location: None,
-            deep_path: None,
-        })?;
-
-    // Pass 4: linearity.
-    chelis_types::check_linearity(&effected).map_err(|errors| ReplacementError::Linearity {
-        message: join_messages(errors.iter().map(|error| error.message.as_str())),
-        location: None,
-        deep_path: None,
-    })?;
+    let report =
+        check_whole_module_edit(rewritten_module).map_err(edit_error_to_replacement_error)?;
 
     Ok(ReplacementReport {
-        rewritten_module,
-        checks_clean: true,
+        rewritten_module: report.rewritten_module,
+        checks_clean: report.checks_clean,
     })
 }
 
@@ -245,8 +327,43 @@ fn resolve_error_to_replacement_error(error: chelis_deep::ResolveError) -> Repla
 /// Map a type-check [`chelis_types::InferResult`] failure to a
 /// [`ReplacementError::Type`]. The underlying `CheckError`s carry no span
 /// today, so `location` is `None`.
-fn infer_result_to_type_error(report: &chelis_types::InferResult) -> ReplacementError {
-    ReplacementError::Type {
+fn edit_error_to_replacement_error(error: EditValidationError) -> ReplacementError {
+    match error {
+        EditValidationError::Type {
+            message,
+            location,
+            deep_path,
+        } => ReplacementError::Type {
+            message,
+            location,
+            deep_path,
+        },
+        EditValidationError::Effect {
+            message,
+            location,
+            deep_path,
+        } => ReplacementError::Effect {
+            message,
+            location,
+            deep_path,
+        },
+        EditValidationError::Linearity {
+            message,
+            location,
+            deep_path,
+        } => ReplacementError::Linearity {
+            message,
+            location,
+            deep_path,
+        },
+    }
+}
+
+/// Map a type-check [`chelis_types::InferResult`] failure to a
+/// [`EditValidationError::Type`]. The underlying `CheckError`s carry no span
+/// today, so `location` is `None`.
+fn infer_result_to_type_error(report: &chelis_types::InferResult) -> EditValidationError {
+    EditValidationError::Type {
         message: join_messages(report.errors.iter().map(|error| error.message.as_str())),
         location: None,
         deep_path: None,

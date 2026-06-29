@@ -18,17 +18,17 @@ use crate::runtime::{
     runtime_value_to_schema,
 };
 use crate::schema::{
-    BatchRequest, BatchResult, BatchResultEnvelope, CheckResult, CompileRequest, CompileResult,
-    CompileTarget, DecompileRequest, DecompileResult, DesugarRequest, DesugarResult, Diagnostic,
-    EvalRequest, EvalResult, EvaluatedRoot, FitnessComponents, GeneratedFile, GradRequest,
-    GradResult, LowerRequest, LowerResult, ParseRequest, ParseResult, SourceKind, Span,
-    ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireDag, WireDagNode,
-    WireDagSchemaError, WireDeepAtom, WireDeepExpr, WireDeepExprKind, WireDimExpr, WireDimInfo,
-    WireFusedInput, WireFusedStep, WireFusedStepOp, WireImportKind, WireLetBinding, WireLetPattern,
-    WireLiteral, WireMatchArm, WireMetaEntry, WireParam, WirePattern, WirePropertyOption,
-    WireRecordExprField, WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireSurfDecl,
-    WireSurfExpr, WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp, WireVariant,
-    WireVariantFields,
+    AddFunctionRequest, AddFunctionResult, BatchRequest, BatchResult, BatchResultEnvelope,
+    CheckResult, CompileRequest, CompileResult, CompileTarget, DecompileRequest, DecompileResult,
+    DesugarRequest, DesugarResult, Diagnostic, EvalRequest, EvalResult, EvaluatedRoot,
+    FitnessComponents, GeneratedFile, GradRequest, GradResult, LowerRequest, LowerResult,
+    ParseRequest, ParseResult, SourceKind, Span, ValidateMode, ValidateRequest, ValidateResult,
+    WireBinOp, WireDag, WireDagNode, WireDagSchemaError, WireDeepAtom, WireDeepExpr,
+    WireDeepExprKind, WireDimExpr, WireDimInfo, WireFusedInput, WireFusedStep, WireFusedStepOp,
+    WireImportKind, WireLetBinding, WireLetPattern, WireLiteral, WireMatchArm, WireMetaEntry,
+    WireParam, WirePattern, WirePropertyOption, WireRecordExprField, WireRecordPatternField,
+    WireRecordTypeField, WireRiscOp, WireSurfDecl, WireSurfExpr, WireSurfTypeExpr, WireTensorType,
+    WireTypeInvariant, WireUnaryOp, WireVariant, WireVariantFields,
 };
 
 const RUNTIME_H: &str = include_str!(concat!(
@@ -170,6 +170,193 @@ pub fn replace_function_body(
         changed_def_deep: chelis_deep::printer::print_expr(&changed_def),
         module_deep: chelis_deep::printer::print_canonical(&report.rewritten_module),
     })
+}
+
+/// Add one function declaration bundle to a Deep module.
+///
+/// The tool is Deep-native and pure. It accepts Deep text for the full module
+/// and the new declaration bundle, performs only request-shape and insertion
+/// target checks before editing, then runs the shared whole-module validation
+/// gate over the rewritten module. Semantic failures such as duplicate `def`,
+/// duplicate `defsig`, type errors, effects, and linearity violations are
+/// surfaced from that whole-module pipeline.
+pub fn add_function(request: AddFunctionRequest) -> Result<AddFunctionResult> {
+    let module = chelis_deep::parser::parse_str_strict(&request.module).map_err(|err| {
+        stage_error_with_span(
+            "add-function",
+            err.to_string(),
+            "deep_parse_error",
+            parse_error_span_deep(&err),
+        )
+    })?;
+
+    let new_decl_exprs =
+        chelis_deep::parser::parse_str_strict(&request.new_decls).map_err(|err| {
+            stage_error_with_span(
+                "add-function",
+                err.to_string(),
+                "deep_parse_error",
+                parse_error_span_deep(&err),
+            )
+        })?;
+    let parsed = parse_add_function_decls(new_decl_exprs)?;
+
+    let rewritten = chelis_deep::insert_function_decls(
+        &module,
+        &parsed.ordered_decls,
+        request.insert_after_function.as_deref(),
+    )
+    .map_err(add_function_insert_error_to_compiler_error)?;
+
+    let report = crate::fragment::check_whole_module_edit(rewritten)
+        .map_err(edit_validation_error_to_compiler_error)?;
+
+    Ok(AddFunctionResult {
+        added_def_deep: chelis_deep::printer::print_expr(&parsed.def),
+        added_defsig_deep: parsed.defsig.as_ref().map(chelis_deep::printer::print_expr),
+        module_deep: chelis_deep::printer::print_canonical(&report.rewritten_module),
+    })
+}
+
+struct ParsedAddFunctionDecls {
+    ordered_decls: Vec<DeepExpr>,
+    def: DeepExpr,
+    defsig: Option<DeepExpr>,
+}
+
+fn parse_add_function_decls(exprs: Vec<DeepExpr>) -> Result<ParsedAddFunctionDecls> {
+    if !(1..=2).contains(&exprs.len()) {
+        return Err(stage_error(
+            "add-function",
+            format!(
+                "`new_decls` must contain exactly one `(def ...)` and an optional matching `(defsig ...)`, got {} top-level expressions",
+                exprs.len()
+            ),
+            "deep_decl_error",
+        ));
+    }
+
+    let mut def: Option<DeepExpr> = None;
+    let mut defsig: Option<DeepExpr> = None;
+    let mut def_name: Option<String> = None;
+    let mut defsig_name: Option<String> = None;
+
+    for expr in &exprs {
+        let Some(tag) = deep_expr_tag(expr) else {
+            return Err(add_function_decl_error(
+                "`new_decls` entries must be Deep declaration lists",
+            ));
+        };
+        match tag {
+            "def" => {
+                if def.is_some() {
+                    return Err(add_function_decl_error(
+                        "`new_decls` must contain exactly one `(def ...)`",
+                    ));
+                }
+                let name = deep_decl_name(expr).ok_or_else(|| {
+                    add_function_decl_error("new `(def ...)` must carry a symbol name")
+                })?;
+                if !deep_def_is_function(expr) {
+                    return Err(add_function_decl_error(
+                        "`chelis_add_function` only accepts function `(def ...)` declarations",
+                    ));
+                }
+                def_name = Some(name.to_string());
+                def = Some(expr.clone());
+            }
+            "defsig" => {
+                if defsig.is_some() {
+                    return Err(add_function_decl_error(
+                        "`new_decls` may contain at most one `(defsig ...)`",
+                    ));
+                }
+                let name = deep_decl_name(expr).ok_or_else(|| {
+                    add_function_decl_error("new `(defsig ...)` must carry a symbol name")
+                })?;
+                defsig_name = Some(name.to_string());
+                defsig = Some(expr.clone());
+            }
+            other => {
+                return Err(add_function_decl_error(format!(
+                    "`chelis_add_function` accepts only `(def ...)` and optional `(defsig ...)`, got `({other} ...)`"
+                )));
+            }
+        }
+    }
+
+    let Some(def) = def else {
+        return Err(add_function_decl_error(
+            "`new_decls` must contain exactly one `(def ...)`",
+        ));
+    };
+    if let (Some(def_name), Some(defsig_name)) = (def_name.as_deref(), defsig_name.as_deref())
+        && def_name != defsig_name
+    {
+        return Err(add_function_decl_error(format!(
+            "new `(defsig ...)` names `{defsig_name}` but new `(def ...)` names `{def_name}`"
+        )));
+    }
+
+    Ok(ParsedAddFunctionDecls {
+        ordered_decls: exprs,
+        def,
+        defsig,
+    })
+}
+
+fn add_function_decl_error(message: impl Into<String>) -> CompilerError {
+    stage_error("add-function", message, "deep_decl_error")
+}
+
+fn add_function_insert_error_to_compiler_error(
+    error: chelis_deep::InsertFunctionError,
+) -> CompilerError {
+    use chelis_deep::InsertFunctionError;
+    match error {
+        InsertFunctionError::InsertionTarget(err) => {
+            stage_error("name-resolution", err.to_string(), "name_resolution_error")
+        }
+        InsertFunctionError::NoModule | InsertFunctionError::MultipleModules { .. } => {
+            stage_error("add-function", error.to_string(), "deep_decl_error")
+        }
+    }
+}
+
+fn edit_validation_error_to_compiler_error(
+    error: crate::fragment::EditValidationError,
+) -> CompilerError {
+    use crate::fragment::EditValidationError;
+    let (kind, location, deep_path) = match &error {
+        EditValidationError::Type {
+            location,
+            deep_path,
+            ..
+        } => ("type_error", *location, deep_path.clone()),
+        EditValidationError::Effect {
+            location,
+            deep_path,
+            ..
+        } => ("effect_error", *location, deep_path.clone()),
+        EditValidationError::Linearity {
+            location,
+            deep_path,
+            ..
+        } => ("linearity_error", *location, deep_path.clone()),
+    };
+    CompilerError {
+        stage: error.stage().to_string(),
+        errors: vec![Diagnostic {
+            kind: kind.to_string(),
+            message: error.message().to_string(),
+            severity: 1.0,
+            expected: None,
+            got: None,
+            suggestions: Vec::new(),
+            span: location,
+            deep_path: deep_path.map(wire_deep_error_path),
+        }],
+    }
 }
 
 /// Map a [`crate::fragment::ReplacementError`] to a structured
@@ -1398,6 +1585,24 @@ fn expr_type_metadata(expr: &DeepExpr) -> Option<&DeepExpr> {
             .map(|(_, value)| value),
         _ => None,
     }
+}
+
+fn deep_expr_tag(expr: &DeepExpr) -> Option<&str> {
+    let DeepExpr::List(list, _) = expr else {
+        return None;
+    };
+    list_tag(list)
+}
+
+fn deep_decl_name(expr: &DeepExpr) -> Option<&str> {
+    let DeepExpr::List(list, _) = expr else {
+        return None;
+    };
+    list.elements.get(2).and_then(symbol_name)
+}
+
+fn deep_def_is_function(expr: &DeepExpr) -> bool {
+    matches!(deep_expr_tag(expr), Some("def")) && chelis_deep::function_body(expr).is_some()
 }
 
 fn list_tag(list: &chelis_deep::List) -> Option<&str> {
