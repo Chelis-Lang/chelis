@@ -245,6 +245,108 @@ fn issue_368_plain_forward_concat_stacks_correctly() {
     assert_close("plain concat forward", &data, &[1.0, 2.0, 10.0, 20.0]);
 }
 
+/// chelis#368 (negative-axis consistency): a NEGATIVE concat axis now evaluates
+/// in the forward host lane, matching the IR lowering (grad / C-build) and the
+/// negative-axis convention every other axis-taking op already follows
+/// (reductions, softmax). `concat(-1)` of two `[1, 2]` rows == concat axis 1.
+/// Before the fix the host forward path rejected it ("concat requires
+/// non-negative axis") while the grad and C backends — which lower through
+/// `lower_tensor_concat` — accepted it, an eval-forward-vs-IR divergence.
+const CONCAT_NEG_AXIS_FWD: &str = "module Repro.ConcatNegAxis\n\
+def f(x: tensor[2, f32]) = {\n\
+  a = reshape(&x, [cast(1, int64), cast(2, int64)])\n\
+  b = mul(reshape(&x, [cast(1, int64), cast(2, int64)]), to_tensor([[cast(5.0, f32), cast(7.0, f32)]]))\n\
+  concat([a, b], -1)\n\
+}\n\
+out = f(to_tensor([cast(1.0, f32), cast(2.0, f32)]))\n";
+
+#[test]
+fn issue_368_negative_concat_axis_forward_matches_positive() {
+    let out = eval_ok(CONCAT_NEG_AXIS_FWD, "concatneg");
+    let (shape, data) = parse_tensor(&out, "out");
+    assert_eq!(
+        shape,
+        vec![1, 4],
+        "negative-axis concat forward shape ({out})"
+    );
+    // x=[1,2]: a=[[1,2]], b=[[5,14]], concat last axis -> [[1,2,5,14]].
+    assert_close(
+        "negative-axis concat forward",
+        &data,
+        &[1.0, 2.0, 5.0, 14.0],
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SYMBOLIC non-concat axis: grad through a `concat` along a CONCRETE axis whose
+// OTHER axis is a symbolic (`batch`) dim — the natural batched generalization of
+// the pooling above (e.g. feature-concat of `tensor[batch, d]` tensors). The
+// Pad adjoint emits the `SHRINK_TO_END` full-axis sentinel on the symbolic
+// no-pad axis. Before the fix the orphaned sentinel reached the `shrink`
+// evaluator and OVERFLOWED `numel` ("attempt to multiply with overflow"):
+// `needs_symbolic_binding` scanned only node TYPES (monomorphized to concrete at
+// eval time) and skipped `bind_symbolic_dims`, so the `usize::MAX` bound in the
+// Shrink OP survived unresolved. The fix routes every sentinel-bearing DAG
+// through resolution (plus a clamp backstop in `eval::shrink`), so grad now
+// evaluates to the finite-difference-validated gradient. (chelis#368)
+// ---------------------------------------------------------------------------
+
+// loss = sum(concat([2x, 3x], axis=1)) = 5 * sum(x), so d loss / d x_i = 5.
+const SYM_BATCH_LINEAR: &str = "module Repro.SymBatchLinear\n\
+def loss(x: tensor[batch, 2, f32]) -> f32 = {\n\
+  a = add(&x, &x)\n\
+  b = add(add(&x, &x), &x)\n\
+  c = concat([a, b], cast(1, int32))\n\
+  sum(sum(c, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
+}\n\
+out = grad(loss)(to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]]))\n";
+
+/// Grad over a concat with a symbolic non-concat axis must NOT overflow/panic;
+/// it must compute the correct gradient. `2x` contributes 2 and `3x` contributes
+/// 3 to every element, so the gradient is `5` everywhere (central-difference
+/// validated). Pre-fix this panicked "attempt to multiply with overflow".
+#[test]
+fn issue_368_symbolic_nonconcat_axis_grad_does_not_overflow() {
+    let out = eval_ok(SYM_BATCH_LINEAR, "symbatchlin");
+    let (shape, data) = parse_tensor(&out, "out");
+    assert_eq!(
+        shape,
+        vec![2, 2],
+        "symbolic-batch concat grad shape ({out})"
+    );
+    assert_close("symbolic-batch concat grad", &data, &[5.0, 5.0, 5.0, 5.0]);
+}
+
+// Nonlinear: loss = sum(square(concat([x, 2x], 1))) = sum(5 x^2), grad = 10 x.
+const SYM_BATCH_NONLINEAR: &str = "module Repro.SymBatchNonlinear\n\
+def loss(x: tensor[batch, 2, f32]) -> f32 = {\n\
+  a = sub(add(&x, &x), &x)\n\
+  b = add(&x, &x)\n\
+  c = concat([a, b], cast(1, int32))\n\
+  sq = mul(c, c)\n\
+  sum(sum(sq, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
+}\n\
+out = grad(loss)(to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]]))\n";
+
+/// Same symbolic-axis shape, NONLINEAR loss: d/dx sum(5 x^2) = 10 x. Pins that
+/// the resolved sentinel routes the cotangent through the squared concat
+/// correctly (finite-difference validated: [10, 20, 30, 40]).
+#[test]
+fn issue_368_symbolic_nonconcat_axis_grad_nonlinear() {
+    let out = eval_ok(SYM_BATCH_NONLINEAR, "symbatchnl");
+    let (shape, data) = parse_tensor(&out, "out");
+    assert_eq!(
+        shape,
+        vec![2, 2],
+        "symbolic-batch nonlinear grad shape ({out})"
+    );
+    assert_close(
+        "symbolic-batch nonlinear grad",
+        &data,
+        &[10.0, 20.0, 30.0, 40.0],
+    );
+}
+
 // ---------------------------------------------------------------------------
 // TRACKED RESIDUAL (expected-to-fail pin, #320-residue discipline).
 // ---------------------------------------------------------------------------

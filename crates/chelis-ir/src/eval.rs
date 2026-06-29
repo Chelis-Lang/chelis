@@ -3,8 +3,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::dag::{
-    Dag, DimInfo, FusedInput, FusedStepOp, NodeId, ReduceWindowKind, RiscOp, TensorType,
-    bind_symbolic_dims, symbolic_bindings,
+    Dag, DimInfo, FusedInput, FusedStepOp, NodeId, ReduceWindowKind, RiscOp, SHRINK_TO_END,
+    TensorType, bind_symbolic_dims, symbolic_bindings,
 };
 use chelis_types::types::Prim;
 
@@ -977,11 +977,23 @@ fn pad(input: &TensorValue, padding: &[(usize, usize)], fill: f64) -> TensorValu
 
 fn shrink(input: &TensorValue, bounds: &[(usize, usize)]) -> TensorValue {
     assert_eq!(bounds.len(), input.shape.len());
+    // chelis#368: defensive backstop for the `SHRINK_TO_END` full-axis
+    // sentinel (the Pad adjoint of the differentiable `concat` over an
+    // unpadded axis). `bind_symbolic_dims` normally resolves the sentinel to
+    // the axis's bound extent before eval (and the `needs_symbolic_binding`
+    // gate now routes every sentinel-bearing DAG through it), so this branch
+    // should not fire in the normal flow. If a sentinel ever does survive,
+    // resolve it here to the axis's runtime extent — `SHRINK_TO_END` means
+    // "to the end of this axis", which is exactly `input.shape[axis]` — rather
+    // than letting `end - start = usize::MAX` overflow `numel`.
     let out_shape: Vec<usize> = input
         .shape
         .iter()
         .zip(bounds.iter())
-        .map(|(_, (start, end))| end - start)
+        .map(|(extent, (start, end))| {
+            let end = if *end == SHRINK_TO_END { *extent } else { *end };
+            end - start
+        })
         .collect();
     let out_len = numel(&out_shape);
     let mut out = vec![0.0; out_len];
@@ -1070,6 +1082,23 @@ where
                 .iter()
                 .any(|dim| matches!(dim, DimInfo::Named(_, None))),
             _ => false,
+        })
+        // chelis#368: a `Shrink` carrying the `SHRINK_TO_END` full-axis
+        // sentinel (the Pad adjoint of the differentiable `concat` over an
+        // unpadded axis) must route through `bind_symbolic_dims` so the
+        // sentinel is resolved from the node's now-bound output type. The
+        // sentinel lives in the OP BOUNDS, not in a type, so the dim-scan
+        // clauses above miss it whenever the axis monomorphized to a concrete
+        // extent at eval time (a symbolic non-concat axis bound to a literal
+        // by the concrete call argument). Without this trigger the orphaned
+        // `usize::MAX` bound reaches the `shrink` evaluator and overflows
+        // `numel` (`attempt to multiply with overflow`) instead of computing
+        // the gradient. `bind_symbolic_dims` with empty bindings is an
+        // identity for concrete dims and resolves the sentinel from the bound
+        // output type.
+        || dag.nodes().iter().any(|node| {
+            matches!(&node.op, RiscOp::Shrink { bounds }
+                if bounds.iter().any(|(_, end)| *end == SHRINK_TO_END))
         });
     // chelis#351: symbolic-dim inference reads shapes from the Loads
     // that `symbolic_occurrences` nominates as each dim's declaring
@@ -1519,6 +1548,27 @@ mod tests {
             dims: dims.iter().copied().map(DimInfo::Lit).collect(),
             precision,
         }
+    }
+
+    /// chelis#368: the `shrink` evaluator must not overflow when a
+    /// `SHRINK_TO_END` (`usize::MAX`) full-axis sentinel survives into eval.
+    /// `bind_symbolic_dims` normally resolves the sentinel first (and the
+    /// `needs_symbolic_binding` gate now routes every sentinel-bearing DAG
+    /// through it), but this is the defensive backstop: the sentinel means
+    /// "to the end of this axis", so it resolves to the runtime extent
+    /// (`input.shape[axis]`) instead of computing `usize::MAX - start` and
+    /// overflowing `numel` ("attempt to multiply with overflow").
+    #[test]
+    fn shrink_clamps_shrink_to_end_sentinel_without_overflow() {
+        // 2x3 input [[1,2,3],[4,5,6]]; axis 0 sliced [1,2] (concrete row 1),
+        // axis 1 a full-axis identity via the sentinel.
+        let input = TensorValue {
+            data: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            shape: vec![2, 3],
+        };
+        let out = shrink(&input, &[(1, 2), (0, SHRINK_TO_END)]);
+        assert_eq!(out.shape, vec![1, 3]);
+        assert_eq!(out.data, vec![4.0, 5.0, 6.0]);
     }
 
     // ---- reduce_window reverse-mode adjoint (RiscOp::ReduceWindowGrad) ----

@@ -227,6 +227,40 @@ impl<'a> EvalContext<'a> {
                 captured_tensors.insert(name.to_string(), tensor.value.clone());
             }
         }
+        // chelis#377: a served capture's value must match the rank its `Load`
+        // node was typed with. The vmap lane prepends the batch axis to a
+        // captured binding's `Load` (typing top-level `w` as `[batch, ..]`)
+        // while the served value keeps its declared rank (`[..]`). Chelis has
+        // no implicit broadcasting, so that rank mismatch is unsatisfiable:
+        // before this guard it reached an elementwise op and PANICKED the
+        // evaluator's shape assertion (`binary_map` left:[batch,..] right:[..]).
+        // Reject it here with a clean diagnostic instead. Correct
+        // vmap-with-captures must BROADCAST the capture across the batch axis,
+        // not batch it — the remaining tracked residual (chelis#377). The grad
+        // lane is unaffected: a captured binding's `Load` keeps its declared
+        // rank there, so the ranks match and this never fires.
+        for node in dag.nodes() {
+            let chelis_ir::dag::RiscOp::Load { name } = &node.op else {
+                continue;
+            };
+            if let Some(value) = captured_tensors.get(name.as_str())
+                && value.shape.len() != node.output_type.dims.len()
+            {
+                let kind_label = match kind {
+                    TransformKind::Grad => "grad",
+                    TransformKind::Vmap => "vmap",
+                };
+                return Err(format!(
+                    "host runtime: `{kind_label}(...)` over a def capturing top-level \
+                     binding `{name}` is unsupported: the transform types the capture as \
+                     rank {} (batched) but the binding is rank {}. vmap-with-captures must \
+                     broadcast the capture across the batch axis, not batch it (tracked \
+                     residual, chelis#377).",
+                    node.output_type.dims.len(),
+                    value.shape.len(),
+                ));
+            }
+        }
         let values = chelis_ir::eval::eval_tensor_roots_with_strict(&dag, &roots, |name| {
             placeholder_tensors
                 .get(name)

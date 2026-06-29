@@ -588,9 +588,15 @@ out = f(1.0)\n";
 /// BROADCAST the capture across the batch axis, not batch it; that vmap-lane
 /// capability is the remaining residual (tracked under chelis#377). The grad
 /// half of the capture gap is fully fixed and promoted in
-/// `issue_377_grad_over_capturing_def_evals_and_agrees_with_backend`. Both
-/// the backend (`expected rank 2, got 1`) and eval (`[3, 2]` vs `[2]`)
-/// failure shapes are pinned so the residual's fix surfaces here.
+/// `issue_377_grad_over_capturing_def_evals_and_agrees_with_backend`.
+///
+/// FAILURE-MODE PINS. The backend side fails the COMPILED binary at runtime
+/// with `expected rank 2, got 1`. The eval side fails with a CLEAN transform-
+/// lane diagnostic naming the capture (chelis#377) — NOT the uncontrolled
+/// `binary_map` shape-assertion PANIC it produced before the fix (serving the
+/// rank-1 capture into a vmap-batched rank-2 `Load`). This test asserts the
+/// eval failure is clean (never a panic) so the residual cannot regress into
+/// an evaluator crash, and surfaces loudly when the broadcast fix lands.
 #[test]
 fn issue_352_vmap_over_capturing_def_gap() {
     let source = "w = to_tensor([10.0, 20.0])\n\
@@ -635,15 +641,63 @@ out = fv(to_tensor([[1.0, 1.0], [2.0, 2.0], [0.0, 1.0]]))\n";
         "eval side of the gap is also broken"
     );
     let eval_stderr = String::from_utf8_lossy(&eval.stderr);
-    // chelis#377 ADVANCED the eval-side failure: the captured `w` is now
-    // served, so eval no longer reports `missing required input \`w\``; it
-    // reaches the same vmap-lane batch-typing defect as the backend (the
-    // batched `[3, 2]` capture validated against the rank-1 `[2]` binding).
+    // chelis#377 review fix: the eval side now fails with a CLEAN transform-
+    // lane diagnostic, NOT the uncontrolled `binary_map` shape-assertion panic
+    // it used to produce (the served rank-1 capture reaching an elementwise op
+    // against the vmap-batched rank-2 `Load`). The transform lane rejects the
+    // capture rank mismatch before eval. Pin BOTH that it stays a failure (the
+    // broadcast capability is still a residual) AND that it is never a panic.
     assert!(
-        eval_stderr.contains("[3, 2]") && eval_stderr.contains("[2]"),
-        "pinned eval-side vmap-capture residual changed shape (expected the \
-         vmap-lane batch-typing mismatch [3, 2] vs [2] after chelis#377 served \
-         the capture): stderr={eval_stderr:?}",
+        !eval_stderr.contains("panicked"),
+        "vmap-over-capture must fail with a clean diagnostic, never an evaluator \
+         panic (chelis#377); stderr={eval_stderr:?}",
+    );
+    assert!(
+        eval_stderr.contains("capturing top-level binding `w`")
+            && eval_stderr.contains("chelis#377"),
+        "pinned eval-side vmap-capture residual must report the clean \
+         capture-batching diagnostic citing chelis#377; stderr={eval_stderr:?}",
+    );
+}
+
+/// chelis#377 review: `vmap(grad(f))` (per-sample gradients) where `f` captures
+/// a top-level binding hits the SAME vmap-lane capture-batching residual as a
+/// plain `vmap` over a capturing def, and must likewise fail with a CLEAN
+/// diagnostic — never the `binary_map` shape-assertion PANIC it produced before
+/// the fix. Pinned so the per-sample-grad composition cannot silently regress
+/// into an evaluator crash; promote to a value oracle when vmap-with-captures
+/// broadcasts the capture across the batch axis (chelis#377).
+#[test]
+fn issue_377_vmap_of_grad_over_capturing_def_fails_clean() {
+    let source = "w = to_tensor([10.0, 20.0])\n\
+def f(x: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(mul(x, w), 0))\n\
+def gradf(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)\n\
+def batched(xs: tensor[3, 2, f32]) -> tensor[3, 2, f32] = xs |> vmap(gradf, axis=0)\n\
+out = batched(to_tensor([[1.0, 1.0], [2.0, 2.0], [0.0, 1.0]]))\n";
+
+    let dir = tempdir().expect("tempdir");
+    let src_path = dir.path().join("vmapgradcap.ch");
+    fs::write(&src_path, source).expect("write .ch source");
+    let eval = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .current_dir(dir.path())
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", src_path.to_str().unwrap()])
+        .output()
+        .expect("invoke chelis eval");
+    assert!(
+        !eval.status.success(),
+        "vmap(grad(capturing def)) is still a residual (chelis#377)",
+    );
+    let eval_stderr = String::from_utf8_lossy(&eval.stderr);
+    assert!(
+        !eval_stderr.contains("panicked"),
+        "vmap(grad(capture)) must fail clean, never panic; stderr={eval_stderr:?}",
+    );
+    assert!(
+        eval_stderr.contains("capturing top-level binding `w`")
+            && eval_stderr.contains("chelis#377"),
+        "must report the clean capture-batching diagnostic; stderr={eval_stderr:?}",
     );
 }
 
