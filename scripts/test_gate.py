@@ -451,7 +451,7 @@ class SmtCiSplitTests(unittest.TestCase):
             "crates/chelis-surf/**",
             "crates/chelis-types/**",
             "scripts/ci_free_disk.py",
-            "shared-key: smt",
+            "shared-key: smt-smt-build",
             "cargo test -p chelis-prove --features smt",
             "cargo test -p chelis-prove --features carcara",
             "cargo test -p chelis-prove --features z3",
@@ -481,7 +481,7 @@ class SmtCiSplitTests(unittest.TestCase):
             full_inputs,
             "required smt smoke and full-prove lane must share rust-cache inputs",
         )
-        self.assertEqual(smoke_inputs, {"shared-key": "smt"})
+        self.assertEqual(smoke_inputs, {"shared-key": "smt-smt-build"})
 
 
 def _parse_job_attrs() -> dict[str, dict[str, str]]:

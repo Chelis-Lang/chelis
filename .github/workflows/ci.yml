@@ -199,9 +199,10 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
-          # cvc5 builds from source into target/; share this key with
-          # the optional full-prove lane while keeping the gate jobs lean.
-          shared-key: smt
+          # cvc5 builds from source into target/; share the former
+          # smt-build cache namespace with the optional full-prove lane
+          # while keeping the gate jobs lean.
+          shared-key: smt-smt-build
 
       - name: Build smt feature
         run: cargo build -p chelis-cli --features smt
