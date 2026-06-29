@@ -176,10 +176,16 @@ chelis-std = {{ version = "0.4.0" }}
 // Codegen build/run harness
 //
 // Shared by the `chelis build --target c` integration tests that compile the
-// generated C with the host toolchain and run it (issue_218, issue_527, and
-// the dtype/monomorphization codegen suites). Previously each of those files
-// carried its own verbatim copy of these helpers; a change to the host link
-// recipe had to be applied in every copy or they drifted.
+// generated C with the host toolchain and run it. The suites that share the
+// identical build-link-run recipe — issue_527, issue_218, issue_289, and
+// issue_345 — pull `build_and_run` / `link_generated` / `parse_tensor_data` /
+// `write_file` from here, so a change to the host link recipe lands in one
+// place instead of drifting across per-file copies.
+//
+// Suites whose recipe genuinely differs keep their own variant and are NOT
+// routed through here: jit_par_runtime_gap parses f32 output, while
+// numeric_dtype_adversarial and monomorphization_build only compile (the
+// latter object-compiles) rather than build-link-run this shape.
 // ---------------------------------------------------------------------------
 
 /// Whether the chelis-generated C `source` (already written under `out_dir`)

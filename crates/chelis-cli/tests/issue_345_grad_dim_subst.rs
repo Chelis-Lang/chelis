@@ -44,10 +44,12 @@
 
 use assert_cmd::Command;
 use serde_json::Value;
-use std::fs;
-use std::path::Path;
 use std::process::Command as StdCommand;
 use tempfile::tempdir;
+
+#[path = "common/mod.rs"]
+mod common;
+use common::{link_generated, parse_tensor_data, write_file};
 
 /// d/dx sum(relu(x)) at x = [2, -1] is the step function [1, 0].
 const RELU_INPUT: &str = "to_tensor([cast(2.0, f32), cast(-1.0, f32)])";
@@ -143,57 +145,6 @@ fn rank2_sig_form() -> String {
 }
 
 const RANK2_GRAD: [f64; 6] = [1.0, 0.0, 1.0, 0.0, 1.0, 0.0];
-
-fn write_file(path: &Path, contents: &str) {
-    fs::write(path, contents).expect("write file");
-}
-
-fn generated_source_needs_blas(out_dir: &Path, source: &str) -> bool {
-    fs::read_to_string(out_dir.join(source))
-        .map(|text| text.contains("cblas_sgemm(") || text.contains("\"chelis_blas.h\""))
-        .unwrap_or(false)
-}
-
-/// Link the chelis-generated C against the platform host toolchain.
-/// Mirrors `link_generated` from `issue_289_grad_precision_var.rs`.
-fn link_generated(out_dir: &Path, source: &str, binary: &str) -> std::process::ExitStatus {
-    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
-        chelis_backend_c::toolchain::CodegenRequirements {
-            wants_openmp: true,
-            needs_blas: generated_source_needs_blas(out_dir, source),
-        },
-    );
-    let mut cmd = StdCommand::new(&toolchain.compiler);
-    cmd.current_dir(out_dir);
-    cmd.arg("-O2");
-    cmd.args(&toolchain.compile_flags);
-    cmd.arg(source);
-    cmd.args(["-L.", "-lchelis_runtime"]);
-    cmd.args(&toolchain.link_flags);
-    cmd.args(["-o", binary]);
-    cmd.status().expect("host compiler should run")
-}
-
-/// Parse a printed Chelis tensor line `name = tensor(shape=[..], data=[..])`.
-fn parse_tensor_data(stdout: &str, name: &str) -> Vec<f64> {
-    let prefix = format!("{name} = tensor(");
-    let line = stdout
-        .lines()
-        .find(|l| l.starts_with(&prefix))
-        .unwrap_or_else(|| panic!("output does not contain `{prefix}` line:\n{stdout}"));
-    let data_marker = "data=[";
-    let start = line
-        .find(data_marker)
-        .unwrap_or_else(|| panic!("no `data=[` in line: {line}"))
-        + data_marker.len();
-    let end = line[start..]
-        .find(']')
-        .unwrap_or_else(|| panic!("no closing `]` after data: {line}"));
-    line[start..start + end]
-        .split(',')
-        .map(|s| s.trim().parse::<f64>().expect("numeric"))
-        .collect()
-}
 
 /// Parse the evaluator's bare `tensor(shape=[..], data=[..])` print.
 fn parse_eval_tensor_data(stdout: &str) -> Vec<f64> {

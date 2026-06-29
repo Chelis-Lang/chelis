@@ -431,6 +431,91 @@ def bad(params: List[tensor[k, f32]]): tensor[k, f32] =
 }
 
 #[test]
+fn len_explicit_container_borrow_is_a_type_error() {
+    // chelis#527: auto-borrow is the idiom for the read-only container
+    // queries; the explicit `len(&xs)` surface form is intentionally
+    // *not* supported and is rejected at check time (spec
+    // `05-risc-primitives.md` §1.3.1). An explicit `&List` would
+    // type-check past the front end but the host-value lane does not
+    // erase the borrow wrapper for container values, so it would fail C
+    // codegen — a worse footgun than a clear front-end error. This locks
+    // the rejection so a future signature change cannot silently admit
+    // `len(&xs)`.
+    let errors = typecheck_surf(
+        r#"
+def bad(params: List[tensor[k, f32]]): int64 =
+  {
+    n: int64 = len(&params)
+    n
+  }
+"#,
+    )
+    .expect_err("explicit &List is not a supported surface form for len");
+
+    // The diagnostic must point at the real problem — `len` auto-borrows, so
+    // the explicit `&` is redundant/unsupported — not the misleading bare
+    // "expects List or Dict input, got &List …" (the input *is* a List).
+    assert!(errors.iter().any(|error| {
+        matches!(error.kind, CheckErrorKind::TypeMismatch)
+            && error
+                .message
+                .contains("len auto-borrows its List/Dict argument")
+            && error.message.contains("write `len(xs)`, not `len(&xs)`")
+    }));
+}
+
+#[test]
+fn index_explicit_container_borrow_is_a_type_error() {
+    // Negative parity for `index`, mirroring the `len` case above:
+    // `index(&xs, i)` is rejected at check time (chelis#527).
+    let errors = typecheck_surf(
+        r#"
+def bad(params: List[tensor[k, f32]]): tensor[k, f32] =
+  {
+    first: tensor[k, f32] = index(&params, 0)
+    first
+  }
+"#,
+    )
+    .expect_err("explicit &List is not a supported surface form for index");
+
+    assert!(errors.iter().any(|error| {
+        matches!(error.kind, CheckErrorKind::TypeMismatch)
+            && error
+                .message
+                .contains("index auto-borrows its List argument")
+            && error
+                .message
+                .contains("write `index(xs, i)`, not `index(&xs, i)`")
+    }));
+}
+
+#[test]
+fn len_of_non_container_does_not_mention_auto_borrow() {
+    // The auto-borrow guidance must fire only for a genuine `&List`/`&Dict`
+    // (a valid container with a redundant `&`). A non-container input is a
+    // different mistake, so it must keep the plain "expects List or Dict
+    // input" diagnostic and must NOT misleadingly claim `len` auto-borrows
+    // an argument that is not even a container.
+    let errors = typecheck_surf(
+        r#"
+def bad(x: f32): int64 =
+  {
+    n: int64 = len(x)
+    n
+  }
+"#,
+    )
+    .expect_err("len of a scalar is a type error");
+
+    assert!(errors.iter().any(|error| {
+        matches!(error.kind, CheckErrorKind::TypeMismatch)
+            && error.message.contains("len expects List or Dict input")
+            && !error.message.contains("auto-borrows")
+    }));
+}
+
+#[test]
 fn grad_accepts_function_with_borrowed_tensor_parameter() {
     check_surf(
         r#"
