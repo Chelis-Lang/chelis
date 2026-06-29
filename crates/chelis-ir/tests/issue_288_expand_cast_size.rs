@@ -124,3 +124,71 @@ def f(x) = tensor_to_scalar(sum(mul(x, expand(scalar_to_tensor(cast(2.5, f32)), 
         "issue #288 constant-broadcast forward must verify clean; got {errors:?}",
     );
 }
+
+// ---------------------------------------------------------------------------
+// chelis#530 (the #288 cast-wrapped sibling, residual inline-form bypass):
+// a §4.7.2 Form-3 `expand` size that is a tuple projection (`t.0`), or a
+// `cast`/arithmetic CONTAINING one, has no backend-materializable shape
+// source and must be REJECTED at check — never lowered to a hardcoded
+// extent-1 `Expand` (the silent C miscompile this gate prevents: eval
+// `[3, 2]` vs compiled C `[1, 2]`). The reject must FAIL CLOSED: a real
+// check error, not a swallowed `Type::Error` that lowers to a default size.
+// ---------------------------------------------------------------------------
+
+fn assert_form3_reject_before_lowering(src: &str, label: &str) {
+    let err = lower_surf(src)
+        .err()
+        .unwrap_or_else(|| panic!("{label}: sourceless inline expand size must reject at check"));
+    assert!(
+        err.contains("expand")
+            && err.contains("no tensor in scope carries it")
+            && err.contains("chelis#469"),
+        "{label}: expected the Form-3 sourceless-size reject citing #469, got: {err}"
+    );
+    assert!(
+        !err.contains("internal compiler error"),
+        "{label}: the reject must be a clean diagnostic, never an ICE; got: {err}"
+    );
+}
+
+#[test]
+fn issue_530_tuple_get_size_rejected_before_lowering() {
+    assert_form3_reject_before_lowering(
+        "def g[a, n](b: tensor[n, f32], t: (int32, int32)) -> tensor[a, n, f32] = expand(b, 0, t.0)\n",
+        "tuple-get size",
+    );
+}
+
+#[test]
+fn issue_530_cast_wrapped_tuple_get_size_rejected_before_lowering() {
+    assert_form3_reject_before_lowering(
+        "def g[a, n](b: tensor[n, f32], t: (int32, int32)) -> tensor[a, n, f32] = expand(b, 0, cast(t.0, int32))\n",
+        "cast(tuple-get) size",
+    );
+}
+
+#[test]
+fn issue_530_arith_over_tuple_get_size_rejected_before_lowering() {
+    assert_form3_reject_before_lowering(
+        "def g[a, n](b: tensor[n, f32], t: (int32, int32)) -> tensor[a, n, f32] = expand(b, 0, add(t.0, cast(0, int32)))\n",
+        "add(tuple-get, ...) size",
+    );
+}
+
+/// FAIL-CLOSED must not become reject-everything: a genuinely
+/// shape-sourced Form-3 size (`shape(c, 0)` of an in-scope tensor) must
+/// still lower to a verify-clean DAG carrying the symbolic extent — not be
+/// over-rejected by the #530 gate.
+#[test]
+fn issue_530_shape_sourced_size_still_lowers_clean() {
+    let src = "def g(b: &tensor[n, f32], c: &tensor[a, f32]) -> tensor[a, n, f32] = expand(b, 0, shape(c, cast(0, int32)))\n\
+         xs = to_tensor([1.0, 2.0])\n\
+         cs = to_tensor([10.0, 20.0, 30.0])\n\
+         out = g(&xs, &cs)\n";
+    let dag = lower_surf(src).expect("a shape-sourced Form-3 expand size must still lower");
+    let errors = verify::verify(&dag);
+    assert!(
+        errors.is_empty(),
+        "shape-sourced Form-3 expand must verify clean; got {errors:?}",
+    );
+}

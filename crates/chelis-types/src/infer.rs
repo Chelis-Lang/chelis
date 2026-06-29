@@ -9543,8 +9543,28 @@ fn infer_app(
         return Type::Unit;
     }
 
-    // If func or any arg is Error, propagate
-    if matches!(func_ty, Type::Error) || arg_tys.iter().any(|t| matches!(t, Type::Error)) {
+    // If func or any arg is Error, propagate.
+    //
+    // chelis#530: the `expand` SIZE slot (kids[3], index 2 in `kids[1..]`)
+    // is exempt. An inline size that is a tuple projection (`t.0`), an
+    // inline `match`/`if`, or a `cast`/integer-arithmetic expression
+    // *containing* one infers to `Type::Error`; letting that short-circuit
+    // here returned `Type::Error` WITHOUT a diagnostic and WITHOUT ever
+    // reaching the per-builtin expand Form-3 gate (positional arm) or the
+    // named-axis literal check — silently accepting a sourceless size that
+    // the C backend then hardcodes to extent 1 (eval `[3, 2]` vs C `[1, 2]`).
+    // Both expand size gates read the size from the raw AST, not from
+    // `arg_tys[2]`, and `unify` treats `Type::Error` as permissive
+    // (`unify.rs`: `(Error, _) | (_, Error) => Ok(())`), so deferring to
+    // them is sound and yields the correct per-form located diagnostic. A
+    // genuinely sourced size never infers to `Error`, so this exemption only
+    // ever reaches the rejection paths.
+    let is_expand_call = matches!(func_name.as_deref(), Some("expand"));
+    let non_size_arg_is_error = arg_tys
+        .iter()
+        .enumerate()
+        .any(|(index, t)| !(is_expand_call && index == 2) && matches!(t, Type::Error));
+    if matches!(func_ty, Type::Error) || non_size_arg_is_error {
         return Type::Error;
     }
 
@@ -13060,7 +13080,17 @@ fn infer_expand_app(
             }
         })
         .collect();
-    if arg_tys.iter().any(|ty| matches!(ty, Type::Error)) {
+    // chelis#530: the size slot (index 2 / `kids[3]`) is exempt from the
+    // error-propagation short-circuit so an inline tuple-get / `match`/`if`
+    // size that infers to `Type::Error` still reaches the named-axis literal
+    // check below (`check_named_expand_signature` reads the size from the raw
+    // AST), rather than being silently accepted. Mirrors the generic-path
+    // exemption in `infer_app`.
+    if arg_tys
+        .iter()
+        .enumerate()
+        .any(|(index, ty)| index != 2 && matches!(ty, Type::Error))
+    {
         return Type::Error;
     }
     // The size slot must still be an int32 (a literal, a symbolic dim, or a
@@ -15575,29 +15605,7 @@ fn check_expand_signature(
         // bare-`var`, `cast(var, _)`, `let`-bound, and arithmetic.
         None => {
             if size_class == SizeClass::Sourceless {
-                let described = arg_exprs
-                    .get(2)
-                    .and_then(symbolic_dim_ref_name)
-                    .map(|name| format!("the symbolic dimension `{name}`"))
-                    .unwrap_or_else(|| "a runtime scalar".to_string());
-                errors.push(CheckError::new(
-                    CheckErrorKind::DimensionMismatch,
-                    format!(
-                        "`expand` size resolves to {described}, but no tensor in scope carries \
-                         it: a \u{00a7}4.7.2 Form-3 runtime size must be a literal/`cast(N, \
-                         int32)`, an in-scope tensor dimension, or a `shape(tensor, axis)` read \
-                         (followed through `let`, `cast`, and integer arithmetic). A bare \
-                         runtime scalar (e.g. an `int32`/`int64` parameter) has no shape source \
-                         the backend can emit, so the extent cannot be materialized. Tracked by \
-                         Chelis-Lang/chelis#469 (spec/04-type-system.md \u{00a7}4.7.2)"
-                    ),
-                    vec![
-                        "Source the extent from a tensor in scope: read it with \
-                         `shape(x, cast(axis, int32))` (the `bias_broadcast` form), bind that \
-                         read to a `let` and pass it, or use a literal/`cast(N, int32)` size."
-                            .to_string(),
-                    ],
-                ));
+                errors.push(sourceless_expand_size_error(arg_exprs.get(2)));
                 return Type::Error;
             }
             // A bare `var` naming a genuine §4.7.2 Form-2 symbolic dim — a
@@ -16114,6 +16122,36 @@ enum SizeClass {
     Unknown,
 }
 
+/// The §4.7.2 Form-3 sourceless-size diagnostic (chelis#469), emitted by
+/// `check_expand_signature` when an `expand` size resolves to `Sourceless`.
+/// Factored out so the diagnostic text has a single source of truth.
+/// `size_expr` is the size sub-expression (used only to name a symbolic
+/// dimension when the size is a bare `var`).
+fn sourceless_expand_size_error(size_expr: Option<&deep::Expr>) -> CheckError {
+    let described = size_expr
+        .and_then(symbolic_dim_ref_name)
+        .map(|name| format!("the symbolic dimension `{name}`"))
+        .unwrap_or_else(|| "a runtime scalar".to_string());
+    CheckError::new(
+        CheckErrorKind::DimensionMismatch,
+        format!(
+            "`expand` size resolves to {described}, but no tensor in scope carries \
+             it: a \u{00a7}4.7.2 Form-3 runtime size must be a literal/`cast(N, \
+             int32)`, an in-scope tensor dimension, or a `shape(tensor, axis)` read \
+             (followed through `let`, `cast`, and integer arithmetic). A bare \
+             runtime scalar (e.g. an `int32`/`int64` parameter) has no shape source \
+             the backend can emit, so the extent cannot be materialized. Tracked by \
+             Chelis-Lang/chelis#469 (spec/04-type-system.md \u{00a7}4.7.2)"
+        ),
+        vec![
+            "Source the extent from a tensor in scope: read it with \
+             `shape(x, cast(axis, int32))` (the `bias_broadcast` form), bind that \
+             read to a `let` and pass it, or use a literal/`cast(N, int32)` size."
+                .to_string(),
+        ],
+    )
+}
+
 /// chelis#397/#469: classify a runtime `expand` size argument by
 /// provenance. Walks `cast`, integer arithmetic (`add`/`sub`/`mul`/`div`),
 /// bare `var` references (resolved against `env` — an in-scope tensor dim
@@ -16162,7 +16200,22 @@ fn classify_expand_size(expr: &deep::Expr, env: &Env) -> SizeClass {
                 },
                 // Integer arithmetic: combine the operands' classes.
                 Some("app") => classify_arith_app(list, env),
-                _ => SizeClass::Unknown,
+                // chelis#530: any other List-shaped size — a tuple
+                // projection (`t.0`), an inline `match`/`if`, a record
+                // `access`, etc. — has NO backend-materializable shape
+                // source. It is `Sourceless`, NOT `Unknown`: returning
+                // `Unknown` here let the inline `expand(b, 0, t.0)` form
+                // (and its `cast`/arithmetic wrappers) reach the
+                // non-rejecting `_ => subst.apply(result_ty)` accept arm of
+                // `check_expand_signature` and silently miscompile in C to a
+                // hardcoded extent-1 axis (eval `[3, 2]` vs C `[1, 2]`),
+                // exactly the silent-miscompile class #469 exists to
+                // prevent. The `shape(t, ..)`, `cast(..)`, literal,
+                // bare-`var`, and arithmetic forms are all recognized BEFORE
+                // this arm, so reaching here means the size is genuinely
+                // sourceless at the check layer. Mirrors the `classify_arith_app`
+                // non-arith-`app` fail-closed default below.
+                _ => SizeClass::Sourceless,
             }
         }
         _ => SizeClass::Unknown,
