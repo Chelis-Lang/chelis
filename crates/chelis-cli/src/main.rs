@@ -3149,7 +3149,7 @@ fn cmd_reef_src(command: ReefSrcCommand) -> Result<(), Box<dyn std::error::Error
                     );
                 }
             }
-            println!("next: run `cargo build` — chelis crates resolve at the pin, no lock churn.");
+            println!("next: run `cargo build`; chelis crates resolve at the pin, no lock churn.");
             Ok(())
         }
         ReefSrcCommand::Check { path } => {
@@ -3186,7 +3186,7 @@ fn cmd_reef_src(command: ReefSrcCommand) -> Result<(), Box<dyn std::error::Error
             }
             match chelis_reef::chelis_src::worktree_head(&ctx.store_root, &ctx.version)? {
                 Some(head) => println!("store:     {} @ {head}", ctx.worktree.display()),
-                None => println!("store:     (not synced — run `chelis reef src sync`)"),
+                None => println!("store:     (not synced; run `chelis reef src sync`)"),
             }
             match std::fs::read_link(&ctx.slot) {
                 Ok(target) => println!("../chelis: {} -> {}", ctx.slot.display(), target.display()),
@@ -3265,7 +3265,7 @@ fn check_cargo_lock_at_pin(root: &Path, crates: &[String], version: &str) -> Res
     } else {
         Err(format!(
             "Cargo.lock records non-pin chelis crate versions (expected {version}): {} \
-             — the ../chelis slot is off the pin",
+             (the ../chelis slot is off the pin)",
             mismatched.join(", ")
         ))
     }
@@ -3330,7 +3330,7 @@ fn cmd_reef_doctor(root: Option<&Path>) -> Result<(), Box<dyn std::error::Error>
                 );
             }
             Some(store) => println!(
-                "  toolchain: MISSING — run the shell's install_chelis_toolchain.py ({} absent)",
+                "  toolchain: MISSING; run the shell's install_chelis_toolchain.py ({} absent)",
                 store.join(&version).display()
             ),
             None => println!("  toolchain: unknown (HOME unset)"),
@@ -3344,7 +3344,7 @@ fn cmd_reef_doctor(root: Option<&Path>) -> Result<(), Box<dyn std::error::Error>
                     println!("  src:       ok (../chelis pinned at {})", ctx.version);
                 } else {
                     for p in &problems {
-                        println!("  src:       DRIFT — {p}");
+                        println!("  src:       DRIFT: {p}");
                     }
                     println!(
                         "  src:       fix: `chelis reef src sync` in {}",

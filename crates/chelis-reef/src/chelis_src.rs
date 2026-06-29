@@ -331,7 +331,7 @@ pub fn wire_slot(slot: &Path, worktree: &Path) -> Result<WireOutcome, ChelisSrcE
         Ok(_) => Err(ChelisSrcError::Wiring {
             slot: slot.to_path_buf(),
             detail: "a real directory/file occupies the slot (likely a chelis dev clone); \
-                     move it out of the sibling slot (e.g. to ~/chelis-dev) and re-run — \
+                     move it out of the sibling slot (e.g. to ~/chelis-dev) and re-run; \
                      refusing to delete it"
                 .to_string(),
         }),
