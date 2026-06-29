@@ -318,7 +318,7 @@ impl CEmitter {
             RiscOp::MaxElem => {
                 self.emit_binary_func(id, "fmaxf", &node.inputs, &node.output_type);
             }
-            RiscOp::CmpLt => self.emit_cmplt(id, &node.inputs, &node.output_type),
+            RiscOp::CmpLt => self.emit_cmplt(id, &node.inputs, &node.output_type, dag),
             RiscOp::Neg => self.emit_unary(id, "-", &node.inputs, &node.output_type),
             RiscOp::Recip => self.emit_recip(id, &node.inputs, &node.output_type),
             RiscOp::Exp => self.emit_unary_func(id, "expf", &node.inputs, &node.output_type),
@@ -1773,23 +1773,60 @@ impl CEmitter {
     }
 
     // ---- CmpLt ----
-    fn emit_cmplt(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType) {
+    /// Comparable-scalar load expression for one cmplt operand. The
+    /// operand carries its own precision `p` (cmplt:
+    /// `∀D,p. (tensor[D,p], tensor[D,p]) → tensor[D,bool]`), so we read
+    /// it through a `p`-typed pointer (`ptr_var` must already be cast to
+    /// the storage element type). Reduced-float operands (`bf16`/`f16`)
+    /// store as `uint16_t` and must convert to `f32` before the
+    /// numeric `<`, matching the evaluator's value comparison rather
+    /// than a 16-bit bit-pattern comparison.
+    fn cmplt_cmp_value(ty: &TensorType, ptr_var: &str, idx: &str) -> String {
+        if Self::is_reduced_float(ty) {
+            let conv = Self::reduced_to_f32_fn(ty.precision);
+            format!("{conv}({ptr_var}[{idx}])")
+        } else {
+            format!("{ptr_var}[{idx}]")
+        }
+    }
+
+    /// #517: cmplt reads each operand through its OWN element dtype,
+    /// resolved from the input DAG nodes — not through the boolean
+    /// (f32) output type. The result is bool (stored as f32 1.0/0.0),
+    /// but a runtime-produced int32/int64/f64/bf16/f16 operand read
+    /// through a raw `float*` would reinterpret its bit pattern (the
+    /// #347/#476 bug class: e.g. a negative int32 reinterpreted as
+    /// `float` is NaN, so `-7 < -3` would wrongly yield false, and an
+    /// f64 read through `float*` truncates the 8-byte payload). Both
+    /// operands share precision `p` per the signature, but each type is
+    /// resolved independently for robustness.
+    fn emit_cmplt(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType, dag: &Dag) {
         let a = inputs[0].0;
         let b = inputs[1].0;
+        let a_ty = dag.get(inputs[0]).unwrap().output_type.clone();
+        let b_ty = dag.get(inputs[1]).unwrap().output_type.clone();
+        let et_a = Self::elem_type(&a_ty);
+        let et_b = Self::elem_type(&b_ty);
         self.emit_slot_wrapper(id, ty);
+        self.line(&format!("float* restrict __out_{id} = t{id}->data;"));
+        self.line(&format!(
+            "const {et_a}* restrict __in_a_{id} = (const {et_a}*)t{a}->data;"
+        ));
+        self.line(&format!(
+            "const {et_b}* restrict __in_b_{id} = (const {et_b}*)t{b}->data;"
+        ));
+        let cmp_a = Self::cmplt_cmp_value(&a_ty, &format!("__in_a_{id}"), "i");
+        let cmp_b = Self::cmplt_cmp_value(&b_ty, &format!("__in_b_{id}"), "i");
         self.line(&format!(
             "if (chelis_is_contiguous(t{a}) && chelis_is_contiguous(t{b}) && t{a}->size == t{id}->size && t{b}->size == t{id}->size) {{"
         ));
         self.indent += 1;
         self.line(&format!("assert(t{a}->size == t{id}->size);"));
-        self.line(&format!("float* restrict __out_{id} = t{id}->data;"));
-        self.line(&format!("const float* restrict __in_a_{id} = t{a}->data;"));
-        self.line(&format!("const float* restrict __in_b_{id} = t{b}->data;"));
         self.line("#pragma omp parallel for simd");
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
         self.line(&format!(
-            "__out_{id}[i] = (__in_a_{id}[i] < __in_b_{id}[i]) ? 1.0f : 0.0f;"
+            "__out_{id}[i] = ({cmp_a} < {cmp_b}) ? 1.0f : 0.0f;"
         ));
         self.indent -= 1;
         self.line("}");
@@ -1809,8 +1846,10 @@ impl CEmitter {
         self.line(&format!(
             "int idx_b = chelis_indices_to_flat(indices, t{b}->strides, t{b}->ndim);"
         ));
+        let cmp_a_strided = Self::cmplt_cmp_value(&a_ty, &format!("__in_a_{id}"), "idx_a");
+        let cmp_b_strided = Self::cmplt_cmp_value(&b_ty, &format!("__in_b_{id}"), "idx_b");
         self.line(&format!(
-            "t{id}->data[i] = (t{a}->data[idx_a] < t{b}->data[idx_b]) ? 1.0f : 0.0f;"
+            "__out_{id}[i] = ({cmp_a_strided} < {cmp_b_strided}) ? 1.0f : 0.0f;"
         ));
         self.indent -= 1;
         self.line("}");
