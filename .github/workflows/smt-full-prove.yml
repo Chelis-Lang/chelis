@@ -81,10 +81,11 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
-          # Keep the full-prove target cache separate from the required
-          # smt smoke cache; Arb/Clarabel/Z3 builds are not needed on the
-          # required path.
-          key: smt-full-prove
+          # Restore the same cvc5 target cache as the required smt smoke
+          # lane. The full corpus is intentionally slower, but it should
+          # spend time proving, not cold-building cvc5 again before the
+          # first prove step.
+          key: smt
 
       - name: Build smt feature
         run: cargo build -p chelis-cli --features smt

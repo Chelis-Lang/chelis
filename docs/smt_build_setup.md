@@ -66,6 +66,11 @@ includes `chelis-prove`, its proof-facing local dependencies
 `chelis-compiler-api`), proof scripts/data, and the CI workflow/action files
 that define the lane.
 
+The full workflow restores the same `smt` cargo cache key as the fast smoke
+lane. The split removes the full proof corpus from the required context; it
+must not make the optional lane cold-build cvc5 before reaching its proof
+steps.
+
 Two companion prove-in-CI lanes, `smt-build-glibc231` (a `debian:11`
 container) and `smt-build-darwin-arm64` (`macos-latest`), build
 `chelis-cli --features smt` on the other two release targets and run

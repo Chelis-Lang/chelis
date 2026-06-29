@@ -412,6 +412,7 @@ class SmtCiSplitTests(unittest.TestCase):
             "crates/chelis-surf/**",
             "crates/chelis-types/**",
             "scripts/ci_free_disk.py",
+            "key: smt",
             "cargo test -p chelis-prove --features smt",
             "cargo test -p chelis-prove --features carcara",
             "cargo test -p chelis-prove --features z3",
