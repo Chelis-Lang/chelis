@@ -1582,6 +1582,17 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
     // never call `chelis_free`, so the caller still owns the input afterwards.
     // Keeping these observational avoids forcing callers to sprinkle
     // `copy(x)` before every query or host-lane conversion.
+    //
+    // chelis#527: the same justification covers the read-only `List`/`Dict`
+    // queries `len` (arg 0) and `index` (arg 0).  `chelis_list_len` /
+    // `chelis_list_index` both take a `const chelis_list *` and never free it
+    // (`index` *retains* the element it returns), so the caller still owns the
+    // container afterwards.  Before this, a `List[tensor]` parameter named
+    // `params` (or any Deep-tag-colliding identifier — see chelis#343) was
+    // consume-tracked, so the idiomatic "read a list's length/element, then
+    // reuse the list" optimizer shape no longer type-checked and there was no
+    // non-consuming form to express it.  Classifying these as borrows restores
+    // read-then-reuse without an extra `copy()`.
     let Some(name) = name else {
         return false;
     };
@@ -1651,7 +1662,9 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
                 | "shape"
                 | "numel"
                 | "to_list"
-                | "tensor_to_scalar",
+                | "tensor_to_scalar"
+                | "len"
+                | "index",
             0
         ) | ("conv2d", 0 | 1)
             | ("einsum", 1 | 2)

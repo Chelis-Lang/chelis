@@ -66,6 +66,10 @@ Required coverage for this feature:
 - `vmap(f, axis=0)(xs)` works when `f` takes `&tensor`
 - Deep validation accepts `t-ref` and keeps the 62-tag vocabulary closed
 - macro-expanded programs continue through check/build when borrow nodes are present
+- read-only `List` / `Dict` queries (`len`, `index`) auto-borrow their container and do
+  not consume it, so read-then-reuse type-checks; a later read after a genuine consume
+  (explicit `drop`, or moving into an owned parameter) is still a use-after-consume
+  (chelis#527)
 
 ## Downstream Propagation
 

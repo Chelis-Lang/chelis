@@ -27,6 +27,16 @@ Outputs remain owned tensors. The borrow distinction is erased before IR and bac
 lowering, so primitive DAG nodes and backend kernels keep their existing value model.
 Consuming operations such as `realize` and explicit `drop` keep owned parameters.
 
+The same observational rule covers the read-only `List` / `Dict` queries `len` and
+`index`: they auto-borrow their container argument rather than consuming it, so the
+idiomatic "read a list's length / element, then reuse the list" pattern type-checks
+without a `copy()`. The runtime backings (`chelis_list_len`, `chelis_list_index`) take a
+`const` container pointer and never free it — `index` retains the element it returns — so
+the caller still owns the container afterwards. A genuine consume of the container (an
+explicit `drop`, or moving it into an owned parameter) still makes a later `len` / `index`
+read a use-after-consume (chelis#527). As with tensors, the borrow is auto-applied to the
+owned argument; writing the container query as `len(&xs)` is not a supported surface form.
+
 ### 1.4 Two Tiers
 
 **Tier 1: RISC Primitives** — the irreducible set. The compiler's IR operates on these. AD adjoint rules are defined for each.

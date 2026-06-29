@@ -601,6 +601,11 @@ Those items should be treated as Phase 3 implementation targets, not as a claim 
 current evaluator/backends already provide the full runtime behavior implied by the type
 examples above.
 
+The read-only container queries `len` and `index` are observational on a
+tensor-carrying `List` / `Dict`: they auto-borrow their container argument and do not
+consume it, so reading a list's length or an element does not forbid a later reuse of the
+list (chelis#527). See `spec/05-risc-primitives.md` §1.3.1.
+
 ### 3.1 Algorithm
 
 Standard Algorithm W with extensions for tensor types. The flow:

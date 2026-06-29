@@ -39,9 +39,19 @@
 //! The returned `_dir: TempDir` keeps the per-test app alive for the
 //! test scope; drop it to clean up.
 
+// Each integration-test binary `#[path]`-includes this whole module but
+// uses only the subset of fixtures it needs: the reef/std tests use
+// `make_app` (and the publish chain it pulls in), while the codegen
+// build/run tests use `build_and_run` (and friends). An item that is
+// unused *in a given includer* is therefore expected, not rot. Allow it
+// module-wide — the standard `tests/common/mod.rs` idiom — so the
+// `-D warnings` clippy gate does not flag the unused subset per binary.
+#![allow(dead_code)]
+
 use assert_cmd::Command;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command as StdCommand;
 use std::sync::LazyLock;
 use tempfile::{TempDir, tempdir};
 
@@ -160,4 +170,120 @@ chelis-std = {{ version = "0.4.0" }}
         ),
     );
     (dir, SHARED_REEF.reef_home.clone(), app_pkg)
+}
+
+// ---------------------------------------------------------------------------
+// Codegen build/run harness
+//
+// Shared by the `chelis build --target c` integration tests that compile the
+// generated C with the host toolchain and run it. The suites that share the
+// identical build-link-run recipe — issue_527, issue_218, issue_289, and
+// issue_345 — pull `build_and_run` / `link_generated` / `parse_tensor_data` /
+// `write_file` from here, so a change to the host link recipe lands in one
+// place instead of drifting across per-file copies.
+//
+// Suites whose recipe genuinely differs keep their own variant and are NOT
+// routed through here: jit_par_runtime_gap parses f32 output, while
+// numeric_dtype_adversarial and monomorphization_build only compile (the
+// latter object-compiles) rather than build-link-run this shape.
+// ---------------------------------------------------------------------------
+
+/// Whether the chelis-generated C `source` (already written under `out_dir`)
+/// pulls in the BLAS-backed runtime path, so the host link step must add the
+/// BLAS link flags.
+pub fn generated_source_needs_blas(out_dir: &Path, source: &str) -> bool {
+    fs::read_to_string(out_dir.join(source))
+        .map(|text| text.contains("cblas_sgemm(") || text.contains("\"chelis_blas.h\""))
+        .unwrap_or(false)
+}
+
+/// Link the chelis-generated C against the platform host toolchain, resolving
+/// compile/link flags (OpenMP, and BLAS when the source needs it) from
+/// `chelis_backend_c::toolchain`.
+pub fn link_generated(out_dir: &Path, source: &str, binary: &str) -> std::process::ExitStatus {
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
+        chelis_backend_c::toolchain::CodegenRequirements {
+            wants_openmp: true,
+            needs_blas: generated_source_needs_blas(out_dir, source),
+        },
+    );
+    let mut cmd = StdCommand::new(&toolchain.compiler);
+    cmd.current_dir(out_dir);
+    cmd.arg("-O2");
+    cmd.args(&toolchain.compile_flags);
+    cmd.arg(source);
+    cmd.args(["-L.", "-lchelis_runtime"]);
+    cmd.args(&toolchain.link_flags);
+    cmd.args(["-o", binary]);
+    cmd.status().expect("host compiler should run")
+}
+
+/// Parse a printed Chelis tensor of the form
+/// `name = tensor(shape=[..], data=[v0, v1, ...])` into its flat data.
+pub fn parse_tensor_data(stdout: &str, name: &str) -> Vec<f64> {
+    let prefix = format!("{name} = tensor(");
+    let line = stdout
+        .lines()
+        .find(|l| l.starts_with(&prefix))
+        .unwrap_or_else(|| panic!("output does not contain `{prefix}` line:\n{stdout}"));
+    let data_marker = "data=[";
+    let start = line
+        .find(data_marker)
+        .unwrap_or_else(|| panic!("no `data=[` in line: {line}"))
+        + data_marker.len();
+    let end = line[start..]
+        .find(']')
+        .unwrap_or_else(|| panic!("no closing `]` after data: {line}"));
+    line[start..start + end]
+        .split(',')
+        .map(|s| s.trim().parse::<f64>().expect("numeric"))
+        .collect()
+}
+
+/// Whether a host C compiler is available, so codegen build/run tests can
+/// skip cleanly on machines without one.
+pub fn gcc_available() -> bool {
+    StdCommand::new(chelis_backend_c::toolchain::c_compiler())
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Build `source` to C, link it, run it, and return its stdout. Panics with a
+/// diagnostic if any stage fails.
+pub fn build_and_run(source: &str, name: &str) -> String {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join(format!("{name}.ch"));
+    let out_dir = dir.path().join(format!("{name}-out"));
+    write_file(&path, source);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source_file = format!("{name}.c");
+    let status = link_generated(&out_dir, &source_file, name);
+    assert!(status.success(), "link failed: {status}");
+
+    let run_output = StdCommand::new(out_dir.join(name))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "binary failed: {}\nstderr: {}",
+        run_output.status,
+        String::from_utf8_lossy(&run_output.stderr),
+    );
+    String::from_utf8(run_output.stdout).expect("utf-8 stdout")
 }

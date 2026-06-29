@@ -11070,6 +11070,21 @@ fn infer_app(
                                     return Type::Prim(Prim::Int64);
                                 }
                                 Type::Var(_) | Type::Error => return Type::Prim(Prim::Int64),
+                                Type::Ref(inner) if matches!(&*inner, Type::Adt(name, _) if name == "List" || name == "Dict") =>
+                                {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "len auto-borrows its List/Dict argument, so an explicit `&` is not a \
+                                                 supported surface form: write `len(xs)`, not `len(&xs)` (got &{inner})"
+                                            ),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
                                 other => {
                                     errors.push(CheckError::new(
                                         CheckErrorKind::TypeMismatch,
@@ -11108,6 +11123,21 @@ fn infer_app(
                                 return args.remove(0);
                             }
                             Type::Var(_) | Type::Error => return result_ty,
+                            Type::Ref(inner) if matches!(&*inner, Type::Adt(name, _) if name == "List") =>
+                            {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!(
+                                            "index auto-borrows its List argument, so an explicit `&` is not a \
+                                             supported surface form: write `index(xs, i)`, not `index(&xs, i)` (got &{inner})"
+                                        ),
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
                             other => {
                                 errors.push(CheckError::new(
                                     CheckErrorKind::TypeMismatch,
