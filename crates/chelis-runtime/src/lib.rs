@@ -3865,6 +3865,68 @@ mod tests {
         assert_eq!(std::mem::align_of::<chelis_tensor>(), 8);
     }
 
+    /// #170: the C-runtime `chelis_tensor_trace` f32 path must sum the
+    /// diagonal in the SAME stride-4 ILP cascade as the emitted `RiscOp::Sum`
+    /// (`trace_cascade_f32`), so a compiled `trace` is bit-exact with
+    /// `torch.trace`. The only executable `trace` example is 2x2 (diagonal
+    /// length 2, where the cascade degenerates to the old left-fold), so this
+    /// pins the behavior on a 20-element diagonal where the two orders differ:
+    /// the cascade gives torch's `0x4125e023`, the prior `trace_loop::<f32>`
+    /// left-fold gave `0x4125e024`. Mirrors the eval-side
+    /// `host_runtime_trace_f32_matches_torch_stride4_cascade`.
+    #[test]
+    fn chelis_tensor_trace_f32_matches_torch_stride4_cascade() {
+        // Diagonal values (torch.rand, manual_seed(7)) as f64 literals that
+        // round-trip to the intended f32 (matches the eval-side test).
+        let diag: [f64; 20] = [
+            0.5349225401878357,
+            0.41317272186279297,
+            0.23315048217773438,
+            0.10808825492858887,
+            0.2942635416984558,
+            0.18491309881210327,
+            0.06628626585006714,
+            0.47317826747894287,
+            0.8760198354721069,
+            0.6712021827697754,
+            0.4092898368835449,
+            0.6157153248786926,
+            0.35706937313079834,
+            0.7855499386787415,
+            0.5738610625267029,
+            0.9782199859619141,
+            0.11917394399642944,
+            0.8441763520240784,
+            0.9919543266296387,
+            0.8370135426521301,
+        ];
+        unsafe {
+            let shape = [20i32, 20i32];
+            let matrix = chelis_alloc(2, shape.as_ptr(), CHELIS_F32);
+            let data = data_as_f32(matrix);
+            for (i, &v) in diag.iter().enumerate() {
+                *data.add(i * 20 + i) = v as f32;
+            }
+            let out = chelis_tensor_trace(matrix, 0, 1);
+            assert_eq!(chelis_tensor_rank(out), 0, "trace is a scalar");
+            let got = *data_as_f32(out);
+            assert_eq!(
+                got.to_bits(),
+                0x4125e023_u32,
+                "compiled trace must be bit-exact with torch.trace (stride-4 \
+                 cascade, #170); got {got} (bits {:#x})",
+                got.to_bits(),
+            );
+            assert_ne!(
+                got.to_bits(),
+                0x4125e024_u32,
+                "regression: trace matches the old f32 left-fold the cascade replaced (#170)",
+            );
+            chelis_free(out);
+            chelis_free(matrix);
+        }
+    }
+
     #[test]
     fn chelis_alloc_returns_32_byte_aligned_data() {
         unsafe {
