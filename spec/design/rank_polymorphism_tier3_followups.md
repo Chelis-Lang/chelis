@@ -115,25 +115,38 @@ backend; add an **eval-vs-backend agreement** test to `rank_poly_tier3.rs`
 (mirror Tier-2's `*_builds_and_runs_*` oracle) at ranks 2/3/4 with **non-square**
 operands.
 
-## #340 — max/min/prod_reduce in a `..r` body
+## #340 — max/min/prod/argmax/argmin_reduce in a `..r` body — SHIPPED
 
-**Root.** The host scalar lane special-cases only `sum`/`mean`
-(`crates/chelis-ir/src/host.rs` ~6330 host-type inference + ~6878;
-`crates/chelis-backend-c/src/host_emit.rs` ~1617 "unsupported builtin"). A
-rank-poly callee with max/min/prod is force-inlined into the host lane and hits
-the stub (the axis name leaks as a bare C identifier). Currently mitigated:
-`shape_class` (`crates/chelis-types/src/builtins.rs`) admits only `sum`/`mean`
-among the reductions as `NameTracked` (`expand` is also `NameTracked` since
-chelis#339); the other reductions are rejected at check time in a `..r` body
-(`rank_poly_tier3.rs::max_reduce_in_rank_poly_body_rejected`). The variadic
-form (chelis#339) desugars to the 2-arg composition, so re-admitting these
-ops automatically extends to their variadic calls in a `..r` body.
+**Root (historical).** The host scalar lane special-cased only `sum`/`mean`
+(`crates/chelis-ir/src/host.rs` host-type inference;
+`crates/chelis-backend-c/src/host_emit.rs` "unsupported builtin" fallthrough). A
+rank-poly callee with max/min/prod was force-inlined into the host lane and hit
+the stub (the axis name leaked as a bare C identifier). The mitigation rejected
+the rest of the reduction family at check time in a `..r` body.
 
-**Approach.** Either (a) route the rank-poly reduce through the DAG lane (likely
-free if #338 does this), or (b) extend the host lane's reduce coverage to
-max/min/prod/argmax/argmin with named-axis→index resolution. Then **re-admit**
-them as `NameTracked` in `shape_class` (update the `shape_class` pin test) and
-**convert** `max_reduce_in_rank_poly_body_rejected` into a build+run test.
+**Shipped (option a — route through the DAG lane, as #338 does).** The
+chelis-ir host-type inference (`infer_app_expr_host_type` ~L7055 and
+`infer_builtin_host_type_from_arg_tys` ~L7685) now types the whole reduction
+family — `max_reduce`/`min_reduce`/`prod_reduce`/`argmax_reduce`/`argmin_reduce`
+— as a tensor (the value reductions keep the operand precision;
+`argmax_reduce`/`argmin_reduce` return an int64 index tensor). With a tensor
+type in hand, a rank-poly reduce wrapper extracts a `__tensor_` DAG helper
+(`resolve_reduce_axis` resolves the named axis to a positional index against the
+operand's named dims) instead of falling through to the host-emit
+"unsupported builtin" path. The family is re-admitted as `NameTracked` in
+`shape_class` (`crates/chelis-types/src/builtins.rs`); the `shape_class` pin
+test and the body-discipline negatives (`permute`/`reshape` still Rewriting)
+are updated. `host_emit.rs` is unchanged: there is no runtime reduction helper
+and the host scalar lane never emitted `sum`/`mean` reductions either, so the
+whole family routes through the tensor-DAG kernel lane. The variadic form
+(chelis#339) desugars to the 2-arg composition, so this extends to variadic
+calls in a `..r` body too.
+
+**Acceptance.** `rank_poly_tier3.rs::max_reduce_family_builds_runs_in_rank_poly_body`
+(converted from the old `max_reduce_in_rank_poly_body_rejected`) builds, compiles,
+runs, and checks the C backend agrees with the `chelis eval` oracle
+value-for-value over the issue's `reduce_seq`/`r3` program for all five
+reductions, with non-square operands.
 
 ## #339 — expand (`R+1`) + variadic reduction surface — SHIPPED
 
