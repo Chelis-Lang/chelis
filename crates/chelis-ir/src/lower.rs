@@ -1481,8 +1481,8 @@ fn collect_body_precision_var_names(expr: &Expr, out: &mut HashSet<String>) {
 /// — in range but pointing at the wrong axis — so the split lands on the wrong
 /// axis (a silent wrong gradient under grad; the range check below does NOT
 /// catch this). The by-name path above tracks the moved anchor and is
-/// unaffected; only the by-position fallback is. Tracked as a chelis#373/#388
-/// follow-up (axis-reorder staleness).
+/// unaffected; only the by-position fallback is. Tracked as chelis#549
+/// (axis-reorder staleness; spans #373/#388/#339).
 fn tensor_rank_substitutions(
     formal_param_exprs: &[Option<Expr>],
     actual_args: &[TensorType],
@@ -1600,7 +1600,7 @@ fn extract_rank_var_bindings(
                         // in-range index: if an axis-reorder (e.g. `permute`)
                         // moved the anchor between the recording parameter and
                         // here, this splits at the wrong axis (silent wrong
-                        // gradient under grad). chelis#373/#388 follow-up
+                        // gradient under grad). Tracked as chelis#549
                         // (axis-reorder staleness).
                         let split = by_name.or_else(|| {
                             dim_axis_positions
@@ -7460,7 +7460,7 @@ impl LowerCtx {
             // recorded index is the anchor's offset in the formal parameter, so
             // an axis-reorder (e.g. `permute`) between that parameter and here
             // can leave it valid-but-stale (in range, wrong axis) and silently
-            // reduce the wrong axis under grad. chelis#373/#388 follow-up
+            // reduce the wrong axis under grad. Tracked as chelis#549
             // (axis-reorder staleness).
             if let Some(&idx) = self.dim_axis_positions.get(&name)
                 && self
