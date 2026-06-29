@@ -256,7 +256,12 @@ def _extract_ci_bash_array(name: str) -> list[str]:
 
 def _ci_job_block(job: str) -> str:
     """Return the raw `.github/workflows/ci.yml` text block for one job."""
-    lines = CI_YML.read_text().splitlines()
+    return _workflow_job_block(CI_YML, job)
+
+
+def _workflow_job_block(path: Path, job: str) -> str:
+    """Return the raw workflow text block for one job."""
+    lines = path.read_text().splitlines()
     header = f"  {job}:"
     start: int | None = None
     for idx, line in enumerate(lines):
@@ -264,13 +269,47 @@ def _ci_job_block(job: str) -> str:
             start = idx
             break
     if start is None:
-        raise AssertionError(f"missing CI job {job!r}")
+        raise AssertionError(f"missing workflow job {job!r} in {path}")
     end = len(lines)
     for idx in range(start + 1, len(lines)):
         if re.match(r"^  [a-z0-9-]+:\s*$", lines[idx]):
             end = idx
             break
     return "\n".join(lines[start:end])
+
+
+def _rust_cache_inputs(job_block: str) -> dict[str, str]:
+    """Return the `with:` inputs for a job's Swatinem/rust-cache step."""
+    lines = job_block.splitlines()
+    uses_idx: int | None = None
+    for idx, line in enumerate(lines):
+        if line.strip() == "uses: Swatinem/rust-cache@v2":
+            uses_idx = idx
+            break
+    if uses_idx is None:
+        raise AssertionError("missing Swatinem/rust-cache@v2 step")
+
+    with_idx: int | None = None
+    for idx in range(uses_idx + 1, len(lines)):
+        if re.match(r"^\s*- ", lines[idx]):
+            break
+        if lines[idx].strip() == "with:":
+            with_idx = idx
+            break
+    if with_idx is None:
+        return {}
+
+    inputs: dict[str, str] = {}
+    for line in lines[with_idx + 1 :]:
+        if re.match(r"^\s*- ", line):
+            break
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        m = re.match(r"^([A-Za-z0-9_-]+):\s*(.+?)\s*$", stripped)
+        if m is not None:
+            inputs[m.group(1)] = m.group(2)
+    return inputs
 
 
 class CiParityTests(unittest.TestCase):
@@ -412,7 +451,7 @@ class SmtCiSplitTests(unittest.TestCase):
             "crates/chelis-surf/**",
             "crates/chelis-types/**",
             "scripts/ci_free_disk.py",
-            "key: smt",
+            "shared-key: smt",
             "cargo test -p chelis-prove --features smt",
             "cargo test -p chelis-prove --features carcara",
             "cargo test -p chelis-prove --features z3",
@@ -431,6 +470,18 @@ class SmtCiSplitTests(unittest.TestCase):
                 text,
                 f"SMT full workflow missing expected full-prove surface: {needle}",
             )
+
+    def test_full_smt_workflow_shares_smoke_cache_key(self):
+        smoke_inputs = _rust_cache_inputs(_ci_job_block("smt-build"))
+        full_inputs = _rust_cache_inputs(
+            _workflow_job_block(SMT_FULL_PROVE_YML, "full-smt-prove")
+        )
+        self.assertEqual(
+            smoke_inputs,
+            full_inputs,
+            "required smt smoke and full-prove lane must share rust-cache inputs",
+        )
+        self.assertEqual(smoke_inputs, {"shared-key": "smt"})
 
 
 def _parse_job_attrs() -> dict[str, dict[str, str]]:

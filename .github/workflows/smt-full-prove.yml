@@ -85,7 +85,7 @@ jobs:
           # lane. The full corpus is intentionally slower, but it should
           # spend time proving, not cold-building cvc5 again before the
           # first prove step.
-          key: smt
+          shared-key: smt
 
       - name: Build smt feature
         run: cargo build -p chelis-cli --features smt
