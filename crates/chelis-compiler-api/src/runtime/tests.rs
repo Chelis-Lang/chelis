@@ -696,6 +696,91 @@ fn host_runtime_trace_f32_matches_torch_stride4_cascade() {
     );
 }
 
+/// #170 eval-vs-compiled parity (eval lane): the f64 `trace` eval reference
+/// sums the diagonal in the stride-4 cascade (it delegates to
+/// `tensor_reduce_host`, whose f64 `Sum` path is a cascade). The catastrophic
+/// diagonal `[2^53.., 1.0x18, -2^53..]` makes the cascade and a strict
+/// left-fold disagree dramatically: the cascade keeps the eighteen `1.0`s
+/// (`-> 12.0`, matching torch and the emitted f64 `sum`), the left-fold gives
+/// `0.0`. The matching compiled-lane assertion lives in `chelis-runtime`
+/// (`chelis_tensor_trace_f64_cascade_matches_eval_not_left_fold`); both lanes
+/// pin `12.0`, so `chelis eval` and the compiled binary agree.
+#[test]
+fn host_runtime_trace_f64_matches_eval_cascade() {
+    let mut diag = vec![1e16_f64];
+    diag.extend(std::iter::repeat_n(1.0_f64, 18));
+    diag.push(-1e16_f64);
+    let k = diag.len(); // 20
+    let mut m = vec![0.0_f64; k * k];
+    for (i, &v) in diag.iter().enumerate() {
+        m[i * k + i] = v;
+    }
+    let tensor = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![k, k], m),
+        precision: Prim::F64,
+    };
+    let out = tensor_trace_value(&tensor, 0, 1).expect("trace must evaluate");
+    assert_eq!(out.value.shape, Vec::<usize>::new(), "trace is a scalar");
+    assert_eq!(
+        out.value.data[0], 12.0,
+        "f64 trace eval must use the stride-4 cascade (== compiled, == torch); \
+         got {}. A left-fold gives 0.0.",
+        out.value.data[0],
+    );
+}
+
+/// #172 sibling (eval lane): windowed Max/Min DROP NaN — Rust `f64::max`/`min`
+/// return the non-NaN operand — unlike `max_reduce`/`min_reduce`, which
+/// PROPAGATE NaN (`tensor_reduce_host` `saw_nan` path). This pins the
+/// documented drop-vs-propagate asymmetry on the eval side; the C lane is
+/// pinned by `reduce_window_max_min_drop_nan` in `chelis-backend-c`. The two
+/// windows `[NaN, 1.0]` and `[2.0, NaN]` must reduce to the finite operand in
+/// either NaN position.
+#[test]
+fn host_runtime_reduce_window_max_min_drop_nan() {
+    let tensor = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![4], vec![f64::NAN, 1.0, 2.0, f64::NAN]),
+        precision: Prim::F32,
+    };
+    let max = tensor_reduce_window_host(
+        &tensor,
+        &[2],
+        &[2],
+        ReduceWindowOp::Max,
+        "reduce_window_max",
+    )
+    .expect("reduce_window max must evaluate");
+    assert_eq!(max.value.shape, vec![2]);
+    assert!(
+        max.value.data.iter().all(|v| !v.is_nan()),
+        "windowed max must DROP NaN (not propagate); got {:?}",
+        max.value.data,
+    );
+    assert_eq!(
+        max.value.data,
+        vec![1.0, 2.0],
+        "windowed max drops NaN -> the non-NaN operand",
+    );
+    let min = tensor_reduce_window_host(
+        &tensor,
+        &[2],
+        &[2],
+        ReduceWindowOp::Min,
+        "reduce_window_min",
+    )
+    .expect("reduce_window min must evaluate");
+    assert!(
+        min.value.data.iter().all(|v| !v.is_nan()),
+        "windowed min must DROP NaN (not propagate); got {:?}",
+        min.value.data,
+    );
+    assert_eq!(
+        min.value.data,
+        vec![1.0, 2.0],
+        "windowed min drops NaN -> the non-NaN operand",
+    );
+}
+
 /// #170 DECISION-LOCK: f32 `matmul` deliberately keeps an f64 eval
 /// accumulator and does NOT take the #163 `sum` cascade nor downcast to
 /// strict f32. torch's CPU f32 matmul is a BLAS GEMM (strict-f32-left-fold

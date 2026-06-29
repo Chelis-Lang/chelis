@@ -2123,17 +2123,20 @@ pub(super) fn tensor_softmax_host(
         //
         // #170 (DO NOT "fix" this sum into the stride-4 cascade): the f64
         // accumulator here is intentional and is NOT a torch-parity gap.
-        // (a) This host-eval softmax is already BIT-IDENTICAL to the lowered
-        //     path (`tier2::lower_softmax` -> `RiscOp::Sum`, which DOES use
-        //     the #163 f32 cascade) — verified at n=20/64/128 across seeds.
-        //     The exp/sum/div composition is well-conditioned enough that
-        //     the f64-sum-then-f64-div and the f32-cascade-then-f32-div
-        //     round to the same f32 output, so the two lanes agree.
+        // (a) This host-eval softmax computes exp/sum/div in f64, whereas the
+        //     lowered path (`tier2::lower_softmax` -> `RiscOp::Sum`) uses f32
+        //     `expf` + the #163 f32 cascade. The two lanes are NOT guaranteed
+        //     bit-identical: the f64 `exp` is more accurate than f32 `expf`
+        //     (cf. #172), so per-element exponentials can differ before the
+        //     sum even runs. What the repo actually proves is agreement within
+        //     the 1e-6 relative parity tolerance the corpus oracle enforces
+        //     (`chelis-cli/tests/parity.rs`) — not bit-identity. Swapping the
+        //     f64 fold for the f32 cascade would not buy bit-identity (the
+        //     exp mismatch remains) and would only lower the host lane's
+        //     precision.
         // (b) torch's softmax is a FUSED kernel; neither the cascade nor an
         //     f64 fold reliably bit-matches it (same situation as matmul —
-        //     see `tensor_matmul_host`). Switching to the cascade here would
-        //     only coincidentally chase torch while RISKING the host==lowered
-        //     bit-identity that currently holds. So softmax is DOCUMENTED, not
+        //     see `tensor_matmul_host`). So softmax is DOCUMENTED, not
         //     cascaded; only `sum`/`trace` take the cascade.
         let mut sum_exp = 0.0_f64;
         for k in 0..axis_size {
