@@ -851,6 +851,17 @@ impl HipEmitter {
                 "kernel_div{}",
                 Self::dtype_kernel_suffix(operand_prec())
             )),
+            // chelis#178: floor / truncating integer division. Both
+            // dispatch on operand precision (the dtype suffix) so the
+            // kernel name matches `kernel_source_for_op`.
+            RiscOp::FloorDiv => Some(format!(
+                "kernel_floor_div{}",
+                Self::dtype_kernel_suffix(operand_prec())
+            )),
+            RiscOp::TruncDiv => Some(format!(
+                "kernel_trunc_div{}",
+                Self::dtype_kernel_suffix(operand_prec())
+            )),
             // WS-A2: float-only kernel templates remain `_<f32|f64>`-suffixed.
             RiscOp::MaxElem => Some(format!("kernel_max_elem_{}", kind_for_node(node).suffix())),
             RiscOp::CmpLt => {
@@ -1113,6 +1124,26 @@ impl HipEmitter {
                     Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type),
                 )
             }
+            // chelis#178: floor division (round toward -inf). Integer
+            // operands use the sign-corrected kernel; float operands use
+            // `floorf(a / b)`.
+            RiscOp::FloorDiv => {
+                let prec = operand_prec();
+                kernels::binary_floor_div_typed(name, Self::dtype_c_type(prec), prec.is_integer())
+            }
+            // chelis#178: truncating (round-toward-zero) division. Integer
+            // operands only — native `/` is exactly the C truncating
+            // quotient, so it reuses the typed binary template.
+            RiscOp::TruncDiv => {
+                let prec = operand_prec();
+                debug_assert!(
+                    prec.is_integer(),
+                    "RiscOp::TruncDiv on non-integer precision `{prec:?}` reached HIP \
+                     codegen; the type checker should reject this at \
+                     spec/05-risc-primitives.md \u{00a7}2.1 before lowering"
+                );
+                kernels::binary_elementwise_typed(name, "/", Self::dtype_c_type(prec))
+            }
             RiscOp::MaxElem => kernels::binary_func(name, "fmaxf", elem_for_unary()),
             RiscOp::CmpLt => kernels::cmplt(
                 name,
@@ -1368,6 +1399,14 @@ impl HipEmitter {
                 &node.output_type,
             ),
             RiscOp::Div => self.emit_binary_launch(
+                id,
+                &resolved_kernel_name(),
+                &node.inputs,
+                &node.output_type,
+            ),
+            // chelis#178: floor / truncating integer division launch like
+            // any other binary elementwise kernel.
+            RiscOp::FloorDiv | RiscOp::TruncDiv => self.emit_binary_launch(
                 id,
                 &resolved_kernel_name(),
                 &node.inputs,
@@ -3165,6 +3204,8 @@ impl HipEmitter {
             | RiscOp::Add
             | RiscOp::Mul
             | RiscOp::Div
+            | RiscOp::FloorDiv
+            | RiscOp::TruncDiv
             | RiscOp::MaxElem
             | RiscOp::CmpLt
             | RiscOp::Neg

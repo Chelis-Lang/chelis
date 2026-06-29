@@ -40,13 +40,18 @@
 //! | optim.tensor_add            |  Y  |  Y  |  Y   |  Y  |   Y  |   Y   |   Y   |   Y   |
 //! | optim.tensor_sub            |  Y  |  Y  |  Y   |  Y  |   Y  |   Y   |   Y   |   Y   |
 //! | optim.tensor_mul            |  Y  |  Y  |  Y   |  Y  |   Y  |   Y   |   Y   |   Y   |
-//! | optim.tensor_div            |  Y  |  Y  |  Y   |  Y  |   Y  |   Y   |   Y   |   Y   |
+//! | optim.tensor_div (#178)     |  Y  |  Y  |  Y   |  Y  |   N  |   N   |   N   |   N   |
+//! | optim.tensor_floor_div      |  Y  |  Y  |  Y   |  Y  |   Y  |   Y   |   Y   |   Y   |
+//! | optim.tensor_trunc_div      |  N  |  N  |  N   |  N  |   Y  |   Y   |   Y   |   Y   |
 //! | test.assert_close_tensor    |  Y  |  Y  |  Y   |  Y  |   Y  |   Y   |   Y   |   Y   |
 //! | test.assert_shape           |  Y  |  Y  |  Y   |  Y  |   Y  |   Y   |   Y   |   Y   |
 //!
 //! Linear / attention reject integers because the underlying matmul
-//! sig rejects integers per spec sec 5.7.2 (no integer matmul). All
-//! other rows admit every active arithmetic dtype.
+//! sig rejects integers per spec sec 5.7.2 (no integer matmul).
+//! chelis#178: `div` is float-only (its integer-operand diagnostic
+//! points at `floor_div` / `trunc_div`); `trunc_div` is integer-only;
+//! `floor_div` admits both. All other rows admit every active
+//! arithmetic dtype.
 //!
 //! For the f32-pinned ops (rmsnorm / silu / gelu / generate / random
 //! / kaiming / xavierext / bce / crossentropy / kldiv / perplexity /
@@ -241,15 +246,18 @@ def call(xs: &tensor[1, 3, {dtype}]) -> int64 = row_argmax(xs)
     }
 }
 
-/// School.Optim.tensor_add / tensor_sub / tensor_mul / tensor_div shape:
-/// pure delegation to the underlying primitive. Each accepts every
-/// active arithmetic dtype. The four variants share an identical
-/// shape, so they are exercised by one table-driven test over the
-/// `[add, sub, mul, div]` primitives (consolidated in the e2e
-/// parsimony pass).
+/// School.Optim.tensor_add / tensor_sub / tensor_mul shape: pure
+/// delegation to the underlying primitive. Each accepts every active
+/// arithmetic dtype. `floor_div` is the same shape (admits all
+/// arithmetic dtypes per chelis#178). The variants share an identical
+/// shape, so they are exercised by one table-driven test.
+///
+/// `div` and `trunc_div` are NOT in this all-dtypes loop: chelis#178
+/// makes `div` float-only and `trunc_div` integer-only; their dtype
+/// matrices are pinned separately below.
 #[test]
 fn optim_tensor_ops_accept_all_arithmetic_dtypes() {
-    for op in ["add", "sub", "mul", "div"] {
+    for op in ["add", "sub", "mul", "floor_div"] {
         for dtype in ARITHMETIC_DTYPES {
             let dir = tempdir().expect("tempdir");
             let path = dir.path().join("optim_op.ch");
@@ -260,6 +268,48 @@ fn optim_tensor_ops_accept_all_arithmetic_dtypes() {
             write_file(&path, &src);
             let json = run_check(&path);
             expect_clean(&json, &format!("optim.tensor_{op}[{dtype}]"));
+        }
+    }
+}
+
+/// chelis#178: a polymorphic `div` wrapper accepts float dtypes and
+/// rejects integer dtypes (pointing at `floor_div` / `trunc_div`).
+#[test]
+fn optim_tensor_div_accepts_float_rejects_integer_dtypes() {
+    for dtype in ARITHMETIC_DTYPES {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("optim_div.ch");
+        let src = format!(
+            "def tensor_op[n, p](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = div(lhs, rhs)\n\
+             def call(xs: &tensor[3, {dtype}]) -> tensor[3, {dtype}] = tensor_op(xs, xs)\n"
+        );
+        write_file(&path, &src);
+        let json = run_check(&path);
+        if FLOAT_DTYPES.contains(dtype) {
+            expect_clean(&json, &format!("optim.tensor_div[{dtype}]"));
+        } else {
+            expect_any_error(&json, &format!("optim.tensor_div[{dtype}]"));
+        }
+    }
+}
+
+/// chelis#178: a polymorphic `trunc_div` wrapper is integer-only —
+/// accepts integer dtypes and rejects float dtypes.
+#[test]
+fn optim_tensor_trunc_div_accepts_integer_rejects_float_dtypes() {
+    for dtype in ARITHMETIC_DTYPES {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("optim_trunc_div.ch");
+        let src = format!(
+            "def tensor_op[n, p](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = trunc_div(lhs, rhs)\n\
+             def call(xs: &tensor[3, {dtype}]) -> tensor[3, {dtype}] = tensor_op(xs, xs)\n"
+        );
+        write_file(&path, &src);
+        let json = run_check(&path);
+        if FLOAT_DTYPES.contains(dtype) {
+            expect_any_error(&json, &format!("optim.tensor_trunc_div[{dtype}]"));
+        } else {
+            expect_clean(&json, &format!("optim.tensor_trunc_div[{dtype}]"));
         }
     }
 }

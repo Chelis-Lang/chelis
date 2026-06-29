@@ -1968,6 +1968,8 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                         | "mul"
                         | "sub"
                         | "div"
+                        | "floor_div"
+                        | "trunc_div"
                         | "max_elem"
                         | "min_elem"
                         | "neg"
@@ -5915,6 +5917,26 @@ impl LowerCtx {
                 let out_ty = Self::elementwise_out_ty(&self.dag, a, ty, None);
                 let parent_span = self.current_span_id.clone();
                 let node = tier2::lower_div(&mut self.dag, a, b, &out_ty, parent_span.as_deref());
+                self.attach_reuse_hint(node, app_span, &[a, b])
+            }
+            // chelis#178: integer-division primitives. Same elementwise
+            // dim contract as `div`; they lower to dedicated RISC ops.
+            "floor_div" if args.len() == 2 => {
+                let a = self.lower_expr_node(&args[0], "floor_div lhs");
+                let b = self.lower_expr_node(&args[1], "floor_div rhs");
+                let out_ty = Self::elementwise_out_ty(&self.dag, a, ty, None);
+                let parent_span = self.current_span_id.clone();
+                let node =
+                    tier2::lower_floor_div(&mut self.dag, a, b, &out_ty, parent_span.as_deref());
+                self.attach_reuse_hint(node, app_span, &[a, b])
+            }
+            "trunc_div" if args.len() == 2 => {
+                let a = self.lower_expr_node(&args[0], "trunc_div lhs");
+                let b = self.lower_expr_node(&args[1], "trunc_div rhs");
+                let out_ty = Self::elementwise_out_ty(&self.dag, a, ty, None);
+                let parent_span = self.current_span_id.clone();
+                let node =
+                    tier2::lower_trunc_div(&mut self.dag, a, b, &out_ty, parent_span.as_deref());
                 self.attach_reuse_hint(node, app_span, &[a, b])
             }
 

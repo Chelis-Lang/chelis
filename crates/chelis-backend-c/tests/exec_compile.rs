@@ -832,23 +832,22 @@ int main() {{
     );
 }
 
-// spec/05-risc-primitives.md §2.1: integer `div` uses C/Rust
-// truncating semantics (round toward zero). This is what
-// chelis-std's `Std.Decimal::normalize` relies on for scale shifts
-// (`div(coefficient, cast(10, int64))`). The C backend emits
-// `int32_t / int32_t` which truncates by language definition; this
-// exec-compile test pins that contract end-to-end.
-#[test]
-fn exec_div_int32_truncates_toward_zero() {
+/// Shared exec-compile driver for an integer binary-division op on an
+/// int32 operand pair. Builds a two-load DAG, lowers `op`, compiles the
+/// kernel, and asserts each output element matches `expected`. The four
+/// operand pairs `{7,2},{7,-2},{-7,2},{-7,-2}` exercise every sign
+/// combination so floor-vs-truncate rounding is distinguished on the
+/// mixed-sign cases.
+fn run_int_div_op_exec(op: RiscOp, fn_name: &str, kernel_name: &str, expected: [i32; 4]) {
     let mut dag = Dag::new();
     let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i32(4), None);
     let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i32(4), None);
-    dag.add_node(RiscOp::Div, vec![a, b], vec_i32(4), None);
+    dag.add_node(op, vec![a, b], vec_i32(4), None);
     let dag = fuse(&dag);
 
     let result = codegen_with_options(
         &dag,
-        "test_div_i32_trunc",
+        fn_name,
         CodegenOptions {
             math_lib_override: Some(MathLib::None),
             ..Default::default()
@@ -856,14 +855,15 @@ fn exec_div_int32_truncates_toward_zero() {
     );
     let src = &result.c_source;
 
+    let [e0, e1, e2, e3] = expected;
     let harness = format!(
         r#"{HARNESS_HEADER}
-extern void test_div_i32_trunc(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+extern void {fn_name}(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
 
 int main() {{
     int32_t a_data[4] = {{ 7,  7, -7, -7}};
     int32_t b_data[4] = {{ 2, -2,  2, -2}};
-    int32_t expected[4] = {{ 3, -3, -3,  3}};
+    int32_t expected[4] = {{ {e0}, {e1}, {e2}, {e3} }};
 
     chelis_tensor a_t;
     memset(&a_t, 0, sizeof(a_t));
@@ -879,7 +879,7 @@ int main() {{
 
     chelis_tensor* inputs[2] = {{&a_t, &b_t}};
     chelis_tensor* outputs[1] = {{NULL}};
-    test_div_i32_trunc(inputs, 2, outputs, 1);
+    {fn_name}(inputs, 2, outputs, 1);
 
     int ok = 1;
     int32_t* o = (int32_t*)outputs[0]->data;
@@ -901,12 +901,46 @@ int main() {{
 "#
     );
 
-    let Some(output) = compile_and_run_kernel("div_i32_trunc", src, &harness) else {
-        panic!("int32 div truncating kernel failed to compile/run");
+    let Some(output) = compile_and_run_kernel(kernel_name, src, &harness) else {
+        panic!("int32 {kernel_name} kernel failed to compile/run");
     };
     assert!(
         output.contains("PASS"),
-        "C-backend Div on int32 must truncate toward zero:\n{output}"
+        "C-backend {kernel_name} on int32 mismatch:\n{output}"
+    );
+}
+
+// spec/05-risc-primitives.md §2.1: `trunc_div` uses C/Rust truncating
+// semantics (round toward zero). This is what chelis-std's
+// `Std.Decimal::normalize` / `decimal_div_nonzero` rely on for scale
+// shifts and quotient computation. The C backend emits `int32_t /
+// int32_t` which truncates by language definition; this exec-compile
+// test pins that contract end-to-end across every sign combination.
+// `{7,-7} / {2,-2}` ⇒ `{3, -3, -3, 3}` (round toward zero).
+#[test]
+fn exec_trunc_div_int32_truncates_toward_zero() {
+    run_int_div_op_exec(
+        RiscOp::TruncDiv,
+        "test_trunc_div_i32",
+        "trunc_div_i32",
+        [3, -3, -3, 3],
+    );
+}
+
+// spec/05-risc-primitives.md §2.1: `floor_div` rounds the quotient
+// toward −∞. It agrees with truncate when the operands share a sign and
+// differs on the mixed-sign exact-fraction cases:
+// `7 floor_div 2 == 3`, `7 floor_div -2 == -4`, `-7 floor_div 2 == -4`,
+// `-7 floor_div -2 == 3`. This is the round-toward-−∞ semantics that
+// matches Python `//` / torch / JAX / numpy `floor_divide`; the C
+// backend realizes it as native `/` plus a remainder-sign correction.
+#[test]
+fn exec_floor_div_int32_rounds_toward_neg_inf() {
+    run_int_div_op_exec(
+        RiscOp::FloorDiv,
+        "test_floor_div_i32",
+        "floor_div_i32",
+        [3, -4, -4, 3],
     );
 }
 

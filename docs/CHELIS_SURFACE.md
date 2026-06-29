@@ -75,13 +75,18 @@ inputs are borrow-typed (`&tensor`, auto-borrowed at call sites).
 |---|---|---|
 | `add` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | `(g, g)` |
 | `mul` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | `(g*y, g*x)` |
-| `div` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | `(g/b, -g*y/b)`; IEEE-754 float, truncating-toward-zero on ints |
+| `div` | `(&tensor[D,p_float], &tensor[D,p_float]) -> tensor[D,p_float]` | `(g/b, -g*y/b)`; IEEE-754, **float operands only** (chelis#178) |
+| `floor_div` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | **non-differentiable** — `grad` rejects; round quotient toward −∞ (Python `//`); ints and floats |
+| `trunc_div` | `(&tensor[D,p_int], &tensor[D,p_int]) -> tensor[D,p_int]` | **non-differentiable** — `grad` rejects; round toward zero (C `/`); **integer operands only** |
 | `max_elem` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | `(g*(x>=y), g*(x<y))` |
 | `cmplt` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,bool]` | zero gradient (by design) |
 
 `div`/`recip` are native Tier-1 (IEEE-754, correct on the full real line) — **not** an
-`exp(neg(log))` decomposition. Integer `div` is C-style truncating division, not the
-torch/JAX float upcast.
+`exp(neg(log))` decomposition. **chelis#178:** `div` is now float-only; integer `div`
+(and the `/` operator on ints) is a type error citing `spec/05` §2.1 and pointing at
+`floor_div` (round toward −∞, matching torch/JAX/numpy `floor_divide` / Python `//`)
+or `trunc_div` (round toward zero, the C `/` quotient). Neither matches the torch/JAX
+float upcast (their default `divide`); use a `cast` first for that.
 
 ### 1.2 Elementwise unary — `spec/05` §2.2 (float types only)
 
@@ -305,7 +310,7 @@ is not in the block, it is not a builtin (it's `chelis-std`, a shell library, or
 undefined).
 
 ```
-Tier-1 DAG:   add mul div max_elem cmplt neg recip exp log sin cos tan atan sqrt
+Tier-1 DAG:   add mul div floor_div trunc_div max_elem cmplt neg recip exp log sin cos tan atan sqrt
               abs floor ceil round sum max_reduce min_reduce prod_reduce argmax_reduce
               argmin_reduce reduce_window_max reduce_window_min reduce_window_sum
               reduce_window_mean reshape permute expand pad shrink stride

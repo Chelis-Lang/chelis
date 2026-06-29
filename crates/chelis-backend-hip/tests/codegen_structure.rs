@@ -293,6 +293,51 @@ fn s3_all_elementwise_ops_emit_kernels() {
     }
 }
 
+// chelis#178: floor_div / trunc_div emit correctly-shaped HIP kernels.
+// `trunc_div` on integers is the native C `/` quotient (guarded);
+// `floor_div` on integers carries the remainder-sign correction; on
+// floats it is `floorf(a / b)`. This locks the kernel-string shape
+// without needing a GPU.
+#[test]
+fn s3_floor_trunc_div_emit_typed_int_kernels() {
+    // trunc_div (int): native `/`, integer-suffixed kernel name.
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i32(4), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i32(4), None);
+    let c = dag.add_node(RiscOp::TruncDiv, vec![a, b], vec_i32(4), None);
+    dag.add_root(c);
+    let trunc_src = codegen_hip(&dag, "test_trunc_div").c_source;
+    assert!(
+        trunc_src.contains("kernel_trunc_div_i32"),
+        "trunc_div(int32) must emit a dtype-suffixed kernel; got:\n{trunc_src}"
+    );
+
+    // floor_div (int): sign-correction kernel (contains the remainder
+    // modulo and the `-= 1` adjustment).
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i32(4), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i32(4), None);
+    let c = dag.add_node(RiscOp::FloorDiv, vec![a, b], vec_i32(4), None);
+    dag.add_root(c);
+    let floor_src = codegen_hip(&dag, "test_floor_div").c_source;
+    assert!(
+        floor_src.contains("kernel_floor_div_i32") && floor_src.contains("q -= 1"),
+        "floor_div(int32) must emit a sign-corrected kernel; got:\n{floor_src}"
+    );
+
+    // floor_div (float): `floorf(a / b)`.
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(4), None);
+    let c = dag.add_node(RiscOp::FloorDiv, vec![a, b], vec_f32(4), None);
+    dag.add_root(c);
+    let floor_f_src = codegen_hip(&dag, "test_floor_div_f").c_source;
+    assert!(
+        floor_f_src.contains("floorf("),
+        "floor_div(f32) must emit floorf(a / b); got:\n{floor_f_src}"
+    );
+}
+
 #[test]
 fn s3_all_unary_ops_emit_kernels() {
     let ops_and_names: Vec<(RiscOp, &str)> = vec![

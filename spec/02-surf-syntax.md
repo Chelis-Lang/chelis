@@ -70,6 +70,15 @@ No operator overloading. No infix bitwise operators. Host-side integer bitwise w
 named built-ins such as `bitand`, `bitor`, `bitxor`, `shl`, and `shr`. No exponentiation
 operator — use `pow(x, n)` from `Std.Math`.
 
+The `/` operator desugars to `div`, which since chelis#178 is **float-only**:
+applying `/` (or `div`) to integer operands is a type error. Integer division
+uses the named built-ins `floor_div(a, b)` (round toward −∞, matching Python `//`
+/ torch / JAX / numpy `floor_divide`) and `trunc_div(a, b)` (round toward zero,
+the C `/` quotient; integer-only). There is intentionally no infix operator for
+either — integer division is explicit at the call site. See
+`spec/05-risc-primitives.md` §2.1 for the full semantics and the migration
+rationale. `%` continues to map to `mod` (integer remainder).
+
 ---
 
 ## 3. Punchlist Decisions

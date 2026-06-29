@@ -72,6 +72,8 @@ fn is_fusible_elementwise(op: &RiscOp) -> bool {
         RiscOp::Add
             | RiscOp::Mul
             | RiscOp::Div
+            | RiscOp::FloorDiv
+            | RiscOp::TruncDiv
             | RiscOp::MaxElem
             | RiscOp::CmpLt
             | RiscOp::Neg
@@ -96,6 +98,8 @@ fn to_fused_step_op(op: &RiscOp) -> FusedStepOp {
         RiscOp::Add => FusedStepOp::Add,
         RiscOp::Mul => FusedStepOp::Mul,
         RiscOp::Div => FusedStepOp::Div,
+        RiscOp::FloorDiv => FusedStepOp::FloorDiv,
+        RiscOp::TruncDiv => FusedStepOp::TruncDiv,
         RiscOp::MaxElem => FusedStepOp::MaxElem,
         RiscOp::CmpLt => FusedStepOp::CmpLt,
         RiscOp::Neg => FusedStepOp::Neg,

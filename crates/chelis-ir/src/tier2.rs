@@ -242,6 +242,34 @@ pub fn lower_div(
     add_synth(dag, RiscOp::Div, vec![a, b], ty.clone(), parent_span)
 }
 
+/// `floor_div(a, b)` — floor division (round quotient toward −∞).
+///
+/// Lowers directly to [`RiscOp::FloorDiv`] (chelis#178). Integer
+/// operands round toward −∞; float operands compute `floor(a / b)`.
+pub fn lower_floor_div(
+    dag: &mut Dag,
+    a: NodeId,
+    b: NodeId,
+    ty: &TensorType,
+    parent_span: Option<&str>,
+) -> NodeId {
+    add_synth(dag, RiscOp::FloorDiv, vec![a, b], ty.clone(), parent_span)
+}
+
+/// `trunc_div(a, b)` — truncating (round-toward-zero) integer division.
+///
+/// Lowers directly to [`RiscOp::TruncDiv`] (chelis#178). Integer
+/// operands only; the C/Rust integer `/` quotient.
+pub fn lower_trunc_div(
+    dag: &mut Dag,
+    a: NodeId,
+    b: NodeId,
+    ty: &TensorType,
+    parent_span: Option<&str>,
+) -> NodeId {
+    add_synth(dag, RiscOp::TruncDiv, vec![a, b], ty.clone(), parent_span)
+}
+
 /// H1: `gt(a, b)` = `cmplt(b, a)` (swap args)
 pub fn lower_gt(
     dag: &mut Dag,

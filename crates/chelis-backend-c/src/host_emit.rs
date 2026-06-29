@@ -2140,11 +2140,33 @@ impl<'a> HostEmitter<'a> {
             // same clean diagnostic the evaluator emits. `chelis_int_div_guard`
             // returns the (nonzero) divisor so it composes inline. Float `div`
             // is IEEE-754 and is never guarded; `mod` is integer-only.
+            // chelis#178: integer `div` is a type error; this arm is dead
+            // (the checker rejects it before host-emit) but kept as a
+            // defensive guard. Float `div` is IEEE-754 and never guarded.
             "div" if matches!(arg_vars[0].1, HostType::Int64) => format!(
                 "{} / chelis_int_div_guard({})",
                 arg_vars[0].0, arg_vars[1].0
             ),
             "div" => format!("{} / {}", arg_vars[0].0, arg_vars[1].0),
+            // chelis#178: `trunc_div` is integer-only — the guarded C `/`
+            // quotient (round toward zero).
+            "trunc_div" => format!(
+                "{} / chelis_int_div_guard({})",
+                arg_vars[0].0, arg_vars[1].0
+            ),
+            // chelis#178: `floor_div` rounds toward -inf. Integer (host
+            // scalar) operands use the guarded `/` plus a remainder-sign
+            // correction; float operands use `floor(a / b)`.
+            "floor_div" if matches!(arg_vars[0].1, HostType::Int64) => {
+                let a = &arg_vars[0].0;
+                let b = &arg_vars[1].0;
+                format!(
+                    "({a} / chelis_int_div_guard({b}) - \
+                     (((({a}) % chelis_int_div_guard({b})) != 0 && \
+                     (((({a}) % chelis_int_div_guard({b})) < 0) != (({b}) < 0))) ? 1 : 0))"
+                )
+            }
+            "floor_div" => format!("floor({} / {})", arg_vars[0].0, arg_vars[1].0),
             "mod" => format!(
                 "{} % chelis_int_div_guard({})",
                 arg_vars[0].0, arg_vars[1].0

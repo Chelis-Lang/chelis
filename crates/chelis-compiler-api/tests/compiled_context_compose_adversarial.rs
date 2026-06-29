@@ -585,13 +585,16 @@ fn g11_check_in_context_does_not_run_user_code() {
     let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
     let (_dir, root) = build_pkg(library, main);
 
-    // The probe: a body that WOULD crash (cast string → int) wrapped in
-    // a 1-arg fn def that is never called from any root. check_in_context
-    // must succeed (typecheck only); eval_in_context likewise won't fire
-    // the body since nothing applies it. The contract being tested: the
-    // check pass is purely static — no eval side effects from defs.
+    // The probe: a body that WOULD crash at runtime (integer division by
+    // zero) wrapped in a 1-arg fn def that is never called from any root.
+    // check_in_context must succeed (typecheck only); eval_in_context
+    // likewise won't fire the body since nothing applies it. The contract
+    // being tested: the check pass is purely static — no eval side effects
+    // from defs. (chelis#178: integer division is `trunc_div`; `x / 0`
+    // would now be a type error since `div` is float-only, so the landmine
+    // uses the well-typed-but-runtime-trapping `trunc_div(x, 0)`.)
     let snippet = "module App.Eval\nimport Mylib.Math (add)\n\n\
-                   def landmine(x: int32) -> int32 = x / 0\n\
+                   def landmine(x: int32) -> int32 = trunc_div(x, cast(0, int32))\n\
                    def safe -> int32 = add(1, 2)\n";
 
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");

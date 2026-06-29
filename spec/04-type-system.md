@@ -1469,7 +1469,10 @@ Operations accept same-precision operands only. The table of valid combinations:
 
 | Operation type | Valid precisions |
 |---|---|
-| Arithmetic (add, mul, sub, div) | f32, f64, bf16, f16, int8, int16, int32, int64 (all same) |
+| Arithmetic (add, mul, sub) | f32, f64, bf16, f16, int8, int16, int32, int64 (all same) |
+| Float division (div) | f32, f64, bf16, f16 only (not integer; integer operands cite `spec/05-risc-primitives.md` §2.1 and point at `floor_div` / `trunc_div`) |
+| Floor division (floor_div) | f32, f64, bf16, f16, int8, int16, int32, int64 (all same) |
+| Truncating division (trunc_div) | int8, int16, int32, int64 only (integer-only; float operands are a type error) |
 | Comparison (cmplt, eq) | any numeric (same precision) → bool |
 | Logical (and, or, not) | bool only |
 | Transcendental (exp, log, sin, cos, tan, atan, sqrt) | f32, f64, bf16, f16 only (not integer) |
@@ -1677,9 +1680,12 @@ A typical generalized signature has the shape:
 
 Float-only operations (those whose §5.4 row reads "f32, f64, bf16, f16 only")
 carry an explicit kind restriction limiting `p` to the float subset of the
-active dtype set. Examples include `exp`, `log`, `sin`, `sqrt`, and the
-transcendental row in §5.4. Calling a float-only op on an integer tensor is a
-type error reported at the call site, not deep inside the implementation.
+active dtype set. Examples include `exp`, `log`, `sin`, `sqrt`, the
+transcendental row in §5.4, and `div` (float division — its integer-operand
+diagnostic points at `floor_div` / `trunc_div`). Calling a float-only op on an
+integer tensor is a type error reported at the call site, not deep inside the
+implementation. `trunc_div` is the mirror case (integer-only): applying it to a
+float tensor is a type error.
 
 The implementation is permitted to specialize each instantiation (e.g. via
 monomorphization) so that backends never see a polymorphic stdlib body. The

@@ -3,7 +3,7 @@
 //! Verifies that bs_call_vec is a WireDag root, round-trips through the
 //! content-addressed byte seam, and produces a deterministic hash.
 
-use chelis_compiler_api::schema::SourceKind;
+use chelis_compiler_api::schema::{SourceKind, WIRE_DAG_SCHEMA_VERSION};
 use chelis_prove::WireDagByteStore;
 use chelis_prove::discharge::{IntervalBox, IrHandle, OutputRange};
 use chelis_prove::graph_extract::box_range_goal_from_source_entry;
@@ -121,7 +121,14 @@ fn bs_call_vec_byte_seam_round_trip() {
     // Deserialize bytes to verify structure
     let parsed: serde_json::Value =
         serde_json::from_slice(&extracted.wire_dag_bytes).expect("valid JSON");
-    assert_eq!(parsed["schema_version"].as_u64(), Some(1));
+    // The producer stamps the current wire schema version. This moved
+    // from 1 -> 2 in chelis#178 (WireRiscOp::FloorDiv / TruncDiv joined
+    // the vocabulary); assert against the constant so the seam test
+    // tracks future additive bumps instead of pinning a magic number.
+    assert_eq!(
+        parsed["schema_version"].as_u64(),
+        Some(u64::from(WIRE_DAG_SCHEMA_VERSION))
+    );
     assert!(
         parsed["roots"]
             .as_array()

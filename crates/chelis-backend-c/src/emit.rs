@@ -306,6 +306,15 @@ impl CEmitter {
             RiscOp::Add => self.emit_binary(id, "+", &node.inputs, &node.output_type),
             RiscOp::Mul => self.emit_binary(id, "*", &node.inputs, &node.output_type),
             RiscOp::Div => self.emit_binary(id, "/", &node.inputs, &node.output_type),
+            // chelis#178: `trunc_div` is the C integer `/` quotient (round
+            // toward zero) — `emit_binary` already wraps the divisor in the
+            // portable zero-divisor guard for integer dtypes. `trunc_div`
+            // is integer-only, so this is exactly C truncating division.
+            RiscOp::TruncDiv => self.emit_binary(id, "/", &node.inputs, &node.output_type),
+            // chelis#178: `floor_div` rounds the quotient toward -inf.
+            // Integer operands use native `/` plus a remainder-sign
+            // correction; float operands use `floorf(a / b)`.
+            RiscOp::FloorDiv => self.emit_floor_div(id, &node.inputs, &node.output_type),
             RiscOp::MaxElem => {
                 self.emit_binary_func(id, "fmaxf", &node.inputs, &node.output_type);
             }
@@ -1489,6 +1498,157 @@ impl CEmitter {
         self.line("}");
     }
 
+    /// chelis#178: floor division (round quotient toward -inf).
+    ///
+    /// - Integer dtype: native `/` plus a remainder-sign correction —
+    ///   `q = a / b; r = a % b; out = q - (r != 0 && ((r < 0) != (b < 0)))`.
+    ///   The divisor is wrapped in the portable `chelis_int_div_guard` so a
+    ///   zero divisor traps identically to `div`/`mod`/`trunc_div`.
+    /// - Float dtype: `floorf(a / b)` (f32) / `floor(a / b)` (f64) /
+    ///   reduced-float via the f32 conversion path. IEEE division is not
+    ///   guarded (`floor(+inf) == +inf`).
+    fn emit_floor_div(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType) {
+        if Self::is_reduced_float(ty) {
+            self.emit_floor_div_reduced_f(id, inputs, ty);
+            return;
+        }
+        let a = inputs[0].0;
+        let b = inputs[1].0;
+        let et = Self::elem_type(ty);
+        let is_int = ty.precision.is_integer();
+        // Build the per-element floor-division expression given lvalue
+        // expressions for the two operands. For ints, guard the divisor and
+        // apply the remainder-sign correction; for floats use the math fn.
+        let floor_fn = if Self::is_f64(ty) { "floor" } else { "floorf" };
+        let elem_expr = |av: &str, bv: &str| -> String {
+            if is_int {
+                format!(
+                    "({et})(({av} / chelis_int_div_guard((int64_t)({bv}))) - \
+                     ((((({av}) % chelis_int_div_guard((int64_t)({bv}))) != 0) && \
+                     (((({av}) % chelis_int_div_guard((int64_t)({bv}))) < 0) != (({bv}) < 0))) ? 1 : 0))"
+                )
+            } else {
+                format!("{floor_fn}(({et})({av}) / ({et})({bv}))")
+            }
+        };
+        self.emit_slot_wrapper(id, ty);
+        self.line(&format!(
+            "if (chelis_is_contiguous(t{a}) && chelis_is_contiguous(t{b}) && t{a}->size == t{id}->size && t{b}->size == t{id}->size) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("assert(t{a}->size == t{id}->size);"));
+        self.line(&format!("{et}* restrict __out_{id} = ({et}*)t{id}->data;"));
+        self.line(&format!(
+            "const {et}* restrict __in_a_{id} = (const {et}*)t{a}->data;"
+        ));
+        self.line(&format!(
+            "const {et}* restrict __in_b_{id} = (const {et}*)t{b}->data;"
+        ));
+        // The integer guard is a side-effecting call; do not vectorize it.
+        if is_int {
+            self.line("#pragma omp parallel for");
+        } else {
+            self.line("#pragma omp parallel for simd");
+        }
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "__out_{id}[i] = {};",
+            elem_expr(&format!("__in_a_{id}[i]"), &format!("__in_b_{id}[i]"))
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line("#pragma omp parallel for");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line("int indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+        ));
+        self.line(&format!(
+            "int idx_a = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+        ));
+        self.line(&format!(
+            "int idx_b = chelis_indices_to_flat(indices, t{b}->strides, t{b}->ndim);"
+        ));
+        self.line(&format!(
+            "(({et}*)t{id}->data)[i] = {};",
+            elem_expr(
+                &format!("(({et}*)t{a}->data)[idx_a]"),
+                &format!("(({et}*)t{b}->data)[idx_b]")
+            )
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// Reduced-float (bf16/f16) floor division. Storage is `uint16_t`;
+    /// arithmetic runs in `f32` via the conversion helpers, then `floorf`.
+    /// `floor_div` admits reduced floats per spec/05 §2.1 (float row).
+    fn emit_floor_div_reduced_f(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType) {
+        let a = inputs[0].0;
+        let b = inputs[1].0;
+        let load = Self::reduced_to_f32_fn(ty.precision);
+        let store = Self::f32_to_reduced_fn(ty.precision);
+        self.emit_slot_wrapper(id, ty);
+        self.line(&format!(
+            "if (chelis_is_contiguous(t{a}) && chelis_is_contiguous(t{b}) && t{a}->size == t{id}->size && t{b}->size == t{id}->size) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("assert(t{a}->size == t{id}->size);"));
+        self.line(&format!(
+            "uint16_t* restrict __out_{id} = (uint16_t*)t{id}->data;"
+        ));
+        self.line(&format!(
+            "const uint16_t* restrict __in_a_{id} = (const uint16_t*)t{a}->data;"
+        ));
+        self.line(&format!(
+            "const uint16_t* restrict __in_b_{id} = (const uint16_t*)t{b}->data;"
+        ));
+        self.line("#pragma omp parallel for simd");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!("float __av = {load}(__in_a_{id}[i]);"));
+        self.line(&format!("float __bv = {load}(__in_b_{id}[i]);"));
+        self.line(&format!("__out_{id}[i] = {store}(floorf(__av / __bv));"));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line("#pragma omp parallel for");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line("int indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+        ));
+        self.line(&format!(
+            "int idx_a = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+        ));
+        self.line(&format!(
+            "int idx_b = chelis_indices_to_flat(indices, t{b}->strides, t{b}->ndim);"
+        ));
+        self.line(&format!(
+            "float __av = {load}(((uint16_t*)t{a}->data)[idx_a]);"
+        ));
+        self.line(&format!(
+            "float __bv = {load}(((uint16_t*)t{b}->data)[idx_b]);"
+        ));
+        self.line(&format!(
+            "((uint16_t*)t{id}->data)[i] = {store}(floorf(__av / __bv));"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
     /// WS-1: bf16 / f16 binary elementwise. Storage is `uint16_t`;
     /// arithmetic is performed in `f32` via the runtime conversion
     /// helpers, matching the spec/04-type-system.md §5.7.1 promise
@@ -2176,6 +2336,22 @@ impl CEmitter {
                 let b = resolve(&inputs[1]);
                 format!("{a} / {b}")
             }
+            // chelis#178: the fused-elem path is f32-only by construction
+            // (the WS-A1 guard panics on non-f32), so only `floor_div` on
+            // float operands can reach here — emit `floorf(a / b)`.
+            // `trunc_div` is integer-only and can never fuse to this f32
+            // path, so it is unreachable.
+            FusedStepOp::FloorDiv => {
+                let a = resolve(&inputs[0]);
+                let b = resolve(&inputs[1]);
+                format!("floorf({a} / {b})")
+            }
+            FusedStepOp::TruncDiv => {
+                unreachable!(
+                    "trunc_div is integer-only (chelis#178); the fused-elem path is \
+                     f32-only and cannot carry an integer trunc_div step"
+                )
+            }
             FusedStepOp::MaxElem => {
                 let a = resolve(&inputs[0]);
                 let b = resolve(&inputs[1]);
@@ -2262,6 +2438,20 @@ impl CEmitter {
                 let a = resolve(&inputs[0]);
                 let b = resolve(&inputs[1]);
                 format!("_mm256_div_ps({a}, {b})")
+            }
+            // chelis#178: the fused-elem path is f32-only, so only float
+            // `floor_div` reaches here — `floor(a / b)` via AVX2.
+            // `trunc_div` is integer-only and cannot fuse to f32.
+            FusedStepOp::FloorDiv => {
+                let a = resolve(&inputs[0]);
+                let b = resolve(&inputs[1]);
+                format!("_mm256_floor_ps(_mm256_div_ps({a}, {b}))")
+            }
+            FusedStepOp::TruncDiv => {
+                unreachable!(
+                    "trunc_div is integer-only (chelis#178); the fused-elem path is \
+                     f32-only and cannot carry an integer trunc_div step"
+                )
             }
             FusedStepOp::MaxElem => {
                 let a = resolve(&inputs[0]);
@@ -4412,6 +4602,19 @@ impl CEmitter {
                     let a = resolve(&step.input_indices[0]);
                     let b = resolve(&step.input_indices[1]);
                     format!("{a} / {b}")
+                }
+                // chelis#178: f32-only fused path — only float `floor_div`
+                // reaches here; `trunc_div` is integer-only.
+                FusedStepOp::FloorDiv => {
+                    let a = resolve(&step.input_indices[0]);
+                    let b = resolve(&step.input_indices[1]);
+                    format!("floorf({a} / {b})")
+                }
+                FusedStepOp::TruncDiv => {
+                    unreachable!(
+                        "trunc_div is integer-only (chelis#178); the fused-elem path is \
+                         f32-only and cannot carry an integer trunc_div step"
+                    )
                 }
                 FusedStepOp::MaxElem => {
                     let a = resolve(&step.input_indices[0]);

@@ -973,7 +973,11 @@ pub struct WireRecordPatternField {
 /// Version history:
 /// - `1`: initial pinned surface (46-variant `WireRiscOp`, additive
 ///   `accumulator` defaults on `Sum`/`BlasMatmul`).
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 1;
+/// - `2`: chelis#178 — added `WireRiscOp::FloorDiv` / `TruncDiv` and the
+///   matching `WireFusedStepOp` variants for integer floor/truncating
+///   division (`div` is now float-only). A producer may emit the new ops,
+///   so a pinned consumer must observe the version bump.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 2;
 
 /// Backwards-compat default for [`WireDag::schema_version`]. A wire
 /// payload predating WI-2 carries no `schema_version`; it is the
@@ -1168,6 +1172,8 @@ pub enum WireFusedStepOp {
     Add,
     Mul,
     Div,
+    FloorDiv,
+    TruncDiv,
     MaxElem,
     CmpLt,
     Neg,
@@ -1198,6 +1204,8 @@ pub enum WireRiscOp {
     Add,
     Mul,
     Div,
+    FloorDiv,
+    TruncDiv,
     CmpLt,
     MaxElem,
     Neg,

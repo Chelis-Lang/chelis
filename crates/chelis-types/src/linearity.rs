@@ -1603,6 +1603,8 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
             | "max_elem"
             | "sub"
             | "div"
+            | "floor_div"
+            | "trunc_div"
             | "eq"
             | "neq"
             | "lt"
