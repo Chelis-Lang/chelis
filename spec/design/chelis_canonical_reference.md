@@ -89,7 +89,9 @@ Every Deep node has the same shape:
 
 Deep is the single source of truth.
 Surf desugars losslessly to Deep.
-Deep decompiles back to Surf on a best-effort basis.
+The default Deep-to-Surf decompile path returns formatter-canonical Surf for
+the supported round-trip surface; verbose decompile remains the explicit
+best-effort debug path.
 Current Phase 1 caveat: the compiler may emit dotted Deep module/import paths that
 `chelis validate` accepts, but the compiler-side Deep parser does not yet fully
 reparse that emitted shape. This round-trip gap is tracked as a Phase 2 bug because it
@@ -112,8 +114,8 @@ also make it a stable editing target. The 62-tag closed vocabulary, the
 3-tuple uniformity, and the metadata-map slot for provenance mean
 structural edits (replace a function body, rename a symbol, change a
 signature) are well-defined operations rather than character-level
-gambles. This is the architectural foundation for the exploratory Agent
-Editing Surface direction (`spec/design/chelis_agent_editing_surface.md`).
+gambles. This is the architectural foundation for the Agent Editing Surface
+direction (`spec/design/chelis_agent_editing_surface.md`).
 
 ### Serialization
 
@@ -784,16 +786,21 @@ enumerated in §6 and [`spec/09-tide.md`](../09-tide.md). The aspiration is full
 type-signature-as-test-specification generation; the shipped `chelis prove` is the
 current step toward it.
 
-### Editing Surface (Exploratory)
+### Editing Surface
 
-Tracks 1 and 2 above cover code *generation*. A separate exploratory
-direction covers structural *editing* — tooling that modifies existing
-Chelis source through Deep-AST operations rather than text patches. One
-bounded proof-of-concept tool (`chelis_replace_body`) is the gate;
-expansion to the full toolset is conditional on that PoC plus a
-comparative benchmark. Detailed design in
-`spec/design/chelis_agent_editing_surface.md`. Status: exploratory, no
-tools shipped.
+Tracks 1 and 2 above cover code *generation*. A separate structural
+*editing* surface modifies existing Chelis source through Deep-AST operations
+rather than text patches. The shipped L0 tool is
+`chelis_replace_function_body` on Tide MCP and HTTP. It accepts Deep strings
+for `{module, function_name, new_body}` and returns canonical Deep
+`{changed_def_deep, module_deep}` only after the post-splice whole-module
+check is clean. Any parse, splice, type, effect, or linearity failure returns
+the normal structured failure envelope and no replacement result.
+
+Detailed design and the current oracle live in
+`spec/design/chelis_agent_editing_surface.md`. The broader structural-edit
+toolset remains future work; no doc should claim a tool as shipped without an
+executable oracle in the same change set.
 
 ---
 

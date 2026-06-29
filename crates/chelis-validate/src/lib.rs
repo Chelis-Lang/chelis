@@ -134,6 +134,12 @@ pub fn validate_deep(source: &str) -> Result<(), ValidationError> {
                  a named module may be opened at most once"
             )));
         }
+        if let Some(name) = first_duplicate_defsig(&exprs) {
+            return Err(ValidationError::Failed(format!(
+                "duplicate signature: `{name}` has more than one `defsig`; \
+                 Chelis does not dispatch same-name functions by argument type, arity, or rank"
+            )));
+        }
     }
     Ok(())
 }
@@ -248,6 +254,58 @@ fn first_reopened_module(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
         }
     }
     None
+}
+
+/// Return the first function name that appears in more than one `(defsig ...)`.
+/// This mirrors the checker's language rule: Chelis does not overload user
+/// functions by arity, type, or rank, so multiple signatures for one name have
+/// no valid dispatch meaning.
+fn first_duplicate_defsig(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
+    fn tag(list: &chelis_deep::ast::List) -> Option<&str> {
+        match list.elements.first() {
+            Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(tag), _)) => {
+                Some(tag.as_str())
+            }
+            _ => None,
+        }
+    }
+
+    fn symbol_child(list: &chelis_deep::ast::List, index: usize) -> Option<&str> {
+        match list.elements.get(index) {
+            Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(name), _)) => {
+                Some(name.as_str())
+            }
+            _ => None,
+        }
+    }
+
+    fn walk(
+        expr: &chelis_deep::ast::Expr,
+        seen: &mut std::collections::HashSet<String>,
+    ) -> Option<String> {
+        let chelis_deep::ast::Expr::List(list, _) = expr else {
+            return None;
+        };
+        match tag(list) {
+            Some("module") => list
+                .elements
+                .iter()
+                .skip(3)
+                .find_map(|child| walk(child, seen)),
+            Some("defsig") => {
+                let name = symbol_child(list, 2)?;
+                if seen.insert(name.to_string()) {
+                    None
+                } else {
+                    Some(name.to_string())
+                }
+            }
+            _ => None,
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    exprs.iter().find_map(|expr| walk(expr, &mut seen))
 }
 
 pub fn validate_desugared(source: &str) -> Result<(), ValidationError> {
@@ -493,6 +551,38 @@ mod tests {
         let source = "(defsig {} f (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} f32))) (t-tensor {} (d-rank {} r) (t-prim {} f32))))\n";
         validate_deep(source)
             .expect("validator should accept canonical t-ref / d-rank rank-polymorphic Deep");
+    }
+
+    fn assert_duplicate_defsig_rejected(source: &str) {
+        let error = validate_deep(source).expect_err("duplicate defsig should fail validation");
+        assert!(
+            error.to_string().contains("duplicate signature"),
+            "diagnostic should name duplicate signature, got: {error}"
+        );
+    }
+
+    #[test]
+    fn deep_rejects_duplicate_defsig_conflicting_order_a() {
+        assert_duplicate_defsig_rejected(
+            "(defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))
+             (defsig {} f (t-fn {} (t-prim {} bool) (t-prim {} f32)))",
+        );
+    }
+
+    #[test]
+    fn deep_rejects_duplicate_defsig_conflicting_order_b() {
+        assert_duplicate_defsig_rejected(
+            "(defsig {} f (t-fn {} (t-prim {} bool) (t-prim {} f32)))
+             (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))",
+        );
+    }
+
+    #[test]
+    fn deep_rejects_duplicate_defsig_identical_signature() {
+        assert_duplicate_defsig_rejected(
+            "(defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))
+             (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))",
+        );
     }
 
     #[test]

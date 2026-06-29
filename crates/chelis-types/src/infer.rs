@@ -7697,6 +7697,7 @@ fn collect_all_declarations(
     // project to the `&deep::Expr` slice the reporters expect.
     let bare_items: Vec<&deep::Expr> = items.iter().map(|(_, expr)| *expr).collect();
     report_duplicate_defs(&bare_items, errors);
+    report_duplicate_defsigs(&bare_items, errors);
     report_builtin_shadowing(&bare_items, errors);
     for (module, expr) in items {
         collect_declarations(
@@ -7883,6 +7884,37 @@ fn report_duplicate_defs(items: &[&deep::Expr], errors: &mut Vec<CheckError>) {
                 format!("duplicate definition: `{name}` is defined more than once"),
                 vec![format!(
                     "rename one of the `{name}` definitions: Chelis does not dispatch same-name `def`s by argument type or rank"
+                )],
+            ));
+        }
+    }
+}
+
+/// Reject two same-name `defsig` declarations in one program.
+///
+/// Chelis does not dispatch user functions by arity, type, or rank; the valid
+/// same-name declaration pair is exactly one `defsig` plus one `def`. Multiple
+/// `defsig`s for a name otherwise feed several last-write-wins maps
+/// (`collect_declarations`, declared-param-type collection, signature metadata)
+/// and make the enforced signature order-dependent.
+fn report_duplicate_defsigs(items: &[&deep::Expr], errors: &mut Vec<CheckError>) {
+    let mut seen: HashSet<&str> = HashSet::new();
+    for expr in items {
+        let deep::Expr::List(list, _) = expr else {
+            continue;
+        };
+        if get_tag(list) != Some("defsig") {
+            continue;
+        }
+        let Some(name) = children(list).first().and_then(symbol_name) else {
+            continue;
+        };
+        if !seen.insert(name) {
+            errors.push(CheckError::new(
+                CheckErrorKind::DuplicateDefinition,
+                format!("duplicate signature: `{name}` has more than one `defsig`"),
+                vec![format!(
+                    "keep a single `defsig` for `{name}`: Chelis does not dispatch same-name functions by argument type, arity, or rank"
                 )],
             ));
         }
@@ -20176,6 +20208,36 @@ mod tests {
         check_ok(
             "(defsig {} f (t-fn {} (t-var {} a) (t-var {} a)))
              (def {} f (fn {} (params {} x) (var {} x)))",
+        );
+    }
+
+    #[test]
+    fn duplicate_defsig_conflicting_order_a_is_rejected() {
+        check_err(
+            "(defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))
+             (defsig {} f (t-fn {} (t-prim {} bool) (t-prim {} f32)))
+             (def {} f (fn {} (params {} x) (var {} x)))",
+            CheckErrorKind::DuplicateDefinition,
+        );
+    }
+
+    #[test]
+    fn duplicate_defsig_conflicting_order_b_is_rejected() {
+        check_err(
+            "(defsig {} f (t-fn {} (t-prim {} bool) (t-prim {} f32)))
+             (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))
+             (def {} f (fn {} (params {} x) (var {} x)))",
+            CheckErrorKind::DuplicateDefinition,
+        );
+    }
+
+    #[test]
+    fn duplicate_defsig_identical_signature_is_rejected() {
+        check_err(
+            "(defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))
+             (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))
+             (def {} f (fn {} (params {} x) (var {} x)))",
+            CheckErrorKind::DuplicateDefinition,
         );
     }
 

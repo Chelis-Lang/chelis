@@ -1056,8 +1056,9 @@ pub fn validate(request: ValidateRequest) -> Result<ValidateResult> {
 
 pub fn decompile(request: DecompileRequest) -> Result<DecompileResult> {
     let exprs = parse_deep(&request.source)?;
+    let surf_text = chelis_surf::decompile::decompile_program(&exprs);
     Ok(DecompileResult {
-        surf_text: chelis_surf::decompile::decompile_program(&exprs),
+        surf_text: canonicalize_decompiled_surf(&surf_text)?,
     })
 }
 
@@ -1272,6 +1273,18 @@ fn parse_deep(source: &str) -> Result<Vec<DeepExpr>> {
             parse_error_span_deep(&err),
         )
     })
+}
+
+fn canonicalize_decompiled_surf(source: &str) -> Result<String> {
+    let decls = chelis_surf::parser::parse_str(source).map_err(|err| {
+        stage_error_with_span(
+            "decompile",
+            format!("decompiler emitted Surf that the parser rejected: {err}"),
+            "surf_parse_error",
+            parse_error_span_surf(source, &err),
+        )
+    })?;
+    Ok(chelis_surf::format::format_program(&decls))
 }
 
 fn root_names_from_checked_exprs(

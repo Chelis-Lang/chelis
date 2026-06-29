@@ -12,7 +12,7 @@ Phase 0i covers the first interactive developer workflow:
 
 - `chelis tide` for a REPL
 - `chelis deep` for Surf to Deep inspection
-- `chelis surf` for best-effort Deep to Surf decompilation
+- `chelis surf` for canonical Deep to Surf decompilation on the default path
 - `chelis fmt` for Surf formatting
 - `chelis eval expr` for one-shot evaluation
 
@@ -55,7 +55,8 @@ path is available.
 
 Launch the HTTP/JSON compiler service.
 The shipped surface includes `/parse`, `/desugar`, `/check`, `/lower`, `/compile`,
-`/eval`, `/grad`, `/validate`, `/decompile`, and `/batch`.
+`/eval`, `/grad`, `/validate`, `/decompile`, `/replace_function_body`, and
+`/batch`.
 The public contract uses explicit wire-model types rather than serialized compiler
 internals.
 
@@ -70,9 +71,16 @@ The shipped MCP tool surface is:
 - `chelis_decompile`
 - `chelis_eval`
 - `chelis_grad`
+- `chelis_replace_function_body`
 - `chelis_prove`
 - `chelis_validate`
-- `chelis_prove`
+
+`chelis_replace_function_body` accepts Deep strings for
+`{module, function_name, new_body}` and returns canonical Deep
+`{changed_def_deep, module_deep}` only after the post-splice whole-module
+check is clean. Parse, splice, type, effect, and linearity failures return the
+normal structured failure envelope with `ok:false`, `stage`, and typed
+diagnostics; failed replacements do not carry a replacement result.
 
 `chelis_prove` runs the same property + derived producer-obligation
 verification as the CLI `chelis prove` on the same module source — the
@@ -119,7 +127,8 @@ keeping top-level forms separated.
 
 ### `chelis surf file.dp`
 
-Best-effort decompile Deep into readable Surf.
+Decompile Deep into formatter-canonical Surf on the default path.
+`--verbose` is the explicit best-effort debug form.
 
 ### `chelis fmt file.ch`
 
