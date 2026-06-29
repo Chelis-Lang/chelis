@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-29
 **Chelis version:** 0.11.1 (main has unreleased work toward 0.12.0)
-**Beacon version:** 0.1.5 (accepts WireDag schema v1 and v2)
+**Beacon version:** 0.1.6 (accepts WireDag schema v1 and v2)
 
 This document is the single-source handover artifact for the verification
 orchestrator. A newcomer reads this to understand what the stack proves today,
@@ -87,9 +87,12 @@ Five frozen surfaces, documented in `docs/design/phase2_seam_contract.md`:
 4. **BeaconShim request** — schema_version 1, inline base64 of exact bytes, expected_dag_sha256
 5. **CheckReport → Discharge** — mapping table in `docs/design/beacon_subprocess_shim.md` §5
 
-**Current state:** Beacon 0.1.5 accepts schema v2. The `beacon_e2e` tests
-(4 tests, `#[ignore]` without `CHELIS_BEACON_BIN`) exercise the full round-trip.
-Build Beacon with `--features arb-oracle` for verified dispatch.
+**Current state:** Beacon accepts schema v2. The default CI oracle for
+`BeaconShim` remains the mock suite, while `beacon_e2e` is the ignored live
+cross-repo gate: with `CHELIS_BEACON_BIN` pointing at an Arb-enabled
+`chelis-beacon`, it exercises the real shim, real Beacon binary, Chelis-produced
+WI-3 bytes, Beacon-side exact-byte evidence, and negative non-proof cases. Build
+Beacon with `--features arb-oracle` for verified dispatch.
 
 ---
 
@@ -125,8 +128,8 @@ cargo build --workspace --features "smt z3 clarabel carcara"
 # Run prove with real engines
 cargo run -p chelis-cli --features smt -- prove --json path/to/file.ch
 
-# Beacon e2e (requires beacon binary)
-CHELIS_BEACON_BIN=/path/to/chelis-beacon cargo nextest run -p chelis-prove --test beacon_e2e -- --ignored
+# Beacon e2e (requires Arb-enabled beacon binary)
+CHELIS_BEACON_BIN=/path/to/chelis-beacon cargo test -p chelis-prove --test beacon_e2e -- --ignored --nocapture
 ```
 
 **Toolchain:** `stable` (pinned in `rust-toolchain.toml`, no version lock).

@@ -216,4 +216,10 @@ negative twin, including:
 - request JSON carries the EXACT base64 bytes and `expected_dag_sha256 ==
   dag_hash` (no parse/reformat between the WI-3 bytes and base64).
 
-No real `chelis-beacon` binary is required in CI; the mock harness is the oracle.
+No real `chelis-beacon` binary is required in default CI; the mock harness is
+the transport/mapping oracle. The live cross-repo gate is
+`crates/chelis-prove/tests/beacon_e2e.rs`, run ignored with
+`CHELIS_BEACON_BIN=/path/to/chelis-beacon`. It exercises the real shim against a
+real Arb-enabled Beacon binary, uses Chelis-produced WI-3 bytes, asserts
+Beacon-side exact-byte evidence, and keeps corrupted-byte / wrong-range
+negatives non-proof.
