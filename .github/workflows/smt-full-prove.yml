@@ -1,0 +1,163 @@
+name: SMT Full Prove
+
+# Full solver/proof corpus for Chelis prove. The required
+# `SMT Feature Build (Linux)` job in ci.yml is the fast cvc5 smoke that
+# preserves branch protection. This workflow carries the expensive proof
+# lanes: Carcara, Z3, cross-engine agreement, Clarabel, Gappa proof
+# re-validation, and Arb cross-checks.
+#
+# It runs automatically on PRs that touch prove/solver/proof/CI surfaces,
+# nightly off the main CI path, and by manual dispatch.
+
+on:
+  pull_request:
+    paths:
+      - ".cargo/**"
+      - ".github/actions/free-disk-space/**"
+      - ".github/workflows/**"
+      - ".github/scripts/verify_release_smt.py"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/chelis-cli/Cargo.toml"
+      - "crates/chelis-compiler-api/**"
+      - "crates/chelis-deep/**"
+      - "crates/chelis-pred/**"
+      - "crates/chelis-prove/**"
+      - "crates/chelis-surf/**"
+      - "crates/chelis-types/**"
+      - "docs/erf_envelope_regen.md"
+      - "docs/smt_build_setup.md"
+      - "scripts/assemble_erf_envelope.py"
+      - "scripts/ci_apt_get.py"
+      - "scripts/ci_free_disk.py"
+      - "scripts/ci_setup_uv_python.py"
+      - "scripts/generate_erf_proof.py"
+      - "scripts/setup_proof_toolchain.py"
+      - "scripts/test_gate.py"
+  schedule:
+    # 09:00 UTC daily, staggered after the existing Hull and Heavy E2E
+    # nightlies so the shared runner pool is not hit all at once.
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: smt-full-prove-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  full-smt-prove:
+    name: SMT Full Prove (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
+
+      - name: Install C dependencies
+        # libz3-dev provides the unversioned libz3 on default linker and
+        # loader paths. libopenblas-dev backs the Clarabel SDP backend.
+        run: python3 scripts/ci_apt_get.py gcc g++ cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev libz3-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Restore the same cvc5 target cache as the required smt smoke
+          # lane. The full corpus is intentionally slower, but it should
+          # spend time proving, not cold-building cvc5 again before the
+          # first prove step.
+          shared-key: smt-smt-build
+
+      - name: Build smt feature
+        run: cargo build -p chelis-cli --features smt
+
+      - name: Run smt-gated chelis-prove tests
+        run: cargo test -p chelis-prove --features smt
+
+      - name: Run carcara-gated chelis-prove tests
+        run: cargo test -p chelis-prove --features carcara
+
+      - name: Run z3-gated chelis-prove tests
+        run: cargo test -p chelis-prove --features z3
+
+      - name: Run cross-engine oracle (cvc5 + Z3 agreement)
+        run: cargo test -p chelis-prove --features "smt z3" --test cross_engine_oracle
+
+      - name: Run clarabel-gated chelis-prove tests
+        run: cargo test -p chelis-prove --features clarabel
+
+      - name: Run the production solver config (cvc5 + Clarabel, both live)
+        run: cargo test -p chelis-prove --features "smt clarabel"
+
+      - name: Install arb lane prerequisites (m4, make, gappa)
+        run: python3 scripts/ci_apt_get.py m4 make gappa
+
+      - name: Re-validate committed Gappa proofs (--check-only)
+        run: .venv/bin/python scripts/generate_erf_proof.py --check-only
+
+      - name: Arb cross-check (certify_erf_envelope validate)
+        run: |
+          cargo run -p chelis-prove --features arb --bin certify_erf_envelope \
+            -- validate crates/chelis-prove/data/erf_envelope.json
+
+      - name: Run arb-gated chelis-prove tests
+        run: cargo test -p chelis-prove --features arb
+
+  report:
+    name: Surface SMT full-prove status
+    needs: full-smt-prove
+    if: ${{ always() && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open/close SMT full-prove tracking issue
+        uses: actions/github-script@v7
+        env:
+          RESULT: ${{ needs.full-smt-prove.result }}
+        with:
+          script: |
+            const title = 'Nightly failing: SMT Full Prove';
+            const { owner, repo } = context.repo;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const q = `repo:${owner}/${repo} is:issue is:open in:title "${title}"`;
+            const found = await github.rest.search.issuesAndPullRequests({ q });
+            const existing = found.data.items.find(i => i.title === title);
+            if (process.env.RESULT === 'failure') {
+              if (existing) {
+                core.info(`Tracking issue #${existing.number} already open.`);
+              } else {
+                const issue = await github.rest.issues.create({
+                  owner, repo, title,
+                  body: `The **SMT Full Prove** workflow failed.\n\nRun: ${runUrl}\nCommit: \`${context.sha}\`\n\nAuto-opened on failure; auto-closes when the workflow next passes.`,
+                  labels: ['nightly-failure'],
+                });
+                core.info(`Opened tracking issue #${issue.data.number}.`);
+              }
+            } else if (process.env.RESULT === 'success' && existing) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number,
+                body: `SMT Full Prove green again — ${runUrl}. Closing.`,
+              });
+              await github.rest.issues.update({ owner, repo, issue_number: existing.number, state: 'closed' });
+              core.info(`Closed tracking issue #${existing.number}.`);
+            }

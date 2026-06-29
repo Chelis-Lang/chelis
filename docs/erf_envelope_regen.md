@@ -79,10 +79,10 @@ no FLINT/Arb/Sollya/Gappa link (`arb` is off by default and absent from the
   and `central_eps_f64_rounding >= rounding_proof_bound`. This closes the
   eps-to-proof link on every PR without requiring Arb, Gappa, or Sollya.
 - **Arb cross-check (belt + suspenders).** The WI-14 Arb whole-box certifier
-  re-validates every box's committed `eps` in the **arb CI lane** (the
-  `smt-build` job's `--features arb` steps) by asserting the committed `eps`
-  bounds the Arb sup-norm bound. The central arm thus has both a Gappa proof term
-  and an independent Arb confirmation.
+  re-validates every box's committed `eps` in the **SMT Full Prove** workflow
+  (`.github/workflows/smt-full-prove.yml`, the `--features arb` steps) by
+  asserting the committed `eps` bounds the Arb sup-norm bound. The central arm
+  thus has both a Gappa proof term and an independent Arb confirmation.
 - **Consistency.** Tests (Rust and Python) lock the committed central polynomial
   and `eps` to the Gappa proof bundle's manifest, so the proved bound and the
   consumed bound cannot drift apart, and the envelope provenance pins the
@@ -110,7 +110,8 @@ git diff crates/chelis-prove/data/
 
 ## CI re-validation (the gate)
 
-CI re-checks the committed artifacts without trusting them:
+The `SMT Full Prove` workflow re-checks the committed artifacts without trusting
+them on relevant proof/solver PRs, nightly, and manual dispatch:
 
 ```sh
 # re-run every committed Gappa proof + verify the bundle sha256

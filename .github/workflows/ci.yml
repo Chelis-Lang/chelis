@@ -151,14 +151,16 @@ jobs:
         run: python3 scripts/gate.py lint-and-unit
 
   # Non-gate job (see NON_GATE_JOBS in scripts/test_gate.py, rule-id
-  # GATE-SCOPE-SMT): builds the cvc5-backed `smt` feature so Tier B
-  # prove code keeps compiling, and runs the smt-gated chelis-prove
-  # suite. Out of scripts/gate.py scope by design — cvc5 builds from
-  # source (cmake/g++/libclang) and is not a per-PR developer-loop
-  # prerequisite. Runbook: docs/smt_build_setup.md.
+  # GATE-SCOPE-SMT): the required fast SMT smoke. It builds the
+  # cvc5-backed `smt` feature and proves the binary can discharge a real
+  # obligation through cvc5, but leaves the full solver/proof corpus to
+  # smt-full-prove.yml (path-gated PRs, nightly, manual). Keep the job
+  # display name stable: branch protection requires this exact context.
+  # Runbook: docs/smt_build_setup.md.
   smt-build:
     name: SMT Feature Build (Linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
     # success. Runs on every code PR and push.
     needs: [changes]
@@ -179,15 +181,11 @@ jobs:
         uses: ./.github/actions/free-disk-space
 
       - name: Install C dependencies
-        # libz3-dev installs an unversioned libz3 on the default linker +
-        # loader paths, so the z3-sys `#[link(name = "z3")]` resolves with
-        # no Z3_LIBRARY_PATH_OVERRIDE / LD_LIBRARY_PATH needed (unlike the
-        # local dev path documented in docs/local_z3_environment.md). The
-        # z3 lane is co-located in this job so the cross-engine oracle has
-        # both cvc5 and Z3 present in one build. apt-get under retry
-        # (scripts/ci_apt_get.py) so a transient mirror reset does not flake
-        # the cvc5 build job.
-        run: python3 scripts/ci_apt_get.py gcc g++ cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev libz3-dev
+        # apt-get under retry (scripts/ci_apt_get.py) so a transient
+        # mirror reset does not flake the cvc5 smoke job. This fast lane
+        # does not install Z3, Gappa, or Arb-only tools; those live in
+        # the non-required full prove workflow.
+        run: python3 scripts/ci_apt_get.py gcc g++ cmake libclang-dev libgmp-dev libmpfr-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -201,51 +199,19 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
-          # cvc5 builds from source into target/; key separately from
-          # the gate jobs so their caches stay lean.
-          key: smt
+          # cvc5 builds from source into target/; share the former
+          # smt-build cache namespace with the optional full-prove lane
+          # while keeping the gate jobs lean.
+          shared-key: smt-smt-build
 
       - name: Build smt feature
         run: cargo build -p chelis-cli --features smt
 
-      - name: Run smt-gated chelis-prove tests
-        run: cargo test -p chelis-prove --features smt
+      - name: Verify cvc5 discharge path (smt feature live)
+        run: python3 .github/scripts/verify_release_smt.py ./target/debug/chelis
 
-      - name: Run carcara-gated chelis-prove tests
-        run: cargo test -p chelis-prove --features carcara
-
-      - name: Run z3-gated chelis-prove tests
-        run: cargo test -p chelis-prove --features z3
-
-      - name: Run cross-engine oracle (cvc5 + Z3 agreement)
-        run: cargo test -p chelis-prove --features "smt z3" --test cross_engine_oracle
-
-      - name: Run clarabel-gated chelis-prove tests
-        # libopenblas-dev (installed above) backs clarabel's sdp-openblas
-        # backend on Linux; the engine is opt-in and never in the release.
-        run: cargo test -p chelis-prove --features clarabel
-
-      - name: Run the production solver config (cvc5 + Clarabel, both live)
-        # The shipped-feature-superset lane: Clarabel registered ahead of
-        # cvc5, the fall-through composition exercised end-to-end.
-        run: cargo test -p chelis-prove --features "smt clarabel"
-
-      # WI-13/WI-14 Arb/FLINT oracle lane. Vendors GMP/MPFR/FLINT/Arb from
-      # C source (~1-2 min cold); .cargo/config.toml supplies CFLAGS=-fPIC
-      # and the *_CACHE redirects. gappa is needed for --check-only.
-      - name: Install arb lane prerequisites (m4, make, gappa)
-        run: python3 scripts/ci_apt_get.py m4 make gappa
-
-      - name: Re-validate committed Gappa proofs (--check-only)
-        run: .venv/bin/python scripts/generate_erf_proof.py --check-only
-
-      - name: Arb cross-check (certify_erf_envelope validate)
-        run: |
-          cargo run -p chelis-prove --features arb --bin certify_erf_envelope \
-            -- validate crates/chelis-prove/data/erf_envelope.json
-
-      - name: Run arb-gated chelis-prove tests
-        run: cargo test -p chelis-prove --features arb
+      - name: Run cvc5 engine smoke tests
+        run: cargo test -p chelis-prove --features smt --lib cvc5_engine_
 
   # chelis#422 (WS-4) PROVE-IN-CI lanes. release.yml ships
   # `chelis-cli --features smt` on three targets; cvc5 builds from

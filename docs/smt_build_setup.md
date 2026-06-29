@@ -44,13 +44,35 @@ triggers the cvc5 source build (~2-5 minutes on first compile, cached thereafter
 
 ## CI Configuration
 
-The `smt-build` job in `.github/workflows/ci.yml` installs the
-prerequisites above, runs `cargo build -p chelis-cli --features smt`,
-and runs the smt-gated chelis-prove suite (`cargo test -p chelis-prove
---features smt`). It is a non-gate job (rule-id GATE-SCOPE-SMT in
-`scripts/test_gate.py`): out of `scripts/gate.py` scope by design,
-like the sanitizer job, because cvc5 builds from source and is not a
-per-PR developer-loop prerequisite.
+The required `smt-build` job in `.github/workflows/ci.yml` keeps the branch
+protection context name `SMT Feature Build (Linux)`, but it is now the fast
+SMT smoke lane. It installs the cvc5 build prerequisites, runs
+`cargo build -p chelis-cli --features smt`, verifies the built binary discharges
+a real obligation through cvc5 with `.github/scripts/verify_release_smt.py`, and
+runs a narrow cvc5 engine smoke (`cargo test -p chelis-prove --features smt
+--lib cvc5_engine_`). It is a non-gate job (rule-id GATE-SCOPE-SMT in
+`scripts/test_gate.py`): out of `scripts/gate.py` scope by design, like the
+sanitizer job, because cvc5 builds from source and is not a per-PR
+developer-loop prerequisite.
+
+The full solver/proof corpus moved to `.github/workflows/smt-full-prove.yml`.
+That workflow runs on relevant prove/solver/proof/CI PR paths, on a nightly
+schedule, and on manual dispatch. It carries the expensive suites that used to
+sit in required CI: `--features smt`, `carcara`, `z3`, the cvc5+Z3
+cross-engine oracle, `clarabel`, the production `smt clarabel` config, Gappa
+`--check-only`, the Arb certifier, and `--features arb`. The PR path trigger
+includes `chelis-prove`, its proof-facing local dependencies
+(`chelis-surf`, `chelis-deep`, `chelis-pred`, `chelis-types`, and
+`chelis-compiler-api`), proof scripts/data, and the CI workflow/action files
+that define the lane.
+
+The full workflow restores the same `shared-key: smt-smt-build` cargo cache as
+the fast smoke lane. The key intentionally matches the old required
+`smt-build` job cache namespace (`key: smt` plus job id `smt-build`) so the
+split can reuse the existing cvc5 build cache while making that cache stable
+across the smoke and full-prove jobs. The split removes the full proof corpus
+from the required context; it must not make the optional lane cold-build cvc5
+before reaching its proof steps.
 
 Two companion prove-in-CI lanes, `smt-build-glibc231` (a `debian:11`
 container) and `smt-build-darwin-arm64` (`macos-latest`), build
