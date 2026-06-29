@@ -1386,14 +1386,20 @@ fn indices_to_linear(indices: &[usize], shape: &[usize]) -> usize {
 }
 
 pub(super) fn normalize_axis(rank: usize, axis: i64, op: &str) -> Result<usize, String> {
-    if axis < 0 {
-        return Err(format!("{op} requires non-negative axis, got {axis}"));
-    }
-    let axis = axis as usize;
-    if axis >= rank {
+    // chelis#522: apply the from-the-end negative-axis convention uniformly
+    // (`-1` == last axis, `-rank` == axis 0), matching the type checker
+    // (`chelis_types::normalize_static_axis`), the IR lowerer
+    // (`chelis_ir::lower::normalize_axis`), and spec/05-risc-primitives.md.
+    // Before this the host evaluator rejected every negative axis with
+    // "requires non-negative axis", so `sum(x, -1)` passed `chelis check` /
+    // `chelis build` (both normalize) but failed `chelis eval` — a check↔eval
+    // soundness gap (same class as #364). An axis still out of `0..rank` after
+    // the offset (e.g. `rank` or `-rank-1`) is rejected loud, not wrapped.
+    let normalized = if axis < 0 { axis + rank as i64 } else { axis };
+    if normalized < 0 || normalized as usize >= rank {
         return Err(format!("{op} axis {axis} out of bounds for rank {rank}"));
     }
-    Ok(axis)
+    Ok(normalized as usize)
 }
 
 pub(super) fn expect_int_list(values: &[RuntimeValue], op: &str) -> Result<Vec<usize>, String> {
@@ -2357,17 +2363,17 @@ pub(super) fn tensor_concat_value(
     let first = tensors
         .first()
         .ok_or_else(|| "concat expects at least one tensor part".to_string())?;
-    // chelis#368: accept a negative concat axis (`-1` = last axis), matching
-    // the negative-axis convention every other axis-taking op already follows
+    // chelis#368/#522: accept a negative concat axis (`-1` = last axis),
+    // matching the negative-axis convention every other axis-taking op follows
     // (reductions, softmax) AND the IR `concat` lowering (`lower_tensor_concat`
-    // normalizes `raw_axis < 0`). Before this, the host forward path rejected
-    // `concat(..., -1)` ("requires non-negative axis") while the grad and
-    // C-build lanes — which lower through `lower_tensor_concat` — accepted and
-    // evaluated it, an eval-forward-vs-IR divergence. Normalize here so all
-    // lanes agree; an out-of-range negative (still negative after the offset)
-    // is rejected by `normalize_axis` below.
+    // normalizes `raw_axis < 0`). Before #368, the host forward path rejected
+    // `concat(..., -1)` while the grad and C-build lanes — which lower through
+    // `lower_tensor_concat` — accepted it, an eval-forward-vs-IR divergence.
+    // `normalize_axis` now applies the from-the-end offset itself (#522), so
+    // the prior inline `axis + rank` pre-pass is removed: doing it twice would
+    // wrongly accept a doubly-out-of-range negative (e.g. `-4` on rank 3 ->
+    // `-1` -> `2`). One offset, then the shared bounds check.
     let rank = first.value.shape.len();
-    let axis = if axis < 0 { axis + rank as i64 } else { axis };
     let axis = normalize_axis(rank, axis, "concat")?;
     for tensor in &tensors[1..] {
         if tensor.precision != first.precision {
@@ -3003,5 +3009,52 @@ pub(super) fn uniform_like_value(
     RuntimeTensorValue {
         value: IrTensorValue::from_vec(template.value.shape.clone(), data),
         precision: template.precision,
+    }
+}
+
+#[cfg(test)]
+mod normalize_axis_tests {
+    //! chelis#522: `normalize_axis` is the single host-evaluator axis
+    //! normalizer for every axis-taking primitive. These pin the
+    //! from-the-end convention and the loud out-of-range rejection at the
+    //! function boundary, independent of any one caller.
+    use super::normalize_axis;
+
+    #[test]
+    fn accepts_last_axis_via_minus_one() {
+        assert_eq!(normalize_axis(3, -1, "op").unwrap(), 2);
+        assert_eq!(normalize_axis(2, -1, "op").unwrap(), 1);
+    }
+
+    #[test]
+    fn accepts_first_axis_via_minus_rank() {
+        assert_eq!(normalize_axis(3, -3, "op").unwrap(), 0);
+        assert_eq!(normalize_axis(1, -1, "op").unwrap(), 0);
+    }
+
+    #[test]
+    fn passes_through_non_negative_axes() {
+        assert_eq!(normalize_axis(3, 0, "op").unwrap(), 0);
+        assert_eq!(normalize_axis(3, 2, "op").unwrap(), 2);
+    }
+
+    #[test]
+    fn rejects_axis_equal_to_rank() {
+        let err = normalize_axis(3, 3, "reduction").expect_err("axis == rank is out of range");
+        assert!(
+            err.contains("reduction") && err.contains("out of bounds"),
+            "expected an out-of-bounds reduction diagnostic, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_axis_one_past_negative_rank() {
+        // `-rank-1` normalizes to `-1`, still out of `0..rank`: reject loud,
+        // do NOT silently wrap to a valid axis.
+        let err = normalize_axis(3, -4, "gather").expect_err("-rank-1 is out of range");
+        assert!(
+            err.contains("gather") && err.contains("out of bounds"),
+            "expected an out-of-bounds gather diagnostic, got {err:?}"
+        );
     }
 }
