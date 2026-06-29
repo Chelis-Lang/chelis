@@ -695,17 +695,26 @@ impl DischargeEngine for Z3Engine {
             }
         };
         let (soundness, qualifier_set) = classify_smt_outcome(&result);
-        let evidence = serde_json::json!({ "solver": "z3" });
-        // The shared classification only pairs `real_arithmetic` with
+        // chelis#496: the canonical attribution is the top-level `"engine"` key
+        // (`"z3"`); the z3 engine carries no extra backend detail on the normal
+        // path. The shared classification only pairs `real_arithmetic` with
         // `SoundApproximate` (its floor) or returns an empty set at `Untrusted`,
         // so this constructor cannot fail here; surfacing the error as a
         // non-proof discharge keeps the seam total (mirrors the cvc5 engine).
-        Discharge::new(soundness, qualifier_set, result, evidence).unwrap_or_else(|err| {
-            Discharge::new(
+        Discharge::with_engine_attribution(
+            "z3",
+            soundness,
+            qualifier_set,
+            result,
+            serde_json::Value::Null,
+        )
+        .unwrap_or_else(|err| {
+            Discharge::with_engine_attribution(
+                "z3",
                 Soundness::Untrusted,
                 QualifierSet::new(),
                 TierBResult::Error(err.to_string()),
-                serde_json::json!({ "solver": "z3", "internal_error": err.to_string() }),
+                serde_json::json!({ "internal_error": err.to_string() }),
             )
             .expect("untrusted discharge with empty qualifier set is always valid")
         })
@@ -1038,8 +1047,9 @@ mod tests {
             "an over-reals proof must not claim exact machine soundness"
         );
         assert_eq!(
-            discharge.evidence().get("solver").and_then(|v| v.as_str()),
-            Some("z3")
+            discharge.evidence().get("engine").and_then(|v| v.as_str()),
+            Some("z3"),
+            "chelis#496: canonical top-level attribution key is `engine`"
         );
     }
 

@@ -357,9 +357,9 @@ fn dispatcher_falls_through_z3_unsupported_to_cvc5_proved() {
         "the fall-through must reach cvc5's Proved for the transcendental goal"
     );
     assert_eq!(
-        discharge.evidence().get("solver").and_then(|v| v.as_str()),
+        discharge.evidence().get("engine").and_then(|v| v.as_str()),
         Some("cvc5"),
-        "the discharging engine is cvc5 (Z3 fell through)"
+        "the discharging engine is cvc5 (Z3 fell through); chelis#496 canonical key"
     );
 }
 
@@ -385,8 +385,8 @@ fn dispatcher_z3_first_proves_a_polynomial_goal_without_consulting_cvc5() {
     let discharge = registry.dispatch(&goal, TIMEOUT_MS);
     assert_eq!(*discharge.result(), TierBResult::Proved);
     assert_eq!(
-        discharge.evidence().get("solver").and_then(|v| v.as_str()),
+        discharge.evidence().get("engine").and_then(|v| v.as_str()),
         Some("z3"),
-        "Z3 decides the polynomial goal; cvc5 is never consulted"
+        "Z3 decides the polynomial goal; cvc5 is never consulted; chelis#496 canonical key"
     );
 }
