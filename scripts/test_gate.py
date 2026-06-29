@@ -40,6 +40,7 @@ def _load_module():
 gate = _load_module()
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+SMT_FULL_PROVE_YML = REPO_ROOT / ".github" / "workflows" / "smt-full-prove.yml"
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 
 # CI jobs that are deliberately NOT part of the per-PR developer gate.
@@ -55,11 +56,10 @@ NON_GATE_JOBS = {
     # runs scripts/ci_detect_docs_only.py, no cargo/chelis command, so it
     # is out of gate.py scope by design.
     "changes",
-    # Rule-id: GATE-SCOPE-SMT -- the smt-build job compiles the
-    # cvc5-backed `smt` feature and runs the smt-gated chelis-prove
-    # suite. cvc5 builds from source (cmake/g++/libclang) and is not a
-    # per-PR developer-loop prerequisite, so it is out of gate.py
-    # scope by design, like backend-sanitizers. Runbook:
+    # Rule-id: GATE-SCOPE-SMT -- the smt-build job is the required fast
+    # cvc5-backed `smt` feature smoke. It is out of gate.py scope by
+    # design, like backend-sanitizers; the full prove corpus lives in
+    # smt-full-prove.yml. Runbook:
     # docs/smt_build_setup.md.
     "smt-build",
     # Rule-id: GATE-SCOPE-SMT -- the chelis#422 prove-in-CI lanes that
@@ -82,6 +82,7 @@ NON_GATE_JOBS = {
 # and .github/workflows/conformance.yml).
 NON_GATE_WORKFLOWS = {
     "ci.yml",
+    "smt-full-prove.yml",
     "heavy-e2e.yml",
     "release.yml",
     "conformance.yml",
@@ -253,6 +254,25 @@ def _extract_ci_bash_array(name: str) -> list[str]:
     raise AssertionError(f"missing Bash array {name} in {CI_YML}")
 
 
+def _ci_job_block(job: str) -> str:
+    """Return the raw `.github/workflows/ci.yml` text block for one job."""
+    lines = CI_YML.read_text().splitlines()
+    header = f"  {job}:"
+    start: int | None = None
+    for idx, line in enumerate(lines):
+        if line == header:
+            start = idx
+            break
+    if start is None:
+        raise AssertionError(f"missing CI job {job!r}")
+    end = len(lines)
+    for idx in range(start + 1, len(lines)):
+        if re.match(r"^  [a-z0-9-]+:\s*$", lines[idx]):
+            end = idx
+            break
+    return "\n".join(lines[start:end])
+
+
 class CiParityTests(unittest.TestCase):
     """The lock: every cargo/chelis gate invocation in the CI workflow
     must be produced by `gate.py`. If a future edit hand-inlines a
@@ -342,6 +362,66 @@ class CiParityTests(unittest.TestCase):
                     f"keep gate steps as single-line `run: python3 "
                     f"scripts/gate.py ...` so the parity parser sees them"
                 ),
+            )
+
+
+class SmtCiSplitTests(unittest.TestCase):
+    """Lock the required-fast / full-prove split for SMT CI."""
+
+    def test_required_smt_job_stays_fast_smoke(self):
+        block = _ci_job_block("smt-build")
+        self.assertIn("name: SMT Feature Build (Linux)", block)
+        self.assertIn("verify_release_smt.py ./target/debug/chelis", block)
+        self.assertIn(
+            "cargo test -p chelis-prove --features smt --lib cvc5_engine_",
+            block,
+        )
+        forbidden = [
+            "--features carcara",
+            "--features z3",
+            '--features "smt z3"',
+            "--features clarabel",
+            '--features "smt clarabel"',
+            "--features arb",
+            "generate_erf_proof.py --check-only",
+            "certify_erf_envelope",
+            "Run arb-gated chelis-prove tests",
+            "libz3-dev",
+            "gappa",
+        ]
+        for needle in forbidden:
+            self.assertNotIn(
+                needle,
+                block,
+                f"required SMT smoke job must not include full-prove work: {needle}",
+            )
+
+    def test_full_smt_workflow_carries_full_prove_corpus(self):
+        self.assertTrue(SMT_FULL_PROVE_YML.is_file(), "missing SMT full workflow")
+        text = SMT_FULL_PROVE_YML.read_text()
+        required = [
+            "pull_request:",
+            "schedule:",
+            "workflow_dispatch:",
+            ".github/workflows/**",
+            "crates/chelis-prove/**",
+            "cargo test -p chelis-prove --features smt",
+            "cargo test -p chelis-prove --features carcara",
+            "cargo test -p chelis-prove --features z3",
+            'cargo test -p chelis-prove --features "smt z3" --test cross_engine_oracle',
+            "cargo test -p chelis-prove --features clarabel",
+            'cargo test -p chelis-prove --features "smt clarabel"',
+            "scripts/generate_erf_proof.py --check-only",
+            "certify_erf_envelope",
+            "cargo test -p chelis-prove --features arb",
+            "Nightly failing: SMT Full Prove",
+            "github.event_name != 'pull_request'",
+        ]
+        for needle in required:
+            self.assertIn(
+                needle,
+                text,
+                f"SMT full workflow missing expected full-prove surface: {needle}",
             )
 
 
