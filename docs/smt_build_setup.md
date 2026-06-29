@@ -60,7 +60,11 @@ That workflow runs on relevant prove/solver/proof/CI PR paths, on a nightly
 schedule, and on manual dispatch. It carries the expensive suites that used to
 sit in required CI: `--features smt`, `carcara`, `z3`, the cvc5+Z3
 cross-engine oracle, `clarabel`, the production `smt clarabel` config, Gappa
-`--check-only`, the Arb certifier, and `--features arb`.
+`--check-only`, the Arb certifier, and `--features arb`. The PR path trigger
+includes `chelis-prove`, its proof-facing local dependencies
+(`chelis-surf`, `chelis-deep`, `chelis-pred`, `chelis-types`, and
+`chelis-compiler-api`), proof scripts/data, and the CI workflow/action files
+that define the lane.
 
 Two companion prove-in-CI lanes, `smt-build-glibc231` (a `debian:11`
 container) and `smt-build-darwin-arm64` (`macos-latest`), build
