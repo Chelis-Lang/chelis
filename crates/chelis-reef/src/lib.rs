@@ -19,6 +19,12 @@ use std::time::Duration;
 use tar::{Archive, Builder};
 use walkdir::WalkDir;
 
+/// Version-keyed source-crate store (class-(c) dependency) for shells that
+/// link chelis compiler crates as Cargo path deps. Self-contained git
+/// machinery driving `~/.local/share/chelis-src/`; wired into the CLI by
+/// `chelis reef src`.
+pub mod chelis_src;
+
 const CURRENT_COMPILER_VERSION: &str = concat!("=", env!("CARGO_PKG_VERSION"));
 
 /// Version of `chelis-std` that ships bundled with this compiler.
@@ -53,6 +59,22 @@ pub struct ReefManifest {
     pub package: ManifestPackage,
     #[serde(default)]
     pub dependencies: BTreeMap<String, DependencySpec>,
+    /// Present only in shells that link chelis compiler **source crates**
+    /// (`chelis-ir`, `chelis-types`, …) as Cargo path dependencies. See
+    /// [`ChelisSrcSpec`]. Default-absent: a `reef.toml` without the
+    /// `[chelis-src]` section gets the same treatment as before.
+    ///
+    /// **Serde-attribute discipline** (see [`LoadedPackage::remote_origin`]):
+    /// `ReefManifest` round-trips through **bincode** inside
+    /// `PreparedReefGraph` (`PackageGraph` → `LoadedPackage` → `manifest`),
+    /// and bincode does not honor `#[serde(skip_serializing_if = ...)]` —
+    /// it would drift the encode/decode offsets and break
+    /// `prepared_reef_graph_round_trips_through_bincode`. The field is
+    /// therefore unconditional in the bincode stream (`None` is a single
+    /// tag byte). The TOML serializer still omits a `None` Option, so a
+    /// manifest without `[chelis-src]` round-trips byte-identically.
+    #[serde(default, rename = "chelis-src")]
+    pub chelis_src: Option<ChelisSrcSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +103,44 @@ pub struct DependencySpec {
     pub version: Option<String>,
     #[serde(default)]
     pub path: Option<String>,
+}
+
+/// The `[chelis-src]` manifest section. It declares that this shell links
+/// chelis compiler **source crates** as Cargo path dependencies
+/// (`chelis-ir = { path = "../chelis/crates/chelis-ir" }`), and pins which
+/// canonical `Chelis-Lang/chelis` commit those crates must come from.
+///
+/// This is metadata for the cross-version `chelis reef src` tooling, **not**
+/// part of the reef package graph: source crates are Cargo crates resolved
+/// by Cargo, never reef packages, so they do not appear in `[dependencies]`
+/// or `reef.lock`. `reef src sync` reads this section to build a
+/// version-keyed source store and point the shell's `../chelis` slot at the
+/// pinned worktree; `reef src check` asserts the slot has not drifted off
+/// the pin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChelisSrcSpec {
+    /// The chelis Rust crates this shell path-deps (e.g. `["chelis-ir",
+    /// "chelis-types"]`). Used by `reef src check`/`doctor` to verify the
+    /// pinned source store actually provides them; informational
+    /// otherwise. May be empty — the store is the full crates tree
+    /// regardless, since intra-repo path deps mean a partial copy would
+    /// not compile.
+    #[serde(default)]
+    pub crates: Vec<String>,
+    /// The 40-character lowercase-hex canonical `Chelis-Lang/chelis`
+    /// release commit the source store is pinned to. This is the single
+    /// source of truth reef reads; the shell's CI `CHELIS_PIN_COMMIT`
+    /// surface mirrors it, and the shell's offline pin guard enforces
+    /// agreement. When absent, `reef src sync` resolves the `v<compiler>`
+    /// tag to a commit **from canonical** — never from a local tag, which
+    /// can be stale.
+    ///
+    /// No `skip_serializing_if`: `ChelisSrcSpec` rides through the same
+    /// bincode stream as its parent `ReefManifest`, so the field is
+    /// unconditional (see [`ReefManifest::chelis_src`]). TOML still omits a
+    /// `None` here.
+    #[serde(default)]
+    pub pin_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -581,6 +641,7 @@ pub fn init_package(
             additional_sources: Vec::new(),
         },
         dependencies: BTreeMap::new(),
+        chelis_src: None,
     };
     write_manifest(&root.join("reef.toml"), &manifest)?;
     let main_module = format!("{module_prefix}.Main");
@@ -1839,6 +1900,14 @@ fn resolve_github_token() -> Result<String, GitHubFetchError> {
             reason: format!("`gh auth token` could not be invoked: {e}"),
         }),
     }
+}
+
+/// Best-effort GitHub token for source-store fetches: `GITHUB_TOKEN`, else
+/// `gh auth token`, else `None`. Unlike the install path, a source sync may
+/// still succeed without a token (a cached mirror, or a local/public
+/// remote in tests), so this returns `Option` rather than erroring.
+pub fn try_github_token() -> Option<String> {
+    resolve_github_token().ok()
 }
 
 /// Read `CHELIS_REEF_GITHUB_BASE_API` or fall back to the canonical
@@ -3342,6 +3411,21 @@ fn read_manifest(path: &Path) -> Result<ReefManifest, String> {
     Ok(manifest)
 }
 
+/// Read a shell's `<root>/reef.toml` for the cross-version `reef src`
+/// tooling: **parse only**, deliberately skipping `validate_manifest`'s
+/// same-compiler-version assertion. A `reef src` invocation runs from
+/// whatever chelis is on PATH while operating on a shell pinned to a
+/// *different* compiler, so the running compiler's version must not gate
+/// reading the shell's manifest. (`chelisup`, chelis#164, is the eventual
+/// version-independent home; this is the interim reef seam.)
+pub fn read_manifest_for_src(root: &Path) -> Result<ReefManifest, String> {
+    let path = root.join("reef.toml");
+    let text =
+        fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    toml::from_str::<ReefManifest>(&text)
+        .map_err(|e| format!("failed to parse {}: {e}", path.display()))
+}
+
 fn write_manifest(path: &Path, manifest: &ReefManifest) -> Result<(), Box<dyn std::error::Error>> {
     let text = toml::to_string_pretty(manifest)?;
     fs::write(path, format!("{text}\n"))?;
@@ -3676,6 +3760,40 @@ fn validate_manifest(manifest: &ReefManifest) -> Result<(), String> {
                 ));
             }
             _ => {}
+        }
+    }
+    if let Some(src) = &manifest.chelis_src {
+        let mut seen_crate = HashSet::new();
+        for entry in &src.crates {
+            if entry.trim().is_empty() {
+                return Err("chelis-src.crates entries must not be empty".to_string());
+            }
+            if !entry
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                return Err(format!(
+                    "chelis-src.crates entry `{entry}` must be a bare crate name \
+                     (ASCII alphanumeric, underscore, or hyphen)"
+                ));
+            }
+            if !seen_crate.insert(entry.as_str()) {
+                return Err(format!(
+                    "chelis-src.crates contains duplicate entry `{entry}`"
+                ));
+            }
+        }
+        if let Some(commit) = &src.pin_commit {
+            let is_lower_hex40 = commit.len() == 40
+                && commit
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c));
+            if !is_lower_hex40 {
+                return Err(format!(
+                    "chelis-src.pin_commit `{commit}` must be a full 40-character \
+                     lowercase-hex commit SHA"
+                ));
+            }
         }
     }
     Ok(())
@@ -6448,6 +6566,7 @@ kind = "local_registry"
                     path: None,
                 },
             )]),
+            chelis_src: None,
         };
         let text = toml::to_string_pretty(&manifest).expect("serialize");
         let parsed = toml::from_str::<ReefManifest>(&text).expect("parse");
@@ -8300,6 +8419,7 @@ additional_sources = ["properties"]
                     additional_sources: entries.iter().map(|s| s.to_string()).collect(),
                 },
                 dependencies: BTreeMap::new(),
+                chelis_src: None,
             };
             let err =
                 validate_manifest(&manifest).expect_err(&format!("{entries:?} must be rejected"));
@@ -8318,8 +8438,143 @@ additional_sources = ["properties"]
                 additional_sources: vec!["properties".to_string(), "references".to_string()],
             },
             dependencies: BTreeMap::new(),
+            chelis_src: None,
         };
         validate_manifest(&manifest).expect("valid additional_sources must pass");
+    }
+
+    /// A `[chelis-src]` section parses into the typed spec, exposes its
+    /// crate list and pinned commit, round-trips through serialize→parse,
+    /// and passes validation when well-formed.
+    #[test]
+    fn chelis_src_section_parses_and_round_trips() {
+        let toml_text = format!(
+            r#"[package]
+name = "shelly"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Shelly"
+
+[chelis-src]
+crates = ["chelis-ir", "chelis-types"]
+pin_commit = "b741149b23db7c05849ebd8f5cccc5ce95ca626b"
+"#,
+            ver = CURRENT_COMPILER_VERSION
+        );
+        let parsed: ReefManifest = toml::from_str(&toml_text).expect("parse [chelis-src]");
+        let src = parsed.chelis_src.as_ref().expect("chelis_src present");
+        assert_eq!(
+            src.crates,
+            vec!["chelis-ir".to_string(), "chelis-types".to_string()]
+        );
+        assert_eq!(
+            src.pin_commit.as_deref(),
+            Some("b741149b23db7c05849ebd8f5cccc5ce95ca626b")
+        );
+        let re_serialized = toml::to_string_pretty(&parsed).expect("serialize");
+        let re_parsed: ReefManifest = toml::from_str(&re_serialized).expect("re-parse");
+        assert_eq!(re_parsed, parsed);
+        validate_manifest(&parsed).expect("well-formed [chelis-src] must pass");
+    }
+
+    /// A manifest with no `[chelis-src]` section serializes without the
+    /// section at all (the `skip_serializing_if` contract), so manifests
+    /// that predate the feature round-trip byte-identically.
+    #[test]
+    fn manifest_without_chelis_src_omits_section() {
+        let manifest = ReefManifest {
+            package: ManifestPackage {
+                name: "plain".to_string(),
+                version: "0.1.0".to_string(),
+                compiler: CURRENT_COMPILER_VERSION.to_string(),
+                module_prefix: "Plain".to_string(),
+                additional_sources: Vec::new(),
+            },
+            dependencies: BTreeMap::new(),
+            chelis_src: None,
+        };
+        let text = toml::to_string_pretty(&manifest).expect("serialize");
+        assert!(
+            !text.contains("chelis-src"),
+            "a None chelis_src must be omitted from serialization, got:\n{text}"
+        );
+        let parsed: ReefManifest = toml::from_str(&text).expect("parse");
+        assert_eq!(parsed.chelis_src, None);
+        assert_eq!(parsed, manifest);
+    }
+
+    /// `validate_manifest` rejects every malformed `[chelis-src]` shape:
+    /// empty/ill-formed/duplicate crate names and a `pin_commit` that is
+    /// not a full 40-character lowercase-hex SHA. The positive control
+    /// confirms a well-formed section passes.
+    #[test]
+    fn validate_rejects_malformed_chelis_src() {
+        let base_pkg = || ManifestPackage {
+            name: "shelly".to_string(),
+            version: "0.1.0".to_string(),
+            compiler: CURRENT_COMPILER_VERSION.to_string(),
+            module_prefix: "Shelly".to_string(),
+            additional_sources: Vec::new(),
+        };
+        let cases: Vec<(ChelisSrcSpec, &str)> = vec![
+            (
+                ChelisSrcSpec {
+                    crates: vec![String::new()],
+                    pin_commit: None,
+                },
+                "must not be empty",
+            ),
+            (
+                ChelisSrcSpec {
+                    crates: vec!["bad name".to_string()],
+                    pin_commit: None,
+                },
+                "bare crate name",
+            ),
+            (
+                ChelisSrcSpec {
+                    crates: vec!["chelis-ir".to_string(), "chelis-ir".to_string()],
+                    pin_commit: None,
+                },
+                "duplicate",
+            ),
+            (
+                ChelisSrcSpec {
+                    crates: Vec::new(),
+                    pin_commit: Some("abc123".to_string()),
+                },
+                "40-character",
+            ),
+            (
+                ChelisSrcSpec {
+                    crates: Vec::new(),
+                    // Same SHA as the positive control but upper-cased.
+                    pin_commit: Some("B741149B23DB7C05849EBD8F5CCCC5CE95CA626B".to_string()),
+                },
+                "lowercase-hex",
+            ),
+        ];
+        for (src, expected_substr) in cases {
+            let manifest = ReefManifest {
+                package: base_pkg(),
+                dependencies: BTreeMap::new(),
+                chelis_src: Some(src.clone()),
+            };
+            let err = validate_manifest(&manifest).expect_err(&format!("{src:?} must be rejected"));
+            assert!(
+                err.contains(expected_substr),
+                "for {src:?}, expected error to contain {expected_substr:?}, got: {err}"
+            );
+        }
+        let ok = ReefManifest {
+            package: base_pkg(),
+            dependencies: BTreeMap::new(),
+            chelis_src: Some(ChelisSrcSpec {
+                crates: vec!["chelis-ir".to_string(), "chelis-types".to_string()],
+                pin_commit: Some("b741149b23db7c05849ebd8f5cccc5ce95ca626b".to_string()),
+            }),
+        };
+        validate_manifest(&ok).expect("well-formed [chelis-src] must pass");
     }
 
     /// `build_archive` packs files from every declared root, not just
