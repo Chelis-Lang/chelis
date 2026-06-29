@@ -32,6 +32,21 @@ impl TensorType {
     }
 }
 
+/// Sentinel `Shrink` bound `end` meaning "to the end of this axis" — a
+/// full-axis identity slice whose extent is only known at runtime.
+///
+/// chelis#368: the reverse-mode adjoint of a `Pad` whose unpadded axes are
+/// runtime-derived symbolic dims (the differentiable `concat` lowering)
+/// cannot bake a literal `end` for those axes. It emits `(0, SHRINK_TO_END)`
+/// there; [`bind_symbolic_dims`] resolves the sentinel to the axis's runtime
+/// extent (read from the node's bound output type) before evaluation, so the
+/// `Shrink` evaluator never sees the sentinel. The C/HIP/Metal backends do
+/// not run `bind_symbolic_dims` (they emit symbolic dims as runtime values),
+/// so they reject the sentinel loudly rather than miscompile — grad through a
+/// symbolic-window `concat` is an eval-lane capability today (the named-def
+/// grad build lane is separately gated; see chelis#368).
+pub const SHRINK_TO_END: usize = usize::MAX;
+
 /// Dimension descriptor for a tensor axis.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DimInfo {
@@ -1677,6 +1692,33 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
                     .map(|dim| bind_dim(dim, bindings))
                     .collect::<Result<_, _>>()?,
             },
+            // chelis#368: resolve the `SHRINK_TO_END` full-axis sentinel to the
+            // axis's now-bound extent (from this node's bound output type). The
+            // sentinel only appears on a `Shrink` adjoint of a `Pad` over an
+            // unpadded symbolic axis, where the slice is the whole axis, so the
+            // resolved `end` is exactly the output dim's size.
+            RiscOp::Shrink { bounds } if bounds.iter().any(|(_, end)| *end == SHRINK_TO_END) => {
+                let resolved = bounds
+                    .iter()
+                    .zip(output_type.dims.iter())
+                    .map(|((start, end), dim)| {
+                        if *end == SHRINK_TO_END {
+                            match dim {
+                                DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => {
+                                    Ok((*start, *start + *size))
+                                }
+                                DimInfo::Named(name, None) => Err(format!(
+                                    "shrink-to-end sentinel left unbound for symbolic \
+                                     dimension `{name}`"
+                                )),
+                            }
+                        } else {
+                            Ok((*start, *end))
+                        }
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                RiscOp::Shrink { bounds: resolved }
+            }
             RiscOp::BlasMatmul {
                 batch_dims,
                 m,
@@ -1999,6 +2041,85 @@ mod tests {
             }
         );
         assert_eq!(rebound.roots(), &[y]);
+    }
+
+    /// chelis#368: `bind_symbolic_dims` resolves a `Shrink`'s `SHRINK_TO_END`
+    /// full-axis sentinel to the axis's now-bound extent (read from the bound
+    /// output type), leaving an explicitly-padded axis untouched. The
+    /// sentinel is the Pad-adjoint's no-pad-axis identity for a symbolic dim.
+    #[test]
+    fn bind_symbolic_dims_resolves_shrink_to_end_sentinel() {
+        let mut dag = Dag::new();
+        let g = dag.add_node(
+            RiscOp::Load { name: "g".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Named("m".into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        // Adjoint of a Pad that padded axis 0 (concat axis, before=1) and
+        // left axis 1 (`m`, symbolic) unpadded: `(1, 2)` on axis 0 (concrete),
+        // `(0, SHRINK_TO_END)` full-axis identity on axis 1.
+        let shrunk = dag.add_node(
+            RiscOp::Shrink {
+                bounds: vec![(1, 2), (0, SHRINK_TO_END)],
+            },
+            vec![g],
+            TensorType {
+                dims: vec![DimInfo::Lit(1), DimInfo::Named("m".into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(shrunk);
+
+        let rebound = bind_symbolic_dims(&dag, &HashMap::from([("m".to_string(), 3usize)]))
+            .expect("bindings should apply");
+        let node = rebound.get(shrunk).unwrap();
+        // The concrete axis-0 bound is untouched; the sentinel axis-1 bound
+        // resolves to `(0, 0 + 3)` = the full bound extent.
+        assert_eq!(
+            node.op,
+            RiscOp::Shrink {
+                bounds: vec![(1, 2), (0, 3)],
+            },
+            "SHRINK_TO_END must resolve to (start, start + bound extent)",
+        );
+    }
+
+    /// chelis#368: an UNBOUND symbolic dim under a `SHRINK_TO_END` sentinel is
+    /// a hard error, never a silent miscompile (no binding to read the extent
+    /// from).
+    #[test]
+    fn bind_symbolic_dims_rejects_unbound_shrink_to_end() {
+        let mut dag = Dag::new();
+        let g = dag.add_node(
+            RiscOp::Load { name: "g".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named("m".into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let shrunk = dag.add_node(
+            RiscOp::Shrink {
+                bounds: vec![(0, SHRINK_TO_END)],
+            },
+            vec![g],
+            TensorType {
+                dims: vec![DimInfo::Named("m".into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(shrunk);
+        // No binding for `m`: bind_dim fails first on the output type, but
+        // even a partial binding map must not silently drop the sentinel.
+        let err = bind_symbolic_dims(&dag, &HashMap::new());
+        assert!(err.is_err(), "unbound symbolic dim must fail closed");
     }
 
     // --- chelis#345: op-internal symbolic references (Bucket 4d) ---

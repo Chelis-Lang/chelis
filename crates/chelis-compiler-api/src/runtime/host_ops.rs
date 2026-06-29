@@ -2357,7 +2357,18 @@ pub(super) fn tensor_concat_value(
     let first = tensors
         .first()
         .ok_or_else(|| "concat expects at least one tensor part".to_string())?;
-    let axis = normalize_axis(first.value.shape.len(), axis, "concat")?;
+    // chelis#368: accept a negative concat axis (`-1` = last axis), matching
+    // the negative-axis convention every other axis-taking op already follows
+    // (reductions, softmax) AND the IR `concat` lowering (`lower_tensor_concat`
+    // normalizes `raw_axis < 0`). Before this, the host forward path rejected
+    // `concat(..., -1)` ("requires non-negative axis") while the grad and
+    // C-build lanes — which lower through `lower_tensor_concat` — accepted and
+    // evaluated it, an eval-forward-vs-IR divergence. Normalize here so all
+    // lanes agree; an out-of-range negative (still negative after the offset)
+    // is rejected by `normalize_axis` below.
+    let rank = first.value.shape.len();
+    let axis = if axis < 0 { axis + rank as i64 } else { axis };
+    let axis = normalize_axis(rank, axis, "concat")?;
     for tensor in &tensors[1..] {
         if tensor.precision != first.precision {
             return Err("concat expects matching tensor precision".to_string());

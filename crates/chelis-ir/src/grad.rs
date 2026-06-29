@@ -1208,11 +1208,27 @@ fn compute_adjoints(
         RiscOp::Pad { padding, .. } => {
             let x = node.inputs[0];
             let input_ty = forward.get(x).unwrap().output_type.clone();
-            // Shrink: bounds = [(before, before + dim_size), ...] for each axis
+            // Shrink: bounds = [(before, before + dim_size), ...] for each axis.
+            //
+            // chelis#368: a Pad whose padded axis is concrete but whose
+            // OTHER axes are runtime-derived symbolic dims (the differentiable
+            // `concat` lowering pads each element along a concrete concat axis
+            // and leaves every other axis `(0, 0)`) cannot bake a literal
+            // `end` for those symbolic no-pad axes. For an unpadded axis the
+            // Shrink is a full-axis identity (`(0, full_extent)`), so emit the
+            // `SHRINK_TO_END` sentinel; `bind_symbolic_dims` resolves it to the
+            // axis's runtime extent before eval. A symbolic dim on an axis that
+            // WAS padded would still need a concrete extent — that stays a
+            // hard error via `dim_size` (no silent guess).
             let bounds: Vec<(usize, usize)> = padding
                 .iter()
                 .zip(input_ty.dims.iter())
-                .map(|((before, _after), dim)| (*before, *before + dim_size(dim)))
+                .map(|((before, after), dim)| match dim {
+                    DimInfo::Named(_, None) if *before == 0 && *after == 0 => {
+                        (0, crate::dag::SHRINK_TO_END)
+                    }
+                    _ => (*before, *before + dim_size(dim)),
+                })
                 .collect();
             let dx = dag.add_node(RiscOp::Shrink { bounds }, vec![g], input_ty, None);
             Some(vec![(x, dx)])

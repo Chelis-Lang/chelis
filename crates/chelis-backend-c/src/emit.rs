@@ -4887,6 +4887,19 @@ impl CEmitter {
         ty: &TensorType,
         _dag: &Dag,
     ) {
+        // chelis#368: the `SHRINK_TO_END` full-axis sentinel is an eval-lane
+        // construct resolved by `bind_symbolic_dims` (which the C backend does
+        // not run). It must never reach codegen; fail loud rather than emit a
+        // `t{id}->shape`-driven loop over a tensor sized from the unresolved
+        // sentinel.
+        assert!(
+            bounds
+                .iter()
+                .all(|(_, hi)| *hi != chelis_ir::dag::SHRINK_TO_END),
+            "C backend reached an unresolved SHRINK_TO_END sentinel at node {id}; \
+             grad through a symbolic-window `concat` is an eval-lane capability \
+             (chelis#368): the build lane must resolve symbolic shrink extents first"
+        );
         let a = inputs[0].0;
         let et = Self::elem_type(ty);
         self.emit_slot_wrapper(id, ty);
@@ -5546,6 +5559,27 @@ mod tests {
         );
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("src_indices[0] = dst_indices[0] + 1"));
+    }
+
+    /// chelis#368: the `SHRINK_TO_END` full-axis sentinel is an eval-lane
+    /// construct (`bind_symbolic_dims` resolves it). The C backend does not
+    /// run that pass, so reaching codegen with the sentinel must fail LOUD
+    /// rather than emit a `t->shape`-driven loop over a tensor sized from the
+    /// unresolved sentinel.
+    #[test]
+    #[should_panic(expected = "SHRINK_TO_END")]
+    fn shrink_to_end_sentinel_rejected_by_c_backend() {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(5), None);
+        dag.add_node(
+            RiscOp::Shrink {
+                bounds: vec![(0, chelis_ir::dag::SHRINK_TO_END)],
+            },
+            vec![a],
+            vec_f32(5),
+            None,
+        );
+        let _ = CEmitter::emit_dag(&dag, "test_fn");
     }
 
     #[test]
