@@ -439,6 +439,57 @@ y = div(a, b)
     assert!(v[0].is_nan(), "expected NaN, got {}", v[0]);
 }
 
+// chelis#458 regression lock (eval/fold side). On chelis 0.9.0 a mixed
+// `(f32, i32)` numeric op silently const-folded when both operands were
+// literals: `div(1.0, 4)` evaluated to 0.25 via a `_ => Prim::F32`
+// re-precisioning fallback, while the bound-variable form errored at
+// type-check — a check↔eval inconsistency (the #458 defect). Per
+// spec/04-type-system.md §5.1 (no implicit promotion) and §5.2 (casts are
+// always explicit) the mixed pair is a type error, so the literal form
+// must NOT fold to 0.25. These two tests pin both barriers: the
+// type-checker rejects the literal pair before eval, AND the host scalar
+// dispatch itself rejects a mixed pair rather than re-precisioning it.
+
+/// The full check→eval pipeline rejects `div(1.0, 4)` at type-check, so
+/// the const-fold to 0.25 is never reached. `4` is an `int32` literal
+/// (§5.3), making this the same mixed `(f32, int32)` pair as the
+/// bound-variable form.
+#[test]
+fn issue_458_div_f32_over_i32_literal_rejected_before_eval_not_folded() {
+    let decls = chelis_surf::parser::parse_str("out = div(1.0, 4)").expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let err = chelis_types::check_ir_program(&exprs).expect_err(
+        "chelis#458: div(1.0, 4) is a mixed (f32, int32) pair and must be a type error",
+    );
+    assert!(
+        err.errors.iter().any(|e| matches!(
+            e.kind,
+            chelis_types::errors::CheckErrorKind::PrecisionMismatch
+        )),
+        "spec §5.1: mixed (f32, int32) div must surface a PrecisionMismatch; got: {:?}",
+        err.errors
+    );
+}
+
+/// Runtime backstop: even if a future type-checker hole let a mixed
+/// `(f32, int32)` scalar pair reach the host evaluator, `dispatch_scalar_binop`
+/// must reject it rather than re-precisioning to a 0.25 float fold (the old
+/// 0.9.0 `_ => Prim::F32` fallback). The mixed pair is neither int-int nor
+/// float-float, so it falls to the `_ => Err(..)` catch-all.
+#[test]
+fn issue_458_dispatch_scalar_binop_rejects_mixed_f32_i32_not_folds_to_quarter() {
+    let lhs = RuntimeValue::scalar_like_float(chelis_types::types::Prim::F32, 1.0)
+        .expect("f32 scalar 1.0");
+    let rhs =
+        RuntimeValue::scalar_like_int(chelis_types::types::Prim::Int32, 4).expect("int32 scalar 4");
+    let result = dispatch_scalar_binop(&lhs, &rhs, &|a, b| a / b);
+    assert!(
+        result.is_err(),
+        "chelis#458 / spec §5.1: a mixed (f32, int32) scalar div must be rejected by the \
+         host dispatch, NOT silently re-precisioned and folded to 0.25; got Ok({result:?})"
+    );
+}
+
 #[test]
 fn host_runtime_recip_negative_value_is_negative_reciprocal() {
     let checked = checked_surf(
