@@ -2685,3 +2685,48 @@ fn reduce_unknown_named_axis_still_rejected() {
     );
     assert_rejected_with(&json, "ghost", "#373: unknown reduced axis rejected");
 }
+
+/// chelis#373 grad-VALUE guard: the sibling sum-of-all grad tests above all
+/// produce an all-ones gradient, which is axis-INSENSITIVE in value — a reduce
+/// over the wrong (recovered) axis would still pass as long as the gradient
+/// keeps the input shape. This test pins the recovered axis by an axis-sensitive
+/// gradient: `loss` is `sum((sum_rows x)^2)`, so the gradient w.r.t. each input
+/// is `2 * rowsum[row]`, NOT a constant. Row sums of [[1,2,3],[4,5,6]] over the
+/// named `seq` axis are [6, 15], so the analytic (and finite-difference) grad is
+/// [[12, 12, 12], [30, 30, 30]]. If the spread-aware anchor recovery reduced the
+/// batch axis instead, the column sums [5, 7, 9] would yield different values
+/// (and a different intermediate shape), so a wrong-axis-but-right-shape
+/// regression surfaces here even though the shape stays [2, 3].
+#[test]
+fn grad_through_concrete_then_spread_named_reduce_values_are_axis_sensitive() {
+    let source = "def sum_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
+         def sum_rows(x: &tensor[b, seq, f32]) -> tensor[b, f32] = sum_seq(x)\n\
+         def loss(x: tensor[2, 3, f32]) -> f32 = {\n\
+           r = sum_rows(&x)\n\
+           sq = r * r\n\
+           tensor_to_scalar(sum(sq, 0))\n\
+         }\n\
+         out = grad(loss)(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
+    assert_clean(&check_json(source), "#373 axis-sensitive grad checks clean");
+    let dir = tempdir().expect("tempdir");
+    let eval = eval_stdout(dir.path(), source, "grad_axis_sensitive_values");
+    let (shape, data) = parse_bare_tensor(&eval);
+    assert_eq!(
+        shape,
+        vec![2, 3],
+        "#373: grad must keep the [2, 3] input shape ({eval})"
+    );
+    // 2 * rowsum: row 0 sum = 6 -> 12; row 1 sum = 15 -> 30.
+    let expected = [12.0, 12.0, 12.0, 30.0, 30.0, 30.0];
+    assert_eq!(
+        data.len(),
+        expected.len(),
+        "#373: grad has 6 elements ({eval})"
+    );
+    for (i, (g, e)) in data.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (g - e).abs() < 1e-6,
+            "#373: grad[{i}] = {g}, expected {e} (2*rowsum, reduced over named `seq`) ({eval})"
+        );
+    }
+}
