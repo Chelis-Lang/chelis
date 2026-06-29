@@ -446,6 +446,11 @@ struct CheckReport {
     /// The counterexample model for a `refuted` verdict (any JSON shape).
     #[serde(default)]
     counterexample: serde_json::Value,
+    /// Beacon-side evidence from the real binary. The shim preserves this under
+    /// `beacon_evidence` on successful mappings so live e2e tests can assert
+    /// the exact bytes and root the binary consumed, not only what Chelis sent.
+    #[serde(default)]
+    evidence: serde_json::Value,
 }
 
 impl DischargeEngine for BeaconShim {
@@ -577,7 +582,11 @@ fn map_report(stdout: &str, stderr: &str) -> Discharge {
             Soundness::SoundApproximate,
             QualifierSet::from_iter_kinds([Qualifier::SoundOverApproximation]),
             TierBResult::Proved,
-            serde_json::json!({ "engine": "beacon", "verdict": "proved" }),
+            serde_json::json!({
+                "engine": "beacon",
+                "verdict": "proved",
+                "beacon_evidence": report.evidence,
+            }),
         )
         .unwrap_or_else(internal_error_discharge),
 
@@ -603,6 +612,7 @@ fn map_report(stdout: &str, stderr: &str) -> Discharge {
                         "engine": "beacon",
                         "verdict": "refuted",
                         "oracle_verified": true,
+                        "beacon_evidence": report.evidence,
                     }),
                 )
                 .unwrap_or_else(internal_error_discharge)
@@ -619,6 +629,7 @@ fn map_report(stdout: &str, stderr: &str) -> Discharge {
                         "engine": "beacon",
                         "verdict": "refuted",
                         "oracle_verified": false,
+                        "beacon_evidence": report.evidence,
                     }),
                 )
                 .unwrap_or_else(internal_error_discharge)
