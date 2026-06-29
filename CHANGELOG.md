@@ -4,6 +4,137 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.12.0] — 2026-06-29
+
+### Changed
+
+- **BREAKING: `div` is now float-only; integer division uses the new
+  `floor_div` / `trunc_div` primitives (#178, #511).** The single-op
+  two-semantics overload (`div(7, 2) == 3` for ints, `== 3.5` for
+  floats) matched none of torch/JAX/numpy and was a footgun, so `div`
+  (and the `/` operator that desugars to it) now requires float
+  operands and an integer operand is a type error whose diagnostic
+  cites `spec/05-risc-primitives.md` §2.1 and points at the
+  replacements:
+  - `floor_div(a, b)` rounds the quotient toward -inf (Python `//` /
+    torch / JAX / numpy `floor_divide`); admits integer **and** float
+    operands.
+  - `trunc_div(a, b)` rounds toward zero (the C/Rust integer `/`
+    quotient); integer-only. This is what `Std.Decimal` arithmetic
+    needs.
+
+  Both new primitives are Tier-1 and are wired through every dispatch
+  site: type checker (direct and polymorphic-wrapper rejection),
+  linearity, IR (`RiscOp`/`FusedStepOp`, lower, tier2, grad, fuse,
+  verify, specialize, eval), the wire schema (bumped to version 2 with
+  a `chelis-prove` producer tripwire), and the C and HIP backends (with
+  remainder-sign correction and a zero-divisor guard). `Std.Decimal`'s
+  bundled `decimal.ch` was migrated from `div(int)` to `trunc_div` and
+  the bundled `chelis-std` artifact regenerated. **Migration:** replace
+  integer `div(a, b)` with `floor_div(a, b)` for Python-style flooring
+  or `trunc_div(a, b)` for C-style truncation; float `div` is unchanged.
+
+### Added
+
+- **Verification stack — Beacon discharge engine + transformation
+  layer.** The Phase 2 push that takes the verification substrate from
+  a registered-in-tests shim to a live engine that closes real proof
+  goals end to end:
+  - **Beacon wired into live dispatch with end-to-end verified Greeks
+    (#539).** `BeaconShim` is registered in the live engine registry,
+    and the transformation-layer Stage 1 substrate lands (`Transformation`
+    type, pipeline, and a soundness harness that rejects unsound
+    transformations).
+  - **Beacon verified-zonotope selector (#538, #532).** A
+    `BeaconOracleMode` lets the shim keep its default `oracle: null` or
+    explicitly request `oracle: "zonotope_verified"`, with exact
+    request-shape and no-laundering tests.
+  - **Abstract-subterm transformation: envelope + polynomial
+    decomposition (#540).** The first transformation through the
+    soundness harness replaces a transcendental subterm (`erf`) with a
+    fresh variable bounded by the WI-13 certified envelope, leaving a
+    residual polynomial goal that routes to Z3/cvc5. The bound is
+    evaluated soundly over the argument's entire range (hull across all
+    intersecting envelope boxes), declines on unboundable arguments, and
+    tags its result `SpecialFunctionCertified` rather than `Exact`.
+  - **Vectorized Black-Scholes pricer WireDag root (WS-9, #541, #440).**
+    A pure-tensor-DAG BS call pricer (`bs_vec.ch`) that emits a named
+    WireDag root Beacon can verify, with byte-seam round-trip,
+    deterministic-lowering, and non-finite-float-precondition tests.
+    Approximation coefficients are passed as tensor parameters pinned to
+    point intervals at the Beacon boundary.
+  - **Goal splitting with lattice-aware recombination (#542).** A
+    `GoalSplit` transformation splits a conjunctive postcondition into
+    independent sub-goals (each retaining the full variable set and
+    precondition list, so coupled variables stay sound) and recombines
+    the sub-discharges by a soundness lattice: soundness is the `min`
+    across sub-discharges, the qualifier set is their union, and
+    `Disproved` / `Error` / `Timeout` dominate so partial green never
+    reads as green. Hand-built as an integrity core with an 11-row
+    exhaustive recombination truth-table test.
+  - **`div(x, x)` one-fabrication elimination + corpus coverage tooling
+    (#546, #547).** The `bs_vec.ch` pricer no longer fabricates `1.0`
+    via `div(x, x)` (replaced with `add(half, half)`), so its WireDag
+    carries no `Div` node; and `scripts/prove_corpus/harvest_coverage.py`
+    harvests `@property` goals from downstream shells and measures
+    discharge coverage with differentiated fuzz-tier buckets.
+- **Verification stack handover milestone docs (#554, #555).** A
+  single-source handover artifact documenting what the stack proves,
+  what falls to fuzz and why, the honesty-layer integrity core, the seam
+  contract state, build commands, and the frontier — validated by a
+  fresh-clone build and a round-tripping proof.
+
+### Fixed
+
+- **`len` / `index` borrow their `List` / `Dict` argument (#527,
+  #531).** Both queries consumed their container, so the idiomatic
+  read-then-reuse shape stopped type-checking once consume-tracking
+  began enforcing tag-colliding `List[...]` parameters. Their runtime
+  backings take a `const` pointer and never free, so they are now
+  classified as borrows in the linearity checker; a genuine consume
+  (explicit `drop`, or moving into an owned parameter) still makes a
+  later `len` / `index` a use-after-consume. The explicit `len(&xs)` /
+  `index(&xs)` surface form is rejected with a diagnostic that the query
+  auto-borrows.
+- **`grad` through a Tier-3 named-axis reduction reached via a
+  concrete-rank intermediate (#373, #515).** The reverse-mode lane
+  inlines the differentiated body into one DAG, monomorphizing the
+  named anchor (`seq`) to a concrete rank and tripping a
+  `rank-spread anchor absent` lowering error even though the forward
+  lane evaluated correctly. Anchor positions are now recorded only when
+  no spread precedes the named dim, and `extract_rank_var_bindings`
+  falls back to the recorded position (range-checked) when the name is
+  absent from the monomorphized actual. (A by-position recovery
+  staleness caveat under intervening axis-reorder ops is tracked as
+  chelis#549.)
+- **Differentiable `concat` grad + grad-capture eval parity (#368,
+  #377, #514).** `grad` through a windowed reduce over `concat` hit the
+  host-only `concat` catch-all and dropped the windowed rows; `concat`
+  along a constant axis now lowers to the adjoint-carrying `Pad`+`Add`
+  cascade so the gradient reaches the windowed inputs (finite-difference
+  validated, including the symbolic-non-concat-axis case via a
+  `SHRINK_TO_END` sentinel resolved before eval). Separately, the
+  host-runtime transform lane now serves captured and top-level tensor
+  bindings to a `grad`/`vmap`-captured def, closing an eval-vs-C-backend
+  parity gap. (Correct `vmap`-with-captures broadcast stays a tracked
+  residual, #377.)
+- **`trace` reduces its diagonal in the stride-4 ILP cascade for torch
+  parity (#170, #505).** `torch.trace == torch.sum(diagonal)`, but both
+  the evaluator and the f32/f64 runtime used a strict left fold, diverging
+  from torch by 1 ULP for diagonals longer than 16 f32 elements. Both
+  lanes now route through the verified stride-4 cascade. The
+  accompanying audit documents why `matmul`/`einsum` (BLAS GEMM order),
+  softmax `sum_exp` (already host==lowered consistent), and `cumsum`
+  (inherent prefix order) deliberately do **not** take the cascade and
+  keep their f64 reference accumulator.
+- **Deep replacement-authoring substrate hardening (#548).**
+  `chelis_replace_function_body` now reports malformed / type / effect /
+  linearity failures over both MCP and HTTP with no replacement result
+  on rejection; duplicate `defsig` declarations are rejected in both
+  check and validate (Chelis has no same-name overload dispatch); and
+  default `chelis surf` / `decompile` output is formatter-canonical, with
+  the agent-editing-surface specs and oracles synced to the shipped tool.
+
 ## [0.11.1] — 2026-06-26
 
 ### Added
