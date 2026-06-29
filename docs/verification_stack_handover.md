@@ -21,7 +21,7 @@ honest composite verdict. The engines:
 | **cvc5** | `GoalShape::Smt` (polynomial/logical NRA) | Exact | Live, release binary |
 | **Z3** | `GoalShape::Smt` (polynomial NRA fallback) | Exact | Live, try-until-discharge after cvc5 |
 | **Clarabel** | `GoalShape::Smt` (univariate poly ≥ 0 on interval) | CertificateBearing | Registered, no standalone integration test |
-| **Carcara** | Post-discharge audit of cvc5 Alethe proofs | Audit evidence (not a verdict) | Live, 14 unit tests |
+| **Carcara** | Post-discharge audit of cvc5 Alethe proofs | Audit evidence (not a verdict) | Live, 15 tests (requires `--features carcara`) |
 | **Beacon** | `GoalShape::BoxRange` (interval bounds) | SoundOverApproximation | Live via subprocess shim, 4 e2e tests |
 
 ### What actually discharges (measured corpus, 12 properties):
@@ -60,7 +60,7 @@ These are the non-negotiable invariants. Each has a named test:
 
 1. **No laundering:** `recombine_split_discharges` rolls up at minimum
    soundness. A Beacon `SoundApproximate` never reads as `Exact`.
-   Test: `goal_split::recombine_exact_plus_sound_approx_is_sound_approx`
+   Test: `goal_split::row2_mixed_soundness_returns_min_soundness`
 
 2. **Non-vacuity mandatory:** A green verdict carries a non-vacuity record.
    Precondition-unsatisfiable poisons the composite.
@@ -119,7 +119,7 @@ cargo build --workspace
 # SMT build (cvc5 linked)
 cargo build --workspace --features smt
 
-# Full engine features
+# Full engine features (Z3 requires libz3-dev / z3-devel system package)
 cargo build --workspace --features "smt z3 clarabel carcara"
 
 # Run prove with real engines
