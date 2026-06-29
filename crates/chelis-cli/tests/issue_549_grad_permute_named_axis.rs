@@ -14,13 +14,28 @@
 //! out-of-range/unrecorded anchors but NOT a stale in-range index.
 //!
 //! The fix (crates/chelis-ir/src/lower.rs, `recover_anchor_axis`) pairs each
-//! recorded position with the anchor's concrete extent and re-validates it
-//! against the monomorphized operand: it confirms the recorded position, or
-//! relocates the anchor when a reorder moved it to an *unambiguous* in-range
-//! axis, and FAILS LOUD when a reorder left the axis ambiguous (its recorded
-//! extent appears at multiple axes) — never reducing/splitting a possibly-wrong
+//! recorded position with the anchor's concrete extent and locates the anchor
+//! purely by that extent in the monomorphized operand — the stale recorded
+//! *index* is never trusted. It takes the axis when the extent is unique
+//! (relocating through any intervening reorder), and FAILS LOUD when the extent
+//! appears at more than one axis — never reducing/splitting a possibly-wrong
 //! axis. Spans the three by-position use sites (#388 reduce, #373/#515 rank
 //! spread, #339 expand) through the shared `recover_anchor_axis`.
+//!
+//! ## RT-1 square/equal-extent residual (closed to fail-loud)
+//!
+//! When the reduced axis's extent collides with another axis — the all-equal
+//! (square) operand, e.g. `seq x seq` attention — value re-validation cannot
+//! tell the anchor from its twin. An earlier version "confirmed by extent" at
+//! the recorded position, which succeeds *vacuously* on a square operand and
+//! silently returned the wrong axis. This is now an `AmbiguousAfterReorder`
+//! loud failure. The soundness FLOOR over-rejects even a *non-permuted* square
+//! reduce (the recorded index was in fact correct, but value alone cannot prove
+//! no reorder happened); see `square_non_permuted_named_reduce_overrejected_*`.
+//! Recovering those instead of rejecting needs the deeper fix: track the anchor
+//! identity through the reorder during lowering. No executable example or
+//! existing test hits the square by-position path, so the floor breaks no
+//! legitimate corpus program.
 //!
 //! ## Oracle design (positive + negative parity, CLAUDE.md)
 //!
@@ -133,6 +148,37 @@ def loss(x: tensor[2, 1, 3, f32]) -> f32 = {\n\
   tensor_to_scalar(sum(sum(sq, 0), 0))\n\
 }\n";
 const POS_RANK3_INPUT: &str = "to_tensor([[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]])";
+
+/// RT-1 square/equal-extent negative: a `3x3` operand where the reduced axis's
+/// extent collides with the other axis. After `permute(x, 1, 0)` the recorded
+/// `seq` position is stale AND its extent (3) appears at BOTH axes, so value
+/// re-validation cannot tell the anchor from its twin — the fast "confirm by
+/// extent" that an earlier version did would have trusted the stale position and
+/// silently returned the column-sum `[[24,30,36]x3]` (correct row-sum is
+/// `[[12,12,12],[30,30,30],[48,48,48]]`). Must fail LOUD instead.
+const SQUARE_PERMUTE_PRELUDE: &str = "\
+def bridge(x: &tensor[a, seq, f32]) -> tensor[a, f32] = sum(permute(x, 1, 0), seq)\n\
+def loss(x: tensor[3, 3, f32]) -> f32 = {\n\
+  r = bridge(&x)\n\
+  sq = r * r\n\
+  tensor_to_scalar(sum(sq, 0))\n\
+}\n";
+
+/// The SAME square reduce WITHOUT a permute. The recorded position is in fact
+/// correct here, but value re-validation cannot distinguish that from the
+/// permuted case (a `3x3` is `3x3` either way), so the soundness FLOOR
+/// over-rejects it too. Documented as a known limitation; the deeper fix
+/// (tracking the anchor through the reorder during lowering) is what recovers
+/// these instead of rejecting.
+const SQUARE_NOPERMUTE_PRELUDE: &str = "\
+def bridge(x: &tensor[a, seq, f32]) -> tensor[a, f32] = sum(x, seq)\n\
+def loss(x: tensor[3, 3, f32]) -> f32 = {\n\
+  r = bridge(&x)\n\
+  sq = r * r\n\
+  tensor_to_scalar(sum(sq, 0))\n\
+}\n";
+
+const SQUARE_INPUT: &str = "to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]])";
 
 // ── Harness ──────────────────────────────────────────────────────────────────
 
@@ -516,6 +562,75 @@ fn spread_path_ambiguous_permute_fails_loud_build() {
     assert!(
         stderr.contains("chelis#549"),
         "C build must cite chelis#549 for the rank-spread path; stderr={stderr}",
+    );
+}
+
+/// RT-1 regression: the all-equal-extent (square) operand. After `permute` the
+/// recorded `seq` position is stale AND its extent collides with the other axis,
+/// so an earlier "confirm by recorded extent" fast-path trusted the stale
+/// position and SILENTLY returned the column-sum gradient (`[[24,30,36]x3]`,
+/// exit 0). The soundness floor must instead fail LOUD: value re-validation
+/// cannot tell the anchor from its equal-extent twin. Eval lane.
+#[test]
+fn square_permute_ambiguous_extent_fails_loud_eval() {
+    let stderr = eval_fail(
+        &grad_source(SQUARE_PERMUTE_PRELUDE, SQUARE_INPUT),
+        "sq_eval",
+    );
+    assert!(
+        stderr.contains("chelis#549") && stderr.contains("seq"),
+        "the square-extent reorder must fail loud citing chelis#549 and `seq`; stderr={stderr}",
+    );
+    // The pre-fix silent value must never appear on stdout — eval exits non-zero
+    // (asserted in `eval_fail`), so there is no `tensor(...)` line at all.
+    assert!(
+        !stderr.contains("24") || stderr.contains("chelis#549"),
+        "must not silently emit the column-sum gradient; stderr={stderr}",
+    );
+}
+
+/// RT-1, C-build lane: the same square case must also fail LOUD when built to C
+/// (a soundness rejection, surfaced — not absorbed into a generic message).
+#[test]
+fn square_permute_ambiguous_extent_fails_loud_build() {
+    let stderr = build_fail(
+        &grad_source(SQUARE_PERMUTE_PRELUDE, SQUARE_INPUT),
+        "sq_build",
+    );
+    assert!(
+        stderr.contains("chelis#549"),
+        "the square-extent reorder C build must cite chelis#549; stderr={stderr}",
+    );
+}
+
+/// Documented soundness-floor limitation (NOT a desired end state). The SAME
+/// square reduce WITHOUT a permute is a legitimate, correct program — the
+/// recorded position is genuinely the anchor — but value re-validation cannot
+/// distinguish a non-reordered `3x3` from a reordered one, so the floor
+/// over-rejects it (fails loud) rather than risk the permuted twin's silent
+/// wrong gradient. This test pins that current behavior AND the gradient the
+/// program SHOULD yield (`[[12,12,12],[30,30,30],[48,48,48]]`, the value a
+/// non-square `[a, seq]` reduce produces). When the deeper fix lands — tracking
+/// the anchor identity through the reorder during lowering, so non-permuted
+/// square recovers and permuted square stays correct — flip this to a positive
+/// assertion against the documented value.
+///
+/// Corpus check (RT-1 item 3): no executable example or existing test hits this
+/// path on a square operand, so the floor breaks no legitimate corpus program;
+/// it is reachable only by hand-written square literal inputs like this one.
+#[test]
+fn square_non_permuted_named_reduce_overrejected_pending_deeper_fix() {
+    // The value the deeper fix should eventually produce here (row-sum `2*r`,
+    // r = [6, 15, 24]); pinned for the future positive flip.
+    let _expected_when_recovered: [f64; 9] = [12.0, 12.0, 12.0, 30.0, 30.0, 30.0, 48.0, 48.0, 48.0];
+    let stderr = eval_fail(
+        &grad_source(SQUARE_NOPERMUTE_PRELUDE, SQUARE_INPUT),
+        "sq_noperm",
+    );
+    assert!(
+        stderr.contains("chelis#549"),
+        "the soundness floor currently over-rejects the legitimate non-permuted square \
+         reduce (documented limitation; deeper permute-tracking fix recovers it); stderr={stderr}",
     );
 }
 

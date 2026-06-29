@@ -1161,19 +1161,20 @@ fn tensor_dim_axis_positions(
 /// valid-but-stale (in range, wrong axis). Rather than trust the bare index, the
 /// recovery re-validates the recorded extent against the monomorphized operand.
 enum AnchorRecovery {
-    /// The recorded position is confirmed (its extent still sits there — no
-    /// reorder) OR the anchor's recorded extent appears at exactly one in-range
-    /// axis (the anchor was located after a reorder). The carried index is sound
-    /// to split/reduce/expand at.
+    /// The anchor's recorded extent appears at EXACTLY ONE in-range axis, so the
+    /// anchor is located unambiguously (whether or not a reorder moved it from
+    /// the recorded position). The carried index is sound to split/reduce/expand
+    /// at.
     Axis(usize),
-    /// No usable record: the anchor was never recorded, its recorded position is
-    /// out of range, AND its recorded extent appears at no in-range axis. The
-    /// caller falls through to its existing loud by-name failure path.
+    /// No usable record: the anchor was never recorded, or its recorded extent
+    /// appears at no in-range axis. The caller falls through to its existing loud
+    /// by-name failure path.
     Unrecorded,
-    /// chelis#549: the recorded position is stale (an axis-reorder moved the
-    /// anchor) AND the recorded extent appears at MORE THAN ONE in-range axis, so
-    /// the anchor cannot be located unambiguously. The caller MUST fail loud
-    /// rather than reduce/split a possibly-wrong axis (fail-closed).
+    /// chelis#549: the anchor's recorded extent appears at MORE THAN ONE in-range
+    /// axis, so the anchor cannot be located by value. This includes the
+    /// all-equal-extent (square) operand, where the recorded position's extent
+    /// matches vacuously even under a reorder. The caller MUST fail loud rather
+    /// than reduce/split a possibly-wrong axis (fail-closed).
     AmbiguousAfterReorder,
 }
 
@@ -1182,25 +1183,29 @@ enum AnchorRecovery {
 /// `dim_axis_positions` oracle and considering only axes in `lo..hi`.
 ///
 /// Soundness (chelis#549): the recorded index is the anchor's offset in the
-/// recording caller's *formal parameter*. An axis-reorder between that parameter
-/// and this use site can make that index stale. So the bare index is never
-/// returned blindly:
+/// recording caller's *formal parameter*. An axis-reorder (`permute`/transpose)
+/// between that parameter and this use site can make that index stale (in range,
+/// wrong axis). The recorded index is therefore **never trusted as a position**;
+/// the anchor is located purely by its recorded *extent*:
 ///
-/// 1. Fast path — if the recorded position is in range and still carries the
-///    recorded extent, no reorder intervened: return it.
-/// 2. Reorder recovery — otherwise the position is stale; locate the anchor by
-///    its recorded extent. Accept it IFF the extent appears at exactly one
-///    in-range axis. Zero matches → [`AnchorRecovery::Unrecorded`] (fall through
-///    to the loud by-name path); two or more → [`AnchorRecovery::AmbiguousAfterReorder`]
-///    (must fail loud; value alone cannot disambiguate equal-extent axes).
+/// * exactly one in-range axis carries the extent → [`AnchorRecovery::Axis`]
+///   (located unambiguously, whether or not a reorder moved it);
+/// * no in-range axis carries it → [`AnchorRecovery::Unrecorded`] (fall through
+///   to the loud by-name path);
+/// * more than one in-range axis carries it → [`AnchorRecovery::AmbiguousAfterReorder`]
+///   (fail loud).
 ///
-/// Residual (acknowledged, narrower than #549): when an axis-reorder permutes a
-/// run of EQUAL-extent axes, the recorded position still carries the recorded
-/// extent so the fast path returns it even though a different equal-extent axis
-/// is the real anchor. Value re-validation cannot catch an all-equal-extent
-/// permutation; closing it requires tracking the anchor identity through the
-/// reorder (a separate, more invasive change). The common attention case
-/// (distinct batch/seq/head extents) is fully covered.
+/// The >1 branch is the chelis#549 / RT-1 fix: when the anchor's extent collides
+/// with another axis (the all-equal-extent / square operand is the headline
+/// case, e.g. a `seq × seq` attention reduce), value re-validation cannot tell
+/// the anchor from its twin, so a stale recorded position would be vacuously
+/// "confirmed" and silently reduce the wrong axis. We refuse instead. This is
+/// the soundness FLOOR: it over-rejects a square reduce that did NOT in fact
+/// reorder (the recorded position was correct) because value alone cannot
+/// distinguish that from a square reduce that DID reorder. RECOVERING those
+/// (rather than rejecting) requires tracking the anchor identity through the
+/// reorder during lowering — a separate, more invasive change. The common
+/// attention case with distinct batch/seq/head extents is recovered exactly.
 fn recover_anchor_axis(
     dims: &[DimInfo],
     lo: usize,
@@ -1208,17 +1213,13 @@ fn recover_anchor_axis(
     anchor: &str,
     dim_axis_positions: &HashMap<String, (usize, DimInfo)>,
 ) -> AnchorRecovery {
-    let Some((pos, expected)) = dim_axis_positions.get(anchor) else {
+    // The recorded position is intentionally unused for the decision (it is the
+    // stale formal-param offset chelis#549 is about); only the recorded extent
+    // is trusted, located by value in the monomorphized operand.
+    let Some((_recorded_pos, expected)) = dim_axis_positions.get(anchor) else {
         return AnchorRecovery::Unrecorded;
     };
     let hi = hi.min(dims.len());
-    // Fast path: recorded position in range AND still carrying the recorded
-    // extent — no intervening axis-reorder, the index is sound.
-    if (lo..hi).contains(pos) && dims.get(*pos) == Some(expected) {
-        return AnchorRecovery::Axis(*pos);
-    }
-    // Stale recorded position (out of range, or a reorder changed the extent
-    // there). Recover by the recorded extent only when it is unambiguous.
     let mut matches = (lo..hi).filter(|&i| dims.get(i) == Some(expected));
     match (matches.next(), matches.next()) {
         (Some(only), None) => AnchorRecovery::Axis(only),
@@ -1576,11 +1577,11 @@ fn collect_body_precision_var_names(expr: &Expr, out: &mut HashSet<String>) {
 /// is the anchor's offset in that caller's *formal parameter*, so an
 /// axis-reordering op (e.g. `permute`) between that parameter and this use site
 /// can leave the recorded index valid-but-stale (in range, wrong axis). The
-/// recovery no longer trusts the bare index: it confirms the recorded position by
-/// its extent, relocates the anchor when a reorder moved it to an unambiguous
-/// in-range axis, and FAILS LOUD when a reorder left the split ambiguous — never
-/// splitting at a possibly-wrong axis. The by-name path above already tracks the
-/// moved anchor and is unaffected.
+/// recovery no longer trusts the bare index at all: it locates the anchor purely
+/// by its recorded extent, taking the axis when that extent is unique, and
+/// FAILING LOUD when the extent collides with another axis (the square/equal-extent
+/// case, RT-1) — never splitting at a possibly-wrong axis. The by-name path above
+/// already tracks the moved anchor and is unaffected.
 fn tensor_rank_substitutions(
     formal_param_exprs: &[Option<Expr>],
     actual_args: &[TensorType],
@@ -1690,15 +1691,13 @@ fn extract_rank_var_bindings(
                             .map(|p| gi + p);
                         // chelis#373 fallback: the actual was monomorphized to
                         // concrete `Lit` dims and the name is gone. Recover the
-                        // split index from the position a concrete-rank caller
-                        // recorded, re-validated against the actual's extents
-                        // (chelis#549): the recorded index is confirmed by its
-                        // extent, or the anchor is relocated when an intervening
-                        // axis-reorder (`permute`) moved it to an unambiguous
-                        // in-range axis. An out-of-range/unrecorded anchor whose
-                        // extent is absent falls through to the loud path; a
-                        // reorder that left the split ambiguous fails loud rather
-                        // than splitting at a possibly-wrong axis.
+                        // split index by locating the anchor's recorded extent in
+                        // the actual (chelis#549): take the axis when the extent is
+                        // unique (relocating through any intervening `permute`).
+                        // An anchor whose extent is absent falls through to the
+                        // loud path; an extent that collides with another axis
+                        // (the square/equal-extent case) fails loud rather than
+                        // splitting at a possibly-wrong axis.
                         let split = match by_name {
                             Some(s) => s,
                             None => match recover_anchor_axis(
@@ -3711,12 +3710,14 @@ struct LowerCtx {
     /// index is the anchor's offset in the *formal parameter*, so an intervening
     /// axis-reorder (`permute`/transpose) between that parameter and the use site
     /// can leave the index valid-but-stale (in range, wrong axis). The recovery
-    /// re-validates the recorded extent against the monomorphized operand instead
-    /// of trusting the bare index, and fails LOUD when it cannot be confirmed —
-    /// never silently splits at a possibly-wrong axis. This is a *position*
-    /// recovery, never an extent guess; an ambiguous name (one at different
-    /// positions/extents across formals) is excluded so the loud by-name failure
-    /// path still fires for genuinely unresolvable axes.
+    /// ([`recover_anchor_axis`]) does NOT trust the recorded index; it locates the
+    /// anchor purely by its recorded extent in the monomorphized operand, taking
+    /// the axis when that extent is unique and failing LOUD when it collides with
+    /// another axis (the square/equal-extent case, RT-1) — never silently splits
+    /// at a possibly-wrong axis. The extent is never *guessed*; an ambiguous name
+    /// (one at different positions/extents across formals) is excluded at
+    /// recording time so the loud by-name failure path still fires for genuinely
+    /// unresolvable axes.
     dim_axis_positions: HashMap<String, (usize, DimInfo)>,
     /// True only while lowering the body of an AD transform. Host-list
     /// combinator rewrites are an AD bridge, not the general C/backend
@@ -7745,15 +7746,12 @@ impl LowerCtx {
             // argument (`to_tensor([[...]])`), call-site monomorphization
             // bound the formal parameter name to a literal-dim node, so the
             // operand's dims are concrete `Lit(_)` and the named axis is gone.
-            // Recover the axis from the formal-parameter position recorded at
-            // the inline site (`dim_axis_positions`), re-validated against the
-            // operand's monomorphized extents (chelis#549). The recovery
-            // confirms the recorded position by its extent, or relocates the
-            // anchor when an intervening axis-reorder (`permute`) moved it to an
-            // unambiguous axis; an out-of-range/unrecorded name still fails
-            // loudly rather than defaulting to 0, and a reorder that left the
-            // axis ambiguous fails loud rather than reducing a possibly-wrong
-            // axis.
+            // Recover the axis by locating the anchor's recorded extent in the
+            // operand's monomorphized dims (chelis#549): take the axis when the
+            // extent is unique (relocating through any intervening `permute`); an
+            // unrecorded name still fails loudly rather than defaulting to 0, and
+            // an extent that collides with another axis (the square/equal-extent
+            // case) fails loud rather than reducing a possibly-wrong axis.
             if let Some(node) = self.dag.get(operand) {
                 let dims = &node.output_type.dims;
                 match recover_anchor_axis(dims, 0, dims.len(), &name, &self.dim_axis_positions) {
@@ -7806,13 +7804,12 @@ impl LowerCtx {
         }) {
             return idx;
         }
-        // Issue #388 (expand twin): recover the anchor position from the
-        // formal-parameter index recorded at the inline site when a
+        // Issue #388 (expand twin): recover the anchor position when a
         // literal-shaped operand erased the named anchor from its dims. Same
-        // soundness argument as `resolve_reduce_axis` (chelis#549): the recorded
-        // position is re-validated against the operand's monomorphized extents,
-        // relocated when an axis-reorder moved the anchor to an unambiguous axis,
-        // and fails loud rather than inserting at a stale/ambiguous axis.
+        // soundness argument as `resolve_reduce_axis` (chelis#549): the anchor is
+        // located by its recorded extent (not the stale recorded index), taken
+        // when unique and failed loud when its extent collides with another axis
+        // (the square/equal-extent case), never inserting at a possibly-wrong axis.
         if let Some(node) = self.dag.get(operand) {
             let dims = &node.output_type.dims;
             match recover_anchor_axis(dims, 0, dims.len(), anchor, &self.dim_axis_positions) {
@@ -10954,8 +10951,8 @@ mod tests {
         // Monomorphized actual: seq erased to a concrete Lit at index 1.
         let actual = vec![DimInfo::Lit(2), DimInfo::Lit(3)];
 
-        // chelis#549: the recorded position is paired with the anchor's extent;
-        // the fast path confirms `seq -> 1` because `actual[1] == Lit(3)`.
+        // chelis#549: the anchor is located by its recorded extent `Lit(3)`,
+        // which is unique in the actual, so it resolves to index 1.
         let positions = HashMap::from([("seq".to_string(), (1usize, DimInfo::Lit(3)))]);
         let bindings = extract_rank_var_bindings(&formal, &actual, &positions);
         assert_eq!(
@@ -11063,12 +11060,13 @@ mod tests {
         );
     }
 
-    /// chelis#549 unit coverage of [`recover_anchor_axis`] directly: the fast
-    /// path, the unique-extent reorder relocation, the ambiguous-reorder loud
-    /// signal, and the unrecorded fall-through.
+    /// chelis#549 unit coverage of [`recover_anchor_axis`] directly: the
+    /// unique-extent resolution (with and without a reorder), the
+    /// equal-extent/square ambiguity loud signal (RT-1), and the unrecorded
+    /// fall-through. The recorded *index* is never trusted — only the extent.
     #[test]
-    fn recover_anchor_axis_covers_fast_unique_ambiguous_and_unrecorded() {
-        // Fast path: recorded position still carries the recorded extent.
+    fn recover_anchor_axis_unique_resolves_ambiguous_and_unrecorded_fail_closed() {
+        // Unique extent at the recorded position (no reorder): resolves there.
         let dims = vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)];
         let positions = HashMap::from([("seq".to_string(), (1usize, DimInfo::Lit(3)))]);
         assert!(matches!(
@@ -11077,18 +11075,28 @@ mod tests {
         ));
 
         // Unique reorder: recorded index 1 is stale (holds Lit(9)); the extent
-        // Lit(3) appears uniquely at index 2 -> relocate to 2.
+        // Lit(3) appears uniquely at index 2 -> relocate to 2 (the recorded
+        // index is irrelevant).
         let reordered = vec![DimInfo::Lit(2), DimInfo::Lit(9), DimInfo::Lit(3)];
         assert!(matches!(
             recover_anchor_axis(&reordered, 0, reordered.len(), "seq", &positions),
             AnchorRecovery::Axis(2)
         ));
 
-        // Ambiguous reorder: extent Lit(3) appears at indices 0 and 2, recorded
-        // index 1 holds Lit(9) -> cannot disambiguate -> loud.
+        // Ambiguous reorder: extent Lit(3) appears at indices 0 and 2 -> cannot
+        // disambiguate by value -> loud.
         let ambiguous = vec![DimInfo::Lit(3), DimInfo::Lit(9), DimInfo::Lit(3)];
         assert!(matches!(
             recover_anchor_axis(&ambiguous, 0, ambiguous.len(), "seq", &positions),
+            AnchorRecovery::AmbiguousAfterReorder
+        ));
+
+        // RT-1 square/equal-extent case: the recorded position (1) carries the
+        // recorded extent, but so does axis 0, so a stale position would be
+        // "confirmed" vacuously. Must be reported ambiguous, NOT Axis(1).
+        let square = vec![DimInfo::Lit(3), DimInfo::Lit(3)];
+        assert!(matches!(
+            recover_anchor_axis(&square, 0, square.len(), "seq", &positions),
             AnchorRecovery::AmbiguousAfterReorder
         ));
 
