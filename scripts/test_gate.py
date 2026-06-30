@@ -481,7 +481,12 @@ class SmtCiSplitTests(unittest.TestCase):
             full_inputs,
             "required smt smoke and full-prove lane must share rust-cache inputs",
         )
-        self.assertEqual(smoke_inputs, {"shared-key": "smt-smt-build"})
+        # cache-on-failure persists a warm workspace cache even when a later
+        # step fails, so a slow cold run is not re-paid next attempt (#583).
+        self.assertEqual(
+            smoke_inputs,
+            {"shared-key": "smt-smt-build", "cache-on-failure": "true"},
+        )
 
 
 def _parse_job_attrs() -> dict[str, dict[str, str]]:

@@ -74,6 +74,42 @@ across the smoke and full-prove jobs. The split removes the full proof corpus
 from the required context; it must not make the optional lane cold-build cvc5
 before reaching its proof steps.
 
+### Stable-key cvc5 cache (chelis#583)
+
+`Swatinem/rust-cache` keys its `target/` cache on `Cargo.lock`, so a PR that
+bumps the lockfile for an UNRELATED reason blows the cache and forces a fresh
+~30-minute from-source cvc5 build. To decouple cvc5 from lockfile churn, every
+SMT lane (the required `smt-build`, the `smt-build-glibc231` and
+`smt-build-darwin-arm64` prove-in-CI lanes, and `smt-full-prove.yml`) layers a
+dedicated cvc5 cache, driven by `scripts/ci_cvc5_cache.py`, in front of the
+rust-cache restore:
+
+1. **`key`** computes a STABLE cache key — `cvc5-prebuilt-<namespace>-cvc5sys
+   <version>-rustc<version>-<schema>` — that depends on the pinned `cvc5-sys`
+   crate version (which moves with the bundled cvc5 release), the os/arch
+   namespace (`linux-x86_64`, `linux-glibc231`, `darwin-arm64`), and the rustc
+   version, but NOT on `Cargo.lock`.
+2. **`actions/cache/restore`** restores the prebuilt artifacts to a dir OUTSIDE
+   `target/` (`~/.cache/chelis-cvc5/<namespace>`), so the cvc5 cache never
+   contends with rust-cache's `target/` domain.
+3. **`activate`** exports `CVC5_DIR` only when the restored cache is complete.
+   `cvc5-sys`'s build script then sees `build/src/libcvc5.a` already present and
+   LINKS the prebuilt static lib instead of running CMake/make — the same
+   prebuilt-link path the `z3` feature uses (`docs/local_z3_environment.md`).
+4. After a cold (from-source) build, **`harvest`** copies the cvc5 link/bindgen
+   inputs into the cache dir and writes a completeness sentinel; a dedicated
+   **`actions/cache/save`** persists them only when the harvest is complete.
+
+This is an optimization, never a correctness risk: `activate` links the cache
+only when it is present AND sentinel-complete, so a cold, partial, or
+incomplete cache simply falls back to the normal from-source build (worst case
+is "no speedup", never a broken build). The lanes also set
+`cache-on-failure: true` on the rust-cache step so a slow cold run still warms
+the workspace cache. Bump `CACHE_SCHEMA` in `scripts/ci_cvc5_cache.py` if the
+harvested artifact set ever changes shape (it invalidates every namespace's
+cvc5 cache). `scripts/test_ci_cvc5_cache.py` covers the key, harvest, and
+activate logic that cannot be exercised in CI without a real ~30m cvc5 build.
+
 Two companion prove-in-CI lanes, `smt-build-glibc231` (a `debian:11`
 container) and `smt-build-darwin-arm64` (`macos-latest`), build
 `chelis-cli --features smt` on the other two release targets and run
