@@ -3,7 +3,8 @@
 //! dependencies (the class-(c) dependency in
 //! `spec/design/shell_repo_contract.md`).
 //!
-//! Layout, under `~/.local/share/chelis-src/` (override `$CHELIS_SRC_HOME`):
+//! Layout, under `~/.chelis/src/` (override `$CHELIS_SRC_HOME`, or
+//! `$CHELIS_HOME/src` under the shared chelis home):
 //!
 //! ```text
 //! mirror.git/   bare mirror of canonical Chelis-Lang/chelis (all refs/tags)
@@ -106,16 +107,36 @@ pub struct SyncOutcome {
     pub commit: String,
 }
 
-/// Resolve the default store root: `$CHELIS_SRC_HOME`, else
-/// `~/.local/share/chelis-src`. Parallels `registry_root` for the reef
-/// registry. The store *operations* take an explicit root; this is only
-/// the production default the CLI passes.
+/// Resolve the default source-crate store root under the consolidated
+/// chelis home: `$CHELIS_SRC_HOME` (explicit override, back-compat), else
+/// `$CHELIS_HOME/src`, else `~/.chelis/src`. The `~/.chelis/` home is
+/// shared with the reef registry (`$CHELIS_REEF_HOME`/`~/.chelis/reef`),
+/// the toolchain store, and the binary-artifact `bin/` dir, so all chelis
+/// state lives under one root. The store *operations* take an explicit
+/// root; this is only the production default the CLI passes.
 pub fn default_store_root() -> Result<PathBuf, ChelisSrcError> {
-    if let Some(p) = std::env::var_os("CHELIS_SRC_HOME") {
+    resolve_store_root(
+        std::env::var_os("CHELIS_SRC_HOME"),
+        std::env::var_os("CHELIS_HOME"),
+        std::env::var_os("HOME"),
+    )
+}
+
+/// Pure resolution of the store root from its three env inputs, so the
+/// precedence is unit-testable without mutating process-global env.
+fn resolve_store_root(
+    src_home: Option<std::ffi::OsString>,
+    chelis_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Result<PathBuf, ChelisSrcError> {
+    if let Some(p) = src_home {
         return Ok(PathBuf::from(p));
     }
-    let home = std::env::var_os("HOME").ok_or(ChelisSrcError::NoStoreRoot)?;
-    Ok(PathBuf::from(home).join(".local/share/chelis-src"))
+    if let Some(h) = chelis_home {
+        return Ok(PathBuf::from(h).join("src"));
+    }
+    let home = home.ok_or(ChelisSrcError::NoStoreRoot)?;
+    Ok(PathBuf::from(home).join(".chelis/src"))
 }
 
 /// Build the `git -c http.extraheader=...` prefix that authenticates
@@ -753,5 +774,32 @@ version = "1.0.0"
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn store_root_precedence_honors_overrides_then_consolidated_home() {
+        use std::ffi::OsString;
+        let os = |s: &str| Some(OsString::from(s));
+
+        // 1. $CHELIS_SRC_HOME wins outright (explicit per-store override).
+        assert_eq!(
+            resolve_store_root(os("/explicit/src"), os("/home"), os("/u")).unwrap(),
+            PathBuf::from("/explicit/src")
+        );
+        // 2. Else $CHELIS_HOME/src (the consolidated chelis home).
+        assert_eq!(
+            resolve_store_root(None, os("/custom/.chelis"), os("/u")).unwrap(),
+            PathBuf::from("/custom/.chelis/src")
+        );
+        // 3. Else ~/.chelis/src.
+        assert_eq!(
+            resolve_store_root(None, None, os("/home/dev")).unwrap(),
+            PathBuf::from("/home/dev/.chelis/src")
+        );
+        // 4. No HOME at all is a loud error, not a silent cwd-relative path.
+        assert!(matches!(
+            resolve_store_root(None, None, None),
+            Err(ChelisSrcError::NoStoreRoot)
+        ));
     }
 }

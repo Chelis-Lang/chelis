@@ -20,7 +20,7 @@ global default the last install repoints.
 |---|---|---|---|---|
 | (a) Toolchain binary | the `chelis` CLI | `~/.local/share/chelis/<ver>/` | pin-resolving PATH launcher (→ `chelisup`, chelis#164) | solved (contract §2) |
 | (b) chelis-std | the std reef package | compiler-bundled, or `~/.chelis/reef/packages/.../<ver>/` | reef registry | solved |
-| (c) Source crates | `chelis-ir` / `chelis-types` / … as Cargo path deps | `~/.local/share/chelis-src/<ver>/` | `../chelis` symlink → version-keyed worktree | **this doc** |
+| (c) Source crates | `chelis-ir` / `chelis-types` / … as Cargo path deps | `~/.chelis/src/<ver>/` | `../chelis` symlink → version-keyed worktree | **this doc** |
 
 Classes (a) and (b) are location-independent and already coexist per-repo.
 Class (c) is the gap this doc closes, and it applies **only** to a shell that
@@ -64,14 +64,19 @@ One store, shared across all shells (like the toolchain store); each shell's
 `../chelis` slot points at the worktree matching *its own* pin:
 
 ```
-~/.local/share/chelis-src/
+~/.chelis/src/
   mirror.git/    bare mirror of Chelis-Lang/chelis (canonical refs/tags)
   0.8.0/    → git worktree @ <0.8.0 release commit>    (hydronnx)
   0.7.21/   → git worktree @ <0.7.21 release commit>   (calcify)
 
-<shell>/../chelis → symlink → ~/.local/share/chelis-src/<that shell's pin>
+<shell>/../chelis → symlink → ~/.chelis/src/<that shell's pin>
 ~/chelis-dev/     the developer's mutable dev clone, OUT of every sibling slot
 ```
+
+The store lives under the shared `~/.chelis/` home (alongside the reef
+registry at `~/.chelis/reef/` and, once chelisup ships, the toolchains at
+`~/.chelis/toolchains/`). Override with `$CHELIS_SRC_HOME`, or `$CHELIS_HOME`
+for the whole home.
 
 git worktrees share one object store, so each pin is a cheap checkout and a
 pin bump is "add a `<ver>/` worktree, re-point the slot." Cargo resolves
