@@ -4,6 +4,66 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.12.1] — 2026-06-30
+
+### Added
+
+- **reef source-crate dependency manager (`reef src` + `reef doctor`)
+  (#571).** Class-(c) source-crate sourcing so shells that link chelis
+  compiler crates (`chelis-ir`, `chelis-types`) as Cargo path deps can
+  build side by side on different chelis pins without colliding on a
+  single `../chelis` sibling clone. Adds the manifest `[chelis-src]`
+  section and a version-keyed source store.
+- **chelisup rustup-style toolchain installer + shim (#164, #576).** New
+  `crates/chelisup` member: a single binary that, via `argv[0]`, runs the
+  installer CLI when invoked as `chelisup` and the fast pin-resolving
+  shim when invoked as `chelis`. Store layout lives under `$CHELIS_HOME`
+  (default `~/.chelis/`): `bin/`, `toolchains/<ver>/`, and a recorded
+  `default`.
+- **reef first-class binary artifact distribution (#468, #577).** Per-
+  platform, SHA-pinned binary release artifacts: declared once in a
+  manifest `[artifacts]` section, recorded in `reef.lock`, and installed
+  by `reef install --from-lockfile`, which downloads, fail-closed
+  SHA-256-verifies, extracts, and places a runnable binary at
+  `$CHELIS_HOME/bin/<name>`.
+
+### Fixed
+
+- **`chelis prove` linked-program guard on the property path (#581).**
+  `chelis prove` on a reef package carrying a `@property` rejected the
+  linker's own internal-mangled names (`pkg__<pkg>__<Module>__<def>`)
+  with `ReservedLinkerName`: the property path
+  (`run_surf_linked_properties_shared`) never installed the
+  linked-program provenance guard that the obligation path
+  (`check_linked_decls`) already installs, so `detect_forged_linker_names`
+  saw `linked_program() == false` and rejected the linker's own output.
+  Install `install_linked_program_guard()` on the linked property path.
+- **Re-synced the committed reef.lock SHA-256s with the embedded bundle
+  (#585).** `packages/chelis-std/reef.lock` and the `release_pipe_stage`
+  fixture lock carried stale `archive_sha256`/`shell_sha256` after #559
+  regenerated the embedded chelis-std bundle without re-committing the
+  locks. The release bump regenerates both locks, restoring
+  `bundled_chelis_std_lock_hashes_match_embedded_artifacts` to green.
+
+### Docs
+
+- **Packaging & install north-star roadmap (#574).** Adds
+  `spec/design/chelis_packaging_and_install.md` (the three-layer install
+  model, the lockfile-ownership rule, store consolidation under
+  `~/.chelis/`, the chelisup #164 spec, and the reef setup orchestrator)
+  and `reef_distribution.md` Item 11 (binary distribution #468), framing
+  source crates (#571), binary distribution (#468), and chelisup (#164)
+  as one coherent install tool plus package manager.
+
+### Internal
+
+- Raise the SMT Feature Build (Linux) timeout 20->40m so cold PR-branch
+  cvc5 builds finish and warm the cache instead of being cancelled at the
+  20m cap (#582).
+- Split the full prove lane from the required SMT smoke job and share its
+  warm cache namespace (#560).
+- Add a live Beacon shim round-trip gate (#561).
+
 ## [0.12.0] — 2026-06-29
 
 ### Changed
