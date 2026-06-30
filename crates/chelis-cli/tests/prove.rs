@@ -9,7 +9,11 @@ fn write_prop(source: &str) -> tempfile::TempDir {
     dir
 }
 
-#[cfg(feature = "smt")]
+// `chelis-prove` (not `smt`): the reef-package property regression below runs
+// at the Tier-C fuzz path and needs no cvc5, so it must compile whenever the
+// shared property runner is present. `smt` always enables `chelis-prove`, so
+// the existing `#[cfg(feature = "smt")]` reef tests keep this helper too.
+#[cfg(feature = "chelis-prove")]
 fn write_file(path: &std::path::Path, contents: &str) {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).expect("create parent");
@@ -24,6 +28,18 @@ fn property_records(output: &[u8]) -> Vec<Value> {
         .map(|line| serde_json::from_str::<Value>(line).expect("json line"))
         .filter(|record| record.get("kind").and_then(Value::as_str) == Some("property"))
         .collect()
+}
+
+/// Parse the single `{kind:"summary"}` NDJSON record from a prove run.
+/// Only the `chelis-prove` reef-package regression below consumes it.
+#[cfg(feature = "chelis-prove")]
+fn property_summary(output: &[u8]) -> Value {
+    String::from_utf8_lossy(output)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).expect("json line"))
+        .find(|record| record.get("kind").and_then(Value::as_str) == Some("summary"))
+        .expect("prove emits a summary record")
 }
 
 #[test]
@@ -225,6 +241,151 @@ import Mylib.Math (double)
     assert_eq!(props[0]["status"], "passed");
     assert_eq!(props[0]["proof_tier"], "smt");
     assert_eq!(props[0]["arith_model"], "real");
+}
+
+// chelis#580: proving a reef PACKAGE that carries a `@property` must not
+// reject the linker's own internal-mangled names. The prove flow links the
+// package (rewriting every def + the property to the `pkg__<pkg>__<Module>__`
+// internal-name format), then re-checks the linked decls on two sibling
+// paths. The obligation path installs the linked-program provenance guard;
+// the property path used to omit it, so the checker's forged-linker-name
+// detector fired `ReservedLinkerName` against names the linker itself
+// produced. This is the Tier-C fuzz path (a tensor property does not lower to
+// SMT), so it needs no cvc5 -- gate on `chelis-prove`, not `smt`.
+//
+// Run: `cargo nextest run -p chelis-cli --features chelis-prove
+//   --test prove reef_package_property_proves_clean`
+#[cfg(feature = "chelis-prove")]
+#[test]
+fn reef_package_property_proves_clean() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path().join("demo");
+    write_file(
+        &root.join("reef.toml"),
+        &format!(
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+compiler = "={}"
+module_prefix = "Demo"
+
+[dependencies]
+"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    let entry = root.join("src/clf.ch");
+    write_file(
+        &entry,
+        r#"module Demo.Clf
+export (forward)
+
+def w() = reshape(to_tensor([cast(1.0, f32), cast(2.0, f32)]), [cast(1, int64), cast(2, int64)])
+
+def forward(x: tensor[1, 2, f32]) = mul(x, w())
+
+@property scaled forall(x: tensor[1, 2, f32]):
+  {
+    y = forward(x)
+    total = tensor_to_scalar(sum(sum(y, 1), 0))
+    _ = drop(x)
+    (total >= -1000000.0)
+  }
+  with samples = 8
+  with seed = 0
+"#,
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            entry.to_str().unwrap(),
+            "--json",
+            "--samples",
+            "8",
+            "--seed",
+            "0",
+        ])
+        .output()
+        .expect("run prove");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // The pre-fix failure surfaced the linker's own names through the
+    // `ReservedLinkerName` rule; assert that exact text never appears on
+    // either stream so a re-regression is caught even if the summary shape
+    // shifts.
+    assert!(
+        !stdout.contains("reserved internal-name format")
+            && !stderr.contains("reserved internal-name format"),
+        "the linked property path must install the linked-program guard \
+         (chelis#580)\nstdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        output.status.success(),
+        "reef-package property must prove clean (exit 0)\nstdout={stdout}\nstderr={stderr}"
+    );
+
+    let props = property_records(&output.stdout);
+    assert_eq!(props.len(), 1, "exactly one property record: {props:?}");
+    assert_eq!(props[0]["name"], "scaled");
+    assert_eq!(props[0]["status"], "passed");
+    assert_eq!(props[0]["proof_tier"], "fuzz");
+    assert_eq!(props[0]["samples"], 8);
+
+    let summary = property_summary(&output.stdout);
+    assert_eq!(summary["passed"], 1, "summary: {summary}");
+    assert_eq!(summary["failed"], 0, "summary: {summary}");
+    assert_eq!(summary["errors"], 0, "summary: {summary}");
+}
+
+// chelis#580 negative parity: the linked-program guard is installed ONLY on
+// the reef-linked property path. A BARE `.ch` (no reef.toml, so no linking)
+// that hand-authors a name in the linker's reserved internal format must
+// still be rejected as `ReservedLinkerName` -- the property path must not
+// leak the guard to non-linked ingestion. Guards against an over-broad fix
+// that installs the guard inside the shared engine instead of at the CLI
+// linked-package boundary.
+#[cfg(feature = "chelis-prove")]
+#[test]
+fn prove_bare_file_still_rejects_forged_linker_name() {
+    let dir = write_prop(
+        r#"def pkg__demo__Demo__Clf__sneaky() -> i64 = 7
+
+@property forged forall(x: int32):
+  {
+    _ = pkg__demo__Demo__Clf__sneaky()
+    x == x
+  }
+  with samples = 4
+  with seed = 0
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--samples",
+            "4",
+            "--seed",
+            "0",
+        ])
+        .output()
+        .expect("run prove");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "a bare file forging the linker name format must NOT prove clean\nstdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stdout.contains("reserved internal-name format")
+            || stderr.contains("reserved internal-name format"),
+        "rejection must still cite the reserved-linker-name rule\nstdout={stdout}\nstderr={stderr}"
+    );
 }
 
 // chelis#422: a top-level call-form comparison predicate
