@@ -825,6 +825,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "chelisup"
+version = "0.12.0"
+dependencies = [
+ "clap",
+ "flate2",
+ "reqwest",
+ "serde_json",
+ "tar",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "clang-sys"
 version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

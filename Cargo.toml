@@ -25,6 +25,7 @@ members = [
     "crates/chelis-cove",
     "crates/chelis-cli",
     "crates/chelis-e2e",
+    "crates/chelisup",
     "tree-sitter-chelis",
 ]
 
