@@ -2402,6 +2402,21 @@ pub fn install_binary_artifact(
     platform: &str,
     chelis_home: &Path,
 ) -> Result<InstalledBinary, GitHubFetchError> {
+    // Defense-in-depth: the lockfile (not the validated manifest) is the
+    // source of `name` on the install path, so re-check it here before any
+    // network or filesystem access. An unsafe name (`..`, absolute, path
+    // separator, control char) would otherwise let `Path::join` escape
+    // `<chelis_home>/bin/` and write a binary anywhere on disk.
+    if !is_safe_artifact_name(name) {
+        return Err(GitHubFetchError::Validation {
+            message: format!(
+                "refusing to place artifact with unsafe name `{name}`: \
+                 a binary name must be a bare file name (no path separators, \
+                 not `.`/`..`, no control characters)"
+            ),
+        });
+    }
+
     let token = resolve_github_token()?;
     let api_base = github_api_base_url();
 
@@ -3939,7 +3954,15 @@ pub fn artifact_bin_dir() -> Result<PathBuf, String> {
 /// Item 11 (chelis#468): resolve the on-disk path a binary artifact would
 /// occupy, i.e. `<chelis_home>/bin/<name>`. Backs `chelis reef which`.
 /// Does not check existence — callers decide whether absence is an error.
+/// Rejects unsafe names (`.`/`..`, path separators, control characters) so
+/// `reef which` cannot be coaxed into resolving a path outside the store.
 pub fn artifact_install_path(name: &str) -> Result<PathBuf, String> {
+    if !is_safe_artifact_name(name) {
+        return Err(format!(
+            "unsafe artifact name `{name}`: a binary name must be a bare file name \
+             (no path separators, not `.`/`..`, no control characters)"
+        ));
+    }
     Ok(artifact_bin_dir()?.join(name))
 }
 
@@ -4360,8 +4383,11 @@ fn validate_manifest(manifest: &ReefManifest) -> Result<(), String> {
 /// - every platform slug must be non-empty, its `asset` non-empty, and
 ///   its `sha256` a 64-character lowercase hex string.
 fn validate_artifact(name: &str, artifact: &ArtifactSpec) -> Result<(), String> {
-    if name.trim().is_empty() {
-        return Err("artifact name must not be empty".to_string());
+    if !is_safe_artifact_name(name) {
+        return Err(format!(
+            "artifact `{name}`: name must be a bare binary name (no path separators, \
+             not `.`/`..`, no control characters)"
+        ));
     }
     if artifact.repo.trim().is_empty() {
         return Err(format!("artifact `{name}`: repo must not be empty"));
@@ -4410,6 +4436,28 @@ fn is_lowercase_hex_sha256(s: &str) -> bool {
     s.len() == 64
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Item 11 (chelis#468) security gate: true iff `name` is safe to use as
+/// the final path component of `<chelis_home>/bin/<name>`. A binary
+/// artifact's logical name comes from a manifest `[artifacts.<name>]` key
+/// (resolved across the WHOLE dependency graph in `build_lockfile`) and
+/// from a `reef.lock` entry on install, so a malicious or typo'd
+/// transitive manifest could otherwise smuggle a `..`-bearing or absolute
+/// name into `Path::join` and escape the store. Modeled on chelisup's
+/// `is_safe_path_component`: reject empty, `.`, `..`, and any name
+/// carrying a path separator (`/`, `\`), a NUL, or any other control
+/// character. Enforced at parse time (`validate_artifact`) AND at the
+/// placement boundary (`install_binary_artifact`, `artifact_install_path`)
+/// because the install path reads the name from the lockfile, not the
+/// validated manifest.
+fn is_safe_artifact_name(name: &str) -> bool {
+    if name.is_empty() || name == "." || name == ".." {
+        return false;
+    }
+    !name
+        .chars()
+        .any(|c| c == '/' || c == '\\' || c == '\0' || c.is_control())
 }
 
 fn resolve_package_graph(root: &Path, options: LoadOptions) -> Result<PackageGraph, String> {
@@ -7339,7 +7387,7 @@ platforms.darwin-arm64 = {{ asset = "octant-translator-darwin-arm64.tar.gz", sha
                     "v1",
                     vec![("linux-x86_64", platform("a", &good_sha))],
                 ),
-                "name must not be empty",
+                "name must be a bare binary name",
             ),
             (
                 "x",
@@ -7405,6 +7453,85 @@ platforms.darwin-arm64 = {{ asset = "octant-translator-darwin-arm64.tar.gz", sha
             )],
         );
         validate_artifact("octant-translator", &ok).expect("valid artifact must pass");
+    }
+
+    /// Security: an artifact name is a path component of
+    /// `<chelis_home>/bin/<name>`, so path-traversal and absolute names
+    /// must be rejected at the parse boundary (`validate_artifact`), at the
+    /// install placement boundary (`install_binary_artifact`), and at the
+    /// `which` resolution boundary (`artifact_install_path`) — none of
+    /// which may touch the filesystem on rejection.
+    #[test]
+    fn artifact_validation_rejects_unsafe_names() {
+        let good_sha = "0".repeat(64);
+        let mut platforms = BTreeMap::new();
+        platforms.insert(
+            "linux-x86_64".to_string(),
+            ArtifactPlatform {
+                asset: "tool-linux-x86_64.tar.gz".to_string(),
+                sha256: good_sha,
+            },
+        );
+        let spec = ArtifactSpec {
+            repo: "Chelis-Lang/octant".to_string(),
+            tag: "v0.4.2".to_string(),
+            platforms,
+        };
+        let unsafe_names = [
+            "../x",
+            "a/b",
+            "/etc/x",
+            "..",
+            ".",
+            "a\\b",
+            "evil\0name",
+            "../../etc/cron.d/evil",
+            "",
+            "ctrl\nname",
+        ];
+        for bad in unsafe_names {
+            // Parse boundary.
+            assert!(
+                validate_artifact(bad, &spec).is_err(),
+                "validate_artifact must reject unsafe name {bad:?}"
+            );
+            assert!(
+                !is_safe_artifact_name(bad),
+                "is_safe_artifact_name must reject {bad:?}"
+            );
+            // `which` resolution boundary: rejected, no path produced.
+            assert!(
+                artifact_install_path(bad).is_err(),
+                "artifact_install_path must reject unsafe name {bad:?}"
+            );
+            // Placement boundary: the safe-name guard is the first statement
+            // of `install_binary_artifact`, so it returns before any token
+            // read, network call, or filesystem write. Point at a home that
+            // must never be created to prove nothing was touched on disk.
+            let home = Path::new("/this/path/must/not/be/written");
+            let result = install_binary_artifact(
+                bad,
+                "Chelis-Lang",
+                "octant",
+                "v0.4.2",
+                "tool-linux-x86_64.tar.gz",
+                "0".repeat(64).as_str(),
+                "linux-x86_64",
+                home,
+            );
+            assert!(
+                matches!(result, Err(GitHubFetchError::Validation { .. })),
+                "install_binary_artifact must reject unsafe name {bad:?} with Validation, got {result:?}"
+            );
+            assert!(
+                !home.exists(),
+                "rejection of {bad:?} must not have created anything on disk"
+            );
+        }
+        // Positive control: a bare binary name is accepted by every gate.
+        assert!(is_safe_artifact_name("octant-translator"));
+        validate_artifact("octant-translator", &spec).expect("bare name must pass validation");
+        artifact_install_path("octant-translator").expect("bare name must resolve a path");
     }
 
     /// A `LockSource::Binary` lock entry round-trips through TOML with the
