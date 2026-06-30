@@ -381,6 +381,78 @@ either a GitHub release or a registry URL).
 
 ---
 
+### Item 11 — First-class binary distribution (chelis#468)
+
+**Status:** planned. Tracked by chelis#468; framed as Layer 1 of
+[`chelis_packaging_and_install.md`](chelis_packaging_and_install.md).
+
+Items 6-9 deliver and verify *source* packages (a `.tar.zst` archive plus a
+`.chb` shell). They cannot carry a **compiled binary**. Every binary-bearing
+component in the ecosystem — the toolchain, nautilus, shoals, and octant's
+translator — therefore distributes its binary out of band through a GitHub
+release tarball, and every consumer hand-rolls download-by-tag plus SHA
+verification (octant's `docs/src/consuming.md`; C Note's verify-in-Dockerfile
+step). reef does the source half; an informal channel does the binary half, and
+the integrity work reef would own is reimplemented per consumer. Item 11 folds
+that verb into the resolver and the lockfile.
+
+**Manifest.** A dedicated `[artifacts]` section — binaries are neither reef
+packages nor Cargo crates, so they get their own artifact-class section, the
+same shape chelis#571 established with `[chelis-src]`:
+
+```toml
+[artifacts.octant-translator]
+repo = "Chelis-Lang/octant"          # publisher; sensible default
+tag  = "v0.4.2"
+platforms.linux-x86_64 = { asset = "octant-translator-linux-x86_64.tar.gz", sha256 = "…" }
+platforms.darwin-arm64 = { asset = "octant-translator-darwin-arm64.tar.gz",  sha256 = "…" }
+```
+
+`linux-x86_64` is the minimum; additional platforms are additive. The
+publisher's release SHA is the source of truth — the consumer pins and verifies
+against it rather than transcribing a copy.
+
+**Install flow.** `chelis reef install` (and `reef setup`) resolves the **host
+platform** entry, downloads the asset through the existing GitHub REST path
+(Item 6's `install_from_github`), **SHA-256-verifies fail-closed** — a mismatch
+aborts before any placement — extracts, and places a runnable binary at
+`~/.chelis/bin/<name>`. A new `chelis reef which <artifact>` prints the resolved
+path so consumers point at it with no out-of-band knowledge.
+
+**Lockfile.** A new `LockSource::Binary { remote_origin, platform, asset,
+sha256 }` variant on `LockedDependency`. Per the lockfile-ownership rule
+([`chelis_packaging_and_install.md`](chelis_packaging_and_install.md) §3),
+binaries *belong* in `reef.lock`: reef fetches them, their integrity primitive
+is a content hash, and nothing else records them. Threads through
+`build_lockfile` and `install_from_lockfile`, so `--from-lockfile` re-fetches
+and re-verifies a binary exactly as it does a source package.
+
+**Reuse.** `install_validated_artifact_pair` (validation + placement); the
+shipped SHA-256 helpers; `install_from_github` (REST asset fetch);
+`try_github_token` (private-repo auth, added in chelis#571); the Item 9
+`remote_origin` lockfile pattern; the `cmd_reef_*` dispatch. The one genuinely
+new mechanism is host-platform / target-triple selection.
+
+**Acceptance:**
+
+- `reef.toml` expresses a per-platform, SHA-pinned binary artifact.
+- `reef install` on a supported platform downloads, SHA-verifies fail-closed,
+  and installs a runnable binary, with no consumer-side hand-rolled download or
+  SHA literal.
+- The binary dependency and its SHA are recorded in the lockfile.
+- A hybrid package (octant) declares both its source shell and its binary, and a
+  consumer obtains both through one dependency set.
+- octant's `consuming.md` workaround and C Note's download-and-verify Dockerfile
+  step retire in favor of the reef path.
+
+**Toolchain note.** The chelis toolchain itself is binary-bearing, but its
+installer of record is `chelisup` (chelis#164), not `reef install` — see
+[`chelis_packaging_and_install.md`](chelis_packaging_and_install.md) §5.6. Item
+11 may *describe* the toolchain as an `[artifacts]` entry for reproducibility,
+but does not install it.
+
+---
+
 ## Acceptance summary
 
 Per item:
@@ -393,10 +465,16 @@ Per item:
   manual install steps.
 - Item 9: a developer can re-create another developer's local
   registry state from the committed lockfile alone.
+- Item 11 (planned): a per-platform SHA-pinned binary is declared once,
+  downloaded + verified fail-closed, placed runnable, and lock-recorded;
+  a consumer obtains a hybrid package's source shell and binary through one
+  dependency set, retiring the out-of-band download-and-verify channel.
 
 With Items 6-9 shipped, a fresh dev environment's onboarding is
 `git clone <project> && export GITHUB_TOKEN=$(gh auth token) &&
-chelis reef build`. That is the experience.
+chelis reef build`. That is the experience. Item 11 extends it to binary
+dependencies; the full cross-class onboarding becomes `chelis reef setup`
+([`chelis_packaging_and_install.md`](chelis_packaging_and_install.md) §7).
 
 ---
 
