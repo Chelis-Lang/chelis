@@ -562,6 +562,62 @@ enum ReefCommand {
         /// Package root (defaults to `.`).
         path: Option<PathBuf>,
     },
+    /// Manage chelis compiler **source crates** (the class-(c) dependency)
+    /// for shells that link `chelis-ir` / `chelis-types` … as Cargo path
+    /// deps via a `[chelis-src]` section in `reef.toml`.
+    ///
+    /// Maintains a version-keyed source store under
+    /// `~/.local/share/chelis-src/` (a bare mirror of canonical
+    /// `Chelis-Lang/chelis` plus one git worktree per pinned commit) and
+    /// points this shell's `../chelis` slot at the worktree matching its own
+    /// pin — so several shells on different chelis versions build side by
+    /// side without colliding on a single sibling clone.
+    Src {
+        #[command(subcommand)]
+        command: ReefSrcCommand,
+    },
+    /// Report chelis dependency health for one or more shells across all
+    /// three classes (toolchain binary, chelis-std, source crates).
+    ///
+    /// Scans a root for shell repos (a directory with a `reef.toml` carrying
+    /// a `compiler =` pin) and, for each, reports whether the pinned
+    /// toolchain is installed, and — for crate-linking shells — whether the
+    /// source store and `../chelis` slot are synced to the pin, with the fix
+    /// for each gap. Read-only; it never installs.
+    Doctor {
+        /// Directory to scan (defaults to `.`): the root itself and each
+        /// immediate subdirectory carrying a `reef.toml` is reported.
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReefSrcCommand {
+    /// Sync the pinned source store and point this shell's `../chelis` slot
+    /// at it. Idempotent. Refuses (never deletes) a real dev clone in the
+    /// slot — relocate it out of the sibling directory first.
+    Sync {
+        /// Shell package root (defaults to `.`).
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+    /// Verify this shell's source crates have not drifted off the pin: the
+    /// store worktree is at the pinned commit, `../chelis` is the symlink
+    /// into it, and `Cargo.lock` records the pinned crate versions. Offline;
+    /// loud, actionable failure on drift. Intended for a shell's local gate.
+    Check {
+        /// Shell package root (defaults to `.`).
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+    /// Show the resolved source-store state for this shell (pin, store
+    /// worktree HEAD, slot target). Read-only and non-failing.
+    Status {
+        /// Shell package root (defaults to `.`).
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -2991,6 +3047,314 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
             let json = serde_json::to_string_pretty(&schema)
                 .map_err(|e| format!("serialize schema: {e}"))?;
             println!("{json}");
+        }
+        ReefCommand::Src { command } => cmd_reef_src(command)?,
+        ReefCommand::Doctor { root } => cmd_reef_doctor(root.as_deref())?,
+    }
+    Ok(())
+}
+
+/// Canonical remote for the source store, overridable by `CHELIS_SRC_REMOTE`
+/// (a test-injection seam paralleling `CHELIS_REEF_GITHUB_BASE_API`; also
+/// usable to point at a mirror). Production default is the canonical repo.
+fn chelis_src_remote() -> String {
+    std::env::var("CHELIS_SRC_REMOTE")
+        .unwrap_or_else(|_| chelis_reef::chelis_src::CANONICAL_REMOTE.to_string())
+}
+
+/// The resolved source-crate facts for one shell: where its `../chelis`
+/// slot is, the bare semver of its compiler pin, its `[chelis-src]` spec,
+/// the store root, and the store worktree path for its version.
+struct ShellSrcContext {
+    root: PathBuf,
+    slot: PathBuf,
+    version: String,
+    spec: chelis_reef::ChelisSrcSpec,
+    store_root: PathBuf,
+    worktree: PathBuf,
+}
+
+/// Resolve a shell root (defaulting to `.`) into its source-crate context,
+/// or a clear error if it carries no `[chelis-src]` section.
+fn resolve_shell_src_context(
+    path: Option<PathBuf>,
+) -> Result<ShellSrcContext, Box<dyn std::error::Error>> {
+    let root = path
+        .unwrap_or_else(|| PathBuf::from("."))
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve shell root: {e}"))?;
+    let manifest = chelis_reef::read_manifest_for_src(&root)?;
+    let spec = manifest.chelis_src.ok_or_else(|| {
+        format!(
+            "{} has no [chelis-src] section: `reef src` applies only to shells that link \
+             chelis source crates (chelis-ir/chelis-types) as Cargo path deps",
+            root.join("reef.toml").display()
+        )
+    })?;
+    // `compiler = "=X.Y.Z"` → bare `X.Y.Z`.
+    let version = manifest
+        .package
+        .compiler
+        .trim_start_matches('=')
+        .to_string();
+    // The committed `path = "../chelis/..."` resolves relative to the
+    // package root, so the slot is `<root>/../chelis` = `<parent>/chelis`.
+    let slot = root
+        .parent()
+        .ok_or("shell root has no parent directory for the ../chelis slot")?
+        .join("chelis");
+    let store_root = chelis_reef::chelis_src::default_store_root()?;
+    let worktree = store_root.join(&version);
+    Ok(ShellSrcContext {
+        root,
+        slot,
+        version,
+        spec,
+        store_root,
+        worktree,
+    })
+}
+
+fn cmd_reef_src(command: ReefSrcCommand) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        ReefSrcCommand::Sync { path } => {
+            let ctx = resolve_shell_src_context(path)?;
+            let token = chelis_reef::try_github_token();
+            let outcome = chelis_reef::chelis_src::sync(
+                &ctx.store_root,
+                &chelis_src_remote(),
+                token.as_deref(),
+                &ctx.version,
+                ctx.spec.pin_commit.as_deref(),
+            )?;
+            let wire = chelis_reef::chelis_src::wire_slot(&ctx.slot, &outcome.worktree)?;
+            println!("synced chelis source crates for pin {}", ctx.version);
+            println!("  commit:   {}", outcome.commit);
+            println!("  store:    {}", outcome.worktree.display());
+            match wire {
+                chelis_reef::chelis_src::WireOutcome::Created => {
+                    println!("  ../chelis: linked -> {}", outcome.worktree.display());
+                }
+                chelis_reef::chelis_src::WireOutcome::AlreadyWired => {
+                    println!(
+                        "  ../chelis: already linked -> {}",
+                        outcome.worktree.display()
+                    );
+                }
+                chelis_reef::chelis_src::WireOutcome::Repointed { previous } => {
+                    println!(
+                        "  ../chelis: repointed {} -> {}",
+                        previous.display(),
+                        outcome.worktree.display()
+                    );
+                }
+            }
+            println!("next: run `cargo build`; chelis crates resolve at the pin, no lock churn.");
+            Ok(())
+        }
+        ReefSrcCommand::Check { path } => {
+            let ctx = resolve_shell_src_context(path)?;
+            let problems = collect_src_drift(&ctx);
+            if problems.is_empty() {
+                println!(
+                    "ok: chelis source crates pinned at {} (commit {})",
+                    ctx.version,
+                    expected_commit(&ctx).unwrap_or_else(|| "unresolved".to_string())
+                );
+                Ok(())
+            } else {
+                for p in &problems {
+                    eprintln!("drift: {p}");
+                }
+                eprintln!("fix: run `chelis reef src sync` in {}", ctx.root.display());
+                Err(format!("{} source-crate drift issue(s)", problems.len()).into())
+            }
+        }
+        ReefSrcCommand::Status { path } => {
+            let ctx = resolve_shell_src_context(path)?;
+            println!("shell:     {}", ctx.root.display());
+            println!("pin:       {}", ctx.version);
+            println!(
+                "pin_commit: {}",
+                ctx.spec
+                    .pin_commit
+                    .as_deref()
+                    .unwrap_or("(from v<version> tag)")
+            );
+            if !ctx.spec.crates.is_empty() {
+                println!("crates:    {}", ctx.spec.crates.join(", "));
+            }
+            match chelis_reef::chelis_src::worktree_head(&ctx.store_root, &ctx.version)? {
+                Some(head) => println!("store:     {} @ {head}", ctx.worktree.display()),
+                None => println!("store:     (not synced; run `chelis reef src sync`)"),
+            }
+            match std::fs::read_link(&ctx.slot) {
+                Ok(target) => println!("../chelis: {} -> {}", ctx.slot.display(), target.display()),
+                Err(_) => println!("../chelis: {} (not a symlink)", ctx.slot.display()),
+            }
+            Ok(())
+        }
+    }
+}
+
+/// The commit the shell expects: its explicit `pin_commit`, else the commit
+/// `v<version>` resolves to in the local mirror (offline; `None` if neither
+/// is available).
+fn expected_commit(ctx: &ShellSrcContext) -> Option<String> {
+    if let Some(c) = &ctx.spec.pin_commit {
+        return Some(c.clone());
+    }
+    let mirror = ctx.store_root.join("mirror.git");
+    chelis_reef::chelis_src::resolve_commit(&mirror, &ctx.version, None).ok()
+}
+
+/// Collect every way this shell's source crates have drifted off the pin:
+/// store worktree missing/wrong commit, `../chelis` slot not the expected
+/// symlink, or `Cargo.lock` recording a non-pin crate version. Empty ⇒ clean.
+fn collect_src_drift(ctx: &ShellSrcContext) -> Vec<String> {
+    let mut problems = Vec::new();
+    let expected = expected_commit(ctx);
+
+    match chelis_reef::chelis_src::worktree_head(&ctx.store_root, &ctx.version) {
+        Ok(Some(head)) => {
+            if let Some(exp) = &expected
+                && &head != exp
+            {
+                problems.push(format!(
+                    "store worktree {} is at {head}, expected {exp}",
+                    ctx.worktree.display()
+                ));
+            }
+        }
+        Ok(None) => problems.push(format!(
+            "no source store worktree for {} ({})",
+            ctx.version,
+            ctx.worktree.display()
+        )),
+        Err(e) => problems.push(format!("reading store worktree: {e}")),
+    }
+
+    if let Err(e) = chelis_reef::chelis_src::check_slot(&ctx.slot, &ctx.worktree) {
+        problems.push(format!("{e}"));
+    }
+
+    if let Err(e) = check_cargo_lock_at_pin(&ctx.root, &ctx.spec.crates, &ctx.version) {
+        problems.push(e);
+    }
+
+    problems
+}
+
+/// Verify that every declared chelis source crate appears in `<root>/
+/// Cargo.lock` at the pinned version. This catches the `.cargo`-override
+/// failure mode (build correct, lockfile churned off the pin) and a stale
+/// sibling. No `Cargo.lock` or no declared crates ⇒ nothing to check.
+fn check_cargo_lock_at_pin(root: &Path, crates: &[String], version: &str) -> Result<(), String> {
+    if crates.is_empty() {
+        return Ok(());
+    }
+    let lock_path = root.join("Cargo.lock");
+    let text = match std::fs::read_to_string(&lock_path) {
+        Ok(t) => t,
+        Err(_) => return Ok(()), // no lockfile yet — nothing to assert
+    };
+    let mismatched = chelis_reef::chelis_src::cargo_lock_mismatches(&text, crates, version)
+        .map_err(|e| format!("{}: {e}", lock_path.display()))?;
+    if mismatched.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Cargo.lock records non-pin chelis crate versions (expected {version}): {} \
+             (the ../chelis slot is off the pin)",
+            mismatched.join(", ")
+        ))
+    }
+}
+
+fn cmd_reef_doctor(root: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
+    let scan_root = root
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve --root: {e}"))?;
+
+    // The scan root itself, then each immediate subdirectory, that carries a
+    // reef.toml with a `compiler =` pin.
+    let mut shells: Vec<PathBuf> = Vec::new();
+    if scan_root.join("reef.toml").is_file() {
+        shells.push(scan_root.clone());
+    }
+    if let Ok(entries) = std::fs::read_dir(&scan_root) {
+        let mut subs: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir() && p.join("reef.toml").is_file())
+            .collect();
+        subs.sort();
+        shells.extend(subs);
+    }
+
+    if shells.is_empty() {
+        println!(
+            "no shell repos (reef.toml) found under {}",
+            scan_root.display()
+        );
+        return Ok(());
+    }
+
+    let toolchain_store =
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/chelis"));
+
+    for shell in &shells {
+        let manifest = match chelis_reef::read_manifest_for_src(shell) {
+            Ok(m) => m,
+            Err(e) => {
+                println!("{}: unreadable reef.toml ({e})", shell.display());
+                continue;
+            }
+        };
+        let version = manifest
+            .package
+            .compiler
+            .trim_start_matches('=')
+            .to_string();
+        println!("{} (pin {})", manifest.package.name, version);
+
+        // Class (a): toolchain installed?
+        match &toolchain_store {
+            Some(store) if store.join(&version).is_dir() => {
+                println!(
+                    "  toolchain: ok ({}/{} installed)",
+                    store.display(),
+                    version
+                );
+            }
+            Some(store) => println!(
+                "  toolchain: MISSING; run the shell's install_chelis_toolchain.py ({} absent)",
+                store.join(&version).display()
+            ),
+            None => println!("  toolchain: unknown (HOME unset)"),
+        }
+
+        // Class (c): source crates (only for crate-linking shells).
+        match resolve_shell_src_context(Some(shell.clone())) {
+            Ok(ctx) => {
+                let problems = collect_src_drift(&ctx);
+                if problems.is_empty() {
+                    println!("  src:       ok (../chelis pinned at {})", ctx.version);
+                } else {
+                    for p in &problems {
+                        println!("  src:       DRIFT: {p}");
+                    }
+                    println!(
+                        "  src:       fix: `chelis reef src sync` in {}",
+                        ctx.root.display()
+                    );
+                }
+            }
+            Err(_) => {
+                println!("  src:       n/a (no [chelis-src]; pure-Chelis shell)");
+            }
         }
     }
     Ok(())

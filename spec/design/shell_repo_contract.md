@@ -99,6 +99,38 @@ School exemplar: [`school/AGENTS.md`](https://github.com/Chelis-Lang/school/blob
   dependency-bearing harness (parity oracles etc.) is its **own uv project**
   (`pyproject.toml` + `uv.lock`, `uv sync --frozen` in CI), keeping heavy
   deps out of the shell's import space. Never `.sh` scripts — Python only.
+- **Source crates (conditional MUST — only shells that link chelis crates
+  as Cargo path deps).** A shell whose `Cargo.toml` carries
+  `chelis-ir`/`chelis-types`/… as `path = "../chelis/..."` dependencies
+  consumes a third dependency class beyond the toolchain binary and
+  chelis-std: the chelis compiler **source crates**. A Cargo path dep
+  carries no version constraint, so the single `../chelis` sibling slot
+  cannot be every co-located shell's pinned build input at once — left
+  unmanaged, the crate-linking lane silently compiles against whatever
+  version sits at `../chelis`. Such shells MUST:
+  - declare a `[chelis-src]` section in `reef.toml` (`crates = [...]` plus a
+    `pin_commit` that mirrors the workflow `CHELIS_PIN_COMMIT` surface; the
+    offline pin-consistency check guards their agreement);
+  - source those crates from a **version-keyed, immutable store**
+    (`~/.local/share/chelis-src/<ver>/`, a git worktree of canonical
+    `Chelis-Lang/chelis` at the pinned release **commit** — never a local
+    tag), and point `../chelis` at the worktree matching the shell's own pin
+    via a **symlink**, exactly as the toolchain launcher resolves the binary
+    per `reef.toml`. `chelis reef src sync` provisions the store and the
+    symlink; it refuses (never deletes) a real dev clone in the slot;
+  - add a **local-only** drift guard (`chelis reef src check`) to the
+    Workspace Gate — it asserts the store worktree, the `../chelis` symlink,
+    and `Cargo.lock` are all at the pin. CI is exempt: it checks out the
+    pinned chelis sibling fresh at `CHELIS_PIN_COMMIT`.
+
+  The committed `Cargo.toml` keeps the relative `path = "../chelis/..."` (CI's
+  sibling checkout relies on it); the wiring is local-dev-only and must not
+  edit `Cargo.toml` or CI. `chelis reef doctor` reports this class alongside
+  the toolchain and chelis-std across a machine's shells. As with the
+  launcher this is the *behavior*, not a specific script; `chelisup`
+  (chelis#164) is the eventual version-independent home. Full design,
+  including the symlink-vs-`.cargo`-override rationale, lives in
+  [`chelis_source_crate_sourcing.md`](chelis_source_crate_sourcing.md).
 
 ## 3. Capability surface doc — `docs/CHELIS_SURFACE.md` (MUST)
 
@@ -305,6 +337,7 @@ both the bootstrap checklist and the conformance self-audit.
 | 15 | Parity harness (own uv project, checked-in goldens, oracle guards) | MUST if external oracles | §9 | `parity/` |
 | 16 | ≥2-config acceptance for new public surface | MUST | §9 | `spec/vision.md` amendments |
 | 17 | Scaffolding Drift Rule in AGENTS.md | MUST | §10 | `AGENTS.md` §Scaffolding Drift Rule |
+| 18 | `[chelis-src]` + `chelis reef src` store/symlink + local drift guard | MUST *if* the shell links chelis crates as Cargo path deps | §2 | hydronnx, calcify (the crate-linking shells; see appendix) |
 
 Bootstrap order for a brand-new shell: stamp from School → rename
 `module_prefix` + manifest + module tree → wire pins + CI guards (rows
@@ -332,3 +365,12 @@ nautilus and coral predate this contract; their gap rows are the standing
 retrofit work list. Retrofit tracking belongs in each shell's own issue
 tracker (per-shell umbrella issue mirroring this table), prioritized by the
 pin-freshness row — a 13–15-release-stale pin compounds every other gap.
+
+**Source-crate class (row 18), verified 2026-06-29.** Two shells link chelis
+crates as Cargo path deps and therefore trigger §2's conditional source-crate
+MUST: **hydronnx** (`=0.8.0`; `chelis-ir` + `chelis-types`) and **calcify**
+(`=0.7.21`; `chelis-types`). Both currently resolve `../chelis` to the same
+real monorepo working tree, so neither is yet conformant — adopting
+`[chelis-src]` + `chelis reef src` is their row-18 retrofit. (The earlier
+claim that hydronnx was the only crate-linking shell is superseded by calcify.)
+All other shells are pure-Chelis and never trigger row 18.
