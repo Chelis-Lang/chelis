@@ -157,20 +157,48 @@ a loud error naming `chelisup install <ver>`, never a silent fall-through to
 another version. This preserves the existing toolchain-store invariant (§2) and
 deliberately avoids rustup's surprise auto-download on `cd`.
 
-### 5.4 The cross-version caveat (a real wrinkle pin-routing creates)
+### 5.4 Cross-version management verbs — DECIDED
 
 Auto-routing to the `reef.toml` pin is right for *compiler* verbs
-(`build`/`check`/`test`/`eval`) but wrong for *cross-version management* verbs:
-`chelis reef src sync` inside a `=0.8.0`-pinned shell would launch 0.8.0, which
-does not have `reef src` at all — the exact case chelis#571 handles today via a
-parse-only manifest read plus an env override. The `+<ver>` argument makes this
-ergonomic (`chelis +latest reef src sync`).
+(`build`/`check`/`test`/`eval`) but creates one friction for *cross-version
+management* verbs (`reef src {sync,check,status}`, `reef doctor`, future `reef
+setup`): run inside a `=0.8.0`-pinned shell, `chelis reef src sync` routes to
+0.8.0, which has no `reef src` at all — the exact case chelis#571 handles today
+via a parse-only manifest read plus an env override.
 
-**Open question (flagged, not closed):** should the handful of cross-version
-management verbs bypass the pin — or, longer term, move into the
-version-independent `chelisup` — rather than being pin-routed `chelis`
-subcommands? §7 (the orchestrator) is where this is settled; until then
-`+<ver>` / `CHELIS_TOOLCHAIN` is the answer.
+**Decision (chelis#574 review, @jeffreyksmithjr):** these verbs **stay in
+chelis** — chelis is the primary tool and its surface is not split; chelisup
+stays minimal (install / route-shim / default only). The friction is handled at
+the UX layer, not by moving verbs, on two mechanics:
+
+1. **A pinned-toolchain hint on unrecognized subcommands.** When the shim routes
+   to a chelis that lacks the requested verb, chelis's unknown-subcommand error
+   names what it knows and points at the override — e.g. *"unrecognized
+   subcommand `src`. You are running chelis 0.8.0, pinned by ./reef.toml. If
+   `src` is a newer command, run it with a version that has it —
+   `chelis +<ver> reef src …` — or check `chelis --version`."* The hint is
+   **generic, not version-specific about the introducing version**, and that is a
+   deliberate limit: the version that emits the error is the one the shim routed
+   *to* (the old pin), and a version only errors on verbs *newer than itself* —
+   exactly the set it cannot know about. Naming *"`src` was added in 0.13"* would
+   need a verb→version table updated independently of the routed toolchain, i.e.
+   inside the shim, which would couple chelisup to chelis's command surface and
+   break "keep chelisup small." chelis names its own version + the pin source
+   (both knowable) and stops there.
+
+2. **Concrete `+<ver>` (or `CHELIS_TOOLCHAIN=<ver>`), never `+latest`.** chelis is
+   exact-pin by design (a floating pin is drift, §2; no semver ranges), so the
+   cross-pin override is a *concrete* version too: `chelis +0.13 reef src sync`.
+   `+latest` is a floating, ambiguous reference (newest *installed* vs newest
+   *available*) and is deliberately **not** a supported pattern; `chelisup
+   list-installed` tells you what you have.
+
+This **closes the prior open question** (move these verbs to chelisup? — no).
+Action items: a small chelis-cli change implements the unknown-subcommand hint
+(tracked with WS-C, where §5.4 is finalized); WS-B (chelisup) keeps `+<ver>`
+concrete-only and verifies its edge cases — a not-installed `+<ver>` already hits
+the loud `chelisup install` error; nested `chelis` re-invocations under a
+`+<ver>` route must not silently flip back to the pin.
 
 This shim **supersedes the per-shell launcher**: §2 of the contract already
 states shells satisfy the toolchain-resolution behavior via chelisup once it
@@ -232,9 +260,10 @@ command. `reef doctor` — already multi-class from chelis#571 — is extended t
 also report binary-artifact deps (#468) and the active toolchain/shim
 (chelisup), as the read-only health counterpart of `setup`.
 
-`reef setup` is also where the §5.4 open question is settled: it runs from a
-current chelis (it may itself be the thing that installs the pinned toolchain),
-so it is the natural home for deciding how cross-version management verbs route.
+`reef setup` is the canonical *current-chelis* entry point for the cross-version
+case §5.4 decided: it runs from a current chelis (it may itself install the
+pinned toolchain), so a clone-and-`setup` does the right thing without the user
+reaching for `+<ver>`. WS-C also lands §5.4's unknown-subcommand hint in chelis.
 
 ## 8. Roadmap & sequencing
 
