@@ -202,6 +202,37 @@ jobs:
       - name: Create uv-managed venv + wire libpython rpath
         run: python3 scripts/ci_setup_uv_python.py
 
+      # chelis#583: cvc5 (cvc5-sys) builds from source via CMake+make (~30m
+      # cold). The Swatinem/rust-cache below keys on Cargo.lock, so an
+      # UNRELATED dependency bump blows the workspace cache and re-pays the
+      # full cvc5 build. This dedicated cache stores the cvc5 build OUTSIDE
+      # target/ under a STABLE key (cvc5-sys version, which moves with the
+      # bundled cvc5 release, + os/arch namespace + rustc version -- NOT
+      # Cargo.lock), restored BEFORE rust-cache. On a warm hit, `activate`
+      # exports CVC5_DIR so cvc5-sys LINKS the prebuilt libcvc5.a and skips
+      # the from-source build (the z3-sys prebuilt-link precedent; see
+      # docs/local_z3_environment.md). Living outside target/, it never
+      # contends with rust-cache's target/ domain. Worst case is "no
+      # speedup", never a broken build: CVC5_DIR is set only when the cache
+      # is complete (verified by ci_cvc5_cache.py's sentinel), else the
+      # normal from-source path runs. See docs/smt_build_setup.md.
+      - name: Compute cvc5 cache key
+        id: cvc5key
+        run: python3 scripts/ci_cvc5_cache.py key --namespace linux-x86_64
+
+      - name: Restore prebuilt cvc5
+        id: cvc5restore
+        uses: actions/cache/restore@v4
+        # Best-effort: a cache-service hiccup must degrade to a from-source
+        # build, never fail this job (chelis#583).
+        continue-on-error: true
+        with:
+          path: ${{ steps.cvc5key.outputs.dir }}
+          key: ${{ steps.cvc5key.outputs.key }}
+
+      - name: Activate prebuilt cvc5 (link instead of rebuild)
+        run: python3 scripts/ci_cvc5_cache.py activate --dir "${{ steps.cvc5key.outputs.dir }}"
+
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
@@ -209,9 +240,30 @@ jobs:
           # smt-build cache namespace with the optional full-prove lane
           # while keeping the gate jobs lean.
           shared-key: smt-smt-build
+          # Persist a warm workspace cache even if a later step fails, so a
+          # slow cold run is not re-paid on the next attempt (chelis#583).
+          cache-on-failure: true
 
       - name: Build smt feature
         run: cargo build -p chelis-cli --features smt
+
+      # Cold runs only (no CVC5_DIR active): copy the freshly built cvc5
+      # artifacts into the stable-key cache dir so the next Cargo.lock churn
+      # links them instead of rebuilding. `complete=true` is emitted only
+      # after a fully-verified harvest; the save step below is gated on it,
+      # so a partial/failed build never poisons the stable-key cache.
+      - name: Harvest cvc5 build for cache
+        id: cvc5harvest
+        run: python3 scripts/ci_cvc5_cache.py harvest --dir "${{ steps.cvc5key.outputs.dir }}"
+
+      - name: Save prebuilt cvc5
+        if: always() && steps.cvc5harvest.outputs.complete == 'true'
+        uses: actions/cache/save@v4
+        # Best-effort: saving the cvc5 cache must never fail the build.
+        continue-on-error: true
+        with:
+          path: ${{ steps.cvc5key.outputs.dir }}
+          key: ${{ steps.cvc5key.outputs.key }}
 
       - name: Verify cvc5 discharge path (smt feature live)
         run: python3 .github/scripts/verify_release_smt.py ./target/debug/chelis
@@ -297,13 +349,50 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # chelis#583: dedicated stable-key cvc5 cache, in its OWN
+      # `linux-glibc231` namespace so the debian:11 (glibc 2.31) toolchain's
+      # libcvc5.a is never crossed with the ubuntu-latest one. On a warm hit
+      # cvc5-sys links the prebuilt lib (built in this same container, so the
+      # glibc-2.31 assertion below stays valid) instead of rebuilding from
+      # source after an unrelated Cargo.lock bump. See the smt-build job.
+      - name: Compute cvc5 cache key
+        id: cvc5key
+        run: python3 scripts/ci_cvc5_cache.py key --namespace linux-glibc231
+
+      - name: Restore prebuilt cvc5
+        id: cvc5restore
+        uses: actions/cache/restore@v4
+        # Best-effort: a cache-service hiccup must degrade to a from-source
+        # build, never fail this job (chelis#583).
+        continue-on-error: true
+        with:
+          path: ${{ steps.cvc5key.outputs.dir }}
+          key: ${{ steps.cvc5key.outputs.key }}
+
+      - name: Activate prebuilt cvc5 (link instead of rebuild)
+        run: python3 scripts/ci_cvc5_cache.py activate --dir "${{ steps.cvc5key.outputs.dir }}"
+
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
           key: smt-glibc231
+          cache-on-failure: true
 
       - name: Build chelis-cli (release, smt)
         run: cargo build --release -p chelis-cli --features smt
+
+      - name: Harvest cvc5 build for cache
+        id: cvc5harvest
+        run: python3 scripts/ci_cvc5_cache.py harvest --dir "${{ steps.cvc5key.outputs.dir }}"
+
+      - name: Save prebuilt cvc5
+        if: always() && steps.cvc5harvest.outputs.complete == 'true'
+        uses: actions/cache/save@v4
+        # Best-effort: saving the cvc5 cache must never fail the build.
+        continue-on-error: true
+        with:
+          path: ${{ steps.cvc5key.outputs.dir }}
+          key: ${{ steps.cvc5key.outputs.key }}
 
       - name: Assert no glibc requirement above 2.31
         run: |
@@ -341,26 +430,63 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       # ROBUSTNESS NOTE (darwin SMT warm-cache masks cold build): Swatinem's
-      # cache restores a previously-built cvc5 from target/, so on a warm
-      # cache this job can pass WITHOUT ever re-running the cold cvc5 source
-      # build (cmake configure + the C++ compile). A break that only manifests
-      # on a cold compile -- a cvc5/cvc5-sys bump, a new flag, a toolchain
-      # change on the macos-latest image -- would then stay green here until a
-      # cache-key change or a cache eviction forces the cold path. The
-      # release.yml darwin job uses a DIFFERENT cache key (no `key:` override),
-      # so it does not share this cache and is the authoritative cold-build
-      # proof for the SHIPPED artifact; treat a release-job cvc5 failure as
-      # real even when this per-PR lane is green. If a cvc5/toolchain bump is
-      # in the diff, force a cold build by bumping this `key:` (e.g.
-      # `smt-darwin-arm64-v2`) in the same PR so the cold path is proven
-      # before release relies on it.
+      # cache restores a previously-built cvc5 from target/, AND the
+      # chelis#583 cvc5 cache below restores a prebuilt libcvc5.a, so on a
+      # warm cache this job can pass WITHOUT ever re-running the cold cvc5
+      # source build (cmake configure + the C++ compile). A break that only
+      # manifests on a cold compile -- a cvc5/cvc5-sys bump, a new flag, a
+      # toolchain change on the macos-latest image -- would then stay green
+      # here until a cache-key change or a cache eviction forces the cold
+      # path. The release.yml darwin job uses a DIFFERENT cache key (no `key:`
+      # override) and no cvc5 cache, so it does not share either cache and is
+      # the authoritative cold-build proof for the SHIPPED artifact; treat a
+      # release-job cvc5 failure as real even when this per-PR lane is green.
+      # If a cvc5/toolchain bump is in the diff, force a cold build by bumping
+      # this `key:` (e.g. `smt-darwin-arm64-v2`) AND the cvc5 CACHE_SCHEMA in
+      # the same PR so both cold paths are proven before release relies on it.
+      #
+      # chelis#583: dedicated stable-key cvc5 cache in the `darwin-arm64`
+      # namespace, decoupled from Cargo.lock churn (the Swatinem cache keys on
+      # Cargo.lock, so an unrelated bump would otherwise re-pay the ~30m cvc5
+      # build). On a warm hit cvc5-sys links the prebuilt lib. See smt-build.
+      - name: Compute cvc5 cache key
+        id: cvc5key
+        run: python3 scripts/ci_cvc5_cache.py key --namespace darwin-arm64
+
+      - name: Restore prebuilt cvc5
+        id: cvc5restore
+        uses: actions/cache/restore@v4
+        # Best-effort: a cache-service hiccup must degrade to a from-source
+        # build, never fail this job (chelis#583).
+        continue-on-error: true
+        with:
+          path: ${{ steps.cvc5key.outputs.dir }}
+          key: ${{ steps.cvc5key.outputs.key }}
+
+      - name: Activate prebuilt cvc5 (link instead of rebuild)
+        run: python3 scripts/ci_cvc5_cache.py activate --dir "${{ steps.cvc5key.outputs.dir }}"
+
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
           key: smt-darwin-arm64
+          cache-on-failure: true
 
       - name: Build chelis-cli (release, smt)
         run: cargo build --release -p chelis-cli --features smt
+
+      - name: Harvest cvc5 build for cache
+        id: cvc5harvest
+        run: python3 scripts/ci_cvc5_cache.py harvest --dir "${{ steps.cvc5key.outputs.dir }}"
+
+      - name: Save prebuilt cvc5
+        if: always() && steps.cvc5harvest.outputs.complete == 'true'
+        uses: actions/cache/save@v4
+        # Best-effort: saving the cvc5 cache must never fail the build.
+        continue-on-error: true
+        with:
+          path: ${{ steps.cvc5key.outputs.dir }}
+          key: ${{ steps.cvc5key.outputs.key }}
 
       - name: Verify packaged binary architecture
         run: |
