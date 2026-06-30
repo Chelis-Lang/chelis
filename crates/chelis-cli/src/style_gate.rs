@@ -101,12 +101,26 @@ pub fn detect_lint_workspace_root(probe_dir: &Path) -> Result<PathBuf, String> {
 /// these fixtures would defeat their purpose. §3.5 explicitly notes
 /// the formatter rewrites colon to arrow, which is what the parser
 /// must still accept on input.
+///
+/// `crates/chelisup/bootstrap/chelisup.sh`: the single shell carve-out
+/// to the `no-shell-scripts` rule (§2.9). The chelisup bootstrap
+/// one-liner runs on a bare machine before any chelis, cargo, or Python
+/// exists, so it cannot be any of those; it is minimal POSIX `sh`,
+/// shellcheck-clean, and test-covered. Every other script remains
+/// Python.
 pub fn exceptions() -> Vec<Exception> {
-    vec![Exception {
-        pattern: "crates/chelis-surf/tests/fixtures/*.ch".to_string(),
-        rule_id: "surf-def-arrow-form".to_string(),
-        cross_ref: "§3.5".to_string(),
-    }]
+    vec![
+        Exception {
+            pattern: "crates/chelis-surf/tests/fixtures/*.ch".to_string(),
+            rule_id: "surf-def-arrow-form".to_string(),
+            cross_ref: "§3.5".to_string(),
+        },
+        Exception {
+            pattern: "crates/chelisup/bootstrap/chelisup.sh".to_string(),
+            rule_id: "no-shell-scripts".to_string(),
+            cross_ref: "§2.9".to_string(),
+        },
+    ]
 }
 
 /// Outcome of one style-gate run on one file.
@@ -325,6 +339,59 @@ mod tests {
         std::fs::write(&path, bad_source).unwrap();
         let res = enforce_style_gate(&path, bad_source, true);
         assert!(res.is_ok(), "--allow-style-violations should pass");
+    }
+
+    #[test]
+    fn bootstrap_sh_is_the_only_no_shell_scripts_exception() {
+        // The chelisup bootstrap installer is the single shell carve-out
+        // (§2.9). Its exception must be registered, cite §2.9, and
+        // actually filter a `no-shell-scripts` violation at its path,
+        // while any other `.sh` path still fires.
+        let excs = exceptions();
+        let entry = excs
+            .iter()
+            .find(|e| e.pattern == "crates/chelisup/bootstrap/chelisup.sh")
+            .expect("bootstrap exception must be registered");
+        assert_eq!(entry.rule_id, "no-shell-scripts");
+        assert_eq!(entry.cross_ref, "§2.9");
+
+        let root = std::path::Path::new("/repo");
+        let blessed = Violation {
+            rule_id: "no-shell-scripts".to_string(),
+            spec_ref: "§2.9".to_string(),
+            path: root.join("crates/chelisup/bootstrap/chelisup.sh"),
+            line: None,
+            col: None,
+            message: "shell".to_string(),
+        };
+        let kept = chelis_lint::exceptions::apply_exceptions([&blessed], &excs, root);
+        assert!(
+            kept.is_empty(),
+            "bootstrap .sh must be excepted; kept={kept:?}"
+        );
+
+        let other = Violation {
+            path: root.join("scripts/whatever.sh"),
+            ..blessed.clone()
+        };
+        let kept_other = chelis_lint::exceptions::apply_exceptions([&other], &excs, root);
+        assert_eq!(
+            kept_other.len(),
+            1,
+            "only the one carve-out path is excepted"
+        );
+    }
+
+    #[test]
+    fn all_exception_cross_refs_resolve_against_the_spec() {
+        // Every exception's `cross_ref` must point at a real section of
+        // the nomenclature spec (closes the opaque-exemption loophole).
+        let spec = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../spec/01-nomenclature.md"
+        ));
+        let res = chelis_lint::exceptions::verify_cross_refs(&exceptions(), spec);
+        assert!(res.is_ok(), "unresolvable cross_refs: {:?}", res.err());
     }
 
     #[test]
