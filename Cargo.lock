@@ -724,6 +724,7 @@ dependencies = [
  "chelis-std-bundle",
  "chelis-surf",
  "chelis-types",
+ "flate2",
  "reqwest",
  "rustix",
  "serde",

@@ -75,6 +75,63 @@ pub struct ReefManifest {
     /// manifest without `[chelis-src]` round-trips byte-identically.
     #[serde(default, rename = "chelis-src")]
     pub chelis_src: Option<ChelisSrcSpec>,
+    /// Item 11 (chelis#468): first-class binary release artifacts.
+    /// Logical artifact name -> per-platform, SHA-pinned release-asset
+    /// spec. These are neither reef source packages nor Cargo crates, so
+    /// they get their own artifact-class section in `reef.toml`:
+    ///
+    /// ```toml
+    /// [artifacts.octant-translator]
+    /// repo = "Chelis-Lang/octant"
+    /// tag  = "v0.4.2"
+    /// platforms.linux-x86_64 = { asset = "octant-translator-linux-x86_64.tar.gz", sha256 = "…" }
+    /// ```
+    ///
+    /// **Serde-attribute discipline.** This field is reachable from
+    /// [`PreparedReefGraph`] through [`LoadedPackage::manifest`], which
+    /// round-trips through **bincode** (a positional binary format).
+    /// bincode does not honor `#[serde(skip_serializing_if = ...)]`, so
+    /// this field carries `#[serde(default)]` ONLY — never a
+    /// `skip_serializing_if`. The field is always present in the bincode
+    /// stream (an empty `BTreeMap` serializes as a length-prefix of 0).
+    /// TOML still omits it when empty because an empty map produces no
+    /// table. See [`LoadedPackage::remote_origin`] for the full rationale.
+    #[serde(default)]
+    pub artifacts: BTreeMap<String, ArtifactSpec>,
+}
+
+/// Item 11 (chelis#468): one logical binary artifact declared in a
+/// manifest's `[artifacts]` section. Carries the publisher repo + release
+/// tag and a per-platform map of SHA-pinned release assets. The
+/// publisher's release SHA is the source of truth; the consumer pins and
+/// verifies against it rather than transcribing a copy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactSpec {
+    /// Publisher repo in `<org>/<repo>` form (e.g. `Chelis-Lang/octant`).
+    pub repo: String,
+    /// Release tag the assets are attached to (e.g. `v0.4.2`). A leading
+    /// `v` is decorative and stripped when deriving the lockfile version,
+    /// matching [`GitHubReleaseSpec`].
+    pub tag: String,
+    /// Platform-slug -> per-platform asset entry. Slugs match the
+    /// installer convention (`scripts/install_chelis_toolchain.py`):
+    /// `darwin-arm64`, `darwin-x86_64`, `linux-x86_64`. At least one
+    /// platform is required; `linux-x86_64` is the documented minimum.
+    /// Additional platforms are additive.
+    pub platforms: BTreeMap<String, ArtifactPlatform>,
+}
+
+/// Item 11 (chelis#468): the per-platform release asset for one
+/// [`ArtifactSpec`]. The `sha256` pins the bytes of the downloaded asset
+/// (the archive or raw binary as served by the release), which the
+/// install path verifies fail-closed before any placement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactPlatform {
+    /// Release asset filename for this platform (e.g.
+    /// `octant-translator-linux-x86_64.tar.gz`).
+    pub asset: String,
+    /// Lowercase 64-character hex SHA-256 of the asset bytes.
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,6 +254,35 @@ pub enum LockSource {
     Bundled {
         compiler_version: String,
     },
+    /// Item 11 (chelis#468): a binary release artifact that reef fetches
+    /// and content-verifies by hash. Binaries belong in `reef.lock` per
+    /// the lockfile-ownership rule (`chelis_packaging_and_install.md` §3):
+    /// reef fetches them, their integrity primitive is a content SHA-256,
+    /// and nothing else records them.
+    ///
+    /// - `remote_origin` is the `github://<org>/<repo>@<tag>` URI the
+    ///   asset was fetched from (same scheme-tagged form as
+    ///   [`LockSource::LocalRegistry`]).
+    /// - `platform` is the resolved host-platform slug (e.g.
+    ///   `linux-x86_64`). A binary lock entry is inherently single-
+    ///   platform — the variant records exactly which host it was
+    ///   resolved for, so `--from-lockfile` re-fetches the matching asset
+    ///   and skips entries for a foreign host.
+    /// - `asset` is the release asset filename.
+    /// - `sha256` is the pinned lowercase-hex SHA-256 of the asset bytes.
+    ///
+    /// **Lockfile-hash convention.** [`LockedDependency`] has both
+    /// `archive_sha256` and `shell_sha256`. For a binary, the content
+    /// hash is carried here in `sha256` AND mirrored into the enclosing
+    /// `archive_sha256` (the lock schema's content-hash slot, which the
+    /// SHA-256 helpers already populate for source archives).
+    /// `shell_sha256` is left empty: a binary has no `.chb` shell.
+    Binary {
+        remote_origin: String,
+        platform: String,
+        asset: String,
+        sha256: String,
+    },
 }
 
 impl LockSource {
@@ -242,6 +328,9 @@ impl LockSource {
     pub fn remote_origin(&self) -> Option<&str> {
         match self {
             Self::LocalRegistry { remote_origin } => remote_origin.as_deref(),
+            // A binary artifact always records the origin it was fetched
+            // from; surface it for introspection.
+            Self::Binary { remote_origin, .. } => Some(remote_origin),
             Self::Path { .. } | Self::Bundled { .. } => None,
         }
     }
@@ -642,6 +731,7 @@ pub fn init_package(
         },
         dependencies: BTreeMap::new(),
         chelis_src: None,
+        artifacts: BTreeMap::new(),
     };
     write_manifest(&root.join("reef.toml"), &manifest)?;
     let main_module = format!("{module_prefix}.Main");
@@ -2221,6 +2311,330 @@ pub fn install_from_github(
     .map_err(|message| GitHubFetchError::Validation { message })
 }
 
+/// Item 11 (chelis#468): the result of placing a binary release artifact
+/// on disk. Returned by [`install_binary_artifact`].
+#[derive(Debug, Clone)]
+pub struct InstalledBinary {
+    /// Logical artifact name (the `[artifacts.<name>]` key).
+    pub name: String,
+    /// Final on-disk path of the runnable binary
+    /// (`<chelis_home>/bin/<name>`).
+    pub path: PathBuf,
+    /// `github://<org>/<repo>@<tag>` origin the asset was fetched from.
+    pub remote_origin: String,
+    /// Resolved host-platform slug.
+    pub platform: String,
+    /// Release asset filename.
+    pub asset: String,
+    /// Verified lowercase-hex SHA-256 of the downloaded asset bytes.
+    pub sha256: String,
+}
+
+/// Item 11 (chelis#468): resolve an [`ArtifactSpec`]'s entry for
+/// `platform` and install it via [`install_binary_artifact`].
+/// `chelis_home` is the placement root (`<chelis_home>/bin/<name>`).
+///
+/// Surfaces a typed [`GitHubFetchError::Validation`] when the artifact
+/// declares no asset for `platform`, listing the platforms it does
+/// declare.
+pub fn install_artifact_for_platform(
+    name: &str,
+    spec: &ArtifactSpec,
+    platform: &str,
+    chelis_home: &Path,
+) -> Result<InstalledBinary, GitHubFetchError> {
+    let entry = spec.platforms.get(platform).ok_or_else(|| {
+        let declared: Vec<&str> = spec.platforms.keys().map(String::as_str).collect();
+        GitHubFetchError::Validation {
+            message: format!(
+                "artifact `{name}` has no asset for platform `{platform}` (declared platforms: [{}])",
+                declared.join(", ")
+            ),
+        }
+    })?;
+    let (org, repo) = spec
+        .repo
+        .split_once('/')
+        .ok_or_else(|| GitHubFetchError::Parse {
+            input: spec.repo.clone(),
+            reason: "artifact repo must be <org>/<repo>".to_string(),
+        })?;
+    install_binary_artifact(
+        name,
+        org,
+        repo,
+        &spec.tag,
+        &entry.asset,
+        &entry.sha256,
+        platform,
+        chelis_home,
+    )
+}
+
+/// Item 11 (chelis#468): fetch a binary release asset, SHA-256-verify it
+/// fail-closed, extract it, and place a runnable binary at
+/// `<chelis_home>/bin/<name>`.
+///
+/// `org`, `repo`, `tag` address the GitHub release through the same REST
+/// path as [`install_from_github`] (metadata fetch by tag, then asset
+/// bytes by id). `asset` is the release asset filename; `expected_sha256`
+/// is the pinned content hash. `platform` is recorded on the returned
+/// [`InstalledBinary`] for the lockfile.
+///
+/// **Fail-closed.** The downloaded asset bytes are hashed and compared to
+/// `expected_sha256` BEFORE any extraction or placement. On a mismatch
+/// the function returns [`GitHubFetchError::Validation`] with nothing
+/// written under `<chelis_home>/bin/`. The download tempdir is removed on
+/// every return path.
+///
+/// **Extraction.** The asset format is inferred from its filename:
+/// `.tar.zst`, `.tar.gz`/`.tgz`, and `.tar` are extracted and the runnable
+/// binary located inside; any other extension is treated as a raw binary
+/// (the asset bytes are the binary). See [`extract_and_place_binary`].
+#[allow(clippy::too_many_arguments)]
+pub fn install_binary_artifact(
+    name: &str,
+    org: &str,
+    repo: &str,
+    tag: &str,
+    asset: &str,
+    expected_sha256: &str,
+    platform: &str,
+    chelis_home: &Path,
+) -> Result<InstalledBinary, GitHubFetchError> {
+    // Defense-in-depth: the lockfile (not the validated manifest) is the
+    // source of `name` on the install path, so re-check it here before any
+    // network or filesystem access. An unsafe name (`..`, absolute, path
+    // separator, control char) would otherwise let `Path::join` escape
+    // `<chelis_home>/bin/` and write a binary anywhere on disk.
+    if !is_safe_artifact_name(name) {
+        return Err(GitHubFetchError::Validation {
+            message: format!(
+                "refusing to place artifact with unsafe name `{name}`: \
+                 a binary name must be a bare file name (no path separators, \
+                 not `.`/`..`, no control characters)"
+            ),
+        });
+    }
+
+    let token = resolve_github_token()?;
+    let api_base = github_api_base_url();
+
+    // Reuse GitHubReleaseSpec only for its URL builders; the version
+    // field mirrors install_from_github's leading-`v` stripping.
+    let spec = GitHubReleaseSpec {
+        org: org.to_string(),
+        repo: repo.to_string(),
+        tag: tag.to_string(),
+        version: tag.strip_prefix('v').unwrap_or(tag).to_string(),
+    };
+
+    let tmp = tempfile::tempdir().map_err(|e| GitHubFetchError::Io {
+        message: format!("create tempdir: {e}"),
+    })?;
+    let asset_path = tmp.path().join(asset);
+
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| GitHubFetchError::Io {
+            message: format!("build http client: {e}"),
+        })?;
+
+    // Step 1: release metadata -> asset id.
+    let metadata_url = spec.release_metadata_url(&api_base);
+    let assets = fetch_release_metadata(&client, &metadata_url, &token, &spec.tag)?;
+    let asset_id = find_asset_id(&assets, asset, &metadata_url)?;
+
+    // Step 2: stream the asset bytes by id.
+    let asset_url = spec.release_asset_url(&api_base, asset_id);
+    download_asset_by_id(&client, &asset_url, asset, &token, &asset_path)?;
+
+    // Fail-closed SHA-256 verification BEFORE any placement.
+    let got_sha = sha256_file(&asset_path).map_err(|message| GitHubFetchError::Validation {
+        message: format!("could not hash downloaded asset `{asset}`: {message}"),
+    })?;
+    if got_sha != expected_sha256.to_ascii_lowercase() {
+        return Err(GitHubFetchError::Validation {
+            message: format!(
+                "SHA-256 mismatch for binary artifact `{name}` asset `{asset}`: \
+                 pinned {expected_sha256}, but the bytes served hash to {got_sha}; \
+                 aborting before placement"
+            ),
+        });
+    }
+
+    let dest = chelis_home.join("bin").join(name);
+    extract_and_place_binary(&asset_path, asset, name, &dest)?;
+
+    Ok(InstalledBinary {
+        name: name.to_string(),
+        path: dest,
+        remote_origin: format_github_origin(org, repo, tag),
+        platform: platform.to_string(),
+        asset: asset.to_string(),
+        sha256: got_sha,
+    })
+}
+
+/// Item 11 (chelis#468): extract the runnable binary from a downloaded
+/// asset and place it at `dest`. The asset format is inferred from
+/// `asset_name`:
+///
+/// - `.tar.zst` — zstd-decode then untar (reuses the `zstd` dep);
+/// - `.tar.gz` / `.tgz` — gunzip then untar (uses `flate2`);
+/// - `.tar` — untar;
+/// - anything else — the asset bytes ARE the binary (raw-binary path).
+///
+/// Inside an extracted archive the binary is located by
+/// [`locate_binary`]: a file named exactly `logical_name` wins; otherwise
+/// a single regular file is taken; otherwise the call fails rather than
+/// guess. The placed file gets mode `0o755` on unix.
+fn extract_and_place_binary(
+    asset_path: &Path,
+    asset_name: &str,
+    logical_name: &str,
+    dest: &Path,
+) -> Result<(), GitHubFetchError> {
+    let lower = asset_name.to_ascii_lowercase();
+    let is_tar_zst = lower.ends_with(".tar.zst");
+    let is_tar_gz = lower.ends_with(".tar.gz") || lower.ends_with(".tgz");
+    let is_tar = lower.ends_with(".tar");
+
+    if !(is_tar_zst || is_tar_gz || is_tar) {
+        // No recognized archive extension: the asset is the binary.
+        return place_runnable_binary(asset_path, dest);
+    }
+
+    let bytes = fs::read(asset_path).map_err(|e| GitHubFetchError::Io {
+        message: format!("read downloaded asset {}: {e}", asset_path.display()),
+    })?;
+    let extract_dir = tempfile::tempdir().map_err(|e| GitHubFetchError::Io {
+        message: format!("create extraction tempdir: {e}"),
+    })?;
+
+    if is_tar_zst {
+        let decoded = zstd::stream::decode_all(Cursor::new(bytes)).map_err(|e| {
+            GitHubFetchError::Validation {
+                message: format!("asset `{asset_name}` is not a valid .tar.zst archive: {e}"),
+            }
+        })?;
+        Archive::new(Cursor::new(decoded))
+            .unpack(extract_dir.path())
+            .map_err(|e| GitHubFetchError::Validation {
+                message: format!("failed to extract `{asset_name}`: {e}"),
+            })?;
+    } else if is_tar_gz {
+        let gz = flate2::read::GzDecoder::new(Cursor::new(bytes));
+        Archive::new(gz)
+            .unpack(extract_dir.path())
+            .map_err(|e| GitHubFetchError::Validation {
+                message: format!("asset `{asset_name}` is not a valid .tar.gz archive: {e}"),
+            })?;
+    } else {
+        Archive::new(Cursor::new(bytes))
+            .unpack(extract_dir.path())
+            .map_err(|e| GitHubFetchError::Validation {
+                message: format!("asset `{asset_name}` is not a valid .tar archive: {e}"),
+            })?;
+    }
+
+    let binary = locate_binary(extract_dir.path(), logical_name)?;
+    place_runnable_binary(&binary, dest)
+}
+
+/// Item 11 (chelis#468): find the binary inside an extracted archive.
+/// A regular file whose name is exactly `logical_name` wins; otherwise a
+/// single regular file is unambiguous; otherwise the call fails rather
+/// than guess which of several files is the binary.
+fn locate_binary(root: &Path, logical_name: &str) -> Result<PathBuf, GitHubFetchError> {
+    let mut regular_files: Vec<PathBuf> = Vec::new();
+    for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+        if entry.file_type().is_file() {
+            regular_files.push(entry.path().to_path_buf());
+        }
+    }
+    if let Some(p) = regular_files
+        .iter()
+        .find(|p| p.file_name().and_then(|n| n.to_str()) == Some(logical_name))
+    {
+        return Ok(p.clone());
+    }
+    match regular_files.len() {
+        0 => Err(GitHubFetchError::Validation {
+            message: format!("extracted archive for `{logical_name}` contained no files"),
+        }),
+        1 => Ok(regular_files.into_iter().next().expect("len == 1")),
+        _ => {
+            let names: Vec<String> = regular_files
+                .iter()
+                .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_string))
+                .collect();
+            Err(GitHubFetchError::Validation {
+                message: format!(
+                    "extracted archive for `{logical_name}` has multiple files and none is named \
+                     `{logical_name}`; cannot pick the binary unambiguously (files: [{}])",
+                    names.join(", ")
+                ),
+            })
+        }
+    }
+}
+
+/// Item 11 (chelis#468): copy `src` into place at `dest`, marking it
+/// executable (mode `0o755`) on unix. Writes to a sibling temp file in the
+/// destination directory and renames into place, so a partially-copied
+/// binary never appears at `dest`.
+fn place_runnable_binary(src: &Path, dest: &Path) -> Result<(), GitHubFetchError> {
+    let parent = dest.parent().ok_or_else(|| GitHubFetchError::Io {
+        message: format!("destination {} has no parent directory", dest.display()),
+    })?;
+    fs::create_dir_all(parent).map_err(|e| GitHubFetchError::Io {
+        message: format!("create bin dir {}: {e}", parent.display()),
+    })?;
+    let file_name = dest.file_name().ok_or_else(|| GitHubFetchError::Io {
+        message: format!("destination {} has no file name", dest.display()),
+    })?;
+    let mut tmp_name = file_name.to_os_string();
+    tmp_name.push(".tmp");
+    let tmp_path = parent.join(&tmp_name);
+    fs::copy(src, &tmp_path).map_err(|e| GitHubFetchError::Io {
+        message: format!(
+            "copy binary {} -> {}: {e}",
+            src.display(),
+            tmp_path.display()
+        ),
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o755)).map_err(|e| {
+            GitHubFetchError::Io {
+                message: format!("set executable bit on {}: {e}", tmp_path.display()),
+            }
+        })?;
+    }
+    fs::rename(&tmp_path, dest).map_err(|e| GitHubFetchError::Io {
+        message: format!("rename {} -> {}: {e}", tmp_path.display(), dest.display()),
+    })?;
+    Ok(())
+}
+
+/// Item 11 (chelis#468): resolve the installed path of a binary artifact,
+/// `<chelis_home>/bin/<name>`. Errors if nothing is installed there.
+/// Backs `chelis reef which <artifact>`.
+pub fn which_artifact(name: &str) -> Result<PathBuf, String> {
+    let path = artifact_install_path(name)?;
+    if path.exists() {
+        Ok(path)
+    } else {
+        Err(format!(
+            "artifact `{name}` is not installed (looked for {})",
+            path.display()
+        ))
+    }
+}
+
 /// Per-entry result of [`install_from_lockfile`]. One of these is
 /// produced for every `[[dependencies]]` row in the input lockfile.
 /// The loop continues past any failure so a partial outcome is
@@ -2253,6 +2667,24 @@ pub enum LockfileInstallEntry {
         name: String,
         version: String,
         compiler_version: String,
+    },
+    /// Item 11 (chelis#468): a `Binary` entry was fetched, SHA-verified
+    /// fail-closed, extracted, and placed at `path`
+    /// (`<chelis_home>/bin/<name>`).
+    InstalledBinary {
+        name: String,
+        version: String,
+        path: PathBuf,
+    },
+    /// Item 11 (chelis#468): a `Binary` lock entry written for a different
+    /// host platform than the one running. A binary lock entry is
+    /// host-specific; a foreign-platform binary cannot be run here, so the
+    /// entry is skipped. Informational, not an error.
+    SkippedForeignPlatform {
+        name: String,
+        version: String,
+        platform: String,
+        host: Option<String>,
     },
     /// Fetch+install attempt failed. The error preserves whatever the
     /// underlying [`GitHubFetchError`] said; the caller is responsible
@@ -2542,6 +2974,80 @@ pub fn install_from_lockfile(
                     version: dep.version.clone(),
                     compiler_version: compiler_version.clone(),
                 });
+            }
+            LockSource::Binary {
+                remote_origin,
+                platform,
+                asset,
+                sha256,
+            } => {
+                // Item 11: binary lock entries are host-specific. Skip an
+                // entry written for a different host — we cannot run a
+                // foreign-platform binary, and its asset may not exist.
+                let host = host_platform_slug();
+                if host != Some(platform.as_str()) {
+                    results.push(LockfileInstallEntry::SkippedForeignPlatform {
+                        name: dep.name.clone(),
+                        version: dep.version.clone(),
+                        platform: platform.clone(),
+                        host: host.map(str::to_string),
+                    });
+                    continue;
+                }
+                let spec = match parse_remote_origin(remote_origin) {
+                    Ok(s) => s,
+                    Err(inner) => {
+                        results.push(LockfileInstallEntry::Failed {
+                            name: dep.name.clone(),
+                            version: dep.version.clone(),
+                            error: LockfileInstallError::OriginParse {
+                                name: dep.name.clone(),
+                                version: dep.version.clone(),
+                                inner,
+                            },
+                        });
+                        continue;
+                    }
+                };
+                let home = match chelis_home() {
+                    Ok(h) => h,
+                    Err(message) => {
+                        results.push(LockfileInstallEntry::Failed {
+                            name: dep.name.clone(),
+                            version: dep.version.clone(),
+                            error: LockfileInstallError::Fetch {
+                                name: dep.name.clone(),
+                                version: dep.version.clone(),
+                                inner: GitHubFetchError::Io { message },
+                            },
+                        });
+                        continue;
+                    }
+                };
+                // `install_binary_artifact` verifies the lock-pinned
+                // `sha256` fail-closed before any placement.
+                match install_binary_artifact(
+                    &dep.name, &spec.org, &spec.repo, &spec.tag, asset, sha256, platform, &home,
+                ) {
+                    Ok(binary) => {
+                        results.push(LockfileInstallEntry::InstalledBinary {
+                            name: dep.name.clone(),
+                            version: dep.version.clone(),
+                            path: binary.path,
+                        });
+                    }
+                    Err(e) => {
+                        results.push(LockfileInstallEntry::Failed {
+                            name: dep.name.clone(),
+                            version: dep.version.clone(),
+                            error: LockfileInstallError::Fetch {
+                                name: dep.name.clone(),
+                                version: dep.version.clone(),
+                                inner: e,
+                            },
+                        });
+                    }
+                }
             }
             LockSource::LocalRegistry {
                 remote_origin: None,
@@ -3124,6 +3630,13 @@ pub fn export_bundle(package_root: &Path, output_dir: &Path) -> Result<BundleMan
                 let dep_dir = output_dir.join(format!("{}-{}", dep.name, dep.version));
                 copy_package_source(&installed.root, &dep_dir)?;
             }
+            LockSource::Binary { .. } => {
+                // Item 11: a binary artifact has no source tree to
+                // materialize into the source bundle. It is still recorded
+                // in bundle.json below so the dependency set stays
+                // complete; the binary bytes are re-fetched and verified
+                // via `chelis reef install --from-lockfile`.
+            }
         }
         bundled_deps.push(BundledDependency {
             name: dep.name.clone(),
@@ -3402,6 +3915,57 @@ pub fn registry_home() -> Result<PathBuf, String> {
     registry_root()
 }
 
+/// Item 11 (chelis#468): map the running host to a platform slug matching
+/// the installer convention (`scripts/install_chelis_toolchain.py`):
+/// `darwin-arm64`, `darwin-x86_64`, `linux-x86_64`. `linux-x86_64` is the
+/// documented minimum; `linux-arm64` is included as a natural extension.
+/// Returns `None` for host OS/arch combinations with no defined slug
+/// (e.g. Windows), so the install path can surface a clear "no artifact
+/// for this platform" error rather than guessing.
+pub fn host_platform_slug() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => Some("darwin-arm64"),
+        ("macos", "x86_64") => Some("darwin-x86_64"),
+        ("linux", "x86_64") => Some("linux-x86_64"),
+        ("linux", "aarch64") => Some("linux-arm64"),
+        _ => None,
+    }
+}
+
+/// Item 11 (chelis#468): resolve the chelis home directory. Honors a
+/// `$CHELIS_HOME` override; defaults to `$HOME/.chelis`. Binary artifacts
+/// are placed under `<home>/bin/`. The directory is not created here;
+/// the install path creates `<home>/bin/` on demand.
+pub fn chelis_home() -> Result<PathBuf, String> {
+    if let Some(p) = env::var_os("CHELIS_HOME") {
+        return Ok(PathBuf::from(p));
+    }
+    let home = env::var_os("HOME").ok_or_else(|| "HOME is not set".to_string())?;
+    Ok(PathBuf::from(home).join(".chelis"))
+}
+
+/// Item 11 (chelis#468): the directory where installed binary artifacts
+/// are placed: `<chelis_home>/bin/`. The runnable binary for logical
+/// artifact `<name>` lives at `<chelis_home>/bin/<name>`.
+pub fn artifact_bin_dir() -> Result<PathBuf, String> {
+    Ok(chelis_home()?.join("bin"))
+}
+
+/// Item 11 (chelis#468): resolve the on-disk path a binary artifact would
+/// occupy, i.e. `<chelis_home>/bin/<name>`. Backs `chelis reef which`.
+/// Does not check existence — callers decide whether absence is an error.
+/// Rejects unsafe names (`.`/`..`, path separators, control characters) so
+/// `reef which` cannot be coaxed into resolving a path outside the store.
+pub fn artifact_install_path(name: &str) -> Result<PathBuf, String> {
+    if !is_safe_artifact_name(name) {
+        return Err(format!(
+            "unsafe artifact name `{name}`: a binary name must be a bare file name \
+             (no path separators, not `.`/`..`, no control characters)"
+        ));
+    }
+    Ok(artifact_bin_dir()?.join(name))
+}
+
 fn read_manifest(path: &Path) -> Result<ReefManifest, String> {
     let text =
         fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
@@ -3666,6 +4230,12 @@ fn reconstruct_graph_from_lockfile(
                     },
                 );
             }
+            LockSource::Binary { .. } => {
+                // Item 11: a binary artifact is not a source package — it
+                // carries no Surf modules and does not participate in the
+                // compile graph. Skip it here; `--from-lockfile` is what
+                // fetches, verifies, and places the binary.
+            }
         }
     }
 
@@ -3796,7 +4366,98 @@ fn validate_manifest(manifest: &ReefManifest) -> Result<(), String> {
             }
         }
     }
+    for (name, artifact) in &manifest.artifacts {
+        validate_artifact(name, artifact)?;
+    }
     Ok(())
+}
+
+/// Validate one `[artifacts.<name>]` entry (Item 11). Rules:
+///
+/// - the logical name (the map key) must be non-empty;
+/// - `repo` must be non-empty and in `<org>/<repo>` form (one `/`,
+///   both halves non-empty);
+/// - `tag` must be non-empty;
+/// - there must be at least one platform (`linux-x86_64` is the
+///   documented minimum, but any non-empty platform set is accepted);
+/// - every platform slug must be non-empty, its `asset` non-empty, and
+///   its `sha256` a 64-character lowercase hex string.
+fn validate_artifact(name: &str, artifact: &ArtifactSpec) -> Result<(), String> {
+    if !is_safe_artifact_name(name) {
+        return Err(format!(
+            "artifact `{name}`: name must be a bare binary name (no path separators, \
+             not `.`/`..`, no control characters)"
+        ));
+    }
+    if artifact.repo.trim().is_empty() {
+        return Err(format!("artifact `{name}`: repo must not be empty"));
+    }
+    match artifact.repo.split_once('/') {
+        Some((org, repo)) if !org.is_empty() && !repo.is_empty() => {}
+        _ => {
+            return Err(format!(
+                "artifact `{name}`: repo `{}` must be in <org>/<repo> form",
+                artifact.repo
+            ));
+        }
+    }
+    if artifact.tag.trim().is_empty() {
+        return Err(format!("artifact `{name}`: tag must not be empty"));
+    }
+    if artifact.platforms.is_empty() {
+        return Err(format!(
+            "artifact `{name}`: at least one platform is required (`linux-x86_64` is the minimum)"
+        ));
+    }
+    for (slug, platform) in &artifact.platforms {
+        if slug.trim().is_empty() {
+            return Err(format!(
+                "artifact `{name}`: platform slug must not be empty"
+            ));
+        }
+        if platform.asset.trim().is_empty() {
+            return Err(format!(
+                "artifact `{name}` platform `{slug}`: asset must not be empty"
+            ));
+        }
+        if !is_lowercase_hex_sha256(&platform.sha256) {
+            return Err(format!(
+                "artifact `{name}` platform `{slug}`: sha256 must be a 64-character lowercase hex string"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// True iff `s` is exactly 64 lowercase hexadecimal characters — the
+/// shape of a SHA-256 digest rendered by the `sha256_*` helpers. Used to
+/// validate manifest-declared artifact pins fail-closed at parse time.
+fn is_lowercase_hex_sha256(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Item 11 (chelis#468) security gate: true iff `name` is safe to use as
+/// the final path component of `<chelis_home>/bin/<name>`. A binary
+/// artifact's logical name comes from a manifest `[artifacts.<name>]` key
+/// (resolved across the WHOLE dependency graph in `build_lockfile`) and
+/// from a `reef.lock` entry on install, so a malicious or typo'd
+/// transitive manifest could otherwise smuggle a `..`-bearing or absolute
+/// name into `Path::join` and escape the store. Modeled on chelisup's
+/// `is_safe_path_component`: reject empty, `.`, `..`, and any name
+/// carrying a path separator (`/`, `\`), a NUL, or any other control
+/// character. Enforced at parse time (`validate_artifact`) AND at the
+/// placement boundary (`install_binary_artifact`, `artifact_install_path`)
+/// because the install path reads the name from the lockfile, not the
+/// validated manifest.
+fn is_safe_artifact_name(name: &str) -> bool {
+    if name.is_empty() || name == "." || name == ".." {
+        return false;
+    }
+    !name
+        .chars()
+        .any(|c| c == '/' || c == '\\' || c == '\0' || c.is_control())
 }
 
 fn resolve_package_graph(root: &Path, options: LoadOptions) -> Result<PackageGraph, String> {
@@ -4283,7 +4944,10 @@ fn lockfile_remote_origin(dep: &LockedDependency) -> Option<String> {
     // remote origin — there is nothing to fetch.
     match &dep.source {
         LockSource::LocalRegistry { remote_origin } => remote_origin.clone(),
-        LockSource::Path { .. } | LockSource::Bundled { .. } => None,
+        // A binary artifact has its own fetch path (the Item 11 install
+        // flow); this helper feeds the *source-package* auto-fetch path,
+        // which a binary never enters, so it contributes no origin here.
+        LockSource::Path { .. } | LockSource::Bundled { .. } | LockSource::Binary { .. } => None,
     }
 }
 
@@ -4519,11 +5183,69 @@ fn build_lockfile(graph: &PackageGraph) -> ReefLock {
         });
     }
 
+    // Item 11 (chelis#468): lock every binary artifact declared across
+    // the graph, resolved to the host platform. The `LockSource::Binary`
+    // variant records the platform, so a binary lock entry is inherently
+    // host-specific; an artifact that declares no asset for the host
+    // platform is skipped here and surfaces at install time instead. The
+    // graph iterates in sorted name order (BTreeMap), and a `seen` set
+    // dedupes artifacts declared by more than one package, so the output
+    // is deterministic.
+    if let Some(platform) = host_platform_slug() {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for package in graph.packages.values() {
+            for (artifact_name, spec) in &package.manifest.artifacts {
+                if !seen.insert(artifact_name.clone()) {
+                    continue;
+                }
+                if let Some(entry) = binary_lock_entry(
+                    artifact_name,
+                    spec,
+                    platform,
+                    &package.manifest.package.compiler,
+                ) {
+                    dependencies.push(entry);
+                }
+            }
+        }
+    }
+
     dependencies.sort_by(|a, b| a.name.cmp(&b.name));
     ReefLock {
         package: root.id.clone(),
         dependencies,
     }
+}
+
+/// Item 11 (chelis#468): build a `LockSource::Binary` lock entry for one
+/// artifact resolved to `platform`, or `None` when the artifact declares
+/// no asset for that platform (binary lock entries are host-specific).
+/// The lockfile version is the tag with one leading `v` stripped, matching
+/// [`GitHubReleaseSpec`]. The pinned `sha256` is mirrored into
+/// `archive_sha256` (the lock schema's content-hash slot); `shell_sha256`
+/// is empty because a binary has no `.chb` shell.
+fn binary_lock_entry(
+    name: &str,
+    spec: &ArtifactSpec,
+    platform: &str,
+    compiler: &str,
+) -> Option<LockedDependency> {
+    let entry = spec.platforms.get(platform)?;
+    let (org, repo) = spec.repo.split_once('/')?;
+    let version = spec.tag.strip_prefix('v').unwrap_or(&spec.tag).to_string();
+    Some(LockedDependency {
+        name: name.to_string(),
+        version,
+        source: LockSource::Binary {
+            remote_origin: format_github_origin(org, repo, &spec.tag),
+            platform: platform.to_string(),
+            asset: entry.asset.clone(),
+            sha256: entry.sha256.clone(),
+        },
+        compiler: compiler.to_string(),
+        archive_sha256: entry.sha256.clone(),
+        shell_sha256: String::new(),
+    })
 }
 
 fn load_package_modules(
@@ -6567,10 +7289,428 @@ kind = "local_registry"
                 },
             )]),
             chelis_src: None,
+            artifacts: BTreeMap::new(),
         };
         let text = toml::to_string_pretty(&manifest).expect("serialize");
         let parsed = toml::from_str::<ReefManifest>(&text).expect("parse");
         assert_eq!(parsed, manifest);
+    }
+
+    // ---- Item 11 (chelis#468): binary artifact distribution ----
+
+    /// A `reef.toml` without `[artifacts]` deserializes with an empty map
+    /// and round-trips, so existing packages keep working unmodified.
+    #[test]
+    fn artifacts_default_is_empty() {
+        let toml_text = format!(
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Demo"
+"#,
+            ver = CURRENT_COMPILER_VERSION
+        );
+        let parsed: ReefManifest = toml::from_str(&toml_text).expect("parse");
+        assert!(
+            parsed.artifacts.is_empty(),
+            "artifacts must default to empty, got {:?}",
+            parsed.artifacts
+        );
+        let re_serialized = toml::to_string(&parsed).expect("serialize");
+        let re_parsed: ReefManifest = toml::from_str(&re_serialized).expect("re-parse");
+        assert_eq!(re_parsed, parsed);
+    }
+
+    /// Happy path: an `[artifacts.<name>]` section with a per-platform,
+    /// SHA-pinned asset parses into the typed model, validates, and
+    /// round-trips through TOML.
+    #[test]
+    fn artifacts_section_parses_and_round_trips() {
+        let sha = "a".repeat(64);
+        let toml_text = format!(
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Demo"
+
+[artifacts.octant-translator]
+repo = "Chelis-Lang/octant"
+tag = "v0.4.2"
+platforms.linux-x86_64 = {{ asset = "octant-translator-linux-x86_64.tar.gz", sha256 = "{sha}" }}
+platforms.darwin-arm64 = {{ asset = "octant-translator-darwin-arm64.tar.gz", sha256 = "{sha}" }}
+"#,
+            ver = CURRENT_COMPILER_VERSION
+        );
+        let parsed: ReefManifest = toml::from_str(&toml_text).expect("parse");
+        let spec = parsed
+            .artifacts
+            .get("octant-translator")
+            .expect("artifact present");
+        assert_eq!(spec.repo, "Chelis-Lang/octant");
+        assert_eq!(spec.tag, "v0.4.2");
+        assert_eq!(spec.platforms.len(), 2);
+        let linux = spec.platforms.get("linux-x86_64").expect("linux platform");
+        assert_eq!(linux.asset, "octant-translator-linux-x86_64.tar.gz");
+        assert_eq!(linux.sha256, sha);
+        validate_manifest(&parsed).expect("valid artifact manifest must pass validation");
+
+        let re_serialized = toml::to_string(&parsed).expect("serialize");
+        let re_parsed: ReefManifest = toml::from_str(&re_serialized).expect("re-parse");
+        assert_eq!(re_parsed, parsed, "artifacts section must round-trip");
+    }
+
+    /// Every documented artifact-validation rule is locked with a
+    /// table-driven negative test, plus a positive control.
+    #[test]
+    fn artifact_validation_rejects_bad_entries() {
+        let good_sha = "0".repeat(64);
+        let platform = |asset: &str, sha: &str| ArtifactPlatform {
+            asset: asset.to_string(),
+            sha256: sha.to_string(),
+        };
+        let make = |repo: &str, tag: &str, platforms: Vec<(&str, ArtifactPlatform)>| ArtifactSpec {
+            repo: repo.to_string(),
+            tag: tag.to_string(),
+            platforms: platforms
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+        };
+        // (artifact name, spec, expected error substring)
+        let cases: Vec<(&str, ArtifactSpec, &str)> = vec![
+            (
+                "",
+                make(
+                    "a/b",
+                    "v1",
+                    vec![("linux-x86_64", platform("a", &good_sha))],
+                ),
+                "name must be a bare binary name",
+            ),
+            (
+                "x",
+                make("", "v1", vec![("linux-x86_64", platform("a", &good_sha))]),
+                "repo must not be empty",
+            ),
+            (
+                "x",
+                make(
+                    "no-slash",
+                    "v1",
+                    vec![("linux-x86_64", platform("a", &good_sha))],
+                ),
+                "<org>/<repo> form",
+            ),
+            (
+                "x",
+                make("a/b", "", vec![("linux-x86_64", platform("a", &good_sha))]),
+                "tag must not be empty",
+            ),
+            ("x", make("a/b", "v1", vec![]), "at least one platform"),
+            (
+                "x",
+                make("a/b", "v1", vec![("linux-x86_64", platform("", &good_sha))]),
+                "asset must not be empty",
+            ),
+            (
+                "x",
+                make(
+                    "a/b",
+                    "v1",
+                    vec![("linux-x86_64", platform("a", "deadbeef"))],
+                ),
+                "64-character lowercase hex",
+            ),
+            (
+                "x",
+                make(
+                    "a/b",
+                    "v1",
+                    // Uppercase hex is rejected: the helper hashes render
+                    // lowercase, so an uppercase pin can never match.
+                    vec![("linux-x86_64", platform("a", &"A".repeat(64)))],
+                ),
+                "64-character lowercase hex",
+            ),
+        ];
+        for (name, spec, expected) in cases {
+            let err = validate_artifact(name, &spec)
+                .expect_err(&format!("artifact `{name}` must be rejected"));
+            assert!(
+                err.contains(expected),
+                "for artifact `{name}`, expected error to contain {expected:?}, got: {err}"
+            );
+        }
+        // Positive control.
+        let ok = make(
+            "Chelis-Lang/octant",
+            "v0.4.2",
+            vec![(
+                "linux-x86_64",
+                platform("octant-linux-x86_64.tar.gz", &good_sha),
+            )],
+        );
+        validate_artifact("octant-translator", &ok).expect("valid artifact must pass");
+    }
+
+    /// Security: an artifact name is a path component of
+    /// `<chelis_home>/bin/<name>`, so path-traversal and absolute names
+    /// must be rejected at the parse boundary (`validate_artifact`), at the
+    /// install placement boundary (`install_binary_artifact`), and at the
+    /// `which` resolution boundary (`artifact_install_path`) — none of
+    /// which may touch the filesystem on rejection.
+    #[test]
+    fn artifact_validation_rejects_unsafe_names() {
+        let good_sha = "0".repeat(64);
+        let mut platforms = BTreeMap::new();
+        platforms.insert(
+            "linux-x86_64".to_string(),
+            ArtifactPlatform {
+                asset: "tool-linux-x86_64.tar.gz".to_string(),
+                sha256: good_sha,
+            },
+        );
+        let spec = ArtifactSpec {
+            repo: "Chelis-Lang/octant".to_string(),
+            tag: "v0.4.2".to_string(),
+            platforms,
+        };
+        let unsafe_names = [
+            "../x",
+            "a/b",
+            "/etc/x",
+            "..",
+            ".",
+            "a\\b",
+            "evil\0name",
+            "../../etc/cron.d/evil",
+            "",
+            "ctrl\nname",
+        ];
+        for bad in unsafe_names {
+            // Parse boundary.
+            assert!(
+                validate_artifact(bad, &spec).is_err(),
+                "validate_artifact must reject unsafe name {bad:?}"
+            );
+            assert!(
+                !is_safe_artifact_name(bad),
+                "is_safe_artifact_name must reject {bad:?}"
+            );
+            // `which` resolution boundary: rejected, no path produced.
+            assert!(
+                artifact_install_path(bad).is_err(),
+                "artifact_install_path must reject unsafe name {bad:?}"
+            );
+            // Placement boundary: the safe-name guard is the first statement
+            // of `install_binary_artifact`, so it returns before any token
+            // read, network call, or filesystem write. Point at a home that
+            // must never be created to prove nothing was touched on disk.
+            let home = Path::new("/this/path/must/not/be/written");
+            let result = install_binary_artifact(
+                bad,
+                "Chelis-Lang",
+                "octant",
+                "v0.4.2",
+                "tool-linux-x86_64.tar.gz",
+                "0".repeat(64).as_str(),
+                "linux-x86_64",
+                home,
+            );
+            assert!(
+                matches!(result, Err(GitHubFetchError::Validation { .. })),
+                "install_binary_artifact must reject unsafe name {bad:?} with Validation, got {result:?}"
+            );
+            assert!(
+                !home.exists(),
+                "rejection of {bad:?} must not have created anything on disk"
+            );
+        }
+        // Positive control: a bare binary name is accepted by every gate.
+        assert!(is_safe_artifact_name("octant-translator"));
+        validate_artifact("octant-translator", &spec).expect("bare name must pass validation");
+        artifact_install_path("octant-translator").expect("bare name must resolve a path");
+    }
+
+    /// A `LockSource::Binary` lock entry round-trips through TOML with the
+    /// `binary` kind tag and all fields preserved.
+    #[test]
+    fn lock_source_binary_round_trips() {
+        let sha = "b".repeat(64);
+        let lock = ReefLock {
+            package: PackageId {
+                name: "downstream".to_string(),
+                version: "0.1.0".to_string(),
+            },
+            dependencies: vec![LockedDependency {
+                name: "octant-translator".to_string(),
+                version: "0.4.2".to_string(),
+                source: LockSource::Binary {
+                    remote_origin: "github://Chelis-Lang/octant@v0.4.2".to_string(),
+                    platform: "linux-x86_64".to_string(),
+                    asset: "octant-translator-linux-x86_64.tar.gz".to_string(),
+                    sha256: sha.clone(),
+                },
+                compiler: CURRENT_COMPILER_VERSION.to_string(),
+                archive_sha256: sha.clone(),
+                shell_sha256: String::new(),
+            }],
+        };
+        let s1 = toml::to_string_pretty(&lock).expect("serialize");
+        assert!(
+            s1.contains("kind = \"binary\""),
+            "serialized binary lock entry must use the `binary` kind tag; got:\n{s1}"
+        );
+        assert!(
+            s1.contains("platform = \"linux-x86_64\""),
+            "binary lock entry must record the platform; got:\n{s1}"
+        );
+        let parsed: ReefLock = toml::from_str(&s1).expect("deserialize");
+        assert_eq!(parsed, lock, "Binary round-trip must preserve all fields");
+        let s2 = toml::to_string_pretty(&parsed).expect("re-serialize");
+        assert_eq!(s1, s2, "second serialize must be a fixed point");
+    }
+
+    /// Host-platform detection returns a slug from the known installer set
+    /// for every host this test runs on (the gate runs on linux-x86_64 and
+    /// darwin-arm64), matching the compile-time host triple.
+    #[test]
+    fn host_platform_slug_matches_running_host() {
+        let slug = host_platform_slug();
+        let expected = match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("macos", "aarch64") => Some("darwin-arm64"),
+            ("macos", "x86_64") => Some("darwin-x86_64"),
+            ("linux", "x86_64") => Some("linux-x86_64"),
+            ("linux", "aarch64") => Some("linux-arm64"),
+            _ => None,
+        };
+        assert_eq!(
+            slug, expected,
+            "host slug must match the running host triple"
+        );
+        if let Some(s) = slug {
+            assert!(
+                [
+                    "darwin-arm64",
+                    "darwin-x86_64",
+                    "linux-x86_64",
+                    "linux-arm64"
+                ]
+                .contains(&s),
+                "slug `{s}` must be in the known installer set"
+            );
+        }
+    }
+
+    /// `binary_lock_entry` resolves the requested platform's asset into a
+    /// `LockSource::Binary` entry (with the content hash mirrored into
+    /// `archive_sha256` and an empty `shell_sha256`), and returns `None`
+    /// for a platform the artifact does not declare.
+    #[test]
+    fn binary_lock_entry_resolves_requested_platform() {
+        let sha = "c".repeat(64);
+        let mut platforms = BTreeMap::new();
+        platforms.insert(
+            "linux-x86_64".to_string(),
+            ArtifactPlatform {
+                asset: "tool-linux-x86_64.tar.gz".to_string(),
+                sha256: sha.clone(),
+            },
+        );
+        let spec = ArtifactSpec {
+            repo: "Chelis-Lang/octant".to_string(),
+            tag: "v0.4.2".to_string(),
+            platforms,
+        };
+        let entry = binary_lock_entry("tool", &spec, "linux-x86_64", CURRENT_COMPILER_VERSION)
+            .expect("declared platform must resolve");
+        assert_eq!(entry.name, "tool");
+        // Tag's leading `v` is stripped for the lockfile version.
+        assert_eq!(entry.version, "0.4.2");
+        assert_eq!(entry.archive_sha256, sha);
+        assert!(entry.shell_sha256.is_empty());
+        match entry.source {
+            LockSource::Binary {
+                remote_origin,
+                platform,
+                asset,
+                sha256,
+            } => {
+                assert_eq!(remote_origin, "github://Chelis-Lang/octant@v0.4.2");
+                assert_eq!(platform, "linux-x86_64");
+                assert_eq!(asset, "tool-linux-x86_64.tar.gz");
+                assert_eq!(sha256, sha);
+            }
+            other => panic!("expected LockSource::Binary, got {other:?}"),
+        }
+        // A platform the artifact does not declare yields no lock entry.
+        assert!(
+            binary_lock_entry("tool", &spec, "darwin-arm64", CURRENT_COMPILER_VERSION).is_none(),
+            "undeclared platform must not produce a lock entry"
+        );
+    }
+
+    /// The full extract-and-place path: a `.tar.gz` asset containing a
+    /// single binary is gunzipped, untarred, located, and placed
+    /// executable at the destination.
+    #[test]
+    fn extract_and_place_tar_gz_binary() {
+        use std::io::Write;
+        let dir = tempdir().expect("tempdir");
+        // Build a .tar.gz with one file named `tool` carrying a marker.
+        let mut tar_buf: Vec<u8> = Vec::new();
+        {
+            let mut builder = Builder::new(&mut tar_buf);
+            let payload = b"#!/bin/sh\necho marker\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(payload.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "tool", &payload[..])
+                .expect("append");
+            builder.finish().expect("finish tar");
+        }
+        let mut gz_buf: Vec<u8> = Vec::new();
+        {
+            let mut enc =
+                flate2::write::GzEncoder::new(&mut gz_buf, flate2::Compression::default());
+            enc.write_all(&tar_buf).expect("gz write");
+            enc.finish().expect("gz finish");
+        }
+        let asset_path = dir.path().join("tool-linux-x86_64.tar.gz");
+        fs::write(&asset_path, &gz_buf).expect("write asset");
+
+        let dest = dir.path().join("bin").join("tool");
+        extract_and_place_binary(&asset_path, "tool-linux-x86_64.tar.gz", "tool", &dest)
+            .expect("extract and place");
+        assert!(dest.exists(), "binary must be placed at dest");
+        let placed = fs::read(&dest).expect("read placed");
+        assert_eq!(placed, b"#!/bin/sh\necho marker\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&dest).expect("stat").permissions().mode();
+            assert_eq!(mode & 0o111, 0o111, "placed binary must be executable");
+        }
+    }
+
+    /// Raw-binary path: an asset with no recognized archive extension is
+    /// placed verbatim as the runnable binary.
+    #[test]
+    fn extract_and_place_raw_binary() {
+        let dir = tempdir().expect("tempdir");
+        let asset_path = dir.path().join("tool-linux-x86_64");
+        fs::write(&asset_path, b"\x7fELF raw binary bytes").expect("write asset");
+        let dest = dir.path().join("bin").join("tool");
+        extract_and_place_binary(&asset_path, "tool-linux-x86_64", "tool", &dest)
+            .expect("place raw binary");
+        assert_eq!(
+            fs::read(&dest).expect("read placed"),
+            b"\x7fELF raw binary bytes"
+        );
     }
 
     #[test]
@@ -8420,6 +9560,7 @@ additional_sources = ["properties"]
                 },
                 dependencies: BTreeMap::new(),
                 chelis_src: None,
+                artifacts: BTreeMap::new(),
             };
             let err =
                 validate_manifest(&manifest).expect_err(&format!("{entries:?} must be rejected"));
@@ -8439,6 +9580,7 @@ additional_sources = ["properties"]
             },
             dependencies: BTreeMap::new(),
             chelis_src: None,
+            artifacts: BTreeMap::new(),
         };
         validate_manifest(&manifest).expect("valid additional_sources must pass");
     }
@@ -8492,6 +9634,7 @@ pin_commit = "b741149b23db7c05849ebd8f5cccc5ce95ca626b"
             },
             dependencies: BTreeMap::new(),
             chelis_src: None,
+            artifacts: BTreeMap::new(),
         };
         let text = toml::to_string_pretty(&manifest).expect("serialize");
         assert!(
@@ -8559,6 +9702,7 @@ pin_commit = "b741149b23db7c05849ebd8f5cccc5ce95ca626b"
                 package: base_pkg(),
                 dependencies: BTreeMap::new(),
                 chelis_src: Some(src.clone()),
+                artifacts: BTreeMap::new(),
             };
             let err = validate_manifest(&manifest).expect_err(&format!("{src:?} must be rejected"));
             assert!(
@@ -8573,6 +9717,7 @@ pin_commit = "b741149b23db7c05849ebd8f5cccc5ce95ca626b"
                 crates: vec!["chelis-ir".to_string(), "chelis-types".to_string()],
                 pin_commit: Some("b741149b23db7c05849ebd8f5cccc5ce95ca626b".to_string()),
             }),
+            artifacts: BTreeMap::new(),
         };
         validate_manifest(&ok).expect("well-formed [chelis-src] must pass");
     }

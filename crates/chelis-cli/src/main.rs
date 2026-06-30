@@ -590,6 +590,18 @@ enum ReefCommand {
         #[arg(long)]
         root: Option<PathBuf>,
     },
+    /// Print the resolved on-disk path of an installed binary artifact.
+    ///
+    /// Item 11 (chelis#468): binary artifacts declared in `[artifacts]`
+    /// and installed via `chelis reef install --from-lockfile` are placed
+    /// at `$CHELIS_HOME/bin/<name>` (default `~/.chelis/bin/<name>`).
+    /// `chelis reef which <artifact>` prints that path so consumers point
+    /// at the binary with no out-of-band knowledge. Exits non-zero with a
+    /// message on stderr if the artifact is not installed.
+    Which {
+        /// Logical artifact name (the `[artifacts.<name>]` key).
+        artifact: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2951,6 +2963,29 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
                                 );
                                 any_no_origin = true;
                             }
+                            chelis_reef::LockfileInstallEntry::InstalledBinary {
+                                name,
+                                version,
+                                path,
+                            } => {
+                                println!("Installed binary {name} {version}");
+                                println!("Binary: {}", path.display());
+                            }
+                            chelis_reef::LockfileInstallEntry::SkippedForeignPlatform {
+                                name,
+                                version,
+                                platform,
+                                host,
+                            } => {
+                                let host_label = match host {
+                                    Some(h) => h.clone(),
+                                    None => "unsupported".to_string(),
+                                };
+                                println!(
+                                    "Skipped binary {name} {version} (built for {platform}; \
+                                     host is {host_label}): not runnable on this host"
+                                );
+                            }
                             chelis_reef::LockfileInstallEntry::Failed { error, .. } => {
                                 eprintln!("error: {error}");
                                 any_failure = true;
@@ -3050,6 +3085,12 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
         }
         ReefCommand::Src { command } => cmd_reef_src(command)?,
         ReefCommand::Doctor { root } => cmd_reef_doctor(root.as_deref())?,
+        ReefCommand::Which { artifact } => {
+            // Item 11 (chelis#468): resolve and print the installed binary
+            // path, or fail with a clear message if it is not installed.
+            let path = chelis_reef::which_artifact(&artifact)?;
+            println!("{}", path.display());
+        }
     }
     Ok(())
 }
