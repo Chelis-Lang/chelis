@@ -65,6 +65,19 @@ pub(super) fn run_surf_linked_properties_shared(
     options: &ProveOptions<'_>,
     totals: &mut Summary,
 ) -> Status {
+    // The decls handed in here are the reef LINKER's output: every def, the
+    // `@property` itself, and the imports carry the linker's internal
+    // `pkg__<pkg>__<Module>__<def>` name format. The shared runner re-checks
+    // those decls (the Tier-C fuzz path re-serializes each sample and re-checks
+    // it through `eval_selected`), so without the linked-program provenance
+    // flag the checker's `detect_forged_linker_names` rejects the linker's own
+    // names as forged (chelis#580). Install the guard the SAME way the sibling
+    // obligation path does in `check_linked_decls`. The flag is thread-local;
+    // every check the shared runner performs for this call runs synchronously
+    // on this thread (the only worker thread the prove stack spawns is the
+    // external SMT subprocess's stdout drain, which never runs the in-process
+    // type-check), so holding the guard across the call covers it.
+    let _linked = chelis_types::install_linked_program_guard();
     let mut outcomes = match run_surf_decls_properties_with_contract_decls(
         all_decls,
         entry_decls,
