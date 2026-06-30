@@ -160,7 +160,13 @@ jobs:
   smt-build:
     name: SMT Feature Build (Linux)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # cvc5 builds from source on top of the workspace build, so a cold cache
+    # (PR branches do not get the warm base-branch cache) runs ~30m+. The old
+    # 20m cap cancelled that mid-build on every PR while main squeaked under it
+    # on a warm cache; the cancelled run skipped the cache-save step, so reruns
+    # stayed cold and re-timed-out. 40m clears the cold build (the glibc-2.31
+    # sibling, which is uncapped, runs ~34m) and lets it warm the cache.
+    timeout-minutes: 40
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
     # success. Runs on every code PR and push.
     needs: [changes]
