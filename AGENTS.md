@@ -124,6 +124,13 @@ When a public surface has an implicit invariant, make it explicit and test it.
 - **Rust** where the task naturally fits a compiled workspace member.
 - **Never shell.** Do not write `.sh` scripts. If a CI step needs a one-liner, invoke
   Python instead. Shell is fragile and untestable.
+- **One exception — the published bootstrap installer.** Shell is permitted *only* for
+  the chelisup bootstrap one-liner (`chelisup.sh`, the `curl -fsSL … | sh` installer). It
+  runs on a bare machine *before* any chelis, cargo, or even Python exists, so Python is
+  not an option — it is not guaranteed present either, which is the whole bootstrap
+  problem. It MUST be minimal POSIX `sh`, `shellcheck`-clean, and covered by a test
+  (`sh -n` parse plus `shellcheck` when available). This is a single-purpose carve-out for
+  the one artifact that cannot be anything else; every other script remains Python.
 - Existing `scripts/` directory uses Python; follow that convention.
 - **Use the uv-managed Python** at `.venv/bin/python`, not the system Python.
   Create it once with `uv venv --python 3.11` from the repo root. `py/pyproject.toml`

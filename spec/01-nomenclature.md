@@ -232,6 +232,14 @@ Examples: `bench_phase_j.py`, `bump_compiler_pins.py`, `gen_goldens.py`,
 Language Policy) prohibits shell scripts in favor of Python. Existing
 shell scripts must be ported.
 
+**One exception:** the chelisup bootstrap installer at
+`crates/chelisup/bootstrap/chelisup.sh` (the `curl -fsSL ... | sh`
+one-liner). It runs on a bare machine before any chelis, cargo, or
+Python exists, so it cannot be written in any of those. It must be
+minimal POSIX `sh`, `shellcheck`-clean, and test-covered (`sh -n` parse
+plus `shellcheck`). It is the only entry on the `no-shell-scripts`
+exception list; every other script remains Python.
+
 ### 2.10 CI workflow filenames
 
 **Rule:** lowercase, no separator.
