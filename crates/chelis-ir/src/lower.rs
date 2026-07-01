@@ -1085,10 +1085,16 @@ fn tensor_dim_substitutions(
 /// concrete-rank caller (`[b, seq]` -> `seq -> 1`). Only a named slot with no
 /// preceding spread contributes a position; a leading anchor before a trailing
 /// spread (`[row, ..rest]` -> `row -> 0`) is still fixed and is recorded.
-fn tensor_dim_axis_positions(formal_param_exprs: &[Option<Expr>]) -> HashMap<String, usize> {
-    let mut positions: HashMap<String, usize> = HashMap::new();
+fn tensor_dim_axis_positions(
+    formal_param_exprs: &[Option<Expr>],
+    actual_args: &[TensorType],
+) -> HashMap<String, (usize, DimInfo)> {
+    let mut positions: HashMap<String, (usize, DimInfo)> = HashMap::new();
     let mut ambiguous: HashSet<String> = HashSet::new();
-    for formal_expr in formal_param_exprs.iter().flatten() {
+    for (formal_expr, actual) in formal_param_exprs.iter().zip(actual_args.iter()) {
+        let Some(formal_expr) = formal_expr else {
+            continue;
+        };
         let Some(slots) = tensor_formal_dim_slots(formal_expr) else {
             continue;
         };
@@ -1104,14 +1110,30 @@ fn tensor_dim_axis_positions(formal_param_exprs: &[Option<Expr>]) -> HashMap<Str
                 _ => None,
             };
             if let Some(name) = named_here {
-                match positions.get(name) {
-                    Some(prev) if *prev != index => {
+                // chelis#549: pair the position with the anchor's concrete extent
+                // at this call site. Positions before a spread align with the
+                // actual's leading dims regardless of any later spread's length,
+                // so `index` maps directly into `actual.dims`. The extent is what
+                // the use-site recovery re-validates against the monomorphized
+                // operand so an intervening axis-reorder cannot be trusted. With
+                // no aligned actual dim (or an inconsistent record across formals)
+                // the name is left UNRECORDED so the loud by-name path fires
+                // rather than an unvalidatable position being used.
+                match actual.dims.get(index) {
+                    Some(extent) => match positions.get(name) {
+                        Some((prev_idx, prev_extent))
+                            if *prev_idx != index || prev_extent != extent =>
+                        {
+                            ambiguous.insert(name.clone());
+                        }
+                        None => {
+                            positions.insert(name.clone(), (index, extent.clone()));
+                        }
+                        _ => {}
+                    },
+                    None => {
                         ambiguous.insert(name.clone());
                     }
-                    None => {
-                        positions.insert(name.clone(), index);
-                    }
-                    _ => {}
                 }
             }
             match slot {
@@ -1129,6 +1151,81 @@ fn tensor_dim_axis_positions(formal_param_exprs: &[Option<Expr>]) -> HashMap<Str
         positions.remove(&name);
     }
     positions
+}
+
+/// Outcome of recovering a named anchor's positional axis from the
+/// `dim_axis_positions` oracle when call-site monomorphization erased the name
+/// from the operand's dims (chelis#388/#373/#339). The recovery is the soundness
+/// fix for chelis#549: the recorded index is the anchor's offset in a *formal
+/// parameter*, so an intervening axis-reorder (`permute`/transpose) can leave it
+/// valid-but-stale (in range, wrong axis). Rather than trust the bare index, the
+/// recovery re-validates the recorded extent against the monomorphized operand.
+enum AnchorRecovery {
+    /// The anchor's recorded extent appears at EXACTLY ONE in-range axis, so the
+    /// anchor is located unambiguously (whether or not a reorder moved it from
+    /// the recorded position). The carried index is sound to split/reduce/expand
+    /// at.
+    Axis(usize),
+    /// No usable record: the anchor was never recorded, or its recorded extent
+    /// appears at no in-range axis. The caller falls through to its existing loud
+    /// by-name failure path.
+    Unrecorded,
+    /// chelis#549: the anchor's recorded extent appears at MORE THAN ONE in-range
+    /// axis, so the anchor cannot be located by value. This includes the
+    /// all-equal-extent (square) operand, where the recorded position's extent
+    /// matches vacuously even under a reorder. The caller MUST fail loud rather
+    /// than reduce/split a possibly-wrong axis (fail-closed).
+    AmbiguousAfterReorder,
+}
+
+/// Recover the positional axis a named anchor maps to in a monomorphized
+/// `operand` whose dims no longer carry the name, consulting the
+/// `dim_axis_positions` oracle and considering only axes in `lo..hi`.
+///
+/// Soundness (chelis#549): the recorded index is the anchor's offset in the
+/// recording caller's *formal parameter*. An axis-reorder (`permute`/transpose)
+/// between that parameter and this use site can make that index stale (in range,
+/// wrong axis). The recorded index is therefore **never trusted as a position**;
+/// the anchor is located purely by its recorded *extent*:
+///
+/// * exactly one in-range axis carries the extent → [`AnchorRecovery::Axis`]
+///   (located unambiguously, whether or not a reorder moved it);
+/// * no in-range axis carries it → [`AnchorRecovery::Unrecorded`] (fall through
+///   to the loud by-name path);
+/// * more than one in-range axis carries it → [`AnchorRecovery::AmbiguousAfterReorder`]
+///   (fail loud).
+///
+/// The >1 branch is the chelis#549 / RT-1 fix: when the anchor's extent collides
+/// with another axis (the all-equal-extent / square operand is the headline
+/// case, e.g. a `seq × seq` attention reduce), value re-validation cannot tell
+/// the anchor from its twin, so a stale recorded position would be vacuously
+/// "confirmed" and silently reduce the wrong axis. We refuse instead. This is
+/// the soundness FLOOR: it over-rejects a square reduce that did NOT in fact
+/// reorder (the recorded position was correct) because value alone cannot
+/// distinguish that from a square reduce that DID reorder. RECOVERING those
+/// (rather than rejecting) requires tracking the anchor identity through the
+/// reorder during lowering — a separate, more invasive change. The common
+/// attention case with distinct batch/seq/head extents is recovered exactly.
+fn recover_anchor_axis(
+    dims: &[DimInfo],
+    lo: usize,
+    hi: usize,
+    anchor: &str,
+    dim_axis_positions: &HashMap<String, (usize, DimInfo)>,
+) -> AnchorRecovery {
+    // The recorded position is intentionally unused for the decision (it is the
+    // stale formal-param offset chelis#549 is about); only the recorded extent
+    // is trusted, located by value in the monomorphized operand.
+    let Some((_recorded_pos, expected)) = dim_axis_positions.get(anchor) else {
+        return AnchorRecovery::Unrecorded;
+    };
+    let hi = hi.min(dims.len());
+    let mut matches = (lo..hi).filter(|&i| dims.get(i) == Some(expected));
+    match (matches.next(), matches.next()) {
+        (Some(only), None) => AnchorRecovery::Axis(only),
+        (None, _) => AnchorRecovery::Unrecorded,
+        (Some(_), Some(_)) => AnchorRecovery::AmbiguousAfterReorder,
+    }
 }
 
 /// WS-A8: build a precision substitution map from formal vs actual
@@ -1471,22 +1568,24 @@ fn collect_body_precision_var_names(expr: &Expr, out: &mut HashSet<String>) {
 /// the case where call-site monomorphization erased a named anchor from the
 /// actual dims (a literal-shaped operand reaching a Tier-3 callee through a
 /// concrete-rank intermediate, e.g. the grad lane that inlines the whole body
-/// into one DAG). When the by-name split fails, the anchor is located at the
-/// recorded fixed index instead. The map carries only positions a concrete-rank
+/// into one DAG). When the by-name split fails, the anchor is recovered via
+/// [`recover_anchor_axis`], which re-validates the recorded position against the
+/// monomorphized actual's extents. The map carries only positions a concrete-rank
 /// caller pinned, and an out-of-range/unrecorded anchor still fails loudly.
 ///
-/// NOT yet fully sound: the recorded index is the anchor's offset in that
-/// caller's *formal parameter*. An axis-reordering op (e.g. `permute`) between
-/// that parameter and this use site can leave the recorded index valid-but-stale
-/// — in range but pointing at the wrong axis — so the split lands on the wrong
-/// axis (a silent wrong gradient under grad; the range check below does NOT
-/// catch this). The by-name path above tracks the moved anchor and is
-/// unaffected; only the by-position fallback is. Tracked as chelis#549
-/// (axis-reorder staleness; spans #373/#388/#339).
+/// chelis#549 (axis-reorder staleness; spans #373/#388/#339): the recorded index
+/// is the anchor's offset in that caller's *formal parameter*, so an
+/// axis-reordering op (e.g. `permute`) between that parameter and this use site
+/// can leave the recorded index valid-but-stale (in range, wrong axis). The
+/// recovery no longer trusts the bare index at all: it locates the anchor purely
+/// by its recorded extent, taking the axis when that extent is unique, and
+/// FAILING LOUD when the extent collides with another axis (the square/equal-extent
+/// case, RT-1) — never splitting at a possibly-wrong axis. The by-name path above
+/// already tracks the moved anchor and is unaffected.
 fn tensor_rank_substitutions(
     formal_param_exprs: &[Option<Expr>],
     actual_args: &[TensorType],
-    dim_axis_positions: &HashMap<String, usize>,
+    dim_axis_positions: &HashMap<String, (usize, DimInfo)>,
 ) -> HashMap<String, Vec<DimInfo>> {
     let mut subst = HashMap::new();
     for (formal_expr, actual) in formal_param_exprs.iter().zip(actual_args.iter()) {
@@ -1543,7 +1642,7 @@ fn tensor_rank_substitutions(
 fn extract_rank_var_bindings(
     expr: &Expr,
     actual_dims: &[DimInfo],
-    dim_axis_positions: &HashMap<String, usize>,
+    dim_axis_positions: &HashMap<String, (usize, DimInfo)>,
 ) -> Vec<(String, Vec<DimInfo>)> {
     let Some(slots) = tensor_formal_dim_slots(expr) else {
         return Vec::new();
@@ -1592,38 +1691,58 @@ fn extract_rank_var_bindings(
                             .map(|p| gi + p);
                         // chelis#373 fallback: the actual was monomorphized to
                         // concrete `Lit` dims and the name is gone. Recover the
-                        // split index from the fixed position a concrete-rank
-                        // caller recorded; accept it only when it lies in the
-                        // remaining run `[gi, n)`. The range check rejects an
-                        // out-of-range/unrecorded anchor (it falls through to the
-                        // loud path below) but does NOT catch a valid-but-stale
-                        // in-range index: if an axis-reorder (e.g. `permute`)
-                        // moved the anchor between the recording parameter and
-                        // here, this splits at the wrong axis (silent wrong
-                        // gradient under grad). Tracked as chelis#549
-                        // (axis-reorder staleness).
-                        let split = by_name.or_else(|| {
-                            dim_axis_positions
-                                .get(anchor)
-                                .copied()
-                                .filter(|&pos| pos >= gi && pos < n)
-                        });
-                        match split {
-                            Some(s) => {
-                                out.push((name.clone(), actual_dims[gi..s].to_vec()));
-                                gi = s;
-                            }
-                            None => {
-                                // Anchor absent by name AND no recorded position —
-                                // the checker located it (Name↔Lit etc. were
-                                // rejected), so unreachable for a checked program.
-                                debug_assert!(
-                                    false,
-                                    "rank-spread anchor `{anchor}` absent from monomorphized actual"
-                                );
-                                return out;
-                            }
-                        }
+                        // split index by locating the anchor's recorded extent in
+                        // the actual (chelis#549): take the axis when the extent is
+                        // unique (relocating through any intervening `permute`).
+                        // An anchor whose extent is absent falls through to the
+                        // loud path; an extent that collides with another axis
+                        // (the square/equal-extent case) fails loud rather than
+                        // splitting at a possibly-wrong axis.
+                        let split = match by_name {
+                            Some(s) => s,
+                            None => match recover_anchor_axis(
+                                actual_dims,
+                                gi,
+                                n,
+                                anchor,
+                                dim_axis_positions,
+                            ) {
+                                AnchorRecovery::Axis(s) => s,
+                                // FATAL (chelis#549): a soundness rejection that
+                                // must not be absorbed by the C host-fallback
+                                // path into a generic grad-unsupported message.
+                                AnchorRecovery::AmbiguousAfterReorder => {
+                                    raise_fatal_lowering_error(
+                                        format!(
+                                            "rank-spread anchor `{anchor}` cannot be located: \
+                                             call-site monomorphization erased the name and an \
+                                             intervening axis-reorder (e.g. `permute`) left its \
+                                             recorded position stale; its recorded extent appears \
+                                             at multiple axes of the monomorphized actual. \
+                                             Refusing to split at a possibly-wrong axis (chelis#549)"
+                                        ),
+                                        None,
+                                        None,
+                                    )
+                                }
+                                // Anchor absent by name AND not soundly
+                                // recoverable by position — the checker located it
+                                // (Name↔Lit etc. were rejected), so unreachable
+                                // for a checked program. Fail loud (fail-closed)
+                                // rather than the former release-silent
+                                // `return out` partial binding.
+                                AnchorRecovery::Unrecorded => raise_lowering_error(
+                                    format!(
+                                        "rank-spread anchor `{anchor}` absent from monomorphized \
+                                         actual: internal rank-monomorphization error"
+                                    ),
+                                    None,
+                                    None,
+                                ),
+                            },
+                        };
+                        out.push((name.clone(), actual_dims[gi..split].to_vec()));
+                        gi = split;
                         ri += 1;
                     }
                     None if rest.is_empty() => {
@@ -3576,18 +3695,30 @@ struct LowerCtx {
     /// the spec's monomorphization invariant; a surviving rank var is a
     /// monomorphization bug, not a backend input.
     rank_substitutions: HashMap<String, Vec<DimInfo>>,
-    /// Issue #388: positional index each named axis occupied in a formal
-    /// parameter shape at the current inlined call site. Populated by
-    /// [`tensor_dim_axis_positions`] in `lower_plain_callable_app`
-    /// alongside `dim_substitutions`. Consulted by
-    /// [`Self::resolve_reduce_axis`] / [`Self::resolve_expand_anchor`] to
-    /// recover the axis a named reduction/expand targets when call-site
-    /// monomorphization erased the named axis from the operand's dims (a
-    /// literal-shaped actual argument carries concrete `Lit` dims). This is
-    /// a *position* recovery, never an extent guess; an ambiguous name (one
-    /// at different positions across formals) is excluded so the loud
-    /// by-name failure path still fires for genuinely unresolvable axes.
-    dim_axis_positions: HashMap<String, usize>,
+    /// Issue #388 / chelis#549: for each named axis, the positional index it
+    /// occupied in a formal parameter shape at the current inlined call site,
+    /// paired with the concrete extent (`DimInfo`) the anchor was recorded with.
+    /// Populated by [`tensor_dim_axis_positions`] in `lower_plain_callable_app`
+    /// alongside `dim_substitutions`. Consulted (via [`recover_anchor_axis`]) by
+    /// [`Self::resolve_reduce_axis`] / [`Self::resolve_expand_anchor`] /
+    /// [`extract_rank_var_bindings`] to recover the axis a named
+    /// reduction/expand/split targets when call-site monomorphization erased the
+    /// named axis from the operand's dims (a literal-shaped actual argument
+    /// carries concrete `Lit` dims).
+    ///
+    /// The paired extent is the soundness anchor for chelis#549: the recorded
+    /// index is the anchor's offset in the *formal parameter*, so an intervening
+    /// axis-reorder (`permute`/transpose) between that parameter and the use site
+    /// can leave the index valid-but-stale (in range, wrong axis). The recovery
+    /// ([`recover_anchor_axis`]) does NOT trust the recorded index; it locates the
+    /// anchor purely by its recorded extent in the monomorphized operand, taking
+    /// the axis when that extent is unique and failing LOUD when it collides with
+    /// another axis (the square/equal-extent case, RT-1) — never silently splits
+    /// at a possibly-wrong axis. The extent is never *guessed*; an ambiguous name
+    /// (one at different positions/extents across formals) is excluded at
+    /// recording time so the loud by-name failure path still fires for genuinely
+    /// unresolvable axes.
+    dim_axis_positions: HashMap<String, (usize, DimInfo)>,
     /// True only while lowering the body of an AD transform. Host-list
     /// combinator rewrites are an AD bridge, not the general C/backend
     /// lowering for ordinary list programs.
@@ -5132,7 +5263,7 @@ impl LowerCtx {
         // can recover the axis even after monomorphization erases the named
         // axis from a literal-shaped operand's dims.
         self.dim_axis_positions
-            .extend(tensor_dim_axis_positions(&formal_type_exprs));
+            .extend(tensor_dim_axis_positions(&formal_type_exprs, &actual_types));
         // WS-A8: extend the precision-tvar substitution with bindings
         // from this call site's formal-vs-actual precision slots. Walks
         // the raw type-exprs (which preserve `(t-var)` shape) against
@@ -7615,23 +7746,34 @@ impl LowerCtx {
             // argument (`to_tensor([[...]])`), call-site monomorphization
             // bound the formal parameter name to a literal-dim node, so the
             // operand's dims are concrete `Lit(_)` and the named axis is gone.
-            // Recover the axis from the formal-parameter position recorded at
-            // the inline site (`dim_axis_positions`), validated against the
-            // operand's actual rank. This recovers the axis the checker accepted
-            // (`sum(x, seq)`); an out-of-range or unrecorded name still fails
-            // loudly rather than defaulting to 0. NOT yet fully sound: the
-            // recorded index is the anchor's offset in the formal parameter, so
-            // an axis-reorder (e.g. `permute`) between that parameter and here
-            // can leave it valid-but-stale (in range, wrong axis) and silently
-            // reduce the wrong axis under grad. Tracked as chelis#549
-            // (axis-reorder staleness).
-            if let Some(&idx) = self.dim_axis_positions.get(&name)
-                && self
-                    .dag
-                    .get(operand)
-                    .is_some_and(|node| idx < node.output_type.dims.len())
-            {
-                return idx;
+            // Recover the axis by locating the anchor's recorded extent in the
+            // operand's monomorphized dims (chelis#549): take the axis when the
+            // extent is unique (relocating through any intervening `permute`); an
+            // unrecorded name still fails loudly rather than defaulting to 0, and
+            // an extent that collides with another axis (the square/equal-extent
+            // case) fails loud rather than reducing a possibly-wrong axis.
+            if let Some(node) = self.dag.get(operand) {
+                let dims = &node.output_type.dims;
+                match recover_anchor_axis(dims, 0, dims.len(), &name, &self.dim_axis_positions) {
+                    AnchorRecovery::Axis(idx) => return idx,
+                    // FATAL (chelis#549): a soundness rejection, not a
+                    // "rewrite your program" hint. A plain lowering diagnostic
+                    // is absorbed by the C host-fallback path and reported as a
+                    // misleading generic grad-unsupported message; make it fatal
+                    // so the real reason surfaces in the build lane too.
+                    AnchorRecovery::AmbiguousAfterReorder => raise_fatal_lowering_error(
+                        format!(
+                            "`{op}` reduces named axis `{name}`, but call-site monomorphization \
+                             erased the name and an intervening axis-reorder (e.g. `permute`) left \
+                             its recorded position stale; the axis cannot be located unambiguously \
+                             (its recorded extent appears at multiple axes of the monomorphized \
+                             operand). Refusing to reduce a possibly-wrong axis (chelis#549)"
+                        ),
+                        Some(axis_expr.span()),
+                        axis_expr.span_id().map(ToOwned::to_owned),
+                    ),
+                    AnchorRecovery::Unrecorded => {}
+                }
             }
             raise_lowering_error(
                 format!(
@@ -7662,18 +7804,30 @@ impl LowerCtx {
         }) {
             return idx;
         }
-        // Issue #388 (expand twin): recover the anchor position from the
-        // formal-parameter index recorded at the inline site when a
+        // Issue #388 (expand twin): recover the anchor position when a
         // literal-shaped operand erased the named anchor from its dims. Same
-        // soundness argument as `resolve_reduce_axis`: position recovery the
-        // checker already validated, never a silent default.
-        if let Some(&idx) = self.dim_axis_positions.get(anchor)
-            && self
-                .dag
-                .get(operand)
-                .is_some_and(|node| idx < node.output_type.dims.len())
-        {
-            return idx;
+        // soundness argument as `resolve_reduce_axis` (chelis#549): the anchor is
+        // located by its recorded extent (not the stale recorded index), taken
+        // when unique and failed loud when its extent collides with another axis
+        // (the square/equal-extent case), never inserting at a possibly-wrong axis.
+        if let Some(node) = self.dag.get(operand) {
+            let dims = &node.output_type.dims;
+            match recover_anchor_axis(dims, 0, dims.len(), anchor, &self.dim_axis_positions) {
+                AnchorRecovery::Axis(idx) => return idx,
+                AnchorRecovery::AmbiguousAfterReorder => raise_fatal_lowering_error(
+                    format!(
+                        "`expand` inserts before named anchor `{anchor}`, but call-site \
+                         monomorphization erased the name and an intervening axis-reorder (e.g. \
+                         `permute`) left its recorded position stale; the anchor cannot be located \
+                         unambiguously (its recorded extent appears at multiple axes of the \
+                         monomorphized operand). Refusing to insert before a possibly-wrong axis \
+                         (chelis#549)"
+                    ),
+                    Some(anchor_expr.span()),
+                    anchor_expr.span_id().map(ToOwned::to_owned),
+                ),
+                AnchorRecovery::Unrecorded => {}
+            }
         }
         // FATAL: a plain lowering diagnostic is absorbed by the host-fallback
         // path (garbage C referencing the anchor as an undeclared identifier),
@@ -10797,7 +10951,9 @@ mod tests {
         // Monomorphized actual: seq erased to a concrete Lit at index 1.
         let actual = vec![DimInfo::Lit(2), DimInfo::Lit(3)];
 
-        let positions = HashMap::from([("seq".to_string(), 1usize)]);
+        // chelis#549: the anchor is located by its recorded extent `Lit(3)`,
+        // which is unique in the actual, so it resolves to index 1.
+        let positions = HashMap::from([("seq".to_string(), (1usize, DimInfo::Lit(3)))]);
         let bindings = extract_rank_var_bindings(&formal, &actual, &positions);
         assert_eq!(
             bindings,
@@ -10820,20 +10976,142 @@ mod tests {
         );
     }
 
-    /// chelis#373: an out-of-range recorded position is NOT trusted — the
-    /// fallback only accepts a position inside the remaining actual run, so a
-    /// stale/wrong index falls through to the loud "anchor absent" path rather
-    /// than splitting at a bogus index. The panic message pins that the right
-    /// failure (not a silent wrong split) is reached.
+    /// chelis#373/#549: an out-of-range recorded position whose recorded extent
+    /// is ALSO absent from the actual is NOT trusted — it falls through to the
+    /// loud "anchor absent" path rather than splitting at a bogus index. The
+    /// panic message pins that the right failure (not a silent wrong split) is
+    /// reached.
     #[test]
-    #[should_panic(expected = "absent from monomorphized actual")]
     fn extract_rank_var_bindings_rejects_out_of_range_position() {
+        let err = std::panic::catch_unwind(|| {
+            let formal = parse_type_expr(
+                "(t-ref {} (t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-prim {} f32)))",
+            );
+            let actual = vec![DimInfo::Lit(2), DimInfo::Lit(3)];
+            // Position 9 is out of range AND extent 99 appears nowhere ->
+            // unrecoverable.
+            let bad_positions = HashMap::from([("seq".to_string(), (9usize, DimInfo::Lit(99)))]);
+            let _ = extract_rank_var_bindings(&formal, &actual, &bad_positions);
+        })
+        .expect_err("an unrecoverable anchor must fail loud, not return a partial binding");
+        let msg = err
+            .downcast_ref::<LowerDiagnostic>()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(
+            msg.contains("absent from monomorphized actual"),
+            "the loud failure must name the absent-anchor reason, got {msg:?}"
+        );
+    }
+
+    /// chelis#549 (the headline soundness fix): a recorded position that is
+    /// in range but STALE (an axis-reorder changed the extent there) must NOT
+    /// split at the bare recorded index. When the recorded extent appears at a
+    /// UNIQUE in-range axis, the anchor is relocated there (the permute repro).
+    #[test]
+    fn extract_rank_var_bindings_relocates_anchor_after_unique_reorder() {
         let formal = parse_type_expr(
             "(t-ref {} (t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-prim {} f32)))",
         );
-        let actual = vec![DimInfo::Lit(2), DimInfo::Lit(3)];
-        let bad_positions = HashMap::from([("seq".to_string(), 9usize)]);
-        let _ = extract_rank_var_bindings(&formal, &actual, &bad_positions);
+        // Repro 2's monomorphized, permuted actual: `seq` (Lit(3)) recorded at
+        // index 1 in the bridge formal `[a, seq]`, but a `permute(x, 1, 0)`
+        // reordered the operand to `[Lit(3), Lit(2)]`, so the recorded index 1
+        // now holds `a`'s extent (Lit(2)). The anchor must be relocated to the
+        // unique axis carrying Lit(3) (index 0), not split at the stale 1.
+        let permuted_actual = vec![DimInfo::Lit(3), DimInfo::Lit(2)];
+        let positions = HashMap::from([("seq".to_string(), (1usize, DimInfo::Lit(3)))]);
+        let bindings = extract_rank_var_bindings(&formal, &permuted_actual, &positions);
+        assert_eq!(
+            bindings,
+            vec![
+                ("pre".to_string(), vec![]),
+                ("post".to_string(), vec![DimInfo::Lit(2)]),
+            ],
+            "a stale in-range index must relocate to the unique extent-matching axis, not split at 1"
+        );
+    }
+
+    /// chelis#549 negative parity: a stale in-range recorded position whose
+    /// recorded extent appears at MORE THAN ONE in-range axis cannot be located
+    /// unambiguously — the split must FAIL LOUD rather than silently land on a
+    /// possibly-wrong axis. Value alone cannot disambiguate equal-extent axes.
+    #[test]
+    fn extract_rank_var_bindings_ambiguous_reorder_fails_loud() {
+        let err = std::panic::catch_unwind(|| {
+            let formal = parse_type_expr(
+                "(t-ref {} (t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-prim {} f32)))",
+            );
+            // `seq` (Lit(2)) recorded at index 2 in formal `[a, b, seq]`, but a
+            // reorder produced `[Lit(2), Lit(2), Lit(3)]`: the recorded extent
+            // Lit(2) now appears at BOTH axes 0 and 1, and the recorded index 2
+            // holds Lit(3).
+            let ambiguous_actual = vec![DimInfo::Lit(2), DimInfo::Lit(2), DimInfo::Lit(3)];
+            let positions = HashMap::from([("seq".to_string(), (2usize, DimInfo::Lit(2)))]);
+            let _ = extract_rank_var_bindings(&formal, &ambiguous_actual, &positions);
+        })
+        .expect_err("an ambiguous post-reorder anchor must fail loud, not split silently");
+        let msg = err
+            .downcast_ref::<LowerDiagnostic>()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(
+            msg.contains("chelis#549"),
+            "the loud failure must cite the chelis#549 axis-reorder soundness rule, got {msg:?}"
+        );
+    }
+
+    /// chelis#549 unit coverage of [`recover_anchor_axis`] directly: the
+    /// unique-extent resolution (with and without a reorder), the
+    /// equal-extent/square ambiguity loud signal (RT-1), and the unrecorded
+    /// fall-through. The recorded *index* is never trusted — only the extent.
+    #[test]
+    fn recover_anchor_axis_unique_resolves_ambiguous_and_unrecorded_fail_closed() {
+        // Unique extent at the recorded position (no reorder): resolves there.
+        let dims = vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)];
+        let positions = HashMap::from([("seq".to_string(), (1usize, DimInfo::Lit(3)))]);
+        assert!(matches!(
+            recover_anchor_axis(&dims, 0, dims.len(), "seq", &positions),
+            AnchorRecovery::Axis(1)
+        ));
+
+        // Unique reorder: recorded index 1 is stale (holds Lit(9)); the extent
+        // Lit(3) appears uniquely at index 2 -> relocate to 2 (the recorded
+        // index is irrelevant).
+        let reordered = vec![DimInfo::Lit(2), DimInfo::Lit(9), DimInfo::Lit(3)];
+        assert!(matches!(
+            recover_anchor_axis(&reordered, 0, reordered.len(), "seq", &positions),
+            AnchorRecovery::Axis(2)
+        ));
+
+        // Ambiguous reorder: extent Lit(3) appears at indices 0 and 2 -> cannot
+        // disambiguate by value -> loud.
+        let ambiguous = vec![DimInfo::Lit(3), DimInfo::Lit(9), DimInfo::Lit(3)];
+        assert!(matches!(
+            recover_anchor_axis(&ambiguous, 0, ambiguous.len(), "seq", &positions),
+            AnchorRecovery::AmbiguousAfterReorder
+        ));
+
+        // RT-1 square/equal-extent case: the recorded position (1) carries the
+        // recorded extent, but so does axis 0, so a stale position would be
+        // "confirmed" vacuously. Must be reported ambiguous, NOT Axis(1).
+        let square = vec![DimInfo::Lit(3), DimInfo::Lit(3)];
+        assert!(matches!(
+            recover_anchor_axis(&square, 0, square.len(), "seq", &positions),
+            AnchorRecovery::AmbiguousAfterReorder
+        ));
+
+        // Unrecorded: extent absent and position out of range.
+        let absent = vec![DimInfo::Lit(7), DimInfo::Lit(8)];
+        assert!(matches!(
+            recover_anchor_axis(&absent, 0, absent.len(), "seq", &positions),
+            AnchorRecovery::Unrecorded
+        ));
+
+        // Name not in the map at all.
+        assert!(matches!(
+            recover_anchor_axis(&dims, 0, dims.len(), "absent", &positions),
+            AnchorRecovery::Unrecorded
+        ));
     }
 
     /// Tier-3: a `(d-rank {} pre) (d-name {} seq) (d-rank {} post)` formal splits
@@ -10906,12 +11184,22 @@ mod tests {
             "(t-ref {} (t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-prim {} f32)))",
         ));
 
-        // Concrete formal alone: seq -> 1.
-        let from_concrete = tensor_dim_axis_positions(std::slice::from_ref(&concrete));
-        assert_eq!(from_concrete.get("seq"), Some(&1));
+        // chelis#549: positions are paired with the anchor's actual extent.
+        let actual = TensorType {
+            dims: vec![DimInfo::Lit(4), DimInfo::Lit(5)],
+            precision: Prim::F32,
+        };
+
+        // Concrete formal alone: seq -> (1, Lit(5)).
+        let from_concrete = tensor_dim_axis_positions(
+            std::slice::from_ref(&concrete),
+            std::slice::from_ref(&actual),
+        );
+        assert_eq!(from_concrete.get("seq"), Some(&(1usize, DimInfo::Lit(5))));
 
         // Spread formal alone: seq is post-spread, recorded nowhere.
-        let from_spread = tensor_dim_axis_positions(std::slice::from_ref(&spread));
+        let from_spread =
+            tensor_dim_axis_positions(std::slice::from_ref(&spread), std::slice::from_ref(&actual));
         assert!(
             !from_spread.contains_key("seq"),
             "a post-spread anchor has no fixed offset; got {from_spread:?}"
@@ -10921,8 +11209,12 @@ mod tests {
         let leading = Some(parse_type_expr(
             "(t-tensor {} (d-name {} row) (d-rank {} rest) (t-prim {} f32))",
         ));
-        let from_leading = tensor_dim_axis_positions(&[leading]);
-        assert_eq!(from_leading.get("row"), Some(&0));
+        let leading_actual = TensorType {
+            dims: vec![DimInfo::Lit(7), DimInfo::Lit(8)],
+            precision: Prim::F32,
+        };
+        let from_leading = tensor_dim_axis_positions(&[leading], &[leading_actual]);
+        assert_eq!(from_leading.get("row"), Some(&(0usize, DimInfo::Lit(7))));
     }
 
     /// chelis#373 anti-clobber: when the SAME named axis appears in a
@@ -10938,12 +11230,19 @@ mod tests {
         let spread = Some(parse_type_expr(
             "(t-ref {} (t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-prim {} f32)))",
         ));
-        let mut positions = tensor_dim_axis_positions(&[concrete]);
-        positions.extend(tensor_dim_axis_positions(&[spread]));
+        let actual = TensorType {
+            dims: vec![DimInfo::Lit(4), DimInfo::Lit(5)],
+            precision: Prim::F32,
+        };
+        let mut positions = tensor_dim_axis_positions(&[concrete], std::slice::from_ref(&actual));
+        positions.extend(tensor_dim_axis_positions(
+            &[spread],
+            std::slice::from_ref(&actual),
+        ));
         assert_eq!(
             positions.get("seq"),
-            Some(&1),
-            "the concrete-rank `seq -> 1` must survive the spread formal's extend"
+            Some(&(1usize, DimInfo::Lit(5))),
+            "the concrete-rank `seq -> (1, Lit(5))` must survive the spread formal's extend"
         );
     }
 
