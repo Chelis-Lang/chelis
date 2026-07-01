@@ -205,19 +205,28 @@ pub fn shape_class(name: &str) -> ShapeClass {
         | "or" => ShapeClass::Identity,
         // Named-axis reductions: address the reduced axis by name and drop
         // exactly it, carrying the surviving named axes through (Tier-3 §4.5.3).
-        // Restricted to `sum`/`mean`: these lower through the tensor-DAG backend
-        // and build+run end-to-end. `max_reduce`/`min_reduce`/`prod_reduce`/
-        // `argmax_reduce`/`argmin_reduce` route through the host lane in a
-        // rank-poly inline and don't yet compile (chelis#340), so they stay
-        // Rewriting — rejected in a `..r` body — to keep check↔backend in sync
-        // (a check-clean program must build). They remain usable at concrete rank.
+        // The whole reduction family is name-tracked: each lowers through the
+        // tensor-DAG backend (`resolve_reduce_axis` resolves the named axis to
+        // a positional index against the operand's named dims) and builds+runs
+        // end-to-end. chelis#340 closed the host-lane gap that had restricted
+        // this to `sum`/`mean`: a rank-poly named-reduce def whose return type
+        // is a tensor routes through `try_lower_tensor_helper_call`, and the
+        // host-type inference (`infer_app_expr_host_type` /
+        // `infer_builtin_host_type_from_arg_tys`) now types
+        // `max_reduce`/`min_reduce`/`prod_reduce`/`argmax_reduce`/
+        // `argmin_reduce` over a named axis so a *host-lane* occurrence keeps
+        // its tensor type instead of falling through to the
+        // "unsupported builtin" host emit. `argmax_reduce`/`argmin_reduce`
+        // return an int64 index tensor (no-grad). All remain usable at
+        // concrete rank.
         //
         // Named-axis expand (chelis#339, the R+1 inverse): `expand` addresses
         // its insertion point by name (trailing end, or before a named anchor)
         // and the procedural arm (`check_expand_signature`) computes the
         // symbolic output row, rejecting positional axes at symbolic rank —
         // the same gate structure as the reductions.
-        "sum" | "mean" | "expand" => ShapeClass::NameTracked,
+        "sum" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce" | "argmax_reduce"
+        | "argmin_reduce" | "expand" => ShapeClass::NameTracked,
         // Positional reshapes/permutes, matmul/conv, axis-indexed ops,
         // gather/scatter, and every non-tensor/host builtin.
         _ => ShapeClass::Rewriting,
@@ -1280,8 +1289,21 @@ mod tests {
         ];
         // Named-axis reductions and named-axis expand are NameTracked
         // (admitted in a `..r` body — the procedural arm is the gate);
-        // everything else outside `identity` is Rewriting.
-        let name_tracked: &[&str] = &["sum", "mean", "expand"];
+        // everything else outside `identity` is Rewriting. chelis#340 added
+        // the full reduction family (`max_reduce`/`min_reduce`/
+        // `prod_reduce`/`argmax_reduce`/`argmin_reduce`) here: they route
+        // through the tensor-DAG kernel lane like `sum`/`mean` and build+run
+        // end-to-end in a rank-poly body.
+        let name_tracked: &[&str] = &[
+            "sum",
+            "mean",
+            "max_reduce",
+            "min_reduce",
+            "prod_reduce",
+            "argmax_reduce",
+            "argmin_reduce",
+            "expand",
+        ];
         for name in BUILTIN_NAMES {
             let expected = if identity.contains(name) {
                 ShapeClass::Identity
@@ -1312,6 +1334,12 @@ mod tests {
         assert_eq!(shape_class("sum"), ShapeClass::NameTracked);
         assert_eq!(shape_class("mean"), ShapeClass::NameTracked);
         assert_eq!(shape_class("expand"), ShapeClass::NameTracked);
+        // chelis#340: the rest of the reduction family is name-tracked too.
+        assert_eq!(shape_class("max_reduce"), ShapeClass::NameTracked);
+        assert_eq!(shape_class("min_reduce"), ShapeClass::NameTracked);
+        assert_eq!(shape_class("prod_reduce"), ShapeClass::NameTracked);
+        assert_eq!(shape_class("argmax_reduce"), ShapeClass::NameTracked);
+        assert_eq!(shape_class("argmin_reduce"), ShapeClass::NameTracked);
     }
 
     /// Lock the §4 "Complete closed vocabulary" block of

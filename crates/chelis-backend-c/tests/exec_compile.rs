@@ -2404,3 +2404,193 @@ fn ws_a4_i8_sum_with_narrower_accumulator_is_ir_error() {
         "rejection diagnostic must cite spec §5.7.1; got: {err}"
     );
 }
+
+// ============================================================
+// #517: emit_cmplt must read its operands through their OWN
+// element dtype, not the boolean (f32) output dtype. The cmplt
+// signature is `∀D,p. (tensor[D,p], tensor[D,p]) → tensor[D,bool]`,
+// so the operands carry the compared precision `p` while the result
+// is bool (stored f32). Reading a RUNTIME-PRODUCED int32 / int64 /
+// f64 operand through a raw `float*` reinterprets the bit pattern
+// (the #347 / #476 bug class). The discriminator is a NEGATIVE
+// integer operand: as int32, `-7 < -3` is true; reinterpreting the
+// int32 bit pattern 0xFFFFFFF9 / 0xFFFFFFFD as `float` yields NaN, so
+// the buggy `float*` read returns false. eval-vs-C parity oracle.
+// ============================================================
+
+fn vec_prim(n: usize, p: Prim) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(n)],
+        precision: p,
+    }
+}
+
+/// Build `cmplt(a, b)` over two runtime Load operands of precision
+/// `prim`, evaluate the chelis-ir oracle, compile + run the generated
+/// C kernel, and assert the C bool output matches the evaluator
+/// element-for-element. `c_elem` / `c_dtype` describe the operand's C
+/// storage type and runtime dtype tag; values are passed as f64 (exact
+/// for the integer and small-double cases used here).
+fn run_cmplt_parity(
+    tag: &str,
+    prim: Prim,
+    c_elem: &str,
+    c_dtype: &str,
+    a_vals: &[f64],
+    b_vals: &[f64],
+) {
+    use chelis_ir::eval::{TensorValue, eval_tensor};
+    use std::collections::HashMap;
+
+    let n = a_vals.len();
+    assert_eq!(n, b_vals.len(), "operand length mismatch in {tag}");
+
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_prim(n, prim),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        vec_prim(n, prim),
+        None,
+    );
+    let root = dag.add_node(RiscOp::CmpLt, vec![a, b], vec_prim(n, Prim::Bool), None);
+
+    // Evaluator oracle: numeric `a < b` per element (eval.rs CmpLt).
+    let mut inputs = HashMap::new();
+    inputs.insert(
+        "a".to_string(),
+        TensorValue::from_vec(vec![n], a_vals.to_vec()),
+    );
+    inputs.insert(
+        "b".to_string(),
+        TensorValue::from_vec(vec![n], b_vals.to_vec()),
+    );
+    let evaluated = eval_tensor(&dag, &inputs).expect("evaluator must succeed");
+    let expected: Vec<f64> = evaluated[&root].data.clone();
+    assert_eq!(expected.len(), n);
+
+    let dag = fuse(&dag);
+    let result = codegen_with_options(&dag, &format!("cmplt_{tag}"), CodegenOptions::default());
+    let src = &result.c_source;
+
+    // Format the operand initializers and the expected bool vector.
+    let fmt_vals = |vals: &[f64]| -> String {
+        vals.iter()
+            .map(|v| {
+                if prim == Prim::F64 {
+                    format!("{v:?}")
+                } else {
+                    format!("{}", *v as i64)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let a_init = fmt_vals(a_vals);
+    let b_init = fmt_vals(b_vals);
+    let exp_init = expected
+        .iter()
+        .map(|v| format!("{:.1}f", v))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+#include <stdint.h>
+
+static chelis_tensor make_view_typed(void* data, int n, int dtype) {{
+    chelis_tensor t;
+    memset(&t, 0, sizeof(t));
+    t.data = (float*)data;
+    t.shape[0] = n;
+    t.strides[0] = 1;
+    t.ndim = 1;
+    t.dtype = dtype;
+    t.size = n;
+    t.owns_data = 0;
+    return t;
+}}
+
+extern void cmplt_{tag}(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    {c_elem} a_data[{n}] = {{{a_init}}};
+    {c_elem} b_data[{n}] = {{{b_init}}};
+    chelis_tensor a_t = make_view_typed(a_data, {n}, {c_dtype});
+    chelis_tensor b_t = make_view_typed(b_data, {n}, {c_dtype});
+    chelis_tensor* inputs[2] = {{&a_t, &b_t}};
+    chelis_tensor* outputs[1] = {{NULL}};
+
+    cmplt_{tag}(inputs, 2, outputs, 1);
+
+    float expected[{n}] = {{{exp_init}}};
+    int ok = 1;
+    for (int i = 0; i < {n}; i++) {{
+        float got = outputs[0]->data[i];
+        if (got != expected[i]) {{
+            printf("MISMATCH at %d: got %.1f expected %.1f\n", i, got, expected[i]);
+            ok = 0;
+        }}
+    }}
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}}
+"#
+    );
+
+    let Some(output) = compile_and_run_kernel(&format!("cmplt_{tag}"), src, &harness) else {
+        panic!("#517 cmplt parity [{tag}]: kernel failed to compile/run");
+    };
+    assert!(
+        output.contains("PASS"),
+        "#517 cmplt parity [{tag}]: C backend disagreed with evaluator.\n\
+         Generated C:\n{src}\nRun output:\n{output}"
+    );
+}
+
+/// #517 primary oracle: runtime int32 operands, including the negative
+/// values that the `float*` bit-reinterpret gets wrong.
+#[test]
+fn exec_cmplt_int32_runtime_operands_match_evaluator() {
+    run_cmplt_parity(
+        "i32",
+        Prim::Int32,
+        "int32_t",
+        "CHELIS_I32",
+        &[-7.0, 2.0, -5.0, 10.0, 3.0, -1.0],
+        &[-3.0, 10.0, 3.0, 2.0, 3.0, -1.0],
+    );
+}
+
+/// #517 sweep: int64 operands. The buggy `float*` read also misaligns
+/// the 8-byte stride; reading as `int64_t*` is required.
+#[test]
+fn exec_cmplt_int64_runtime_operands_match_evaluator() {
+    run_cmplt_parity(
+        "i64",
+        Prim::Int64,
+        "int64_t",
+        "CHELIS_I64",
+        &[-7.0, 2.0, -5.0, 100.0, 3.0],
+        &[-3.0, 100.0, 3.0, 2.0, 3.0],
+    );
+}
+
+/// #517 sweep: f64 operands. f64 read through `float*` truncates the
+/// 8-byte payload to 4 bytes; reading as `double*` is required.
+#[test]
+fn exec_cmplt_f64_runtime_operands_match_evaluator() {
+    run_cmplt_parity(
+        "f64",
+        Prim::F64,
+        "double",
+        "CHELIS_F64",
+        &[-7.5, 2.25, -5.0, 10.0, 3.0],
+        &[-3.5, 10.0, 3.0, 2.0, 3.0],
+    );
+}
