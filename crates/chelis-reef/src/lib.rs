@@ -7180,25 +7180,143 @@ mod tests {
         );
     }
 
+    /// Every committed `reef.lock` that records the bundled chelis-std
+    /// dependency must pin the `archive_sha256` / `shell_sha256` of the
+    /// embedded bundle bytes shipped in `crates/chelis-std-bundle/dist/`.
+    ///
+    /// The hashes are recomputed by reading the dist files **from disk** at
+    /// test time, deliberately NOT via `chelis_std_bundle::archive_sha256()`.
+    /// That accessor returns a value baked into the compiled
+    /// `chelis-std-bundle` rlib via `include_bytes!`; the bundle bytes are not
+    /// part of `Cargo.lock`, so `Swatinem/rust-cache` keys on neither and can
+    /// serve a stale-compiled rlib whose hash matches an equally-stale lock,
+    /// masking a real desync until a clean build (chelis#585). Reading the
+    /// committed bytes here makes the invariant cache-proof: it fails
+    /// identically on a clean checkout, a warm `target/`, and the per-crate
+    /// `cargo nextest run -p chelis-reef` loop.
+    ///
+    /// Keep the lock list in sync with `PINNED_REAL_LOCK_DIRS` in
+    /// `scripts/bump_compiler_pins.py` and `pinned_real_lock_files()` in
+    /// `crates/chelis-cli/tests/compiler_pin_tripwire.rs`.
     #[test]
     fn bundled_chelis_std_lock_hashes_match_embedded_artifacts() {
         let here = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let lock_path = here.join("../../packages/chelis-std/reef.lock");
-        let text = fs::read_to_string(&lock_path).unwrap_or_else(|e| {
+        let dist = here.join("../chelis-std-bundle/dist");
+        let archive_path = dist.join(format!("chelis-std-{BUNDLED_CHELIS_STD_VERSION}.tar.zst"));
+        let shell_path = dist.join(format!("chelis-std-{BUNDLED_CHELIS_STD_VERSION}.chb"));
+        let disk_archive_sha = sha256_file(&archive_path).unwrap_or_else(|e| {
             panic!(
-                "could not read {}: {e}: \
-                 chelis-std lock hash sync test cannot run",
-                lock_path.display()
+                "could not hash embedded bundle archive {}: {e}",
+                archive_path.display()
             )
         });
-        let lock: ReefLock = toml::from_str(&text).expect("packages/chelis-std/reef.lock parses");
+        let disk_shell_sha = sha256_file(&shell_path).unwrap_or_else(|e| {
+            panic!(
+                "could not hash embedded bundle shell {}: {e}",
+                shell_path.display()
+            )
+        });
+
+        let lock_paths = [
+            here.join("../../packages/chelis-std/reef.lock"),
+            here.join("../../crates/chelis-cli/tests/fixtures/release_pipe_stage/reef.lock"),
+        ];
+        for lock_path in lock_paths {
+            let text = fs::read_to_string(&lock_path).unwrap_or_else(|e| {
+                panic!(
+                    "could not read {}: {e}: \
+                     chelis-std lock hash sync test cannot run",
+                    lock_path.display()
+                )
+            });
+            let lock: ReefLock = toml::from_str(&text)
+                .unwrap_or_else(|e| panic!("{} must parse: {e}", lock_path.display()));
+            let dep = lock
+                .dependencies
+                .iter()
+                .find(|dep| dep.name == CHELIS_STD_PACKAGE_NAME)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} must record the bundled chelis-std runtime dependency",
+                        lock_path.display()
+                    )
+                });
+            assert_eq!(
+                dep.archive_sha256,
+                disk_archive_sha,
+                "{} archive_sha256 is stale vs the embedded bundle {}; \
+                 regenerate the lock with `chelis reef build` (or \
+                 scripts/bump_compiler_pins.py step 5). chelis#585",
+                lock_path.display(),
+                archive_path.display()
+            );
+            assert_eq!(
+                dep.shell_sha256,
+                disk_shell_sha,
+                "{} shell_sha256 is stale vs the embedded bundle {}; \
+                 regenerate the lock with `chelis reef build` (or \
+                 scripts/bump_compiler_pins.py step 5). chelis#585",
+                lock_path.display(),
+                shell_path.display()
+            );
+        }
+    }
+
+    /// Negative parity for `bundled_chelis_std_lock_hashes_match_embedded_artifacts`:
+    /// a committed lock whose `archive_sha256` has drifted from the embedded
+    /// bundle bytes must be caught by the exact parse -> find -> compare path the
+    /// guard runs. Synthesizing a drifted hash (the class of desync #559
+    /// introduced and chelis#585 hardened against) and asserting the comparison
+    /// rejects it proves the positive test's `assert_eq!` is not a no-op that
+    /// passes any input.
+    #[test]
+    fn drifted_chelis_std_lock_hash_is_detected() {
+        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let dist = here.join("../chelis-std-bundle/dist");
+        let archive_path = dist.join(format!("chelis-std-{BUNDLED_CHELIS_STD_VERSION}.tar.zst"));
+        let real = sha256_file(&archive_path).expect("hash embedded bundle archive");
+
+        // Flip the leading hex nibble to synthesize a hash that cannot match
+        // the bundle, version-robustly (no hard-coded historical value).
+        let mut drifted = real.clone();
+        let first = drifted.remove(0);
+        drifted.insert(0, if first == '0' { '1' } else { '0' });
+        assert_ne!(
+            drifted, real,
+            "synthesized drift must differ from the real bundle hash"
+        );
+
+        let ver = env!("CARGO_PKG_VERSION");
+        let tampered_lock = format!(
+            r#"[package]
+name = "downstream"
+version = "0.1.0"
+
+[[dependencies]]
+name = "chelis-std"
+version = "{BUNDLED_CHELIS_STD_VERSION}"
+compiler = "={ver}"
+archive_sha256 = "{drifted}"
+shell_sha256 = "{drifted}"
+
+[dependencies.source]
+kind = "bundled"
+compiler_version = "{ver}"
+"#
+        );
+        let lock: ReefLock = toml::from_str(&tampered_lock).expect("tampered lock parses");
         let dep = lock
             .dependencies
             .iter()
             .find(|dep| dep.name == CHELIS_STD_PACKAGE_NAME)
-            .expect("chelis-std lock must record bundled runtime dependency");
-        assert_eq!(dep.archive_sha256, chelis_std_bundle::archive_sha256());
-        assert_eq!(dep.shell_sha256, chelis_std_bundle::shell_sha256());
+            .expect("tampered lock records chelis-std dependency");
+
+        // The exact comparison the positive guard performs must flag the drift.
+        assert_ne!(
+            dep.archive_sha256, real,
+            "guard failed to detect a lock archive_sha256 that drifted from \
+             the embedded bundle"
+        );
     }
 
     /// Negative parity for the version sync: a soft-verify mismatch must
