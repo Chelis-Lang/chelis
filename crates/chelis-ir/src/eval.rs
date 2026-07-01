@@ -158,6 +158,77 @@ fn validate_shape_against_type(
     Ok(())
 }
 
+/// chelis#523: post-`bind_symbolic_dims` movement-op bound re-check.
+///
+/// `verify` (invoked before binding) skips C10 shrink/stride bound checks on
+/// symbolic axes because the extent is unknown. After binding makes those
+/// extents concrete, re-validate every LIVE `Shrink`/`Stride` node's bounds
+/// against its (now concrete) input extent so an out-of-bounds shrink/stride
+/// — which a future pass rewriting a Stride/Shrink's input vs output symbols
+/// independently could introduce — fails loud with a clean `Err` rather than a
+/// silent out-of-bounds read in the evaluator. Scoped to shrink/stride bounds
+/// on live nodes only: the full structural `verify` would reject the dead
+/// symbolic-dim-source Loads that root-scoped eval keeps alive.
+fn verify_bound_movement_bounds(dag: &Dag, live: Option<&[bool]>) -> Result<(), String> {
+    fn known_size(dim: &DimInfo) -> Option<usize> {
+        match dim {
+            DimInfo::Lit(n) => Some(*n),
+            DimInfo::Named(_, Some(n)) => Some(*n),
+            DimInfo::Named(_, None) => None,
+        }
+    }
+    for node in dag.nodes() {
+        if let Some(mask) = live
+            && !mask.get(node.id.0).copied().unwrap_or(false)
+        {
+            continue;
+        }
+        let input_dims = match node.inputs.first().and_then(|id| dag.get(*id)) {
+            Some(input) => &input.output_type.dims,
+            None => continue,
+        };
+        match &node.op {
+            RiscOp::Shrink { bounds } => {
+                for (axis, (start, end)) in bounds.iter().enumerate() {
+                    // A surviving SHRINK_TO_END sentinel is resolved to the
+                    // axis extent by the evaluator; skip it here.
+                    if *end == SHRINK_TO_END {
+                        continue;
+                    }
+                    if start > end {
+                        return Err(format!(
+                            "post-bind shrink at node {} axis {axis}: start {start} > end {end} \
+                             (chelis#523)",
+                            node.id.0
+                        ));
+                    }
+                    if let Some(in_size) = input_dims.get(axis).and_then(known_size)
+                        && *end > in_size
+                    {
+                        return Err(format!(
+                            "post-bind shrink at node {} axis {axis}: end {end} > input extent \
+                             {in_size} (chelis#523)",
+                            node.id.0
+                        ));
+                    }
+                }
+            }
+            RiscOp::Stride { strides } => {
+                for (axis, step) in strides.iter().enumerate() {
+                    if *step == 0 {
+                        return Err(format!(
+                            "post-bind stride at node {} axis {axis}: step 0 (chelis#523)",
+                            node.id.0
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn infer_symbolic_bindings_from_inputs(
     dag: &Dag,
     inputs: &HashMap<String, TensorValue>,
@@ -1015,12 +1086,35 @@ fn shrink(input: &TensorValue, bounds: &[(usize, usize)]) -> TensorValue {
     // resolve it here to the axis's runtime extent — `SHRINK_TO_END` means
     // "to the end of this axis", which is exactly `input.shape[axis]` — rather
     // than letting `end - start = usize::MAX` overflow `numel`.
+    // chelis#523: loud bounds clamp. `verify`'s C10 shrink check runs BEFORE
+    // `bind_symbolic_dims` and skips symbolic axes, so a shrink whose `end`
+    // exceeds the (now concrete) input extent, or whose `start > end`, could
+    // reach here and either underflow `end - start` (usize) or read
+    // out-of-bounds in the copy loop below (a silent wrong gradient on higher
+    // rank, where the flat index can alias a valid slot). This is not an active
+    // wrong-result today (a type-checker symbol-identity invariant keeps it
+    // unreachable), but a future pass that rewrites a Stride/Shrink's input vs
+    // output symbols independently would break that invariant. Fail loud here
+    // rather than silently corrupt — do NOT clamp to a valid range (that would
+    // hide the producing-pass bug).
     let out_shape: Vec<usize> = input
         .shape
         .iter()
         .zip(bounds.iter())
-        .map(|(extent, (start, end))| {
+        .enumerate()
+        .map(|(axis, (extent, (start, end)))| {
             let end = if *end == SHRINK_TO_END { *extent } else { *end };
+            assert!(
+                *start <= end,
+                "eval::shrink: axis {axis} bound start {start} exceeds end {end} \
+                 (input extent {extent}); the producing IR pass emitted an inverted \
+                 shrink (chelis#523)"
+            );
+            assert!(
+                end <= *extent,
+                "eval::shrink: axis {axis} bound end {end} exceeds input extent {extent}; \
+                 out-of-bounds shrink (chelis#523)"
+            );
             end - start
         })
         .collect();
@@ -1170,7 +1264,22 @@ where
     )?;
     let bound_dag = if needs_symbolic_binding {
         let bindings = infer_symbolic_bindings_from_inputs(dag, &resolved_inputs)?;
-        bind_symbolic_dims(dag, &bindings)?
+        let bound = bind_symbolic_dims(dag, &bindings)?;
+        // chelis#523: `verify` (grad.rs, before eval) runs BEFORE binding, so
+        // its C10 shrink/stride bound checks are SKIPPED on symbolic axes
+        // (extent unknown). Once `bind_symbolic_dims` makes those extents
+        // concrete, re-check the movement-op bounds so an out-of-bounds
+        // shrink/stride that only becomes visible post-bind fails loud with a
+        // clean `Err` here instead of reaching the evaluator as a silent OOB
+        // read / wrong gradient. This is the defensive-failsafe half of #523
+        // (the `eval::shrink` clamp is the other half); it is not an active
+        // wrong-result today, but closes the gap should a future pass break the
+        // symbol-identity invariant. The check is scoped to shrink/stride
+        // bounds on LIVE nodes only — the full `verify` would flag the dead
+        // symbolic-dim-source Loads that root-scoped eval deliberately keeps
+        // alive ("node N is dangling"), over-rejecting legitimate programs.
+        verify_bound_movement_bounds(&bound, live)?;
+        bound
     } else {
         dag.clone()
     };
@@ -1662,6 +1771,100 @@ mod tests {
         let out = shrink(&input, &[(1, 2), (0, SHRINK_TO_END)]);
         assert_eq!(out.shape, vec![1, 3]);
         assert_eq!(out.data, vec![4.0, 5.0, 6.0]);
+    }
+
+    /// chelis#523: `eval::shrink` loud-clamp — a genuine (non-sentinel) `end`
+    /// beyond the input extent must fail loud, not read out of bounds / return
+    /// a silently wrong slice. Do NOT clamp to a valid range (that hides the
+    /// producing-pass bug).
+    #[test]
+    #[should_panic(expected = "end 5 exceeds input extent 3")]
+    fn shrink_asserts_on_end_beyond_extent() {
+        let input = TensorValue {
+            data: vec![1.0, 2.0, 3.0],
+            shape: vec![3],
+        };
+        let _ = shrink(&input, &[(0, 5)]);
+    }
+
+    /// chelis#523: `eval::shrink` loud-clamp — an inverted bound (`start > end`)
+    /// must fail loud rather than underflow `end - start` (usize).
+    #[test]
+    #[should_panic(expected = "start 3 exceeds end 1")]
+    fn shrink_asserts_on_inverted_bounds() {
+        let input = TensorValue {
+            data: vec![1.0, 2.0, 3.0],
+            shape: vec![3],
+        };
+        let _ = shrink(&input, &[(3, 1)]);
+    }
+
+    /// chelis#523: the post-bind re-verify. `verify` runs BEFORE
+    /// `bind_symbolic_dims` and skips the C10 shrink-bound check on symbolic
+    /// axes, so an out-of-bounds shrink whose overrun only becomes visible once
+    /// the symbolic input extent is bound must be caught after binding — a
+    /// clean `Err`, not a panic or silent OOB read. Here the input is symbolic
+    /// `tensor[n]`; the shrink's `end = 10` exceeds the extent once `n` binds to
+    /// 4 from the runtime input.
+    #[test]
+    fn post_bind_reverify_rejects_out_of_bounds_symbolic_shrink() {
+        let mut dag = Dag::new();
+        let sym_ty = TensorType {
+            dims: vec![DimInfo::Named("n".to_string(), None)],
+            precision: Prim::F32,
+        };
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], sym_ty, None);
+        // A shrink whose end (10) exceeds the eventual concrete extent (4).
+        let shr = dag.add_node(
+            RiscOp::Shrink {
+                bounds: vec![(0, 10)],
+            },
+            vec![x],
+            TensorType {
+                dims: vec![DimInfo::Lit(10)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let err = eval_tensor_roots_with_strict(&dag, &[shr], |name| match name {
+            "x" => Some(TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0])),
+            _ => None,
+        })
+        .unwrap_err();
+        assert!(
+            err.contains("chelis#523") && err.contains("end 10 > input extent 4"),
+            "expected the post-bind OOB-shrink re-verify error, got: {err}"
+        );
+    }
+
+    /// Negative parity: an IN-bounds symbolic shrink must still eval cleanly
+    /// (the re-verify must not over-reject legitimate programs). `tensor[n]`
+    /// with `n` bound to 4, shrink `[1, 3)` -> the middle two elements.
+    #[test]
+    fn post_bind_reverify_allows_in_bounds_symbolic_shrink() {
+        let mut dag = Dag::new();
+        let sym_ty = TensorType {
+            dims: vec![DimInfo::Named("n".to_string(), None)],
+            precision: Prim::F32,
+        };
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], sym_ty, None);
+        let shr = dag.add_node(
+            RiscOp::Shrink {
+                bounds: vec![(1, 3)],
+            },
+            vec![x],
+            TensorType {
+                dims: vec![DimInfo::Lit(2)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let vals = eval_tensor_roots_with_strict(&dag, &[shr], |name| match name {
+            "x" => Some(TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0])),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(vals[&shr], TensorValue::from_vec(vec![2], vec![2.0, 3.0]));
     }
 
     // ---- reduce_window reverse-mode adjoint (RiscOp::ReduceWindowGrad) ----
