@@ -355,6 +355,35 @@ fn binary_map(lhs: &TensorValue, rhs: &TensorValue, f: impl Fn(f64, f64) -> f64)
     }
 }
 
+/// The exact diagnostic the integer zero-divisor trap emits, shared with the
+/// host evaluator (`chelis-compiler-api` `host_ops::INT_DIV_ZERO_MSG`), the C
+/// runtime guard (`chelis_int_div_guard`), and `spec/05-risc-primitives.md`
+/// §2.1, so the three lanes are byte-identical.
+const INT_DIV_ZERO_MSG: &str = "integer division or remainder by zero";
+
+/// Like [`binary_map`] but the element closure may fail, surfacing the first
+/// error. Used by the integer `floor_div` / `trunc_div` zero-divisor trap
+/// (chelis#550) so this reference evaluator fails closed on an integer divide
+/// by zero instead of computing `floor(x/0) == ±inf` and propagating garbage.
+fn try_binary_map(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    f: impl Fn(f64, f64) -> Result<f64, String>,
+) -> Result<TensorValue, String> {
+    assert_eq!(lhs.shape, rhs.shape);
+    let data = lhs
+        .data
+        .iter()
+        .copied()
+        .zip(rhs.data.iter().copied())
+        .map(|(a, b)| f(a, b))
+        .collect::<Result<Vec<f64>, String>>()?;
+    Ok(TensorValue {
+        data,
+        shape: lhs.shape.clone(),
+    })
+}
+
 fn matmul(lhs: &TensorValue, rhs: &TensorValue) -> TensorValue {
     assert_eq!(lhs.shape.len(), 2);
     assert_eq!(rhs.shape.len(), 2);
@@ -1190,19 +1219,49 @@ where
             // Tensor values are stored as f64; for integer-valued operands
             // `(a / b).floor()` yields the integer floored quotient, and
             // for float operands it is `floor(a / b)` directly.
-            RiscOp::FloorDiv => binary_map(
-                &values[&node.inputs[0]],
-                &values[&node.inputs[1]],
-                |a, b| (a / b).floor(),
-            ),
+            //
+            // chelis#550: integer operands trap on a zero divisor with the
+            // shared diagnostic, mirroring the host evaluator (`host_ops`,
+            // i64 + trap) and the C backend (`chelis_int_div_guard`) so this
+            // reference lane fails closed instead of emitting `floor(x/0)`.
+            // Float operands keep IEEE semantics (`floor(+inf) == +inf`,
+            // never traps), per spec/05-risc-primitives.md §2.1. The integer
+            // case is gated on the output precision, which equals the operand
+            // precision for `floor_div` (the §2.1 precision rule).
+            RiscOp::FloorDiv => {
+                let lhs = &values[&node.inputs[0]];
+                let rhs = &values[&node.inputs[1]];
+                if node.output_type.precision.is_integer() {
+                    try_binary_map(lhs, rhs, |a, b| {
+                        if b == 0.0 {
+                            Err(INT_DIV_ZERO_MSG.to_string())
+                        } else {
+                            Ok((a / b).floor())
+                        }
+                    })?
+                } else {
+                    binary_map(lhs, rhs, |a, b| (a / b).floor())
+                }
+            }
             // chelis#178: truncating (round-toward-zero) integer division.
             // `(a / b).trunc()` matches C/Rust integer `/` for the
             // integer-valued f64 operands this op is restricted to.
-            RiscOp::TruncDiv => binary_map(
-                &values[&node.inputs[0]],
-                &values[&node.inputs[1]],
-                |a, b| (a / b).trunc(),
-            ),
+            //
+            // chelis#550: `trunc_div` is integer-only (the checker rejects
+            // float operands), so a zero divisor always traps with the shared
+            // diagnostic — matching `host_ops::eval_trunc_div` and the C
+            // backend guard.
+            RiscOp::TruncDiv => {
+                let lhs = &values[&node.inputs[0]];
+                let rhs = &values[&node.inputs[1]];
+                try_binary_map(lhs, rhs, |a, b| {
+                    if b == 0.0 {
+                        Err(INT_DIV_ZERO_MSG.to_string())
+                    } else {
+                        Ok((a / b).trunc())
+                    }
+                })?
+            }
             RiscOp::Neg => unary_map(&values[&node.inputs[0]], |x| -x),
             RiscOp::Recip => unary_map(&values[&node.inputs[0]], |x| 1.0 / x),
             RiscOp::Exp => unary_map(&values[&node.inputs[0]], f64::exp),
@@ -1300,6 +1359,20 @@ where
                 let externals: Vec<&TensorValue> =
                     node.inputs.iter().map(|id| &values[id]).collect();
 
+                // chelis#550: gate the integer `floor_div` zero-divisor trap on
+                // the fused node's output precision. A pure integer-division
+                // chain carries an integer output precision, so the trap fires
+                // for its `floor_div` steps; a float chain keeps IEEE semantics
+                // (`floor(+inf)`), never trapping. `trunc_div` is integer-only
+                // and traps unconditionally. Per-step operand precision is not
+                // recorded on `FusedStep`, so a `floor_div` buried in a chain
+                // whose tail changes the output precision (e.g. a trailing
+                // `cmplt` -> bool) is the one residual the output-precision
+                // gate cannot see; the authoritative integer trap there rests
+                // on `host_ops` (the user `chelis eval` lane) and the C backend
+                // guard, both of which trap per primitive.
+                let fused_is_integer = node.output_type.precision.is_integer();
+
                 // Walk the fused steps sequentially, building up intermediate results.
                 let mut intermediates: Vec<TensorValue> = Vec::with_capacity(ops.len());
 
@@ -1330,16 +1403,36 @@ where
                         ),
                         // chelis#178: floor / truncating integer division
                         // fused steps. See the standalone `RiscOp` arms.
-                        FusedStepOp::FloorDiv => binary_map(
-                            resolve(&step.input_indices[0]),
-                            resolve(&step.input_indices[1]),
-                            |a, b| (a / b).floor(),
-                        ),
-                        FusedStepOp::TruncDiv => binary_map(
-                            resolve(&step.input_indices[0]),
-                            resolve(&step.input_indices[1]),
-                            |a, b| (a / b).trunc(),
-                        ),
+                        // chelis#550: integer divisors trap on zero (gated on
+                        // the fused output precision; see `fused_is_integer`).
+                        FusedStepOp::FloorDiv => {
+                            let lhs = resolve(&step.input_indices[0]);
+                            let rhs = resolve(&step.input_indices[1]);
+                            if fused_is_integer {
+                                try_binary_map(lhs, rhs, |a, b| {
+                                    if b == 0.0 {
+                                        Err(INT_DIV_ZERO_MSG.to_string())
+                                    } else {
+                                        Ok((a / b).floor())
+                                    }
+                                })?
+                            } else {
+                                binary_map(lhs, rhs, |a, b| (a / b).floor())
+                            }
+                        }
+                        FusedStepOp::TruncDiv => {
+                            let lhs = resolve(&step.input_indices[0]);
+                            let rhs = resolve(&step.input_indices[1]);
+                            // `trunc_div` is integer-only; a zero divisor
+                            // always traps.
+                            try_binary_map(lhs, rhs, |a, b| {
+                                if b == 0.0 {
+                                    Err(INT_DIV_ZERO_MSG.to_string())
+                                } else {
+                                    Ok((a / b).trunc())
+                                }
+                            })?
+                        }
                         FusedStepOp::MaxElem => binary_map(
                             resolve(&step.input_indices[0]),
                             resolve(&step.input_indices[1]),
@@ -2456,5 +2549,143 @@ mod tests {
                 "expected axis-out-of-range error, got: {errs:?}"
             );
         }
+    }
+
+    // ---- chelis#550: integer floor_div / trunc_div zero-divisor trap ----
+    //
+    // The chelis-ir evaluator is a backend-agreement numeric reference (all
+    // values are f64). #178 added `floor_div` / `trunc_div` but computed
+    // `(a/b).floor()` / `.trunc()` with no zero-divisor trap, so an integer
+    // divide by zero silently produced `floor(x/0) == ±inf` rather than
+    // halting. Spec §2.1 scopes the `integer division or remainder by zero`
+    // trap to BOTH the evaluator and the C backend; these pin that this lane
+    // now fails closed on integer operands, while float `floor_div` keeps the
+    // IEEE no-trap semantics §2.1 also mandates.
+
+    fn int_div_dag(op: RiscOp, precision: Prim) -> Dag {
+        let mut dag = Dag::new();
+        let a = dag.add_node(
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            tensor_ty(&[2], precision),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            tensor_ty(&[2], precision),
+            None,
+        );
+        let out = dag.add_node(op, vec![a, b], tensor_ty(&[2], precision), None);
+        dag.add_root(out);
+        dag
+    }
+
+    fn divisor_inputs(b: Vec<f64>) -> HashMap<String, TensorValue> {
+        let mut inputs = HashMap::new();
+        inputs.insert("a".into(), TensorValue::from_vec(vec![2], vec![10.0, 7.0]));
+        inputs.insert("b".into(), TensorValue::from_vec(vec![2], b));
+        inputs
+    }
+
+    #[test]
+    fn floor_div_integer_traps_on_zero_divisor() {
+        let dag = int_div_dag(RiscOp::FloorDiv, Prim::Int32);
+        let err = eval_tensor(&dag, &divisor_inputs(vec![2.0, 0.0]))
+            .expect_err("integer floor_div by zero must trap");
+        assert_eq!(
+            err, INT_DIV_ZERO_MSG,
+            "trap diagnostic must match the shared message exactly"
+        );
+    }
+
+    #[test]
+    fn trunc_div_integer_traps_on_zero_divisor() {
+        let dag = int_div_dag(RiscOp::TruncDiv, Prim::Int64);
+        let err = eval_tensor(&dag, &divisor_inputs(vec![0.0, 2.0]))
+            .expect_err("integer trunc_div by zero must trap");
+        assert_eq!(err, INT_DIV_ZERO_MSG);
+    }
+
+    #[test]
+    fn floor_div_integer_nonzero_divisor_is_floored_quotient() {
+        // floor_div rounds toward -inf: floor_div(10, 4) == 2,
+        // floor_div(7, -2) == -4 (7 / -2 == -3.5 -> floor -4).
+        let dag = int_div_dag(RiscOp::FloorDiv, Prim::Int32);
+        let mut inputs = HashMap::new();
+        inputs.insert("a".into(), TensorValue::from_vec(vec![2], vec![10.0, 7.0]));
+        inputs.insert("b".into(), TensorValue::from_vec(vec![2], vec![4.0, -2.0]));
+        let vals = eval_tensor(&dag, &inputs).expect("non-zero divisor must not trap");
+        let root = dag.roots()[0];
+        assert_eq!(vals[&root].data, vec![2.0, -4.0]);
+    }
+
+    #[test]
+    fn trunc_div_integer_nonzero_divisor_is_truncated_quotient() {
+        // trunc_div rounds toward zero: trunc_div(10, 4) == 2,
+        // trunc_div(7, -2) == -3 (7 / -2 == -3.5 -> trunc -3).
+        let dag = int_div_dag(RiscOp::TruncDiv, Prim::Int32);
+        let mut inputs = HashMap::new();
+        inputs.insert("a".into(), TensorValue::from_vec(vec![2], vec![10.0, 7.0]));
+        inputs.insert("b".into(), TensorValue::from_vec(vec![2], vec![4.0, -2.0]));
+        let vals = eval_tensor(&dag, &inputs).expect("non-zero divisor must not trap");
+        let root = dag.roots()[0];
+        assert_eq!(vals[&root].data, vec![2.0, -3.0]);
+    }
+
+    #[test]
+    fn floor_div_float_does_not_trap_on_zero_divisor() {
+        // Spec §2.1: float `floor_div` follows IEEE division and is NOT
+        // guarded; `floor(x / 0.0)` yields ±inf (or NaN for 0/0), never a
+        // trap. This pins that the integer trap does not bleed into floats.
+        let dag = int_div_dag(RiscOp::FloorDiv, Prim::F32);
+        let vals = eval_tensor(&dag, &divisor_inputs(vec![0.0, 2.0]))
+            .expect("float floor_div by zero must NOT trap");
+        let root = dag.roots()[0];
+        assert!(
+            vals[&root].data[0].is_infinite() && vals[&root].data[0] > 0.0,
+            "float floor_div(10.0, 0.0) must be +inf, got {}",
+            vals[&root].data[0]
+        );
+        assert_eq!(vals[&root].data[1], 3.0, "floor(7.0 / 2.0) == 3.0");
+    }
+
+    #[test]
+    fn fused_integer_floor_div_traps_on_zero_divisor() {
+        // floor_div feeding an add forms a fusible 2-node integer chain.
+        // After `fuse`, the divide-by-zero must still trap through the
+        // FusedElem path (the trap is gated on the fused output precision).
+        let mut dag = Dag::new();
+        let a = dag.add_node(
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            tensor_ty(&[2], Prim::Int32),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            tensor_ty(&[2], Prim::Int32),
+            None,
+        );
+        let d = dag.add_node(
+            RiscOp::FloorDiv,
+            vec![a, b],
+            tensor_ty(&[2], Prim::Int32),
+            None,
+        );
+        let e = dag.add_node(RiscOp::Add, vec![d, a], tensor_ty(&[2], Prim::Int32), None);
+        dag.add_root(e);
+        let fused = crate::fuse::fuse(&dag);
+        assert!(
+            fused
+                .nodes()
+                .iter()
+                .any(|n| matches!(n.op, RiscOp::FusedElem { .. })),
+            "the floor_div -> add chain must fuse for this test to exercise the fused path"
+        );
+        let err = eval_tensor(&fused, &divisor_inputs(vec![2.0, 0.0]))
+            .expect_err("fused integer floor_div by zero must trap");
+        assert_eq!(err, INT_DIV_ZERO_MSG);
     }
 }

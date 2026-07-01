@@ -832,17 +832,56 @@ int main() {{
     );
 }
 
-/// Shared exec-compile driver for an integer binary-division op on an
-/// int32 operand pair. Builds a two-load DAG, lowers `op`, compiles the
-/// kernel, and asserts each output element matches `expected`. The four
+/// The C scalar type and `CHELIS_*` dtype macro for an integer precision,
+/// used to generate width-parametrized exec harnesses (chelis#550 F2). The
+/// printf specifier is always `%lld` after a `(long long)` cast so the same
+/// format string works for every width.
+fn int_c_type_and_dtype(precision: Prim) -> (&'static str, &'static str) {
+    match precision {
+        Prim::Int8 => ("int8_t", "CHELIS_I8"),
+        Prim::Int16 => ("int16_t", "CHELIS_I16"),
+        Prim::Int32 => ("int32_t", "CHELIS_I32"),
+        Prim::Int64 => ("int64_t", "CHELIS_I64"),
+        other => panic!("int_c_type_and_dtype: non-integer precision {other:?}"),
+    }
+}
+
+fn vec_int(n: usize, precision: Prim) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(n)],
+        precision,
+    }
+}
+
+/// Shared exec-compile driver for an integer binary-division op on a
+/// same-precision operand pair. Builds a two-load DAG, lowers `op`, compiles
+/// the kernel, and asserts each output element matches `expected`. The four
 /// operand pairs `{7,2},{7,-2},{-7,2},{-7,-2}` exercise every sign
 /// combination so floor-vs-truncate rounding is distinguished on the
-/// mixed-sign cases.
-fn run_int_div_op_exec(op: RiscOp, fn_name: &str, kernel_name: &str, expected: [i32; 4]) {
+/// mixed-sign cases. `precision` parametrizes the integer width (chelis#550
+/// F2: int8 / int16 / int64 in addition to the original int32).
+fn run_int_div_op_exec(
+    op: RiscOp,
+    fn_name: &str,
+    kernel_name: &str,
+    expected: [i32; 4],
+    precision: Prim,
+) {
+    let (c_type, dtype_macro) = int_c_type_and_dtype(precision);
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i32(4), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i32(4), None);
-    dag.add_node(op, vec![a, b], vec_i32(4), None);
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_int(4, precision),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        vec_int(4, precision),
+        None,
+    );
+    dag.add_node(op, vec![a, b], vec_int(4, precision), None);
     let dag = fuse(&dag);
 
     let result = codegen_with_options(
@@ -861,37 +900,38 @@ fn run_int_div_op_exec(op: RiscOp, fn_name: &str, kernel_name: &str, expected: [
 extern void {fn_name}(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
 
 int main() {{
-    int32_t a_data[4] = {{ 7,  7, -7, -7}};
-    int32_t b_data[4] = {{ 2, -2,  2, -2}};
-    int32_t expected[4] = {{ {e0}, {e1}, {e2}, {e3} }};
+    {c_type} a_data[4] = {{ 7,  7, -7, -7}};
+    {c_type} b_data[4] = {{ 2, -2,  2, -2}};
+    {c_type} expected[4] = {{ {e0}, {e1}, {e2}, {e3} }};
 
     chelis_tensor a_t;
     memset(&a_t, 0, sizeof(a_t));
     a_t.data = (float*)a_data;
     a_t.shape[0] = 4; a_t.strides[0] = 1; a_t.ndim = 1;
-    a_t.dtype = CHELIS_I32; a_t.size = 4;
+    a_t.dtype = {dtype_macro}; a_t.size = 4;
 
     chelis_tensor b_t;
     memset(&b_t, 0, sizeof(b_t));
     b_t.data = (float*)b_data;
     b_t.shape[0] = 4; b_t.strides[0] = 1; b_t.ndim = 1;
-    b_t.dtype = CHELIS_I32; b_t.size = 4;
+    b_t.dtype = {dtype_macro}; b_t.size = 4;
 
     chelis_tensor* inputs[2] = {{&a_t, &b_t}};
     chelis_tensor* outputs[1] = {{NULL}};
     {fn_name}(inputs, 2, outputs, 1);
 
     int ok = 1;
-    int32_t* o = (int32_t*)outputs[0]->data;
-    if (outputs[0]->dtype != CHELIS_I32) {{
-        printf("FAIL: output dtype %d, expected CHELIS_I32 (%d)\n",
-               outputs[0]->dtype, CHELIS_I32);
+    {c_type}* o = ({c_type}*)outputs[0]->data;
+    if (outputs[0]->dtype != {dtype_macro}) {{
+        printf("FAIL: output dtype %d, expected {dtype_macro} (%d)\n",
+               outputs[0]->dtype, {dtype_macro});
         ok = 0;
     }}
     for (int i = 0; i < 4 && ok; i++) {{
         if (o[i] != expected[i]) {{
-            printf("MISMATCH idx=%d a=%d b=%d got=%d want=%d\n",
-                   i, a_data[i], b_data[i], o[i], expected[i]);
+            printf("MISMATCH idx=%d a=%lld b=%lld got=%lld want=%lld\n",
+                   i, (long long)a_data[i], (long long)b_data[i],
+                   (long long)o[i], (long long)expected[i]);
             ok = 0;
         }}
     }}
@@ -902,11 +942,11 @@ int main() {{
     );
 
     let Some(output) = compile_and_run_kernel(kernel_name, src, &harness) else {
-        panic!("int32 {kernel_name} kernel failed to compile/run");
+        panic!("{kernel_name} ({precision:?}) kernel failed to compile/run");
     };
     assert!(
         output.contains("PASS"),
-        "C-backend {kernel_name} on int32 mismatch:\n{output}"
+        "C-backend {kernel_name} on {precision:?} mismatch:\n{output}"
     );
 }
 
@@ -924,6 +964,45 @@ fn exec_trunc_div_int32_truncates_toward_zero() {
         "test_trunc_div_i32",
         "trunc_div_i32",
         [3, -3, -3, 3],
+        Prim::Int32,
+    );
+}
+
+// chelis#550 F2: the trunc_div / floor_div emit is width-independent (the
+// C backend promotes to int64 internally), but the repo's negative-parity
+// bar requires the narrower and wider integer widths be exercised
+// end-to-end, not just int32. Same operands / expected results as the int32
+// cases above; only the storage precision changes.
+#[test]
+fn exec_trunc_div_int8_truncates_toward_zero() {
+    run_int_div_op_exec(
+        RiscOp::TruncDiv,
+        "test_trunc_div_i8",
+        "trunc_div_i8",
+        [3, -3, -3, 3],
+        Prim::Int8,
+    );
+}
+
+#[test]
+fn exec_trunc_div_int16_truncates_toward_zero() {
+    run_int_div_op_exec(
+        RiscOp::TruncDiv,
+        "test_trunc_div_i16",
+        "trunc_div_i16",
+        [3, -3, -3, 3],
+        Prim::Int16,
+    );
+}
+
+#[test]
+fn exec_trunc_div_int64_truncates_toward_zero() {
+    run_int_div_op_exec(
+        RiscOp::TruncDiv,
+        "test_trunc_div_i64",
+        "trunc_div_i64",
+        [3, -3, -3, 3],
+        Prim::Int64,
     );
 }
 
@@ -941,6 +1020,186 @@ fn exec_floor_div_int32_rounds_toward_neg_inf() {
         "test_floor_div_i32",
         "floor_div_i32",
         [3, -4, -4, 3],
+        Prim::Int32,
+    );
+}
+
+// chelis#550 F2: floor_div across the remaining integer widths. The
+// round-toward-−∞ remainder-sign correction must hold at int8 / int16 /
+// int64 just as at int32.
+#[test]
+fn exec_floor_div_int8_rounds_toward_neg_inf() {
+    run_int_div_op_exec(
+        RiscOp::FloorDiv,
+        "test_floor_div_i8",
+        "floor_div_i8",
+        [3, -4, -4, 3],
+        Prim::Int8,
+    );
+}
+
+#[test]
+fn exec_floor_div_int16_rounds_toward_neg_inf() {
+    run_int_div_op_exec(
+        RiscOp::FloorDiv,
+        "test_floor_div_i16",
+        "floor_div_i16",
+        [3, -4, -4, 3],
+        Prim::Int16,
+    );
+}
+
+#[test]
+fn exec_floor_div_int64_rounds_toward_neg_inf() {
+    run_int_div_op_exec(
+        RiscOp::FloorDiv,
+        "test_floor_div_i64",
+        "floor_div_i64",
+        [3, -4, -4, 3],
+        Prim::Int64,
+    );
+}
+
+/// Compile a kernel + harness exactly like `compile_and_run_kernel`, but
+/// return the run `Output` (status + stderr) so a trap test can assert the
+/// binary aborts. Panics if COMPILATION fails — a zero-divisor trap is a
+/// runtime abort, not a compile error.
+fn compile_and_capture_run(test_name: &str, c_source: &str, harness: &str) -> std::process::Output {
+    let dir = std::env::temp_dir().join(format!("chelis_exec_{test_name}"));
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("kernel.c"), c_source).unwrap();
+    fs::write(dir.join("main.c"), harness).unwrap();
+
+    let include_dir = runtime_include_dir();
+    for hdr in &[
+        "chelis_runtime.h",
+        "chelis_blas.h",
+        "chelis_simd.h",
+        "chelis_math.h",
+    ] {
+        let src = fs::read_to_string(include_dir.join(hdr)).unwrap();
+        fs::write(dir.join(hdr), src).unwrap();
+    }
+
+    let bin = dir.join("test_bin");
+    let runtime_lib = runtime_lib_path();
+    let compile = Command::new("gcc")
+        .arg("-O2")
+        .args(simd_isa_flags())
+        .args([
+            "-std=c11",
+            "-I",
+            dir.to_str().unwrap(),
+            dir.join("kernel.c").to_str().unwrap(),
+            dir.join("main.c").to_str().unwrap(),
+            "-o",
+            bin.to_str().unwrap(),
+            runtime_lib.to_str().unwrap(),
+            "-lm",
+            "-lpthread",
+            "-ldl",
+        ])
+        .output()
+        .expect("failed to invoke gcc");
+    assert!(
+        compile.status.success(),
+        "COMPILE FAILED [{test_name}]:\n{}\nKernel C:\n{c_source}",
+        String::from_utf8_lossy(&compile.stderr),
+    );
+
+    Command::new(&bin).output().expect("failed to run binary")
+}
+
+// chelis#550 F2: a COMPILED floor_div zero-divisor trap. The existing
+// backend trap coverage was trunc_div-only; floor_div emits the SAME
+// portable `chelis_int_div_guard` and must abort identically. The divisor
+// arrives through a runtime Load (`inputs[1]->data`), so gcc cannot
+// constant-fold the zero and elide the guard. Spec/05-risc-primitives.md
+// §2.1 scopes the `integer division or remainder by zero` trap to the C
+// backend (and the evaluator); this is the fail-closed end-to-end proof.
+#[test]
+fn exec_floor_div_int_zero_divisor_traps() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_int(2, Prim::Int64),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        vec_int(2, Prim::Int64),
+        None,
+    );
+    dag.add_node(RiscOp::FloorDiv, vec![a, b], vec_int(2, Prim::Int64), None);
+    let dag = fuse(&dag);
+
+    let result = codegen_with_options(
+        &dag,
+        "test_floor_div_trap",
+        CodegenOptions {
+            math_lib_override: Some(MathLib::None),
+            ..Default::default()
+        },
+    );
+    let src = &result.c_source;
+    // Emit-shape: floor_div must wrap the integer divisor in the portable guard.
+    assert!(
+        src.contains("chelis_int_div_guard("),
+        "integer floor_div must emit the portable zero-divisor guard (#550); \
+         emitted C=\n{src}",
+    );
+
+    // b_data[1] == 0: the second element divides by zero at runtime.
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+extern void test_floor_div_trap(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    int64_t a_data[2] = {{ 10, 7 }};
+    int64_t b_data[2] = {{ 2, 0 }};
+
+    chelis_tensor a_t;
+    memset(&a_t, 0, sizeof(a_t));
+    a_t.data = (float*)a_data;
+    a_t.shape[0] = 2; a_t.strides[0] = 1; a_t.ndim = 1;
+    a_t.dtype = CHELIS_I64; a_t.size = 2;
+
+    chelis_tensor b_t;
+    memset(&b_t, 0, sizeof(b_t));
+    b_t.data = (float*)b_data;
+    b_t.shape[0] = 2; b_t.strides[0] = 1; b_t.ndim = 1;
+    b_t.dtype = CHELIS_I64; b_t.size = 2;
+
+    chelis_tensor* inputs[2] = {{&a_t, &b_t}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    test_floor_div_trap(inputs, 2, outputs, 1);
+
+    /* The guard aborts before reaching here; printing PASS would be a bug. */
+    printf("PASS\n");
+    return 0;
+}}
+"#
+    );
+
+    let run = compile_and_capture_run("floor_div_trap", src, &harness);
+    assert!(
+        !run.status.success(),
+        "floor_div by a runtime zero divisor must trap (abort), not succeed; \
+         stdout={}",
+        String::from_utf8_lossy(&run.stdout),
+    );
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("integer division or remainder by zero"),
+        "the C backend trap must emit the canonical diagnostic on stderr; \
+         stderr={stderr:?}",
+    );
+    assert!(
+        !String::from_utf8_lossy(&run.stdout).contains("PASS"),
+        "no PASS line may print when the program traps; the guard must abort \
+         before the kernel returns",
     );
 }
 
