@@ -1276,10 +1276,13 @@ materialize. The C backend's IR lowering now materializes the runtime
 extent for each of these forms (Chelis-Lang/chelis#469):
 
 - an **inline `shape(x, axis)` read** and a **`let`-bound shape read**
-  (`a = shape(x, 0)` then `expand(b, 0, a)`, followed through `cast`)
-  bind the extent to the shape-source operand `x` via a `shape_dep`
-  liveness edge that keeps `x`'s `Load` alive through DCE (the
-  `let`-bound recovery is Chelis-Lang/chelis#369/#495);
+  (`a = shape(x, 0)` then `expand(b, 0, a)`, followed through `cast`
+  wrappers AND `let`-to-`let` aliases — `c = a; expand(b, 0, c)`) bind
+  the extent to the shape-source operand `x` via a `shape_dep` liveness
+  edge that keeps `x`'s `Load` alive through DCE; alias recovery records
+  the underlying `shape(x, axis)` app, so the extent binds to the actual
+  source tensor and axis (the `let`-bound recovery is
+  Chelis-Lang/chelis#369/#495, alias threading is #469 RT-3);
 - a **`literal`/`cast(N, _)`** size, or **static integer arithmetic**
   over such values (`add`/`sub`/`mul`/`mod`/`neg`, followed through
   `cast` and `let`-bound static names), is const-folded to a concrete

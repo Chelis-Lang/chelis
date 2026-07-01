@@ -4642,16 +4642,21 @@ impl LowerCtx {
                         self.list_bindings
                             .insert(name.clone(), bind_kids[i + 1].clone());
                     }
-                    // chelis#369: remember a `len = shape(operand, axis)`
-                    // binding so a later `expand(s, axis, cast(len, int32))`
+                    // chelis#369/#469: remember a `len = shape(operand, axis)`
+                    // binding — OR a `let`-to-`let` alias / use-site `cast` of
+                    // such a name (`a = shape(x, 0); c = a; expand(b, 0, c)`,
+                    // RT-3) — so a later `expand(s, axis, cast(len, int32))`
                     // can recover the broadcast extent through the `let`
-                    // indirection (the `tensor_full_like` idiom). A
-                    // re-binding of `name` to anything else must drop any
-                    // stale shape entry so shadowing never recovers a wrong
-                    // extent.
-                    if shape_app_operand_axis(&bind_kids[i + 1]).is_some() {
-                        self.shape_bindings
-                            .insert(name.clone(), bind_kids[i + 1].clone());
+                    // indirection (the `tensor_full_like` idiom).
+                    // `resolve_shape_binding_source` follows the alias chain
+                    // and records the UNDERLYING `shape(...)` app, so recovery
+                    // binds the `shape_dep` liveness edge to the actual source
+                    // tensor and axis (mirroring how `fold_static_size`
+                    // recurses `static_size_bindings` for the static path). A
+                    // re-binding of `name` to anything else must drop any stale
+                    // shape entry so shadowing never recovers a wrong extent.
+                    if let Some(shape_app) = self.resolve_shape_binding_source(&bind_kids[i + 1]) {
+                        self.shape_bindings.insert(name.clone(), shape_app);
                     } else {
                         self.shape_bindings.remove(name);
                     }
@@ -8219,11 +8224,38 @@ impl LowerCtx {
             return Some((operand.clone(), axis));
         }
         // Strip any `cast(..., int32)` wrappers to reach a bare `var name`,
-        // then follow the recorded `let len = shape(...)` binding.
+        // then follow the recorded `let len = shape(...)` binding. Because
+        // `resolve_shape_binding_source` records the UNDERLYING `shape(...)`
+        // app for `let`-to-`let` aliases too (chelis#469 RT-3), a single
+        // lookup here resolves a whole alias chain to its real source.
         let name = bare_var_name(strip_cast_wrappers(expr))?;
         let bound = self.shape_bindings.get(&name)?;
         let (operand, axis) = shape_app_operand_axis(bound)?;
         Some((operand.clone(), axis))
+    }
+
+    /// Resolve the underlying `shape(operand, axis)` app that a `let`-binding
+    /// value refers to, following a `let`-to-`let` alias chain and any
+    /// use-site `cast` wrappers (chelis#369/#469 RT-3). Returns the direct
+    /// `shape(...)` app `Expr` when:
+    ///   - the value IS a `shape(...)` app (possibly `cast`-wrapped), or
+    ///   - the value is a bare / `cast`-wrapped `var` already recorded in
+    ///     [`Self::shape_bindings`] (an alias of an earlier shape name).
+    ///
+    /// Returning the UNDERLYING app (not the alias name) is the safety
+    /// property: the recovered extent and its `shape_dep` liveness edge bind
+    /// to the ACTUAL source tensor and axis, so an alias can never resolve to
+    /// the wrong `Load`. Because each recorded alias already points at the
+    /// underlying app, a chain (`a = shape(x, 0); c = a; d = cast(c, int32)`)
+    /// resolves in one lookup per link at bind time. Mirrors how
+    /// [`Self::fold_static_size`] recurses [`Self::static_size_bindings`] for
+    /// the static path (`j = k; ...` folds through the alias).
+    fn resolve_shape_binding_source(&self, value: &Expr) -> Option<Expr> {
+        if shape_app_operand_axis(value).is_some() {
+            return Some(value.clone());
+        }
+        let alias = bare_var_name(strip_cast_wrappers(value))?;
+        self.shape_bindings.get(&alias).cloned()
     }
 
     fn lower_handle_effect(&mut self, elems: &[Expr]) -> LoweredValue {

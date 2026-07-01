@@ -2492,6 +2492,113 @@ fn form3_let_bound_shape_sourced_expand_matches_backend() {
     assert_eval_agrees_with_backend(source, "issue_469_let_bound_shape", &backend);
 }
 
+/// chelis#469 RT-3 (let-to-let alias of a shape name): an intermediate `let`
+/// alias of a shape-bound name — `a = shape(x, 0); c = a; expand(b, 0, c)`,
+/// and the `cast`-wrapped `c = cast(a, int32); expand(b, 0, cast(c, int32))` —
+/// is check-clean and eval-correct and must now also BUILD with C agreeing
+/// with the evaluator. Pre-RT-3 the shape recovery followed a name bound
+/// DIRECTLY to `shape(...)` (plus a use-site `cast`) but not through a
+/// `let`-to-`let` alias, so build rejected #469 (a check-accept/build-reject
+/// asymmetry the static path did not have). `resolve_shape_binding_source`
+/// threads the alias, recording the underlying `shape(x, 0)` app so the extent
+/// binds to `x` (=2), NOT `b`.
+#[test]
+fn form3_shape_alias_expand_matches_backend() {
+    for (variant, body) in [
+        (
+            "bare_alias",
+            "def f(x: &tensor[n, 4, f32], b: &tensor[4, f32]) -> tensor[n, 4, f32] = {\n\
+            \x20 a: int32 = shape(x, cast(0, int32))\n\
+            \x20 c: int32 = a\n\
+            \x20 expand(b, 0, c)\n\
+            }\n",
+        ),
+        (
+            "cast_alias",
+            "def f(x: &tensor[n, 4, f32], b: &tensor[4, f32]) -> tensor[n, 4, f32] = {\n\
+            \x20 a: int32 = shape(x, cast(0, int32))\n\
+            \x20 c: int32 = cast(a, int32)\n\
+            \x20 expand(b, 0, cast(c, int32))\n\
+            }\n",
+        ),
+    ] {
+        let source = format!(
+            "{body}\
+             xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])\n\
+             out = f(xs, to_tensor([10.0, 20.0, 30.0, 40.0]))\n"
+        );
+        let name = format!("issue_469_shape_alias_{variant}");
+        let backend = build_compile_run(&source, &name);
+        let tensors = parse_printed_tensors(&backend);
+        let out = tensors
+            .iter()
+            .find(|(n, _, _)| n == "out")
+            .unwrap_or_else(|| panic!("[{variant}] backend output missing `out`: {backend}"));
+        assert_eq!(
+            out.1,
+            vec![2, 4],
+            "[{variant}] aliased shape-sourced expand must bind the extent to `x` (=2) ({backend})"
+        );
+        assert_eval_agrees_with_backend(&source, &name, &backend);
+    }
+}
+
+/// chelis#469 RT-3 axis-discriminator (correct-source SAFETY): the alias
+/// recovery must bind the `shape_dep` to the ACTUAL source tensor AND axis,
+/// never a neighbouring axis or the expand operand. A NON-SQUARE source
+/// `x: tensor[2, 3]` (axis 0 = 2, axis 1 = 3) with the size aliased from
+/// `shape(x, 1)` through a `let` must produce `[3, 4]` — a wrong-axis
+/// resolution would give `[2, 4]` and a wrong-source (operand `b`) resolution
+/// `[4, 4]`. Build and eval must agree, so any mis-resolution surfaces as
+/// C != eval rather than a silently plausible-but-wrong shape.
+#[test]
+fn form3_shape_alias_axis_discriminator_matches_backend() {
+    let source = "def f(x: &tensor[2, 3, f32], b: &tensor[4, f32]) -> tensor[three, 4, f32] = {\n\
+        \x20 a: int32 = shape(x, cast(1, int32))\n\
+        \x20 c: int32 = a\n\
+        \x20 expand(b, 0, c)\n\
+        }\n\
+        xs = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
+        out = f(&xs, to_tensor([10.0, 20.0, 30.0, 40.0]))\n";
+    let backend = build_compile_run(source, "issue_469_shape_alias_axis");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    assert_eq!(
+        out.1,
+        vec![3, 4],
+        "aliased `shape(x, 1)` (=3) must bind axis 1 of `x`, not axis 0 (=2) or `b` (=4) ({backend})"
+    );
+    assert_eval_agrees_with_backend(source, "issue_469_shape_alias_axis", &backend);
+}
+
+/// chelis#469 RT-3 shadowing safety: an alias of a shape name that is then
+/// RE-BOUND to a sourceless scalar (`a = shape(x, 0); c = a; c = k`) must drop
+/// the stale shape provenance — the later `expand(b, 0, c)` is sourceless and
+/// must be REJECTED (at check, and fail-closed at build), never recover the
+/// stale extent. Pins that `resolve_shape_binding_source` clears the alias
+/// entry on re-bind, mirroring the direct-name rebind
+/// (`form3_shape_to_sourceless_rebind_expand_rejected_at_check`).
+#[test]
+fn form3_shape_alias_rebound_to_sourceless_rejected_at_check() {
+    let json = check_json(
+        "def f(x: &tensor[n, 4, f32], b: &tensor[4, f32], k: int32) -> tensor[n, 4, f32] = {\n\
+        \x20 a: int32 = shape(x, cast(0, int32))\n\
+        \x20 c: int32 = a\n\
+        \x20 c: int32 = k\n\
+        \x20 expand(b, 0, c)\n\
+        }\n",
+    );
+    assert_rejected_with(
+        &json,
+        "no tensor in scope carries it",
+        "alias re-bound to a sourceless scalar must drop shape provenance (chelis#469 RT-3)",
+    );
+    assert_rejected_with(&json, "chelis#469", "RT-3 alias rebind cites #469");
+}
+
 /// chelis#469 (Case 1, static arithmetic): a size built from all-constant
 /// integer arithmetic (`sub(cast(4, int32), cast(1, int32))` = 3) now
 /// const-folds to a concrete extent and BUILDS, with C agreeing with the
