@@ -13,6 +13,7 @@
 
 use std::cell::RefCell;
 
+use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, List as DeepList};
 use chelis_surf::ast::{BinOp, Decl, Expr, LetPattern, Literal, Param, UnaryOp};
 
 use crate::contracts::{NORMAL_CDF_IMPLEMENTATION, NORMAL_CDF_RANGE, NORMAL_CDF_REFLECTION};
@@ -24,6 +25,13 @@ pub(super) struct InlineCtx<'a> {
     pub(super) max_depth: usize,
     pub(super) call_stack: Vec<String>,
     pub(super) contracts: Option<&'a RefCell<ContractAbstraction>>,
+}
+
+pub(super) struct DeepInlineCtx<'a> {
+    pub(super) exprs: &'a [DeepExpr],
+    pub(super) depth: usize,
+    pub(super) max_depth: usize,
+    pub(super) call_stack: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -279,6 +287,418 @@ pub(super) fn surf_expr_to_smt(expr: &Expr, ctx: &InlineCtx) -> Option<crate::so
                 _ => None,
             }
         }
+        _ => None,
+    }
+}
+
+pub(super) fn deep_expr_to_smt(
+    expr: &DeepExpr,
+    ctx: &DeepInlineCtx,
+) -> Option<crate::solver::SmtExpr> {
+    use crate::solver::{BoolOp as SB, CmpOp as SC, SmtExpr};
+    match deep_app_name_and_args(expr) {
+        Some((name, args)) => {
+            if let Some(op) = call_form_cmp_op(name) {
+                if args.len() != 2 {
+                    return None;
+                }
+                return Some(SmtExpr::Cmp(
+                    op,
+                    Box::new(deep_arith(&args[0], ctx)?),
+                    Box::new(deep_arith(&args[1], ctx)?),
+                ));
+            }
+            match (name, args) {
+                ("and", [left, right]) => Some(SmtExpr::Bool(
+                    SB::And,
+                    vec![deep_expr_to_smt(left, ctx)?, deep_expr_to_smt(right, ctx)?],
+                )),
+                ("or", [left, right]) => Some(SmtExpr::Bool(
+                    SB::Or,
+                    vec![deep_expr_to_smt(left, ctx)?, deep_expr_to_smt(right, ctx)?],
+                )),
+                ("not", [inner]) => Some(SmtExpr::Not(Box::new(deep_expr_to_smt(inner, ctx)?))),
+                _ => None,
+            }
+        }
+        _ => match deep_bool_lit(expr) {
+            Some(value) => Some(SmtExpr::BoolLit(value)),
+            None => {
+                if let Some((left, right)) = deep_builtin_cmp(expr, "cmplt") {
+                    return Some(SmtExpr::Cmp(
+                        SC::Lt,
+                        Box::new(deep_arith(left, ctx)?),
+                        Box::new(deep_arith(right, ctx)?),
+                    ));
+                }
+                None
+            }
+        },
+    }
+}
+
+fn deep_arith(expr: &DeepExpr, ctx: &DeepInlineCtx) -> Option<crate::solver::SmtExpr> {
+    use crate::solver::{ArithOp as SA, SmtExpr};
+    if let Some(name) = deep_var_name(expr) {
+        return Some(SmtExpr::Var(name.to_string()));
+    }
+    if let Some(value) = deep_float_lit(expr) {
+        return Some(SmtExpr::RealLit(value));
+    }
+    if let Some(value) = deep_int_lit(expr) {
+        return Some(SmtExpr::IntLit(value));
+    }
+    if let Some((name, args)) = deep_app_name_and_args(expr) {
+        let smt_args: Option<Vec<_>> = args.iter().map(|arg| deep_arith(arg, ctx)).collect();
+        let smt_args = smt_args?;
+        if name == "neg" && smt_args.len() == 1 {
+            return Some(SmtExpr::Arith(
+                SA::Neg,
+                Box::new(smt_args[0].clone()),
+                Box::new(SmtExpr::IntLit(0)),
+            ));
+        }
+        if let Some(op) = call_form_arith_op(name) {
+            if smt_args.len() != 2 {
+                return None;
+            }
+            return Some(SmtExpr::Arith(
+                op,
+                Box::new(smt_args[0].clone()),
+                Box::new(smt_args[1].clone()),
+            ));
+        }
+        if let Some((params, body)) = lookup_deep_fun_body(ctx.exprs, name) {
+            if ctx.call_stack.iter().any(|existing| existing == name) {
+                return None;
+            }
+            if ctx.depth >= ctx.max_depth || params.len() != args.len() {
+                return None;
+            }
+            let subst = params
+                .iter()
+                .zip(smt_args.iter())
+                .map(|(param, arg)| (param.clone(), arg.clone()))
+                .collect();
+            let deeper = DeepInlineCtx {
+                exprs: ctx.exprs,
+                depth: ctx.depth + 1,
+                max_depth: ctx.max_depth,
+                call_stack: {
+                    let mut stack = ctx.call_stack.clone();
+                    stack.push(name.to_string());
+                    stack
+                },
+            };
+            return deep_arith_subst(body, &subst, &deeper);
+        }
+        return Some(SmtExpr::Apply(name.to_string(), smt_args));
+    }
+    if deep_tag(expr) == Some("if") {
+        let list = deep_list(expr)?;
+        let cond = list.elements.get(2)?;
+        let then_expr = list.elements.get(3)?;
+        let else_expr = list.elements.get(4)?;
+        return Some(SmtExpr::Ite(
+            Box::new(deep_expr_to_smt(cond, ctx)?),
+            Box::new(deep_arith(then_expr, ctx)?),
+            Box::new(deep_arith(else_expr, ctx)?),
+        ));
+    }
+    None
+}
+
+fn deep_arith_subst(
+    expr: &DeepExpr,
+    subst: &std::collections::HashMap<String, crate::solver::SmtExpr>,
+    ctx: &DeepInlineCtx,
+) -> Option<crate::solver::SmtExpr> {
+    use crate::solver::{ArithOp as SA, SmtExpr};
+    if let Some(name) = deep_var_name(expr) {
+        return subst
+            .get(name)
+            .cloned()
+            .or_else(|| Some(SmtExpr::Var(name.to_string())));
+    }
+    if let Some(value) = deep_float_lit(expr) {
+        return Some(SmtExpr::RealLit(value));
+    }
+    if let Some(value) = deep_int_lit(expr) {
+        return Some(SmtExpr::IntLit(value));
+    }
+    if let Some((name, args)) = deep_app_name_and_args(expr) {
+        let smt_args: Option<Vec<_>> = args
+            .iter()
+            .map(|arg| deep_arith_subst(arg, subst, ctx))
+            .collect();
+        let smt_args = smt_args?;
+        if name == "neg" && smt_args.len() == 1 {
+            return Some(SmtExpr::Arith(
+                SA::Neg,
+                Box::new(smt_args[0].clone()),
+                Box::new(SmtExpr::IntLit(0)),
+            ));
+        }
+        if let Some(op) = call_form_arith_op(name) {
+            if smt_args.len() != 2 {
+                return None;
+            }
+            return Some(SmtExpr::Arith(
+                op,
+                Box::new(smt_args[0].clone()),
+                Box::new(smt_args[1].clone()),
+            ));
+        }
+        if let Some((params, body)) = lookup_deep_fun_body(ctx.exprs, name) {
+            if ctx.call_stack.iter().any(|existing| existing == name) {
+                return None;
+            }
+            if ctx.depth >= ctx.max_depth || params.len() != args.len() {
+                return None;
+            }
+            let inner_subst = params
+                .iter()
+                .zip(smt_args.iter())
+                .map(|(param, arg)| (param.clone(), arg.clone()))
+                .collect();
+            let deeper = DeepInlineCtx {
+                exprs: ctx.exprs,
+                depth: ctx.depth + 1,
+                max_depth: ctx.max_depth,
+                call_stack: {
+                    let mut stack = ctx.call_stack.clone();
+                    stack.push(name.to_string());
+                    stack
+                },
+            };
+            return deep_arith_subst(body, &inner_subst, &deeper);
+        }
+        return Some(SmtExpr::Apply(name.to_string(), smt_args));
+    }
+    if deep_tag(expr) == Some("if") {
+        let list = deep_list(expr)?;
+        let cond = list.elements.get(2)?;
+        let then_expr = list.elements.get(3)?;
+        let else_expr = list.elements.get(4)?;
+        return Some(SmtExpr::Ite(
+            Box::new(deep_expr_to_smt_subst(cond, subst, ctx)?),
+            Box::new(deep_arith_subst(then_expr, subst, ctx)?),
+            Box::new(deep_arith_subst(else_expr, subst, ctx)?),
+        ));
+    }
+    if deep_tag(expr) == Some("let") {
+        let list = deep_list(expr)?;
+        let bind = list.elements.get(2)?;
+        let body = list.elements.get(3)?;
+        let mut extended = subst.clone();
+        for (name, value) in deep_bind_pairs(bind)? {
+            let lowered = deep_arith_subst(value, &extended, ctx)?;
+            extended.insert(name.to_string(), lowered);
+        }
+        return deep_arith_subst(body, &extended, ctx);
+    }
+    None
+}
+
+fn deep_expr_to_smt_subst(
+    expr: &DeepExpr,
+    subst: &std::collections::HashMap<String, crate::solver::SmtExpr>,
+    ctx: &DeepInlineCtx,
+) -> Option<crate::solver::SmtExpr> {
+    use crate::solver::{BoolOp as SB, CmpOp as SC, SmtExpr};
+    match deep_app_name_and_args(expr) {
+        Some((name, args)) => {
+            if let Some(op) = call_form_cmp_op(name) {
+                if args.len() != 2 {
+                    return None;
+                }
+                return Some(SmtExpr::Cmp(
+                    op,
+                    Box::new(deep_arith_subst(&args[0], subst, ctx)?),
+                    Box::new(deep_arith_subst(&args[1], subst, ctx)?),
+                ));
+            }
+            match (name, args) {
+                ("and", [left, right]) => Some(SmtExpr::Bool(
+                    SB::And,
+                    vec![
+                        deep_expr_to_smt_subst(left, subst, ctx)?,
+                        deep_expr_to_smt_subst(right, subst, ctx)?,
+                    ],
+                )),
+                ("or", [left, right]) => Some(SmtExpr::Bool(
+                    SB::Or,
+                    vec![
+                        deep_expr_to_smt_subst(left, subst, ctx)?,
+                        deep_expr_to_smt_subst(right, subst, ctx)?,
+                    ],
+                )),
+                ("not", [inner]) => Some(SmtExpr::Not(Box::new(deep_expr_to_smt_subst(
+                    inner, subst, ctx,
+                )?))),
+                _ => None,
+            }
+        }
+        _ => match deep_bool_lit(expr) {
+            Some(value) => Some(SmtExpr::BoolLit(value)),
+            None => {
+                if let Some((left, right)) = deep_builtin_cmp(expr, "cmplt") {
+                    return Some(SmtExpr::Cmp(
+                        SC::Lt,
+                        Box::new(deep_arith_subst(left, subst, ctx)?),
+                        Box::new(deep_arith_subst(right, subst, ctx)?),
+                    ));
+                }
+                None
+            }
+        },
+    }
+}
+
+fn lookup_deep_fun_body<'a>(
+    exprs: &'a [DeepExpr],
+    name: &str,
+) -> Option<(Vec<String>, &'a DeepExpr)> {
+    let mut stack: Vec<&DeepExpr> = exprs.iter().collect();
+    while let Some(expr) = stack.pop() {
+        let Some(list) = deep_list(expr) else {
+            continue;
+        };
+        match list_tag_from_list(list) {
+            Some("module") => {
+                stack.extend(list.elements.iter().skip(3));
+            }
+            Some("def") if list.elements.get(2).and_then(deep_symbol_text) == Some(name) => {
+                let fn_expr = list.elements.get(3)?;
+                let params = deep_fn_param_names(fn_expr)?;
+                let body = deep_fn_body(fn_expr)?;
+                return Some((params, body));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn deep_fn_param_names(expr: &DeepExpr) -> Option<Vec<String>> {
+    let list = deep_list(expr)?;
+    if list_tag_from_list(list) != Some("fn") {
+        return None;
+    }
+    let params = list.elements.get(2).and_then(deep_list)?;
+    if list_tag_from_list(params) != Some("params") {
+        return None;
+    }
+    params
+        .elements
+        .iter()
+        .skip(2)
+        .map(|param| {
+            deep_symbol_text(param)
+                .or_else(|| {
+                    let list = deep_list(param)?;
+                    list.elements.first().and_then(deep_symbol_text)
+                })
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn deep_fn_body(expr: &DeepExpr) -> Option<&DeepExpr> {
+    let list = deep_list(expr)?;
+    if list_tag_from_list(list) != Some("fn") {
+        return None;
+    }
+    list.elements.get(3)
+}
+
+fn deep_bind_pairs(expr: &DeepExpr) -> Option<Vec<(&str, &DeepExpr)>> {
+    let list = deep_list(expr)?;
+    if list_tag_from_list(list) != Some("bind") {
+        return None;
+    }
+    let mut pairs = Vec::new();
+    let mut children = list.elements.iter().skip(2);
+    while let Some(name) = children.next() {
+        let value = children.next()?;
+        pairs.push((deep_symbol_text(name)?, value));
+    }
+    Some(pairs)
+}
+
+fn deep_builtin_cmp<'a>(expr: &'a DeepExpr, name: &str) -> Option<(&'a DeepExpr, &'a DeepExpr)> {
+    let (found, args) = deep_app_name_and_args(expr)?;
+    (found == name && args.len() == 2).then_some((&args[0], &args[1]))
+}
+
+fn deep_app_name_and_args(expr: &DeepExpr) -> Option<(&str, &[DeepExpr])> {
+    let list = deep_list(expr)?;
+    if list_tag_from_list(list) != Some("app") {
+        return None;
+    }
+    let name = list.elements.get(2).and_then(deep_var_name)?;
+    Some((name, &list.elements[3..]))
+}
+
+fn deep_var_name(expr: &DeepExpr) -> Option<&str> {
+    let list = deep_list(expr)?;
+    if list_tag_from_list(list) != Some("var") {
+        return None;
+    }
+    list.elements.get(2).and_then(deep_symbol_text)
+}
+
+fn deep_float_lit(expr: &DeepExpr) -> Option<f64> {
+    let list = deep_list(expr)?;
+    if list_tag_from_list(list) != Some("lit") {
+        return None;
+    }
+    match list.elements.get(2)? {
+        DeepExpr::Atom(DeepAtom::Float(value), _) => Some(*value),
+        _ => None,
+    }
+}
+
+fn deep_int_lit(expr: &DeepExpr) -> Option<i64> {
+    let list = deep_list(expr)?;
+    if list_tag_from_list(list) != Some("lit") {
+        return None;
+    }
+    match list.elements.get(2)? {
+        DeepExpr::Atom(DeepAtom::Int(value), _) => Some(*value),
+        _ => None,
+    }
+}
+
+fn deep_bool_lit(expr: &DeepExpr) -> Option<bool> {
+    let list = deep_list(expr)?;
+    if list_tag_from_list(list) != Some("lit") {
+        return None;
+    }
+    match list.elements.get(2)? {
+        DeepExpr::Atom(DeepAtom::Bool(value), _) => Some(*value),
+        _ => None,
+    }
+}
+
+fn deep_tag(expr: &DeepExpr) -> Option<&str> {
+    deep_list(expr).and_then(list_tag_from_list)
+}
+
+fn list_tag_from_list(list: &DeepList) -> Option<&str> {
+    list.elements.first().and_then(deep_symbol_text)
+}
+
+fn deep_list(expr: &DeepExpr) -> Option<&DeepList> {
+    match expr {
+        DeepExpr::List(list, _) => Some(list),
+        _ => None,
+    }
+}
+
+fn deep_symbol_text(expr: &DeepExpr) -> Option<&str> {
+    match expr {
+        DeepExpr::Atom(DeepAtom::Symbol(value), _) => Some(value.as_str()),
         _ => None,
     }
 }

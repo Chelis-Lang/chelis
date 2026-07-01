@@ -1,6 +1,8 @@
 use chelis_compiler_api::compiler;
 use chelis_compiler_api::schema::{
-    AddFunctionRequest, AddFunctionResult, ApiEnvelope, CheckRequest, SourceKind, WireDeepExpr,
+    AddFunctionRequest, AddFunctionResult, AddPropertyRequest, ApiEnvelope, ChangeSignatureRequest,
+    CheckRequest, DeepCallGraphRequest, DeepOutlineRequest, RenameRequest, ReplaceFunctionRequest,
+    SourceKind, WireDeepExpr,
 };
 use chelis_deep::{Atom, Expr};
 use schemars::schema_for;
@@ -89,6 +91,19 @@ const ADD_ILL_TYPED: &str = r#"(defsig {}
   (fn {}
     (params {} (x {type: (t-prim {} f32)}))
     (lit {type: (t-prim {} bool)} true)))
+"#;
+
+const ADD_PROPERTY_ALWAYS_TRUE: &str = r#"(defsig {}
+  always_true
+  (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} bool)))
+(def {chelis_role: "property",
+       property_preconditions: (tuple {}),
+       property_quantifiers: (params {} (x {type: (t-prim {} f32)})),
+       property_source_kind: "user"}
+  always_true
+  (fn {}
+    (params {} (x {type: (t-prim {} f32)}))
+    (app {} (var {} gte) (var {} x) (var {} x))))
 "#;
 
 fn add_function(module: &str, new_decls: &str, insert_after: Option<&str>) -> AddFunctionResult {
@@ -185,6 +200,225 @@ fn assert_full_check_has_no_fitness_errors(module_deep: &str) {
         "rewritten module has no fitness errors: {:?}",
         check.errors
     );
+}
+
+fn target_preimage(module: &str, function_name: &str) -> String {
+    let outline = compiler::deep_outline(DeepOutlineRequest {
+        module: module.to_string(),
+    })
+    .expect("outline");
+    outline
+        .functions
+        .into_iter()
+        .find(|function| function.name == function_name)
+        .expect("function")
+        .preimage_sha256
+}
+
+#[test]
+fn deep_outline_and_call_graph_are_machine_contracts() {
+    let outline = compiler::deep_outline(DeepOutlineRequest {
+        module: BASE_TWO_FUNCTIONS.to_string(),
+    })
+    .expect("outline");
+    assert_eq!(outline.module_name, "handoff.demo");
+    assert_eq!(outline.functions.len(), 2);
+    let first = outline
+        .functions
+        .iter()
+        .find(|function| function.name == "first")
+        .expect("first");
+    assert_eq!(first.qualified_name, "handoff.demo.first");
+    assert_eq!(first.params, vec!["x"]);
+    assert_eq!(first.preimage_sha256.len(), 64);
+
+    let graph = compiler::deep_call_graph(DeepCallGraphRequest {
+        module: BASE_TWO_FUNCTIONS.to_string(),
+    })
+    .expect("call graph");
+    assert!(graph.edges.is_empty(), "identity functions have no calls");
+}
+
+#[test]
+fn rename_fails_closed_on_stale_preimage_and_cascades_calls() {
+    let caller_module = r#"(module {}
+  handoff.rename
+  (export {} first second)
+  (defsig {} first (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32)))
+  (def {} first (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))
+  (defsig {} second (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32)))
+  (def {} second (fn {} (params {} (x {type: (t-prim {} f32)})) (app {} (var {} first) (var {} x)))))
+"#;
+    let stale = compiler::result_envelope(compiler::rename(RenameRequest {
+        module: caller_module.to_string(),
+        function_name: "first".to_string(),
+        new_name: "renamed".to_string(),
+        preimage_sha256: Some("0".repeat(64)),
+    }));
+    let stale_json = serde_json::to_value(stale).expect("stale serializes");
+    assert_eq!(stale_json["ok"], false);
+    assert_eq!(stale_json["stage"], "preimage");
+    assert!(stale_json.get("result").is_none());
+
+    let ok = compiler::rename(RenameRequest {
+        module: caller_module.to_string(),
+        function_name: "first".to_string(),
+        new_name: "renamed".to_string(),
+        preimage_sha256: Some(target_preimage(caller_module, "first")),
+    })
+    .expect("rename");
+    assert!(ok.module_deep.contains("(export {} renamed second)"));
+    assert!(
+        ok.module_deep
+            .contains("(app {} (var {} renamed) (var {} x))")
+    );
+    assert_eq!(ok.renamed_references, 1);
+    assert_full_check_has_no_fitness_errors(&ok.module_deep);
+}
+
+#[test]
+fn rename_cascades_property_precondition_metadata() {
+    let module = r#"(module {}
+  handoff.property_meta
+  (defsig {} guard (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} bool)))
+  (def {} guard (fn {} (params {} (x {type: (t-prim {} f32)})) (app {} (var {} gte) (var {} x) (var {} x))))
+  (defsig {} holds (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} bool)))
+  (def {chelis_role: "property",
+        property_preconditions: (tuple {} (app {} (var {} guard) (var {} x))),
+        property_quantifiers: (params {} (x {type: (t-prim {} f32)})),
+        property_source_kind: "user"}
+    holds
+    (fn {} (params {} (x {type: (t-prim {} f32)})) (app {} (var {} gte) (var {} x) (var {} x)))))
+"#;
+
+    let ok = compiler::rename(RenameRequest {
+        module: module.to_string(),
+        function_name: "guard".to_string(),
+        new_name: "renamed".to_string(),
+        preimage_sha256: Some(target_preimage(module, "guard")),
+    })
+    .expect("rename cascades through metadata");
+
+    assert!(
+        ok.module_deep
+            .contains("property_preconditions: (tuple {} (app {} (var {} renamed) (var {} x)))"),
+        "property preconditions are semantically active Deep and must be cascaded: {}",
+        ok.module_deep
+    );
+    assert_full_check_has_no_fitness_errors(&ok.module_deep);
+}
+
+#[test]
+fn replace_function_and_change_signature_validate_whole_module() {
+    let new_decls = r#"(defsig {}
+  first
+  (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32)))
+(def {}
+  first
+  (fn {}
+    (params {} (x {type: (t-prim {} f32)}))
+    (lit {type: (t-prim {} bool)} true)))
+"#;
+    let rejected = compiler::result_envelope(compiler::replace_function(ReplaceFunctionRequest {
+        module: BASE_TWO_FUNCTIONS.to_string(),
+        function_name: "first".to_string(),
+        new_decls: new_decls.to_string(),
+        preimage_sha256: Some(target_preimage(BASE_TWO_FUNCTIONS, "first")),
+    }));
+    let rejected_json = serde_json::to_value(rejected).expect("rejection serializes");
+    assert_eq!(rejected_json["ok"], false);
+    assert_eq!(rejected_json["stage"], "check");
+    assert!(rejected_json.get("result").is_none());
+
+    let sig_module = r#"(module {}
+  handoff.sig
+  (defsig {} pair (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32)))
+  (def {} pair (fn {} (params {} (x {type: (t-prim {} f32)}) (y {type: (t-prim {} f32)})) (app {} (var {} sub) (var {} x) (var {} y))))
+  (defsig {} caller (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32)))
+  (def {} caller (fn {} (params {} (a {type: (t-prim {} f32)}) (b {type: (t-prim {} f32)})) (app {} (var {} pair) (var {} a) (var {} b)))))
+"#;
+    let changed = compiler::change_signature(ChangeSignatureRequest {
+        module: sig_module.to_string(),
+        function_name: "pair".to_string(),
+        new_defsig: "(defsig {} pair (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32)))".to_string(),
+        new_params: "(params {} (y {type: (t-prim {} f32)}) (x {type: (t-prim {} f32)}))".to_string(),
+        argument_order: vec!["y".to_string(), "x".to_string()],
+        param_renames: Default::default(),
+        preimage_sha256: Some(target_preimage(sig_module, "pair")),
+    })
+    .expect("change signature");
+    assert!(
+        changed
+            .module_deep
+            .contains("(app {} (var {} pair) (var {} b) (var {} a))")
+    );
+    assert_eq!(changed.rewritten_calls, 1);
+    assert_full_check_has_no_fitness_errors(&changed.module_deep);
+}
+
+#[test]
+fn change_signature_rewrites_property_precondition_metadata_calls() {
+    let module = r#"(module {}
+  handoff.property_sig
+  (defsig {} guard (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32) (t-prim {} bool)))
+  (def {} guard (fn {} (params {} (x {type: (t-prim {} f32)}) (y {type: (t-prim {} f32)})) (app {} (var {} gte) (var {} x) (var {} y))))
+  (defsig {} holds (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32) (t-prim {} bool)))
+  (def {chelis_role: "property",
+        property_preconditions: (tuple {} (app {} (var {} guard) (var {} x) (var {} y))),
+        property_quantifiers: (params {} (x {type: (t-prim {} f32)}) (y {type: (t-prim {} f32)})),
+        property_source_kind: "user"}
+    holds
+    (fn {} (params {} (x {type: (t-prim {} f32)}) (y {type: (t-prim {} f32)})) (app {} (var {} gte) (var {} x) (var {} x)))))
+"#;
+
+    let changed = compiler::change_signature(ChangeSignatureRequest {
+        module: module.to_string(),
+        function_name: "guard".to_string(),
+        new_defsig: "(defsig {} guard (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32) (t-prim {} bool)))".to_string(),
+        new_params: "(params {} (y {type: (t-prim {} f32)}) (x {type: (t-prim {} f32)}))"
+            .to_string(),
+        argument_order: vec!["y".to_string(), "x".to_string()],
+        param_renames: Default::default(),
+        preimage_sha256: Some(target_preimage(module, "guard")),
+    })
+    .expect("change_signature cascades through metadata");
+
+    assert!(
+        changed
+            .module_deep
+            .contains("(app {} (var {} guard) (var {} y) (var {} x))"),
+        "property precondition call arguments must be reordered: {}",
+        changed.module_deep
+    );
+    assert_eq!(changed.rewritten_calls, 1);
+    assert_full_check_has_no_fitness_errors(&changed.module_deep);
+}
+
+#[test]
+fn add_property_requires_property_role_and_validates_whole_module() {
+    let added = compiler::add_property(AddPropertyRequest {
+        module: BASE_TWO_FUNCTIONS.to_string(),
+        new_decls: ADD_PROPERTY_ALWAYS_TRUE.to_string(),
+        insert_after_function: Some("second".to_string()),
+    })
+    .expect("add property");
+    assert!(
+        added
+            .added_property_def_deep
+            .contains("chelis_role: \"property\"")
+    );
+    assert!(added.module_deep.contains("always_true"));
+    assert_full_check_has_no_fitness_errors(&added.module_deep);
+
+    let rejected = compiler::result_envelope(compiler::add_property(AddPropertyRequest {
+        module: BASE_TWO_FUNCTIONS.to_string(),
+        new_decls: ADD_IDENTITY.to_string(),
+        insert_after_function: None,
+    }));
+    let rejected_json = serde_json::to_value(rejected).expect("rejection serializes");
+    assert_eq!(rejected_json["ok"], false);
+    assert_eq!(rejected_json["stage"], "add-property");
+    assert!(rejected_json.get("result").is_none());
 }
 
 #[test]

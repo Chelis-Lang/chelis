@@ -141,7 +141,9 @@ With no path, discovery scans the current package's `properties/**/*.ch` and
 `src/**/*.ch`, skipping `tests/`, hidden directories, `target/`, `dist/`, and
 dependency trees. Explicit `.ch` inputs discover properties only in that file;
 imports are for name resolution, not discovery. Explicit `.dp` inputs are
-validated first, then scanned for canonical `chelis_role: "property"` metadata.
+validated first, then scanned for canonical `chelis_role: "property"`
+metadata. SMT-amenable scalar Deep properties lower directly to Tier B;
+unsupported Deep property shapes follow the normal requested-tier policy.
 
 Exit codes are stable for CI: `0` pass, `1` counterexample, `2` selected
 property unsupported by the v1 generator, and `3` setup/input/config error.

@@ -10,9 +10,11 @@ use tokio::net::TcpListener;
 
 use crate::compiler;
 use crate::schema::{
-    AddFunctionRequest, ApiEnvelope, BatchRequestEnvelope, BatchResultEnvelope, CheckRequest,
-    CompileRequest, DecompileRequest, DesugarRequest, Diagnostic, EvalRequest, GradRequest,
-    LowerRequest, ParseRequest, ReplaceFunctionBodyRequest, ValidateRequest,
+    AddFunctionRequest, AddPropertyRequest, ApiEnvelope, BatchRequestEnvelope, BatchResultEnvelope,
+    ChangeSignatureRequest, CheckRequest, CompileRequest, DecompileRequest, DeepCallGraphRequest,
+    DeepOutlineRequest, DeepReferencesRequest, DesugarRequest, Diagnostic, EvalRequest,
+    GradRequest, LowerRequest, ParseRequest, RenameRequest, ReplaceFunctionBodyRequest,
+    ReplaceFunctionRequest, ValidateRequest,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -31,6 +33,13 @@ pub fn router() -> Router {
         .route("/decompile", post(decompile))
         .route("/replace_function_body", post(replace_function_body))
         .route("/add_function", post(add_function))
+        .route("/deep_outline", post(deep_outline))
+        .route("/deep_references", post(deep_references))
+        .route("/deep_call_graph", post(deep_call_graph))
+        .route("/replace_function", post(replace_function))
+        .route("/add_property", post(add_property))
+        .route("/rename", post(rename))
+        .route("/change_signature", post(change_signature))
         .route("/batch", post(batch))
         .with_state(AppState)
 }
@@ -127,6 +136,83 @@ async fn add_function(
         crate::schema::AddFunctionResult,
         _,
     >(body, compiler::add_function))
+}
+
+async fn deep_outline(
+    State(_state): State<AppState>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Json<ApiEnvelope<crate::schema::DeepOutlineResult>> {
+    Json(authoring_request_envelope::<
+        DeepOutlineRequest,
+        crate::schema::DeepOutlineResult,
+        _,
+    >(body, compiler::deep_outline))
+}
+
+async fn deep_references(
+    State(_state): State<AppState>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Json<ApiEnvelope<crate::schema::DeepReferencesResult>> {
+    Json(authoring_request_envelope::<
+        DeepReferencesRequest,
+        crate::schema::DeepReferencesResult,
+        _,
+    >(body, compiler::deep_references))
+}
+
+async fn deep_call_graph(
+    State(_state): State<AppState>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Json<ApiEnvelope<crate::schema::DeepCallGraphResult>> {
+    Json(authoring_request_envelope::<
+        DeepCallGraphRequest,
+        crate::schema::DeepCallGraphResult,
+        _,
+    >(body, compiler::deep_call_graph))
+}
+
+async fn replace_function(
+    State(_state): State<AppState>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Json<ApiEnvelope<crate::schema::ReplaceFunctionResult>> {
+    Json(authoring_request_envelope::<
+        ReplaceFunctionRequest,
+        crate::schema::ReplaceFunctionResult,
+        _,
+    >(body, compiler::replace_function))
+}
+
+async fn add_property(
+    State(_state): State<AppState>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Json<ApiEnvelope<crate::schema::AddPropertyResult>> {
+    Json(authoring_request_envelope::<
+        AddPropertyRequest,
+        crate::schema::AddPropertyResult,
+        _,
+    >(body, compiler::add_property))
+}
+
+async fn rename(
+    State(_state): State<AppState>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Json<ApiEnvelope<crate::schema::RenameResult>> {
+    Json(authoring_request_envelope::<
+        RenameRequest,
+        crate::schema::RenameResult,
+        _,
+    >(body, compiler::rename))
+}
+
+async fn change_signature(
+    State(_state): State<AppState>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Json<ApiEnvelope<crate::schema::ChangeSignatureResult>> {
+    Json(authoring_request_envelope::<
+        ChangeSignatureRequest,
+        crate::schema::ChangeSignatureResult,
+        _,
+    >(body, compiler::change_signature))
 }
 
 fn authoring_request_envelope<T, R, F>(

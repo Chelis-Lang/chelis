@@ -11,6 +11,7 @@ use chelis_surf::ast::{
     TypeExpr, UnaryOp, Variant, VariantFields,
 };
 use chelis_types::{CheckedProgram, errors::CheckError};
+use sha2::{Digest, Sha256};
 
 use crate::runtime::{
     RuntimeTensorValue, evaluate_host_program_filtered,
@@ -18,17 +19,21 @@ use crate::runtime::{
     runtime_value_to_schema,
 };
 use crate::schema::{
-    AddFunctionRequest, AddFunctionResult, BatchRequest, BatchResult, BatchResultEnvelope,
-    CheckResult, CompileRequest, CompileResult, CompileTarget, DecompileRequest, DecompileResult,
-    DesugarRequest, DesugarResult, Diagnostic, EvalRequest, EvalResult, EvaluatedRoot,
-    FitnessComponents, GeneratedFile, GradRequest, GradResult, LowerRequest, LowerResult,
-    ParseRequest, ParseResult, SourceKind, Span, ValidateMode, ValidateRequest, ValidateResult,
-    WireBinOp, WireDag, WireDagNode, WireDagSchemaError, WireDeepAtom, WireDeepExpr,
-    WireDeepExprKind, WireDimExpr, WireDimInfo, WireFusedInput, WireFusedStep, WireFusedStepOp,
-    WireImportKind, WireLetBinding, WireLetPattern, WireLiteral, WireMatchArm, WireMetaEntry,
-    WireParam, WirePattern, WirePropertyOption, WireRecordExprField, WireRecordPatternField,
-    WireRecordTypeField, WireRiscOp, WireSurfDecl, WireSurfExpr, WireSurfTypeExpr, WireTensorType,
-    WireTypeInvariant, WireUnaryOp, WireVariant, WireVariantFields,
+    AddFunctionRequest, AddFunctionResult, AddPropertyRequest, AddPropertyResult, BatchRequest,
+    BatchResult, BatchResultEnvelope, ChangeSignatureRequest, ChangeSignatureResult, CheckResult,
+    CompileRequest, CompileResult, CompileTarget, DecompileRequest, DecompileResult,
+    DeepCallGraphRequest, DeepCallGraphResult, DeepFunctionOutline, DeepOutlineRequest,
+    DeepOutlineResult, DeepReference, DeepReferencesRequest, DeepReferencesResult, DesugarRequest,
+    DesugarResult, Diagnostic, EvalRequest, EvalResult, EvaluatedRoot, FitnessComponents,
+    GeneratedFile, GradRequest, GradResult, LowerRequest, LowerResult, ParseRequest, ParseResult,
+    RenameRequest, RenameResult, ReplaceFunctionRequest, ReplaceFunctionResult, SourceKind, Span,
+    ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireDag, WireDagNode,
+    WireDagSchemaError, WireDeepAtom, WireDeepExpr, WireDeepExprKind, WireDimExpr, WireDimInfo,
+    WireFusedInput, WireFusedStep, WireFusedStepOp, WireImportKind, WireLetBinding, WireLetPattern,
+    WireLiteral, WireMatchArm, WireMetaEntry, WireParam, WirePattern, WirePropertyOption,
+    WireRecordExprField, WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireSurfDecl,
+    WireSurfExpr, WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp, WireVariant,
+    WireVariantFields,
 };
 
 const RUNTIME_H: &str = include_str!(concat!(
@@ -216,6 +221,265 @@ pub fn add_function(request: AddFunctionRequest) -> Result<AddFunctionResult> {
         added_defsig_deep: parsed.defsig.as_ref().map(chelis_deep::printer::print_expr),
         module_deep: chelis_deep::printer::print_canonical(&report.rewritten_module),
     })
+}
+
+pub fn deep_outline(request: DeepOutlineRequest) -> Result<DeepOutlineResult> {
+    let module = parse_deep_authoring("deep-outline", &request.module)?;
+    let outline = chelis_deep::authoring::outline(&module)
+        .map_err(|err| authoring_error_to_compiler_error("deep-outline", err))?;
+    Ok(DeepOutlineResult {
+        module_name: outline.module_name,
+        exports: outline.exports,
+        functions: outline
+            .functions
+            .into_iter()
+            .map(|function| {
+                let preimage_sha256 = sha256_hex(function.def_deep.as_bytes());
+                DeepFunctionOutline {
+                    name: function.name,
+                    qualified_name: function.qualified_name,
+                    params: function.params,
+                    has_defsig: function.has_defsig,
+                    body_path: function.body_path,
+                    def_deep: function.def_deep,
+                    defsig_deep: function.defsig_deep,
+                    preimage_sha256,
+                }
+            })
+            .collect(),
+    })
+}
+
+pub fn deep_references(request: DeepReferencesRequest) -> Result<DeepReferencesResult> {
+    let module = parse_deep_authoring("deep-references", &request.module)?;
+    let refs = chelis_deep::authoring::references(&module, &request.symbol)
+        .map_err(|err| authoring_error_to_compiler_error("deep-references", err))?;
+    Ok(DeepReferencesResult {
+        symbol: refs.symbol,
+        references: refs
+            .references
+            .into_iter()
+            .map(wire_deep_reference)
+            .collect(),
+    })
+}
+
+pub fn deep_call_graph(request: DeepCallGraphRequest) -> Result<DeepCallGraphResult> {
+    let module = parse_deep_authoring("deep-call-graph", &request.module)?;
+    let graph = chelis_deep::authoring::call_graph(&module)
+        .map_err(|err| authoring_error_to_compiler_error("deep-call-graph", err))?;
+    Ok(DeepCallGraphResult {
+        edges: graph.edges.into_iter().map(wire_deep_reference).collect(),
+    })
+}
+
+pub fn replace_function(request: ReplaceFunctionRequest) -> Result<ReplaceFunctionResult> {
+    let module = parse_deep_authoring("replace-function", &request.module)?;
+    check_preimage(
+        &module,
+        &request.function_name,
+        request.preimage_sha256.as_deref(),
+    )?;
+    let new_decls = parse_deep_authoring("replace-function", &request.new_decls)?;
+    let edited =
+        chelis_deep::authoring::replace_function(&module, &request.function_name, &new_decls)
+            .map_err(|err| authoring_error_to_compiler_error("replace-function", err))?;
+    let report = crate::fragment::check_whole_module_edit(edited.module)
+        .map_err(edit_validation_error_to_compiler_error)?;
+    Ok(ReplaceFunctionResult {
+        replaced_def_deep: chelis_deep::printer::print_expr(&edited.replaced_def),
+        replaced_defsig_deep: edited
+            .replaced_defsig
+            .as_ref()
+            .map(chelis_deep::printer::print_expr),
+        module_deep: chelis_deep::printer::print_canonical(&report.rewritten_module),
+    })
+}
+
+pub fn rename(request: RenameRequest) -> Result<RenameResult> {
+    let module = parse_deep_authoring("rename", &request.module)?;
+    check_preimage(
+        &module,
+        &request.function_name,
+        request.preimage_sha256.as_deref(),
+    )?;
+    let edited =
+        chelis_deep::authoring::rename_function(&module, &request.function_name, &request.new_name)
+            .map_err(|err| authoring_error_to_compiler_error("rename", err))?;
+    let report = crate::fragment::check_whole_module_edit(edited.module)
+        .map_err(edit_validation_error_to_compiler_error)?;
+    Ok(RenameResult {
+        renamed_def_deep: chelis_deep::printer::print_expr(&edited.renamed_def),
+        renamed_defsig_deep: edited
+            .renamed_defsig
+            .as_ref()
+            .map(chelis_deep::printer::print_expr),
+        module_deep: chelis_deep::printer::print_canonical(&report.rewritten_module),
+        renamed_references: edited.renamed_references,
+    })
+}
+
+pub fn change_signature(request: ChangeSignatureRequest) -> Result<ChangeSignatureResult> {
+    let module = parse_deep_authoring("change-signature", &request.module)?;
+    check_preimage(
+        &module,
+        &request.function_name,
+        request.preimage_sha256.as_deref(),
+    )?;
+    let new_defsig =
+        parse_one_deep_authoring("change-signature", "new_defsig", &request.new_defsig)?;
+    let new_params =
+        parse_one_deep_authoring("change-signature", "new_params", &request.new_params)?;
+    let param_renames: Vec<(String, String)> = request.param_renames.into_iter().collect();
+    let edited = chelis_deep::authoring::change_signature(
+        &module,
+        &request.function_name,
+        &new_defsig,
+        &new_params,
+        &request.argument_order,
+        &param_renames,
+    )
+    .map_err(|err| authoring_error_to_compiler_error("change-signature", err))?;
+    let report = crate::fragment::check_whole_module_edit(edited.module)
+        .map_err(edit_validation_error_to_compiler_error)?;
+    Ok(ChangeSignatureResult {
+        changed_def_deep: chelis_deep::printer::print_expr(&edited.changed_def),
+        changed_defsig_deep: chelis_deep::printer::print_expr(&edited.changed_defsig),
+        module_deep: chelis_deep::printer::print_canonical(&report.rewritten_module),
+        rewritten_calls: edited.rewritten_calls,
+    })
+}
+
+pub fn add_property(request: AddPropertyRequest) -> Result<AddPropertyResult> {
+    let module = parse_deep_authoring("add-property", &request.module)?;
+    let new_decl_exprs = parse_deep_authoring("add-property", &request.new_decls)?;
+    let parsed = parse_add_function_decls(new_decl_exprs)?;
+    if !deep_def_has_role(&parsed.def, "property") {
+        return Err(stage_error(
+            "add-property",
+            "`new_decls` def must carry `chelis_role: \"property\"`",
+            "deep_decl_error",
+        ));
+    }
+    let rewritten = chelis_deep::insert_function_decls(
+        &module,
+        &parsed.ordered_decls,
+        request.insert_after_function.as_deref(),
+    )
+    .map_err(add_function_insert_error_to_compiler_error)?;
+    let report = crate::fragment::check_whole_module_edit(rewritten)
+        .map_err(edit_validation_error_to_compiler_error)?;
+    Ok(AddPropertyResult {
+        added_property_def_deep: chelis_deep::printer::print_expr(&parsed.def),
+        added_defsig_deep: parsed.defsig.as_ref().map(chelis_deep::printer::print_expr),
+        module_deep: chelis_deep::printer::print_canonical(&report.rewritten_module),
+    })
+}
+
+fn parse_deep_authoring(stage: &str, source: &str) -> Result<Vec<DeepExpr>> {
+    chelis_deep::parser::parse_str_strict(source).map_err(|err| {
+        stage_error_with_span(
+            stage,
+            err.to_string(),
+            "deep_parse_error",
+            parse_error_span_deep(&err),
+        )
+    })
+}
+
+fn parse_one_deep_authoring(stage: &str, field: &str, source: &str) -> Result<DeepExpr> {
+    let exprs = parse_deep_authoring(stage, source)?;
+    match exprs.as_slice() {
+        [single] => Ok(single.clone()),
+        other => Err(stage_error(
+            stage,
+            format!(
+                "`{field}` must be exactly one Deep expression, got {}",
+                other.len()
+            ),
+            "deep_parse_error",
+        )),
+    }
+}
+
+fn wire_deep_reference(reference: chelis_deep::authoring::Reference) -> DeepReference {
+    DeepReference {
+        caller: reference.caller,
+        callee: reference.callee,
+        path: reference.path,
+    }
+}
+
+fn check_preimage(module: &[DeepExpr], function_name: &str, expected: Option<&str>) -> Result<()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let actual = target_preimage_sha256(module, function_name)?;
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(stage_error(
+            "preimage",
+            format!(
+                "preimage hash mismatch for `{function_name}`: expected {expected}, got {actual}"
+            ),
+            "preimage_mismatch",
+        ))
+    }
+}
+
+fn target_preimage_sha256(module: &[DeepExpr], function_name: &str) -> Result<String> {
+    let outline = chelis_deep::authoring::outline(module)
+        .map_err(|err| authoring_error_to_compiler_error("deep-outline", err))?;
+    let function = outline
+        .functions
+        .iter()
+        .find(|function| function.name == function_name || function.qualified_name == function_name)
+        .ok_or_else(|| {
+            stage_error(
+                "name-resolution",
+                format!("function `{function_name}` not found"),
+                "name_resolution_error",
+            )
+        })?;
+    Ok(sha256_hex(function.def_deep.as_bytes()))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut out, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    out
+}
+
+fn authoring_error_to_compiler_error(
+    default_stage: &str,
+    error: chelis_deep::authoring::AuthoringError,
+) -> CompilerError {
+    use chelis_deep::authoring::AuthoringError;
+    match error {
+        AuthoringError::Resolve(err) => {
+            stage_error("name-resolution", err.to_string(), "name_resolution_error")
+        }
+        AuthoringError::NoModule | AuthoringError::MultipleModules { .. } => {
+            stage_error(default_stage, error.to_string(), "deep_decl_error")
+        }
+        AuthoringError::InvalidDecl(message) => {
+            stage_error(default_stage, message, "deep_decl_error")
+        }
+        AuthoringError::DuplicateFunction { .. } => {
+            stage_error("name-resolution", error.to_string(), "duplicate_name")
+        }
+        AuthoringError::PreimageMismatch { .. } => {
+            stage_error("preimage", error.to_string(), "preimage_mismatch")
+        }
+        AuthoringError::CascadeIncomplete { .. } => {
+            stage_error("cascade", error.to_string(), "cascade_incomplete")
+        }
+    }
 }
 
 struct ParsedAddFunctionDecls {
@@ -1603,6 +1867,22 @@ fn deep_decl_name(expr: &DeepExpr) -> Option<&str> {
 
 fn deep_def_is_function(expr: &DeepExpr) -> bool {
     matches!(deep_expr_tag(expr), Some("def")) && chelis_deep::function_body(expr).is_some()
+}
+
+fn deep_def_has_role(expr: &DeepExpr, expected: &str) -> bool {
+    let DeepExpr::List(list, _) = expr else {
+        return false;
+    };
+    if list_tag(list) != Some("def") {
+        return false;
+    }
+    let Some(DeepExpr::Map(meta, _)) = list.elements.get(1) else {
+        return false;
+    };
+    meta.entries.iter().any(|(key, value)| {
+        key == "chelis_role"
+            && matches!(value, DeepExpr::Atom(chelis_deep::Atom::Str(role), _) if role == expected)
+    })
 }
 
 fn list_tag(list: &chelis_deep::List) -> Option<&str> {

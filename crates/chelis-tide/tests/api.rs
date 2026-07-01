@@ -21,6 +21,14 @@ loss = (mean(x, 0) : tensor[f32])
 const NON_SCALAR_PROGRAM: &str = r#"x = (x : tensor[4, f32])
 out = (add(copy(x), x) : tensor[4, f32])
 "#;
+const DEEP_AUTHORING_RENAME_MODULE: &str = r#"(module {}
+  tide.rename
+  (export {} first second)
+  (defsig {} first (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32)))
+  (def {} first (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))
+  (defsig {} second (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32)))
+  (def {} second (fn {} (params {} (x {type: (t-prim {} f32)})) (app {} (var {} first) (var {} x)))))
+"#;
 
 async fn post_json(app: Router, path: &str, value: Value) -> (u16, Value) {
     post_raw_json(app, path, value.to_string()).await
@@ -768,6 +776,71 @@ async fn add_function_endpoint_locks_effect_and_linearity_envelopes() {
         "linearity_error",
     )
     .await;
+}
+
+#[tokio::test]
+async fn deep_query_and_rename_http_endpoints_lock_preimage_contract() {
+    let (_, outline) = post_json(
+        router(),
+        "/deep_outline",
+        json!({"module": DEEP_AUTHORING_RENAME_MODULE}),
+    )
+    .await;
+    assert_eq!(outline["ok"], true);
+    let functions = outline["result"]["functions"].as_array().unwrap();
+    let first = functions
+        .iter()
+        .find(|function| function["name"] == "first")
+        .expect("first outline");
+    let preimage = first["preimage_sha256"].as_str().unwrap();
+    assert_eq!(preimage.len(), 64);
+
+    let (_, graph) = post_json(
+        router(),
+        "/deep_call_graph",
+        json!({"module": DEEP_AUTHORING_RENAME_MODULE}),
+    )
+    .await;
+    assert_eq!(graph["ok"], true);
+    let edges = graph["result"]["edges"].as_array().unwrap();
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0]["caller"], "tide.rename.second");
+    assert_eq!(edges[0]["callee"], "tide.rename.first");
+
+    let (_, stale) = post_json(
+        router(),
+        "/rename",
+        json!({
+            "module": DEEP_AUTHORING_RENAME_MODULE,
+            "function_name": "first",
+            "new_name": "renamed",
+            "preimage_sha256": "0".repeat(64),
+        }),
+    )
+    .await;
+    assert_eq!(stale["ok"], false);
+    assert_eq!(stale["stage"], "preimage");
+    assert!(stale.get("result").is_none());
+
+    let (_, renamed) = post_json(
+        router(),
+        "/rename",
+        json!({
+            "module": DEEP_AUTHORING_RENAME_MODULE,
+            "function_name": "first",
+            "new_name": "renamed",
+            "preimage_sha256": preimage,
+        }),
+    )
+    .await;
+    assert_eq!(renamed["ok"], true);
+    assert_eq!(renamed["result"]["renamed_references"], 1);
+    assert!(
+        renamed["result"]["module_deep"]
+            .as_str()
+            .unwrap()
+            .contains("(app {} (var {} renamed) (var {} x))")
+    );
 }
 
 #[tokio::test]

@@ -25,7 +25,9 @@ use chelis_surf::ast::{
 };
 
 mod smt_lower;
-use smt_lower::{ContractAbstraction, InlineCtx, surf_expr_to_smt};
+use smt_lower::{
+    ContractAbstraction, DeepInlineCtx, InlineCtx, deep_expr_to_smt, surf_expr_to_smt,
+};
 
 mod injection;
 use crate::composition::{
@@ -2026,24 +2028,26 @@ fn prove_deep_property(
     options: &PropertyRunOptions,
 ) -> PropertyOutcome {
     let seed = options.effective_seed(property.seed);
-    // Honor the --tier contract on the deep path (F7). A Deep property body
-    // is in Deep AST and has no Surf->SMT lowering path (the Tier B
-    // surf_expr_to_smt lowering the surf path uses takes a Surf body), so
-    // `smt-only` is Unsupported rather than a silent fuzz run; `fuzz-only`
-    // and `auto` run the Tier C fuzz loop below.
-    if options.tier == "smt-only" {
-        return PropertyOutcome::new(
-            property.name.clone(),
-            PropertyStatus::Unsupported,
-            PropertyTier::Smt,
-            0,
-            seed,
-            None,
-            Some("deep property has no Tier B (SMT) lowering path (smt-only)".to_string()),
-            false,
-            Vec::new(),
-        );
+
+    if options.tier == "auto" || options.tier == "smt-only" {
+        if let Some(outcome) = try_deep_tier_b(exprs, property, options, seed) {
+            return outcome;
+        }
+        if options.tier == "smt-only" {
+            return PropertyOutcome::new(
+                property.name.clone(),
+                PropertyStatus::Unsupported,
+                PropertyTier::Smt,
+                0,
+                seed,
+                None,
+                Some("property does not lower to Tier B (smt-only)".to_string()),
+                false,
+                Vec::new(),
+            );
+        }
     }
+
     let samples_needed = if options.samples != 100 {
         options.samples
     } else {
@@ -2116,6 +2120,168 @@ fn prove_deep_property(
         false,
         fuzz_precondition_assumptions(&property.name, property.preconditions.len(), accepted, seed),
     )
+}
+
+fn try_deep_tier_b(
+    exprs: &[DeepExpr],
+    property: &DeepProperty,
+    options: &PropertyRunOptions,
+    seed: u64,
+) -> Option<PropertyOutcome> {
+    let ctx = DeepInlineCtx {
+        exprs,
+        depth: 0,
+        max_depth: 3,
+        call_stack: vec![],
+    };
+    let postcondition = deep_expr_to_smt(&property.body, &ctx)?;
+    let variables: Vec<(String, crate::solver::SmtSort)> = property
+        .params
+        .iter()
+        .filter_map(|param| {
+            let sort = match param.ty.as_ref()? {
+                TypeExpr::Named(name, _)
+                    if matches!(name.as_str(), "f32" | "f64" | "bool")
+                        || crate::opaque::is_int_width(name) =>
+                {
+                    crate::opaque::prim_to_smt_sort(name)
+                }
+                _ => return None,
+            };
+            Some((param.name.clone(), sort))
+        })
+        .collect();
+    if variables.len() != property.params.len() {
+        return None;
+    }
+    let preconditions: Vec<crate::solver::SmtExpr> = property
+        .preconditions
+        .iter()
+        .filter_map(|expr| deep_expr_to_smt(expr, &ctx))
+        .collect();
+    if preconditions.len() != property.preconditions.len() {
+        return None;
+    }
+    let smt_prop = crate::tier_b::SmtProperty {
+        variables,
+        preconditions,
+        postcondition,
+    };
+    if !matches!(
+        crate::classify_inlineability(&smt_prop.postcondition),
+        crate::Inlineability::Inlineable
+    ) {
+        return None;
+    }
+    let discharge = crate::engine_registry::DischargeRegistry::with_builtin_engines().dispatch(
+        &crate::discharge::Goal::smt(smt_prop.clone()),
+        options.smt_timeout_ms,
+    );
+    let base_discharge = Some((discharge.soundness(), discharge.qualifier_set().clone()));
+    match discharge.into_result() {
+        crate::tier_b::TierBResult::Proved => {
+            let non_vacuity = smt_non_vacuity_record(&smt_prop, options.smt_timeout_ms);
+            let reason = match non_vacuity.status {
+                NonVacuityStatus::Established => None,
+                NonVacuityStatus::Invalid | NonVacuityStatus::Unsupported => {
+                    non_vacuity.reason.clone()
+                }
+            };
+            let assumptions = property_assumption_records(
+                &property.name,
+                &smt_prop,
+                AssumptionDischarge::new(
+                    DischargeMethod::Smt,
+                    serde_json::json!({
+                        "status": "proved",
+                        "property": property.name,
+                        "arith_model": "real",
+                    }),
+                ),
+                non_vacuity,
+            );
+            let status = if reason.is_some() {
+                PropertyStatus::Unsupported
+            } else {
+                PropertyStatus::Passed
+            };
+            Some(PropertyOutcome::with_base_discharge(
+                property.name.clone(),
+                status,
+                PropertyTier::Smt,
+                0,
+                seed,
+                None,
+                reason,
+                false,
+                assumptions,
+                base_discharge,
+            ))
+        }
+        crate::tier_b::TierBResult::Disproved(model) => Some(PropertyOutcome::with_base_discharge(
+            property.name.clone(),
+            PropertyStatus::Failed,
+            PropertyTier::Smt,
+            0,
+            seed,
+            Some(model),
+            None,
+            false,
+            Vec::new(),
+            base_discharge,
+        )),
+        crate::tier_b::TierBResult::Timeout => {
+            if options.tier == "smt-only" {
+                Some(PropertyOutcome::new(
+                    property.name.clone(),
+                    PropertyStatus::Unsupported,
+                    PropertyTier::Smt,
+                    0,
+                    seed,
+                    None,
+                    Some("smt timeout".to_string()),
+                    false,
+                    Vec::new(),
+                ))
+            } else {
+                None
+            }
+        }
+        crate::tier_b::TierBResult::Unknown => {
+            if options.tier == "smt-only" {
+                Some(PropertyOutcome::new(
+                    property.name.clone(),
+                    PropertyStatus::Unsupported,
+                    PropertyTier::Smt,
+                    0,
+                    seed,
+                    None,
+                    Some("smt unknown".to_string()),
+                    false,
+                    Vec::new(),
+                ))
+            } else {
+                None
+            }
+        }
+        crate::tier_b::TierBResult::Error(reason) => {
+            if options.tier == "smt-only" {
+                Some(PropertyOutcome::new(
+                    property.name.clone(),
+                    PropertyStatus::Unsupported,
+                    PropertyTier::Smt,
+                    0,
+                    seed,
+                    None,
+                    Some(format!("property does not lower to the SMT tier: {reason}")),
+                    false,
+                    Vec::new(),
+                ))
+            } else {
+                None
+            }
+        }
+    }
 }
 
 fn sample_deep_property(property: &DeepProperty, rng: &mut Lcg) -> Result<Sample, String> {

@@ -1,9 +1,10 @@
 # Agent Editing Surface
 
-**Status:** L0 shipped in v0.11.1 and hardening; the handover substrate adds
-the second structural edit tool. The shipped Tide MCP and HTTP tools are
-`chelis_replace_function_body` and `chelis_add_function`. Expansion to the
-remaining toolset remains future work.
+**Status:** L0/L1 shipped and L2 query/cascade tools added. The shipped Tide
+MCP and HTTP tools are `chelis_replace_function_body`,
+`chelis_add_function`, `chelis_deep_outline`, `chelis_deep_references`,
+`chelis_deep_call_graph`, `chelis_replace_function`,
+`chelis_add_property`, `chelis_rename`, and `chelis_change_signature`.
 
 **Owning surface:** Tide (MCP tool layer). Operates on Deep AST in
 `chelis-deep`. Validates via the existing compiler API.
@@ -47,10 +48,10 @@ not require a text-vs-Deep benchmark before further hardening work.
 **Public contract judgment:** the authoring API remains text-first at the
 wire boundary: callers send Deep text, and successful tools return canonical
 Deep text. The implementation uses parsed Deep AST operations internally.
-That is sufficient for body replacement and function insertion. Rename and
-signature-change are not blocked on JSON AST input; they are blocked on a
-public reference/call-graph query surface so cascades can be computed
-honestly instead of by textual search.
+That is sufficient for body replacement, function insertion, replacement of a
+whole function, property insertion, rename, and signature change. Rename and
+signature-change use the public reference/call-graph query surface so
+cascades are computed structurally instead of by textual search.
 
 ---
 
@@ -158,29 +159,49 @@ hardening campaign row.
 
 ---
 
-## Next capability frontier
+## L2: Query and cascade tools
 
-After L0 hardening, the next structural-edit increment is a small set of
-high-leverage authoring tools:
+The L2 increment adds the query surface needed for auditable cascades and
+then ships the remaining high-leverage Deep edit tools:
 
-- replace a whole function
-- add a property
-- rename a symbol
-- change a signature
+- `chelis_deep_outline`: returns module name, exports, function outline,
+  canonical def/defsig Deep, and the `preimage_sha256` for each function.
+- `chelis_deep_references`: returns scope-aware references to a top-level
+  symbol. Function parameters and local bindings shadow same-name top-level
+  functions; shadowed vars are not reported as references.
+- `chelis_deep_call_graph`: returns scope-aware direct-call edges.
+- `chelis_replace_function`: replaces one whole `(def ...)` and optional
+  matching `(defsig ...)`, preserving declaration position, then requires full
+  whole-module validation.
+- `chelis_add_property`: inserts one Deep property declaration bundle, then
+  requires full whole-module validation.
+- `chelis_rename`: renames one function, matching defsig/export entries, and
+  every unshadowed reference. It asserts no residual old references before
+  validation.
+- `chelis_change_signature`: replaces a function defsig and parameter list,
+  rewrites every direct call from the pre-edit call graph according to
+  `argument_order`, and fails if any direct call remains stale.
 
-`chelis_add_function` is now the worked extension reference. The remaining
-tools are not shipped by this milestone. They must each get an owning oracle
-before implementation claims land in active docs.
+The optional `preimage_sha256` on cascade/whole-function edit requests is an
+optimistic-concurrency guard over the canonical Deep of the addressed `(def
+...)` node. A mismatch fails the whole request at `stage:"preimage"` with no
+result payload; callers should re-query and retry.
+
+**Acceptance oracle:** `cargo test -p chelis-deep --test authoring`, `cargo
+test -p chelis-compiler-api --test deep_authoring`, `cargo test -p chelis-tide
+--test mcp deep_query_and_rename_tools_are_model_facing_contracts`, and `cargo
+test -p chelis-tide --test api
+deep_query_and_rename_http_endpoints_lock_preimage_contract`.
 
 ---
 
 ## Dependencies
 
 - **Tide MCP surface** — shipped (per `spec/09-tide.md`).
-- **Compiler reference/call graph as a queryable surface** — graph-like helper
-  code exists internally in checker/backend passes, but no public authoring API
-  exposes it. Required for `chelis_change_signature` and `chelis_rename`
-  cascade behavior.
+- **Compiler reference/call graph as a queryable surface** — shipped for the
+  Deep authoring surface as `chelis_deep_references` and
+  `chelis_deep_call_graph`. It is syntactic and scope-aware for top-level
+  functions; richer semantic reference classes remain future work.
 - **Surf rendering of arbitrary Deep changes** — default `chelis surf` output
   is canonical for the supported round-trip path; richer diff display remains
   separate work.
@@ -210,8 +231,8 @@ before implementation claims land in active docs.
 
 ## Status framing discipline
 
-- Docs may claim only `chelis_replace_function_body` and
-  `chelis_add_function` as shipped.
+- Docs may claim only the tools listed in this document's Status paragraph as
+  shipped.
 - Docs may claim whole-module validation only for builds that enforce the
   soundness rule and pass the wire-surface oracle above.
 - Future tools must remain explicitly future until their implementation and

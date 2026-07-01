@@ -74,6 +74,13 @@ The shipped MCP tool surface is:
 - `chelis_validate`
 - `chelis_replace_function_body`
 - `chelis_add_function`
+- `chelis_deep_outline`
+- `chelis_deep_references`
+- `chelis_deep_call_graph`
+- `chelis_replace_function`
+- `chelis_add_property`
+- `chelis_rename`
+- `chelis_change_signature`
 - `chelis_prove`
 
 `chelis_replace_function_body` accepts Deep strings for
@@ -92,6 +99,16 @@ bundle containing exactly one `(def ...)` and an optional matching
 insertion-target, type, effect, and linearity failures return the normal
 structured failure envelope with `ok:false`; failed additions do not carry a
 result.
+
+The Deep authoring query/cascade tools are also exposed over HTTP with
+snake-case endpoint names (`/deep_outline`, `/deep_references`,
+`/deep_call_graph`, `/replace_function`, `/add_property`, `/rename`,
+`/change_signature`). `chelis_deep_outline` returns `preimage_sha256` values
+computed over canonical function `(def ...)` nodes. Edit requests that include
+a stale preimage fail at `stage:"preimage"` with no result payload.
+`chelis_rename` and `chelis_change_signature` perform structural cascade
+completeness checks over the query substrate before reporting success; whole
+module validation remains the final success gate.
 
 `chelis_prove` runs the same property + derived producer-obligation
 verification as the CLI `chelis prove` on the same module source — the

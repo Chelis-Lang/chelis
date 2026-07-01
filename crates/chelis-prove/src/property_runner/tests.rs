@@ -326,7 +326,7 @@ fn u4_statistically_validated_zero_samples_is_not_pass() {
     );
 }
 
-// --- F7: the deep property path honors the --tier contract ---
+// --- F7 / chelis#507: the deep property path honors the --tier contract ---
 
 fn run_deep(source: &str, tier: &str) -> Vec<PropertyOutcome> {
     let opts = PropertyRunOptions {
@@ -374,32 +374,85 @@ fn f7_deep_fuzz_only_runs_the_fuzz_loop() {
 }
 
 #[test]
-fn f7_deep_smt_only_is_unsupported_not_silently_fuzzed() {
-    // `--tier smt-only` on a deep property must NOT silently run the fuzz
-    // loop (the tier was previously ignored on the deep path). A deep body
-    // has no Surf->SMT lowering path, so smt-only is Unsupported.
+#[cfg(feature = "smt")]
+fn f7_deep_smt_only_uses_tier_b_not_fuzz() {
+    // chelis#507: a Deep property body reaches the same Tier-B SMT lane as
+    // the equivalent Surf property. `smt-only` must not report the legacy
+    // "no Tier B path" unsupported verdict and must not run fuzz samples.
     let outcomes = run_deep(DEEP_TRUE_PROPERTY, "smt-only");
     assert_eq!(outcomes.len(), 1);
     assert_eq!(
         outcomes[0].status,
-        PropertyStatus::Unsupported,
-        "deep smt-only is unsupported, not a silent fuzz pass: {:?}",
+        PropertyStatus::Passed,
+        "deep smt-only should prove through Tier B: {:?}",
         outcomes[0]
     );
     assert_eq!(outcomes[0].samples, 0, "smt-only ran no fuzz samples");
+    assert_eq!(outcomes[0].proof_tier, PropertyTier::Smt);
+    assert!(outcomes[0].is_pass());
 }
 
 #[test]
-fn f7_deep_auto_runs_the_fuzz_loop() {
-    // `--tier auto` falls through to fuzz for a deep property (no SMT path).
+#[cfg(feature = "smt")]
+fn f7_deep_auto_prefers_tier_b_when_deep_goal_lowers() {
+    // Under `auto`, an SMT-amenable Deep property should take the proof lane,
+    // not trail into fuzz.
     let outcomes = run_deep(DEEP_TRUE_PROPERTY, "auto");
     assert_eq!(outcomes.len(), 1);
     assert!(
         outcomes[0].is_pass(),
-        "deep auto passes via fuzz: {:?}",
+        "deep auto passes via SMT: {:?}",
         outcomes[0]
     );
-    assert!(outcomes[0].samples > 0);
+    assert_eq!(outcomes[0].samples, 0);
+    assert_eq!(outcomes[0].proof_tier, PropertyTier::Smt);
+}
+
+#[cfg(feature = "smt")]
+const DEEP_BOOL_CONNECTIVE_PROPERTIES: &str = r#"(module {}
+  m
+  (defsig {} conj (t-fn {} (t-prim {} f32) (t-prim {} bool)))
+  (def {chelis_role: "property",
+         property_preconditions: (tuple {}),
+         property_quantifiers: (params {} (x {type: (t-prim {} f32)})),
+         property_source_kind: "user"
+       }
+    conj
+    (fn {}
+      (params {} (x {type: (t-prim {} f32)}))
+      (app {}
+        (var {} and)
+        (app {} (var {} gte) (var {} x) (var {} x))
+        (app {} (var {} lte) (var {} x) (var {} x)))))
+  (defsig {} disj (t-fn {} (t-prim {} f32) (t-prim {} bool)))
+  (def {chelis_role: "property",
+         property_preconditions: (tuple {}),
+         property_quantifiers: (params {} (x {type: (t-prim {} f32)})),
+         property_source_kind: "user"
+       }
+    disj
+    (fn {}
+      (params {} (x {type: (t-prim {} f32)}))
+      (app {}
+        (var {} or)
+        (app {} (var {} gte) (var {} x) (var {} x))
+        (app {} (var {} gte) (var {} x) (lit {type: (t-prim {} f32)} 0.0))))))
+"#;
+
+#[test]
+#[cfg(feature = "smt")]
+fn f7_deep_boolean_connectives_lower_to_tier_b() {
+    let outcomes = run_deep(DEEP_BOOL_CONNECTIVE_PROPERTIES, "smt-only");
+    assert_eq!(outcomes.len(), 2, "two deep properties: {outcomes:?}");
+    for outcome in outcomes {
+        assert_eq!(
+            outcome.status,
+            PropertyStatus::Passed,
+            "boolean connective property proves: {outcome:?}"
+        );
+        assert_eq!(outcome.proof_tier, PropertyTier::Smt);
+        assert_eq!(outcome.samples, 0);
+    }
 }
 
 // --- F6: the deep discoverer classifies source kind like the CLI ---
