@@ -296,6 +296,61 @@ mod tests {
         assert!(!result.h_header.contains('{'));
     }
 
+    /// chelis#593 memory-safety floor (negative parity): a `Pad` whose output
+    /// extent on the concrete leading axis disagrees with `input + before +
+    /// after` (the symbolic entry-wrapper concat mis-sizing) must be rejected
+    /// loud at codegen, never emit the heap-corrupting copy loop.
+    #[test]
+    #[should_panic(expected = "chelis#593")]
+    fn codegen_rejects_mis_sized_leading_axis_pad() {
+        let mut dag = Dag::new();
+        let sym = TensorType {
+            dims: vec![DimInfo::Lit(2), DimInfo::Named("batch".into(), None)],
+            precision: Prim::F32,
+        };
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], sym.clone(), None);
+        // Padded leading axis by (2,0): output SHOULD be [4, batch] but is
+        // MIS-SIZED to the operand extent [2, batch] (the #593 wrapper clobber).
+        dag.add_node(
+            RiscOp::Pad {
+                padding: vec![(2, 0), (0, 0)],
+                fill: 0.0,
+            },
+            vec![x],
+            sym,
+            None,
+        );
+        let _ = codegen(&dag, "mis_sized");
+    }
+
+    /// Positive parity: a CORRECTLY sized leading-axis Pad over a symbolic
+    /// trailing dim must codegen fine (no over-rejection). Output [4, batch]
+    /// == input [2, batch] + (2, 0).
+    #[test]
+    fn codegen_accepts_well_sized_leading_axis_pad() {
+        let mut dag = Dag::new();
+        let in_ty = TensorType {
+            dims: vec![DimInfo::Lit(2), DimInfo::Named("batch".into(), None)],
+            precision: Prim::F32,
+        };
+        let out_ty = TensorType {
+            dims: vec![DimInfo::Lit(4), DimInfo::Named("batch".into(), None)],
+            precision: Prim::F32,
+        };
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
+        dag.add_node(
+            RiscOp::Pad {
+                padding: vec![(2, 0), (0, 0)],
+                fill: 0.0,
+            },
+            vec![x],
+            out_ty,
+            None,
+        );
+        let result = codegen(&dag, "well_sized");
+        assert!(result.c_source.contains("void well_sized("));
+    }
+
     // ---- Linkage invariant tests ----
     //
     // These tests enforce the PLT-avoidance contract: internal tensor helper

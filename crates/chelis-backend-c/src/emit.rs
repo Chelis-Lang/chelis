@@ -83,6 +83,16 @@ impl CEmitter {
         let dag_owned = Self::rename_anonymous_dims(dag);
         let dag = &dag_owned;
 
+        // chelis#593 memory-safety floor. Run AFTER `rename_anonymous_dims`:
+        // that pass resolves an anon (`*`/empty) output dim by copying the
+        // first input's dims wholesale, which — for a `Pad` whose output has an
+        // anon TRAILING dim (the symbolic entry-wrapper of a leading-axis
+        // `concat`) — also clobbers the correctly-sized CONCRETE padded axis
+        // back to the operand extent. Validate the exact dag that is about to
+        // be emitted so the mis-sizing is caught before any heap-corrupting C
+        // is written.
+        Self::validate_pad_output_sizing(dag);
+
         let reduction_inlined = chelis_ir::fuse::reduction_inlined_fused_elems(dag);
         let math_lib = options
             .math_lib_override
@@ -727,6 +737,78 @@ impl CEmitter {
                 } else {
                     seen.insert(name.as_str().to_string(), node.output_type.clone());
                 }
+            }
+        }
+    }
+
+    /// chelis#593 memory-safety floor. A `Pad` whose output extent on a
+    /// statically-known axis does not equal `input + before + after` emits a
+    /// copy loop that writes at `src_index + before` into an output allocated
+    /// at the wrong (smaller) size — a heap out-of-bounds write AND a silently
+    /// wrong forward result.
+    ///
+    /// This surfaces in the SYMBOLIC ENTRY-WRAPPER of a leading / non-last-axis
+    /// `concat` over a symbolic trailing dim. `concat` lowers to a Pad+Add
+    /// cascade; the wrapper allocates each Pad output at the OPERAND leading
+    /// extent (e.g. `[2, batch]`) while its loop writes at a `+before` row
+    /// offset, overrunning the buffer. The inner monomorphized fn sizes the
+    /// concat output correctly (`[4, batch]`); only the symbolic wrapper
+    /// mis-sizes (Chelis-Lang/chelis#593). Before the chelis#551
+    /// `shape_source_for_axis` reduction arm, `reduce(concat(axis=leading))`
+    /// over a symbolic trailing dim ICE'd LOUD at the symbolic-dim guard; the
+    /// arm now lets it (and bare leading-axis `concat`) reach codegen, so this
+    /// guard is the fail-closed floor that keeps a loud reject loud instead of
+    /// degrading to silent-wrong + memory-unsafe. Reject here rather than emit
+    /// heap-corrupting C. Concat along the LAST axis and concrete-dim concats
+    /// stay well-sized (`output == input + padding`) and pass unaffected.
+    ///
+    /// The deeper wrapper-sizing fix is tracked in chelis#593; this is only
+    /// the memory-safety guard.
+    fn validate_pad_output_sizing(dag: &Dag) {
+        for node in dag.nodes() {
+            let RiscOp::Pad { padding, .. } = &node.op else {
+                continue;
+            };
+            let Some(input) = node.inputs.first().and_then(|id| dag.get(*id)) else {
+                continue;
+            };
+            if node.output_type.dims.len() != input.output_type.dims.len() {
+                // Rank mismatch is a distinct malformation; leave it to the
+                // rank/shape checks. This guard is specifically about a padded
+                // axis whose output extent disagrees with input + padding.
+                continue;
+            }
+            for (axis, ((before, after), in_dim)) in padding
+                .iter()
+                .zip(input.output_type.dims.iter())
+                .enumerate()
+            {
+                let (Some(in_size), Some(out_size)) = (
+                    Self::known_dim_size(in_dim),
+                    node.output_type
+                        .dims
+                        .get(axis)
+                        .and_then(Self::known_dim_size),
+                ) else {
+                    // A symbolic in/out extent on this axis cannot be checked
+                    // statically; the mis-sizing that #593 produces is on a
+                    // CONCRETE padded axis (the leading concat axis), so the
+                    // guard still fires there.
+                    continue;
+                };
+                let expected = in_size + before + after;
+                assert!(
+                    out_size == expected,
+                    "internal compiler error: C backend `Pad` at node {} axis {axis} is mis-sized: \
+                     output extent {out_size} != input {in_size} + before {before} + after {after} \
+                     = {expected}. Emitting the pad copy loop would write past the output \
+                     allocation (heap out-of-bounds write / silent wrong result). This is the \
+                     symbolic entry-wrapper mis-sizing of a leading / non-last-axis `concat` over \
+                     a symbolic trailing dim (Chelis-Lang/chelis#593); the producing IR pass must \
+                     size the concat Pad output at the padded extent. Rejected fail-closed rather \
+                     than emit heap-corrupting C.",
+                    node.id.0
+                );
             }
         }
     }
@@ -4926,19 +5008,34 @@ impl CEmitter {
         ty: &TensorType,
         _dag: &Dag,
     ) {
-        // chelis#368: the `SHRINK_TO_END` full-axis sentinel is an eval-lane
-        // construct resolved by `bind_symbolic_dims` (which the C backend does
-        // not run). It must never reach codegen; fail loud rather than emit a
-        // `t{id}->shape`-driven loop over a tensor sized from the unresolved
-        // sentinel.
-        assert!(
-            bounds
-                .iter()
-                .all(|(_, hi)| *hi != chelis_ir::dag::SHRINK_TO_END),
-            "C backend reached an unresolved SHRINK_TO_END sentinel at node {id}; \
-             grad through a symbolic-window `concat` is an eval-lane capability \
-             (chelis#368): the build lane must resolve symbolic shrink extents first"
-        );
+        // chelis#368/#551: the `SHRINK_TO_END` full-axis sentinel encodes
+        // "shrink axis `d` to its full runtime extent" for a SYMBOLIC no-pad
+        // axis whose extent cannot be baked as a literal `usize`. The eval lane
+        // resolves it via `bind_symbolic_dims` (binding the symbol to a concrete
+        // value). The C build lane never binds — the symbol stays a runtime C
+        // variable — so we resolve it structurally instead: the shrink loop
+        // below is driven entirely by the OUTPUT shape (`t{id}->shape`, sized
+        // from `ty`) and the per-axis start offset `lo`; the `hi` bound is not
+        // read by codegen. A sentinel bound is a full-axis identity (`lo == 0`,
+        // output extent == input extent), so the emitted loop is already
+        // correct once `ty`'s axis dim (the same symbolic dim) is declared by
+        // `symbolic_occurrences`. Fail loud only for a MALFORMED sentinel: one
+        // on an axis whose output dim is concrete (a producing-pass bug that
+        // would silently drop a real trim), or with a nonzero start.
+        for (d, &(lo, hi)) in bounds.iter().enumerate() {
+            if hi != chelis_ir::dag::SHRINK_TO_END {
+                continue;
+            }
+            let out_dim = ty.dims.get(d);
+            let symbolic_axis = matches!(out_dim, Some(chelis_ir::dag::DimInfo::Named(_, None)));
+            assert!(
+                symbolic_axis && lo == 0,
+                "C backend reached an unresolved SHRINK_TO_END sentinel at node {id} \
+                 axis {d} (start {lo}, output dim {out_dim:?}) that is not a symbolic \
+                 full-axis identity; the producing IR pass emitted a malformed shrink \
+                 (chelis#368/#551)"
+            );
+        }
         let a = inputs[0].0;
         let et = Self::elem_type(ty);
         self.emit_slot_wrapper(id, ty);

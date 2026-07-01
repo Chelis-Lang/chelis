@@ -6715,22 +6715,37 @@ impl LowerCtx {
             "reshape" if !args.is_empty() => {
                 let x = self.lower_expr_node(&args[0], "reshape input");
                 // Try to extract new_shape from the second arg; fall back to output type dims.
-                let new_shape = if args.len() >= 2 {
-                    self.extract_dim_list(&args[1])
-                        .unwrap_or_else(|| ty.dims.clone())
+                // chelis#513 gap 1: a `shape(operand, axis)`-derived reshape
+                // target dim (e.g. `reshape(&x, [shape(x, 0), 1])` or the
+                // let-bound `k = shape(x, 0); reshape(&x, [k, 1])` idiom) must
+                // be resolved to the operand's declaring source, NOT left as a
+                // bare `Named("k", None)` symbol. Left unresolved, the reduce/
+                // reshape backward `Expand`/`Sum` inherits `Sym("k")` and
+                // `symbolic_occurrences` ICEs ("symbolic dim `k` ... no Load
+                // input declares it"). Resolving to the operand dim folds it to
+                // a concrete `Lit` when the operand axis is static and to a
+                // Load-carried `Named` (kept live via a `shape_dep`) when
+                // symbolic, so the dim traces to a declaring input either way.
+                let (new_shape, shape_srcs) = if args.len() >= 2 {
+                    self.extract_reshape_dim_list(&args[1])
+                        .unwrap_or_else(|| (ty.dims.clone(), Vec::new()))
                 } else {
-                    ty.dims.clone()
+                    (ty.dims.clone(), Vec::new())
                 };
                 let out_ty = TensorType {
                     dims: new_shape.clone(),
                     precision: ty.precision,
                 };
-                self.dag.add_node(
+                let reshape_id = self.dag.add_node(
                     RiscOp::Reshape { new_shape },
                     vec![x],
                     out_ty,
                     self.current_span_id.clone(),
-                )
+                );
+                for src in shape_srcs {
+                    self.dag.add_shape_dep(reshape_id, src);
+                }
+                reshape_id
             }
             "permute" if args.len() >= 2 => {
                 let x = self.lower_expr_node(&args[0], "permute input");
@@ -8108,39 +8123,58 @@ impl LowerCtx {
         result
     }
 
-    /// Extract a `reshape` shape list from a Deep expression. Accepts
-    /// the Cons-chain shape Surf desugars to:
+    /// Extract a `reshape` shape list from a Deep expression. Accepts the
+    /// Cons-chain shape Surf desugars to:
     ///
     /// ```text
     ///   (app {} (var {} Cons) <head_0>
     ///           (app {} (var {} Cons) <head_1> ... (var {} Nil)))
     /// ```
     ///
-    /// Each head is interpreted as either an integer dim (via
-    /// [`extract_int_for_dim`], which handles `Atom::Int`, `(lit ...)`,
-    /// and `(cast ... int64)`) or a symbolic dim variable (via
+    /// Each head is interpreted as, in order: an integer dim (via
+    /// [`extract_int_for_dim`], which handles `Atom::Int`, `(lit ...)`, and
+    /// `(cast ... int64)`); a `shape(operand, axis)`-derived dim (chelis#513
+    /// gap 1, see below); or a symbolic dim variable (via
     /// [`symbolic_dim_var_name`], which recognizes `(var {} <name>)`).
-    /// Non-recognized shapes abort the walk and return `None` so the
-    /// caller falls back to `ty.dims` — this prevents the prior
-    /// `Atom::Symbol(...)` arm from misreading a Deep structural tag
-    /// like `"app"` as a dim name and synthesizing
-    /// `DimInfo::Named("app", None)` (issue Chelis-Lang/chelis#220).
-    fn extract_dim_list(&self, expr: &Expr) -> Option<Vec<DimInfo>> {
-        let elements = collect_cons_chain(expr)?;
+    /// Non-recognized shapes abort the walk and return `None` so the caller
+    /// falls back to `ty.dims` — this prevents misreading a Deep structural tag
+    /// like `"app"` as a dim name and synthesizing `DimInfo::Named("app",
+    /// None)` (issue Chelis-Lang/chelis#220).
+    ///
+    /// chelis#513 gap 1: a `shape(operand, axis)`-derived reshape target dim
+    /// (directly or through the `let k = shape(x, 0); reshape(&x, [k, 1])`
+    /// indirection) is resolved to the operand's declaring source dim instead
+    /// of a bare `Named(name, None)` symbol. Returns the dims plus the lowered
+    /// source nodes to record as `shape_dep`s so the declaring input survives
+    /// DCE. A static operand axis folds to `Lit`; a symbolic one becomes a
+    /// `Load`-carried `Named` that `symbolic_occurrences` can trace, closing
+    /// the reshape/reduce backward `Expand`/`Sum` symbolic-dim ICE.
+    fn extract_reshape_dim_list(&mut self, expr: &Expr) -> Option<(Vec<DimInfo>, Vec<NodeId>)> {
+        let elements: Vec<Expr> = collect_cons_chain(expr)?.into_iter().cloned().collect();
         let mut dims = Vec::with_capacity(elements.len());
+        let mut srcs = Vec::new();
         for elem in &elements {
             if let Some(value) = extract_int_for_dim(elem) {
                 if value < 0 {
                     return None;
                 }
                 dims.push(DimInfo::Lit(value as usize));
+            } else if let Some((dim_expr, src)) = self.dim_expr_from_shape_arg_with_source(elem)
+                && let Some(dim) = Self::dim_info_from_dim_expr(&dim_expr)
+            {
+                dims.push(dim);
+                srcs.push(src);
             } else if let Some(name) = symbolic_dim_var_name(elem) {
                 dims.push(DimInfo::Named(name, None));
             } else {
                 return None;
             }
         }
-        if dims.is_empty() { None } else { Some(dims) }
+        if dims.is_empty() {
+            None
+        } else {
+            Some((dims, srcs))
+        }
     }
 
     /// Extract a list of (usize, usize) pairs from an expression (for
