@@ -103,6 +103,88 @@ fn call_add(arguments: serde_json::Value) -> serde_json::Value {
     .expect("add_function response")
 }
 
+fn call_tool(name: &str, arguments: serde_json::Value) -> serde_json::Value {
+    handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":101,
+        "method":"tools/call",
+        "params":{"name":name,"arguments":arguments}
+    }))
+    .expect("tool response")
+}
+
+const DEEP_AUTHORING_RENAME_MODULE: &str = r#"(module {}
+  tide.rename
+  (export {} first second)
+  (defsig {} first (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32)))
+  (def {} first (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))
+  (defsig {} second (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32)))
+  (def {} second (fn {} (params {} (x {type: (t-prim {} f32)})) (app {} (var {} first) (var {} x)))))
+"#;
+
+#[test]
+fn deep_query_and_rename_tools_are_model_facing_contracts() {
+    let outline = call_tool(
+        "chelis_deep_outline",
+        json!({"module": DEEP_AUTHORING_RENAME_MODULE}),
+    );
+    let structured = &outline["result"]["structuredContent"];
+    assert_eq!(outline["result"]["isError"], false);
+    let functions = structured["result"]["functions"].as_array().unwrap();
+    let first = functions
+        .iter()
+        .find(|function| function["name"] == "first")
+        .expect("first outline");
+    let preimage = first["preimage_sha256"].as_str().unwrap();
+    assert_eq!(preimage.len(), 64);
+
+    let graph = call_tool(
+        "chelis_deep_call_graph",
+        json!({"module": DEEP_AUTHORING_RENAME_MODULE}),
+    );
+    let edges = graph["result"]["structuredContent"]["result"]["edges"]
+        .as_array()
+        .unwrap();
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0]["caller"], "tide.rename.second");
+    assert_eq!(edges[0]["callee"], "tide.rename.first");
+
+    let stale = call_tool(
+        "chelis_rename",
+        json!({
+            "module": DEEP_AUTHORING_RENAME_MODULE,
+            "function_name": "first",
+            "new_name": "renamed",
+            "preimage_sha256": "0".repeat(64),
+        }),
+    );
+    let stale_structured = &stale["result"]["structuredContent"];
+    assert_eq!(stale["result"]["isError"], true);
+    assert_eq!(stale_structured["ok"], false);
+    assert_eq!(stale_structured["stage"], "preimage");
+    assert!(stale_structured.get("result").is_none());
+
+    let ok = call_tool(
+        "chelis_rename",
+        json!({
+            "module": DEEP_AUTHORING_RENAME_MODULE,
+            "function_name": "first",
+            "new_name": "renamed",
+            "preimage_sha256": preimage,
+        }),
+    );
+    let ok_structured = &ok["result"]["structuredContent"];
+    assert_eq!(ok["result"]["isError"], false);
+    assert_eq!(ok_structured["ok"], true);
+    assert_eq!(ok_structured["result"]["renamed_references"], 1);
+    assert!(
+        ok_structured["result"]["module_deep"]
+            .as_str()
+            .unwrap()
+            .contains("(app {} (var {} renamed) (var {} x))")
+    );
+}
+
 fn assert_replace_rejection(
     module: &str,
     new_body: &str,
@@ -511,6 +593,13 @@ fn initialize_and_tool_discovery_work() {
             "chelis_validate",
             "chelis_replace_function_body",
             "chelis_add_function",
+            "chelis_deep_outline",
+            "chelis_deep_references",
+            "chelis_deep_call_graph",
+            "chelis_replace_function",
+            "chelis_add_property",
+            "chelis_rename",
+            "chelis_change_signature",
             "chelis_prove",
         ]
     );
@@ -572,6 +661,27 @@ fn initialize_and_tool_discovery_work() {
             .any(|value| value == "insert_after_function"),
         "insert_after_function is optional"
     );
+
+    let rename_tool = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "chelis_rename")
+        .expect("rename tool");
+    for property in ["module", "function_name", "new_name"] {
+        assert_eq!(
+            rename_tool["inputSchema"]["properties"][property]["type"], "string",
+            "rename tool exposes `{property}` as a string"
+        );
+        assert!(
+            rename_tool["inputSchema"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == property),
+            "rename tool requires `{property}`"
+        );
+    }
 
     let check_tool = tools["result"]["tools"]
         .as_array()
@@ -1238,6 +1348,27 @@ fn u4_tide_handles_deep_module() {
         structured["ok"], true,
         "clean deep module is ok: {structured}"
     );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn deep_user_property_proves_at_smt_tier_through_tide() {
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":49,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"deep","source": DEEP_PROPERTY_MODULE, "tier":"smt-only", "seed": 0
+        }}
+    }))
+    .expect("prove response");
+    let structured = &response["result"]["structuredContent"];
+    let props = structured["properties"].as_array().expect("properties");
+    assert_eq!(props.len(), 1);
+    assert_eq!(props[0]["status"], "passed");
+    assert_eq!(props[0]["proof_tier"], "smt");
+    assert_eq!(props[0]["samples"], 0);
+    assert_eq!(structured["ok"], true);
 }
 
 /// F6 (review 4): the CLI `.dp` path and the tide `.dp` path run user

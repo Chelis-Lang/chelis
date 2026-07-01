@@ -5,8 +5,10 @@ use serde_json::{Value, json};
 
 use crate::compiler;
 use crate::schema::{
-    AddFunctionRequest, CheckRequest, CompileRequest, DecompileRequest, DesugarRequest,
-    EvalRequest, GradRequest, ReplaceFunctionBodyRequest, ValidateRequest,
+    AddFunctionRequest, AddPropertyRequest, ChangeSignatureRequest, CheckRequest, CompileRequest,
+    DecompileRequest, DeepCallGraphRequest, DeepOutlineRequest, DeepReferencesRequest,
+    DesugarRequest, EvalRequest, GradRequest, RenameRequest, ReplaceFunctionBodyRequest,
+    ReplaceFunctionRequest, ValidateRequest,
 };
 
 pub fn run_stdio() -> io::Result<()> {
@@ -84,6 +86,25 @@ fn handle_tool_call(id: Option<Value>, params: Option<&Value>) -> Value {
         "chelis_add_function" => {
             deserialize_and_run::<AddFunctionRequest, _, _>(&args, compiler::add_function)
         }
+        "chelis_deep_outline" => {
+            deserialize_and_run::<DeepOutlineRequest, _, _>(&args, compiler::deep_outline)
+        }
+        "chelis_deep_references" => {
+            deserialize_and_run::<DeepReferencesRequest, _, _>(&args, compiler::deep_references)
+        }
+        "chelis_deep_call_graph" => {
+            deserialize_and_run::<DeepCallGraphRequest, _, _>(&args, compiler::deep_call_graph)
+        }
+        "chelis_replace_function" => {
+            deserialize_and_run::<ReplaceFunctionRequest, _, _>(&args, compiler::replace_function)
+        }
+        "chelis_add_property" => {
+            deserialize_and_run::<AddPropertyRequest, _, _>(&args, compiler::add_property)
+        }
+        "chelis_rename" => deserialize_and_run::<RenameRequest, _, _>(&args, compiler::rename),
+        "chelis_change_signature" => {
+            deserialize_and_run::<ChangeSignatureRequest, _, _>(&args, compiler::change_signature)
+        }
         "chelis_prove" => handle_prove_tool(&args),
         other => {
             return error(id, -32601, format!("unknown tool `{other}`"));
@@ -158,6 +179,34 @@ fn tool_list() -> Vec<Value> {
         tool::<AddFunctionRequest>(
             "chelis_add_function",
             "Add one Deep function declaration bundle to a module and return the canonical rewritten module",
+        ),
+        tool::<DeepOutlineRequest>(
+            "chelis_deep_outline",
+            "Return the stable Deep authoring outline with canonical preimage hashes",
+        ),
+        tool::<DeepReferencesRequest>(
+            "chelis_deep_references",
+            "Return scope-aware Deep references to a top-level symbol",
+        ),
+        tool::<DeepCallGraphRequest>(
+            "chelis_deep_call_graph",
+            "Return the scope-aware direct-call graph for a Deep module",
+        ),
+        tool::<ReplaceFunctionRequest>(
+            "chelis_replace_function",
+            "Replace one whole Deep function declaration bundle with whole-module validation",
+        ),
+        tool::<AddPropertyRequest>(
+            "chelis_add_property",
+            "Add one Deep property declaration bundle with whole-module validation",
+        ),
+        tool::<RenameRequest>(
+            "chelis_rename",
+            "Rename one Deep function and structurally cascade unshadowed references",
+        ),
+        tool::<ChangeSignatureRequest>(
+            "chelis_change_signature",
+            "Change one Deep function signature and structurally rewrite direct callsites",
         ),
         prove_tool_schema(),
     ]

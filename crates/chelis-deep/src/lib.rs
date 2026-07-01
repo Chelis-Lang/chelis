@@ -5,6 +5,7 @@
 //! form that the compiler operates on internally.
 
 pub mod ast;
+pub mod authoring;
 pub mod lexer;
 pub mod parser;
 pub mod path;

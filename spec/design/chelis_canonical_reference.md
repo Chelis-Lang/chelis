@@ -791,17 +791,21 @@ current step toward it.
 Tracks 1 and 2 above cover code *generation*. A separate structural
 *editing* surface modifies existing Chelis source through Deep-AST operations
 rather than text patches. The shipped Tide MCP and HTTP editing tools are
-`chelis_replace_function_body` and `chelis_add_function`. Both accept Deep
-strings at the public boundary, perform structured Deep AST edits internally,
-and return canonical Deep only after the rewritten whole module passes the
-compiler-owned validation pipeline. Any parse, edit-shape, name-resolution,
-type, effect, or linearity failure returns the normal structured failure
-envelope and no edit result.
+`chelis_replace_function_body`, `chelis_add_function`,
+`chelis_deep_outline`, `chelis_deep_references`,
+`chelis_deep_call_graph`, `chelis_replace_function`,
+`chelis_add_property`, `chelis_rename`, and
+`chelis_change_signature`. They accept Deep strings at the public boundary,
+perform structured Deep AST queries/edits internally, and edit tools return
+canonical Deep only after the rewritten whole module passes the compiler-owned
+validation pipeline. Any parse, edit-shape, name-resolution,
+cascade-completeness, preimage, type, effect, or linearity failure returns the
+normal structured failure envelope and no edit result.
 
 Detailed design and the current oracle live in
-`spec/design/chelis_agent_editing_surface.md`. The broader structural-edit
-toolset remains future work; no doc should claim a tool as shipped without an
-executable oracle in the same change set.
+`spec/design/chelis_agent_editing_surface.md`. Future structural-edit
+extensions must name an executable oracle in the same change set as any
+implementation claim.
 
 ---
 

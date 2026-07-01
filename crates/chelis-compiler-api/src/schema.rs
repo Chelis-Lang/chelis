@@ -239,6 +239,142 @@ pub struct AddFunctionResult {
     pub module_deep: String,
 }
 
+/// Query the stable Deep authoring outline for one module.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DeepOutlineRequest {
+    /// The full module as canonical Deep (`.dp`) text.
+    pub module: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DeepOutlineResult {
+    pub module_name: String,
+    pub exports: Vec<String>,
+    pub functions: Vec<DeepFunctionOutline>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DeepFunctionOutline {
+    pub name: String,
+    pub qualified_name: String,
+    pub params: Vec<String>,
+    pub has_defsig: bool,
+    pub body_path: String,
+    pub def_deep: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub defsig_deep: Option<String>,
+    /// SHA-256 over the canonical Deep of this function's `(def ...)` node.
+    /// Edit tools use this as an optional optimistic-concurrency preimage:
+    /// mismatch means the target node is not the node the caller planned over,
+    /// so the whole edit fails closed before validation.
+    pub preimage_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DeepReferencesRequest {
+    pub module: String,
+    pub symbol: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DeepReferencesResult {
+    pub symbol: String,
+    pub references: Vec<DeepReference>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DeepCallGraphRequest {
+    pub module: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DeepCallGraphResult {
+    pub edges: Vec<DeepReference>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DeepReference {
+    pub caller: String,
+    pub callee: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReplaceFunctionRequest {
+    pub module: String,
+    pub function_name: String,
+    pub new_decls: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preimage_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReplaceFunctionResult {
+    pub replaced_def_deep: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replaced_defsig_deep: Option<String>,
+    pub module_deep: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RenameRequest {
+    pub module: String,
+    pub function_name: String,
+    pub new_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preimage_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RenameResult {
+    pub renamed_def_deep: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub renamed_defsig_deep: Option<String>,
+    pub module_deep: String,
+    pub renamed_references: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ChangeSignatureRequest {
+    pub module: String,
+    pub function_name: String,
+    pub new_defsig: String,
+    pub new_params: String,
+    /// Old parameter names in the order call-site arguments should appear
+    /// after the signature change. A mismatch is a request-shape error. The
+    /// cascade is fail-closed: every direct call in the pre-edit call graph is
+    /// rewritten or the whole tool call fails.
+    pub argument_order: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub param_renames: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preimage_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ChangeSignatureResult {
+    pub changed_def_deep: String,
+    pub changed_defsig_deep: String,
+    pub module_deep: String,
+    pub rewritten_calls: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AddPropertyRequest {
+    pub module: String,
+    pub new_decls: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insert_after_function: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AddPropertyResult {
+    pub added_property_def_deep: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub added_defsig_deep: Option<String>,
+    pub module_deep: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CheckRequest {
     pub source_kind: SourceKind,

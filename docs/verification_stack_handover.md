@@ -172,7 +172,7 @@ CHELIS_BEACON_BIN=/path/to/chelis-beacon cargo test -p chelis-prove --test beaco
 |-------|-------|--------|
 | #496 | Canonical discharge-attribution evidence key | Evidence schema consistency |
 | #506 | WI-3 scalar-returning entry has no WireDag root | Shoals scalar pricer dispatch |
-| #507 | Deep (.dp) properties have no Tier-B lowering | Deep-format proofs |
+| #507 | Deep (.dp) properties now have direct Tier-B lowering for the supported scalar SMT subset; broader property shapes remain follow-up | Deep-format proofs |
 | #434 | SMT cannot lower transcendental finance properties | Direct erf/log in goals |
 | #463 | Boolean connective goal-site lowering | `and`/`or` keyword forms |
 | #423 | eval does not resolve package imports for standalone files | eval/prove parity |
