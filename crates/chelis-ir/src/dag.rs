@@ -1610,6 +1610,28 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
                 shape_source_for_axis(dag, operand, axis)
             }
         }
+        // chelis#551/#340: a single-axis reduction REMOVES its `axis`, so an
+        // output axis `a` maps back to input axis `a` (for `a` before the
+        // reduced axis) or `a + 1` (for `a` at/after it). When a reduction
+        // operand is a host-lane `concat` (or grad-backward concat cascade),
+        // the operand's non-concat axis is a `*` wildcard that the C backend
+        // renamed to a fresh `_anon_dim_*`; the reduction output re-anonymizes
+        // it to a DIFFERENT `_anon_dim_*`. Both names denote the same runtime
+        // dim (the surviving operand axis), so trace the kept output axis back
+        // through the reduction to its declaring Load rather than falling to
+        // the sourceless-symbol panic.
+        RiscOp::Sum {
+            axis: reduce_axis, ..
+        }
+        | RiscOp::MaxReduce { axis: reduce_axis }
+        | RiscOp::MinReduce { axis: reduce_axis }
+        | RiscOp::ProdReduce { axis: reduce_axis }
+        | RiscOp::Argmax { axis: reduce_axis }
+        | RiscOp::Argmin { axis: reduce_axis } => {
+            let operand = *node.inputs.first()?;
+            let input_axis = if axis < *reduce_axis { axis } else { axis + 1 };
+            shape_source_for_axis(dag, operand, input_axis)
+        }
         RiscOp::Reshape { .. }
         | RiscOp::Permute { .. }
         | RiscOp::Pad { .. }
@@ -2301,6 +2323,91 @@ mod tests {
             None,
         );
         assert!(symbolic_occurrences(&dag).is_empty());
+    }
+
+    #[test]
+    fn symbolic_occurrences_traces_reduction_kept_axis_to_load() {
+        // chelis#551/#340: a host-lane / grad-backward reduction whose
+        // operand is a `concat` output carries a `*`-wildcard non-concat
+        // axis. The C backend renames the operand's wildcard and the
+        // reduction's surviving wildcard to DIFFERENT `_anon_dim_*` names,
+        // so the reduction output's dim symbol does not appear in any Load.
+        // The reduction arm of `shape_source_for_axis` must map the kept
+        // output axis back through the removed reduce axis to the declaring
+        // Load rather than tripping the sourceless-symbol panic.
+        let mut dag = Dag::new();
+        // Load "c": [batch, d1] (d1 == the concat wildcard, renamed).
+        let c = dag.add_node(
+            RiscOp::Load { name: "c".into() },
+            vec![],
+            TensorType {
+                dims: vec![
+                    DimInfo::Named("batch".into(), None),
+                    DimInfo::Named("d1".into(), None),
+                ],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        // Sum over axis 0 keeps axis 1, re-anonymised to a DIFFERENT symbol.
+        dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: Prim::F32,
+            },
+            vec![c],
+            TensorType {
+                dims: vec![DimInfo::Named("d2".into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let occurrences = symbolic_occurrences(&dag);
+        let d2 = occurrences
+            .iter()
+            .find(|o| o.name == "d2")
+            .expect("reduction kept-axis symbol `d2` must be declared");
+        // The kept output axis 0 maps back to input axis 1 of Load "c".
+        assert_eq!(d2.input_label, "c");
+        assert_eq!(d2.axis, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "internal compiler error: symbolic dim `d2` is referenced")]
+    fn symbolic_occurrences_reduction_arm_still_fails_loud_without_load() {
+        // Negative parity for the reduction arm (chelis#551): the arm must
+        // NOT launder a genuinely-unbound symbolic dim green. When the
+        // reduction operand traces to a non-Load with no declaring Load
+        // (here a `Const`), the kept-axis symbol is unrecoverable and the
+        // guard must still panic — do not weaken fail-loud.
+        let mut dag = Dag::new();
+        // A CONCRETE-dim Const operand (so its own dims do not trip the
+        // guard) whose reduction output nonetheless carries an unbound
+        // symbol. The reduction arm recurses into the Const and bottoms out
+        // (`Const` is not a Load and has no shape source), so the kept-axis
+        // symbol is unrecoverable and the guard must panic.
+        let src = dag.add_node(
+            RiscOp::Const { value: 0.0 },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(3), DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: Prim::F32,
+            },
+            vec![src],
+            TensorType {
+                dims: vec![DimInfo::Named("d2".into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let _ = symbolic_occurrences(&dag);
     }
 
     /// One instance of every `RiscOp` variant. The

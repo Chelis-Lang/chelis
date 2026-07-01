@@ -4926,19 +4926,34 @@ impl CEmitter {
         ty: &TensorType,
         _dag: &Dag,
     ) {
-        // chelis#368: the `SHRINK_TO_END` full-axis sentinel is an eval-lane
-        // construct resolved by `bind_symbolic_dims` (which the C backend does
-        // not run). It must never reach codegen; fail loud rather than emit a
-        // `t{id}->shape`-driven loop over a tensor sized from the unresolved
-        // sentinel.
-        assert!(
-            bounds
-                .iter()
-                .all(|(_, hi)| *hi != chelis_ir::dag::SHRINK_TO_END),
-            "C backend reached an unresolved SHRINK_TO_END sentinel at node {id}; \
-             grad through a symbolic-window `concat` is an eval-lane capability \
-             (chelis#368): the build lane must resolve symbolic shrink extents first"
-        );
+        // chelis#368/#551: the `SHRINK_TO_END` full-axis sentinel encodes
+        // "shrink axis `d` to its full runtime extent" for a SYMBOLIC no-pad
+        // axis whose extent cannot be baked as a literal `usize`. The eval lane
+        // resolves it via `bind_symbolic_dims` (binding the symbol to a concrete
+        // value). The C build lane never binds — the symbol stays a runtime C
+        // variable — so we resolve it structurally instead: the shrink loop
+        // below is driven entirely by the OUTPUT shape (`t{id}->shape`, sized
+        // from `ty`) and the per-axis start offset `lo`; the `hi` bound is not
+        // read by codegen. A sentinel bound is a full-axis identity (`lo == 0`,
+        // output extent == input extent), so the emitted loop is already
+        // correct once `ty`'s axis dim (the same symbolic dim) is declared by
+        // `symbolic_occurrences`. Fail loud only for a MALFORMED sentinel: one
+        // on an axis whose output dim is concrete (a producing-pass bug that
+        // would silently drop a real trim), or with a nonzero start.
+        for (d, &(lo, hi)) in bounds.iter().enumerate() {
+            if hi != chelis_ir::dag::SHRINK_TO_END {
+                continue;
+            }
+            let out_dim = ty.dims.get(d);
+            let symbolic_axis = matches!(out_dim, Some(chelis_ir::dag::DimInfo::Named(_, None)));
+            assert!(
+                symbolic_axis && lo == 0,
+                "C backend reached an unresolved SHRINK_TO_END sentinel at node {id} \
+                 axis {d} (start {lo}, output dim {out_dim:?}) that is not a symbolic \
+                 full-axis identity; the producing IR pass emitted a malformed shrink \
+                 (chelis#368/#551)"
+            );
+        }
         let a = inputs[0].0;
         let et = Self::elem_type(ty);
         self.emit_slot_wrapper(id, ty);
