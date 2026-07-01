@@ -282,15 +282,25 @@ uses a single-letter dim *var* whose source letter equals the inserted
 name — d-vars lower to `Named` with their source letter, a collision
 the checker (which sees an anonymous `Dim::Var`) cannot represent.
 Rejecting these at check time needs body-aware call-site re-checking or
-α-fresh d-var lowering, respectively. PRE-EXISTING (chelis#383; verified on main at
-d786744, untouched by chelis#339): `vmap` over a def chaining TWO named
-reduces to a scalar ICEs on the dag.rs symbolic-dim guard when the
-vmapped operand is a top-level *binding* (`vmap(f)(y)`; an inline
-literal operand and single-stage reduces are fine) — the
+α-fresh d-var lowering, respectively. CLOSED (chelis#383; was verified
+broken on main at d786744): `vmap` over a def chaining TWO named reduces
+to a scalar ICE'd the dag.rs symbolic-dim guard in the C-build lane
+("symbolic dim `seq` referenced by a non-Load node") when the vmapped
+operand was a top-level *binding* (`vmap(f)(y)`; an inline literal
+operand and single-stage reduces were unaffected) — the
 chelis#346/#351 annotation-dims family in a lane those fixes did not
-cover; the variadic form desugars to that composition and inherits the
-gap unchanged. The positional (integer-axis) reduction and expand paths
-on concrete operands are unchanged.
+cover; the variadic form desugars to that composition and inherited the
+gap. Wave-1's by-position named-axis recovery re-validation (chelis#549)
+closed the forward case; it is now locked across the build+run+eval
+oracle in
+`crates/chelis-cli/tests/rank_poly_tier3.rs::issue_383_vmap_two_stage_named_reduce_regression_matrix`
+(plus `variadic_reduce_builds_runs_and_evals`, whose `out_v` now uses the
+once-ICEing top-level binding). RESIDUAL (chelis#513 family, NOT #383):
+the grad+vmap form (`vmap(grad(f))(y)`) still ICEs the same guard in the
+C-build lane via the grad-backward `Expand { size: Sym(..) }` over a
+monomorphized concrete Load; its eval lane is correct (finite-difference
+validated). The positional (integer-axis) reduction and expand paths on
+concrete operands are unchanged.
 
 ## Why this is needed
 

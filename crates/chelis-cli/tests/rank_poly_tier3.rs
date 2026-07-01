@@ -818,15 +818,18 @@ fn variadic_reduce_builds_runs_and_evals() {
          out_x = xboth(y)\n\
          out_r = use_rp(y)\n\
          gr = grad(tot)(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n\
-         out_v = vmap(vinner)(to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]))\n";
-    // NOTE on `out_v`: the vmap probe deliberately uses an INLINE literal
-    // operand. `vmap(vinner)(y)` with the shared top-level `y` binding hits
-    // a PRE-EXISTING dag.rs symbolic-dim ICE on main (verified at d786744
-    // with the explicit composition `sum(sum(x, head), seq)` — vmap +
-    // binding-typed Load + a two-stage named reduce; the chelis#346/#351
-    // annotation-dims family in a lane those fixes did not cover). The
-    // variadic surface desugars to that same composition, so it inherits
-    // the gap unchanged; see the chelis#339 PR for the boundary analysis.
+         out_v = vmap(vinner)(y)\n";
+    // chelis#383 (CLOSED): `out_v` now uses the shared top-level `y`
+    // BINDING, not an inline literal. `vmap(vinner)(y)` with a binding-typed
+    // Load + a two-stage named reduce to a scalar (the variadic surface
+    // desugars to the `sum(sum(x, head), seq)` composition) previously ICE'd
+    // the dag.rs symbolic-dim guard in the C-build lane ("symbolic dim `seq`
+    // referenced by a non-Load node") — verified at d786744. Wave-1's
+    // by-position named-axis recovery re-validation (chelis#549) closed it;
+    // this line is the regression lock (build + run + eval agreement over the
+    // once-ICEing binding-operand form). The single-stage and inline-literal
+    // forms are locked separately in
+    // `issue_383_vmap_two_stage_named_reduce_regression_matrix`.
     let backend = build_compile_run(source, "variadic_reduce");
     let tensors = parse_printed_tensors(&backend);
     // Per batch slice (3x4): b0 sums 1..=12 = 78; b1 sums 13..=24 = 222.
@@ -842,7 +845,10 @@ fn variadic_reduce_builds_runs_and_evals() {
         // scalar reduce yields the per-slice sums (the #351 lesson: pin
         // transform lanes on new rank-poly capability from day one).
         ("gr", &[2, 2], &[1.0, 1.0, 1.0, 1.0]),
-        ("out_v", &[2], &[10.0, 26.0]),
+        // chelis#383: over the shared top-level `y` binding ([2,3,4]), the
+        // per-batch sums are 1..=12=78 and 13..=24=222 (was [10,26] on the
+        // old inline [2,2,2] literal).
+        ("out_v", &[2], &[78.0, 222.0]),
     ];
     for (name, shape, data) in expected {
         let got = tensors
@@ -858,6 +864,83 @@ fn variadic_reduce_builds_runs_and_evals() {
         }
     }
     assert_eval_agrees_with_backend(source, "variadic_reduce", &backend);
+}
+
+/// chelis#383 regression matrix. `vmap(f)(y)` where `y` is a top-level
+/// BINDING (not an inline literal) and `f` performs a two-stage named reduce
+/// to a scalar previously ICE'd the dag.rs symbolic-dim guard in the C-build
+/// lane ("symbolic dim `seq` referenced by a non-Load node") — a binding-typed
+/// Load + a two-stage named reduce, verified at d786744. Wave-1's by-position
+/// named-axis recovery re-validation (chelis#549) closed the forward case; this
+/// pins it green across the build+run+eval oracle AND locks the single-stage
+/// and inline-literal forms (the two that were "unaffected" and must stay so).
+///
+/// FD note: the forward reduce cases carry no gradient, so their oracle is
+/// build-vs-eval agreement on exact per-slice sums. The grad+vmap case below
+/// (`vmap(grad(vsq))`) is the finite-difference twin: grad of `sum(x^2)` is
+/// `2 x`, exactly the central-difference gradient. Its EVAL result matches
+/// `2 y`. Its C-BUILD lane still ICEs on the same symbolic-dim guard via the
+/// grad-backward `Expand { size: Sym("seq") }` over a monomorphized (concrete)
+/// Load — a distinct grad-build symbolic-dim gap (chelis#513 family, the
+/// grad+vmap interaction), NOT the forward #383 case this locks. Recorded as a
+/// residual; the eval lane is correct today.
+#[test]
+fn issue_383_vmap_two_stage_named_reduce_regression_matrix() {
+    // Forward lane: all three build + run + eval-agree. `y` is a top-level
+    // binding ([2,2,2]); per-slice sum of [1,2,3,4]=10 and [5,6,7,8]=26.
+    let forward = "def vsingle(x: &tensor[seq, head, f32]) -> f32 = tensor_to_scalar(sum(x, seq, head))\n\
+         def vtwostage(x: &tensor[seq, head, f32]) -> f32 = tensor_to_scalar(sum(sum(x, head), seq))\n\
+         y = to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]])\n\
+         out_two_binding = vmap(vtwostage)(y)\n\
+         out_single_binding = vmap(vsingle)(y)\n\
+         out_inline = vmap(vtwostage)(to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]))\n";
+    let backend = build_compile_run(forward, "issue_383_forward");
+    let tensors = parse_printed_tensors(&backend);
+    let expected: &[(&str, &[usize], &[f64])] = &[
+        // chelis#383 headline: the once-ICEing two-stage + top-level-binding form.
+        ("out_two_binding", &[2], &[10.0, 26.0]),
+        // Regression locks: single-stage and inline-literal must stay green.
+        ("out_single_binding", &[2], &[10.0, 26.0]),
+        ("out_inline", &[2], &[10.0, 26.0]),
+    ];
+    for (name, shape, data) in expected {
+        let got = tensors
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .unwrap_or_else(|| panic!("backend output missing `{name}`: {backend}"));
+        assert_eq!(&got.1, shape, "{name}: backend shape ({backend})");
+        for (i, (g, e)) in got.2.iter().zip(data.iter()).enumerate() {
+            assert!(
+                (g - e).abs() < 1e-6,
+                "{name}[{i}]: backend {g} != expected {e} ({backend})"
+            );
+        }
+    }
+    assert_eval_agrees_with_backend(forward, "issue_383_forward", &backend);
+
+    // FD twin (eval lane): grad of a two-stage `sum(x^2)` reduce, vmapped over
+    // the top-level binding, must equal `2 y` (== the central-difference
+    // gradient). Eval only — the C-build lane of this grad+vmap form has a
+    // separate symbolic-dim-grad residual (see doc comment).
+    let grad_src = "def vsq(x: &tensor[seq, head, f32]) -> f32 = tensor_to_scalar(sum(sum(mul(x, x), head), seq))\n\
+         y = to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]])\n\
+         out_grad_two = vmap(grad(vsq))(y)\n";
+    let dir = tempdir().expect("tempdir");
+    let eval = eval_stdout(dir.path(), grad_src, "issue_383_grad");
+    let eval_tensors = parse_printed_tensors(&eval);
+    let (_, shape, data) = eval_tensors
+        .iter()
+        .find(|(n, _, _)| n == "out_grad_two")
+        .unwrap_or_else(|| panic!("eval missing `out_grad_two`: {eval}"));
+    assert_eq!(shape, &vec![2, 2, 2], "grad+vmap shape ({eval})");
+    // 2 * y (central-difference gradient of sum(x^2)).
+    let want = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
+    for (i, (g, w)) in data.iter().zip(want.iter()).enumerate() {
+        assert!(
+            (g - w).abs() < 1e-4,
+            "grad+vmap elem {i}: eval {g} != 2*y {w} (finite-difference twin)"
+        );
+    }
 }
 
 /// NEGATIVE: a duplicate axis name in the variadic list is rejected, never
