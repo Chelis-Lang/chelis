@@ -1134,6 +1134,37 @@ fn build_expecting_failure(source: &str, name: &str) -> String {
     String::from_utf8(build.stderr).expect("utf-8 build stderr")
 }
 
+/// Build `source` to C and return the generated `<name>.c` file contents
+/// (chelis#469 codegen-determinism oracle). Each call is an independent
+/// `chelis build` subprocess, so two calls exercise two fresh HashMap seeds —
+/// the condition under which the pre-fix non-deterministic tensor-kernel input
+/// ordering surfaced.
+fn build_c_source(source: &str, name: &str) -> String {
+    let dir = tempdir().expect("tempdir");
+    let src = dir.path().join(format!("{name}.ch"));
+    let out_dir = dir.path().join(format!("{name}-out"));
+    fs::write(&src, source).expect("write source");
+    let build = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            src.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run chelis build");
+    assert!(
+        build.status.success(),
+        "build must succeed; stderr: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    fs::read_to_string(out_dir.join(format!("{name}.c"))).expect("read generated C")
+}
+
 /// Run `chelis eval --file` and return its stdout (the evaluator oracle the
 /// backend must agree with, per the backend-numerics discipline).
 fn eval_stdout(dir: &Path, source: &str, name: &str) -> String {
@@ -2388,11 +2419,14 @@ fn form3_let_bound_shape_sourced_expand_accepted_at_check() {
 /// path exercised by `chelis-compiler-api`'s
 /// `host_runtime_expand_negative_count_errors` (which builds a non-positive
 /// arithmetic count the SAME way): both rely on static-arithmetic sizes
-/// passing check so the runtime/eval lane can compute them. The C backend
-/// does not yet fold this arithmetic (it still rejects the residual
-/// `DimExpr::Sym` at lowering) — that materialization gap is the separate
-/// C-codegen issue; the check layer's job here is to stop over-rejecting a
-/// materializable extent.
+/// passing check so the runtime/eval lane can compute them. The C backend now
+/// const-folds inline / def-scoped static arithmetic to a concrete extent
+/// (chelis#469; the build+agreement oracle is
+/// `form3_static_arithmetic_expand_size_matches_backend`). This test's
+/// TOP-LEVEL-NAMED spelling (`some_count = sub(...)`) is a residual: top-level
+/// binding provenance is not threaded into IR lowering, so it still rejects at
+/// build (fail-closed, never a silent miscompile). The check layer's job here
+/// is to stop over-rejecting a materializable extent.
 #[test]
 fn form3_static_arithmetic_expand_size_accepted_at_check() {
     let source = "b = to_tensor([1.0, 2.0])\n\
@@ -2414,6 +2448,197 @@ fn form3_static_arithmetic_expand_size_accepted_at_check() {
         out.1,
         vec![3, 2],
         "static-arithmetic expand size (4-1=3) must evaluate to shape [3, 2], got {eval}"
+    );
+}
+
+// ── chelis#469: Form-3 runtime expand-size RESOLUTION (build lane) ──
+//
+// The check-layer tests above pin that these materializable sizes are
+// ACCEPTED at check and EVALUATE correctly. #469 closes the C-codegen
+// materialization gap so each also BUILDS and the compiled C AGREES with the
+// evaluator (the #338 eval-vs-backend oracle). Fail-closed parity: a size the
+// backend cannot yet materialize (arithmetic that COMBINES a shape source with
+// another term) must still reject loudly, never silently emit a wrong extent.
+
+/// chelis#469 (Case 1, let-bound shape source): the `let`-bound
+/// `shape(x, axis)` form — `a_dim = shape(x, 0); expand(b, 0, a_dim)` —
+/// now BUILDS and the compiled C agrees with the evaluator. Pre-#469 it
+/// type-checked and evaluated (`form3_let_bound_shape_sourced_expand_accepted_at_check`)
+/// but the C `build` rejected the residual `Sym("a_dim")` at lowering (a
+/// check-accept / build-reject asymmetry). The fix resolves the size through
+/// the `let` indirection to `x`'s shape source (recording the `shape_dep` that
+/// keeps `x` live), producing the same DAG as the inline
+/// `form3_shape_sourced_expand_matches_backend`. Extent `n` (=2) comes from
+/// `x` axis 0, NOT `b`; a mixup would print `[4, 4]`.
+#[test]
+fn form3_let_bound_shape_sourced_expand_matches_backend() {
+    let source = "def f(x: &tensor[n, 4, f32], b: &tensor[4, f32]) -> tensor[n, 4, f32] = {\n\
+        \x20 a_dim: int32 = shape(x, cast(0, int32))\n\
+        \x20 expand(b, 0, a_dim)\n\
+        }\n\
+        xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])\n\
+        out = f(xs, to_tensor([10.0, 20.0, 30.0, 40.0]))\n";
+    let backend = build_compile_run(source, "issue_469_let_bound_shape");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    assert_eq!(
+        out.1,
+        vec![2, 4],
+        "let-bound shape-sourced expand must bind the extent to `x` (=2), got ({backend})"
+    );
+    assert_eval_agrees_with_backend(source, "issue_469_let_bound_shape", &backend);
+}
+
+/// chelis#469 (Case 1, static arithmetic): a size built from all-constant
+/// integer arithmetic (`sub(cast(4, int32), cast(1, int32))` = 3) now
+/// const-folds to a concrete extent and BUILDS, with C agreeing with the
+/// evaluator. Pre-#469 this SILENTLY miscompiled: check + eval produced
+/// `[3, 2]` while the C backend defaulted the unresolved size to extent 1 and
+/// emitted `[1, 2]` — a live eval-vs-backend divergence the fail-closed
+/// invariant forbids. (Inline form; the top-level-NAMED spelling
+/// `some_count = sub(...)` still rejects at build — top-level binding
+/// tracking is a documented residual, fail-closed.)
+#[test]
+fn form3_static_arithmetic_expand_size_matches_backend() {
+    let source = "b = to_tensor([1.0, 2.0])\n\
+        out = expand(b, cast(0, int32), sub(cast(4, int32), cast(1, int32)))\n";
+    let backend = build_compile_run(source, "issue_469_static_arith");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    assert_eq!(
+        out.1,
+        vec![3, 2],
+        "static-arithmetic expand size (4-1=3) must build to shape [3, 2], not the \
+         pre-#469 silent extent-1 [1, 2] ({backend})"
+    );
+    assert_eval_agrees_with_backend(source, "issue_469_static_arith", &backend);
+}
+
+/// chelis#469 (Case 1, let-bound static): a `let`-bound STATIC size
+/// (`k = cast(3, int32); expand(b, 0, cast(k, int32))`) folds to its value
+/// through the `let` and `cast` in IR lowering, matching the §4.7.2
+/// `SizeClass::Static` "followed transitively through `let` bindings" contract.
+/// Pre-#469 the cast-wrapped form silently defaulted to extent 1 (eval
+/// `[3, 3]` vs C `[1, 3]`); now the C `build` lane resolves it and emits the
+/// correct extent + values.
+///
+/// BUILD-ONLY oracle: unlike the shape-sourced forms, `chelis eval` on this
+/// exact form is blocked by a SEPARATE, PRE-EXISTING checker gap — the checker
+/// annotates a shape-sensitive `expand` app's `type:` metadata for
+/// ShapeSourced sizes but not for `let`-bound Static sizes, so the eval
+/// lowering's `assert_ir_typed` rejects it ("shape-sensitive IR app nodes must
+/// carry explicit type metadata"). That is a chelis-types annotation issue,
+/// independent of this #469 IR/backend lowering work; the DAG-level fold is
+/// additionally pinned by `issue_369_expand_let_bound_non_shape_does_not_recover`.
+#[test]
+fn form3_let_bound_static_expand_size_builds_correct_extent() {
+    let source = "def f(b: &tensor[3, f32]) -> tensor[3, 3, f32] = {\n\
+        \x20 k: int32 = cast(3, int32)\n\
+        \x20 expand(b, 0, cast(k, int32))\n\
+        }\n\
+        b = to_tensor([7.0, 8.0, 9.0])\n\
+        out = f(&b)\n";
+    let backend = build_compile_run(source, "issue_469_let_bound_static");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    assert_eq!(
+        out.1,
+        vec![3, 3],
+        "let-bound static expand size (k=3) must build to [3, 3], not [1, 3] ({backend})"
+    );
+    // Each row is the broadcast of b = [7, 8, 9]; a wrong extent would change
+    // the row count or the value pattern.
+    let expected = [7.0, 8.0, 9.0, 7.0, 8.0, 9.0, 7.0, 8.0, 9.0];
+    for (i, e) in expected.iter().enumerate() {
+        assert!(
+            (out.2[i] - e).abs() < 1e-6,
+            "out[{i}]: backend {} != {e} ({backend})",
+            out.2[i]
+        );
+    }
+}
+
+/// chelis#469 fail-closed parity: an expand size that is integer arithmetic
+/// COMBINING a `shape(tensor, axis)` read with another term
+/// (`mul(shape(x, 0), cast(2, int32))`) is admitted at check as `ShapeSourced`
+/// but has no single tensor axis the backend can read the extent from and no
+/// `DimExpr` representation for the arithmetic. It must REJECT loudly at build
+/// with the #469 diagnostic — NEVER the pre-fix silent extent-1 default
+/// (eval `[4, 4]` vs C `[1, 4]`). This is the negative twin of
+/// `form3_static_arithmetic_expand_size_matches_backend`: all-constant
+/// arithmetic folds and builds; arithmetic that touches a runtime shape does
+/// not (yet) and rejects rather than miscompiles.
+#[test]
+fn form3_arith_over_shape_expand_size_rejected_at_build() {
+    let source = "def f(x: &tensor[n, 4, f32], b: &tensor[4, f32]) -> tensor[m, 4, f32] = expand(b, 0, mul(shape(x, cast(0, int32)), cast(2, int32)))\n\
+        xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])\n\
+        out = f(xs, to_tensor([10.0, 20.0, 30.0, 40.0]))\n";
+    let stderr = build_expecting_failure(source, "issue_469_arith_over_shape");
+    assert!(
+        stderr.contains("cannot")
+            && stderr.contains("materialize")
+            && stderr.contains("chelis#469"),
+        "arithmetic-over-shape expand size must reject at build with the #469 \
+         materialization diagnostic, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("internal compiler error"),
+        "arith-over-shape expand size must reject cleanly, not ICE: {stderr}"
+    );
+}
+
+/// chelis#469 codegen determinism: the spec's canonical Form-3 example
+/// (`bias_broadcast` from `examples/illustrative/runtime_shape_semantics.ch`)
+/// must build to BYTE-IDENTICAL C across independent `chelis build`
+/// invocations. The shape-source operand `x` is referenced ONLY via
+/// `shape(x, …)`, so its `Load` is pre-created alongside `b`'s in
+/// `lower_subexpr_program_inner`; that pre-creation iterated a `HashMap`
+/// (per-process-random order), flipping the tensor-kernel input slots
+/// (`inputs[0]`/`inputs[1]`) build-to-build — a codegen-determinism-invariant
+/// violation the `bias_broadcast` oracle could otherwise never assert
+/// "byte-identical". Sorting the pre-creation by name makes the kernel ABI
+/// stable. Two independent subprocess builds (each a fresh HashMap seed) must
+/// emit identical `.c`.
+#[test]
+fn form3_bias_broadcast_c_is_byte_deterministic() {
+    let source = "def bias_broadcast(x: &tensor[n, 4, f32], b: &tensor[4, f32]) -> tensor[n, 4, f32] = expand(b, 0, shape(x, cast(0, int32)))\n\
+        xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])\n\
+        out = bias_broadcast(xs, to_tensor([10.0, 20.0, 30.0, 40.0]))\n";
+    let first = build_c_source(source, "issue_469_determinism_a");
+    let second = build_c_source(source, "issue_469_determinism_b");
+    assert_eq!(
+        first, second,
+        "Form-3 shape-sourced expand C must be byte-identical across builds"
+    );
+}
+
+/// chelis#469 axis-side separation (rlronan's shared-walker constraint, the
+/// #364 sibling): the extent-side static-arithmetic fold must NOT leak into
+/// the reduction/softmax/gather AXIS path. `extract_int_for_dim` (the shared
+/// axis walker) is deliberately left un-widened; the fold lives only in
+/// `fold_static_size` on the extent path. A static-arithmetic reduction axis
+/// (`sum(x, sub(cast(2, int32), cast(1, int32)))`) therefore stays REJECTED at
+/// check ("axis must be a compile-time constant or a named axis") — proving the
+/// extent fold did not silently widen the axis contract.
+#[test]
+fn static_arith_reduction_axis_still_rejected_at_check() {
+    let json = check_json(
+        "def f(x: &tensor[2, 3, f32]) -> tensor[2, f32] = sum(x, sub(cast(2, int32), cast(1, int32)))\n",
+    );
+    assert_rejected_with(
+        &json,
+        "axis must be a compile-time constant or a named axis",
+        "static-arithmetic reduction axis must stay rejected at check (chelis#469/#364 \
+         extent-vs-axis separation)",
     );
 }
 
