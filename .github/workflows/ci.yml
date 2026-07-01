@@ -154,7 +154,7 @@ jobs:
   # GATE-SCOPE-SMT): the required fast SMT smoke. It builds the
   # cvc5-backed `smt` feature and proves the binary can discharge a real
   # obligation through cvc5, but leaves the full solver/proof corpus to
-  # smt-full-prove.yml (path-gated PRs, nightly, manual). Keep the job
+  # smt-full-prove.yml (nightly + manual dispatch only, not on PRs). Keep the job
   # display name stable: branch protection requires this exact context.
   # Runbook: docs/smt_build_setup.md.
   smt-build:
