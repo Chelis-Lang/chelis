@@ -158,6 +158,18 @@ pub fn references(module_exprs: &[Expr], symbol: &str) -> Result<References, Aut
         let Some(caller_name) = decl_name(def) else {
             continue;
         };
+        let caller = qualify(&module_name, caller_name);
+        let mut metadata_scope: BTreeSet<String> = property_quantifier_names_from_def_list(def)
+            .into_iter()
+            .collect();
+        collect_metadata_symbol_references(
+            def,
+            bare,
+            &top_level_names,
+            &mut metadata_scope,
+            &caller,
+            &mut references,
+        );
         let Some(body) = function_body(decl) else {
             continue;
         };
@@ -168,7 +180,7 @@ pub fn references(module_exprs: &[Expr], symbol: &str) -> Result<References, Aut
             &top_level_names,
             &mut scope,
             "body".to_string(),
-            &qualify(&module_name, caller_name),
+            &caller,
             &mut references,
         );
     }
@@ -195,6 +207,18 @@ pub fn call_graph(module_exprs: &[Expr]) -> Result<CallGraph, AuthoringError> {
         let Some(caller_name) = decl_name(def) else {
             continue;
         };
+        let caller = qualify(&module_name, caller_name);
+        let mut metadata_scope: BTreeSet<String> = property_quantifier_names_from_def_list(def)
+            .into_iter()
+            .collect();
+        collect_metadata_call_edges(
+            def,
+            &top_level_names,
+            &mut metadata_scope,
+            &caller,
+            &module_name,
+            &mut edges,
+        );
         let Some(body) = function_body(decl) else {
             continue;
         };
@@ -204,7 +228,7 @@ pub fn call_graph(module_exprs: &[Expr]) -> Result<CallGraph, AuthoringError> {
             &top_level_names,
             &mut scope,
             "body".to_string(),
-            &qualify(&module_name, caller_name),
+            &caller,
             &module_name,
             &mut edges,
         );
@@ -249,13 +273,24 @@ pub fn rename_function(
 
     let mut renamed_references = 0;
     for decl in module.elements.iter_mut().skip(MODULE_DECLS_START) {
-        let Some(def) = tagged_list(decl, "def") else {
+        let Some(def) = tagged_list_mut(decl, "def") else {
             continue;
         };
         if !def_is_function(def) {
             continue;
         }
-        let mut scope: BTreeSet<String> = fn_params_from_def_list(def).into_iter().collect();
+        let fn_params = fn_params_from_def_list(def);
+        let mut metadata_scope: BTreeSet<String> = property_quantifier_names_from_def_list(def)
+            .into_iter()
+            .collect();
+        renamed_references += rename_metadata_references(
+            def,
+            &old_name,
+            new_name,
+            &old_top_level_names,
+            &mut metadata_scope,
+        );
+        let mut scope: BTreeSet<String> = fn_params.into_iter().collect();
         if let Some(body) = function_body_mut_expr(decl) {
             renamed_references +=
                 rename_unshadowed_vars(body, &old_name, new_name, &old_top_level_names, &mut scope);
@@ -388,13 +423,25 @@ pub fn change_signature(
     }
 
     for decl in module.elements.iter_mut().skip(MODULE_DECLS_START) {
-        let Some(def) = tagged_list(decl, "def") else {
+        let Some(def) = tagged_list_mut(decl, "def") else {
             continue;
         };
         if !def_is_function(def) {
             continue;
         }
-        let mut scope: BTreeSet<String> = fn_params_from_def_list(def).into_iter().collect();
+        let fn_params = fn_params_from_def_list(def);
+        let mut metadata_scope: BTreeSet<String> = property_quantifier_names_from_def_list(def)
+            .into_iter()
+            .collect();
+        rewritten_calls += rewrite_metadata_direct_calls(
+            def,
+            &target_name,
+            &old_params,
+            argument_order,
+            &top_level_names,
+            &mut metadata_scope,
+        )?;
+        let mut scope: BTreeSet<String> = fn_params.into_iter().collect();
         if let Some(body) = function_body_mut_expr(decl) {
             rewritten_calls += rewrite_direct_calls(
                 body,
@@ -460,6 +507,111 @@ pub fn unshadowed_symbol_occurrences(
     symbol: &str,
 ) -> Result<usize, AuthoringError> {
     Ok(references(module_exprs, symbol)?.references.len())
+}
+
+fn collect_metadata_symbol_references(
+    def: &List,
+    symbol: &str,
+    top_level_names: &BTreeSet<String>,
+    scope: &mut BTreeSet<String>,
+    caller: &str,
+    out: &mut Vec<Reference>,
+) {
+    let Some(Expr::Map(meta, _)) = def.elements.get(1) else {
+        return;
+    };
+    for (key, value) in &meta.entries {
+        collect_symbol_references(
+            value,
+            symbol,
+            top_level_names,
+            scope,
+            format!("metadata.{key}"),
+            caller,
+            out,
+        );
+    }
+}
+
+fn collect_metadata_call_edges(
+    def: &List,
+    top_level_names: &BTreeSet<String>,
+    scope: &mut BTreeSet<String>,
+    caller: &str,
+    module_name: &str,
+    out: &mut Vec<Reference>,
+) {
+    let Some(Expr::Map(meta, _)) = def.elements.get(1) else {
+        return;
+    };
+    for (key, value) in &meta.entries {
+        collect_call_edges(
+            value,
+            top_level_names,
+            scope,
+            format!("metadata.{key}"),
+            caller,
+            module_name,
+            out,
+        );
+    }
+}
+
+fn rename_metadata_references(
+    def: &mut List,
+    old_name: &str,
+    new_name: &str,
+    top_level_names: &BTreeSet<String>,
+    scope: &mut BTreeSet<String>,
+) -> usize {
+    let Some(Expr::Map(meta, _)) = def.elements.get_mut(1) else {
+        return 0;
+    };
+    meta.entries
+        .iter_mut()
+        .map(|(_, value)| rename_unshadowed_vars(value, old_name, new_name, top_level_names, scope))
+        .sum()
+}
+
+fn rewrite_metadata_direct_calls(
+    def: &mut List,
+    target_name: &str,
+    old_params: &[String],
+    argument_order: &[String],
+    top_level_names: &BTreeSet<String>,
+    scope: &mut BTreeSet<String>,
+) -> Result<usize, AuthoringError> {
+    let Some(Expr::Map(meta, _)) = def.elements.get_mut(1) else {
+        return Ok(0);
+    };
+    let mut count = 0;
+    for (_, value) in &mut meta.entries {
+        count += rewrite_direct_calls(
+            value,
+            target_name,
+            old_params,
+            argument_order,
+            top_level_names,
+            scope,
+        )?;
+    }
+    Ok(count)
+}
+
+fn count_stale_metadata_calls(
+    def: &List,
+    target: &str,
+    expected_arity: usize,
+    top_level_names: &BTreeSet<String>,
+    scope: &mut BTreeSet<String>,
+) -> usize {
+    let Some(Expr::Map(meta, _)) = def.elements.get(1) else {
+        return 0;
+    };
+    meta.entries
+        .iter()
+        .map(|(_, value)| count_stale_calls(value, target, expected_arity, top_level_names, scope))
+        .sum()
 }
 
 fn collect_call_edges(
@@ -570,7 +722,7 @@ fn rewrite_direct_calls(
         if is_target {
             let old_args: Vec<Expr> = list.elements.iter().skip(3).cloned().collect();
             let mut old_by_name = BTreeMap::new();
-            for (name, arg) in old_params.iter().zip(old_args.into_iter()) {
+            for (name, arg) in old_params.iter().zip(old_args) {
                 old_by_name.insert(name.clone(), arg);
             }
             let mut new_elements = list.elements[..3].to_vec();
@@ -617,6 +769,16 @@ fn stale_direct_calls(
         if !def_is_function(def) {
             continue;
         }
+        let mut metadata_scope: BTreeSet<String> = property_quantifier_names_from_def_list(def)
+            .into_iter()
+            .collect();
+        stale += count_stale_metadata_calls(
+            def,
+            bare,
+            expected_arity,
+            &top_level_names,
+            &mut metadata_scope,
+        );
         let Some(body) = function_body(decl) else {
             continue;
         };
@@ -668,10 +830,27 @@ fn walk_children<F>(expr: &Expr, scope: &mut BTreeSet<String>, path: String, mut
 where
     F: FnMut(&Expr, &mut BTreeSet<String>, String),
 {
-    let Some(list) = any_list(expr) else {
-        return;
+    let list = match expr {
+        Expr::Map(meta, _) => {
+            for (key, value) in &meta.entries {
+                f(value, scope, format!("{path}.{key}"));
+            }
+            return;
+        }
+        Expr::MetaExpr(meta, _) => {
+            for (key, value) in &meta.entries {
+                f(value, scope, format!("{path}.{key}"));
+            }
+            f(&meta.expr, scope, format!("{path}.expr"));
+            return;
+        }
+        Expr::List(list, _) => list,
+        Expr::Atom(..) => return,
     };
     let tag = list_tag(list);
+    if let Some(meta) = list.elements.get(1) {
+        f(meta, scope, format!("{path}.meta"));
+    }
     if tag == Some("fn") {
         let added = list
             .elements
@@ -706,10 +885,27 @@ fn walk_children_mut<F>(expr: &mut Expr, scope: &mut BTreeSet<String>, f: &mut F
 where
     F: FnMut(&mut Expr, &mut BTreeSet<String>),
 {
-    let Some(list) = any_list_mut(expr) else {
-        return;
+    let list = match expr {
+        Expr::Map(meta, _) => {
+            for (_, value) in &mut meta.entries {
+                f(value, scope);
+            }
+            return;
+        }
+        Expr::MetaExpr(meta, _) => {
+            for (_, value) in &mut meta.entries {
+                f(value, scope);
+            }
+            f(&mut meta.expr, scope);
+            return;
+        }
+        Expr::List(list, _) => list,
+        Expr::Atom(..) => return,
     };
     let tag = list_tag(list).map(str::to_string);
+    if let Some(meta) = list.elements.get_mut(1) {
+        f(meta, scope);
+    }
     if tag.as_deref() == Some("fn") {
         let added = list
             .elements
@@ -1005,6 +1201,18 @@ fn fn_params_from_def_list(def: &List) -> Vec<String> {
     def.elements
         .get(DEF_VALUE_INDEX)
         .and_then(tagged_fn_params)
+        .unwrap_or_default()
+}
+
+fn property_quantifier_names_from_def_list(def: &List) -> Vec<String> {
+    let Some(Expr::Map(meta, _)) = def.elements.get(1) else {
+        return Vec::new();
+    };
+    meta.entries
+        .iter()
+        .find_map(|(key, value)| {
+            (key == "property_quantifiers").then(|| params_node_names(value))?
+        })
         .unwrap_or_default()
 }
 

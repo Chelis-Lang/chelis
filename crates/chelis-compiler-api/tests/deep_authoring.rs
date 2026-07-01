@@ -277,6 +277,38 @@ fn rename_fails_closed_on_stale_preimage_and_cascades_calls() {
 }
 
 #[test]
+fn rename_cascades_property_precondition_metadata() {
+    let module = r#"(module {}
+  handoff.property_meta
+  (defsig {} guard (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} bool)))
+  (def {} guard (fn {} (params {} (x {type: (t-prim {} f32)})) (app {} (var {} gte) (var {} x) (var {} x))))
+  (defsig {} holds (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} bool)))
+  (def {chelis_role: "property",
+        property_preconditions: (tuple {} (app {} (var {} guard) (var {} x))),
+        property_quantifiers: (params {} (x {type: (t-prim {} f32)})),
+        property_source_kind: "user"}
+    holds
+    (fn {} (params {} (x {type: (t-prim {} f32)})) (app {} (var {} gte) (var {} x) (var {} x)))))
+"#;
+
+    let ok = compiler::rename(RenameRequest {
+        module: module.to_string(),
+        function_name: "guard".to_string(),
+        new_name: "renamed".to_string(),
+        preimage_sha256: Some(target_preimage(module, "guard")),
+    })
+    .expect("rename cascades through metadata");
+
+    assert!(
+        ok.module_deep
+            .contains("property_preconditions: (tuple {} (app {} (var {} renamed) (var {} x)))"),
+        "property preconditions are semantically active Deep and must be cascaded: {}",
+        ok.module_deep
+    );
+    assert_full_check_has_no_fitness_errors(&ok.module_deep);
+}
+
+#[test]
 fn replace_function_and_change_signature_validate_whole_module() {
     let new_decls = r#"(defsig {}
   first
@@ -319,6 +351,44 @@ fn replace_function_and_change_signature_validate_whole_module() {
         changed
             .module_deep
             .contains("(app {} (var {} pair) (var {} b) (var {} a))")
+    );
+    assert_eq!(changed.rewritten_calls, 1);
+    assert_full_check_has_no_fitness_errors(&changed.module_deep);
+}
+
+#[test]
+fn change_signature_rewrites_property_precondition_metadata_calls() {
+    let module = r#"(module {}
+  handoff.property_sig
+  (defsig {} guard (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32) (t-prim {} bool)))
+  (def {} guard (fn {} (params {} (x {type: (t-prim {} f32)}) (y {type: (t-prim {} f32)})) (app {} (var {} gte) (var {} x) (var {} y))))
+  (defsig {} holds (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32) (t-prim {} bool)))
+  (def {chelis_role: "property",
+        property_preconditions: (tuple {} (app {} (var {} guard) (var {} x) (var {} y))),
+        property_quantifiers: (params {} (x {type: (t-prim {} f32)}) (y {type: (t-prim {} f32)})),
+        property_source_kind: "user"}
+    holds
+    (fn {} (params {} (x {type: (t-prim {} f32)}) (y {type: (t-prim {} f32)})) (app {} (var {} gte) (var {} x) (var {} x)))))
+"#;
+
+    let changed = compiler::change_signature(ChangeSignatureRequest {
+        module: module.to_string(),
+        function_name: "guard".to_string(),
+        new_defsig: "(defsig {} guard (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32) (t-prim {} bool)))".to_string(),
+        new_params: "(params {} (y {type: (t-prim {} f32)}) (x {type: (t-prim {} f32)}))"
+            .to_string(),
+        argument_order: vec!["y".to_string(), "x".to_string()],
+        param_renames: Default::default(),
+        preimage_sha256: Some(target_preimage(module, "guard")),
+    })
+    .expect("change_signature cascades through metadata");
+
+    assert!(
+        changed
+            .module_deep
+            .contains("(app {} (var {} guard) (var {} y) (var {} x))"),
+        "property precondition call arguments must be reordered: {}",
+        changed.module_deep
     );
     assert_eq!(changed.rewritten_calls, 1);
     assert_full_check_has_no_fitness_errors(&changed.module_deep);
