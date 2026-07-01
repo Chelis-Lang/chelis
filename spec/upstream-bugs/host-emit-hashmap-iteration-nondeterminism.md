@@ -2,6 +2,8 @@
 
 **Status:** RESOLVED 2026-05-01 at commit `17a28b9`. Actual sites were in `chelis-backend-c::emit::emit_input_shape_preamble` (not `host_emit` as this filing originally said) plus systematic-bug-search siblings in `chelis-backend-hip::emit::emit_input_shape_preamble` and `emit_input_shape_preamble_device`. Fix: collect keys into Vec, sort lex, iterate. Regression tests added at `crates/chelis-backend-c/tests/codegen_determinism.rs`. Original filing kept below for historical reference.
 
+**Lowering-side sibling (chelis#469, 2026-07):** the `emit_*` fix above sorted the *presentation* order of the input-validation block, but the underlying tensor-kernel input-*slot* assignment (`CEmitter::input_labels` follows `Dag::nodes()` order) was still non-deterministic from the LOWERING side: `chelis_ir::lower::lower_subexpr_program_inner` pre-created a `Load` node per scoped tensor param by iterating a `HashMap<String, TensorType>` (per-process-random order). For a Form-3 `expand` whose extent is read from a shape-source operand referenced only via `shape(x, …)` (the §4.7.2 `bias_broadcast` example), both that operand and the data operand survive DCE, so their slot order — and the emitted `.c` — flipped build-to-build. `codegen_determinism.rs` did not catch this because it constructs DAGs directly, bypassing lowering. Fix: sort the pre-creation by name. CLI-level regression: `rank_poly_tier3::form3_bias_broadcast_c_is_byte_deterministic` (two independent `chelis build` subprocesses, each a fresh HashMap seed, must emit identical C).
+
 **Original status:** open; not blocking the audit chain semantically
 **Filed:** 2026-05-01
 **Owning phase:** chelis-core (`chelis-backend-c::host_emit`)

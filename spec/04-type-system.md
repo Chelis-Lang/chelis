@@ -1272,18 +1272,43 @@ read instead — directly or bound to a `let`. Tracked by
 Chelis-Lang/chelis#397 and #469.
 
 The check-time accept set matches what the evaluator and host runtime
-materialize. The C backend's IR lowering currently materializes only
-the *inline* shape source and *literal* size; recovering the extent of
-a **`let`-bound shape read** or **static integer arithmetic** is a
-separate lowering improvement (the `let`-bound-shape recovery is
-Chelis-Lang/chelis#369/#495; static-arithmetic folding is tracked
-alongside it as Chelis-Lang/chelis#528). Until that lands, those two
-materializable forms type-check and evaluate but are rejected at C
-`build` with the same #469 diagnostic — a build-side limitation, never
-a silent miscompile. (The old spelling-based predicate did allow that
-miscompile, for both the `cast`-wrapped and the function-call sourceless
-spellings; closing those is what makes the uniform-rejection claim above
-true at check.)
+materialize. The C backend's IR lowering now materializes the runtime
+extent for each of these forms (Chelis-Lang/chelis#469):
+
+- an **inline `shape(x, axis)` read** and a **`let`-bound shape read**
+  (`a = shape(x, 0)` then `expand(b, 0, a)`, followed through `cast`
+  wrappers AND `let`-to-`let` aliases — `c = a; expand(b, 0, c)`) bind
+  the extent to the shape-source operand `x` via a `shape_dep` liveness
+  edge that keeps `x`'s `Load` alive through DCE; alias recovery records
+  the underlying `shape(x, axis)` app, so the extent binds to the actual
+  source tensor and axis (the `let`-bound recovery is
+  Chelis-Lang/chelis#369/#495, alias threading is #469 RT-3);
+- a **`literal`/`cast(N, _)`** size, or **static integer arithmetic**
+  over such values (`add`/`sub`/`mul`/`mod`/`neg`, followed through
+  `cast` and `let`-bound static names), is const-folded to a concrete
+  extent (Chelis-Lang/chelis#528). `div` is float-only (§ divergence
+  below / spec/05 §2.1) and never reaches this fold as an integer size.
+
+Two residual materializable-at-check forms are **rejected loudly at C
+`build`** rather than resolved — a build-side capability limit, never a
+silent miscompile:
+
+- **integer arithmetic that combines a `shape(x, axis)` read (or a
+  symbolic dim) with another term** (`mul(shape(x, 0), 2)`,
+  `add(shape(x, 0), 1)`): the extent is a runtime `shape * k` / `shape
+  + k` the backend's `DimExpr` has no representation for, so it rejects
+  with the #469 diagnostic;
+- a **top-level-`def`-bound** shape read or static value referenced as
+  an expand size (`a = shape(&x, 0)` at module scope then
+  `expand(b, 0, a)`): top-level binding provenance is not threaded into
+  IR lowering (only `let`/block-scoped bindings are), so it rejects at
+  build.
+
+Both stay fail-closed: rejected identically enough that no `build`
+emits a wrong extent. (The old spelling-based predicate allowed a
+silent miscompile for the `cast`-wrapped and the function-call
+sourceless spellings; closing those is what makes the uniform-rejection
+claim above true at check.)
 
 Form (3) is how the `bias_broadcast` pattern from
 `examples/illustrative/runtime_shape_semantics.ch` preserves the
@@ -1313,11 +1338,14 @@ defaulting to size 1. The `let`-indirection case is the canonical
 expand lowers to a size-1 axis, the size-1 broadcast that the typer
 accepts is rejected by the no-implicit-broadcasting IR, and
 `grad` fails to construct the backward DAG (Chelis-Lang/chelis#318,
-#369). A `size` argument that is neither a recognized literal/symbol
-nor a `shape(...)` read of an in-scope tensor (a bare runtime scalar)
-has no shape source the backend can materialize and is rejected
-loudly at lowering, not silently defaulted (§4.7.2 Form-3,
-Chelis-Lang/chelis#469).
+#369). Lowering additionally const-folds a fully-static size (a
+`literal`/`cast(N, _)`, integer arithmetic over such, or a `let`-bound
+static name) to a concrete extent. A `size` that is neither a recognized
+static value nor a resolvable single-tensor shape source — a bare
+runtime scalar, or arithmetic that *combines* a `shape(...)` read with
+another term (`mul(shape(x, 0), 2)`) — has no extent the backend can
+materialize and is rejected loudly at lowering, never silently defaulted
+to size 1 (§4.7.2 Form-3, Chelis-Lang/chelis#469).
 
 #### 4.7.3 `reshape` with runtime sizes from `shape(x, ...)`
 

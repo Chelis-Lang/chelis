@@ -834,7 +834,23 @@ fn lower_subexpr_program_inner(
     merged_types.extend(scoped_tensor_types);
 
     let mut ctx = LowerCtx::new(merged_types, program_defs, LinearityInfo::default());
-    for (name, tensor_ty) in scoped_tensor_types_for_bindings {
+    // Pre-create a `Load` for every scoped tensor param in a DETERMINISTIC
+    // (name-sorted) order. `scoped_tensor_types_for_bindings` is a `HashMap`,
+    // whose iteration order is randomized per process; using it directly made
+    // the pre-created `Load` node order — and therefore the tensor-helper
+    // kernel's input-slot order (`input_labels` follows `dag.nodes()`) —
+    // non-deterministic across builds. For a Form-3 `expand` whose extent is
+    // read from a shape-source operand referenced ONLY via `shape(x, …)` (the
+    // §4.7.2 `bias_broadcast` example), both that operand and the data operand
+    // survive DCE, so their relative slot order flipped build-to-build and the
+    // emitted C was not byte-identical (violating the codegen-determinism
+    // invariant and chelis#469's positive oracle). Sorting by name makes the
+    // kernel ABI stable; the host caller maps arguments by `input_label`, so
+    // the slot order is internal and any stable order is correct.
+    let mut scoped_bindings: Vec<(String, TensorType)> =
+        scoped_tensor_types_for_bindings.into_iter().collect();
+    scoped_bindings.sort_by(|(a, _), (b, _)| a.cmp(b));
+    for (name, tensor_ty) in scoped_bindings {
         let load = ctx.dag.add_node(
             RiscOp::Load {
                 name: name.as_str().into(),
@@ -3655,6 +3671,17 @@ struct LowerCtx {
     /// producing the `Lit(n) vs Lit(1)` backward-DAG verification failure.
     /// Saved/restored across binding scopes exactly like `list_bindings`.
     shape_bindings: HashMap<String, Expr>,
+    /// chelis#469/#528: `let`-bound names whose value const-folds to a
+    /// compile-time integer (a literal, `cast(N, _)`, or integer arithmetic
+    /// over such values — the §4.7.2 `SizeClass::Static` provenance the
+    /// checker follows transitively through `let` bindings). Lets a later
+    /// `expand(s, axis, cast(len, int32))` (or `len` used directly) recover
+    /// the concrete extent instead of the pre-fix size-1 default — the exact
+    /// eval-`[7]`-vs-C-`[1]` silent miscompile #469 exists to prevent when a
+    /// `let`-bound static size reaches the backend. Re-binding a name to a
+    /// non-static value drops its stale entry (shadowing symmetry, mirroring
+    /// `shape_bindings`). Saved/restored across binding scopes.
+    static_size_bindings: HashMap<String, i64>,
     local_callables: HashMap<String, Expr>,
     program_types: HashMap<String, TensorType>,
     program_defs: HashMap<String, Expr>,
@@ -3743,6 +3770,7 @@ impl LowerCtx {
             bindings: HashMap::new(),
             list_bindings: HashMap::new(),
             shape_bindings: HashMap::new(),
+            static_size_bindings: HashMap::new(),
             local_callables: HashMap::new(),
             program_types,
             program_defs,
@@ -4581,6 +4609,7 @@ impl LowerCtx {
         let saved = self.bindings.clone();
         let saved_list_bindings = self.list_bindings.clone();
         let saved_shape_bindings = self.shape_bindings.clone();
+        let saved_static_size_bindings = self.static_size_bindings.clone();
         let saved_callables = self.local_callables.clone();
         let saved_fn_typed_params = self.fn_typed_params.clone();
 
@@ -4613,18 +4642,35 @@ impl LowerCtx {
                         self.list_bindings
                             .insert(name.clone(), bind_kids[i + 1].clone());
                     }
-                    // chelis#369: remember a `len = shape(operand, axis)`
-                    // binding so a later `expand(s, axis, cast(len, int32))`
+                    // chelis#369/#469: remember a `len = shape(operand, axis)`
+                    // binding — OR a `let`-to-`let` alias / use-site `cast` of
+                    // such a name (`a = shape(x, 0); c = a; expand(b, 0, c)`,
+                    // RT-3) — so a later `expand(s, axis, cast(len, int32))`
                     // can recover the broadcast extent through the `let`
-                    // indirection (the `tensor_full_like` idiom). A
-                    // re-binding of `name` to anything else must drop any
-                    // stale shape entry so shadowing never recovers a wrong
-                    // extent.
-                    if shape_app_operand_axis(&bind_kids[i + 1]).is_some() {
-                        self.shape_bindings
-                            .insert(name.clone(), bind_kids[i + 1].clone());
+                    // indirection (the `tensor_full_like` idiom).
+                    // `resolve_shape_binding_source` follows the alias chain
+                    // and records the UNDERLYING `shape(...)` app, so recovery
+                    // binds the `shape_dep` liveness edge to the actual source
+                    // tensor and axis (mirroring how `fold_static_size`
+                    // recurses `static_size_bindings` for the static path). A
+                    // re-binding of `name` to anything else must drop any stale
+                    // shape entry so shadowing never recovers a wrong extent.
+                    if let Some(shape_app) = self.resolve_shape_binding_source(&bind_kids[i + 1]) {
+                        self.shape_bindings.insert(name.clone(), shape_app);
                     } else {
                         self.shape_bindings.remove(name);
+                    }
+                    // chelis#469/#528: remember a `len = <static int>` binding
+                    // (a literal, `cast(N, _)`, or integer arithmetic over
+                    // such, following prior static bindings) so a later
+                    // `expand(s, axis, cast(len, int32))` const-folds the
+                    // extent instead of the size-1 default. Re-binding to a
+                    // non-static value drops any stale entry (shadowing
+                    // symmetry, mirroring `shape_bindings`).
+                    if let Some(value) = self.fold_static_size(&bind_kids[i + 1]) {
+                        self.static_size_bindings.insert(name.clone(), value);
+                    } else {
+                        self.static_size_bindings.remove(name);
                     }
                     if let Some(callable) = self.callable_binding_expr(&bind_kids[i + 1]) {
                         self.local_callables.insert(name.clone(), callable);
@@ -4641,6 +4687,7 @@ impl LowerCtx {
         self.bindings = saved; // Restore scope
         self.list_bindings = saved_list_bindings;
         self.shape_bindings = saved_shape_bindings;
+        self.static_size_bindings = saved_static_size_bindings;
         self.local_callables = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
         result
@@ -5208,6 +5255,7 @@ impl LowerCtx {
         let saved = self.bindings.clone();
         let saved_list_bindings = self.list_bindings.clone();
         let saved_shape_bindings = self.shape_bindings.clone();
+        let saved_static_size_bindings = self.static_size_bindings.clone();
         let saved_callables = self.local_callables.clone();
         let saved_fn_typed_params = self.fn_typed_params.clone();
         let saved_dim_substitutions = self.dim_substitutions.clone();
@@ -5353,6 +5401,7 @@ impl LowerCtx {
         self.bindings = saved;
         self.list_bindings = saved_list_bindings;
         self.shape_bindings = saved_shape_bindings;
+        self.static_size_bindings = saved_static_size_bindings;
         self.local_callables = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
         self.dim_substitutions = saved_dim_substitutions;
@@ -5374,6 +5423,7 @@ impl LowerCtx {
         let saved = self.bindings.clone();
         let saved_list_bindings = self.list_bindings.clone();
         let saved_shape_bindings = self.shape_bindings.clone();
+        let saved_static_size_bindings = self.static_size_bindings.clone();
         let saved_callables = self.local_callables.clone();
         let saved_fn_typed_params = self.fn_typed_params.clone();
         for (name, arg_id) in param_names.iter().zip(args.iter().cloned()) {
@@ -5393,6 +5443,7 @@ impl LowerCtx {
         self.bindings = saved;
         self.list_bindings = saved_list_bindings;
         self.shape_bindings = saved_shape_bindings;
+        self.static_size_bindings = saved_static_size_bindings;
         self.local_callables = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
         result
@@ -6875,15 +6926,70 @@ impl LowerCtx {
                 // the symbol loses its source (silent wrong shape in C).
                 let mut shape_source: Option<NodeId> = None;
                 let size = if args.len() >= 3 {
-                    self.extract_dim_expr_value(&args[2])
-                        .or_else(|| {
-                            self.dim_expr_from_shape_arg_with_source(&args[2])
-                                .map(|(dim, src)| {
-                                    shape_source = Some(src);
-                                    dim
-                                })
-                        })
-                        .unwrap_or(DimExpr::Concrete(1))
+                    let size_arg = &args[2];
+                    // (1) A fully-static size: a literal, `cast(N, _)`,
+                    //     integer arithmetic over such values, or a `let`-bound
+                    //     name that folds to one (chelis#469 / #528). Const-
+                    //     folded to a concrete extent so a `sub(cast(4, int32),
+                    //     cast(1, int32))` size — or a `len = cast(7, int32)`
+                    //     followed by `cast(len, int32)` — no longer falls
+                    //     through to the size-1 default (a silent
+                    //     eval-`[3, 3]`-vs-C-`[1, 3]` miscompile pre-fix).
+                    if let Some(v) = self
+                        .fold_static_size(size_arg)
+                        .and_then(|n| usize::try_from(n).ok())
+                    {
+                        DimExpr::Concrete(v)
+                    }
+                    // (2) A shape source: an inline `shape(x, axis)` read OR a
+                    //     `let`-bound `len = shape(x, axis)` name (followed
+                    //     through `cast` / `let` by `shape_app_operand_axis_
+                    //     resolved`). Tried BEFORE the bare-symbol arm so the
+                    //     `let`-bound form resolves to the tensor extent rather
+                    //     than a sourceless `Sym("len")` that the guard below
+                    //     rejects (the check-`accept` / build-`reject`
+                    //     asymmetry #469 tracks). The source node is recorded
+                    //     as a `shape_dep` below so its `Load` survives DCE and
+                    //     declares the extent symbol (chelis#384/#397).
+                    else if let Some((dim, src)) =
+                        self.dim_expr_from_shape_arg_with_source(size_arg)
+                    {
+                        shape_source = Some(src);
+                        dim
+                    }
+                    // (3) A bare `var` naming a §4.7.2 Form-2 symbolic dim (an
+                    //     in-scope tensor dimension, or a monomorphized dim
+                    //     substitution). The post-node sourceless guard below
+                    //     validates the symbol has a real tensor source and
+                    //     fails closed otherwise.
+                    else if let Some(dim) = self.extract_dim_expr_value(size_arg) {
+                        dim
+                    }
+                    // (4) Fail closed (chelis#469): a check-clean runtime size
+                    //     the backend cannot yet materialize as an extent —
+                    //     integer arithmetic that COMBINES a `shape(tensor,
+                    //     axis)` read (or a symbolic dim) with another term
+                    //     (`mul(shape(x, 0), 2)`, `add(shape(x, 0), 1)`), which
+                    //     the checker admits as `ShapeSourced` but `DimExpr`
+                    //     has no representation for. Reject loudly rather than
+                    //     the pre-fix silent `Concrete(1)` default, which
+                    //     emitted an extent-1 axis and silently diverged from
+                    //     `eval` — the exact miscompile class #469 exists to
+                    //     prevent.
+                    else {
+                        raise_fatal_lowering_error(
+                            "`expand` size is a runtime expression the backend cannot \
+                             materialize as an extent: integer arithmetic that combines a \
+                             `shape(tensor, axis)` read (or a symbolic dimension) with another \
+                             term (e.g. `mul(shape(x, 0), 2)` or `add(shape(x, 0), 1)`) has no \
+                             single tensor axis to read the extent from. Use a literal/`cast(N, \
+                             int32)` size, a bare `shape(tensor, axis)` read, or an in-scope \
+                             tensor dimension. Tracked by Chelis-Lang/chelis#469 \
+                             (spec/04-type-system.md \u{00a7}4.7.2)",
+                            Some(app_span),
+                            self.current_span_id.clone(),
+                        );
+                    }
                 } else {
                     DimExpr::Concrete(1)
                 };
@@ -7940,6 +8046,72 @@ impl LowerCtx {
         extract_int_for_dim(expr).and_then(|n| usize::try_from(n).ok())
     }
 
+    /// Const-fold a fully-static integer `expand` SIZE to its value
+    /// (chelis#469 / #528). Extends [`extract_int_for_dim`] (literal / `(lit
+    /// …)` / `cast`) with (a) the integer arithmetic the §4.7.2 checker
+    /// classifies as `SizeClass::Static` (`classify_arith_app`:
+    /// `add`/`sub`/`mul`/`mod`/`neg`) and (b) a bare/`cast`-wrapped `var`
+    /// bound by a prior `let` to a static value ([`Self::static_size_bindings`]
+    /// — the checker's "followed transitively through `let` bindings"). Folds
+    /// only when EVERY leaf is itself static; a `shape(x, …)`-touching or a
+    /// runtime-parameter-touching size returns `None` so the caller routes it
+    /// to the shape-source or fail-closed arm. (`div` is float-only per
+    /// chelis#178 and is rejected at check before lowering; `floor_div`/
+    /// `trunc_div` are not in the checker's arith set — neither reaches here
+    /// as an accepted size.) Overflow / mod-by-zero use checked arithmetic and
+    /// return `None`, never a wrapped or otherwise wrong extent.
+    ///
+    /// Deliberately kept SEPARATE from the shared [`extract_int_for_dim`]
+    /// walker, which also drives reduction / softmax / gather AXES: the
+    /// checker rejects a static-arithmetic *axis* ("sum axis must be a
+    /// compile-time constant or a named axis"), so folding arithmetic in the
+    /// shared walker would silently widen the axis contract (chelis#364).
+    /// Extent-side folding lives only here; the axis side is unchanged.
+    fn fold_static_size(&self, expr: &Expr) -> Option<i64> {
+        if let Some(n) = extract_int_for_dim(expr) {
+            return Some(n);
+        }
+        let Expr::List(list, _) = expr else {
+            return None;
+        };
+        match get_tag(list) {
+            // A bare `var` bound to a static value by a prior `let`.
+            Some("var") => self
+                .static_size_bindings
+                .get(&bare_var_name(expr)?)
+                .copied(),
+            // `cast(<inner>, ty)` — fold the inner value.
+            Some("cast") => self.fold_static_size(children(list).first()?),
+            // Integer arithmetic over static operands.
+            Some("app") => {
+                let kids = children(list);
+                let op = bare_var_name(kids.first()?)?;
+                let operands = &kids[1..];
+                match (op.as_str(), operands.len()) {
+                    ("neg", 1) => self.fold_static_size(&operands[0])?.checked_neg(),
+                    ("add", 2) => self
+                        .fold_static_size(&operands[0])?
+                        .checked_add(self.fold_static_size(&operands[1])?),
+                    ("sub", 2) => self
+                        .fold_static_size(&operands[0])?
+                        .checked_sub(self.fold_static_size(&operands[1])?),
+                    ("mul", 2) => self
+                        .fold_static_size(&operands[0])?
+                        .checked_mul(self.fold_static_size(&operands[1])?),
+                    ("mod", 2) => {
+                        let divisor = self.fold_static_size(&operands[1])?;
+                        if divisor == 0 {
+                            return None;
+                        }
+                        self.fold_static_size(&operands[0])?.checked_rem(divisor)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn extract_dim_expr_value(&self, expr: &Expr) -> Option<DimExpr> {
         if let Some(value) = self.extract_usize_value(expr) {
             return Some(DimExpr::Concrete(value));
@@ -8052,11 +8224,38 @@ impl LowerCtx {
             return Some((operand.clone(), axis));
         }
         // Strip any `cast(..., int32)` wrappers to reach a bare `var name`,
-        // then follow the recorded `let len = shape(...)` binding.
+        // then follow the recorded `let len = shape(...)` binding. Because
+        // `resolve_shape_binding_source` records the UNDERLYING `shape(...)`
+        // app for `let`-to-`let` aliases too (chelis#469 RT-3), a single
+        // lookup here resolves a whole alias chain to its real source.
         let name = bare_var_name(strip_cast_wrappers(expr))?;
         let bound = self.shape_bindings.get(&name)?;
         let (operand, axis) = shape_app_operand_axis(bound)?;
         Some((operand.clone(), axis))
+    }
+
+    /// Resolve the underlying `shape(operand, axis)` app that a `let`-binding
+    /// value refers to, following a `let`-to-`let` alias chain and any
+    /// use-site `cast` wrappers (chelis#369/#469 RT-3). Returns the direct
+    /// `shape(...)` app `Expr` when:
+    ///   - the value IS a `shape(...)` app (possibly `cast`-wrapped), or
+    ///   - the value is a bare / `cast`-wrapped `var` already recorded in
+    ///     [`Self::shape_bindings`] (an alias of an earlier shape name).
+    ///
+    /// Returning the UNDERLYING app (not the alias name) is the safety
+    /// property: the recovered extent and its `shape_dep` liveness edge bind
+    /// to the ACTUAL source tensor and axis, so an alias can never resolve to
+    /// the wrong `Load`. Because each recorded alias already points at the
+    /// underlying app, a chain (`a = shape(x, 0); c = a; d = cast(c, int32)`)
+    /// resolves in one lookup per link at bind time. Mirrors how
+    /// [`Self::fold_static_size`] recurses [`Self::static_size_bindings`] for
+    /// the static path (`j = k; ...` folds through the alias).
+    fn resolve_shape_binding_source(&self, value: &Expr) -> Option<Expr> {
+        if shape_app_operand_axis(value).is_some() {
+            return Some(value.clone());
+        }
+        let alias = bare_var_name(strip_cast_wrappers(value))?;
+        self.shape_bindings.get(&alias).cloned()
     }
 
     fn lower_handle_effect(&mut self, elems: &[Expr]) -> LoweredValue {
@@ -8261,6 +8460,7 @@ impl LowerCtx {
         let saved = self.bindings.clone();
         let saved_list_bindings = self.list_bindings.clone();
         let saved_shape_bindings = self.shape_bindings.clone();
+        let saved_static_size_bindings = self.static_size_bindings.clone();
         let saved_callables = self.local_callables.clone();
         let saved_fn_typed_params = self.fn_typed_params.clone();
 
@@ -8288,6 +8488,7 @@ impl LowerCtx {
         self.bindings = saved; // Restore scope
         self.list_bindings = saved_list_bindings;
         self.shape_bindings = saved_shape_bindings;
+        self.static_size_bindings = saved_static_size_bindings;
         self.local_callables = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
         result
@@ -9416,14 +9617,17 @@ mod tests {
         );
     }
 
-    /// chelis#369 negative parity: the recovery must follow ONLY a genuine
-    /// `let len = shape(...)` binding. A `len` bound to something that is
-    /// NOT a `shape(...)` app must NOT fabricate an extent — the size has
-    /// no static/shape source, so it stays the size-1 default. This proves
-    /// the fix does not blindly trust any `var` in the expand size slot.
+    /// chelis#369 negative parity + chelis#469/#528 positive parity: the
+    /// SHAPE-recovery path must follow ONLY a genuine `let len = shape(...)`
+    /// binding — a `len` bound to a static `cast(7, int32)` must NOT
+    /// mis-recover `x`'s shape extent 3. It is not sourceless, though: a
+    /// `let`-bound static value folds to its own extent (`SizeClass::Static`
+    /// followed through the `let`), so the size resolves to `Concrete(7)`, not
+    /// the pre-#469 size-1 default (which silently miscompiled eval-`[7]` to
+    /// C-`[1]`) and not `x`'s 3.
     #[test]
     fn issue_369_expand_let_bound_non_shape_does_not_recover() {
-        // len is bound to a literal int, not a shape read.
+        // len is bound to a static int (`cast(7, int32)`), not a shape read.
         let body = r#"
             (let {}
                  (bind {} len (cast {} (lit {} 7) (t-prim {} int32)))
@@ -9437,25 +9641,28 @@ mod tests {
         "#;
         let dag = lower_body_with_bound_x(3, body);
         let (size, _dims) = only_expand(&dag);
-        // `len` resolves as a symbolic dim name (no shape source), NOT a
-        // recovered concrete extent. The point is that the chelis#369 path
-        // did NOT mis-recover `x`'s size 3 for a non-shape binding.
-        assert_ne!(
+        // Folds to the `let`-bound static value 7 (NOT `x`'s shape extent 3,
+        // proving the shape-recovery path did not fire, and NOT the size-1
+        // default, proving the static value is materialized).
+        assert_eq!(
             size,
-            DimExpr::Concrete(3),
-            "a non-shape `let` binding must NOT recover x's size 3; got {size:?}",
+            DimExpr::Concrete(7),
+            "a `let`-bound static size must fold to its own extent 7, never \
+             recover x's 3 or default to 1; got {size:?}",
         );
     }
 
-    /// chelis#369 negative parity: re-binding a name that WAS a shape
-    /// binding to a non-shape value must drop the stale shape entry, so a
-    /// later expand size referencing the re-bound name does not recover the
-    /// old extent. Guards the shadowing path in `lower_let`.
+    /// chelis#369 negative parity: re-binding a name that WAS a shape binding
+    /// to a static value must drop the stale shape entry, so a later expand
+    /// size referencing the re-bound name does not recover the old shape
+    /// extent 3 — it folds to the NEW static value (5) instead (chelis#469/
+    /// #528 `SizeClass::Static` shadowing symmetry). Guards the shadowing
+    /// path in `lower_let` for both `shape_bindings` and `static_size_bindings`.
     #[test]
     fn issue_369_expand_shadowed_let_binding_does_not_leak_stale_shape() {
-        // len = shape(x, 0)   -- shape binding
-        // len = scalar_to_tensor(2.0)  -- re-bound to a non-shape value
-        // expand(s, 0, cast(len, int32))  -- must NOT recover size 3
+        // len = shape(x, 0)          -- shape binding
+        // len = cast(5, int32)       -- re-bound to a static value
+        // expand(s, 0, cast(len, int32))  -- must recover 5, NOT the stale 3
         let body = r#"
             (let {}
                  (bind {}
@@ -9476,11 +9683,11 @@ mod tests {
         "#;
         let dag = lower_body_with_bound_x(3, body);
         let (size, _dims) = only_expand(&dag);
-        assert_ne!(
+        assert_eq!(
             size,
-            DimExpr::Concrete(3),
-            "a re-bound (shadowed) `len` must not recover the stale shape \
-             extent 3; got {size:?}",
+            DimExpr::Concrete(5),
+            "a re-bound (shadowed) `len` must fold to the NEW static 5, never \
+             recover the stale shape extent 3; got {size:?}",
         );
     }
 
