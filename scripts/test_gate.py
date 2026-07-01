@@ -463,6 +463,7 @@ class SmtCiSplitTests(unittest.TestCase):
             "cargo test -p chelis-prove --features arb",
             "Nightly failing: SMT Full Prove",
             "github.event_name != 'pull_request'",
+            "timeout-minutes: 75",
         ]
         for needle in required:
             self.assertIn(
