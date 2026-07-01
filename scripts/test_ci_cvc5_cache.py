@@ -378,7 +378,7 @@ class FetchTests(unittest.TestCase):
     def _copy_downloader(self, tar: Path, sha: Path):
         """A downloader that maps browser_download_url back to local files."""
 
-        def dl(url: str, dest: Path) -> None:
+        def dl(url: str, dest: Path, token=None) -> None:
             src = tar if url.endswith(".tar.gz") else sha
             import shutil as _sh
 
@@ -391,8 +391,8 @@ class FetchTests(unittest.TestCase):
             root = Path(td)
             tar, sha, name = self._prepare_asset(root)
             assets = {
-                name: {"browser_download_url": "http://x/" + name},
-                name + ".sha256": {"browser_download_url": "http://x/" + name + ".sha256"},
+                name: {"url": "http://x/" + name},
+                name + ".sha256": {"url": "http://x/" + name + ".sha256"},
             }
             text, dest = self._run_fetch(root, assets, self._copy_downloader(tar, sha))
             self.assertIn("warm=true", text)
@@ -421,8 +421,8 @@ class FetchTests(unittest.TestCase):
             # Corrupt the sidecar to a valid-but-wrong digest.
             sha.write_text(("b" * 64) + f"  {name}\n", encoding="utf-8")
             assets = {
-                name: {"browser_download_url": "http://x/" + name},
-                name + ".sha256": {"browser_download_url": "http://x/" + name + ".sha256"},
+                name: {"url": "http://x/" + name},
+                name + ".sha256": {"url": "http://x/" + name + ".sha256"},
             }
             text, dest = self._run_fetch(root, assets, self._copy_downloader(tar, sha))
             self.assertIn("warm=false", text)
@@ -453,8 +453,8 @@ class FetchTests(unittest.TestCase):
             sha = Path(str(tar) + ".sha256")
             sha.write_text(f"{digest}  {name}\n", encoding="utf-8")
             assets = {
-                name: {"browser_download_url": "http://x/" + name},
-                name + ".sha256": {"browser_download_url": "http://x/" + name + ".sha256"},
+                name: {"url": "http://x/" + name},
+                name + ".sha256": {"url": "http://x/" + name + ".sha256"},
             }
             text, dest = self._run_fetch(root, assets, self._copy_downloader(tar, sha))
             self.assertIn("warm=false", text)
@@ -473,7 +473,7 @@ class FetchTests(unittest.TestCase):
             gh_out = root / "gh_output"
             gh_out.write_text("")
 
-            def _boom(url, d):  # must NOT be called
+            def _boom(url, d, token=None):  # must NOT be called
                 raise AssertionError("download attempted on an already-warm store")
 
             with mock.patch.dict(
@@ -492,7 +492,7 @@ class FetchTests(unittest.TestCase):
             root = Path(td)
             tar, sha, name = self._prepare_asset(root)
             # Release lists the tar but NOT its .sha256 sidecar.
-            assets = {name: {"browser_download_url": "http://x/" + name}}
+            assets = {name: {"url": "http://x/" + name}}
             text, dest = self._run_fetch(root, assets, self._copy_downloader(tar, sha))
             self.assertIn("warm=false", text)
             self.assertFalse(mod.is_warm(dest))
@@ -502,11 +502,11 @@ class FetchTests(unittest.TestCase):
             root = Path(td)
             tar, sha, name = self._prepare_asset(root)
             assets = {
-                name: {"browser_download_url": "http://x/" + name},
-                name + ".sha256": {"browser_download_url": "http://x/" + name + ".sha256"},
+                name: {"url": "http://x/" + name},
+                name + ".sha256": {"url": "http://x/" + name + ".sha256"},
             }
 
-            def _boom(url, dest):
+            def _boom(url, dest, token=None):
                 raise OSError("network down")
 
             text, dest = self._run_fetch(root, assets, _boom)
@@ -525,8 +525,8 @@ class FetchTests(unittest.TestCase):
             sha = Path(str(garbage) + ".sha256")
             sha.write_text(f"{digest}  {name}\n", encoding="utf-8")
             assets = {
-                name: {"browser_download_url": "http://x/" + name},
-                name + ".sha256": {"browser_download_url": "http://x/" + name + ".sha256"},
+                name: {"url": "http://x/" + name},
+                name + ".sha256": {"url": "http://x/" + name + ".sha256"},
             }
             text, dest = self._run_fetch(root, assets, self._copy_downloader(garbage, sha))
             self.assertIn("warm=false", text)
@@ -577,6 +577,99 @@ class PlanTests(unittest.TestCase):
             text = self._run_plan(Path(td), assets, force=True)
             for ns in mod.NAMESPACES:
                 self.assertIn(f"missing_{ns.replace('-', '_')}=true", text)
+
+
+class HttpDownloadRedirectTests(unittest.TestCase):
+    """REAL (non-mocked) test of `_http_download` against a local HTTP server.
+
+    Locks the private-repo fix: the asset API `url` hop must carry the Bearer
+    token + octet-stream Accept, and the 302 redirect to signed storage must be
+    followed WITHOUT the Authorization header (leaking the token to a third
+    party host, or letting storage reject it, is the bug this guards). The unit
+    tests elsewhere mock `_http_download`, so this is the only coverage of the
+    actual auth/redirect transport.
+    """
+
+    def test_auth_on_api_hop_stripped_on_redirect(self):
+        import http.server
+        import threading
+
+        payload = b"cvc5-durable-asset-bytes"
+        seen = {}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):  # silence
+                pass
+
+            def do_GET(self):
+                if self.path == "/asset":
+                    seen["asset_auth"] = self.headers.get("Authorization")
+                    seen["asset_accept"] = self.headers.get("Accept")
+                    self.send_response(302)
+                    self.send_header("Location", f"http://{self.headers['Host']}/signed")
+                    self.end_headers()
+                elif self.path == "/signed":
+                    seen["signed_auth"] = self.headers.get("Authorization")
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                else:  # pragma: no cover
+                    self.send_response(404)
+                    self.end_headers()
+
+        srv = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        port = srv.server_address[1]
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with TemporaryDirectory() as td:
+                dest = Path(td) / "out.bin"
+                mod._http_download(
+                    f"http://127.0.0.1:{port}/asset", dest, token="TESTTOKEN"
+                )
+                self.assertEqual(dest.read_bytes(), payload)
+        finally:
+            srv.shutdown()
+            thread.join(timeout=5)
+
+        # Auth + octet-stream reach the GitHub API hop...
+        self.assertEqual(seen.get("asset_auth"), "Bearer TESTTOKEN")
+        self.assertEqual(seen.get("asset_accept"), "application/octet-stream")
+        # ...but the token is NOT forwarded to the signed storage URL.
+        self.assertIsNone(seen.get("signed_auth"))
+
+    def test_no_token_sends_no_auth_header(self):
+        import http.server
+        import threading
+
+        payload = b"anon"
+        seen = {}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                seen["auth"] = self.headers.get("Authorization")
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        srv = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        port = srv.server_address[1]
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with TemporaryDirectory() as td:
+                dest = Path(td) / "out.bin"
+                mod._http_download(f"http://127.0.0.1:{port}/a", dest, token=None)
+                self.assertEqual(dest.read_bytes(), payload)
+        finally:
+            srv.shutdown()
+            thread.join(timeout=5)
+        self.assertIsNone(seen.get("auth"))
 
 
 if __name__ == "__main__":

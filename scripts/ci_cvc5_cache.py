@@ -387,15 +387,50 @@ def _http_get_json(url: str, token: str | None = None) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _http_download(url: str, dest: Path) -> None:
-    # Public-repo asset download via `browser_download_url`; no auth header is
-    # sent (it would be forwarded to the storage redirect target). Chelis is a
-    # public repository, so unauthenticated asset download works.
-    req = urllib.request.Request(
-        url, headers={"User-Agent": "chelis-ci", "Accept": "application/octet-stream"}
-    )
-    with urllib.request.urlopen(req, timeout=300) as resp, open(dest, "wb") as fh:
-        shutil.copyfileobj(resp, fh)
+class _NoAutoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse to auto-follow redirects so `_http_download` can re-issue the
+    redirected GET WITHOUT the Authorization header. GitHub asset downloads
+    302 to a signed storage URL (objects.githubusercontent.com / S3) that
+    rejects the API token, and stdlib urllib on older Pythons (debian:11 ships
+    3.9) forwards the Authorization header across the redirect."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _http_download(url: str, dest: Path, token: str | None = None) -> None:
+    """Download a release asset (works for PRIVATE repos) to `dest`.
+
+    Uses the asset API `url` (NOT `browser_download_url`, which needs a web
+    session and 404s for a token on a private repo) with
+    `Accept: application/octet-stream` + Bearer auth. GitHub 302-redirects to a
+    signed storage URL that must be fetched WITHOUT the Authorization header, so
+    the redirect is followed manually.
+    """
+    headers = {"Accept": "application/octet-stream", "User-Agent": "chelis-ci"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    opener = urllib.request.build_opener(_NoAutoRedirect)
+    location = None
+    resp = None
+    try:
+        resp = opener.open(urllib.request.Request(url, headers=headers), timeout=300)
+    except urllib.error.HTTPError as exc:
+        if exc.code in (301, 302, 303, 307, 308) and exc.headers.get("Location"):
+            location = exc.headers["Location"]
+        else:
+            raise
+    if location is not None:
+        # Signed storage URL: fetch with NO auth header (it would be rejected by
+        # the storage backend and would leak the token to a third-party host).
+        with urllib.request.urlopen(
+            urllib.request.Request(location, headers={"User-Agent": "chelis-ci"}),
+            timeout=300,
+        ) as red, open(dest, "wb") as fh:
+            shutil.copyfileobj(red, fh)
+    else:
+        with resp, open(dest, "wb") as fh:
+            shutil.copyfileobj(resp, fh)
 
 
 def _release_assets(tag: str) -> dict[str, dict] | None:
@@ -465,9 +500,10 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     with TemporaryDirectory() as td:
         tar_path = Path(td) / name
         sha_path = Path(td) / sha_name
+        token = os.environ.get("GITHUB_TOKEN")
         try:
-            _http_download(assets[name]["browser_download_url"], tar_path)
-            _http_download(assets[sha_name]["browser_download_url"], sha_path)
+            _http_download(assets[name]["url"], tar_path, token)
+            _http_download(assets[sha_name]["url"], sha_path, token)
         except (urllib.error.URLError, urllib.error.HTTPError, KeyError, OSError) as exc:
             print(f"durable cvc5 asset download failed: {exc}", file=sys.stderr)
             _github_output("warm", "false")
