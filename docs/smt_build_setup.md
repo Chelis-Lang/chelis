@@ -74,41 +74,99 @@ across the smoke and full-prove jobs. The split removes the full proof corpus
 from the required context; it must not make the optional lane cold-build cvc5
 before reaching its proof steps.
 
-### Stable-key cvc5 cache (chelis#583)
+### Durable prebuilt cvc5 (chelis#583 + follow-up)
 
-`Swatinem/rust-cache` keys its `target/` cache on `Cargo.lock`, so a PR that
-bumps the lockfile for an UNRELATED reason blows the cache and forces a fresh
-~30-minute from-source cvc5 build. To decouple cvc5 from lockfile churn, every
-SMT lane (the required `smt-build`, the `smt-build-glibc231` and
-`smt-build-darwin-arm64` prove-in-CI lanes, and `smt-full-prove.yml`) layers a
-dedicated cvc5 cache, driven by `scripts/ci_cvc5_cache.py`, in front of the
-rust-cache restore:
+Building cvc5 from source is ~22 minutes of CMake/make. The SMT lanes must
+never pay that on the per-PR path, so every SMT lane (the required `smt-build`,
+the `smt-build-glibc231` and `smt-build-darwin-arm64` prove-in-CI lanes, and
+`smt-full-prove.yml`) LINKS a prebuilt cvc5 instead of rebuilding it. The
+prebuilt tree is held in TWO stores, tried in order, driven by
+`scripts/ci_cvc5_cache.py`:
 
-1. **`key`** computes a STABLE cache key — `cvc5-prebuilt-<namespace>-cvc5sys
-   <version>-rustc<version>-<schema>` — that depends on the pinned `cvc5-sys`
-   crate version (which moves with the bundled cvc5 release), the os/arch
-   namespace (`linux-x86_64`, `linux-glibc231`, `darwin-arm64`), and the rustc
-   version, but NOT on `Cargo.lock`.
-2. **`actions/cache/restore`** restores the prebuilt artifacts to a dir OUTSIDE
-   `target/` (`~/.cache/chelis-cvc5/<namespace>`), so the cvc5 cache never
-   contends with rust-cache's `target/` domain.
-3. **`activate`** exports `CVC5_DIR` only when the restored cache is complete.
-   `cvc5-sys`'s build script then sees `build/src/libcvc5.a` already present and
-   LINKS the prebuilt static lib instead of running CMake/make — the same
-   prebuilt-link path the `z3` feature uses (`docs/local_z3_environment.md`).
-4. After a cold (from-source) build, **`harvest`** copies the cvc5 link/bindgen
-   inputs into the cache dir and writes a completeness sentinel; a dedicated
-   **`actions/cache/save`** persists them only when the harvest is complete.
+1. **Durable Release asset (primary).** `.github/workflows/build-cvc5.yml`
+   builds cvc5 from source once per (cvc5-sys version, namespace) and publishes
+   `<store-key>.tar.gz` + a `.sha256` sidecar to a
+   `cvc5-prebuilt-cvc5sys<version>` **prerelease** tag (deliberately not `v*`,
+   so it never triggers `release.yml`). Each SMT lane's **`fetch`** step
+   downloads the asset, verifies the sha256 BEFORE extraction, rejects unsafe
+   tar members, and re-checks every required path. A Release asset has **no
+   10GB Actions-cache LRU budget, no 7-day idle TTL, and no branch scope**, so
+   it survives the three conditions that used to force a cold rebuild onto the
+   per-PR path: a rustc-stable bump, a quiet/docs-only stretch, and cache-pool
+   pressure.
+2. **Actions cache (fallback).** The stable-key `actions/cache` restore runs
+   only when `fetch` reported `warm=false` (`if: steps.cvc5fetch.outputs.warm
+   != 'true'`). It covers the window between a cvc5-sys bump and
+   `build-cvc5.yml` republishing, and any run where the Release lookup fails.
+   The dir lives OUTSIDE `target/` (`~/.cache/chelis-cvc5/<namespace>`), so it
+   never contends with rust-cache's `target/` domain.
 
-This is an optimization, never a correctness risk: `activate` links the cache
-only when it is present AND sentinel-complete, so a cold, partial, or
-incomplete cache simply falls back to the normal from-source build (worst case
-is "no speedup", never a broken build). The lanes also set
-`cache-on-failure: true` on the rust-cache step so a slow cold run still warms
-the workspace cache. Bump `CACHE_SCHEMA` in `scripts/ci_cvc5_cache.py` if the
-harvested artifact set ever changes shape (it invalidates every namespace's
-cvc5 cache). `scripts/test_ci_cvc5_cache.py` covers the key, harvest, and
-activate logic that cannot be exercised in CI without a real ~30m cvc5 build.
+The store key — `cvc5-prebuilt-<namespace>-cvc5sys<version>-<schema>` — depends
+on the pinned `cvc5-sys` crate version (which moves with the bundled cvc5
+release), the os/arch namespace (`linux-x86_64`, `linux-glibc231`,
+`darwin-arm64`), and the cache schema, but **NOT** on `Cargo.lock` and **NOT**
+on the rustc version. The harvested payload is 100% cvc5 C++/CMake output
+(`bindings.rs` is regenerated per build in `OUT_DIR` and is not harvested), so
+rustc is provably irrelevant to the cached bytes; the earlier `-rustc<version>`
+component only forced needless cold rebuilds on every ~6-week stable bump and
+was dropped (schema `v2`).
+
+After a genuine from-source build (the fallback/bootstrap path), **`harvest`**
+copies the cvc5 link/bindgen inputs into the store dir and writes a
+completeness sentinel; **`activate`** exports `CVC5_DIR` only when the store is
+present AND sentinel-complete, so `cvc5-sys`'s build script sees
+`build/src/libcvc5.a` and LINKS it instead of running CMake/make (the same
+prebuilt-link path the `z3` feature uses; `docs/local_z3_environment.md`). This
+is an optimization, never a correctness risk: a missing asset, a network error,
+a sha256 mismatch, an unsafe/incomplete archive, or a partial cache all leave
+no sentinel, so the build falls back to from-source (worst case is "no
+speedup", never a broken or mislinked build). cvc5-sys's own
+`check_cvc5_version` (reads the harvested `cmake/version-base.cmake`)
+additionally hard-fails a wrong-version link. `scripts/test_ci_cvc5_cache.py`
+covers the key, asset naming, harvest/pack/fetch round-trip, and activate logic
+that cannot be exercised in CI without a real ~22m cvc5 build.
+
+Bump `CACHE_SCHEMA` in `scripts/ci_cvc5_cache.py` if the harvested artifact set
+ever changes shape (it rotates the store key AND the asset filename, and the
+`scripts/ci_cvc5_cache.py` path trigger republishes `build-cvc5.yml`).
+
+#### cvc5-sys version-bump runbook
+
+A cvc5-sys bump is the ONLY event that legitimately puts a cold from-source
+cvc5 build back on the per-PR path, because the new version's Release asset
+does not exist until `build-cvc5.yml` republishes it (which happens on push to
+`main`, i.e. after merge). To keep the bump PR itself warm, publish the new
+assets first:
+
+1. On the bump branch, run `build-cvc5.yml` via **workflow_dispatch** (it must
+   already exist on `main`; the very first landing of this workflow bootstraps
+   itself on merge — see below). `plan` finds the new-version assets missing
+   and builds + publishes all three namespaces.
+2. Re-run the bump PR's CI; each SMT lane's `fetch` now links the freshly
+   published asset and stays warm.
+
+If step 1 is skipped, the bump PR's `smt-build` builds cvc5 cold and will
+exceed its 25-minute timeout — a loud, deliberate failure that points here,
+not a silent per-PR tax.
+
+**Bootstrap (first landing of `build-cvc5.yml`):** no asset exists yet for the
+current cvc5-sys version, so this PR's `smt-build` links cvc5 from the warm
+`Swatinem` `target/` cache instead (unchanged `Cargo.lock`/rustc → cache hit,
+~3m). On merge, the push-to-`main` trigger (paths include
+`scripts/ci_cvc5_cache.py` and `build-cvc5.yml`) runs `build-cvc5.yml`, which
+publishes the durable assets; every subsequent run links them.
+
+### Cache-pool pruning
+
+The Actions-cache pool is dominated by `Swatinem/rust-cache` `target/`
+snapshots — one per (job, `Cargo.lock`/rustc generation) — plus per-PR caches.
+Left alone it creeps over GitHub's 10GB per-repo limit and LRU-evicts whatever
+is least-recently-used. `.github/workflows/cache-prune.yml` (weekly + manual)
+runs `scripts/ci_cache_prune.py`, which deletes closed-PR-ref caches and stale
+duplicate `main` generations while PROTECTING the `cvc5-prebuilt-*` fallback
+caches. A failed open-PR lookup fail-safes to no PR pruning (never mass-delete
+on error); manual dispatch is dry-run unless `apply` is set.
+`scripts/test_ci_cache_prune.py` covers the deletion policy.
 
 Two companion prove-in-CI lanes, `smt-build-glibc231` (a `debian:11`
 container) and `smt-build-darwin-arm64` (`macos-latest`), build
@@ -145,6 +203,13 @@ WI-11 (license): the `cvc5-sys` build forces GMP and disables the GPL
 CLN path (the cvc5 CMake cache records `ENABLE_GPL=OFF` and
 `USE_CLN=OFF`; only `libgmp.a` is linked, never `libcln.a`), so the
 shipped artifact is distributable.
+
+`release.yml` deliberately does NOT link the durable prebuilt asset: each
+release job builds cvc5 cold from source, so the shipped binary is an
+INDEPENDENT, license-safe proof of the exact recipe rather than trusting an
+asset produced by `build-cvc5.yml`. A `build-cvc5.yml` bug therefore can never
+silently reach a shipped artifact. Treat a `release.yml` cvc5 failure as real
+even when the per-PR SMT lanes are green off the asset.
 
 ## Downstream Impact
 

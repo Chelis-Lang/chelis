@@ -1,11 +1,12 @@
-"""Unit tests for scripts/ci_cvc5_cache.py (chelis#583).
+"""Unit tests for scripts/ci_cvc5_cache.py (chelis#583 + durable-asset follow-up).
 
-Covers the pure logic that cannot be validated in CI without a real ~30m cvc5
-build: version parsing, stable-key formatting, build-output discovery, the
-harvest copy + completeness sentinel, and the warm/cold activate gate. The
-safety contract under test is "worst case is no speedup, never a broken build":
-an incomplete harvest must NOT mark the cache complete, and activate must only
-export CVC5_DIR for a complete cache.
+Covers the pure logic that cannot be validated in CI without a real ~22m cvc5
+build: version parsing, stable-key formatting, Release-asset naming,
+build-output discovery, the harvest/pack/fetch round-trip + completeness
+sentinel, and the warm/cold activate gate. The safety contract under test is
+"worst case is no speedup, never a broken build": an incomplete harvest/fetch
+must NOT mark the store complete, a sha256 mismatch must NOT extract, and
+activate must only export CVC5_DIR for a complete store.
 """
 
 from __future__ import annotations
@@ -61,51 +62,56 @@ class ParseVersionTests(unittest.TestCase):
         self.assertRegex(version, r"^\d+\.\d+\.\d+")
 
 
-class ParseRustcTests(unittest.TestCase):
-    def test_typical_output(self):
-        out = "rustc 1.86.0 (05f9846f8 2025-03-31)"
-        self.assertEqual(mod.parse_rustc_version(out), "1.86.0")
-
-    def test_nightly_output(self):
-        out = "rustc 1.90.0-nightly (abc123 2025-06-01)"
-        self.assertEqual(mod.parse_rustc_version(out), "1.90.0")
-
-    def test_unparseable_does_not_raise(self):
-        self.assertEqual(mod.parse_rustc_version(""), "unknown")
-        # Sanitized but non-empty for a surprising format.
-        self.assertTrue(mod.parse_rustc_version("weird build"))
-
-
 class ComputeKeyTests(unittest.TestCase):
-    def test_key_shape_and_stability(self):
-        key = mod.compute_key("linux-x86_64", "0.3.1", "1.86.0")
-        self.assertEqual(
-            key, "cvc5-prebuilt-linux-x86_64-cvc5sys0.3.1-rustc1.86.0-v1"
-        )
+    def test_key_shape_is_rustc_free_v2(self):
+        key = mod.compute_key("linux-x86_64", "0.3.1")
+        self.assertEqual(key, "cvc5-prebuilt-linux-x86_64-cvc5sys0.3.1-v2")
+
+    def test_key_has_no_rustc_component(self):
+        # The chelis#583 follow-up: a stable-toolchain bump must NOT rotate the
+        # key (rustc is irrelevant to the harvested cvc5 C++ bytes).
+        self.assertNotIn("rustc", mod.compute_key("darwin-arm64", "0.3.1"))
 
     def test_key_excludes_cargo_lock_hash(self):
-        # The whole point of chelis#583: the key must not encode anything that
-        # changes on an unrelated Cargo.lock bump. Same cvc5-sys/os/rustc ->
-        # identical key regardless of the rest of the lockfile.
-        a = mod.compute_key("linux-x86_64", "0.3.1", "1.86.0")
-        b = mod.compute_key("linux-x86_64", "0.3.1", "1.86.0")
+        # Same cvc5-sys/os -> identical key regardless of the rest of the lock.
+        a = mod.compute_key("linux-x86_64", "0.3.1")
+        b = mod.compute_key("linux-x86_64", "0.3.1")
         self.assertEqual(a, b)
 
     def test_key_changes_on_solver_version(self):
-        a = mod.compute_key("linux-x86_64", "0.3.1", "1.86.0")
-        b = mod.compute_key("linux-x86_64", "0.4.0", "1.86.0")
-        self.assertNotEqual(a, b)
-
-    def test_key_changes_on_rustc(self):
-        a = mod.compute_key("linux-x86_64", "0.3.1", "1.86.0")
-        b = mod.compute_key("linux-x86_64", "0.3.1", "1.87.0")
+        a = mod.compute_key("linux-x86_64", "0.3.1")
+        b = mod.compute_key("linux-x86_64", "0.4.0")
         self.assertNotEqual(a, b)
 
     def test_namespace_separates_lanes(self):
-        a = mod.compute_key("linux-x86_64", "0.3.1", "1.86.0")
-        b = mod.compute_key("linux-glibc231", "0.3.1", "1.86.0")
-        c = mod.compute_key("darwin-arm64", "0.3.1", "1.86.0")
-        self.assertEqual(len({a, b, c}), 3)
+        keys = {mod.compute_key(ns, "0.3.1") for ns in mod.NAMESPACES}
+        self.assertEqual(len(keys), 3)
+
+
+class AssetNamingTests(unittest.TestCase):
+    def test_tag_is_per_version_and_not_v_prefixed(self):
+        tag = mod.asset_tag("0.3.1")
+        self.assertEqual(tag, "cvc5-prebuilt-cvc5sys0.3.1")
+        # Must not collide with release.yml's `v*` shipped-release trigger.
+        self.assertFalse(tag.startswith("v"))
+
+    def test_asset_filename_is_key_plus_targz(self):
+        name = mod.asset_filename("linux-glibc231", "0.3.1")
+        self.assertEqual(name, "cvc5-prebuilt-linux-glibc231-cvc5sys0.3.1-v2.tar.gz")
+
+    def test_asset_filenames_unique_per_namespace(self):
+        names = {mod.asset_filename(ns, "0.3.1") for ns in mod.NAMESPACES}
+        self.assertEqual(len(names), 3)
+
+
+class Sha256SidecarTests(unittest.TestCase):
+    def test_parses_leading_hex(self):
+        digest = "a" * 64
+        self.assertEqual(mod._parse_sha256_sidecar(f"{digest}  file.tar.gz\n"), digest)
+
+    def test_rejects_non_hex(self):
+        self.assertIsNone(mod._parse_sha256_sidecar("not-a-digest file\n"))
+        self.assertIsNone(mod._parse_sha256_sidecar(""))
 
 
 def _make_built_cvc5(root: Path) -> Path:
@@ -161,13 +167,10 @@ class HarvestTests(unittest.TestCase):
             built = _make_built_cvc5(root)
             dest = root / "cache" / "linux-x86_64"
             self.assertTrue(mod.harvest(built, dest))
-            # Sentinel present -> activate would treat it as warm.
             self.assertTrue((dest / mod.SENTINEL_NAME).is_file())
             self.assertTrue(mod.is_warm(dest))
-            # Every required link/bindgen input landed.
             for rel in mod.REQUIRED_DEST:
                 self.assertTrue((dest / rel).exists(), rel)
-            # The dep static libs came across.
             self.assertTrue((dest / "build" / "deps" / "lib" / "libgmp.a").is_file())
 
     def test_incomplete_source_does_not_mark_complete(self):
@@ -197,8 +200,6 @@ class HarvestTests(unittest.TestCase):
             self.assertFalse(mod.is_warm(dest))
 
     def test_harvest_overwrites_stale_partial(self):
-        # A prior partial harvest left junk + a stale sentinel; a fresh
-        # complete harvest must clean it and end complete.
         with TemporaryDirectory() as td:
             root = Path(td)
             built = _make_built_cvc5(root)
@@ -237,7 +238,6 @@ class HarvestOutputTests(unittest.TestCase):
             out.write_text("")
             patched = {"GITHUB_OUTPUT": str(out), **env}
             with mock.patch.dict(os.environ, patched, clear=False):
-                # Drop CVC5_DIR if not requested (the runner may export it).
                 if "CVC5_DIR" not in env:
                     os.environ.pop("CVC5_DIR", None)
                 root = target_root if target_root is not None else Path(td) / "empty"
@@ -262,6 +262,262 @@ class HarvestOutputTests(unittest.TestCase):
             _make_built_cvc5(root)
             text = self._run_harvest({}, root)
             self.assertIn("complete=true", text)
+
+
+class PackTests(unittest.TestCase):
+    def _harvested(self, root: Path) -> Path:
+        built = _make_built_cvc5(root)
+        dest = root / "store"
+        self.assertTrue(mod.harvest(built, dest))
+        return dest
+
+    def test_pack_produces_targz_and_matching_sha256(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            store = self._harvested(root)
+            out = root / "art" / "cvc5.tar.gz"
+            digest = mod.pack(store, out)
+            self.assertTrue(out.is_file())
+            sidecar = Path(str(out) + ".sha256")
+            self.assertTrue(sidecar.is_file())
+            self.assertEqual(mod._parse_sha256_sidecar(sidecar.read_text()), digest)
+            self.assertEqual(mod.sha256_file(out), digest)
+
+    def test_pack_refuses_incomplete_store(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            store = root / "store"
+            (store / "build" / "src").mkdir(parents=True)  # no sentinel/lib
+            with self.assertRaises(RuntimeError):
+                mod.pack(store, root / "out.tar.gz")
+
+
+class SafeExtractTests(unittest.TestCase):
+    def test_roundtrip_reproduces_layout(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            built = _make_built_cvc5(root)
+            store = root / "store"
+            self.assertTrue(mod.harvest(built, store))
+            tar = root / "a.tar.gz"
+            mod.pack(store, tar)
+            dest = root / "extracted"
+            mod.safe_extract(tar, dest)
+            for rel in mod.REQUIRED_DEST:
+                self.assertTrue((dest / rel).exists(), rel)
+
+    def test_rejects_path_traversal_member(self):
+        import tarfile
+
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            payload = root / "evil"
+            payload.write_text("x\n")
+            tar = root / "evil.tar.gz"
+            with tarfile.open(tar, "w:gz") as t:
+                t.add(payload, arcname="../escape.txt")
+            with self.assertRaises(RuntimeError):
+                mod.safe_extract(tar, root / "dest")
+
+
+class FetchTests(unittest.TestCase):
+    """cmd_fetch: durable Release-asset download+verify+extract, always exit 0."""
+
+    def _prepare_asset(self, root: Path) -> tuple[Path, Path, str]:
+        """Return (tar_path, sha_path, asset_name) for a valid packed store."""
+        built = _make_built_cvc5(root)
+        store = root / "producer-store"
+        self.assertTrue(mod.harvest(built, store))
+        name = mod.asset_filename("linux-x86_64", "0.3.1")
+        tar = root / name
+        mod.pack(store, tar)
+        return tar, Path(str(tar) + ".sha256"), name
+
+    def _run_fetch(
+        self,
+        root: Path,
+        assets_json,
+        downloader,
+    ) -> tuple[str, Path]:
+        """Run cmd_fetch with injected release metadata + downloader. Returns
+        (github_output_text, dest_dir)."""
+        lock = root / "Cargo.lock"
+        lock.write_text(SAMPLE_LOCK, encoding="utf-8")
+        dest = root / "consumer-store"
+        gh_out = root / "gh_output"
+        gh_out.write_text("")
+        env = {
+            "GITHUB_OUTPUT": str(gh_out),
+            "GITHUB_REPOSITORY": "Chelis-Lang/chelis",
+        }
+        with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(
+            mod, "CARGO_LOCK", lock
+        ), mock.patch.object(
+            mod, "_release_assets", lambda tag: assets_json
+        ), mock.patch.object(
+            mod, "_http_download", downloader
+        ):
+            rc = mod.cmd_fetch(argparse.Namespace(namespace="linux-x86_64", dir=str(dest)))
+        self.assertEqual(rc, 0)  # ALWAYS exits 0
+        return gh_out.read_text(), dest
+
+    def _copy_downloader(self, tar: Path, sha: Path):
+        """A downloader that maps browser_download_url back to local files."""
+
+        def dl(url: str, dest: Path) -> None:
+            src = tar if url.endswith(".tar.gz") else sha
+            import shutil as _sh
+
+            _sh.copy2(src, dest)
+
+        return dl
+
+    def test_happy_path_warms_store(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            tar, sha, name = self._prepare_asset(root)
+            assets = {
+                name: {"browser_download_url": "http://x/" + name},
+                name + ".sha256": {"browser_download_url": "http://x/" + name + ".sha256"},
+            }
+            text, dest = self._run_fetch(root, assets, self._copy_downloader(tar, sha))
+            self.assertIn("warm=true", text)
+            self.assertTrue(mod.is_warm(dest))
+
+    def test_missing_release_falls_back_cold(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            tar, sha, _ = self._prepare_asset(root)
+            text, dest = self._run_fetch(root, None, self._copy_downloader(tar, sha))
+            self.assertIn("warm=false", text)
+            self.assertFalse(mod.is_warm(dest))
+
+    def test_asset_absent_from_release_falls_back_cold(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            tar, sha, _ = self._prepare_asset(root)
+            text, dest = self._run_fetch(root, {}, self._copy_downloader(tar, sha))
+            self.assertIn("warm=false", text)
+            self.assertFalse(mod.is_warm(dest))
+
+    def test_sha256_mismatch_does_not_extract(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            tar, sha, name = self._prepare_asset(root)
+            # Corrupt the sidecar to a valid-but-wrong digest.
+            sha.write_text(("b" * 64) + f"  {name}\n", encoding="utf-8")
+            assets = {
+                name: {"browser_download_url": "http://x/" + name},
+                name + ".sha256": {"browser_download_url": "http://x/" + name + ".sha256"},
+            }
+            text, dest = self._run_fetch(root, assets, self._copy_downloader(tar, sha))
+            self.assertIn("warm=false", text)
+            self.assertFalse(mod.is_warm(dest))
+            # Nothing should have been extracted.
+            self.assertFalse((dest / "build" / "src" / "libcvc5.a").exists())
+
+    def test_incomplete_archive_does_not_mark_warm(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            # Pack a store that is missing a REQUIRED_DEST path, but force a
+            # sentinel so pack() accepts it, then re-verify fetch's finalize
+            # rejects it. Simpler: build a tar lacking build/deps/lib.
+            import tarfile
+
+            built = _make_built_cvc5(root)
+            store = root / "s"
+            self.assertTrue(mod.harvest(built, store))
+            import shutil as _sh
+
+            _sh.rmtree(store / "build" / "deps" / "lib")
+            name = mod.asset_filename("linux-x86_64", "0.3.1")
+            tar = root / name
+            with tarfile.open(tar, "w:gz") as t:
+                for child in sorted(store.iterdir()):
+                    t.add(child, arcname=child.name)
+            digest = mod.sha256_file(tar)
+            sha = Path(str(tar) + ".sha256")
+            sha.write_text(f"{digest}  {name}\n", encoding="utf-8")
+            assets = {
+                name: {"browser_download_url": "http://x/" + name},
+                name + ".sha256": {"browser_download_url": "http://x/" + name + ".sha256"},
+            }
+            text, dest = self._run_fetch(root, assets, self._copy_downloader(tar, sha))
+            self.assertIn("warm=false", text)
+            self.assertFalse(mod.is_warm(dest))
+
+    def test_already_warm_skips_download(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            tar, sha, name = self._prepare_asset(root)
+            lock = root / "Cargo.lock"
+            lock.write_text(SAMPLE_LOCK, encoding="utf-8")
+            dest = root / "consumer-store"
+            # Pre-warm dest so fetch must short-circuit.
+            built = _make_built_cvc5(root / "pre")
+            self.assertTrue(mod.harvest(built, dest))
+            gh_out = root / "gh_output"
+            gh_out.write_text("")
+
+            def _boom(url, d):  # must NOT be called
+                raise AssertionError("download attempted on an already-warm store")
+
+            with mock.patch.dict(
+                os.environ, {"GITHUB_OUTPUT": str(gh_out)}, clear=False
+            ), mock.patch.object(mod, "CARGO_LOCK", lock), mock.patch.object(
+                mod, "_http_download", _boom
+            ):
+                rc = mod.cmd_fetch(
+                    argparse.Namespace(namespace="linux-x86_64", dir=str(dest))
+                )
+            self.assertEqual(rc, 0)
+            self.assertIn("warm=true", gh_out.read_text())
+
+
+class PlanTests(unittest.TestCase):
+    def _run_plan(self, root: Path, assets_json, force: bool = False) -> str:
+        lock = root / "Cargo.lock"
+        lock.write_text(SAMPLE_LOCK, encoding="utf-8")
+        gh_out = root / "gh_output"
+        gh_out.write_text("")
+        env = {"GITHUB_OUTPUT": str(gh_out)}
+        if force:
+            env["CVC5_FORCE_REBUILD"] = "1"
+        with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(
+            mod, "CARGO_LOCK", lock
+        ), mock.patch.object(mod, "_release_assets", lambda tag: assets_json):
+            if not force:
+                os.environ.pop("CVC5_FORCE_REBUILD", None)
+            mod.cmd_plan(argparse.Namespace(namespace=None))
+        return gh_out.read_text()
+
+    def test_no_release_marks_all_missing(self):
+        with TemporaryDirectory() as td:
+            text = self._run_plan(Path(td), None)
+            for ns in mod.NAMESPACES:
+                self.assertIn(f"missing_{ns.replace('-', '_')}=true", text)
+
+    def test_all_present_marks_none_missing(self):
+        with TemporaryDirectory() as td:
+            assets = {mod.asset_filename(ns, "0.3.1"): {} for ns in mod.NAMESPACES}
+            text = self._run_plan(Path(td), assets)
+            for ns in mod.NAMESPACES:
+                self.assertIn(f"missing_{ns.replace('-', '_')}=false", text)
+
+    def test_partial_presence_is_per_namespace(self):
+        with TemporaryDirectory() as td:
+            assets = {mod.asset_filename("linux-x86_64", "0.3.1"): {}}
+            text = self._run_plan(Path(td), assets)
+            self.assertIn("missing_linux_x86_64=false", text)
+            self.assertIn("missing_linux_glibc231=true", text)
+            self.assertIn("missing_darwin_arm64=true", text)
+
+    def test_force_marks_all_missing_even_when_present(self):
+        with TemporaryDirectory() as td:
+            assets = {mod.asset_filename(ns, "0.3.1"): {} for ns in mod.NAMESPACES}
+            text = self._run_plan(Path(td), assets, force=True)
+            for ns in mod.NAMESPACES:
+                self.assertIn(f"missing_{ns.replace('-', '_')}=true", text)
 
 
 if __name__ == "__main__":

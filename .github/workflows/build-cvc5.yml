@@ -1,0 +1,257 @@
+name: Build cvc5 prebuilt
+
+# Produces the DURABLE prebuilt cvc5 that the smt lanes (ci.yml smt-build*,
+# smt-full-prove.yml) LINK instead of rebuilding cvc5 from source (~22m CMake/
+# make). Publishes one tar.gz + sha256 per namespace (linux-x86_64,
+# linux-glibc231, darwin-arm64) to a `cvc5-prebuilt-cvc5sys<ver>` prerelease
+# tag, keyed on the cvc5-sys version so a rustc-stable bump or unrelated
+# Cargo.lock churn never invalidates it. A Release asset has no Actions-cache
+# LRU budget, no 7-day TTL, and no branch scope, so the smt lanes stay warm
+# across the conditions that used to force a cold cvc5 rebuild onto the per-PR
+# path (chelis#583 follow-up). The `plan` job only spends the ~22m build on
+# namespaces whose asset does not yet exist -- i.e. only on a genuine cvc5-sys
+# bump (or a manual `force`). See docs/smt_build_setup.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild + republish even if the asset already exists"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    # Only the inputs that can change the harvested cvc5 bytes or the store
+    # contract. An unrelated Cargo.lock bump still triggers `plan`, which then
+    # finds the asset already present and skips every build (one cheap API
+    # call, no runner build).
+    paths:
+      - "Cargo.lock"
+      - ".github/workflows/build-cvc5.yml"
+      - "scripts/ci_cvc5_cache.py"
+      - "scripts/ci_publish_cvc5_release.py"
+  schedule:
+    # Weekly safety net: republish if a tag/asset was ever manually deleted.
+    - cron: "0 7 * * 1"
+
+permissions:
+  contents: write
+
+concurrency:
+  # Never cancel an in-flight producer run (it may be publishing assets other
+  # lanes are about to fetch); serialize per ref instead.
+  group: build-cvc5-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  plan:
+    name: Plan (namespaces needing a build)
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      missing_linux_x86_64: ${{ steps.plan.outputs.missing_linux_x86_64 }}
+      missing_linux_glibc231: ${{ steps.plan.outputs.missing_linux_glibc231 }}
+      missing_darwin_arm64: ${{ steps.plan.outputs.missing_darwin_arm64 }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Compute missing assets
+        id: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          # `force` marks every namespace missing so a manual dispatch can
+          # republish over an existing (e.g. suspect) asset.
+          CVC5_FORCE_REBUILD: ${{ (github.event_name == 'workflow_dispatch' && inputs.force) && '1' || '' }}
+        run: python3 scripts/ci_cvc5_cache.py plan
+
+  build-linux-x86_64:
+    name: Build cvc5 (linux-x86_64)
+    needs: [plan]
+    if: needs.plan.outputs.missing_linux_x86_64 == 'true'
+    runs-on: ubuntu-latest
+    # Debuginfo strip; the cvc5 static lib is unaffected (chelis#392).
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
+
+      - name: Install C dependencies
+        run: python3 scripts/ci_apt_get.py gcc g++ cmake libclang-dev libgmp-dev libmpfr-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Compute cvc5 store dir
+        id: cvc5key
+        run: python3 scripts/ci_cvc5_cache.py key --namespace linux-x86_64
+
+      # Genuine from-source cvc5 build: no CVC5_DIR, no cvc5 cache, no Swatinem
+      # restore, so the harvested artifact is the exact from-source recipe (the
+      # same command ci.yml smt-build runs, debug profile). cvc5's CMake build
+      # type is Release regardless of the cargo profile, so the static lib is
+      # profile-independent.
+      - name: Build smt feature (cvc5 from source)
+        run: cargo build -p chelis-cli --features smt
+
+      - name: Harvest cvc5 build
+        run: python3 scripts/ci_cvc5_cache.py harvest --dir "${{ steps.cvc5key.outputs.dir }}"
+
+      - name: Pack durable asset
+        id: pack
+        run: python3 scripts/ci_cvc5_cache.py pack --namespace linux-x86_64 --dir "${{ steps.cvc5key.outputs.dir }}" --out-dir artifacts
+
+      - name: Upload asset artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cvc5-linux-x86_64
+          path: |
+            artifacts/${{ steps.pack.outputs.asset }}
+            artifacts/${{ steps.pack.outputs.asset }}.sha256
+          if-no-files-found: error
+          retention-days: 3
+
+  build-linux-glibc231:
+    name: Build cvc5 (linux-glibc231)
+    needs: [plan]
+    if: needs.plan.outputs.missing_linux_glibc231 == 'true'
+    runs-on: ubuntu-latest
+    container: debian:11
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # See ci.yml smt-build-glibc231 for why python3 must exist before the
+      # in-repo apt retry helper can run on the slim debian:11 image.
+      - name: Bootstrap checkout prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates curl python3
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install build prerequisites
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_apt_get.py --no-sudo --no-install-recommends \
+            build-essential m4 \
+            cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev \
+            python3 python3-pip python3-venv
+          pip3 install --break-system-packages tomli || pip3 install tomli
+
+      - name: Assert glibc 2.31 build environment
+        run: |
+          set -euo pipefail
+          ldd --version | awk 'NR==1'
+          ldd --version | awk 'NR==1' | grep -F '2.31'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Compute cvc5 store dir
+        id: cvc5key
+        run: python3 scripts/ci_cvc5_cache.py key --namespace linux-glibc231
+
+      # Release profile to mirror ci.yml smt-build-glibc231 / release.yml.
+      - name: Build chelis-cli (release, smt; cvc5 from source)
+        run: cargo build --release -p chelis-cli --features smt
+
+      - name: Harvest cvc5 build
+        run: python3 scripts/ci_cvc5_cache.py harvest --dir "${{ steps.cvc5key.outputs.dir }}"
+
+      - name: Pack durable asset
+        id: pack
+        run: python3 scripts/ci_cvc5_cache.py pack --namespace linux-glibc231 --dir "${{ steps.cvc5key.outputs.dir }}" --out-dir artifacts
+
+      - name: Upload asset artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cvc5-linux-glibc231
+          path: |
+            artifacts/${{ steps.pack.outputs.asset }}
+            artifacts/${{ steps.pack.outputs.asset }}.sha256
+          if-no-files-found: error
+          retention-days: 3
+
+  build-darwin-arm64:
+    name: Build cvc5 (darwin-arm64)
+    needs: [plan]
+    if: needs.plan.outputs.missing_darwin_arm64 == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Assert Apple Silicon runner
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "arm64"
+
+      - name: Install build prerequisites
+        run: |
+          set -euo pipefail
+          brew list cmake >/dev/null 2>&1 || brew install cmake
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Compute cvc5 store dir
+        id: cvc5key
+        run: python3 scripts/ci_cvc5_cache.py key --namespace darwin-arm64
+
+      - name: Build chelis-cli (release, smt; cvc5 from source)
+        run: cargo build --release -p chelis-cli --features smt
+
+      - name: Harvest cvc5 build
+        run: python3 scripts/ci_cvc5_cache.py harvest --dir "${{ steps.cvc5key.outputs.dir }}"
+
+      - name: Pack durable asset
+        id: pack
+        run: python3 scripts/ci_cvc5_cache.py pack --namespace darwin-arm64 --dir "${{ steps.cvc5key.outputs.dir }}" --out-dir artifacts
+
+      - name: Upload asset artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cvc5-darwin-arm64
+          path: |
+            artifacts/${{ steps.pack.outputs.asset }}
+            artifacts/${{ steps.pack.outputs.asset }}.sha256
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    name: Publish cvc5 prebuilt release
+    needs: [plan, build-linux-x86_64, build-linux-glibc231, build-darwin-arm64]
+    # Never publish from a PR (contents: write). Run if the plan succeeded and
+    # at least one namespace was actually (re)built. `always()` so a skipped
+    # sibling build (asset already present) does not cancel publish of the
+    # namespaces that did build.
+    if: >-
+      always()
+      && github.event_name != 'pull_request'
+      && needs.plan.result == 'success'
+      && (needs.build-linux-x86_64.result == 'success'
+          || needs.build-linux-glibc231.result == 'success'
+          || needs.build-darwin-arm64.result == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download built assets
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: cvc5-*
+          merge-multiple: true
+
+      - name: Publish to prebuilt release tag
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci_publish_cvc5_release.py --tag "${{ needs.plan.outputs.tag }}" --dir dist
