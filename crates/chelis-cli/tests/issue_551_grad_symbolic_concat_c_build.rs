@@ -67,6 +67,46 @@ fn build_c(source: &str, stem: &str) -> (TempDir, std::path::PathBuf) {
     (dir, build_dir)
 }
 
+/// `chelis build --target c` expecting a FAIL-CLOSED reject: nonzero exit, no
+/// emitted `<stem>.c` artifact, and combined stdout+stderr for message
+/// assertions. Used for the chelis#593 memory-safety guard tests.
+fn build_c_expect_reject(source: &str, stem: &str) -> String {
+    let dir = tempdir().expect("tempdir");
+    let src_path = dir.path().join(format!("{stem}.ch"));
+    fs::write(&src_path, source).expect("write .ch source");
+    let build_dir = dir.path().join("build");
+    let output = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .current_dir(dir.path())
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            src_path.to_str().unwrap(),
+            "--target",
+            "c",
+            "-o",
+            build_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run chelis build");
+    assert!(
+        !output.status.success(),
+        "expected a fail-closed reject, but build SUCCEEDED (would emit \
+         heap-corrupting C): stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        !build_dir.join(format!("{stem}.c")).exists(),
+        "reject must emit NO artifact, but {stem}.c was written"
+    );
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
 /// gcc-compile `<stem>.c + driver.c` against the emitted
 /// `libchelis_runtime.a`, run the binary, and return stdout. A gcc or
 /// run-time failure fails the test with the captured diagnostics.
@@ -280,4 +320,141 @@ int main(void) {
         .map(|l| l.trim().parse::<f64>().expect("element"))
         .collect();
     assert_eq!(got, vec![8.0, 12.0, 12.0, 18.0], "host-lane concat->reduce");
+}
+
+// ---------------------------------------------------------------------------
+// chelis#593 MEMORY-SAFETY FLOOR (RT-2 finding). The #551 reduction arm above
+// lets `reduce(concat(axis=leading))` over a symbolic trailing dim reach C
+// codegen (it ICE'd loud at the symbolic-dim guard before). But the C-backend
+// symbolic ENTRY-WRAPPER mis-sizes the concat Pad output: `rename_anonymous_dims`
+// resolves the anon trailing dim by copying the operand's dims wholesale, which
+// clobbers the correctly-sized CONCRETE padded axis (`Lit(4)`) back to the
+// operand extent (`Lit(2)`), so the pad copy loop writes past the allocation —
+// a HEAP OUT-OF-BOUNDS WRITE and a silently wrong forward result (RT-2: eval
+// [40] vs C-build [16]; batch=2 double-free). The deeper wrapper-sizing fix is
+// tracked in chelis#593; `validate_pad_output_sizing` (chelis-backend-c) is the
+// fail-closed floor that keeps this loud instead of silent-wrong + unsafe.
+// ---------------------------------------------------------------------------
+
+// The RT-2 reproducer: reduce over a LEADING-axis concat, symbolic trailing dim.
+const RT2_REDUCE_LEADING_CONCAT: &str = "module Repro.RT2Reduce\n\
+def loss(x: tensor[2, batch, f32]) -> tensor[batch, f32] = {\n\
+  a = add(&x, &x)\n\
+  b = add(add(&x, &x), &x)\n\
+  c = concat([a, b], cast(0, int32))\n\
+  sum(c, cast(0, int32))\n\
+}\n\
+out = loss\n";
+
+/// NEGATIVE (chelis#593 / RT-2): `reduce(concat(axis=0))` over a symbolic
+/// trailing dim must FAIL LOUD at build — nonzero exit, no artifact, message
+/// citing #593 — never emit the mis-sized Pad that produces the silent-wrong
+/// [16] and the heap OOB write. This is the transition the phase must never
+/// ship (loud ICE -> silent-wrong + memory-unsafe); the guard restores loud.
+#[test]
+fn issue_593_leading_axis_symbolic_concat_reduce_rejects_loud() {
+    let out = build_c_expect_reject(RT2_REDUCE_LEADING_CONCAT, "rt2reduce");
+    assert!(
+        out.contains("593") && out.contains("mis-sized"),
+        "reject must cite chelis#593 and the mis-sizing; got: {out}"
+    );
+}
+
+// The bare-concat path (no reduce) — main's pre-existing memory hole. The #551
+// arm is not involved here; the guard must cover it too.
+const BARE_LEADING_CONCAT: &str = "module Repro.BareLeading\n\
+def f(x: tensor[2, batch, f32]) -> tensor[four, batch, f32] = {\n\
+  a = add(&x, &x)\n\
+  b = add(add(&x, &x), &x)\n\
+  concat([a, b], cast(0, int32))\n\
+}\n\
+out = f\n";
+
+/// NEGATIVE (chelis#593): the BARE leading-axis concat over a symbolic trailing
+/// dim (no reduce) — a pre-existing memory-safety hole on main — must also fail
+/// loud, so no heap-corrupting C is emitted on either path.
+#[test]
+fn issue_593_bare_leading_axis_symbolic_concat_rejects_loud() {
+    let out = build_c_expect_reject(BARE_LEADING_CONCAT, "bareleading");
+    assert!(
+        out.contains("593") && out.contains("mis-sized"),
+        "bare-concat reject must cite chelis#593; got: {out}"
+    );
+}
+
+// POSITIVE control: a CONCRETE-dim leading-axis concat is correctly sized (no
+// anon dim to trigger the wrapper clobber), so it must still build AND run.
+const CONCRETE_LEADING_CONCAT: &str = "module Repro.ConcreteLeading\n\
+def f(x: tensor[2, 3, f32]) -> tensor[3, f32] = {\n\
+  a = add(&x, &x)\n\
+  b = add(add(&x, &x), &x)\n\
+  c = concat([a, b], cast(0, int32))\n\
+  sum(c, cast(0, int32))\n\
+}\n\
+out = f\n";
+
+/// POSITIVE (no over-rejection): a concrete-dim leading-axis concat is
+/// well-sized and must still build + run correctly. x=[[1,2,3],[4,5,6]]:
+/// a=2x, b=3x, concat axis 0 -> rows [2,4,6],[8,10,12],[3,6,9],[12,15,18];
+/// sum axis 0 -> [25, 35, 45].
+#[test]
+fn issue_593_concrete_leading_axis_concat_still_builds_and_runs() {
+    let (_dir, build_dir) = build_c(CONCRETE_LEADING_CONCAT, "concleading");
+    let driver = r#"
+#include <stdio.h>
+#include <string.h>
+#include "chelis_runtime.h"
+extern chelis_tensor* out(chelis_tensor* arg0);
+int main(void) {
+    int shape[2] = {2, 3};
+    chelis_tensor* x = chelis_alloc(2, shape, CHELIS_F32);
+    float xd[6] = {1,2,3,4,5,6};
+    memcpy(x->data, xd, sizeof(xd));
+    chelis_tensor* r = out(x);
+    if (r->size != 3) { printf("FAIL_SIZE %d\n", r->size); return 1; }
+    for (int i = 0; i < 3; i++) printf("%.1f\n", r->data[i]);
+    return 0;
+}
+"#;
+    let stdout = compile_and_run(&build_dir, "concleading", driver);
+    let got: Vec<f64> = stdout
+        .lines()
+        .map(|l| l.trim().parse::<f64>().expect("element"))
+        .collect();
+    assert_eq!(got, vec![25.0, 35.0, 45.0], "concrete leading-axis concat");
+}
+
+/// POSITIVE (no over-rejection): a symbolic LAST-axis concat grad must still
+/// build + run correctly — the working #551 path (reuses SYM_BATCH_LINEAR,
+/// concat axis 1 over `tensor[batch, 2]`), guarding that the #593 floor does
+/// not reject the last-axis case. d/dx sum(concat([2x,3x],axis=1)) = 5.
+#[test]
+fn issue_593_last_axis_symbolic_concat_grad_still_builds_and_runs() {
+    let (_dir, build_dir) = build_c(LINEAR_GRAD, "lastaxisok");
+    let driver = r#"
+#include <stdio.h>
+#include <string.h>
+#include "chelis_runtime.h"
+extern chelis_tensor* out(chelis_tensor* arg0);
+int main(void) {
+    int shape[2] = {2, 2};
+    chelis_tensor* x = chelis_alloc(2, shape, CHELIS_F32);
+    float xd[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    memcpy(x->data, xd, sizeof(xd));
+    chelis_tensor* g = out(x);
+    if (g->size != 4) { printf("FAIL_SIZE %d\n", g->size); return 1; }
+    for (int i = 0; i < 4; i++) printf("%.1f\n", g->data[i]);
+    return 0;
+}
+"#;
+    let stdout = compile_and_run(&build_dir, "lastaxisok", driver);
+    let got: Vec<f64> = stdout
+        .lines()
+        .map(|l| l.trim().parse::<f64>().expect("element"))
+        .collect();
+    assert_eq!(
+        got,
+        vec![5.0, 5.0, 5.0, 5.0],
+        "last-axis symbolic concat grad"
+    );
 }
