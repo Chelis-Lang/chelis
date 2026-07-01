@@ -4890,10 +4890,33 @@ impl LowerCtx {
             }
             Some("vmap") => {
                 let kids = children(list);
-                let axis = kids
-                    .get(1)
-                    .and_then(|expr| self.extract_usize_value(expr))
-                    .unwrap_or(0);
+                // chelis#524: distinguish the documented `vmap` contract
+                // (axis argument ABSENT -> map over axis 0) from an axis
+                // argument that is PRESENT but not a compile-time constant.
+                // The pre-fix `extract_usize_value(...).unwrap_or(0)`
+                // collapsed BOTH to axis 0, so a runtime mapped axis
+                // silently vectorized over the WRONG axis — the same
+                // silent default-to-0 anti-pattern #364 eliminated for
+                // reductions / softmax / gather/scatter. A runtime axis must
+                // be rejected at check time, so reaching here with an
+                // unresolvable PRESENT axis is a loud, FATAL, located
+                // lowering error (mirrors `extract_axis_raw`); a silent 0
+                // would be absorbed into a wrong-axis vectorization.
+                let axis = match kids.get(1) {
+                    None => 0,
+                    Some(axis_expr) => match self.extract_usize_value(axis_expr) {
+                        Some(value) => value,
+                        None => raise_fatal_lowering_error(
+                            "`vmap` mapped axis is not a compile-time integer constant: the DAG \
+                             cannot vectorize over a runtime axis (the checker admits only a \
+                             literal or a `cast(<int>, int32)` axis here; a runtime axis must be \
+                             rejected at check time). `vmap` defaults to axis 0 only when the axis \
+                             argument is omitted, never when a non-constant axis is supplied",
+                            Some(axis_expr.span()),
+                            axis_expr.span_id().map(ToOwned::to_owned),
+                        ),
+                    },
+                };
                 if let Some(Expr::List(grad_list, _)) = kids.first()
                     && get_tag(grad_list) == Some("grad")
                 {

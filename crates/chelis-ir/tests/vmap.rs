@@ -1,6 +1,7 @@
 use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_ir::vmap::vectorize_axis0;
+use chelis_types::check_ir_program;
 use chelis_types::types::Prim;
 use std::collections::HashMap;
 
@@ -167,4 +168,155 @@ fn vmap_batched_matmul_stays_in_expand_mul_sum_form() {
             .any(|node| matches!(node.op, RiscOp::Expand { axis: 3, .. })),
         "batched matmul should stay in the generic expand->mul->sum decomposition"
     );
+}
+
+// =====================================================================
+// chelis#524: a non-constant `vmap` mapped (batch) axis must FAIL CLOSED
+// at lowering — a loud, LOCATED, FATAL diagnostic — never silently
+// default to axis 0.
+//
+// `resolve_callable_expr_inner`'s `Some("vmap")` arm read the axis with
+// `kids.get(1).and_then(extract_usize_value).unwrap_or(0)`, which
+// collapsed BOTH "axis arg absent" (the documented vmap default) AND
+// "axis arg present but non-constant" to axis 0. A runtime mapped axis
+// then silently vectorized the WRONG axis — the same default-to-0
+// anti-pattern #364 eliminated for reductions / softmax / gather/scatter.
+//
+// The surf parser only admits a literal `axis=N`, so a runtime axis is
+// reachable through the Deep (`.dp`) input path (or any internal IR
+// transform): the program below `chelis check`s clean and pre-fix
+// `chelis build` succeeded, silently lowering the `vmap` over axis 0.
+// Negative parity with #364's `extract_axis_raw`.
+// =====================================================================
+
+/// A `vmap` over `tensor[batch, features]` whose mapped axis is the bound
+/// runtime parameter `ax: int32` (a non-constant). Spans are carried on the
+/// axis node so the lowering diagnostic is LOCATED.
+const VMAP_RUNTIME_AXIS_DEEP: &str = r#"
+(defsig {} process
+  (t-fn {} (t-tensor {} (d-name {} features) (t-prim {} f32))
+           (t-tensor {} (d-name {} features) (t-prim {} f32))))
+(def {} process
+  (fn {} (params {} (x {type: (t-tensor {} (d-name {} features) (t-prim {} f32))}))
+    (app {} (var {} relu) (var {} x))))
+(defsig {} batch_process
+  (t-fn {} (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))
+           (t-prim {} int32)
+           (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))))
+(def {} batch_process
+  (fn {} (params {}
+           (xs {type: (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))})
+           (ax {type: (t-prim {} int32)}))
+    (pipe {} (var {} xs)
+      (vmap {} (var {} process) (var {span: "dp:vmap-runtime-axis"} ax)))))
+"#;
+
+/// The same program with a CONSTANT (`lit`) mapped axis — the negative
+/// parity control. Identical except the axis node is a literal, so it must
+/// lower cleanly.
+const VMAP_CONST_AXIS_DEEP: &str = r#"
+(defsig {} process
+  (t-fn {} (t-tensor {} (d-name {} features) (t-prim {} f32))
+           (t-tensor {} (d-name {} features) (t-prim {} f32))))
+(def {} process
+  (fn {} (params {} (x {type: (t-tensor {} (d-name {} features) (t-prim {} f32))}))
+    (app {} (var {} relu) (var {} x))))
+(defsig {} batch_process
+  (t-fn {} (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))
+           (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))))
+(def {} batch_process
+  (fn {} (params {}
+           (xs {type: (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))}))
+    (pipe {} (var {} xs)
+      (vmap {} (var {} process) (lit {type: (t-prim {} int32)} 0)))))
+"#;
+
+fn check_effects_linearity_deep(deep_src: &str) -> chelis_types::CheckedProgram {
+    let exprs = chelis_deep::parser::parse_str(deep_src).expect("deep parse");
+    let checked = check_ir_program(&exprs)
+        .unwrap_or_else(|r| panic!("deep program must check clean: {:?}", r.errors));
+    let checked = chelis_effects::check_program(&checked).expect("effects");
+    chelis_types::check_linearity(&checked).expect("linearity")
+}
+
+fn lower_surf_program(src: &str) -> Result<Dag, chelis_ir::lower::LowerDiagnostic> {
+    let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
+    let exprs = chelis_macros::expand_program(
+        &chelis_surf::desugar::desugar_program(&decls),
+        &chelis_macros::ExpansionOptions::default(),
+    )
+    .expect("expand")
+    .into_exprs();
+    let checked = check_ir_program(&exprs)
+        .unwrap_or_else(|r| panic!("surf program must check clean: {:?}", r.errors));
+    let checked = chelis_effects::check_program(&checked).expect("effects");
+    let checked = chelis_types::check_linearity(&checked).expect("linearity");
+    chelis_ir::lower::try_lower_program(&checked)
+}
+
+/// REJECT: a present-but-non-constant `vmap` mapped axis must lower to a
+/// FATAL, LOCATED diagnostic naming `vmap` and the runtime-axis cause — not
+/// silently default to axis 0 (which pre-fix let `chelis build` succeed).
+#[test]
+fn issue524_runtime_vmap_axis_is_fatal_located_lowering_error() {
+    let checked = check_effects_linearity_deep(VMAP_RUNTIME_AXIS_DEEP);
+    let diag = chelis_ir::lower::try_lower_program(&checked)
+        .expect_err("a runtime vmap axis must REJECT at lowering, not silently default to 0");
+    assert!(
+        diag.fatal,
+        "the runtime-axis reject must be FATAL (not host-fallback-absorbable); got {diag:?}"
+    );
+    assert!(
+        diag.message.contains("vmap") && diag.message.contains("axis"),
+        "the diagnostic must name `vmap` and the axis; got: {}",
+        diag.message
+    );
+    assert!(
+        diag.message.contains("compile-time")
+            && diag
+                .message
+                .contains("runtime axis must be rejected at check time"),
+        "the diagnostic must explain the compile-time-constant requirement (mirroring #364); \
+         got: {}",
+        diag.message
+    );
+    // LOCATED: the axis node carried a span, so the diagnostic must point at
+    // it — a default-to-0 would have no location at all.
+    assert_eq!(
+        diag.span_id.as_deref(),
+        Some("dp:vmap-runtime-axis"),
+        "the reject must be located at the axis sub-expression; got {:?}",
+        diag.span_id
+    );
+}
+
+/// CONTROL (constant axis): the same program with a `lit` axis lowers
+/// cleanly — FAIL-CLOSED must not become reject-everything.
+#[test]
+fn issue524_constant_vmap_axis_still_lowers() {
+    let checked = check_effects_linearity_deep(VMAP_CONST_AXIS_DEEP);
+    let dag = chelis_ir::lower::try_lower_program(&checked)
+        .expect("a constant vmap axis must still lower cleanly");
+    assert!(!dag.nodes().is_empty(), "lowered DAG must be non-empty");
+}
+
+/// CONTROL (absent axis): the documented `vmap` contract — an OMITTED axis
+/// argument defaults to axis 0 — must still hold. `vmap(process)` lowers
+/// cleanly (the `None` branch, not the rejected non-constant branch).
+#[test]
+fn issue524_absent_vmap_axis_defaults_to_zero_and_lowers() {
+    let src = "def process(x: tensor[features, f32]) -> tensor[features, f32] = relu(x)\n\
+         def batch_process(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] = xs |> vmap(process)\n";
+    let dag = lower_surf_program(src).expect("an absent vmap axis must default to 0 and lower");
+    assert!(!dag.nodes().is_empty(), "lowered DAG must be non-empty");
+}
+
+/// CONTROL (explicit constant axis via Surf): the surf surface form
+/// `vmap(process, axis=0)` lowers cleanly.
+#[test]
+fn issue524_explicit_constant_vmap_axis_via_surf_lowers() {
+    let src = "def process(x: tensor[features, f32]) -> tensor[features, f32] = relu(x)\n\
+         def batch_process(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] = xs |> vmap(process, axis=0)\n";
+    let dag = lower_surf_program(src).expect("an explicit constant vmap axis must lower");
+    assert!(!dag.nodes().is_empty(), "lowered DAG must be non-empty");
 }
