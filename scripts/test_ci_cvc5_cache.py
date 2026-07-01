@@ -319,6 +319,20 @@ class SafeExtractTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 mod.safe_extract(tar, root / "dest")
 
+    def test_rejects_symlink_member(self):
+        import os as _os
+        import tarfile
+
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "real.txt").write_text("x\n")
+            _os.symlink(root / "real.txt", root / "link")
+            tar = root / "link.tar.gz"
+            with tarfile.open(tar, "w:gz") as t:
+                t.add(root / "link", arcname="link")
+            with self.assertRaises(RuntimeError):
+                mod.safe_extract(tar, root / "dest")
+
 
 class FetchTests(unittest.TestCase):
     """cmd_fetch: durable Release-asset download+verify+extract, always exit 0."""
@@ -472,6 +486,51 @@ class FetchTests(unittest.TestCase):
                 )
             self.assertEqual(rc, 0)
             self.assertIn("warm=true", gh_out.read_text())
+
+    def test_missing_sha256_sidecar_falls_back_cold(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            tar, sha, name = self._prepare_asset(root)
+            # Release lists the tar but NOT its .sha256 sidecar.
+            assets = {name: {"browser_download_url": "http://x/" + name}}
+            text, dest = self._run_fetch(root, assets, self._copy_downloader(tar, sha))
+            self.assertIn("warm=false", text)
+            self.assertFalse(mod.is_warm(dest))
+
+    def test_download_error_falls_back_cold(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            tar, sha, name = self._prepare_asset(root)
+            assets = {
+                name: {"browser_download_url": "http://x/" + name},
+                name + ".sha256": {"browser_download_url": "http://x/" + name + ".sha256"},
+            }
+
+            def _boom(url, dest):
+                raise OSError("network down")
+
+            text, dest = self._run_fetch(root, assets, _boom)
+            self.assertIn("warm=false", text)
+            self.assertFalse(mod.is_warm(dest))
+
+    def test_garbage_gzip_falls_back_cold(self):
+        # A non-gzip payload whose sha256 sidecar MATCHES (so it passes
+        # verification) must still fail to open as a tar.gz -> caught -> cold.
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            name = mod.asset_filename("linux-x86_64", "0.3.1")
+            garbage = root / name
+            garbage.write_bytes(b"this is not a gzip tarball")
+            digest = mod.sha256_file(garbage)
+            sha = Path(str(garbage) + ".sha256")
+            sha.write_text(f"{digest}  {name}\n", encoding="utf-8")
+            assets = {
+                name: {"browser_download_url": "http://x/" + name},
+                name + ".sha256": {"browser_download_url": "http://x/" + name + ".sha256"},
+            }
+            text, dest = self._run_fetch(root, assets, self._copy_downloader(garbage, sha))
+            self.assertIn("warm=false", text)
+            self.assertFalse(mod.is_warm(dest))
 
 
 class PlanTests(unittest.TestCase):
