@@ -63,19 +63,26 @@ jobs:
       - name: Create uv-managed venv + wire libpython rpath
         run: python3 scripts/ci_setup_uv_python.py
 
-      # chelis#583: dedicated stable-key cvc5 cache, shared with the required
-      # smt-build smoke lane (same `linux-x86_64` namespace + key). cvc5
-      # builds from source (~30m cold) and the Swatinem cache below keys on
-      # Cargo.lock, so an unrelated dependency bump would otherwise re-pay
-      # the full build before the first prove step. On a warm hit, `activate`
-      # exports CVC5_DIR and cvc5-sys LINKS the prebuilt libcvc5.a. See the
-      # smt-build job in ci.yml and docs/smt_build_setup.md.
+      # Same layered prebuilt-cvc5 link as the required smt-build smoke lane
+      # (shared `linux-x86_64` namespace + key): durable Release asset first
+      # (build-cvc5.yml, rustc-independent, no TTL/LRU/branch-scope), Actions
+      # cache fallback second. Keeps the ~22m from-source cvc5 build off this
+      # lane so it spends time proving, not rebuilding cvc5. On a warm store
+      # `activate` exports CVC5_DIR and cvc5-sys LINKS the prebuilt libcvc5.a.
+      # See the smt-build job in ci.yml and docs/smt_build_setup.md.
       - name: Compute cvc5 cache key
         id: cvc5key
         run: python3 scripts/ci_cvc5_cache.py key --namespace linux-x86_64
 
-      - name: Restore prebuilt cvc5
+      - name: Fetch durable prebuilt cvc5 (Release asset)
+        id: cvc5fetch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci_cvc5_cache.py fetch --namespace linux-x86_64 --dir "${{ steps.cvc5key.outputs.dir }}"
+
+      - name: Restore prebuilt cvc5 (Actions cache fallback)
         id: cvc5restore
+        if: steps.cvc5fetch.outputs.warm != 'true'
         uses: actions/cache/restore@v4
         # Best-effort: a cache-service hiccup must degrade to a from-source
         # build, never fail this job (chelis#583).

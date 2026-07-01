@@ -160,13 +160,15 @@ jobs:
   smt-build:
     name: SMT Feature Build (Linux)
     runs-on: ubuntu-latest
-    # cvc5 builds from source on top of the workspace build, so a cold cache
-    # (PR branches do not get the warm base-branch cache) runs ~30m+. The old
-    # 20m cap cancelled that mid-build on every PR while main squeaked under it
-    # on a warm cache; the cancelled run skipped the cache-save step, so reruns
-    # stayed cold and re-timed-out. 40m clears the cold build (the glibc-2.31
-    # sibling, which is uncapped, runs ~34m) and lets it warm the cache.
-    timeout-minutes: 40
+    # In steady state this job LINKS a durable prebuilt cvc5 (a GitHub Release
+    # asset published by build-cvc5.yml, rustc-independent, no cache TTL/LRU),
+    # so it runs ~3m warm. The from-source cvc5 compile (~22m) is off the
+    # per-PR path: it only recurs on a cvc5-sys version bump before
+    # build-cvc5.yml republishes the asset (see docs/smt_build_setup.md for the
+    # bump runbook). 25m covers a warm link plus a fully cold Rust workspace
+    # recompile (e.g. after a stable-toolchain bump) with margin, and fails
+    # fast instead of silently absorbing a stray from-source cvc5 build.
+    timeout-minutes: 25
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
     # success. Runs on every code PR and push.
     needs: [changes]
@@ -202,26 +204,37 @@ jobs:
       - name: Create uv-managed venv + wire libpython rpath
         run: python3 scripts/ci_setup_uv_python.py
 
-      # chelis#583: cvc5 (cvc5-sys) builds from source via CMake+make (~30m
-      # cold). The Swatinem/rust-cache below keys on Cargo.lock, so an
-      # UNRELATED dependency bump blows the workspace cache and re-pays the
-      # full cvc5 build. This dedicated cache stores the cvc5 build OUTSIDE
-      # target/ under a STABLE key (cvc5-sys version, which moves with the
-      # bundled cvc5 release, + os/arch namespace + rustc version -- NOT
-      # Cargo.lock), restored BEFORE rust-cache. On a warm hit, `activate`
-      # exports CVC5_DIR so cvc5-sys LINKS the prebuilt libcvc5.a and skips
-      # the from-source build (the z3-sys prebuilt-link precedent; see
-      # docs/local_z3_environment.md). Living outside target/, it never
-      # contends with rust-cache's target/ domain. Worst case is "no
-      # speedup", never a broken build: CVC5_DIR is set only when the cache
-      # is complete (verified by ci_cvc5_cache.py's sentinel), else the
-      # normal from-source path runs. See docs/smt_build_setup.md.
+      # cvc5 (cvc5-sys) builds from source via CMake+make (~22m cold). To keep
+      # that off the per-PR path we LINK a prebuilt cvc5, tried in two layers
+      # (see docs/smt_build_setup.md and scripts/ci_cvc5_cache.py):
+      #   1. DURABLE (primary): a GitHub Release asset published by
+      #      build-cvc5.yml, keyed on the cvc5-sys version + namespace (NOT
+      #      Cargo.lock, NOT rustc). A Release asset has no 10GB LRU budget, no
+      #      7-day TTL, and no branch scope, so a stable-toolchain bump or a
+      #      quiet stretch no longer forces a cold rebuild. `fetch`
+      #      sha256-verifies and extracts it; on ANY miss it exits 0 with
+      #      warm=false.
+      #   2. FALLBACK (secondary): the stable-key Actions cache, restored only
+      #      when the durable fetch missed (the cvc5-sys-bump window before
+      #      build-cvc5.yml republishes). Best-effort; a hiccup degrades to
+      #      from-source, never fails the job.
+      # `activate` exports CVC5_DIR only when the store is complete (verified by
+      # ci_cvc5_cache.py's sentinel); otherwise the normal from-source path
+      # runs. (A PR branch DOES inherit main's caches/assets; only a PR's own
+      # cache SAVE is branch-scoped.)
       - name: Compute cvc5 cache key
         id: cvc5key
         run: python3 scripts/ci_cvc5_cache.py key --namespace linux-x86_64
 
-      - name: Restore prebuilt cvc5
+      - name: Fetch durable prebuilt cvc5 (Release asset)
+        id: cvc5fetch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci_cvc5_cache.py fetch --namespace linux-x86_64 --dir "${{ steps.cvc5key.outputs.dir }}"
+
+      - name: Restore prebuilt cvc5 (Actions cache fallback)
         id: cvc5restore
+        if: steps.cvc5fetch.outputs.warm != 'true'
         uses: actions/cache/restore@v4
         # Best-effort: a cache-service hiccup must degrade to a from-source
         # build, never fail this job (chelis#583).
@@ -359,8 +372,19 @@ jobs:
         id: cvc5key
         run: python3 scripts/ci_cvc5_cache.py key --namespace linux-glibc231
 
-      - name: Restore prebuilt cvc5
+      # Durable Release asset first, Actions cache fallback second; see the
+      # smt-build job for the full rationale. The asset is built in this same
+      # debian:11 (glibc 2.31) container by build-cvc5.yml, so the glibc-2.31
+      # assertion below stays valid on the linked artifact.
+      - name: Fetch durable prebuilt cvc5 (Release asset)
+        id: cvc5fetch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci_cvc5_cache.py fetch --namespace linux-glibc231 --dir "${{ steps.cvc5key.outputs.dir }}"
+
+      - name: Restore prebuilt cvc5 (Actions cache fallback)
         id: cvc5restore
+        if: steps.cvc5fetch.outputs.warm != 'true'
         uses: actions/cache/restore@v4
         # Best-effort: a cache-service hiccup must degrade to a from-source
         # build, never fail this job (chelis#583).
@@ -453,8 +477,17 @@ jobs:
         id: cvc5key
         run: python3 scripts/ci_cvc5_cache.py key --namespace darwin-arm64
 
-      - name: Restore prebuilt cvc5
+      # Durable Release asset first, Actions cache fallback second; see the
+      # smt-build job for the full rationale.
+      - name: Fetch durable prebuilt cvc5 (Release asset)
+        id: cvc5fetch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci_cvc5_cache.py fetch --namespace darwin-arm64 --dir "${{ steps.cvc5key.outputs.dir }}"
+
+      - name: Restore prebuilt cvc5 (Actions cache fallback)
         id: cvc5restore
+        if: steps.cvc5fetch.outputs.warm != 'true'
         uses: actions/cache/restore@v4
         # Best-effort: a cache-service hiccup must degrade to a from-source
         # build, never fail this job (chelis#583).

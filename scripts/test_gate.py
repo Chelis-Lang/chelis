@@ -96,6 +96,15 @@ NON_GATE_WORKFLOWS = {
     # scheduled workflow; it commits a docs/loc_report.md bot commit and runs
     # nothing the per-PR gate owns, so it is out of gate.py scope by design.
     "loc-report.yml",
+    # Producer for the durable prebuilt-cvc5 Release asset the smt lanes LINK
+    # (scripts/ci_cvc5_cache.py). Builds cvc5 from source and publishes a
+    # Release; it runs no cargo/chelis command the per-PR gate owns, only on a
+    # cvc5-sys bump / dispatch / weekly schedule. Out of gate.py scope.
+    "build-cvc5.yml",
+    # Scheduled Actions-cache pruner (scripts/ci_cache_prune.py). Deletes stale
+    # caches to hold the pool under the 10GB LRU budget; runs no per-PR gate
+    # command. Out of gate.py scope by design.
+    "cache-prune.yml",
 }
 
 
