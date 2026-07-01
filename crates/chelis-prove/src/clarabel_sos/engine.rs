@@ -108,11 +108,14 @@ impl<P: SosProposer> ClarabelSosEngine<P> {
     /// outcome the engine emits; it never fabricates a `Disproved` or a partial
     /// proof.
     fn unknown(reason: &str, extra: serde_json::Value) -> Discharge {
-        Discharge::new(
+        // chelis#496: canonical top-level `"engine"` attribution; the outcome,
+        // reason, and detail are backend-specific evidence.
+        Discharge::with_engine_attribution(
+            ENGINE_NAME,
             Soundness::Untrusted,
             QualifierSet::new(),
             TierBResult::Unknown,
-            json!({ "engine": ENGINE_NAME, "outcome": "unknown", "reason": reason, "detail": extra }),
+            json!({ "outcome": "unknown", "reason": reason, "detail": extra }),
         )
         .expect("untrusted discharge with an empty qualifier set is always valid")
     }
@@ -209,17 +212,19 @@ impl<P: SosProposer> DischargeEngine for ClarabelSosEngine<P> {
                 // symmetric + exactly PSD over the rationals AND the combined
                 // quadratic form equals the goal polynomial exactly. ONLY now do
                 // we claim CertificateBearing@Exact.
-                let evidence = json!({
-                    "engine": ENGINE_NAME,
+                // chelis#496: canonical top-level `"engine"` attribution; the
+                // certificate and outcome detail are backend-specific evidence.
+                let backend = json!({
                     "outcome": "proved",
                     "certificate": cert_evidence(&cert),
                     "strict": poly_goal.strict,
                 });
-                Discharge::new(
+                Discharge::with_engine_attribution(
+                    ENGINE_NAME,
                     Soundness::Exact,
                     QualifierSet::from_iter_kinds([Qualifier::CertificateBearing]),
                     TierBResult::Proved,
-                    evidence,
+                    backend,
                 )
                 .unwrap_or_else(|err| {
                     // CertificateBearing's floor is exactly Soundness::Exact, so
@@ -402,12 +407,17 @@ mod tests {
                 .qualifier_set()
                 .contains(Qualifier::CertificateBearing)
         );
-        // The evidence carries the certificate for downstream re-checking.
+        // The evidence carries the certificate for downstream re-checking,
+        // under the canonical `backend` sub-object (chelis#496).
+        let backend = discharge
+            .evidence()
+            .get("backend")
+            .expect("clarabel evidence carries a backend sub-object");
         assert_eq!(
-            discharge.evidence().get("outcome").and_then(|v| v.as_str()),
+            backend.get("outcome").and_then(|v| v.as_str()),
             Some("proved")
         );
-        assert!(discharge.evidence().get("certificate").is_some());
+        assert!(backend.get("certificate").is_some());
     }
 
     #[test]
@@ -479,7 +489,8 @@ mod tests {
         assert_eq!(
             discharge
                 .evidence()
-                .get("detail")
+                .get("backend")
+                .and_then(|b| b.get("detail"))
                 .and_then(|d| d.get("cert_error"))
                 .and_then(|v| v.as_str()),
             Some("not_psd")
@@ -508,7 +519,8 @@ mod tests {
         assert_eq!(
             discharge
                 .evidence()
-                .get("detail")
+                .get("backend")
+                .and_then(|b| b.get("detail"))
                 .and_then(|d| d.get("cert_error"))
                 .and_then(|v| v.as_str()),
             Some("polynomial_mismatch")
@@ -653,7 +665,13 @@ mod tests {
                 .qualifier_set()
                 .contains(Qualifier::CertificateBearing)
         );
-        assert!(discharge.evidence().get("certificate").is_some());
+        assert!(
+            discharge
+                .evidence()
+                .get("backend")
+                .and_then(|b| b.get("certificate"))
+                .is_some()
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

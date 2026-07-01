@@ -247,22 +247,30 @@ pub fn exhausted_discharge(goal: &Goal, last_non_verdict: Option<&Discharge>) ->
     // Preserve the last engine's honest non-verdict result (and a note of which
     // engine it came from) when one is available; otherwise synthesize an
     // Error. Either way the lattice membership is Untrusted/empty/Error.
-    let (result, evidence) = match last_non_verdict {
+    // chelis#496: the canonical attribution is the top-level `"engine"` key
+    // (here the dispatcher pseudo-source `exhausted_fallthrough`); the reason and
+    // the last engine's own evidence live under `"backend"`.
+    let (result, backend) = match last_non_verdict {
         Some(d) => (
             d.result().clone(),
             serde_json::json!({
-                "dispatch": "exhausted_fallthrough",
                 "reason": reason,
                 "last_engine_evidence": d.evidence().clone(),
             }),
         ),
         None => (
             TierBResult::Error(reason.clone()),
-            serde_json::json!({ "dispatch": "exhausted_fallthrough", "reason": reason }),
+            serde_json::json!({ "reason": reason }),
         ),
     };
-    Discharge::new(Soundness::Untrusted, QualifierSet::new(), result, evidence)
-        .expect("untrusted discharge with an empty qualifier set is always valid")
+    Discharge::with_engine_attribution(
+        "exhausted_fallthrough",
+        Soundness::Untrusted,
+        QualifierSet::new(),
+        result,
+        backend,
+    )
+    .expect("untrusted discharge with an empty qualifier set is always valid")
 }
 
 /// Build the canonical no-fit [`Discharge`] for a goal that no registered engine
@@ -280,11 +288,14 @@ pub fn no_fit_discharge(goal: &Goal) -> Discharge {
         "no registered discharge engine fits goal shape `{}`",
         goal_shape_label(goal)
     );
-    Discharge::new(
+    // chelis#496: the canonical attribution is the top-level `"engine"` key
+    // (the dispatcher pseudo-source `no_fit`); the reason lives under `"backend"`.
+    Discharge::with_engine_attribution(
+        "no_fit",
         Soundness::Untrusted,
         QualifierSet::new(),
         TierBResult::Error(reason.clone()),
-        serde_json::json!({ "dispatch": "no_fit", "reason": reason }),
+        serde_json::json!({ "reason": reason }),
     )
     .expect("untrusted discharge with an empty qualifier set is always valid")
 }
@@ -350,13 +361,22 @@ impl DischargeEngine for SolvePropertyEngine {
             ),
         };
         let (soundness, qualifier_set) = Self::classify(&result);
-        let evidence = serde_json::json!({ "engine": "solve_property" });
-        Discharge::new(soundness, qualifier_set, result, evidence).unwrap_or_else(|err| {
-            Discharge::new(
+        // chelis#496: canonical top-level `"engine"` attribution; no extra
+        // backend detail on the normal path.
+        Discharge::with_engine_attribution(
+            "solve_property",
+            soundness,
+            qualifier_set,
+            result,
+            serde_json::Value::Null,
+        )
+        .unwrap_or_else(|err| {
+            Discharge::with_engine_attribution(
+                "solve_property",
                 Soundness::Untrusted,
                 QualifierSet::new(),
                 TierBResult::Error(err.to_string()),
-                serde_json::json!({ "engine": "solve_property", "internal_error": err.to_string() }),
+                serde_json::json!({ "internal_error": err.to_string() }),
             )
             .expect("untrusted discharge with empty qualifier set is always valid")
         })
@@ -487,11 +507,14 @@ mod tests {
         }
 
         fn discharge(&self, _goal: &Goal, _timeout_ms: u64) -> Discharge {
-            Discharge::new(
+            // chelis#496: route through the canonical attribution helper too, so
+            // the mock cannot drift from the convention it exists to exercise.
+            Discharge::with_engine_attribution(
+                self.name,
                 self.soundness,
                 self.qualifiers.clone(),
                 self.result.clone(),
-                serde_json::json!({ "engine": self.name }),
+                serde_json::Value::Null,
             )
             .expect("mock discharge must satisfy the integrity invariant")
         }
@@ -952,12 +975,10 @@ mod tests {
         let verdict = composite_with_no_fit_dependency(&discharge);
         assert_eq!(verdict, CompositeVerdict::Unsupported);
         assert_ne!(verdict, CompositeVerdict::Proven);
-        // Honest reason: exhausted, not "no engine fits".
+        // Honest reason: exhausted, not "no engine fits". chelis#496: the
+        // canonical top-level attribution key is `engine`.
         assert_eq!(
-            discharge
-                .evidence()
-                .get("dispatch")
-                .and_then(|v| v.as_str()),
+            discharge.evidence().get("engine").and_then(|v| v.as_str()),
             Some("exhausted_fallthrough"),
             "the exhausted case is distinguished from no-fit in the evidence"
         );
@@ -977,10 +998,7 @@ mod tests {
         let discharge = registry.dispatch(&box_range_goal(), 1_000);
         assert_no_fit_lattice_membership(&discharge);
         assert_eq!(
-            discharge
-                .evidence()
-                .get("dispatch")
-                .and_then(|v| v.as_str()),
+            discharge.evidence().get("engine").and_then(|v| v.as_str()),
             Some("no_fit"),
             "an unfit shape is no_fit, never exhausted_fallthrough"
         );

@@ -471,6 +471,31 @@ impl Discharge {
     pub fn evidence(&self) -> &serde_json::Value {
         &self.evidence
     }
+
+    /// Build a discharge carrying the CANONICAL cross-engine attribution
+    /// (chelis#496): a single top-level `"engine"` key naming the producer (a
+    /// [`DischargeEngine::name`] or a dispatcher pseudo-source such as `no_fit`
+    /// / `exhausted_fallthrough`), with all solver-/backend-specific detail
+    /// nested under a `"backend"` sub-object. Every engine and dispatcher
+    /// routes its evidence through here, so the raw evidence cannot drift to a
+    /// per-engine attribution key (the old `"solver"` / `"dispatch"` split).
+    ///
+    /// `backend` is omitted when it is `Null`, so an engine with no extra detail
+    /// emits exactly `{"engine": "<name>"}`. The integrity invariant of
+    /// [`Discharge::new`] still applies.
+    pub fn with_engine_attribution(
+        engine: &str,
+        soundness: Soundness,
+        qualifier_set: QualifierSet,
+        result: TierBResult,
+        backend: serde_json::Value,
+    ) -> Result<Self, DischargeError> {
+        let mut evidence = serde_json::json!({ "engine": engine });
+        if !backend.is_null() {
+            evidence["backend"] = backend;
+        }
+        Self::new(soundness, qualifier_set, result, evidence)
+    }
 }
 
 /// The ENGINE-AGNOSTIC classification of an SMT [`TierBResult`] into its
@@ -569,15 +594,18 @@ impl DischargeEngine for Cvc5Engine {
             }
         };
         let (soundness, qualifier_set) = Self::classify(&result);
+        // chelis#496: the canonical attribution is the top-level `"engine"` key
+        // (`"cvc5"`); solver-specific detail lives under `"backend"`. Empty when
+        // there is no extra detail.
         #[cfg_attr(not(feature = "carcara"), allow(unused_mut))]
-        let mut evidence = serde_json::json!({ "solver": "cvc5" });
+        let mut backend = serde_json::Value::Null;
 
         // WI-16 Carcara audit dimension: when the `carcara` feature is on and
         // cvc5 returned a proof (Proved == UNSAT), independently re-check that
-        // proof with Carcara and FOLD the outcome into the evidence. This does
-        // NOT change `soundness`/`qualifier_set`: a cvc5 `Proved` keeps the
-        // classification's `SoundApproximate` / `RealArith` badge (the auditor
-        // adds an independent-audit dimension, it does not manufacture a
+        // proof with Carcara and FOLD the outcome into the backend evidence.
+        // This does NOT change `soundness`/`qualifier_set`: a cvc5 `Proved` keeps
+        // the classification's `SoundApproximate` / `RealArith` badge (the
+        // auditor adds an independent-audit dimension, it does not manufacture a
         // stronger badge). A re-check FAILURE is recorded in the evidence as an
         // auditor disagreement (write-only today; see `carcara_audit`), never
         // folded into a confirmed state.
@@ -586,23 +614,27 @@ impl DischargeEngine for Cvc5Engine {
             && let Some(property) = goal.as_smt()
         {
             let audit = crate::carcara_audit::audit_cvc5_proof(property, timeout_ms);
-            evidence["carcara_audit"] = serde_json::to_value(&audit)
-                .unwrap_or(serde_json::Value::String("serialization_error".to_string()));
+            backend = serde_json::json!({
+                "carcara_audit": serde_json::to_value(&audit)
+                    .unwrap_or(serde_json::Value::String("serialization_error".to_string())),
+            });
         }
 
         // The classification only ever pairs the `real_arithmetic` qualifier
         // with `Soundness::SoundApproximate` (its floor) or returns an empty
         // set at `Untrusted`, so this constructor cannot fail here; surfacing
         // the error as a non-proof discharge keeps the seam total.
-        Discharge::new(soundness, qualifier_set, result, evidence).unwrap_or_else(|err| {
-            Discharge::new(
-                Soundness::Untrusted,
-                QualifierSet::new(),
-                TierBResult::Error(err.to_string()),
-                serde_json::json!({ "solver": "cvc5", "internal_error": err.to_string() }),
-            )
-            .expect("untrusted discharge with empty qualifier set is always valid")
-        })
+        Discharge::with_engine_attribution("cvc5", soundness, qualifier_set, result, backend)
+            .unwrap_or_else(|err| {
+                Discharge::with_engine_attribution(
+                    "cvc5",
+                    Soundness::Untrusted,
+                    QualifierSet::new(),
+                    TierBResult::Error(err.to_string()),
+                    serde_json::json!({ "internal_error": err.to_string() }),
+                )
+                .expect("untrusted discharge with empty qualifier set is always valid")
+            })
     }
 }
 
@@ -975,12 +1007,13 @@ mod tests {
         // proof structure). It must NOT be a failure or absent.
         let status = discharge
             .evidence()
-            .get("carcara_audit")
+            .get("backend")
+            .and_then(|b| b.get("carcara_audit"))
             .and_then(|v| v.get("status"))
             .and_then(|s| s.as_str())
             .unwrap_or_else(|| {
                 panic!(
-                    "evidence must carry a carcara_audit status, got {:?}",
+                    "evidence must carry a backend.carcara_audit status, got {:?}",
                     discharge.evidence()
                 )
             });
