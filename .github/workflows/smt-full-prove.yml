@@ -6,35 +6,16 @@ name: SMT Full Prove
 # lanes: Carcara, Z3, cross-engine agreement, Clarabel, Gappa proof
 # re-validation, and Arb cross-checks.
 #
-# It runs automatically on PRs that touch prove/solver/proof/CI surfaces,
-# nightly off the main CI path, and by manual dispatch.
+# It runs NIGHTLY and by manual dispatch only -- NOT on PRs. The full corpus is
+# ~46 min (Clarabel SoS ~25m + the from-source Arb/FLINT cross-check ~12m), far
+# too heavy for the per-PR path, and `SMT Full Prove (Linux)` is NOT a required
+# status check, so dropping the PR trigger cannot deadlock branch protection.
+# Prove-stack regressions are caught by the nightly run (which opens/closes a
+# tracking issue below) and can be checked on demand via workflow_dispatch; the
+# required per-PR cvc5 signal is the fast `SMT Feature Build (Linux)` smoke in
+# ci.yml. See docs/smt_build_setup.md.
 
 on:
-  pull_request:
-    paths:
-      - ".cargo/**"
-      - ".github/actions/free-disk-space/**"
-      - ".github/workflows/**"
-      - ".github/scripts/verify_release_smt.py"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "crates/chelis-cli/Cargo.toml"
-      - "crates/chelis-compiler-api/**"
-      - "crates/chelis-deep/**"
-      - "crates/chelis-pred/**"
-      - "crates/chelis-prove/**"
-      - "crates/chelis-surf/**"
-      - "crates/chelis-types/**"
-      - "docs/erf_envelope_regen.md"
-      - "docs/smt_build_setup.md"
-      - "scripts/assemble_erf_envelope.py"
-      - "scripts/ci_apt_get.py"
-      - "scripts/ci_cvc5_cache.py"
-      - "scripts/ci_free_disk.py"
-      - "scripts/ci_setup_uv_python.py"
-      - "scripts/generate_erf_proof.py"
-      - "scripts/setup_proof_toolchain.py"
-      - "scripts/test_gate.py"
   schedule:
     # 09:00 UTC daily, staggered after the existing Hull and Heavy E2E
     # nightlies so the shared runner pool is not hit all at once.

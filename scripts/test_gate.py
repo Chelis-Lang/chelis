@@ -439,18 +439,11 @@ class SmtCiSplitTests(unittest.TestCase):
         self.assertTrue(SMT_FULL_PROVE_YML.is_file(), "missing SMT full workflow")
         text = SMT_FULL_PROVE_YML.read_text()
         required = [
-            "pull_request:",
+            # Nightly + manual only (the PR trigger was removed: the ~46m
+            # corpus is too heavy for the per-PR path and is not a required
+            # check; the per-PR cvc5 signal is ci.yml's fast smoke).
             "schedule:",
             "workflow_dispatch:",
-            ".github/actions/free-disk-space/**",
-            ".github/workflows/**",
-            "crates/chelis-compiler-api/**",
-            "crates/chelis-deep/**",
-            "crates/chelis-pred/**",
-            "crates/chelis-prove/**",
-            "crates/chelis-surf/**",
-            "crates/chelis-types/**",
-            "scripts/ci_free_disk.py",
             "shared-key: smt-smt-build",
             "cargo test -p chelis-prove --features smt",
             "cargo test -p chelis-prove --features carcara",
@@ -471,6 +464,14 @@ class SmtCiSplitTests(unittest.TestCase):
                 text,
                 f"SMT full workflow missing expected full-prove surface: {needle}",
             )
+        # Negative lock: the heavy corpus must NOT run on PRs. The report job's
+        # `github.event_name != 'pull_request'` guard uses a quote, not a colon,
+        # so this only trips on a reintroduced `pull_request:` trigger key.
+        self.assertNotIn(
+            "pull_request:",
+            text,
+            "SMT full-prove must stay nightly/dispatch-only (no pull_request trigger)",
+        )
 
     def test_full_smt_workflow_shares_smoke_cache_key(self):
         smoke_inputs = _rust_cache_inputs(_ci_job_block("smt-build"))
