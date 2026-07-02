@@ -212,9 +212,15 @@ ships, and retire their vendored `install_chelis_toolchain.py`.
 `curl -fsSL <host>/chelisup.sh | sh` fetches a prebuilt `chelisup` for the host
 platform, drops it at `~/.chelis/bin/chelisup`, and prompts the user to add
 `~/.chelis/bin` to PATH. The chelis releases page hosts the `chelisup`
-prebuilts alongside the existing toolchain tarballs. **Private-repo caveat:**
-until chelis releases are public the bootstrap needs a PAT or an authenticated
-`gh` (the fallback the current School install script already uses).
+prebuilts alongside the existing toolchain tarballs: `release.yml` publishes
+`chelisup-<slug>` bare executables plus sha256 sidecars (the linux binary is
+built in the glibc-2.31 container job so the first binary a bare machine runs
+loads on the oldest supported glibc, #330) and `chelisup.sh` itself, making the
+canonical bootstrap URL
+`https://github.com/Chelis-Lang/chelis/releases/latest/download/chelisup.sh`.
+**Private-repo caveat:** until chelis releases are public the bootstrap needs a
+PAT or an authenticated `gh` (the fallback the current School install script
+already uses).
 
 ### 5.6 Relationship to binary distribution (chelis#468)
 
