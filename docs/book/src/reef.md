@@ -120,6 +120,61 @@ Auto-fetch handles the rest. `GITHUB_TOKEN` is mandatory because the
 canonical-org shell repositories are private; the install path
 hard-fails with a clear error if no token is available.
 
+## One-command provisioning: `chelis reef setup`
+
+`chelis reef build` fetches source packages, but a freshly-cloned shell has
+three more dependency classes to satisfy first: the pinned **toolchain**,
+**binary artifacts**, and (for crate-linking shells) chelis **source crates**.
+`chelis reef setup` is the orchestrator that brings all of them to their pins
+in one verb:
+
+```sh
+chelis reef setup            # provisions the project rooted at .
+chelis reef setup --path <dir>
+```
+
+It reads the `reef.toml` `compiler =` pin and runs, in order:
+
+1. **toolchain**: if the pinned toolchain is not installed in the chelisup
+   store, it auto-installs it by delegating to the `chelisup` binary
+   (`chelisup install <ver>`). If `chelisup` itself is missing it stops with a
+   loud, actionable error. This is *explicit, user-invoked* provisioning, so it
+   is exempt from the shim's "never auto-install on `cd`" rule; the toolchain
+   step deliberately subprocesses the real `chelisup` rather than installing
+   in-process, so it never overwrites the shim with the compiler.
+2. **source packages + binaries**: `reef install --from-lockfile`, when a
+   `reef.lock` is present.
+3. **source crates**: `reef src sync`, when the manifest declares a
+   `[chelis-src]` section.
+4. **summary**: prints the `reef doctor` report (below).
+
+`reef setup` runs from a *current* chelis (it may itself install the pinned
+one), so a clone-and-`setup` does the right thing without reaching for
+`+<ver>`. Combined with the `chelisup` bootstrap, the full onboarding is two
+commands: install `chelisup` once, then `chelis reef setup` per clone. See
+[Install](install.md) for the chelisup side.
+
+## Health: `chelis reef doctor`
+
+`chelis reef doctor` is the read-only counterpart of `setup`. It never
+installs.
+
+```sh
+chelis reef doctor              # the shell rooted at .
+chelis reef doctor --root ~     # every shell one level under ~
+```
+
+It prints a machine-wide header (the chelis home, the shim, the recorded
+default), then for each discovered shell reports every dependency class:
+
+- **toolchain**: installed in the chelisup store
+  (`~/.chelis/toolchains/<ver>`) or `MISSING` with the `chelisup install <ver>`
+  fix;
+- **source crates**: `ok`, drift with the `reef src sync` fix, or `n/a` for a
+  pure-Chelis shell;
+- **binary artifacts** (from `[artifacts]`): `ok` with the resolved path, or
+  `MISSING` with the `reef install --from-lockfile` fix.
+
 ## Lockfile
 
 `reef.lock` records every resolved dependency as a tuple of
@@ -168,6 +223,14 @@ chelis reef build
 
 ## Environment Variables
 
+- `CHELIS_HOME`: the consolidated chelis home. Default is `~/.chelis`. It roots
+  the chelisup toolchain store (`toolchains/<ver>`), the `chelis`/`chelisup`
+  binaries (`bin/`), the reef registry (`reef/`), and the source-crate store
+  (`src/`). `reef setup` and `reef doctor` resolve toolchains and binary
+  artifacts under it.
+- `CHELIS_TOOLCHAIN`: pin the toolchain the `chelis` shim resolves to, above
+  the `reef.toml` pin and the recorded default (see
+  [Managing versions](install.md#managing-versions)).
 - `CHELIS_REEF_HOME`: local registry root. Default is
   `~/.chelis/reef`.
 - `GITHUB_TOKEN`: required for any remote fetch

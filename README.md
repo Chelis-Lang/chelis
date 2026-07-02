@@ -9,7 +9,49 @@ machines and the compiler.
   <img src="assets/mascot/chev.svg" alt="Chev Chelis, the project mascot — a turtle on a mountain bike climbing a hill" width="320"/>
 </p>
 
+## Install
+
+There are two paths: **use** Chelis (install the toolchain and provision a
+project), or **build the compiler from source** (the Prerequisites and Build
+sections below). Most users want the first.
+
+Chelis ships a rustup-style toolchain manager, **`chelisup`**, and a
+one-command project orchestrator, **`chelis reef setup`**.
+
+```sh
+# 1. Bootstrap chelisup (drops ~/.chelis/bin/chelisup and prints the PATH line).
+#    Once releases are public:
+curl -fsSL https://<host>/chelisup.sh | sh
+#    Private-repo pre-launch (needs an authenticated `gh`): run the vendored script
+sh crates/chelisup/bootstrap/chelisup.sh
+export PATH="$HOME/.chelis/bin:$PATH"     # add to your shell rc
+
+# 2. Install a toolchain (side-by-side under ~/.chelis/toolchains/<ver>).
+chelisup install 0.12.1
+
+# 3. Provision a freshly-cloned project in one command.
+cd my-shell && chelis reef setup
+```
+
+`chelis reef setup` reads the project's `reef.toml` pin and brings every
+dependency class to it: the toolchain (auto-installed via `chelisup`), source
+packages and binary artifacts (`reef install --from-lockfile`), and chelis
+source crates (`reef src sync`), then prints a `chelis reef doctor` summary.
+
+**Version management.** A small `chelis` shim resolves the active toolchain at
+each call, first match wins: a leading `+<ver>` (`chelis +0.13.0 build main.ch`)
+→ `CHELIS_TOOLCHAIN` → a `chelis-toolchain` file → the nearest `reef.toml`
+`compiler =` pin → the recorded default (`chelisup default <ver>`). A
+resolved-but-not-installed version is a loud error, never a silent fallback.
+`chelisup list-installed`, `chelisup show`, and `chelis reef doctor` report the
+state.
+
+Full guide: **[Install](docs/book/src/install.md)** and **[Reef and
+Packages](docs/book/src/reef.md)**.
+
 ## Prerequisites
+
+The rest of this README builds the Chelis compiler from a checkout.
 
 **Rust toolchain.** Install [rustup](https://rustup.rs) (the Rust toolchain
 installer) if you do not already have it:
@@ -200,6 +242,9 @@ spec/                  Numbered language specs and design docs
 - [Agent Contract](AGENTS.md)
 - [chelis-std SKILL File](packages/chelis-std/SKILL.md)
 - [Developer Book](docs/book/src/README.md)
+- [Install and toolchain management (chelisup)](docs/book/src/install.md)
+- [Reef, `reef setup`, and packages](docs/book/src/reef.md)
+- [Packaging & install design](spec/design/chelis_packaging_and_install.md)
 - [Canonical Project Reference](spec/design/chelis_canonical_reference.md)
 - [Ecosystem Context](spec/design/chelis_ecosystem_context.md)
 - [Context](spec/00-context.md)
