@@ -2875,7 +2875,8 @@ fn eprint_pin_hint() {
 
 /// Best-effort `, pinned by <source>` clause naming what routed this
 /// invocation (via the same resolver the shim uses), or an empty string
-/// when nothing resolves or the chelis home is unavailable.
+/// when nothing resolves, the chelis home is unavailable, or the cwd is
+/// unreadable.
 fn pin_source_clause() -> String {
     let store = match chelisup::paths::Store::from_env() {
         Ok(s) => s,
@@ -2885,7 +2886,12 @@ fn pin_source_clause() -> String {
     // from the forwarded args names the directory/env/pin source that
     // selected this toolchain.
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    let cwd = std::env::current_dir().unwrap_or_default();
+    // An unreadable cwd (e.g. deleted under us) would degrade the resolver
+    // walk to a bare relative path; omit the clause instead.
+    let cwd = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(_) => return String::new(),
+    };
     let input = chelisup::resolve::ResolveInput {
         args: &args,
         env_toolchain: std::env::var("CHELIS_TOOLCHAIN").ok(),
@@ -3187,6 +3193,11 @@ fn run_install_from_lockfile(pkg_root: &Path) -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
+/// Normalize a manifest `compiler = "=X.Y.Z"` pin to the bare `X.Y.Z`.
+fn bare_compiler_pin(pin: &str) -> String {
+    pin.trim_start_matches('=').to_string()
+}
+
 /// WS-C (§7): bring a freshly-cloned shell to its pins in one verb. Reads
 /// the `reef.toml` compiler pin, then in order: ensures the pinned
 /// toolchain (auto-installing via chelisup), installs source packages +
@@ -3200,13 +3211,9 @@ fn cmd_reef_setup(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error
         .map_err(|e| format!("cannot resolve setup root: {e}"))?;
     // Parse-only manifest read (like `reef src`): deliberately skips the
     // same-compiler-version gate so a shell pinned to a *different* chelis
-    // still sets up. `compiler = "=X.Y.Z"` -> bare `X.Y.Z`.
+    // still sets up.
     let manifest = chelis_reef::read_manifest_for_src(&root)?;
-    let version = manifest
-        .package
-        .compiler
-        .trim_start_matches('=')
-        .to_string();
+    let version = bare_compiler_pin(&manifest.package.compiler);
     println!(
         "chelis reef setup: {} (pin {version})",
         manifest.package.name
@@ -3365,12 +3372,7 @@ fn resolve_shell_src_context(
             root.join("reef.toml").display()
         )
     })?;
-    // `compiler = "=X.Y.Z"` → bare `X.Y.Z`.
-    let version = manifest
-        .package
-        .compiler
-        .trim_start_matches('=')
-        .to_string();
+    let version = bare_compiler_pin(&manifest.package.compiler);
     // The committed `path = "../chelis/..."` resolves relative to the
     // package root, so the slot is `<root>/../chelis` = `<parent>/chelis`.
     let slot = root
@@ -3607,11 +3609,7 @@ fn cmd_reef_doctor(root: Option<&Path>) -> Result<(), Box<dyn std::error::Error>
                 continue;
             }
         };
-        let version = manifest
-            .package
-            .compiler
-            .trim_start_matches('=')
-            .to_string();
+        let version = bare_compiler_pin(&manifest.package.compiler);
         println!("{} (pin {})", manifest.package.name, version);
 
         // Class (a): is the pinned toolchain installed in the chelisup store?

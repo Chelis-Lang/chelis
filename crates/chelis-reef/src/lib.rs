@@ -3933,15 +3933,23 @@ pub fn host_platform_slug() -> Option<&'static str> {
 }
 
 /// Item 11 (chelis#468): resolve the chelis home directory. Honors a
-/// `$CHELIS_HOME` override; defaults to `$HOME/.chelis`. Binary artifacts
-/// are placed under `<home>/bin/`. The directory is not created here;
-/// the install path creates `<home>/bin/` on demand.
+/// `$CHELIS_HOME` override; defaults to `$HOME/.chelis`. An empty value
+/// counts as unset, matching `chelisup::paths::resolve_home`, so a
+/// `CHELIS_HOME=""` environment cannot split consumers that mix the two
+/// resolvers (e.g. `reef doctor`'s toolchain vs artifact classes) across
+/// two different homes. Binary artifacts are placed under `<home>/bin/`.
+/// The directory is not created here; the install path creates
+/// `<home>/bin/` on demand.
 pub fn chelis_home() -> Result<PathBuf, String> {
-    if let Some(p) = env::var_os("CHELIS_HOME") {
+    if let Some(p) = env::var_os("CHELIS_HOME")
+        && !p.is_empty()
+    {
         return Ok(PathBuf::from(p));
     }
-    let home = env::var_os("HOME").ok_or_else(|| "HOME is not set".to_string())?;
-    Ok(PathBuf::from(home).join(".chelis"))
+    match env::var_os("HOME") {
+        Some(h) if !h.is_empty() => Ok(PathBuf::from(h).join(".chelis")),
+        _ => Err("HOME is not set".to_string()),
+    }
 }
 
 /// Item 11 (chelis#468): the directory where installed binary artifacts

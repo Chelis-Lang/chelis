@@ -287,3 +287,35 @@ pub fn build_and_run(source: &str, name: &str) -> String {
     );
     String::from_utf8(run_output.stdout).expect("utf-8 stdout")
 }
+
+// ---------------------------------------------------------------------------
+// WS-C packaging-orchestration fixtures
+//
+// Shared by reef_setup.rs, reef_doctor_unified.rs, and
+// unknown_subcommand_hint.rs, which all synthesize a pinned shell
+// `reef.toml` (and, for the store-reading paths, a stub toolchain) inside
+// an isolated `CHELIS_HOME`.
+// ---------------------------------------------------------------------------
+
+/// Write a shell `reef.toml` pinned to `pin`, appending `extra` verbatim
+/// (e.g. a `[chelis-src]` or `[artifacts]` section). Creates the directory.
+pub fn write_pinned_reef_toml(dir: &Path, pin: &str, extra: &str) {
+    fs::create_dir_all(dir).unwrap();
+    fs::write(
+        dir.join("reef.toml"),
+        format!(
+            "[package]\nname = \"shelly\"\nversion = \"0.1.0\"\n\
+             compiler = \"={pin}\"\nmodule_prefix = \"Shelly\"\n{extra}"
+        ),
+    )
+    .unwrap();
+}
+
+/// Stub an installed toolchain in the chelisup store: a real `bin/chelis`
+/// file under `<home>/toolchains/<ver>/`. `Store::is_installed` only checks
+/// that this path is a file.
+pub fn stub_toolchain(home: &Path, ver: &str) {
+    let bin = home.join("toolchains").join(ver).join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(bin.join("chelis"), b"#!/bin/true\n").unwrap();
+}

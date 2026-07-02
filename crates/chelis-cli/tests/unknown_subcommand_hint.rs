@@ -12,19 +12,11 @@ use std::fs;
 use std::path::Path;
 use tempfile::tempdir;
 
-const HINT: &str = "You are running chelis";
+#[path = "common/mod.rs"]
+mod common;
+use common::write_pinned_reef_toml;
 
-fn write_pinned_reef_toml(dir: &Path, pin: &str) {
-    fs::create_dir_all(dir).unwrap();
-    fs::write(
-        dir.join("reef.toml"),
-        format!(
-            "[package]\nname = \"shelly\"\nversion = \"0.1.0\"\n\
-             compiler = \"={pin}\"\nmodule_prefix = \"Shelly\"\n"
-        ),
-    )
-    .unwrap();
-}
+const HINT: &str = "You are running chelis";
 
 /// A `chelis` invocation whose cwd and chelisup home are isolated so pin
 /// resolution is deterministic (no ambient `CHELIS_TOOLCHAIN`, no leaked
@@ -43,7 +35,7 @@ fn hint_on_nested_unknown_reef_subcommand_names_pin() {
     let tmp = tempdir().unwrap();
     let shell = tmp.path().join("shell");
     let home = tmp.path().join("home");
-    write_pinned_reef_toml(&shell, "0.9.9");
+    write_pinned_reef_toml(&shell, "0.9.9", "");
 
     chelis(&shell, &home)
         .args(["reef", "definitely-not-a-verb"])
@@ -62,7 +54,7 @@ fn hint_on_top_level_unknown_subcommand() {
     let tmp = tempdir().unwrap();
     let shell = tmp.path().join("shell");
     let home = tmp.path().join("home");
-    write_pinned_reef_toml(&shell, "0.9.9");
+    write_pinned_reef_toml(&shell, "0.9.9", "");
 
     chelis(&shell, &home)
         .arg("totally-bogus")

@@ -16,6 +16,10 @@
 //!   * toolchain missing + chelisup absent -> loud, actionable error naming
 //!     `chelisup install`, never the retired `install_chelis_toolchain.py`.
 //!   * missing reef.toml -> clear parse/read error.
+//!   * malformed reef.lock -> the install step's error stops setup before
+//!     the doctor summary.
+//!   * unreachable [chelis-src] remote -> the sync step's error stops setup
+//!     before the doctor summary.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -25,28 +29,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command as Proc;
 use tempfile::tempdir;
 
-/// Write a shell `reef.toml` pinned to `pin`, appending `extra` verbatim
-/// (e.g. a `[chelis-src]` section). Creates the directory.
-fn write_reef_toml(dir: &Path, pin: &str, extra: &str) {
-    fs::create_dir_all(dir).unwrap();
-    fs::write(
-        dir.join("reef.toml"),
-        format!(
-            "[package]\nname = \"shelly\"\nversion = \"0.1.0\"\n\
-             compiler = \"={pin}\"\nmodule_prefix = \"Shelly\"\n{extra}"
-        ),
-    )
-    .unwrap();
-}
-
-/// Stub an installed toolchain in the chelisup store: a real `bin/chelis`
-/// file under `<home>/toolchains/<ver>/`. `Store::is_installed` only checks
-/// that this path is a file.
-fn stub_toolchain(home: &Path, ver: &str) {
-    let bin = home.join("toolchains").join(ver).join("bin");
-    fs::create_dir_all(&bin).unwrap();
-    fs::write(bin.join("chelis"), b"#!/bin/true\n").unwrap();
-}
+#[path = "common/mod.rs"]
+mod common;
+use common::{stub_toolchain, write_pinned_reef_toml};
 
 /// A `chelis` invocation with the chelisup store isolated and the chelisup
 /// delegation seams cleared unless a test sets them.
@@ -66,7 +51,7 @@ fn setup_succeeds_when_toolchain_present_no_lock_no_src() {
     let tmp = tempdir().unwrap();
     let home = tmp.path().join("home");
     let shell = tmp.path().join("shell");
-    write_reef_toml(&shell, "0.9.9", "");
+    write_pinned_reef_toml(&shell, "0.9.9", "");
     stub_toolchain(&home, "0.9.9");
 
     chelis(&home)
@@ -85,7 +70,7 @@ fn setup_runs_install_section_when_reef_lock_present() {
     let tmp = tempdir().unwrap();
     let home = tmp.path().join("home");
     let shell = tmp.path().join("shell");
-    write_reef_toml(&shell, "0.9.9", "");
+    write_pinned_reef_toml(&shell, "0.9.9", "");
     stub_toolchain(&home, "0.9.9");
     // A bundled skip-class dependency: install_from_lockfile reports it
     // without any network access.
@@ -143,7 +128,7 @@ fn setup_syncs_source_crates_when_chelis_src_present() {
     init_canonical(&canonical, "v0.0.1");
     let ws = tmp.path().join("ws");
     let shell = ws.join("shelly");
-    write_reef_toml(
+    write_pinned_reef_toml(
         &shell,
         "0.0.1",
         "\n[chelis-src]\ncrates = [\"chelis-types\"]\n",
@@ -201,18 +186,21 @@ fn write_release_tarball(base: &Path, ver: &str, slug: &str) {
     fs::write(base.join(format!("chelis-v{ver}-{slug}.tar.gz")), gz).unwrap();
 }
 
-/// Build (once) and return the path to the real `chelisup` binary that
-/// `reef setup` delegates installs to.
+/// Build and return the path to the real `chelisup` binary that
+/// `reef setup` delegates installs to. The build runs *before* the
+/// assert_cmd resolution: `cargo_bin` panics (rather than returning a
+/// candidate path) when the binary is absent, so a build-on-miss fallback
+/// after it is unreachable, and a fresh target dir (e.g. an isolated
+/// `CARGO_TARGET_DIR`) starts without chelisup built. When it is already
+/// built this is a fast no-op.
 fn chelisup_bin() -> PathBuf {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let status = Proc::new(cargo)
+        .args(["build", "-p", "chelisup", "--bin", "chelisup"])
+        .status()
+        .expect("spawn cargo build for chelisup");
+    assert!(status.success(), "building chelisup failed");
     let path = assert_cmd::cargo::cargo_bin("chelisup");
-    if !path.exists() {
-        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-        let status = Proc::new(cargo)
-            .args(["build", "-p", "chelisup", "--bin", "chelisup"])
-            .status()
-            .expect("spawn cargo build for chelisup");
-        assert!(status.success(), "building chelisup failed");
-    }
     assert!(path.exists(), "chelisup binary at {}", path.display());
     path
 }
@@ -222,7 +210,7 @@ fn setup_auto_installs_missing_toolchain_and_keeps_shim_intact() {
     let tmp = tempdir().unwrap();
     let home = tmp.path().join("home");
     let shell = tmp.path().join("shell");
-    write_reef_toml(&shell, "0.9.9", "");
+    write_pinned_reef_toml(&shell, "0.9.9", "");
     // No toolchain in `home` yet -> setup must delegate to chelisup.
     let releases = tmp.path().join("releases");
     fs::create_dir_all(&releases).unwrap();
@@ -264,7 +252,7 @@ fn setup_errors_when_toolchain_missing_and_chelisup_absent() {
     let tmp = tempdir().unwrap();
     let home = tmp.path().join("home");
     let shell = tmp.path().join("shell");
-    write_reef_toml(&shell, "0.9.9", "");
+    write_pinned_reef_toml(&shell, "0.9.9", "");
     // Empty home (no toolchain) and a CHELISUP_BIN that does not exist, so
     // the delegation spawn fails deterministically regardless of PATH.
     let missing = tmp.path().join("no-such-chelisup");
@@ -293,4 +281,55 @@ fn setup_errors_without_reef_toml() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("reef.toml"));
+}
+
+#[test]
+fn setup_stops_before_doctor_when_install_step_fails() {
+    // Failure parity for the install section: a malformed reef.lock must
+    // fail the run *and* stop the orchestrator before the doctor summary,
+    // not degrade into a green setup with a broken install.
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let shell = tmp.path().join("shell");
+    write_pinned_reef_toml(&shell, "0.9.9", "");
+    stub_toolchain(&home, "0.9.9");
+    fs::write(shell.join("reef.lock"), "this is not toml [").unwrap();
+
+    chelis(&home)
+        .args(["reef", "setup", "--path"])
+        .arg(&shell)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("reef.lock"))
+        // Step 1 passed; the failure is the install step, not a precondition.
+        .stdout(predicate::str::contains("toolchain: ok"))
+        .stdout(predicate::str::contains("--- doctor ---").not());
+}
+
+#[test]
+fn setup_stops_before_doctor_when_src_sync_fails() {
+    // Failure parity for the source-crate section: an unreachable
+    // [chelis-src] remote must fail the run and stop the orchestrator
+    // before the doctor summary.
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let shell = tmp.path().join("ws").join("shelly");
+    write_pinned_reef_toml(
+        &shell,
+        "0.9.9",
+        "\n[chelis-src]\ncrates = [\"chelis-types\"]\n",
+    );
+    stub_toolchain(&home, "0.9.9");
+    let missing_remote = tmp.path().join("no-such-remote");
+
+    chelis(&home)
+        .env("CHELIS_SRC_REMOTE", &missing_remote)
+        .args(["reef", "setup", "--path"])
+        .arg(&shell)
+        .assert()
+        .failure()
+        // Steps 1-2 passed; the failure is the sync step.
+        .stdout(predicate::str::contains("toolchain: ok"))
+        .stdout(predicate::str::contains("no reef.lock"))
+        .stdout(predicate::str::contains("--- doctor ---").not());
 }

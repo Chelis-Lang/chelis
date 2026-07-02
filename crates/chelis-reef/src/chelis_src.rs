@@ -109,7 +109,7 @@ pub struct SyncOutcome {
 
 /// Resolve the default source-crate store root under the consolidated
 /// chelis home: `$CHELIS_SRC_HOME` (explicit override, back-compat), else
-/// `$CHELIS_HOME/src`, else `~/.chelis/src`. The `~/.chelis/` home is
+/// `$CHELIS_HOME/src`, else `~/.chelis/src`. Empty values count as unset. The `~/.chelis/` home is
 /// shared with the reef registry (`$CHELIS_REEF_HOME`/`~/.chelis/reef`),
 /// the toolchain store, and the binary-artifact `bin/` dir, so all chelis
 /// state lives under one root. The store *operations* take an explicit
@@ -123,19 +123,22 @@ pub fn default_store_root() -> Result<PathBuf, ChelisSrcError> {
 }
 
 /// Pure resolution of the store root from its three env inputs, so the
-/// precedence is unit-testable without mutating process-global env.
+/// precedence is unit-testable without mutating process-global env. An
+/// empty value counts as unset (parity with `chelisup::paths::resolve_home`
+/// and `chelis_home`), never a cwd-relative store root.
 fn resolve_store_root(
     src_home: Option<std::ffi::OsString>,
     chelis_home: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
 ) -> Result<PathBuf, ChelisSrcError> {
-    if let Some(p) = src_home {
+    let set = |v: Option<std::ffi::OsString>| v.filter(|s| !s.is_empty());
+    if let Some(p) = set(src_home) {
         return Ok(PathBuf::from(p));
     }
-    if let Some(h) = chelis_home {
+    if let Some(h) = set(chelis_home) {
         return Ok(PathBuf::from(h).join("src"));
     }
-    let home = home.ok_or(ChelisSrcError::NoStoreRoot)?;
+    let home = set(home).ok_or(ChelisSrcError::NoStoreRoot)?;
     Ok(PathBuf::from(home).join(".chelis/src"))
 }
 
@@ -799,6 +802,17 @@ version = "1.0.0"
         // 4. No HOME at all is a loud error, not a silent cwd-relative path.
         assert!(matches!(
             resolve_store_root(None, None, None),
+            Err(ChelisSrcError::NoStoreRoot)
+        ));
+        // 5. Empty values count as unset (parity with
+        //    chelisup::paths::resolve_home): an exported-but-empty override
+        //    falls through instead of yielding a cwd-relative root.
+        assert_eq!(
+            resolve_store_root(os(""), os(""), os("/home/dev")).unwrap(),
+            PathBuf::from("/home/dev/.chelis/src")
+        );
+        assert!(matches!(
+            resolve_store_root(os(""), os(""), os("")),
             Err(ChelisSrcError::NoStoreRoot)
         ));
     }
