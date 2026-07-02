@@ -43,10 +43,10 @@ produces `target/debug/chelisup`.
 ### 2. Install a toolchain
 
 ```sh
-chelisup install 0.12.1        # into ~/.chelis/toolchains/0.12.1/
+chelisup install 0.13.0        # into ~/.chelis/toolchains/0.13.0/
 ```
 
-The first install also records `0.12.1` as the default and installs the
+The first install also records `0.13.0` as the default and installs the
 `chelis` shim, so `chelis --version` works from anywhere.
 
 ### 3. Provision a project in one command
@@ -93,7 +93,7 @@ chelisup's management verbs:
 
 ```sh
 chelisup list-installed        # installed toolchains (marks the default)
-chelisup default 0.12.1        # set the default used outside a package
+chelisup default 0.13.0        # set the default used outside a package
 chelisup show                  # store layout + what resolves in the cwd
 chelisup which                 # print the toolchain binary chelis resolves to
 chelisup uninstall 0.11.0      # remove a toolchain

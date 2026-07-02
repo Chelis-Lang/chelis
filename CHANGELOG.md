@@ -4,6 +4,58 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.0] — 2026-07-02
+
+### Added
+
+- **`chelis reef setup` one-command provisioning, unified `reef doctor`,
+  and the cross-version unknown-subcommand hint (#602).** The WS-C
+  orchestration layer: `reef setup` ensures the pinned toolchain
+  (auto-installing by subprocessing the real `chelisup` binary), installs
+  source packages and binary artifacts from `reef.lock`, syncs
+  `[chelis-src]` source crates, and prints the `reef doctor` summary.
+  `reef doctor` now reports toolchains from the consolidated chelisup
+  store (`$CHELIS_HOME/toolchains/<ver>`) with a machine-wide header
+  (home, shim, recorded default) and covers `[artifacts]` binaries.
+  Unrecognized-subcommand errors name this chelis's version, the pin
+  source that routed the invocation, and the `chelis +<ver>` override.
+- **chelisup bootstrap release assets (#604).** `release.yml` now
+  publishes `chelisup-<slug>` bare executables (plus sha256 sidecars) and
+  `chelisup.sh` itself, so the bootstrap one-liner has a canonical
+  latest-release URL. The linux chelisup builds in the glibc-2.31
+  container so the first binary a bare machine runs loads on the oldest
+  supported glibc.
+- **Deep authoring L2 substrate (#588).** Build-out of the Deep authoring
+  layer-2 substrate.
+
+### Fixed
+
+- **Soundness Wave-2: symbolic-dim grad/eval machinery (#590).** Covers
+  chelis#551, #513, #523, and #383.
+- **Form-3 runtime expand-size resolution: fail-closed reject +
+  deterministic kernel ABI (#469, #596).**
+- **Loud-reject inline `expand` sizes (#530) and the runtime `vmap` axis
+  (#524) (#563).** Previously-silent unsound accepts now reject loudly.
+- **Eval host negative-axis parity (#522) and chelis-ir integer division
+  zero-trap (#550) (#567).**
+- **backend-c: `cmplt` dtype-correct read (#517); named-axis reduction
+  family admitted in `..r` bodies (#340) (#565).**
+- **`chelis prove` soundness hardening (#564).** chelis#463/#434 oracles
+  plus #496 canonical attribution.
+- **IR by-position named-axis recovery re-validated against reorder
+  (#549) (#562).**
+- **Cache-proof the bundled chelis-std lock-hash invariant (#585,
+  #598).** The lock-hash desync class fixed in 0.12.1 is now guarded
+  against cache-staleness regressions.
+
+### Internal
+
+- ci(smt): durable prebuilt cvc5 as a Release asset with a rustc-free
+  cache key and cache pruning (#591); stable cvc5 cache key (#583, #584);
+  SMT Full Prove runs nightly/dispatch only, not on PRs (#595).
+- test(types): lock the #458 mixed `(f32, i32)` numeric-op rejection
+  consistency (#566).
+
 ## [0.12.1] — 2026-06-30
 
 ### Added
