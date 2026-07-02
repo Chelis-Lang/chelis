@@ -36,9 +36,10 @@ jobs:
   full-smt-prove:
     name: SMT Full Prove (Linux)
     runs-on: ubuntu-latest
-    # The fast required SMT smoke stays in ci.yml. This path-gated/nightly lane
-    # intentionally carries the full solver + Arb/Gappa corpus, which exceeded
-    # 45 minutes on a warm-cache PR run while still making forward progress.
+    # The fast required SMT smoke stays in ci.yml. This nightly/dispatch-only
+    # lane intentionally carries the full solver + Arb/Gappa corpus (~46m on a
+    # warm cache), too heavy for the per-PR path; 75m leaves headroom over the
+    # observed wall time while it makes forward progress.
     timeout-minutes: 75
     env:
       CARGO_PROFILE_DEV_DEBUG: 0

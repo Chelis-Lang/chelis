@@ -56,15 +56,16 @@ sanitizer job, because cvc5 builds from source and is not a per-PR
 developer-loop prerequisite.
 
 The full solver/proof corpus moved to `.github/workflows/smt-full-prove.yml`.
-That workflow runs on relevant prove/solver/proof/CI PR paths, on a nightly
-schedule, and on manual dispatch. It carries the expensive suites that used to
-sit in required CI: `--features smt`, `carcara`, `z3`, the cvc5+Z3
-cross-engine oracle, `clarabel`, the production `smt clarabel` config, Gappa
-`--check-only`, the Arb certifier, and `--features arb`. The PR path trigger
-includes `chelis-prove`, its proof-facing local dependencies
-(`chelis-surf`, `chelis-deep`, `chelis-pred`, `chelis-types`, and
-`chelis-compiler-api`), proof scripts/data, and the CI workflow/action files
-that define the lane.
+That workflow runs on a nightly schedule and on manual dispatch only -- NOT on
+PRs. The ~46m corpus is too heavy for the per-PR path, and `SMT Full Prove
+(Linux)` is not a required status check, so dropping the PR trigger cannot
+deadlock branch protection; the per-PR cvc5 signal is ci.yml's fast
+`SMT Feature Build (Linux)` smoke, and prove-stack regressions are caught by
+the nightly run (which opens/closes a tracking issue) or on demand via
+`workflow_dispatch`. It carries the expensive suites that used to sit in
+required CI: `--features smt`, `carcara`, `z3`, the cvc5+Z3 cross-engine
+oracle, `clarabel`, the production `smt clarabel` config, Gappa
+`--check-only`, the Arb certifier, and `--features arb`.
 
 The full workflow restores the same `shared-key: smt-smt-build` cargo cache as
 the fast smoke lane. The key intentionally matches the old required
