@@ -576,14 +576,18 @@ enum ReefCommand {
         #[command(subcommand)]
         command: ReefSrcCommand,
     },
-    /// Report chelis dependency health for one or more shells across all
-    /// three classes (toolchain binary, chelis-std, source crates).
+    /// Report chelis dependency health for one or more shells across every
+    /// class (toolchain binary, source crates, binary artifacts).
     ///
-    /// Scans a root for shell repos (a directory with a `reef.toml` carrying
-    /// a `compiler =` pin) and, for each, reports whether the pinned
-    /// toolchain is installed, and — for crate-linking shells — whether the
-    /// source store and `../chelis` slot are synced to the pin, with the fix
-    /// for each gap. Read-only; it never installs.
+    /// Prints a machine-wide header (the chelis home, the shim, and the
+    /// recorded default), then scans a root for shell repos (a directory
+    /// with a `reef.toml` carrying a `compiler =` pin). For each it reports
+    /// whether the pinned toolchain is installed in the chelisup store
+    /// (`<chelis home>/toolchains/<ver>`, fixed with `chelisup install`);
+    /// for crate-linking shells, whether the source store and `../chelis`
+    /// slot are synced to the pin; and for shells declaring `[artifacts]`,
+    /// whether each binary artifact is installed (Item 11 / chelis#468).
+    /// Read-only; it never installs.
     Doctor {
         /// Directory to scan (defaults to `.`): the root itself and each
         /// immediate subdirectory carrying a `reef.toml` is reported.
@@ -601,6 +605,25 @@ enum ReefCommand {
     Which {
         /// Logical artifact name (the `[artifacts.<name>]` key).
         artifact: String,
+    },
+    /// Bring a freshly-cloned shell to its pins in one command (WS-C, §7).
+    ///
+    /// Reads the `reef.toml` compiler pin, then, in order:
+    /// 1. ensures the pinned toolchain is installed, auto-installing it by
+    ///    delegating to `chelisup` when it is missing;
+    /// 2. `reef install --from-lockfile` — source packages + binary
+    ///    artifacts (chelis#468) from `reef.lock`, when one is present;
+    /// 3. `reef src sync` — chelis source crates (chelis#571), when the
+    ///    manifest carries a `[chelis-src]` section;
+    /// 4. prints the `reef doctor` health summary.
+    ///
+    /// This is the current-chelis entry point for the cross-version case
+    /// (§5.4): it may itself install the pinned toolchain, so a
+    /// clone-and-`setup` does the right thing without reaching for `+<ver>`.
+    Setup {
+        /// Shell package root (defaults to `.`).
+        #[arg(long)]
+        path: Option<PathBuf>,
     },
 }
 
@@ -645,7 +668,9 @@ fn main() {
         chelis_prove::enable_isolation();
     }
     chelis_ir::lower::install_chelis_panic_hook();
-    let cli = Cli::parse();
+    // §5.4: intercept clap's unrecognized-subcommand error to append the
+    // cross-version hint; every other clap outcome is left untouched.
+    let cli = Cli::try_parse().unwrap_or_else(|e| handle_parse_error(e));
     let result = match cli.command {
         Some(Command::Deep {
             file,
@@ -2816,6 +2841,63 @@ fn cmd_build_deep(
     }
 }
 
+/// Handle a clap parse failure. §5.4: an unrecognized subcommand gets
+/// clap's own message plus the cross-version hint; every other clap outcome
+/// (help, version, unknown flag, missing/duplicate arg) defers to clap so
+/// exit codes and rendering stay byte-for-byte identical to `Cli::parse()`.
+/// Never returns.
+fn handle_parse_error(e: clap::Error) -> ! {
+    if e.kind() == clap::error::ErrorKind::InvalidSubcommand {
+        // clap's message names the offending token (and any "did you mean"
+        // tip) on stderr; append the hint and exit with clap's own code (2).
+        let _ = e.print();
+        eprint_pin_hint();
+        std::process::exit(2);
+    }
+    e.exit();
+}
+
+/// Print the §5.4 cross-version hint after an unrecognized-subcommand error:
+/// name this chelis's own version and, when resolvable, the pin source that
+/// routed here, then point at the `+<ver>` override. Deliberately
+/// version-generic: a chelis only errors on verbs newer than itself,
+/// exactly the set it cannot name.
+fn eprint_pin_hint() {
+    let version = env!("CARGO_PKG_VERSION");
+    let pin_clause = pin_source_clause();
+    eprintln!();
+    eprintln!(
+        "You are running chelis {version}{pin_clause}. If this is a newer command, \
+         run it with a toolchain that has it: `chelis +<ver> ...` \
+         (see `chelis --version` and `chelisup list-installed`)."
+    );
+}
+
+/// Best-effort `, pinned by <source>` clause naming what routed this
+/// invocation (via the same resolver the shim uses), or an empty string
+/// when nothing resolves or the chelis home is unavailable.
+fn pin_source_clause() -> String {
+    let store = match chelisup::paths::Store::from_env() {
+        Ok(s) => s,
+        Err(_) => return String::new(),
+    };
+    // The shim has already stripped any leading `+<ver>`, so re-resolving
+    // from the forwarded args names the directory/env/pin source that
+    // selected this toolchain.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let input = chelisup::resolve::ResolveInput {
+        args: &args,
+        env_toolchain: std::env::var("CHELIS_TOOLCHAIN").ok(),
+        cwd: &cwd,
+        store: &store,
+    };
+    match chelisup::resolve::resolve(&input) {
+        Some(r) => format!(", pinned by {}", r.source),
+        None => String::new(),
+    }
+}
+
 fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         ReefCommand::Init {
@@ -2916,96 +2998,7 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
                             .into());
                     }
                     let pkg_root = package_root.unwrap_or_else(|| PathBuf::from("."));
-                    let registry_root = chelis_reef::registry_home()?;
-                    let results = chelis_reef::install_from_lockfile(&pkg_root, &registry_root)?;
-                    let mut any_failure = false;
-                    let mut any_no_origin = false;
-                    for entry in &results {
-                        match entry {
-                            chelis_reef::LockfileInstallEntry::Installed(artifact) => {
-                                println!(
-                                    "Installed {} {}",
-                                    artifact.package.name, artifact.package.version
-                                );
-                                println!("Shell: {}", artifact.shell_path.display());
-                                println!("Archive: {}", artifact.archive_path.display());
-                            }
-                            chelis_reef::LockfileInstallEntry::SkippedPathDep {
-                                name,
-                                version,
-                                path,
-                            } => {
-                                println!(
-                                    "Skipped path dep {name} {version} (path = {path}): \
-                                     resolved at build time, not via remote fetch"
-                                );
-                            }
-                            chelis_reef::LockfileInstallEntry::SkippedBundledRuntime {
-                                name,
-                                version,
-                                compiler_version,
-                            } => {
-                                println!(
-                                    "Skipped bundled runtime {name} {version} \
-                                     (compiler version {compiler_version}): \
-                                     ships with the compiler, not fetched"
-                                );
-                            }
-                            chelis_reef::LockfileInstallEntry::SkippedNoOrigin {
-                                name,
-                                version,
-                            } => {
-                                eprintln!(
-                                    "error: lockfile entry `{name}` v{version} has no \
-                                     `remote_origin` recorded; cannot fetch. \
-                                     Run `chelis reef install --bootstrap` (or re-run \
-                                     `--from-github`) to populate the origin."
-                                );
-                                any_no_origin = true;
-                            }
-                            chelis_reef::LockfileInstallEntry::InstalledBinary {
-                                name,
-                                version,
-                                path,
-                            } => {
-                                println!("Installed binary {name} {version}");
-                                println!("Binary: {}", path.display());
-                            }
-                            chelis_reef::LockfileInstallEntry::SkippedForeignPlatform {
-                                name,
-                                version,
-                                platform,
-                                host,
-                            } => {
-                                let host_label = match host {
-                                    Some(h) => h.clone(),
-                                    None => "unsupported".to_string(),
-                                };
-                                println!(
-                                    "Skipped binary {name} {version} (built for {platform}; \
-                                     host is {host_label}): not runnable on this host"
-                                );
-                            }
-                            chelis_reef::LockfileInstallEntry::Failed { error, .. } => {
-                                eprintln!("error: {error}");
-                                any_failure = true;
-                            }
-                        }
-                    }
-                    if any_failure || any_no_origin {
-                        let detail = if any_no_origin && any_failure {
-                            "one or more lockfile entries failed to install and one or more \
-                             have no remote_origin"
-                        } else if any_no_origin {
-                            "one or more lockfile entries have no remote_origin"
-                        } else {
-                            "one or more lockfile entries failed to install"
-                        };
-                        return Err(detail.into());
-                    }
-                    if results.is_empty() {
-                        println!("No dependencies in lockfile.");
-                    }
+                    run_install_from_lockfile(&pkg_root)?;
                 }
                 (None, None, false, Some(bootstrap_args)) => {
                     if !packages.is_empty() {
@@ -3091,8 +3084,242 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
             let path = chelis_reef::which_artifact(&artifact)?;
             println!("{}", path.display());
         }
+        ReefCommand::Setup { path } => cmd_reef_setup(path)?,
     }
     Ok(())
+}
+
+/// Re-install every dependency named by a package's `reef.lock`, fetching
+/// each from its recorded `remote_origin` and verifying hashes against the
+/// pins. Prints one line per [`chelis_reef::LockfileInstallEntry`] and
+/// returns an aggregated error if any entry failed or lacked an origin.
+///
+/// Extracted from the `reef install --from-lockfile` arm so `reef setup`
+/// (WS-C) reuses the exact same reporting.
+fn run_install_from_lockfile(pkg_root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let registry_root = chelis_reef::registry_home()?;
+    let results = chelis_reef::install_from_lockfile(pkg_root, &registry_root)?;
+    let mut any_failure = false;
+    let mut any_no_origin = false;
+    for entry in &results {
+        match entry {
+            chelis_reef::LockfileInstallEntry::Installed(artifact) => {
+                println!(
+                    "Installed {} {}",
+                    artifact.package.name, artifact.package.version
+                );
+                println!("Shell: {}", artifact.shell_path.display());
+                println!("Archive: {}", artifact.archive_path.display());
+            }
+            chelis_reef::LockfileInstallEntry::SkippedPathDep {
+                name,
+                version,
+                path,
+            } => {
+                println!(
+                    "Skipped path dep {name} {version} (path = {path}): \
+                     resolved at build time, not via remote fetch"
+                );
+            }
+            chelis_reef::LockfileInstallEntry::SkippedBundledRuntime {
+                name,
+                version,
+                compiler_version,
+            } => {
+                println!(
+                    "Skipped bundled runtime {name} {version} \
+                     (compiler version {compiler_version}): \
+                     ships with the compiler, not fetched"
+                );
+            }
+            chelis_reef::LockfileInstallEntry::SkippedNoOrigin { name, version } => {
+                eprintln!(
+                    "error: lockfile entry `{name}` v{version} has no \
+                     `remote_origin` recorded; cannot fetch. \
+                     Run `chelis reef install --bootstrap` (or re-run \
+                     `--from-github`) to populate the origin."
+                );
+                any_no_origin = true;
+            }
+            chelis_reef::LockfileInstallEntry::InstalledBinary {
+                name,
+                version,
+                path,
+            } => {
+                println!("Installed binary {name} {version}");
+                println!("Binary: {}", path.display());
+            }
+            chelis_reef::LockfileInstallEntry::SkippedForeignPlatform {
+                name,
+                version,
+                platform,
+                host,
+            } => {
+                let host_label = match host {
+                    Some(h) => h.clone(),
+                    None => "unsupported".to_string(),
+                };
+                println!(
+                    "Skipped binary {name} {version} (built for {platform}; \
+                     host is {host_label}): not runnable on this host"
+                );
+            }
+            chelis_reef::LockfileInstallEntry::Failed { error, .. } => {
+                eprintln!("error: {error}");
+                any_failure = true;
+            }
+        }
+    }
+    if any_failure || any_no_origin {
+        let detail = if any_no_origin && any_failure {
+            "one or more lockfile entries failed to install and one or more \
+             have no remote_origin"
+        } else if any_no_origin {
+            "one or more lockfile entries have no remote_origin"
+        } else {
+            "one or more lockfile entries failed to install"
+        };
+        return Err(detail.into());
+    }
+    if results.is_empty() {
+        println!("No dependencies in lockfile.");
+    }
+    Ok(())
+}
+
+/// WS-C (§7): bring a freshly-cloned shell to its pins in one verb. Reads
+/// the `reef.toml` compiler pin, then in order: ensures the pinned
+/// toolchain (auto-installing via chelisup), installs source packages +
+/// binary artifacts from `reef.lock` (WS-A), syncs source crates when
+/// `[chelis-src]` is present (chelis#571), and prints the `reef doctor`
+/// health summary. This is the "clone -> one command -> build" entry point.
+fn cmd_reef_setup(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    let root = path
+        .unwrap_or_else(|| PathBuf::from("."))
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve setup root: {e}"))?;
+    // Parse-only manifest read (like `reef src`): deliberately skips the
+    // same-compiler-version gate so a shell pinned to a *different* chelis
+    // still sets up. `compiler = "=X.Y.Z"` -> bare `X.Y.Z`.
+    let manifest = chelis_reef::read_manifest_for_src(&root)?;
+    let version = manifest
+        .package
+        .compiler
+        .trim_start_matches('=')
+        .to_string();
+    println!(
+        "chelis reef setup: {} (pin {version})",
+        manifest.package.name
+    );
+
+    // Step 1: ensure the pinned toolchain. Fail-fast: a missing or wrong
+    // compiler blocks the downstream build, so there is no point continuing.
+    ensure_pinned_toolchain(&version)?;
+
+    // Step 2: source packages + binary artifacts from reef.lock (WS-A).
+    if root.join("reef.lock").is_file() {
+        run_install_from_lockfile(&root)?;
+    } else {
+        println!("  install:   no reef.lock; skipping source-package/binary install");
+    }
+
+    // Step 3: source crates (chelis#571), only for crate-linking shells.
+    // The `is_some` guard avoids the "no [chelis-src]" error path in
+    // `resolve_shell_src_context`.
+    if manifest.chelis_src.is_some() {
+        cmd_reef_src(ReefSrcCommand::Sync {
+            path: Some(root.clone()),
+        })?;
+    } else {
+        println!("  src:       no [chelis-src]; skipping source-crate sync");
+    }
+
+    // Step 4: read-only health summary across every dependency class.
+    println!("--- doctor ---");
+    cmd_reef_doctor(Some(&root))?;
+    Ok(())
+}
+
+/// Step 1 of `reef setup`: ensure the `version` toolchain is installed in
+/// the chelisup store, auto-installing it by delegating to the real
+/// `chelisup` binary when it is missing.
+///
+/// IMPORTANT (shim-corruption guard): this MUST subprocess the installed
+/// `chelisup` binary and MUST NOT call `chelisup::install::install(...)`
+/// in-process. That library helper copies `current_exe()` into
+/// `<home>/bin/{chelis,chelisup}`; called from *this* (the `chelis`
+/// compiler) binary it would overwrite the shim and the installer with the
+/// compiler. The subprocess runs the real chelisup, whose `current_exe()`
+/// is chelisup itself. Do not "simplify" this into a library call.
+fn ensure_pinned_toolchain(version: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let store = chelisup::paths::Store::from_env()?;
+    if store.is_installed(version) {
+        println!(
+            "  toolchain: ok ({} installed)",
+            store.toolchain_dir(version).display()
+        );
+        return Ok(());
+    }
+    let chelisup = chelisup_binary(&store);
+    println!("  toolchain: {version} not installed; running `chelisup install {version}`...");
+    let status = match std::process::Command::new(&chelisup)
+        .args(["install", version])
+        .status()
+    {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!(
+                "the pinned toolchain {version} is not installed and `chelisup` was not \
+                 found (looked at {} and on PATH). Bootstrap chelisup \
+                 (`curl -fsSL <host>/chelisup.sh | sh`) so `chelisup install {version}` \
+                 can run, then re-run `chelis reef setup`.",
+                store.chelisup_path().display()
+            )
+            .into());
+        }
+        Err(e) => return Err(format!("could not run {}: {e}", chelisup.display()).into()),
+    };
+    if !status.success() {
+        let code = status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "signal".to_string());
+        return Err(format!(
+            "`chelisup install {version}` failed (exit {code}). \
+             Install the toolchain manually and re-run `chelis reef setup`."
+        )
+        .into());
+    }
+    // Post-condition: a successful chelisup install must have placed it.
+    if !store.is_installed(version) {
+        return Err(format!(
+            "`chelisup install {version}` reported success but {} is still absent",
+            store.toolchain_dir(version).display()
+        )
+        .into());
+    }
+    println!(
+        "  toolchain: ok ({} installed)",
+        store.toolchain_dir(version).display()
+    );
+    Ok(())
+}
+
+/// Resolve the `chelisup` binary `reef setup` delegates installs to:
+/// `$CHELISUP_BIN` (the test seam) if it names a non-empty path, else the
+/// installed copy at `<home>/bin/chelisup`, else bare `chelisup` on PATH
+/// (the spawn surfaces a clear NotFound if it is absent).
+fn chelisup_binary(store: &chelisup::paths::Store) -> PathBuf {
+    if let Some(bin) = std::env::var_os("CHELISUP_BIN")
+        && !bin.is_empty()
+    {
+        return PathBuf::from(bin);
+    }
+    let stored = store.chelisup_path();
+    if stored.exists() {
+        return stored;
+    }
+    PathBuf::from("chelisup")
 }
 
 /// Canonical remote for the source store, overridable by `CHELIS_SRC_REMOTE`
@@ -3343,8 +3570,28 @@ fn cmd_reef_doctor(root: Option<&Path>) -> Result<(), Box<dyn std::error::Error>
         return Ok(());
     }
 
-    let toolchain_store =
-        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/chelis"));
+    // The consolidated chelisup store (`$CHELIS_HOME` else `~/.chelis`),
+    // which owns toolchains (`toolchains/<ver>`), the shim, and the recorded
+    // default. Kept as a `Result` so an unresolved home degrades the
+    // per-shell toolchain line to "unknown" rather than aborting the scan.
+    let store = chelisup::paths::Store::from_env();
+    match &store {
+        Ok(s) => {
+            println!("chelis home: {}", s.home().display());
+            let shim = s.shim_path();
+            println!(
+                "shim:        {} ({})",
+                shim.display(),
+                if shim.exists() { "present" } else { "absent" }
+            );
+            println!(
+                "default:     {}",
+                s.read_default().unwrap_or_else(|| "(unset)".to_string())
+            );
+        }
+        Err(e) => println!("chelis home: unresolved ({e})"),
+    }
+    println!();
 
     for shell in &shells {
         let manifest = match chelis_reef::read_manifest_for_src(shell) {
@@ -3361,20 +3608,19 @@ fn cmd_reef_doctor(root: Option<&Path>) -> Result<(), Box<dyn std::error::Error>
             .to_string();
         println!("{} (pin {})", manifest.package.name, version);
 
-        // Class (a): toolchain installed?
-        match &toolchain_store {
-            Some(store) if store.join(&version).is_dir() => {
+        // Class (a): is the pinned toolchain installed in the chelisup store?
+        match &store {
+            Ok(s) if s.is_installed(&version) => {
                 println!(
-                    "  toolchain: ok ({}/{} installed)",
-                    store.display(),
-                    version
+                    "  toolchain: ok ({} installed)",
+                    s.toolchain_dir(&version).display()
                 );
             }
-            Some(store) => println!(
-                "  toolchain: MISSING; run the shell's install_chelis_toolchain.py ({} absent)",
-                store.join(&version).display()
+            Ok(s) => println!(
+                "  toolchain: MISSING; run `chelisup install {version}` ({} absent)",
+                s.toolchain_dir(&version).display()
             ),
-            None => println!("  toolchain: unknown (HOME unset)"),
+            Err(_) => println!("  toolchain: unknown (chelis home unresolved)"),
         }
 
         // Class (c): source crates (only for crate-linking shells).
@@ -3395,6 +3641,23 @@ fn cmd_reef_doctor(root: Option<&Path>) -> Result<(), Box<dyn std::error::Error>
             }
             Err(_) => {
                 println!("  src:       n/a (no [chelis-src]; pure-Chelis shell)");
+            }
+        }
+
+        // Class (binary artifacts, Item 11 / WS-A): declared in `[artifacts]`
+        // and installed via `chelis reef install --from-lockfile` to
+        // `<chelis home>/bin/<name>`.
+        if manifest.artifacts.is_empty() {
+            println!("  artifacts: n/a (no [artifacts])");
+        } else {
+            for name in manifest.artifacts.keys() {
+                match chelis_reef::which_artifact(name) {
+                    Ok(path) => println!("  artifacts: ok ({name} -> {})", path.display()),
+                    Err(_) => println!(
+                        "  artifacts: MISSING: {name} \
+                         (fix: `chelis reef install --from-lockfile`)"
+                    ),
+                }
             }
         }
     }

@@ -83,6 +83,10 @@ fn chelis(store: &Path, remote: &Path) -> Command {
     let mut c = Command::cargo_bin("chelis").expect("chelis binary built");
     c.env("CHELIS_SRC_HOME", store)
         .env("CHELIS_SRC_REMOTE", remote)
+        // Isolate the chelisup store `reef doctor` now reads (toolchain
+        // check + shim/default header) so it never touches the developer's
+        // real ~/.chelis. CHELIS_SRC_HOME above still owns the src store.
+        .env("CHELIS_HOME", store)
         // Keep token resolution from reaching out; a local remote needs none.
         .env_remove("GITHUB_TOKEN");
     c

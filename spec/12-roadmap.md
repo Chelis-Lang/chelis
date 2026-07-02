@@ -78,7 +78,11 @@ depends on Phase B. Phase D is post-launch.
 
 Cross-references: `spec/design/effect_taxonomy_expansion.md` for the
 detailed design of Phases B and C; `spec/design/reef_distribution.md` for
-Phase A and the post-launch Phase D registry-server endgame.
+Phase A and the post-launch Phase D registry-server endgame;
+`spec/design/chelis_packaging_and_install.md` for the unified install/packaging
+end-state — `chelisup` (WS-B), binary distribution (WS-A), and the
+`chelis reef setup` orchestrator + unified `reef doctor` (WS-C) — that extends
+the Phase-A distribution surface.
 
 ## Differentiable programming (committed scope)
 
