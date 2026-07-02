@@ -3251,6 +3251,12 @@ fn cmd_reef_setup(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error
 /// compiler) binary it would overwrite the shim and the installer with the
 /// compiler. The subprocess runs the real chelisup, whose `current_exe()`
 /// is chelisup itself. Do not "simplify" this into a library call.
+///
+/// This is enforced at compile time: chelisup's `install` and
+/// `ensure_shim_installed` are `pub(crate)`, so referencing them from here is
+/// an `E0603` build error caught by the normal clippy/build/test stages. The
+/// guard would only regress if someone widened that visibility *and* added
+/// the call.
 fn ensure_pinned_toolchain(version: &str) -> Result<(), Box<dyn std::error::Error>> {
     let store = chelisup::paths::Store::from_env()?;
     if store.is_installed(version) {

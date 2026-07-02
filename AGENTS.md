@@ -400,7 +400,11 @@ and [`docs/book/src/reef.md`](docs/book/src/reef.md).
   subprocess the real `chelisup` binary. Never call `chelisup::install::install`
   in-process from `chelis-cli`: that helper copies `current_exe()` into
   `<home>/bin/{chelis,chelisup}`, which from the `chelis` binary overwrites the
-  shim with the compiler. There is a guard comment at the call site.
+  shim with the compiler. **This is enforced at compile time:** chelisup's
+  `install` and `ensure_shim_installed` are `pub(crate)`, so a call from
+  `chelis-cli` is an `E0603` build error caught by the normal
+  clippy/build/test stages. Keep that visibility (and the call-site comment);
+  do not widen it to `pub`.
 - **§5.4 invariant:** `setup`'s auto-install is *explicit* provisioning and is
   therefore exempt from the "no auto-install" rule, which governs only the
   *implicit* shim. The unknown-subcommand hint augments only clap's

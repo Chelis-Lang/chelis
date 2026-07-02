@@ -257,7 +257,9 @@ freshly-cloned shell to its pins across every class in one verb:
    forbids the implicit per-invocation auto-install). It subprocesses the real
    `chelisup` rather than calling its install path in-process: that path copies
    `current_exe()` into `<home>/bin/{chelis,chelisup}`, which from the `chelis`
-   binary would overwrite the shim with the compiler;
+   binary would overwrite the shim with the compiler. This is enforced at
+   compile time — chelisup's `install`/`ensure_shim_installed` are `pub(crate)`,
+   so an in-process call from `chelis-cli` is an `E0603` build error;
 2. **`reef install --from-lockfile`** — source packages + binaries (#468) from
    `reef.lock`, when one is present;
 3. **`reef src sync`** — source crates (chelis#571) when `[chelis-src]` is

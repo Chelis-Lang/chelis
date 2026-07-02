@@ -71,8 +71,13 @@ sync` (if `[chelis-src]`) → `reef doctor` summary.
 - **NEVER call `chelisup::install::install(...)` in-process from `chelis-cli`.**
   That helper calls `ensure_shim_installed`, which copies `current_exe()` into
   `<home>/bin/{chelis,chelisup}`. From the `chelis` compiler binary that would
-  overwrite the shim and the installer with the compiler. There is a guard
-  comment at the call site; keep it, and keep a test asserting the shim stays
+  overwrite the shim and the installer with the compiler.
+- **The guard is compile-time.** chelisup's `install`, `ensure_shim_installed`,
+  `uninstall`, and `self_uninstall` are `pub(crate)` (only chelisup's own
+  `cli.rs` calls them; the sole external use is the pure `detect_slug` helper).
+  Any in-process reference from another crate is an `E0603` build error caught
+  by the normal clippy/build/test stages. Do NOT widen that visibility to
+  `pub`; keep the call-site comment and the test asserting the shim stays
   chelisup after an auto-install.
 
 ## `reef doctor`
