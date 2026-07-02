@@ -64,7 +64,16 @@ pub fn asset_name(version: &str, slug: &str) -> String {
 /// Install `version`. Idempotent. Validates the version, fetches and
 /// unpacks the tarball, installs the shim, and seeds the default on the
 /// first install.
-pub fn install(store: &Store, version: &str) -> Result<InstallOutcome, String> {
+///
+/// GUARD (shim-corruption trap): `pub(crate)`, deliberately NOT `pub`. This
+/// installs the shim by copying `current_exe()` into
+/// `<home>/bin/{chelis,chelisup}` (see [`ensure_shim_installed`]), which is
+/// correct only when the running executable IS chelisup. Another crate
+/// calling this in-process (notably `chelis-cli`, the `chelis` compiler)
+/// would copy the wrong binary over the shim. External callers must
+/// subprocess the real `chelisup` binary instead (see `chelis reef setup` in
+/// `chelis-cli`). Do NOT widen this to `pub`; the visibility is the guard.
+pub(crate) fn install(store: &Store, version: &str) -> Result<InstallOutcome, String> {
     validate_install_version(version)?;
 
     if store.is_installed(version) {
@@ -430,7 +439,11 @@ fn install_into_store(store: &Store, version: &str, unpacked: &Path) -> Result<(
 
 /// Install/refresh the `chelis` shim and the `chelisup` copy by copying
 /// this running executable into `<home>/bin/`.
-pub fn ensure_shim_installed(store: &Store) -> Result<(), String> {
+///
+/// GUARD (shim-corruption trap): `pub(crate)`, deliberately NOT `pub`. It
+/// copies `current_exe()`; from any process that is not chelisup that writes
+/// the wrong binary as the shim. Do NOT widen this to `pub`.
+pub(crate) fn ensure_shim_installed(store: &Store) -> Result<(), String> {
     fs::create_dir_all(store.bin_dir())
         .map_err(|e| format!("could not create {}: {e}", store.bin_dir().display()))?;
     let current = std::env::current_exe()
@@ -522,7 +535,10 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), String> {
 /// Remove an installed toolchain. Errors if it is not installed. Returns
 /// whether the removed version was the recorded default (so the caller
 /// can warn that the default is now unset).
-pub fn uninstall(store: &Store, version: &str) -> Result<bool, String> {
+///
+/// `pub(crate)`: chelisup owns the toolchain lifecycle. Other crates drive
+/// it through the `chelisup` binary, never in-process (see [`install`]).
+pub(crate) fn uninstall(store: &Store, version: &str) -> Result<bool, String> {
     if !store.is_installed(version) {
         return Err(format!(
             "toolchain {version} is not installed.\n  installed: {}",
@@ -541,7 +557,10 @@ pub fn uninstall(store: &Store, version: &str) -> Result<bool, String> {
 /// Remove the shim and installer copies and the recorded default,
 /// leaving installed toolchains and the reef/src stores intact. Returns
 /// the list of paths removed.
-pub fn self_uninstall(store: &Store) -> Result<Vec<PathBuf>, String> {
+///
+/// `pub(crate)`: chelisup owns the toolchain lifecycle. Other crates drive
+/// it through the `chelisup` binary, never in-process (see [`install`]).
+pub(crate) fn self_uninstall(store: &Store) -> Result<Vec<PathBuf>, String> {
     let mut removed = Vec::new();
     for path in [
         store.shim_path(),

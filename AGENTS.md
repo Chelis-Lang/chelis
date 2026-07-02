@@ -371,6 +371,47 @@ When writing or rewriting Surf in this repository:
   [`docs/local_hip_environment.md`](docs/local_hip_environment.md) for the authoritative
   runbook.
 
+## Toolchain And Packaging Orchestration
+
+Chelis has a rustup-style install/version layer and a one-command project
+orchestrator. The authoritative design is
+[`spec/design/chelis_packaging_and_install.md`](spec/design/chelis_packaging_and_install.md);
+the user-facing guide is [`docs/book/src/install.md`](docs/book/src/install.md)
+and [`docs/book/src/reef.md`](docs/book/src/reef.md).
+
+- **`chelisup`** (`crates/chelisup`) is the toolchain installer and the
+  pin-resolving `chelis` **shim**. It owns the toolchain lifecycle: bootstrap
+  (`crates/chelisup/bootstrap/chelisup.sh`, the one permitted shell script),
+  `install` / `default` / `list-installed` / `which` / `show` / `uninstall` /
+  `self uninstall`. The store is `$CHELIS_HOME` (default `~/.chelis`):
+  `toolchains/<ver>`, `bin/{chelis,chelisup}`, `reef/`, `src/`.
+- **Shim resolution order** (first match wins): `+<ver>` arg → `CHELIS_TOOLCHAIN`
+  → nearest `chelis-toolchain` file → nearest `reef.toml` `compiler =` pin →
+  recorded default. A resolved-but-not-installed version is a loud error naming
+  `chelisup install <ver>`; the shim never auto-installs on `cd` and never
+  silently falls back. `+latest` is not a supported reference (concrete pins
+  only).
+- **`chelis reef setup [--path]`** (`cmd_reef_setup` in `crates/chelis-cli`) is
+  the orchestrator: ensure the pinned toolchain (auto-install via the chelisup
+  binary), `reef install --from-lockfile`, `reef src sync` when `[chelis-src]`
+  is present, then a `reef doctor` summary. `reef doctor` is its read-only
+  counterpart across all classes (toolchain, source crates, binary artifacts).
+- **Shim-corruption trap (do not regress):** `reef setup`'s toolchain step MUST
+  subprocess the real `chelisup` binary. Never call `chelisup::install::install`
+  in-process from `chelis-cli`: that helper copies `current_exe()` into
+  `<home>/bin/{chelis,chelisup}`, which from the `chelis` binary overwrites the
+  shim with the compiler. **This is enforced at compile time:** chelisup's
+  `install` and `ensure_shim_installed` are `pub(crate)`, so a call from
+  `chelis-cli` is an `E0603` build error caught by the normal
+  clippy/build/test stages. Keep that visibility (and the call-site comment);
+  do not widen it to `pub`.
+- **§5.4 invariant:** `setup`'s auto-install is *explicit* provisioning and is
+  therefore exempt from the "no auto-install" rule, which governs only the
+  *implicit* shim. The unknown-subcommand hint augments only clap's
+  `InvalidSubcommand`.
+
+Use the `packaging-install` skill when changing or validating any of this.
+
 ## Shared Local Skills
 
 Project-local skills live in `agent-skills/`.
@@ -390,6 +431,7 @@ Current shared skill set:
 - `backend-numerics`
 - `example-corpus`
 - `cli-surface`
+- `packaging-install`
 
 ## Downstream Shell Contract
 

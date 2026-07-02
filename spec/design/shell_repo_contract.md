@@ -70,29 +70,39 @@ School exemplar: [`school/AGENTS.md`](https://github.com/Chelis-Lang/school/blob
   School exemplar: [`scripts/audit_workarounds.py`](https://github.com/Chelis-Lang/school/blob/main/scripts/audit_workarounds.py)
   `--pins-only`, wired as a `hard-rule-guard` step in
   [`ci.yml`](https://github.com/Chelis-Lang/school/blob/main/.github/workflows/ci.yml).
-- Toolchain installs go through a checked-in installer that reads the reef
-  pin (School: `scripts/install_chelis_toolchain.py`). Never vendor or
-  build the compiler inside a shell; never hand-symlink; consume the
-  released tarball (CI auth via a `CHELIS_RELEASE_TOKEN`-style PAT with
-  `contents: read` on every private dep the shell consumes).
+- Toolchain installs go through an installer that reads the reef pin. The
+  first-party path (shipped; WS-B/WS-C of
+  [`chelis_packaging_and_install.md`](chelis_packaging_and_install.md)) is
+  `chelisup`: bootstrap once via `chelisup.sh`, then `chelisup install <ver>`
+  — or let `chelis reef setup` provision the pin, the lockfile install, and
+  the source-crate sync in one verb (user guide:
+  [`docs/book/src/install.md`](../../docs/book/src/install.md)). New shells
+  MUST use `chelisup`; a shell still carrying a checked-in per-repo installer
+  (School: `scripts/install_chelis_toolchain.py`, the pre-chelisup form)
+  remains conformant until its WS-0 migration, which is parked/optional.
+  Never vendor or build the compiler inside a shell; never hand-symlink;
+  consume the released tarball (CI auth via a `CHELIS_RELEASE_TOKEN`-style
+  PAT with `contents: read` on every private dep the shell consumes).
 - **Per-repo toolchain resolution; installs have no machine-global side
-  effects.** Toolchains install side-by-side
-  (`~/.local/share/chelis/<ver>/`), and the PATH entrypoint resolves the
-  version **at invocation time from the invoking repo's reef pin** (env
-  override → nearest `reef.toml` walking up from CWD → an explicitly
-  recorded default used only outside packages). Installing a toolchain
-  MUST NOT repoint the machine default — a fixed
+  effects.** Toolchains install side-by-side in a version-keyed store
+  (first-party: `$CHELIS_HOME/toolchains/<ver>`, default `~/.chelis/`;
+  School's pre-chelisup launcher used `~/.local/share/chelis/<ver>/`), and
+  the PATH entrypoint resolves the version **at invocation time from the
+  invoking repo's reef pin**. The chelisup shim's order, first match wins:
+  `+<ver>` argument → `CHELIS_TOOLCHAIN` env → nearest `chelis-toolchain`
+  file → nearest `reef.toml` `compiler =` pin → an explicitly recorded
+  default used only outside packages. Installing a toolchain MUST NOT
+  repoint the machine default — a fixed
   symlink-to-the-last-installed-version makes bare `chelis` run the wrong
   toolchain for every *other* repo on the machine wherever the reef pin
   guard doesn't reach (single-file `fmt`/`check`, `eval`, editor
   integrations, scripts). A resolved-but-not-installed version is a loud
-  error, never a silent fallback to another version. School exemplar: the
-  pin-resolving launcher written by
+  error naming `chelisup install <ver>`, never a silent fallback to another
+  version. This requirement is the *behavior*, not the tool: first-party
+  `chelisup` (chelis#164, shipped) satisfies it out of the box, and shells
+  retire their per-repo launchers as they migrate (WS-0). School exemplar
+  (pre-chelisup form): the pin-resolving launcher written by
   [`scripts/install_chelis_toolchain.py`](https://github.com/Chelis-Lang/school/blob/main/scripts/install_chelis_toolchain.py).
-  This requirement is the *behavior*, not the script: when first-party
-  `chelisup` (chelis#164 — whose proposal already specifies the
-  reef-pin-honoring shim) ships, shells satisfy it via `chelisup` and
-  retire their per-repo launchers.
 - **Python is uv-managed, never the system installation** (this surfaces the
   monorepo `AGENTS.md` §Scripting Language Policy for shells): repo scripts
   are stdlib-only and invoked via `python3`/`uv run --python X.Y`; any
@@ -112,11 +122,12 @@ School exemplar: [`school/AGENTS.md`](https://github.com/Chelis-Lang/school/blob
     `pin_commit` that mirrors the workflow `CHELIS_PIN_COMMIT` surface; the
     offline pin-consistency check guards their agreement);
   - source those crates from a **version-keyed, immutable store**
-    (`~/.local/share/chelis-src/<ver>/`, a git worktree of canonical
-    `Chelis-Lang/chelis` at the pinned release **commit** — never a local
-    tag), and point `../chelis` at the worktree matching the shell's own pin
-    via a **symlink**, exactly as the toolchain launcher resolves the binary
-    per `reef.toml`. `chelis reef src sync` provisions the store and the
+    (`$CHELIS_HOME/src/<ver>/`, default `~/.chelis/src/<ver>/`, a git
+    worktree of canonical `Chelis-Lang/chelis` at the pinned release
+    **commit** — never a local tag), and point `../chelis` at the worktree
+    matching the shell's own pin
+    via a **symlink**, exactly as the chelisup shim resolves the toolchain
+    binary per `reef.toml`. `chelis reef src sync` provisions the store and the
     symlink; it refuses (never deletes) a real dev clone in the slot;
   - add a **local-only** drift guard (`chelis reef src check`) to the
     Workspace Gate — it asserts the store worktree, the `../chelis` symlink,
@@ -127,8 +138,10 @@ School exemplar: [`school/AGENTS.md`](https://github.com/Chelis-Lang/school/blob
   sibling checkout relies on it); the wiring is local-dev-only and must not
   edit `Cargo.toml` or CI. `chelis reef doctor` reports this class alongside
   the toolchain and chelis-std across a machine's shells. As with the
-  launcher this is the *behavior*, not a specific script; `chelisup`
-  (chelis#164) is the eventual version-independent home. Full design,
+  launcher this is the *behavior*, not a specific script; the sync verbs
+  live in the pinned toolchain, and the version-independent `chelisup` shim
+  (chelis#164, shipped) provides cross-version reach via
+  `chelis +<ver> reef src sync` (packaging design §5.4). Full design,
   including the symlink-vs-`.cargo`-override rationale, lives in
   [`chelis_source_crate_sourcing.md`](chelis_source_crate_sourcing.md).
 
@@ -324,7 +337,7 @@ both the bootstrap checklist and the conformance self-audit.
 | 2 | `reef.toml` exact pin = latest validation-clean release | MUST | §2 | `reef.toml` |
 | 3 | Workflow env pins in every toolchain-installing workflow | MUST | §2 | `.github/workflows/{ci,release}.yml` |
 | 4 | Offline pin-consistency CI guard | MUST | §2 | `audit_workarounds.py --pins-only` (ci.yml guard) |
-| 5 | Toolchain installer + pin-resolving launcher (no global-default side effects) | MUST | §2 | `scripts/install_chelis_toolchain.py` |
+| 5 | Toolchain installer + pin-resolving launcher (no global-default side effects) | MUST | §2 | first-party `chelisup` (bootstrap + shim; do not copy School's pre-chelisup `scripts/install_chelis_toolchain.py`) |
 | 6 | uv-only Python (stdlib scripts; uv projects for dep-bearing harnesses) | MUST | §2 | `parity/pyproject.toml` |
 | 7 | `docs/CHELIS_SURFACE.md` (domain-relevant subset, @pin/@upstream) | MUST | §3 | `docs/CHELIS_SURFACE.md` |
 | 8 | `docs/UPSTREAM_BUGS.md` (sections + cadence) | MUST | §4 | `docs/UPSTREAM_BUGS.md` |

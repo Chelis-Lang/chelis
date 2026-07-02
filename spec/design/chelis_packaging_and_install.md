@@ -3,11 +3,14 @@
 **Status:** North-star design + roadmap (scoped 2026-06-30). The toolchain
 launcher behavior in §3 is contract-normative today
 ([`shell_repo_contract.md`](shell_repo_contract.md) §2); the source-crate layer
-is implemented (chelis#571); binary distribution (chelis#468) and the
-first-party installer `chelisup` (chelis#164) are planned and specified here.
-This doc is the umbrella the rest of the install/packaging work hangs off; it
-does not supersede [`reef_distribution.md`](reef_distribution.md) (reef's
-package-delivery design) but frames it as one layer of a larger whole.
+is implemented (chelis#571). Binary distribution (chelis#468, WS-A) and the
+first-party installer `chelisup` (chelis#164, WS-B) are **implemented**, and the
+orchestration layer (WS-C) — `chelis reef setup`, the `reef doctor`
+unification, and §5.4's unknown-subcommand hint — is **implemented** and
+described in §7 / §5.4. This doc is the umbrella the rest of the
+install/packaging work hangs off; it does not supersede
+[`reef_distribution.md`](reef_distribution.md) (reef's package-delivery design)
+but frames it as one layer of a larger whole.
 
 ## 1. Why this doc
 
@@ -243,13 +246,22 @@ reuses `install_validated_artifact_pair`, the shipped SHA-256 helpers,
 
 ## 7. Layer 2 — orchestration: `chelis reef setup`
 
-`chelis reef setup [--path]` brings a freshly-cloned shell to its pins across
-every class in one verb:
+**Implemented (WS-C).** `chelis reef setup [--path <PATH>]` brings a
+freshly-cloned shell to its pins across every class in one verb:
 
-1. **ensure the pinned toolchain** — delegate to chelisup, or emit a loud,
-   actionable error naming the `chelisup install` command if it is absent;
+1. **ensure the pinned toolchain** — check the chelisup store; when the pin is
+   missing, **auto-install** by delegating to the `chelisup` binary
+   (`chelisup install <ver>`), or emit a loud, actionable error naming that
+   command if `chelisup` itself is absent. This is explicit, user-invoked
+   provisioning, so it does *not* violate the §5.3 *shim* invariant (which
+   forbids the implicit per-invocation auto-install). It subprocesses the real
+   `chelisup` rather than calling its install path in-process: that path copies
+   `current_exe()` into `<home>/bin/{chelis,chelisup}`, which from the `chelis`
+   binary would overwrite the shim with the compiler. This is enforced at
+   compile time — chelisup's `install`/`ensure_shim_installed` are `pub(crate)`,
+   so an in-process call from `chelis-cli` is an `E0603` build error;
 2. **`reef install --from-lockfile`** — source packages + binaries (#468) from
-   `reef.lock`;
+   `reef.lock`, when one is present;
 3. **`reef src sync`** — source crates (chelis#571) when `[chelis-src]` is
    present;
 4. print the **`reef doctor`** summary.
@@ -280,6 +292,11 @@ WS-A and WS-B are independent — WS-A extends `install_from_github` inside
 concurrently. WS-C composes both, so it lands last. This doc plus the
 store-consolidation default-path change land first (cheap, and they unblock
 both workstreams). WS-0 (chelis#571 downstream adoption) gates nothing here.
+
+**Status:** WS-A, WS-B, and WS-C are implemented (`chelis reef setup`, the
+unified `reef doctor`, and the §5.4 unknown-subcommand hint all ship in
+`crates/chelis-cli`). WS-0 — downstream shells adopting `chelisup` and retiring
+their vendored `install_chelis_toolchain.py` — remains parked/optional.
 
 ## 9. End-state acceptance
 
