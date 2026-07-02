@@ -18,7 +18,7 @@ global default the last install repoints.
 
 | Class | What | Store | Resolution | Status |
 |---|---|---|---|---|
-| (a) Toolchain binary | the `chelis` CLI | `~/.local/share/chelis/<ver>/` | pin-resolving PATH launcher (→ `chelisup`, chelis#164) | solved (contract §2) |
+| (a) Toolchain binary | the `chelis` CLI | `~/.chelis/toolchains/<ver>/` | `chelisup` pin-resolving shim (chelis#164, shipped) | solved (contract §2) |
 | (b) chelis-std | the std reef package | compiler-bundled, or `~/.chelis/reef/packages/.../<ver>/` | reef registry | solved |
 | (c) Source crates | `chelis-ir` / `chelis-types` / … as Cargo path deps | `~/.chelis/src/<ver>/` | `../chelis` symlink → version-keyed worktree | **this doc** |
 
