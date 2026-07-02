@@ -18,7 +18,7 @@ Once chelis releases are public, one line drops the prebuilt `chelisup` at
 `~/.chelis/bin/chelisup` and prints the PATH line to add:
 
 ```sh
-curl -fsSL https://<host>/chelisup.sh | sh
+curl -fsSL https://github.com/Chelis-Lang/chelis/releases/latest/download/chelisup.sh | sh
 ```
 
 During the private-repo pre-launch era the public release URL does not serve

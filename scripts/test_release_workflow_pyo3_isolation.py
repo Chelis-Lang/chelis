@@ -68,13 +68,15 @@ class ReleaseWorkflowPyo3IsolationTest(unittest.TestCase):
         self.assertTrue(RELEASE_WORKFLOW.is_file(), f"{RELEASE_WORKFLOW} not found")
 
     def test_extract_release_targets_finds_expected_set(self) -> None:
-        # Sanity check the parser: at time of writing, release.yml builds
-        # exactly chelis-cli + chelis-runtime. If a target is added, this
-        # test will fail and the new target must be vetted for pyo3 by
-        # the no-pyo3 test below.
+        # Sanity check the parser: release.yml builds chelis-cli +
+        # chelis-runtime (the toolchain tarball) and chelisup (the bare
+        # `chelisup-<slug>` bootstrap asset, WS-B / chelis#164). If a
+        # target is added, this test will fail and the new target must be
+        # vetted for pyo3 by the no-pyo3 test below.
         targets = extract_release_targets(RELEASE_WORKFLOW)
         self.assertIn("chelis-cli", targets)
         self.assertIn("chelis-runtime", targets)
+        self.assertIn("chelisup", targets)
 
     @unittest.skipUnless(
         shutil.which("cargo") is not None,
