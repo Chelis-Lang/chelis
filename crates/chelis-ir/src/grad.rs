@@ -971,6 +971,14 @@ fn compute_adjoints(
             };
 
             // Slice each element along `axis`.
+            //
+            // chelis#513 gap 3 (structural slice): a bystander NON-reduced
+            // axis takes the whole axis (`(0, full_extent)`), so a symbolic
+            // bystander dim uses the `SHRINK_TO_END` full-axis sentinel
+            // instead of demanding a concrete size; `bind_symbolic_dims` (eval
+            // lane) and `emit_shrink` (C lane) resolve it. Only the REDUCED
+            // axis needs a concrete size (the slice count), which stays a
+            // hard error above -- no silent guess.
             let mut slices: Vec<NodeId> = Vec::with_capacity(axis_size);
             for i in 0..axis_size {
                 let bounds: Vec<(usize, usize)> = (0..rank)
@@ -978,7 +986,10 @@ fn compute_adjoints(
                         if d == *axis {
                             (i, i + 1)
                         } else {
-                            (0, dim_size(&input_ty.dims[d]))
+                            match &input_ty.dims[d] {
+                                DimInfo::Named(_, None) => (0, crate::dag::SHRINK_TO_END),
+                                dim => (0, dim_size(dim)),
+                            }
                         }
                     })
                     .collect();
@@ -1236,11 +1247,31 @@ fn compute_adjoints(
         RiscOp::Shrink { bounds } => {
             let x = node.inputs[0];
             let input_ty = forward.get(x).unwrap().output_type.clone();
-            // Pad: for each axis, before = start, after = original_size - end
+            // Pad: for each axis, before = start, after = original_size - end.
+            //
+            // chelis#513 gap 3: a `(0, SHRINK_TO_END)` bound is the full-axis
+            // identity sentinel (emitted by the Pad and Stride adjoints on
+            // symbolic bystander axes), whose exact adjoint is no padding at
+            // all -- `(0, 0)` -- with no axis size needed. Anything else
+            // carrying the sentinel is a producing-pass bug: fail loud rather
+            // than let the `dim_size(dim) - end` subtraction wrap. A symbolic
+            // dim under a CONCRETE sub-range bound still needs the runtime
+            // size for `after` and stays a hard error via `dim_size`.
             let padding: Vec<(usize, usize)> = bounds
                 .iter()
                 .zip(input_ty.dims.iter())
-                .map(|((start, end), dim)| (*start, dim_size(dim) - end))
+                .map(|((start, end), dim)| {
+                    if *end == crate::dag::SHRINK_TO_END {
+                        assert_eq!(
+                            *start, 0,
+                            "malformed SHRINK_TO_END sentinel in shrink adjoint: \
+                             nonzero start {start}"
+                        );
+                        (0, 0)
+                    } else {
+                        (*start, dim_size(dim) - end)
+                    }
+                })
                 .collect();
             let dx = dag.add_node(RiscOp::Pad { padding, fill: 0.0 }, vec![g], input_ty, None);
             Some(vec![(x, dx)])
@@ -1275,21 +1306,38 @@ fn compute_adjoints(
             let x = node.inputs[0];
             let input_ty = forward.get(x).unwrap().output_type.clone();
             let precision = input_ty.precision;
-            // Source sizes per axis; symbolic (unsized) dims cannot be
-            // upsampled because the trim size is unknown, so fail closed.
-            let source_sizes: Vec<usize> = input_ty.dims.iter().map(dim_size).collect();
+            // chelis#513 gap 3 (structural slice): only a STRIDED axis
+            // (step > 1) needs its concrete source size, for the trim bound
+            // that reconstructs the source extent. A symbolic bystander axis
+            // (step <= 1, the batched-pooling shape) flows through the
+            // reshape/pad/reshape cascade untouched and its trim bound is the
+            // `SHRINK_TO_END` full-axis sentinel. A symbolic STRIDED axis
+            // would need the runtime size (a shape() value read) and stays
+            // fail-closed loud -- no silent guess.
+            let strided_axis_size = |axis: usize, dim: &DimInfo| -> usize {
+                match dim {
+                    DimInfo::Lit(n) => *n,
+                    DimInfo::Named(_, Some(n)) => *n,
+                    DimInfo::Named(name, None) => panic!(
+                        "stride adjoint requires a concrete size for strided axis {axis}; \
+                         got symbolic dimension `{name}` (chelis#513: a runtime-symbolic \
+                         strided extent needs shape() value reads in the DAG)"
+                    ),
+                }
+            };
 
             // Running cotangent; its dims mutate axis-by-axis from the
             // strided shape back toward the source shape.
             let mut cur = g;
             let mut cur_dims: Vec<DimInfo> = node.output_type.dims.clone();
 
-            for (axis, (&step, &n_a)) in strides.iter().zip(source_sizes.iter()).enumerate() {
+            for (axis, &step) in strides.iter().enumerate() {
                 if step <= 1 {
                     // Identity stride on this axis: m_a == n_a already.
                     continue;
                 }
-                let m_a = dim_size(&cur_dims[axis]);
+                let n_a = strided_axis_size(axis, &input_ty.dims[axis]);
+                let m_a = strided_axis_size(axis, &cur_dims[axis]);
 
                 // reshape: insert a size-1 axis after `axis`.
                 let mut split_dims = cur_dims.clone();
@@ -1339,9 +1387,15 @@ fn compute_adjoints(
 
                 // shrink axis back to [0, n_a). m_a * step >= n_a always
                 // (ceil), so this is a valid trim of the trailing
-                // overshoot from the final group.
-                let mut bounds: Vec<(usize, usize)> =
-                    merged_dims.iter().map(|d| (0usize, dim_size(d))).collect();
+                // overshoot from the final group. Symbolic bystander axes
+                // take the full-axis identity sentinel (chelis#513 gap 3).
+                let mut bounds: Vec<(usize, usize)> = merged_dims
+                    .iter()
+                    .map(|d| match d {
+                        DimInfo::Named(_, None) => (0usize, crate::dag::SHRINK_TO_END),
+                        dim => (0usize, dim_size(dim)),
+                    })
+                    .collect();
                 bounds[axis] = (0, n_a);
                 let mut trimmed_dims = merged_dims.clone();
                 trimmed_dims[axis] = DimInfo::Lit(n_a);
@@ -3836,5 +3890,264 @@ mod tests {
             (a - expected).abs() < 1e-5,
             "cos gradient at x=0.5 must be -sin(0.5) ≈ {expected:.6}, got {a:.6}"
         );
+    }
+
+    // --- chelis#513 gap 3: structural symbolic-bystander-axis adjoints ---
+
+    fn sym_batch_ty(rest: &[usize]) -> TensorType {
+        let mut dims = vec![DimInfo::Named("batch".into(), None)];
+        dims.extend(rest.iter().map(|n| DimInfo::Lit(*n)));
+        TensorType {
+            dims,
+            precision: chelis_types::types::Prim::F32,
+        }
+    }
+
+    /// Reduce `node` (rank-2 `[batch, k]`) to a scalar via two Sums, so the
+    /// DAG has the scalar-loss output `grad_dag` requires.
+    fn reduce_rank2_to_scalar(dag: &mut Dag, node: NodeId, mid_dims: Vec<DimInfo>) -> NodeId {
+        let mid = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![node],
+            TensorType {
+                dims: mid_dims,
+                precision: chelis_types::types::Prim::F32,
+            },
+            None,
+        );
+        dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![mid],
+            scalar_f32(),
+            None,
+        )
+    }
+
+    /// Stride along the concrete axis of a `[batch, 4]` input: backward
+    /// construction must succeed and the trim `Shrink` must carry the
+    /// `SHRINK_TO_END` full-axis sentinel on the symbolic bystander axis
+    /// (never a guessed concrete extent).
+    #[test]
+    fn stride_adjoint_symbolic_bystander_axis_uses_sentinel_trim() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            sym_batch_ty(&[4]),
+            None,
+        );
+        let strided = dag.add_node(
+            RiscOp::Stride {
+                strides: vec![1, 2],
+            },
+            vec![x],
+            sym_batch_ty(&[2]),
+            None,
+        );
+        let out = reduce_rank2_to_scalar(&mut dag, strided, vec![DimInfo::Lit(2)]);
+
+        let grad_result = grad_dag(&dag, out, &[x]).expect("symbolic bystander must construct");
+        let sentinel_trim = grad_result.dag.nodes().iter().any(|node| {
+            matches!(
+                &node.op,
+                RiscOp::Shrink { bounds }
+                    if bounds.first() == Some(&(0, crate::dag::SHRINK_TO_END))
+                        && bounds.get(1) == Some(&(0, 4))
+            )
+        });
+        assert!(
+            sentinel_trim,
+            "stride adjoint must trim via a SHRINK_TO_END sentinel on the \
+             symbolic bystander axis and the concrete source extent on the \
+             strided axis"
+        );
+    }
+
+    /// NEGATIVE PARITY: a stride along the SYMBOLIC axis itself needs the
+    /// runtime source size and must stay fail-closed loud.
+    #[test]
+    #[should_panic(expected = "stride adjoint requires a concrete size for strided axis")]
+    fn stride_adjoint_symbolic_strided_axis_fails_loud() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named("n".into(), None)],
+                precision: chelis_types::types::Prim::F32,
+            },
+            None,
+        );
+        let strided = dag.add_node(
+            RiscOp::Stride { strides: vec![2] },
+            vec![x],
+            TensorType {
+                dims: vec![DimInfo::Named("m".into(), None)],
+                precision: chelis_types::types::Prim::F32,
+            },
+            None,
+        );
+        let out = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![strided],
+            scalar_f32(),
+            None,
+        );
+        let _ = grad_dag(&dag, out, &[x]);
+    }
+
+    /// ProdReduce along the concrete axis of a `[batch, 3]` input: backward
+    /// construction must succeed and the per-slice Shrinks must carry the
+    /// sentinel on the symbolic bystander axis.
+    #[test]
+    fn prod_reduce_adjoint_symbolic_bystander_axis_uses_sentinel_slices() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            sym_batch_ty(&[3]),
+            None,
+        );
+        let prod = dag.add_node(
+            RiscOp::ProdReduce { axis: 1 },
+            vec![x],
+            TensorType {
+                dims: vec![DimInfo::Named("batch".into(), None)],
+                precision: chelis_types::types::Prim::F32,
+            },
+            None,
+        );
+        let out = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![prod],
+            scalar_f32(),
+            None,
+        );
+
+        let grad_result = grad_dag(&dag, out, &[x]).expect("symbolic bystander must construct");
+        let sentinel_slices = grad_result
+            .dag
+            .nodes()
+            .iter()
+            .filter(|node| {
+                matches!(
+                    &node.op,
+                    RiscOp::Shrink { bounds }
+                        if bounds.first() == Some(&(0, crate::dag::SHRINK_TO_END))
+                )
+            })
+            .count();
+        assert_eq!(
+            sentinel_slices, 3,
+            "prod_reduce adjoint must emit one sentinel-bounded slice per \
+             element of the concrete reduced axis"
+        );
+    }
+
+    /// NEGATIVE PARITY: prod_reduce along the SYMBOLIC axis needs one slice
+    /// per runtime element; stays fail-closed loud.
+    #[test]
+    #[should_panic(expected = "prod_reduce adjoint requires a concrete axis size")]
+    fn prod_reduce_adjoint_symbolic_reduced_axis_fails_loud() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named("n".into(), None)],
+                precision: chelis_types::types::Prim::F32,
+            },
+            None,
+        );
+        let prod = dag.add_node(RiscOp::ProdReduce { axis: 0 }, vec![x], scalar_f32(), None);
+        let _ = grad_dag(&dag, prod, &[x]);
+    }
+
+    /// The Shrink adjoint of a full-axis `(0, SHRINK_TO_END)` sentinel bound
+    /// is exactly no padding on that axis: `(0, 0)`, no axis size needed.
+    /// (This is the double-grad consumer of the sentinel the Pad and Stride
+    /// adjoints emit on symbolic bystander axes.)
+    #[test]
+    fn shrink_adjoint_full_axis_sentinel_pads_zero() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            sym_batch_ty(&[3]),
+            None,
+        );
+        let shrunk = dag.add_node(
+            RiscOp::Shrink {
+                bounds: vec![(0, crate::dag::SHRINK_TO_END), (1, 3)],
+            },
+            vec![x],
+            sym_batch_ty(&[2]),
+            None,
+        );
+        let out = reduce_rank2_to_scalar(&mut dag, shrunk, vec![DimInfo::Lit(2)]);
+
+        let grad_result = grad_dag(&dag, out, &[x]).expect("sentinel shrink must construct");
+        let pad_zero = grad_result.dag.nodes().iter().any(|node| {
+            matches!(
+                &node.op,
+                RiscOp::Pad { padding, .. }
+                    if padding.first() == Some(&(0, 0)) && padding.get(1) == Some(&(1, 0))
+            )
+        });
+        assert!(
+            pad_zero,
+            "shrink adjoint must lower the full-axis sentinel to (0, 0) \
+             padding and the concrete sub-range to its exact padding"
+        );
+    }
+
+    /// NEGATIVE PARITY: a sentinel with a nonzero start is a producing-pass
+    /// bug and must fail loud, never wrap `dim_size - end`.
+    #[test]
+    #[should_panic(expected = "malformed SHRINK_TO_END sentinel")]
+    fn shrink_adjoint_malformed_sentinel_fails_loud() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(4)],
+                precision: chelis_types::types::Prim::F32,
+            },
+            None,
+        );
+        let shrunk = dag.add_node(
+            RiscOp::Shrink {
+                bounds: vec![(1, crate::dag::SHRINK_TO_END)],
+            },
+            vec![x],
+            TensorType {
+                dims: vec![DimInfo::Lit(3)],
+                precision: chelis_types::types::Prim::F32,
+            },
+            None,
+        );
+        let out = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![shrunk],
+            scalar_f32(),
+            None,
+        );
+        let _ = grad_dag(&dag, out, &[x]);
     }
 }
