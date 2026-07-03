@@ -578,7 +578,7 @@ fn issue_579_let_bound_shape_extent_chained_c_backend_agrees() {
     assert_eval_agrees_with_backend(&source, "issue_579_achw_let_bound_c", &backend);
 }
 
-// ── Negatives: the sourceless issue spelling and genuine misuse ──────────
+// ── Negatives: the bare-scalar sourceless spellings and genuine misuse ───
 
 /// The batchnorm1d-flavor bare-scalar sourceless spelling must be rejected
 /// at CHECK with the #469 sourceless-size diagnostic, and no error may carry
