@@ -312,6 +312,7 @@ impl CEmitter {
         let id = node.id.0;
         match &node.op {
             RiscOp::Const { value } => self.emit_const(id, *value, &node.output_type),
+            RiscOp::ConstTensor { data } => self.emit_const_tensor(id, data, &node.output_type),
             RiscOp::Load { .. } => unreachable!("handled in emit_dag"),
             RiscOp::Add => self.emit_binary(id, "+", &node.inputs, &node.output_type),
             RiscOp::Mul => self.emit_binary(id, "*", &node.inputs, &node.output_type),
@@ -1491,6 +1492,82 @@ impl CEmitter {
                 "C backend emit_const has no path for `{}` (spec/04-type-system.md §1.1)",
                 other.name()
             ),
+        }
+    }
+
+    /// Emit a multi-element constant tensor as a C array initialized
+    /// with the literal data values, then memcpy into the tensor slot.
+    fn emit_const_tensor(&mut self, id: usize, data: &[f64], ty: &TensorType) {
+        self.emit_slot_wrapper(id, ty);
+        match ty.precision {
+            Prim::F32 => {
+                // Use a uint32_t array of bit patterns (compile-time constants),
+                // then memcpy into the tensor. This avoids function-call
+                // initializers that C89/C99 reject in static arrays.
+                let values: Vec<String> = data
+                    .iter()
+                    .map(|v| {
+                        let bits = (*v as f32).to_bits();
+                        format!("0x{bits:08x}u")
+                    })
+                    .collect();
+                self.line(&format!(
+                    "{{ static const uint32_t __bits[] = {{ {} }};",
+                    values.join(", ")
+                ));
+                self.line(&format!(
+                    "  memcpy(t{id}->data, __bits, {}u * sizeof(uint32_t)); }}",
+                    data.len()
+                ));
+            }
+            Prim::F64 => {
+                let values: Vec<String> = data
+                    .iter()
+                    .map(|v| {
+                        let bits = v.to_bits();
+                        format!("0x{bits:016x}uLL")
+                    })
+                    .collect();
+                self.line(&format!(
+                    "{{ static const uint64_t __bits[] = {{ {} }};",
+                    values.join(", ")
+                ));
+                self.line(&format!(
+                    "  memcpy(t{id}->data, __bits, {}u * sizeof(uint64_t)); }}",
+                    data.len()
+                ));
+            }
+            Prim::Int32 => {
+                let values: Vec<String> = data.iter().map(|v| format!("{}", *v as i32)).collect();
+                self.line(&format!(
+                    "{{ static const int32_t __data[] = {{ {} }};",
+                    values.join(", ")
+                ));
+                self.line(&format!(
+                    "  memcpy(t{id}->data, __data, {}u * sizeof(int32_t)); }}",
+                    data.len()
+                ));
+            }
+            Prim::Int64 => {
+                let values: Vec<String> = data.iter().map(|v| format!("{}", *v as i64)).collect();
+                self.line(&format!(
+                    "{{ static const int64_t __data[] = {{ {} }};",
+                    values.join(", ")
+                ));
+                self.line(&format!(
+                    "  memcpy(t{id}->data, __data, {}u * sizeof(int64_t)); }}",
+                    data.len()
+                ));
+            }
+            _ => {
+                // Fallback: fill element by element via bit-cast helpers.
+                for (i, v) in data.iter().enumerate() {
+                    let bits = (*v as f32).to_bits();
+                    self.line(&format!(
+                        "((float*)t{id}->data)[{i}] = chelis_f32_from_bits(0x{bits:08x}u);"
+                    ));
+                }
+            }
         }
     }
 

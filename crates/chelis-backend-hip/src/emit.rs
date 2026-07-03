@@ -986,6 +986,7 @@ impl HipEmitter {
             RiscOp::ReduceWindowGrad { .. } => None,
             RiscOp::OneHot { .. } => None,
             RiscOp::Const { .. } => Some(format!("kernel_fill_{}", kind_for_node(node).suffix())),
+            RiscOp::ConstTensor { .. } => Some(format!("kernel_fill_{}", kind_for_node(node).suffix())),
             RiscOp::Realize => Some(Self::cast_kernel_name(node, dag)),
             RiscOp::Cast { .. } => Some(Self::cast_kernel_name(node, dag)),
             // `pad` / `shrink` materialize a fresh buffer via a typed
@@ -1241,6 +1242,7 @@ impl HipEmitter {
                 kernels::reduce_argmin(name, *axis, Self::elem_kind(input_ty))
             }
             RiscOp::Const { .. } => kernels::fill(name, elem_for_unary()),
+            RiscOp::ConstTensor { .. } => kernels::fill(name, elem_for_unary()),
             RiscOp::Realize => Self::cast_kernel_source(name, node, dag),
             RiscOp::Cast { .. } => Self::cast_kernel_source(name, node, dag),
             RiscOp::Copy => Self::cast_kernel_source(name, node, dag),
@@ -1385,6 +1387,7 @@ impl HipEmitter {
         };
         match &node.op {
             RiscOp::Const { value } => self.emit_const(id, *value, &node.output_type),
+            RiscOp::ConstTensor { data } => self.emit_const_tensor(id, data, &node.output_type),
             RiscOp::Load { .. } => unreachable!("handled in emit_dag"),
             RiscOp::Add => self.emit_binary_launch(
                 id,
@@ -1778,6 +1781,59 @@ impl HipEmitter {
             "256",
             "fill_args",
         );
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// Emit a multi-element constant tensor on HIP. Uploads data
+    /// element-by-element via fill calls (same kernel as Const).
+    fn emit_const_tensor(&mut self, id: usize, data: &[f64], ty: &TensorType) {
+        self.emit_slot_wrapper(id, ty);
+        let elem = Self::elem_kind(ty);
+        self.line("{");
+        self.indent += 1;
+        match elem {
+            kernels::ElemKind::F32 => {
+                // Upload the full data via a host-side memcpy into a
+                // temporary then hipMemcpy to device. For simplicity,
+                // reuse the fill kernel per-element is too slow; instead
+                // build a host-side buffer and copy.
+                self.line(&format!("int fill_size = d_t{id}->size;"));
+                self.line(&format!(
+                    "float *__host_data = (float*)malloc({}u * sizeof(float));",
+                    data.len()
+                ));
+                for (i, v) in data.iter().enumerate() {
+                    let bits = (*v as f32).to_bits();
+                    self.line(&format!(
+                        "__host_data[{i}] = chelis_f32_from_bits(0x{bits:08x}u);"
+                    ));
+                }
+                self.line(&format!(
+                    "hipMemcpy(d_t{id}->data, __host_data, {}u * sizeof(float), hipMemcpyHostToDevice);",
+                    data.len()
+                ));
+                self.line("free(__host_data);");
+            }
+            kernels::ElemKind::F64 => {
+                self.line(&format!("int fill_size = d_t{id}->size;"));
+                self.line(&format!(
+                    "double *__host_data = (double*)malloc({}u * sizeof(double));",
+                    data.len()
+                ));
+                for (i, v) in data.iter().enumerate() {
+                    let bits = v.to_bits();
+                    self.line(&format!(
+                        "__host_data[{i}] = chelis_f64_from_bits(0x{bits:016x}uLL);"
+                    ));
+                }
+                self.line(&format!(
+                    "hipMemcpy(d_t{id}->data, __host_data, {}u * sizeof(double), hipMemcpyHostToDevice);",
+                    data.len()
+                ));
+                self.line("free(__host_data);");
+            }
+        }
         self.indent -= 1;
         self.line("}");
     }
@@ -3201,6 +3257,7 @@ impl HipEmitter {
         match &dag.get(id).unwrap().op {
             RiscOp::Load { .. }
             | RiscOp::Const { .. }
+            | RiscOp::ConstTensor { .. }
             | RiscOp::Add
             | RiscOp::Mul
             | RiscOp::Div

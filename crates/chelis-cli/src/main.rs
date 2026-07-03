@@ -1840,7 +1840,7 @@ fn assemble_check_json(
         .iter()
         .map(|e| {
             format!(
-                "{{\"kind\":\"{:?}\",\"message\":{},\"severity\":{}{}{}}}",
+                "{{\"kind\":\"{:?}\",\"message\":{},\"severity\":{}{}{}{}{}}}",
                 e.kind,
                 serde_json::to_string(&e.message).unwrap_or_default(),
                 e.severity,
@@ -1855,6 +1855,16 @@ fn assemble_check_json(
                     .as_ref()
                     .map(|s| format!(",\"got\":{}", serde_json::to_string(s).unwrap_or_default()))
                     .unwrap_or_default(),
+                e.span_offset
+                    .map(|o| format!(",\"span_offset\":{o}"))
+                    .unwrap_or_default(),
+                e.span_id
+                    .as_ref()
+                    .map(|s| format!(
+                        ",\"span_id\":{}",
+                        serde_json::to_string(s).unwrap_or_default()
+                    ))
+                    .unwrap_or_default(),
             )
         })
         .collect();
@@ -1867,10 +1877,20 @@ fn assemble_check_json(
     }));
     errors_json.extend(linearity_errors.iter().map(|e| {
         format!(
-            "{{\"kind\":\"{:?}\",\"message\":{},\"severity\":{}}}",
+            "{{\"kind\":\"{:?}\",\"message\":{},\"severity\":{}{}{}}}",
             e.kind,
             serde_json::to_string(&e.message).unwrap_or_default(),
             e.severity,
+            e.span_offset
+                .map(|o| format!(",\"span_offset\":{o}"))
+                .unwrap_or_default(),
+            e.span_id
+                .as_ref()
+                .map(|s| format!(
+                    ",\"span_id\":{}",
+                    serde_json::to_string(s).unwrap_or_default()
+                ))
+                .unwrap_or_default(),
         )
     }));
 

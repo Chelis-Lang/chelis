@@ -144,6 +144,7 @@ fn classify_nodes(dag: &Dag, reduction_inlined: &HashSet<NodeId>) -> Vec<NodeMem
                     source: node.inputs[0],
                 },
                 RiscOp::Const { .. }
+                | RiscOp::ConstTensor { .. }
                 | RiscOp::Add
                 | RiscOp::Mul
                 | RiscOp::Div

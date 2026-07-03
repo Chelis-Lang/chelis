@@ -113,6 +113,7 @@ fn classify_nodes(dag: &Dag, skipped: &HashSet<NodeId>) -> Vec<NodeMemoryKind> {
                     source: node.inputs[0],
                 },
                 RiscOp::Const { .. }
+                | RiscOp::ConstTensor { .. }
                 | RiscOp::Add
                 | RiscOp::Mul
                 | RiscOp::Div

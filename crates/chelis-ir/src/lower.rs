@@ -7865,71 +7865,15 @@ impl LowerCtx {
             );
         }
 
-        // Non-uniform: build the Const + Pad + Add cascade.
-        let rank = shape.len();
-        let unit_dims: Vec<DimInfo> = vec![DimInfo::Lit(1); rank];
-        let unit_ty = TensorType {
-            dims: unit_dims,
-            precision,
-        };
-        let mut accumulator: Option<NodeId> = None;
-        for (flat_idx, &value) in literal.data.iter().enumerate() {
-            // Skip zero contributions — `+ 0` is the identity. The
-            // uniform fast-path catches the all-zeros case above.
-            if value == 0.0 {
-                continue;
-            }
-            let const_node = self.dag.add_node(
-                RiscOp::Const { value },
-                vec![],
-                unit_ty.clone(),
-                self.current_span_id.clone(),
-            );
-            // Decompose flat_idx into per-axis indices (row-major).
-            let mut per_axis = vec![0usize; rank];
-            let mut residual = flat_idx;
-            for axis in (0..rank).rev() {
-                let dim = literal.shape[axis];
-                per_axis[axis] = residual % dim;
-                residual /= dim;
-            }
-            let padding: Vec<(usize, usize)> = (0..rank)
-                .map(|axis| {
-                    let dim = literal.shape[axis];
-                    let before = per_axis[axis];
-                    let after = dim - 1 - before;
-                    (before, after)
-                })
-                .collect();
-            let padded = self.dag.add_node(
-                RiscOp::Pad { padding, fill: 0.0 },
-                vec![const_node],
-                tensor_ty.clone(),
-                self.current_span_id.clone(),
-            );
-            accumulator = Some(match accumulator {
-                None => padded,
-                Some(prev) => self.dag.add_node(
-                    RiscOp::Add,
-                    vec![prev, padded],
-                    tensor_ty.clone(),
-                    self.current_span_id.clone(),
-                ),
-            });
-        }
-
-        // Fallback: if every element was zero, the uniform fast-path
-        // returns above. This branch handles the logically-
-        // unreachable case fail-closed with an all-zero Const of the
-        // full shape.
-        accumulator.unwrap_or_else(|| {
-            self.dag.add_node(
-                RiscOp::Const { value: 0.0 },
-                vec![],
-                tensor_ty,
-                self.current_span_id.clone(),
-            )
-        })
+        // Non-uniform: emit a single ConstTensor node.
+        self.dag.add_node(
+            RiscOp::ConstTensor {
+                data: literal.data.clone(),
+            },
+            vec![],
+            tensor_ty,
+            self.current_span_id.clone(),
+        )
     }
 
     /// Issue #368: lower `concat([t0, t1, ...], axis)` of a

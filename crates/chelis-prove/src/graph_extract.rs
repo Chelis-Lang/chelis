@@ -173,6 +173,16 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             WireRiscOp::Dropout { rate, .. } => reject_if_non_finite(id, "rate", *rate)?,
             WireRiscOp::Pad { fill, .. } => reject_if_non_finite(id, "fill", *fill)?,
             WireRiscOp::Const { value } => reject_if_non_finite(id, "value", *value)?,
+            WireRiscOp::ConstTensor { data } => {
+                for v in data.iter() {
+                    if !v.is_finite() {
+                        return Err(GraphExtractError::NonFiniteValue {
+                            node: id,
+                            field: "data",
+                        });
+                    }
+                }
+            }
 
             // --- f64-free ops: no float to check. Listed explicitly (no
             // wildcard) so a new variant breaks the build until someone

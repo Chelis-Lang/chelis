@@ -718,6 +718,12 @@ pub enum RiscOp {
     Const {
         value: f64,
     },
+    /// A multi-element constant tensor stored as a flat row-major data
+    /// vector. Replaces the Const+Pad+Add tree for literal `to_tensor`
+    /// calls with non-uniform data.
+    ConstTensor {
+        data: Vec<f64>,
+    },
     Load {
         name: LoadStoreName,
     },
@@ -1041,7 +1047,10 @@ impl RiscOp {
             // input box itself; `BlasMatmul` is a sum-of-products fold of
             // targetable transformers (the pricer and NN graphs both hit
             // it).
-            RiscOp::Const { .. } | RiscOp::Load { .. } | RiscOp::BlasMatmul { .. } => true,
+            RiscOp::Const { .. }
+            | RiscOp::ConstTensor { .. }
+            | RiscOp::Load { .. }
+            | RiscOp::BlasMatmul { .. } => true,
 
             // --- Cast ---
             // Real-valued first: identity on the real envelope. The

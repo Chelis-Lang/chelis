@@ -1500,14 +1500,17 @@ fn infer_ir_program_with_state(
     crate::opacity::set_current_item(None, None);
 
     for warning in chelis_deep::validate::validate(exprs) {
-        errors.push(CheckError::new(
-            match warning.kind {
-                chelis_deep::validate::WarningKind::Arity => CheckErrorKind::ArityMismatch,
-                _ => CheckErrorKind::Other,
-            },
-            warning.message,
-            vec!["Use canonical Deep 3-tuple forms from spec/03".to_string()],
-        ));
+        errors.push(
+            CheckError::new(
+                match warning.kind {
+                    chelis_deep::validate::WarningKind::Arity => CheckErrorKind::ArityMismatch,
+                    _ => CheckErrorKind::Other,
+                },
+                warning.message,
+                vec!["Use canonical Deep 3-tuple forms from spec/03".to_string()],
+            )
+            .at_offset(warning.offset),
+        );
     }
 
     if let Some(target_exprs) = run_validate_passes_on {
@@ -6545,6 +6548,35 @@ fn validator_span_suffix(call_site: &deep::List) -> Option<String> {
     None
 }
 
+/// Extract the `:span` metadata string from a list node, if present.
+/// Used to propagate external span identifiers into check diagnostics.
+fn list_span_id(list: &deep::List) -> Option<&str> {
+    let meta = get_meta(list)?;
+    for (key, value) in &meta.entries {
+        if key == "span"
+            && let deep::Expr::Atom(deep::Atom::Str(s), _) = value
+        {
+            return Some(s.as_str());
+        }
+    }
+    None
+}
+
+/// Parse the start byte offset from a span identifier string.
+/// Handles the `"surf:<start>..<end>"` format emitted by the desugar step
+/// and bare `"<start>..<end>"` ranges.
+fn parse_span_offset(span_id: &str) -> Option<usize> {
+    // Format: "surf:10..25" or "10..25" or "octant:line:7" (opaque)
+    let numeric_part = span_id
+        .rfind(':')
+        .map(|i| &span_id[i + 1..])
+        .unwrap_or(span_id);
+    // Try to parse "start..end"
+    numeric_part
+        .split_once("..")
+        .and_then(|(start, _)| start.parse::<usize>().ok())
+}
+
 /// Validate the symbolic requirements of an IR-level `conv2d` call.
 ///
 /// The previous implementation read `:type` from the app node's
@@ -9017,7 +9049,7 @@ fn infer_var(
         // fallback. Check exact scope first; the fuzzy `lookup_terminal_unique`
         // is the mis-resolution path the issue reports.
         if constructor_out_of_scope(name, env) {
-            errors.push(CheckError::new(
+            let mut err = CheckError::new(
                 CheckErrorKind::UnknownConstructor,
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
@@ -9027,7 +9059,14 @@ fn infer_var(
                     "Constructor '{name}' is not in scope. Declare it locally or add it \
                      to an import (e.g. `import Mod ({name})`)"
                 )],
-            ));
+            );
+            if let Some(sid) = list_span_id(list) {
+                if let Some(off) = parse_span_offset(sid) {
+                    err.span_offset = Some(off);
+                }
+                err.span_id = Some(sid.to_string());
+            }
+            errors.push(err);
             return Type::Error;
         }
         if let Some(scheme) = env
@@ -9047,14 +9086,21 @@ fn infer_var(
             }
             resolved
         } else {
-            errors.push(CheckError::new(
+            let mut err = CheckError::new(
                 CheckErrorKind::UnboundVariable,
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
                     format!("unbound variable: {name}"),
                 ),
                 vec![format!("Check spelling of '{}'", name)],
-            ));
+            );
+            if let Some(sid) = list_span_id(list) {
+                if let Some(off) = parse_span_offset(sid) {
+                    err.span_offset = Some(off);
+                }
+                err.span_id = Some(sid.to_string());
+            }
+            errors.push(err);
             Type::Error
         }
     } else {
@@ -12694,7 +12740,17 @@ fn infer_app(
             result_ty
         }
         Err(te) => {
-            errors.push(te.into());
+            let mut e: CheckError = te.into();
+            if let Some(id) = list_span_id(list) {
+                e.span_offset = parse_span_offset(id);
+                e.span_id = Some(id.to_string());
+            } else {
+                let off = span_of_list(list).offset;
+                if off > 0 {
+                    e.span_offset = Some(off);
+                }
+            }
+            errors.push(e);
             Type::Error
         }
     }
@@ -17080,7 +17136,17 @@ fn infer_if(
     match unify(&then_ty, &else_ty, subst) {
         Ok(()) => subst.apply(&then_ty),
         Err(te) => {
-            errors.push(te.into());
+            let mut e: CheckError = te.into();
+            if let Some(id) = list_span_id(list) {
+                e.span_offset = parse_span_offset(id);
+                e.span_id = Some(id.to_string());
+            } else {
+                let off = span_of_list(list).offset;
+                if off > 0 {
+                    e.span_offset = Some(off);
+                }
+            }
+            errors.push(e);
             subst.apply(&then_ty)
         }
     }
@@ -17695,7 +17761,17 @@ fn infer_pipe(
                 current_ty = subst.apply(&ret_tv);
             }
             Err(te) => {
-                errors.push(te.into());
+                let mut e: CheckError = te.into();
+                if let Some(id) = stage.span_id() {
+                    e.span_offset = parse_span_offset(id);
+                    e.span_id = Some(id.to_string());
+                } else {
+                    let off = stage.span().offset;
+                    if off > 0 {
+                        e.span_offset = Some(off);
+                    }
+                }
+                errors.push(e);
                 return Type::Error;
             }
         }

@@ -1301,6 +1301,13 @@ where
                     shape,
                 }
             }
+            RiscOp::ConstTensor { data } => {
+                let shape = concrete_shape(&node.output_type).unwrap_or_default();
+                TensorValue {
+                    data: data.clone(),
+                    shape,
+                }
+            }
             RiscOp::Load { name } => match resolved_inputs.get(name.as_str()) {
                 Some(value) => value.clone(),
                 None if strict_loads => return Err(format!("missing required input `{name}`")),
