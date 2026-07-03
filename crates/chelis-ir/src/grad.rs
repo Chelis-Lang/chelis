@@ -291,6 +291,7 @@ fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Shrink { .. } => "shrink",
         RiscOp::Stride { .. } => "stride",
         RiscOp::Const { .. } => "const",
+        RiscOp::ConstTensor { .. } => "const_tensor",
         RiscOp::Load { .. } => "load",
         RiscOp::Store { .. } => "store",
         RiscOp::Copy => "copy",
@@ -1430,6 +1431,7 @@ fn compute_adjoints(
 
         // --- Memory ---
         RiscOp::Const { .. } => Some(vec![]),
+        RiscOp::ConstTensor { .. } => Some(vec![]),
         RiscOp::Load { .. } => Some(vec![]),
         RiscOp::Store { .. } => {
             let x = node.inputs[0];

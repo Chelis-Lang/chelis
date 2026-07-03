@@ -12,6 +12,10 @@ pub struct CheckError {
     pub expected: Option<String>,
     /// Actual type found (for structured error reports).
     pub got: Option<String>,
+    /// Byte offset into the source where the error occurred.
+    pub span_offset: Option<usize>,
+    /// External span identifier (e.g. from Octant's LaTeX-to-Deep translator).
+    pub span_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +139,8 @@ impl CheckError {
             severity,
             expected: None,
             got: None,
+            span_offset: None,
+            span_id: None,
         }
     }
 
@@ -154,7 +160,21 @@ impl CheckError {
             severity,
             expected: Some(expected),
             got: Some(got),
+            span_offset: None,
+            span_id: None,
         }
+    }
+
+    /// Set the byte offset into the source where this error occurred.
+    pub fn at_offset(mut self, offset: usize) -> Self {
+        self.span_offset = Some(offset);
+        self
+    }
+
+    /// Set the external span identifier for this error.
+    pub fn with_span_id(mut self, id: String) -> Self {
+        self.span_id = Some(id);
+        self
     }
 }
 
@@ -189,6 +209,8 @@ impl From<TypeError> for CheckError {
             severity,
             expected: None,
             got: None,
+            span_offset: None,
+            span_id: None,
         }
     }
 }

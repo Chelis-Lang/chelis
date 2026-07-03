@@ -329,7 +329,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                     ));
                 }
             }
-            RiscOp::Const { .. } | RiscOp::Load { .. } => {
+            RiscOp::Const { .. } | RiscOp::ConstTensor { .. } | RiscOp::Load { .. } => {
                 if arity != 0 {
                     errors.push(format!(
                         "memory op at node {} has {} inputs (expected 0)",

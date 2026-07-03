@@ -3386,6 +3386,7 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
             strides: strides.clone(),
         },
         RiscOp::Const { value } => WireRiscOp::Const { value: *value },
+        RiscOp::ConstTensor { data } => WireRiscOp::ConstTensor { data: data.clone() },
         RiscOp::Load { name } => WireRiscOp::Load {
             name: name.as_str().to_string(),
         },
