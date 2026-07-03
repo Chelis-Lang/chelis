@@ -38,13 +38,18 @@ impl TensorType {
 /// chelis#368: the reverse-mode adjoint of a `Pad` whose unpadded axes are
 /// runtime-derived symbolic dims (the differentiable `concat` lowering)
 /// cannot bake a literal `end` for those axes. It emits `(0, SHRINK_TO_END)`
-/// there; [`bind_symbolic_dims`] resolves the sentinel to the axis's runtime
-/// extent (read from the node's bound output type) before evaluation, so the
-/// `Shrink` evaluator never sees the sentinel. The C/HIP/Metal backends do
-/// not run `bind_symbolic_dims` (they emit symbolic dims as runtime values),
-/// so they reject the sentinel loudly rather than miscompile — grad through a
-/// symbolic-window `concat` is an eval-lane capability today (the named-def
-/// grad build lane is separately gated; see chelis#368).
+/// there, and since chelis#513 the `Stride` adjoint's trim bound and the
+/// `ProdReduce` adjoint's per-element slice bounds emit the same sentinel on
+/// symbolic bystander axes. [`bind_symbolic_dims`] resolves the sentinel to
+/// the axis's runtime extent (read from the node's bound output type) before
+/// evaluation, so the `Shrink` evaluator never sees it. The C backend does
+/// not run `bind_symbolic_dims` (the symbolic dim stays a runtime C
+/// variable); its `emit_shrink` loop is driven by the output shape, so a
+/// well-formed full-axis sentinel (`start == 0` on a symbolic output axis)
+/// is already correct structurally and only a MALFORMED sentinel fails loud
+/// (chelis#551). The Metal lane requires concrete movement shapes and
+/// rejects a symbolic-axis shrink with a clean error before the sentinel
+/// matters; the HIP shrink kernel, like C, reads only the per-axis `start`.
 pub const SHRINK_TO_END: usize = usize::MAX;
 
 /// Dimension descriptor for a tensor axis.
@@ -1716,9 +1721,11 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
             },
             // chelis#368: resolve the `SHRINK_TO_END` full-axis sentinel to the
             // axis's now-bound extent (from this node's bound output type). The
-            // sentinel only appears on a `Shrink` adjoint of a `Pad` over an
-            // unpadded symbolic axis, where the slice is the whole axis, so the
-            // resolved `end` is exactly the output dim's size.
+            // sentinel is emitted only for a full-axis slice of a symbolic
+            // bystander axis (the Pad adjoint's no-pad axes, and since
+            // chelis#513 the Stride adjoint's trim and the ProdReduce
+            // adjoint's per-element slices), so the resolved `end` is exactly
+            // `start` plus the output dim's size.
             RiscOp::Shrink { bounds } if bounds.iter().any(|(_, end)| *end == SHRINK_TO_END) => {
                 let resolved = bounds
                     .iter()

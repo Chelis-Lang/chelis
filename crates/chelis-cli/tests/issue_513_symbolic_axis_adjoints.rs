@@ -29,6 +29,19 @@
 //! axis, symbolic-sig arithmetic reshape targets, runtime shrink bounds on a
 //! symbolic axis) REMAIN fail-closed with loud diagnostics, pinned by the
 //! negative tests at the bottom.
+//!
+//! Fail-closed hardening on top of the fold: a shape()-derived arithmetic
+//! reshape target the exactness gate REFUSES (symbolic dim leaf, negative
+//! operand, non-positive divisor, or overflow) now fails LOUD at lowering
+//! instead of falling back to the checker's wildcard dims. Pre-hardening,
+//! the wildcard became an anonymous dim that the eval lane's symbolic
+//! binding could satisfy with a coincidental input extent under `grad`,
+//! silently accepting a program whose written target expression was never
+//! checked (e.g. a target that folds to [4, 4] over an 8-element input
+//! evaluated as if it were [2, 4]). Forward (non-grad) uses of the same
+//! form still evaluate through the host lane, which computes the target
+//! expression with true runtime semantics and rejects shape-inconsistent
+//! programs at runtime; both behaviors are pinned below.
 
 use std::fs;
 use std::path::Path;
@@ -210,6 +223,28 @@ fn issue_513_stride_symbolic_batch_grad_nonlinear_matches_fd() {
     assert_close("stride nonlinear grad vs FD", &grad, &fd, 5e-2);
 }
 
+/// ADVERSARIAL: overshooting stride (step 3 over a size-4 axis, so the
+/// upsample cascade's merged axis is 2 * 3 = 6 and the trim discards the
+/// trailing 2 slots) with the symbolic bystander axis in play. Locks the
+/// `m_a * step > n_a` trailing-trim path next to the sentinel bounds:
+/// kept columns are {0, 3}, gradient 2x there and 0 elsewhere.
+#[test]
+fn issue_513_stride_overshoot_symbolic_batch_grad_matches_fd() {
+    let body = "  s = stride(&x, cast(1, int32), cast(3, int32))\n\
+  sq = mul(s, s)\n\
+  sum(sum(sq, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar";
+    let (shape, grad) = eval_grad(&grad_source(
+        STRIDE_SIG,
+        body,
+        &matrix_literal(&STRIDE_BASE, 4),
+    ));
+    assert_eq!(shape, vec![2, 4], "stride overshoot grad shape");
+    let want = [2.0, 0.0, 0.0, 8.0, 10.0, 0.0, 0.0, 16.0];
+    assert_close("stride overshoot grad", &grad, &want, 1e-3);
+    let fd = finite_difference(STRIDE_SIG, body, &STRIDE_BASE, 4);
+    assert_close("stride overshoot grad vs FD", &grad, &fd, 5e-2);
+}
+
 // ---------------------------------------------------------------------------
 // Sub-slice 2: ProdReduce adjoint, symbolic batch axis, concrete reduced axis.
 // ---------------------------------------------------------------------------
@@ -239,6 +274,27 @@ fn issue_513_prod_reduce_symbolic_batch_grad_matches_fd() {
     assert_close("prod_reduce grad", &grad, &want, 1e-3);
     let fd = finite_difference(PROD_SIG, PROD_BODY, &PROD_BASE, 3);
     assert_close("prod_reduce grad vs FD", &grad, &fd, 5e-2);
+}
+
+/// ADVERSARIAL: zero elements in the input on the ENABLED symbolic-bystander
+/// path. The naive `g * prod / x_i` adjoint divides by zero here; the
+/// prefix*suffix construction must produce the exact finite leave-one-out
+/// products through the sentinel-bounded slices. Row 0 = [2, 0, 4] has one
+/// zero (gradient nonzero ONLY at the zero position: 2 * 4 = 8); row 1 =
+/// [0, 0, 5] has two zeros (every leave-one-out product contains a zero, so
+/// the whole row's gradient is 0).
+#[test]
+fn issue_513_prod_reduce_zero_element_symbolic_batch_grad_matches_fd() {
+    let base = [2.0, 0.0, 4.0, 0.0, 0.0, 5.0];
+    let (shape, grad) = eval_grad(&grad_source(PROD_SIG, PROD_BODY, &matrix_literal(&base, 3)));
+    assert_eq!(shape, vec![2, 3], "prod_reduce zero-element grad shape");
+    for v in &grad {
+        assert!(v.is_finite(), "prod_reduce grad must be finite; got {v}");
+    }
+    let want = [0.0, 8.0, 0.0, 0.0, 0.0, 0.0];
+    assert_close("prod_reduce zero-element grad", &grad, &want, 1e-3);
+    let fd = finite_difference(PROD_SIG, PROD_BODY, &base, 3);
+    assert_close("prod_reduce zero-element grad vs FD", &grad, &fd, 5e-2);
 }
 
 // ---------------------------------------------------------------------------
@@ -327,6 +383,73 @@ fn issue_513_reshape_arith_target_grad_nonlinear_matches_fd() {
         fd.push((lp - lm) / (2.0 * h));
     }
     assert_close("reshape-arith nonlinear grad vs FD", &grad, &fd, 5e-2);
+}
+
+/// General 2x4 verb whose reshape target dims are caller-supplied
+/// arithmetic expressions over the shape-read bindings `a_d` (= 2) and
+/// `b_d` (= 4). Used by the division/mod fold oracles and the fail-closed
+/// pins below.
+fn reshape_arith2_source(target: &str, literal: &str, grad: bool) -> String {
+    let call = if grad {
+        format!("out = grad(f)(to_tensor([{literal}]))")
+    } else {
+        format!("out = f(to_tensor([{literal}]))")
+    };
+    format!(
+        "module Repro.ReshapeArith2\n\
+         def f(x: tensor[2, 4, f32]) -> f32 = {{\n\
+         \x20 a_d = cast(shape(x, cast(0, int32)), int64)\n\
+         \x20 b_d = cast(shape(x, cast(1, int32)), int64)\n\
+         \x20 p = permute(&x, cast(1, int32), cast(0, int32))\n\
+         \x20 r = reshape(p, [{target}])\n\
+         \x20 sq = mul(r, r)\n\
+         \x20 sum(sum(sq, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
+         }}\n\
+         {call}\n"
+    )
+}
+
+const RESHAPE2_BASE: [f64; 8] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+
+/// The gated-domain division/mod arms of the fold: target
+/// `[floor_div(mul(b_d, a_d), 4), add(sub(b_d, a_d), mod(a_d, b_d))]`
+/// = `[8 / 4, (4 - 2) + (2 mod 4)]` = `[2, 4]` (all operands non-negative,
+/// all divisors positive, so floor, trunc, and euclidean semantics agree
+/// and the fold is exact). Loss = sum of squares, gradient 2x. Pre-fold
+/// these arms had no positive coverage at all.
+const DIV_MOD_TARGET: &str = "floor_div(mul(b_d, a_d), cast(4, int64)), \
+     add(sub(b_d, a_d), mod(a_d, b_d))";
+
+#[test]
+fn issue_513_reshape_div_mod_target_grad_matches_fd() {
+    let (shape, grad) = eval_grad(&reshape_arith2_source(
+        DIV_MOD_TARGET,
+        &matrix_literal(&RESHAPE2_BASE, 4),
+        true,
+    ));
+    assert_eq!(shape, vec![2, 4], "div/mod reshape-arith grad shape");
+    let want: Vec<f64> = RESHAPE2_BASE.iter().map(|x| 2.0 * x).collect();
+    assert_close("div/mod reshape-arith grad", &grad, &want, 1e-3);
+    let h = 1e-2;
+    let mut fd = Vec::new();
+    for i in 0..RESHAPE2_BASE.len() {
+        let mut xp = RESHAPE2_BASE.to_vec();
+        let mut xm = RESHAPE2_BASE.to_vec();
+        xp[i] += h;
+        xm[i] -= h;
+        let lp = eval_scalar(&reshape_arith2_source(
+            DIV_MOD_TARGET,
+            &matrix_literal(&xp, 4),
+            false,
+        ));
+        let lm = eval_scalar(&reshape_arith2_source(
+            DIV_MOD_TARGET,
+            &matrix_literal(&xm, 4),
+            false,
+        ));
+        fd.push((lp - lm) / (2.0 * h));
+    }
+    assert_close("div/mod reshape-arith grad vs FD", &grad, &fd, 5e-2);
 }
 
 // ---------------------------------------------------------------------------
@@ -431,13 +554,16 @@ fn parse_lines(stdout: &str) -> Vec<f64> {
 
 /// gcc-compile a MAIN-CARRYING emitted program (the `out = grad(f)(input)`
 /// applied form) directly against the emitted runtime and run it, returning
-/// stdout. The bare-export `out = grad(f)` form only supports rank-1 verbs
-/// today (a pre-existing bare-grad-export lane limitation unrelated to this
-/// issue: even `add` + double-sum over `tensor[batch, 2, f32]` is rejected
-/// with "`grad` is not supported by IR evaluation yet"), so the symbolic
-/// rank-2 C oracles use the applied form, whose emitted C still reads
-/// `batch` from the runtime input tensor (`inputs[0]->shape[0]`) and so
-/// exercises the symbolic-dim lowering end to end.
+/// stdout. The bare-export `out = grad(f)` form is rejected ("`grad` is not
+/// supported by IR evaluation yet") whenever the verb body contains no
+/// `shape()` read, at ANY rank (chelis#613, a pre-existing bare-grad-export
+/// lane limitation unrelated to this issue; the reshape-arith oracle below
+/// bare-exports fine because its body reads `shape()`). The stride and
+/// prod_reduce verbs here have shape()-free bodies, so their C oracles use
+/// the applied form, whose emitted C still reads `batch` from the runtime
+/// input tensor (`inputs[0]->shape[0]`, and the build log reports
+/// "Symbolic dims: batch") and so exercises the symbolic-dim lowering end
+/// to end.
 fn compile_and_run_main(build_dir: &Path, stem: &str) -> String {
     let kernel = build_dir.join(format!("{stem}.c"));
     let runtime = build_dir.join("libchelis_runtime.a");
@@ -522,6 +648,39 @@ fn issue_513_prod_reduce_symbolic_batch_grad_c_backend_agrees() {
     assert_close("prod grad C vs eval", &c_grad, &eval_g, 1e-3);
     let want = [6.0, 3.0, 2.0, 30.0, 24.0, 20.0];
     assert_close("prod grad C vs analytic", &c_grad, &want, 1e-3);
+}
+
+/// eval-vs-C agreement for the gated-domain division/mod reshape-target
+/// grad (the floor_div / mod fold arms).
+#[test]
+fn issue_513_reshape_div_mod_target_grad_c_backend_agrees() {
+    let source = reshape_arith2_source(DIV_MOD_TARGET, "", false)
+        .replace("out = f(to_tensor([]))", "out = grad(f)");
+    let (_dir, build_dir) = build_c(&source, "divmod513");
+    let stdout = compile_and_run(
+        &build_dir,
+        "divmod513",
+        &matrix_driver(2, 4, &RESHAPE2_BASE),
+    );
+    let c_grad = parse_lines(&stdout);
+    let (_, eval_g) = eval_grad(&reshape_arith2_source(
+        DIV_MOD_TARGET,
+        &matrix_literal(&RESHAPE2_BASE, 4),
+        true,
+    ));
+    assert_close(
+        "div/mod reshape-arith grad C vs eval",
+        &c_grad,
+        &eval_g,
+        1e-3,
+    );
+    let want: Vec<f64> = RESHAPE2_BASE.iter().map(|x| 2.0 * x).collect();
+    assert_close(
+        "div/mod reshape-arith grad C vs analytic",
+        &c_grad,
+        &want,
+        1e-3,
+    );
 }
 
 /// eval-vs-C agreement for the arithmetic reshape-target grad.
@@ -634,8 +793,11 @@ out = grad(f)(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4
 
 /// The SYMBOLIC-sig arithmetic reshape target (the true school im2col form,
 /// `tensor[a, b, f32]` with `reshape(p, [mul(b_d, a_d), 1])`) cannot fold
-/// statically; it still falls back to the checker's wildcard dims and fails
-/// loud in symbolic_occurrences. This pin keeps that boundary explicit until
+/// statically; the lowering-time refusal (a symbolic dim leaf fails the
+/// exactness gate) rejects it with a located chelis#513 diagnostic instead
+/// of the pre-hardening wildcard fallback (whose failure surface was the
+/// symbolic_occurrences ICE in the C lane and a coincidental anon-dim
+/// binding in the eval lane). This pin keeps that boundary explicit until
 /// the scalar-shape()-value capability lands (chelis#513 remainder).
 #[test]
 fn issue_513_symbolic_sig_reshape_arith_target_stays_fail_closed() {
@@ -652,7 +814,73 @@ out = grad(f)(to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast
     expect_grad_failure(
         source,
         "rshasym",
-        "symbolic dim",
+        "cannot be folded to an exact static extent",
         "symbolic-sig arithmetic reshape target",
+    );
+}
+
+/// A GATE-REFUSED arithmetic target over a CONCRETE sig: the fold rejects
+/// the negative intermediate (`sub(a_d, 10)` = -8 feeding `floor_div`, the
+/// domain where floor, trunc, and euclidean division disagree), and the
+/// lowering must fail LOUD. Pre-hardening this was the silent-acceptance
+/// hole: the wildcard fallback's anon dim bound to input axis 0 (= 2) at
+/// eval time, so this ill-formed program (its written target folds to
+/// [4, 4] over an 8-element input) evaluated `grad` as if the target were
+/// [2, 4], returning plausible numbers for a program that should have been
+/// rejected.
+#[test]
+fn issue_513_reshape_arith_gate_refused_grad_fails_loud() {
+    let target = "neg(floor_div(sub(a_d, cast(10, int64)), cast(2, int64))), cast(4, int64)";
+    let source = reshape_arith2_source(
+        target,
+        "[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)], \
+         [cast(5.0, f32), cast(6.0, f32), cast(7.0, f32), cast(8.0, f32)]",
+        true,
+    );
+    expect_grad_failure(
+        &source,
+        "gaterefused",
+        "cannot be folded to an exact static extent",
+        "gate-refused arithmetic reshape target under grad",
+    );
+}
+
+/// A target the fold PROVES negative (`sub(a_d, 10)` = -8 directly as the
+/// extent) is a proven-invalid program and must fail loud with the
+/// negative-extent diagnostic, never fall back to wildcard dims.
+#[test]
+fn issue_513_reshape_arith_negative_fold_fails_loud() {
+    let target = "sub(a_d, cast(10, int64)), cast(4, int64)";
+    let source = reshape_arith2_source(
+        target,
+        "[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)], \
+         [cast(5.0, f32), cast(6.0, f32), cast(7.0, f32), cast(8.0, f32)]",
+        true,
+    );
+    expect_grad_failure(
+        &source,
+        "negfold",
+        "folds to the negative extent",
+        "negative-extent arithmetic reshape target under grad",
+    );
+}
+
+/// HOST-LANE PARITY GUARD for the loud refusal: a FORWARD (non-grad) use of
+/// a gate-refused-but-VALID arithmetic target must keep evaluating through
+/// the host lane, which computes the written expression with true runtime
+/// semantics (`neg(floor_div(sub(2, 5), 2))` = 2 under floor division, so
+/// the reshape is [2, 4] over the 8-element input and the loss is
+/// sum(x^2) = 204). The lowering refusal must never leak into forward
+/// evaluation of forms the host lane handles honestly.
+#[test]
+fn issue_513_reshape_arith_gate_refused_forward_still_evals_via_host() {
+    let target = "neg(floor_div(sub(a_d, cast(5, int64)), cast(2, int64))), cast(4, int64)";
+    let source = reshape_arith2_source(target, &matrix_literal(&RESHAPE2_BASE, 4), false);
+    let loss = eval_scalar(&source);
+    let want: f64 = RESHAPE2_BASE.iter().map(|x| x * x).sum();
+    assert!(
+        (loss - want).abs() < 1e-3,
+        "forward host eval of the gate-refused-but-valid form must produce \
+         sum(x^2) = {want}; got {loss}"
     );
 }

@@ -215,15 +215,24 @@ classes (chelis#513, gap 3 structural slice):
   resolve to the runtime extent. The `Shrink` adjoint of a full-axis
   `(0, SHRINK_TO_END)` bound is exactly zero padding on that axis. A
   `reshape` target dim written as static integer arithmetic over `shape()`
-  reads of statically-sized axes folds to a literal at lowering.
+  reads of statically-sized axes folds to a literal at lowering; the
+  `floor_div` / `trunc_div` / `mod` arms fold only on a non-negative
+  dividend with a positive divisor, the domain where floor, truncating,
+  and euclidean division agree, so the fold can never disagree with the
+  runtime operator.
 - **Value-dependent (fail-closed).** Where the construction needs the
   concrete size -- the strided axis of a `Stride` adjoint (the trim bound),
   the reduced axis of a `ProdReduce` adjoint (one slice per element), or a
   symbolic axis under a concrete `Shrink` sub-range (the trailing pad
   amount) -- the adjoint fails loudly at construction, naming the op, the
-  axis, and the symbolic dim. It never guesses a size. Lifting this class
-  requires scalar `shape()` value reads in the RISC DAG (the open
-  chelis#513 remainder).
+  axis, and the symbolic dim. It never guesses a size. Likewise, a
+  shape()-derived arithmetic `reshape` target the fold cannot prove exact
+  (a symbolic dim leaf, a negative operand, a non-positive divisor, or
+  overflow) is refused loudly at lowering rather than falling back to the
+  checker's wildcard dims; forward (non-`grad`) uses of such a form still
+  evaluate through the host lane, which computes the target expression
+  with true runtime semantics. Lifting this class requires scalar
+  `shape()` value reads in the RISC DAG (the open chelis#513 remainder).
 
 Executable oracles: `crates/chelis-cli/tests/issue_513_symbolic_axis_adjoints.rs`
 (finite-difference + eval-vs-C agreement per enabled path, plus the
