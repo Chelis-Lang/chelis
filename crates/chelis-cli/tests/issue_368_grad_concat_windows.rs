@@ -355,21 +355,29 @@ fn issue_368_symbolic_nonconcat_axis_grad_nonlinear() {
 /// where the window count `m` is RUNTIME-derived (`m = shape(x, 0)`-based)
 /// over a SYMBOLIC-rank input `tensor[n, f32]`, behind a symbolic-dim sig'd
 /// callee and an `if/fail` guard. The concat→rank-0 collapse #368 fixed is
-/// gone, but this form still fails to lower under `grad` because of three
-/// INDEPENDENT symbolic-dim machinery gaps tracked in Chelis-Lang/chelis#513
+/// gone, but this form still fails to lower under `grad` because of the
+/// remaining symbolic-dim machinery gaps tracked in Chelis-Lang/chelis#513
 /// ("symbolic-dim-aware grad machinery"):
 ///
 /// 1. the runtime-expr `mean` divisor `Const` carries `Named("m")` with no
-///    declaring `Load` (symbol-declaration ICE),
+///    declaring `Load` (symbol-declaration ICE), and
 /// 2. runtime `shrink`/`stride` bounds (`cast(add(...))`) extract to empty
-///    bounds, and
-/// 3. the `if/fail` blend's `Named("*")` wildcard hits `dim_size` in the
-///    `sum`/`Pad`/`Shrink` adjoints over symbolic input dims.
+///    bounds, leaving the windowed intermediate a `Named("*")` wildcard.
 ///
-/// Closing those is the broad `grad.rs`+`dag.rs`+`lower.rs` symbolic rewrite
-/// deliberately out of #368's scope. This pin asserts the boundary stays
-/// EXPLICIT: the form fails (non-zero exit) rather than silently mis-lowering.
-/// When chelis#513 lands, flip this to a finite-diff + forward-parity oracle.
+/// The gap-3 STRUCTURAL slice (bystander-symbolic-axis `Stride`/`ProdReduce`/
+/// `Shrink`-sentinel adjoints + static-arithmetic reshape targets; see
+/// `issue_513_symbolic_axis_adjoints.rs`) is closed, which moved this
+/// residual's boundary: the pipeline now reaches the stride ADJOINT and dies
+/// on its fail-closed guard for the wildcard STRIDED axis ("stride adjoint
+/// requires a concrete size for strided axis 0; got symbolic `*`"), which is
+/// gap 2's empty-bounds consequence surfacing through the gap-3 guard. The
+/// remaining fix needs scalar shape() VALUE reads + integer arithmetic in
+/// the RISC DAG (the capability rewrite the issue escalated).
+///
+/// This pin asserts the boundary stays EXPLICIT: the form fails (non-zero
+/// exit) with a symbolic-dim diagnostic rather than silently mis-lowering.
+/// When the remaining chelis#513 gaps land, flip this to a finite-diff +
+/// forward-parity oracle.
 #[test]
 fn issue_368_runtime_symbolic_window_grad_is_tracked_residual() {
     // The exact #368 reproducer: avgpool1d with a RUNTIME-derived window
@@ -412,7 +420,12 @@ out = grad(loss)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast
     );
     // The boundary is the symbolic-dim machinery, not the concat collapse:
     // the failure must mention a symbolic dimension (the chelis#513 surface),
-    // never the old rank-0 `index out of bounds` / `1 vs 0` collapse #368 fixed.
+    // never the old rank-0 `index out of bounds` / `1 vs 0` collapse #368
+    // fixed. Both boundary wordings match the needle: the dag.rs
+    // symbol-declaration ICE ("symbolic dim `m` ...") and the gap-3 stride
+    // adjoint fail-closed guard ("... got symbolic dimension `*`
+    // (chelis#513: ...)"), which is where the pipeline stops now that the
+    // structural adjoint slice landed.
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("symbolic dim"),

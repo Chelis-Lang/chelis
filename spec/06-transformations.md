@@ -199,6 +199,37 @@ The following operations produce zero gradients when encountered in a `grad` sco
 
 The compiler does **not** error on non-differentiable operations in the forward pass of a `grad`-ed function. It only errors if the function's **parameter types** are non-differentiable. This follows JAX's convention: `grad(relu)` is valid (ReLU uses Max internally, which has zero gradient at one point), but `grad(fn (x: bool) -> ...)` is a type error.
 
+### 2.7.1 Symbolic Input Dimensions in Adjoint Construction
+
+Adjoint construction runs before symbolic dimensions are bound, so an input
+axis may be a `Named` dim with no concrete size. The rules split into two
+classes (chelis#513, gap 3 structural slice):
+
+- **Structural (supported).** Where the adjoint can carry the symbolic dim
+  through without reading its value, it must. `Sum`/`Expand` adjoints carry
+  the extent as a `DimExpr`; `Reshape`/`Permute` adjoints reuse the source
+  dims; and a symbolic **bystander** axis (one the op does not touch) in the
+  `Pad`, `Stride`, and `ProdReduce` adjoints uses the `SHRINK_TO_END`
+  full-axis identity sentinel in its `Shrink` bounds, which
+  `bind_symbolic_dims` (evaluation) and the C backend's `emit_shrink`
+  resolve to the runtime extent. The `Shrink` adjoint of a full-axis
+  `(0, SHRINK_TO_END)` bound is exactly zero padding on that axis. A
+  `reshape` target dim written as static integer arithmetic over `shape()`
+  reads of statically-sized axes folds to a literal at lowering.
+- **Value-dependent (fail-closed).** Where the construction needs the
+  concrete size -- the strided axis of a `Stride` adjoint (the trim bound),
+  the reduced axis of a `ProdReduce` adjoint (one slice per element), or a
+  symbolic axis under a concrete `Shrink` sub-range (the trailing pad
+  amount) -- the adjoint fails loudly at construction, naming the op, the
+  axis, and the symbolic dim. It never guesses a size. Lifting this class
+  requires scalar `shape()` value reads in the RISC DAG (the open
+  chelis#513 remainder).
+
+Executable oracles: `crates/chelis-cli/tests/issue_513_symbolic_axis_adjoints.rs`
+(finite-difference + eval-vs-C agreement per enabled path, plus the
+fail-closed negative pins) and the `chelis-ir` unit tests alongside the
+adjoint rules.
+
 ### 2.8 Higher-Order Derivatives (Composition)
 
 `grad(grad(f))` computes second derivatives. This works because the backward DAG produced by `grad(f)` is itself a valid RISC DAG, and `grad` can be applied to any valid DAG.

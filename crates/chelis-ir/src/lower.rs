@@ -8112,6 +8112,99 @@ impl LowerCtx {
         }
     }
 
+    /// chelis#513 gap 3 (school im2col witness): const-fold a `reshape`
+    /// TARGET dim that is integer ARITHMETIC over static leaves, where a
+    /// leaf may additionally be a `shape(operand, axis)` read (direct or a
+    /// `let`-bound alias) of a STATICALLY-sized operand axis. This covers the
+    /// im2col-style `reshape(p, [mul(b_d, a_d), 1])` target over a
+    /// concrete-shaped input, which [`Self::fold_static_size`] deliberately
+    /// rejects (its expand-size contract routes shape() reads to the
+    /// shape-source arm) and [`Self::extract_reshape_dim_list`]'s per-element
+    /// vocabulary could not express: the unresolvable element aborted the
+    /// walk and the reshape fell back to the checker's `Named("*")` wildcard
+    /// dims, which the backward `Expand`/`Sum` inherited and
+    /// `symbolic_occurrences` ICE'd on.
+    ///
+    /// Exactness contract: folds ONLY when every leaf is static.
+    ///   - a symbolic operand axis returns `None` (the caller falls back to
+    ///     its pre-existing paths; a symbolic-sig arithmetic target stays
+    ///     fail-closed loud, pinned in `issue_513_symbolic_axis_adjoints.rs`),
+    ///   - `add`/`sub`/`mul`/`neg` use checked i64 arithmetic (overflow folds
+    ///     to `None`, never a wrapped extent),
+    ///   - `floor_div`/`trunc_div`/`mod` fold only on a non-negative lhs with
+    ///     a positive rhs, the domain where floor, trunc, and euclidean
+    ///     semantics coincide, so the fold can never disagree with the
+    ///     runtime op. Anything else returns `None`.
+    ///
+    /// Takes `&mut self` because resolving a shape read lowers its operand
+    /// (idempotent for the bound-`var` operands this walks; the same contract
+    /// as [`Self::dim_expr_from_shape_arg_with_source`]).
+    fn fold_shape_derived_static_size(&mut self, expr: &Expr) -> Option<i64> {
+        if let Some(n) = extract_int_for_dim(expr) {
+            return Some(n);
+        }
+        // A shape(...) read (direct app, or a bare/cast-wrapped var recorded
+        // in `shape_bindings`) of a statically-sized operand axis folds to
+        // that extent; a symbolic extent fails the fold.
+        if let Some((operand, axis)) = self.shape_app_operand_axis_resolved(expr) {
+            let operand_id = self.lower_expr(&operand).as_single_node()?;
+            return match self.dag.get(operand_id)?.output_type.dims.get(axis)? {
+                DimInfo::Lit(n) => i64::try_from(*n).ok(),
+                DimInfo::Named(_, Some(n)) => i64::try_from(*n).ok(),
+                DimInfo::Named(_, None) => None,
+            };
+        }
+        let Expr::List(list, _) = expr else {
+            return None;
+        };
+        match get_tag(list) {
+            // A bare `var` bound to a static value by a prior `let`. (A
+            // shape-bound var was already handled above.)
+            Some("var") => self
+                .static_size_bindings
+                .get(&bare_var_name(expr)?)
+                .copied(),
+            Some("cast") => self.fold_shape_derived_static_size(children(list).first()?),
+            Some("app") => {
+                let kids = children(list);
+                let op = bare_var_name(kids.first()?)?;
+                let operands = &kids[1..];
+                match (op.as_str(), operands.len()) {
+                    ("neg", 1) => self
+                        .fold_shape_derived_static_size(&operands[0])?
+                        .checked_neg(),
+                    ("add", 2) => self
+                        .fold_shape_derived_static_size(&operands[0])?
+                        .checked_add(self.fold_shape_derived_static_size(&operands[1])?),
+                    ("sub", 2) => self
+                        .fold_shape_derived_static_size(&operands[0])?
+                        .checked_sub(self.fold_shape_derived_static_size(&operands[1])?),
+                    ("mul", 2) => self
+                        .fold_shape_derived_static_size(&operands[0])?
+                        .checked_mul(self.fold_shape_derived_static_size(&operands[1])?),
+                    ("floor_div" | "trunc_div", 2) => {
+                        let lhs = self.fold_shape_derived_static_size(&operands[0])?;
+                        let rhs = self.fold_shape_derived_static_size(&operands[1])?;
+                        if lhs < 0 || rhs <= 0 {
+                            return None;
+                        }
+                        lhs.checked_div(rhs)
+                    }
+                    ("mod", 2) => {
+                        let lhs = self.fold_shape_derived_static_size(&operands[0])?;
+                        let rhs = self.fold_shape_derived_static_size(&operands[1])?;
+                        if lhs < 0 || rhs <= 0 {
+                            return None;
+                        }
+                        lhs.checked_rem(rhs)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn extract_dim_expr_value(&self, expr: &Expr) -> Option<DimExpr> {
         if let Some(value) = self.extract_usize_value(expr) {
             return Some(DimExpr::Concrete(value));
@@ -8363,6 +8456,15 @@ impl LowerCtx {
             {
                 dims.push(dim);
                 srcs.push(src);
+            } else if let Some(value) = self.fold_shape_derived_static_size(elem) {
+                // chelis#513 gap 3: static integer arithmetic over shape()
+                // reads of statically-sized axes (the school im2col target
+                // form `mul(b_d, a_d)`) folds to a concrete literal dim. A
+                // non-static leaf keeps the pre-existing fallback below.
+                if value < 0 {
+                    return None;
+                }
+                dims.push(DimInfo::Lit(value as usize));
             } else if let Some(name) = symbolic_dim_var_name(elem) {
                 dims.push(DimInfo::Named(name, None));
             } else {
