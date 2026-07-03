@@ -172,7 +172,10 @@ def good(x: tensor[3, f32]) -> tensor[3, f32] =
     add(x, x)
 "#;
     let errors = check_errors(source);
-    assert!(errors.is_empty(), "clean program should produce no errors; got: {errors:?}");
+    assert!(
+        errors.is_empty(),
+        "clean program should produce no errors; got: {errors:?}"
+    );
 }
 
 // ── Multi-error programs: all errors get span_offset ────────────────
@@ -250,10 +253,7 @@ def outer() -> f32 = {
 }
 "#;
     let errors = check_errors(source);
-    assert!(
-        !errors.is_empty(),
-        "expected at least one error; got none"
-    );
+    assert!(!errors.is_empty(), "expected at least one error; got none");
     let e = &errors[0];
     assert!(
         e.span_offset.is_some(),
@@ -307,10 +307,7 @@ def second() -> f32 = add(1.0, 1)
         "expected at least 2 errors; got {} errors: {errors:?}",
         errors.len()
     );
-    let offsets: Vec<usize> = errors
-        .iter()
-        .filter_map(|e| e.span_offset)
-        .collect();
+    let offsets: Vec<usize> = errors.iter().filter_map(|e| e.span_offset).collect();
     assert!(
         offsets.len() >= 2,
         "expected at least 2 errors with span_offset; got offsets: {offsets:?}"

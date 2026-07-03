@@ -986,7 +986,9 @@ impl HipEmitter {
             RiscOp::ReduceWindowGrad { .. } => None,
             RiscOp::OneHot { .. } => None,
             RiscOp::Const { .. } => Some(format!("kernel_fill_{}", kind_for_node(node).suffix())),
-            RiscOp::ConstTensor { .. } => Some(format!("kernel_fill_{}", kind_for_node(node).suffix())),
+            RiscOp::ConstTensor { .. } => {
+                Some(format!("kernel_fill_{}", kind_for_node(node).suffix()))
+            }
             RiscOp::Realize => Some(Self::cast_kernel_name(node, dag)),
             RiscOp::Cast { .. } => Some(Self::cast_kernel_name(node, dag)),
             // `pad` / `shrink` materialize a fresh buffer via a typed

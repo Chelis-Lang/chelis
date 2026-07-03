@@ -2,7 +2,7 @@
 //! lowers to a single `ConstTensor` node instead of a Const+Pad+Add tree.
 
 use chelis_ir::dag::{Dag, NodeId, RiscOp};
-use chelis_ir::eval::{eval_tensor_roots_with, TensorValue};
+use chelis_ir::eval::{TensorValue, eval_tensor_roots_with};
 use chelis_ir::lower::try_lower_program;
 use chelis_ir::verify;
 use chelis_surf::desugar::desugar_program;
@@ -51,10 +51,7 @@ def main() -> tensor[3, f32] =
         .nodes()
         .iter()
         .any(|n| matches!(&n.op, RiscOp::Pad { .. }));
-    assert!(
-        !has_pad,
-        "expected no Pad nodes (old cascade pattern)"
-    );
+    assert!(!has_pad, "expected no Pad nodes (old cascade pattern)");
 }
 
 /// Evaluate a ConstTensor node and verify it produces the correct values.
@@ -67,8 +64,7 @@ def main() -> tensor[3, f32] =
     let dag = surf_to_dag(source).expect("pipeline succeeds");
 
     let roots: Vec<NodeId> = dag.roots().to_vec();
-    let values =
-        eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
+    let values = eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
 
     assert_eq!(roots.len(), 1);
     let result = &values[&roots[0]];
@@ -95,13 +91,11 @@ def main() -> tensor[3, f32] =
         "uniform data should use Const, not ConstTensor"
     );
 
-    let has_const_5 = dag.nodes().iter().any(|n| {
-        matches!(&n.op, RiscOp::Const { value } if (*value - 5.0).abs() < f64::EPSILON)
-    });
-    assert!(
-        has_const_5,
-        "expected a Const(5.0) node for uniform data"
-    );
+    let has_const_5 = dag
+        .nodes()
+        .iter()
+        .any(|n| matches!(&n.op, RiscOp::Const { value } if (*value - 5.0).abs() < f64::EPSILON));
+    assert!(has_const_5, "expected a Const(5.0) node for uniform data");
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -171,8 +165,7 @@ def main() -> tensor[4, f32] =
     let dag = surf_to_dag(source).expect("pipeline succeeds");
 
     let roots: Vec<NodeId> = dag.roots().to_vec();
-    let values =
-        eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
+    let values = eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
 
     assert_eq!(roots.len(), 1);
     let result = &values[&roots[0]];
@@ -191,8 +184,7 @@ def main() -> tensor[3, f32] =
     let dag = surf_to_dag(source).expect("pipeline succeeds");
 
     let roots: Vec<NodeId> = dag.roots().to_vec();
-    let values =
-        eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
+    let values = eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
 
     let result = &values[&roots[0]];
     assert_eq!(result.shape, vec![3]);
@@ -223,8 +215,7 @@ def main() -> tensor[2, 3, f32] =
 
     // Verify correct eval
     let roots: Vec<NodeId> = dag.roots().to_vec();
-    let values =
-        eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
+    let values = eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
     let result = &values[&roots[0]];
     assert_eq!(result.shape, vec![2, 3]);
     assert_eq!(result.data, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
@@ -311,8 +302,7 @@ def main() -> tensor[4, int32] =
     );
 
     let roots: Vec<NodeId> = dag.roots().to_vec();
-    let values =
-        eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
+    let values = eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
     let result = &values[&roots[0]];
     assert_eq!(result.data, vec![10.0, 20.0, 30.0, 40.0]);
 }
