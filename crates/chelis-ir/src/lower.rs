@@ -96,6 +96,178 @@ impl fmt::Display for LowerDiagnostic {
 
 impl std::error::Error for LowerDiagnostic {}
 
+/// Outcome of matching one `match` arm pattern against a statically-known
+/// constructor value during static arm selection (chelis#520 D1).
+enum StaticPatternMatch {
+    /// The pattern matches; apply these bindings and take the arm.
+    Match(Vec<(String, LoweredValue)>),
+    /// The pattern provably does not match this constructor; try the next arm.
+    NoMatch,
+    /// The pattern is outside the supported static slice; the whole match
+    /// must be rejected (taking a later arm could be unsound).
+    Unsupported(String),
+}
+
+/// Match a Deep pattern against a static ADT value `(ctor, field_names,
+/// fields)`. The supported slice is deliberately conservative: constructor
+/// name selection with `pat-var`/`pat-wild` sub-patterns (positional or
+/// record form), whole-value `pat-var`/`pat-wild`/`pat-as`. Anything else
+/// is `Unsupported`, which the caller turns into a loud rejection; a
+/// pattern this function cannot decide must never fall through to a later
+/// arm.
+fn match_static_pattern(
+    pattern: &Expr,
+    ctor: &str,
+    field_names: Option<&[String]>,
+    fields: &[LoweredValue],
+) -> StaticPatternMatch {
+    let Expr::List(pat_list, _) = pattern else {
+        return StaticPatternMatch::Unsupported("a non-list pattern form".to_string());
+    };
+    let pat_kids = children(pat_list);
+    match get_tag(pat_list) {
+        Some("pat-wild") => StaticPatternMatch::Match(Vec::new()),
+        Some("pat-var") => match pat_kids.first().and_then(symbol_name) {
+            Some(name) => StaticPatternMatch::Match(vec![(
+                name.to_string(),
+                LoweredValue::Adt {
+                    ctor: ctor.to_string(),
+                    field_names: field_names.map(<[String]>::to_vec),
+                    fields: fields.to_vec(),
+                },
+            )]),
+            None => StaticPatternMatch::Unsupported("a nameless `pat-var`".to_string()),
+        },
+        Some("pat-as") => {
+            let (Some(name), Some(inner)) =
+                (pat_kids.first().and_then(symbol_name), pat_kids.get(1))
+            else {
+                return StaticPatternMatch::Unsupported("a malformed `pat-as`".to_string());
+            };
+            match match_static_pattern(inner, ctor, field_names, fields) {
+                StaticPatternMatch::Match(mut binds) => {
+                    binds.push((
+                        name.to_string(),
+                        LoweredValue::Adt {
+                            ctor: ctor.to_string(),
+                            field_names: field_names.map(<[String]>::to_vec),
+                            fields: fields.to_vec(),
+                        },
+                    ));
+                    StaticPatternMatch::Match(binds)
+                }
+                other => other,
+            }
+        }
+        Some("pat-ctor") => {
+            let Some(pat_ctor) = pat_kids.first().and_then(symbol_name) else {
+                return StaticPatternMatch::Unsupported("a nameless `pat-ctor`".to_string());
+            };
+            if pat_ctor != ctor {
+                return StaticPatternMatch::NoMatch;
+            }
+            let sub_pats = &pat_kids[1..];
+            if sub_pats.len() != fields.len() {
+                return StaticPatternMatch::Unsupported(format!(
+                    "a `pat-ctor` with {} sub-patterns against a `{ctor}` value with {} \
+                     fields",
+                    sub_pats.len(),
+                    fields.len()
+                ));
+            }
+            let mut binds = Vec::new();
+            for (sub_pat, field) in sub_pats.iter().zip(fields.iter()) {
+                match bind_leaf_pattern(sub_pat, field) {
+                    Ok(Some(bind)) => binds.push(bind),
+                    Ok(None) => {}
+                    Err(reason) => return StaticPatternMatch::Unsupported(reason),
+                }
+            }
+            StaticPatternMatch::Match(binds)
+        }
+        Some("pat-record") => {
+            let Some(pat_ctor) = pat_kids.first().and_then(symbol_name) else {
+                return StaticPatternMatch::Unsupported("a nameless `pat-record`".to_string());
+            };
+            if pat_ctor != ctor {
+                return StaticPatternMatch::NoMatch;
+            }
+            let Some(field_names) = field_names else {
+                return StaticPatternMatch::Unsupported(format!(
+                    "a `pat-record` against a positionally-constructed `{ctor}` value"
+                ));
+            };
+            let mut binds = Vec::new();
+            for kv in &pat_kids[1..] {
+                let Expr::List(kv_list, _) = kv else {
+                    continue;
+                };
+                if get_tag(kv_list) != Some("kv") {
+                    continue;
+                }
+                let kv_kids = children(kv_list);
+                let (Some(field), Some(sub_pat)) =
+                    (kv_kids.first().and_then(symbol_name), kv_kids.get(1))
+                else {
+                    return StaticPatternMatch::Unsupported(
+                        "a malformed `pat-record` field entry".to_string(),
+                    );
+                };
+                let Some(value) = field_names
+                    .iter()
+                    .position(|name| name == field)
+                    .and_then(|index| fields.get(index))
+                else {
+                    return StaticPatternMatch::Unsupported(format!(
+                        "a `pat-record` field `{field}` absent from the constructed \
+                         `{ctor}` value"
+                    ));
+                };
+                match bind_leaf_pattern(sub_pat, value) {
+                    Ok(Some(bind)) => binds.push(bind),
+                    Ok(None) => {}
+                    Err(reason) => return StaticPatternMatch::Unsupported(reason),
+                }
+            }
+            StaticPatternMatch::Match(binds)
+        }
+        // `pat-lit` against a constructor value cannot match, but a match
+        // mixing literal and constructor patterns is outside the checked
+        // slice; reject rather than guess.
+        Some(other) => StaticPatternMatch::Unsupported(format!("`{other}` patterns")),
+        None => StaticPatternMatch::Unsupported("an untagged pattern form".to_string()),
+    }
+}
+
+/// A leaf sub-pattern inside a constructor pattern: `pat-var` binds the
+/// field value, `pat-wild` discards it. Nested destructuring is outside
+/// the static slice.
+fn bind_leaf_pattern(
+    pattern: &Expr,
+    value: &LoweredValue,
+) -> Result<Option<(String, LoweredValue)>, String> {
+    let Expr::List(pat_list, _) = pattern else {
+        return Err("a non-list sub-pattern form".to_string());
+    };
+    match get_tag(pat_list) {
+        Some("pat-wild") => Ok(None),
+        Some("pat-var") => match children(pat_list).first().and_then(symbol_name) {
+            Some(name) => Ok(Some((name.to_string(), value.clone()))),
+            None => Err("a nameless `pat-var` sub-pattern".to_string()),
+        },
+        Some(other) => Err(format!(
+            "nested `{other}` sub-patterns (only `pat-var`/`pat-wild` field bindings \
+             are in the static slice)"
+        )),
+        None => Err("an untagged sub-pattern form".to_string()),
+    }
+}
+
+/// An absent match-arm guard desugars to a bare empty list `()`.
+fn guard_is_absent(guard: &Expr) -> bool {
+    matches!(guard, Expr::List(list, _) if list.elements.is_empty())
+}
+
 fn unsupported_lowering_message(tag: &str) -> String {
     let subject = if tag == "pipe stage" {
         "pipe stage".to_string()
@@ -790,6 +962,21 @@ fn flatten_binding_into(prefix: &str, value: &LoweredValue, out: &mut HashMap<St
         LoweredValue::Tuple(items) => {
             for (index, item) in items.iter().enumerate() {
                 flatten_binding_into(&format!("{prefix}.{index}"), item, out);
+            }
+        }
+        // ADT gradient values flatten field-wise, keyed by field name when
+        // the constructor is a record form (chelis#520 D2).
+        LoweredValue::Adt {
+            field_names,
+            fields,
+            ..
+        } => {
+            for (index, field) in fields.iter().enumerate() {
+                let label = field_names
+                    .as_ref()
+                    .and_then(|names| names.get(index).cloned())
+                    .unwrap_or_else(|| index.to_string());
+                flatten_binding_into(&format!("{prefix}.{label}"), field, out);
             }
         }
     }
@@ -3504,6 +3691,21 @@ enum CallableExpr {
 enum LoweredValue {
     Node(NodeId),
     Tuple(Vec<LoweredValue>),
+    /// A statically-known ADT/record value (chelis#520). Constructed by
+    /// `lower_record` (record-syntax construction), constructor
+    /// application in `lower_app`, and nullary-constructor references in
+    /// `lower_var`. Consumed by `lower_match` (static arm selection: the
+    /// constructor tag is discrete, so the taken arm is known at lowering
+    /// time), `lower_access` (field projection), and the grad lowering
+    /// (field-wise ADT gradients, the pytree contract of
+    /// spec/design/differentiable_language.md Decision 6).
+    Adt {
+        ctor: String,
+        /// Declared field names for record-syntax constructors, in the
+        /// order `fields` was built; `None` for positional constructors.
+        field_names: Option<Vec<String>>,
+        fields: Vec<LoweredValue>,
+    },
 }
 
 impl LoweredValue {
@@ -3515,6 +3717,14 @@ impl LoweredValue {
                 None,
                 None,
             ),
+            Self::Adt { ctor, .. } => raise_lowering_error(
+                format!(
+                    "{context} expected a single tensor value, got an ADT value \
+                     constructed with `{ctor}`"
+                ),
+                None,
+                None,
+            ),
         }
     }
 
@@ -3522,6 +3732,7 @@ impl LoweredValue {
         match self {
             Self::Node(id) => vec![*id],
             Self::Tuple(items) => items.iter().flat_map(Self::flatten_nodes).collect(),
+            Self::Adt { fields, .. } => fields.iter().flat_map(Self::flatten_nodes).collect(),
         }
     }
 
@@ -3530,14 +3741,14 @@ impl LoweredValue {
     fn as_single_node(&self) -> Option<NodeId> {
         match self {
             Self::Node(id) => Some(*id),
-            Self::Tuple(_) => None,
+            Self::Tuple(_) | Self::Adt { .. } => None,
         }
     }
 
     fn tuple_get(&self, index: usize) -> Option<LoweredValue> {
         match self {
             Self::Tuple(items) => items.get(index).cloned(),
-            Self::Node(_) => None,
+            Self::Node(_) | Self::Adt { .. } => None,
         }
     }
 
@@ -3550,6 +3761,18 @@ impl LoweredValue {
                     .map(|item| Self::from_flat(item, nodes))
                     .collect(),
             ),
+            Self::Adt {
+                ctor,
+                field_names,
+                fields,
+            } => Self::Adt {
+                ctor: ctor.clone(),
+                field_names: field_names.clone(),
+                fields: fields
+                    .iter()
+                    .map(|field| Self::from_flat(field, nodes))
+                    .collect(),
+            },
         }
     }
 }
@@ -4397,6 +4620,11 @@ impl LowerCtx {
                     self.append_current_span_to_lowered_value(item);
                 }
             }
+            LoweredValue::Adt { fields, .. } => {
+                for field in fields {
+                    self.append_current_span_to_lowered_value(field);
+                }
+            }
         }
     }
 
@@ -4435,6 +4663,21 @@ impl LowerCtx {
             LoweredValue::Tuple(items) => {
                 for (index, item) in items.iter().enumerate() {
                     self.add_named_roots(&format!("{prefix}.{index}"), item);
+                }
+            }
+            // ADT gradient values store field-wise roots, keyed by field
+            // name when the constructor is a record form (chelis#520 D2).
+            LoweredValue::Adt {
+                field_names,
+                fields,
+                ..
+            } => {
+                for (index, field) in fields.iter().enumerate() {
+                    let label = field_names
+                        .as_ref()
+                        .and_then(|names| names.get(index).cloned())
+                        .unwrap_or_else(|| index.to_string());
+                    self.add_named_roots(&format!("{prefix}.{label}"), field);
                 }
             }
         }
@@ -4537,6 +4780,8 @@ impl LowerCtx {
             "copy" => self.lower_copy(elems),
             "borrow" => self.lower_identity(elems),
             "tuple-get" => self.lower_tuple_get(elems),
+            "record" => self.lower_record(elems),
+            "access" => self.lower_access(elems),
             "match" => self.lower_match(elems),
             "grad" => self.lower_grad(elems),
             "handle-effect" => self.lower_handle_effect(elems),
@@ -4763,6 +5008,23 @@ impl LowerCtx {
                     elems.first().and_then(Expr::span_id).map(ToOwned::to_owned),
                 );
             }
+            // chelis#520 D1: an unbound uppercase-initial name in
+            // expression position is a nullary ADT constructor reference
+            // (post-checker: the type checker resolves every value name,
+            // and value identifiers are snake_case per spec/01 §3.2). The
+            // host runtime applies the same rule in `eval_var`. Emitting
+            // a `Load { name: "ModeA" }` here would fabricate a phantom
+            // tensor input; the static Adt value instead lets
+            // `lower_match` select the taken arm at lowering time.
+            if !self.program_defs.contains_key(name)
+                && name.chars().next().is_some_and(|ch| ch.is_uppercase())
+            {
+                return LoweredValue::Adt {
+                    ctor: name.clone(),
+                    field_names: None,
+                    fields: Vec::new(),
+                };
+            }
             let ty = if explicit_ty == Self::default_type() {
                 self.program_types.get(name).cloned().unwrap_or(explicit_ty)
             } else {
@@ -4819,6 +5081,23 @@ impl LowerCtx {
             && !self.program_defs.contains_key(func_name)
             && !self.local_callables.contains_key(func_name)
         {
+            // chelis#520: a positional ADT constructor application
+            // `(app {} (var Ctor) args...)`. Same uppercase-initial rule
+            // as `lower_var`'s nullary-constructor branch; a constructor
+            // is never a builtin, def, or local callable post-checker.
+            if !BUILTIN_NAMES.contains(&func_name.as_str())
+                && func_name.chars().next().is_some_and(|ch| ch.is_uppercase())
+            {
+                let fields = elems[3..]
+                    .iter()
+                    .map(|arg| self.lower_expr(arg))
+                    .collect::<Vec<_>>();
+                return LoweredValue::Adt {
+                    ctor: func_name.clone(),
+                    field_names: None,
+                    fields,
+                };
+            }
             return LoweredValue::Node(self.lower_builtin_app(
                 func_name,
                 &elems[3..],
@@ -5046,22 +5325,23 @@ impl LowerCtx {
         args: &[Expr],
         app_span: Span,
     ) -> LoweredValue {
-        let actual_args: Vec<NodeId> = args
-            .iter()
-            .map(|arg| self.lower_expr_node(arg, "grad arguments"))
-            .collect();
-        self.lower_grad_callable_with_nodes(fn_expr, wrt_indices, &actual_args, app_span)
+        let actual_args: Vec<LoweredValue> = args.iter().map(|arg| self.lower_expr(arg)).collect();
+        self.lower_grad_callable_with_values(fn_expr, wrt_indices, &actual_args, app_span)
     }
 
     /// Core lowering for `grad(fn)` applied to already-lowered argument
-    /// nodes. Used by both `lower_grad_callable_app` (which lowers
+    /// values. Used by both `lower_grad_callable_app` (which lowers
     /// expression arguments first) and `lower_pipe` (which inherits the
-    /// argument from the previous pipe stage).
-    fn lower_grad_callable_with_nodes(
+    /// argument from the previous pipe stage). A `Node` argument is the
+    /// classic tensor/scalar lane; an `Adt` argument (chelis#520 D2) is a
+    /// statically-constructed record whose float-tensor fields are
+    /// differentiated field-wise, producing an `Adt`-shaped gradient (the
+    /// pytree contract of spec/design/differentiable_language.md Decision 6).
+    fn lower_grad_callable_with_values(
         &mut self,
         fn_expr: &Expr,
         wrt_indices: Option<&[usize]>,
-        actual_args: &[NodeId],
+        actual_args: &[LoweredValue],
         app_span: Span,
     ) -> LoweredValue {
         let Some((param_names, body)) = self.extract_fn_parts(fn_expr) else {
@@ -5072,15 +5352,105 @@ impl LowerCtx {
             .enumerate()
             .map(|(index, _)| extract_param_type(fn_expr, index).cloned())
             .collect();
-        let actual_types: Vec<TensorType> = actual_args
+        // chelis#520 D2: classify each already-lowered argument. A `Node`
+        // is the classic tensor/scalar lane. An `Adt` is a statically-
+        // constructed record: its fields must themselves be single tensor
+        // nodes (nested ADT/tuple fields are outside the slice and fail
+        // loudly). A `Tuple` argument has never been accepted here.
+        enum GradArgPlan {
+            Tensor(NodeId),
+            Adt {
+                ctor: String,
+                field_names: Option<Vec<String>>,
+                field_nodes: Vec<NodeId>,
+            },
+        }
+        // The D2 slice packs an ADT gradient only for single-argument
+        // calls: downstream consumers of a multi-root result (host tuple
+        // typing, eval root display) flatten the constructor structure
+        // silently, so a mixed tuple-with-ADT gradient must stay rejected
+        // at the lowering level, not just in the eval-lane marshalling.
+        if actual_args.len() > 1
+            && actual_args
+                .iter()
+                .any(|arg| matches!(arg, LoweredValue::Adt { .. }))
+        {
+            raise_fatal_lowering_error(
+                format!(
+                    "`grad(...)` over an ADT-typed argument currently supports \
+                     single-argument functions only; got {} arguments (chelis#520 D2)",
+                    actual_args.len()
+                ),
+                Some(app_span),
+                None,
+            );
+        }
+        let plans: Vec<GradArgPlan> = actual_args
             .iter()
-            .map(|id| {
-                self.dag
-                    .get(*id)
-                    .map(|node| node.output_type.clone())
-                    .unwrap_or_else(Self::default_type)
+            .enumerate()
+            .map(|(index, arg)| match arg {
+                LoweredValue::Node(id) => GradArgPlan::Tensor(*id),
+                LoweredValue::Adt {
+                    ctor,
+                    field_names,
+                    fields,
+                } => {
+                    let field_nodes = fields
+                        .iter()
+                        .enumerate()
+                        .map(|(fidx, field)| {
+                            field.as_single_node().unwrap_or_else(|| {
+                                let label = field_names
+                                    .as_ref()
+                                    .and_then(|names| names.get(fidx).cloned())
+                                    .unwrap_or_else(|| fidx.to_string());
+                                raise_fatal_lowering_error(
+                                    format!(
+                                        "`grad(...)` argument {index}: field `{label}` of \
+                                         constructor `{ctor}` is not a single tensor value; \
+                                         nested ADT/tuple fields are not supported yet \
+                                         (chelis#520 D2)"
+                                    ),
+                                    Some(app_span),
+                                    None,
+                                )
+                            })
+                        })
+                        .collect();
+                    GradArgPlan::Adt {
+                        ctor: ctor.clone(),
+                        field_names: field_names.clone(),
+                        field_nodes,
+                    }
+                }
+                LoweredValue::Tuple(_) => raise_fatal_lowering_error(
+                    format!(
+                        "`grad(...)` argument {index} must be a tensor, scalar, or ADT of \
+                         float tensors; got a tuple value"
+                    ),
+                    Some(app_span),
+                    None,
+                ),
             })
             .collect();
+        let node_type = |ctx: &Self, id: NodeId| {
+            ctx.dag
+                .get(id)
+                .map(|node| node.output_type.clone())
+                .unwrap_or_else(Self::default_type)
+        };
+        // Formal/actual pairs for the precision/rank substitution seeding
+        // below. ADT-typed params are excluded: their formal annotation is
+        // an ADT type (no tensor precision/rank slots) and their field
+        // loads are typed directly from the actual field nodes.
+        let mut subst_param_type_exprs: Vec<Option<Expr>> = Vec::new();
+        let mut subst_actual_types: Vec<TensorType> = Vec::new();
+        for (index, plan) in plans.iter().enumerate() {
+            if let GradArgPlan::Tensor(id) = plan {
+                subst_param_type_exprs.push(grad_param_type_exprs.get(index).cloned().flatten());
+                subst_actual_types.push(node_type(self, *id));
+            }
+        }
         // issue #289: the precision substitution visible to the grad
         // sub-context. Parent bindings first, then the differentiated
         // function's own formal precision vars bound against the concrete
@@ -5089,8 +5459,8 @@ impl LowerCtx {
         // below.
         let mut grad_prec_subst = self.prec_substitutions.clone();
         grad_prec_subst.extend(tensor_prec_substitutions(
-            &grad_param_type_exprs,
-            &actual_types,
+            &subst_param_type_exprs,
+            &subst_actual_types,
         ));
         // Tier-2 rank polymorphism (#286/#258): the rank-var substitution
         // visible to the grad sub-context — the structural twin of
@@ -5102,8 +5472,8 @@ impl LowerCtx {
         // as the precision path does.
         let mut grad_rank_subst = self.rank_substitutions.clone();
         grad_rank_subst.extend(tensor_rank_substitutions(
-            &grad_param_type_exprs,
-            &actual_types,
+            &subst_param_type_exprs,
+            &subst_actual_types,
             &self.dim_axis_positions,
         ));
         // Formal parameter shapes for the differentiated function. Use the
@@ -5171,25 +5541,140 @@ impl LowerCtx {
         subctx.current_span_id = self.current_span_id.clone();
         let captured_bindings = self.seed_subctx_with_lexical_scope(&mut subctx, &param_names);
         let mut wrt = Vec::new();
+        // Actual argument node backing each `wrt` load, in `wrt` order
+        // (tensor param -> the argument node, ADT field -> the field node).
+        let mut wrt_actuals: Vec<NodeId> = Vec::new();
+        // Formal/actual type pairs per load, for the dim-symbol remap of
+        // the differentiated DAG below.
+        let mut remap_formal_types: Vec<TensorType> = Vec::new();
+        let mut remap_actual_types: Vec<TensorType> = Vec::new();
+        // Extra `Load`-name -> actual-node entries for ADT field loads.
+        let mut adt_arg_map_entries: Vec<(String, NodeId)> = Vec::new();
+        // Result-packing plan: per selected param, how many gradient roots
+        // it owns and how to reshape them.
+        enum GradResultPlan {
+            Tensor,
+            Adt {
+                ctor: String,
+                field_names: Option<Vec<String>>,
+                field_count: usize,
+            },
+        }
+        let mut result_plans: Vec<GradResultPlan> = Vec::new();
         for (index, (name, param_ty)) in param_names
             .iter()
             .zip(param_types.iter().cloned())
             .enumerate()
         {
-            let load = subctx.dag.add_node(
-                RiscOp::Load {
-                    name: name.as_str().into(),
-                },
-                vec![],
-                param_ty.clone(),
-                subctx.current_span_id.clone(),
-            );
-            if self.is_selected_wrt(index, &param_ty, wrt_indices) {
-                wrt.push(load);
+            match plans.get(index) {
+                Some(GradArgPlan::Adt {
+                    ctor,
+                    field_names,
+                    field_nodes,
+                }) => {
+                    // chelis#520 D2: an ADT-typed differentiated parameter.
+                    // Every float-tensor field becomes its own Load + wrt
+                    // entry; the parameter name binds to the Adt of those
+                    // loads so the body's `match`/`access` destructuring
+                    // resolves statically.
+                    let selected = match wrt_indices {
+                        Some(indices) => indices.contains(&index),
+                        None => true,
+                    };
+                    let mut field_values = Vec::with_capacity(field_nodes.len());
+                    for (fidx, field_node) in field_nodes.iter().enumerate() {
+                        let field_ty = node_type(self, *field_node);
+                        if selected && !field_ty.precision.is_float() {
+                            let label = field_names
+                                .as_ref()
+                                .and_then(|names| names.get(fidx).cloned())
+                                .unwrap_or_else(|| fidx.to_string());
+                            raise_fatal_lowering_error(
+                                format!(
+                                    "`grad(...)` over ADT-typed parameter `{name}`: field \
+                                     `{label}` of constructor `{ctor}` is not a float \
+                                     tensor; mixed-struct gradients are not supported yet \
+                                     (chelis#520 D2)"
+                                ),
+                                Some(app_span),
+                                None,
+                            );
+                        }
+                        let load_name = format!("{name}__adt_field_{fidx}");
+                        let load = subctx.dag.add_node(
+                            RiscOp::Load {
+                                name: load_name.as_str().into(),
+                            },
+                            vec![],
+                            field_ty.clone(),
+                            subctx.current_span_id.clone(),
+                        );
+                        if selected {
+                            wrt.push(load);
+                            wrt_actuals.push(*field_node);
+                        }
+                        remap_formal_types.push(field_ty.clone());
+                        remap_actual_types.push(field_ty);
+                        adt_arg_map_entries.push((load_name, *field_node));
+                        field_values.push(LoweredValue::Node(load));
+                    }
+                    if selected {
+                        result_plans.push(GradResultPlan::Adt {
+                            ctor: ctor.clone(),
+                            field_names: field_names.clone(),
+                            field_count: field_nodes.len(),
+                        });
+                    }
+                    subctx.bindings.insert(
+                        name.clone(),
+                        LoweredValue::Adt {
+                            ctor: ctor.clone(),
+                            field_names: field_names.clone(),
+                            fields: field_values,
+                        },
+                    );
+                }
+                Some(GradArgPlan::Tensor(actual)) => {
+                    let load = subctx.dag.add_node(
+                        RiscOp::Load {
+                            name: name.as_str().into(),
+                        },
+                        vec![],
+                        param_ty.clone(),
+                        subctx.current_span_id.clone(),
+                    );
+                    if self.is_selected_wrt(index, &param_ty, wrt_indices) {
+                        wrt.push(load);
+                        wrt_actuals.push(*actual);
+                        result_plans.push(GradResultPlan::Tensor);
+                    }
+                    remap_formal_types.push(param_ty.clone());
+                    remap_actual_types.push(node_type(self, *actual));
+                    subctx
+                        .bindings
+                        .insert(name.clone(), LoweredValue::Node(load));
+                }
+                // Fewer arguments than parameters: keep the pre-#520
+                // behavior (a free Load with the formal type; the splice
+                // leaves it unresolved and downstream evaluation reports
+                // the missing input).
+                None => {
+                    let load = subctx.dag.add_node(
+                        RiscOp::Load {
+                            name: name.as_str().into(),
+                        },
+                        vec![],
+                        param_ty.clone(),
+                        subctx.current_span_id.clone(),
+                    );
+                    if self.is_selected_wrt(index, &param_ty, wrt_indices) {
+                        wrt.push(load);
+                    }
+                    subctx
+                        .bindings
+                        .insert(name.clone(), LoweredValue::Node(load));
+                }
             }
-            subctx
-                .bindings
-                .insert(name.clone(), LoweredValue::Node(load));
         }
         let output = subctx
             .lower_expr(body)
@@ -5212,33 +5697,150 @@ impl LowerCtx {
 
         let arg_map = param_names
             .iter()
-            .zip(actual_args.iter().copied())
-            .map(|(name, arg)| (name.clone(), arg))
+            .zip(plans.iter())
+            .filter_map(|(name, plan)| match plan {
+                GradArgPlan::Tensor(actual) => Some((name.clone(), *actual)),
+                // ADT params are served by their per-field load entries.
+                GradArgPlan::Adt { .. } => None,
+            })
+            .chain(adt_arg_map_entries)
             .chain(captured_bindings)
             .collect::<HashMap<_, _>>();
-        let specialized_grad_dag =
-            Self::remap_callable_dim_symbols(&grad_result.dag, &param_types, &actual_types);
+        let specialized_grad_dag = Self::remap_callable_dim_symbols(
+            &grad_result.dag,
+            &remap_formal_types,
+            &remap_actual_types,
+        );
         let remap = self.splice_dag(&specialized_grad_dag, &arg_map);
-        let grad_results = wrt
+        // Per-wrt gradient node (post-splice). A `None` entry means the
+        // wrt input has no adjoint because it does not influence the
+        // output; the tensor lane preserves the pre-#520 behavior of
+        // dropping it from the result, and the ADT lane packs an explicit
+        // zero tensor so the gradient struct keeps its field structure.
+        let grad_per_wrt: Vec<Option<NodeId>> = wrt
             .iter()
-            .filter_map(|wrt_node| grad_result.grad_nodes.get(wrt_node))
-            .map(|grad_node| remap[grad_node])
-            .collect::<Vec<_>>();
-        let reusable_inputs = param_types
-            .iter()
-            .enumerate()
-            .filter_map(|(index, param_ty)| {
-                self.is_selected_wrt(index, param_ty, wrt_indices)
-                    .then_some(actual_args[index])
+            .map(|wrt_node| {
+                grad_result
+                    .grad_nodes
+                    .get(wrt_node)
+                    .map(|grad_node| remap[grad_node])
             })
-            .collect::<Vec<_>>();
-        for (grad_node, reusable_input) in grad_results.iter().zip(reusable_inputs.iter()) {
-            self.dag.set_reusable_input(*grad_node, *reusable_input);
+            .collect();
+        for (grad_node, reusable_input) in grad_per_wrt.iter().zip(wrt_actuals.iter()) {
+            if let Some(grad_node) = grad_node {
+                self.dag.set_reusable_input(*grad_node, *reusable_input);
+            }
         }
-        match grad_results.as_slice() {
-            [single] => LoweredValue::Node(self.attach_reuse_hint(*single, app_span, actual_args)),
-            _ => LoweredValue::Tuple(grad_results.into_iter().map(LoweredValue::Node).collect()),
+        // Rebuild the per-parameter result structure: one Node per tensor
+        // param, an Adt of Nodes per ADT param (chelis#520 D2).
+        let mut grad_iter = grad_per_wrt.iter().copied();
+        let mut wrt_actual_iter = wrt_actuals.iter().copied();
+        let mut packed: Vec<LoweredValue> = Vec::with_capacity(result_plans.len());
+        for plan in &result_plans {
+            match plan {
+                GradResultPlan::Tensor => {
+                    let grad_node = grad_iter.next().flatten();
+                    let _ = wrt_actual_iter.next();
+                    if let Some(node) = grad_node {
+                        packed.push(LoweredValue::Node(node));
+                    }
+                }
+                GradResultPlan::Adt {
+                    ctor,
+                    field_names,
+                    field_count,
+                } => {
+                    let mut fields = Vec::with_capacity(*field_count);
+                    for _ in 0..*field_count {
+                        let grad_node = grad_iter.next().flatten();
+                        let actual = wrt_actual_iter.next();
+                        let node = grad_node.unwrap_or_else(|| {
+                            // The field does not influence the output:
+                            // its gradient is exactly zero. Materialize
+                            // the zero so the gradient struct keeps the
+                            // input's field structure (pytree contract).
+                            let field_ty = actual
+                                .map(|id| node_type(self, id))
+                                .unwrap_or_else(Self::default_type);
+                            self.zero_tensor_node(&field_ty)
+                        });
+                        fields.push(LoweredValue::Node(node));
+                    }
+                    packed.push(LoweredValue::Adt {
+                        ctor: ctor.clone(),
+                        field_names: field_names.clone(),
+                        fields,
+                    });
+                }
+            }
         }
+        match packed.as_slice() {
+            [LoweredValue::Node(single)] => {
+                // Preserve the pre-#520 reuse hint on the classic
+                // single-tensor-gradient shape.
+                let candidate_inputs: Vec<NodeId> = plans
+                    .iter()
+                    .filter_map(|plan| match plan {
+                        GradArgPlan::Tensor(actual) => Some(*actual),
+                        GradArgPlan::Adt { .. } => None,
+                    })
+                    .collect();
+                if candidate_inputs.len() == plans.len() {
+                    let single = *single;
+                    return LoweredValue::Node(self.attach_reuse_hint(
+                        single,
+                        app_span,
+                        &candidate_inputs,
+                    ));
+                }
+                LoweredValue::Node(*single)
+            }
+            [single_adt @ LoweredValue::Adt { .. }] => single_adt.clone(),
+            _ => LoweredValue::Tuple(packed),
+        }
+    }
+
+    /// A zero-valued tensor of the given type: `Const 0.0`, cast to the
+    /// target precision, expanded axis-by-axis to the target dims
+    /// (mirrors the `lower_if_mask` expansion pattern). Used by the ADT
+    /// gradient packing (chelis#520 D2) for fields with no adjoint.
+    fn zero_tensor_node(&mut self, ty: &TensorType) -> NodeId {
+        let mut node = self.dag.add_node(
+            RiscOp::Const { value: 0.0 },
+            vec![],
+            Self::default_type(),
+            self.current_span_id.clone(),
+        );
+        if ty.precision != Self::default_type().precision {
+            node = self.dag.add_node(
+                RiscOp::Cast {
+                    new_precision: ty.precision,
+                },
+                vec![node],
+                TensorType {
+                    dims: vec![],
+                    precision: ty.precision,
+                },
+                self.current_span_id.clone(),
+            );
+        }
+        let mut dims = Vec::new();
+        for (axis, dim) in ty.dims.iter().enumerate() {
+            dims.push(dim.clone());
+            node = self.dag.add_node(
+                RiscOp::Expand {
+                    axis,
+                    size: DimExpr::from(dim),
+                },
+                vec![node],
+                TensorType {
+                    dims: dims.clone(),
+                    precision: ty.precision,
+                },
+                self.current_span_id.clone(),
+            );
+        }
+        node
     }
 
     fn lower_plain_callable_app(
@@ -8743,12 +9345,11 @@ impl LowerCtx {
                     CallableExpr::Grad { fn_expr, wrt } => {
                         // `x |> grad(f)` lowers as `grad(f)(x)` — reuse
                         // the non-pipe grad lowering with the previous
-                        // stage's NodeId as the single argument.
-                        let current_node = current.expect_node("pipe stage");
-                        self.lower_grad_callable_with_nodes(
+                        // stage's value as the single argument.
+                        self.lower_grad_callable_with_values(
                             &fn_expr,
                             wrt.as_deref(),
-                            &[current_node],
+                            &[current.clone()],
                             func_expr.span(),
                         )
                     }
@@ -9106,9 +9707,206 @@ impl LowerCtx {
         })
     }
 
-    /// `(match {} scrutinee (arm {} pattern body) ...)` -- not representable in the Phase 0 RISC DAG.
+    /// `(record {} Ctor (kv {} field value) ...)` -- static ADT/record
+    /// construction (chelis#520). The constructor tag and field layout are
+    /// compile-time facts; only the field values are lowered.
+    fn lower_record(&mut self, elems: &[Expr]) -> LoweredValue {
+        let Some(ctor) = elems.get(2).and_then(symbol_name) else {
+            self.reject_static_adt(
+                elems,
+                "`record` construction is missing its constructor name".to_string(),
+            );
+        };
+        let ctor = ctor.to_string();
+        let mut field_names: Vec<String> = Vec::new();
+        let mut fields: Vec<LoweredValue> = Vec::new();
+        for kv in &elems[3..] {
+            let Expr::List(kv_list, _) = kv else {
+                continue;
+            };
+            if get_tag(kv_list) != Some("kv") {
+                continue;
+            }
+            let kv_kids = children(kv_list);
+            let (Some(field), Some(value)) =
+                (kv_kids.first().and_then(symbol_name), kv_kids.get(1))
+            else {
+                self.reject_static_adt(
+                    elems,
+                    format!("`record` constructor `{ctor}` has a malformed field entry"),
+                );
+            };
+            field_names.push(field.to_string());
+            fields.push(self.lower_expr(value));
+        }
+        LoweredValue::Adt {
+            ctor,
+            field_names: Some(field_names),
+            fields,
+        }
+    }
+
+    /// `(access {} target field)` -- field projection on a statically-known
+    /// ADT/record value (chelis#520). A runtime target stays rejected: the
+    /// Phase 0 RISC DAG has no runtime record representation.
+    fn lower_access(&mut self, elems: &[Expr]) -> LoweredValue {
+        if elems.len() < 4 {
+            self.reject_static_adt(elems, "`access` is missing its field name".to_string());
+        }
+        let target = self.lower_expr(&elems[2]);
+        let Some(field) = symbol_name(&elems[3]) else {
+            self.reject_static_adt(elems, "`access` field name is not a symbol".to_string());
+        };
+        match target {
+            LoweredValue::Adt {
+                ctor,
+                field_names: Some(names),
+                fields,
+            } => names
+                .iter()
+                .position(|name| name == field)
+                .and_then(|index| fields.get(index).cloned())
+                .unwrap_or_else(|| {
+                    self.reject_static_adt(elems, format!("record `{ctor}` has no field `{field}`"))
+                }),
+            _ => self.reject_static_adt(
+                elems,
+                format!(
+                    "`access` on a runtime value is not supported by IR lowering; only \
+                     a compile-time-known record construction can be projected (field \
+                     `{field}`)"
+                ),
+            ),
+        }
+    }
+
+    /// `(match {} scrutinee (arm {} pattern guard body) ...)`.
+    ///
+    /// chelis#520 D1 slice: when the scrutinee lowers to a statically-known
+    /// constructor value (`LoweredValue::Adt`), the taken arm is resolved at
+    /// lowering time and only that arm's body is lowered. This is the exact
+    /// gradient semantics for AD (spec/design/differentiable_language.md
+    /// Phase 1: "the pattern match itself is non-differentiable; gradient
+    /// flow goes through the matched values"): the constructor tag is
+    /// discrete, so perturbing tensor inputs can never change the taken arm.
+    ///
+    /// A runtime scrutinee (anything that lowers to a tensor node), an arm
+    /// guard on the selected pattern, and pattern forms outside the static
+    /// slice all stay rejected, loudly, naming the construct.
     fn lower_match(&mut self, elems: &[Expr]) -> LoweredValue {
-        self.lower_unrepresentable("match", elems)
+        if elems.len() < 4 {
+            return self.lower_unrepresentable("match", elems);
+        }
+        let scrutinee = self.lower_expr(&elems[2]);
+        let LoweredValue::Adt {
+            ctor,
+            field_names,
+            fields,
+        } = scrutinee
+        else {
+            self.reject_static_adt(
+                elems,
+                "`match` on a runtime scrutinee is not supported by IR evaluation yet; \
+                 only a match whose scrutinee is a compile-time-known constructor value \
+                 is resolved by static arm selection (chelis#520 D1)"
+                    .to_string(),
+            );
+        };
+        for arm in &elems[3..] {
+            let Expr::List(arm_list, _) = arm else {
+                continue;
+            };
+            if get_tag(arm_list) != Some("arm") {
+                continue;
+            }
+            let arm_kids = children(arm_list);
+            let (Some(pattern), Some(guard), Some(body)) =
+                (arm_kids.first(), arm_kids.get(1), arm_kids.get(2))
+            else {
+                continue;
+            };
+            match match_static_pattern(pattern, &ctor, field_names.as_deref(), &fields) {
+                StaticPatternMatch::NoMatch => continue,
+                StaticPatternMatch::Unsupported(reason) => {
+                    self.reject_static_adt(
+                        elems,
+                        format!(
+                            "`match` static arm selection does not support {reason} \
+                             (chelis#520 D1)"
+                        ),
+                    );
+                }
+                StaticPatternMatch::Match(binds) => {
+                    if !guard_is_absent(guard) {
+                        self.reject_static_adt(
+                            elems,
+                            "`match` arm guards are not supported by static arm \
+                             selection: a guard needs runtime evaluation, so the taken \
+                             arm is not compile-time-known (chelis#520 D1)"
+                                .to_string(),
+                        );
+                    }
+                    let saved = self.bindings.clone();
+                    let saved_list_bindings = self.list_bindings.clone();
+                    let saved_shape_bindings = self.shape_bindings.clone();
+                    let saved_static_size_bindings = self.static_size_bindings.clone();
+                    let saved_callables = self.local_callables.clone();
+                    let saved_fn_typed_params = self.fn_typed_params.clone();
+                    for (name, value) in binds {
+                        // Pattern binds shadow every same-named outer
+                        // binding class, mirroring `lower_plain_callable_app`.
+                        self.list_bindings.remove(&name);
+                        self.shape_bindings.remove(&name);
+                        self.static_size_bindings.remove(&name);
+                        self.local_callables.remove(&name);
+                        self.fn_typed_params.remove(&name);
+                        self.bindings.insert(name, value);
+                    }
+                    let value = self.lower_expr(body);
+                    self.bindings = saved;
+                    self.list_bindings = saved_list_bindings;
+                    self.shape_bindings = saved_shape_bindings;
+                    self.static_size_bindings = saved_static_size_bindings;
+                    self.local_callables = saved_callables;
+                    self.fn_typed_params = saved_fn_typed_params;
+                    return value;
+                }
+            }
+        }
+        self.reject_static_adt(
+            elems,
+            format!(
+                "`match` static arm selection found no arm matching constructor \
+                 `{ctor}`; a checked match is exhaustive, so this indicates a pattern \
+                 form outside the supported static slice (chelis#520 D1)"
+            ),
+        )
+    }
+
+    /// Rejection helper for the static-ADT lowering slice (chelis#520).
+    /// Preserves the host-lane speculative-attempt contract (quiet unwind
+    /// when `unrepresentable_panic_suppressed`), then raises FATAL inside an
+    /// AD transform body (so the precise message survives the build lane's
+    /// recoverable tensor-helper fallback, the issue #197 pattern) and
+    /// recoverable everywhere else (so non-grad host-lane routing keeps
+    /// falling back to interpretation).
+    fn reject_static_adt(&self, elems: &[Expr], message: String) -> ! {
+        if unrepresentable_panic_suppressed() {
+            std::panic::panic_any(UnrepresentableDag);
+        }
+        let expr = elems.first();
+        if self.allow_host_list_ad_rewrites {
+            raise_fatal_lowering_error(
+                message,
+                expr.map(Expr::span),
+                expr.and_then(Expr::span_id).map(ToOwned::to_owned),
+            )
+        }
+        raise_lowering_error(
+            message,
+            expr.map(Expr::span),
+            expr.and_then(Expr::span_id).map(ToOwned::to_owned),
+        )
     }
 
     fn lower_unrepresentable(&mut self, tag: &str, elems: &[Expr]) -> LoweredValue {
@@ -12003,7 +12801,10 @@ mod regression_tests {
     }
 
     #[test]
-    fn unsupported_match_is_rejected_before_lowering() {
+    fn runtime_scrutinee_match_is_rejected_before_lowering() {
+        // chelis#520 D1: a match over a runtime value (here an unbound
+        // lowercase var, which lowers to a `Load`) stays rejected; only a
+        // compile-time-known constructor scrutinee resolves statically.
         let err = std::panic::catch_unwind(|| {
             let _ = parse_and_lower_unchecked(
                 "(match {} (var {} x) (arm {} (pat-var {} y) () (var {} y)))",
@@ -12011,8 +12812,63 @@ mod regression_tests {
         })
         .expect_err("match should be rejected");
         assert!(
-            captured_lower_message(err).contains("`match` is not supported by IR evaluation yet")
+            captured_lower_message(err).contains("`match` on a runtime scrutinee is not supported")
         );
+    }
+
+    #[test]
+    fn static_ctor_scrutinee_match_selects_taken_arm() {
+        // chelis#520 D1: a nullary-constructor scrutinee statically selects
+        // the matching arm; the dead arm is never lowered.
+        let dag = parse_and_lower_unchecked(
+            "(match {} (var {} ModeA) \
+             (arm {} (pat-ctor {} ModeA) () (lit {type: (t-prim {} f32)} 2.5)) \
+             (arm {} (pat-ctor {} ModeB) () (lit {type: (t-prim {} f32)} 9.0)))",
+        );
+        assert!(
+            dag.nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Const { value } if value == 2.5)),
+            "taken arm's literal must be lowered: {dag:?}"
+        );
+        assert!(
+            !dag.nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Const { value } if value == 9.0)),
+            "dead arm's literal must not be lowered: {dag:?}"
+        );
+    }
+
+    #[test]
+    fn static_record_scrutinee_match_binds_fields_by_name() {
+        // chelis#520 D2 mechanics: a record construction scrutinee binds
+        // pat-record fields by name, so the arm body sees the bound field's
+        // node (a Load of `w`), not the constructor wrapper.
+        let dag = parse_and_lower_unchecked(
+            "(match {} (record {} Box (kv {} t (var {} w))) \
+             (arm {} (pat-record {} Box (kv {} t (pat-var {} u))) () (var {} u)))",
+        );
+        assert!(
+            dag.nodes()
+                .iter()
+                .any(|node| matches!(&node.op, RiscOp::Load { name } if name.as_str() == "w")),
+            "bound field must lower to the field expr's Load: {dag:?}"
+        );
+    }
+
+    #[test]
+    fn guarded_static_match_arm_is_rejected() {
+        // chelis#520 D1 negative parity: a guard on the selected arm needs
+        // runtime evaluation, so static selection must reject it.
+        let err = std::panic::catch_unwind(|| {
+            let _ = parse_and_lower_unchecked(
+                "(match {} (var {} ModeA) \
+                 (arm {} (pat-ctor {} ModeA) (lit {type: (t-prim {} bool)} true) \
+                 (lit {type: (t-prim {} f32)} 2.5)))",
+            );
+        })
+        .expect_err("guarded arm should be rejected");
+        assert!(captured_lower_message(err).contains("guards are not supported"));
     }
 
     #[test]
