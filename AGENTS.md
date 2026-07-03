@@ -432,6 +432,7 @@ Current shared skill set:
 - `example-corpus`
 - `cli-surface`
 - `packaging-install`
+- `issue-resolution`
 
 ## Downstream Shell Contract
 
