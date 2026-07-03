@@ -284,7 +284,8 @@ pre-staging required changes, the unlock wave, and the re-probe table.
 
 - Vendor the monorepo's shared skill set from `chelis/agent-skills/`
   (currently `redteam-exec`, `spec-sync`, `phase-gate`, `backend-numerics`,
-  `example-corpus`, `cli-surface`) into the shell's `agent-skills/`.
+  `example-corpus`, `cli-surface`, `packaging-install`, `issue-resolution`)
+  into the shell's `agent-skills/`.
 - `.claude/skills` and `.codex/skills` are **symlinks** to `agent-skills/`;
   `.claude/commands/` and `.codex/commands/` wrappers stay mirrored; the
   `red-team` alias stays wired to `redteam-exec` (per monorepo `AGENTS.md`
