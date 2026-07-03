@@ -32,7 +32,15 @@ Then grad(f) : A -> dA
 where `dA` is the gradient type:
 - If `A` is a single tensor type `tensor[D, P]`, then `dA = tensor[D, P]` (same type).
 - If `A` is a tuple `(T1, T2, ..., Tn)`, then `dA = (dT1, dT2, ..., dTn)`.
-- If a component of `A` is non-differentiable (e.g., `bool`, `i32`, ADT), then its gradient component is `unit`.
+- If `A` is an ADT/record whose fields (across every variant) are all float tensors
+  or float scalars, and at least one variant carries a field, then `dA` is the same
+  constructor shape with a gradient per field (the field-wise extension of
+  `spec/design/differentiable_language.md` Decision 6; shipped as the chelis#520 D2
+  slice documented in §2.10.1, with the limits listed there).
+- If a component of `A` is otherwise non-differentiable (e.g., `bool`, `i32`, an ADT
+  with a non-tensor field in any variant, or a pure enum with no fields at all),
+  then its gradient component is `unit`; the shipped D2 slice rejects such
+  arguments loudly rather than emitting a partial gradient struct.
 
 Chelis's shipped source-level `grad` returns gradients only, not `(value, grad)`.
 For a multi-parameter function, the gradient payload is flattened:
@@ -316,6 +324,49 @@ constant-mask cotangent path for scalar losses over the selected values.
 do not enter the tensor DAG transform path. Adding a general scalar host AD
 engine remains tracked under Phase 5
 (`spec/design/phase5_host_scalar_ad.md`).
+
+### 2.10.1 `match` bodies and ADT-typed arguments (chelis#520 D1/D2 slices)
+
+Two slices of the differentiable-language roadmap
+(`spec/design/differentiable_language.md` Phases 1 and 2) are shipped for
+`grad`:
+
+**D1 slice — static arm selection.** A `match` inside a differentiated body is
+resolved at lowering time when its scrutinee is a compile-time-known
+constructor value: a nullary constructor literal (`ModeA`), a positional
+constructor application, a record construction (`Box { t: e }`), or an
+ADT-typed parameter of the differentiated function (whose constructor shape is
+fixed at the `grad` call boundary). Only the taken arm is lowered and
+differentiated. This is the exact gradient, not an approximation: the
+constructor tag is discrete, so perturbing tensor inputs cannot change the
+taken arm. The slice covers both the host-eval lane (`chelis eval`) and the
+compiled tensor lane (`chelis build --target c`), which share the same DAG
+lowering. Still rejected, loudly and by name: a runtime scrutinee (anything
+that lowers to a tensor node), an arm guard on the selected pattern, and
+nested destructuring beyond `pat-var`/`pat-wild` field bindings.
+
+**D2 slice — field-wise ADT gradients (eval lane).** `grad(f)(Ctor { .. })`
+over a single ADT argument whose fields are all float tensors or float
+scalars returns a gradient with the same constructor shape, one gradient per
+field (the pytree contract). A field that does not influence the output
+receives an explicit zero tensor of its shape, so the gradient struct always
+matches the argument's structure. For a multi-constructor sum type, the
+gradient corresponds to whichever variant was constructed. Limits, each a loud
+diagnostic naming the construct: mixed types (a non-float-tensor field in ANY
+variant of the argument's type) are rejected naming the field, even when the
+constructed variant itself is float-clean, because the checker types such a
+gradient as `unit` and the runtime must not produce a value the static type
+does not admit; pure enums (no fields in any variant) are rejected because
+there is no continuous payload to differentiate; an ADT argument in a
+multi-argument call is a check-time error (single-argument functions only,
+including when `wrt` narrows the target to the ADT alone); the compiled lane
+rejects `out = grad(f)` exports over ADT-typed parameters (the C ABI has no
+ADT value representation).
+
+The acceptance oracle for both slices is
+`crates/chelis-cli/tests/issue_520_adt_match_grad.rs` (analytic +
+finite-difference gradients, eval-vs-C-backend agreement for D1, and the
+negative-parity pins for every listed rejection).
 
 ### 2.11 Interaction With Phase 2a Effects
 

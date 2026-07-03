@@ -245,8 +245,8 @@ impl<'a> EvalContext<'a> {
             .cloned()
             .unwrap_or_else(|| source_order.clone());
         let mut ordered = Vec::with_capacity(declared.len());
-        for field_name in declared {
-            let value = fields_by_name.remove(&field_name).ok_or_else(|| {
+        for field_name in &declared {
+            let value = fields_by_name.remove(field_name).ok_or_else(|| {
                 format!("record `{ctor}` missing field `{field_name}` at runtime")
             })?;
             ordered.push(value);
@@ -256,10 +256,16 @@ impl<'a> EvalContext<'a> {
                 "record `{ctor}` has unknown field `{extra}` at runtime"
             ));
         }
+        // `field_names` must stay aligned with `fields`: both follow the
+        // DECLARED field order used for the reordering above. The pre-#520
+        // code stored the kv SOURCE order here (the desugarer sorts record
+        // kvs alphabetically), so any record whose alphabetical order
+        // differs from its declared order carried misaligned
+        // `field_names[i]` metadata against `fields[i]`.
         Ok(RuntimeValue::Adt {
             ctor: ctor.to_string(),
             fields: ordered,
-            field_names: Some(source_order),
+            field_names: Some(declared),
         })
     }
 

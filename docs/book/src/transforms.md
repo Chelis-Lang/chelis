@@ -32,6 +32,21 @@ parameter in the order listed. Apply the gradient function to get the values:
 `grad` returns gradients only, not the forward value alongside them. It composes with
 itself for higher derivatives: `grad(grad(f))` is the second derivative.
 
+Two chelis#520 slices extend the differentiated surface beyond flat tensors
+(`spec/06-transformations.md` §2.10.1 has the full contract and limits):
+
+- A `match` whose scrutinee is a compile-time-known constructor value (a
+  constructor literal, a record construction, or an ADT-typed parameter of the
+  differentiated function) resolves to its taken arm at lowering time, so such
+  bodies differentiate in both the eval and compiled lanes. A runtime scrutinee
+  or a guarded arm is still rejected with a diagnostic naming the construct.
+- `grad(f)` over a single ADT argument whose fields are all float tensors
+  returns a gradient with the same constructor shape, one gradient per field
+  (eval lane). Mixed types (a non-float field in any variant, even a variant
+  other than the constructed one), pure enums with no fields, multi-argument
+  calls with an ADT argument (including `wrt`-narrowed ones), and
+  compiled-lane ADT-param gradient exports are rejected with named diagnostics.
+
 ## vmap
 
 `vmap` vectorizes a per-example function over a batch dimension. It is a DAG rewrite, not a

@@ -18618,7 +18618,7 @@ fn infer_grad(
                 return Type::Error;
             }
 
-            match grad_result_type(list, &args, errors) {
+            match grad_result_type(list, &args, adt_reg, errors) {
                 Some(grad_ret) => Type::Fn(args, Box::new(grad_ret)),
                 None => Type::Error,
             }
@@ -18642,6 +18642,7 @@ fn grad_output_supported(ty: &Type) -> bool {
 fn grad_result_type(
     list: &deep::List,
     args: &[Type],
+    adt_reg: &AdtRegistry,
     errors: &mut Vec<CheckError>,
 ) -> Option<Type> {
     let targets = if let Some(indices) = grad_wrt_indices(list, errors)? {
@@ -18659,7 +18660,7 @@ fn grad_result_type(
                 ));
                 return None;
             };
-            let Some(grad_ty) = grad_argument_type(arg) else {
+            let Some(grad_ty) = grad_argument_type(arg, adt_reg) else {
                 errors.push(CheckError::new(
                     CheckErrorKind::TypeMismatch,
                     format!("grad `wrt` index {index} is not differentiable"),
@@ -18671,9 +18672,35 @@ fn grad_result_type(
         }
         selected
     } else {
-        args.iter().filter_map(grad_argument_type).collect()
+        args.iter()
+            .filter_map(|arg| grad_argument_type(arg, adt_reg))
+            .collect()
     };
 
+    // chelis#520 D2 slice boundary: an ADT gradient target is supported
+    // only when the differentiated function takes exactly one argument.
+    // The lowering rejects any ADT argument in a multi-argument grad
+    // call (structure-aware tuple packing is not implemented), so gate
+    // on the FUNCTION arity, not just the selected-target count: a
+    // `wrt`-restricted ADT target inside a multi-argument call would
+    // otherwise pass the check and then die at lowering, making the
+    // check-time claim (and any `wrt`-based suggestion) a lie.
+    if args.len() > 1
+        && targets
+            .iter()
+            .any(|target| matches!(target, Type::Adt(_, _)))
+    {
+        errors.push(CheckError::new(
+            CheckErrorKind::Other,
+            "grad over an ADT-typed parameter supports single-argument functions only (chelis#520 D2)"
+                .to_string(),
+            vec![
+                "Fold the extra arguments into the ADT's fields, or differentiate a single-parameter wrapper function that takes only the ADT"
+                    .to_string(),
+            ],
+        ));
+        return None;
+    }
     Some(match targets.as_slice() {
         [] => Type::Unit,
         [single] => single.clone(),
@@ -18739,7 +18766,7 @@ fn grad_wrt_indices(list: &deep::List, errors: &mut Vec<CheckError>) -> Option<O
     }
 }
 
-fn grad_argument_type(arg: &Type) -> Option<Type> {
+fn grad_argument_type(arg: &Type, adt_reg: &AdtRegistry) -> Option<Type> {
     match arg {
         Type::Prim(prim) if prim.is_float() => Some(Type::Prim(*prim)),
         // WS-A5: a polymorphic precision (TensorPrec::Var) is not yet
@@ -18749,7 +18776,35 @@ fn grad_argument_type(arg: &Type) -> Option<Type> {
         Type::Tensor(dims, prec) if prec.is_float() => {
             Some(Type::Tensor(dims.clone(), prec.clone()))
         }
-        Type::Ref(inner) => grad_argument_type(inner),
+        // chelis#520 D2 slice: an ADT whose every variant carries only
+        // float tensors / float scalars gets a field-wise gradient of
+        // the same constructor shape (spec/06-transformations.md
+        // §2.10.1). Mixed or non-tensor payloads stay
+        // non-differentiable, so the arg is skipped (no `wrt`) or
+        // rejected (`wrt`-selected) exactly as before. Generic ADTs
+        // fall out naturally: an uninstantiated param var is not a
+        // float tensor.
+        Type::Adt(name, args) => {
+            let def = adt_reg.defs.get(name)?;
+            let all_float_fields = def.variants.iter().all(|variant| {
+                variant.fields.iter().all(|(_, field_ty)| match field_ty {
+                    Type::Prim(prim) => prim.is_float(),
+                    Type::Tensor(_, prec) => prec.is_float(),
+                    _ => false,
+                })
+            });
+            // A pure enum (no fields in any variant) carries no
+            // continuous payload: there is nothing to differentiate,
+            // and typing its gradient as the enum itself would claim a
+            // gradient value the runtime cannot produce. Keep it
+            // non-differentiable (unit payload), the pre-#520 typing.
+            let has_any_field = def
+                .variants
+                .iter()
+                .any(|variant| !variant.fields.is_empty());
+            (all_float_fields && has_any_field).then(|| Type::Adt(name.clone(), args.clone()))
+        }
+        Type::Ref(inner) => grad_argument_type(inner, adt_reg),
         _ => None,
     }
 }
@@ -19921,6 +19976,143 @@ mod tests {
                 .trim()
                 .to_string(),
             "(t-fn {} (t-prim {} bool) (t-unit {}))"
+        );
+    }
+
+    #[test]
+    fn grad_over_all_float_field_adt_types_as_same_adt() {
+        // chelis#520 D2 slice: an ADT whose fields are all float tensors
+        // gets a field-wise gradient of the same constructor shape, so
+        // `grad(f : Box -> f32) : Box -> Box`.
+        let exprs = chelis_deep::parser::parse_str(
+            "(deftype {} Box
+                (variant {} Box
+                    (field {} t (t-tensor {} (d-lit {} 2) (t-prim {} f32)))))
+             (defsig {} f (t-fn {} (t-adt {} Box) (t-prim {} f32)))
+             (def {} f (fn {} (params {} p) (lit {type: (t-prim {} f32)} 1.0)))
+             (def {} g (grad {} (var {} f)))",
+        )
+        .unwrap();
+        let checked = check_ir_program(&exprs).expect("IR check");
+        let ty = checked.type_env().get("g").expect("g type");
+        let printed = chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
+            .trim()
+            .to_string();
+        assert_eq!(printed, "(t-fn {} (t-adt {} Box) (t-adt {} Box))");
+    }
+
+    #[test]
+    fn grad_over_mixed_field_adt_stays_non_differentiable() {
+        // chelis#520 D2 negative parity: a mixed struct (int field) is not
+        // differentiable, so the default (no `wrt`) gradient payload is
+        // unit, exactly as before the slice.
+        let exprs = chelis_deep::parser::parse_str(
+            "(deftype {} Mixed
+                (variant {} Mixed
+                    (field {} t (t-tensor {} (d-lit {} 2) (t-prim {} f32)))
+                    (field {} n (t-prim {} int32))))
+             (defsig {} f (t-fn {} (t-adt {} Mixed) (t-prim {} f32)))
+             (def {} f (fn {} (params {} p) (lit {type: (t-prim {} f32)} 1.0)))
+             (def {} g (grad {} (var {} f)))",
+        )
+        .unwrap();
+        let checked = check_ir_program(&exprs).expect("IR check");
+        let ty = checked.type_env().get("g").expect("g type");
+        let printed = chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
+            .trim()
+            .to_string();
+        assert_eq!(printed, "(t-fn {} (t-adt {} Mixed) (t-unit {}))");
+    }
+
+    #[test]
+    fn grad_over_adt_plus_tensor_multi_target_is_rejected() {
+        // chelis#520 D2 negative parity: an ADT gradient target is
+        // supported only as the sole differentiated argument; a
+        // multi-target payload containing an ADT is a check-time error.
+        check_err(
+            "(deftype {} Box
+                (variant {} Box
+                    (field {} t (t-tensor {} (d-lit {} 2) (t-prim {} f32)))))
+             (defsig {} f (t-fn {}
+                (t-adt {} Box)
+                (t-tensor {} (d-lit {} 2) (t-prim {} f32))
+                (t-prim {} f32)))
+             (def {} f (fn {} (params {} p y) (lit {type: (t-prim {} f32)} 1.0)))
+             (def {} g (grad {} (var {} f)))",
+            CheckErrorKind::Other,
+        );
+    }
+
+    #[test]
+    fn grad_wrt_adt_in_multi_arg_call_is_rejected() {
+        // chelis#520 D2 negative parity: a `wrt`-restricted ADT target
+        // inside a multi-argument function is still a check-time error.
+        // The lowering rejects any ADT argument in a multi-argument grad
+        // call, so letting the wrt form pass the check would defer the
+        // failure to a runtime diagnostic and make the old "restrict
+        // with wrt" suggestion a dead end.
+        check_err(
+            "(deftype {} Box
+                (variant {} Box
+                    (field {} t (t-tensor {} (d-lit {} 2) (t-prim {} f32)))))
+             (defsig {} f (t-fn {}
+                (t-adt {} Box)
+                (t-tensor {} (d-lit {} 2) (t-prim {} f32))
+                (t-prim {} f32)))
+             (def {} f (fn {} (params {} p y) (lit {type: (t-prim {} f32)} 1.0)))
+             (def {} g (grad {} (var {} f) (lit {type: (t-prim {} int32)} 0)))",
+            CheckErrorKind::Other,
+        );
+    }
+
+    #[test]
+    fn grad_over_pure_enum_stays_unit() {
+        // chelis#520 D2: a pure enum (no fields in any variant) carries
+        // no continuous payload, so it stays non-differentiable and the
+        // default gradient payload is unit, the pre-#520 typing.
+        let exprs = chelis_deep::parser::parse_str(
+            "(deftype {} Mode
+                (variant {} ModeA)
+                (variant {} ModeB))
+             (defsig {} f (t-fn {} (t-adt {} Mode) (t-prim {} f32)))
+             (def {} f (fn {} (params {} m) (lit {type: (t-prim {} f32)} 1.0)))
+             (def {} g (grad {} (var {} f)))",
+        )
+        .unwrap();
+        let checked = check_ir_program(&exprs).expect("IR check");
+        let ty = checked.type_env().get("g").expect("g type");
+        let printed = chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
+            .trim()
+            .to_string();
+        assert_eq!(printed, "(t-fn {} (t-adt {} Mode) (t-unit {}))");
+    }
+
+    #[test]
+    fn grad_over_enum_plus_tensor_keeps_tensor_only_payload() {
+        // chelis#520 D2 regression guard: a nullary-enum parameter next
+        // to a tensor parameter must not trip the single-argument ADT
+        // rejection; the enum is non-differentiable (skipped), so the
+        // gradient payload is the tensor alone, the pre-#520 typing.
+        let exprs = chelis_deep::parser::parse_str(
+            "(deftype {} Mode
+                (variant {} ModeA)
+                (variant {} ModeB))
+             (defsig {} f (t-fn {}
+                (t-adt {} Mode)
+                (t-tensor {} (d-lit {} 2) (t-prim {} f32))
+                (t-prim {} f32)))
+             (def {} f (fn {} (params {} m x) (lit {type: (t-prim {} f32)} 1.0)))
+             (def {} g (grad {} (var {} f)))",
+        )
+        .unwrap();
+        let checked = check_ir_program(&exprs).expect("IR check");
+        let ty = checked.type_env().get("g").expect("g type");
+        let printed = chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
+            .trim()
+            .to_string();
+        assert_eq!(
+            printed,
+            "(t-fn {} (t-adt {} Mode) (t-tensor {} (d-lit {} 2) (t-prim {} f32)) (t-tensor {} (d-lit {} 2) (t-prim {} f32)))"
         );
     }
 

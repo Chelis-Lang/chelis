@@ -34,6 +34,14 @@ impl<'a> EvalContext<'a> {
         let mut placeholder_types: Vec<TensorType> = Vec::with_capacity(args.len());
         let mut placeholder_tensors: HashMap<String, IrTensorValue> =
             HashMap::with_capacity(args.len());
+        // Per-argument Deep expression to splice into the synthesized app:
+        // a typed placeholder var for tensor/scalar args, or a synthesized
+        // ADT construction over per-field placeholders (chelis#520 D2).
+        let mut arg_exprs: Vec<Expr> = Vec::with_capacity(args.len());
+        // Set when the single differentiated argument is an ADT value:
+        // the gradient roots are repacked into the same constructor shape
+        // after evaluation (the pytree contract).
+        let mut adt_repack: Option<(String, Option<Vec<String>>, usize)> = None;
 
         // Best-effort fn-expr lookup so we can read the inner
         // function's parameter type metadata. The transform_expr is the
@@ -65,7 +73,94 @@ impl<'a> EvalContext<'a> {
             TransformKind::Grad => None,
         };
 
+        let span = Span::new(0, 0);
         for (index, value) in args.iter().enumerate() {
+            // chelis#520 D2: an ADT-valued grad argument marshals as one
+            // placeholder per field plus a synthesized construction expr,
+            // so the IR lowering sees the static constructor shape and
+            // differentiates field-wise.
+            if let (
+                TransformKind::Grad,
+                RuntimeValue::Adt {
+                    ctor,
+                    fields,
+                    field_names,
+                },
+            ) = (&kind, value)
+            {
+                if args.len() != 1 {
+                    return Err(format!(
+                        "host runtime: `grad(...)` over an ADT-typed argument currently \
+                         supports single-argument functions only; got {} arguments \
+                         (chelis#520 D2)",
+                        args.len()
+                    ));
+                }
+                // Type-level gate: the checker types `grad` over an ADT
+                // as non-differentiable (unit payload) when ANY variant
+                // of the type carries a non-float field, or when the
+                // type is a pure enum with no fields. The constructed
+                // value's own fields may look float-clean (e.g. the
+                // clean variant of a mixed sum type), but producing a
+                // gradient struct here would contradict the static type.
+                // Reject with the reason recorded at context build.
+                if let Some(reason) = self.adt_grad_rejections.get(ctor) {
+                    return Err(format!(
+                        "host runtime: `grad(...)` argument {index}: {reason} \
+                         (chelis#520 D2)"
+                    ));
+                }
+                // Field names aligned with `fields` order. `fields` is in
+                // DECLARED order (`eval_record` reorders by the deftype
+                // table), so prefer the authoritative `adt_fields` entry;
+                // the value's own `field_names` is the fallback for Adt
+                // values built outside `eval_record`.
+                let aligned_names: Option<Vec<String>> = self
+                    .adt_fields
+                    .get(ctor)
+                    .cloned()
+                    .filter(|names| names.len() == fields.len())
+                    .or_else(|| {
+                        field_names
+                            .clone()
+                            .filter(|names| names.len() == fields.len())
+                    });
+                let mut field_placeholders: Vec<(String, TensorType)> =
+                    Vec::with_capacity(fields.len());
+                for (fidx, field_value) in fields.iter().enumerate() {
+                    let field_label = aligned_names
+                        .as_ref()
+                        .and_then(|names| names.get(fidx).cloned())
+                        .unwrap_or_else(|| fidx.to_string());
+                    let convertible = matches!(
+                        field_value,
+                        RuntimeValue::Tensor(_) | RuntimeValue::Scalar(_)
+                    );
+                    if !convertible {
+                        return Err(format!(
+                            "host runtime: `grad(...)` argument {index}: field \
+                             `{field_label}` of constructor `{ctor}` is not a tensor or \
+                             scalar; only ADT values whose fields are all float tensors \
+                             can be differentiated (chelis#520 D2)"
+                        ));
+                    }
+                    let (tensor_value, tensor_type) =
+                        runtime_value_to_dag_input(field_value, None, index)?;
+                    let placeholder = format!("__chelis_xform_arg_{index}_field_{fidx}");
+                    placeholder_tensors.insert(placeholder.clone(), tensor_value);
+                    placeholder_names.push(placeholder.clone());
+                    placeholder_types.push(tensor_type.clone());
+                    field_placeholders.push((placeholder, tensor_type));
+                }
+                arg_exprs.push(make_adt_construction_expr(
+                    ctor,
+                    aligned_names.as_deref(),
+                    &field_placeholders,
+                    span,
+                ));
+                adt_repack = Some((ctor.clone(), aligned_names, fields.len()));
+                continue;
+            }
             let placeholder = format!("__chelis_xform_arg_{index}");
             let (tensor_value, mut tensor_type) =
                 runtime_value_to_dag_input(value, fn_expr, index)?;
@@ -76,20 +171,18 @@ impl<'a> EvalContext<'a> {
             {
                 tensor_type = refined;
             }
+            arg_exprs.push(make_var_with_type(&placeholder, &tensor_type, span));
             placeholder_tensors.insert(placeholder.clone(), tensor_value);
             placeholder_names.push(placeholder);
             placeholder_types.push(tensor_type);
         }
 
-        // Synthesize `(app {} <transform-expr> (var __chelis_xform_arg_0) ...)`.
-        let span = Span::new(0, 0);
-        let mut app_elements: Vec<Expr> = Vec::with_capacity(2 + placeholder_names.len());
+        // Synthesize `(app {} <transform-expr> <arg-expr_0> ...)`.
+        let mut app_elements: Vec<Expr> = Vec::with_capacity(3 + arg_exprs.len());
         app_elements.push(Expr::Atom(Atom::Symbol("app".to_string()), span));
         app_elements.push(Expr::Map(MetaMap::default(), span));
         app_elements.push(transform_expr.clone());
-        for (placeholder, ty) in placeholder_names.iter().zip(placeholder_types.iter()) {
-            app_elements.push(make_var_with_type(placeholder, ty, span));
-        }
+        app_elements.extend(arg_exprs);
         let app_expr = Expr::List(
             List {
                 elements: app_elements,
@@ -281,7 +374,88 @@ impl<'a> EvalContext<'a> {
             TransformKind::Grad => "grad",
             TransformKind::Vmap => "vmap",
         };
-        pack_dag_roots(&dag, &roots, &values, kind_label)
+        let packed = pack_dag_roots(&dag, &roots, &values, kind_label)?;
+        // chelis#520 D2: repack the field-wise gradient roots into the
+        // argument's constructor shape (the pytree contract: the gradient
+        // of a Box-shaped argument is a Box-shaped value).
+        if let Some((ctor, field_names, field_count)) = adt_repack {
+            let fields = match packed {
+                RuntimeValue::Tuple(items) => items,
+                single => vec![single],
+            };
+            if fields.len() != field_count {
+                return Err(format!(
+                    "host runtime: `grad(...)` over `{ctor}` produced {} gradient \
+                     roots for {field_count} fields; refusing to pack a misaligned \
+                     gradient structure (chelis#520 D2)",
+                    fields.len()
+                ));
+            }
+            return Ok(RuntimeValue::Adt {
+                ctor,
+                fields,
+                field_names,
+            });
+        }
+        Ok(packed)
+    }
+}
+
+/// chelis#520 D2: synthesize the Deep construction expression that
+/// rebuilds an ADT argument from its per-field typed placeholders --
+/// `(record {} Ctor (kv {} field (var {type: ...} ph)) ...)` for record
+/// constructors, `(app {} (var Ctor) (var {type: ...} ph) ...)` for
+/// positional ones. The IR lowering resolves either form to a static
+/// `LoweredValue::Adt`, which is what lets the differentiated body's
+/// `match` destructuring resolve at lowering time.
+fn make_adt_construction_expr(
+    ctor: &str,
+    field_names: Option<&[String]>,
+    field_placeholders: &[(String, TensorType)],
+    span: Span,
+) -> Expr {
+    match field_names {
+        Some(names) => {
+            let mut elements = vec![
+                Expr::Atom(Atom::Symbol("record".to_string()), span),
+                Expr::Map(MetaMap::default(), span),
+                Expr::Atom(Atom::Symbol(ctor.to_string()), span),
+            ];
+            for (name, (placeholder, ty)) in names.iter().zip(field_placeholders.iter()) {
+                elements.push(Expr::List(
+                    List {
+                        elements: vec![
+                            Expr::Atom(Atom::Symbol("kv".to_string()), span),
+                            Expr::Map(MetaMap::default(), span),
+                            Expr::Atom(Atom::Symbol(name.clone()), span),
+                            make_var_with_type(placeholder, ty, span),
+                        ],
+                    },
+                    span,
+                ));
+            }
+            Expr::List(List { elements }, span)
+        }
+        None => {
+            let mut elements = vec![
+                Expr::Atom(Atom::Symbol("app".to_string()), span),
+                Expr::Map(MetaMap::default(), span),
+                Expr::List(
+                    List {
+                        elements: vec![
+                            Expr::Atom(Atom::Symbol("var".to_string()), span),
+                            Expr::Map(MetaMap::default(), span),
+                            Expr::Atom(Atom::Symbol(ctor.to_string()), span),
+                        ],
+                    },
+                    span,
+                ),
+            ];
+            for (placeholder, ty) in field_placeholders {
+                elements.push(make_var_with_type(placeholder, ty, span));
+            }
+            Expr::List(List { elements }, span)
+        }
     }
 }
 
