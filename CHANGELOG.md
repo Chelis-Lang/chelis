@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.14.0] — 2026-07-03
+
+### Added
+
+- **Error localization in `chelis check` diagnostics (#615).** The
+  structured `errors` array now carries `span_offset` (byte offset in
+  source) and `span_id` (e.g. `"surf:23..45"`) for PrecisionMismatch,
+  ArityMismatch, DimensionMismatch, UnboundVariable, and
+  UnknownConstructor errors. Downstream tools can identify WHERE an error
+  occurs without heuristic post-processing. FlukeBall can drop its
+  approximate error localizer.
+- **`ConstTensor` RISC op for in-core tensor literals (#615).**
+  `to_tensor([1.0, 2.0, 3.0])` with all-literal arguments now lowers to
+  a single `ConstTensor` node instead of a 145-node add-tree. C/HIP
+  backends emit a static `memcpy` from an initialized constant array.
+  Beacon-provable with trivial known range `[min(data), max(data)]`.
+  FlukeBall can relax the #38-B add-tree avoidance steer.
+
 ## [0.13.0] — 2026-07-02
 
 ### Added
