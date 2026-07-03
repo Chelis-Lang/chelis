@@ -96,6 +96,20 @@ impl<'a> EvalContext<'a> {
                         args.len()
                     ));
                 }
+                // Type-level gate: the checker types `grad` over an ADT
+                // as non-differentiable (unit payload) when ANY variant
+                // of the type carries a non-float field, or when the
+                // type is a pure enum with no fields. The constructed
+                // value's own fields may look float-clean (e.g. the
+                // clean variant of a mixed sum type), but producing a
+                // gradient struct here would contradict the static type.
+                // Reject with the reason recorded at context build.
+                if let Some(reason) = self.adt_grad_rejections.get(ctor) {
+                    return Err(format!(
+                        "host runtime: `grad(...)` argument {index}: {reason} \
+                         (chelis#520 D2)"
+                    ));
+                }
                 // Field names aligned with `fields` order. `fields` is in
                 // DECLARED order (`eval_record` reorders by the deftype
                 // table), so prefer the authoritative `adt_fields` entry;

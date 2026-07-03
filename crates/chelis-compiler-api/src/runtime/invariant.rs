@@ -756,6 +756,9 @@ pub(crate) fn revalidate_adt_value(
         top_level_defs: module_constants.clone(),
         type_env: HashMap::new(),
         adt_fields: adt_fields.clone(),
+        // Invariant predicates never route through grad marshalling, so
+        // the rejection map is not needed here.
+        adt_grad_rejections: HashMap::new(),
         tensor_bindings: &empty_tensors,
         transcript: Vec::new(),
         resolving_top_levels: Vec::new(),

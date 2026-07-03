@@ -18,9 +18,15 @@
 //!
 //! Negative parity (each pinned with its diagnostic):
 //!   - runtime (non-constructor) scrutinee in a differentiated `match`
+//!   - runtime-dependent constructor (an `if` between constructors) feeding
+//!     a differentiated `match` scrutinee
 //!   - guarded arm reached during static arm selection
 //!   - mixed tensor/non-tensor ADT fields in a grad argument
-//!   - ADT grad argument in a multi-argument call
+//!   - mixed SIBLING variant (float-clean constructed variant of a type
+//!     whose other variant carries a non-tensor field)
+//!   - pure enum (no fields in any variant) as a grad argument
+//!   - ADT grad argument in a multi-argument call (default and
+//!     `wrt`-narrowed forms, both check-time)
 //!   - compiled-lane `out = grad(f)` export over an ADT-typed param
 
 use std::fs;
@@ -189,6 +195,129 @@ fn issue_520_d1_static_match_nonlinear_matches_fd() {
             grad[i]
         );
     }
+}
+
+/// Nested static matches: both scrutinees are compile-time constructors,
+/// so both resolve statically and the innermost taken arm's gradient is
+/// exact (2x for the sum-of-squares arm).
+#[test]
+fn issue_520_d1_nested_static_match_grads_taken_arm() {
+    let source = format!(
+        "module Repro.D1Nested\n\n\
+         type Mode =\n\
+         \x20 | ModeA\n\
+         \x20 | ModeB\n\n\
+         type Kind =\n\
+         \x20 | KindX\n\
+         \x20 | KindY\n\n\
+         def fwd_nested(x: tensor[2, f32]) -> f32 = {{\n\
+         \x20 match ModeA with {{\n\
+         \x20   | ModeA => match KindY with {{\n\
+         \x20     | KindX => cast(0.0, f32)\n\
+         \x20     | KindY => sum(mul(&x, &x), cast(0, int32)) |> tensor_to_scalar\n\
+         \x20   }}\n\
+         \x20   | ModeB => cast(0.0, f32)\n\
+         \x20 }}\n\
+         }}\n\n\
+         out = grad(fwd_nested)(to_tensor([{}]))\n",
+        fmt_f32_list(&[1.0, 2.0]),
+    );
+    let (stdout, stderr, ok) = eval_program(&source);
+    assert!(ok, "nested static match grad failed: {stderr}");
+    let grad = parse_tensor_data(&stdout);
+    assert_eq!(grad, vec![2.0, 4.0], "grad of inner taken arm: {stdout}");
+}
+
+/// A constructor application whose FIELD value is runtime-dependent while
+/// the tag is static: the bound field must wire into the DAG so gradients
+/// flow through it. grad of sum(t) where t = x*x is 2x; FD-validated.
+#[test]
+fn issue_520_d1_static_tag_runtime_field_gradient_flows() {
+    let base = [1.0, 2.0];
+    let body = "module Repro.D1Field\n\n\
+                type Box =\n\
+                \x20 | Box { t: tensor[2, f32] }\n\n\
+                def fwd_field(x: tensor[2, f32]) -> f32 = {\n\
+                \x20 match Box { t: mul(&x, &x) } with {\n\
+                \x20   | Box { t: t } => sum(t, cast(0, int32)) |> tensor_to_scalar\n\
+                \x20 }\n\
+                }\n\n";
+    let source = format!(
+        "{body}out = grad(fwd_field)(to_tensor([{}]))\n",
+        fmt_f32_list(&base),
+    );
+    let (stdout, stderr, ok) = eval_program(&source);
+    assert!(ok, "static-tag runtime-field grad failed: {stderr}");
+    let grad = parse_tensor_data(&stdout);
+    assert_eq!(grad.len(), 2);
+    for (i, g) in grad.iter().enumerate() {
+        assert!(
+            (g - 2.0 * base[i]).abs() < 1e-4,
+            "analytic grad elem {i}: got {g}, want {}",
+            2.0 * base[i]
+        );
+    }
+    // Central-difference oracle from the forward loss.
+    let h = 1e-2;
+    for i in 0..base.len() {
+        let mut xp = base.to_vec();
+        let mut xm = base.to_vec();
+        xp[i] += h;
+        xm[i] -= h;
+        let fwd = |xs: &[f64]| {
+            let src = format!("{body}out = fwd_field(to_tensor([{}]))\n", fmt_f32_list(xs),);
+            let (stdout, stderr, ok) = eval_program(&src);
+            assert!(ok, "forward eval failed: {stderr}");
+            parse_scalar(&stdout)
+        };
+        let fd = (fwd(&xp) - fwd(&xm)) / (2.0 * h);
+        assert!(
+            (grad[i] - fd).abs() < 5e-2,
+            "elem {i}: analytic {} vs finite-difference {fd}",
+            grad[i]
+        );
+    }
+}
+
+/// Static selection of a constant taken arm must behave exactly like the
+/// no-match constant-function control: today both fail with the same
+/// pre-existing "produced no roots" diagnostic (grad of a constant has no
+/// adjoint; zero-filling constant gradients is tracked separately from
+/// chelis#520). The match must introduce no divergence from the control.
+#[test]
+fn issue_520_d1_constant_taken_arm_matches_constant_fn_control() {
+    let match_source = format!(
+        "{D1_HEADER}{}\nout = grad(fwd_match)(to_tensor([{}]))\n",
+        d1_match_fn(
+            "sum(x, cast(0, int32)) |> tensor_to_scalar",
+            "cast(0.0, f32)"
+        )
+        .replace("match ModeA", "match ModeB"),
+        fmt_f32_list(&[1.0, 2.0]),
+    );
+    let control_source = format!(
+        "module Repro.CtrlConst\n\n\
+         def fwd_const(x: tensor[2, f32]) -> f32 = {{\n\
+         \x20 cast(0.0, f32)\n\
+         }}\n\n\
+         out = grad(fwd_const)(to_tensor([{}]))\n",
+        fmt_f32_list(&[1.0, 2.0]),
+    );
+    let (_stdout, match_stderr, match_ok) = eval_program(&match_source);
+    let (_stdout, control_stderr, control_ok) = eval_program(&control_source);
+    assert!(
+        !match_ok,
+        "constant-arm grad currently has no adjoint roots"
+    );
+    assert!(!control_ok, "constant-fn grad control must agree");
+    assert!(
+        match_stderr.contains("produced no roots"),
+        "constant-arm diagnostic: {match_stderr}"
+    );
+    assert!(
+        control_stderr.contains("produced no roots"),
+        "control diagnostic: {control_stderr}"
+    );
 }
 
 // --- D1 compiled lane ----------------------------------------------------------
@@ -455,7 +584,98 @@ fn issue_520_d2_composed_def_returns_typed_box_gradient() {
     assert_eq!(grad, vec![2.0, 4.0], "grad of sum(t*t) is 2t: {stdout}");
 }
 
+/// D2 zero-fill: a two-tensor-field struct where only one field reaches
+/// the output. The unused field's gradient must be an explicit zero
+/// tensor OF ITS OWN SHAPE (here [3], distinct from the used field's
+/// [2]), so the gradient struct mirrors the argument structure exactly.
+#[test]
+fn issue_520_d2_unused_field_gets_shaped_zero_gradient() {
+    let source = format!(
+        "module Repro.D2Zero\n\n\
+         type Pair =\n\
+         \x20 | Pair {{ a: tensor[2, f32], b: tensor[3, f32] }}\n\n\
+         def fwd_pair(p: Pair) -> f32 = {{\n\
+         \x20 match p with {{\n\
+         \x20   | Pair {{ a: a, b: _ }} => sum(mul(&a, &a), cast(0, int32)) |> tensor_to_scalar\n\
+         \x20 }}\n\
+         }}\n\n\
+         out = grad(fwd_pair)(Pair {{ a: to_tensor([{}]), b: to_tensor([{}]) }})\n",
+        fmt_f32_list(&[1.0, 2.0]),
+        fmt_f32_list(&[5.0, 6.0, 7.0]),
+    );
+    let (stdout, stderr, ok) = eval_program(&source);
+    assert!(ok, "two-field D2 grad eval failed: {stderr}");
+    assert!(stdout.contains("Pair("), "Pair-shaped gradient: {stdout}");
+    assert!(
+        stdout.contains("data=[2.0, 4.0]"),
+        "used field grad 2a: {stdout}"
+    );
+    assert!(
+        stdout.contains("shape=[3], data=[0.0, 0.0, 0.0]"),
+        "unused field must get a zero tensor of its own [3] shape: {stdout}"
+    );
+}
+
+/// A field declared through a zero-parameter `typealias` to a float
+/// tensor is inside the D2 slice: the runtime's type-level gate must
+/// resolve the alias the way the checker does, not reject the field as
+/// an opaque nested type.
+#[test]
+fn issue_520_d2_alias_typed_float_field_accepted() {
+    let source = format!(
+        "module Repro.D2Alias\n\n\
+         type V2 = tensor[2, f32]\n\n\
+         type Box2 =\n\
+         \x20 | Box2 {{ t: V2 }}\n\n\
+         def fwd_alias(p: Box2) -> f32 = {{\n\
+         \x20 match p with {{\n\
+         \x20   | Box2 {{ t: t }} => sum(mul(&t, &t), cast(0, int32)) |> tensor_to_scalar\n\
+         \x20 }}\n\
+         }}\n\n\
+         out = grad(fwd_alias)(Box2 {{ t: to_tensor([{}]) }})\n",
+        fmt_f32_list(&[1.0, 2.0]),
+    );
+    let (stdout, stderr, ok) = eval_program(&source);
+    assert!(ok, "alias-typed float field grad failed: {stderr}");
+    assert!(stdout.contains("Box2("), "Box2-shaped gradient: {stdout}");
+    let grad = parse_tensor_data(&stdout);
+    assert_eq!(grad, vec![2.0, 4.0], "grad of sum(t*t) is 2t: {stdout}");
+}
+
 // --- Negative parity ------------------------------------------------------------
+
+/// A scrutinee whose constructor is runtime-dependent (an `if` choosing
+/// between constructors inside a called function) must be rejected
+/// loudly, never silently resolved to one arm. The `if` lowering cannot
+/// represent an ADT-valued branch, which is exactly what keeps a
+/// data-dependent constructor out of static arm selection.
+#[test]
+fn issue_520_d1_runtime_ctor_through_if_still_rejected() {
+    let source = format!(
+        "module Repro.Neg0\n\n\
+         type Mode =\n\
+         \x20 | ModeA\n\
+         \x20 | ModeB\n\n\
+         def pick(c: f32) -> Mode = if c > 0.0 then ModeA else ModeB\n\n\
+         def fwd_dynpick(x: tensor[2, f32]) -> f32 = {{\n\
+         \x20 match pick(tensor_to_scalar(sum(&x, cast(0, int32)))) with {{\n\
+         \x20   | ModeA => sum(x, cast(0, int32)) |> tensor_to_scalar\n\
+         \x20   | ModeB => cast(0.0, f32)\n\
+         \x20 }}\n\
+         }}\n\n\
+         out = grad(fwd_dynpick)(to_tensor([{}]))\n",
+        fmt_f32_list(&[-1.0, -2.0]),
+    );
+    let (_stdout, stderr, ok) = eval_program(&source);
+    assert!(
+        !ok,
+        "a data-dependent constructor must never be statically selected"
+    );
+    assert!(
+        stderr.contains("expected a single tensor value, got an ADT value"),
+        "diagnostic must name the ADT-in-branch shape: {stderr}"
+    );
+}
 
 /// A `match` whose scrutinee is a runtime value (not a compile-time-known
 /// constructor) stays rejected, with a diagnostic naming the construct.
@@ -527,6 +747,87 @@ fn issue_520_d2_mixed_field_struct_rejected() {
     assert!(
         stderr.contains("`n`") && stderr.contains("float tensor"),
         "diagnostic must name the non-tensor field: {stderr}"
+    );
+}
+
+/// A mixed SIBLING variant poisons the whole type: grad over a value of
+/// the float-clean variant of a sum type whose other variant carries a
+/// non-tensor field is rejected. The checker types this gradient as
+/// unit, so the eval lane must not fabricate a gradient struct the
+/// static type does not admit.
+#[test]
+fn issue_520_d2_mixed_sibling_variant_rejected() {
+    let source = format!(
+        "module Repro.Neg6\n\n\
+         type Pick =\n\
+         \x20 | A {{ s: tensor[2, f32] }}\n\
+         \x20 | B {{ u: tensor[2, f32], n: int32 }}\n\n\
+         def fwd_pick(p: Pick) -> f32 = {{\n\
+         \x20 match p with {{\n\
+         \x20   | A {{ s: s }} => sum(mul(&s, &s), cast(0, int32)) |> tensor_to_scalar\n\
+         \x20   | B {{ u: u, n: _ }} => sum(u, cast(0, int32)) |> tensor_to_scalar\n\
+         \x20 }}\n\
+         }}\n\n\
+         out = grad(fwd_pick)(A {{ s: to_tensor([{}]) }})\n",
+        fmt_f32_list(&[1.0, 2.0]),
+    );
+    let (_stdout, stderr, ok) = eval_program(&source);
+    assert!(
+        !ok,
+        "grad over a mixed-sibling-variant type must stay rejected"
+    );
+    assert!(
+        stderr.contains("field `n` of constructor `B`") && stderr.contains("float tensor"),
+        "diagnostic must name the poisoning sibling field: {stderr}"
+    );
+}
+
+/// A pure enum (no fields in any variant) has no continuous payload:
+/// the checker keeps its gradient payload unit, and the eval lane names
+/// the reason instead of dying downstream with a bare no-roots error.
+#[test]
+fn issue_520_d2_pure_enum_grad_rejected() {
+    let source = "module Repro.Neg7\n\n\
+type Mode =\n\
+  | ModeA\n\
+  | ModeB\n\n\
+def fwd_mode(m: Mode) -> f32 = {\n\
+  match m with {\n\
+    | ModeA => cast(1.0, f32)\n\
+    | ModeB => cast(2.0, f32)\n\
+  }\n\
+}\n\n\
+out = grad(fwd_mode)(ModeA)\n";
+    let (_stdout, stderr, ok) = eval_program(source);
+    assert!(!ok, "grad over a pure enum must stay rejected");
+    assert!(
+        stderr.contains("no fields in any constructor"),
+        "diagnostic must name the empty payload: {stderr}"
+    );
+}
+
+/// A `wrt`-restricted ADT target inside a multi-argument call is a
+/// CHECK-TIME error (not a lowering surprise): the D2 slice supports
+/// single-argument functions only, regardless of `wrt` narrowing.
+#[test]
+fn issue_520_d2_wrt_restricted_adt_multi_arg_rejected_at_check() {
+    let source = format!(
+        "module Repro.Neg8\n\n\
+         type Box =\n\
+         \x20 | Box {{ t: tensor[2, f32] }}\n\n\
+         def fwd_two(p: Box, y: tensor[2, f32]) -> f32 = {{\n\
+         \x20 match p with {{\n\
+         \x20   | Box {{ t: t }} => sum(add(t, y), cast(0, int32)) |> tensor_to_scalar\n\
+         \x20 }}\n\
+         }}\n\n\
+         out = grad(fwd_two, wrt=(p))(Box {{ t: to_tensor([{a}]) }}, to_tensor([{a}]))\n",
+        a = fmt_f32_list(&[1.0, 2.0]),
+    );
+    let (_stdout, stderr, ok) = eval_program(&source);
+    assert!(!ok, "wrt-restricted ADT in a multi-arg call must fail");
+    assert!(
+        stderr.contains("grad over an ADT-typed parameter supports single-argument functions only"),
+        "must fail with the check-time diagnostic: {stderr}"
     );
 }
 

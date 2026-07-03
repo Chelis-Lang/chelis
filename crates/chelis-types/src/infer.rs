@@ -18678,12 +18678,14 @@ fn grad_result_type(
     };
 
     // chelis#520 D2 slice boundary: an ADT gradient target is supported
-    // only as the sole differentiated argument. A multi-target gradient
-    // payload containing an ADT would need structure-aware tuple packing
-    // that the runtime and display lanes do not implement yet; reject it
-    // here so the failure is a check-time diagnostic in every lane rather
-    // than a silently-empty evaluation.
-    if targets.len() > 1
+    // only when the differentiated function takes exactly one argument.
+    // The lowering rejects any ADT argument in a multi-argument grad
+    // call (structure-aware tuple packing is not implemented), so gate
+    // on the FUNCTION arity, not just the selected-target count: a
+    // `wrt`-restricted ADT target inside a multi-argument call would
+    // otherwise pass the check and then die at lowering, making the
+    // check-time claim (and any `wrt`-based suggestion) a lie.
+    if args.len() > 1
         && targets
             .iter()
             .any(|target| matches!(target, Type::Adt(_, _)))
@@ -18693,7 +18695,7 @@ fn grad_result_type(
             "grad over an ADT-typed parameter supports single-argument functions only (chelis#520 D2)"
                 .to_string(),
             vec![
-                "Differentiate the ADT parameter alone (restrict with `wrt`), or fold the extra arguments into the ADT's fields"
+                "Fold the extra arguments into the ADT's fields, or differentiate a single-parameter wrapper function that takes only the ADT"
                     .to_string(),
             ],
         ));
@@ -18791,7 +18793,16 @@ fn grad_argument_type(arg: &Type, adt_reg: &AdtRegistry) -> Option<Type> {
                     _ => false,
                 })
             });
-            all_float_fields.then(|| Type::Adt(name.clone(), args.clone()))
+            // A pure enum (no fields in any variant) carries no
+            // continuous payload: there is nothing to differentiate,
+            // and typing its gradient as the enum itself would claim a
+            // gradient value the runtime cannot produce. Keep it
+            // non-differentiable (unit payload), the pre-#520 typing.
+            let has_any_field = def
+                .variants
+                .iter()
+                .any(|variant| !variant.fields.is_empty());
+            (all_float_fields && has_any_field).then(|| Type::Adt(name.clone(), args.clone()))
         }
         Type::Ref(inner) => grad_argument_type(inner, adt_reg),
         _ => None,
@@ -20029,6 +20040,79 @@ mod tests {
              (def {} f (fn {} (params {} p y) (lit {type: (t-prim {} f32)} 1.0)))
              (def {} g (grad {} (var {} f)))",
             CheckErrorKind::Other,
+        );
+    }
+
+    #[test]
+    fn grad_wrt_adt_in_multi_arg_call_is_rejected() {
+        // chelis#520 D2 negative parity: a `wrt`-restricted ADT target
+        // inside a multi-argument function is still a check-time error.
+        // The lowering rejects any ADT argument in a multi-argument grad
+        // call, so letting the wrt form pass the check would defer the
+        // failure to a runtime diagnostic and make the old "restrict
+        // with wrt" suggestion a dead end.
+        check_err(
+            "(deftype {} Box
+                (variant {} Box
+                    (field {} t (t-tensor {} (d-lit {} 2) (t-prim {} f32)))))
+             (defsig {} f (t-fn {}
+                (t-adt {} Box)
+                (t-tensor {} (d-lit {} 2) (t-prim {} f32))
+                (t-prim {} f32)))
+             (def {} f (fn {} (params {} p y) (lit {type: (t-prim {} f32)} 1.0)))
+             (def {} g (grad {} (var {} f) (lit {type: (t-prim {} int32)} 0)))",
+            CheckErrorKind::Other,
+        );
+    }
+
+    #[test]
+    fn grad_over_pure_enum_stays_unit() {
+        // chelis#520 D2: a pure enum (no fields in any variant) carries
+        // no continuous payload, so it stays non-differentiable and the
+        // default gradient payload is unit, the pre-#520 typing.
+        let exprs = chelis_deep::parser::parse_str(
+            "(deftype {} Mode
+                (variant {} ModeA)
+                (variant {} ModeB))
+             (defsig {} f (t-fn {} (t-adt {} Mode) (t-prim {} f32)))
+             (def {} f (fn {} (params {} m) (lit {type: (t-prim {} f32)} 1.0)))
+             (def {} g (grad {} (var {} f)))",
+        )
+        .unwrap();
+        let checked = check_ir_program(&exprs).expect("IR check");
+        let ty = checked.type_env().get("g").expect("g type");
+        let printed = chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
+            .trim()
+            .to_string();
+        assert_eq!(printed, "(t-fn {} (t-adt {} Mode) (t-unit {}))");
+    }
+
+    #[test]
+    fn grad_over_enum_plus_tensor_keeps_tensor_only_payload() {
+        // chelis#520 D2 regression guard: a nullary-enum parameter next
+        // to a tensor parameter must not trip the single-argument ADT
+        // rejection; the enum is non-differentiable (skipped), so the
+        // gradient payload is the tensor alone, the pre-#520 typing.
+        let exprs = chelis_deep::parser::parse_str(
+            "(deftype {} Mode
+                (variant {} ModeA)
+                (variant {} ModeB))
+             (defsig {} f (t-fn {}
+                (t-adt {} Mode)
+                (t-tensor {} (d-lit {} 2) (t-prim {} f32))
+                (t-prim {} f32)))
+             (def {} f (fn {} (params {} m x) (lit {type: (t-prim {} f32)} 1.0)))
+             (def {} g (grad {} (var {} f)))",
+        )
+        .unwrap();
+        let checked = check_ir_program(&exprs).expect("IR check");
+        let ty = checked.type_env().get("g").expect("g type");
+        let printed = chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
+            .trim()
+            .to_string();
+        assert_eq!(
+            printed,
+            "(t-fn {} (t-adt {} Mode) (t-tensor {} (d-lit {} 2) (t-prim {} f32)) (t-tensor {} (d-lit {} 2) (t-prim {} f32)))"
         );
     }
 
