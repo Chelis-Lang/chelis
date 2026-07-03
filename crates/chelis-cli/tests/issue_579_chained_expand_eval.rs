@@ -1,29 +1,43 @@
-//! chelis#579 (residue of chelis#397): chained `expand` rank-1 -> rank-N
-//! broadcasts (the batchnorm pattern) failed host eval at chelis 0.12.0 with
-//! the rank-monomorphization ICE `tensor rank mismatch: 1 dims vs 2 dims` /
-//! `1 dims vs 4 dims` even though the program was check-clean.
+//! chelis#579 (residue of chelis#397): school's BatchNorm broadcasts
+//! (batchnorm1d rank-1 -> rank-2, batchnorm2d `broadcast_to_achw` rank-1 ->
+//! rank-4) were reported check-clean and `reef build`-clean at chelis 0.12.0
+//! yet failing `chelis test`/eval with the rank-monomorphization ICE
+//! `tensor rank mismatch: 1 dims vs N dims`.
 //!
-//! The fix shipped after 0.12.0 (PR #596, the Form-3 §4.7.2 runtime
-//! expand-size resolution + fail-closed reject). This corpus pins BOTH sides
-//! of that resolution so the #579 failure mode cannot silently return:
+//! Empirical v0.12.0 baseline (established by building the v0.12.0 tag and
+//! running this corpus against it during review):
 //!
-//! - POSITIVE: the supported spelling of the batchnorm broadcasts, where each
-//!   runtime extent is sourced from an in-scope tensor via `shape(x, axis)`,
-//!   EVALUATES correctly at rank-1 -> rank-2 (batchnorm1d) and through the
-//!   full chained rank-1 -> rank-4 `broadcast_to_achw` (batchnorm2d),
-//!   including the two-broadcast affine composition, and the C backend agrees
-//!   with the evaluator value-for-value.
-//! - NEGATIVE: the sourceless spelling from the issue (a bare runtime
-//!   `int64` dim parameter with no tensor source) is rejected LOUDLY at
-//!   check and eval with the #469 sourceless-size diagnostic, and the reject
-//!   never regresses into the original `rank mismatch` ICE. Genuine misuse
-//!   (wrong-axis broadcast, out-of-bounds insert axis) also still fails with
-//!   targeted reasons.
+//! - School's REAL batchnorm extent spelling, a LET-BOUND
+//!   `cast(shape(x, axis), int64)` read passed to `expand`, was check-clean
+//!   AND eval-clean at v0.12.0 but REJECTED at `chelis build` as sourceless:
+//!   a §4.7.2 Form-3 check-accept/build-reject asymmetry. PR #596 closed it
+//!   by following let-bound `shape` reads to their source tensor. The
+//!   `issue_579_let_bound_*` tests below FAIL on a pre-#596 compiler and are
+//!   this file's #596 discriminator.
+//! - The bare-runtime-scalar sourceless spellings (school's pre-0.12-bump
+//!   `broadcast_to_achw(v, h_dim, w_dim, a_dim)` signature) were ALREADY
+//!   rejected at check at v0.12.0: the #494 source-tracking predicate
+//!   shipped IN 0.12.0, which is what forced school's §4.7.2 witness rewrite
+//!   at its 0.12.0 pin bump. They are pinned here so the reject stays loud,
+//!   cites #469, and never regresses into the reported rank-mismatch ICE.
+//! - The inline shape-sourced chain (`expand(g, 1, shape(x, cast(2,
+//!   int32)))`) already checked, evaluated, and built correctly at v0.12.0.
+//!   Its chained positive lane (eval + C parity) was previously untested and
+//!   is pinned here as the explicit working baseline.
+//!
+//! The issue's own symptom, `chelis test` dying with the rank-mismatch ICE
+//! inside the school repo at 0.12.0, has NOT been reproduced upstream: at
+//! the v0.12.0 tag, school's exact spellings pass check, eval, and a minimal
+//! `chelis test` reef in isolation. The school-context trigger remains
+//! unisolated, so school's `tests_blocked/nn/batchnorm.ch` probe at its next
+//! pin bump is the closing oracle for chelis#579 itself; this corpus pins
+//! the adjacent upstream lanes so the failure class cannot silently return.
 //!
 //! Sibling coverage: `rank_poly_tier3.rs` pins the check/build/eval reject of
-//! the rank-1 -> rank-4 chain and the single-expand `bias_broadcast`
-//! positives. This file adds the missing CHAINED positive lane (eval + C
-//! parity) plus the batchnorm1d-flavor reject pins.
+//! the sourceless rank-1 -> rank-4 chain and the single-expand
+//! `bias_broadcast` positives. This file adds the let-bound (school-real)
+//! spelling across check/eval/build/C-parity, the missing CHAINED positive
+//! lane (eval + C parity), and the batchnorm1d-flavor reject pins.
 
 use assert_cmd::Command;
 use serde_json::Value;
@@ -45,21 +59,67 @@ const BN1D_SOURCE: &str = "def bn1d_scale(x: &tensor[a, n, f32], g: &tensor[n, f
     gs = to_tensor([10.0, 20.0, 30.0])\n\
     out = bn1d_scale(xs, gs)\n";
 
+/// School's REAL batchnorm1d extent spelling (src/nn/batchnorm.ch):
+/// `a_dim = cast(shape(x, cast(0, int32)), int64)` LET-BOUND, then
+/// `expand(g, 0, a_dim)`. At the v0.12.0 tag this exact program was
+/// check-clean AND eval-clean but `chelis build` rejected the extent as
+/// sourceless (the §4.7.2 check-accept/build-reject asymmetry #596 closed
+/// by following let-bound `shape` reads to their source tensor). The
+/// let-bound tests below fail on a pre-#596 compiler.
+const BN1D_LET_BOUND_SOURCE: &str = "def bn1d_scale(x: &tensor[a, n, f32], g: &tensor[n, f32]) -> tensor[a, n, f32] = {\n\
+    \x20 a_dim = cast(shape(x, cast(0, int32)), int64)\n\
+    \x20 gb: tensor[a, n, f32] = expand(g, 0, a_dim)\n\
+    \x20 mul(x, gb)\n\
+    }\n\
+    xs = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
+    gs = to_tensor([10.0, 20.0, 30.0])\n\
+    out = bn1d_scale(xs, gs)\n";
+
+/// How the chained corpus spells its runtime extents.
+#[derive(Clone, Copy)]
+enum ExtentSpelling {
+    /// `expand(g, 1, shape(x, cast(2, int32)))`: the `bias_broadcast` form.
+    /// Already worked end-to-end at v0.12.0; pinned as the working baseline.
+    Inline,
+    /// School's batchnorm form: `h_dim = cast(shape(x, cast(2, int32)),
+    /// int64)` let-bound, then `expand(g, 1, h_dim)`. Check/eval-clean but
+    /// build-REJECTED as sourceless at v0.12.0; fixed by #596.
+    LetBound,
+}
+
 /// The supported spelling of school's `broadcast_to_achw` (batchnorm2d):
 /// three CHAINED Form-3 expands, every extent read from the in-scope source
-/// tensor `x` via `shape(x, axis)`. `out` is the raw rank-1 -> rank-4
-/// broadcast; `out_affine` is the batchnorm2d-forward affine composition
-/// (two broadcasts through the same helper, then mul + add). `x` carries
-/// sequential data so the affine values encode flat position: any axis
-/// permutation in evaluation changes them and cannot hide.
-fn chained_achw_source(shape: &[usize; 4]) -> String {
+/// tensor `x` via `shape(x, axis)` (inline or let-bound per `spelling`).
+/// `out` is the raw rank-1 -> rank-4 broadcast; `out_affine` is the
+/// batchnorm2d-forward affine composition (two broadcasts through the same
+/// helper, then mul + add). `x` carries sequential data so the affine values
+/// encode flat position: any axis permutation in evaluation changes them and
+/// cannot hide.
+fn chained_achw_source(shape: &[usize; 4], spelling: ExtentSpelling) -> String {
     let mut next = 1.0f64;
     let xs = nested_literal(shape, &mut next);
+    let (lets, h_size, w_size, a_size) = match spelling {
+        ExtentSpelling::Inline => (
+            "",
+            "shape(x, cast(2, int32))",
+            "shape(x, cast(3, int32))",
+            "shape(x, cast(0, int32))",
+        ),
+        ExtentSpelling::LetBound => (
+            "\x20 h_dim = cast(shape(x, cast(2, int32)), int64)\n\
+             \x20 w_dim = cast(shape(x, cast(3, int32)), int64)\n\
+             \x20 a_dim = cast(shape(x, cast(0, int32)), int64)\n",
+            "h_dim",
+            "w_dim",
+            "a_dim",
+        ),
+    };
     format!(
         "def broadcast_to_achw(g: &tensor[c, f32], x: &tensor[a, c, h, w, f32]) -> tensor[a, c, h, w, f32] = {{\n\
-        \x20 step1: tensor[c, h, f32] = expand(g, 1, shape(x, cast(2, int32)))\n\
-        \x20 step2: tensor[c, h, w, f32] = expand(step1, 2, shape(x, cast(3, int32)))\n\
-        \x20 step3: tensor[a, c, h, w, f32] = expand(step2, 0, shape(x, cast(0, int32)))\n\
+        {lets}\
+        \x20 step1: tensor[c, h, f32] = expand(g, 1, {h_size})\n\
+        \x20 step2: tensor[c, h, w, f32] = expand(step1, 2, {w_size})\n\
+        \x20 step3: tensor[a, c, h, w, f32] = expand(step2, 0, {a_size})\n\
         \x20 step3\n\
         }}\n\
         def bn2d_affine(x: &tensor[a, c, h, w, f32], g: &tensor[c, f32], b: &tensor[c, f32]) -> tensor[a, c, h, w, f32] = {{\n\
@@ -75,16 +135,20 @@ fn chained_achw_source(shape: &[usize; 4]) -> String {
     )
 }
 
-/// The EXACT sourceless spelling from the issue, batchnorm1d flavor: the
-/// expand size is a bare runtime `int64` parameter with no tensor source.
-/// At 0.12.0 this was check-clean and died at eval with
-/// `tensor rank mismatch: 1 dims vs 2 dims`.
+/// Bare-runtime-scalar sourceless spelling, batchnorm1d flavor: the expand
+/// size is a bare `int64` parameter with no tensor source. NOTE: this is the
+/// #469 sourceless family, NOT school's shipped spelling (that one is
+/// `BN1D_LET_BOUND_SOURCE`), and it was ALREADY check-rejected at v0.12.0 by
+/// the #494 source-tracking predicate. Pinned so the reject stays loud,
+/// cites #469, and never regresses into the issue's `rank mismatch` ICE.
 const SOURCELESS_1D_SOURCE: &str = "def bcast_1d_to_2d[a, n](g: tensor[n, f32], a_dim: int64) -> tensor[a, n, f32] = expand(g, 0, a_dim)\n\
     out = bcast_1d_to_2d(to_tensor([1.0, 2.0, 3.0]), cast(2, int64))\n";
 
-/// The sourceless chained rank-1 -> rank-4 spelling (school's original
-/// `broadcast_to_achw`). At 0.12.0: check-clean, eval died with
-/// `tensor rank mismatch: 1 dims vs 4 dims`.
+/// The sourceless chained rank-1 -> rank-4 spelling: school's PRE-0.12-bump
+/// `broadcast_to_achw` signature (bare `int64` dim params), retired in
+/// school's §4.7.2 witness rewrite when the 0.12.0 pin bump brought in the
+/// #494 check reject. Already check-rejected at v0.12.0; pinned for the same
+/// loud-reject / no-ICE invariant through the eval lane.
 const SOURCELESS_ACHW_SOURCE: &str = "def broadcast_to_achw[c, h, w, a](v: &tensor[c, f32], h_dim: int64, w_dim: int64, a_dim: int64) -> tensor[a, c, h, w, f32] = {\n\
     \x20 step1: tensor[c, h, f32] = expand(v, 1, h_dim)\n\
     \x20 step2: tensor[c, h, w, f32] = expand(step1, 2, w_dim)\n\
@@ -341,6 +405,22 @@ fn channel_of(i: usize, shape: &[usize; 4]) -> usize {
 
 // ── Positives: the #579 patterns in the supported shape-sourced form ─────
 
+/// Assert the bn1d corpus `out` tensor: xs `[[1,2,3],[4,5,6]]` scaled
+/// per-column by g `[10,20,30]`.
+fn assert_bn1d_out(tensors: &[(String, Vec<usize>, Vec<f64>)], label: &str) {
+    let out = find_tensor(tensors, "out", label);
+    assert_eq!(out.1, vec![2, 3], "{label}: bn1d broadcast shape");
+    let expected = [10.0, 40.0, 90.0, 40.0, 100.0, 180.0];
+    assert_eq!(out.2.len(), expected.len(), "{label}: bn1d element count");
+    for (i, e) in expected.iter().enumerate() {
+        assert!(
+            (out.2[i] - e).abs() < 1e-6,
+            "{label}: bn1d out[{i}]: {} != {e}",
+            out.2[i]
+        );
+    }
+}
+
 /// batchnorm1d flavor: a single shape-sourced rank-1 -> rank-2 expand plus
 /// `mul` checks clean, evaluates, and produces the exact per-column scaling.
 #[test]
@@ -351,17 +431,36 @@ fn issue_579_bn1d_single_shape_sourced_expand_evals() {
     );
     let dir = tempdir().expect("tempdir");
     let eval = eval_stdout(dir.path(), BN1D_SOURCE, "issue_579_bn1d");
-    let tensors = parse_printed_tensors(&eval);
-    let out = find_tensor(&tensors, "out", "bn1d eval");
-    assert_eq!(out.1, vec![2, 3], "bn1d broadcast shape");
-    let expected = [10.0, 40.0, 90.0, 40.0, 100.0, 180.0];
-    for (i, e) in expected.iter().enumerate() {
-        assert!(
-            (out.2[i] - e).abs() < 1e-6,
-            "bn1d out[{i}]: eval {} != {e}",
-            out.2[i]
-        );
-    }
+    assert_bn1d_out(&parse_printed_tensors(&eval), "bn1d eval");
+}
+
+/// School's REAL bn1d spelling (let-bound `cast(shape(x, 0), int64)` extent)
+/// through EVERY lane: checks clean, evaluates to the exact values, C build
+/// succeeds, the compiled binary produces the same values, and eval agrees
+/// with the backend. At the v0.12.0 tag this exact program was check-clean
+/// and eval-clean but `chelis build` REJECTED the extent as sourceless; #596
+/// taught lowering to follow let-bound `shape` reads to their source. This
+/// test FAILS on a pre-#596 compiler (verified against the v0.12.0 tag).
+#[test]
+fn issue_579_let_bound_shape_extent_bn1d_builds_and_evals() {
+    assert_clean(
+        &check_json(BN1D_LET_BOUND_SOURCE),
+        "let-bound bn1d checks clean",
+    );
+    let dir = tempdir().expect("tempdir");
+    let eval = eval_stdout(
+        dir.path(),
+        BN1D_LET_BOUND_SOURCE,
+        "issue_579_bn1d_let_bound",
+    );
+    assert_bn1d_out(&parse_printed_tensors(&eval), "let-bound bn1d eval");
+    let backend = build_compile_run(BN1D_LET_BOUND_SOURCE, "issue_579_bn1d_let_bound_c");
+    assert_bn1d_out(&parse_printed_tensors(&backend), "let-bound bn1d backend");
+    assert_eval_agrees_with_backend(
+        BN1D_LET_BOUND_SOURCE,
+        "issue_579_bn1d_let_bound_c",
+        &backend,
+    );
 }
 
 /// Assert the raw broadcast (`out`) and the affine composition
@@ -404,20 +503,21 @@ fn assert_achw_values(
     }
 }
 
-/// The #579 headline: the chained rank-1 -> rank-4 `broadcast_to_achw` in
-/// its supported shape-sourced spelling checks clean and EVALUATES, with the
-/// exact per-channel broadcast values, and the two-broadcast batchnorm2d
-/// affine composition on top of it evaluates too. At 0.12.0 the chained
-/// pattern died in eval lowering with `tensor rank mismatch: 1 dims vs 4
-/// dims`. Small corpus: complete value coverage. Big corpus: distinct dims
-/// pin the shape against axis/source mixups.
+/// The chained rank-1 -> rank-4 `broadcast_to_achw` in the inline
+/// shape-sourced spelling checks clean and EVALUATES, with the exact
+/// per-channel broadcast values, and the two-broadcast batchnorm2d affine
+/// composition on top of it evaluates too. This spelling already worked at
+/// v0.12.0; it is the working baseline the #579 failure class is pinned
+/// against (the issue reported the chain dying in eval at 0.12.0 in school's
+/// module context). Small corpus: complete value coverage. Big corpus:
+/// distinct dims pin the shape against axis/source mixups.
 #[test]
 fn issue_579_chained_rank4_shape_sourced_expand_evals() {
     for (shape, require_full, label) in [
         (&SMALL_SHAPE, true, "small achw eval"),
         (&BIG_SHAPE, false, "big achw eval"),
     ] {
-        let source = chained_achw_source(shape);
+        let source = chained_achw_source(shape, ExtentSpelling::Inline);
         assert_clean(
             &check_json(&source),
             "chained rank-1 -> rank-4 shape-sourced expand checks clean",
@@ -429,26 +529,62 @@ fn issue_579_chained_rank4_shape_sourced_expand_evals() {
     }
 }
 
+/// The chained corpus in school's LET-BOUND extent spelling (the batchnorm2d
+/// train-mode form) checks clean and evaluates with the exact per-channel
+/// values on both corpora. Check and eval were already clean at v0.12.0 for
+/// this spelling; the build-lane discriminator is the companion
+/// `issue_579_let_bound_shape_extent_chained_c_backend_agrees`.
+#[test]
+fn issue_579_let_bound_shape_extent_chained_evals() {
+    for (shape, require_full, label) in [
+        (&SMALL_SHAPE, true, "small let-bound achw eval"),
+        (&BIG_SHAPE, false, "big let-bound achw eval"),
+    ] {
+        let source = chained_achw_source(shape, ExtentSpelling::LetBound);
+        assert_clean(
+            &check_json(&source),
+            "chained let-bound shape-extent expand checks clean",
+        );
+        let dir = tempdir().expect("tempdir");
+        let eval = eval_stdout(dir.path(), &source, "issue_579_achw_let_bound");
+        let tensors = parse_printed_tensors(&eval);
+        assert_achw_values(&tensors, shape, require_full, label);
+    }
+}
+
 /// eval-vs-C-backend agreement on the chained corpus: `chelis build --target
 /// c` must succeed, the compiled binary must produce the analytic values, and
 /// every printed tensor must match the evaluator shape-for-shape and
 /// value-for-value (on the printed prefix; the printers truncate long data).
 #[test]
 fn issue_579_chained_rank4_expand_c_backend_agrees() {
-    let source = chained_achw_source(&BIG_SHAPE);
+    let source = chained_achw_source(&BIG_SHAPE, ExtentSpelling::Inline);
     let backend = build_compile_run(&source, "issue_579_achw_c");
     let tensors = parse_printed_tensors(&backend);
     assert_achw_values(&tensors, &BIG_SHAPE, false, "big achw backend");
     assert_eval_agrees_with_backend(&source, "issue_579_achw_c", &backend);
 }
 
+/// The #596 discriminator, chained flavor: the LET-BOUND spelling must BUILD
+/// on the C backend (at v0.12.0 it was check/eval-clean but build-rejected
+/// as sourceless), the compiled binary must produce the analytic values, and
+/// eval must agree with the backend value-for-value.
+#[test]
+fn issue_579_let_bound_shape_extent_chained_c_backend_agrees() {
+    let source = chained_achw_source(&BIG_SHAPE, ExtentSpelling::LetBound);
+    let backend = build_compile_run(&source, "issue_579_achw_let_bound_c");
+    let tensors = parse_printed_tensors(&backend);
+    assert_achw_values(&tensors, &BIG_SHAPE, false, "big let-bound achw backend");
+    assert_eval_agrees_with_backend(&source, "issue_579_achw_let_bound_c", &backend);
+}
+
 // ── Negatives: the sourceless issue spelling and genuine misuse ──────────
 
-/// The batchnorm1d-flavor sourceless spelling from the issue must be rejected
+/// The batchnorm1d-flavor bare-scalar sourceless spelling must be rejected
 /// at CHECK with the #469 sourceless-size diagnostic, and no error may carry
-/// the original `rank mismatch` ICE text. (The rank-1 -> rank-4 chain's check
-/// reject is pinned in rank_poly_tier3.rs; this pins the 1d flavor whose
-/// 0.12.0 signature was `1 dims vs 2 dims`.)
+/// the `rank mismatch` ICE text the issue reported. (The rank-1 -> rank-4
+/// chain's check reject is pinned in rank_poly_tier3.rs; this pins the 1d
+/// flavor.)
 #[test]
 fn issue_579_sourceless_bn1d_expand_rejected_at_check_without_rank_ice() {
     let json = check_json(SOURCELESS_1D_SOURCE);
@@ -469,10 +605,11 @@ fn issue_579_sourceless_bn1d_expand_rejected_at_check_without_rank_ice() {
     );
 }
 
-/// The eval lane rejects both sourceless spellings (1d and the chained
-/// rank-1 -> rank-4) with the same #469 diagnostic and NEVER the 0.12.0
-/// `tensor rank mismatch: N dims vs M dims` ICE or an internal compiler
-/// error. This is the exact #579 symptom pinned extinct.
+/// The eval lane rejects both bare-scalar sourceless spellings (1d and the
+/// chained rank-1 -> rank-4) with the same #469 diagnostic and NEVER the
+/// `tensor rank mismatch: N dims vs M dims` ICE the issue reported, nor an
+/// internal compiler error: the reject must stay a loud, targeted
+/// diagnostic so the #579 failure class cannot return silently.
 #[test]
 fn issue_579_sourceless_expand_rejects_in_eval_without_rank_ice() {
     for (source, name) in [
