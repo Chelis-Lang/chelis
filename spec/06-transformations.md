@@ -374,9 +374,8 @@ would be dropped, leaving the per-slot boundaries ambiguous) is rejected
 rather than packed into a possibly-misaligned structure; and the compiled lane
 rejects `out = grad(f)` exports over ADT-typed parameters (the C ABI has no
 ADT value representation). Runtime-scrutinee `match` differentiation stays
-rejected and is tracked separately (see §2.10 and the roadmap D1 row); it
-awaits a `RiscOp::Select` blend primitive per
-`spec/design/differentiable_language.md` Phase 1.
+rejected and is tracked separately (chelis#618); it awaits a `RiscOp::Select`
+blend primitive per `spec/design/differentiable_language.md` Phase 1.
 
 The acceptance oracle for both slices is
 `crates/chelis-cli/tests/issue_520_adt_match_grad.rs` (analytic +

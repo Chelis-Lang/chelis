@@ -50,7 +50,7 @@ Two chelis#520 slices extend the differentiated surface beyond flat tensors
   other than the constructed one), pure enums with no fields, and compiled-lane
   ADT-param gradient exports are rejected with named diagnostics. A
   runtime-scrutinee `match` in a differentiated body also stays rejected,
-  pending the `RiscOp::Select` blend primitive.
+  pending the `RiscOp::Select` blend primitive (tracked in chelis#618).
 
 ## vmap
 
