@@ -1069,8 +1069,12 @@ fn lower_subexpr_program_inner(
                 .get(id)
                 .map(|node| node.output_type.clone())
                 .unwrap_or_else(LowerCtx::default_type);
-            ctx.dag
-                .add_node(RiscOp::Copy, vec![id], output_type, ctx.current_span_id.clone())
+            ctx.dag.add_node(
+                RiscOp::Copy,
+                vec![id],
+                output_type,
+                ctx.current_span_id.clone(),
+            )
         };
         ctx.dag.add_root(root_id);
     }

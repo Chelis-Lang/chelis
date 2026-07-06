@@ -646,7 +646,9 @@ fn register_top_level_defs(
             let selected = match selected_roots {
                 None => true,
                 Some(filter) => filter.iter().any(|s| {
-                    s == name || s.strip_prefix(name).is_some_and(|rest| rest.starts_with('.'))
+                    s == name
+                        || s.strip_prefix(name)
+                            .is_some_and(|rest| rest.starts_with('.'))
                 }),
             };
             if selected {
