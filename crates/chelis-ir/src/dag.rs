@@ -714,6 +714,32 @@ pub enum RiscOp {
         strides: Vec<usize>,
     },
 
+    // --- Shape query ---
+    /// Runtime extent of the input tensor along `axis`, produced as a
+    /// rank-0 integer scalar (the precision is carried on the node's
+    /// `output_type`; the Surf `shape(tensor, axis)` builtin types it as
+    /// `int32`, while the hydronnx ONNX translator constructs it as
+    /// `int64` per chelis#558).
+    ///
+    /// This is the DAG-level realization of a `shape(tensor, axis)` read
+    /// used as a *value*. It is distinct from a shape read consumed as an
+    /// `expand` / `reshape` extent argument, which the lowering folds into
+    /// a `DimExpr` on the movement node rather than into a value node.
+    /// Before chelis#513 a scalar shape read had no DAG node and fell
+    /// through to a bogus `Load { name: "shape" }` placeholder.
+    ///
+    /// The single input is the tensor whose extent is read; only the
+    /// input's shape metadata is observed, never its element values, so
+    /// the reverse-mode adjoint contributes a zero cotangent to the input
+    /// (differentiable in the trivial constant sense per chelis#558). The
+    /// C backend emits `t{input}->shape[axis]`; the Metal and HIP lanes
+    /// reject it loudly (`reject_unsupported_{metal,hip}_ops`) because a
+    /// runtime-symbolic movement/shape read is out of their admitted
+    /// scope.
+    Shape {
+        axis: usize,
+    },
+
     // --- Memory ---
     Const {
         value: f64,
@@ -1080,6 +1106,13 @@ impl RiscOp {
             // before backend emission and is not part of the numeric
             // forward-bound surface.
             RiscOp::OneHot { .. } => false,
+
+            // `Shape` reads a runtime axis extent as a discrete integer
+            // scalar derived from tensor metadata, not a bound over the
+            // input's real-valued data (its output is constant w.r.t. the
+            // element values). Like the arg-reductions it is outside the
+            // real-valued forward-bound story (chelis#513 / chelis#558).
+            RiscOp::Shape { .. } => false,
 
             // Sparse gather/scatter index data movement; no real-valued
             // transformer is pinned, and `Scatter` / `ScatterElements`
@@ -2495,7 +2528,11 @@ mod tests {
                 bounds: vec![(0, 1)],
             },
             RiscOp::Stride { strides: vec![1] },
+            RiscOp::Shape { axis: 0 },
             RiscOp::Const { value: 1.0 },
+            RiscOp::ConstTensor {
+                data: vec![1.0, 2.0],
+            },
             RiscOp::Load {
                 name: LoadStoreName::must("x"),
             },
@@ -2532,11 +2569,11 @@ mod tests {
     #[test]
     fn every_risc_op_is_classified_for_verifier_subset() {
         let all = one_of_every_risc_op();
-        // 48-variant closed vocabulary (spec WI-2 / dag.rs RiscOp).
+        // 50-variant closed vocabulary (spec WI-2 / dag.rs RiscOp).
         assert_eq!(
             all.len(),
-            48,
-            "one_of_every_risc_op must list all 48 RiscOp variants"
+            50,
+            "one_of_every_risc_op must list all 50 RiscOp variants"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -2546,17 +2583,18 @@ mod tests {
 
         // Pinned partition per beacon_plan.md §3.1: the elementwise math
         // (5 binary/cmp + 13 unary, including `round`), 5 reductions, 6
-        // movement, 3 memory/blas value nodes, and Cast are targetable
-        // (33); stochastic (2), arg-reductions (2), one_hot (1), sparse
-        // gather/scatter (4, including element-wise `ScatterElements`),
-        // linearity/lifecycle markers + store (4), reduce-window-grad
-        // (1), and fused-elem (1) are excluded (15).
+        // movement, 4 memory/blas value nodes (Const, ConstTensor, Load,
+        // BlasMatmul), and Cast are targetable (34); stochastic (2),
+        // arg-reductions (2), one_hot (1), the `Shape` metadata read (1),
+        // sparse gather/scatter (4, including element-wise
+        // `ScatterElements`), linearity/lifecycle markers + store (4),
+        // reduce-window-grad (1), and fused-elem (1) are excluded (16).
         assert_eq!(
-            targetable, 33,
+            targetable, 34,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 15,
+            excluded, 16,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 

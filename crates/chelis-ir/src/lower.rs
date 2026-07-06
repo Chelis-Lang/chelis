@@ -7842,6 +7842,48 @@ impl LowerCtx {
                 )
             }
 
+            // chelis#513 / chelis#558: a `shape(operand, axis)` read used
+            // as a scalar VALUE (not folded into an `expand`/`reshape`
+            // extent `DimExpr`) lowers to a real `RiscOp::Shape` node that
+            // reads the operand's runtime extent along a constant `axis`
+            // as a rank-0 integer scalar. Before this, a scalar shape read
+            // fell through to the fallback below and fabricated a bogus
+            // `Load { name: "shape" }` placeholder with no inputs and a
+            // default scalar-f32 type, which produced garbage in the C /
+            // grad DAG lanes. The axis must be a compile-time literal (the
+            // idiomatic `cast(N, int32)` form is accepted via
+            // `extract_int_for_dim`); a genuinely runtime axis is not
+            // representable and falls through to the loud fallback.
+            "shape"
+                if args.len() == 2
+                    && extract_int_for_dim(&args[1])
+                        .and_then(|a| usize::try_from(a).ok())
+                        .is_some() =>
+            {
+                let axis = extract_int_for_dim(&args[1])
+                    .and_then(|a| usize::try_from(a).ok())
+                    .expect("axis literal guarded by the arm predicate");
+                let x = self.lower_expr_node(&args[0], "shape input");
+                // The checker types `shape(...)` as an `int32` scalar. Pin
+                // a rank-0 integer output regardless of the incoming `ty`
+                // shape so the value node is always a well-formed scalar
+                // extent (verified by `chelis_ir::verify`).
+                let precision = if ty.precision.is_integer() {
+                    ty.precision
+                } else {
+                    Prim::Int32
+                };
+                self.dag.add_node(
+                    RiscOp::Shape { axis },
+                    vec![x],
+                    TensorType {
+                        dims: Vec::new(),
+                        precision,
+                    },
+                    self.current_span_id.clone(),
+                )
+            }
+
             // Fallback: unknown function.
             _ => {
                 for arg in args {

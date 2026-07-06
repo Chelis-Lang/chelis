@@ -313,6 +313,7 @@ impl CEmitter {
         match &node.op {
             RiscOp::Const { value } => self.emit_const(id, *value, &node.output_type),
             RiscOp::ConstTensor { data } => self.emit_const_tensor(id, data, &node.output_type),
+            RiscOp::Shape { axis } => self.emit_shape(id, *axis, &node.inputs, &node.output_type),
             RiscOp::Load { .. } => unreachable!("handled in emit_dag"),
             RiscOp::Add => self.emit_binary(id, "+", &node.inputs, &node.output_type),
             RiscOp::Mul => self.emit_binary(id, "*", &node.inputs, &node.output_type),
@@ -1490,6 +1491,45 @@ impl CEmitter {
             }
             other => panic!(
                 "C backend emit_const has no path for `{}` (spec/04-type-system.md §1.1)",
+                other.name()
+            ),
+        }
+    }
+
+    /// Emit a `shape(input, axis)` read (chelis#513/#558): a rank-0
+    /// integer scalar holding the input tensor's runtime extent along
+    /// `axis`, read from `t{input}->shape[axis]` (the runtime `int`
+    /// field). The extent is stored into the scalar buffer using the
+    /// node's integer precision. This is the C realization of the runtime
+    /// dim read; the emitted expression reads the shape at execution time,
+    /// so a symbolic input axis is resolved from the actual input tensor
+    /// rather than baked at codegen time.
+    fn emit_shape(&mut self, id: usize, axis: usize, inputs: &[NodeId], ty: &TensorType) {
+        let a = inputs[0].0;
+        self.emit_slot_wrapper(id, ty);
+        let extent = format!("t{a}->shape[{axis}]");
+        match ty.precision {
+            Prim::Int64 => {
+                self.line(&format!("chelis_fill_i64(t{id}, (int64_t)({extent}));"));
+            }
+            Prim::Int32 => {
+                self.line(&format!(
+                    "{{ int32_t *__p = (int32_t*)t{id}->data; __p[0] = (int32_t)({extent}); }}"
+                ));
+            }
+            Prim::Int16 => {
+                self.line(&format!(
+                    "{{ int16_t *__p = (int16_t*)t{id}->data; __p[0] = (int16_t)({extent}); }}"
+                ));
+            }
+            Prim::Int8 => {
+                self.line(&format!(
+                    "{{ int8_t *__p = (int8_t*)t{id}->data; __p[0] = (int8_t)({extent}); }}"
+                ));
+            }
+            other => panic!(
+                "C backend emit_shape has no path for `{}`; shape reads produce an \
+                 integer scalar (chelis#513/#558)",
                 other.name()
             ),
         }

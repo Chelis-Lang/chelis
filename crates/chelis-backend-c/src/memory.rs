@@ -114,6 +114,10 @@ fn classify_nodes(dag: &Dag, skipped: &HashSet<NodeId>) -> Vec<NodeMemoryKind> {
                 },
                 RiscOp::Const { .. }
                 | RiscOp::ConstTensor { .. }
+                // `Shape` reads only its input's `->shape[axis]` metadata
+                // and materializes a fresh rank-0 scalar slot; it does not
+                // alias the input buffer (chelis#513/#558).
+                | RiscOp::Shape { .. }
                 | RiscOp::Add
                 | RiscOp::Mul
                 | RiscOp::Div

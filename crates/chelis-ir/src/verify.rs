@@ -313,6 +313,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             | RiscOp::Pad { .. }
             | RiscOp::Shrink { .. }
             | RiscOp::Stride { .. }
+            | RiscOp::Shape { .. }
             | RiscOp::Cast { .. } => {
                 if arity != 1 {
                     errors.push(format!(
@@ -365,6 +366,38 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                 }
             }
             _ => {}
+        }
+
+        // Shape query (chelis#513/#558): the read axis must be in range
+        // of the input rank, and the output must be a rank-0 integer
+        // scalar (the runtime extent). A non-scalar or non-integer output
+        // would misdeclare the value node's type to the backend.
+        if let RiscOp::Shape { axis } = &node.op {
+            if arity == 1
+                && let Some(input) = dag.get(node.inputs[0])
+            {
+                let ndims = input.output_type.dims.len();
+                if *axis >= ndims {
+                    errors.push(format!(
+                        "shape read at node {} has axis {} but input has {} dimensions",
+                        node.id.0, axis, ndims
+                    ));
+                }
+            }
+            if !node.output_type.dims.is_empty() {
+                errors.push(format!(
+                    "shape read at node {} must produce a rank-0 scalar, got rank {}",
+                    node.id.0,
+                    node.output_type.dims.len()
+                ));
+            }
+            if !node.output_type.precision.is_integer() {
+                errors.push(format!(
+                    "shape read at node {} must produce an integer scalar, got precision `{}`",
+                    node.id.0,
+                    node.output_type.precision.name()
+                ));
+            }
         }
 
         // C3a (WS-A0): per spec/04-type-system.md §5.7.1 the result
