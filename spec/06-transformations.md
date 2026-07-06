@@ -359,9 +359,13 @@ result is the per-target tuple, whose ADT slot is the field-wise gradient
 struct and whose tensor slots are bare tensor gradients, exactly as the
 multi-parameter tensor contract in §2.1; when `wrt` narrows to a single
 target the result is that bare gradient (an ADT struct or a tensor) with no
-enclosing tuple. Two pytree leaves whose gradient is the same DAG node (e.g.
-`sum(add(t, y))` has adjoint `1` for both) each keep their own root, so no
-tuple slot collapses.
+enclosing tuple. A differentiated tensor argument that does not influence the
+output receives an explicit zero tensor of its shape — mirroring the
+adjoint-free ADT field above — so a multi-target tuple always keeps full
+arity and every gradient stays in its own `out.0..out.N` slot; dropping the
+slot would shift and mislabel every later gradient. Two pytree leaves whose
+gradient is the same DAG node (e.g. `sum(add(t, y))` has adjoint `1` for both)
+each keep their own root, so no tuple slot collapses.
 
 Limits, each a loud diagnostic naming the construct: mixed types (a
 non-float-tensor field in ANY variant of the argument's type) are rejected
@@ -369,11 +373,9 @@ naming the field, even when the constructed variant itself is float-clean,
 because the checker types such a gradient as `unit` and the runtime must not
 produce a value the static type does not admit; pure enums (no fields in any
 variant) are rejected because there is no continuous payload to differentiate;
-a multi-target grad where a plain tensor argument has no adjoint (its gradient
-would be dropped, leaving the per-slot boundaries ambiguous) is rejected
-rather than packed into a possibly-misaligned structure; and the compiled lane
-rejects `out = grad(f)` exports over ADT-typed parameters (the C ABI has no
-ADT value representation). Runtime-scrutinee `match` differentiation stays
+and the compiled lane rejects `out = grad(f)` exports over ADT-typed
+parameters (the C ABI has no ADT value representation). Runtime-scrutinee
+`match` differentiation stays
 rejected and is tracked separately (chelis#618); it awaits a `RiscOp::Select`
 blend primitive per `spec/design/differentiable_language.md` Phase 1.
 

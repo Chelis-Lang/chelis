@@ -23,7 +23,11 @@
 //!
 //! Also covers chelis#614: a multi-target grad binding `out = grad(f)(a,
 //! b)` (tuple payload) displays every slot in the eval lane instead of
-//! silently dropping them behind a "defs-only" breadcrumb.
+//! silently dropping them behind a "defs-only" breadcrumb. An unused
+//! (zero-adjoint) argument in a multi-target result is displayed as its
+//! shaped zero, keeping every slot in its correct `out.0..out.N` position
+//! rather than dropping it -- a dropped slot would shift and mislabel every
+//! later gradient (pure-tensor and ADT-mixed cases pinned below).
 //!
 //! Negative parity (each pinned with its diagnostic):
 //!   - runtime (non-constructor) scrutinee in a differentiated `match`
@@ -34,9 +38,14 @@
 //!   - mixed SIBLING variant (float-clean constructed variant of a type
 //!     whose other variant carries a non-tensor field)
 //!   - pure enum (no fields in any variant) as a grad argument
-//!   - multi-argument grad whose plain tensor argument has no adjoint
-//!     (dropped root leaves the per-slot boundaries ambiguous)
 //!   - compiled-lane `out = grad(f)` export over an ADT-typed param
+//!
+//! Zero-fill parity (unused multi-target argument -> shaped zero slot, the
+//! negative-of-the-bug pinned by output assertions rather than a
+//! diagnostic, each red on the pre-zero-fill behavior):
+//!   - ADT arg alongside an unused tensor arg (zero tensor slot)
+//!   - pure-tensor grad with an unused MIDDLE arg (zero slot, no mislabel)
+//!   - pure-tensor grad with an unused LEADING arg (zero slot, no vanish)
 
 use std::fs;
 use std::path::Path;
@@ -1238,14 +1247,15 @@ fn issue_520_multi_arg_three_way_shared_adjoint_keeps_all_slots() {
     }
 }
 
-/// Soundness pin for the misalignment guard: a multi-argument grad whose
-/// plain tensor argument is UNUSED (no adjoint) leaves the per-slot
-/// boundaries ambiguous (the ADT still owns its field roots, but the
-/// dropped tensor slot has no root). Rather than pack a possibly-mislabeled
-/// gradient, the eval lane refuses loudly. Pins the guard so a future
-/// change cannot silently pad or transpose the tuple into a wrong answer.
+/// Soundness pin: a multi-argument grad whose plain tensor argument is
+/// UNUSED (no adjoint) yields a shaped ZERO for that slot, not a dropped
+/// root. The ADT slot keeps its field roots and the unused tensor slot is
+/// filled with its own [0,0] gradient, so the per-slot boundaries stay
+/// aligned (the pytree contract: the gradient of an unused input is zero).
+/// The IR lowering zero-fills the adjoint-free tensor slot the same way it
+/// already zero-fills adjoint-free ADT fields (chelis#520 D2 / chelis#614).
 #[test]
-fn issue_520_multi_arg_unused_tensor_adjoint_rejected_loudly() {
+fn issue_520_multi_arg_adt_unused_tensor_zero_slot() {
     let source = format!(
         "module Repro.DropTensor\n\n\
          type Box =\n\
@@ -1258,10 +1268,130 @@ fn issue_520_multi_arg_unused_tensor_adjoint_rejected_loudly() {
          out = grad(fwd)(Box {{ t: to_tensor([{a}]) }}, to_tensor([{a}]))\n",
         a = fmt_f32_list(&[1.0, 2.0]),
     );
-    let (_stdout, stderr, ok) = eval_program(&source);
-    assert!(!ok, "unused-tensor-adjoint multi-arg grad must be rejected");
+    let (stdout, stderr, ok) = eval_program(&source);
     assert!(
-        stderr.contains("refusing to pack a misaligned gradient"),
-        "must fail with the loud misalignment guard: {stderr}"
+        ok,
+        "unused-tensor-adjoint multi-arg grad must succeed with a zero slot: {stderr}"
+    );
+    // ADT slot (out.0): d/d t of sum(t) = [1,1], packed in the Box shape.
+    assert!(
+        stdout.contains("Box(tensor(shape=[2], data=[1.0, 1.0]))"),
+        "ADT slot must be Box([1,1]): {stdout}"
+    );
+    // Tensor slot (out.1): y is unused, so its gradient is a shaped zero, not
+    // a dropped/mislabeled slot.
+    let tensor_line = stdout
+        .lines()
+        .find(|l| l.contains("out.1"))
+        .unwrap_or_else(|| panic!("no out.1 slot: {stdout}"));
+    assert!(
+        tensor_line.contains("data=[0.0, 0.0]"),
+        "unused tensor slot must be a [0,0] zero gradient: {stdout}"
+    );
+}
+
+/// Pure-tensor multi-argument grad with an UNUSED MIDDLE argument. The
+/// analytic Jacobian is `d/dx = 2x`, `d/dy = 0` (y is not read), `d/dz = 2z`.
+/// Before the tensor-lane zero-fill, the adjoint-free `y` slot was dropped
+/// from the result tuple, so the eval-root display (chelis#614, fixed
+/// `out.0..out.N` names) shifted z's gradient into the `out.1` (y) slot and
+/// dropped `out.2` entirely -- a silently wrong Jacobian. This pins that the
+/// unused slot is exactly zero and does NOT carry the neighbor's gradient.
+#[test]
+fn issue_520_multi_arg_pure_tensor_unused_middle_zero_slot() {
+    let source = format!(
+        "module Repro.PureMid\n\n\
+         def fwd(x: tensor[2, f32], y: tensor[2, f32], z: tensor[2, f32]) -> f32 = {{\n\
+         \x20 sum(add(mul(&x, &x), mul(&z, &z)), cast(0, int32)) |> tensor_to_scalar\n\
+         }}\n\n\
+         out = grad(fwd)(to_tensor([{x}]), to_tensor([{y}]), to_tensor([{z}]))\n",
+        x = fmt_f32_list(&[1.0, 2.0]),
+        y = fmt_f32_list(&[3.0, 4.0]),
+        z = fmt_f32_list(&[5.0, 6.0]),
+    );
+    let (stdout, stderr, ok) = eval_program(&source);
+    assert!(
+        ok,
+        "pure-tensor multi-arg grad with an unused middle arg failed: {stderr}"
+    );
+    // out.0 = d/dx = 2x = [2,4].
+    let l0 = stdout
+        .lines()
+        .find(|l| l.contains("out.0"))
+        .unwrap_or_else(|| panic!("no out.0 slot: {stdout}"));
+    assert!(
+        l0.contains("data=[2.0, 4.0]"),
+        "out.0 must be 2x = [2,4]: {stdout}"
+    );
+    // out.1 = d/dy: y is unused, so this slot must be a shaped zero. The bug
+    // this pins would instead shift z's gradient ([10,12]) into the y slot.
+    let l1 = stdout
+        .lines()
+        .find(|l| l.contains("out.1"))
+        .unwrap_or_else(|| panic!("no out.1 slot: {stdout}"));
+    assert!(
+        l1.contains("data=[0.0, 0.0]"),
+        "out.1 (unused y) must be a [0,0] zero gradient: {stdout}"
+    );
+    assert!(
+        !l1.contains("data=[10.0, 12.0]"),
+        "out.1 must NOT carry z's gradient (the mislabel this fix removes): {stdout}"
+    );
+    // out.2 = d/dz = 2z = [10,12], in its own slot (not dropped).
+    let l2 = stdout
+        .lines()
+        .find(|l| l.contains("out.2"))
+        .unwrap_or_else(|| panic!("no out.2 slot (z gradient was dropped): {stdout}"));
+    assert!(
+        l2.contains("data=[10.0, 12.0]"),
+        "out.2 must be 2z = [10,12]: {stdout}"
+    );
+}
+
+/// Pure-tensor multi-argument grad with an UNUSED LEADING argument. The
+/// analytic Jacobian is `d/dx = 0` (x is not read), `d/dy = 2y`. Before the
+/// zero-fill, dropping the leading `x` root left only one surviving root,
+/// which `pack_dag_roots` collapses to a bare tensor; every `out.N` lookup
+/// then missed and the whole gradient vanished behind the misleading
+/// "input contains only def declarations; nothing to evaluate" breadcrumb.
+/// This pins that the gradient survives with `out.0` a shaped zero.
+#[test]
+fn issue_520_multi_arg_pure_tensor_unused_leading_no_vanish() {
+    let source = format!(
+        "module Repro.PureLead\n\n\
+         def fwd(x: tensor[2, f32], y: tensor[2, f32]) -> f32 = {{\n\
+         \x20 sum(mul(&y, &y), cast(0, int32)) |> tensor_to_scalar\n\
+         }}\n\n\
+         out = grad(fwd)(to_tensor([{x}]), to_tensor([{y}]))\n",
+        x = fmt_f32_list(&[1.0, 2.0]),
+        y = fmt_f32_list(&[3.0, 4.0]),
+    );
+    let (stdout, stderr, ok) = eval_program(&source);
+    assert!(
+        ok,
+        "pure-tensor multi-arg grad with an unused leading arg failed: {stderr}"
+    );
+    assert!(
+        !stderr.contains("nothing to evaluate"),
+        "gradient must not vanish behind the defs-only breadcrumb: {stderr}"
+    );
+    // out.0 = d/dx: x is unused -> [0,0] (not dropped, which previously
+    // collapsed the whole tuple to a single bare tensor).
+    let l0 = stdout
+        .lines()
+        .find(|l| l.contains("out.0"))
+        .unwrap_or_else(|| panic!("no out.0 slot: {stdout}"));
+    assert!(
+        l0.contains("data=[0.0, 0.0]"),
+        "out.0 (unused x) must be a [0,0] zero gradient: {stdout}"
+    );
+    // out.1 = d/dy = 2y = [6,8].
+    let l1 = stdout
+        .lines()
+        .find(|l| l.contains("out.1"))
+        .unwrap_or_else(|| panic!("no out.1 slot: {stdout}"));
+    assert!(
+        l1.contains("data=[6.0, 8.0]"),
+        "out.1 must be 2y = [6,8]: {stdout}"
     );
 }
