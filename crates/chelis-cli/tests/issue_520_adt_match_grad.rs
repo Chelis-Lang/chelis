@@ -10,11 +10,20 @@
 //! (`chelis build --target c`).
 //!
 //! D2 slice (field-wise ADT gradient, eval lane): `grad(f)(Ctor { .. })`
-//! over a single ADT argument whose fields are all float tensors returns a
+//! over an ADT argument whose fields are all float tensors returns a
 //! structurally matching gradient value (`Ctor(grad_t, ...)`), the pytree
 //! contract of spec/design/differentiable_language.md Decision 6 / Phase 2.
-//! The compiled lane keeps rejecting an ADT-param grad export (the C ABI
-//! has no ADT value representation); that rejection is pinned below.
+//! The ADT argument may appear ALONGSIDE plain tensor arguments (the
+//! chelis#520 closing bar `grad(model_forward, wrt=params)(x, params)`):
+//! the result is a tuple whose ADT slot is the field-wise gradient struct
+//! and whose tensor slots are bare tensor gradients, or the bare struct
+//! when `wrt` narrows to the ADT alone. The compiled lane keeps rejecting
+//! an ADT-param grad export (the C ABI has no ADT value representation);
+//! that rejection is pinned below.
+//!
+//! Also covers chelis#614: a multi-target grad binding `out = grad(f)(a,
+//! b)` (tuple payload) displays every slot in the eval lane instead of
+//! silently dropping them behind a "defs-only" breadcrumb.
 //!
 //! Negative parity (each pinned with its diagnostic):
 //!   - runtime (non-constructor) scrutinee in a differentiated `match`
@@ -25,8 +34,6 @@
 //!   - mixed SIBLING variant (float-clean constructed variant of a type
 //!     whose other variant carries a non-tensor field)
 //!   - pure enum (no fields in any variant) as a grad argument
-//!   - ADT grad argument in a multi-argument call (default and
-//!     `wrt`-narrowed forms, both check-time)
 //!   - compiled-lane `out = grad(f)` export over an ADT-typed param
 
 use std::fs;
@@ -806,37 +813,108 @@ out = grad(fwd_mode)(ModeA)\n";
     );
 }
 
-/// A `wrt`-restricted ADT target inside a multi-argument call is a
-/// CHECK-TIME error (not a lowering surprise): the D2 slice supports
-/// single-argument functions only, regardless of `wrt` narrowing.
+// --- D2 multi-argument: grad over an ADT param alongside plain args ------------
+//
+// The chelis#520 closing bar: `grad(model_forward, wrt=params)(x, params)`
+// works for a forward taking an ADT params argument ALONGSIDE plain tensor
+// args. The result is a tuple whose ADT slot is the field-wise gradient
+// struct and whose tensor slot is the bare tensor gradient (the pytree
+// contract extended across arguments). Flipped from the pre-close negatives
+// #20/#21.
+
+/// The exact issue "together" reproducer: a forward with ADT params and a
+/// plain tensor arg, differentiated wrt only the params struct. The result
+/// is the field-wise gradient struct, packed in the constructor shape.
+/// `sum(mul(x, w))` has analytic gradient wrt `w` equal to `x`.
 #[test]
-fn issue_520_d2_wrt_restricted_adt_multi_arg_rejected_at_check() {
+fn issue_520_together_multi_arg_adt_grad_wrt_params() {
+    let x = [2.0, 3.0];
+    let w = [5.0, 7.0];
     let source = format!(
-        "module Repro.Neg8\n\n\
-         type Box =\n\
-         \x20 | Box {{ t: tensor[2, f32] }}\n\n\
-         def fwd_two(p: Box, y: tensor[2, f32]) -> f32 = {{\n\
+        "module Repro.Together\n\n\
+         type Params =\n\
+         \x20 | Params {{ w: tensor[2, f32] }}\n\n\
+         def model_forward(x: tensor[2, f32], p: Params) -> f32 = {{\n\
          \x20 match p with {{\n\
-         \x20   | Box {{ t: t }} => sum(add(t, y), cast(0, int32)) |> tensor_to_scalar\n\
+         \x20   | Params {{ w: w }} => sum(mul(&x, &w), cast(0, int32)) |> tensor_to_scalar\n\
          \x20 }}\n\
          }}\n\n\
-         out = grad(fwd_two, wrt=(p))(Box {{ t: to_tensor([{a}]) }}, to_tensor([{a}]))\n",
-        a = fmt_f32_list(&[1.0, 2.0]),
+         out = grad(model_forward, wrt=(p))(to_tensor([{x}]), Params {{ w: to_tensor([{w}]) }})\n",
+        x = fmt_f32_list(&x),
+        w = fmt_f32_list(&w),
     );
-    let (_stdout, stderr, ok) = eval_program(&source);
-    assert!(!ok, "wrt-restricted ADT in a multi-arg call must fail");
+    let (stdout, stderr, ok) = eval_program(&source);
+    assert!(ok, "issue-shaped multi-arg ADT grad failed: {stderr}");
+    // Single differentiated target (the ADT): the result is the bare
+    // Params-shaped gradient struct, not a tuple.
     assert!(
-        stderr.contains("grad over an ADT-typed parameter supports single-argument functions only"),
-        "must fail with the check-time diagnostic: {stderr}"
+        stdout.contains("Params("),
+        "gradient must be a Params-shaped struct: {stdout}"
+    );
+    let grad = parse_tensor_data(&stdout);
+    // d/dw sum(x * w) = x.
+    assert_eq!(grad.len(), 2, "grad field shape: {stdout}");
+    for (i, g) in grad.iter().enumerate() {
+        assert!(
+            (g - x[i]).abs() < 1e-6,
+            "grad w elem {i}: got {g}, want {}",
+            x[i]
+        );
+    }
+}
+
+/// Default `wrt` over the same shape differentiates BOTH arguments: the
+/// result is a tuple whose slot 0 is the tensor gradient (wrt x) and whose
+/// slot 1 is the Params-shaped gradient (wrt the struct). This is the
+/// full multi-target pytree; slot 0 is `d/dx sum(x*w) = w` and slot 1 is
+/// `d/dw sum(x*w) = x` packed as Params.
+#[test]
+fn issue_520_multi_arg_adt_grad_default_wrt_returns_tuple() {
+    let x = [2.0, 3.0];
+    let w = [5.0, 7.0];
+    let source = format!(
+        "module Repro.MultiDefault\n\n\
+         type Params =\n\
+         \x20 | Params {{ w: tensor[2, f32] }}\n\n\
+         def model_forward(x: tensor[2, f32], p: Params) -> f32 = {{\n\
+         \x20 match p with {{\n\
+         \x20   | Params {{ w: w }} => sum(mul(&x, &w), cast(0, int32)) |> tensor_to_scalar\n\
+         \x20 }}\n\
+         }}\n\n\
+         out = grad(model_forward)(to_tensor([{x}]), Params {{ w: to_tensor([{w}]) }})\n",
+        x = fmt_f32_list(&x),
+        w = fmt_f32_list(&w),
+    );
+    let (stdout, stderr, ok) = eval_program(&source);
+    assert!(ok, "default-wrt multi-arg ADT grad failed: {stderr}");
+    // Slot 0: bare tensor gradient wrt x = w = [5, 7].
+    let tensor_line = stdout
+        .lines()
+        .find(|l| l.contains("out.0"))
+        .unwrap_or_else(|| panic!("no out.0 slot: {stdout}"));
+    assert!(
+        !tensor_line.contains("Params(") && tensor_line.contains("data=[5.0, 7.0]"),
+        "slot 0 must be the bare tensor gradient w = [5,7]: {stdout}"
+    );
+    // Slot 1: Params-shaped gradient wrt w = x = [2, 3].
+    let adt_line = stdout
+        .lines()
+        .find(|l| l.contains("out.1"))
+        .unwrap_or_else(|| panic!("no out.1 slot: {stdout}"));
+    assert!(
+        adt_line.contains("Params(") && adt_line.contains("data=[2.0, 3.0]"),
+        "slot 1 must be a Params-shaped gradient x = [2,3]: {stdout}"
     );
 }
 
-/// An ADT grad argument in a multi-argument call stays rejected (the D2
-/// slice packs gradients for single-argument calls only).
+/// Shared-adjoint distinct-root path: `sum(add(t, y))` has adjoint 1 for
+/// BOTH the ADT field and the tensor arg, so the two gradient roots are the
+/// same DAG node. Each pytree leaf must still appear as its own root (the
+/// `add_root` id-dedup would otherwise collapse the tuple to one slot).
 #[test]
-fn issue_520_d2_multi_arg_adt_grad_rejected() {
+fn issue_520_multi_arg_adt_grad_shared_adjoint_keeps_both_slots() {
     let source = format!(
-        "module Repro.Neg4\n\n\
+        "module Repro.Shared\n\n\
          type Box =\n\
          \x20 | Box {{ t: tensor[2, f32] }}\n\n\
          def fwd_two(p: Box, y: tensor[2, f32]) -> f32 = {{\n\
@@ -847,11 +925,150 @@ fn issue_520_d2_multi_arg_adt_grad_rejected() {
          out = grad(fwd_two)(Box {{ t: to_tensor([{a}]) }}, to_tensor([{a}]))\n",
         a = fmt_f32_list(&[1.0, 2.0]),
     );
-    let (_stdout, stderr, ok) = eval_program(&source);
-    assert!(!ok, "multi-arg ADT grad must stay rejected");
+    let (stdout, stderr, ok) = eval_program(&source);
+    assert!(ok, "shared-adjoint multi-arg grad failed: {stderr}");
     assert!(
-        stderr.contains("single-argument"),
-        "diagnostic must name the single-argument restriction: {stderr}"
+        stdout.contains("Box(tensor(shape=[2], data=[1.0, 1.0]))"),
+        "ADT slot must survive as its own [1,1] gradient: {stdout}"
+    );
+    let tensor_line = stdout
+        .lines()
+        .find(|l| l.contains("out.1"))
+        .unwrap_or_else(|| panic!("no out.1 slot: {stdout}"));
+    assert!(
+        tensor_line.contains("data=[1.0, 1.0]"),
+        "tensor slot must survive as its own [1,1] gradient: {stdout}"
+    );
+}
+
+/// Multi-arg nonlinear + finite-difference oracle: `sum(add(mul(t,t),
+/// mul(y,y)))` grads to 2t (Box slot) and 2y (tensor slot), each validated
+/// against a central-difference gradient of the forward.
+#[test]
+fn issue_520_multi_arg_adt_grad_nonlinear_matches_fd() {
+    let base_t = [1.5, -0.5];
+    let base_y = [0.75, 2.0];
+    let program = |t: &[f64], y: &[f64], applied: &str| {
+        format!(
+            "module Repro.MultiFD\n\n\
+             type Box =\n\
+             \x20 | Box {{ t: tensor[2, f32] }}\n\n\
+             def fwd_two(p: Box, y: tensor[2, f32]) -> f32 = {{\n\
+             \x20 match p with {{\n\
+             \x20   | Box {{ t: t }} => sum(add(mul(&t, &t), mul(&y, &y)), cast(0, int32)) |> tensor_to_scalar\n\
+             \x20 }}\n\
+             }}\n\n\
+             out = {applied}(Box {{ t: to_tensor([{tl}]) }}, to_tensor([{yl}]))\n",
+            tl = fmt_f32_list(t),
+            yl = fmt_f32_list(y),
+        )
+    };
+    let (stdout, stderr, ok) = eval_program(&program(&base_t, &base_y, "grad(fwd_two)"));
+    assert!(ok, "multi-arg nonlinear grad failed: {stderr}");
+    // Box slot (out.0): 2t; tensor slot (out.1): 2y.
+    let box_line = stdout.lines().find(|l| l.contains("out.0")).unwrap();
+    let want_t: Vec<f64> = base_t.iter().map(|v| 2.0 * v).collect();
+    for (i, w) in want_t.iter().enumerate() {
+        assert!(
+            box_line.contains(&format!("{w:?}")),
+            "box grad elem {i} want {w}: {stdout}"
+        );
+    }
+    // Finite-difference each input against the forward loss.
+    let fwd = |t: &[f64], y: &[f64]| {
+        let (s, e, ok) = eval_program(&program(t, y, "fwd_two"));
+        assert!(ok, "forward failed: {e}");
+        parse_scalar(&s)
+    };
+    let h = 1e-2;
+    for i in 0..base_t.len() {
+        let (mut tp, mut tm) = (base_t.to_vec(), base_t.to_vec());
+        tp[i] += h;
+        tm[i] -= h;
+        let fd = (fwd(&tp, &base_y) - fwd(&tm, &base_y)) / (2.0 * h);
+        assert!(
+            (2.0 * base_t[i] - fd).abs() < 5e-2,
+            "t elem {i}: analytic {} vs fd {fd}",
+            2.0 * base_t[i]
+        );
+    }
+    for i in 0..base_y.len() {
+        let (mut yp, mut ym) = (base_y.to_vec(), base_y.to_vec());
+        yp[i] += h;
+        ym[i] -= h;
+        let fd = (fwd(&base_t, &yp) - fwd(&base_t, &ym)) / (2.0 * h);
+        assert!(
+            (2.0 * base_y[i] - fd).abs() < 5e-2,
+            "y elem {i}: analytic {} vs fd {fd}",
+            2.0 * base_y[i]
+        );
+    }
+}
+
+/// `wrt`-narrowing the OTHER way: differentiate only the plain tensor arg
+/// among the several. No ADT slot is produced; the result is the bare
+/// tensor gradient. `d/dy sum(t + y) = [1, 1]`.
+#[test]
+fn issue_520_multi_arg_grad_wrt_tensor_only_returns_bare() {
+    let source = format!(
+        "module Repro.WrtTensor\n\n\
+         type Box =\n\
+         \x20 | Box {{ t: tensor[2, f32] }}\n\n\
+         def fwd_two(p: Box, y: tensor[2, f32]) -> f32 = {{\n\
+         \x20 match p with {{\n\
+         \x20   | Box {{ t: t }} => sum(add(t, y), cast(0, int32)) |> tensor_to_scalar\n\
+         \x20 }}\n\
+         }}\n\n\
+         out = grad(fwd_two, wrt=(y))(Box {{ t: to_tensor([{a}]) }}, to_tensor([{a}]))\n",
+        a = fmt_f32_list(&[1.0, 2.0]),
+    );
+    let (stdout, stderr, ok) = eval_program(&source);
+    assert!(ok, "wrt-tensor-only multi-arg grad failed: {stderr}");
+    assert!(
+        !stdout.contains("Box("),
+        "wrt=(y) must not pack an ADT slot: {stdout}"
+    );
+    let grad = parse_tensor_data(&stdout);
+    assert_eq!(grad, vec![1.0, 1.0], "d/dy sum(t + y) = [1,1]: {stdout}");
+}
+
+/// Multi-arg zero-fill: an unused ADT field in a multi-argument grad still
+/// gets an explicit zero tensor OF ITS OWN SHAPE, and the tensor slot is
+/// preserved. Guards the per-argument boundary alignment of the repack.
+#[test]
+fn issue_520_multi_arg_adt_grad_unused_field_shaped_zero() {
+    let source = format!(
+        "module Repro.MultiZero\n\n\
+         type Pair =\n\
+         \x20 | Pair {{ a: tensor[2, f32], b: tensor[3, f32] }}\n\n\
+         def fwd(p: Pair, y: tensor[2, f32]) -> f32 = {{\n\
+         \x20 match p with {{\n\
+         \x20   | Pair {{ a: a, b: _ }} => sum(add(mul(&a, &a), y), cast(0, int32)) |> tensor_to_scalar\n\
+         \x20 }}\n\
+         }}\n\n\
+         out = grad(fwd)(Pair {{ a: to_tensor([{a}]), b: to_tensor([{b}]) }}, to_tensor([{a}]))\n",
+        a = fmt_f32_list(&[1.0, 2.0]),
+        b = fmt_f32_list(&[5.0, 6.0, 7.0]),
+    );
+    let (stdout, stderr, ok) = eval_program(&source);
+    assert!(ok, "multi-arg zero-fill grad failed: {stderr}");
+    // Pair slot: a grad = 2a = [2,4]; b unused -> zeros of its own [3] shape.
+    assert!(
+        stdout.contains("Pair(") && stdout.contains("data=[2.0, 4.0]"),
+        "used field grad 2a: {stdout}"
+    );
+    assert!(
+        stdout.contains("shape=[3], data=[0.0, 0.0, 0.0]"),
+        "unused field must get a [3]-shaped zero: {stdout}"
+    );
+    // Tensor slot: d/dy = [1,1].
+    let tensor_line = stdout
+        .lines()
+        .find(|l| l.contains("out.1"))
+        .unwrap_or_else(|| panic!("no out.1 slot: {stdout}"));
+    assert!(
+        tensor_line.contains("data=[1.0, 1.0]"),
+        "tensor slot d/dy = [1,1]: {stdout}"
     );
 }
 
@@ -895,5 +1112,41 @@ out = grad(fwd_box)\n";
     assert!(
         stderr.contains("grad"),
         "diagnostic must mention grad: {stderr}"
+    );
+}
+
+// --- chelis#614: multi-target grad binding display ----------------------------
+
+/// chelis#614 regression: a multi-target gradient binding
+/// `out = grad(f)(a, b)` (tuple-valued grad payload) must PRINT its values
+/// in the eval lane, not silently drop them behind the misleading
+/// "input contains only def declarations" breadcrumb. The tuple-valued
+/// binding owns flattened root names (`out.0`, `out.1`), and the host
+/// runtime must eager-evaluate the `out` def and reconstruct each slot.
+#[test]
+fn issue_614_multi_target_grad_binding_displays_values() {
+    let source = format!(
+        "module Repro.GradTuple614\n\n\
+         def fwd(x: tensor[2, f32], y: tensor[2, f32]) -> f32 = {{\n\
+         \x20 sum(add(mul(&x, &x), mul(&y, &y)), cast(0, int32)) |> tensor_to_scalar\n\
+         }}\n\n\
+         out = grad(fwd)(to_tensor([{x}]), to_tensor([{y}]))\n",
+        x = fmt_f32_list(&[1.0, 2.0]),
+        y = fmt_f32_list(&[5.0, 6.0]),
+    );
+    let (stdout, stderr, ok) = eval_program(&source);
+    assert!(ok, "multi-target grad eval failed: {stderr}");
+    assert!(
+        !stderr.contains("only def declarations"),
+        "must not emit the defs-only breadcrumb for a tuple-valued binding: {stderr}"
+    );
+    // d/dx sum(x^2 + y^2) = 2x = [2,4]; d/dy = 2y = [10,12].
+    assert!(
+        stdout.contains("data=[2.0, 4.0]"),
+        "slot 0 must display 2x = [2,4]: {stdout}"
+    );
+    assert!(
+        stdout.contains("data=[10.0, 12.0]"),
+        "slot 1 must display 2y = [10,12]: {stdout}"
     );
 }
