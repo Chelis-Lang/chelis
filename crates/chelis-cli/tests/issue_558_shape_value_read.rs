@@ -1,6 +1,6 @@
 //! chelis#558 (`RiscOp::Shape`) + chelis#513 foundation: a `shape(tensor,
 //! axis)` read used as a scalar VALUE (not folded into an `expand`/`reshape`
-//! extent `DimExpr`) lowers to a real `RiscOp::Shape` DAG node — a rank-0
+//! extent `DimExpr`) lowers to a real `RiscOp::Shape` DAG node: a rank-0
 //! integer scalar equal to the input's runtime extent along `axis`.
 //!
 //! Before this, a scalar shape read had no DAG node and fell through to the

@@ -1,4 +1,4 @@
-//! chelis#558 / chelis#513: `RiscOp::Shape` — a runtime shape-extraction
+//! chelis#558 / chelis#513: `RiscOp::Shape`, a runtime shape-extraction
 //! DAG node. Unit + pipeline coverage for the value node itself: lowering,
 //! verification (positive + negative), evaluation, and AD-transparency.
 
