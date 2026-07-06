@@ -40,12 +40,17 @@ Two chelis#520 slices extend the differentiated surface beyond flat tensors
   differentiated function) resolves to its taken arm at lowering time, so such
   bodies differentiate in both the eval and compiled lanes. A runtime scrutinee
   or a guarded arm is still rejected with a diagnostic naming the construct.
-- `grad(f)` over a single ADT argument whose fields are all float tensors
-  returns a gradient with the same constructor shape, one gradient per field
-  (eval lane). Mixed types (a non-float field in any variant, even a variant
-  other than the constructed one), pure enums with no fields, multi-argument
-  calls with an ADT argument (including `wrt`-narrowed ones), and
-  compiled-lane ADT-param gradient exports are rejected with named diagnostics.
+- `grad(f)` over an ADT argument whose fields are all float tensors returns a
+  gradient with the same constructor shape, one gradient per field (eval lane).
+  The ADT argument may sit alongside plain tensor arguments —
+  `grad(model_forward, wrt=params)(x, params)` returns the field-wise gradient
+  struct for `params`, and the default (all-argument) form returns the
+  per-target tuple whose ADT slot is that struct and whose tensor slots are
+  bare gradients. Mixed types (a non-float field in any variant, even a variant
+  other than the constructed one), pure enums with no fields, and compiled-lane
+  ADT-param gradient exports are rejected with named diagnostics. A
+  runtime-scrutinee `match` in a differentiated body also stays rejected,
+  pending the `RiscOp::Select` blend primitive.
 
 ## vmap
 
