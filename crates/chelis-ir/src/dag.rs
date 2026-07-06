@@ -732,10 +732,11 @@ pub enum RiscOp {
     /// input's shape metadata is observed, never its element values, so
     /// the reverse-mode adjoint contributes a zero cotangent to the input
     /// (differentiable in the trivial constant sense per chelis#558). The
-    /// C backend emits `t{input}->shape[axis]`; the Metal and HIP lanes
-    /// reject it loudly (`reject_unsupported_{metal,hip}_ops`) because a
-    /// runtime-symbolic movement/shape read is out of their admitted
-    /// scope.
+    /// C backend emits `t{input}->shape[axis]`; the HIP lane rejects it
+    /// loudly before codegen (`reject_unsupported_hip_ops`) and the Metal
+    /// lane rejects it via its emit-time unsupported-op arm (a clean
+    /// `Err`, not a panic), because a runtime-symbolic movement/shape read
+    /// is out of their admitted scope.
     Shape {
         axis: usize,
     },
@@ -2471,6 +2472,8 @@ mod tests {
             RiscOp::Add,
             RiscOp::Mul,
             RiscOp::Div,
+            RiscOp::FloorDiv,
+            RiscOp::TruncDiv,
             RiscOp::CmpLt,
             RiscOp::MaxElem,
             RiscOp::Neg,
@@ -2569,11 +2572,11 @@ mod tests {
     #[test]
     fn every_risc_op_is_classified_for_verifier_subset() {
         let all = one_of_every_risc_op();
-        // 50-variant closed vocabulary (spec WI-2 / dag.rs RiscOp).
+        // 52-variant closed vocabulary (spec WI-2 / dag.rs RiscOp).
         assert_eq!(
             all.len(),
-            50,
-            "one_of_every_risc_op must list all 50 RiscOp variants"
+            52,
+            "one_of_every_risc_op must list all 52 RiscOp variants"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -2585,16 +2588,16 @@ mod tests {
         // (5 binary/cmp + 13 unary, including `round`), 5 reductions, 6
         // movement, 4 memory/blas value nodes (Const, ConstTensor, Load,
         // BlasMatmul), and Cast are targetable (34); stochastic (2),
-        // arg-reductions (2), one_hot (1), the `Shape` metadata read (1),
-        // sparse gather/scatter (4, including element-wise
-        // `ScatterElements`), linearity/lifecycle markers + store (4),
-        // reduce-window-grad (1), and fused-elem (1) are excluded (16).
+        // arg-reductions (2), integer floor/trunc division (2), one_hot (1),
+        // the `Shape` metadata read (1), sparse gather/scatter (4, including
+        // element-wise `ScatterElements`), linearity/lifecycle markers + store
+        // (4), reduce-window-grad (1), and fused-elem (1) are excluded (18).
         assert_eq!(
             targetable, 34,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 16,
+            excluded, 18,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 
