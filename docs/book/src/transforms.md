@@ -46,7 +46,10 @@ Two chelis#520 slices extend the differentiated surface beyond flat tensors
   `grad(model_forward, wrt=params)(x, params)` returns the field-wise gradient
   struct for `params`, and the default (all-argument) form returns the
   per-target tuple whose ADT slot is that struct and whose tensor slots are
-  bare gradients. Mixed types (a non-float field in any variant, even a variant
+  bare gradients. An argument that does not influence the output gets a shaped
+  zero in its slot (a zero tensor, or a zero-filled gradient struct), so the
+  tuple keeps full arity and every gradient stays in its own `out.0..out.N`
+  position. Mixed types (a non-float field in any variant, even a variant
   other than the constructed one), pure enums with no fields, and compiled-lane
   ADT-param gradient exports are rejected with named diagnostics. A
   runtime-scrutinee `match` in a differentiated body also stays rejected,

@@ -436,12 +436,15 @@ impl<'a> EvalContext<'a> {
                 RuntimeValue::Tuple(items) => items,
                 single => vec![single],
             };
-            // Every ADT slot always owns exactly `field_count` roots (the
-            // IR lowering zero-fills adjoint-free fields), and every tensor
-            // slot owns one. A flat count below this total means a tensor
-            // target had no adjoint and was dropped, leaving the per-slot
-            // boundaries ambiguous. Refuse to guess: a misaligned repack
-            // would mislabel a gradient, so fail loudly instead.
+            // Every ADT slot always owns exactly `field_count` roots and
+            // every tensor slot owns one, because the IR lowering
+            // (`GradResultPlan`) zero-fills BOTH adjoint-free ADT fields and,
+            // in a multi-target result, adjoint-free tensor slots. So for a
+            // well-formed program `flat.len()` always equals `expected` and
+            // this guard does not fire. It is retained as a defensive
+            // internal-consistency tripwire: if a future lowering change ever
+            // re-drops a slot, refuse to guess the per-slot boundaries and
+            // fail loudly rather than pack a mislabeled gradient.
             let expected: usize = arg_repacks
                 .iter()
                 .map(|slot| match slot {
@@ -453,8 +456,8 @@ impl<'a> EvalContext<'a> {
                 return Err(format!(
                     "host runtime: `grad(...)` produced {} gradient roots for a \
                      structure expecting {expected}; refusing to pack a misaligned \
-                     gradient (a differentiated argument likely has no adjoint) \
-                     (chelis#520 D2)",
+                     gradient (internal invariant: the IR lowering should have \
+                     zero-filled every adjoint-free slot) (chelis#520 D2)",
                     flat.len()
                 ));
             }

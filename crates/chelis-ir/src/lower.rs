@@ -5750,13 +5750,37 @@ impl LowerCtx {
         let mut grad_iter = grad_per_wrt.iter().copied();
         let mut wrt_actual_iter = wrt_actuals.iter().copied();
         let mut packed: Vec<LoweredValue> = Vec::with_capacity(result_plans.len());
+        // A multi-target result is displayed as a tuple keyed by fixed,
+        // type-derived slot names (`out.0..out.N`, chelis#614): slot position
+        // is significant. A single-target result is a bare value with no
+        // sibling slots to shift.
+        let multi_target = result_plans.len() > 1;
         for plan in &result_plans {
             match plan {
                 GradResultPlan::Tensor => {
                     let grad_node = grad_iter.next().flatten();
-                    let _ = wrt_actual_iter.next();
-                    if let Some(node) = grad_node {
-                        packed.push(LoweredValue::Node(node));
+                    let actual = wrt_actual_iter.next();
+                    match grad_node {
+                        Some(node) => packed.push(LoweredValue::Node(node)),
+                        // The differentiated tensor argument does not
+                        // influence the output: its gradient is exactly zero.
+                        // In a multi-target result, dropping the slot would
+                        // shift every later gradient into the wrong tuple
+                        // position and mislabel it, so materialize the shaped
+                        // zero, the same way the ADT field zero-fill below
+                        // does (chelis#520 D2 / chelis#614).
+                        None if multi_target => {
+                            let field_ty = actual
+                                .map(|id| node_type(self, id))
+                                .unwrap_or_else(Self::default_type);
+                            let zero = self.zero_tensor_node(&field_ty);
+                            packed.push(LoweredValue::Node(zero));
+                        }
+                        // Single-target result: preserve the pre-#520
+                        // bare-tensor drop and its reuse-hint path (the
+                        // `[LoweredValue::Node(single)]` arm below). A lone
+                        // target has no sibling slot to mislabel.
+                        None => {}
                     }
                 }
                 GradResultPlan::Adt {
