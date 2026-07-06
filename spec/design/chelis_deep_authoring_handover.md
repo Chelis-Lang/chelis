@@ -5,20 +5,26 @@ The owning behavior spec is `spec/design/chelis_agent_editing_surface.md`.
 
 ## Verified Baseline
 
-- Current branch starts from `origin/main` at `996fdb31` (`fix(deep): harden
-  replacement authoring substrate (#548)`).
+- Current handover polish starts from `origin/main` at `a2e894e7`
+  (`release: v0.14.0 -- error localization + ConstTensor`).
 - Phase 0 found the trust-boundary blocker already fixed on `origin/main`:
   malformed replacement bodies, including `70.0(as)(f32)`, reject with
   `ok:false` and no replacement result over MCP/HTTP.
 - Phase 0 found duplicate `defsig` rejection already fixed in both
   `chelis-types` and `chelis-validate`. Chelis does not currently dispatch
-  same-name user-function overloads; issue #258 tracks that design gap.
+  same-name user-function overloads; issue #258 is closed.
 - Phase 0 found default `chelis surf` canonicalization already fixed and
   covered by `cargo test -p chelis-cli --test surf_round_trip`.
 - Duplicate export entries are not a language error today:
   `validate --deep` accepts duplicate names inside `(export ...)`, and checker
   / prove metadata stores exports in set-like structures. Edit tools preserve
   exports unless a future export-edit tool owns a different policy.
+- WIP audit on 2026-07-06 found the old `deep-substrate-handover` worktree
+  patch-equivalent to main and the old `deep-authoring-l2` branch superseded by
+  the squashed mainline work. The next handover work should branch from current
+  `origin/main`, not from either stale worktree.
+- Remote audit on 2026-07-06 found open Chelis PRs #617 and #619 on AD/shape
+  machinery; neither changes the Deep authoring API contract documented here.
 
 ## Stable Authoring API
 
@@ -111,14 +117,21 @@ rename-by-module-qualified disambiguation in multi-module payloads, richer
 semantic references beyond direct function calls, and higher-level property
 authoring helpers over the raw Deep property bundle.
 
+The next substantial colleague pickup is prove parity, not more edit substrate:
+broaden `.dp` property lowering beyond the scalar SMT-amenable subset while
+preserving the same per-edit oracle shape for Deep-authored properties.
+
 ## Known Limitations
 
-- `.dp` prove parity is partially complete. Chelis #507's direct Deep
-  property-to-SMT path is implemented for scalar SMT-amenable properties and
-  call-form boolean connectives; unsupported property shapes still fall back
-  or report unsupported per the existing prove tier policy.
-- Related prove/lowering gaps remain adjacent, not substrate blockers:
-  Chelis #463, #434, #506, and raw evidence cleanup #496.
+- `.dp` prove parity is partially complete. Chelis #507 remains open even
+  though the direct Deep property-to-SMT path is implemented for scalar
+  SMT-amenable properties and call-form boolean connectives; unsupported
+  property shapes still fall back or report unsupported per the existing prove
+  tier policy.
+- Related live prove/lowering gaps remain adjacent, not substrate blockers:
+  Chelis #434 (transcendental finance SMT), #506 (scalar WireDag root), #513
+  (symbolic-dim-aware grad machinery), and #423 (standalone eval package
+  imports). Chelis #463 and #496 are closed as of the 2026-07-06 remote audit.
 - Shoals #19 is downstream work to expose a tensor Black-Scholes entry as a
   WireDag root for Beacon; Beacon currently has no open issue/PR that blocks
   this substrate.
