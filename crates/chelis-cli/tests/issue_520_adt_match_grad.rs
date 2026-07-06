@@ -34,6 +34,8 @@
 //!   - mixed SIBLING variant (float-clean constructed variant of a type
 //!     whose other variant carries a non-tensor field)
 //!   - pure enum (no fields in any variant) as a grad argument
+//!   - multi-argument grad whose plain tensor argument has no adjoint
+//!     (dropped root leaves the per-slot boundaries ambiguous)
 //!   - compiled-lane `out = grad(f)` export over an ADT-typed param
 
 use std::fs;
@@ -1148,5 +1150,118 @@ fn issue_614_multi_target_grad_binding_displays_values() {
     assert!(
         stdout.contains("data=[10.0, 12.0]"),
         "slot 1 must display 2y = [10,12]: {stdout}"
+    );
+}
+
+// --- Adversarial multi-argument alignment pins (chelis#520 D2) -----------------
+
+/// TWO ADT arguments: each gradient slot must map to its OWN constructor.
+/// `sum(u*u + v*v)` grads to `2u` for the first ADT (`A`) and `2v` for the
+/// second (`B`); a per-argument repack that transposed the slots or shared
+/// a boundary would surface here as a mislabeled constructor or value.
+#[test]
+fn issue_520_multi_arg_two_adt_args_align_per_constructor() {
+    let source = format!(
+        "module Repro.TwoAdt\n\n\
+         type A =\n\
+         \x20 | A {{ u: tensor[2, f32] }}\n\n\
+         type B =\n\
+         \x20 | B {{ v: tensor[2, f32] }}\n\n\
+         def fwd(p: A, q: B) -> f32 = {{\n\
+         \x20 match p with {{\n\
+         \x20   | A {{ u: u }} =>\n\
+         \x20     match q with {{\n\
+         \x20       | B {{ v: v }} => sum(add(mul(&u, &u), mul(&v, &v)), cast(0, int32)) |> tensor_to_scalar\n\
+         \x20     }}\n\
+         \x20 }}\n\
+         }}\n\n\
+         out = grad(fwd)(A {{ u: to_tensor([{u}]) }}, B {{ v: to_tensor([{v}]) }})\n",
+        u = fmt_f32_list(&[1.0, 2.0]),
+        v = fmt_f32_list(&[3.0, 4.0]),
+    );
+    let (stdout, stderr, ok) = eval_program(&source);
+    assert!(ok, "two-ADT-arg grad failed: {stderr}");
+    let a_line = stdout
+        .lines()
+        .find(|l| l.contains("out.0"))
+        .unwrap_or_else(|| panic!("no out.0 slot: {stdout}"));
+    assert!(
+        a_line.contains("A(") && a_line.contains("data=[2.0, 4.0]"),
+        "slot 0 must be A-shaped 2u = [2,4]: {stdout}"
+    );
+    let b_line = stdout
+        .lines()
+        .find(|l| l.contains("out.1"))
+        .unwrap_or_else(|| panic!("no out.1 slot: {stdout}"));
+    assert!(
+        b_line.contains("B(") && b_line.contains("data=[6.0, 8.0]"),
+        "slot 1 must be B-shaped 2v = [6,8]: {stdout}"
+    );
+}
+
+/// Three-way shared-adjoint distinct-root path: `sum(add(add(t, y), z))`
+/// has adjoint `1` for the ADT field `t`, the tensor `y`, and the tensor
+/// `z` -- all three the SAME CSE-collapsed DAG node. Each pytree leaf must
+/// still keep its own root (the identity-`Copy` materialization in
+/// `lower_subexpr_program_inner`), so the tuple carries three distinct
+/// [1,1] slots instead of collapsing onto the first. Stresses the Copy fix
+/// harder than the two-way `shared_adjoint` pin.
+#[test]
+fn issue_520_multi_arg_three_way_shared_adjoint_keeps_all_slots() {
+    let source = format!(
+        "module Repro.ThreeShare\n\n\
+         type Box =\n\
+         \x20 | Box {{ t: tensor[2, f32] }}\n\n\
+         def fwd(p: Box, y: tensor[2, f32], z: tensor[2, f32]) -> f32 = {{\n\
+         \x20 match p with {{\n\
+         \x20   | Box {{ t: t }} => sum(add(add(t, y), z), cast(0, int32)) |> tensor_to_scalar\n\
+         \x20 }}\n\
+         }}\n\n\
+         out = grad(fwd)(Box {{ t: to_tensor([{a}]) }}, to_tensor([{a}]), to_tensor([{a}]))\n",
+        a = fmt_f32_list(&[1.0, 2.0]),
+    );
+    let (stdout, stderr, ok) = eval_program(&source);
+    assert!(ok, "three-way shared-adjoint grad failed: {stderr}");
+    assert!(
+        stdout.contains("Box(tensor(shape=[2], data=[1.0, 1.0]))"),
+        "ADT slot must survive as its own [1,1] gradient: {stdout}"
+    );
+    for slot in ["out.1", "out.2"] {
+        let line = stdout
+            .lines()
+            .find(|l| l.contains(slot))
+            .unwrap_or_else(|| panic!("no {slot} slot: {stdout}"));
+        assert!(
+            line.contains("data=[1.0, 1.0]"),
+            "{slot} must survive as its own [1,1] gradient: {stdout}"
+        );
+    }
+}
+
+/// Soundness pin for the misalignment guard: a multi-argument grad whose
+/// plain tensor argument is UNUSED (no adjoint) leaves the per-slot
+/// boundaries ambiguous (the ADT still owns its field roots, but the
+/// dropped tensor slot has no root). Rather than pack a possibly-mislabeled
+/// gradient, the eval lane refuses loudly. Pins the guard so a future
+/// change cannot silently pad or transpose the tuple into a wrong answer.
+#[test]
+fn issue_520_multi_arg_unused_tensor_adjoint_rejected_loudly() {
+    let source = format!(
+        "module Repro.DropTensor\n\n\
+         type Box =\n\
+         \x20 | Box {{ t: tensor[2, f32] }}\n\n\
+         def fwd(p: Box, y: tensor[2, f32]) -> f32 = {{\n\
+         \x20 match p with {{\n\
+         \x20   | Box {{ t: t }} => sum(t, cast(0, int32)) |> tensor_to_scalar\n\
+         \x20 }}\n\
+         }}\n\n\
+         out = grad(fwd)(Box {{ t: to_tensor([{a}]) }}, to_tensor([{a}]))\n",
+        a = fmt_f32_list(&[1.0, 2.0]),
+    );
+    let (_stdout, stderr, ok) = eval_program(&source);
+    assert!(!ok, "unused-tensor-adjoint multi-arg grad must be rejected");
+    assert!(
+        stderr.contains("refusing to pack a misaligned gradient"),
+        "must fail with the loud misalignment guard: {stderr}"
     );
 }
