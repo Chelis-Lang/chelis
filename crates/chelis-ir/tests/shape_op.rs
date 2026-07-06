@@ -34,9 +34,7 @@ fn scalar_int_ty(precision: Prim) -> TensorType {
 fn shape_node_evaluates_to_runtime_extent() {
     let mut dag = Dag::new();
     let x = dag.add_node(
-        RiscOp::Load {
-            name: "x".into(),
-        },
+        RiscOp::Load { name: "x".into() },
         vec![],
         tensor_ty(
             vec![DimInfo::Named("batch".into(), None), DimInfo::Lit(3)],
@@ -44,8 +42,18 @@ fn shape_node_evaluates_to_runtime_extent() {
         ),
         None,
     );
-    let s0 = dag.add_node(RiscOp::Shape { axis: 0 }, vec![x], scalar_int_ty(Prim::Int32), None);
-    let s1 = dag.add_node(RiscOp::Shape { axis: 1 }, vec![x], scalar_int_ty(Prim::Int32), None);
+    let s0 = dag.add_node(
+        RiscOp::Shape { axis: 0 },
+        vec![x],
+        scalar_int_ty(Prim::Int32),
+        None,
+    );
+    let s1 = dag.add_node(
+        RiscOp::Shape { axis: 1 },
+        vec![x],
+        scalar_int_ty(Prim::Int32),
+        None,
+    );
 
     // Feed a concrete 2x3 input; extents are 2 and 3.
     let mut inputs: HashMap<String, TensorValue> = HashMap::new();
@@ -66,9 +74,7 @@ fn shape_node_evaluates_to_runtime_extent() {
 fn verify_shape(input_dims: Vec<DimInfo>, axis: usize, out_ty: TensorType) -> Vec<String> {
     let mut dag = Dag::new();
     let x = dag.add_node(
-        RiscOp::Load {
-            name: "x".into(),
-        },
+        RiscOp::Load { name: "x".into() },
         vec![],
         tensor_ty(input_dims, Prim::F32),
         None,
@@ -81,7 +87,8 @@ fn verify_shape(input_dims: Vec<DimInfo>, axis: usize, out_ty: TensorType) -> Ve
 fn shape_node_verify_rejects_out_of_range_axis() {
     let errs = verify_shape(vec![DimInfo::Lit(4)], 3, scalar_int_ty(Prim::Int32));
     assert!(
-        errs.iter().any(|e| e.contains("shape read") && e.contains("axis")),
+        errs.iter()
+            .any(|e| e.contains("shape read") && e.contains("axis")),
         "out-of-range axis must be rejected; errs = {errs:?}"
     );
 }
@@ -115,7 +122,10 @@ fn shape_node_verify_accepts_wellformed() {
         0,
         scalar_int_ty(Prim::Int64),
     );
-    assert!(errs.is_empty(), "well-formed Shape must verify clean; errs = {errs:?}");
+    assert!(
+        errs.is_empty(),
+        "well-formed Shape must verify clean; errs = {errs:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -129,14 +139,17 @@ fn shape_node_is_ad_transparent_with_zero_adjoint() {
     // forward: loss = cast(shape(x, 0), f32)  (a scalar float).
     let mut dag = Dag::new();
     let x = dag.add_node(
-        RiscOp::Load {
-            name: "x".into(),
-        },
+        RiscOp::Load { name: "x".into() },
         vec![],
         tensor_ty(vec![DimInfo::Lit(3), DimInfo::Lit(2)], Prim::F32),
         None,
     );
-    let sh = dag.add_node(RiscOp::Shape { axis: 0 }, vec![x], scalar_int_ty(Prim::Int32), None);
+    let sh = dag.add_node(
+        RiscOp::Shape { axis: 0 },
+        vec![x],
+        scalar_int_ty(Prim::Int32),
+        None,
+    );
     let loss = dag.add_node(
         RiscOp::Cast {
             new_precision: Prim::F32,

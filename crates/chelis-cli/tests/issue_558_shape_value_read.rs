@@ -225,8 +225,9 @@ out = grad(f)(to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast
 /// export lane accepts it (chelis#613). The emitted `out()` reads `batch`
 /// from `inputs[0]->shape[0]` at runtime.
 fn build_c_bare(sig: &str, stem: &str) -> (TempDir, std::path::PathBuf) {
-    let source =
-        format!("module Repro.ShapeGradBare\n{sig}\ndef f(x) = {{\n{SHAPE_MUL_BODY}\n}}\nout = grad(f)\n");
+    let source = format!(
+        "module Repro.ShapeGradBare\n{sig}\ndef f(x) = {{\n{SHAPE_MUL_BODY}\n}}\nout = grad(f)\n"
+    );
     let dir = tempdir().expect("tempdir");
     let src_path = dir.path().join(format!("{stem}.ch"));
     fs::write(&src_path, &source).expect("write .ch source");
@@ -370,4 +371,3 @@ fn issue_558_shape_value_forward_matches_c() {
 // The HIP device-path rejection is not exercised here because it needs a GPU
 // toolchain (hipcc) that CI does not guarantee; the mandatory lanes are eval
 // + C, which the oracles above lock end to end.
-
