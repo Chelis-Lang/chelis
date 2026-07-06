@@ -1,8 +1,11 @@
 # Verification Stack: Handover State
 
-**Date:** 2026-06-29
-**Chelis version:** 0.11.1 (main has unreleased work toward 0.12.0)
+**Date:** 2026-07-06
+**Chelis version:** 0.14.0
 **Beacon version:** 0.1.6 (accepts WireDag schema v1 and v2)
+
+> **Update 2026-07:** A three-wave compiler/prover **Soundness hardening** campaign closed since
+> this doc was written — see §9. It resolved #496 and #463 (both dropped from §8 below).
 
 This document is the single-source handover artifact for the verification
 orchestrator. A newcomer reads this to understand what the stack proves today,
@@ -156,9 +159,11 @@ CHELIS_BEACON_BIN=/path/to/chelis-beacon cargo test -p chelis-prove --test beaco
 - **WI-18/19/20:** Build features, vendor config, deployment surface
 
 ### Cross-repo:
-- **School cascade:** Blocked on chelis 0.12.0 release (#527 len/index borrow fix)
-- **Shoals BS seam:** #506 (scalar WireDag root) blocks scalar-returning pricer entries
-- **Discharge attribution:** #496 (canonical evidence key across engines)
+- **School cascade:** Unblocked — the #527 len/index borrow fix shipped in 0.12.0; the downstream
+  cascade into School is the remaining work.
+- **Shoals BS seam:** #506 (scalar WireDag root, reopened) — settled as **Option B**: a Shoals
+  *tensor* entry is the seam; scalar host entries stay non-root, no chelis lowering change.
+- **Discharge attribution:** #496 — **resolved** (uniform top-level `engine` key, #564); see §9.
 
 ### Trust-stack track (business-prioritized):
 - **Phase B:** Effect taxonomy expansion (`Network` + `Filesystem`)
@@ -168,11 +173,76 @@ CHELIS_BEACON_BIN=/path/to/chelis-beacon cargo test -p chelis-prove --test beaco
 
 ## 8. Open issues touching the prove surface
 
+(#496 and #463 were **resolved** in the 2026-07 soundness campaign — see §9 — and removed from this list.)
+
 | Issue | Title | Blocks |
 |-------|-------|--------|
-| #496 | Canonical discharge-attribution evidence key | Evidence schema consistency |
-| #506 | WI-3 scalar-returning entry has no WireDag root | Shoals scalar pricer dispatch |
+| #506 | WI-3 scalar-returning entry has no WireDag root (reopened) | Shoals scalar pricer dispatch (Option B: tensor entry is the seam) |
 | #507 | Deep (.dp) properties now have direct Tier-B lowering for the supported scalar SMT subset; broader property shapes remain follow-up | Deep-format proofs |
-| #434 | SMT cannot lower transcendental finance properties | Direct erf/log in goals |
-| #463 | Boolean connective goal-site lowering | `and`/`or` keyword forms |
+| #434 | Transcendental-discharge capability (Black-Scholes positivity via log/exp/sqrt) — rescoped; internal-message leak fixed + honest-Unsupported locked (#564); exp/log/sqrt envelope is the remaining reach | Direct transcendentals in goals |
 | #423 | eval does not resolve package imports for standalone files | eval/prove parity |
+
+---
+
+## 9. Soundness hardening (closed 2026-07)
+
+A three-wave campaign hardened the compiler→IR→goal→discharge trust chain: the prover's
+"proven, not tested" claim is only as sound as the lowering beneath it, so every silent-miscompile and
+check-vs-eval-vs-backend gap in the backlog was closed with a corrected result or a fail-loud reject,
+each behind a fresh-context red-team gate. **Structure:** Wave 1 (parallel honest-reject + eval/type
+fixes, PRs #562–#567), Wave 2 (sequential AD/symbolic-dim grad machinery, #590), Wave 3 (Form-3 runtime
+expand-size, #596). Each red team (RT-1/2/3) EXECUTED adversarial tests and *found a real issue*, all
+resolved fail-closed; a phase-wide RT-final returned **PASS** (acceptance oracle green except the
+pre-existing `chelisup` `/tmp/reef.toml` env leak; no swallowed reject, no silent-wrong; complete
+positive+negative coverage). Documented in the `[0.13.0]` CHANGELOG entry.
+
+**Re-verified on v0.14.0 (2026-07-06): no regression.** After #615/#612/#611 subsequently touched the
+hardened files, all phase oracle suites pass (issue_549 14/14, issue_551 7/7, issue_513 3/3 +
+`symbolic_axis_adjoints` 19/19, rank_poly_tier3 98/98, chelis-ir 828, chelis-types 777, chelis-backend-c
+374, chelis-prove 323, issue_522 10/10) and every fail-closed spot-check still rejects loud.
+
+**Governing discipline for whoever continues this line:** a reject that is swallowed and falls through
+to a green result (default-0, hardcoded extent, empty goal, fuzz-green) is the same laundering wearing a
+different mask. Every reject introduced here fails LOUD, and the red team specifically exercises each
+reject path. Keep that bar.
+
+### Resolved (merged to main)
+
+| Issue | PR | What |
+|-------|----|------|
+| #549 | #562 | grad by-position named-axis recovery re-validated against a permute; fails loud when the axis is ambiguous |
+| #530 | #563 | inline `expand` size (tuple-get / cast / arith / if / match) routes through the Form-3 gate → rejects loud |
+| #524 | #563 | `vmap` present-but-non-constant axis rejects loud (was a silent default-to-0) |
+| #517 | #565 | C-backend `emit_cmplt` reads each operand's real dtype (was a `float*` reinterpret) |
+| #340 | #565 | named-axis max/min/prod/argmax/argmin_reduce in a `..r` body builds + runs (was host-lane unsupported) |
+| #522 | #567 | host evaluator accepts negative axes uniformly (closed a check↔eval gap) |
+| #550 | #567 | chelis-ir eval traps integer floor_div/trunc_div by zero (fail-closed, matches the C backend) |
+| #458 | #566 | mixed (f32,i32) numeric op rejects consistently at check — resolved-by-design (no implicit promotion) |
+| #463 | #564 | `&&`/`||` goal-site lowering verified sound + locked (residual: `and`/`or` keyword → #589) |
+| #496 | #564 | uniform top-level `engine` discharge-attribution key across all engines |
+| #551 | #590 | grad over a symbolic-axis concat builds under `--target c` (was a dag.rs ICE) |
+| #513 (gap 1) | #590 | grad through a shape()-derived reshape target (gaps 2/3 → rlronan/#611) |
+| #523 | #590 | `eval::shrink` loud bounds asserts + post-bind re-verify |
+| #383 | #590 | verify-closed (fixed by #549) + regression-locked |
+| #469 | #596 | Form-3 runtime expand-size: shape / let-bound / static-arith resolve correct + byte-deterministic; arith-over-shape rejects loud |
+
+### Open follow-ups (all fail-loud today — none silently wrong)
+
+| Issue | State | Note |
+|-------|-------|------|
+| **#609** | open, unassigned | **Top item.** Checker accepts a wrong-rank ascription on a Form-3 `expand` result → eval silently returns a contradicting rank. Live silent-wrong in the Form-3 area; overlaps rlronan's active Form-3 track (#611/#469) → hand off there. |
+| #593 | open, unassigned | Deeper fix for the concat symbolic-wrapper Pad-output mis-sizing (memory-safety). Interim is a loud fail-closed abort; the real fix sizes the wrapper output correctly or emits a graceful error. |
+| #592 | open, unassigned | `vmap(grad(f))(y)` C-build ICE (eval FD-correct); #513-family. |
+| #587 | open, unassigned | Deeper #549: track the named-axis anchor *through* a permute (recover, don't reject the square case). |
+| #572 / #573 | open, unassigned | Sibling silent-default-0 sites: expand axis-slot (#572), tuple-get index (#573). Same #364/#524/#530 class. |
+| #597 | open, unassigned | let-bound-static expand size errors in eval though C build resolves it (checker annotation gap; fails loud). |
+| #594 | open, unassigned | concat marks its concat-axis extent symbolic `*` instead of the concrete sum of operands (type-inference). |
+| #589 | open, unassigned | chelis-surf `and`/`or` keyword diagnostic (#463 residual; fails safe, usability). |
+| #434 | open, jeff | Transcendental-discharge capability (exp/log/sqrt envelope); fail-safe locked (never falsely proven). |
+| #513 gaps 2/3 | open, **rlronan (#611)** | Runtime symbolic-value grad adjoints — in progress; do not duplicate. |
+| #516 | open, unassigned (parked) | vmap capture-broadcast; overlaps rlronan's reopened #377 (his vmap half) — coordinate before touching. |
+| #469 Case 2 | **closed by rlronan** | scalar-param expand size; confirm the capability shipped. |
+
+**Post-phase surface drift:** #615 (error-localization + ConstTensor), #612 (match/ADT grad), and #611
+(#513 gap 3) landed after the phase and touch the hardened files — the re-verify above confirms no
+regression, but a colleague extending any of these files should re-run the phase oracle suites.
