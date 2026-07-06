@@ -18753,30 +18753,14 @@ fn grad_result_type(
             .collect()
     };
 
-    // chelis#520 D2 slice boundary: an ADT gradient target is supported
-    // only when the differentiated function takes exactly one argument.
-    // The lowering rejects any ADT argument in a multi-argument grad
-    // call (structure-aware tuple packing is not implemented), so gate
-    // on the FUNCTION arity, not just the selected-target count: a
-    // `wrt`-restricted ADT target inside a multi-argument call would
-    // otherwise pass the check and then die at lowering, making the
-    // check-time claim (and any `wrt`-based suggestion) a lie.
-    if args.len() > 1
-        && targets
-            .iter()
-            .any(|target| matches!(target, Type::Adt(_, _)))
-    {
-        errors.push(CheckError::new(
-            CheckErrorKind::Other,
-            "grad over an ADT-typed parameter supports single-argument functions only (chelis#520 D2)"
-                .to_string(),
-            vec![
-                "Fold the extra arguments into the ADT's fields, or differentiate a single-parameter wrapper function that takes only the ADT"
-                    .to_string(),
-            ],
-        ));
-        return None;
-    }
+    // chelis#520 D2: an ADT gradient target is supported alongside plain
+    // tensor/scalar targets in a multi-argument call. `grad_argument_type`
+    // has already mapped each selected parameter to its gradient type (an
+    // all-float-field ADT maps to itself; a tensor/scalar to itself; a
+    // non-differentiable payload was skipped or rejected). The result type
+    // is the per-target tuple, whose ADT slot is the field-wise gradient
+    // struct (the pytree contract). The eval-lane marshalling packs the
+    // flat gradient roots back into this exact structure per argument.
     Some(match targets.as_slice() {
         [] => Type::Unit,
         [single] => single.clone(),

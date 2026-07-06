@@ -38,10 +38,33 @@ impl<'a> EvalContext<'a> {
         // a typed placeholder var for tensor/scalar args, or a synthesized
         // ADT construction over per-field placeholders (chelis#520 D2).
         let mut arg_exprs: Vec<Expr> = Vec::with_capacity(args.len());
-        // Set when the single differentiated argument is an ADT value:
-        // the gradient roots are repacked into the same constructor shape
-        // after evaluation (the pytree contract).
-        let mut adt_repack: Option<(String, Option<Vec<String>>, usize)> = None;
+        // chelis#520 D2: per-differentiated-target repack plan. After
+        // evaluation the gradient roots come back as one FLAT tuple (the
+        // pytree of every wrt-selected target's fields, concatenated in
+        // parameter order); each plan slot says how many of those flat
+        // roots the target owns and what structure to fold them back into
+        // (a bare tensor, or a constructor-shaped `Adt`). This is the
+        // eval-lane twin of the IR lowering's `GradResultPlan` list. Only
+        // wrt-selected differentiable targets get a slot; a non-selected
+        // or non-differentiable argument still marshals its placeholders
+        // (the body may read it) but owns no gradient root.
+        enum ArgRepack {
+            Tensor,
+            Adt {
+                ctor: String,
+                field_names: Option<Vec<String>>,
+                field_count: usize,
+            },
+        }
+        let mut arg_repacks: Vec<ArgRepack> = Vec::with_capacity(args.len());
+        // wrt indices for this grad call, if narrowed (`grad(f, wrt=(i))`).
+        // `None` means differentiate every differentiable argument, exactly
+        // as the checker's `grad_result_type` and the IR lowering's
+        // `is_selected_wrt` do.
+        let grad_wrt = match kind {
+            TransformKind::Grad => grad_wrt_indices_from_transform(transform_expr),
+            TransformKind::Vmap => None,
+        };
 
         // Best-effort fn-expr lookup so we can read the inner
         // function's parameter type metadata. The transform_expr is the
@@ -88,14 +111,6 @@ impl<'a> EvalContext<'a> {
                 },
             ) = (&kind, value)
             {
-                if args.len() != 1 {
-                    return Err(format!(
-                        "host runtime: `grad(...)` over an ADT-typed argument currently \
-                         supports single-argument functions only; got {} arguments \
-                         (chelis#520 D2)",
-                        args.len()
-                    ));
-                }
                 // Type-level gate: the checker types `grad` over an ADT
                 // as non-differentiable (unit payload) when ANY variant
                 // of the type carries a non-float field, or when the
@@ -158,7 +173,22 @@ impl<'a> EvalContext<'a> {
                     &field_placeholders,
                     span,
                 ));
-                adt_repack = Some((ctor.clone(), aligned_names, fields.len()));
+                // A clean (all-float-field) ADT argument is a differentiated
+                // target whenever `wrt` selects it (or `wrt` is the default,
+                // all-args form). The rejection above guarantees the type is
+                // differentiable, so a wrt-selected slot always owns exactly
+                // `fields.len()` gradient roots (the IR lowering zero-fills a
+                // field with no adjoint, so every field is represented).
+                let selected = grad_wrt
+                    .as_ref()
+                    .is_none_or(|indices| indices.contains(&index));
+                if selected {
+                    arg_repacks.push(ArgRepack::Adt {
+                        ctor: ctor.clone(),
+                        field_names: aligned_names,
+                        field_count: fields.len(),
+                    });
+                }
                 continue;
             }
             let placeholder = format!("__chelis_xform_arg_{index}");
@@ -174,7 +204,22 @@ impl<'a> EvalContext<'a> {
             arg_exprs.push(make_var_with_type(&placeholder, &tensor_type, span));
             placeholder_tensors.insert(placeholder.clone(), tensor_value);
             placeholder_names.push(placeholder);
-            placeholder_types.push(tensor_type);
+            placeholder_types.push(tensor_type.clone());
+            // chelis#520 D2: a wrt-selected float tensor/scalar argument owns
+            // one gradient root, packed back as a bare tensor. A non-float or
+            // non-selected argument owns none (matching the IR lowering's
+            // `is_selected_wrt`), so it gets no repack slot even though its
+            // placeholder is still marshalled (the body may read it).
+            if matches!(kind, TransformKind::Grad) {
+                let differentiable = tensor_type.precision.is_float();
+                let selected = differentiable
+                    && grad_wrt
+                        .as_ref()
+                        .is_none_or(|indices| indices.contains(&index));
+                if selected {
+                    arg_repacks.push(ArgRepack::Tensor);
+                }
+            }
         }
 
         // Synthesize `(app {} <transform-expr> <arg-expr_0> ...)`.
@@ -375,30 +420,103 @@ impl<'a> EvalContext<'a> {
             TransformKind::Vmap => "vmap",
         };
         let packed = pack_dag_roots(&dag, &roots, &values, kind_label)?;
-        // chelis#520 D2: repack the field-wise gradient roots into the
-        // argument's constructor shape (the pytree contract: the gradient
-        // of a Box-shaped argument is a Box-shaped value).
-        if let Some((ctor, field_names, field_count)) = adt_repack {
-            let fields = match packed {
+        // chelis#520 D2: when at least one differentiated target is an ADT,
+        // re-collapse the FLAT gradient roots into the per-argument pytree
+        // structure (the gradient of a `Box`-shaped argument is a
+        // `Box`-shaped value; a multi-target result is a tuple whose ADT
+        // slot is a field-wise gradient struct and whose tensor slot is the
+        // bare gradient). A pure-tensor grad needs no re-collapse: `packed`
+        // is already the flat tuple the pre-#520 contract specifies, and
+        // the eval-root display (chelis#614) walks it component-wise.
+        let has_adt_slot = arg_repacks
+            .iter()
+            .any(|slot| matches!(slot, ArgRepack::Adt { .. }));
+        if matches!(kind, TransformKind::Grad) && has_adt_slot {
+            let flat: Vec<RuntimeValue> = match packed {
                 RuntimeValue::Tuple(items) => items,
                 single => vec![single],
             };
-            if fields.len() != field_count {
+            // Every ADT slot always owns exactly `field_count` roots (the
+            // IR lowering zero-fills adjoint-free fields), and every tensor
+            // slot owns one. A flat count below this total means a tensor
+            // target had no adjoint and was dropped, leaving the per-slot
+            // boundaries ambiguous. Refuse to guess: a misaligned repack
+            // would mislabel a gradient, so fail loudly instead.
+            let expected: usize = arg_repacks
+                .iter()
+                .map(|slot| match slot {
+                    ArgRepack::Tensor => 1,
+                    ArgRepack::Adt { field_count, .. } => *field_count,
+                })
+                .sum();
+            if flat.len() != expected {
                 return Err(format!(
-                    "host runtime: `grad(...)` over `{ctor}` produced {} gradient \
-                     roots for {field_count} fields; refusing to pack a misaligned \
-                     gradient structure (chelis#520 D2)",
-                    fields.len()
+                    "host runtime: `grad(...)` produced {} gradient roots for a \
+                     structure expecting {expected}; refusing to pack a misaligned \
+                     gradient (a differentiated argument likely has no adjoint) \
+                     (chelis#520 D2)",
+                    flat.len()
                 ));
             }
-            return Ok(RuntimeValue::Adt {
-                ctor,
-                fields,
-                field_names,
+            let mut flat_iter = flat.into_iter();
+            let mut slots: Vec<RuntimeValue> = Vec::with_capacity(arg_repacks.len());
+            for slot in &arg_repacks {
+                match slot {
+                    ArgRepack::Tensor => {
+                        slots.push(flat_iter.next().expect("count checked above"));
+                    }
+                    ArgRepack::Adt {
+                        ctor,
+                        field_names,
+                        field_count,
+                    } => {
+                        let mut fields = Vec::with_capacity(*field_count);
+                        for _ in 0..*field_count {
+                            fields.push(flat_iter.next().expect("count checked above"));
+                        }
+                        slots.push(RuntimeValue::Adt {
+                            ctor: ctor.clone(),
+                            fields,
+                            field_names: field_names.clone(),
+                        });
+                    }
+                }
+            }
+            return Ok(match slots.len() {
+                // A single differentiated target (one ADT, possibly with
+                // other non-selected args present) returns the bare
+                // gradient value, not a one-element tuple.
+                1 => slots.into_iter().next().expect("non-empty"),
+                _ => RuntimeValue::Tuple(slots),
             });
         }
         Ok(packed)
     }
+}
+
+/// chelis#520 D2: the `wrt` parameter indices of a direct `(grad {} fn
+/// wrt?)` transform form, or `None` for the default all-arguments grad.
+/// `wrt` is the optional second child: a `(tuple {} i ...)` of indices or
+/// a single index literal (`cast`-wrapped ints are peeled by
+/// `static_usize_value`). A non-`grad` head or an unreadable index yields
+/// `None`, so the caller falls back to the differentiate-all default.
+fn grad_wrt_indices_from_transform(transform_expr: &Expr) -> Option<Vec<usize>> {
+    let list = as_list(transform_expr)?;
+    if tag(list) != Some("grad") {
+        return None;
+    }
+    let wrt_expr = children(list).get(1)?;
+    if let Expr::List(tuple, _) = wrt_expr
+        && tag(tuple) == Some("tuple")
+    {
+        return Some(
+            children(tuple)
+                .iter()
+                .filter_map(static_usize_value)
+                .collect(),
+        );
+    }
+    static_usize_value(wrt_expr).map(|index| vec![index])
 }
 
 /// chelis#520 D2: synthesize the Deep construction expression that
