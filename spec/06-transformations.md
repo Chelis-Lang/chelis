@@ -346,27 +346,42 @@ that lowers to a tensor node), an arm guard on the selected pattern, and
 nested destructuring beyond `pat-var`/`pat-wild` field bindings.
 
 **D2 slice — field-wise ADT gradients (eval lane).** `grad(f)(Ctor { .. })`
-over a single ADT argument whose fields are all float tensors or float
-scalars returns a gradient with the same constructor shape, one gradient per
-field (the pytree contract). A field that does not influence the output
-receives an explicit zero tensor of its shape, so the gradient struct always
-matches the argument's structure. For a multi-constructor sum type, the
-gradient corresponds to whichever variant was constructed. Limits, each a loud
-diagnostic naming the construct: mixed types (a non-float-tensor field in ANY
-variant of the argument's type) are rejected naming the field, even when the
-constructed variant itself is float-clean, because the checker types such a
-gradient as `unit` and the runtime must not produce a value the static type
-does not admit; pure enums (no fields in any variant) are rejected because
-there is no continuous payload to differentiate; an ADT argument in a
-multi-argument call is a check-time error (single-argument functions only,
-including when `wrt` narrows the target to the ADT alone); the compiled lane
+over an ADT argument whose fields are all float tensors or float scalars
+returns a gradient with the same constructor shape, one gradient per field
+(the pytree contract). A field that does not influence the output receives an
+explicit zero tensor of its shape, so the gradient struct always matches the
+argument's structure. For a multi-constructor sum type, the gradient
+corresponds to whichever variant was constructed.
+
+The ADT argument may appear ALONGSIDE plain tensor/scalar arguments — the
+chelis#520 closing bar `grad(model_forward, wrt=params)(x, params)`. The
+result is the per-target tuple, whose ADT slot is the field-wise gradient
+struct and whose tensor slots are bare tensor gradients, exactly as the
+multi-parameter tensor contract in §2.1; when `wrt` narrows to a single
+target the result is that bare gradient (an ADT struct or a tensor) with no
+enclosing tuple. Two pytree leaves whose gradient is the same DAG node (e.g.
+`sum(add(t, y))` has adjoint `1` for both) each keep their own root, so no
+tuple slot collapses.
+
+Limits, each a loud diagnostic naming the construct: mixed types (a
+non-float-tensor field in ANY variant of the argument's type) are rejected
+naming the field, even when the constructed variant itself is float-clean,
+because the checker types such a gradient as `unit` and the runtime must not
+produce a value the static type does not admit; pure enums (no fields in any
+variant) are rejected because there is no continuous payload to differentiate;
+a multi-target grad where a plain tensor argument has no adjoint (its gradient
+would be dropped, leaving the per-slot boundaries ambiguous) is rejected
+rather than packed into a possibly-misaligned structure; and the compiled lane
 rejects `out = grad(f)` exports over ADT-typed parameters (the C ABI has no
-ADT value representation).
+ADT value representation). Runtime-scrutinee `match` differentiation stays
+rejected and is tracked separately (chelis#618); it awaits a `RiscOp::Select`
+blend primitive per `spec/design/differentiable_language.md` Phase 1.
 
 The acceptance oracle for both slices is
 `crates/chelis-cli/tests/issue_520_adt_match_grad.rs` (analytic +
-finite-difference gradients, eval-vs-C-backend agreement for D1, and the
-negative-parity pins for every listed rejection).
+finite-difference gradients, eval-vs-C-backend agreement for D1, the
+multi-argument issue-shaped reproducer, and the negative-parity pins for
+every listed rejection).
 
 ### 2.11 Interaction With Phase 2a Effects
 

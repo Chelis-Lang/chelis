@@ -18753,30 +18753,14 @@ fn grad_result_type(
             .collect()
     };
 
-    // chelis#520 D2 slice boundary: an ADT gradient target is supported
-    // only when the differentiated function takes exactly one argument.
-    // The lowering rejects any ADT argument in a multi-argument grad
-    // call (structure-aware tuple packing is not implemented), so gate
-    // on the FUNCTION arity, not just the selected-target count: a
-    // `wrt`-restricted ADT target inside a multi-argument call would
-    // otherwise pass the check and then die at lowering, making the
-    // check-time claim (and any `wrt`-based suggestion) a lie.
-    if args.len() > 1
-        && targets
-            .iter()
-            .any(|target| matches!(target, Type::Adt(_, _)))
-    {
-        errors.push(CheckError::new(
-            CheckErrorKind::Other,
-            "grad over an ADT-typed parameter supports single-argument functions only (chelis#520 D2)"
-                .to_string(),
-            vec![
-                "Fold the extra arguments into the ADT's fields, or differentiate a single-parameter wrapper function that takes only the ADT"
-                    .to_string(),
-            ],
-        ));
-        return None;
-    }
+    // chelis#520 D2: an ADT gradient target is supported alongside plain
+    // tensor/scalar targets in a multi-argument call. `grad_argument_type`
+    // has already mapped each selected parameter to its gradient type (an
+    // all-float-field ADT maps to itself; a tensor/scalar to itself; a
+    // non-differentiable payload was skipped or rejected). The result type
+    // is the per-target tuple, whose ADT slot is the field-wise gradient
+    // struct (the pytree contract). The eval-lane marshalling packs the
+    // flat gradient roots back into this exact structure per argument.
     Some(match targets.as_slice() {
         [] => Type::Unit,
         [single] => single.clone(),
@@ -20101,11 +20085,13 @@ mod tests {
     }
 
     #[test]
-    fn grad_over_adt_plus_tensor_multi_target_is_rejected() {
-        // chelis#520 D2 negative parity: an ADT gradient target is
-        // supported only as the sole differentiated argument; a
-        // multi-target payload containing an ADT is a check-time error.
-        check_err(
+    fn grad_over_adt_plus_tensor_multi_target_returns_tuple() {
+        // chelis#520 D2: an ADT gradient target is supported ALONGSIDE a
+        // plain tensor argument (the closing bar). The default (no `wrt`)
+        // gradient payload is the per-target tuple whose ADT slot is the
+        // field-wise gradient struct and whose tensor slot is the bare
+        // tensor gradient.
+        let exprs = chelis_deep::parser::parse_str(
             "(deftype {} Box
                 (variant {} Box
                     (field {} t (t-tensor {} (d-lit {} 2) (t-prim {} f32)))))
@@ -20115,19 +20101,26 @@ mod tests {
                 (t-prim {} f32)))
              (def {} f (fn {} (params {} p y) (lit {type: (t-prim {} f32)} 1.0)))
              (def {} g (grad {} (var {} f)))",
-            CheckErrorKind::Other,
+        )
+        .unwrap();
+        let checked = check_ir_program(&exprs).expect("IR check");
+        let ty = checked.type_env().get("g").expect("g type");
+        let printed = chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
+            .trim()
+            .to_string();
+        assert_eq!(
+            printed,
+            "(t-fn {} (t-adt {} Box) (t-tensor {} (d-lit {} 2) (t-prim {} f32)) (t-tuple {} (t-adt {} Box) (t-tensor {} (d-lit {} 2) (t-prim {} f32))))"
         );
     }
 
     #[test]
-    fn grad_wrt_adt_in_multi_arg_call_is_rejected() {
-        // chelis#520 D2 negative parity: a `wrt`-restricted ADT target
-        // inside a multi-argument function is still a check-time error.
-        // The lowering rejects any ADT argument in a multi-argument grad
-        // call, so letting the wrt form pass the check would defer the
-        // failure to a runtime diagnostic and make the old "restrict
-        // with wrt" suggestion a dead end.
-        check_err(
+    fn grad_wrt_adt_in_multi_arg_call_returns_struct() {
+        // chelis#520 D2: a `wrt`-restricted ADT target inside a
+        // multi-argument function is supported; narrowing to the ADT alone
+        // yields the bare field-wise gradient struct (a single target, so
+        // no enclosing tuple).
+        let exprs = chelis_deep::parser::parse_str(
             "(deftype {} Box
                 (variant {} Box
                     (field {} t (t-tensor {} (d-lit {} 2) (t-prim {} f32)))))
@@ -20137,7 +20130,16 @@ mod tests {
                 (t-prim {} f32)))
              (def {} f (fn {} (params {} p y) (lit {type: (t-prim {} f32)} 1.0)))
              (def {} g (grad {} (var {} f) (lit {type: (t-prim {} int32)} 0)))",
-            CheckErrorKind::Other,
+        )
+        .unwrap();
+        let checked = check_ir_program(&exprs).expect("IR check");
+        let ty = checked.type_env().get("g").expect("g type");
+        let printed = chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
+            .trim()
+            .to_string();
+        assert_eq!(
+            printed,
+            "(t-fn {} (t-adt {} Box) (t-tensor {} (d-lit {} 2) (t-prim {} f32)) (t-adt {} Box))"
         );
     }
 

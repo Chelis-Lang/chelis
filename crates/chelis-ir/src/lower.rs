@@ -1049,8 +1049,34 @@ fn lower_subexpr_program_inner(
         ctx.bindings.insert(name, LoweredValue::Node(load));
     }
     let value = ctx.lower_expr(expr);
+    // Each leaf of the result pytree must be a DISTINCT root node.
+    // `Dag::add_root` deduplicates by node id, so when the same node feeds
+    // two leaves (chelis#520/#614: two `grad` targets whose adjoint is the
+    // same DAG node — e.g. `grad(sum(add(t, y)))` has adjoint `1` for both
+    // `t` and `y`, common-subexpression-shared into one node), the second
+    // leaf would silently collapse onto the first and the multi-target
+    // tuple/ADT structure would lose a slot. Materialize an identity `Copy`
+    // for any repeat so every leaf keeps its own root; the value is
+    // unchanged (eval and the copy/drop linearity passes treat `Copy` as a
+    // pass-through) but the root count now matches the pytree arity.
+    let mut seen_roots: HashSet<NodeId> = HashSet::new();
     for id in value.flatten_nodes() {
-        ctx.dag.add_root(id);
+        let root_id = if seen_roots.insert(id) {
+            id
+        } else {
+            let output_type = ctx
+                .dag
+                .get(id)
+                .map(|node| node.output_type.clone())
+                .unwrap_or_else(LowerCtx::default_type);
+            ctx.dag.add_node(
+                RiscOp::Copy,
+                vec![id],
+                output_type,
+                ctx.current_span_id.clone(),
+            )
+        };
+        ctx.dag.add_root(root_id);
     }
     let dce_dag = crate::optimize::dead_code_eliminate(&ctx.dag);
     let (copy_dag, _) = insert_copy_nodes_for_consuming_fanout(&dce_dag);
@@ -5365,26 +5391,14 @@ impl LowerCtx {
                 field_nodes: Vec<NodeId>,
             },
         }
-        // The D2 slice packs an ADT gradient only for single-argument
-        // calls: downstream consumers of a multi-root result (host tuple
-        // typing, eval root display) flatten the constructor structure
-        // silently, so a mixed tuple-with-ADT gradient must stay rejected
-        // at the lowering level, not just in the eval-lane marshalling.
-        if actual_args.len() > 1
-            && actual_args
-                .iter()
-                .any(|arg| matches!(arg, LoweredValue::Adt { .. }))
-        {
-            raise_fatal_lowering_error(
-                format!(
-                    "`grad(...)` over an ADT-typed argument currently supports \
-                     single-argument functions only; got {} arguments (chelis#520 D2)",
-                    actual_args.len()
-                ),
-                Some(app_span),
-                None,
-            );
-        }
+        // chelis#520 D2: a multi-argument grad call may mix ADT and
+        // tensor/scalar arguments. Each argument is lowered independently
+        // below into its own gradient plan; the per-argument result plans
+        // repack the flat gradient roots back into the correct structure
+        // (an `Adt` for an ADT parameter, a `Node` for a tensor one), so
+        // the result is a `Tuple` whose slots line up 1:1 with the
+        // selected parameters. Structure alignment is preserved because
+        // every ADT field root gets a distinct dotted key.
         let plans: Vec<GradArgPlan> = actual_args
             .iter()
             .enumerate()

@@ -634,9 +634,22 @@ fn register_top_level_defs(
         }
         let is_fn = matches!(body, Expr::List(body_list, _) if tag(body_list) == Some("fn"));
         if !is_fn && !lowered_names.get(name).copied().unwrap_or(false) {
+            // chelis#614: a tuple- or ADT-valued binding `out = ...` owns
+            // FLATTENED root names (`out.0`, `out.1`, ...) in the caller's
+            // `selected_roots` filter, but the def itself is named `out`.
+            // Match the base def name against those flattened entries by
+            // prefix so the host runtime eager-evaluates `out` and binds
+            // the whole tuple/ADT; the display path then walks into it per
+            // component. Without this, a multi-target grad binding is never
+            // evaluated and its roots come back empty (the misleading
+            // "input contains only def declarations" breadcrumb).
             let selected = match selected_roots {
                 None => true,
-                Some(filter) => filter.iter().any(|s| s == name),
+                Some(filter) => filter.iter().any(|s| {
+                    s == name
+                        || s.strip_prefix(name)
+                            .is_some_and(|rest| rest.starts_with('.'))
+                }),
             };
             if selected {
                 top_level_order.push(name.to_string());
@@ -776,9 +789,30 @@ pub(crate) fn lookup_runtime_value_for_root(
     let head = parts.next()?;
     let mut value = host_bindings.get(head)?.clone();
     for part in parts {
-        let index = part.parse::<usize>().ok()?;
         value = match value {
-            RuntimeValue::Tuple(items) => items.get(index)?.clone(),
+            // Tuple components are keyed by positional index.
+            RuntimeValue::Tuple(items) => {
+                let index = part.parse::<usize>().ok()?;
+                items.into_iter().nth(index)?
+            }
+            // chelis#614/#520 D2: an ADT-valued component (e.g. the
+            // params slot of a multi-target `grad` result, or a field-wise
+            // gradient struct) is keyed by field NAME for a record
+            // constructor and by positional index for a positional one.
+            // Descend into it the same way `flatten_binding_into` /
+            // `add_named_roots` build the dotted key, so a nested ADT root
+            // reconstructs its value instead of being silently dropped.
+            RuntimeValue::Adt {
+                fields,
+                field_names,
+                ..
+            } => {
+                let index = field_names
+                    .as_ref()
+                    .and_then(|names| names.iter().position(|n| n == part))
+                    .or_else(|| part.parse::<usize>().ok())?;
+                fields.into_iter().nth(index)?
+            }
             _ => return None,
         };
     }

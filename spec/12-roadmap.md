@@ -97,7 +97,7 @@ design in `spec/design/differentiable_language.md`.
 |---|---|---|
 | **D0** | Spec lock — `spec/design/differentiable_language.md` | ✅ Complete |
 | **D1** | Control-flow AD (`if`, `match`, `while`, `for`, recursion). Depends on the IR-SelectOp-F1 and IR-MatchLowering-F1 §5 entries in `docs/gap_synthesis.md`. | Planned; static-scrutinee `match` slice shipped (chelis#520, `spec/06-transformations.md` §2.10.1) |
-| **D2** | ADT and record gradients (field-wise extension + higher-order). Depends on IR-FirstClassFn-F1. | Planned; single-ADT-argument field-wise slice shipped in the eval lane (chelis#520, `spec/06-transformations.md` §2.10.1) |
+| **D2** | ADT and record gradients (field-wise extension + higher-order). Depends on IR-FirstClassFn-F1. | Planned; field-wise ADT-gradient slice shipped in the eval lane, including a multi-argument ADT-alongside-tensor payload (`grad(model_forward, wrt=params)(x, params)`) (chelis#520, `spec/06-transformations.md` §2.10.1). Compiled-lane ADT-param export and higher-order ADT gradients remain roadmap work |
 | **D3** | Effect-aware AD (state, raises, capability, stochastic sample-effect dispatch for reparam / REINFORCE / pathwise). | Planned |
 | **D4** | Implicit differentiation (`fix`, `argmin`, `solve` markers + IFT-derived gradients). | Planned |
 | **D5** | Differentiability typing (`Differentiable` / `PartiallyDifferentiable` / `NonDifferentiable` type-level marker, inference, property attachment). | Planned |
