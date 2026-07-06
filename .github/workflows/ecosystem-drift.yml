@@ -318,13 +318,14 @@ jobs:
           # overlay Dockerfile that `FROM`s the freshly built hello-chelis
           # image — see the `type: docker` steps. token_repos must cover every
           # repo the Dockerfile's `reef install --from-github` reads
-          # (coral/nautilus/octant/c-earchin/school) plus the octant release
+          # (chelis/coral/nautilus/octant/c-earchin/school) plus the octant release
           # tarball it downloads, plus hello-chelis itself.
           - repo: hello-chelis
             type: docker
             reef_deps: ""
             token_repos: |-
               hello-chelis
+              chelis
               coral
               nautilus
               octant
