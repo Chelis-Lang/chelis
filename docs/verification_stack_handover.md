@@ -1,8 +1,9 @@
 # Verification Stack: Handover State
 
 **Date:** 2026-07-06
-**Chelis version:** 0.14.0
-**Beacon version:** 0.1.6 (accepts WireDag schema v1 and v2)
+**Chelis version:** 0.14.0 (`origin/main` at `3a7e1932` after #622 for this handover polish)
+**Beacon version:** 0.1.6 was the last verified cross-repo witness; this
+polish did not requalify Beacon.
 
 > **Update 2026-07:** A three-wave compiler/prover **Soundness hardening** campaign closed since
 > this doc was written — see §9. It resolved #496 and #463 (both dropped from §8 below).
@@ -25,9 +26,9 @@ honest composite verdict. The engines:
 | **Z3** | `GoalShape::Smt` (polynomial NRA fallback) | Exact | Live, try-until-discharge after cvc5 |
 | **Clarabel** | `GoalShape::Smt` (univariate poly ≥ 0 on interval) | CertificateBearing | Registered, no standalone integration test |
 | **Carcara** | Post-discharge audit of cvc5 Alethe proofs | Audit evidence (not a verdict) | Live, 15 tests (requires `--features carcara`) |
-| **Beacon** | `GoalShape::BoxRange` (interval bounds) | SoundOverApproximation | Live via subprocess shim, 4 e2e tests |
+| **Beacon** | `GoalShape::BoxRange` (interval bounds) | SoundOverApproximation | Live via subprocess shim; ignored live e2e gate |
 
-### What actually discharges (measured corpus, 12 properties):
+### What actually discharged in the last measured corpus (12 properties):
 
 - **Proved (25%):** Polynomial structural claims — Shoals put-call parity,
   call ≤ spot, delta ∈ [0,1]. Discharged by cvc5 over the reals, with fuzz-
@@ -175,10 +176,10 @@ CHELIS_BEACON_BIN=/path/to/chelis-beacon cargo test -p chelis-prove --test beaco
 
 (#496 and #463 were **resolved** in the 2026-07 soundness campaign — see §9 — and removed from this list.)
 
-| Issue | Title | Blocks |
+| Issue | Current state | Blocks |
 |-------|-------|--------|
 | #506 | WI-3 scalar-returning entry has no WireDag root (reopened) | Shoals scalar pricer dispatch (Option B: tensor entry is the seam) |
-| #507 | Deep (.dp) properties now have direct Tier-B lowering for the supported scalar SMT subset; broader property shapes remain follow-up | Deep-format proofs |
+| #507 | Deep (.dp) properties have direct Tier-B lowering only for the supported scalar SMT subset; broader property shapes remain follow-up | Deep-format proofs |
 | #434 | Transcendental-discharge capability (Black-Scholes positivity via log/exp/sqrt) — rescoped; internal-message leak fixed + honest-Unsupported locked (#564); exp/log/sqrt envelope is the remaining reach | Direct transcendentals in goals |
 | #423 | eval does not resolve package imports for standalone files | eval/prove parity |
 
