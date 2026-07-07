@@ -518,7 +518,7 @@ use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_types::{BUILTIN_NAMES, CheckedProgram, LinearityInfo, types::Prim};
 
-use crate::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
+use crate::dag::{Bound, Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
 use crate::grad::grad_dag_checked;
 use crate::tier2;
 use crate::vmap;
@@ -7702,8 +7702,11 @@ impl LowerCtx {
             }
             "pad" if !args.is_empty() => {
                 let x = self.lower_expr_node(&args[0], "pad input");
+                // chelis#616: `inputs` starts as `[tensor]`; node-valued bounds
+                // append rank-0 int scalars and are referenced by slot index.
+                let mut inputs = vec![x];
                 let padding = if args.len() >= 2 {
-                    self.extract_pair_list(&args[1]).unwrap_or_default()
+                    self.lower_pair_bounds(&args[1], &mut inputs)
                 } else {
                     vec![]
                 };
@@ -7714,35 +7717,37 @@ impl LowerCtx {
                 };
                 self.dag.add_node(
                     RiscOp::Pad { padding, fill },
-                    vec![x],
+                    inputs,
                     ty.clone(),
                     self.current_span_id.clone(),
                 )
             }
             "shrink" if !args.is_empty() => {
                 let x = self.lower_expr_node(&args[0], "shrink input");
+                let mut inputs = vec![x];
                 let bounds = if args.len() >= 2 {
-                    self.extract_pair_list(&args[1]).unwrap_or_default()
+                    self.lower_pair_bounds(&args[1], &mut inputs)
                 } else {
                     vec![]
                 };
                 self.dag.add_node(
                     RiscOp::Shrink { bounds },
-                    vec![x],
+                    inputs,
                     ty.clone(),
                     self.current_span_id.clone(),
                 )
             }
             "stride" if !args.is_empty() => {
                 let x = self.lower_expr_node(&args[0], "stride input");
+                let mut inputs = vec![x];
                 let strides = if args.len() >= 2 {
-                    self.extract_usize_list(&args[1..])
+                    self.lower_stride_bounds(&args[1..], &mut inputs)
                 } else {
                     vec![]
                 };
                 self.dag.add_node(
                     RiscOp::Stride { strides },
-                    vec![x],
+                    inputs,
                     ty.clone(),
                     self.current_span_id.clone(),
                 )
@@ -8085,8 +8090,8 @@ impl LowerCtx {
             offset += extent;
             // `(0, 0)` everywhere except the concat axis, so symbolic
             // non-concat dims need no concrete extent.
-            let mut padding = vec![(0usize, 0usize); rank];
-            padding[axis] = (before, after);
+            let mut padding = vec![(Bound::Lit(0), Bound::Lit(0)); rank];
+            padding[axis] = (Bound::Lit(before), Bound::Lit(after));
             let padded = self.dag.add_node(
                 RiscOp::Pad { padding, fill: 0.0 },
                 vec![*node],
@@ -8258,7 +8263,7 @@ impl LowerCtx {
         };
         let sliced = self.dag.add_node(
             RiscOp::Shrink {
-                bounds: vec![(index, index + 1)],
+                bounds: vec![(Bound::Lit(index), Bound::Lit(index + 1))],
             },
             vec![source_node],
             unit_ty,
@@ -8302,7 +8307,7 @@ impl LowerCtx {
             );
             let padded = self.dag.add_node(
                 RiscOp::Pad {
-                    padding: vec![(index, out_len - index - 1)],
+                    padding: vec![(Bound::Lit(index), Bound::Lit(out_len - index - 1))],
                     fill: 0.0,
                 },
                 vec![unit],
@@ -9291,6 +9296,71 @@ impl LowerCtx {
             }
         }
         cons_chain_pair_list(expr)
+    }
+
+    /// chelis#616: lower a movement pair-list argument (`[[start, end], ...]`)
+    /// into node-valued [`Bound`]s. A compile-time-int element (bare, `(lit
+    /// ...)`, or `cast`-wrapped) becomes `Bound::Lit`; a runtime element (a
+    /// `shape()`-derived `cast(add(...))` expression) is lowered to a rank-0
+    /// integer node appended to `inputs` and referenced as `Bound::Node(slot)`.
+    /// `inputs` starts as `[tensor]`. The Surf-desugared Cons-chain form carries
+    /// runtime bounds; the hand-written `(list ...)` IR form stays literal-only
+    /// (via [`Self::extract_pair_list`]).
+    fn lower_pair_bounds(&mut self, expr: &Expr, inputs: &mut Vec<NodeId>) -> Vec<(Bound, Bound)> {
+        if let Some(pair_exprs) = collect_cons_chain(expr) {
+            let mut elems: Vec<(&Expr, &Expr)> = Vec::with_capacity(pair_exprs.len());
+            let mut well_formed = true;
+            for pe in pair_exprs {
+                match collect_cons_chain(pe) {
+                    Some(two) if two.len() == 2 => elems.push((two[0], two[1])),
+                    _ => {
+                        well_formed = false;
+                        break;
+                    }
+                }
+            }
+            if well_formed {
+                let mut bounds = Vec::with_capacity(elems.len());
+                for (s, e) in elems {
+                    let start = self.lower_one_bound(s, inputs);
+                    let end = self.lower_one_bound(e, inputs);
+                    bounds.push((start, end));
+                }
+                return bounds;
+            }
+        }
+        // Hand-written `(list ...)` IR form: literal-only.
+        self.extract_pair_list(expr)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(s, e)| (Bound::Lit(s), Bound::Lit(e)))
+            .collect()
+    }
+
+    /// chelis#616: lower a single movement-bound element to a [`Bound`]. A
+    /// compile-time int becomes `Bound::Lit`; a runtime expression becomes a
+    /// `Bound::Node` referencing a freshly-lowered rank-0 integer node appended
+    /// to `inputs`.
+    fn lower_one_bound(&mut self, expr: &Expr, inputs: &mut Vec<NodeId>) -> Bound {
+        if let Some(n) = extract_int_for_dim(expr).and_then(|v| usize::try_from(v).ok()) {
+            return Bound::Lit(n);
+        }
+        let node = self.lower_expr_node(expr, "movement bound");
+        let slot = inputs.len();
+        inputs.push(node);
+        Bound::Node(slot)
+    }
+
+    /// chelis#616: lower a `stride` step list into node-valued [`Bound`]s (one
+    /// per axis). Literal steps become `Bound::Lit`, runtime steps become
+    /// `Bound::Node`. Mirrors [`Self::extract_usize_list`] but preserves a
+    /// runtime step instead of silently dropping it.
+    fn lower_stride_bounds(&mut self, exprs: &[Expr], inputs: &mut Vec<NodeId>) -> Vec<Bound> {
+        let mut out = Vec::with_capacity(exprs.len());
+        for e in exprs {
+            out.push(self.lower_one_bound(e, inputs));
+        }
+        out
     }
 
     /// C4: Enforce float-only for transcendental ops (exp, log, sin, sqrt).
@@ -11816,7 +11886,7 @@ mod tests {
             .expect("a Shrink node must be present");
         assert_eq!(
             bounds,
-            vec![(0, 2)],
+            vec![(Bound::Lit(0), Bound::Lit(2))],
             "cast-wrapped cons-chain bounds must extract to (0, 2), not an empty list",
         );
         assert!(verify::verify(&dag).is_empty());
@@ -11852,7 +11922,7 @@ mod tests {
             .expect("a Shrink node must be present");
         assert_eq!(
             bounds,
-            vec![(0, 2)],
+            vec![(Bound::Lit(0), Bound::Lit(2))],
             "plain cons-chain bounds must still extract to (0, 2)",
         );
     }

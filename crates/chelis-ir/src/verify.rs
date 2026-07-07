@@ -1,6 +1,6 @@
 //! DAG structural verification.
 
-use crate::dag::{Dag, DimInfo, RiscOp};
+use crate::dag::{Bound, Dag, DimInfo, RiscOp};
 #[allow(unused_imports)]
 use chelis_types::types::Prim;
 
@@ -310,14 +310,23 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             | RiscOp::Permute { .. }
             | RiscOp::Expand { .. }
             | RiscOp::OneHot { .. }
-            | RiscOp::Pad { .. }
-            | RiscOp::Shrink { .. }
-            | RiscOp::Stride { .. }
             | RiscOp::Shape { .. }
             | RiscOp::Cast { .. } => {
                 if arity != 1 {
                     errors.push(format!(
                         "unary op at node {} has {} inputs (expected 1)",
+                        node.id.0, arity
+                    ));
+                }
+            }
+            // chelis#616: movement ops carry a tensor at `inputs[0]` plus zero or
+            // more rank-0 integer bound scalars at `inputs[1..]` (node-valued
+            // runtime bounds). Their arity + bound-source validity is checked in
+            // the dedicated arms below.
+            RiscOp::Pad { .. } | RiscOp::Shrink { .. } | RiscOp::Stride { .. } => {
+                if arity < 1 {
+                    errors.push(format!(
+                        "movement op at node {} has {} inputs (expected at least 1)",
                         node.id.0, arity
                     ));
                 }
@@ -793,7 +802,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                 }
             }
             RiscOp::Pad { padding, .. } => {
-                if arity == 1 {
+                if !node.inputs.is_empty() {
                     let input = dag.get(node.inputs[0]).unwrap();
                     let input_rank = input.output_type.dims.len();
                     if padding.len() != input_rank {
@@ -810,6 +819,31 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                             node.id.0, node.output_type.precision, input.output_type.precision
                         ));
                     }
+                    // chelis#616: validate node-valued bound sources; `ToEnd` is
+                    // shrink-only.
+                    for (axis, (before, after)) in padding.iter().enumerate() {
+                        check_bound_source(
+                            dag,
+                            node,
+                            before,
+                            &format!("pad at node {} axis {} before", node.id.0, axis),
+                            &mut errors,
+                        );
+                        check_bound_source(
+                            dag,
+                            node,
+                            after,
+                            &format!("pad at node {} axis {} after", node.id.0, axis),
+                            &mut errors,
+                        );
+                        if matches!(before, Bound::ToEnd) || matches!(after, Bound::ToEnd) {
+                            errors.push(format!(
+                                "pad at node {}: axis {} uses the ToEnd sentinel, which is \
+                                 only valid as a shrink end",
+                                node.id.0, axis
+                            ));
+                        }
+                    }
                     if node.output_type.dims.len() != input_rank {
                         errors.push(format!(
                             "pad at node {}: output rank {} != input rank {}",
@@ -823,7 +857,10 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                             .zip(input.output_type.dims.iter())
                             .enumerate()
                         {
-                            if let Some(in_size) = dim_known_size(in_dim) {
+                            // Static size check only for compile-time bounds.
+                            if let (Some(before), Some(after)) = (before.as_lit(), after.as_lit())
+                                && let Some(in_size) = dim_known_size(in_dim)
+                            {
                                 let expected = in_size + before + after;
                                 if let Some(out_size) = dim_known_size(&node.output_type.dims[axis])
                                     && out_size != expected
@@ -839,7 +876,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                 }
             }
             RiscOp::Shrink { bounds } => {
-                if arity == 1 {
+                if !node.inputs.is_empty() {
                     let input = dag.get(node.inputs[0]).unwrap();
                     let input_rank = input.output_type.dims.len();
                     if bounds.len() != input_rank {
@@ -856,6 +893,31 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                             node.id.0, node.output_type.precision, input.output_type.precision
                         ));
                     }
+                    // chelis#616: validate node-valued bound sources; a `ToEnd`
+                    // start is malformed (the sentinel is an `end`-only marker).
+                    for (axis, (start, end)) in bounds.iter().enumerate() {
+                        check_bound_source(
+                            dag,
+                            node,
+                            start,
+                            &format!("shrink at node {} axis {} start", node.id.0, axis),
+                            &mut errors,
+                        );
+                        check_bound_source(
+                            dag,
+                            node,
+                            end,
+                            &format!("shrink at node {} axis {} end", node.id.0, axis),
+                            &mut errors,
+                        );
+                        if matches!(start, Bound::ToEnd) {
+                            errors.push(format!(
+                                "shrink at node {}: axis {} start uses the ToEnd sentinel, \
+                                 which is only valid as an end",
+                                node.id.0, axis
+                            ));
+                        }
+                    }
                     if node.output_type.dims.len() != input_rank {
                         errors.push(format!(
                             "shrink at node {}: output rank {} != input rank {}",
@@ -867,6 +929,12 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                         for (axis, ((start, end), in_dim)) in
                             bounds.iter().zip(input.output_type.dims.iter()).enumerate()
                         {
+                            // Static checks only for compile-time `(Lit, Lit)`
+                            // bounds; `Node`/`ToEnd` are validated at runtime /
+                            // bind time.
+                            let (Some(start), Some(end)) = (start.as_lit(), end.as_lit()) else {
+                                continue;
+                            };
                             if start > end {
                                 errors.push(format!(
                                     "shrink at node {}: axis {} has invalid bounds ({}, {})",
@@ -875,7 +943,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                                 continue;
                             }
                             if let Some(in_size) = dim_known_size(in_dim)
-                                && *end > in_size
+                                && end > in_size
                             {
                                 errors.push(format!(
                                     "shrink at node {}: axis {} end {} > input size {}",
@@ -896,7 +964,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                 }
             }
             RiscOp::Stride { strides } => {
-                if arity == 1 {
+                if !node.inputs.is_empty() {
                     let input = dag.get(node.inputs[0]).unwrap();
                     let input_rank = input.output_type.dims.len();
                     if strides.len() != input_rank {
@@ -913,6 +981,24 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                             node.id.0, node.output_type.precision, input.output_type.precision
                         ));
                     }
+                    // chelis#616: validate node-valued step sources; `ToEnd` is
+                    // never a valid stride step.
+                    for (axis, step) in strides.iter().enumerate() {
+                        check_bound_source(
+                            dag,
+                            node,
+                            step,
+                            &format!("stride at node {} axis {} step", node.id.0, axis),
+                            &mut errors,
+                        );
+                        if matches!(step, Bound::ToEnd) {
+                            errors.push(format!(
+                                "stride at node {}: axis {} step uses the ToEnd sentinel, \
+                                 which is not a valid stride",
+                                node.id.0, axis
+                            ));
+                        }
+                    }
                     if node.output_type.dims.len() != input_rank {
                         errors.push(format!(
                             "stride at node {}: output rank {} != input rank {}",
@@ -926,7 +1012,10 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                             .zip(input.output_type.dims.iter())
                             .enumerate()
                         {
-                            if *step == 0 {
+                            let Some(step) = step.as_lit() else {
+                                continue;
+                            };
+                            if step == 0 {
                                 errors.push(format!(
                                     "stride at node {}: axis {} has invalid step 0",
                                     node.id.0, axis
@@ -934,7 +1023,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                                 continue;
                             }
                             if let Some(in_size) = dim_known_size(in_dim) {
-                                let expected = in_size.div_ceil(*step);
+                                let expected = in_size.div_ceil(step);
                                 if let Some(out_size) = dim_known_size(&node.output_type.dims[axis])
                                     && out_size != expected
                                 {
@@ -1143,6 +1232,47 @@ fn dim_known_size(dim: &DimInfo) -> Option<usize> {
         DimInfo::Lit(n) => Some(*n),
         DimInfo::Named(_, Some(n)) => Some(*n),
         DimInfo::Named(_, None) => None,
+    }
+}
+
+/// chelis#616: validate a single movement `Bound` against the owning node. A
+/// `Bound::Node(i)` must reference a real bound-scalar input slot
+/// (`1 <= i < inputs.len()`) that is a rank-0 integer node. Pushes an error for
+/// each violation. `Lit` / `ToEnd` carry no input reference and are accepted
+/// here (`ToEnd`'s position legality is checked by the caller).
+fn check_bound_source(
+    dag: &Dag,
+    node: &crate::dag::DagNode,
+    bound: &Bound,
+    label: &str,
+    errors: &mut Vec<String>,
+) {
+    let Bound::Node(i) = bound else {
+        return;
+    };
+    let i = *i;
+    if i == 0 || i >= node.inputs.len() {
+        errors.push(format!(
+            "{label}: node-valued bound references invalid input slot {i} \
+             (inputs len {})",
+            node.inputs.len()
+        ));
+        return;
+    }
+    let src = dag.get(node.inputs[i]).unwrap();
+    if !src.output_type.dims.is_empty() {
+        errors.push(format!(
+            "{label}: node-valued bound source (input slot {i}) must be a rank-0 \
+             scalar, got rank {}",
+            src.output_type.dims.len()
+        ));
+    }
+    if !src.output_type.precision.is_integer() {
+        errors.push(format!(
+            "{label}: node-valued bound source (input slot {i}) must be an integer, \
+             got `{}`",
+            src.output_type.precision.name()
+        ));
     }
 }
 
@@ -1780,7 +1910,7 @@ mod tests {
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty, None);
         dag.add_node(
             RiscOp::Pad {
-                padding: vec![(1, 1)],
+                padding: vec![(Bound::Lit(1), Bound::Lit(1))],
                 fill: 0.0,
             },
             vec![x],
@@ -1804,7 +1934,7 @@ mod tests {
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty, None);
         dag.add_node(
             RiscOp::Shrink {
-                bounds: vec![(6, 2)],
+                bounds: vec![(Bound::Lit(6), Bound::Lit(2))],
             },
             vec![x],
             TensorType {
@@ -1826,7 +1956,9 @@ mod tests {
         };
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty, None);
         dag.add_node(
-            RiscOp::Stride { strides: vec![0] },
+            RiscOp::Stride {
+                strides: vec![Bound::Lit(0)],
+            },
             vec![x],
             TensorType {
                 dims: vec![DimInfo::Lit(8)],

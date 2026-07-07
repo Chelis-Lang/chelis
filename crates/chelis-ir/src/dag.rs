@@ -52,6 +52,59 @@ impl TensorType {
 /// matters; the HIP shrink kernel, like C, reads only the per-axis `start`.
 pub const SHRINK_TO_END: usize = usize::MAX;
 
+/// A single movement-op (`Pad` / `Shrink` / `Stride`) bound value.
+///
+/// chelis#616: movement bounds were compile-time `usize` only, so a runtime
+/// (`shape()`-derived) `shrink`/`stride` bound was dropped to empty at lowering
+/// and the windowed axis degraded to a `Named("*")` wildcard. A `Bound` can now
+/// be a compile-time literal, the full-axis sentinel, or a *runtime* value read
+/// from a rank-0 integer node.
+///
+/// `Node(i)` is an **absolute** index into the owning node's `inputs`, where
+/// `inputs[0]` is always the tensor operand and `inputs[1..]` are rank-0 integer
+/// bound scalars (a [`RiscOp::Shape`] read or an integer-arithmetic chain over
+/// one). Invariant (checked by `verify`): for `Bound::Node(i)`,
+/// `1 <= i < inputs.len()` and `inputs[i]` is a rank-0 integer node. Keeping the
+/// index absolute means `Node(i)` reads exactly like `inputs[i]` at every
+/// dispatch site with no offset arithmetic.
+///
+/// `ToEnd` promotes the [`SHRINK_TO_END`] sentinel to an explicit variant; it is
+/// only legal as a `Shrink` `end` (verify rejects it elsewhere). The resolved
+/// runtime extent it stands for is still [`SHRINK_TO_END`] after
+/// `bind_symbolic_dims` / in the backend loop bookkeeping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Bound {
+    /// A compile-time-constant bound.
+    Lit(usize),
+    /// The runtime end of a (symbolic) axis; `Shrink` `end` only.
+    ToEnd,
+    /// A runtime bound read from `inputs[i]` (a rank-0 integer node).
+    Node(usize),
+}
+
+impl Bound {
+    /// The compile-time value, if this bound is a literal.
+    pub fn as_lit(&self) -> Option<usize> {
+        match self {
+            Bound::Lit(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// Whether this bound is only known at runtime (`Node` or `ToEnd`).
+    pub fn is_runtime(&self) -> bool {
+        matches!(self, Bound::Node(_) | Bound::ToEnd)
+    }
+
+    /// The `inputs` slot index if this bound is node-valued.
+    pub fn node_input(&self) -> Option<usize> {
+        match self {
+            Bound::Node(i) => Some(*i),
+            _ => None,
+        }
+    }
+}
+
 /// Dimension descriptor for a tensor axis.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DimInfo {
@@ -704,14 +757,14 @@ pub enum RiscOp {
         vocab: usize,
     },
     Pad {
-        padding: Vec<(usize, usize)>,
+        padding: Vec<(Bound, Bound)>,
         fill: f64,
     },
     Shrink {
-        bounds: Vec<(usize, usize)>,
+        bounds: Vec<(Bound, Bound)>,
     },
     Stride {
-        strides: Vec<usize>,
+        strides: Vec<Bound>,
     },
 
     // --- Shape query ---
@@ -1680,12 +1733,27 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
             let input_axis = if axis < *reduce_axis { axis } else { axis + 1 };
             shape_source_for_axis(dag, operand, input_axis)
         }
-        RiscOp::Reshape { .. }
-        | RiscOp::Permute { .. }
-        | RiscOp::Pad { .. }
-        | RiscOp::Shrink { .. }
-        | RiscOp::Stride { .. }
-        | RiscOp::Store { .. } => shape_source_for_axis(dag, *node.inputs.first()?, axis),
+        RiscOp::Reshape { .. } | RiscOp::Permute { .. } | RiscOp::Store { .. } => {
+            shape_source_for_axis(dag, *node.inputs.first()?, axis)
+        }
+        // chelis#616 (soundness): a node-valued (runtime) movement bound produces
+        // a FRESH runtime extent that is not the input axis's runtime dim, so it
+        // must not be traced to the input's declaring `Load` (that would bind a
+        // symbolic movement-output dim to the wrong input extent). `Lit` / `ToEnd`
+        // axes keep the pre-existing pass-through: `ToEnd` is a full-axis identity
+        // (same runtime dim as the input), `Lit` is concrete/non-symbolic.
+        RiscOp::Shrink { bounds } => match bounds.get(axis) {
+            Some((s, e)) if s.node_input().is_some() || e.node_input().is_some() => None,
+            _ => shape_source_for_axis(dag, *node.inputs.first()?, axis),
+        },
+        RiscOp::Stride { strides } => match strides.get(axis) {
+            Some(b) if b.node_input().is_some() => None,
+            _ => shape_source_for_axis(dag, *node.inputs.first()?, axis),
+        },
+        RiscOp::Pad { padding, .. } => match padding.get(axis) {
+            Some((b, a)) if b.node_input().is_some() || a.node_input().is_some() => None,
+            _ => shape_source_for_axis(dag, *node.inputs.first()?, axis),
+        },
         RiscOp::FusedElem { .. } => node
             .inputs
             .iter()
@@ -1769,23 +1837,31 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
             // chelis#513 the Stride adjoint's trim and the ProdReduce
             // adjoint's per-element slices), so the resolved `end` is exactly
             // `start` plus the output dim's size.
-            RiscOp::Shrink { bounds } if bounds.iter().any(|(_, end)| *end == SHRINK_TO_END) => {
+            RiscOp::Shrink { bounds } if bounds.iter().any(|(_, end)| matches!(end, Bound::ToEnd)) => {
                 let resolved = bounds
                     .iter()
                     .zip(output_type.dims.iter())
                     .map(|((start, end), dim)| {
-                        if *end == SHRINK_TO_END {
+                        if matches!(end, Bound::ToEnd) {
+                            // The sentinel is always emitted as `(Lit(0), ToEnd)`;
+                            // a non-literal start is malformed.
+                            let start_lit = start.as_lit().ok_or_else(|| {
+                                "shrink-to-end sentinel with non-literal start".to_string()
+                            })?;
                             match dim {
-                                DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => {
-                                    Ok((*start, *start + *size))
-                                }
+                                DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => Ok((
+                                    Bound::Lit(start_lit),
+                                    Bound::Lit(start_lit + *size),
+                                )),
                                 DimInfo::Named(name, None) => Err(format!(
                                     "shrink-to-end sentinel left unbound for symbolic \
                                      dimension `{name}`"
                                 )),
                             }
                         } else {
-                            Ok((*start, *end))
+                            // `Lit` passes through; `Node` (runtime) bounds are
+                            // resolved by the evaluator from `inputs`, not here.
+                            Ok((start.clone(), end.clone()))
                         }
                     })
                     .collect::<Result<Vec<_>, String>>()?;
@@ -2136,7 +2212,10 @@ mod tests {
         // `(0, SHRINK_TO_END)` full-axis identity on axis 1.
         let shrunk = dag.add_node(
             RiscOp::Shrink {
-                bounds: vec![(1, 2), (0, SHRINK_TO_END)],
+                bounds: vec![
+                    (Bound::Lit(1), Bound::Lit(2)),
+                    (Bound::Lit(0), Bound::ToEnd),
+                ],
             },
             vec![g],
             TensorType {
@@ -2155,7 +2234,7 @@ mod tests {
         assert_eq!(
             node.op,
             RiscOp::Shrink {
-                bounds: vec![(1, 2), (0, 3)],
+                bounds: vec![(Bound::Lit(1), Bound::Lit(2)), (Bound::Lit(0), Bound::Lit(3))],
             },
             "SHRINK_TO_END must resolve to (start, start + bound extent)",
         );
@@ -2178,7 +2257,7 @@ mod tests {
         );
         let shrunk = dag.add_node(
             RiscOp::Shrink {
-                bounds: vec![(0, SHRINK_TO_END)],
+                bounds: vec![(Bound::Lit(0), Bound::ToEnd)],
             },
             vec![g],
             TensorType {
@@ -2524,13 +2603,15 @@ mod tests {
             },
             RiscOp::OneHot { vocab: 8 },
             RiscOp::Pad {
-                padding: vec![(0, 0)],
+                padding: vec![(Bound::Lit(0), Bound::Lit(0))],
                 fill: 0.0,
             },
             RiscOp::Shrink {
-                bounds: vec![(0, 1)],
+                bounds: vec![(Bound::Lit(0), Bound::Lit(1))],
             },
-            RiscOp::Stride { strides: vec![1] },
+            RiscOp::Stride {
+                strides: vec![Bound::Lit(1)],
+            },
             RiscOp::Shape { axis: 0 },
             RiscOp::Const { value: 1.0 },
             RiscOp::ConstTensor {

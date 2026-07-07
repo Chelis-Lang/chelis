@@ -1,4 +1,4 @@
-use crate::dag::{Dag, DimInfo, RiscOp, TensorType};
+use crate::dag::{Bound, Dag, DimInfo, RiscOp, TensorType};
 
 pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
     let mut out = Dag::new();
@@ -33,7 +33,7 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
                 size: size.clone(),
             },
             RiscOp::Pad { padding, fill } => RiscOp::Pad {
-                padding: std::iter::once((0, 0))
+                padding: std::iter::once((Bound::Lit(0), Bound::Lit(0)))
                     .chain(padding.iter().copied())
                     .collect(),
                 fill: *fill,
@@ -46,13 +46,15 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
                     );
                 };
                 RiscOp::Shrink {
-                    bounds: std::iter::once((0, batch))
+                    bounds: std::iter::once((Bound::Lit(0), Bound::Lit(batch)))
                         .chain(bounds.iter().copied())
                         .collect(),
                 }
             }
             RiscOp::Stride { strides } => RiscOp::Stride {
-                strides: std::iter::once(1).chain(strides.iter().copied()).collect(),
+                strides: std::iter::once(Bound::Lit(1))
+                    .chain(strides.iter().copied())
+                    .collect(),
             },
             RiscOp::Load { name } => RiscOp::Load { name: name.clone() },
             other => other.clone(),

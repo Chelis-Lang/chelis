@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::fmt;
 
-use crate::dag::{Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
+use crate::dag::{Bound, Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
 use crate::tier2;
 use chelis_types::types::Prim;
 
@@ -983,14 +983,14 @@ fn compute_adjoints(
             // hard error above -- no silent guess.
             let mut slices: Vec<NodeId> = Vec::with_capacity(axis_size);
             for i in 0..axis_size {
-                let bounds: Vec<(usize, usize)> = (0..rank)
+                let bounds: Vec<(Bound, Bound)> = (0..rank)
                     .map(|d| {
                         if d == *axis {
-                            (i, i + 1)
+                            (Bound::Lit(i), Bound::Lit(i + 1))
                         } else {
                             match &input_ty.dims[d] {
-                                DimInfo::Named(_, None) => (0, crate::dag::SHRINK_TO_END),
-                                dim => (0, dim_size(dim)),
+                                DimInfo::Named(_, None) => (Bound::Lit(0), Bound::ToEnd),
+                                dim => (Bound::Lit(0), Bound::Lit(dim_size(dim))),
                             }
                         }
                     })
@@ -1037,12 +1037,12 @@ fn compute_adjoints(
                     slice_ty.clone(),
                     None,
                 );
-                let padding: Vec<(usize, usize)> = (0..rank)
+                let padding: Vec<(Bound, Bound)> = (0..rank)
                     .map(|d| {
                         if d == *axis {
-                            (i, axis_size - i - 1)
+                            (Bound::Lit(i), Bound::Lit(axis_size - i - 1))
                         } else {
-                            (0, 0)
+                            (Bound::Lit(0), Bound::Lit(0))
                         }
                     })
                     .collect();
@@ -1233,14 +1233,24 @@ fn compute_adjoints(
             // axis's runtime extent before eval. A symbolic dim on an axis that
             // WAS padded would still need a concrete extent — that stays a
             // hard error via `dim_size` (no silent guess).
-            let bounds: Vec<(usize, usize)> = padding
+            let bounds: Vec<(Bound, Bound)> = padding
                 .iter()
                 .zip(input_ty.dims.iter())
                 .map(|((before, after), dim)| match dim {
-                    DimInfo::Named(_, None) if *before == 0 && *after == 0 => {
-                        (0, crate::dag::SHRINK_TO_END)
+                    DimInfo::Named(_, None)
+                        if before.as_lit() == Some(0) && after.as_lit() == Some(0) =>
+                    {
+                        (Bound::Lit(0), Bound::ToEnd)
                     }
-                    _ => (*before, *before + dim_size(dim)),
+                    // chelis#616 M1: the differentiable-concat Pad adjoint operates
+                    // on compile-time padding; a node-valued (runtime) forward pad
+                    // reaching here is M2 value-dependent territory.
+                    _ => {
+                        let before = before
+                            .as_lit()
+                            .expect("node-valued pad adjoint is chelis#616 M2 work");
+                        (Bound::Lit(before), Bound::Lit(before + dim_size(dim)))
+                    }
                 })
                 .collect();
             let dx = dag.add_node(RiscOp::Shrink { bounds }, vec![g], input_ty, None);
@@ -1259,19 +1269,29 @@ fn compute_adjoints(
             // than let the `dim_size(dim) - end` subtraction wrap. A symbolic
             // dim under a CONCRETE sub-range bound still needs the runtime
             // size for `after` and stays a hard error via `dim_size`.
-            let padding: Vec<(usize, usize)> = bounds
+            let padding: Vec<(Bound, Bound)> = bounds
                 .iter()
                 .zip(input_ty.dims.iter())
                 .map(|((start, end), dim)| {
-                    if *end == crate::dag::SHRINK_TO_END {
+                    if matches!(end, Bound::ToEnd) {
                         assert_eq!(
-                            *start, 0,
-                            "malformed SHRINK_TO_END sentinel in shrink adjoint: \
-                             nonzero start {start}"
+                            start.as_lit(),
+                            Some(0),
+                            "malformed ToEnd sentinel in shrink adjoint: nonzero start {start:?}"
                         );
-                        (0, 0)
+                        (Bound::Lit(0), Bound::Lit(0))
                     } else {
-                        (*start, dim_size(dim) - end)
+                        // chelis#616 M1: a node-valued (runtime) forward shrink
+                        // bound reaching here is M2 value-dependent territory; a
+                        // concrete sub-range on a symbolic axis stays a hard error
+                        // via `dim_size`.
+                        let start = start
+                            .as_lit()
+                            .expect("node-valued shrink adjoint is chelis#616 M2 work");
+                        let end = end
+                            .as_lit()
+                            .expect("node-valued shrink adjoint is chelis#616 M2 work");
+                        (Bound::Lit(start), Bound::Lit(dim_size(dim) - end))
                     }
                 })
                 .collect();
@@ -1333,7 +1353,13 @@ fn compute_adjoints(
             let mut cur = g;
             let mut cur_dims: Vec<DimInfo> = node.output_type.dims.clone();
 
-            for (axis, &step) in strides.iter().enumerate() {
+            for (axis, step) in strides.iter().enumerate() {
+                // chelis#616 M1: a runtime (node-valued) stride step is M2
+                // value-dependent territory; the structural adjoint operates on
+                // compile-time steps.
+                let step = step
+                    .as_lit()
+                    .expect("node-valued stride adjoint is chelis#616 M2 work");
                 if step <= 1 {
                     // Identity stride on this axis: m_a == n_a already.
                     continue;
@@ -1357,8 +1383,8 @@ fn compute_adjoints(
                 );
 
                 // pad the new minor axis with (0, step - 1).
-                let mut padding = vec![(0usize, 0usize); split_dims.len()];
-                padding[axis + 1] = (0, step - 1);
+                let mut padding = vec![(Bound::Lit(0), Bound::Lit(0)); split_dims.len()];
+                padding[axis + 1] = (Bound::Lit(0), Bound::Lit(step - 1));
                 let mut padded_dims = split_dims.clone();
                 padded_dims[axis + 1] = DimInfo::Lit(step);
                 let padded = dag.add_node(
@@ -1391,14 +1417,14 @@ fn compute_adjoints(
                 // (ceil), so this is a valid trim of the trailing
                 // overshoot from the final group. Symbolic bystander axes
                 // take the full-axis identity sentinel (chelis#513 gap 3).
-                let mut bounds: Vec<(usize, usize)> = merged_dims
+                let mut bounds: Vec<(Bound, Bound)> = merged_dims
                     .iter()
                     .map(|d| match d {
-                        DimInfo::Named(_, None) => (0usize, crate::dag::SHRINK_TO_END),
-                        dim => (0usize, dim_size(dim)),
+                        DimInfo::Named(_, None) => (Bound::Lit(0), Bound::ToEnd),
+                        dim => (Bound::Lit(0), Bound::Lit(dim_size(dim))),
                     })
                     .collect();
-                bounds[axis] = (0, n_a);
+                bounds[axis] = (Bound::Lit(0), Bound::Lit(n_a));
                 let mut trimmed_dims = merged_dims.clone();
                 trimmed_dims[axis] = DimInfo::Lit(n_a);
                 let trimmed = dag.add_node(
@@ -3178,7 +3204,7 @@ mod tests {
         );
         let padded = dag.add_node(
             RiscOp::Pad {
-                padding: vec![(1, 1)],
+                padding: vec![(Bound::Lit(1), Bound::Lit(1))],
                 fill: 0.0,
             },
             vec![x],
@@ -3230,7 +3256,7 @@ mod tests {
         );
         let shrunk = dag.add_node(
             RiscOp::Shrink {
-                bounds: vec![(1, 4)],
+                bounds: vec![(Bound::Lit(1), Bound::Lit(4))],
             },
             vec![x],
             vec3_ty.clone(),
@@ -3344,7 +3370,9 @@ mod tests {
             None,
         );
         let strided = dag.add_node(
-            RiscOp::Stride { strides: vec![2] },
+            RiscOp::Stride {
+                strides: vec![Bound::Lit(2)],
+            },
             vec![x],
             vec2_ty.clone(),
             None,
@@ -3962,7 +3990,7 @@ mod tests {
         );
         let strided = dag.add_node(
             RiscOp::Stride {
-                strides: vec![1, 2],
+                strides: vec![Bound::Lit(1), Bound::Lit(2)],
             },
             vec![x],
             sym_batch_ty(&[2]),
@@ -3975,8 +4003,8 @@ mod tests {
             matches!(
                 &node.op,
                 RiscOp::Shrink { bounds }
-                    if bounds.first() == Some(&(0, crate::dag::SHRINK_TO_END))
-                        && bounds.get(1) == Some(&(0, 4))
+                    if bounds.first() == Some(&(Bound::Lit(0), Bound::ToEnd))
+                        && bounds.get(1) == Some(&(Bound::Lit(0), Bound::Lit(4)))
             )
         });
         assert!(
@@ -4003,7 +4031,9 @@ mod tests {
             None,
         );
         let strided = dag.add_node(
-            RiscOp::Stride { strides: vec![2] },
+            RiscOp::Stride {
+                strides: vec![Bound::Lit(2)],
+            },
             vec![x],
             TensorType {
                 dims: vec![DimInfo::Named("m".into(), None)],
@@ -4063,7 +4093,7 @@ mod tests {
                 matches!(
                     &node.op,
                     RiscOp::Shrink { bounds }
-                        if bounds.first() == Some(&(0, crate::dag::SHRINK_TO_END))
+                        if bounds.first() == Some(&(Bound::Lit(0), Bound::ToEnd))
                 )
             })
             .count();
@@ -4108,7 +4138,7 @@ mod tests {
         );
         let shrunk = dag.add_node(
             RiscOp::Shrink {
-                bounds: vec![(0, crate::dag::SHRINK_TO_END), (1, 3)],
+                bounds: vec![(Bound::Lit(0), Bound::ToEnd), (Bound::Lit(1), Bound::Lit(3))],
             },
             vec![x],
             sym_batch_ty(&[2]),
@@ -4121,7 +4151,8 @@ mod tests {
             matches!(
                 &node.op,
                 RiscOp::Pad { padding, .. }
-                    if padding.first() == Some(&(0, 0)) && padding.get(1) == Some(&(1, 0))
+                    if padding.first() == Some(&(Bound::Lit(0), Bound::Lit(0)))
+                        && padding.get(1) == Some(&(Bound::Lit(1), Bound::Lit(0)))
             )
         });
         assert!(
@@ -4134,7 +4165,7 @@ mod tests {
     /// NEGATIVE PARITY: a sentinel with a nonzero start is a producing-pass
     /// bug and must fail loud, never wrap `dim_size - end`.
     #[test]
-    #[should_panic(expected = "malformed SHRINK_TO_END sentinel")]
+    #[should_panic(expected = "malformed ToEnd sentinel")]
     fn shrink_adjoint_malformed_sentinel_fails_loud() {
         let mut dag = Dag::new();
         let x = dag.add_node(
@@ -4148,7 +4179,7 @@ mod tests {
         );
         let shrunk = dag.add_node(
             RiscOp::Shrink {
-                bounds: vec![(1, crate::dag::SHRINK_TO_END)],
+                bounds: vec![(Bound::Lit(1), Bound::ToEnd)],
             },
             vec![x],
             TensorType {

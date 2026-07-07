@@ -17,7 +17,7 @@
 
 use chelis_types::types::Prim;
 
-use crate::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
+use crate::dag::{Bound, Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
 
 /// Canonical synthesized marker for Tier 2 decomposition sub-nodes when
 /// the parent op had no source span. Locked by spec/03-deep-syntax.md
@@ -1061,7 +1061,12 @@ pub fn lower_conv2d(
     let padded = add_synth(
         dag,
         RiscOp::Pad {
-            padding: vec![(0, 0), (0, 0), (padding, padding), (padding, padding)],
+            padding: vec![
+                (Bound::Lit(0), Bound::Lit(0)),
+                (Bound::Lit(0), Bound::Lit(0)),
+                (Bound::Lit(padding), Bound::Lit(padding)),
+                (Bound::Lit(padding), Bound::Lit(padding)),
+            ],
             fill: 0.0,
         },
         vec![input],
@@ -1171,10 +1176,16 @@ fn lower_conv2d_sample(
         dag,
         RiscOp::Shrink {
             bounds: vec![
-                (0, require_dim_extent(batch, "conv2d batch axis")),
-                (0, require_dim_extent(in_c, "conv2d input channel axis")),
-                (kh_idx, kh_idx + sample_h),
-                (kw_idx, kw_idx + sample_w),
+                (
+                    Bound::Lit(0),
+                    Bound::Lit(require_dim_extent(batch, "conv2d batch axis")),
+                ),
+                (
+                    Bound::Lit(0),
+                    Bound::Lit(require_dim_extent(in_c, "conv2d input channel axis")),
+                ),
+                (Bound::Lit(kh_idx), Bound::Lit(kh_idx + sample_h)),
+                (Bound::Lit(kw_idx), Bound::Lit(kw_idx + sample_w)),
             ],
         },
         vec![padded],
@@ -1194,7 +1205,12 @@ fn lower_conv2d_sample(
     add_synth(
         dag,
         RiscOp::Stride {
-            strides: vec![1, 1, stride, stride],
+            strides: vec![
+                Bound::Lit(1),
+                Bound::Lit(1),
+                Bound::Lit(stride),
+                Bound::Lit(stride),
+            ],
         },
         vec![sampled_window],
         sampled_ty,
@@ -1217,10 +1233,16 @@ fn lower_conv2d_kernel_slice(
         dag,
         RiscOp::Shrink {
             bounds: vec![
-                (0, require_dim_extent(out_c, "conv2d output channel axis")),
-                (0, require_dim_extent(in_c, "conv2d input channel axis")),
-                (kh_idx, kh_idx + 1),
-                (kw_idx, kw_idx + 1),
+                (
+                    Bound::Lit(0),
+                    Bound::Lit(require_dim_extent(out_c, "conv2d output channel axis")),
+                ),
+                (
+                    Bound::Lit(0),
+                    Bound::Lit(require_dim_extent(in_c, "conv2d input channel axis")),
+                ),
+                (Bound::Lit(kh_idx), Bound::Lit(kh_idx + 1)),
+                (Bound::Lit(kw_idx), Bound::Lit(kw_idx + 1)),
             ],
         },
         vec![kernel],
