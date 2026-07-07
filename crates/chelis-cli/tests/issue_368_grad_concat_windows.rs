@@ -433,15 +433,21 @@ out = grad(loss)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast
     // The boundary is the symbolic-dim machinery, not the concat collapse:
     // the failure must mention a symbolic dimension (the chelis#513 surface),
     // never the old rank-0 `index out of bounds` / `1 vs 0` collapse #368
-    // fixed. Both boundary wordings match the needle: the dag.rs
-    // symbol-declaration ICE ("symbolic dim `m` ...") and the gap-3 stride
-    // adjoint fail-closed guard ("... got symbolic dimension `*`
-    // (chelis#513: ...)"), which is where the pipeline stops now that the
-    // structural adjoint slice landed.
+    // fixed. The needle matches every valid boundary wording as the residual
+    // shrinks: the dag.rs symbol-declaration ICE ("symbolic dim `m` ..."), the
+    // gap-3 stride adjoint fail-closed guard ("... got symbolic dimension `*`"),
+    // and -- since the chelis#616 node-valued movement bounds landed -- the
+    // window-count bound arithmetic reaching the gradient path
+    // ("floor_div is non-differentiable"). The last is the current boundary:
+    // the runtime `shrink`/`stride` bounds now lower to real node-valued bounds
+    // (no more empty-bounds wildcard), so the pipeline progresses PAST the old
+    // stride-adjoint guard and stops at the non-differentiable `floor_div` in
+    // the window-count chain, which chelis#616 M2 must exclude from
+    // differentiation (bounds are index math, not data).
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("symbolic dim"),
-        "residual failure must be the symbolic-dim-machinery boundary (chelis#513), \
+        stderr.contains("symbolic dim") || stderr.contains("floor_div is non-differentiable"),
+        "residual failure must be the runtime-symbolic-window boundary (chelis#513/#616), \
          not the #368 rank-0 collapse; stderr={stderr}",
     );
 }
