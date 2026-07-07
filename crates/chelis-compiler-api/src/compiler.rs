@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use chelis_backend_c::CodegenResult;
 use chelis_backend_hip::HipCodegenResult;
 use chelis_deep::Expr as DeepExpr;
-use chelis_ir::dag::{Dag, DimInfo, FusedInput, FusedStepOp, NodeId, RiscOp, TensorType};
+use chelis_ir::dag::{Bound, Dag, DimInfo, FusedInput, FusedStepOp, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{self, TensorValue as IrTensorValue};
 use chelis_ir::lower::top_level_lowering_map;
 use chelis_surf::ast::{
@@ -31,7 +31,8 @@ use crate::schema::{
     WireDagSchemaError, WireDeepAtom, WireDeepExpr, WireDeepExprKind, WireDimExpr, WireDimInfo,
     WireFusedInput, WireFusedStep, WireFusedStepOp, WireImportKind, WireLetBinding, WireLetPattern,
     WireLiteral, WireMatchArm, WireMetaEntry, WireParam, WirePattern, WirePropertyOption,
-    WireRecordExprField, WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireSurfDecl,
+    WireBound, WireRecordExprField, WireRecordPatternField, WireRecordTypeField, WireRiscOp,
+    WireSurfDecl,
     WireSurfExpr, WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp, WireVariant,
     WireVariantFields,
 };
@@ -2406,6 +2407,11 @@ fn reject_host_only_builtins(
     Ok(())
 }
 
+/// chelis#616: whether a movement `(start, end)` bound pair is node-valued.
+fn pair_has_node_bound(pair: &(Bound, Bound)) -> bool {
+    pair.0.node_input().is_some() || pair.1.node_input().is_some()
+}
+
 fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
     let sparse_index_nodes: HashSet<NodeId> = dag
         .nodes()
@@ -2472,6 +2478,41 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                         "`chelis build --target hip` does not yet support the runtime `shape` \
                          value read; lowered node {} requires it. The C backend is canonical \
                          for runtime-dim reads (chelis#513/#558); use `--target c`.",
+                        node.id.0
+                    ),
+                    "unsupported_feature",
+                ));
+            }
+            // chelis#616: node-valued (runtime) movement bounds are C-only.
+            RiscOp::Shrink { bounds } if bounds.iter().any(pair_has_node_bound) => {
+                return Err(stage_error(
+                    "compile",
+                    format!(
+                        "`chelis build --target hip` does not yet support a runtime (node-valued) \
+                         `shrink` bound; lowered node {} requires it. The C backend is canonical \
+                         for runtime movement bounds (chelis#616); use `--target c`.",
+                        node.id.0
+                    ),
+                    "unsupported_feature",
+                ));
+            }
+            RiscOp::Pad { padding, .. } if padding.iter().any(pair_has_node_bound) => {
+                return Err(stage_error(
+                    "compile",
+                    format!(
+                        "`chelis build --target hip` does not yet support a runtime (node-valued) \
+                         `pad` bound; lowered node {} requires it. Use `--target c` (chelis#616).",
+                        node.id.0
+                    ),
+                    "unsupported_feature",
+                ));
+            }
+            RiscOp::Stride { strides } if strides.iter().any(|s| s.node_input().is_some()) => {
+                return Err(stage_error(
+                    "compile",
+                    format!(
+                        "`chelis build --target hip` does not yet support a runtime (node-valued) \
+                         `stride` step; lowered node {} requires it. Use `--target c` (chelis#616).",
                         node.id.0
                     ),
                     "unsupported_feature",
@@ -3310,6 +3351,15 @@ fn wire_dim_expr(expr: &chelis_ir::dag::DimExpr) -> WireDimExpr {
     }
 }
 
+/// chelis#616: map a movement-op [`Bound`] to its wire form.
+fn wire_bound(b: &Bound) -> WireBound {
+    match b {
+        Bound::Lit(n) => WireBound::Lit { value: *n },
+        Bound::ToEnd => WireBound::ToEnd,
+        Bound::Node(i) => WireBound::Node { input: *i },
+    }
+}
+
 fn wire_op(op: &RiscOp) -> WireRiscOp {
     match op {
         RiscOp::Add => WireRiscOp::Add,
@@ -3388,14 +3438,14 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
         },
         RiscOp::OneHot { vocab } => WireRiscOp::OneHot { vocab: *vocab },
         RiscOp::Pad { padding, fill } => WireRiscOp::Pad {
-            padding: padding.clone(),
+            padding: padding.iter().map(|(s, e)| (wire_bound(s), wire_bound(e))).collect(),
             fill: *fill,
         },
         RiscOp::Shrink { bounds } => WireRiscOp::Shrink {
-            bounds: bounds.clone(),
+            bounds: bounds.iter().map(|(s, e)| (wire_bound(s), wire_bound(e))).collect(),
         },
         RiscOp::Stride { strides } => WireRiscOp::Stride {
-            strides: strides.clone(),
+            strides: strides.iter().map(wire_bound).collect(),
         },
         RiscOp::Const { value } => WireRiscOp::Const { value: *value },
         RiscOp::ConstTensor { data } => WireRiscOp::ConstTensor { data: data.clone() },

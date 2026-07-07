@@ -4,9 +4,36 @@
 //! and walks the DAG in topological order launching kernels on GPU.
 
 use chelis_ir::dag::{
-    Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, TensorType, symbolic_bindings,
+    Bound, Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, TensorType, symbolic_bindings,
 };
 use chelis_types::types::Prim;
+
+/// chelis#616: the HIP device-kernel lane does not support runtime (node-valued)
+/// movement bounds; `reject_unsupported_hip_ops` (compiler-api + CLI) rejects
+/// them before codegen. This converter materializes the compile-time bound for
+/// the literal launch emitters and panics on a node-valued bound as a defensive
+/// backstop (only reachable if a path bypasses the reject seam).
+fn hip_bound_to_usize(b: &Bound) -> usize {
+    match b {
+        Bound::Lit(n) => *n,
+        Bound::ToEnd => chelis_ir::dag::SHRINK_TO_END,
+        Bound::Node(_) => panic!(
+            "HIP backend reached a node-valued (runtime) movement bound; \
+             reject_unsupported_hip_ops must reject it before codegen (chelis#616)"
+        ),
+    }
+}
+
+fn hip_pairs_to_usize(bounds: &[(Bound, Bound)]) -> Vec<(usize, usize)> {
+    bounds
+        .iter()
+        .map(|(s, e)| (hip_bound_to_usize(s), hip_bound_to_usize(e)))
+        .collect()
+}
+
+fn hip_strides_to_usize(strides: &[Bound]) -> Vec<usize> {
+    strides.iter().map(hip_bound_to_usize).collect()
+}
 
 use crate::blas;
 use crate::fusion::{FusedInPlaceSpec, fused_in_place_spec};
@@ -1578,7 +1605,7 @@ impl HipEmitter {
             RiscOp::Pad { padding, fill } => {
                 self.emit_pad_launch(
                     id,
-                    padding,
+                    &hip_pairs_to_usize(padding),
                     *fill,
                     &resolved_kernel_name(),
                     &node.inputs,
@@ -1589,7 +1616,7 @@ impl HipEmitter {
             RiscOp::Shrink { bounds } => {
                 self.emit_shrink_launch(
                     id,
-                    bounds,
+                    &hip_pairs_to_usize(bounds),
                     &resolved_kernel_name(),
                     &node.inputs,
                     &node.output_type,
@@ -1597,7 +1624,7 @@ impl HipEmitter {
                 );
             }
             RiscOp::Stride { strides } => {
-                self.emit_stride(id, strides, &node.inputs, &node.output_type);
+                self.emit_stride(id, &hip_strides_to_usize(strides), &node.inputs, &node.output_type);
             }
             RiscOp::Realize => {
                 self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)

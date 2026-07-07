@@ -5979,6 +5979,41 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
                 )
                 .into());
             }
+            // chelis#616: node-valued (runtime) movement bounds are C-only.
+            chelis_ir::dag::RiscOp::Shrink { bounds }
+                if bounds
+                    .iter()
+                    .any(|(s, e)| s.node_input().is_some() || e.node_input().is_some()) =>
+            {
+                return Err(format!(
+                    "`chelis build --target hip` does not yet support a runtime (node-valued) \
+                     `shrink` bound; lowered node {} requires it. Use `--target c` (chelis#616).",
+                    node.id.0
+                )
+                .into());
+            }
+            chelis_ir::dag::RiscOp::Pad { padding, .. }
+                if padding
+                    .iter()
+                    .any(|(s, e)| s.node_input().is_some() || e.node_input().is_some()) =>
+            {
+                return Err(format!(
+                    "`chelis build --target hip` does not yet support a runtime (node-valued) \
+                     `pad` bound; lowered node {} requires it. Use `--target c` (chelis#616).",
+                    node.id.0
+                )
+                .into());
+            }
+            chelis_ir::dag::RiscOp::Stride { strides }
+                if strides.iter().any(|s| s.node_input().is_some()) =>
+            {
+                return Err(format!(
+                    "`chelis build --target hip` does not yet support a runtime (node-valued) \
+                     `stride` step; lowered node {} requires it. Use `--target c` (chelis#616).",
+                    node.id.0
+                )
+                .into());
+            }
             chelis_ir::dag::RiscOp::Gather { .. } => {
                 let values = &dag.get(node.inputs[0]).unwrap().output_type;
                 let index_node = dag.get(node.inputs[1]).unwrap();
