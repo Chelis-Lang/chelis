@@ -68,7 +68,10 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
     //   pad axis=1 by (0, 1) with fill 0 → [n=3, vocab=2] = [[1,0],[1,0],[1,0]]
     let one_hot = dag.add_node(
         RiscOp::Pad {
-            padding: vec![(Bound::Lit(0), Bound::Lit(0)), (Bound::Lit(0), Bound::Lit(1))],
+            padding: vec![
+                (Bound::Lit(0), Bound::Lit(0)),
+                (Bound::Lit(0), Bound::Lit(1)),
+            ],
             fill: 0.0,
         },
         vec![oh_col],

@@ -1624,7 +1624,12 @@ impl HipEmitter {
                 );
             }
             RiscOp::Stride { strides } => {
-                self.emit_stride(id, &hip_strides_to_usize(strides), &node.inputs, &node.output_type);
+                self.emit_stride(
+                    id,
+                    &hip_strides_to_usize(strides),
+                    &node.inputs,
+                    &node.output_type,
+                );
             }
             RiscOp::Realize => {
                 self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)

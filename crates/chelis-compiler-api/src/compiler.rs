@@ -27,12 +27,11 @@ use crate::schema::{
     DesugarResult, Diagnostic, EvalRequest, EvalResult, EvaluatedRoot, FitnessComponents,
     GeneratedFile, GradRequest, GradResult, LowerRequest, LowerResult, ParseRequest, ParseResult,
     RenameRequest, RenameResult, ReplaceFunctionRequest, ReplaceFunctionResult, SourceKind, Span,
-    ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireDag, WireDagNode,
+    ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireBound, WireDag, WireDagNode,
     WireDagSchemaError, WireDeepAtom, WireDeepExpr, WireDeepExprKind, WireDimExpr, WireDimInfo,
     WireFusedInput, WireFusedStep, WireFusedStepOp, WireImportKind, WireLetBinding, WireLetPattern,
     WireLiteral, WireMatchArm, WireMetaEntry, WireParam, WirePattern, WirePropertyOption,
-    WireBound, WireRecordExprField, WireRecordPatternField, WireRecordTypeField, WireRiscOp,
-    WireSurfDecl,
+    WireRecordExprField, WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireSurfDecl,
     WireSurfExpr, WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp, WireVariant,
     WireVariantFields,
 };
@@ -3438,11 +3437,17 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
         },
         RiscOp::OneHot { vocab } => WireRiscOp::OneHot { vocab: *vocab },
         RiscOp::Pad { padding, fill } => WireRiscOp::Pad {
-            padding: padding.iter().map(|(s, e)| (wire_bound(s), wire_bound(e))).collect(),
+            padding: padding
+                .iter()
+                .map(|(s, e)| (wire_bound(s), wire_bound(e)))
+                .collect(),
             fill: *fill,
         },
         RiscOp::Shrink { bounds } => WireRiscOp::Shrink {
-            bounds: bounds.iter().map(|(s, e)| (wire_bound(s), wire_bound(e))).collect(),
+            bounds: bounds
+                .iter()
+                .map(|(s, e)| (wire_bound(s), wire_bound(e)))
+                .collect(),
         },
         RiscOp::Stride { strides } => WireRiscOp::Stride {
             strides: strides.iter().map(wire_bound).collect(),

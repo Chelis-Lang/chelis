@@ -306,8 +306,7 @@ impl CEmitter {
                     dims.extend_from_slice(&values.output_type.dims[*axis + 1..]);
                     new_ty.dims = dims;
                 } else if !has_node_bound(&node.op)
-                    && let Some(first_input) =
-                        node.inputs.first().and_then(|input| out.get(*input))
+                    && let Some(first_input) = node.inputs.first().and_then(|input| out.get(*input))
                     && first_input.output_type.dims.len() == new_ty.dims.len()
                 {
                     new_ty.dims = first_input.output_type.dims.clone();
@@ -5196,7 +5195,9 @@ impl CEmitter {
         ));
         self.line("int dst_indices[CHELIS_MAX_DIM];");
         for (d, (before_e, _)) in pad_exprs.iter().enumerate() {
-            self.line(&format!("dst_indices[{d}] = src_indices[{d}] + ({before_e});"));
+            self.line(&format!(
+                "dst_indices[{d}] = src_indices[{d}] + ({before_e});"
+            ));
         }
         self.line(&format!(
             "int dst_flat = chelis_indices_to_flat(dst_indices, t{id}->strides, t{id}->ndim);"
@@ -5289,7 +5290,9 @@ impl CEmitter {
         ));
         self.line("int src_indices[CHELIS_MAX_DIM];");
         for (d, (start_e, _)) in shrink_exprs.iter().enumerate() {
-            self.line(&format!("src_indices[{d}] = dst_indices[{d}] + ({start_e});"));
+            self.line(&format!(
+                "src_indices[{d}] = dst_indices[{d}] + ({start_e});"
+            ));
         }
         self.line(&format!(
             "int src_flat = chelis_indices_to_flat(src_indices, t{a}->strides, t{a}->ndim);"

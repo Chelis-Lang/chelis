@@ -4138,7 +4138,10 @@ mod tests {
         );
         let shrunk = dag.add_node(
             RiscOp::Shrink {
-                bounds: vec![(Bound::Lit(0), Bound::ToEnd), (Bound::Lit(1), Bound::Lit(3))],
+                bounds: vec![
+                    (Bound::Lit(0), Bound::ToEnd),
+                    (Bound::Lit(1), Bound::Lit(3)),
+                ],
             },
             vec![x],
             sym_batch_ty(&[2]),

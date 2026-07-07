@@ -1849,7 +1849,9 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
             // chelis#513 the Stride adjoint's trim and the ProdReduce
             // adjoint's per-element slices), so the resolved `end` is exactly
             // `start` plus the output dim's size.
-            RiscOp::Shrink { bounds } if bounds.iter().any(|(_, end)| matches!(end, Bound::ToEnd)) => {
+            RiscOp::Shrink { bounds }
+                if bounds.iter().any(|(_, end)| matches!(end, Bound::ToEnd)) =>
+            {
                 let resolved = bounds
                     .iter()
                     .zip(output_type.dims.iter())
@@ -1861,10 +1863,9 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
                                 "shrink-to-end sentinel with non-literal start".to_string()
                             })?;
                             match dim {
-                                DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => Ok((
-                                    Bound::Lit(start_lit),
-                                    Bound::Lit(start_lit + *size),
-                                )),
+                                DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => {
+                                    Ok((Bound::Lit(start_lit), Bound::Lit(start_lit + *size)))
+                                }
                                 DimInfo::Named(name, None) => Err(format!(
                                     "shrink-to-end sentinel left unbound for symbolic \
                                      dimension `{name}`"
@@ -2246,7 +2247,10 @@ mod tests {
         assert_eq!(
             node.op,
             RiscOp::Shrink {
-                bounds: vec![(Bound::Lit(1), Bound::Lit(2)), (Bound::Lit(0), Bound::Lit(3))],
+                bounds: vec![
+                    (Bound::Lit(1), Bound::Lit(2)),
+                    (Bound::Lit(0), Bound::Lit(3))
+                ],
             },
             "SHRINK_TO_END must resolve to (start, start + bound extent)",
         );
