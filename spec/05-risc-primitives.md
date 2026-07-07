@@ -507,11 +507,19 @@ metadata op); a `Shape` node reaching the HIP device-kernel path is rejected
 loudly (`reject_unsupported_hip_ops`) and the Metal lane rejects it via its
 emit-time `unsupported`-op arm. eval and C are the mandatory lanes.
 
-A `shape()` read whose `axis` is not a compile-time literal is not yet
-DAG-representable and retains the prior host-lane behavior. Using the extent as
-a runtime **movement-op bound** (a `shrink`/`stride` start/end derived from a
-`shape()` value, and the integer arithmetic feeding it) is the remaining
-chelis#513 gap-2 / gap-3-value work that builds on this node.
+A `shape()` read whose `axis` is not a compile-time literal (a data- or
+metadata-derived runtime axis) is not DAG-representable, because `RiscOp::Shape`
+carries a compile-time `axis`. The **forward host evaluator** still resolves
+such a read at runtime. Any path that forces DAG construction — notably
+`grad` — fails **loud** with a clean, source-located lowering diagnostic
+(`shape(tensor, axis)` requires a compile-time-constant `axis`, citing
+chelis#616), rather than the pre-fix silent `Load { name: "shape" }`
+fabrication (which produced a wrong/fabricated gradient in the eval lane and a
+missing-input error in the C backend). Making a runtime axis DAG-representable —
+and, more broadly, using the extent as a runtime **movement-op bound** (a
+`shrink`/`stride` start/end derived from a `shape()` value, and the integer
+arithmetic feeding it) — is the remaining chelis#513 gap-2 / gap-3-value work
+(chelis#616) that builds on this node.
 
 ### 2.6 Effectful Primitive
 

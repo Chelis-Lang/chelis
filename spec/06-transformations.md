@@ -248,9 +248,14 @@ prior bogus `Load { name: "shape" }` fallthrough. It is AD-transparent: the
 node reads only shape metadata, so its adjoint routes a zero cotangent to the
 input, and a loss whose value depends on a runtime dim (for example
 `loss = sum(x) * shape(x, 0)`, whose gradient is `shape(x, 0)` at every
-element) differentiates correctly in the eval and C lanes. This is the
-foundation for lifting the value-dependent class above, but it does NOT by
-itself close it: the runtime-`shrink`/`stride` **bound** representation (a
+element) differentiates correctly in the eval and C lanes. The node carries a
+compile-time-constant `axis`; a `shape()` read whose axis is itself a runtime
+(data- or metadata-derived) value is not representable, so the forward host
+lane resolves it while any DAG-forcing path (notably `grad`) fails **loud** with
+a source-located "requires a compile-time-constant `axis`" diagnostic
+(chelis#616) instead of the same bogus `Load { name: "shape" }` fallthrough.
+This is the foundation for lifting the value-dependent class above, but it does
+NOT by itself close it: the runtime-`shrink`/`stride` **bound** representation (a
 movement-op start/end that is a `shape()`-derived runtime value, plus the
 integer arithmetic feeding it) is still unrepresentable, so the value-dependent
 adjoints and the runtime-symbolic-window `avgpool1d` grad
@@ -260,8 +265,9 @@ open chelis#513 gap-2 / gap-3-value remainder.
 Executable oracles: `crates/chelis-cli/tests/issue_513_symbolic_axis_adjoints.rs`
 (finite-difference + eval-vs-C agreement per enabled path, plus the
 fail-closed negative pins), `crates/chelis-cli/tests/issue_558_shape_value_read.rs`
-(the scalar `shape()` value-read node: FD + eval-vs-C runtime-dim agreement),
-and the `chelis-ir` unit tests alongside the adjoint rules.
+(the scalar `shape()` value-read node: FD + eval-vs-C runtime-dim agreement,
+plus the runtime-axis pins — a loud grad rejection and the preserved forward
+host lane), and the `chelis-ir` unit tests alongside the adjoint rules.
 
 ### 2.8 Higher-Order Derivatives (Composition)
 

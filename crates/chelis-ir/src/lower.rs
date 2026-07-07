@@ -7847,13 +7847,14 @@ impl LowerCtx {
             // extent `DimExpr`) lowers to a real `RiscOp::Shape` node that
             // reads the operand's runtime extent along a constant `axis`
             // as a rank-0 integer scalar. Before this, a scalar shape read
-            // fell through to the fallback below and fabricated a bogus
-            // `Load { name: "shape" }` placeholder with no inputs and a
-            // default scalar-f32 type, which produced garbage in the C /
-            // grad DAG lanes. The axis must be a compile-time literal (the
-            // idiomatic `cast(N, int32)` form is accepted via
-            // `extract_int_for_dim`); a genuinely runtime axis is not
-            // representable and falls through to the loud fallback.
+            // fell through to the generic unknown-function fallback below
+            // and fabricated a bogus `Load { name: "shape" }` placeholder
+            // with no inputs and a default scalar-f32 type, which produced
+            // garbage in the C / grad DAG lanes. The axis must be a
+            // compile-time literal (the idiomatic `cast(N, int32)` form is
+            // accepted via `extract_int_for_dim`); a genuinely runtime axis
+            // is caught by the dedicated loud arm immediately below rather
+            // than reaching the fallback.
             "shape"
                 if args.len() == 2
                     && extract_int_for_dim(&args[1])
@@ -7880,6 +7881,44 @@ impl LowerCtx {
                         dims: Vec::new(),
                         precision,
                     },
+                    self.current_span_id.clone(),
+                )
+            }
+
+            // chelis#513 / chelis#558 / chelis#616: `shape(operand, axis)`
+            // reached here with two arguments but a NON-literal `axis` (the
+            // literal-axis arm above did not match). `RiscOp::Shape` carries
+            // a compile-time `axis`, so a runtime (data- or metadata-derived)
+            // axis is genuinely not representable as a RISC value node. Fail
+            // LOUD and CLEAN here instead of falling through to the generic
+            // unknown-function fallback below, which fabricated a bogus
+            // `Load { name: "shape" }` placeholder (no inputs, default
+            // scalar-f32 type) — the latent unsoundness chelis#513 named:
+            // silently wrong under grad-DAG eval, and an undefined `shape`
+            // input slot in the C backend. The host evaluator DOES resolve a
+            // runtime axis, so a host-lane speculative DAG probe (with the
+            // suppression flag set) unwinds quietly via `UnrepresentableDag`
+            // and lets host lowering take over; only a hard DAG requirement
+            // (`grad`, which forces DAG construction) surfaces the diagnostic
+            // to the user. Node-valued runtime shape axes are tracked in
+            // chelis#616.
+            "shape" if args.len() == 2 => {
+                // Lower the operand + axis sub-expressions for their side
+                // effects (span registration, surfacing any nested
+                // unrepresentable form) before bailing, mirroring
+                // `lower_unrepresentable`.
+                for arg in args {
+                    let _ = self.lower_expr(arg);
+                }
+                if unrepresentable_panic_suppressed() {
+                    std::panic::panic_any(UnrepresentableDag);
+                }
+                raise_lowering_error(
+                    "`shape(tensor, axis)` requires a compile-time-constant `axis`: a \
+                     runtime (data- or metadata-derived) axis cannot be lowered to a RISC \
+                     `shape` value node (chelis#616). Bind `axis` to a literal, or keep the \
+                     read in host evaluation, which resolves a runtime axis.",
+                    Some(app_span),
                     self.current_span_id.clone(),
                 )
             }

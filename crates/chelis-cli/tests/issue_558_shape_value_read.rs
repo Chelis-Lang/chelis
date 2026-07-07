@@ -362,6 +362,80 @@ fn issue_558_shape_value_forward_matches_c() {
 }
 
 // ---------------------------------------------------------------------------
+// Runtime (non-literal) axis: NOT representable as a `RiscOp::Shape` value
+// node (which carries a compile-time `axis`). The DAG lane must fail LOUD and
+// CLEAN, and the forward host lane must still resolve it. This pins the
+// boundary of the chelis#513/#558 slice and the fix for the pre-existing
+// silent `Load { name: "shape" }` fabrication (chelis#616 tracks the
+// node-valued runtime axis that would lift the restriction).
+// ---------------------------------------------------------------------------
+
+// A RUNTIME (metadata-derived, non-literal) shape axis. `ax = shape(x, 0) - 3`
+// is `0` for a `tensor[3, 2]` input (in range), but it is a data-flow VALUE,
+// so `extract_int_for_dim` cannot fold it to a literal and the DAG lowering
+// has no representable axis. The `def`-body is shared by the two tests below.
+const RUNTIME_AXIS_BODY: &str = "\
+  ax = sub(shape(&x, cast(0, int32)), cast(3, int32))\n\
+  n = cast(shape(x, ax), f32)\n\
+  s = sum(sum(&x, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
+  mul(s, n)";
+
+const RUNTIME_AXIS_INPUT: &str = "to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)], \
+     [cast(5.0, f32), cast(6.0, f32)]])";
+
+/// `grad` forces DAG construction, so a runtime shape axis must fail LOUD with
+/// the clean compile-time-axis diagnostic (chelis#616) — NOT the pre-fix
+/// internal `missing required input \`shape\`` strict-load artifact that leaked
+/// from the fabricated `Load { name: "shape" }` placeholder, and NOT a silent
+/// success (which would mean a wrong or fabricated gradient).
+#[test]
+fn issue_558_runtime_axis_shape_grad_is_rejected_loudly() {
+    let source = format!(
+        "module Repro.RuntimeAxisGrad\n\
+         sig f: tensor[3, 2, f32] -> f32\n\
+         def f(x) = {{\n{RUNTIME_AXIS_BODY}\n}}\n\
+         out = grad(f)({RUNTIME_AXIS_INPUT})\n"
+    );
+    let output = run_eval(&source, "rtaxisgrad");
+    assert!(
+        !output.status.success(),
+        "runtime-axis shape grad must fail closed, not silently succeed; stdout={}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("compile-time-constant `axis`") && stderr.contains("chelis#616"),
+        "runtime-axis shape grad must fail with the clean compile-time-axis diagnostic; \
+         stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("missing required input"),
+        "runtime-axis shape grad must NOT surface the pre-fix bogus-`Load` strict-load \
+         artifact (`missing required input shape`); stderr={stderr}"
+    );
+}
+
+/// The loud grad rejection must NOT regress the forward lane: the host
+/// evaluator resolves a runtime shape axis, so the same body evaluated forward
+/// returns the real value. For `tensor[3, 2]` with `[1..6]`,
+/// `ax = shape(x, 0) - 3 = 0`, `shape(x, 0) = 3`, `sum(x) = 21`, so
+/// `loss = 21 * 3 = 63`.
+#[test]
+fn issue_558_runtime_axis_shape_forward_uses_host_lane() {
+    let source = format!(
+        "module Repro.RuntimeAxisFwd\n\
+         sig f: tensor[3, 2, f32] -> f32\n\
+         def f(x) = {{\n{RUNTIME_AXIS_BODY}\n}}\n\
+         out = f({RUNTIME_AXIS_INPUT})\n"
+    );
+    let loss = eval_scalar(&source);
+    assert!(
+        (loss - 63.0).abs() < 1e-3,
+        "runtime-axis shape forward must resolve via the host lane to 63.0, got {loss}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Backend lanes: the scalar shape read is a HOST-side metadata op. `--target
 // c` emits it directly (covered above). Under `--target hip`, a `grad`
 // export host-falls-back to the C emitter (the grad-in-host-position lane),
