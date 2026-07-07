@@ -5093,6 +5093,17 @@ impl CEmitter {
         matches!(dim, DimInfo::Named(name, None) if *name == format!("_anon_dim_{id}_{axis}"))
     }
 
+    /// chelis#616: the C variable name a node-valued movement axis must declare
+    /// its runtime output extent under, if the output dim is a symbolic
+    /// (`Named(_, None)`) dim. `Lit` / bound-`Named` axes are concrete and need
+    /// no declaration.
+    fn runtime_dim_decl_name(dim: Option<&DimInfo>) -> Option<String> {
+        match dim {
+            Some(DimInfo::Named(name, None)) => Some(name.clone()),
+            _ => None,
+        }
+    }
+
     fn emit_pad(
         &mut self,
         id: usize,
@@ -5126,9 +5137,11 @@ impl CEmitter {
                 "if (({before_e}) < 0 || ({after_e}) < 0) {{ fprintf(stderr, \
                  \"chelis: runtime pad bound out of range at node {id} axis {d}\\n\"); abort(); }}"
             ));
-            self.line(&format!(
-                "int _anon_dim_{id}_{d} = t{a}->shape[{d}] + ({before_e}) + ({after_e});"
-            ));
+            if let Some(name) = Self::runtime_dim_decl_name(ty.dims.get(d)) {
+                self.line(&format!(
+                    "int {name} = t{a}->shape[{d}] + ({before_e}) + ({after_e});"
+                ));
+            }
         }
         self.emit_slot_wrapper(id, ty);
         // WS-A1: pad fill must honor the output dtype. Pre-WS-A1 the
@@ -5260,7 +5273,12 @@ impl CEmitter {
                  {{ fprintf(stderr, \"chelis: runtime shrink bound out of range at node {id} \
                  axis {d}\\n\"); abort(); }}"
             ));
-            self.line(&format!("int _anon_dim_{id}_{d} = ({end_e}) - ({start_e});"));
+            // chelis#616: declare this axis's runtime output extent under its
+            // actual symbolic dim name (a fresh `_anon_dim_*` or a sig-named `k`),
+            // which `shape_literal` references for the output allocation.
+            if let Some(name) = Self::runtime_dim_decl_name(ty.dims.get(d)) {
+                self.line(&format!("int {name} = ({end_e}) - ({start_e});"));
+            }
         }
         self.emit_slot_wrapper(id, ty);
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
@@ -5304,15 +5322,22 @@ impl CEmitter {
             .collect();
         for (d, step_e) in step_exprs.iter().enumerate() {
             let Some(dim) = ty.dims.get(d) else { continue };
+            // Declare a runtime output extent only for this node's OWN fresh
+            // anon axis (`_anon_dim_{id}_{d}`): a bystander symbolic axis (e.g.
+            // a passed-through `batch`) is declared by `symbolic_bindings` from
+            // its Load and must not be redeclared here.
             if !Self::is_own_anon_dim(id, d, dim) {
                 continue;
             }
+            let Some(name) = Self::runtime_dim_decl_name(Some(dim)) else {
+                continue;
+            };
             self.line(&format!(
                 "if (({step_e}) <= 0) {{ fprintf(stderr, \"chelis: runtime stride step must be \
                  positive at node {id} axis {d}\\n\"); abort(); }}"
             ));
             self.line(&format!(
-                "int _anon_dim_{id}_{d} = (t{a}->shape[{d}] + ({step_e}) - 1) / ({step_e});"
+                "int {name} = (t{a}->shape[{d}] + ({step_e}) - 1) / ({step_e});"
             ));
         }
         let ndim = Self::ndim(ty);
