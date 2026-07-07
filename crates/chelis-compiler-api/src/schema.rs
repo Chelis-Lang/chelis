@@ -1467,6 +1467,9 @@ pub enum WireRiscOp {
     ConstTensor {
         data: Vec<f64>,
     },
+    Shape {
+        axis: usize,
+    },
     Load {
         name: String,
     },

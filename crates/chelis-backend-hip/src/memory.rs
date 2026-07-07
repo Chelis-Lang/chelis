@@ -145,6 +145,10 @@ fn classify_nodes(dag: &Dag, reduction_inlined: &HashSet<NodeId>) -> Vec<NodeMem
                 },
                 RiscOp::Const { .. }
                 | RiscOp::ConstTensor { .. }
+                // `Shape` reads only its input's shape metadata and
+                // materializes a fresh rank-0 scalar slot (HIP-rejected
+                // before codegen; classification completeness only).
+                | RiscOp::Shape { .. }
                 | RiscOp::Add
                 | RiscOp::Mul
                 | RiscOp::Div

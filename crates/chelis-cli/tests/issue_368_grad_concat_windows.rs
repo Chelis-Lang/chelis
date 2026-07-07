@@ -370,9 +370,21 @@ fn issue_368_symbolic_nonconcat_axis_grad_nonlinear() {
 /// residual's boundary: the pipeline now reaches the stride ADJOINT and dies
 /// on its fail-closed guard for the wildcard STRIDED axis ("stride adjoint
 /// requires a concrete size for strided axis 0; got symbolic `*`"), which is
-/// gap 2's empty-bounds consequence surfacing through the gap-3 guard. The
-/// remaining fix needs scalar shape() VALUE reads + integer arithmetic in
-/// the RISC DAG (the capability rewrite the issue escalated).
+/// gap 2's empty-bounds consequence surfacing through the gap-3 guard.
+///
+/// UPDATE (chelis#558 / the scalar-shape-value slice): the scalar `shape(x,
+/// axis)` VALUE read now lowers to a real `RiscOp::Shape` DAG node (rank-0
+/// integer extent), replacing the bogus `Load { name: "shape" }` fallthrough;
+/// see `issue_558_shape_value_read.rs` for its FD + eval-vs-C oracles. That
+/// removes gap 1 for this reproducer, but the boundary is UNCHANGED: the
+/// runtime `shrink`/`stride` BOUND extraction (`extract_pair_list` still
+/// drops runtime `cast(add(...))` bounds to empty -> the windowed axis stays
+/// a `Named("*")` wildcard -> the stride adjoint's fail-closed guard fires).
+/// Closing this residual still needs (a) integer-arithmetic scalar nodes
+/// feeding movement-op bounds and (b) a node-valued (runtime) `Shrink`/
+/// `Stride` bound representation threaded through verify/eval/C-emit/grad
+/// (gap 2 + gap 3's value-dependent half). The `RiscOp::Shape` node is the
+/// foundation those two build on.
 ///
 /// This pin asserts the boundary stays EXPLICIT: the form fails (non-zero
 /// exit) with a symbolic-dim diagnostic rather than silently mis-lowering.

@@ -2465,6 +2465,18 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                     "unsupported_feature",
                 ));
             }
+            RiscOp::Shape { .. } => {
+                return Err(stage_error(
+                    "compile",
+                    format!(
+                        "`chelis build --target hip` does not yet support the runtime `shape` \
+                         value read; lowered node {} requires it. The C backend is canonical \
+                         for runtime-dim reads (chelis#513/#558); use `--target c`.",
+                        node.id.0
+                    ),
+                    "unsupported_feature",
+                ));
+            }
             RiscOp::Gather { .. } => {
                 let values = &dag.get(node.inputs[0]).unwrap().output_type;
                 let index_node = dag.get(node.inputs[1]).unwrap();
@@ -3387,6 +3399,7 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
         },
         RiscOp::Const { value } => WireRiscOp::Const { value: *value },
         RiscOp::ConstTensor { data } => WireRiscOp::ConstTensor { data: data.clone() },
+        RiscOp::Shape { axis } => WireRiscOp::Shape { axis: *axis },
         RiscOp::Load { name } => WireRiscOp::Load {
             name: name.as_str().to_string(),
         },

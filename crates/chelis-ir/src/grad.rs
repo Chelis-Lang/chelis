@@ -290,6 +290,7 @@ fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Pad { .. } => "pad",
         RiscOp::Shrink { .. } => "shrink",
         RiscOp::Stride { .. } => "stride",
+        RiscOp::Shape { .. } => "shape",
         RiscOp::Const { .. } => "const",
         RiscOp::ConstTensor { .. } => "const_tensor",
         RiscOp::Load { .. } => "load",
@@ -1427,6 +1428,21 @@ fn compute_adjoints(
                 );
                 Some(vec![(x, cur)])
             }
+        }
+
+        // --- Shape query ---
+        RiscOp::Shape { .. } => {
+            // `shape(x, axis)` reads only the input's shape metadata, not
+            // its element values, so its output is constant w.r.t. those
+            // values: the cotangent to the input tensor is exactly zero
+            // (differentiable in the trivial constant sense per
+            // chelis#558). Emit a zero of the INPUT's type (the cotangent
+            // `g` has the scalar output's type, which differs from the
+            // input's, so it is not reused here).
+            let x = node.inputs[0];
+            let input_ty = forward.get(x).unwrap().output_type.clone();
+            let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], input_ty, None);
+            Some(vec![(x, zero)])
         }
 
         // --- Memory ---

@@ -985,6 +985,11 @@ impl HipEmitter {
             // forward op (see above); launch-emit panics via `todo!`.
             RiscOp::ReduceWindowGrad { .. } => None,
             RiscOp::OneHot { .. } => None,
+            // The runtime `shape` value read is HIP-deferred (chelis#513/
+            // #558); `reject_unsupported_hip_ops` rejects it cleanly before
+            // codegen, so no kernel name is registered. The launch-emit arm
+            // below is a defensive `todo!` if one ever reaches codegen.
+            RiscOp::Shape { .. } => None,
             RiscOp::Const { .. } => Some(format!("kernel_fill_{}", kind_for_node(node).suffix())),
             RiscOp::ConstTensor { .. } => {
                 Some(format!("kernel_fill_{}", kind_for_node(node).suffix()))
@@ -1548,6 +1553,17 @@ impl HipEmitter {
             RiscOp::OneHot { .. } => {
                 panic!(
                     "HIP backend: internal OneHot must be consumed by specialization before codegen"
+                )
+            }
+            // The runtime `shape` value read is HIP-deferred (chelis#513/
+            // #558) and rejected before codegen by
+            // `reject_unsupported_hip_ops` (compiler-api + CLI mirror); this
+            // `todo!` is a defensive backstop matching the ReduceWindow
+            // stubs above, reached only if some path bypasses that guard.
+            RiscOp::Shape { .. } => {
+                todo!(
+                    "runtime `shape` value read HIP codegen is deferred (chelis#513/#558); \
+                     the C backend is canonical for runtime-dim reads. Use `--target c`."
                 )
             }
             RiscOp::Reshape { .. } => {
@@ -3306,7 +3322,11 @@ impl HipEmitter {
             // the contiguous output buffer), so the result is statically
             // contiguous like any other kernel output.
             | RiscOp::Pad { .. }
-            | RiscOp::Shrink { .. } => true,
+            | RiscOp::Shrink { .. }
+            // `Shape` materializes a fresh rank-0 scalar (trivially
+            // contiguous). It is HIP-rejected before codegen (chelis#513/
+            // #558), so this arm is only for classification completeness.
+            | RiscOp::Shape { .. } => true,
             RiscOp::Reshape { .. } | RiscOp::Store { .. } => {
                 Self::node_is_statically_contiguous(dag, dag.get(id).unwrap().inputs[0])
             }

@@ -474,6 +474,53 @@ from computation on existing tensors.
 
 `const` is not differentiable (it produces a constant — gradient is zero). `load` is not differentiable.
 
+#### 2.5.1 Shape query (`shape`)
+
+| Name | Signature | Semantics |
+|---|---|---|
+| `shape` | `(&tensor[d1,...,dn,p], axis: int32) -> int` | Runtime extent of the input along `axis`, as a rank-0 integer scalar. |
+
+The Surf `shape(tensor, axis)` builtin types this read as an `int32` scalar
+(the hydronnx ONNX translator constructs the equivalent DAG node as `int64`
+per chelis#558). Two lowering shapes exist, and they are distinct:
+
+- **As an extent argument** to `expand` / `reshape`, a `shape()` read is folded
+  into the movement node's `DimExpr` (the output dim), not materialized as a
+  value node. This is the pre-existing size-recovery path (chelis#318/#369).
+- **As a scalar VALUE** (used in arithmetic, a `mean` divisor, or any other
+  value position), a `shape()` read lowers to a dedicated `RiscOp::Shape { axis }`
+  node — a rank-0 integer scalar equal to the input's runtime extent along a
+  compile-time-constant `axis`. Before chelis#513 there was no such node and a
+  scalar shape read fell through to a bogus `Load { name: "shape" }` placeholder,
+  which was silently wrong in the eval lane (resolved to the missing-input
+  default) and a hard missing-input error in the C backend.
+
+`shape` reads only the input's shape metadata, never its element values, so it
+is a trivial constant with respect to those values: its reverse-mode adjoint
+contributes a **zero cotangent** to the input (like `const` / `load`, it does
+not block AD — a loss that reads a runtime dim differentiates correctly, with
+the shape factor contributing nothing). The C backend emits the read directly
+(`t{input}->shape[axis]`), so a symbolic input axis is resolved from the actual
+runtime input tensor rather than baked at codegen time. Under `--target hip` a
+`grad` export host-falls-back to the C emitter (the scalar read is a host-side
+metadata op); a `Shape` node reaching the HIP device-kernel path is rejected
+loudly (`reject_unsupported_hip_ops`) and the Metal lane rejects it via its
+emit-time `unsupported`-op arm. eval and C are the mandatory lanes.
+
+A `shape()` read whose `axis` is not a compile-time literal (a data- or
+metadata-derived runtime axis) is not DAG-representable, because `RiscOp::Shape`
+carries a compile-time `axis`. The **forward host evaluator** still resolves
+such a read at runtime. Any path that forces DAG construction — notably
+`grad` — fails **loud** with a clean, source-located lowering diagnostic
+(`shape(tensor, axis)` requires a compile-time-constant `axis`, citing
+chelis#616), rather than the pre-fix silent `Load { name: "shape" }`
+fabrication (which produced a wrong/fabricated gradient in the eval lane and a
+missing-input error in the C backend). Making a runtime axis DAG-representable —
+and, more broadly, using the extent as a runtime **movement-op bound** (a
+`shrink`/`stride` start/end derived from a `shape()` value, and the integer
+arithmetic feeding it) — is the remaining chelis#513 gap-2 / gap-3-value work
+(chelis#616) that builds on this node.
+
 ### 2.6 Effectful Primitive
 
 | Name | Signature | Semantics | AD / effect note |

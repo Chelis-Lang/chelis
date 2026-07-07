@@ -1308,6 +1308,23 @@ where
                     shape,
                 }
             }
+            RiscOp::Shape { axis } => {
+                // Runtime extent of the input tensor along `axis`, as a
+                // rank-0 integer scalar. The DAG is already bound
+                // (symbolic dims resolved to concrete extents) before
+                // eval, so the input value's `.shape` is concrete here.
+                let input = &values[&node.inputs[0]];
+                let extent = *input.shape.get(*axis).ok_or_else(|| {
+                    format!(
+                        "shape read axis {axis} out of bounds for rank {} input",
+                        input.shape.len()
+                    )
+                })?;
+                TensorValue {
+                    data: vec![extent as f64],
+                    shape: vec![],
+                }
+            }
             RiscOp::Load { name } => match resolved_inputs.get(name.as_str()) {
                 Some(value) => value.clone(),
                 None if strict_loads => return Err(format!("missing required input `{name}`")),

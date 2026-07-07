@@ -5970,6 +5970,15 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
                 )
                 .into());
             }
+            chelis_ir::dag::RiscOp::Shape { .. } => {
+                return Err(format!(
+                    "`chelis build --target hip` does not yet support the runtime `shape` \
+                     value read; lowered node {} requires it. The C backend is canonical \
+                     for runtime-dim reads (chelis#513/#558); use `--target c`.",
+                    node.id.0
+                )
+                .into());
+            }
             chelis_ir::dag::RiscOp::Gather { .. } => {
                 let values = &dag.get(node.inputs[0]).unwrap().output_type;
                 let index_node = dag.get(node.inputs[1]).unwrap();

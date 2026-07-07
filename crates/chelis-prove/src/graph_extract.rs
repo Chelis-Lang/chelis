@@ -221,6 +221,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::OneHot { .. }
             | WireRiscOp::Shrink { .. }
             | WireRiscOp::Stride { .. }
+            | WireRiscOp::Shape { .. }
             | WireRiscOp::Load { .. }
             | WireRiscOp::Store { .. }
             | WireRiscOp::Copy
