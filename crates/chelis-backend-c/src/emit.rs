@@ -5196,7 +5196,7 @@ impl CEmitter {
         self.line("int dst_indices[CHELIS_MAX_DIM];");
         for (d, (before_e, _)) in pad_exprs.iter().enumerate() {
             self.line(&format!(
-                "dst_indices[{d}] = src_indices[{d}] + ({before_e});"
+                "dst_indices[{d}] = src_indices[{d}] + {before_e};"
             ));
         }
         self.line(&format!(
@@ -5290,9 +5290,7 @@ impl CEmitter {
         ));
         self.line("int src_indices[CHELIS_MAX_DIM];");
         for (d, (start_e, _)) in shrink_exprs.iter().enumerate() {
-            self.line(&format!(
-                "src_indices[{d}] = dst_indices[{d}] + ({start_e});"
-            ));
+            self.line(&format!("src_indices[{d}] = dst_indices[{d}] + {start_e};"));
         }
         self.line(&format!(
             "int src_flat = chelis_indices_to_flat(src_indices, t{a}->strides, t{a}->ndim);"
@@ -5355,7 +5353,7 @@ impl CEmitter {
                 break;
             }
             self.line(&format!(
-                "t{id}->strides[{d}] = t{a}->strides[{d}] * ({step_e});"
+                "t{id}->strides[{d}] = t{a}->strides[{d}] * {step_e};"
             ));
         }
     }
@@ -5988,7 +5986,7 @@ mod tests {
     /// rather than emit a `t->shape`-driven loop over a tensor sized from the
     /// unresolved sentinel.
     #[test]
-    #[should_panic(expected = "SHRINK_TO_END")]
+    #[should_panic(expected = "unresolved ToEnd sentinel")]
     fn shrink_to_end_sentinel_rejected_by_c_backend() {
         let mut dag = Dag::new();
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(5), None);
