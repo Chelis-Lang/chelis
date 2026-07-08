@@ -1535,17 +1535,16 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
                 }
                 if !bound {
                     // chelis#616: a node-valued movement op computes a FRESH
-                    // runtime output extent with no Load source. Declaring that
-                    // dim from the bound in the C backend works when each such
-                    // dim is distinct, but the checker currently WILDCARDS the
-                    // node-valued output and can unify the whole chain to one
-                    // symbol (e.g. a sig-named `m`), which mislabels an
-                    // intermediate extent and produces a wrong OUTPUT SHAPE. Until
-                    // the checker tracks the runtime extent per axis (plan Step G
-                    // follow-up), this path stays FAIL-CLOSED and LOUD rather than
-                    // emit a silently mis-sized allocation. `emit_shrink` /
-                    // `emit_stride` / `emit_pad` already declare the dim from the
-                    // bound for when that lands.
+                    // runtime output extent with no Load source, and so does a
+                    // runtime-`shape()`-derived `reshape` target (the window
+                    // count `m`). The C backend can declare a movement output dim
+                    // from its bound scalars (`emit_shrink`/`emit_stride`/
+                    // `emit_pad`), but a `reshape` target has no node-valued dim
+                    // source threaded through yet, so a full runtime-symbolic
+                    // program still reaches an undeclarable dim. Until node-valued
+                    // Reshape/Const dims land (the runtime-dim-from-Shape-arith
+                    // declaration capability), this stays FAIL-CLOSED and LOUD
+                    // rather than emit a silently mis-sized allocation.
                     panic!(
                         "internal compiler error: symbolic dim `{symbol}` is referenced by a \
                          non-Load node (id {}, op {:?}, inputs {:?}, type {:?}) but no Load input \
