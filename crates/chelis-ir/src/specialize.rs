@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::dag::{Bound, Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
+use crate::dag::{Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType};
 use chelis_types::types::Prim;
 
 /// Compiler pipeline ordering around backend specialization.
@@ -350,8 +350,8 @@ fn lower_one_hot_node(out: &mut Dag, indices: NodeId, source: &DagNode, vocab: u
                 padding: indices_ty
                     .dims
                     .iter()
-                    .map(|_| (Bound::Lit(0), Bound::Lit(0)))
-                    .chain([(Bound::Lit(class), Bound::Lit(vocab - class - 1))])
+                    .map(|_| (RtDim::Lit(0), RtDim::Lit(0)))
+                    .chain([(RtDim::Lit(class), RtDim::Lit(vocab - class - 1))])
                     .collect(),
                 fill: 0.0,
             },

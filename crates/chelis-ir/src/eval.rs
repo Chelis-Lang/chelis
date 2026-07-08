@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::dag::{
-    Bound, Dag, DagNode, DimInfo, FusedInput, FusedStepOp, NodeId, ReduceWindowKind, RiscOp,
+    Dag, DagNode, DimInfo, FusedInput, FusedStepOp, NodeId, ReduceWindowKind, RiscOp, RtDim,
     SHRINK_TO_END, TensorType, bind_symbolic_dims, symbolic_bindings,
 };
 use chelis_types::types::Prim;
@@ -1053,20 +1053,20 @@ fn one_hot(indices: &TensorValue, vocab: usize) -> TensorValue {
     }
 }
 
-/// chelis#616: resolve a movement [`Bound`] to a concrete extent at eval time.
+/// chelis#616: resolve a movement [`RtDim`] to a concrete extent at eval time.
 /// `Lit` is itself; `ToEnd` is the axis's input extent; `Node(i)` reads the
 /// rank-0 integer value at `node.inputs[i]` (loud on a missing / non-integral /
 /// negative source).
 fn resolve_eval_bound(
-    bound: &Bound,
+    bound: &RtDim,
     node: &DagNode,
     values: &HashMap<NodeId, TensorValue>,
     input_extent: usize,
 ) -> Result<usize, String> {
     match bound {
-        Bound::Lit(n) => Ok(*n),
-        Bound::ToEnd => Ok(input_extent),
-        Bound::Node(i) => {
+        RtDim::Lit(n) => Ok(*n),
+        RtDim::ToEnd => Ok(input_extent),
+        RtDim::Node(i) => {
             let src = values.get(&node.inputs[*i]).ok_or_else(|| {
                 format!(
                     "movement bound at node {}: missing value for bound-source input slot {i}",
@@ -1094,7 +1094,7 @@ fn resolve_eval_bound(
 /// chelis#616: resolve a `(start, end)` bound-pair list against the input shape
 /// (used for `Pad` / `Shrink`).
 fn resolve_eval_pairs(
-    bounds: &[(Bound, Bound)],
+    bounds: &[(RtDim, RtDim)],
     node: &DagNode,
     values: &HashMap<NodeId, TensorValue>,
     input_shape: &[usize],
@@ -1114,7 +1114,7 @@ fn resolve_eval_pairs(
 
 /// chelis#616: resolve a `Stride` step list against the input shape.
 fn resolve_eval_strides(
-    strides: &[Bound],
+    strides: &[RtDim],
     node: &DagNode,
     values: &HashMap<NodeId, TensorValue>,
     input_shape: &[usize],
@@ -1300,7 +1300,7 @@ where
         // output type.
         || dag.nodes().iter().any(|node| {
             matches!(&node.op, RiscOp::Shrink { bounds }
-                if bounds.iter().any(|(_, end)| matches!(end, Bound::ToEnd)))
+                if bounds.iter().any(|(_, end)| matches!(end, RtDim::ToEnd)))
         });
     // chelis#351: symbolic-dim inference reads shapes from the Loads
     // that `symbolic_occurrences` nominates as each dim's declaring
@@ -1932,7 +1932,7 @@ mod tests {
         // A shrink whose end (10) exceeds the eventual concrete extent (4).
         let shr = dag.add_node(
             RiscOp::Shrink {
-                bounds: vec![(Bound::Lit(0), Bound::Lit(10))],
+                bounds: vec![(RtDim::Lit(0), RtDim::Lit(10))],
             },
             vec![x],
             TensorType {
@@ -1965,7 +1965,7 @@ mod tests {
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], sym_ty, None);
         let shr = dag.add_node(
             RiscOp::Shrink {
-                bounds: vec![(Bound::Lit(1), Bound::Lit(3))],
+                bounds: vec![(RtDim::Lit(1), RtDim::Lit(3))],
             },
             vec![x],
             TensorType {

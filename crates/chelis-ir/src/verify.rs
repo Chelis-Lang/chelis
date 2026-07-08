@@ -1,6 +1,6 @@
 //! DAG structural verification.
 
-use crate::dag::{Bound, Dag, DimInfo, RiscOp};
+use crate::dag::{Dag, DimInfo, RiscOp, RtDim};
 #[allow(unused_imports)]
 use chelis_types::types::Prim;
 
@@ -836,7 +836,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                             &format!("pad at node {} axis {} after", node.id.0, axis),
                             &mut errors,
                         );
-                        if matches!(before, Bound::ToEnd) || matches!(after, Bound::ToEnd) {
+                        if matches!(before, RtDim::ToEnd) || matches!(after, RtDim::ToEnd) {
                             errors.push(format!(
                                 "pad at node {}: axis {} uses the ToEnd sentinel, which is \
                                  only valid as a shrink end",
@@ -910,7 +910,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                             &format!("shrink at node {} axis {} end", node.id.0, axis),
                             &mut errors,
                         );
-                        if matches!(start, Bound::ToEnd) {
+                        if matches!(start, RtDim::ToEnd) {
                             errors.push(format!(
                                 "shrink at node {}: axis {} start uses the ToEnd sentinel, \
                                  which is only valid as an end",
@@ -991,7 +991,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                             &format!("stride at node {} axis {} step", node.id.0, axis),
                             &mut errors,
                         );
-                        if matches!(step, Bound::ToEnd) {
+                        if matches!(step, RtDim::ToEnd) {
                             errors.push(format!(
                                 "stride at node {}: axis {} step uses the ToEnd sentinel, \
                                  which is not a valid stride",
@@ -1235,19 +1235,19 @@ fn dim_known_size(dim: &DimInfo) -> Option<usize> {
     }
 }
 
-/// chelis#616: validate a single movement `Bound` against the owning node. A
-/// `Bound::Node(i)` must reference a real bound-scalar input slot
+/// chelis#616: validate a single movement `RtDim` against the owning node. A
+/// `RtDim::Node(i)` must reference a real bound-scalar input slot
 /// (`1 <= i < inputs.len()`) that is a rank-0 integer node. Pushes an error for
 /// each violation. `Lit` / `ToEnd` carry no input reference and are accepted
 /// here (`ToEnd`'s position legality is checked by the caller).
 fn check_bound_source(
     dag: &Dag,
     node: &crate::dag::DagNode,
-    bound: &Bound,
+    bound: &RtDim,
     label: &str,
     errors: &mut Vec<String>,
 ) {
-    let Bound::Node(i) = bound else {
+    let RtDim::Node(i) = bound else {
         return;
     };
     let i = *i;
@@ -1910,7 +1910,7 @@ mod tests {
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty, None);
         dag.add_node(
             RiscOp::Pad {
-                padding: vec![(Bound::Lit(1), Bound::Lit(1))],
+                padding: vec![(RtDim::Lit(1), RtDim::Lit(1))],
                 fill: 0.0,
             },
             vec![x],
@@ -1934,7 +1934,7 @@ mod tests {
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty, None);
         dag.add_node(
             RiscOp::Shrink {
-                bounds: vec![(Bound::Lit(6), Bound::Lit(2))],
+                bounds: vec![(RtDim::Lit(6), RtDim::Lit(2))],
             },
             vec![x],
             TensorType {
@@ -1957,7 +1957,7 @@ mod tests {
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty, None);
         dag.add_node(
             RiscOp::Stride {
-                strides: vec![Bound::Lit(0)],
+                strides: vec![RtDim::Lit(0)],
             },
             vec![x],
             TensorType {

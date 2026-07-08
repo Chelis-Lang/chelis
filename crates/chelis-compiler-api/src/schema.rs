@@ -1367,12 +1367,12 @@ pub enum WireFusedInput {
     PreviousStep { index: usize },
 }
 
-/// chelis#616: wire form of `chelis_ir::dag::Bound` for movement-op bounds.
+/// chelis#616: wire form of `chelis_ir::dag::RtDim` for movement-op bounds.
 /// `Node(i)` indexes the owning op's `inputs` (the rank-0 integer bound scalars);
 /// `to_end` is the full-axis sentinel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "bound", rename_all = "snake_case")]
-pub enum WireBound {
+pub enum WireRtDim {
     Lit { value: usize },
     ToEnd,
     Node { input: usize },
@@ -1463,14 +1463,14 @@ pub enum WireRiscOp {
         vocab: usize,
     },
     Pad {
-        padding: Vec<(WireBound, WireBound)>,
+        padding: Vec<(WireRtDim, WireRtDim)>,
         fill: f64,
     },
     Shrink {
-        bounds: Vec<(WireBound, WireBound)>,
+        bounds: Vec<(WireRtDim, WireRtDim)>,
     },
     Stride {
-        strides: Vec<WireBound>,
+        strides: Vec<WireRtDim>,
     },
     Const {
         value: f64,

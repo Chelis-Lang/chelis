@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::fmt;
 
-use crate::dag::{Bound, Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
+use crate::dag::{Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType};
 use crate::tier2;
 use chelis_types::types::Prim;
 
@@ -999,14 +999,14 @@ fn compute_adjoints(
             // hard error above -- no silent guess.
             let mut slices: Vec<NodeId> = Vec::with_capacity(axis_size);
             for i in 0..axis_size {
-                let bounds: Vec<(Bound, Bound)> = (0..rank)
+                let bounds: Vec<(RtDim, RtDim)> = (0..rank)
                     .map(|d| {
                         if d == *axis {
-                            (Bound::Lit(i), Bound::Lit(i + 1))
+                            (RtDim::Lit(i), RtDim::Lit(i + 1))
                         } else {
                             match &input_ty.dims[d] {
-                                DimInfo::Named(_, None) => (Bound::Lit(0), Bound::ToEnd),
-                                dim => (Bound::Lit(0), Bound::Lit(dim_size(dim))),
+                                DimInfo::Named(_, None) => (RtDim::Lit(0), RtDim::ToEnd),
+                                dim => (RtDim::Lit(0), RtDim::Lit(dim_size(dim))),
                             }
                         }
                     })
@@ -1053,12 +1053,12 @@ fn compute_adjoints(
                     slice_ty.clone(),
                     None,
                 );
-                let padding: Vec<(Bound, Bound)> = (0..rank)
+                let padding: Vec<(RtDim, RtDim)> = (0..rank)
                     .map(|d| {
                         if d == *axis {
-                            (Bound::Lit(i), Bound::Lit(axis_size - i - 1))
+                            (RtDim::Lit(i), RtDim::Lit(axis_size - i - 1))
                         } else {
-                            (Bound::Lit(0), Bound::Lit(0))
+                            (RtDim::Lit(0), RtDim::Lit(0))
                         }
                     })
                     .collect();
@@ -1249,14 +1249,14 @@ fn compute_adjoints(
             // axis's runtime extent before eval. A symbolic dim on an axis that
             // WAS padded would still need a concrete extent — that stays a
             // hard error via `dim_size` (no silent guess).
-            let bounds: Vec<(Bound, Bound)> = padding
+            let bounds: Vec<(RtDim, RtDim)> = padding
                 .iter()
                 .zip(input_ty.dims.iter())
                 .map(|((before, after), dim)| match dim {
                     DimInfo::Named(_, None)
                         if before.as_lit() == Some(0) && after.as_lit() == Some(0) =>
                     {
-                        (Bound::Lit(0), Bound::ToEnd)
+                        (RtDim::Lit(0), RtDim::ToEnd)
                     }
                     // chelis#616 M1: the differentiable-concat Pad adjoint operates
                     // on compile-time padding; a node-valued (runtime) forward pad
@@ -1265,7 +1265,7 @@ fn compute_adjoints(
                         let before = before
                             .as_lit()
                             .expect("node-valued pad adjoint is chelis#616 M2 work");
-                        (Bound::Lit(before), Bound::Lit(before + dim_size(dim)))
+                        (RtDim::Lit(before), RtDim::Lit(before + dim_size(dim)))
                     }
                 })
                 .collect();
@@ -1285,17 +1285,17 @@ fn compute_adjoints(
             // than let the `dim_size(dim) - end` subtraction wrap. A symbolic
             // dim under a CONCRETE sub-range bound still needs the runtime
             // size for `after` and stays a hard error via `dim_size`.
-            let padding: Vec<(Bound, Bound)> = bounds
+            let padding: Vec<(RtDim, RtDim)> = bounds
                 .iter()
                 .zip(input_ty.dims.iter())
                 .map(|((start, end), dim)| {
-                    if matches!(end, Bound::ToEnd) {
+                    if matches!(end, RtDim::ToEnd) {
                         assert_eq!(
                             start.as_lit(),
                             Some(0),
                             "malformed ToEnd sentinel in shrink adjoint: nonzero start {start:?}"
                         );
-                        (Bound::Lit(0), Bound::Lit(0))
+                        (RtDim::Lit(0), RtDim::Lit(0))
                     } else {
                         // chelis#616 M1: a node-valued (runtime) forward shrink
                         // bound reaching here is M2 value-dependent territory; a
@@ -1307,7 +1307,7 @@ fn compute_adjoints(
                         let end = end
                             .as_lit()
                             .expect("node-valued shrink adjoint is chelis#616 M2 work");
-                        (Bound::Lit(start), Bound::Lit(dim_size(dim) - end))
+                        (RtDim::Lit(start), RtDim::Lit(dim_size(dim) - end))
                     }
                 })
                 .collect();
@@ -1399,8 +1399,8 @@ fn compute_adjoints(
                 );
 
                 // pad the new minor axis with (0, step - 1).
-                let mut padding = vec![(Bound::Lit(0), Bound::Lit(0)); split_dims.len()];
-                padding[axis + 1] = (Bound::Lit(0), Bound::Lit(step - 1));
+                let mut padding = vec![(RtDim::Lit(0), RtDim::Lit(0)); split_dims.len()];
+                padding[axis + 1] = (RtDim::Lit(0), RtDim::Lit(step - 1));
                 let mut padded_dims = split_dims.clone();
                 padded_dims[axis + 1] = DimInfo::Lit(step);
                 let padded = dag.add_node(
@@ -1433,14 +1433,14 @@ fn compute_adjoints(
                 // (ceil), so this is a valid trim of the trailing
                 // overshoot from the final group. Symbolic bystander axes
                 // take the full-axis identity sentinel (chelis#513 gap 3).
-                let mut bounds: Vec<(Bound, Bound)> = merged_dims
+                let mut bounds: Vec<(RtDim, RtDim)> = merged_dims
                     .iter()
                     .map(|d| match d {
-                        DimInfo::Named(_, None) => (Bound::Lit(0), Bound::ToEnd),
-                        dim => (Bound::Lit(0), Bound::Lit(dim_size(dim))),
+                        DimInfo::Named(_, None) => (RtDim::Lit(0), RtDim::ToEnd),
+                        dim => (RtDim::Lit(0), RtDim::Lit(dim_size(dim))),
                     })
                     .collect();
-                bounds[axis] = (Bound::Lit(0), Bound::Lit(n_a));
+                bounds[axis] = (RtDim::Lit(0), RtDim::Lit(n_a));
                 let mut trimmed_dims = merged_dims.clone();
                 trimmed_dims[axis] = DimInfo::Lit(n_a);
                 let trimmed = dag.add_node(
@@ -3220,7 +3220,7 @@ mod tests {
         );
         let padded = dag.add_node(
             RiscOp::Pad {
-                padding: vec![(Bound::Lit(1), Bound::Lit(1))],
+                padding: vec![(RtDim::Lit(1), RtDim::Lit(1))],
                 fill: 0.0,
             },
             vec![x],
@@ -3272,7 +3272,7 @@ mod tests {
         );
         let shrunk = dag.add_node(
             RiscOp::Shrink {
-                bounds: vec![(Bound::Lit(1), Bound::Lit(4))],
+                bounds: vec![(RtDim::Lit(1), RtDim::Lit(4))],
             },
             vec![x],
             vec3_ty.clone(),
@@ -3387,7 +3387,7 @@ mod tests {
         );
         let strided = dag.add_node(
             RiscOp::Stride {
-                strides: vec![Bound::Lit(2)],
+                strides: vec![RtDim::Lit(2)],
             },
             vec![x],
             vec2_ty.clone(),
@@ -4006,7 +4006,7 @@ mod tests {
         );
         let strided = dag.add_node(
             RiscOp::Stride {
-                strides: vec![Bound::Lit(1), Bound::Lit(2)],
+                strides: vec![RtDim::Lit(1), RtDim::Lit(2)],
             },
             vec![x],
             sym_batch_ty(&[2]),
@@ -4019,8 +4019,8 @@ mod tests {
             matches!(
                 &node.op,
                 RiscOp::Shrink { bounds }
-                    if bounds.first() == Some(&(Bound::Lit(0), Bound::ToEnd))
-                        && bounds.get(1) == Some(&(Bound::Lit(0), Bound::Lit(4)))
+                    if bounds.first() == Some(&(RtDim::Lit(0), RtDim::ToEnd))
+                        && bounds.get(1) == Some(&(RtDim::Lit(0), RtDim::Lit(4)))
             )
         });
         assert!(
@@ -4048,7 +4048,7 @@ mod tests {
         );
         let strided = dag.add_node(
             RiscOp::Stride {
-                strides: vec![Bound::Lit(2)],
+                strides: vec![RtDim::Lit(2)],
             },
             vec![x],
             TensorType {
@@ -4109,7 +4109,7 @@ mod tests {
                 matches!(
                     &node.op,
                     RiscOp::Shrink { bounds }
-                        if bounds.first() == Some(&(Bound::Lit(0), Bound::ToEnd))
+                        if bounds.first() == Some(&(RtDim::Lit(0), RtDim::ToEnd))
                 )
             })
             .count();
@@ -4155,8 +4155,8 @@ mod tests {
         let shrunk = dag.add_node(
             RiscOp::Shrink {
                 bounds: vec![
-                    (Bound::Lit(0), Bound::ToEnd),
-                    (Bound::Lit(1), Bound::Lit(3)),
+                    (RtDim::Lit(0), RtDim::ToEnd),
+                    (RtDim::Lit(1), RtDim::Lit(3)),
                 ],
             },
             vec![x],
@@ -4170,8 +4170,8 @@ mod tests {
             matches!(
                 &node.op,
                 RiscOp::Pad { padding, .. }
-                    if padding.first() == Some(&(Bound::Lit(0), Bound::Lit(0)))
-                        && padding.get(1) == Some(&(Bound::Lit(1), Bound::Lit(0)))
+                    if padding.first() == Some(&(RtDim::Lit(0), RtDim::Lit(0)))
+                        && padding.get(1) == Some(&(RtDim::Lit(1), RtDim::Lit(0)))
             )
         });
         assert!(
@@ -4198,7 +4198,7 @@ mod tests {
         );
         let shrunk = dag.add_node(
             RiscOp::Shrink {
-                bounds: vec![(Bound::Lit(1), Bound::ToEnd)],
+                bounds: vec![(RtDim::Lit(1), RtDim::ToEnd)],
             },
             vec![x],
             TensorType {

@@ -1,8 +1,8 @@
 //! RISC DAG to C source code emission.
 
 use chelis_ir::dag::{
-    Bound, Dag, DagNode, DimExpr, DimInfo, FusedInput, FusedStep, FusedStepOp, NodeId,
-    ReduceWindowKind, RiscOp, TensorType, symbolic_bindings,
+    Dag, DagNode, DimExpr, DimInfo, FusedInput, FusedStep, FusedStepOp, NodeId, ReduceWindowKind,
+    RiscOp, RtDim, TensorType, symbolic_bindings,
 };
 use chelis_types::types::Prim;
 
@@ -5060,16 +5060,16 @@ impl CEmitter {
     }
 
     // ---- Pad ----
-    /// chelis#616: the C integer expression for a movement [`Bound`] at run
+    /// chelis#616: the C integer expression for a movement [`RtDim`] at run
     /// time. `Lit` is a literal; `ToEnd` reads the input tensor's runtime axis
     /// extent (`t{a}->shape[axis]`); `Node(i)` reads the rank-0 integer bound
     /// scalar `t{inputs[i]}->data[0]` with its declared element type, cast to
     /// `int` for use as a C index.
-    fn bound_c_expr(bound: &Bound, inputs: &[NodeId], a: usize, axis: usize, dag: &Dag) -> String {
+    fn bound_c_expr(bound: &RtDim, inputs: &[NodeId], a: usize, axis: usize, dag: &Dag) -> String {
         match bound {
-            Bound::Lit(n) => n.to_string(),
-            Bound::ToEnd => format!("t{a}->shape[{axis}]"),
-            Bound::Node(i) => {
+            RtDim::Lit(n) => n.to_string(),
+            RtDim::ToEnd => format!("t{a}->shape[{axis}]"),
+            RtDim::Node(i) => {
                 let n = inputs[*i].0;
                 let ct = Self::elem_type(&dag.get(inputs[*i]).unwrap().output_type);
                 format!("((int)((({ct}*)t{n}->data)[0]))")
@@ -5079,7 +5079,7 @@ impl CEmitter {
 
     /// chelis#616: whether any bound in a `(start, end)` pair list is
     /// node-valued (runtime) on the given axis.
-    fn pair_is_node(pair: &(Bound, Bound)) -> bool {
+    fn pair_is_node(pair: &(RtDim, RtDim)) -> bool {
         pair.0.node_input().is_some() || pair.1.node_input().is_some()
     }
 
@@ -5106,7 +5106,7 @@ impl CEmitter {
     fn emit_pad(
         &mut self,
         id: usize,
-        padding: &[(Bound, Bound)],
+        padding: &[(RtDim, RtDim)],
         fill: f64,
         inputs: &[NodeId],
         ty: &TensorType,
@@ -5216,7 +5216,7 @@ impl CEmitter {
     fn emit_shrink(
         &mut self,
         id: usize,
-        bounds: &[(Bound, Bound)],
+        bounds: &[(RtDim, RtDim)],
         inputs: &[NodeId],
         ty: &TensorType,
         dag: &Dag,
@@ -5236,13 +5236,13 @@ impl CEmitter {
         // on an axis whose output dim is concrete (a producing-pass bug that
         // would silently drop a real trim), or with a nonzero start.
         for (d, (lo, hi)) in bounds.iter().enumerate() {
-            if !matches!(hi, Bound::ToEnd) {
+            if !matches!(hi, RtDim::ToEnd) {
                 continue;
             }
             let out_dim = ty.dims.get(d);
             let symbolic_axis = matches!(out_dim, Some(DimInfo::Named(_, None)));
             assert!(
-                symbolic_axis && matches!(lo, Bound::Lit(0)),
+                symbolic_axis && matches!(lo, RtDim::Lit(0)),
                 "C backend reached an unresolved ToEnd sentinel at node {id} \
                  axis {d} (start {lo:?}, output dim {out_dim:?}) that is not a symbolic \
                  full-axis identity; the producing IR pass emitted a malformed shrink \
@@ -5308,7 +5308,7 @@ impl CEmitter {
     fn emit_stride(
         &mut self,
         id: usize,
-        strides: &[Bound],
+        strides: &[RtDim],
         inputs: &[NodeId],
         ty: &TensorType,
         dag: &Dag,

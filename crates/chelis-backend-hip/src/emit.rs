@@ -4,7 +4,7 @@
 //! and walks the DAG in topological order launching kernels on GPU.
 
 use chelis_ir::dag::{
-    Bound, Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, TensorType, symbolic_bindings,
+    Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType, symbolic_bindings,
 };
 use chelis_types::types::Prim;
 
@@ -13,25 +13,25 @@ use chelis_types::types::Prim;
 /// them before codegen. This converter materializes the compile-time bound for
 /// the literal launch emitters and panics on a node-valued bound as a defensive
 /// backstop (only reachable if a path bypasses the reject seam).
-fn hip_bound_to_usize(b: &Bound) -> usize {
+fn hip_bound_to_usize(b: &RtDim) -> usize {
     match b {
-        Bound::Lit(n) => *n,
-        Bound::ToEnd => chelis_ir::dag::SHRINK_TO_END,
-        Bound::Node(_) => panic!(
+        RtDim::Lit(n) => *n,
+        RtDim::ToEnd => chelis_ir::dag::SHRINK_TO_END,
+        RtDim::Node(_) => panic!(
             "HIP backend reached a node-valued (runtime) movement bound; \
              reject_unsupported_hip_ops must reject it before codegen (chelis#616)"
         ),
     }
 }
 
-fn hip_pairs_to_usize(bounds: &[(Bound, Bound)]) -> Vec<(usize, usize)> {
+fn hip_pairs_to_usize(bounds: &[(RtDim, RtDim)]) -> Vec<(usize, usize)> {
     bounds
         .iter()
         .map(|(s, e)| (hip_bound_to_usize(s), hip_bound_to_usize(e)))
         .collect()
 }
 
-fn hip_strides_to_usize(strides: &[Bound]) -> Vec<usize> {
+fn hip_strides_to_usize(strides: &[RtDim]) -> Vec<usize> {
     strides.iter().map(hip_bound_to_usize).collect()
 }
 

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use chelis_backend_c::CodegenResult;
 use chelis_backend_hip::HipCodegenResult;
 use chelis_deep::Expr as DeepExpr;
-use chelis_ir::dag::{Bound, Dag, DimInfo, FusedInput, FusedStepOp, NodeId, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, FusedInput, FusedStepOp, NodeId, RiscOp, RtDim, TensorType};
 use chelis_ir::eval::{self, TensorValue as IrTensorValue};
 use chelis_ir::lower::top_level_lowering_map;
 use chelis_surf::ast::{
@@ -27,13 +27,13 @@ use crate::schema::{
     DesugarResult, Diagnostic, EvalRequest, EvalResult, EvaluatedRoot, FitnessComponents,
     GeneratedFile, GradRequest, GradResult, LowerRequest, LowerResult, ParseRequest, ParseResult,
     RenameRequest, RenameResult, ReplaceFunctionRequest, ReplaceFunctionResult, SourceKind, Span,
-    ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireBound, WireDag, WireDagNode,
+    ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireDag, WireDagNode,
     WireDagSchemaError, WireDeepAtom, WireDeepExpr, WireDeepExprKind, WireDimExpr, WireDimInfo,
     WireFusedInput, WireFusedStep, WireFusedStepOp, WireImportKind, WireLetBinding, WireLetPattern,
     WireLiteral, WireMatchArm, WireMetaEntry, WireParam, WirePattern, WirePropertyOption,
-    WireRecordExprField, WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireSurfDecl,
-    WireSurfExpr, WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp, WireVariant,
-    WireVariantFields,
+    WireRecordExprField, WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireRtDim,
+    WireSurfDecl, WireSurfExpr, WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp,
+    WireVariant, WireVariantFields,
 };
 
 const RUNTIME_H: &str = include_str!(concat!(
@@ -2407,7 +2407,7 @@ fn reject_host_only_builtins(
 }
 
 /// chelis#616: whether a movement `(start, end)` bound pair is node-valued.
-fn pair_has_node_bound(pair: &(Bound, Bound)) -> bool {
+fn pair_has_node_bound(pair: &(RtDim, RtDim)) -> bool {
     pair.0.node_input().is_some() || pair.1.node_input().is_some()
 }
 
@@ -3350,12 +3350,12 @@ fn wire_dim_expr(expr: &chelis_ir::dag::DimExpr) -> WireDimExpr {
     }
 }
 
-/// chelis#616: map a movement-op [`Bound`] to its wire form.
-fn wire_bound(b: &Bound) -> WireBound {
+/// chelis#616: map a movement-op [`RtDim`] to its wire form.
+fn wire_bound(b: &RtDim) -> WireRtDim {
     match b {
-        Bound::Lit(n) => WireBound::Lit { value: *n },
-        Bound::ToEnd => WireBound::ToEnd,
-        Bound::Node(i) => WireBound::Node { input: *i },
+        RtDim::Lit(n) => WireRtDim::Lit { value: *n },
+        RtDim::ToEnd => WireRtDim::ToEnd,
+        RtDim::Node(i) => WireRtDim::Node { input: *i },
     }
 }
 

@@ -29,7 +29,7 @@
 
 use std::collections::HashMap;
 
-use chelis_ir::dag::{Bound, Dag, DimExpr, DimInfo, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, RtDim, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
 use chelis_ir::grad::grad_dag_checked;
 use chelis_types::types::Prim;
@@ -69,8 +69,8 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
     let one_hot = dag.add_node(
         RiscOp::Pad {
             padding: vec![
-                (Bound::Lit(0), Bound::Lit(0)),
-                (Bound::Lit(0), Bound::Lit(1)),
+                (RtDim::Lit(0), RtDim::Lit(0)),
+                (RtDim::Lit(0), RtDim::Lit(1)),
             ],
             fill: 0.0,
         },
