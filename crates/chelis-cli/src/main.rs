@@ -4485,7 +4485,7 @@ fn expect_detail(verdict: &chelis_conformance::expect::Verdict) -> String {
             format!("failed without the required diagnostic substring {expected:?}")
         }
         Verdict::FixDetected { .. } => {
-            "probe passes — upstream fixed the blocker; de-narrow now".to_string()
+            "probe passes: upstream fixed the blocker; de-narrow now".to_string()
         }
         Verdict::Drifted { expected, .. } => {
             format!("failed with a different diagnostic (expected {expected:?})")
@@ -4535,7 +4535,7 @@ fn emit_expect(
         Verdict::FixDetected { instructions } => {
             writeln!(
                 out,
-                "    upstream fixed this blocker — de-narrowing instructions:"
+                "    upstream fixed this blocker; de-narrowing instructions:"
             )
             .map_err(|e| e.to_string())?;
             for line in instructions {

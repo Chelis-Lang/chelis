@@ -130,7 +130,7 @@ fn blocked_fail_with_substring_is_ok() {
         "probe",
         "Probe",
         r#"def test_blocked_repro() -> unit = test_assert(false, "rank mismatch in expand")"#,
-        Some("rank mismatch\nchelis#345 — promote to tests/ on fix\n"),
+        Some("rank mismatch\nchelis#345: promote to tests/ on fix\n"),
     );
     run_expect(&pkg, "blocked")
         .success()
@@ -145,7 +145,7 @@ fn blocked_pass_is_fix_detected() {
         "probe",
         "Probe",
         r#"def test_blocked_repro() -> unit = test_assert(true, "now works")"#,
-        Some("rank mismatch\nchelis#345 — promote to tests/ on fix\n"),
+        Some("rank mismatch\nchelis#345: promote to tests/ on fix\n"),
     );
     run_expect(&pkg, "blocked")
         .failure()
