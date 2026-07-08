@@ -1873,7 +1873,7 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
                         } else {
                             // `Lit` passes through; `Node` (runtime) bounds are
                             // resolved by the evaluator from `inputs`, not here.
-                            Ok((start.clone(), end.clone()))
+                            Ok((*start, *end))
                         }
                     })
                     .collect::<Result<Vec<_>, String>>()?;
