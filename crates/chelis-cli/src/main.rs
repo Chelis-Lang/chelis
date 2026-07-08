@@ -305,6 +305,13 @@ enum Command {
         /// Suite batching mode: `auto` batches eligible files, `file` keeps per-file workers
         #[clap(long, default_value = "auto", value_name = "auto|file")]
         batch_mode: TestBatchMode,
+        /// Expected-failure mode: treat each `.ch` as an expected-to-fail case
+        /// paired with a `.expect` sidecar (line 1 = required diagnostic
+        /// substring). `neg` drives `tests_neg/`; `blocked` drives
+        /// `tests_blocked/` (a pass = FIX-detected, fails loudly). Runs per-file
+        /// isolated regardless of `--batch-mode`.
+        #[clap(long, value_name = "neg|blocked")]
+        expect: Option<ExpectArg>,
     },
     /// Run L2 property checks discovered in Surf or Deep inputs
     Prove {
@@ -625,6 +632,75 @@ enum ReefCommand {
         #[arg(long)]
         path: Option<PathBuf>,
     },
+    /// Downstream shell-repo contract conformance (audit / stamp / sync).
+    ///
+    /// The machine-checked form of `spec/design/shell_repo_contract.md`,
+    /// shipped in the toolchain so it cannot copy-drift. See
+    /// [`ConformCommand`] for the verbs.
+    Conform {
+        #[command(subcommand)]
+        command: ConformCommand,
+    },
+}
+
+/// `chelis reef conform <verb>` — see `shell_repo_contract.md`.
+#[derive(Subcommand)]
+enum ConformCommand {
+    /// Audit the current repo against the §11 conformance manifest. Read-only,
+    /// offline, deterministic. Exits non-zero on any MUST-tier failure.
+    Audit {
+        /// Repo root to audit (defaults to `.`).
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Emit one NDJSON record per contract row plus a summary line.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Scaffold a new shell (or retrofit an existing one) from the embedded
+    /// templates: reef.toml, AGENTS.md (+ CLAUDE.md symlink), the CHELIS_SURFACE
+    /// / UPSTREAM_BUGS docs, tests_neg/tests_blocked, CI, and materialized skills.
+    Init {
+        /// Package name.
+        name: String,
+        /// Module namespace (PascalCase).
+        #[arg(long)]
+        module_prefix: String,
+        /// Output directory (defaults to `./<name>`).
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+    /// Regenerate the pointer managed blocks and re-materialize the skill set
+    /// from the pinned toolchain, restamping to the reef pin. Touches only
+    /// managed regions and `agent-skills/`.
+    Sync {
+        /// Shell package root (defaults to `.`).
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+    /// Mechanize the Pin Bump Checklist: rewrite every pin location in lockstep,
+    /// restamp the managed blocks + re-materialize skills, then run the offline
+    /// audit and the blocked/negative suites. Produces the change set on the
+    /// working tree (git-agnostic; the caller opens the PR) and exits non-zero
+    /// if any gate fails.
+    Bump {
+        /// Target chelis version (bare `X.Y.Z`).
+        version: String,
+        /// Shell package root (defaults to `.`).
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+    /// Pin-change guard for shell CI: pass trivially if the reef pin is
+    /// unchanged vs `--base`; if it changed, require a green conformance audit
+    /// (fresh managed-block stamps, lockstep workflow pins, wired probes) — so a
+    /// raw pin edit that skips the checklist fails the PR.
+    BumpCheck {
+        /// Git ref to diff the pin against (e.g. `origin/main`).
+        #[arg(long)]
+        base: String,
+        /// Shell package root (defaults to `.`).
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -764,6 +840,7 @@ fn main() {
             timeout,
             jobs,
             batch_mode,
+            expect,
         }) => match cmd_test(
             path.as_deref(),
             filter.as_deref(),
@@ -771,6 +848,7 @@ fn main() {
             timeout,
             jobs,
             batch_mode,
+            expect,
         ) {
             Ok(code) => std::process::exit(code),
             Err(err) => {
@@ -3111,6 +3189,240 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", path.display());
         }
         ReefCommand::Setup { path } => cmd_reef_setup(path)?,
+        ReefCommand::Conform { command } => cmd_reef_conform(command)?,
+    }
+    Ok(())
+}
+
+/// Dispatch `chelis reef conform <verb>`.
+fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        ConformCommand::Audit { root, json } => {
+            let root = match root {
+                Some(p) => p,
+                None => env::current_dir()?,
+            };
+            let report = chelis_conformance::audit::audit(&root);
+            print_audit_report(&report, json)?;
+            if !report.ok() {
+                std::process::exit(1);
+            }
+        }
+        ConformCommand::Init {
+            name,
+            module_prefix,
+            output,
+        } => {
+            let root = output.unwrap_or_else(|| PathBuf::from(&name));
+            chelis_conformance::scaffold::scaffold(
+                &root,
+                &name,
+                &module_prefix,
+                chelis_compiler_api::COMPILER_VERSION,
+            )?;
+            println!(
+                "scaffolded conformant shell `{name}` at {} (chelis {})",
+                root.display(),
+                chelis_compiler_api::COMPILER_VERSION
+            );
+        }
+        ConformCommand::Sync { path } => {
+            let root = match path {
+                Some(p) => p,
+                None => env::current_dir()?,
+            };
+            let version = chelis_conformance::audit::audit(&root)
+                .reef_pin
+                .map(|p| p.trim_start_matches('=').to_string())
+                .unwrap_or_else(|| chelis_compiler_api::COMPILER_VERSION.to_string());
+            chelis_conformance::scaffold::materialize_skills(&root)?;
+            chelis_conformance::scaffold::sync_managed_blocks(&root, &version)?;
+            println!(
+                "synced managed blocks + skills to chelis {version} at {}",
+                root.display()
+            );
+        }
+        ConformCommand::Bump { version, path } => {
+            let root = match path {
+                Some(p) => p,
+                None => env::current_dir()?,
+            };
+            let changed = chelis_conformance::bump::rewrite_pins(&root, &version)?;
+            for p in &changed {
+                println!("repinned {}", p.display());
+            }
+            chelis_conformance::scaffold::materialize_skills(&root)?;
+            chelis_conformance::scaffold::sync_managed_blocks(&root, &version)?;
+            println!("restamped managed blocks + skills to chelis {version}");
+
+            // Offline gate: the mechanical bump must leave a conformant tree.
+            let report = chelis_conformance::audit::audit(&root);
+            if !report.ok() {
+                eprintln!("bump left the shell non-conformant:");
+                print_audit_report(&report, false)?;
+                std::process::exit(1);
+            }
+
+            // Executable gates: the blocked-probe + negative suites, run against
+            // the bumped toolchain. A FIX-detected probe is the wanted outcome
+            // but still exits non-zero so it is acted on (de-narrow + promote).
+            let mut gate_failed = false;
+            for (dir, mode) in [("tests_blocked", "blocked"), ("tests_neg", "neg")] {
+                if dir_has_ch_files(&root.join(dir)) {
+                    let ok = run_self_test_expect(&root, dir, mode)?;
+                    if !ok {
+                        gate_failed = true;
+                    }
+                }
+            }
+            if gate_failed {
+                std::process::exit(1);
+            }
+
+            println!(
+                "bump to chelis {version} is mechanically complete. Remaining manual checklist:\n\
+                 - `chelis reef conform staleness` (closed-but-cited workarounds; needs gh)\n\
+                 - re-probe every docs/UPSTREAM_BUGS.md §Tracking entry naming this release, per-verb\n\
+                 Open a PR with this change set; do not push the pin directly to main."
+            );
+        }
+        ConformCommand::BumpCheck { base, path } => {
+            let root = match path {
+                Some(p) => p,
+                None => env::current_dir()?,
+            };
+            let current = chelis_conformance::bump::bare_pin(&std::fs::read_to_string(
+                root.join("reef.toml"),
+            )?);
+            let base_pin = git_show_reef_pin(&root, &base);
+            match (current, base_pin) {
+                (Some(cur), Some(base_pin)) if cur != base_pin => {
+                    // The pin changed: require a green audit (fresh stamps,
+                    // lockstep workflow pins, wired probes).
+                    let report = chelis_conformance::audit::audit(&root);
+                    if report.ok() {
+                        println!("pin change {base_pin} -> {cur}: conformance audit green");
+                    } else {
+                        eprintln!(
+                            "pin changed {base_pin} -> {cur} but the checklist did not run \
+                             (audit not green). Bump via `chelis reef conform bump {cur}`, not a raw edit:"
+                        );
+                        print_audit_report(&report, false)?;
+                        std::process::exit(1);
+                    }
+                }
+                (Some(_), Some(_)) => {
+                    println!("reef pin unchanged vs {base}; bump-check passes");
+                }
+                _ => {
+                    // Could not read the base pin (shallow clone, first commit,
+                    // no git). The guard only fires on a provable change.
+                    println!(
+                        "bump-check: could not resolve base pin vs {base}; skipping (no provable pin change)"
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether `dir` contains any `.ch` file (recursively).
+fn dir_has_ch_files(dir: &Path) -> bool {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        if let Ok(entries) = std::fs::read_dir(&d) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().and_then(|s| s.to_str()) == Some("ch") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Re-exec this binary as `chelis test <dir>/ --expect <mode>` in `root`,
+/// inheriting stdio. Returns whether it passed (exit 0).
+fn run_self_test_expect(
+    root: &Path,
+    dir: &str,
+    mode: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let exe = std::env::current_exe()?;
+    let status = std::process::Command::new(exe)
+        .current_dir(root)
+        .args(["test", &format!("{dir}/"), "--expect", mode])
+        .status()?;
+    Ok(status.success())
+}
+
+/// Read the `compiler` pin from `reef.toml` at git ref `base` (bare `X.Y.Z`),
+/// or `None` if git or the file is unavailable at that ref.
+fn git_show_reef_pin(root: &Path, base: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["show", &format!("{base}:reef.toml")])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(out.stdout).ok()?;
+    chelis_conformance::bump::bare_pin(&text)
+}
+
+/// Print a conformance audit report as plain text or NDJSON.
+fn print_audit_report(
+    report: &chelis_conformance::audit::AuditReport,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    if json {
+        for r in &report.rows {
+            let record = serde_json::json!({
+                "row": r.row,
+                "key": r.key,
+                "section": r.section,
+                "verdict": r.verdict.tag(),
+                "diagnostic": r.diagnostic,
+                "fix": r.fix,
+            });
+            writeln!(out, "{record}")?;
+        }
+        let summary = serde_json::json!({
+            "summary": {
+                "must_failures": report.must_failures(),
+                "ok": report.ok(),
+                "pin": report.reef_pin,
+            }
+        });
+        writeln!(out, "{summary}")?;
+    } else {
+        for r in &report.rows {
+            let mark = r.verdict.tag().to_uppercase();
+            writeln!(
+                out,
+                "row {:>2} {:<10} {} ({})",
+                r.row, mark, r.key, r.section
+            )?;
+            if !r.diagnostic.is_empty() {
+                writeln!(out, "        {}", r.diagnostic)?;
+                if !r.fix.is_empty() {
+                    writeln!(out, "        fix: {}", r.fix)?;
+                }
+            }
+        }
+        let n = report.must_failures();
+        if n == 0 {
+            writeln!(out, "\nconformant: no MUST failures")?;
+        } else {
+            writeln!(out, "\n{n} MUST failure(s)")?;
+        }
     }
     Ok(())
 }
@@ -3799,6 +4111,37 @@ impl FromStr for TestBatchMode {
     }
 }
 
+/// `--expect <neg|blocked>`: which expected-failure suite semantics to apply.
+/// Thin CLI mirror of [`chelis_conformance::expect::ExpectMode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExpectArg {
+    Neg,
+    Blocked,
+}
+
+impl FromStr for ExpectArg {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.eq_ignore_ascii_case("neg") {
+            return Ok(ExpectArg::Neg);
+        }
+        if value.eq_ignore_ascii_case("blocked") {
+            return Ok(ExpectArg::Blocked);
+        }
+        Err("`--expect` must be `neg` or `blocked`".to_string())
+    }
+}
+
+impl ExpectArg {
+    fn mode(self) -> chelis_conformance::expect::ExpectMode {
+        match self {
+            ExpectArg::Neg => chelis_conformance::expect::ExpectMode::Neg,
+            ExpectArg::Blocked => chelis_conformance::expect::ExpectMode::Blocked,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct TestFileJob {
     index: usize,
@@ -3828,6 +4171,7 @@ fn cmd_test(
     timeout_secs: u64,
     jobs: TestJobs,
     batch_mode: TestBatchMode,
+    expect: Option<ExpectArg>,
 ) -> Result<i32, String> {
     let raw_cwd = env::current_dir().map_err(|e| format!("failed to read cwd: {e}"))?;
     let target = match path {
@@ -3996,6 +4340,25 @@ fn cmd_test(
                 .to_string(),
         })
         .collect::<Vec<_>>();
+
+    // Expected-failure mode reinterprets each file's result against its
+    // `.expect` sidecar and always runs per-file isolated (contract §5: a
+    // pinned failure mode can poison a shared compile unit), so it bypasses the
+    // streaming batch/summary path entirely.
+    if let Some(expect) = expect {
+        return run_expect(
+            expect.mode(),
+            &self_path,
+            &cwd,
+            &test_jobs,
+            jobs,
+            timeout_secs,
+            context_tempfile.path(),
+            json,
+            &mut out,
+        );
+    }
+
     match batch_mode {
         TestBatchMode::File => {
             let worker_count = jobs.resolve(test_jobs.len());
@@ -4041,6 +4404,150 @@ fn cmd_test(
     }
 
     Ok(if failed == 0 { 0 } else { 1 })
+}
+
+/// Run the expected-failure suites (`tests_neg/` / `tests_blocked/`) with
+/// per-file isolated workers, classifying each file against its `.expect`
+/// sidecar via [`chelis_conformance::expect`]. Exit code is `0` iff every file
+/// is healthy (still fails with the pinned diagnostic); any regression,
+/// FIX-detected, drift, or config error is non-zero so CI blocks on it.
+#[allow(clippy::too_many_arguments)]
+fn run_expect(
+    mode: chelis_conformance::expect::ExpectMode,
+    self_path: &Path,
+    cwd: &Path,
+    test_jobs: &[TestFileJob],
+    jobs: TestJobs,
+    timeout_secs: u64,
+    context_path: &Path,
+    json: bool,
+    out: &mut impl Write,
+) -> Result<i32, String> {
+    use chelis_conformance::expect::{FileOutcome, Sidecar, classify};
+
+    let worker_count = jobs.resolve(test_jobs.len());
+    let results = collect_test_file_jobs(
+        self_path,
+        cwd,
+        test_jobs,
+        worker_count,
+        None,
+        timeout_secs,
+        context_path,
+    )?;
+
+    let mut ok = 0usize;
+    let mut bad = 0usize;
+    for job in test_jobs {
+        let empty: Vec<TestRow> = Vec::new();
+        let rows = results.get(&job.index).unwrap_or(&empty);
+        let outcome = FileOutcome::from_rows(
+            rows.iter()
+                .map(|r| (matches!(r.status, TestStatus::Pass), r.message.as_deref())),
+        );
+        let sidecar_path = job.file.with_extension("expect");
+        let verdict = match std::fs::read_to_string(&sidecar_path) {
+            Ok(text) => match Sidecar::parse(&text) {
+                Ok(sidecar) => classify(mode, &outcome, Some(&sidecar)),
+                Err(reason) => chelis_conformance::expect::Verdict::ConfigError { reason },
+            },
+            Err(_) => classify(mode, &outcome, None),
+        };
+        if verdict.is_ok() {
+            ok += 1;
+        } else {
+            bad += 1;
+        }
+        emit_expect(out, json, mode, &job.rel_display, &verdict)?;
+    }
+
+    if json {
+        writeln!(
+            out,
+            "{{\"summary\":{{\"ok\":{ok},\"failed\":{bad},\"mode\":\"{}\"}}}}",
+            mode.as_str()
+        )
+        .map_err(|e| e.to_string())?;
+    } else {
+        writeln!(out, "\n{ok} ok, {bad} failing ({} mode)", mode.as_str())
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(if bad == 0 { 0 } else { 1 })
+}
+
+/// Human-readable one-line detail for an expected-failure verdict.
+fn expect_detail(verdict: &chelis_conformance::expect::Verdict) -> String {
+    use chelis_conformance::expect::Verdict;
+    match verdict {
+        Verdict::Ok => String::new(),
+        Verdict::ShouldHaveFailed => "case passed but was required to fail".to_string(),
+        Verdict::WrongDiagnostic { expected, .. } => {
+            format!("failed without the required diagnostic substring {expected:?}")
+        }
+        Verdict::FixDetected { .. } => {
+            "probe passes — upstream fixed the blocker; de-narrow now".to_string()
+        }
+        Verdict::Drifted { expected, .. } => {
+            format!("failed with a different diagnostic (expected {expected:?})")
+        }
+        Verdict::ConfigError { reason } => reason.clone(),
+    }
+}
+
+/// Emit one file's expected-failure verdict (NDJSON record or a plain line +
+/// indented detail, mirroring `chelis test`'s two output shapes).
+fn emit_expect(
+    out: &mut impl Write,
+    json: bool,
+    mode: chelis_conformance::expect::ExpectMode,
+    file: &str,
+    verdict: &chelis_conformance::expect::Verdict,
+) -> Result<(), String> {
+    use chelis_conformance::expect::Verdict;
+    if json {
+        let record = serde_json::json!({
+            "file": file,
+            "expect": mode.as_str(),
+            "verdict": verdict.tag(),
+            "detail": expect_detail(verdict),
+        });
+        writeln!(out, "{record}").map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    let label = match verdict {
+        Verdict::Ok => "OK",
+        Verdict::ShouldHaveFailed => "SHOULD-HAVE-FAILED",
+        Verdict::WrongDiagnostic { .. } => "WRONG-DIAGNOSTIC",
+        Verdict::FixDetected { .. } => "FIX-DETECTED",
+        Verdict::Drifted { .. } => "DRIFTED",
+        Verdict::ConfigError { .. } => "CONFIG-ERROR",
+    };
+    writeln!(out, "{label:<18} {file}").map_err(|e| e.to_string())?;
+    match verdict {
+        Verdict::WrongDiagnostic { expected, got } | Verdict::Drifted { expected, got } => {
+            writeln!(out, "    expected diagnostic substring: {expected:?}")
+                .map_err(|e| e.to_string())?;
+            for g in got {
+                writeln!(out, "    got: {g}").map_err(|e| e.to_string())?;
+            }
+        }
+        Verdict::FixDetected { instructions } => {
+            writeln!(
+                out,
+                "    upstream fixed this blocker — de-narrowing instructions:"
+            )
+            .map_err(|e| e.to_string())?;
+            for line in instructions {
+                writeln!(out, "      {line}").map_err(|e| e.to_string())?;
+            }
+        }
+        Verdict::ConfigError { reason } => {
+            writeln!(out, "    {reason}").map_err(|e| e.to_string())?;
+        }
+        Verdict::Ok | Verdict::ShouldHaveFailed => {}
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
