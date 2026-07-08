@@ -4,7 +4,7 @@
 //! a GPU or HIP runtime. They run in default CI.
 
 use chelis_backend_hip::codegen_hip;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
 use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
 use std::env;
@@ -467,7 +467,9 @@ fn s5_realize_materializes_with_kernel_not_view() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
     let s = dag.add_node(
-        RiscOp::Stride { strides: vec![2] },
+        RiscOp::Stride {
+            strides: vec![RtDim::Lit(2)],
+        },
         vec![x],
         vec_f32(3),
         None,
@@ -1756,7 +1758,7 @@ fn s8a_pad_emits_kernel_and_launch_not_view() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
     let p = dag.add_node(
         RiscOp::Pad {
-            padding: vec![(1, 1)],
+            padding: vec![(RtDim::Lit(1), RtDim::Lit(1))],
             fill: 0.0,
         },
         vec![x],
@@ -1789,7 +1791,7 @@ fn s8a_shrink_emits_kernel_and_launch_not_view() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
     let s = dag.add_node(
         RiscOp::Shrink {
-            bounds: vec![(1, 5)],
+            bounds: vec![(RtDim::Lit(1), RtDim::Lit(5))],
         },
         vec![x],
         vec_f32(4),
@@ -1823,7 +1825,7 @@ fn s8a_pad_f64_uses_dtype_suffix() {
     );
     let p = dag.add_node(
         RiscOp::Pad {
-            padding: vec![(1, 1)],
+            padding: vec![(RtDim::Lit(1), RtDim::Lit(1))],
             fill: 0.0,
         },
         vec![x],
@@ -1853,7 +1855,7 @@ fn s8a_shrink_i32_uses_dtype_suffix() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_i32(6), None);
     let s = dag.add_node(
         RiscOp::Shrink {
-            bounds: vec![(1, 5)],
+            bounds: vec![(RtDim::Lit(1), RtDim::Lit(5))],
         },
         vec![x],
         vec_i32(4),

@@ -3,7 +3,7 @@
 //! These probe edge cases not covered by S1-S13 structural tests.
 
 use chelis_backend_hip::codegen_hip;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
 use chelis_types::types::Prim;
 
 fn scalar_f32() -> TensorType {
@@ -208,7 +208,9 @@ fn rt5_stride_op_multiplies_strides() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
     let _s = dag.add_node(
-        RiscOp::Stride { strides: vec![2] },
+        RiscOp::Stride {
+            strides: vec![RtDim::Lit(2)],
+        },
         vec![x],
         vec_f32(3),
         None,

@@ -14,7 +14,7 @@
 //! Manual gate per AGENTS.md: not part of default CI.
 
 use chelis_backend_hip::codegen_hip;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
@@ -1156,7 +1156,9 @@ fn g10_realize_materializes_view_on_gpu() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(5), None);
     let s = dag.add_node(
-        RiscOp::Stride { strides: vec![2] },
+        RiscOp::Stride {
+            strides: vec![RtDim::Lit(2)],
+        },
         vec![x],
         vec_f32(3),
         None,
@@ -2859,7 +2861,7 @@ fn g16_pad_1d_zero_fill_matches_eval() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
     let p = dag.add_node(
         RiscOp::Pad {
-            padding: vec![(1, 1)],
+            padding: vec![(RtDim::Lit(1), RtDim::Lit(1))],
             fill: 0.0,
         },
         vec![x],
@@ -2881,7 +2883,7 @@ fn g16_pad_1d_nonzero_fill_matches_eval() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
     let p = dag.add_node(
         RiscOp::Pad {
-            padding: vec![(2, 1)],
+            padding: vec![(RtDim::Lit(2), RtDim::Lit(1))],
             fill: -7.5,
         },
         vec![x],
@@ -2910,7 +2912,10 @@ fn g16_pad_2d_asymmetric_matches_eval() {
         RiscOp::Pad {
             // before/after per axis: row axis (1,0), col axis (0,2) →
             // output is 3x5.
-            padding: vec![(1, 0), (0, 2)],
+            padding: vec![
+                (RtDim::Lit(1), RtDim::Lit(0)),
+                (RtDim::Lit(0), RtDim::Lit(2)),
+            ],
             fill: 0.0,
         },
         vec![x],
@@ -2937,14 +2942,16 @@ fn g16_pad_over_strided_source_matches_eval() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
     let s = dag.add_node(
-        RiscOp::Stride { strides: vec![2] },
+        RiscOp::Stride {
+            strides: vec![RtDim::Lit(2)],
+        },
         vec![x],
         vec_f32(3),
         None,
     );
     let p = dag.add_node(
         RiscOp::Pad {
-            padding: vec![(1, 1)],
+            padding: vec![(RtDim::Lit(1), RtDim::Lit(1))],
             fill: 9.0,
         },
         vec![s],
@@ -2966,7 +2973,7 @@ fn g16_shrink_1d_matches_eval() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
     let s = dag.add_node(
         RiscOp::Shrink {
-            bounds: vec![(1, 5)],
+            bounds: vec![(RtDim::Lit(1), RtDim::Lit(5))],
         },
         vec![x],
         vec_f32(4),
@@ -2993,7 +3000,10 @@ fn g16_shrink_2d_matches_eval() {
     let s = dag.add_node(
         RiscOp::Shrink {
             // keep rows [1,3) and cols [0,2) → 2x2 interior crop.
-            bounds: vec![(1, 3), (0, 2)],
+            bounds: vec![
+                (RtDim::Lit(1), RtDim::Lit(3)),
+                (RtDim::Lit(0), RtDim::Lit(2)),
+            ],
         },
         vec![x],
         mat_f32(2, 2),
@@ -3022,7 +3032,7 @@ fn g16_pad_then_shrink_roundtrip_matches_eval() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
     let p = dag.add_node(
         RiscOp::Pad {
-            padding: vec![(2, 2)],
+            padding: vec![(RtDim::Lit(2), RtDim::Lit(2))],
             fill: 0.0,
         },
         vec![x],
@@ -3031,7 +3041,7 @@ fn g16_pad_then_shrink_roundtrip_matches_eval() {
     );
     let s = dag.add_node(
         RiscOp::Shrink {
-            bounds: vec![(2, 6)],
+            bounds: vec![(RtDim::Lit(2), RtDim::Lit(6))],
         },
         vec![p],
         vec_f32(4),

@@ -8,7 +8,7 @@
 //! coverage; M4 reductions; M5 matmul.
 
 use chelis_backend_metal::codegen_metal;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
 use chelis_types::types::Prim;
 
 fn vec_f32(n: usize) -> TensorType {
@@ -898,7 +898,7 @@ fn ws8a_pad_emits_msl_kernel_and_two_uniform_launch() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
     let p = dag.add_node(
         RiscOp::Pad {
-            padding: vec![(1, 1)],
+            padding: vec![(RtDim::Lit(1), RtDim::Lit(1))],
             fill: 0.0,
         },
         vec![x],
@@ -939,7 +939,7 @@ fn ws8a_shrink_emits_msl_kernel_and_single_uniform_launch() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
     let s = dag.add_node(
         RiscOp::Shrink {
-            bounds: vec![(1, 5)],
+            bounds: vec![(RtDim::Lit(1), RtDim::Lit(5))],
         },
         vec![x],
         vec_f32(4),
@@ -980,7 +980,10 @@ fn ws8a_pad_2d_uses_movement_dims() {
     );
     let p = dag.add_node(
         RiscOp::Pad {
-            padding: vec![(1, 0), (0, 2)],
+            padding: vec![
+                (RtDim::Lit(1), RtDim::Lit(0)),
+                (RtDim::Lit(0), RtDim::Lit(2)),
+            ],
             fill: 0.0,
         },
         vec![x],

@@ -5512,7 +5512,7 @@ impl CEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+    use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
     use chelis_types::types::Prim;
 
     fn scalar_f32() -> TensorType {
@@ -5855,7 +5855,9 @@ mod tests {
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
         let s = dag.add_node(
-            RiscOp::Stride { strides: vec![2] },
+            RiscOp::Stride {
+                strides: vec![RtDim::Lit(2)],
+            },
             vec![x],
             vec_f32(3),
             None,
@@ -5952,7 +5954,7 @@ mod tests {
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(3), None);
         dag.add_node(
             RiscOp::Pad {
-                padding: vec![(1, 1)],
+                padding: vec![(RtDim::Lit(1), RtDim::Lit(1))],
                 fill: 0.0,
             },
             vec![a],
@@ -5970,7 +5972,7 @@ mod tests {
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(5), None);
         dag.add_node(
             RiscOp::Shrink {
-                bounds: vec![(1, 4)],
+                bounds: vec![(RtDim::Lit(1), RtDim::Lit(4))],
             },
             vec![a],
             vec_f32(3),
@@ -5992,7 +5994,7 @@ mod tests {
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(5), None);
         dag.add_node(
             RiscOp::Shrink {
-                bounds: vec![(0, chelis_ir::dag::SHRINK_TO_END)],
+                bounds: vec![(RtDim::Lit(0), RtDim::ToEnd)],
             },
             vec![a],
             vec_f32(5),
@@ -6006,7 +6008,9 @@ mod tests {
         let mut dag = Dag::new();
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
         dag.add_node(
-            RiscOp::Stride { strides: vec![2] },
+            RiscOp::Stride {
+                strides: vec![RtDim::Lit(2)],
+            },
             vec![a],
             vec_f32(2),
             None,

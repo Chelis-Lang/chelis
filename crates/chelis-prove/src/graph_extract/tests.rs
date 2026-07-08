@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 
 use chelis_compiler_api::schema::{
-    SourceKind, WIRE_DAG_SCHEMA_VERSION, WireDag, WireDagNode, WireDimInfo, WireRiscOp,
+    SourceKind, WIRE_DAG_SCHEMA_VERSION, WireDag, WireDagNode, WireDimInfo, WireRiscOp, WireRtDim,
     WireTensorType,
 };
 use sha2::{Digest, Sha256};
@@ -496,7 +496,7 @@ fn every_f64_bearing_op_field_is_guarded() {
         ),
         (
             WireRiscOp::Pad {
-                padding: vec![(0, 0)],
+                padding: vec![(WireRtDim::Lit { value: 0 }, WireRtDim::Lit { value: 0 })],
                 fill: f64::NAN,
             },
             "fill",
@@ -546,7 +546,7 @@ fn finite_f64_bearing_ops_pass_the_finite_guard() {
         },
         WireRiscOp::Dropout { rate: 0.5, seed: 0 },
         WireRiscOp::Pad {
-            padding: vec![(0, 0)],
+            padding: vec![(WireRtDim::Lit { value: 0 }, WireRtDim::Lit { value: 0 })],
             fill: 0.0,
         },
         WireRiscOp::Const { value: 3.5 },
