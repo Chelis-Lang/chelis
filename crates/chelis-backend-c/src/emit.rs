@@ -5060,6 +5060,7 @@ impl CEmitter {
                 "if (({extent}) < 0) {{ fprintf(stderr, \"chelis: runtime reshape target \
                  must be non-negative at node {id} axis {axis}\\n\"); abort(); }}"
             ));
+            self.emit_static_dim_guard(id, axis, &extent, ty.dims.get(axis));
             self.emit_runtime_dim_site(id, axis, &extent);
         }
         if has_runtime_target {
@@ -5128,9 +5129,24 @@ impl CEmitter {
         _size: &DimExpr,
         inputs: &[NodeId],
         ty: &TensorType,
-        _dag: &Dag,
+        dag: &Dag,
     ) {
         let a = inputs[0].0;
+        // chelis#616: an op-declared expanded-axis extent (a Sum-adjoint
+        // restore over a runtime axis, the `lower_if` mask expansion) is
+        // declared from the node's shape-dep source — the tensor whose
+        // actual shape carries the extent (the dep is a computed tensor
+        // emitted earlier, so the read is valid here and never at prologue
+        // time). The strides below never read the size; only the allocation
+        // references the declared name via `shape_literal`.
+        if self.runtime_dim_sites.contains_key(&(id, axis))
+            && let Some(dep) = dag
+                .get(NodeId(id))
+                .and_then(|node| node.shape_deps.first().copied())
+        {
+            let extent = format!("t{}->shape[{axis}]", dep.0);
+            self.emit_runtime_dim_site(id, axis, &extent);
+        }
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
         let dtype = Self::dtype_macro(ty);
@@ -5209,6 +5225,28 @@ impl CEmitter {
         }
     }
 
+    /// chelis#616 (defense in depth): a RUNTIME axis whose output dim
+    /// resolved to a STATIC size must agree with the op's computed extent at
+    /// run time. The static size comes from the checker; if type inference
+    /// ever mis-fills a runtime axis (the red-team multi-axis-shrink
+    /// finding), this abort is what stands between that imprecision and a
+    /// silently mis-sized allocation.
+    fn emit_static_dim_guard(
+        &mut self,
+        id: usize,
+        axis: usize,
+        extent_expr: &str,
+        dim: Option<&DimInfo>,
+    ) {
+        let Some(expected) = dim.and_then(Self::known_dim_size) else {
+            return;
+        };
+        self.line(&format!(
+            "if (({extent_expr}) != {expected}) {{ fprintf(stderr, \"chelis: runtime dim \
+             disagrees with static extent {expected} at node {id} axis {axis}\\n\"); abort(); }}"
+        ));
+    }
+
     fn emit_pad(
         &mut self,
         id: usize,
@@ -5235,17 +5273,15 @@ impl CEmitter {
             .collect();
         for (d, pair) in padding.iter().enumerate() {
             let (before_e, after_e) = &pad_exprs[d];
+            let extent = format!("t{a}->shape[{d}] + ({before_e}) + ({after_e})");
             if Self::pair_is_node(pair) {
                 self.line(&format!(
                     "if (({before_e}) < 0 || ({after_e}) < 0) {{ fprintf(stderr, \
                      \"chelis: runtime pad bound out of range at node {id} axis {d}\\n\"); abort(); }}"
                 ));
+                self.emit_static_dim_guard(id, d, &extent, ty.dims.get(d));
             }
-            self.emit_runtime_dim_site(
-                id,
-                d,
-                &format!("t{a}->shape[{d}] + ({before_e}) + ({after_e})"),
-            );
+            self.emit_runtime_dim_site(id, d, &extent);
         }
         self.emit_slot_wrapper(id, ty);
         // WS-A1: pad fill must honor the output dtype. Pre-WS-A1 the
@@ -5371,6 +5407,7 @@ impl CEmitter {
             .collect();
         for (d, pair) in bounds.iter().enumerate() {
             let (start_e, end_e) = &shrink_exprs[d];
+            let extent = format!("({end_e}) - ({start_e})");
             if Self::pair_is_node(pair) {
                 // `end <= start` (empty or inverted) mirrors the evaluator's
                 // rejection exactly — error-path parity, chelis#616.
@@ -5379,12 +5416,13 @@ impl CEmitter {
                      {{ fprintf(stderr, \"chelis: runtime shrink bound out of range at node {id} \
                      axis {d}\\n\"); abort(); }}"
                 ));
+                self.emit_static_dim_guard(id, d, &extent, ty.dims.get(d));
             }
             // chelis#616: declare (or guard) this axis's runtime output
             // extent under its actual symbolic dim name (a fresh
             // `_anon_dim_*` or a sig-named `k`), which `shape_literal`
             // references for the output allocation.
-            self.emit_runtime_dim_site(id, d, &format!("({end_e}) - ({start_e})"));
+            self.emit_runtime_dim_site(id, d, &extent);
         }
         self.emit_slot_wrapper(id, ty);
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
@@ -5427,23 +5465,26 @@ impl CEmitter {
             .map(|(d, s)| Self::bound_c_expr(s, inputs, a, d, dag))
             .collect();
         for (d, step_e) in step_exprs.iter().enumerate() {
-            // Declare (or guard) a runtime output extent only where the
-            // occurrence pass marked this op as the axis's runtime-dim site:
-            // a bystander symbolic axis (e.g. a passed-through `batch`) is
-            // declared by `symbolic_bindings` from its Load and must not be
-            // redeclared here.
-            if !self.runtime_dim_sites.contains_key(&(id, d)) {
+            // Declare (or guard) a runtime output extent where the
+            // occurrence pass marked this op as the axis's runtime-dim site
+            // (a bystander symbolic axis — e.g. a passed-through `batch` —
+            // is declared by `symbolic_bindings` from its Load and must not
+            // be redeclared here), and additionally emit the step and
+            // static-extent guards for any node-valued step.
+            let node_step = strides.get(d).is_some_and(|s| s.node_input().is_some());
+            let has_site = self.runtime_dim_sites.contains_key(&(id, d));
+            if !node_step && !has_site {
                 continue;
             }
+            let extent = format!("(t{a}->shape[{d}] + ({step_e}) - 1) / ({step_e})");
             self.line(&format!(
                 "if (({step_e}) <= 0) {{ fprintf(stderr, \"chelis: runtime stride step must be \
                  positive at node {id} axis {d}\\n\"); abort(); }}"
             ));
-            self.emit_runtime_dim_site(
-                id,
-                d,
-                &format!("(t{a}->shape[{d}] + ({step_e}) - 1) / ({step_e})"),
-            );
+            if node_step {
+                self.emit_static_dim_guard(id, d, &extent, ty.dims.get(d));
+            }
+            self.emit_runtime_dim_site(id, d, &extent);
         }
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);

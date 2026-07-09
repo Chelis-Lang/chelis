@@ -462,4 +462,63 @@ out = loss(to_tensor([{literal}]))\n"
             grad[i]
         );
     }
+
+    // eval-vs-C GRADIENT parity: the grad DAG (which inlines the guard as
+    // mask arithmetic) builds and runs through `chelis build --target c`,
+    // producing the same [0.5, 0.5, 0.5, 0.5]. (The guarded FORWARD build
+    // routes through the host-program lane and stays loudly blocked on the
+    // pre-existing list-concat typing gap; the gradient path is the chelis
+    // #616 oracle and has full parity.)
+    let dir = tempdir().expect("tempdir");
+    let src_path = dir.path().join("symoraclec.ch");
+    fs::write(&src_path, grad_source(base_literal)).expect("write source");
+    let build_dir = dir.path().join("build");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .current_dir(dir.path())
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            src_path.to_str().unwrap(),
+            "--target",
+            "c",
+            "-o",
+            build_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let bin = build_dir.join("self_bin");
+    let compile = std::process::Command::new("gcc")
+        .args([
+            "-O0",
+            "-std=c11",
+            "-I",
+            build_dir.to_str().unwrap(),
+            build_dir.join("symoraclec.c").to_str().unwrap(),
+            "-o",
+            bin.to_str().unwrap(),
+            build_dir.join("libchelis_runtime.a").to_str().unwrap(),
+            "-lm",
+            "-lpthread",
+            "-ldl",
+        ])
+        .output()
+        .expect("invoke gcc");
+    assert!(
+        compile.status.success(),
+        "gcc compile failed: stderr={}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = std::process::Command::new(&bin)
+        .output()
+        .expect("run emitted program");
+    assert!(
+        run.status.success(),
+        "emitted grad program exited non-zero: stdout={} stderr={}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let (c_shape, c_grad) = parse_tensor(&String::from_utf8_lossy(&run.stdout), "out");
+    assert_eq!(c_shape, vec![4]);
+    assert_close("runtime-window grad eval-vs-C", &c_grad, &grad);
 }

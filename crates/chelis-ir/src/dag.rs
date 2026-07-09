@@ -1810,6 +1810,35 @@ fn op_declared_output_axes(dag: &Dag, node: &DagNode) -> Vec<(String, usize)> {
                 _ => None,
             })
             .collect(),
+        // chelis#616: an Expand whose inserted/set axis has an ANONYMOUS
+        // (wildcard) size and a shape-dep extent source (the Sum-adjoint
+        // restore over a runtime axis, the `lower_if` mask expansion — both
+        // constructed with a POSITIONALLY-ALIGNED dep, whose `shape[axis]`
+        // is the extent) declares that axis at run time from the dep's
+        // actual shape. A real-symbol size (a Form-3 broadcast like
+        // `expand(g, 1, h)`, whose shape-dep is the SOURCE tensor with a
+        // different axis layout) resolves through its Load-declared symbol
+        // and must NOT be op-declared — a positional read of its dep would
+        // compare the wrong axis.
+        RiscOp::Expand { axis, size } => {
+            fn size_is_anon(expr: &DimExpr) -> bool {
+                match expr {
+                    DimExpr::Sym(name) => name.is_empty() || name == "*",
+                    DimExpr::Concrete(_) => false,
+                    DimExpr::Mul(lhs, rhs) | DimExpr::Div(lhs, rhs) => {
+                        size_is_anon(lhs) || size_is_anon(rhs)
+                    }
+                }
+            }
+            match node.output_type.dims.get(*axis) {
+                Some(DimInfo::Named(symbol, None))
+                    if !is_anon(symbol) && size_is_anon(size) && !node.shape_deps.is_empty() =>
+                {
+                    vec![(symbol.clone(), *axis)]
+                }
+                _ => Vec::new(),
+            }
+        }
         _ => Vec::new(),
     }
 }

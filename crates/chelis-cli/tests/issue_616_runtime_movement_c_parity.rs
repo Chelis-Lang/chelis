@@ -292,6 +292,157 @@ fn issue_616_over_unified_movement_chain_fails_loud_not_mis_sized() {
     );
 }
 
+/// RED-TEAM FINDING 1 (chelis#616): a MULTI-AXIS shrink mixing a runtime
+/// axis with a literal-bounded axis. Type inference used to collapse EVERY
+/// axis to a wildcard when any bound was non-literal; downstream
+/// unification then filled the runtime axis's extent from the sibling
+/// literal axis and the C backend baked the wrong extent unguarded — a
+/// SILENT mis-size (C returned shape [3,3] with fabricated values where
+/// eval computed [2,3]). Per-axis inference keeps the literal axis precise
+/// and only the runtime axis symbolic; both lanes must now agree exactly.
+#[test]
+fn issue_616_multi_axis_runtime_shrink_matches_c() {
+    let source = "module Repro.MatSlice\n\
+sig f: tensor[rows, 5, f32] -> tensor[rows, 3, f32]\n\
+def f(x) = {\n\
+  rows = cast(shape(x, cast(0, int32)), int32)\n\
+  shrink(x, [[cast(0, int32), rows], [cast(1, int32), cast(4, int32)]])\n\
+}\n\
+out = f(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32), cast(5.0, f32)], [cast(6.0, f32), cast(7.0, f32), cast(8.0, f32), cast(9.0, f32), cast(10.0, f32)]]))\n";
+
+    let eval_out = run_eval(source, "matslice");
+    assert!(
+        eval_out.status.success(),
+        "matslice eval failed: {}",
+        String::from_utf8_lossy(&eval_out.stderr)
+    );
+    let eval_values = parse_tensor_data(&String::from_utf8_lossy(&eval_out.stdout));
+    let want = [2.0, 3.0, 4.0, 7.0, 8.0, 9.0];
+    assert_close("eval matslice", &eval_values, &want);
+
+    let (_dir, build_dir) = build_c(source, "matslice");
+    let bin = gcc(&build_dir, "matslice", None, "self_bin");
+    let run = StdCommand::new(&bin).output().expect("run emitted program");
+    assert!(
+        run.status.success(),
+        "matslice C binary exited non-zero: stdout={} stderr={}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("shape=[2, 3]"),
+        "C matslice must keep the true [2, 3] shape, never a baked sibling \
+         extent; stdout={stdout}"
+    );
+    let c_values = parse_tensor_data(&stdout);
+    assert_close("eval-vs-C matslice", &c_values, &want);
+}
+
+/// RED-TEAM FINDING 1 sibling: the same per-axis mixing through a
+/// multi-axis PAD (runtime after-pad on axis 0, literal pads on axis 1).
+#[test]
+fn issue_616_multi_axis_runtime_pad_matches_c() {
+    let source = "module Repro.MatPad\n\
+sig f: tensor[rows, 3, f32] -> tensor[u, 5, f32]\n\
+def f(x) = {\n\
+  k = cast(shape(x, cast(0, int32)), int32)\n\
+  pad(x, [[cast(0, int32), k], [cast(1, int32), cast(1, int32)]], cast(0.0, f32))\n\
+}\n\
+out = f(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]]))\n";
+
+    let eval_out = run_eval(source, "matpad");
+    assert!(
+        eval_out.status.success(),
+        "matpad eval failed: {}",
+        String::from_utf8_lossy(&eval_out.stderr)
+    );
+    let eval_values = parse_tensor_data(&String::from_utf8_lossy(&eval_out.stdout));
+
+    let (_dir, build_dir) = build_c(source, "matpad");
+    let bin = gcc(&build_dir, "matpad", None, "self_bin");
+    let run = StdCommand::new(&bin).output().expect("run emitted program");
+    assert!(
+        run.status.success(),
+        "matpad C binary exited non-zero: stdout={} stderr={}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("shape=[4, 5]"),
+        "C matpad must produce the true [4, 5] shape; stdout={stdout}"
+    );
+    let c_values = parse_tensor_data(&stdout);
+    assert_close("eval-vs-C matpad", &c_values, &eval_values);
+}
+
+/// Negative parity for the per-axis fix: a LITERAL pair alongside a runtime
+/// pair keeps its precise infer-time validation — an out-of-range literal
+/// bound is rejected at `chelis check`, not deferred to run time just
+/// because a sibling axis is runtime.
+#[test]
+fn issue_616_literal_axis_still_checked_beside_runtime_axis() {
+    let source = "module Repro.MatSliceBad\n\
+sig f: tensor[rows, 5, f32] -> tensor[rows, 3, f32]\n\
+def f(x) = {\n\
+  rows = cast(shape(x, cast(0, int32)), int32)\n\
+  shrink(x, [[cast(0, int32), rows], [cast(1, int32), cast(9, int32)]])\n\
+}\n\
+out = f(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32), cast(5.0, f32)], [cast(6.0, f32), cast(7.0, f32), cast(8.0, f32), cast(9.0, f32), cast(10.0, f32)]]))\n";
+    let output = run_eval(source, "matslicebad");
+    assert!(
+        !output.status.success(),
+        "the out-of-range literal bound [1, 9] on the 5-wide axis must be \
+         rejected even with a runtime sibling axis; stdout={}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("out of range"),
+        "rejection must name the out-of-range literal bound; stderr={stderr}"
+    );
+}
+
+/// RED-TEAM FINDING 2 (chelis#616): grad of a runtime shrink feeding a
+/// reduction DIRECTLY (no interposed reshape). The backward Sum-adjoint
+/// restore is an `Expand` over the runtime axis; the C lane used to ICE
+/// ("no Load input declares it") because the expanded-axis extent had no
+/// declaration source. It is now op-declared from the Expand's shape-dep
+/// (the forward input's actual shape) and both lanes agree.
+#[test]
+fn issue_616_runtime_shrink_grad_through_reduction_matches_c() {
+    let source = "module Repro.RtShrinkGrad\n\
+sig f: tensor[5, f32] -> f32\n\
+def f(x) = {\n\
+  e = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(1, int64)), int32)\n\
+  w = shrink(x, [[cast(1, int32), e]])\n\
+  sum(w, cast(0, int32)) |> tensor_to_scalar\n\
+}\n\
+out = grad(f)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32), cast(5.0, f32)]))\n";
+
+    let eval_out = run_eval(source, "rtshrinkgrad");
+    assert!(
+        eval_out.status.success(),
+        "runtime shrink grad eval failed: {}",
+        String::from_utf8_lossy(&eval_out.stderr)
+    );
+    let eval_grad = parse_tensor_data(&String::from_utf8_lossy(&eval_out.stdout));
+    assert_close("eval shrink grad", &eval_grad, &[0.0, 1.0, 1.0, 1.0, 0.0]);
+
+    let (_dir, build_dir) = build_c(source, "rtshrinkgrad");
+    let bin = gcc(&build_dir, "rtshrinkgrad", None, "self_bin");
+    let run = StdCommand::new(&bin).output().expect("run emitted program");
+    assert!(
+        run.status.success(),
+        "runtime shrink grad C binary exited non-zero: stdout={} stderr={}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let c_grad = parse_tensor_data(&String::from_utf8_lossy(&run.stdout));
+    assert_close("eval-vs-C shrink grad", &c_grad, &eval_grad);
+}
+
 /// Error-path parity (soundness): a runtime shrink whose bounds resolve to a
 /// ZERO-SIZE axis (`start == end`) must fail LOUDLY in both lanes — the eval
 /// lane rejects an empty-or-inverted bound, and the C runtime guard mirrors
