@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use chelis_backend_c::CodegenResult;
 use chelis_backend_hip::HipCodegenResult;
 use chelis_deep::Expr as DeepExpr;
-use chelis_ir::dag::{Dag, DimInfo, FusedInput, FusedStepOp, NodeId, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, FusedInput, FusedStepOp, NodeId, RiscOp, RtDim, TensorType};
 use chelis_ir::eval::{self, TensorValue as IrTensorValue};
 use chelis_ir::lower::top_level_lowering_map;
 use chelis_surf::ast::{
@@ -31,9 +31,9 @@ use crate::schema::{
     WireDagSchemaError, WireDeepAtom, WireDeepExpr, WireDeepExprKind, WireDimExpr, WireDimInfo,
     WireFusedInput, WireFusedStep, WireFusedStepOp, WireImportKind, WireLetBinding, WireLetPattern,
     WireLiteral, WireMatchArm, WireMetaEntry, WireParam, WirePattern, WirePropertyOption,
-    WireRecordExprField, WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireSurfDecl,
-    WireSurfExpr, WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp, WireVariant,
-    WireVariantFields,
+    WireRecordExprField, WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireRtDim,
+    WireSurfDecl, WireSurfExpr, WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp,
+    WireVariant, WireVariantFields,
 };
 
 const RUNTIME_H: &str = include_str!(concat!(
@@ -2406,6 +2406,11 @@ fn reject_host_only_builtins(
     Ok(())
 }
 
+/// chelis#616: whether a movement `(start, end)` bound pair is node-valued.
+fn pair_has_node_bound(pair: &(RtDim, RtDim)) -> bool {
+    pair.0.node_input().is_some() || pair.1.node_input().is_some()
+}
+
 fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
     let sparse_index_nodes: HashSet<NodeId> = dag
         .nodes()
@@ -2472,6 +2477,53 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                         "`chelis build --target hip` does not yet support the runtime `shape` \
                          value read; lowered node {} requires it. The C backend is canonical \
                          for runtime-dim reads (chelis#513/#558); use `--target c`.",
+                        node.id.0
+                    ),
+                    "unsupported_feature",
+                ));
+            }
+            // chelis#616: node-valued (runtime) movement bounds are C-only.
+            RiscOp::Shrink { bounds } if bounds.iter().any(pair_has_node_bound) => {
+                return Err(stage_error(
+                    "compile",
+                    format!(
+                        "`chelis build --target hip` does not yet support a runtime (node-valued) \
+                         `shrink` bound; lowered node {} requires it. The C backend is canonical \
+                         for runtime movement bounds (chelis#616); use `--target c`.",
+                        node.id.0
+                    ),
+                    "unsupported_feature",
+                ));
+            }
+            RiscOp::Pad { padding, .. } if padding.iter().any(pair_has_node_bound) => {
+                return Err(stage_error(
+                    "compile",
+                    format!(
+                        "`chelis build --target hip` does not yet support a runtime (node-valued) \
+                         `pad` bound; lowered node {} requires it. Use `--target c` (chelis#616).",
+                        node.id.0
+                    ),
+                    "unsupported_feature",
+                ));
+            }
+            RiscOp::Stride { strides } if strides.iter().any(|s| s.node_input().is_some()) => {
+                return Err(stage_error(
+                    "compile",
+                    format!(
+                        "`chelis build --target hip` does not yet support a runtime (node-valued) \
+                         `stride` step; lowered node {} requires it. Use `--target c` (chelis#616).",
+                        node.id.0
+                    ),
+                    "unsupported_feature",
+                ));
+            }
+            RiscOp::Reshape { new_shape } if new_shape.iter().any(|d| d.node_input().is_some()) => {
+                return Err(stage_error(
+                    "compile",
+                    format!(
+                        "`chelis build --target hip` does not yet support a runtime (node-valued) \
+                         `reshape` target extent; lowered node {} requires it. \
+                         Use `--target c` (chelis#616).",
                         node.id.0
                     ),
                     "unsupported_feature",
@@ -3310,6 +3362,16 @@ fn wire_dim_expr(expr: &chelis_ir::dag::DimExpr) -> WireDimExpr {
     }
 }
 
+/// chelis#616: map a movement-op / reshape-target [`RtDim`] to its wire form.
+fn wire_bound(b: &RtDim) -> WireRtDim {
+    match b {
+        RtDim::Lit(n) => WireRtDim::Lit { value: *n },
+        RtDim::ToEnd => WireRtDim::ToEnd,
+        RtDim::Node(i) => WireRtDim::Node { input: *i },
+        RtDim::Sym(name) => WireRtDim::Sym { name: name.clone() },
+    }
+}
+
 fn wire_op(op: &RiscOp) -> WireRiscOp {
     match op {
         RiscOp::Add => WireRiscOp::Add,
@@ -3379,7 +3441,7 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
         RiscOp::Argmax { axis } => WireRiscOp::Argmax { axis: *axis },
         RiscOp::Argmin { axis } => WireRiscOp::Argmin { axis: *axis },
         RiscOp::Reshape { new_shape } => WireRiscOp::Reshape {
-            new_shape: new_shape.iter().map(wire_dim).collect(),
+            new_shape: new_shape.iter().map(wire_bound).collect(),
         },
         RiscOp::Permute { axes } => WireRiscOp::Permute { axes: axes.clone() },
         RiscOp::Expand { axis, size } => WireRiscOp::Expand {
@@ -3388,14 +3450,20 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
         },
         RiscOp::OneHot { vocab } => WireRiscOp::OneHot { vocab: *vocab },
         RiscOp::Pad { padding, fill } => WireRiscOp::Pad {
-            padding: padding.clone(),
+            padding: padding
+                .iter()
+                .map(|(s, e)| (wire_bound(s), wire_bound(e)))
+                .collect(),
             fill: *fill,
         },
         RiscOp::Shrink { bounds } => WireRiscOp::Shrink {
-            bounds: bounds.clone(),
+            bounds: bounds
+                .iter()
+                .map(|(s, e)| (wire_bound(s), wire_bound(e)))
+                .collect(),
         },
         RiscOp::Stride { strides } => WireRiscOp::Stride {
-            strides: strides.clone(),
+            strides: strides.iter().map(wire_bound).collect(),
         },
         RiscOp::Const { value } => WireRiscOp::Const { value: *value },
         RiscOp::ConstTensor { data } => WireRiscOp::ConstTensor { data: data.clone() },
@@ -3811,6 +3879,44 @@ windowed = reduce_window_max(padded, [2], [1])
         let message = &err.errors[0].message;
         assert!(
             message.contains("reduce_window") && message.contains("--target hip"),
+            "unexpected message: {message}"
+        );
+        assert_eq!(err.errors[0].kind, "unsupported_feature");
+    }
+
+    /// chelis#616: a runtime (node-valued) reshape target extent is C-only;
+    /// the HIP seam must reject it cleanly before codegen, exactly like the
+    /// node-valued movement-bound arms.
+    #[test]
+    fn hip_rejects_node_valued_reshape_target_with_clean_message() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            tensor_type(vec![4], chelis_types::types::Prim::F32),
+            None,
+        );
+        // A rank-0 integer Load, not a `Shape` read: the seam blanket-rejects
+        // `RiscOp::Shape` first, and this test must exercise the reshape arm.
+        let extent = dag.add_node(
+            RiscOp::Load { name: "m".into() },
+            vec![],
+            tensor_type(vec![], chelis_types::types::Prim::Int32),
+            None,
+        );
+        dag.add_node(
+            RiscOp::Reshape {
+                new_shape: vec![RtDim::Node(1)],
+            },
+            vec![x, extent],
+            tensor_type(vec![4], chelis_types::types::Prim::F32),
+            None,
+        );
+        let err = reject_unsupported_hip_ops(&dag)
+            .expect_err("HIP must reject a node-valued reshape target");
+        let message = &err.errors[0].message;
+        assert!(
+            message.contains("reshape") && message.contains("--target c"),
             "unexpected message: {message}"
         );
         assert_eq!(err.errors[0].kind, "unsupported_feature");

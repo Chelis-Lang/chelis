@@ -518,7 +518,7 @@ use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_types::{BUILTIN_NAMES, CheckedProgram, LinearityInfo, types::Prim};
 
-use crate::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
+use crate::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType};
 use crate::grad::grad_dag_checked;
 use crate::tier2;
 use crate::vmap;
@@ -1157,7 +1157,13 @@ pub(crate) fn apply_dim_substitutions(dag: &Dag, substitutions: &HashMap<String,
             RiscOp::Reshape { new_shape } => RiscOp::Reshape {
                 new_shape: new_shape
                     .iter()
-                    .map(|dim| rewrite_dim_info(dim, substitutions))
+                    .map(|dim| match dim {
+                        RtDim::Sym(name) => substitutions
+                            .get(name)
+                            .map(RtDim::from_dim_info)
+                            .unwrap_or_else(|| dim.clone()),
+                        _ => dim.clone(),
+                    })
                     .collect(),
             },
             RiscOp::BlasMatmul {
@@ -7417,19 +7423,28 @@ impl LowerCtx {
                 // a concrete `Lit` when the operand axis is static and to a
                 // Load-carried `Named` (kept live via a `shape_dep`) when
                 // symbolic, so the dim traces to a declaring input either way.
-                let (new_shape, shape_srcs) = if args.len() >= 2 {
-                    self.extract_reshape_dim_list(&args[1])
-                        .unwrap_or_else(|| (ty.dims.clone(), Vec::new()))
+                let mut inputs = vec![x];
+                let fallback = || {
+                    (
+                        ty.dims.iter().map(RtDim::from_dim_info).collect(),
+                        ty.dims.clone(),
+                        Vec::new(),
+                    )
+                };
+                let (new_shape, ty_dims, shape_srcs) = if args.len() >= 2 {
+                    let checker_dims = ty.dims.clone();
+                    self.extract_reshape_dim_list(&args[1], &checker_dims, &mut inputs)
+                        .unwrap_or_else(fallback)
                 } else {
-                    (ty.dims.clone(), Vec::new())
+                    fallback()
                 };
                 let out_ty = TensorType {
-                    dims: new_shape.clone(),
+                    dims: ty_dims,
                     precision: ty.precision,
                 };
                 let reshape_id = self.dag.add_node(
                     RiscOp::Reshape { new_shape },
-                    vec![x],
+                    inputs,
                     out_ty,
                     self.current_span_id.clone(),
                 );
@@ -7702,8 +7717,11 @@ impl LowerCtx {
             }
             "pad" if !args.is_empty() => {
                 let x = self.lower_expr_node(&args[0], "pad input");
+                // chelis#616: `inputs` starts as `[tensor]`; node-valued bounds
+                // append rank-0 int scalars and are referenced by slot index.
+                let mut inputs = vec![x];
                 let padding = if args.len() >= 2 {
-                    self.extract_pair_list(&args[1]).unwrap_or_default()
+                    self.lower_pair_bounds(&args[1], &mut inputs)
                 } else {
                     vec![]
                 };
@@ -7714,35 +7732,37 @@ impl LowerCtx {
                 };
                 self.dag.add_node(
                     RiscOp::Pad { padding, fill },
-                    vec![x],
+                    inputs,
                     ty.clone(),
                     self.current_span_id.clone(),
                 )
             }
             "shrink" if !args.is_empty() => {
                 let x = self.lower_expr_node(&args[0], "shrink input");
+                let mut inputs = vec![x];
                 let bounds = if args.len() >= 2 {
-                    self.extract_pair_list(&args[1]).unwrap_or_default()
+                    self.lower_pair_bounds(&args[1], &mut inputs)
                 } else {
                     vec![]
                 };
                 self.dag.add_node(
                     RiscOp::Shrink { bounds },
-                    vec![x],
+                    inputs,
                     ty.clone(),
                     self.current_span_id.clone(),
                 )
             }
             "stride" if !args.is_empty() => {
                 let x = self.lower_expr_node(&args[0], "stride input");
+                let mut inputs = vec![x];
                 let strides = if args.len() >= 2 {
-                    self.extract_usize_list(&args[1..])
+                    self.lower_stride_bounds(&args[1..], &mut inputs)
                 } else {
                     vec![]
                 };
                 self.dag.add_node(
                     RiscOp::Stride { strides },
-                    vec![x],
+                    inputs,
                     ty.clone(),
                     self.current_span_id.clone(),
                 )
@@ -7923,6 +7943,40 @@ impl LowerCtx {
                 )
             }
 
+            // chelis#616: `fail(...)` in a DAG-lowered `if` branch. The mask
+            // lowering zeroes the untaken branch, so the placeholder's VALUE
+            // never matters on the taken path; real abort semantics live in
+            // the host lane (which owns entry-level `if`/`fail`). The
+            // pre-#616 terminal fallback fabricated a rank-0
+            // `Load { name: "fail" }` — a phantom input slot that broke the
+            // C lane and mixed ranks in the mask arithmetic. Emit a zero
+            // Const at the branch's rank instead, with ANONYMOUS symbolic
+            // dims (the checker's symbol may be declared later in program
+            // order; `lower_if` ties the placeholder's shape to the sibling
+            // branch via a shape-dep).
+            "fail" => {
+                for arg in args {
+                    let _ = self.lower_expr(arg);
+                }
+                let dims = ty
+                    .dims
+                    .iter()
+                    .map(|dim| match dim {
+                        DimInfo::Lit(n) | DimInfo::Named(_, Some(n)) => DimInfo::Lit(*n),
+                        DimInfo::Named(_, None) => DimInfo::Named(String::new(), None),
+                    })
+                    .collect();
+                self.dag.add_node(
+                    RiscOp::Const { value: 0.0 },
+                    vec![],
+                    TensorType {
+                        dims,
+                        precision: ty.precision,
+                    },
+                    self.current_span_id.clone(),
+                )
+            }
+
             // Fallback: unknown function.
             _ => {
                 for arg in args {
@@ -8085,8 +8139,8 @@ impl LowerCtx {
             offset += extent;
             // `(0, 0)` everywhere except the concat axis, so symbolic
             // non-concat dims need no concrete extent.
-            let mut padding = vec![(0usize, 0usize); rank];
-            padding[axis] = (before, after);
+            let mut padding = vec![(RtDim::Lit(0), RtDim::Lit(0)); rank];
+            padding[axis] = (RtDim::Lit(before), RtDim::Lit(after));
             let padded = self.dag.add_node(
                 RiscOp::Pad { padding, fill: 0.0 },
                 vec![*node],
@@ -8258,7 +8312,7 @@ impl LowerCtx {
         };
         let sliced = self.dag.add_node(
             RiscOp::Shrink {
-                bounds: vec![(index, index + 1)],
+                bounds: vec![(RtDim::Lit(index), RtDim::Lit(index + 1))],
             },
             vec![source_node],
             unit_ty,
@@ -8294,7 +8348,7 @@ impl LowerCtx {
             }
             let unit = self.dag.add_node(
                 RiscOp::Reshape {
-                    new_shape: unit_ty.dims.clone(),
+                    new_shape: vec![RtDim::Lit(1)],
                 },
                 vec![node],
                 unit_ty.clone(),
@@ -8302,7 +8356,7 @@ impl LowerCtx {
             );
             let padded = self.dag.add_node(
                 RiscOp::Pad {
-                    padding: vec![(index, out_len - index - 1)],
+                    padding: vec![(RtDim::Lit(index), RtDim::Lit(out_len - index - 1))],
                     fill: 0.0,
                 },
                 vec![unit],
@@ -9180,25 +9234,42 @@ impl LowerCtx {
     /// chelis#513 gap 1: a `shape(operand, axis)`-derived reshape target dim
     /// (directly or through the `let k = shape(x, 0); reshape(&x, [k, 1])`
     /// indirection) is resolved to the operand's declaring source dim instead
-    /// of a bare `Named(name, None)` symbol. Returns the dims plus the lowered
-    /// source nodes to record as `shape_dep`s so the declaring input survives
-    /// DCE. A static operand axis folds to `Lit`; a symbolic one becomes a
-    /// `Load`-carried `Named` that `symbolic_occurrences` can trace, closing
-    /// the reshape/reduce backward `Expand`/`Sum` symbolic-dim ICE.
-    fn extract_reshape_dim_list(&mut self, expr: &Expr) -> Option<(Vec<DimInfo>, Vec<NodeId>)> {
+    /// of a bare `Named(name, None)` symbol. Returns the op target dims, the
+    /// output-type dims, and the lowered source nodes to record as
+    /// `shape_dep`s so the declaring input survives DCE. A static operand
+    /// axis folds to `Lit`; a symbolic one becomes a `Load`-carried `Named`
+    /// that `symbolic_occurrences` can trace, closing the reshape/reduce
+    /// backward `Expand`/`Sum` symbolic-dim ICE.
+    ///
+    /// chelis#616: a target dim that is runtime integer arithmetic over
+    /// `shape()` reads (the former chelis#513 refuse-to-lower arm) or a term
+    /// variable bound to a rank-0 integer scalar (the inlined window count
+    /// `m`) now lowers to a real scalar node appended to `inputs`, referenced
+    /// as `RtDim::Node(slot)` exactly like a movement bound. Its output-type
+    /// dim keeps the checker's symbol for the axis so downstream types keep
+    /// resolving; the eval and C lanes size the axis from the scalar value.
+    fn extract_reshape_dim_list(
+        &mut self,
+        expr: &Expr,
+        checker_dims: &[DimInfo],
+        inputs: &mut Vec<NodeId>,
+    ) -> Option<(Vec<RtDim>, Vec<DimInfo>, Vec<NodeId>)> {
         let elements: Vec<Expr> = collect_cons_chain(expr)?.into_iter().cloned().collect();
-        let mut dims = Vec::with_capacity(elements.len());
+        let mut op_dims = Vec::with_capacity(elements.len());
+        let mut ty_dims = Vec::with_capacity(elements.len());
         let mut srcs = Vec::new();
-        for elem in &elements {
+        for (axis, elem) in elements.iter().enumerate() {
             if let Some(value) = extract_int_for_dim(elem) {
                 if value < 0 {
                     return None;
                 }
-                dims.push(DimInfo::Lit(value as usize));
+                op_dims.push(RtDim::Lit(value as usize));
+                ty_dims.push(DimInfo::Lit(value as usize));
             } else if let Some((dim_expr, src)) = self.dim_expr_from_shape_arg_with_source(elem)
                 && let Some(dim) = Self::dim_info_from_dim_expr(&dim_expr)
             {
-                dims.push(dim);
+                op_dims.push(RtDim::from_dim_info(&dim));
+                ty_dims.push(dim);
                 srcs.push(src);
             } else if let Some(value) = self.fold_shape_derived_static_size(elem) {
                 // chelis#513 gap 3: static integer arithmetic over shape()
@@ -9217,36 +9288,79 @@ impl LowerCtx {
                         elem.span_id().map(ToOwned::to_owned),
                     );
                 }
-                dims.push(DimInfo::Lit(value as usize));
-            } else if self.is_shape_derived_arith_dim(elem) {
-                // chelis#513: the exactness gate refused this shape()-derived
-                // arithmetic target (symbolic dim leaf, negative operand,
-                // non-positive divisor, or int overflow). The wildcard
-                // fallback is NOT safe for this family: under `grad` the
-                // anon dim can bind to a coincidental input extent and the
-                // written target expression is never checked, silently
-                // accepting an ill-formed program (the C lane ICEs on the
-                // same anon dim). Fail loud; forward host evaluation of this
-                // form is unaffected (see `is_shape_derived_arith_dim`).
-                raise_lowering_error(
-                    "reshape target dim is integer arithmetic over shape() reads that cannot \
-                     be folded to an exact static extent (symbolic dim leaf, negative \
-                     operand, non-positive divisor, or int overflow; chelis#513): refusing \
-                     to lower a guessed extent",
-                    Some(elem.span()),
-                    elem.span_id().map(ToOwned::to_owned),
-                );
-            } else if let Some(name) = symbolic_dim_var_name(elem) {
-                dims.push(DimInfo::Named(name, None));
+                op_dims.push(RtDim::Lit(value as usize));
+                ty_dims.push(DimInfo::Lit(value as usize));
+            } else if self.is_shape_derived_arith_dim(elem) || self.is_runtime_scalar_var(elem) {
+                // chelis#616: lower the runtime target expression to a rank-0
+                // integer scalar node (replacing the chelis#513 loud refusal).
+                // The extent is now checked at run time: the eval lane reads
+                // the scalar and enforces the numel invariant, and the C lane
+                // declares the dim from the scalar behind negativity + numel
+                // abort guards. A non-scalar or non-integer lowering is a
+                // producing-pass bug and stays fail-closed.
+                let node = self.lower_expr_node(elem, "reshape target dim");
+                let node_ty = self
+                    .dag
+                    .get(node)
+                    .map(|n| n.output_type.clone())
+                    .unwrap_or_else(Self::default_type);
+                if !node_ty.dims.is_empty() || !node_ty.precision.is_integer() {
+                    raise_lowering_error(
+                        format!(
+                            "reshape target dim expression must lower to a rank-0 integer \
+                             scalar, got rank {} `{}` (chelis#616)",
+                            node_ty.dims.len(),
+                            node_ty.precision.name()
+                        ),
+                        Some(elem.span()),
+                        elem.span_id().map(ToOwned::to_owned),
+                    );
+                }
+                let slot = inputs.len();
+                inputs.push(node);
+                op_dims.push(RtDim::Node(slot));
+                // The output-type dim keeps the checker's symbol for this
+                // axis (downstream types reference it; the C lane declares it
+                // from the scalar). A wildcard, concrete, or missing checker
+                // dim gets a fresh GENERATED name instead — never a guessed
+                // extent, and never the bare `*`/`""` wildcard (both lanes
+                // need one stable, unique name per runtime extent: the eval
+                // lane binds it from the scalar's value mid-evaluation and
+                // the C lane declares it at the op).
+                ty_dims.push(match checker_dims.get(axis) {
+                    Some(dim @ DimInfo::Named(name, None)) if !name.is_empty() && name != "*" => {
+                        dim.clone()
+                    }
+                    _ => DimInfo::Named(format!("_rt_dim_{}_{axis}", node.0), None),
+                });
             } else {
-                return None;
+                let name = symbolic_dim_var_name(elem)?;
+                op_dims.push(RtDim::Sym(name.clone()));
+                ty_dims.push(DimInfo::Named(name, None));
             }
         }
-        if dims.is_empty() {
+        if op_dims.is_empty() {
             None
         } else {
-            Some((dims, srcs))
+            Some((op_dims, ty_dims, srcs))
         }
+    }
+
+    /// chelis#616: whether `expr` is a term variable bound to a rank-0
+    /// integer scalar node (e.g. an inlined fn parameter carrying a runtime
+    /// window count). Such a var in a reshape target position is a runtime
+    /// extent, not a type-level symbolic dim.
+    fn is_runtime_scalar_var(&self, expr: &Expr) -> bool {
+        let Some(name) = symbolic_dim_var_name(expr) else {
+            return false;
+        };
+        matches!(
+            self.bindings.get(&name),
+            Some(LoweredValue::Node(node))
+                if self.dag.get(*node).is_some_and(|n| {
+                    n.output_type.dims.is_empty() && n.output_type.precision.is_integer()
+                })
+        )
     }
 
     /// Extract a list of (usize, usize) pairs from an expression (for
@@ -9291,6 +9405,71 @@ impl LowerCtx {
             }
         }
         cons_chain_pair_list(expr)
+    }
+
+    /// chelis#616: lower a movement pair-list argument (`[[start, end], ...]`)
+    /// into node-valued [`RtDim`]s. A compile-time-int element (bare, `(lit
+    /// ...)`, or `cast`-wrapped) becomes `RtDim::Lit`; a runtime element (a
+    /// `shape()`-derived `cast(add(...))` expression) is lowered to a rank-0
+    /// integer node appended to `inputs` and referenced as `RtDim::Node(slot)`.
+    /// `inputs` starts as `[tensor]`. The Surf-desugared Cons-chain form carries
+    /// runtime bounds; the hand-written `(list ...)` IR form stays literal-only
+    /// (via [`Self::extract_pair_list`]).
+    fn lower_pair_bounds(&mut self, expr: &Expr, inputs: &mut Vec<NodeId>) -> Vec<(RtDim, RtDim)> {
+        if let Some(pair_exprs) = collect_cons_chain(expr) {
+            let mut elems: Vec<(&Expr, &Expr)> = Vec::with_capacity(pair_exprs.len());
+            let mut well_formed = true;
+            for pe in pair_exprs {
+                match collect_cons_chain(pe) {
+                    Some(two) if two.len() == 2 => elems.push((two[0], two[1])),
+                    _ => {
+                        well_formed = false;
+                        break;
+                    }
+                }
+            }
+            if well_formed {
+                let mut bounds = Vec::with_capacity(elems.len());
+                for (s, e) in elems {
+                    let start = self.lower_one_bound(s, inputs);
+                    let end = self.lower_one_bound(e, inputs);
+                    bounds.push((start, end));
+                }
+                return bounds;
+            }
+        }
+        // Hand-written `(list ...)` IR form: literal-only.
+        self.extract_pair_list(expr)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(s, e)| (RtDim::Lit(s), RtDim::Lit(e)))
+            .collect()
+    }
+
+    /// chelis#616: lower a single movement-bound element to a [`RtDim`]. A
+    /// compile-time int becomes `RtDim::Lit`; a runtime expression becomes a
+    /// `RtDim::Node` referencing a freshly-lowered rank-0 integer node appended
+    /// to `inputs`.
+    fn lower_one_bound(&mut self, expr: &Expr, inputs: &mut Vec<NodeId>) -> RtDim {
+        if let Some(n) = extract_int_for_dim(expr).and_then(|v| usize::try_from(v).ok()) {
+            return RtDim::Lit(n);
+        }
+        let node = self.lower_expr_node(expr, "movement bound");
+        let slot = inputs.len();
+        inputs.push(node);
+        RtDim::Node(slot)
+    }
+
+    /// chelis#616: lower a `stride` step list into node-valued [`RtDim`]s (one
+    /// per axis). Literal steps become `RtDim::Lit`, runtime steps become
+    /// `RtDim::Node`. Mirrors [`Self::extract_usize_list`] but preserves a
+    /// runtime step instead of silently dropping it.
+    fn lower_stride_bounds(&mut self, exprs: &[Expr], inputs: &mut Vec<NodeId>) -> Vec<RtDim> {
+        let mut out = Vec::with_capacity(exprs.len());
+        for e in exprs {
+            out.push(self.lower_one_bound(e, inputs));
+        }
+        out
     }
 
     /// C4: Enforce float-only for transcendental ops (exp, log, sin, sqrt).
@@ -9770,13 +9949,25 @@ impl LowerCtx {
             return self.lower_unrepresentable("if", elems);
         }
 
-        let mask = self.lower_if_mask(cond, &out_ty);
+        // chelis#616: a leaf-Const branch (the `fail` placeholder) and the
+        // mask's `one` Const are shaped like the branch values, but as leaf
+        // nodes they have no input edge carrying that relation. Conform the
+        // placeholder to the if's rank (the checker types `fail` as bottom,
+        // which lowers rank-0) and record a shape-dep so (i) the C backend's
+        // anon-dim renaming ties the Const's wildcard dims to the sibling's
+        // instead of fragmenting them into fresh sourceless `_anon_dim_*`s,
+        // (ii) the evaluator can size the Const from the sibling's actual
+        // value, and (iii) the extent source stays alive under DCE.
+        let then_node = self.conform_branch_placeholder(then_node, &out_ty, else_node);
+        let else_node = self.conform_branch_placeholder(else_node, &out_ty, then_node);
+        let mask = self.lower_if_mask(cond, &out_ty, else_node);
         let one = self.dag.add_node(
             RiscOp::Const { value: 1.0 },
             vec![],
             out_ty.clone(),
             self.current_span_id.clone(),
         );
+        self.dag.add_shape_dep(one, else_node);
         let neg_mask = self.dag.add_node(
             RiscOp::Neg,
             vec![mask],
@@ -10209,7 +10400,71 @@ impl LowerCtx {
         )
     }
 
-    fn lower_if_mask(&mut self, cond: NodeId, out_ty: &TensorType) -> NodeId {
+    /// chelis#616: conform an `if` branch that lowered as an input-less
+    /// `Const` (the `fail` placeholder) to the if's type, and record the
+    /// sibling branch as its shape source (see `lower_if`). The checker
+    /// types `fail` as bottom, which lowers rank-0; a checked program's
+    /// branches otherwise agree in rank, so a rank-0 leaf Const under a
+    /// tensor-typed `if` is exactly the bottom placeholder. Returns the
+    /// branch node to use in the mask arithmetic: for the bottom
+    /// placeholder that is a FRESH conformed Const emitted here — after
+    /// both branches — so its shape source (the sibling) precedes it in
+    /// evaluation order.
+    fn conform_branch_placeholder(
+        &mut self,
+        node: NodeId,
+        out_ty: &TensorType,
+        sibling: NodeId,
+    ) -> NodeId {
+        if node == sibling || out_ty.dims.is_empty() {
+            return node;
+        }
+        let Some(n) = self.dag.get(node).cloned() else {
+            return node;
+        };
+        if !(matches!(n.op, RiscOp::Const { .. }) && n.inputs.is_empty() && n.shape_deps.is_empty())
+        {
+            return node;
+        }
+        if n.output_type.dims.is_empty() {
+            // Bottom placeholder: a fresh Const at the if's rank with
+            // anonymous symbolic dims (the checker's symbol for an unbound
+            // axis may be declared later in program order; the shape-dep
+            // carries the actual extent source). The rank-0 original is left
+            // unconsumed for DCE.
+            let dims = out_ty
+                .dims
+                .iter()
+                .map(|dim| match dim {
+                    DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => DimInfo::Lit(*size),
+                    DimInfo::Named(_, None) => DimInfo::Named(String::new(), None),
+                })
+                .collect();
+            let conformed = self.dag.add_node(
+                n.op,
+                Vec::new(),
+                TensorType {
+                    dims,
+                    precision: out_ty.precision,
+                },
+                self.current_span_id.clone(),
+            );
+            self.dag.add_shape_dep(conformed, sibling);
+            conformed
+        } else {
+            if n.output_type.dims.len() == out_ty.dims.len()
+                && n.output_type
+                    .dims
+                    .iter()
+                    .any(|d| matches!(d, DimInfo::Named(_, None)))
+            {
+                self.dag.add_shape_dep(node, sibling);
+            }
+            node
+        }
+    }
+
+    fn lower_if_mask(&mut self, cond: NodeId, out_ty: &TensorType, shape_source: NodeId) -> NodeId {
         let mut mask = cond;
         let cond_ty = self
             .dag
@@ -10246,6 +10501,9 @@ impl LowerCtx {
                     },
                     self.current_span_id.clone(),
                 );
+                // chelis#616: an unbound (possibly wildcard) `size` resolves
+                // from the branch value's actual shape at eval time.
+                self.dag.add_shape_dep(expanded, shape_source);
             }
             return expanded;
         }
@@ -11816,7 +12074,7 @@ mod tests {
             .expect("a Shrink node must be present");
         assert_eq!(
             bounds,
-            vec![(0, 2)],
+            vec![(RtDim::Lit(0), RtDim::Lit(2))],
             "cast-wrapped cons-chain bounds must extract to (0, 2), not an empty list",
         );
         assert!(verify::verify(&dag).is_empty());
@@ -11852,7 +12110,7 @@ mod tests {
             .expect("a Shrink node must be present");
         assert_eq!(
             bounds,
-            vec![(0, 2)],
+            vec![(RtDim::Lit(0), RtDim::Lit(2))],
             "plain cons-chain bounds must still extract to (0, 2)",
         );
     }

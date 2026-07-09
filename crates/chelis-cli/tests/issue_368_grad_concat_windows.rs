@@ -354,49 +354,37 @@ fn issue_368_symbolic_nonconcat_axis_grad_nonlinear() {
 /// The issue's LITERAL reproducer: `grad` through `mean(concat(windows))`
 /// where the window count `m` is RUNTIME-derived (`m = shape(x, 0)`-based)
 /// over a SYMBOLIC-rank input `tensor[n, f32]`, behind a symbolic-dim sig'd
-/// callee and an `if/fail` guard. The concat→rank-0 collapse #368 fixed is
-/// gone, but this form still fails to lower under `grad` because of the
-/// remaining symbolic-dim machinery gaps tracked in Chelis-Lang/chelis#513
-/// ("symbolic-dim-aware grad machinery"):
+/// callee and an `if/fail` guard.
 ///
-/// 1. the runtime-expr `mean` divisor `Const` carries `Named("m")` with no
-///    declaring `Load` (symbol-declaration ICE), and
-/// 2. runtime `shrink`/`stride` bounds (`cast(add(...))`) extract to empty
-///    bounds, leaving the windowed intermediate a `Named("*")` wildcard.
+/// chelis#616 COMPLETION ORACLE (formerly the tracked-residual pin): the
+/// full runtime-symbolic-window gradient now computes. The capability chain
+/// that landed: runtime (node-valued) `shrink`/`stride` bounds; runtime
+/// `reshape` target extents referencing rank-0 scalar nodes (including the
+/// inlined window-count parameter `m`); op-declared symbolic-dim sources
+/// with mid-evaluation binding; stop-gradient boundaries for bound-source
+/// scalars (`floor_div` in the window-count chain is index math, not data);
+/// and runtime movement adjoints (the stride adjoint's node-valued trim /
+/// merge, the shrink adjoint's `shape(x, axis) - end` pad).
 ///
-/// The gap-3 STRUCTURAL slice (bystander-symbolic-axis `Stride`/`ProdReduce`/
-/// `Shrink`-sentinel adjoints + static-arithmetic reshape targets; see
-/// `issue_513_symbolic_axis_adjoints.rs`) is closed, which moved this
-/// residual's boundary: the pipeline now reaches the stride ADJOINT and dies
-/// on its fail-closed guard for the wildcard STRIDED axis ("stride adjoint
-/// requires a concrete size for strided axis 0; got symbolic `*`"), which is
-/// gap 2's empty-bounds consequence surfacing through the gap-3 guard.
+/// avgpool1d([1, 2, 3, 4], window 2, stride 2) = [1.5, 3.5];
+/// loss = sum(avgpool1d(x)), so dloss/dx = 1/2 everywhere (each element
+/// contributes to exactly one window mean over 2 elements).
 ///
-/// UPDATE (chelis#558 / the scalar-shape-value slice): the scalar `shape(x,
-/// axis)` VALUE read now lowers to a real `RiscOp::Shape` DAG node (rank-0
-/// integer extent), replacing the bogus `Load { name: "shape" }` fallthrough;
-/// see `issue_558_shape_value_read.rs` for its FD + eval-vs-C oracles. That
-/// removes gap 1 for this reproducer, but the boundary is UNCHANGED: the
-/// runtime `shrink`/`stride` BOUND extraction (`extract_pair_list` still
-/// drops runtime `cast(add(...))` bounds to empty -> the windowed axis stays
-/// a `Named("*")` wildcard -> the stride adjoint's fail-closed guard fires).
-/// Closing this residual still needs (a) integer-arithmetic scalar nodes
-/// feeding movement-op bounds and (b) a node-valued (runtime) `Shrink`/
-/// `Stride` bound representation threaded through verify/eval/C-emit/grad
-/// (gap 2 + gap 3's value-dependent half). The `RiscOp::Shape` node is the
-/// foundation those two build on.
-///
-/// This pin asserts the boundary stays EXPLICIT: the form fails (non-zero
-/// exit) with a symbolic-dim diagnostic rather than silently mis-lowering.
-/// When the remaining chelis#513 gaps land, flip this to a finite-diff +
-/// forward-parity oracle.
+/// Locked by (i) the analytic gradient, (ii) a central-difference
+/// finite-difference oracle, and (iii) forward parity of the pooled values.
+/// The eval-vs-C legs for the runtime-window machinery live in
+/// `issue_616_runtime_movement_c_parity.rs` /
+/// `issue_616_runtime_reshape_c_parity.rs` on `if`-free twins: this guarded
+/// form's C build routes through the host-program lane, which still types a
+/// list `concat` as its element type and cannot render the wildcard-typed
+/// `if` mask expansion — both PRE-EXISTING host-lane gaps that fail the
+/// build loudly (never a mis-sized binary).
 #[test]
-fn issue_368_runtime_symbolic_window_grad_is_tracked_residual() {
+fn issue_368_runtime_symbolic_window_grad_is_half_everywhere() {
     // The exact #368 reproducer: avgpool1d with a RUNTIME-derived window
     // count `m` AND runtime `shrink`/`stride` bounds, behind a symbolic-rank
     // callee sig + `if/fail` guard + a `[n]`-quantified `window_row` helper.
-    let source = "module Repro.SymResidual\n\
-sig avgpool1d: tensor[n, f32] -> tensor[m, f32]\n\
+    let avgpool = "sig avgpool1d: tensor[n, f32] -> tensor[m, f32]\n\
 def avgpool1d(x) = {\n\
   n = cast(shape(x, cast(0, int32)), int64)\n\
   if gt(cast(2, int64), n) then fail(\"kernel exceeds input length\") else {\n\
@@ -409,39 +397,128 @@ def window_row[n](x: &tensor[n, f32], m: int64, k: int64) -> tensor[u, m, f32] =
   start = cast(k, int32)\n\
   extent = cast(add(add(k, mul(sub(m, cast(1, int64)), cast(2, int64))), cast(1, int64)), int32)\n\
   reshape(stride(shrink(x, [[start, extent]]), cast(2, int32)), [cast(1, int64), m])\n\
-}\n\
-def loss(x: tensor[4, f32]) -> f32 = sum(avgpool1d(x), cast(0, int32)) |> tensor_to_scalar\n\
-out = grad(loss)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)]))\n";
+}";
 
+    // Forward parity: the pooled means themselves.
+    let forward = format!(
+        "module Repro.SymOracleFwd\n{avgpool}\n\
+out = avgpool1d(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)]))\n"
+    );
+    let stdout = eval_ok(&forward, "symoraclefwd");
+    let (shape, pooled) = parse_tensor(&stdout, "out");
+    assert_eq!(shape, vec![2], "two stride-2 windows over 4 elements");
+    assert_close("runtime-window forward", &pooled, &[1.5, 3.5]);
+
+    // The gradient: analytic 1/2 everywhere.
+    let grad_source = |literal: &str| {
+        format!(
+            "module Repro.SymOracle\n{avgpool}\n\
+def loss(x: tensor[4, f32]) -> f32 = sum(avgpool1d(x), cast(0, int32)) |> tensor_to_scalar\n\
+out = grad(loss)(to_tensor([{literal}]))\n"
+        )
+    };
+    let base_literal = "cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)";
+    let stdout = eval_ok(&grad_source(base_literal), "symoracle");
+    let (shape, grad) = parse_tensor(&stdout, "out");
+    assert_eq!(shape, vec![4]);
+    assert_close("runtime-window grad", &grad, &[0.5, 0.5, 0.5, 0.5]);
+
+    // Central-difference finite-difference oracle over the forward loss.
+    let loss_source = |values: &[f64]| {
+        let literal = values
+            .iter()
+            .map(|v| format!("cast({v:?}, f32)"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "module Repro.SymOracleLoss\n{avgpool}\n\
+def loss(x: tensor[4, f32]) -> f32 = sum(avgpool1d(x), cast(0, int32)) |> tensor_to_scalar\n\
+out = loss(to_tensor([{literal}]))\n"
+        )
+    };
+    let base = [1.0, 2.0, 3.0, 4.0];
+    let h = 1e-2;
+    for i in 0..base.len() {
+        let mut xp = base;
+        let mut xm = base;
+        xp[i] += h;
+        xm[i] -= h;
+        let lp: f64 = eval_ok(&loss_source(&xp), "symoraclefd")
+            .trim()
+            .lines()
+            .last()
+            .and_then(|l| l.trim().parse().ok())
+            .expect("scalar loss");
+        let lm: f64 = eval_ok(&loss_source(&xm), "symoraclefd")
+            .trim()
+            .lines()
+            .last()
+            .and_then(|l| l.trim().parse().ok())
+            .expect("scalar loss");
+        let fd = (lp - lm) / (2.0 * h);
+        assert!(
+            (fd - grad[i]).abs() < 1e-2,
+            "FD mismatch at {i}: fd={fd}, grad={}",
+            grad[i]
+        );
+    }
+
+    // eval-vs-C GRADIENT parity: the grad DAG (which inlines the guard as
+    // mask arithmetic) builds and runs through `chelis build --target c`,
+    // producing the same [0.5, 0.5, 0.5, 0.5]. (The guarded FORWARD build
+    // routes through the host-program lane and stays loudly blocked on the
+    // pre-existing list-concat typing gap, chelis#631; the gradient path is
+    // the chelis#616 oracle and has full parity.)
     let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("symresidual.ch");
-    fs::write(&path, source).expect("write source");
-    let output = Command::cargo_bin("chelis")
+    let src_path = dir.path().join("symoraclec.ch");
+    fs::write(&src_path, grad_source(base_literal)).expect("write source");
+    let build_dir = dir.path().join("build");
+    Command::cargo_bin("chelis")
         .expect("binary")
         .current_dir(dir.path())
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["eval", "--file", path.to_str().unwrap()])
+        .args([
+            "build",
+            src_path.to_str().unwrap(),
+            "--target",
+            "c",
+            "-o",
+            build_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let bin = build_dir.join("self_bin");
+    let compile = std::process::Command::new("gcc")
+        .args([
+            "-O0",
+            "-std=c11",
+            "-I",
+            build_dir.to_str().unwrap(),
+            build_dir.join("symoraclec.c").to_str().unwrap(),
+            "-o",
+            bin.to_str().unwrap(),
+            build_dir.join("libchelis_runtime.a").to_str().unwrap(),
+            "-lm",
+            "-lpthread",
+            "-ldl",
+        ])
         .output()
-        .expect("run chelis eval");
+        .expect("invoke gcc");
     assert!(
-        !output.status.success(),
-        "TRACKED RESIDUAL chelis#513 unexpectedly passing: runtime-symbolic-window \
-         grad now lowers. Promote this pin to a finite-diff + forward-parity oracle \
-         (the symbolic-dim grad machinery has landed). stdout={}",
-        String::from_utf8_lossy(&output.stdout),
+        compile.status.success(),
+        "gcc compile failed: stderr={}",
+        String::from_utf8_lossy(&compile.stderr)
     );
-    // The boundary is the symbolic-dim machinery, not the concat collapse:
-    // the failure must mention a symbolic dimension (the chelis#513 surface),
-    // never the old rank-0 `index out of bounds` / `1 vs 0` collapse #368
-    // fixed. Both boundary wordings match the needle: the dag.rs
-    // symbol-declaration ICE ("symbolic dim `m` ...") and the gap-3 stride
-    // adjoint fail-closed guard ("... got symbolic dimension `*`
-    // (chelis#513: ...)"), which is where the pipeline stops now that the
-    // structural adjoint slice landed.
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let run = std::process::Command::new(&bin)
+        .output()
+        .expect("run emitted program");
     assert!(
-        stderr.contains("symbolic dim"),
-        "residual failure must be the symbolic-dim-machinery boundary (chelis#513), \
-         not the #368 rank-0 collapse; stderr={stderr}",
+        run.status.success(),
+        "emitted grad program exited non-zero: stdout={} stderr={}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
     );
+    let (c_shape, c_grad) = parse_tensor(&String::from_utf8_lossy(&run.stdout), "out");
+    assert_eq!(c_shape, vec![4]);
+    assert_close("runtime-window grad eval-vs-C", &c_grad, &grad);
 }

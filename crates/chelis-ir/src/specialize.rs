@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::dag::{Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
+use crate::dag::{Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType};
 use chelis_types::types::Prim;
 
 /// Compiler pipeline ordering around backend specialization.
@@ -92,8 +92,21 @@ fn identity_source(node: &DagNode, dag: &Dag) -> Option<NodeId> {
         {
             Some(input_id)
         }
+        // chelis#616: a `RtDim::Node` (runtime) target never matches here —
+        // its extent is unknowable statically, and eliding it would also
+        // delete the backend's runtime numel guard. (Arity is 1-gated above,
+        // so a runtime reshape, which carries scalar inputs, never reaches
+        // this arm anyway.)
         RiscOp::Reshape { new_shape }
-            if input.output_type.dims == *new_shape
+            if new_shape.len() == input.output_type.dims.len()
+                && new_shape.iter().zip(input.output_type.dims.iter()).all(
+                    |(target, dim)| match (target, dim) {
+                        (RtDim::Lit(n), DimInfo::Lit(m))
+                        | (RtDim::Lit(n), DimInfo::Named(_, Some(m))) => n == m,
+                        (RtDim::Sym(s), DimInfo::Named(name, None)) => s == name,
+                        _ => false,
+                    },
+                )
                 && input.output_type.dims == node.output_type.dims =>
         {
             Some(input_id)
@@ -350,8 +363,8 @@ fn lower_one_hot_node(out: &mut Dag, indices: NodeId, source: &DagNode, vocab: u
                 padding: indices_ty
                     .dims
                     .iter()
-                    .map(|_| (0, 0))
-                    .chain([(class, vocab - class - 1)])
+                    .map(|_| (RtDim::Lit(0), RtDim::Lit(0)))
+                    .chain([(RtDim::Lit(class), RtDim::Lit(vocab - class - 1))])
                     .collect(),
                 fill: 0.0,
             },

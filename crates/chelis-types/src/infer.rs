@@ -56,7 +56,10 @@ use std::cell::{Cell, RefCell};
 /// measured is well under that, so reserving 128 KiB guarantees the
 /// current frame plus a few more can unwind and allocate the diagnostic
 /// without touching the guard page, while costing negligibly little of an
-/// 8 MiB stack.
+/// 8 MiB stack. (The rustc 1.97 SIGABRT in the small-stack guard tests was
+/// NOT a red-zone shortfall: the tests dropped their 4000-deep chain's
+/// unguarded drop glue on the 1 MiB worker itself; measured empirically,
+/// the guarded walkers still bail comfortably inside 128 KiB.)
 const STACK_RED_ZONE_BYTES: usize = 128 * 1024;
 
 /// Fallback recursion-depth cap used *only* when
@@ -13579,9 +13582,15 @@ fn infer_shrink_app(
     // to runtime, output wildcards) from "structurally malformed"
     // (reject at infer with a clear axis-tagged message). See PR #214
     // red team round 1 finding R1-F1.
-    let bounds = match cons_chain_int_pairs(&kids[2]) {
-        PairListShape::Literal(pairs) => pairs,
-        PairListShape::NonLiteralLiterals | PairListShape::Unknown => {
+    let bounds: Vec<Option<(i64, i64)>> = match cons_chain_int_pairs(&kids[2]) {
+        PairListShape::Literal(pairs) => pairs.into_iter().map(Some).collect(),
+        // chelis#616: per-axis mixing — a literal pair keeps its precise
+        // extent (and its infer-time validation); only a RUNTIME pair's own
+        // axis becomes a wildcard. Collapsing every axis let unification
+        // fill a runtime axis from a sibling literal axis, which the C
+        // backend then baked as a wrong, unguarded allocation extent.
+        PairListShape::Mixed(pairs) => pairs,
+        PairListShape::Unknown => {
             return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
         }
         PairListShape::Malformed { axis, reason } => {
@@ -13615,7 +13624,12 @@ fn infer_shrink_app(
     }
 
     let mut out_dims = Vec::with_capacity(dims.len());
-    for (axis, ((start, end), dim)) in bounds.iter().zip(dims.iter()).enumerate() {
+    for (axis, (pair, dim)) in bounds.iter().zip(dims.iter()).enumerate() {
+        let Some((start, end)) = pair else {
+            // Runtime bounds on this axis: extent known only at run time.
+            out_dims.push(Dim::Wildcard);
+            continue;
+        };
         if *start < 0 || *end < 0 {
             errors.push(CheckError::new(
                 CheckErrorKind::DimensionMismatch,
@@ -13768,18 +13782,15 @@ fn infer_stride_app(
         }
     };
 
-    let Some(strides) = kids[2..]
-        .iter()
-        .map(extract_int_for_dim)
-        .collect::<Option<Vec<_>>>()
-    else {
-        // Strides are int32-typed but non-literal (e.g. parameters). Keep
-        // the rank, make dims wildcard. Uses `extract_int_for_dim` so
-        // `cast(N, int32)`-wrapped literal strides reach the positive-
-        // stride check at infer time instead of falling back to host
-        // runtime (red team round 3 finding R3-HIGH1).
-        return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
-    };
+    // Per-axis extraction (chelis#616): a literal (possibly cast-wrapped)
+    // step keeps its precise infer-time validation and extent math; only a
+    // RUNTIME step's own axis becomes a wildcard. Collapsing every axis to
+    // a wildcard let unification fill a runtime axis's extent from a
+    // sibling literal axis (see the shrink arm). Uses
+    // `extract_int_for_dim` so `cast(N, int32)`-wrapped literal strides
+    // reach the positive-stride check at infer time instead of falling
+    // back to host runtime (red team round 3 finding R3-HIGH1).
+    let strides: Vec<Option<i64>> = kids[2..].iter().map(extract_int_for_dim).collect();
 
     if strides.len() != dims.len() {
         errors.push(CheckError::new(
@@ -13800,6 +13811,11 @@ fn infer_stride_app(
 
     let mut out_dims = Vec::with_capacity(dims.len());
     for (axis, (step, dim)) in strides.iter().zip(dims.iter()).enumerate() {
+        let Some(step) = step else {
+            // Runtime step on this axis: extent known only at run time.
+            out_dims.push(Dim::Wildcard);
+            continue;
+        };
         if *step <= 0 {
             errors.push(CheckError::new(
                 CheckErrorKind::DimensionMismatch,
@@ -13969,9 +13985,12 @@ fn infer_pad_app(
         return Type::Error;
     }
 
-    let padding = match cons_chain_int_pairs(&kids[2]) {
-        PairListShape::Literal(pairs) => pairs,
-        PairListShape::NonLiteralLiterals | PairListShape::Unknown => {
+    let padding: Vec<Option<(i64, i64)>> = match cons_chain_int_pairs(&kids[2]) {
+        PairListShape::Literal(pairs) => pairs.into_iter().map(Some).collect(),
+        // chelis#616: per-axis mixing — only a RUNTIME pair's own axis
+        // wildcards (see the shrink arm for the mis-size this prevents).
+        PairListShape::Mixed(pairs) => pairs,
+        PairListShape::Unknown => {
             return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
         }
         PairListShape::Malformed { axis, reason } => {
@@ -14005,7 +14024,12 @@ fn infer_pad_app(
     }
 
     let mut out_dims = Vec::with_capacity(dims.len());
-    for (axis, ((lo, hi), dim)) in padding.iter().zip(dims.iter()).enumerate() {
+    for (axis, (pair, dim)) in padding.iter().zip(dims.iter()).enumerate() {
+        let Some((lo, hi)) = pair else {
+            // Runtime padding on this axis: extent known only at run time.
+            out_dims.push(Dim::Wildcard);
+            continue;
+        };
         if *lo < 0 || *hi < 0 {
             errors.push(CheckError::new(
                 CheckErrorKind::DimensionMismatch,
@@ -14304,9 +14328,16 @@ enum PairListShape {
     Literal(Vec<(i64, i64)>),
     /// Top-level chain closed by `Nil` and every entry was structurally
     /// a `Cons(_, Cons(_, Nil))`, but at least one inner element was a
-    /// non-literal (variable, call, etc.). Output shape must be
-    /// wildcarded but no infer-side error -- runtime will validate.
-    NonLiteralLiterals,
+    /// non-literal (variable, call, etc.). Carries the PER-AXIS
+    /// classification: `Some((start, end))` for a literal pair (which
+    /// the caller must still validate and size precisely), `None` for a
+    /// runtime pair (that axis alone becomes a wildcard; runtime
+    /// validates it). chelis#616 red-team finding: collapsing EVERY
+    /// axis to a wildcard here let downstream unification fill a
+    /// runtime axis's extent from a sibling literal axis, and the C
+    /// backend baked the wrong literal with no guard — a silent
+    /// mis-size.
+    Mixed(Vec<Option<(i64, i64)>>),
     /// At least one inner entry has the wrong structural shape (wrong
     /// number of elements, missing `Nil` close, etc.). The caller MUST
     /// emit an infer-time error naming the offending axis.
@@ -14321,7 +14352,7 @@ enum PairListShape {
 /// desugared form of a Surf `[[start_0, end_0], [start_1, end_1], ...]`
 /// list-of-pair literal — and classify it via [`PairListShape`].
 fn cons_chain_int_pairs(expr: &deep::Expr) -> PairListShape {
-    let mut pairs: Vec<(i64, i64)> = Vec::new();
+    let mut pairs: Vec<Option<(i64, i64)>> = Vec::new();
     let mut any_non_literal = false;
     let mut cursor = expr;
     let mut axis = 0usize;
@@ -14337,9 +14368,14 @@ fn cons_chain_int_pairs(expr: &deep::Expr) -> PairListShape {
                 };
                 if name == "Nil" {
                     if any_non_literal {
-                        return PairListShape::NonLiteralLiterals;
+                        return PairListShape::Mixed(pairs);
                     }
-                    return PairListShape::Literal(pairs);
+                    return PairListShape::Literal(
+                        pairs
+                            .into_iter()
+                            .map(|pair| pair.expect("all literal"))
+                            .collect(),
+                    );
                 }
                 return PairListShape::Unknown;
             }
@@ -14361,8 +14397,11 @@ fn cons_chain_int_pairs(expr: &deep::Expr) -> PairListShape {
                     None => return PairListShape::Unknown,
                 };
                 match cons_chain_two_ints(pair_expr, axis) {
-                    InnerPairShape::Literal(pair) => pairs.push(pair),
-                    InnerPairShape::NonLiteral => any_non_literal = true,
+                    InnerPairShape::Literal(pair) => pairs.push(Some(pair)),
+                    InnerPairShape::NonLiteral => {
+                        any_non_literal = true;
+                        pairs.push(None);
+                    }
                     InnerPairShape::Malformed { reason } => {
                         return PairListShape::Malformed { axis, reason };
                     }
@@ -19368,23 +19407,28 @@ mod tests {
     /// flag proves the bail surfaces.
     #[test]
     fn walk_for_tensor_precision_sibling_is_guarded_not_sigsegv() {
+        // Built and dropped on the main thread: the chain's unguarded drop
+        // glue overflows a 1 MiB stack on its own under rustc 1.97 codegen
+        // (see `stack_exhaustion_drains_into_a_located_error`).
+        let program = std::sync::Arc::new(vec![deep_app_chain_node(4000)]);
+        let worker_program = std::sync::Arc::clone(&program);
         let flagged = std::thread::Builder::new()
             .name("sibling-guard-test".to_string())
             // 1 MiB: small enough that a 4000-deep chain trips the byte
             // budget early, well inside the guard, with no risk of overflow.
             .stack_size(1024 * 1024)
-            .spawn(|| {
-                let program = vec![deep_app_chain_node(4000)];
+            .spawn(move || {
                 let _scope = StackExhaustionScope::enter();
                 let mut errors = Vec::new();
                 // Drive ONLY the tensor-precision pass (whose deep walker is
                 // walk_for_tensor_precision), isolating it from infer_expr.
-                validate_tensor_precisions_in_program(&program, &mut errors);
+                validate_tensor_precisions_in_program(&worker_program, &mut errors);
                 STACK_EXHAUSTED.with(|cell| cell.borrow().clone())
             })
             .expect("spawn sibling-guard worker")
             .join()
             .expect("sibling walker aborted (stack overflow?) instead of returning");
+        drop(program);
 
         let (site, _span) = flagged.expect(
             "walk_for_tensor_precision must record a stack-exhaustion bail on a \
@@ -19402,22 +19446,33 @@ mod tests {
     /// error -- never a silent empty result.
     #[test]
     fn stack_exhaustion_drains_into_a_located_error() {
+        // The 4000-deep chain is BUILT and DROPPED on the test's main thread:
+        // its derived drop glue recurses the full chain depth with no guard,
+        // and under rustc 1.97 codegen those frames overflow the worker's
+        // 1 MiB stack on their own (the pre-1.97 frames merely happened to
+        // fit). The worker thread exists to exercise the GUARDED walker on a
+        // small stack; the unguarded collateral must not share it.
+        // (Production runs construction, walkers, and drops on the
+        // `with_grown_stack` segment, so this is a test-harness concern.)
+        let program = std::sync::Arc::new(vec![deep_app_chain_node(4000)]);
+        let worker_program = std::sync::Arc::clone(&program);
         let errors = std::thread::Builder::new()
             .stack_size(1024 * 1024)
-            .spawn(|| {
-                let program = vec![deep_app_chain_node(4000)];
+            .spawn(move || {
                 let scope = StackExhaustionScope::enter();
                 let mut errors = Vec::new();
-                validate_tensor_precisions_in_program(&program, &mut errors);
+                validate_tensor_precisions_in_program(&worker_program, &mut errors);
                 // Before drain: the precision pass carries no error vector of
                 // its own for the bail, so `errors` may be empty here ...
                 scope.drain_into(&mut errors);
                 // ... but after drain the exhaustion is a hard error.
+                drop(worker_program);
                 errors
             })
             .expect("spawn drain-test worker")
             .join()
             .expect("worker aborted instead of returning");
+        drop(program);
         assert!(
             errors
                 .iter()

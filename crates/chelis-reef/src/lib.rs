@@ -510,7 +510,7 @@ impl PreparedReefGraph {
     /// retain extracted-cache file paths so this method can hash them.
     pub fn source_digests(&self) -> Result<Vec<SourceDigest>, String> {
         let mut digests = Vec::new();
-        for (_, package) in self.graph.packages.iter() {
+        for package in self.graph.packages.values() {
             let source_root = match &package.source {
                 LoadedSourceKind::Root => self.package_root.clone(),
                 LoadedSourceKind::Path { relative } => self

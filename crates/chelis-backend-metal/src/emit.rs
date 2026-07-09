@@ -5,7 +5,33 @@
 //! programs. Reductions land in M4, matmul in M5, and broadcasting/strided
 //! layouts will be added incrementally.
 
-use chelis_ir::dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, RtDim, TensorType};
+
+/// chelis#616: the Metal lane requires compile-time movement bounds (it rejects
+/// symbolic movement shapes via `require_movement_shape`). This converter
+/// materializes the literal bound for the emitters and panics on a node-valued
+/// (runtime) bound as a defensive backstop.
+fn metal_bound_to_usize(b: &RtDim) -> usize {
+    match b {
+        RtDim::Lit(n) => *n,
+        RtDim::ToEnd => chelis_ir::dag::SHRINK_TO_END,
+        RtDim::Node(_) => panic!(
+            "Metal backend reached a node-valued (runtime) movement bound; runtime-symbolic \
+             movement bounds are not supported on the Metal lane (chelis#616)"
+        ),
+        RtDim::Sym(name) => panic!(
+            "Metal backend reached a symbolic movement bound `{name}`; verify rejects \
+             symbolic dims outside reshape targets (chelis#616)"
+        ),
+    }
+}
+
+fn metal_pairs_to_usize(bounds: &[(RtDim, RtDim)]) -> Vec<(usize, usize)> {
+    bounds
+        .iter()
+        .map(|(s, e)| (metal_bound_to_usize(s), metal_bound_to_usize(e)))
+        .collect()
+}
 use chelis_types::types::Prim;
 
 use crate::blas;
@@ -539,8 +565,10 @@ impl Emitter {
             // kernels (one thread per output element) over contiguous
             // buffers, mirroring the HIP path. The GPU==eval numeric proof
             // is the manual `gpu_correctness` Mac gate.
-            RiscOp::Pad { padding, fill } => self.emit_pad(node, padding, *fill),
-            RiscOp::Shrink { bounds } => self.emit_shrink(node, bounds),
+            RiscOp::Pad { padding, fill } => {
+                self.emit_pad(node, &metal_pairs_to_usize(padding), *fill)
+            }
+            RiscOp::Shrink { bounds } => self.emit_shrink(node, &metal_pairs_to_usize(bounds)),
 
             other => Err(format!(
                 "Metal M4 emit: node {id} op {other:?} not yet supported \

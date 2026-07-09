@@ -18,7 +18,7 @@
 //! the per-test relaxations.
 
 use chelis_backend_metal::codegen_metal;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_types::types::Prim;
 use std::collections::HashMap;
@@ -912,7 +912,7 @@ fn m6_pad_1d_zero_fill_matches_evaluator() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
     let p = dag.add_node(
         RiscOp::Pad {
-            padding: vec![(1, 1)],
+            padding: vec![(RtDim::Lit(1), RtDim::Lit(1))],
             fill: 0.0,
         },
         vec![x],
@@ -933,7 +933,7 @@ fn m6_pad_1d_nonzero_fill_matches_evaluator() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
     let p = dag.add_node(
         RiscOp::Pad {
-            padding: vec![(2, 1)],
+            padding: vec![(RtDim::Lit(2), RtDim::Lit(1))],
             fill: -7.5,
         },
         vec![x],
@@ -959,7 +959,10 @@ fn m6_pad_2d_asymmetric_matches_evaluator() {
     );
     let p = dag.add_node(
         RiscOp::Pad {
-            padding: vec![(1, 0), (0, 2)],
+            padding: vec![
+                (RtDim::Lit(1), RtDim::Lit(0)),
+                (RtDim::Lit(0), RtDim::Lit(2)),
+            ],
             fill: 0.0,
         },
         vec![x],
@@ -984,7 +987,7 @@ fn m6_shrink_1d_matches_evaluator() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
     let s = dag.add_node(
         RiscOp::Shrink {
-            bounds: vec![(1, 5)],
+            bounds: vec![(RtDim::Lit(1), RtDim::Lit(5))],
         },
         vec![x],
         vec_f32(4),
@@ -1009,7 +1012,10 @@ fn m6_shrink_2d_matches_evaluator() {
     );
     let s = dag.add_node(
         RiscOp::Shrink {
-            bounds: vec![(1, 3), (0, 2)],
+            bounds: vec![
+                (RtDim::Lit(1), RtDim::Lit(3)),
+                (RtDim::Lit(0), RtDim::Lit(2)),
+            ],
         },
         vec![x],
         mat_f32(2, 2),
@@ -1035,7 +1041,7 @@ fn m6_pad_then_shrink_roundtrip_matches_evaluator() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
     let p = dag.add_node(
         RiscOp::Pad {
-            padding: vec![(2, 2)],
+            padding: vec![(RtDim::Lit(2), RtDim::Lit(2))],
             fill: 0.0,
         },
         vec![x],
@@ -1044,7 +1050,7 @@ fn m6_pad_then_shrink_roundtrip_matches_evaluator() {
     );
     let s = dag.add_node(
         RiscOp::Shrink {
-            bounds: vec![(2, 6)],
+            bounds: vec![(RtDim::Lit(2), RtDim::Lit(6))],
         },
         vec![p],
         vec_f32(4),

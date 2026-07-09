@@ -4,9 +4,55 @@
 //! and walks the DAG in topological order launching kernels on GPU.
 
 use chelis_ir::dag::{
-    Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, TensorType, symbolic_bindings,
+    Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType, symbolic_bindings,
 };
 use chelis_types::types::Prim;
+
+/// chelis#616: the HIP device-kernel lane does not support runtime (node-valued)
+/// movement bounds; `reject_unsupported_hip_ops` (compiler-api + CLI) rejects
+/// them before codegen. This converter materializes the compile-time bound for
+/// the literal launch emitters and panics on a node-valued bound as a defensive
+/// backstop (only reachable if a path bypasses the reject seam).
+fn hip_bound_to_usize(b: &RtDim) -> usize {
+    match b {
+        RtDim::Lit(n) => *n,
+        RtDim::ToEnd => chelis_ir::dag::SHRINK_TO_END,
+        RtDim::Node(_) => panic!(
+            "HIP backend reached a node-valued (runtime) movement bound; \
+             reject_unsupported_hip_ops must reject it before codegen (chelis#616)"
+        ),
+        RtDim::Sym(name) => panic!(
+            "HIP backend reached a symbolic movement bound `{name}`; verify rejects \
+             symbolic dims outside reshape targets (chelis#616)"
+        ),
+    }
+}
+
+fn hip_pairs_to_usize(bounds: &[(RtDim, RtDim)]) -> Vec<(usize, usize)> {
+    bounds
+        .iter()
+        .map(|(s, e)| (hip_bound_to_usize(s), hip_bound_to_usize(e)))
+        .collect()
+}
+
+/// chelis#616: the HIP lane only supports Load-declared symbolic dims; an
+/// op-declared dim implies a node-valued movement bound or runtime reshape
+/// target, which `reject_unsupported_hip_ops` rejects before codegen. This
+/// panic is a defensive backstop against a seam bypass.
+fn require_load_source(occurrence: &chelis_ir::dag::SymbolicDimOccurrence) -> (&String, usize) {
+    match &occurrence.source {
+        chelis_ir::dag::SymbolicDimSource::Load { input_label, axis } => (input_label, *axis),
+        chelis_ir::dag::SymbolicDimSource::OpDeclared { node, .. } => panic!(
+            "HIP backend reached an op-declared runtime dim `{}` (declared by node {}); \
+             reject_unsupported_hip_ops must reject it before codegen (chelis#616)",
+            occurrence.name, node.0
+        ),
+    }
+}
+
+fn hip_strides_to_usize(strides: &[RtDim]) -> Vec<usize> {
+    strides.iter().map(hip_bound_to_usize).collect()
+}
 
 use crate::blas;
 use crate::fusion::{FusedInPlaceSpec, fused_in_place_spec};
@@ -596,27 +642,26 @@ impl HipEmitter {
         }
 
         for binding in symbolic_bindings(dag) {
-            let canonical_slot = input_slots[&binding.canonical.input_label];
+            let (canonical_label, canonical_axis) = require_load_source(&binding.canonical);
+            let canonical_slot = input_slots[canonical_label];
             // `binding.name` flows into format-string context; sanitize.
             let binding_name_fmt =
                 chelis_ir::span_sanitize::sanitize_for_format_string(&binding.name);
             self.line(&format!(
-                "int {} = inputs[{canonical_slot}]->shape[{}];",
-                binding.name, binding.canonical.axis
+                "int {} = inputs[{canonical_slot}]->shape[{canonical_axis}];",
+                binding.name
             ));
-            for occurrence in binding.others {
-                let slot = input_slots[&occurrence.input_label];
-                let occ_label_fmt =
-                    chelis_ir::span_sanitize::sanitize_for_format_string(&occurrence.input_label);
+            for occurrence in &binding.others {
+                let (occ_label, occ_axis) = require_load_source(occurrence);
+                let slot = input_slots[occ_label];
+                let occ_label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(occ_label);
                 self.line(&format!(
-                    "if (inputs[{slot}]->shape[{}] != {}) {{",
-                    occurrence.axis, binding.name
+                    "if (inputs[{slot}]->shape[{occ_axis}] != {}) {{",
+                    binding.name
                 ));
                 self.indent += 1;
                 self.line(&format!(
-                    "fprintf(stderr, \"{func_name_fmt}: symbolic dim `{binding_name_fmt}` mismatch: {occ_label_fmt}[{}]=%d but {binding_name_fmt}=%d\\n\", inputs[{slot}]->shape[{}], {});",
-                    occurrence.axis,
-                    occurrence.axis,
+                    "fprintf(stderr, \"{func_name_fmt}: symbolic dim `{binding_name_fmt}` mismatch: {occ_label_fmt}[{occ_axis}]=%d but {binding_name_fmt}=%d\\n\", inputs[{slot}]->shape[{occ_axis}], {});",
                     binding.name
                 ));
                 self.line("abort();");
@@ -684,26 +729,25 @@ impl HipEmitter {
         }
 
         for binding in symbolic_bindings(dag) {
-            let canonical_slot = input_slots[&binding.canonical.input_label];
+            let (canonical_label, canonical_axis) = require_load_source(&binding.canonical);
+            let canonical_slot = input_slots[canonical_label];
             let binding_name_fmt =
                 chelis_ir::span_sanitize::sanitize_for_format_string(&binding.name);
             self.line(&format!(
-                "int {} = inputs[{canonical_slot}]->shape[{}];",
-                binding.name, binding.canonical.axis
+                "int {} = inputs[{canonical_slot}]->shape[{canonical_axis}];",
+                binding.name
             ));
-            for occurrence in binding.others {
-                let slot = input_slots[&occurrence.input_label];
-                let occ_label_fmt =
-                    chelis_ir::span_sanitize::sanitize_for_format_string(&occurrence.input_label);
+            for occurrence in &binding.others {
+                let (occ_label, occ_axis) = require_load_source(occurrence);
+                let slot = input_slots[occ_label];
+                let occ_label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(occ_label);
                 self.line(&format!(
-                    "if (inputs[{slot}]->shape[{}] != {}) {{",
-                    occurrence.axis, binding.name
+                    "if (inputs[{slot}]->shape[{occ_axis}] != {}) {{",
+                    binding.name
                 ));
                 self.indent += 1;
                 self.line(&format!(
-                    "fprintf(stderr, \"{func_name_fmt}_device: symbolic dim `{binding_name_fmt}` mismatch: {occ_label_fmt}[{}]=%d but {binding_name_fmt}=%d\\n\", inputs[{slot}]->shape[{}], {});",
-                    occurrence.axis,
-                    occurrence.axis,
+                    "fprintf(stderr, \"{func_name_fmt}_device: symbolic dim `{binding_name_fmt}` mismatch: {occ_label_fmt}[{occ_axis}]=%d but {binding_name_fmt}=%d\\n\", inputs[{slot}]->shape[{occ_axis}], {});",
                     binding.name
                 ));
                 self.line("abort();");
@@ -1578,7 +1622,7 @@ impl HipEmitter {
             RiscOp::Pad { padding, fill } => {
                 self.emit_pad_launch(
                     id,
-                    padding,
+                    &hip_pairs_to_usize(padding),
                     *fill,
                     &resolved_kernel_name(),
                     &node.inputs,
@@ -1589,7 +1633,7 @@ impl HipEmitter {
             RiscOp::Shrink { bounds } => {
                 self.emit_shrink_launch(
                     id,
-                    bounds,
+                    &hip_pairs_to_usize(bounds),
                     &resolved_kernel_name(),
                     &node.inputs,
                     &node.output_type,
@@ -1597,7 +1641,12 @@ impl HipEmitter {
                 );
             }
             RiscOp::Stride { strides } => {
-                self.emit_stride(id, strides, &node.inputs, &node.output_type);
+                self.emit_stride(
+                    id,
+                    &hip_strides_to_usize(strides),
+                    &node.inputs,
+                    &node.output_type,
+                );
             }
             RiscOp::Realize => {
                 self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)

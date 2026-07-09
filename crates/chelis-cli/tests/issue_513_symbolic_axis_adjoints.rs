@@ -25,23 +25,22 @@
 //! Every enabled path is locked by (i) a central-difference finite-difference
 //! oracle and (ii) eval-vs-`chelis build --target c` backend agreement,
 //! following `issue_513_reshape_shape_derived_grad.rs`. Paths that would need
-//! a runtime shape() VALUE (symbolic strided axis, symbolic reduced prod
-//! axis, symbolic-sig arithmetic reshape targets, runtime shrink bounds on a
-//! symbolic axis) REMAIN fail-closed with loud diagnostics, pinned by the
-//! negative tests at the bottom.
+//! a runtime shape() VALUE in an ADJOINT construction (symbolic strided
+//! axis, symbolic reduced prod axis, runtime shrink bounds on a symbolic
+//! axis) REMAIN fail-closed with loud diagnostics, pinned by the negative
+//! tests at the bottom.
 //!
-//! Fail-closed hardening on top of the fold: a shape()-derived arithmetic
-//! reshape target the exactness gate REFUSES (symbolic dim leaf, negative
-//! operand, non-positive divisor, or overflow) now fails LOUD at lowering
-//! instead of falling back to the checker's wildcard dims. Pre-hardening,
-//! the wildcard became an anonymous dim that the eval lane's symbolic
-//! binding could satisfy with a coincidental input extent under `grad`,
-//! silently accepting a program whose written target expression was never
-//! checked (e.g. a target that folds to [4, 4] over an 8-element input
-//! evaluated as if it were [2, 4]). Forward (non-grad) uses of the same
-//! form still evaluate through the host lane, which computes the target
-//! expression with true runtime semantics and rejects shape-inconsistent
-//! programs at runtime; both behaviors are pinned below.
+//! chelis#616 update: a shape()-derived arithmetic reshape target the
+//! exactness gate refuses to FOLD (symbolic dim leaf, negative operand,
+//! non-positive divisor, or overflow) now LOWERS as a runtime (node-valued)
+//! target extent instead of failing at lowering. The written expression is
+//! evaluated with true runtime semantics in both lanes, and the reshape
+//! numel invariant is enforced at run time — a clean eval error and a C
+//! runtime abort (never the pre-hardening silent wildcard acceptance, and
+//! never a lowering-time refusal of a valid program). The symbolic-sig
+//! im2col form is now a passing grad oracle; the ill-formed [4, 4]-over-8
+//! form is a runtime numel-mismatch error in both lanes. A target the fold
+//! PROVES negative still fails loud at lowering (proven-invalid program).
 
 use std::fs;
 use std::path::Path;
@@ -731,11 +730,12 @@ fn expect_grad_failure(source: &str, stem: &str, needle: &str, context: &str) {
     );
 }
 
-/// A stride along the SYMBOLIC axis itself needs the axis's runtime size to
-/// rebuild the source shape; that is a shape() VALUE read (chelis#513 gaps
-/// 2/3 residue) and must stay fail-closed with the adjoint's own message.
+/// chelis#616: a stride along the SYMBOLIC axis itself now builds the
+/// runtime adjoint cascade (Shape-read trim + runtime merge extent). For
+/// `f(x) = sum(stride(x, 2))` over `[1, 2, 3, 4]`, the loss reads elements
+/// 0 and 2, so the gradient is the upsample mask `[1, 0, 1, 0]`.
 #[test]
-fn issue_513_stride_on_symbolic_axis_stays_fail_closed() {
+fn issue_513_stride_on_symbolic_axis_grad_is_upsample_mask() {
     let source = "module Repro.StrideSymAxis\n\
 sig f: tensor[n, f32] -> f32\n\
 def f(x) = {\n\
@@ -743,11 +743,13 @@ def f(x) = {\n\
   sum(s, cast(0, int32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(f)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)]))\n";
-    expect_grad_failure(
-        source,
-        "stridesymaxis",
-        "stride adjoint requires a concrete size for strided axis",
-        "stride over symbolic strided axis",
+    let (shape, grad) = eval_grad(source);
+    assert_eq!(shape, vec![4]);
+    assert_close(
+        "symbolic strided-axis grad",
+        &grad,
+        &[1.0, 0.0, 1.0, 0.0],
+        1e-3,
     );
 }
 
@@ -771,11 +773,12 @@ out = grad(f)(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast
     );
 }
 
-/// A shrink with CONCRETE sub-range bounds on a symbolic axis needs the
-/// axis's runtime size for the Pad adjoint's `after` amount: shape() VALUE
-/// territory, stays fail-closed.
+/// chelis#616: a shrink with CONCRETE sub-range bounds on a symbolic axis
+/// now builds the runtime Pad adjoint (`after = shape(x, axis) - end`). For
+/// the `[[0,1], [1,3]]` sub-range over a `[2, 4]` input, the loss reads
+/// `x[0][1..3]`, so the gradient is 1 exactly there.
 #[test]
-fn issue_513_shrink_concrete_bounds_on_symbolic_axis_stays_fail_closed() {
+fn issue_513_shrink_concrete_bounds_on_symbolic_axis_grad_is_window_mask() {
     let source = "module Repro.ShrinkSymAxis\n\
 sig f: tensor[batch, 4, f32] -> f32\n\
 def f(x) = {\n\
@@ -783,24 +786,26 @@ def f(x) = {\n\
   sum(sum(s, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(f)(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)], [cast(5.0, f32), cast(6.0, f32), cast(7.0, f32), cast(8.0, f32)]]))\n";
-    expect_grad_failure(
-        source,
-        "shrinksymaxis",
-        "cannot determine size for symbolic dimension",
-        "shrink sub-range on symbolic axis",
+    let (shape, grad) = eval_grad(source);
+    assert_eq!(shape, vec![2, 4]);
+    assert_close(
+        "shrink sub-range on symbolic axis grad",
+        &grad,
+        &[0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        1e-3,
     );
 }
 
 /// The SYMBOLIC-sig arithmetic reshape target (the true school im2col form,
-/// `tensor[a, b, f32]` with `reshape(p, [mul(b_d, a_d), 1])`) cannot fold
-/// statically; the lowering-time refusal (a symbolic dim leaf fails the
-/// exactness gate) rejects it with a located chelis#513 diagnostic instead
-/// of the pre-hardening wildcard fallback (whose failure surface was the
-/// symbolic_occurrences ICE in the C lane and a coincidental anon-dim
-/// binding in the eval lane). This pin keeps that boundary explicit until
-/// the scalar-shape()-value capability lands (chelis#513 remainder).
+/// `tensor[a, b, f32]` with `reshape(p, [mul(b_d, a_d), 1])`) now LOWERS
+/// (chelis#616): the runtime product becomes a rank-0 scalar node that the
+/// reshape references as a node-valued target extent, the numel invariant is
+/// enforced at run time, and the backward pass resolves the runtime extent
+/// mid-evaluation. The loss is a plain double-sum, so the gradient is ones
+/// everywhere; the eval and C lanes must agree exactly. (This replaces the
+/// pre-#616 fail-closed pin on the lowering-time exactness-gate refusal.)
 #[test]
-fn issue_513_symbolic_sig_reshape_arith_target_stays_fail_closed() {
+fn issue_513_symbolic_sig_reshape_arith_target_grad_is_ones() {
     let source = "module Repro.ReshapeArithSym\n\
 sig f: tensor[a, b, f32] -> f32\n\
 def f(x) = {\n\
@@ -811,25 +816,37 @@ def f(x) = {\n\
   sum(sum(r, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(f)(to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]]))\n";
-    expect_grad_failure(
-        source,
-        "rshasym",
-        "cannot be folded to an exact static extent",
-        "symbolic-sig arithmetic reshape target",
+    let (shape, eval_g) = eval_grad(source);
+    assert_eq!(shape, vec![2, 2], "gradient keeps the input shape");
+    assert_close("symbolic-sig reshape-arith grad", &eval_g, &[1.0; 4], 1e-3);
+
+    // eval-vs-C agreement: the emitted main computes the same gradient by
+    // reading the runtime extents and declaring the reshape target dim from
+    // its scalar.
+    let (_dir, build_dir) = build_c(source, "rshasym");
+    let stdout = compile_and_run_main(&build_dir, "rshasym");
+    let c_grad = parse_printed_tensor(&stdout);
+    assert_close(
+        "symbolic-sig reshape-arith grad C vs eval",
+        &c_grad,
+        &eval_g,
+        1e-3,
     );
 }
 
-/// A GATE-REFUSED arithmetic target over a CONCRETE sig: the fold rejects
-/// the negative intermediate (`sub(a_d, 10)` = -8 feeding `floor_div`, the
-/// domain where floor, trunc, and euclidean division disagree), and the
-/// lowering must fail LOUD. Pre-hardening this was the silent-acceptance
-/// hole: the wildcard fallback's anon dim bound to input axis 0 (= 2) at
-/// eval time, so this ill-formed program (its written target folds to
-/// [4, 4] over an 8-element input) evaluated `grad` as if the target were
-/// [2, 4], returning plausible numbers for a program that should have been
-/// rejected.
+/// A FORMERLY gate-refused arithmetic target over a CONCRETE sig: the fold
+/// refuses the negative intermediate (`sub(a_d, 10)` = -8 feeding
+/// `floor_div`, the domain where floor, trunc, and euclidean division
+/// disagree), so chelis#616 lowers the expression to a runtime scalar
+/// instead of guessing. Its true runtime value makes the written target
+/// [4, 4] — 16 elements over an 8-element input — so BOTH lanes must reject
+/// it at run time with the numel invariant: the eval lane with a clean
+/// error, the C lane with the emitted numel abort. (Pre-hardening this was
+/// the silent-acceptance hole: a wildcard anon dim bound to a coincidental
+/// input extent and `grad` returned plausible numbers for an ill-formed
+/// program.)
 #[test]
-fn issue_513_reshape_arith_gate_refused_grad_fails_loud() {
+fn issue_513_reshape_arith_gate_refused_grad_numel_mismatch_errs_in_both_lanes() {
     let target = "neg(floor_div(sub(a_d, cast(10, int64)), cast(2, int64))), cast(4, int64)";
     let source = reshape_arith2_source(
         target,
@@ -840,8 +857,48 @@ fn issue_513_reshape_arith_gate_refused_grad_fails_loud() {
     expect_grad_failure(
         &source,
         "gaterefused",
-        "cannot be folded to an exact static extent",
-        "gate-refused arithmetic reshape target under grad",
+        "elements but the input has",
+        "runtime numel mismatch under grad",
+    );
+
+    // C-lane error parity: the build succeeds (the mismatch is a runtime
+    // property), and the emitted binary aborts at the reshape numel guard
+    // instead of allocating a mis-sized view.
+    let (_dir, build_dir) = build_c(&source, "gaterefused");
+    let kernel = build_dir.join("gaterefused.c");
+    let runtime = build_dir.join("libchelis_runtime.a");
+    let bin = build_dir.join("self_bin");
+    let compile = StdCommand::new("gcc")
+        .args([
+            "-O0",
+            "-std=c11",
+            "-I",
+            build_dir.to_str().unwrap(),
+            kernel.to_str().unwrap(),
+            "-o",
+            bin.to_str().unwrap(),
+            runtime.to_str().unwrap(),
+            "-lm",
+            "-lpthread",
+            "-ldl",
+        ])
+        .output()
+        .expect("invoke gcc");
+    assert!(
+        compile.status.success(),
+        "gcc compile failed: stderr={}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = StdCommand::new(&bin).output().expect("run emitted program");
+    assert!(
+        !run.status.success(),
+        "C binary must abort on the runtime numel mismatch; stdout={}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("reshape numel mismatch"),
+        "C abort must name the reshape numel guard; stderr={stderr}"
     );
 }
 

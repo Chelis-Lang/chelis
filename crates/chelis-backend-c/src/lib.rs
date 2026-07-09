@@ -151,7 +151,7 @@ pub fn codegen_with_options(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+    use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
     use chelis_ir::tier2;
     use chelis_types::types::Prim;
     use std::io::Write;
@@ -313,7 +313,10 @@ mod tests {
         // MIS-SIZED to the operand extent [2, batch] (the #593 wrapper clobber).
         dag.add_node(
             RiscOp::Pad {
-                padding: vec![(2, 0), (0, 0)],
+                padding: vec![
+                    (RtDim::Lit(2), RtDim::Lit(0)),
+                    (RtDim::Lit(0), RtDim::Lit(0)),
+                ],
                 fill: 0.0,
             },
             vec![x],
@@ -340,7 +343,10 @@ mod tests {
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
         dag.add_node(
             RiscOp::Pad {
-                padding: vec![(2, 0), (0, 0)],
+                padding: vec![
+                    (RtDim::Lit(2), RtDim::Lit(0)),
+                    (RtDim::Lit(0), RtDim::Lit(0)),
+                ],
                 fill: 0.0,
             },
             vec![x],
@@ -1590,7 +1596,7 @@ int main(void) {{
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(6), None);
         dag.add_node(
             RiscOp::Reshape {
-                new_shape: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+                new_shape: vec![RtDim::Lit(2), RtDim::Lit(3)],
             },
             vec![a],
             mat_f32(2, 3),
@@ -1609,7 +1615,7 @@ int main(void) {{
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(6), None);
         let reshaped = dag.add_node(
             RiscOp::Reshape {
-                new_shape: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+                new_shape: vec![RtDim::Lit(2), RtDim::Lit(3)],
             },
             vec![a],
             mat_f32(2, 3),
@@ -1847,7 +1853,7 @@ int main(void) {{
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
         dag.add_node(
             RiscOp::Pad {
-                padding: vec![(1, 2)],
+                padding: vec![(RtDim::Lit(1), RtDim::Lit(2))],
                 fill: -1.0,
             },
             vec![x],
@@ -1875,7 +1881,7 @@ int main(void) {{
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(5), None);
         dag.add_node(
             RiscOp::Shrink {
-                bounds: vec![(1, 4)],
+                bounds: vec![(RtDim::Lit(1), RtDim::Lit(4))],
             },
             vec![x],
             vec_f32(3),
@@ -1898,7 +1904,9 @@ int main(void) {{
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(5), None);
         dag.add_node(
-            RiscOp::Stride { strides: vec![2] },
+            RiscOp::Stride {
+                strides: vec![RtDim::Lit(2)],
+            },
             vec![x],
             vec_f32(3),
             None,

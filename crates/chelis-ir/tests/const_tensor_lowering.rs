@@ -42,7 +42,7 @@ def main() -> tensor[3, f32] =
          DAG ops: {:?}",
         dag.nodes()
             .iter()
-            .map(|n| format!("{:?}", &n.op))
+            .map(|n| format!("{:?}", n.op))
             .collect::<Vec<_>>()
     );
 

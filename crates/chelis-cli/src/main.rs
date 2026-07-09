@@ -5979,6 +5979,52 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
                 )
                 .into());
             }
+            // chelis#616: node-valued (runtime) movement bounds are C-only.
+            chelis_ir::dag::RiscOp::Shrink { bounds }
+                if bounds
+                    .iter()
+                    .any(|(s, e)| s.node_input().is_some() || e.node_input().is_some()) =>
+            {
+                return Err(format!(
+                    "`chelis build --target hip` does not yet support a runtime (node-valued) \
+                     `shrink` bound; lowered node {} requires it. Use `--target c` (chelis#616).",
+                    node.id.0
+                )
+                .into());
+            }
+            chelis_ir::dag::RiscOp::Pad { padding, .. }
+                if padding
+                    .iter()
+                    .any(|(s, e)| s.node_input().is_some() || e.node_input().is_some()) =>
+            {
+                return Err(format!(
+                    "`chelis build --target hip` does not yet support a runtime (node-valued) \
+                     `pad` bound; lowered node {} requires it. Use `--target c` (chelis#616).",
+                    node.id.0
+                )
+                .into());
+            }
+            chelis_ir::dag::RiscOp::Stride { strides }
+                if strides.iter().any(|s| s.node_input().is_some()) =>
+            {
+                return Err(format!(
+                    "`chelis build --target hip` does not yet support a runtime (node-valued) \
+                     `stride` step; lowered node {} requires it. Use `--target c` (chelis#616).",
+                    node.id.0
+                )
+                .into());
+            }
+            chelis_ir::dag::RiscOp::Reshape { new_shape }
+                if new_shape.iter().any(|d| d.node_input().is_some()) =>
+            {
+                return Err(format!(
+                    "`chelis build --target hip` does not yet support a runtime (node-valued) \
+                     `reshape` target extent; lowered node {} requires it. \
+                     Use `--target c` (chelis#616).",
+                    node.id.0
+                )
+                .into());
+            }
             chelis_ir::dag::RiscOp::Gather { .. } => {
                 let values = &dag.get(node.inputs[0]).unwrap().output_type;
                 let index_node = dag.get(node.inputs[1]).unwrap();
@@ -6223,6 +6269,35 @@ fn reject_unsupported_metal_ops(
         // (typed per-output-element MSL kernels). They fall through to
         // codegen; no reject arm here. f64 and any out-of-matrix dtype are
         // still rejected by the precision gate below.
+        //
+        // chelis#616: node-valued (runtime) movement bounds and reshape
+        // target extents are C-only. Without this arm a runtime `pad` /
+        // `shrink` bound reaches `metal_bound_to_usize`'s defensive panic
+        // instead of a clean CLI diagnostic.
+        let node_valued = match &node.op {
+            chelis_ir::dag::RiscOp::Shrink { bounds } => bounds
+                .iter()
+                .any(|(s, e)| s.node_input().is_some() || e.node_input().is_some()),
+            chelis_ir::dag::RiscOp::Pad { padding, .. } => padding
+                .iter()
+                .any(|(s, e)| s.node_input().is_some() || e.node_input().is_some()),
+            chelis_ir::dag::RiscOp::Stride { strides } => {
+                strides.iter().any(|s| s.node_input().is_some())
+            }
+            chelis_ir::dag::RiscOp::Reshape { new_shape } => {
+                new_shape.iter().any(|d| d.node_input().is_some())
+            }
+            _ => false,
+        };
+        if node_valued {
+            return Err(format!(
+                "`chelis build --target metal` does not support a runtime (node-valued) \
+                 movement bound or reshape target extent; lowered node {} requires it. \
+                 Use `--target c` (chelis#616).",
+                node.id.0
+            )
+            .into());
+        }
         match node.output_type.precision {
             chelis_types::types::Prim::F32
             | chelis_types::types::Prim::F16
@@ -7260,10 +7335,9 @@ fn fallback_symbolic_dims(
     } else if !hint.is_empty() {
         hint.to_vec()
     } else {
-        chelis_ir::dag::symbolic_bindings(dag)
-            .into_iter()
-            .map(|binding| binding.name)
-            .collect()
+        // chelis#616: only Load-bound dims are caller-suppliable;
+        // op-declared dims are computed at run time by their owning op.
+        chelis_ir::dag::symbolic_params(dag)
     }
 }
 
@@ -8179,5 +8253,132 @@ mod eval_only_pruning_tests {
             names.contains(&"main"),
             "reachable eval-only def must be preserved for the build gate: {names:?}"
         );
+    }
+}
+
+/// chelis#616: the CLI reject seams must turn a runtime (node-valued)
+/// movement bound / reshape target into a clean diagnostic on the non-C
+/// targets, never a backend panic. Kept in lockstep with the compiler-api
+/// seam (`chelis-compiler-api::compiler::reject_unsupported_hip_ops`).
+#[cfg(test)]
+mod runtime_dim_reject_tests {
+    use super::{reject_unsupported_hip_ops, reject_unsupported_metal_ops};
+    use chelis_ir::dag::{Dag, RiscOp, RtDim, TensorType};
+    use chelis_types::types::Prim;
+
+    fn ty(dims: Vec<chelis_ir::dag::DimInfo>, precision: Prim) -> TensorType {
+        TensorType { dims, precision }
+    }
+
+    fn lit_dims(sizes: &[usize]) -> Vec<chelis_ir::dag::DimInfo> {
+        sizes
+            .iter()
+            .map(|n| chelis_ir::dag::DimInfo::Lit(*n))
+            .collect()
+    }
+
+    /// Load x: [4] f32 plus a rank-0 int32 Load scalar (not a `Shape` read;
+    /// the HIP seam blanket-rejects `Shape` first and these tests must
+    /// exercise the movement/reshape arms).
+    fn dag_with_scalar() -> (Dag, chelis_ir::dag::NodeId, chelis_ir::dag::NodeId) {
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty(lit_dims(&[4]), Prim::F32),
+            None,
+        );
+        let m = dag.add_node(
+            RiscOp::Load { name: "m".into() },
+            vec![],
+            ty(lit_dims(&[]), Prim::Int32),
+            None,
+        );
+        (dag, x, m)
+    }
+
+    #[test]
+    fn hip_seam_rejects_node_valued_reshape_target() {
+        let (mut dag, x, m) = dag_with_scalar();
+        dag.add_node(
+            RiscOp::Reshape {
+                new_shape: vec![RtDim::Node(1)],
+            },
+            vec![x, m],
+            ty(lit_dims(&[4]), Prim::F32),
+            None,
+        );
+        let err = reject_unsupported_hip_ops(&dag)
+            .expect_err("HIP seam must reject a node-valued reshape target");
+        let message = err.to_string();
+        assert!(
+            message.contains("reshape") && message.contains("--target c"),
+            "unexpected message: {message}"
+        );
+    }
+
+    #[test]
+    fn metal_seam_rejects_node_valued_shrink_bound() {
+        let (mut dag, x, m) = dag_with_scalar();
+        dag.add_node(
+            RiscOp::Shrink {
+                bounds: vec![(RtDim::Lit(0), RtDim::Node(1))],
+            },
+            vec![x, m],
+            ty(lit_dims(&[4]), Prim::F32),
+            None,
+        );
+        let err = reject_unsupported_metal_ops(&dag)
+            .expect_err("Metal seam must reject a node-valued shrink bound, not panic later");
+        let message = err.to_string();
+        assert!(
+            message.contains("--target c") && message.contains("chelis#616"),
+            "unexpected message: {message}"
+        );
+    }
+
+    #[test]
+    fn metal_seam_rejects_node_valued_reshape_target() {
+        let (mut dag, x, m) = dag_with_scalar();
+        dag.add_node(
+            RiscOp::Reshape {
+                new_shape: vec![RtDim::Node(1)],
+            },
+            vec![x, m],
+            ty(lit_dims(&[4]), Prim::F32),
+            None,
+        );
+        let err = reject_unsupported_metal_ops(&dag)
+            .expect_err("Metal seam must reject a node-valued reshape target");
+        let message = err.to_string();
+        assert!(
+            message.contains("--target c") && message.contains("chelis#616"),
+            "unexpected message: {message}"
+        );
+    }
+
+    /// Concrete (literal) bounds keep flowing through both seams — the
+    /// rejection is scoped to node-valued dims only.
+    #[test]
+    fn seams_accept_literal_movement_and_reshape() {
+        let (mut dag, x, _m) = dag_with_scalar();
+        let shrunk = dag.add_node(
+            RiscOp::Shrink {
+                bounds: vec![(RtDim::Lit(0), RtDim::Lit(2))],
+            },
+            vec![x],
+            ty(lit_dims(&[2]), Prim::F32),
+            None,
+        );
+        dag.add_node(
+            RiscOp::Reshape {
+                new_shape: vec![RtDim::Lit(2), RtDim::Lit(1)],
+            },
+            vec![shrunk],
+            ty(lit_dims(&[2, 1]), Prim::F32),
+            None,
+        );
+        reject_unsupported_hip_ops(&dag).expect("literal bounds must pass the HIP seam");
+        reject_unsupported_metal_ops(&dag).expect("literal bounds must pass the Metal seam");
     }
 }

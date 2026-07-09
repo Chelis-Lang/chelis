@@ -228,18 +228,31 @@ classes (chelis#513, gap 3 structural slice):
   dividend with a positive divisor, the domain where floor, truncating,
   and euclidean division agree, so the fold can never disagree with the
   runtime operator.
-- **Value-dependent (fail-closed).** Where the construction needs the
-  concrete size -- the strided axis of a `Stride` adjoint (the trim bound),
-  the reduced axis of a `ProdReduce` adjoint (one slice per element), or a
-  symbolic axis under a concrete `Shrink` sub-range (the trailing pad
-  amount) -- the adjoint fails loudly at construction, naming the op, the
-  axis, and the symbolic dim. It never guesses a size. Likewise, a
-  shape()-derived arithmetic `reshape` target the fold cannot prove exact
-  (a symbolic dim leaf, a negative operand, a non-positive divisor, or
-  overflow) is refused loudly at lowering rather than falling back to the
-  checker's wildcard dims; forward (non-`grad`) uses of such a form still
-  evaluate through the host lane, which computes the target expression
-  with true runtime semantics.
+- **Runtime (node-valued; chelis#616).** Where the construction needs an
+  extent that is only known at run time -- the strided axis of a `Stride`
+  adjoint (the trim bound and the `m_a * step` merge extent), a symbolic
+  axis under a concrete or runtime `Shrink` sub-range (the trailing pad
+  amount `shape(x, axis) - end`), a runtime `Pad` bound (`end = before +
+  shape(x, axis)`), or a `reshape` target restoring a runtime axis -- the
+  adjoint builds the extent as a rank-0 integer scalar node (`Shape` reads
+  plus `add`/`mul`/`neg` arithmetic, with explicit casts between integer
+  precisions) referenced as a node-valued `RtDim` (see
+  `spec/05-risc-primitives.md` §2.4.1). It never guesses a size. Bound
+  scalars are a stop-gradient boundary: index math carries no cotangent and
+  does not pull its producers (a window-count `floor_div`) into the
+  differentiability check.
+- **Value-dependent (fail-closed).** The residual constructions that need a
+  runtime LOOP or value-dependent structure, not just an extent: the reduced
+  axis of a `ProdReduce` adjoint (one slice per element of the runtime
+  axis) and a runtime (node-valued) stride STEP (a runtime-extent axis
+  insertion). These fail loudly at construction, naming the op, the axis,
+  and the symbolic dim.
+
+Likewise at lowering, a shape()-derived arithmetic `reshape` target now
+lowers to a rank-0 scalar node referenced as a node-valued target extent
+(chelis#616), with the numel invariant enforced at run time in both lanes
+(clean eval error, C runtime abort); only a target the fold PROVES negative
+is refused at lowering (a proven-invalid program).
 
 **Scalar `shape()` value reads (chelis#558 / chelis#513).** A `shape(x, axis)`
 read used as a scalar VALUE now lowers to a `RiscOp::Shape { axis }` node (a
@@ -254,20 +267,21 @@ compile-time-constant `axis`; a `shape()` read whose axis is itself a runtime
 lane resolves it while any DAG-forcing path (notably `grad`) fails **loud** with
 a source-located "requires a compile-time-constant `axis`" diagnostic
 (chelis#616) instead of the same bogus `Load { name: "shape" }` fallthrough.
-This is the foundation for lifting the value-dependent class above, but it does
-NOT by itself close it: the runtime-`shrink`/`stride` **bound** representation (a
-movement-op start/end that is a `shape()`-derived runtime value, plus the
-integer arithmetic feeding it) is still unrepresentable, so the value-dependent
-adjoints and the runtime-symbolic-window `avgpool1d` grad
-(`issue_368_grad_concat_windows.rs`) remain fail-closed and loud. That is the
-open chelis#513 gap-2 / gap-3-value remainder.
+The runtime movement-op bound and reshape-target representation built on this
+node (chelis#616) closed the former gap-2 / gap-3-value remainder: the
+runtime-symbolic-window `avgpool1d` grad
+(`issue_368_grad_concat_windows.rs::issue_368_runtime_symbolic_window_grad_is_half_everywhere`)
+is a passing analytic + finite-difference + forward-parity oracle.
 
 Executable oracles: `crates/chelis-cli/tests/issue_513_symbolic_axis_adjoints.rs`
 (finite-difference + eval-vs-C agreement per enabled path, plus the
 fail-closed negative pins), `crates/chelis-cli/tests/issue_558_shape_value_read.rs`
 (the scalar `shape()` value-read node: FD + eval-vs-C runtime-dim agreement,
 plus the runtime-axis pins — a loud grad rejection and the preserved forward
-host lane), and the `chelis-ir` unit tests alongside the adjoint rules.
+host lane), `crates/chelis-cli/tests/issue_616_runtime_movement_c_parity.rs` /
+`issue_616_runtime_reshape_c_parity.rs` (runtime bound/target eval-vs-C value
+AND error parity, one C binary across input lengths, gradient parity for the
+runtime window), and the `chelis-ir` unit tests alongside the adjoint rules.
 
 ### 2.8 Higher-Order Derivatives (Composition)
 

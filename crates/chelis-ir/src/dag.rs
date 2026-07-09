@@ -52,6 +52,80 @@ impl TensorType {
 /// matters; the HIP shrink kernel, like C, reads only the per-axis `start`.
 pub const SHRINK_TO_END: usize = usize::MAX;
 
+/// A single movement-op (`Pad` / `Shrink` / `Stride`) bound value.
+///
+/// chelis#616: movement bounds were compile-time `usize` only, so a runtime
+/// (`shape()`-derived) `shrink`/`stride` bound was dropped to empty at lowering
+/// and the windowed axis degraded to a `Named("*")` wildcard. A `RtDim` can now
+/// be a compile-time literal, the full-axis sentinel, or a *runtime* value read
+/// from a rank-0 integer node.
+///
+/// `Node(i)` is an **absolute** index into the owning node's `inputs`, where
+/// `inputs[0]` is always the tensor operand and `inputs[1..]` are rank-0 integer
+/// bound scalars (a [`RiscOp::Shape`] read or an integer-arithmetic chain over
+/// one). Invariant (checked by `verify`): for `RtDim::Node(i)`,
+/// `1 <= i < inputs.len()` and `inputs[i]` is a rank-0 integer node. Keeping the
+/// index absolute means `Node(i)` reads exactly like `inputs[i]` at every
+/// dispatch site with no offset arithmetic.
+///
+/// `ToEnd` promotes the [`SHRINK_TO_END`] sentinel to an explicit variant; it is
+/// only legal as a `Shrink` `end` (verify rejects it elsewhere). The resolved
+/// runtime extent it stands for is still [`SHRINK_TO_END`] after
+/// `bind_symbolic_dims` / in the backend loop bookkeeping.
+///
+/// `Sym(name)` is a symbolic dimension declared elsewhere (a `Load`'s named
+/// axis, e.g. a bystander `batch`). It is only legal in a `Reshape` target
+/// (verify rejects it in movement-bound positions): a movement bound is a
+/// scalar *value*, lowered to `Lit` or `Node`, while a reshape target may
+/// restate an axis the checker already named.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RtDim {
+    /// A compile-time-constant bound.
+    Lit(usize),
+    /// The runtime end of a (symbolic) axis; `Shrink` `end` only.
+    ToEnd,
+    /// A runtime bound read from `inputs[i]` (a rank-0 integer node).
+    Node(usize),
+    /// A symbolic dimension declared elsewhere; `Reshape` targets only.
+    Sym(String),
+}
+
+impl RtDim {
+    /// The compile-time value, if this bound is a literal.
+    pub fn as_lit(&self) -> Option<usize> {
+        match self {
+            RtDim::Lit(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// Whether this bound is only known at runtime (`Node` or `ToEnd`).
+    /// `Sym` is not "runtime" in this sense: its extent is bound from an
+    /// input shape before evaluation, not computed by a node.
+    pub fn is_runtime(&self) -> bool {
+        matches!(self, RtDim::Node(_) | RtDim::ToEnd)
+    }
+
+    /// The `inputs` slot index if this bound is node-valued.
+    pub fn node_input(&self) -> Option<usize> {
+        match self {
+            RtDim::Node(i) => Some(*i),
+            _ => None,
+        }
+    }
+
+    /// The behavior-preserving translation of a static dimension descriptor:
+    /// a known extent (literal or bound named dim) becomes `Lit`, an unbound
+    /// named dim becomes `Sym`. Used wherever a `Reshape` target is built
+    /// from an existing `TensorType` (grad adjoints, tier2 lowering, vmap).
+    pub fn from_dim_info(dim: &DimInfo) -> RtDim {
+        match dim {
+            DimInfo::Lit(n) | DimInfo::Named(_, Some(n)) => RtDim::Lit(*n),
+            DimInfo::Named(name, None) => RtDim::Sym(name.clone()),
+        }
+    }
+}
+
 /// Dimension descriptor for a tensor axis.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DimInfo {
@@ -174,6 +248,35 @@ impl DimExpr {
                 Box::new(lhs.bind(bindings)?),
                 Box::new(rhs.bind(bindings)?),
             )),
+        }
+    }
+
+    /// chelis#616: like [`Self::bind`], but a symbol in `exempt` (an
+    /// op-declared runtime dim, whose value does not exist until its owning
+    /// op evaluates) or an ANONYMOUS wildcard (resolved by the evaluator
+    /// from a shape-dep value) stays symbolic instead of raising the loud
+    /// missing-binding error.
+    pub fn bind_except(
+        &self,
+        bindings: &HashMap<String, usize>,
+        exempt: &HashSet<String>,
+    ) -> Result<Self, String> {
+        match self {
+            Self::Sym(name)
+                if (exempt.contains(name) || name.is_empty() || name == "*")
+                    && !bindings.contains_key(name) =>
+            {
+                Ok(Self::Sym(name.clone()))
+            }
+            Self::Mul(lhs, rhs) => Ok(Self::Mul(
+                Box::new(lhs.bind_except(bindings, exempt)?),
+                Box::new(rhs.bind_except(bindings, exempt)?),
+            )),
+            Self::Div(lhs, rhs) => Ok(Self::Div(
+                Box::new(lhs.bind_except(bindings, exempt)?),
+                Box::new(rhs.bind_except(bindings, exempt)?),
+            )),
+            other => other.bind(bindings),
         }
     }
 
@@ -426,11 +529,41 @@ impl fmt::Display for DimExpr {
     }
 }
 
+/// Where a symbolic dim's runtime value comes from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SymbolicDimSource {
+    /// Declared from an input tensor's shape: the C prologue emits
+    /// `int name = inputs[slot]->shape[axis];` and the eval lane binds the
+    /// value from the corresponding input before evaluation.
+    Load { input_label: String, axis: usize },
+    /// chelis#616: declared at run time by the owning op itself — a
+    /// node-valued movement output axis (or a runtime reshape target) whose
+    /// extent is computed from rank-0 bound scalars. The C declaration is
+    /// emitted inline at the op (the scalars are computed tensors that do
+    /// not exist at prologue time); the eval lane resolves the extent from
+    /// actual values during evaluation and never pre-binds the symbol. When
+    /// the same symbol also has a `Load` source (or an earlier `OpDeclared`
+    /// declarer), this site is an equality-guard site: the C emitter aborts
+    /// at run time if the op's extent disagrees with the declared value.
+    OpDeclared { node: NodeId, axis: usize },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolicDimOccurrence {
     pub name: String,
-    pub input_label: String,
-    pub axis: usize,
+    pub source: SymbolicDimSource,
+}
+
+impl SymbolicDimOccurrence {
+    fn load(name: &str, input_label: &str, axis: usize) -> Self {
+        SymbolicDimOccurrence {
+            name: name.to_string(),
+            source: SymbolicDimSource::Load {
+                input_label: input_label.to_string(),
+                axis,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -685,8 +818,13 @@ pub enum RiscOp {
     },
 
     // --- Movement ---
+    /// chelis#616: a reshape target dim is a [`RtDim`] so a runtime
+    /// (`shape()`-derived) extent can reference a rank-0 integer scalar in
+    /// `inputs[1..]` (`RtDim::Node`), exactly like a movement bound. `ToEnd`
+    /// is illegal here (verify rejects it). The output `TensorType` stays
+    /// `Vec<DimInfo>`.
     Reshape {
-        new_shape: Vec<DimInfo>,
+        new_shape: Vec<RtDim>,
     },
     Permute {
         axes: Vec<usize>,
@@ -704,14 +842,14 @@ pub enum RiscOp {
         vocab: usize,
     },
     Pad {
-        padding: Vec<(usize, usize)>,
+        padding: Vec<(RtDim, RtDim)>,
         fill: f64,
     },
     Shrink {
-        bounds: Vec<(usize, usize)>,
+        bounds: Vec<(RtDim, RtDim)>,
     },
     Stride {
-        strides: Vec<usize>,
+        strides: Vec<RtDim>,
     },
 
     // --- Shape query ---
@@ -1421,11 +1559,76 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
         for (axis, dim) in node.output_type.dims.iter().enumerate() {
             if let DimInfo::Named(symbol, None) = dim {
                 named_dims_in_loads.insert(symbol.clone());
-                occurrences.push(SymbolicDimOccurrence {
-                    name: symbol.clone(),
-                    input_label: name.as_str().to_string(),
+                occurrences.push(SymbolicDimOccurrence::load(symbol, name.as_str(), axis));
+            }
+        }
+    }
+
+    // chelis#616 pass: movement ops whose output axis extent is computed at
+    // RUN TIME by the op itself (a node-valued bound produces a fresh extent
+    // no Load traces to). Record an `OpDeclared` source so the C emitter
+    // declares (or equality-guards) the dim inline at the op and the eval
+    // lane skips pre-eval binding for it. A symbol that is also Load-carried
+    // keeps the Load as its canonical declaration; the op site then becomes
+    // a runtime equality guard rather than a redeclaration.
+    let mut op_declared: HashSet<String> = HashSet::new();
+    for node in dag.nodes() {
+        for (symbol, axis) in op_declared_output_axes(dag, node) {
+            if !named_dims_in_loads.contains(&symbol) {
+                let _ = bind_symbol_from_any_load(
+                    dag,
+                    &symbol,
+                    &mut occurrences,
+                    &mut named_dims_in_loads,
+                );
+            }
+            occurrences.push(SymbolicDimOccurrence {
+                name: symbol.clone(),
+                source: SymbolicDimSource::OpDeclared {
+                    node: node.id,
                     axis,
-                });
+                },
+            });
+            op_declared.insert(symbol);
+        }
+    }
+
+    // Dominance guard (chelis#616 soundness): an op-declared symbol's C
+    // declaration is emitted at the declaring op, so every node that
+    // references the symbol (output dims or op-internal fields) must come
+    // AFTER the declarer in emission (= node id) order, or the C references
+    // an undeclared identifier. A violation is a producing-pass bug; fail
+    // loud rather than emit non-compiling (or worse, shadowed) C.
+    for symbol in &op_declared {
+        if named_dims_in_loads.contains(symbol) {
+            // Load-declared in the prologue; every reference is dominated.
+            continue;
+        }
+        let declarer = occurrences
+            .iter()
+            .find_map(|occurrence| match &occurrence.source {
+                SymbolicDimSource::OpDeclared { node, .. } if occurrence.name == *symbol => {
+                    Some(*node)
+                }
+                _ => None,
+            })
+            .expect("op_declared symbols always have an OpDeclared occurrence");
+        for node in dag.nodes() {
+            let references = node
+                .output_type
+                .dims
+                .iter()
+                .any(|dim| matches!(dim, DimInfo::Named(name, None) if name == symbol))
+                || op_internal_symbolic_dims(&node.op)
+                    .iter()
+                    .any(|name| name == symbol);
+            if references && node.id.0 < declarer.0 {
+                panic!(
+                    "internal compiler error: symbolic dim `{symbol}` is declared at run time \
+                     by node {} but referenced by EARLIER node {} (op {:?}); the C declaration \
+                     would not dominate the reference. Fix the producing IR pass.",
+                    declarer.0, node.id.0, node.op
+                );
             }
         }
     }
@@ -1451,6 +1654,16 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
         for dim in &node.output_type.dims {
             if let DimInfo::Named(symbol, None) = dim
                 && !named_dims_in_loads.contains(symbol)
+                && !op_declared.contains(symbol)
+                // chelis#616: a raw ANONYMOUS (wildcard) output dim is not a
+                // referenceable symbol — nothing renders it, and distinct
+                // runtime extents share it. The C backend renames every anon
+                // dim to a unique `_anon_dim_{id}_{axis}` BEFORE this pass
+                // (so a genuinely sourceless anon dim still fails loud
+                // there); the eval lane computes shapes from values and
+                // never reads a wildcard by name.
+                && !symbol.is_empty()
+                && symbol != "*"
             {
                 // Hunt for any Load whose own type contains the same
                 // unbound dim name. We have to widen the search because
@@ -1472,15 +1685,26 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
                     && let Some((input_label, input_axis)) =
                         shape_source_for_axis(dag, node.id, axis)
                 {
-                    occurrences.push(SymbolicDimOccurrence {
-                        name: symbol.clone(),
-                        input_label,
-                        axis: input_axis,
-                    });
+                    occurrences.push(SymbolicDimOccurrence::load(
+                        symbol,
+                        &input_label,
+                        input_axis,
+                    ));
                     named_dims_in_loads.insert(symbol.clone());
                     bound = true;
                 }
                 if !bound {
+                    // chelis#616: a node-valued movement op computes a FRESH
+                    // runtime output extent with no Load source, and so does a
+                    // runtime-`shape()`-derived `reshape` target (the window
+                    // count `m`). The C backend can declare a movement output dim
+                    // from its bound scalars (`emit_shrink`/`emit_stride`/
+                    // `emit_pad`), but a `reshape` target has no node-valued dim
+                    // source threaded through yet, so a full runtime-symbolic
+                    // program still reaches an undeclarable dim. Until node-valued
+                    // Reshape/Const dims land (the runtime-dim-from-Shape-arith
+                    // declaration capability), this stays FAIL-CLOSED and LOUD
+                    // rather than emit a silently mis-sized allocation.
                     panic!(
                         "internal compiler error: symbolic dim `{symbol}` is referenced by a \
                          non-Load node (id {}, op {:?}, inputs {:?}, type {:?}) but no Load input \
@@ -1513,7 +1737,16 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
             continue;
         }
         for symbol in op_internal_symbolic_dims(&node.op) {
-            if named_dims_in_loads.contains(&symbol) {
+            if named_dims_in_loads.contains(&symbol) || op_declared.contains(&symbol) {
+                continue;
+            }
+            // chelis#616: a raw ANONYMOUS op-internal reference (the
+            // `lower_if` mask expansion over a wildcard-typed branch) is
+            // resolved by the evaluator from the node's shape-dep value. The
+            // C lane cannot render it — but the emitted identifier `*` fails
+            // C compilation LOUDLY if such a node ever reaches codegen
+            // (guarded `if` programs route through the host lane).
+            if symbol.is_empty() || symbol == "*" {
                 continue;
             }
             if !bind_symbol_from_any_load(dag, &symbol, &mut occurrences, &mut named_dims_in_loads)
@@ -1530,6 +1763,153 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
     }
 
     occurrences
+}
+
+/// chelis#616: the output axes of `node` whose symbolic dim is sized at RUN
+/// TIME by the op itself — a movement op axis with a non-identity bound,
+/// which [`shape_source_for_axis`] deliberately refuses to trace to a Load
+/// (the extent is fresh, not the input axis's runtime dim), or a `Reshape`
+/// axis whose target is a node-valued (`RtDim::Node`) extent. Each returned
+/// `(symbol, axis)` pair becomes an [`SymbolicDimSource::OpDeclared`]
+/// occurrence: the C emitter declares (or equality-guards) the dim inline at
+/// the op and the eval lane resolves it from actual values.
+fn op_declared_output_axes(dag: &Dag, node: &DagNode) -> Vec<(String, usize)> {
+    // An ANONYMOUS (wildcard) dim name is not a stable symbol: distinct
+    // runtime extents share it, so binding/declaring it would falsely unify
+    // them. The C backend renames every anon dim to a unique
+    // `_anon_dim_{id}_{axis}` before its occurrence pass (making them
+    // eligible there); the eval lane computes shapes from values and never
+    // needs a wildcard bound.
+    fn is_anon(name: &str) -> bool {
+        name.is_empty() || name == "*"
+    }
+    match &node.op {
+        RiscOp::Shrink { .. } | RiscOp::Stride { .. } | RiscOp::Pad { .. } => node
+            .output_type
+            .dims
+            .iter()
+            .enumerate()
+            .filter_map(|(axis, dim)| match dim {
+                DimInfo::Named(symbol, None)
+                    if !is_anon(symbol) && shape_source_for_axis(dag, node.id, axis).is_none() =>
+                {
+                    Some((symbol.clone(), axis))
+                }
+                _ => None,
+            })
+            .collect(),
+        RiscOp::Reshape { new_shape } => node
+            .output_type
+            .dims
+            .iter()
+            .enumerate()
+            .filter_map(|(axis, dim)| match (dim, new_shape.get(axis)) {
+                (DimInfo::Named(symbol, None), Some(RtDim::Node(_))) if !is_anon(symbol) => {
+                    Some((symbol.clone(), axis))
+                }
+                _ => None,
+            })
+            .collect(),
+        // chelis#616: an Expand whose inserted/set axis has an ANONYMOUS
+        // (wildcard) size and a shape-dep extent source (the Sum-adjoint
+        // restore over a runtime axis, the `lower_if` mask expansion — both
+        // constructed with a POSITIONALLY-ALIGNED dep, whose `shape[axis]`
+        // is the extent) declares that axis at run time from the dep's
+        // actual shape. A real-symbol size (a Form-3 broadcast like
+        // `expand(g, 1, h)`, whose shape-dep is the SOURCE tensor with a
+        // different axis layout) resolves through its Load-declared symbol
+        // and must NOT be op-declared — a positional read of its dep would
+        // compare the wrong axis.
+        RiscOp::Expand { axis, size } => {
+            fn size_is_anon(expr: &DimExpr) -> bool {
+                match expr {
+                    DimExpr::Sym(name) => name.is_empty() || name == "*",
+                    DimExpr::Concrete(_) => false,
+                    DimExpr::Mul(lhs, rhs) | DimExpr::Div(lhs, rhs) => {
+                        size_is_anon(lhs) || size_is_anon(rhs)
+                    }
+                }
+            }
+            match node.output_type.dims.get(*axis) {
+                Some(DimInfo::Named(symbol, None))
+                    if !is_anon(symbol) && size_is_anon(size) && !node.shape_deps.is_empty() =>
+                {
+                    vec![(symbol.clone(), *axis)]
+                }
+                _ => Vec::new(),
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// chelis#616: every symbolic dim name that is op-declared somewhere in the
+/// DAG (see [`op_declared_output_axes`]). Used by [`bind_symbolic_dims`] to
+/// exempt these names from the pre-eval "missing symbolic dimension binding"
+/// error — their values do not exist until the owning op evaluates.
+pub fn op_declared_dim_names(dag: &Dag) -> HashSet<String> {
+    dag.nodes()
+        .iter()
+        .flat_map(|node| op_declared_output_axes(dag, node))
+        .map(|(symbol, _)| symbol)
+        .collect()
+}
+
+/// chelis#616: per-node op-declared runtime dims (see
+/// [`op_declared_output_axes`]), for the evaluator's mid-evaluation binding:
+/// when the declaring node's value is computed, each `(symbol, axis)` binds
+/// the symbol to the value's actual extent on that axis.
+pub(crate) fn op_declared_axes_by_node(dag: &Dag) -> HashMap<NodeId, Vec<(String, usize)>> {
+    let mut out = HashMap::new();
+    for node in dag.nodes() {
+        let axes = op_declared_output_axes(dag, node);
+        if !axes.is_empty() {
+            out.insert(node.id, axes);
+        }
+    }
+    out
+}
+
+/// chelis#616: add a shape-dep from every node that references an
+/// op-declared runtime dim (in its output dims or op-internal fields) to the
+/// dim's declaring node. DCE and grad's output pruning honor `shape_deps`,
+/// so this keeps the declarer — and, transitively, its bound-scalar chain —
+/// alive for consumers that need the extent at run time even when the
+/// declarer's VALUE is dead (e.g. a backward `Expand` over a runtime reshape
+/// extent whose forward result the gradient never reads).
+pub fn record_runtime_dim_shape_deps(dag: &mut Dag) {
+    let mut declarers: HashMap<String, NodeId> = HashMap::new();
+    for node in dag.nodes() {
+        for (symbol, _) in op_declared_output_axes(dag, node) {
+            declarers.entry(symbol).or_insert(node.id);
+        }
+    }
+    if declarers.is_empty() {
+        return;
+    }
+    let mut deps: Vec<(NodeId, NodeId)> = Vec::new();
+    for node in dag.nodes() {
+        let mut names: Vec<String> = node
+            .output_type
+            .dims
+            .iter()
+            .filter_map(|dim| match dim {
+                DimInfo::Named(name, None) => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        names.extend(op_internal_symbolic_dims(&node.op));
+        for name in names {
+            if let Some(declarer) = declarers.get(&name)
+                && *declarer != node.id
+            {
+                deps.push((node.id, *declarer));
+            }
+        }
+    }
+    for (from, to) in deps {
+        dag.add_shape_dep(from, to);
+    }
 }
 
 /// Hunt for any Load whose type carries `symbol` (bound or unbound) and
@@ -1550,11 +1930,11 @@ fn bind_symbol_from_any_load(
             if let DimInfo::Named(candidate_sym, _) = candidate_dim
                 && candidate_sym == symbol
             {
-                occurrences.push(SymbolicDimOccurrence {
-                    name: symbol.to_string(),
-                    input_label: load_name.as_str().to_string(),
+                occurrences.push(SymbolicDimOccurrence::load(
+                    symbol,
+                    load_name.as_str(),
                     axis,
-                });
+                ));
                 named_dims_in_loads.insert(symbol.to_string());
                 return true;
             }
@@ -1584,7 +1964,7 @@ fn op_internal_symbolic_dims(op: &RiscOp) -> Vec<String> {
         RiscOp::Expand { size, .. } => collect_dim_expr(size, &mut out),
         RiscOp::Reshape { new_shape } => {
             for dim in new_shape {
-                if let DimInfo::Named(name, None) = dim {
+                if let RtDim::Sym(name) = dim {
                     out.push(name.clone());
                 }
             }
@@ -1680,12 +2060,37 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
             let input_axis = if axis < *reduce_axis { axis } else { axis + 1 };
             shape_source_for_axis(dag, operand, input_axis)
         }
-        RiscOp::Reshape { .. }
-        | RiscOp::Permute { .. }
-        | RiscOp::Pad { .. }
-        | RiscOp::Shrink { .. }
-        | RiscOp::Stride { .. }
-        | RiscOp::Store { .. } => shape_source_for_axis(dag, *node.inputs.first()?, axis),
+        RiscOp::Reshape { .. } | RiscOp::Permute { .. } | RiscOp::Store { .. } => {
+            shape_source_for_axis(dag, *node.inputs.first()?, axis)
+        }
+        // chelis#616 (soundness): a movement op passes an axis's runtime dim
+        // through ONLY when the op is an identity on that axis — a full-axis
+        // shrink sentinel `(0, ToEnd)`, a stride step of literal 1, or a
+        // zero pad. Every other bound (node-valued OR non-identity literal)
+        // produces a FRESH extent that is NOT the input axis's runtime dim,
+        // so tracing it to the input's declaring `Load` would bind the
+        // symbolic output dim to the wrong extent (e.g. `stride(x, 2)`'s
+        // output extent is `ceil(n/2)`, not `n`). Those axes are op-declared
+        // instead (see [`op_declared_output_axes`]): the owning op's emitter
+        // declares the exact extent formula at run time.
+        RiscOp::Shrink { bounds } => match bounds.get(axis) {
+            Some((s, e)) if s.as_lit() == Some(0) && matches!(e, RtDim::ToEnd) => {
+                shape_source_for_axis(dag, *node.inputs.first()?, axis)
+            }
+            _ => None,
+        },
+        RiscOp::Stride { strides } => match strides.get(axis) {
+            Some(b) if b.as_lit() == Some(1) => {
+                shape_source_for_axis(dag, *node.inputs.first()?, axis)
+            }
+            _ => None,
+        },
+        RiscOp::Pad { padding, .. } => match padding.get(axis) {
+            Some((b, a)) if b.as_lit() == Some(0) && a.as_lit() == Some(0) => {
+                shape_source_for_axis(dag, *node.inputs.first()?, axis)
+            }
+            _ => None,
+        },
         RiscOp::FusedElem { .. } => node
             .inputs
             .iter()
@@ -1706,7 +2111,14 @@ pub fn symbolic_bindings(dag: &Dag) -> Vec<SymbolicDimBinding> {
     grouped
         .into_iter()
         .map(|(name, mut occurrences)| {
-            let canonical = occurrences.remove(0);
+            // chelis#616: a Load source, when one exists, is always the
+            // canonical declaration (the prologue declares it; op-declared
+            // sites for the same symbol become runtime equality guards).
+            let canonical_index = occurrences
+                .iter()
+                .position(|occurrence| matches!(occurrence.source, SymbolicDimSource::Load { .. }))
+                .unwrap_or(0);
+            let canonical = occurrences.remove(canonical_index);
             SymbolicDimBinding {
                 name,
                 canonical,
@@ -1716,29 +2128,39 @@ pub fn symbolic_bindings(dag: &Dag) -> Vec<SymbolicDimBinding> {
         .collect()
 }
 
+/// The symbolic dims a caller can (and must) supply — those bound from input
+/// shape metadata. chelis#616: op-declared dims are computed at run time by
+/// their owning op and are deliberately excluded; they are not parameters.
 pub fn symbolic_params(dag: &Dag) -> Vec<String> {
     symbolic_bindings(dag)
         .into_iter()
+        .filter(|binding| matches!(binding.canonical.source, SymbolicDimSource::Load { .. }))
         .map(|binding| binding.name)
         .collect()
 }
 
 pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Result<Dag, String> {
-    fn bind_dim(dim: &DimInfo, bindings: &HashMap<String, usize>) -> Result<DimInfo, String> {
+    // chelis#616: an op-declared dim (a node-valued movement output extent)
+    // has no pre-eval value — the evaluator computes it from actual bound
+    // scalars. Leave it unbound instead of raising the loud missing-binding
+    // error; the eval movement arms never read the output type for it. The
+    // same applies to a raw ANONYMOUS (wildcard) dim: it is not a
+    // referenceable symbol, and the evaluator computes the real extent from
+    // values.
+    let op_declared = op_declared_dim_names(dag);
+    let bind_dim = |dim: &DimInfo| -> Result<DimInfo, String> {
         match dim {
             DimInfo::Lit(size) => Ok(DimInfo::Lit(*size)),
             DimInfo::Named(name, Some(size)) => Ok(DimInfo::Named(name.clone(), Some(*size))),
-            DimInfo::Named(name, None) => Ok(DimInfo::Named(
-                name.clone(),
-                Some(
-                    bindings
-                        .get(name)
-                        .copied()
-                        .ok_or_else(|| format!("missing symbolic dimension binding `{name}`"))?,
-                ),
-            )),
+            DimInfo::Named(name, None) => match bindings.get(name) {
+                Some(size) => Ok(DimInfo::Named(name.clone(), Some(*size))),
+                None if op_declared.contains(name) || name.is_empty() || name == "*" => {
+                    Ok(dim.clone())
+                }
+                None => Err(format!("missing symbolic dimension binding `{name}`")),
+            },
         }
-    }
+    };
 
     let mut rebound = Dag::new();
     for node in dag.nodes() {
@@ -1747,19 +2169,43 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
                 .output_type
                 .dims
                 .iter()
-                .map(|dim| bind_dim(dim, bindings))
+                .map(&bind_dim)
                 .collect::<Result<_, _>>()?,
             precision: node.output_type.precision,
         };
         let op = match &node.op {
             RiscOp::Expand { axis, size } => RiscOp::Expand {
                 axis: *axis,
-                size: size.bind(bindings)?,
+                // chelis#616: an op-declared size (e.g. the Sum adjoint's
+                // Expand over a runtime reshape extent) resolves during
+                // evaluation, not here.
+                size: size.bind_except(bindings, &op_declared)?,
             },
             RiscOp::Reshape { new_shape } => RiscOp::Reshape {
                 new_shape: new_shape
                     .iter()
-                    .map(|dim| bind_dim(dim, bindings))
+                    .map(|dim| match dim {
+                        RtDim::Sym(name) => match bindings.get(name) {
+                            Some(size) => Ok(RtDim::Lit(*size)),
+                            // chelis#616: an op-declared symbol (and an
+                            // anonymous wildcard) resolves during evaluation,
+                            // not here.
+                            None if op_declared.contains(name)
+                                || name.is_empty()
+                                || name == "*" =>
+                            {
+                                Ok(dim.clone())
+                            }
+                            None => Err(format!("missing symbolic dimension binding `{name}`")),
+                        },
+                        // `Lit` passes through; `Node` (runtime) targets are
+                        // resolved by the evaluator from `inputs`, not here.
+                        RtDim::Lit(n) => Ok(RtDim::Lit(*n)),
+                        RtDim::Node(i) => Ok(RtDim::Node(*i)),
+                        RtDim::ToEnd => {
+                            Err("reshape target dim cannot be a shrink-to-end sentinel".to_string())
+                        }
+                    })
                     .collect::<Result<_, _>>()?,
             },
             // chelis#368: resolve the `SHRINK_TO_END` full-axis sentinel to the
@@ -1769,15 +2215,36 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
             // chelis#513 the Stride adjoint's trim and the ProdReduce
             // adjoint's per-element slices), so the resolved `end` is exactly
             // `start` plus the output dim's size.
-            RiscOp::Shrink { bounds } if bounds.iter().any(|(_, end)| *end == SHRINK_TO_END) => {
+            RiscOp::Shrink { bounds }
+                if bounds.iter().any(|(_, end)| matches!(end, RtDim::ToEnd)) =>
+            {
                 let resolved = bounds
                     .iter()
                     .zip(output_type.dims.iter())
                     .map(|((start, end), dim)| {
-                        if *end == SHRINK_TO_END {
+                        if matches!(end, RtDim::ToEnd) {
+                            // The sentinel is always emitted as `(Lit(0), ToEnd)`;
+                            // a non-literal start is malformed.
+                            let start_lit = start.as_lit().ok_or_else(|| {
+                                "shrink-to-end sentinel with non-literal start".to_string()
+                            })?;
                             match dim {
                                 DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => {
-                                    Ok((*start, *start + *size))
+                                    Ok((RtDim::Lit(start_lit), RtDim::Lit(start_lit + *size)))
+                                }
+                                // chelis#616: an op-declared (or wildcard)
+                                // axis has no pre-eval binding; keep the
+                                // sentinel — the evaluator resolves `ToEnd`
+                                // to the INPUT's runtime extent, which for
+                                // the full-axis identity slice (start 0) is
+                                // exactly the sentinel's meaning.
+                                DimInfo::Named(name, None)
+                                    if start_lit == 0
+                                        && (op_declared.contains(name)
+                                            || name.is_empty()
+                                            || name == "*") =>
+                                {
+                                    Ok((start.clone(), end.clone()))
                                 }
                                 DimInfo::Named(name, None) => Err(format!(
                                     "shrink-to-end sentinel left unbound for symbolic \
@@ -1785,7 +2252,9 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
                                 )),
                             }
                         } else {
-                            Ok((*start, *end))
+                            // `Lit` passes through; `Node` (runtime) bounds are
+                            // resolved by the evaluator from `inputs`, not here.
+                            Ok((start.clone(), end.clone()))
                         }
                     })
                     .collect::<Result<Vec<_>, String>>()?;
@@ -1810,6 +2279,12 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
             other => other.clone(),
         };
         let new_id = rebound.add_node(op, node.inputs.clone(), output_type, None);
+        // chelis#616: binding is a 1:1 id-preserving rebuild; shape-only
+        // deps (runtime-dim declarers, `lower_if` placeholder shape sources)
+        // must survive it — the evaluator reads them.
+        if let Some(new_node) = rebound.node_mut(new_id) {
+            new_node.shape_deps = node.shape_deps.clone();
+        }
         if dag.is_root(node.id) {
             rebound.add_root(new_id);
         }
@@ -2000,7 +2475,13 @@ mod tests {
         // dim is already covered).
         assert_eq!(occurrences.len(), 1);
         assert_eq!(occurrences[0].name, "n");
-        assert_eq!(occurrences[0].input_label, "x");
+        assert_eq!(
+            occurrences[0].source,
+            SymbolicDimSource::Load {
+                input_label: "x".into(),
+                axis: 0,
+            }
+        );
     }
 
     #[test]
@@ -2042,22 +2523,38 @@ mod tests {
             vec![
                 SymbolicDimOccurrence {
                     name: "batch".into(),
-                    input_label: "x".into(),
-                    axis: 0,
+                    source: SymbolicDimSource::Load {
+                        input_label: "x".into(),
+                        axis: 0,
+                    },
                 },
                 SymbolicDimOccurrence {
                     name: "batch".into(),
-                    input_label: "y".into(),
-                    axis: 0,
+                    source: SymbolicDimSource::Load {
+                        input_label: "y".into(),
+                        axis: 0,
+                    },
                 },
             ]
         );
 
         let bindings = symbolic_bindings(&dag);
         assert_eq!(bindings.len(), 1);
-        assert_eq!(bindings[0].canonical.input_label, "x");
+        assert_eq!(
+            bindings[0].canonical.source,
+            SymbolicDimSource::Load {
+                input_label: "x".into(),
+                axis: 0,
+            }
+        );
         assert_eq!(bindings[0].others.len(), 1);
-        assert_eq!(bindings[0].others[0].input_label, "y");
+        assert_eq!(
+            bindings[0].others[0].source,
+            SymbolicDimSource::Load {
+                input_label: "y".into(),
+                axis: 0,
+            }
+        );
     }
 
     #[test]
@@ -2136,7 +2633,10 @@ mod tests {
         // `(0, SHRINK_TO_END)` full-axis identity on axis 1.
         let shrunk = dag.add_node(
             RiscOp::Shrink {
-                bounds: vec![(1, 2), (0, SHRINK_TO_END)],
+                bounds: vec![
+                    (RtDim::Lit(1), RtDim::Lit(2)),
+                    (RtDim::Lit(0), RtDim::ToEnd),
+                ],
             },
             vec![g],
             TensorType {
@@ -2155,7 +2655,10 @@ mod tests {
         assert_eq!(
             node.op,
             RiscOp::Shrink {
-                bounds: vec![(1, 2), (0, 3)],
+                bounds: vec![
+                    (RtDim::Lit(1), RtDim::Lit(2)),
+                    (RtDim::Lit(0), RtDim::Lit(3))
+                ],
             },
             "SHRINK_TO_END must resolve to (start, start + bound extent)",
         );
@@ -2178,7 +2681,7 @@ mod tests {
         );
         let shrunk = dag.add_node(
             RiscOp::Shrink {
-                bounds: vec![(0, SHRINK_TO_END)],
+                bounds: vec![(RtDim::Lit(0), RtDim::ToEnd)],
             },
             vec![g],
             TensorType {
@@ -2237,7 +2740,13 @@ mod tests {
         let occurrences = symbolic_occurrences(&dag);
         assert_eq!(occurrences.len(), 1);
         assert_eq!(occurrences[0].name, "n");
-        assert_eq!(occurrences[0].input_label, "x");
+        assert_eq!(
+            occurrences[0].source,
+            SymbolicDimSource::Load {
+                input_label: "x".into(),
+                axis: 0,
+            }
+        );
     }
 
     #[test]
@@ -2289,7 +2798,7 @@ mod tests {
         );
         dag.add_node(
             RiscOp::Reshape {
-                new_shape: vec![DimInfo::Named("d9".into(), None), DimInfo::Lit(2)],
+                new_shape: vec![RtDim::Sym("d9".into()), RtDim::Lit(2)],
             },
             vec![x],
             TensorType {
@@ -2418,8 +2927,13 @@ mod tests {
             .find(|o| o.name == "d2")
             .expect("reduction kept-axis symbol `d2` must be declared");
         // The kept output axis 0 maps back to input axis 1 of Load "c".
-        assert_eq!(d2.input_label, "c");
-        assert_eq!(d2.axis, 1);
+        assert_eq!(
+            d2.source,
+            SymbolicDimSource::Load {
+                input_label: "c".into(),
+                axis: 1,
+            }
+        );
     }
 
     #[test]
@@ -2515,7 +3029,7 @@ mod tests {
             RiscOp::Argmax { axis: 0 },
             RiscOp::Argmin { axis: 0 },
             RiscOp::Reshape {
-                new_shape: vec![DimInfo::Lit(4)],
+                new_shape: vec![RtDim::Lit(4)],
             },
             RiscOp::Permute { axes: vec![0] },
             RiscOp::Expand {
@@ -2524,13 +3038,15 @@ mod tests {
             },
             RiscOp::OneHot { vocab: 8 },
             RiscOp::Pad {
-                padding: vec![(0, 0)],
+                padding: vec![(RtDim::Lit(0), RtDim::Lit(0))],
                 fill: 0.0,
             },
             RiscOp::Shrink {
-                bounds: vec![(0, 1)],
+                bounds: vec![(RtDim::Lit(0), RtDim::Lit(1))],
             },
-            RiscOp::Stride { strides: vec![1] },
+            RiscOp::Stride {
+                strides: vec![RtDim::Lit(1)],
+            },
             RiscOp::Shape { axis: 0 },
             RiscOp::Const { value: 1.0 },
             RiscOp::ConstTensor {

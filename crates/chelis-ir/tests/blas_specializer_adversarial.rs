@@ -28,7 +28,7 @@
 //! commit extends the cleanup to handle these cases, the test will fail
 //! deliberately so the spec/owning docs can be updated in the same change.
 
-use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, RtDim, TensorType};
 use chelis_ir::specialize::specialize_for_blas;
 use chelis_types::types::Prim;
 
@@ -246,7 +246,7 @@ fn reshape_round_trip_pair_between_expand_and_mul_misses_blas() {
     // Reshape pair: [2,3,4] → [3,2,4] → [2,3,4]. Neither step is identity.
     let rs_a_up = dag.add_node(
         RiscOp::Reshape {
-            new_shape: vec![DimInfo::Lit(3), DimInfo::Lit(2), DimInfo::Lit(4)],
+            new_shape: vec![RtDim::Lit(3), RtDim::Lit(2), RtDim::Lit(4)],
         },
         vec![ea],
         t3(Prim::F32, 3, 2, 4),
@@ -254,7 +254,7 @@ fn reshape_round_trip_pair_between_expand_and_mul_misses_blas() {
     );
     let rs_a_down = dag.add_node(
         RiscOp::Reshape {
-            new_shape: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
+            new_shape: vec![RtDim::Lit(2), RtDim::Lit(3), RtDim::Lit(4)],
         },
         vec![rs_a_up],
         t3(Prim::F32, 2, 3, 4),
@@ -435,7 +435,7 @@ fn named_vs_lit_dim_reshape_is_not_identity_and_misses_blas() {
     let lit_ty = mat(Prim::F32, 2, 3);
     let reshaped = dag.add_node(
         RiscOp::Reshape {
-            new_shape: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+            new_shape: vec![RtDim::Lit(2), RtDim::Lit(3)],
         },
         vec![a],
         lit_ty.clone(),

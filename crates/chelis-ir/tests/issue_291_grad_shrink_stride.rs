@@ -42,8 +42,8 @@
 //! CLI sibling file pins the end-to-end `build`/`eval` path including
 //! the `shrink` lowering fix.
 
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
-use chelis_ir::eval::{TensorValue, eval_tensor};
+use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtDim, TensorType};
+use chelis_ir::eval::{TensorValue, eval_tensor, eval_tensor_roots_with_strict};
 use chelis_ir::grad::{AdError, grad_dag_checked};
 use chelis_types::types::Prim;
 use std::collections::HashMap;
@@ -94,7 +94,7 @@ fn build_stride_sum_1d(n: usize, step: usize) -> (Dag, NodeId, NodeId) {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
     let strided = dag.add_node(
         RiscOp::Stride {
-            strides: vec![step],
+            strides: vec![RtDim::Lit(step)],
         },
         vec![x],
         strided_ty,
@@ -161,7 +161,9 @@ fn issue_291_grad_stride_routes_nonuniform_cotangent() {
     let strided_ty = vec_n_f32(2);
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
     let s = dag.add_node(
-        RiscOp::Stride { strides: vec![2] },
+        RiscOp::Stride {
+            strides: vec![RtDim::Lit(2)],
+        },
         vec![x],
         strided_ty.clone(),
         None,
@@ -250,7 +252,7 @@ fn issue_291_grad_stride_two_axes() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
     let strided = dag.add_node(
         RiscOp::Stride {
-            strides: vec![2, 2],
+            strides: vec![RtDim::Lit(2), RtDim::Lit(2)],
         },
         vec![x],
         strided_ty.clone(),
@@ -301,7 +303,7 @@ fn issue_291_grad_stride_mixed_identity_axis() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
     let strided = dag.add_node(
         RiscOp::Stride {
-            strides: vec![1, 2],
+            strides: vec![RtDim::Lit(1), RtDim::Lit(2)],
         },
         vec![x],
         strided_ty,
@@ -348,7 +350,9 @@ fn issue_291_grad_stride_matches_finite_difference() {
     let strided_ty = vec_n_f32(2);
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
     let s = dag.add_node(
-        RiscOp::Stride { strides: vec![2] },
+        RiscOp::Stride {
+            strides: vec![RtDim::Lit(2)],
+        },
         vec![x],
         strided_ty.clone(),
         None,
@@ -449,7 +453,9 @@ fn issue_291_grad_stride_supports_higher_order_ad() {
     let strided_ty = vec_n_f32(2);
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
     let s = dag.add_node(
-        RiscOp::Stride { strides: vec![2] },
+        RiscOp::Stride {
+            strides: vec![RtDim::Lit(2)],
+        },
         vec![x],
         strided_ty.clone(),
         None,
@@ -491,16 +497,15 @@ fn issue_291_grad_stride_supports_higher_order_ad() {
     assert_eq!(vals[&grad2_x].shape, vec![4]);
 }
 
-// --- STRIDE: negative parity ---
+// --- STRIDE: runtime-symbolic strided axis (chelis#616) ---
 
-/// Negative parity: a stride over a SYMBOLIC (unsized) axis cannot be
-/// upsampled because the trim size is unknown. The adjoint relies on a
-/// concrete source size (`dim_size`), matching the existing Pad/Shrink
-/// adjoints. This pins that the construction does not silently fabricate
-/// a wrong shape; the symbolic source dim is unrepresentable here.
+/// chelis#616: a stride over a SYMBOLIC (unsized) axis now constructs a
+/// RUNTIME adjoint — the trim bound is a node-valued Shape read of the
+/// forward input and the merge extent is runtime `m * step` arithmetic —
+/// and evaluates to the exact upsample mask. (Pre-#616 this pinned the
+/// loud `dim_size` panic; the capability replaced the boundary.)
 #[test]
-#[should_panic(expected = "symbolic dimension")]
-fn issue_291_grad_stride_symbolic_axis_is_unrepresentable() {
+fn issue_291_grad_stride_symbolic_axis_is_runtime_upsample() {
     let mut dag = Dag::new();
     let in_ty = TensorType {
         dims: vec![DimInfo::Named("n".into(), None)],
@@ -512,7 +517,9 @@ fn issue_291_grad_stride_symbolic_axis_is_unrepresentable() {
     };
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
     let s = dag.add_node(
-        RiscOp::Stride { strides: vec![2] },
+        RiscOp::Stride {
+            strides: vec![RtDim::Lit(2)],
+        },
         vec![x],
         strided_ty,
         None,
@@ -523,10 +530,22 @@ fn issue_291_grad_stride_symbolic_axis_is_unrepresentable() {
         scalar_f32(),
         None,
     );
-    // The Stride adjoint must read concrete source sizes; a symbolic
-    // unsized source dim panics in `dim_size` (same fail-mode as the
-    // existing Pad/Shrink adjoints).
-    let _ = grad_dag_checked(&dag, out, &[x]);
+    let grad = grad_dag_checked(&dag, out, &[x]).expect("runtime strided adjoint constructs");
+    let grad_x = grad.grad_nodes[&x];
+    let mut inputs = HashMap::new();
+    inputs.insert(
+        "x".to_string(),
+        TensorValue {
+            data: vec![1.0, 2.0, 3.0, 4.0],
+            shape: vec![4],
+        },
+    );
+    let vals =
+        eval_tensor_roots_with_strict(&grad.dag, &[grad_x], |name| inputs.get(name).cloned())
+            .expect("runtime strided adjoint evaluates");
+    // f(x) = sum(stride(x, 2)) = x0 + x2, so df/dx = [1, 0, 1, 0].
+    assert_eq!(vals[&grad_x].shape, vec![4]);
+    assert_eq!(vals[&grad_x].data, vec![1.0, 0.0, 1.0, 0.0]);
 }
 
 // --- SHRINK: IR-level controls (the adjoint itself was already
@@ -547,7 +566,7 @@ fn issue_291_grad_through_shrink_is_exact_pad() {
     );
     let shrunk = dag.add_node(
         RiscOp::Shrink {
-            bounds: vec![(0, 2)],
+            bounds: vec![(RtDim::Lit(0), RtDim::Lit(2))],
         },
         vec![x],
         vec_n_f32(2),
@@ -591,7 +610,7 @@ fn issue_291_grad_shrink_interior_nonuniform() {
     );
     let shrunk = dag.add_node(
         RiscOp::Shrink {
-            bounds: vec![(1, 3)],
+            bounds: vec![(RtDim::Lit(1), RtDim::Lit(3))],
         },
         vec![x],
         vec_n_f32(2),
