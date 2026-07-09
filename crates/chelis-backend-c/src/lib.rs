@@ -1596,7 +1596,7 @@ int main(void) {{
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(6), None);
         dag.add_node(
             RiscOp::Reshape {
-                new_shape: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+                new_shape: vec![RtDim::Lit(2), RtDim::Lit(3)],
             },
             vec![a],
             mat_f32(2, 3),
@@ -1615,7 +1615,7 @@ int main(void) {{
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(6), None);
         let reshaped = dag.add_node(
             RiscOp::Reshape {
-                new_shape: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+                new_shape: vec![RtDim::Lit(2), RtDim::Lit(3)],
             },
             vec![a],
             mat_f32(2, 3),

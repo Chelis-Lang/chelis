@@ -408,7 +408,7 @@ fn s5_reshape_no_kernel_launch() {
     let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3), None);
     let r = dag.add_node(
         RiscOp::Reshape {
-            new_shape: vec![DimInfo::Lit(6)],
+            new_shape: vec![RtDim::Lit(6)],
         },
         vec![x],
         vec_f32(6),

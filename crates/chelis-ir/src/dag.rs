@@ -72,7 +72,13 @@ pub const SHRINK_TO_END: usize = usize::MAX;
 /// only legal as a `Shrink` `end` (verify rejects it elsewhere). The resolved
 /// runtime extent it stands for is still [`SHRINK_TO_END`] after
 /// `bind_symbolic_dims` / in the backend loop bookkeeping.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// `Sym(name)` is a symbolic dimension declared elsewhere (a `Load`'s named
+/// axis, e.g. a bystander `batch`). It is only legal in a `Reshape` target
+/// (verify rejects it in movement-bound positions): a movement bound is a
+/// scalar *value*, lowered to `Lit` or `Node`, while a reshape target may
+/// restate an axis the checker already named.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RtDim {
     /// A compile-time-constant bound.
     Lit(usize),
@@ -80,6 +86,8 @@ pub enum RtDim {
     ToEnd,
     /// A runtime bound read from `inputs[i]` (a rank-0 integer node).
     Node(usize),
+    /// A symbolic dimension declared elsewhere; `Reshape` targets only.
+    Sym(String),
 }
 
 impl RtDim {
@@ -92,6 +100,8 @@ impl RtDim {
     }
 
     /// Whether this bound is only known at runtime (`Node` or `ToEnd`).
+    /// `Sym` is not "runtime" in this sense: its extent is bound from an
+    /// input shape before evaluation, not computed by a node.
     pub fn is_runtime(&self) -> bool {
         matches!(self, RtDim::Node(_) | RtDim::ToEnd)
     }
@@ -101,6 +111,17 @@ impl RtDim {
         match self {
             RtDim::Node(i) => Some(*i),
             _ => None,
+        }
+    }
+
+    /// The behavior-preserving translation of a static dimension descriptor:
+    /// a known extent (literal or bound named dim) becomes `Lit`, an unbound
+    /// named dim becomes `Sym`. Used wherever a `Reshape` target is built
+    /// from an existing `TensorType` (grad adjoints, tier2 lowering, vmap).
+    pub fn from_dim_info(dim: &DimInfo) -> RtDim {
+        match dim {
+            DimInfo::Lit(n) | DimInfo::Named(_, Some(n)) => RtDim::Lit(*n),
+            DimInfo::Named(name, None) => RtDim::Sym(name.clone()),
         }
     }
 }
@@ -738,8 +759,13 @@ pub enum RiscOp {
     },
 
     // --- Movement ---
+    /// chelis#616: a reshape target dim is a [`RtDim`] so a runtime
+    /// (`shape()`-derived) extent can reference a rank-0 integer scalar in
+    /// `inputs[1..]` (`RtDim::Node`), exactly like a movement bound. `ToEnd`
+    /// is illegal here (verify rejects it). The output `TensorType` stays
+    /// `Vec<DimInfo>`.
     Reshape {
-        new_shape: Vec<DimInfo>,
+        new_shape: Vec<RtDim>,
     },
     Permute {
         axes: Vec<usize>,
@@ -1648,7 +1674,7 @@ fn op_internal_symbolic_dims(op: &RiscOp) -> Vec<String> {
         RiscOp::Expand { size, .. } => collect_dim_expr(size, &mut out),
         RiscOp::Reshape { new_shape } => {
             for dim in new_shape {
-                if let DimInfo::Named(name, None) = dim {
+                if let RtDim::Sym(name) = dim {
                     out.push(name.clone());
                 }
             }
@@ -1838,7 +1864,20 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
             RiscOp::Reshape { new_shape } => RiscOp::Reshape {
                 new_shape: new_shape
                     .iter()
-                    .map(|dim| bind_dim(dim, bindings))
+                    .map(|dim| match dim {
+                        RtDim::Sym(name) => {
+                            Ok(RtDim::Lit(bindings.get(name).copied().ok_or_else(
+                                || format!("missing symbolic dimension binding `{name}`"),
+                            )?))
+                        }
+                        // `Lit` passes through; `Node` (runtime) targets are
+                        // resolved by the evaluator from `inputs`, not here.
+                        RtDim::Lit(n) => Ok(RtDim::Lit(*n)),
+                        RtDim::Node(i) => Ok(RtDim::Node(*i)),
+                        RtDim::ToEnd => {
+                            Err("reshape target dim cannot be a shrink-to-end sentinel".to_string())
+                        }
+                    })
                     .collect::<Result<_, _>>()?,
             },
             // chelis#368: resolve the `SHRINK_TO_END` full-axis sentinel to the
@@ -1873,7 +1912,7 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
                         } else {
                             // `Lit` passes through; `Node` (runtime) bounds are
                             // resolved by the evaluator from `inputs`, not here.
-                            Ok((*start, *end))
+                            Ok((start.clone(), end.clone()))
                         }
                     })
                     .collect::<Result<Vec<_>, String>>()?;
@@ -2383,7 +2422,7 @@ mod tests {
         );
         dag.add_node(
             RiscOp::Reshape {
-                new_shape: vec![DimInfo::Named("d9".into(), None), DimInfo::Lit(2)],
+                new_shape: vec![RtDim::Sym("d9".into()), RtDim::Lit(2)],
             },
             vec![x],
             TensorType {
@@ -2609,7 +2648,7 @@ mod tests {
             RiscOp::Argmax { axis: 0 },
             RiscOp::Argmin { axis: 0 },
             RiscOp::Reshape {
-                new_shape: vec![DimInfo::Lit(4)],
+                new_shape: vec![RtDim::Lit(4)],
             },
             RiscOp::Permute { axes: vec![0] },
             RiscOp::Expand {

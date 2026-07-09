@@ -21,6 +21,10 @@ fn hip_bound_to_usize(b: &RtDim) -> usize {
             "HIP backend reached a node-valued (runtime) movement bound; \
              reject_unsupported_hip_ops must reject it before codegen (chelis#616)"
         ),
+        RtDim::Sym(name) => panic!(
+            "HIP backend reached a symbolic movement bound `{name}`; verify rejects \
+             symbolic dims outside reshape targets (chelis#616)"
+        ),
     }
 }
 

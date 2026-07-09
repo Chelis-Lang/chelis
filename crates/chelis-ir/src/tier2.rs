@@ -1303,7 +1303,7 @@ fn lower_conv2d_pointwise(
     let cols = add_synth(
         dag,
         RiscOp::Reshape {
-            new_shape: cols_ty.dims.clone(),
+            new_shape: cols_ty.dims.iter().map(RtDim::from_dim_info).collect(),
         },
         vec![permuted],
         cols_ty.clone(),
@@ -1317,7 +1317,11 @@ fn lower_conv2d_pointwise(
     let kernel_flat = add_synth(
         dag,
         RiscOp::Reshape {
-            new_shape: kernel_flat_ty.dims.clone(),
+            new_shape: kernel_flat_ty
+                .dims
+                .iter()
+                .map(RtDim::from_dim_info)
+                .collect(),
         },
         vec![kernel],
         kernel_flat_ty.clone(),
@@ -1344,7 +1348,11 @@ fn lower_conv2d_pointwise(
     let product_4d = add_synth(
         dag,
         RiscOp::Reshape {
-            new_shape: product_4d_ty.dims.clone(),
+            new_shape: product_4d_ty
+                .dims
+                .iter()
+                .map(RtDim::from_dim_info)
+                .collect(),
         },
         vec![product],
         product_4d_ty,

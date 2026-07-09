@@ -31,7 +31,7 @@
 //! `HelperSummaryRejection::rejection_class`, and the structured
 //! `SummaryRejectionDetail` variant.
 
-use chelis_ir::dag::{Dag, DimExpr, RiscOp};
+use chelis_ir::dag::{Dag, DimExpr, RiscOp, RtDim};
 use chelis_ir::host::{
     BlasDimRole, BlasSummaryAttempt, HelperSummaryRejection, HostBlasMatmulSummary,
     HostTensorInput, SummaryRejectionClass, SummaryRejectionDetail,
@@ -279,7 +279,7 @@ fn root_reshape_wrapping_matmul_returns_not_eligible() {
     // Wrap the matmul in a Reshape (flatten 8x4 → 32).
     let reshape = dag.add_node(
         RiscOp::Reshape {
-            new_shape: vec![DimInfo::Lit(32)],
+            new_shape: vec![RtDim::Lit(32)],
         },
         vec![sum],
         TensorType {

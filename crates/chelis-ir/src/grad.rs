@@ -155,8 +155,9 @@ pub fn grad_dag_checked(
     //
     // chelis#616: a movement op's bound-source inputs (`inputs[1..]` — the
     // rank-0 integer `Shape`/arithmetic scalars that compute a runtime
-    // `shrink`/`stride`/`pad` bound) are INDEX MATH, not data. They carry no
-    // cotangent (the adjoint routes gradient only to `inputs[0]`), so they are a
+    // `shrink`/`stride`/`pad` bound or a runtime `reshape` target extent, e.g.
+    // the window count `m`) are INDEX MATH, not data. They carry no cotangent
+    // (the adjoint routes gradient only to `inputs[0]`), so they are a
     // stop-gradient boundary and must not pull their producers — which may be
     // intentionally non-differentiable (e.g. the window-count `floor_div`) —
     // into the differentiability check. A bound scalar that is ALSO reached via
@@ -167,9 +168,10 @@ pub fn grad_dag_checked(
         if live[i] {
             let node = &forward.nodes()[i];
             let differentiable_inputs: &[NodeId] = match &node.op {
-                RiscOp::Shrink { .. } | RiscOp::Stride { .. } | RiscOp::Pad { .. } => {
-                    &node.inputs[..node.inputs.len().min(1)]
-                }
+                RiscOp::Shrink { .. }
+                | RiscOp::Stride { .. }
+                | RiscOp::Pad { .. }
+                | RiscOp::Reshape { .. } => &node.inputs[..node.inputs.len().min(1)],
                 _ => &node.inputs,
             };
             for input in differentiable_inputs {
@@ -1107,7 +1109,7 @@ fn compute_adjoints(
         RiscOp::Reshape { .. } => {
             let x = node.inputs[0];
             let input_ty = forward.get(x).unwrap().output_type.clone();
-            let original_shape = input_ty.dims.clone();
+            let original_shape = reshape_target(&input_ty.dims);
             let dx = dag.add_node(
                 RiscOp::Reshape {
                     new_shape: original_shape,
@@ -1219,7 +1221,7 @@ fn compute_adjoints(
                 // source shape `[..., 1, ...]`.
                 let dx = dag.add_node(
                     RiscOp::Reshape {
-                        new_shape: source_ty.dims.clone(),
+                        new_shape: reshape_target(&source_ty.dims),
                     },
                     vec![summed_in_source_prec],
                     source_ty,
@@ -1388,7 +1390,7 @@ fn compute_adjoints(
                 split_dims.insert(axis + 1, DimInfo::Lit(1));
                 let split = dag.add_node(
                     RiscOp::Reshape {
-                        new_shape: split_dims.clone(),
+                        new_shape: reshape_target(&split_dims),
                     },
                     vec![cur],
                     TensorType {
@@ -1419,7 +1421,7 @@ fn compute_adjoints(
                 merged_dims[axis] = DimInfo::Lit(m_a * step);
                 let merged = dag.add_node(
                     RiscOp::Reshape {
-                        new_shape: merged_dims.clone(),
+                        new_shape: reshape_target(&merged_dims),
                     },
                     vec![padded],
                     TensorType {
@@ -1717,6 +1719,13 @@ fn dim_size(dim: &DimInfo) -> usize {
             panic!("cannot determine size for symbolic dimension `{name}`")
         }
     }
+}
+
+/// chelis#616: build a `Reshape` target from a static dim list. Known extents
+/// become `Lit`, unbound named dims stay symbolic (`Sym`) so a Load-declared
+/// bystander axis keeps resolving through `bind_symbolic_dims`.
+fn reshape_target(dims: &[DimInfo]) -> Vec<RtDim> {
+    dims.iter().map(RtDim::from_dim_info).collect()
 }
 
 #[cfg(test)]
@@ -2242,7 +2251,7 @@ mod tests {
         );
         let reshaped = dag.add_node(
             RiscOp::Reshape {
-                new_shape: mat23_ty.dims.clone(),
+                new_shape: reshape_target(&mat23_ty.dims),
             },
             vec![x],
             mat23_ty.clone(),

@@ -1157,7 +1157,13 @@ pub(crate) fn apply_dim_substitutions(dag: &Dag, substitutions: &HashMap<String,
             RiscOp::Reshape { new_shape } => RiscOp::Reshape {
                 new_shape: new_shape
                     .iter()
-                    .map(|dim| rewrite_dim_info(dim, substitutions))
+                    .map(|dim| match dim {
+                        RtDim::Sym(name) => substitutions
+                            .get(name)
+                            .map(RtDim::from_dim_info)
+                            .unwrap_or_else(|| dim.clone()),
+                        _ => dim.clone(),
+                    })
                     .collect(),
             },
             RiscOp::BlasMatmul {
@@ -7428,7 +7434,9 @@ impl LowerCtx {
                     precision: ty.precision,
                 };
                 let reshape_id = self.dag.add_node(
-                    RiscOp::Reshape { new_shape },
+                    RiscOp::Reshape {
+                        new_shape: new_shape.iter().map(RtDim::from_dim_info).collect(),
+                    },
                     vec![x],
                     out_ty,
                     self.current_span_id.clone(),
@@ -8299,7 +8307,7 @@ impl LowerCtx {
             }
             let unit = self.dag.add_node(
                 RiscOp::Reshape {
-                    new_shape: unit_ty.dims.clone(),
+                    new_shape: vec![RtDim::Lit(1)],
                 },
                 vec![node],
                 unit_ty.clone(),

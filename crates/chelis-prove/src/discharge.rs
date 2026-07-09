@@ -32,7 +32,7 @@ use crate::tier_b::{SmtProperty, TierBResult};
 ///
 /// This is exactly what an out-of-tree consumer (Beacon) resolves: it parses
 /// the serialized `WireDag` JSON bytes, validates `schema_version <=
-/// WIRE_DAG_SCHEMA_VERSION` (currently `2` since chelis#178; a lower version
+/// WIRE_DAG_SCHEMA_VERSION` (currently `3` since chelis#616; a lower version
 /// is forward-compatible via additive defaults, a higher one fails closed),
 /// computes a sha256 over those bytes, and selects the output of interest by
 /// `root_index`. So the handle addresses that artifact by:

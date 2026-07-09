@@ -1146,7 +1146,12 @@ pub struct WireRecordPatternField {
 ///   matching `WireFusedStepOp` variants for integer floor/truncating
 ///   division (`div` is now float-only). A producer may emit the new ops,
 ///   so a pinned consumer must observe the version bump.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 2;
+/// - `3`: chelis#616 — `WireRiscOp::Reshape::new_shape` changed from
+///   `Vec<WireDimInfo>` to `Vec<WireRtDim>` (runtime reshape target
+///   extents), and `WireRtDim` gained the `Sym` variant. A reshape target
+///   now serializes as a bound-tagged value (`lit` / `node` / `sym`), not
+///   a dim-info object, so a pinned consumer must observe the bump.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 3;
 
 /// Backwards-compat default for [`WireDag::schema_version`]. A wire
 /// payload predating WI-2 carries no `schema_version`; it is the
@@ -1367,15 +1372,17 @@ pub enum WireFusedInput {
     PreviousStep { index: usize },
 }
 
-/// chelis#616: wire form of `chelis_ir::dag::RtDim` for movement-op bounds.
-/// `Node(i)` indexes the owning op's `inputs` (the rank-0 integer bound scalars);
-/// `to_end` is the full-axis sentinel.
+/// chelis#616: wire form of `chelis_ir::dag::RtDim` for movement-op bounds
+/// and reshape targets. `Node(i)` indexes the owning op's `inputs` (the
+/// rank-0 integer bound scalars); `to_end` is the full-axis sentinel; `sym`
+/// is a symbolic dim declared elsewhere (reshape targets only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "bound", rename_all = "snake_case")]
 pub enum WireRtDim {
     Lit { value: usize },
     ToEnd,
     Node { input: usize },
+    Sym { name: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1450,7 +1457,7 @@ pub enum WireRiscOp {
         axis: usize,
     },
     Reshape {
-        new_shape: Vec<WireDimInfo>,
+        new_shape: Vec<WireRtDim>,
     },
     Permute {
         axes: Vec<usize>,

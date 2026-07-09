@@ -5074,6 +5074,10 @@ impl CEmitter {
                 let ct = Self::elem_type(&dag.get(inputs[*i]).unwrap().output_type);
                 format!("((int)((({ct}*)t{n}->data)[0]))")
             }
+            // A symbolic dim (reshape targets only; verify rejects it in
+            // movement bounds) is a declared C variable, exactly as
+            // `emit_dim_expr` renders `DimExpr::Sym`.
+            RtDim::Sym(name) => name.clone(),
         }
     }
 
@@ -5756,7 +5760,7 @@ mod tests {
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(6), None);
         dag.add_node(
             RiscOp::Reshape {
-                new_shape: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+                new_shape: vec![RtDim::Lit(2), RtDim::Lit(3)],
             },
             vec![a],
             mat_f32(2, 3),

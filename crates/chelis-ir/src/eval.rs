@@ -1088,6 +1088,13 @@ fn resolve_eval_bound(
             }
             Ok(raw as usize)
         }
+        // `Sym` is legal only in a `Reshape` target and is rewritten to
+        // `Lit` by `bind_symbolic_dims` before evaluation; a movement bound
+        // never carries it (verify rejects it there).
+        RtDim::Sym(name) => Err(format!(
+            "movement bound at node {}: unbound symbolic dim `{name}` reached the evaluator",
+            node.id.0
+        )),
     }
 }
 
@@ -1282,7 +1289,7 @@ where
         || dag.nodes().iter().any(|node| match &node.op {
             RiscOp::Reshape { new_shape } => new_shape
                 .iter()
-                .any(|dim| matches!(dim, DimInfo::Named(_, None))),
+                .any(|dim| matches!(dim, RtDim::Sym(_))),
             _ => false,
         })
         // chelis#368: a `Shrink` carrying the `SHRINK_TO_END` full-axis
@@ -1545,10 +1552,15 @@ where
                 let shape: Vec<usize> = new_shape
                     .iter()
                     .map(|dim| match dim {
-                        DimInfo::Lit(n) => Ok(*n),
-                        DimInfo::Named(_, Some(n)) => Ok(*n),
-                        DimInfo::Named(name, None) => {
+                        RtDim::Lit(n) => Ok(*n),
+                        // chelis#616: a runtime target extent reads its rank-0
+                        // integer scalar exactly like a movement bound.
+                        RtDim::Node(_) => resolve_eval_bound(dim, node, &values, 0),
+                        RtDim::Sym(name) => {
                             Err(format!("cannot reshape to symbolic dimension `{name}`"))
+                        }
+                        RtDim::ToEnd => {
+                            Err("reshape target dim cannot be a shrink-to-end sentinel".to_string())
                         }
                     })
                     .collect::<Result<_, _>>()?;

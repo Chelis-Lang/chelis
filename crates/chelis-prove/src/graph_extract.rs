@@ -473,7 +473,14 @@ const _: () = {
     // `reject_non_finite_floats` above — they carry no float field, so they
     // do not change the box/range float-bound extraction contract; the
     // version moves only because a producer may now emit the new ops.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 2);
+    //
+    // Moved to `3` for chelis#616: `WireRiscOp::Reshape::new_shape` changed
+    // from `Vec<WireDimInfo>` to `Vec<WireRtDim>` (runtime reshape target
+    // extents) and `WireRtDim` gained `Sym`. `Reshape` stays in the f64-free
+    // op group (`WireRtDim` carries no float field), so the box/range
+    // float-bound extraction contract is unchanged; the version moves
+    // because the reshape payload shape itself changed.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 3);
 };
 
 #[cfg(test)]

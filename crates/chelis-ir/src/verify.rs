@@ -306,7 +306,6 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             | RiscOp::ReduceWindow { .. }
             | RiscOp::Argmax { .. }
             | RiscOp::Argmin { .. }
-            | RiscOp::Reshape { .. }
             | RiscOp::Permute { .. }
             | RiscOp::Expand { .. }
             | RiscOp::OneHot { .. }
@@ -319,11 +318,15 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                     ));
                 }
             }
-            // chelis#616: movement ops carry a tensor at `inputs[0]` plus zero or
-            // more rank-0 integer bound scalars at `inputs[1..]` (node-valued
+            // chelis#616: movement ops (and `Reshape`, whose runtime target
+            // extents work the same way) carry a tensor at `inputs[0]` plus zero
+            // or more rank-0 integer bound scalars at `inputs[1..]` (node-valued
             // runtime bounds). Their arity + bound-source validity is checked in
             // the dedicated arms below.
-            RiscOp::Pad { .. } | RiscOp::Shrink { .. } | RiscOp::Stride { .. } => {
+            RiscOp::Pad { .. }
+            | RiscOp::Shrink { .. }
+            | RiscOp::Stride { .. }
+            | RiscOp::Reshape { .. } => {
                 if arity < 1 {
                     errors.push(format!(
                         "movement op at node {} has {} inputs (expected at least 1)",
@@ -620,13 +623,19 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             }
         }
 
-        // C7: Reshape validation — product of dims must match.
+        // C7: Reshape validation — static product check when every extent is
+        // compile-time known; node-valued (runtime) targets are guarded at
+        // eval / C runtime instead (chelis#616). Each `Node` target must
+        // reference a valid rank-0 integer bound-scalar slot, and the
+        // shrink-only `ToEnd` sentinel is never a valid target.
         if let RiscOp::Reshape { new_shape } = &node.op
-            && arity == 1
+            && arity >= 1
         {
             let input = dag.get(node.inputs[0]).unwrap();
             let old_product = dim_product(&input.output_type.dims);
-            let new_product = dim_product(new_shape);
+            let new_product = new_shape
+                .iter()
+                .try_fold(1usize, |acc, dim| dim.as_lit().map(|n| acc * n));
             if let (Some(old), Some(new)) = (old_product, new_product)
                 && old != new
             {
@@ -634,6 +643,22 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                     "reshape at node {}: product mismatch {} vs {}",
                     node.id.0, old, new
                 ));
+            }
+            for (axis, dim) in new_shape.iter().enumerate() {
+                check_bound_source(
+                    dag,
+                    node,
+                    dim,
+                    &format!("reshape at node {} target axis {}", node.id.0, axis),
+                    &mut errors,
+                );
+                if matches!(dim, RtDim::ToEnd) {
+                    errors.push(format!(
+                        "reshape at node {}: target axis {} uses the ToEnd sentinel, \
+                         which is only valid as a shrink end",
+                        node.id.0, axis
+                    ));
+                }
             }
         }
 
@@ -843,6 +868,13 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                                 node.id.0, axis
                             ));
                         }
+                        if matches!(before, RtDim::Sym(_)) || matches!(after, RtDim::Sym(_)) {
+                            errors.push(format!(
+                                "pad at node {}: axis {} uses a symbolic dim, which is only \
+                                 valid as a reshape target",
+                                node.id.0, axis
+                            ));
+                        }
                     }
                     if node.output_type.dims.len() != input_rank {
                         errors.push(format!(
@@ -914,6 +946,13 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                             errors.push(format!(
                                 "shrink at node {}: axis {} start uses the ToEnd sentinel, \
                                  which is only valid as an end",
+                                node.id.0, axis
+                            ));
+                        }
+                        if matches!(start, RtDim::Sym(_)) || matches!(end, RtDim::Sym(_)) {
+                            errors.push(format!(
+                                "shrink at node {}: axis {} uses a symbolic dim, which is \
+                                 only valid as a reshape target",
                                 node.id.0, axis
                             ));
                         }
@@ -995,6 +1034,13 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                             errors.push(format!(
                                 "stride at node {}: axis {} step uses the ToEnd sentinel, \
                                  which is not a valid stride",
+                                node.id.0, axis
+                            ));
+                        }
+                        if matches!(step, RtDim::Sym(_)) {
+                            errors.push(format!(
+                                "stride at node {}: axis {} step uses a symbolic dim, which \
+                                 is only valid as a reshape target",
                                 node.id.0, axis
                             ));
                         }

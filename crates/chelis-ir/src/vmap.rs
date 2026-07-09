@@ -21,7 +21,11 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
             RiscOp::Argmax { axis } => RiscOp::Argmax { axis: axis + 1 },
             RiscOp::Argmin { axis } => RiscOp::Argmin { axis: axis + 1 },
             RiscOp::Reshape { new_shape } => RiscOp::Reshape {
-                new_shape: prepend_batch_dims(new_shape, &batch_dim),
+                // `RtDim::Node` slots index this node's `inputs`, which vmap
+                // clones verbatim, so prepending a target axis shifts nothing.
+                new_shape: std::iter::once(RtDim::from_dim_info(&batch_dim))
+                    .chain(new_shape.iter().cloned())
+                    .collect(),
             },
             RiscOp::Permute { axes } => RiscOp::Permute {
                 axes: std::iter::once(0)
@@ -34,7 +38,7 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
             },
             RiscOp::Pad { padding, fill } => RiscOp::Pad {
                 padding: std::iter::once((RtDim::Lit(0), RtDim::Lit(0)))
-                    .chain(padding.iter().copied())
+                    .chain(padding.iter().cloned())
                     .collect(),
                 fill: *fill,
             },
@@ -47,13 +51,13 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
                 };
                 RiscOp::Shrink {
                     bounds: std::iter::once((RtDim::Lit(0), RtDim::Lit(batch)))
-                        .chain(bounds.iter().copied())
+                        .chain(bounds.iter().cloned())
                         .collect(),
                 }
             }
             RiscOp::Stride { strides } => RiscOp::Stride {
                 strides: std::iter::once(RtDim::Lit(1))
-                    .chain(strides.iter().copied())
+                    .chain(strides.iter().cloned())
                     .collect(),
             },
             RiscOp::Load { name } => RiscOp::Load { name: name.clone() },

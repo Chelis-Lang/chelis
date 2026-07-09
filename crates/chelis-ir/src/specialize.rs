@@ -92,8 +92,21 @@ fn identity_source(node: &DagNode, dag: &Dag) -> Option<NodeId> {
         {
             Some(input_id)
         }
+        // chelis#616: a `RtDim::Node` (runtime) target never matches here —
+        // its extent is unknowable statically, and eliding it would also
+        // delete the backend's runtime numel guard. (Arity is 1-gated above,
+        // so a runtime reshape, which carries scalar inputs, never reaches
+        // this arm anyway.)
         RiscOp::Reshape { new_shape }
-            if input.output_type.dims == *new_shape
+            if new_shape.len() == input.output_type.dims.len()
+                && new_shape.iter().zip(input.output_type.dims.iter()).all(
+                    |(target, dim)| match (target, dim) {
+                        (RtDim::Lit(n), DimInfo::Lit(m))
+                        | (RtDim::Lit(n), DimInfo::Named(_, Some(m))) => n == m,
+                        (RtDim::Sym(s), DimInfo::Named(name, None)) => s == name,
+                        _ => false,
+                    },
+                )
                 && input.output_type.dims == node.output_type.dims =>
         {
             Some(input_id)
