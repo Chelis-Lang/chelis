@@ -2,7 +2,7 @@
 
 use chelis_ir::dag::{
     Dag, DagNode, DimExpr, DimInfo, FusedInput, FusedStep, FusedStepOp, NodeId, ReduceWindowKind,
-    RiscOp, RtDim, TensorType, symbolic_bindings,
+    RiscOp, RtDim, SymbolicDimSource, TensorType, symbolic_bindings,
 };
 use chelis_types::types::Prim;
 
@@ -19,6 +19,13 @@ pub struct CEmitter {
     reduction_inlined: std::collections::HashSet<usize>,
     /// Backing-slot plan for materialized C tensors.
     memory_plan: MemoryPlan,
+    /// chelis#616: `(node id, output axis) -> (symbol, declares)` for every
+    /// op-declared runtime dim (see `SymbolicDimSource::OpDeclared`). The
+    /// owning movement op's emitter declares `int <symbol> = <extent>;` when
+    /// `declares` is true, or emits a runtime equality-abort guard against
+    /// the already-declared value when false (the symbol is Load-declared in
+    /// the prologue, or an earlier op already declared it).
+    runtime_dim_sites: std::collections::HashMap<(usize, usize), (String, bool)>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +111,28 @@ impl CEmitter {
             .collect::<Vec<_>>();
         let memory_plan = MemoryPlan::build(dag, &output_ids, &reduction_inlined);
 
+        // chelis#616: resolve each op-declared runtime dim to a declare/guard
+        // site. A Load source anywhere makes every op site a guard; otherwise
+        // the first op site (node-id order = emission order) declares and any
+        // later site for the same symbol guards.
+        let mut runtime_dim_sites = std::collections::HashMap::new();
+        {
+            let occurrences = chelis_ir::dag::symbolic_occurrences(dag);
+            let load_declared: std::collections::HashSet<&str> = occurrences
+                .iter()
+                .filter(|o| matches!(o.source, SymbolicDimSource::Load { .. }))
+                .map(|o| o.name.as_str())
+                .collect();
+            let mut declared = std::collections::HashSet::new();
+            for occurrence in &occurrences {
+                if let SymbolicDimSource::OpDeclared { node, axis } = &occurrence.source {
+                    let declares = !load_declared.contains(occurrence.name.as_str())
+                        && declared.insert(occurrence.name.clone());
+                    runtime_dim_sites.insert((node.0, *axis), (occurrence.name.clone(), declares));
+                }
+            }
+        }
+
         let mut e = CEmitter {
             lines: Vec::new(),
             indent: 0,
@@ -111,6 +140,7 @@ impl CEmitter {
             math_lib,
             reduction_inlined: reduction_inlined.iter().map(|id| id.0).collect(),
             memory_plan,
+            runtime_dim_sites,
         };
 
         e.line("#include \"chelis_runtime.h\"");
@@ -254,21 +284,26 @@ impl CEmitter {
         fn is_anon(name: &str) -> bool {
             name.is_empty() || name == "*"
         }
-        // chelis#616 (soundness): a movement op with a node-valued (runtime)
-        // bound produces a FRESH output extent per shrunk/strided/padded axis,
-        // which is NOT the input axis extent. The "copy first-input dims"
-        // shortcut below would clobber that axis with the input extent, so skip
-        // it and let each anon axis get a fresh `_anon_dim_{id}_{axis}` that
-        // `emit_shrink`/`emit_stride`/`emit_pad` size from the runtime bounds.
-        fn has_node_bound(op: &RiscOp) -> bool {
+        // chelis#616 (soundness): a movement op with any NON-IDENTITY axis (a
+        // node-valued bound, a non-sentinel shrink, a stride step other than
+        // literal 1, or a non-zero pad) produces a FRESH output extent on that
+        // axis, which is NOT the input axis extent. The "copy first-input
+        // dims" shortcut below would clobber such an axis with the input's dim
+        // (e.g. propagate a shrink's `_anon_dim` onto a stride's output,
+        // making two different extents share one C variable), so skip it and
+        // let each anon axis get a fresh `_anon_dim_{id}_{axis}` that
+        // `emit_shrink`/`emit_stride`/`emit_pad` size from its own bounds.
+        // Mirrors the identity-only pass-through rule in
+        // `chelis_ir::dag::shape_source_for_axis`.
+        fn movement_alters_extents(op: &RiscOp) -> bool {
             match op {
                 RiscOp::Shrink { bounds } => bounds
                     .iter()
-                    .any(|(s, e)| s.node_input().is_some() || e.node_input().is_some()),
+                    .any(|(s, e)| !(s.as_lit() == Some(0) && matches!(e, RtDim::ToEnd))),
                 RiscOp::Pad { padding, .. } => padding
                     .iter()
-                    .any(|(s, e)| s.node_input().is_some() || e.node_input().is_some()),
-                RiscOp::Stride { strides } => strides.iter().any(|s| s.node_input().is_some()),
+                    .any(|(b, a)| !(b.as_lit() == Some(0) && a.as_lit() == Some(0))),
+                RiscOp::Stride { strides } => strides.iter().any(|s| s.as_lit() != Some(1)),
                 _ => false,
             }
         }
@@ -305,7 +340,7 @@ impl CEmitter {
                     dims.extend(indices.output_type.dims.iter().cloned());
                     dims.extend_from_slice(&values.output_type.dims[*axis + 1..]);
                     new_ty.dims = dims;
-                } else if !has_node_bound(&node.op)
+                } else if !movement_alters_extents(&node.op)
                     && let Some(first_input) = node.inputs.first().and_then(|input| out.get(*input))
                     && first_input.output_type.dims.len() == new_ty.dims.len()
                 {
@@ -986,34 +1021,46 @@ impl CEmitter {
         }
 
         for binding in symbolic_bindings(dag) {
-            let canonical_slot = input_slots[&binding.canonical.input_label];
+            // chelis#616: an op-declared dim is declared inline at its
+            // owning op (the bound scalars are computed tensors that do not
+            // exist here at prologue time); see `runtime_dim_sites`.
+            let SymbolicDimSource::Load {
+                input_label: canonical_label,
+                axis: canonical_axis,
+            } = &binding.canonical.source
+            else {
+                continue;
+            };
+            let canonical_slot = input_slots[canonical_label];
             // `binding.name` flows into BOTH an identifier context (the
             // emitted `int {name} = ...;` declarator) and a format-string
             // context (the fprintf below). The identifier emission is
             // guarded by parser/IR construction; the format-string
             // emission needs `%`/`\\`/`"`/control sanitization here.
-            // `occurrence.input_label` is a Load name (LoadStoreName-
-            // validated) but we route both through the format-string
-            // sanitizer to lock the architectural pattern.
+            // The Load `input_label` is a LoadStoreName-validated name but
+            // we route both through the format-string sanitizer to lock the
+            // architectural pattern.
             let binding_name_fmt =
                 chelis_ir::span_sanitize::sanitize_for_format_string(&binding.name);
             self.line(&format!(
-                "int {} = inputs[{canonical_slot}]->shape[{}];",
-                binding.name, binding.canonical.axis
+                "int {} = inputs[{canonical_slot}]->shape[{canonical_axis}];",
+                binding.name
             ));
             for occurrence in binding.others {
-                let slot = input_slots[&occurrence.input_label];
+                // Op-declared guard sites are emitted at their owning op.
+                let SymbolicDimSource::Load { input_label, axis } = &occurrence.source else {
+                    continue;
+                };
+                let slot = input_slots[input_label];
                 let occ_label_fmt =
-                    chelis_ir::span_sanitize::sanitize_for_format_string(&occurrence.input_label);
+                    chelis_ir::span_sanitize::sanitize_for_format_string(input_label);
                 self.line(&format!(
-                    "if (inputs[{slot}]->shape[{}] != {}) {{",
-                    occurrence.axis, binding.name
+                    "if (inputs[{slot}]->shape[{axis}] != {}) {{",
+                    binding.name
                 ));
                 self.indent += 1;
                 self.line(&format!(
-                    "fprintf(stderr, \"{func_name_fmt}: symbolic dim `{binding_name_fmt}` mismatch: {occ_label_fmt}[{}]=%d but {binding_name_fmt}=%d\\n\", inputs[{slot}]->shape[{}], {});",
-                    occurrence.axis,
-                    occurrence.axis,
+                    "fprintf(stderr, \"{func_name_fmt}: symbolic dim `{binding_name_fmt}` mismatch: {occ_label_fmt}[{axis}]=%d but {binding_name_fmt}=%d\\n\", inputs[{slot}]->shape[{axis}], {});",
                     binding.name
                 ));
                 self.line("abort();");
@@ -5087,23 +5134,27 @@ impl CEmitter {
         pair.0.node_input().is_some() || pair.1.node_input().is_some()
     }
 
-    /// chelis#616: whether `dim` is this node's own fresh anonymous output dim
-    /// (`_anon_dim_{id}_{axis}`, produced by `rename_anonymous_dims` for a
-    /// runtime-sized movement axis), which `emit_*` must declare from the
-    /// runtime bounds rather than let `shape_literal` reference an undeclared C
-    /// variable.
-    fn is_own_anon_dim(id: usize, axis: usize, dim: &DimInfo) -> bool {
-        matches!(dim, DimInfo::Named(name, None) if *name == format!("_anon_dim_{id}_{axis}"))
-    }
-
-    /// chelis#616: the C variable name a node-valued movement axis must declare
-    /// its runtime output extent under, if the output dim is a symbolic
-    /// (`Named(_, None)`) dim. `Lit` / bound-`Named` axes are concrete and need
-    /// no declaration.
-    fn runtime_dim_decl_name(dim: Option<&DimInfo>) -> Option<String> {
-        match dim {
-            Some(DimInfo::Named(name, None)) => Some(name.clone()),
-            _ => None,
+    /// chelis#616: emit the declaration or equality guard for an op-declared
+    /// runtime dim at `(node id, axis)`, with `extent_expr` the C integer
+    /// expression computing this op's extent for the axis. A declare site
+    /// emits `int <sym> = <extent>;` (which `shape_literal` references for
+    /// the output allocation); a guard site aborts at run time if the op's
+    /// extent disagrees with the already-declared value (the symbol is
+    /// Load-declared in the prologue or declared by an earlier op — the
+    /// checker unified them, so a disagreement is a real shape error).
+    fn emit_runtime_dim_site(&mut self, id: usize, axis: usize, extent_expr: &str) {
+        let Some((name, declares)) = self.runtime_dim_sites.get(&(id, axis)) else {
+            return;
+        };
+        let (name, declares) = (name.clone(), *declares);
+        if declares {
+            self.line(&format!("int {name} = {extent_expr};"));
+        } else {
+            let name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(&name);
+            self.line(&format!(
+                "if (({extent_expr}) != {name}) {{ fprintf(stderr, \"chelis: runtime dim \
+                 `{name_fmt}` mismatch at node {id} axis {axis}\\n\"); abort(); }}"
+            ));
         }
     }
 
@@ -5132,19 +5183,18 @@ impl CEmitter {
             })
             .collect();
         for (d, pair) in padding.iter().enumerate() {
-            if !Self::pair_is_node(pair) {
-                continue;
-            }
             let (before_e, after_e) = &pad_exprs[d];
-            self.line(&format!(
-                "if (({before_e}) < 0 || ({after_e}) < 0) {{ fprintf(stderr, \
-                 \"chelis: runtime pad bound out of range at node {id} axis {d}\\n\"); abort(); }}"
-            ));
-            if let Some(name) = Self::runtime_dim_decl_name(ty.dims.get(d)) {
+            if Self::pair_is_node(pair) {
                 self.line(&format!(
-                    "int {name} = t{a}->shape[{d}] + ({before_e}) + ({after_e});"
+                    "if (({before_e}) < 0 || ({after_e}) < 0) {{ fprintf(stderr, \
+                     \"chelis: runtime pad bound out of range at node {id} axis {d}\\n\"); abort(); }}"
                 ));
             }
+            self.emit_runtime_dim_site(
+                id,
+                d,
+                &format!("t{a}->shape[{d}] + ({before_e}) + ({after_e})"),
+            );
         }
         self.emit_slot_wrapper(id, ty);
         // WS-A1: pad fill must honor the output dtype. Pre-WS-A1 the
@@ -5269,21 +5319,19 @@ impl CEmitter {
             })
             .collect();
         for (d, pair) in bounds.iter().enumerate() {
-            if !Self::pair_is_node(pair) {
-                continue;
-            }
             let (start_e, end_e) = &shrink_exprs[d];
-            self.line(&format!(
-                "if (({start_e}) < 0 || ({end_e}) < ({start_e}) || ({end_e}) > t{a}->shape[{d}]) \
-                 {{ fprintf(stderr, \"chelis: runtime shrink bound out of range at node {id} \
-                 axis {d}\\n\"); abort(); }}"
-            ));
-            // chelis#616: declare this axis's runtime output extent under its
-            // actual symbolic dim name (a fresh `_anon_dim_*` or a sig-named `k`),
-            // which `shape_literal` references for the output allocation.
-            if let Some(name) = Self::runtime_dim_decl_name(ty.dims.get(d)) {
-                self.line(&format!("int {name} = ({end_e}) - ({start_e});"));
+            if Self::pair_is_node(pair) {
+                self.line(&format!(
+                    "if (({start_e}) < 0 || ({end_e}) < ({start_e}) || ({end_e}) > t{a}->shape[{d}]) \
+                     {{ fprintf(stderr, \"chelis: runtime shrink bound out of range at node {id} \
+                     axis {d}\\n\"); abort(); }}"
+                ));
             }
+            // chelis#616: declare (or guard) this axis's runtime output
+            // extent under its actual symbolic dim name (a fresh
+            // `_anon_dim_*` or a sig-named `k`), which `shape_literal`
+            // references for the output allocation.
+            self.emit_runtime_dim_site(id, d, &format!("({end_e}) - ({start_e})"));
         }
         self.emit_slot_wrapper(id, ty);
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
@@ -5326,24 +5374,23 @@ impl CEmitter {
             .map(|(d, s)| Self::bound_c_expr(s, inputs, a, d, dag))
             .collect();
         for (d, step_e) in step_exprs.iter().enumerate() {
-            let Some(dim) = ty.dims.get(d) else { continue };
-            // Declare a runtime output extent only for this node's OWN fresh
-            // anon axis (`_anon_dim_{id}_{d}`): a bystander symbolic axis (e.g.
-            // a passed-through `batch`) is declared by `symbolic_bindings` from
-            // its Load and must not be redeclared here.
-            if !Self::is_own_anon_dim(id, d, dim) {
+            // Declare (or guard) a runtime output extent only where the
+            // occurrence pass marked this op as the axis's runtime-dim site:
+            // a bystander symbolic axis (e.g. a passed-through `batch`) is
+            // declared by `symbolic_bindings` from its Load and must not be
+            // redeclared here.
+            if !self.runtime_dim_sites.contains_key(&(id, d)) {
                 continue;
             }
-            let Some(name) = Self::runtime_dim_decl_name(Some(dim)) else {
-                continue;
-            };
             self.line(&format!(
                 "if (({step_e}) <= 0) {{ fprintf(stderr, \"chelis: runtime stride step must be \
                  positive at node {id} axis {d}\\n\"); abort(); }}"
             ));
-            self.line(&format!(
-                "int {name} = (t{a}->shape[{d}] + ({step_e}) - 1) / ({step_e});"
-            ));
+            self.emit_runtime_dim_site(
+                id,
+                d,
+                &format!("(t{a}->shape[{d}] + ({step_e}) - 1) / ({step_e})"),
+            );
         }
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);

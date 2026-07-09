@@ -35,6 +35,21 @@ fn hip_pairs_to_usize(bounds: &[(RtDim, RtDim)]) -> Vec<(usize, usize)> {
         .collect()
 }
 
+/// chelis#616: the HIP lane only supports Load-declared symbolic dims; an
+/// op-declared dim implies a node-valued movement bound or runtime reshape
+/// target, which `reject_unsupported_hip_ops` rejects before codegen. This
+/// panic is a defensive backstop against a seam bypass.
+fn require_load_source(occurrence: &chelis_ir::dag::SymbolicDimOccurrence) -> (&String, usize) {
+    match &occurrence.source {
+        chelis_ir::dag::SymbolicDimSource::Load { input_label, axis } => (input_label, *axis),
+        chelis_ir::dag::SymbolicDimSource::OpDeclared { node, .. } => panic!(
+            "HIP backend reached an op-declared runtime dim `{}` (declared by node {}); \
+             reject_unsupported_hip_ops must reject it before codegen (chelis#616)",
+            occurrence.name, node.0
+        ),
+    }
+}
+
 fn hip_strides_to_usize(strides: &[RtDim]) -> Vec<usize> {
     strides.iter().map(hip_bound_to_usize).collect()
 }
@@ -627,27 +642,26 @@ impl HipEmitter {
         }
 
         for binding in symbolic_bindings(dag) {
-            let canonical_slot = input_slots[&binding.canonical.input_label];
+            let (canonical_label, canonical_axis) = require_load_source(&binding.canonical);
+            let canonical_slot = input_slots[canonical_label];
             // `binding.name` flows into format-string context; sanitize.
             let binding_name_fmt =
                 chelis_ir::span_sanitize::sanitize_for_format_string(&binding.name);
             self.line(&format!(
-                "int {} = inputs[{canonical_slot}]->shape[{}];",
-                binding.name, binding.canonical.axis
+                "int {} = inputs[{canonical_slot}]->shape[{canonical_axis}];",
+                binding.name
             ));
-            for occurrence in binding.others {
-                let slot = input_slots[&occurrence.input_label];
-                let occ_label_fmt =
-                    chelis_ir::span_sanitize::sanitize_for_format_string(&occurrence.input_label);
+            for occurrence in &binding.others {
+                let (occ_label, occ_axis) = require_load_source(occurrence);
+                let slot = input_slots[occ_label];
+                let occ_label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(occ_label);
                 self.line(&format!(
-                    "if (inputs[{slot}]->shape[{}] != {}) {{",
-                    occurrence.axis, binding.name
+                    "if (inputs[{slot}]->shape[{occ_axis}] != {}) {{",
+                    binding.name
                 ));
                 self.indent += 1;
                 self.line(&format!(
-                    "fprintf(stderr, \"{func_name_fmt}: symbolic dim `{binding_name_fmt}` mismatch: {occ_label_fmt}[{}]=%d but {binding_name_fmt}=%d\\n\", inputs[{slot}]->shape[{}], {});",
-                    occurrence.axis,
-                    occurrence.axis,
+                    "fprintf(stderr, \"{func_name_fmt}: symbolic dim `{binding_name_fmt}` mismatch: {occ_label_fmt}[{occ_axis}]=%d but {binding_name_fmt}=%d\\n\", inputs[{slot}]->shape[{occ_axis}], {});",
                     binding.name
                 ));
                 self.line("abort();");
@@ -715,26 +729,25 @@ impl HipEmitter {
         }
 
         for binding in symbolic_bindings(dag) {
-            let canonical_slot = input_slots[&binding.canonical.input_label];
+            let (canonical_label, canonical_axis) = require_load_source(&binding.canonical);
+            let canonical_slot = input_slots[canonical_label];
             let binding_name_fmt =
                 chelis_ir::span_sanitize::sanitize_for_format_string(&binding.name);
             self.line(&format!(
-                "int {} = inputs[{canonical_slot}]->shape[{}];",
-                binding.name, binding.canonical.axis
+                "int {} = inputs[{canonical_slot}]->shape[{canonical_axis}];",
+                binding.name
             ));
-            for occurrence in binding.others {
-                let slot = input_slots[&occurrence.input_label];
-                let occ_label_fmt =
-                    chelis_ir::span_sanitize::sanitize_for_format_string(&occurrence.input_label);
+            for occurrence in &binding.others {
+                let (occ_label, occ_axis) = require_load_source(occurrence);
+                let slot = input_slots[occ_label];
+                let occ_label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(occ_label);
                 self.line(&format!(
-                    "if (inputs[{slot}]->shape[{}] != {}) {{",
-                    occurrence.axis, binding.name
+                    "if (inputs[{slot}]->shape[{occ_axis}] != {}) {{",
+                    binding.name
                 ));
                 self.indent += 1;
                 self.line(&format!(
-                    "fprintf(stderr, \"{func_name_fmt}_device: symbolic dim `{binding_name_fmt}` mismatch: {occ_label_fmt}[{}]=%d but {binding_name_fmt}=%d\\n\", inputs[{slot}]->shape[{}], {});",
-                    occurrence.axis,
-                    occurrence.axis,
+                    "fprintf(stderr, \"{func_name_fmt}_device: symbolic dim `{binding_name_fmt}` mismatch: {occ_label_fmt}[{occ_axis}]=%d but {binding_name_fmt}=%d\\n\", inputs[{slot}]->shape[{occ_axis}], {});",
                     binding.name
                 ));
                 self.line("abort();");

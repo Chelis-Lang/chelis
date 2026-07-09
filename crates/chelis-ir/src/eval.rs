@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::dag::{
     Dag, DagNode, DimInfo, FusedInput, FusedStepOp, NodeId, ReduceWindowKind, RiscOp, RtDim,
-    SHRINK_TO_END, TensorType, bind_symbolic_dims, symbolic_bindings,
+    SHRINK_TO_END, SymbolicDimSource, TensorType, bind_symbolic_dims, symbolic_bindings,
 };
 use chelis_types::types::Prim;
 
@@ -254,46 +254,53 @@ fn infer_symbolic_bindings_from_inputs(
     }
 
     for binding in symbolic_bindings(dag) {
-        let canonical_value = inputs.get(&binding.canonical.input_label).ok_or_else(|| {
+        // chelis#616: an op-declared dim (node-valued movement output
+        // extent) has no input to infer from; the evaluator resolves it
+        // from actual values when the owning op evaluates.
+        let SymbolicDimSource::Load {
+            input_label: canonical_label,
+            axis: canonical_axis,
+        } = &binding.canonical.source
+        else {
+            continue;
+        };
+        let canonical_value = inputs.get(canonical_label).ok_or_else(|| {
             format!(
-                "missing required input `{}` for symbolic dimension `{}`",
-                binding.canonical.input_label, binding.name
+                "missing required input `{canonical_label}` for symbolic dimension `{}`",
+                binding.name
             )
         })?;
-        let value = *canonical_value
-            .shape
-            .get(binding.canonical.axis)
-            .ok_or_else(|| {
-                format!(
-                    "input `{}` is missing axis {} for symbolic dimension `{}`",
-                    binding.canonical.input_label, binding.canonical.axis, binding.name
-                )
-            })?;
+        let value = *canonical_value.shape.get(*canonical_axis).ok_or_else(|| {
+            format!(
+                "input `{canonical_label}` is missing axis {canonical_axis} for symbolic \
+                 dimension `{}`",
+                binding.name
+            )
+        })?;
         bindings.insert(binding.name.clone(), value);
 
         for occurrence in &binding.others {
-            let other_value = inputs.get(&occurrence.input_label).ok_or_else(|| {
+            // Op-declared guard sites are checked at run time by the C
+            // backend and from actual values by the evaluator, not here.
+            let SymbolicDimSource::Load { input_label, axis } = &occurrence.source else {
+                continue;
+            };
+            let other_value = inputs.get(input_label).ok_or_else(|| {
                 format!(
-                    "missing required input `{}` for symbolic dimension `{}`",
-                    occurrence.input_label, binding.name
+                    "missing required input `{input_label}` for symbolic dimension `{}`",
+                    binding.name
                 )
             })?;
-            let other = *other_value.shape.get(occurrence.axis).ok_or_else(|| {
+            let other = *other_value.shape.get(*axis).ok_or_else(|| {
                 format!(
-                    "input `{}` is missing axis {} for symbolic dimension `{}`",
-                    occurrence.input_label, occurrence.axis, binding.name
+                    "input `{input_label}` is missing axis {axis} for symbolic dimension `{}`",
+                    binding.name
                 )
             })?;
             if other != value {
                 return Err(format!(
-                    "symbolic dimension `{}` mismatch: canonical {}[{}] = {}, but {}[{}] = {}",
+                    "symbolic dimension `{}` mismatch: canonical {canonical_label}[{canonical_axis}] = {value}, but {input_label}[{axis}] = {other}",
                     binding.name,
-                    binding.canonical.input_label,
-                    binding.canonical.axis,
-                    value,
-                    occurrence.input_label,
-                    occurrence.axis,
-                    other
                 ));
             }
         }

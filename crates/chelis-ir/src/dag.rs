@@ -500,11 +500,41 @@ impl fmt::Display for DimExpr {
     }
 }
 
+/// Where a symbolic dim's runtime value comes from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SymbolicDimSource {
+    /// Declared from an input tensor's shape: the C prologue emits
+    /// `int name = inputs[slot]->shape[axis];` and the eval lane binds the
+    /// value from the corresponding input before evaluation.
+    Load { input_label: String, axis: usize },
+    /// chelis#616: declared at run time by the owning op itself — a
+    /// node-valued movement output axis (or a runtime reshape target) whose
+    /// extent is computed from rank-0 bound scalars. The C declaration is
+    /// emitted inline at the op (the scalars are computed tensors that do
+    /// not exist at prologue time); the eval lane resolves the extent from
+    /// actual values during evaluation and never pre-binds the symbol. When
+    /// the same symbol also has a `Load` source (or an earlier `OpDeclared`
+    /// declarer), this site is an equality-guard site: the C emitter aborts
+    /// at run time if the op's extent disagrees with the declared value.
+    OpDeclared { node: NodeId, axis: usize },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolicDimOccurrence {
     pub name: String,
-    pub input_label: String,
-    pub axis: usize,
+    pub source: SymbolicDimSource,
+}
+
+impl SymbolicDimOccurrence {
+    fn load(name: &str, input_label: &str, axis: usize) -> Self {
+        SymbolicDimOccurrence {
+            name: name.to_string(),
+            source: SymbolicDimSource::Load {
+                input_label: input_label.to_string(),
+                axis,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1500,11 +1530,76 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
         for (axis, dim) in node.output_type.dims.iter().enumerate() {
             if let DimInfo::Named(symbol, None) = dim {
                 named_dims_in_loads.insert(symbol.clone());
-                occurrences.push(SymbolicDimOccurrence {
-                    name: symbol.clone(),
-                    input_label: name.as_str().to_string(),
+                occurrences.push(SymbolicDimOccurrence::load(symbol, name.as_str(), axis));
+            }
+        }
+    }
+
+    // chelis#616 pass: movement ops whose output axis extent is computed at
+    // RUN TIME by the op itself (a node-valued bound produces a fresh extent
+    // no Load traces to). Record an `OpDeclared` source so the C emitter
+    // declares (or equality-guards) the dim inline at the op and the eval
+    // lane skips pre-eval binding for it. A symbol that is also Load-carried
+    // keeps the Load as its canonical declaration; the op site then becomes
+    // a runtime equality guard rather than a redeclaration.
+    let mut op_declared: HashSet<String> = HashSet::new();
+    for node in dag.nodes() {
+        for (symbol, axis) in op_declared_output_axes(dag, node) {
+            if !named_dims_in_loads.contains(&symbol) {
+                let _ = bind_symbol_from_any_load(
+                    dag,
+                    &symbol,
+                    &mut occurrences,
+                    &mut named_dims_in_loads,
+                );
+            }
+            occurrences.push(SymbolicDimOccurrence {
+                name: symbol.clone(),
+                source: SymbolicDimSource::OpDeclared {
+                    node: node.id,
                     axis,
-                });
+                },
+            });
+            op_declared.insert(symbol);
+        }
+    }
+
+    // Dominance guard (chelis#616 soundness): an op-declared symbol's C
+    // declaration is emitted at the declaring op, so every node that
+    // references the symbol (output dims or op-internal fields) must come
+    // AFTER the declarer in emission (= node id) order, or the C references
+    // an undeclared identifier. A violation is a producing-pass bug; fail
+    // loud rather than emit non-compiling (or worse, shadowed) C.
+    for symbol in &op_declared {
+        if named_dims_in_loads.contains(symbol) {
+            // Load-declared in the prologue; every reference is dominated.
+            continue;
+        }
+        let declarer = occurrences
+            .iter()
+            .find_map(|occurrence| match &occurrence.source {
+                SymbolicDimSource::OpDeclared { node, .. } if occurrence.name == *symbol => {
+                    Some(*node)
+                }
+                _ => None,
+            })
+            .expect("op_declared symbols always have an OpDeclared occurrence");
+        for node in dag.nodes() {
+            let references = node
+                .output_type
+                .dims
+                .iter()
+                .any(|dim| matches!(dim, DimInfo::Named(name, None) if name == symbol))
+                || op_internal_symbolic_dims(&node.op)
+                    .iter()
+                    .any(|name| name == symbol);
+            if references && node.id.0 < declarer.0 {
+                panic!(
+                    "internal compiler error: symbolic dim `{symbol}` is declared at run time \
+                     by node {} but referenced by EARLIER node {} (op {:?}); the C declaration \
+                     would not dominate the reference. Fix the producing IR pass.",
+                    declarer.0, node.id.0, node.op
+                );
             }
         }
     }
@@ -1530,6 +1625,7 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
         for dim in &node.output_type.dims {
             if let DimInfo::Named(symbol, None) = dim
                 && !named_dims_in_loads.contains(symbol)
+                && !op_declared.contains(symbol)
             {
                 // Hunt for any Load whose own type contains the same
                 // unbound dim name. We have to widen the search because
@@ -1551,11 +1647,11 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
                     && let Some((input_label, input_axis)) =
                         shape_source_for_axis(dag, node.id, axis)
                 {
-                    occurrences.push(SymbolicDimOccurrence {
-                        name: symbol.clone(),
-                        input_label,
-                        axis: input_axis,
-                    });
+                    occurrences.push(SymbolicDimOccurrence::load(
+                        symbol,
+                        &input_label,
+                        input_axis,
+                    ));
                     named_dims_in_loads.insert(symbol.clone());
                     bound = true;
                 }
@@ -1603,7 +1699,7 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
             continue;
         }
         for symbol in op_internal_symbolic_dims(&node.op) {
-            if named_dims_in_loads.contains(&symbol) {
+            if named_dims_in_loads.contains(&symbol) || op_declared.contains(&symbol) {
                 continue;
             }
             if !bind_symbol_from_any_load(dag, &symbol, &mut occurrences, &mut named_dims_in_loads)
@@ -1620,6 +1716,45 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
     }
 
     occurrences
+}
+
+/// chelis#616: the output axes of `node` whose symbolic dim is sized at RUN
+/// TIME by the op itself — a movement op axis with a node-valued bound, which
+/// [`shape_source_for_axis`] deliberately refuses to trace to a Load (the
+/// extent is fresh, not the input axis's runtime dim). Each returned
+/// `(symbol, axis)` pair becomes an [`SymbolicDimSource::OpDeclared`]
+/// occurrence: the C emitter declares (or equality-guards) the dim inline at
+/// the op and the eval lane resolves it from actual values.
+fn op_declared_output_axes(dag: &Dag, node: &DagNode) -> Vec<(String, usize)> {
+    if !matches!(
+        node.op,
+        RiscOp::Shrink { .. } | RiscOp::Stride { .. } | RiscOp::Pad { .. }
+    ) {
+        return Vec::new();
+    }
+    node.output_type
+        .dims
+        .iter()
+        .enumerate()
+        .filter_map(|(axis, dim)| match dim {
+            DimInfo::Named(symbol, None) if shape_source_for_axis(dag, node.id, axis).is_none() => {
+                Some((symbol.clone(), axis))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// chelis#616: every symbolic dim name that is op-declared somewhere in the
+/// DAG (see [`op_declared_output_axes`]). Used by [`bind_symbolic_dims`] to
+/// exempt these names from the pre-eval "missing symbolic dimension binding"
+/// error — their values do not exist until the owning op evaluates.
+pub fn op_declared_dim_names(dag: &Dag) -> HashSet<String> {
+    dag.nodes()
+        .iter()
+        .flat_map(|node| op_declared_output_axes(dag, node))
+        .map(|(symbol, _)| symbol)
+        .collect()
 }
 
 /// Hunt for any Load whose type carries `symbol` (bound or unbound) and
@@ -1640,11 +1775,11 @@ fn bind_symbol_from_any_load(
             if let DimInfo::Named(candidate_sym, _) = candidate_dim
                 && candidate_sym == symbol
             {
-                occurrences.push(SymbolicDimOccurrence {
-                    name: symbol.to_string(),
-                    input_label: load_name.as_str().to_string(),
+                occurrences.push(SymbolicDimOccurrence::load(
+                    symbol,
+                    load_name.as_str(),
                     axis,
-                });
+                ));
                 named_dims_in_loads.insert(symbol.to_string());
                 return true;
             }
@@ -1773,23 +1908,33 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         RiscOp::Reshape { .. } | RiscOp::Permute { .. } | RiscOp::Store { .. } => {
             shape_source_for_axis(dag, *node.inputs.first()?, axis)
         }
-        // chelis#616 (soundness): a node-valued (runtime) movement bound produces
-        // a FRESH runtime extent that is not the input axis's runtime dim, so it
-        // must not be traced to the input's declaring `Load` (that would bind a
-        // symbolic movement-output dim to the wrong input extent). `Lit` / `ToEnd`
-        // axes keep the pre-existing pass-through: `ToEnd` is a full-axis identity
-        // (same runtime dim as the input), `Lit` is concrete/non-symbolic.
+        // chelis#616 (soundness): a movement op passes an axis's runtime dim
+        // through ONLY when the op is an identity on that axis — a full-axis
+        // shrink sentinel `(0, ToEnd)`, a stride step of literal 1, or a
+        // zero pad. Every other bound (node-valued OR non-identity literal)
+        // produces a FRESH extent that is NOT the input axis's runtime dim,
+        // so tracing it to the input's declaring `Load` would bind the
+        // symbolic output dim to the wrong extent (e.g. `stride(x, 2)`'s
+        // output extent is `ceil(n/2)`, not `n`). Those axes are op-declared
+        // instead (see [`op_declared_output_axes`]): the owning op's emitter
+        // declares the exact extent formula at run time.
         RiscOp::Shrink { bounds } => match bounds.get(axis) {
-            Some((s, e)) if s.node_input().is_some() || e.node_input().is_some() => None,
-            _ => shape_source_for_axis(dag, *node.inputs.first()?, axis),
+            Some((s, e)) if s.as_lit() == Some(0) && matches!(e, RtDim::ToEnd) => {
+                shape_source_for_axis(dag, *node.inputs.first()?, axis)
+            }
+            _ => None,
         },
         RiscOp::Stride { strides } => match strides.get(axis) {
-            Some(b) if b.node_input().is_some() => None,
-            _ => shape_source_for_axis(dag, *node.inputs.first()?, axis),
+            Some(b) if b.as_lit() == Some(1) => {
+                shape_source_for_axis(dag, *node.inputs.first()?, axis)
+            }
+            _ => None,
         },
         RiscOp::Pad { padding, .. } => match padding.get(axis) {
-            Some((b, a)) if b.node_input().is_some() || a.node_input().is_some() => None,
-            _ => shape_source_for_axis(dag, *node.inputs.first()?, axis),
+            Some((b, a)) if b.as_lit() == Some(0) && a.as_lit() == Some(0) => {
+                shape_source_for_axis(dag, *node.inputs.first()?, axis)
+            }
+            _ => None,
         },
         RiscOp::FusedElem { .. } => node
             .inputs
@@ -1811,7 +1956,14 @@ pub fn symbolic_bindings(dag: &Dag) -> Vec<SymbolicDimBinding> {
     grouped
         .into_iter()
         .map(|(name, mut occurrences)| {
-            let canonical = occurrences.remove(0);
+            // chelis#616: a Load source, when one exists, is always the
+            // canonical declaration (the prologue declares it; op-declared
+            // sites for the same symbol become runtime equality guards).
+            let canonical_index = occurrences
+                .iter()
+                .position(|occurrence| matches!(occurrence.source, SymbolicDimSource::Load { .. }))
+                .unwrap_or(0);
+            let canonical = occurrences.remove(canonical_index);
             SymbolicDimBinding {
                 name,
                 canonical,
@@ -1821,29 +1973,34 @@ pub fn symbolic_bindings(dag: &Dag) -> Vec<SymbolicDimBinding> {
         .collect()
 }
 
+/// The symbolic dims a caller can (and must) supply — those bound from input
+/// shape metadata. chelis#616: op-declared dims are computed at run time by
+/// their owning op and are deliberately excluded; they are not parameters.
 pub fn symbolic_params(dag: &Dag) -> Vec<String> {
     symbolic_bindings(dag)
         .into_iter()
+        .filter(|binding| matches!(binding.canonical.source, SymbolicDimSource::Load { .. }))
         .map(|binding| binding.name)
         .collect()
 }
 
 pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Result<Dag, String> {
-    fn bind_dim(dim: &DimInfo, bindings: &HashMap<String, usize>) -> Result<DimInfo, String> {
+    // chelis#616: an op-declared dim (a node-valued movement output extent)
+    // has no pre-eval value — the evaluator computes it from actual bound
+    // scalars. Leave it unbound instead of raising the loud missing-binding
+    // error; the eval movement arms never read the output type for it.
+    let op_declared = op_declared_dim_names(dag);
+    let bind_dim = |dim: &DimInfo| -> Result<DimInfo, String> {
         match dim {
             DimInfo::Lit(size) => Ok(DimInfo::Lit(*size)),
             DimInfo::Named(name, Some(size)) => Ok(DimInfo::Named(name.clone(), Some(*size))),
-            DimInfo::Named(name, None) => Ok(DimInfo::Named(
-                name.clone(),
-                Some(
-                    bindings
-                        .get(name)
-                        .copied()
-                        .ok_or_else(|| format!("missing symbolic dimension binding `{name}`"))?,
-                ),
-            )),
+            DimInfo::Named(name, None) => match bindings.get(name) {
+                Some(size) => Ok(DimInfo::Named(name.clone(), Some(*size))),
+                None if op_declared.contains(name) => Ok(dim.clone()),
+                None => Err(format!("missing symbolic dimension binding `{name}`")),
+            },
         }
-    }
+    };
 
     let mut rebound = Dag::new();
     for node in dag.nodes() {
@@ -1852,7 +2009,7 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
                 .output_type
                 .dims
                 .iter()
-                .map(|dim| bind_dim(dim, bindings))
+                .map(&bind_dim)
                 .collect::<Result<_, _>>()?,
             precision: node.output_type.precision,
         };
@@ -2127,7 +2284,13 @@ mod tests {
         // dim is already covered).
         assert_eq!(occurrences.len(), 1);
         assert_eq!(occurrences[0].name, "n");
-        assert_eq!(occurrences[0].input_label, "x");
+        assert_eq!(
+            occurrences[0].source,
+            SymbolicDimSource::Load {
+                input_label: "x".into(),
+                axis: 0,
+            }
+        );
     }
 
     #[test]
@@ -2169,22 +2332,38 @@ mod tests {
             vec![
                 SymbolicDimOccurrence {
                     name: "batch".into(),
-                    input_label: "x".into(),
-                    axis: 0,
+                    source: SymbolicDimSource::Load {
+                        input_label: "x".into(),
+                        axis: 0,
+                    },
                 },
                 SymbolicDimOccurrence {
                     name: "batch".into(),
-                    input_label: "y".into(),
-                    axis: 0,
+                    source: SymbolicDimSource::Load {
+                        input_label: "y".into(),
+                        axis: 0,
+                    },
                 },
             ]
         );
 
         let bindings = symbolic_bindings(&dag);
         assert_eq!(bindings.len(), 1);
-        assert_eq!(bindings[0].canonical.input_label, "x");
+        assert_eq!(
+            bindings[0].canonical.source,
+            SymbolicDimSource::Load {
+                input_label: "x".into(),
+                axis: 0,
+            }
+        );
         assert_eq!(bindings[0].others.len(), 1);
-        assert_eq!(bindings[0].others[0].input_label, "y");
+        assert_eq!(
+            bindings[0].others[0].source,
+            SymbolicDimSource::Load {
+                input_label: "y".into(),
+                axis: 0,
+            }
+        );
     }
 
     #[test]
@@ -2370,7 +2549,13 @@ mod tests {
         let occurrences = symbolic_occurrences(&dag);
         assert_eq!(occurrences.len(), 1);
         assert_eq!(occurrences[0].name, "n");
-        assert_eq!(occurrences[0].input_label, "x");
+        assert_eq!(
+            occurrences[0].source,
+            SymbolicDimSource::Load {
+                input_label: "x".into(),
+                axis: 0,
+            }
+        );
     }
 
     #[test]
@@ -2551,8 +2736,13 @@ mod tests {
             .find(|o| o.name == "d2")
             .expect("reduction kept-axis symbol `d2` must be declared");
         // The kept output axis 0 maps back to input axis 1 of Load "c".
-        assert_eq!(d2.input_label, "c");
-        assert_eq!(d2.axis, 1);
+        assert_eq!(
+            d2.source,
+            SymbolicDimSource::Load {
+                input_label: "c".into(),
+                axis: 1,
+            }
+        );
     }
 
     #[test]

@@ -7335,10 +7335,9 @@ fn fallback_symbolic_dims(
     } else if !hint.is_empty() {
         hint.to_vec()
     } else {
-        chelis_ir::dag::symbolic_bindings(dag)
-            .into_iter()
-            .map(|binding| binding.name)
-            .collect()
+        // chelis#616: only Load-bound dims are caller-suppliable;
+        // op-declared dims are computed at run time by their owning op.
+        chelis_ir::dag::symbolic_params(dag)
     }
 }
 
