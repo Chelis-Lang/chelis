@@ -5372,8 +5372,10 @@ impl CEmitter {
         for (d, pair) in bounds.iter().enumerate() {
             let (start_e, end_e) = &shrink_exprs[d];
             if Self::pair_is_node(pair) {
+                // `end <= start` (empty or inverted) mirrors the evaluator's
+                // rejection exactly — error-path parity, chelis#616.
                 self.line(&format!(
-                    "if (({start_e}) < 0 || ({end_e}) < ({start_e}) || ({end_e}) > t{a}->shape[{d}]) \
+                    "if (({start_e}) < 0 || ({end_e}) <= ({start_e}) || ({end_e}) > t{a}->shape[{d}]) \
                      {{ fprintf(stderr, \"chelis: runtime shrink bound out of range at node {id} \
                      axis {d}\\n\"); abort(); }}"
                 ));

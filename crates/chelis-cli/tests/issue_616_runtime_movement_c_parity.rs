@@ -292,6 +292,49 @@ fn issue_616_over_unified_movement_chain_fails_loud_not_mis_sized() {
     );
 }
 
+/// Error-path parity (soundness): a runtime shrink whose bounds resolve to a
+/// ZERO-SIZE axis (`start == end`) must fail LOUDLY in both lanes — the eval
+/// lane rejects an empty-or-inverted bound, and the C runtime guard mirrors
+/// it exactly (`end <= start` aborts). Before this guard alignment the C
+/// lane silently produced an empty tensor where eval errored.
+#[test]
+fn issue_616_runtime_shrink_zero_size_axis_errs_in_both_lanes() {
+    // k = n - 4 == 0 for the 4-element input: bounds [0, 0).
+    let body = "\
+  k = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(4, int64)), int32)\n\
+  shrink(x, [[cast(0, int32), k]])";
+    let input = f32_literal(&[1.0, 2.0, 3.0, 4.0]);
+    let source = format!(
+        "module Repro.RtZeroSize\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n{body}\n}}\nout = f(to_tensor([{input}]))\n"
+    );
+
+    let eval_out = run_eval(&source, "rtzero");
+    assert!(
+        !eval_out.status.success(),
+        "eval must reject the zero-size shrink axis; stdout={}",
+        String::from_utf8_lossy(&eval_out.stdout)
+    );
+    let eval_err = String::from_utf8_lossy(&eval_out.stderr).into_owned();
+    assert!(
+        eval_err.contains("empty or inverted"),
+        "eval must name the empty-bound rejection; stderr={eval_err}"
+    );
+
+    let (_dir, build_dir) = build_c(&source, "rtzero");
+    let bin = gcc(&build_dir, "rtzero", None, "self_bin");
+    let run = StdCommand::new(&bin).output().expect("run emitted program");
+    assert!(
+        !run.status.success(),
+        "C binary must abort on the zero-size shrink axis; stdout={}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("shrink bound out of range"),
+        "C abort must name the shrink range guard; stderr={stderr}"
+    );
+}
+
 /// Error-path parity (soundness): a runtime shrink END that overshoots the
 /// input extent must fail LOUDLY in both lanes — the eval lane with a
 /// range-guard error, the C lane with the emitted runtime abort — never a

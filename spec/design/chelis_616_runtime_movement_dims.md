@@ -1,189 +1,150 @@
-# chelis#616 — Runtime-symbolic movement-op bounds: implementation handoff
+# chelis#616 — Runtime-symbolic movement-op bounds: implementation record
 
-**Status:** foundation landed on branch `agent/616-runtime-movement-bounds` (PR #627,
-draft). This doc is the continuation plan for the next agent. The completion oracle has
-NOT flipped yet; two capability pieces remain (§4, §5).
-
-## 1. Goal and completion oracle
-
-Make the runtime-symbolic-window `avgpool1d` gradient work end to end. The single
-authoritative oracle is:
+**Status: COMPLETE** on branch `agent/616-runtime-movement-bounds` (PR #627).
+The completion oracle is green:
 
 ```
 crates/chelis-cli/tests/issue_368_grad_concat_windows.rs
-  ::issue_368_runtime_symbolic_window_grad_is_tracked_residual
+  ::issue_368_runtime_symbolic_window_grad_is_half_everywhere
 ```
 
-Today it is an expected-to-fail pin (asserts `!success()` + a fail-closed diagnostic).
-When #616 lands it must flip to a PASSING finite-difference + forward-parity +
-eval-vs-`chelis build --target c` oracle whose gradient is `[0.5, 0.5, 0.5, 0.5]`
-(for input `[1,2,3,4]`, window 2, stride 2). Reproducer source is in that test
-(`window_row` = `reshape(stride(shrink(x, [[start, extent]]), 2), [1, m])`, with
-`start`/`extent`/`m` all runtime `shape()`-derived).
+a passing analytic + finite-difference + forward-parity oracle whose gradient
+is `[0.5, 0.5, 0.5, 0.5]` (input `[1,2,3,4]`, window 2, stride 2). This file
+was the implementation handoff plan; it now records what shipped, where the
+original plan was corrected, and the residuals. The authoritative behavior
+spec is `spec/05-risc-primitives.md` §2.4.1 and
+`spec/06-transformations.md` §2.7.1.
 
-**SOUNDNESS IS ABSOLUTE.** A loud failure must never be traded for a silently-wrong
-gradient or a mis-sized allocation. Every runtime bound that eval rejects loudly, the C
-backend must reject loudly too (error-path parity, not just value-path).
+**SOUNDNESS IS ABSOLUTE** held throughout: every boundary that moved was
+replaced by a runtime capability with eval-vs-C value AND error parity, or
+stayed loud.
 
-## 2. The core idea (one capability, applied in two places)
+## 1. What shipped (one capability, applied in two places)
 
-Everything reduces to: **a tensor dimension whose value is a runtime rank-0 integer
-scalar node (a `Shape` read or integer arithmetic over one), declared/resolved in the
-eval and C backend lanes.** Arithmetic lives as ordinary DAG scalar ops
-(`Add`/`Mul`/`FloorDiv`/`Neg` — already integer-capable end to end); the dim just
-*references the result node*. This capability is needed in two payload positions:
+A tensor dimension whose value is a runtime rank-0 integer scalar node (a
+`Shape` read or integer arithmetic over one), declared and resolved in the
+eval and C backend lanes. Representation: `dag::RtDim { Lit(usize),
+Sym(String), Node(usize), ToEnd }`, where `Node(i)` is an ABSOLUTE index into
+the owning op's `inputs` (`inputs[0]` = tensor, `inputs[1..]` = rank-0
+integer scalars) and `Sym` is legal only in reshape targets.
 
-- **movement bounds** (`Shrink`/`Stride`/`Pad` start/end/step) — LANDED.
-- **reshape targets** (`Reshape.new_shape`) — the window count `m` and the stride
-  adjoint's `m_a*step` merge extent. NOT landed. This is the remaining gap.
+- **Movement bounds** (`Shrink`/`Stride`/`Pad` start/end/step): lowering,
+  eval resolution, verify (`check_bound_source`, variable arity, `ToEnd`
+  position rules), C emission with runtime abort guards.
+- **Reshape targets** (`Reshape.new_shape: Vec<RtDim>`): the shape-derived
+  arithmetic arm and the term-bound-var arm (`m` as an inlined parameter)
+  lower to scalar nodes; the C lane declares the dim inline behind
+  negativity + numel abort guards (`chelis_alloc_view` checks nothing); the
+  eval lane resolves the scalar and reports numel mismatches as clean errors.
+- **Op-declared symbolic dims**: `SymbolicDimOccurrence` carries a source
+  (`Load { input_label, axis } | OpDeclared { node, axis }`). An op-declared
+  dim is declared inline at the owning op in C (the prologue cannot
+  reference a computed `t{n}`) and bound MID-EVALUATION from actual values
+  in eval; a Load-declared or earlier-declared symbol makes later sites
+  runtime equality guards (the over-unification guard).
+- **Runtime movement adjoints** (`grad.rs`): shrink pads with
+  `shape(x, axis) - end`; pad shrinks to `before + shape(x, axis)`; stride's
+  upsample cascade reads `m_a = shape(g, axis)`, merges with a runtime
+  `m_a * step` extent, and trims to `(0, shape(x, axis))`. Bound scalars are
+  a stop-gradient boundary (the pre-pass covers `Reshape` too). The reshape
+  and Expand-restore adjoints restore Load-declared symbols as `Sym` (no new
+  nodes; HIP-compatible) and any other runtime axis as an explicit `Shape`
+  read.
+- **`if`/`fail` in the DAG lane**: `fail(...)` lowers to a zero-`Const`
+  placeholder (not the legacy bogus `Load { name: "fail" }`), conformed to
+  the if's rank after both branches with a shape-dep on the sibling; the
+  mask expansion and `lower_mean`'s count constants carry shape-deps that
+  eval and the C anon-dim renaming resolve.
+- **HIP/Metal**: reject node-valued movement bounds AND reshape targets with
+  clean diagnostics naming `--target c` (compiler-api seam + CLI seam in
+  lockstep; the Metal seam previously had no movement arm at all and reached
+  a panic).
+- **Wire**: `WireRtDim { Lit, ToEnd, Node, Sym }`; `Reshape` serializes
+  `Vec<WireRtDim>`; `WIRE_DAG_SCHEMA_VERSION` bumped 2 → 3 (chelis-prove
+  tripwire moved with it; `Reshape` stays in the f64-free op group).
 
-The uniform representation is `dag::RtDim { Lit(usize), Sym(String), Node(usize), ToEnd }`
-(currently `Lit`/`Node`/`ToEnd` only — see §4 step 2 for `Sym`). `Node(i)` is an ABSOLUTE
-index into the owning op's `inputs`, where `inputs[0]` is the tensor and `inputs[1..]` are
-rank-0 integer bound/dim scalars. `Node(i)` reads exactly like `inputs[i]` everywhere.
+## 2. Corrections to the original handoff plan (found during implementation)
 
-## 3. What is already DONE (green; commits on the branch)
+1. The oracle's `m` reshape target is a bare `(var m)` (an inlined fn
+   parameter), which never reached the arithmetic refuse-to-lower arm; a NEW
+   lowering arm resolves a term var bound to a rank-0 integer node.
+2. Node-sourced dims cannot be declared in the C prologue (the scalar is a
+   computed tensor); declaration is inline at the owning op.
+3. "Fail loud on a duplicate node-source" as written would have rejected the
+   oracle (both inlined `window_row` reshapes declare `m` from the same
+   scalar). Shipped: first site declares, later sites equality-guard at run
+   time (both lanes).
+4. "Thread the node value into `bind_symbolic_dims`" was unimplementable
+   (values do not exist pre-eval); shipped as mid-evaluation binding, with
+   `Const`/`Expand`/reshape-target consumers resolving through it or through
+   shape-dep value shapes.
+5. Checker wildcards (`*`/`""`) are not stable symbols: the op-declared
+   machinery excludes them (the C lane renames anon dims to unique
+   per-node names first; eval computes shapes from values). Grad-built
+   restore targets use explicit `Shape` reads for them.
+6. `shape_source_for_axis`'s movement pass-through was tightened to
+   IDENTITY-ONLY (sentinel shrink / stride step 1 / zero pad); a non-identity
+   literal axis (e.g. `stride(x, 2)`) previously traced the output symbol to
+   the INPUT's Load — a latent mis-size.
+7. `rename_anonymous_dims`' copy-first-input shortcut is skipped for ANY
+   extent-altering movement op (not just node-bound ones); this structurally
+   closed the chelis#593 heap-OOB hole (its fail-closed pins flipped to
+   build-and-run oracles).
+8. The eval-lane zero-size shrink rejection (`start >= end`) was not
+   mirrored by the C guard (`end < start`); aligned to `end <= start`.
+9. `DimInfo::Named(s, Some(n))` converts to `RtDim::Lit(n)` (not `Sym`),
+   preserving eval semantics.
+10. Assorted: `bind_symbolic_dims` silently dropped `shape_deps` (fixed);
+    grad's pruner, eval's root liveness, and verify's dangling check now
+    honor `shape_deps`; the Sum adjoint's restore Expand records the forward
+    input as its shape source.
 
-- **`RtDim` representation** (`crates/chelis-ir/src/dag.rs`): the enum + `as_lit`/
-  `is_runtime`/`node_input` helpers; `Pad`/`Shrink`/`Stride` payloads carry it; `ToEnd`
-  promotes the `SHRINK_TO_END` sentinel. Renamed from `Bound` in commit `cb7d0514`.
-- **Lowering** (`lower.rs`): `lower_pair_bounds` / `lower_stride_bounds` / `lower_one_bound`
-  build node-valued movement bounds from runtime `cast(add(...))` args instead of
-  `.unwrap_or_default()` to empty (the pad/shrink/stride arms near `lower.rs:7406`).
-- **Eval** (`eval.rs`): `resolve_eval_bound` / `resolve_eval_pairs` / `resolve_eval_strides`
-  read each `RtDim` to a concrete extent at eval time with non-negative/integral/range
-  guards; the Pad/Shrink/Stride eval arms resolve then call the existing helpers. **Forward
-  eval of a runtime shrink+stride and of the full `avgpool1d` reproducer is CORRECT** (the
-  eval lane resolves runtime dims via `bind_symbolic_dims`; verified `[1.5,3.5]`).
-- **Verify** (`verify.rs`): variable arity (`1 + Node count`), rank-0-int bound-source
-  checks (`check_bound_source`), `ToEnd`-position rules; static extent checks apply only to
-  `Lit` bounds.
-- **Grad (movement, mechanical + stop-gradient)** (`grad.rs`): adjoints are `RtDim`-
-  compatible; the value-dependent guards STAY (node-valued = the work below). Commit
-  `05fb136b` made a movement op's bound-source inputs (`inputs[1..]`) a **stop-gradient
-  boundary** in `grad_dag_checked`'s differentiability pre-pass (the liveness walk
-  propagates only through `inputs[0]` for Shrink/Stride/Pad), so the window-count
-  `floor_div` no longer wrongly rejects the whole gradient.
-- **C backend** (`backend-c/src/emit.rs`): `emit_shrink`/`emit_stride`/`emit_pad` size
-  node-valued axes at runtime (`bound_c_expr` reads a bound scalar `t{n}->data[0]`;
-  `runtime_dim_decl_name` declares the axis's `_anon_dim`/named dim `int name = end-start`)
-  with runtime `abort` guards. Soundness edit: `rename_anonymous_dims` no longer copies
-  first-input dims for node-valued movement outputs (would clobber the shrunk axis).
-- **HIP/Metal**: convert `RtDim`→`usize` for the literal launch emitters, panic on a
-  node-valued bound (rejected upstream). **Reject seams** (`compiler-api/src/compiler.rs`
-  `reject_unsupported_hip_ops`, CLI `main.rs`) reject node-valued movement bounds loudly for
-  `--target hip` (C is canonical).
-- **Wire**: `WireRtDim { Lit, ToEnd, Node }` in `schema.rs`; `wire_bound` maps it.
-- **issue_368 residual pin** retargeted to the current (deeper) boundary; sibling pins green.
+## 3. Executable oracles
 
-**Where forward-C and grad still fail closed (loud):** `symbolic_occurrences`
-(`dag.rs`, the `panic!` around the `!bound` arm ~line 1549) fails loud when a node-valued
-movement OUTPUT dim or a runtime RESHAPE-target dim has no `Load` source. That is the
-declaration gap §4 step 3 closes.
+- `issue_368_grad_concat_windows.rs::issue_368_runtime_symbolic_window_grad_is_half_everywhere`
+  — THE completion oracle (analytic + FD + forward parity, eval lane).
+- `issue_616_runtime_movement_c_parity.rs` — runtime shrink/stride forward
+  eval-vs-C parity, one C binary across input lengths, the guarded
+  over-unified degenerate (loud abort, never mis-sized), zero-size-axis and
+  overshoot ERROR parity.
+- `issue_616_runtime_reshape_c_parity.rs` — the `window_row` form: forward
+  and GRADIENT eval-vs-C parity, one C binary across lengths, negative-extent
+  error parity.
+- `issue_513_symbolic_axis_adjoints.rs` — the formerly fail-closed pins now
+  passing (symbolic-sig im2col grad = ones with a C leg; runtime numel
+  mismatch as error parity; symbolic strided-axis / shrink-sub-range grads);
+  `issue_291_grad_shrink_stride.rs` and the `grad.rs` unit tests likewise.
+- `issue_551_grad_symbolic_concat_c_build.rs` — the chelis#593 reproducers
+  as build-and-run oracles.
 
-## 4. Remaining implementation — step by step
+## 4. Residuals (tracked, loud, NOT part of this issue's oracle)
 
-### Step 2 — `RtDim::Sym` + reshape `new_shape: Vec<RtDim>` (large, atomic, compiler-guided)
-
-- Add `RtDim::Sym(String)` (a symbolic dim declared elsewhere, e.g. a bystander `batch`).
-  This DROPS `Copy` on `RtDim` (String) — change `.copied()` → `.cloned()` on bound/stride
-  slices (grep for `.iter().copied()` on `RtDim` in `vmap.rs`, `emit_*`) and any `*rtdim`.
-- Change `RiscOp::Reshape { new_shape: Vec<DimInfo> }` → `Vec<RtDim>`. This is wide
-  (`Reshape` is common). Do it as ONE atomic compiler-guided sweep across
-  eval/verify/grad/specialize/vmap/tier2/backend-c/hip/metal/wire/tests. Conversions:
-  `DimInfo::Lit(n)` → `RtDim::Lit(n)`; `DimInfo::Named(s, _)` → `RtDim::Sym(s)`; the output
-  TensorType stays `Vec<DimInfo>` (convert `RtDim`→`DimInfo` for the result type).
-- **Lowering the runtime reshape dim** (`lower.rs`, `extract_reshape_dim_list` ~line 9560):
-  today the non-static shape-arithmetic case raises a loud lowering error
-  (`is_shape_derived_arith_dim` → "refusing to lower a guessed extent"). Replace that arm:
-  lower the arithmetic expression to a rank-0 int scalar node (via `lower_expr_node`),
-  append it to the reshape's `inputs`, and record `RtDim::Node(slot)` for that dim. The
-  static (`fold_shape_derived_static_size`) and bare-`shape(x,i)`
-  (`dim_expr_from_shape_arg_with_source`) cases stay as-is (fold to `Lit`/`Sym`+shape_dep).
-- Reshape eval/verify/C-emit must handle `RtDim::Node`: eval reads the scalar for the
-  target dim (numel check uses it); C-emit declares the output dim from the scalar (see
-  step 3); wire gets `WireRtDim` already.
-
-### Step 3 — node-sourced symbolic-dim declaration (the missing piece)
-
-`shape_deps` (`dag.rs`) only keeps a *Load* source alive; the actual declaration always
-sources from a Load (`symbolic_bindings` → `int name = inputs[slot]->shape[axis]`,
-`backend-c/src/emit.rs` ~line 989). Extend it so a symbolic output dim can be sourced from
-a **scalar node**:
-
-- `symbolic_occurrences` (`dag.rs` ~1500-1549): when a `Named(sym, None)` output dim has no
-  Load source but IS the runtime output of a node-valued movement op or a `RtDim::Node`
-  reshape target, record a node-source occurrence (dim name → the scalar `NodeId`) instead
-  of `panic!`. (Keep the panic for genuinely sourceless symbols — soundness.)
-- C backend (`emit.rs`): declare a node-sourced dim as `int name = t{node}->data[0]`
-  (integer read; reuse `bound_c_expr`'s precision handling). `emit_shrink`/`emit_stride`/
-  `emit_pad` already declare movement output dims from the bound; unify so reshape targets
-  use the same path.
-- eval (`bind_symbolic_dims`, `dag.rs`): resolve a node-sourced dim from the evaluated
-  scalar node's value (the eval lane already binds symbolic dims before eval — thread the
-  node value in).
-- **Soundness guard (the over-unification trap):** if the checker WILDCARDS a node-valued
-  movement/reshape output and unifies a whole `shrink→stride` chain to ONE sig-named symbol
-  (a degenerate direct-return pattern), two nodes could declare the same symbol → wrong
-  shape or a duplicate C declaration. The oracle path (movement outputs anchored by an
-  intervening `reshape`) keeps each dim distinct; but detect/guard the degenerate case
-  (e.g. fail loud on a duplicate node-source for one symbol) so it can never silently
-  mis-size. A `chelis eval` vs `chelis build --target c` parity test catches it.
-
-After steps 2+3: `chelis build --target c` of the forward reproducer must produce
-`[1.5, 3.5]` (currently ICEs at the reshape target). Add a forward eval-vs-C parity test
-(model on `crates/chelis-cli/tests/issue_558_shape_value_read.rs`).
-
-### Step 4 — runtime grad adjoints (lift the guards)
-
-- **Stride adjoint** (`grad.rs` ~1319-1436): the `strided_axis_size` closure panics on a
-  `Named(_, None)` strided axis. Replace with a fresh `RiscOp::Shape { axis }` read on the
-  forward INPUT for the source extent `n_a` (used as the trim `Shrink` bound
-  `(RtDim::Lit(0), RtDim::Node(n_a))`), and make the merge reshape dim `m_a*step` a
-  `RtDim::Node` computed by runtime `Mul` (m_a = the cotangent's own dim, itself runtime).
-  The `SHRINK_TO_END` sentinel is INSUFFICIENT for the strided axis — the overshoot trim
-  must cut to exactly `n_a`. Bystander (non-strided) symbolic axes keep the sentinel path
-  (do not touch — pins `stride_adjoint_symbolic_bystander_axis_uses_sentinel_trim`,
-  `prod_reduce_adjoint_symbolic_bystander_axis_uses_sentinel_slices` must stay green).
-- **Shrink adjoint** (`grad.rs` ~1274): replace `dim_size(dim) - end` with
-  `Add(Shape(x, axis), Neg(end))` feeding a node-valued `Pad.after`.
-- Note the movement adjoints currently `.expect("node-valued ... chelis#616 M2 work")` on
-  node-valued bounds — replace those `expect`s with the runtime construction above.
-- **ProdReduce** reduced-axis guard (`grad.rs` ~960) is OFF the avgpool path and
-  independent (needs a runtime loop / closed form) — leave it guarded; do NOT flip its pin.
-
-### Step 5 — flip the oracle + close out
-
-- Flip `issue_368_runtime_symbolic_window_grad_is_tracked_residual` to a passing FD +
-  forward-parity + eval-vs-C oracle (`[0.5,0.5,0.5,0.5]`). Reuse the file's
-  `eval_ok`/`parse_tensor`/`assert_close` harness. Flip
-  `stride_adjoint_symbolic_strided_axis_fails_loud` (`grad.rs`) to a passing adjoint test.
-- Add the M1 forward eval-vs-C parity + negatives file (zero-size axis, shrink overshoot,
-  negative intermediate, stride overshoot — eval-vs-C ERROR parity).
-- Spec sync: `spec/05-risc-primitives.md` (§2.4 Stride/Shrink, the `RtDim` representation),
-  `spec/06-transformations.md` (node-valued movement + reshape dims). Update the issue_368
-  pin's boundary comment.
-- Gates: `python3 scripts/gate.py --local`; `cargo clippy --workspace --all-targets
-  -- -D warnings`; `cargo fmt --all -- --check`; `chelis lint --check .` (§8.6, no em-dash
-  in Rust string literals). Full workspace suite via CI (macOS Smoke is the authoritative
-  oracle). **Run `cargo build --workspace --all-targets` locally, not just `-p <crate>
-  --lib`** — the first CI red on this branch was test targets that `--lib` never compiled.
-
-## 5. Gotchas / invariants (learned the hard way)
-
-- **Always check `--all-targets` across the workspace**, not per-crate `--lib`. `--lib`
-  skips `#[cfg(test)]` modules AND other crates' `tests/`. CI runs
-  `cargo build --workspace --all-targets`.
-- `RtDim::Node(i)` nodes MUST be in `inputs` (never embedded NodeId-in-payload) — DCE,
-  topo-sort, `verify`'s "references earlier node" check, `shape_source_for_axis`, and wire
-  all assume `inputs` is the complete edge set.
-- `shape_source_for_axis` (`dag.rs`) returns `None` for node-valued movement axes (soundness
-  edit already in) so a runtime output dim is not mis-sourced to the input axis.
-- The forward reproducer's `if/fail` guard routes forward EVAL to the HOST lane (not DAG),
-  which is why forward eval "works" while forward-C ICEs — do not mistake host-lane success
-  for DAG-lane coverage. `grad` forces DAG construction, which is where the real work is.
-- macOS build hygiene: concurrent heavy builds starve each other past the 600s watchdog;
-  build per-crate where possible and reap orphans (`python3 scripts/reap_orphans.py`).
-- `chelis-python`'s `pyo3::Bound<'py, T>` is UNRELATED to the dag type — do not rename it.
-- Concrete arithmetic edges to probe (soundness): zero-size axis (`start==end`), step
-  overshoot (`m*step > n`), negative intermediate, i32-vs-i64 bound precision.
+- **ProdReduce over a runtime reduced axis** stays fail-closed (needs a
+  runtime loop / closed form). Pin:
+  `prod_reduce_adjoint_symbolic_reduced_axis_fails_loud`.
+- **Runtime (node-valued) stride STEP** has no structural adjoint (a
+  runtime-extent axis insertion); loud expect in the stride adjoint.
+- **Guarded (`if`/`fail`) programs through `chelis build`** route via the
+  host-program lane, which (a) types a list `concat` as its element type
+  (`[1, m]` instead of `[2, m]` — the mean helper's input-shape assert
+  aborts loudly at run time), and (b) cannot render a wildcard-typed mask
+  expansion in C (loud `symbolic_occurrences` ICE / gcc failure). Both are
+  PRE-EXISTING host-lane gaps, now the boundary for guarded-program C
+  builds; the runtime-window machinery itself has full C parity on
+  unguarded twins. Needs its own issue.
+- **Checker over-unification of movement chains** (a direct-return
+  `shrink -> stride` under one sig symbol): the checker's movement typing
+  passes symbolic dims through unchanged, so two different extents share a
+  symbol. Guarded at run time (C abort + eval mismatch error; the eval lane
+  accepts when nothing consumes the symbol — pin
+  `issue_616_over_unified_movement_chain_fails_loud_not_mis_sized`). A
+  precise fix is checker-side movement typing (fresh extents per
+  non-identity axis).
+- **`shape_source_for_axis`'s Reshape arm** still recurses positionally into
+  the input (axis-naive); unsound in principle for rank-shifting reshapes
+  whose downstream symbolic axes trace through it. The oracle paths avoid
+  it (runtime targets return op-declared sources first); tighten when a
+  reproducer appears.
+- **Bound precision**: bound scalars are read through their declared integer
+  type and cast to C `int`; extents beyond `int` range are out of scope
+  (allocation-impossible sizes).
