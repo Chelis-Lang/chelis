@@ -56,7 +56,10 @@ use std::cell::{Cell, RefCell};
 /// measured is well under that, so reserving 128 KiB guarantees the
 /// current frame plus a few more can unwind and allocate the diagnostic
 /// without touching the guard page, while costing negligibly little of an
-/// 8 MiB stack.
+/// 8 MiB stack. (The rustc 1.97 SIGABRT in the small-stack guard tests was
+/// NOT a red-zone shortfall: the tests dropped their 4000-deep chain's
+/// unguarded drop glue on the 1 MiB worker itself; measured empirically,
+/// the guarded walkers still bail comfortably inside 128 KiB.)
 const STACK_RED_ZONE_BYTES: usize = 128 * 1024;
 
 /// Fallback recursion-depth cap used *only* when
@@ -19404,23 +19407,28 @@ mod tests {
     /// flag proves the bail surfaces.
     #[test]
     fn walk_for_tensor_precision_sibling_is_guarded_not_sigsegv() {
+        // Built and dropped on the main thread: the chain's unguarded drop
+        // glue overflows a 1 MiB stack on its own under rustc 1.97 codegen
+        // (see `stack_exhaustion_drains_into_a_located_error`).
+        let program = std::sync::Arc::new(vec![deep_app_chain_node(4000)]);
+        let worker_program = std::sync::Arc::clone(&program);
         let flagged = std::thread::Builder::new()
             .name("sibling-guard-test".to_string())
             // 1 MiB: small enough that a 4000-deep chain trips the byte
             // budget early, well inside the guard, with no risk of overflow.
             .stack_size(1024 * 1024)
-            .spawn(|| {
-                let program = vec![deep_app_chain_node(4000)];
+            .spawn(move || {
                 let _scope = StackExhaustionScope::enter();
                 let mut errors = Vec::new();
                 // Drive ONLY the tensor-precision pass (whose deep walker is
                 // walk_for_tensor_precision), isolating it from infer_expr.
-                validate_tensor_precisions_in_program(&program, &mut errors);
+                validate_tensor_precisions_in_program(&worker_program, &mut errors);
                 STACK_EXHAUSTED.with(|cell| cell.borrow().clone())
             })
             .expect("spawn sibling-guard worker")
             .join()
             .expect("sibling walker aborted (stack overflow?) instead of returning");
+        drop(program);
 
         let (site, _span) = flagged.expect(
             "walk_for_tensor_precision must record a stack-exhaustion bail on a \
@@ -19438,22 +19446,33 @@ mod tests {
     /// error -- never a silent empty result.
     #[test]
     fn stack_exhaustion_drains_into_a_located_error() {
+        // The 4000-deep chain is BUILT and DROPPED on the test's main thread:
+        // its derived drop glue recurses the full chain depth with no guard,
+        // and under rustc 1.97 codegen those frames overflow the worker's
+        // 1 MiB stack on their own (the pre-1.97 frames merely happened to
+        // fit). The worker thread exists to exercise the GUARDED walker on a
+        // small stack; the unguarded collateral must not share it.
+        // (Production runs construction, walkers, and drops on the
+        // `with_grown_stack` segment, so this is a test-harness concern.)
+        let program = std::sync::Arc::new(vec![deep_app_chain_node(4000)]);
+        let worker_program = std::sync::Arc::clone(&program);
         let errors = std::thread::Builder::new()
             .stack_size(1024 * 1024)
-            .spawn(|| {
-                let program = vec![deep_app_chain_node(4000)];
+            .spawn(move || {
                 let scope = StackExhaustionScope::enter();
                 let mut errors = Vec::new();
-                validate_tensor_precisions_in_program(&program, &mut errors);
+                validate_tensor_precisions_in_program(&worker_program, &mut errors);
                 // Before drain: the precision pass carries no error vector of
                 // its own for the bail, so `errors` may be empty here ...
                 scope.drain_into(&mut errors);
                 // ... but after drain the exhaustion is a hard error.
+                drop(worker_program);
                 errors
             })
             .expect("spawn drain-test worker")
             .join()
             .expect("worker aborted instead of returning");
+        drop(program);
         assert!(
             errors
                 .iter()

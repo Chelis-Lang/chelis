@@ -684,10 +684,7 @@ pub(crate) fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<Stri
         if let Some(prim) = lit_type_prim(body) {
             return as_int_width(prim);
         }
-        match referenced_const(body) {
-            Some(next) => current = next.to_string(),
-            None => return None,
-        }
+        current = referenced_const(body)?.to_string();
     }
 }
 
