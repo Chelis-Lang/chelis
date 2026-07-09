@@ -99,10 +99,36 @@ integer scalars) and `Sym` is legal only in reshape targets.
     honor `shape_deps`; the Sum adjoint's restore Expand records the forward
     input as its shape source.
 
+## 2b. Red-team round (fresh-context subagent, executed per CLAUDE.md)
+
+Two findings, both fixed on the branch:
+
+1. **CRITICAL (silent mis-size)**: a multi-axis shrink mixing a runtime axis
+   with a literal-bounded axis returned a wrong, unguarded C tensor while
+   both lanes exited 0. `infer_shrink_app` collapsed EVERY axis to a
+   wildcard when any bound was non-literal; unification filled the runtime
+   axis from the sibling literal axis and the C backend baked it. Fixed by
+   per-axis inference (shrink/pad/stride) plus a backend
+   static-extent-vs-runtime-extent abort guard on every runtime axis
+   (defense in depth against future checker imprecision). Oracles:
+   `issue_616_multi_axis_runtime_shrink_matches_c` / `..._pad_...` /
+   `issue_616_literal_axis_still_checked_beside_runtime_axis`.
+2. **MAJOR (grad-to-C ICE)**: grad of a runtime shrink feeding a reduction
+   directly had no C declaration source for the backward restore `Expand`.
+   An Expand with an ANONYMOUS size and a positionally-aligned shape-dep is
+   now op-declared and emitted from the dep's actual shape; real-symbol
+   Form-3 broadcasts are excluded (their dep has a different axis layout).
+   Oracle: `issue_616_runtime_shrink_grad_through_reduction_matches_c`.
+
+The same machinery gave the guarded completion oracle full **gradient**
+eval-vs-C parity (the compiled binary prints `[0.5, 0.5, 0.5, 0.5]`; the C
+leg is part of the oracle test now).
+
 ## 3. Executable oracles
 
 - `issue_368_grad_concat_windows.rs::issue_368_runtime_symbolic_window_grad_is_half_everywhere`
-  — THE completion oracle (analytic + FD + forward parity, eval lane).
+  — THE completion oracle (analytic + FD + forward parity in the eval lane,
+  plus gradient eval-vs-C parity of the compiled binary).
 - `issue_616_runtime_movement_c_parity.rs` — runtime shrink/stride forward
   eval-vs-C parity, one C binary across input lengths, the guarded
   over-unified degenerate (loud abort, never mis-sized), zero-size-axis and
@@ -124,14 +150,12 @@ integer scalars) and `Sym` is legal only in reshape targets.
   `prod_reduce_adjoint_symbolic_reduced_axis_fails_loud`.
 - **Runtime (node-valued) stride STEP** has no structural adjoint (a
   runtime-extent axis insertion); loud expect in the stride adjoint.
-- **Guarded (`if`/`fail`) programs through `chelis build`** route via the
-  host-program lane, which (a) types a list `concat` as its element type
-  (`[1, m]` instead of `[2, m]` — the mean helper's input-shape assert
-  aborts loudly at run time), and (b) cannot render a wildcard-typed mask
-  expansion in C (loud `symbolic_occurrences` ICE / gcc failure). Both are
-  PRE-EXISTING host-lane gaps, now the boundary for guarded-program C
-  builds; the runtime-window machinery itself has full C parity on
-  unguarded twins. Needs its own issue.
+- **Guarded (`if`/`fail`) FORWARD programs through `chelis build`** route
+  via the host-program lane, where the checker types a list `concat` as its
+  element type (`[1, m]` instead of `[2, m]`); the compiled binary aborts
+  loudly at the runtime-dim equality guard. A PRE-EXISTING host-lane typing
+  gap; the guarded GRADIENT path (the oracle) and unguarded forward twins
+  have full C parity. Needs its own issue.
 - **Checker over-unification of movement chains** (a direct-return
   `shrink -> stride` under one sig symbol): the checker's movement typing
   passes symbolic dims through unchanged, so two different extents share a
