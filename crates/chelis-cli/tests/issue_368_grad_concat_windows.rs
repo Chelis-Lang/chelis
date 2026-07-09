@@ -467,8 +467,8 @@ out = loss(to_tensor([{literal}]))\n"
     // mask arithmetic) builds and runs through `chelis build --target c`,
     // producing the same [0.5, 0.5, 0.5, 0.5]. (The guarded FORWARD build
     // routes through the host-program lane and stays loudly blocked on the
-    // pre-existing list-concat typing gap; the gradient path is the chelis
-    // #616 oracle and has full parity.)
+    // pre-existing list-concat typing gap, chelis#631; the gradient path is
+    // the chelis#616 oracle and has full parity.)
     let dir = tempdir().expect("tempdir");
     let src_path = dir.path().join("symoraclec.ch");
     fs::write(&src_path, grad_source(base_literal)).expect("write source");

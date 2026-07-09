@@ -155,7 +155,7 @@ leg is part of the oracle test now).
   element type (`[1, m]` instead of `[2, m]`); the compiled binary aborts
   loudly at the runtime-dim equality guard. A PRE-EXISTING host-lane typing
   gap; the guarded GRADIENT path (the oracle) and unguarded forward twins
-  have full C parity. Needs its own issue.
+  have full C parity. Tracked as chelis#631.
 - **Checker over-unification of movement chains** (a direct-return
   `shrink -> stride` under one sig symbol): the checker's movement typing
   passes symbolic dims through unchanged, so two different extents share a
@@ -163,7 +163,7 @@ leg is part of the oracle test now).
   accepts when nothing consumes the symbol — pin
   `issue_616_over_unified_movement_chain_fails_loud_not_mis_sized`). A
   precise fix is checker-side movement typing (fresh extents per
-  non-identity axis).
+  non-identity axis). Tracked as chelis#632.
 - **`shape_source_for_axis`'s Reshape arm** still recurses positionally into
   the input (axis-naive); unsound in principle for rank-shifting reshapes
   whose downstream symbolic axes trace through it. The oracle paths avoid

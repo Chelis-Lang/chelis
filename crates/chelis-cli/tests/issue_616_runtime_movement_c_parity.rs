@@ -255,8 +255,8 @@ int main(void) {{
 /// allocate a mis-sized tensor. The eval lane, which computes shapes from
 /// actual values and never consults the over-unified type, accepts and
 /// computes the correct window — the asymmetry is the checker's typing
-/// imprecision, tracked with the movement typing work, and the C guard is
-/// the soundness floor under it.
+/// imprecision, tracked as chelis#632 (fresh extents per non-identity
+/// movement axis), and the C guard is the soundness floor under it.
 #[test]
 fn issue_616_over_unified_movement_chain_fails_loud_not_mis_sized() {
     let input: Vec<f64> = (1..=6).map(|v| v as f64).collect();
