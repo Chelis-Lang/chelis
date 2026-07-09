@@ -4,6 +4,7 @@ members = [
     "crates/chelis-prove",
     "crates/chelis-runtime",
     "crates/chelis-compiler-api",
+    "crates/chelis-version",
     "crates/chelis-python",
     "crates/chelis-shell",
     "crates/chelis-std-bundle",

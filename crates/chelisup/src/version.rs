@@ -1,46 +1,33 @@
 //! Version-string validation.
 //!
-//! Two distinct checks, deliberately kept separate:
+//! The two underlying rules — strict `X.Y.Z` and safe-path-component — live in
+//! the shared [`chelis_version`] leaf crate so the installer and the
+//! `chelis-conformance` auditor cannot diverge on what a valid pin is. This
+//! module keeps the installer-facing wrapper (a `Result` with an actionable
+//! error) and re-exports the security gate:
 //!
-//! - [`validate_install_version`] is strict `X.Y.Z` (digits only),
-//!   because `install` builds a release-asset name from it
-//!   (`chelis-vX.Y.Z-<slug>.tar.gz`) and a non-version there is a user
-//!   typo we should reject loudly, not paper over.
-//! - [`is_safe_path_component`] is the security gate applied to every
-//!   version that gets joined into a filesystem path during resolution.
-//!   A resolved version can come from an attacker-influenceable source
-//!   (a `reef.toml` pin, a `chelis-toolchain` file, the `CHELIS_TOOLCHAIN`
-//!   env), so it must never be allowed to contain a path separator or a
-//!   `..` traversal before it is joined under `~/.chelis/toolchains/`.
+//! - [`validate_install_version`] is strict `X.Y.Z` (digits only), because
+//!   `install` builds a release-asset name from it (`chelis-vX.Y.Z-<slug>.tar.gz`)
+//!   and a non-version there is a user typo we should reject loudly.
+//! - [`is_safe_path_component`] is the security gate applied to every version
+//!   joined into a filesystem path during resolution. A resolved version can
+//!   come from an attacker-influenceable source (a `reef.toml` pin, a
+//!   `chelis-toolchain` file, the `CHELIS_TOOLCHAIN` env), so it must never
+//!   contain a path separator or a `..` traversal before it is joined under
+//!   `~/.chelis/toolchains/`.
+
+pub use chelis_version::is_safe_path_component;
 
 /// True iff `v` is exactly `X.Y.Z` where each component is one or more
 /// ASCII digits. Used by `install` and `default`.
 pub fn validate_install_version(v: &str) -> Result<(), String> {
-    let parts: Vec<&str> = v.split('.').collect();
-    let ok = parts.len() == 3
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
-    if ok {
+    if chelis_version::is_strict_semver(v) {
         Ok(())
     } else {
         Err(format!(
             "malformed version {v:?}; expected X.Y.Z (for example 0.12.0)"
         ))
     }
-}
-
-/// True iff `v` is safe to use as a single path component under the
-/// store root: non-empty, no path separators, no NUL, and not a
-/// `.`/`..` traversal. Intentionally broader than [`validate_install_version`]
-/// so a future channel-style name (for example a date-stamped nightly)
-/// could resolve, while still refusing anything that escapes the store.
-pub fn is_safe_path_component(v: &str) -> bool {
-    if v.is_empty() || v == "." || v == ".." {
-        return false;
-    }
-    !v.chars()
-        .any(|c| c == '/' || c == '\\' || c == '\0' || c.is_control())
 }
 
 #[cfg(test)]

@@ -16,7 +16,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::manifest::{CONTRACT_BASELINE_VERSION, ContractRow, MANIFEST, Tier};
-use crate::{canonical, managed_block, skills};
+use crate::{canonical, managed_block, registry, skills};
 
 /// The version of the toolchain performing the audit — the crate's own build
 /// version, which equals `chelis_compiler_api::COMPILER_VERSION` (both are the
@@ -123,6 +123,9 @@ pub fn audit(root: &Path) -> AuditReport {
 struct Ctx {
     root: PathBuf,
     reef_pin: Option<String>,
+    /// The shell's package name from `reef.toml`, used to look the shell up in
+    /// the registry (its authoritative classification).
+    shell_name: Option<String>,
     agents_md: Option<String>,
     claude_symlink_ok: bool,
     reef_toml: Option<String>,
@@ -135,6 +138,7 @@ impl Ctx {
     fn load(root: &Path) -> Ctx {
         let reef_toml = read_opt(&root.join("reef.toml"));
         let reef_pin = reef_toml.as_deref().and_then(parse_compiler_pin);
+        let shell_name = reef_toml.as_deref().and_then(parse_package_name);
         let agents_md = read_opt(&root.join("AGENTS.md"));
         let claude_symlink_ok = claude_is_symlink_to_agents(root);
         let cargo_toml = read_opt(&root.join("Cargo.toml"));
@@ -142,6 +146,7 @@ impl Ctx {
         Ctx {
             root: root.to_path_buf(),
             reef_pin,
+            shell_name,
             agents_md,
             claude_symlink_ok,
             reef_toml,
@@ -615,7 +620,15 @@ fn check_parity_harness(ctx: &Ctx) -> Check {
 }
 
 fn check_chelis_src(ctx: &Ctx) -> Check {
-    let links = ctx.cargo_toml.as_deref().is_some_and(links_chelis_crates);
+    // Prefer the registry's authoritative `links_chelis_crates` flag when the
+    // shell is known (its name matches a registry entry). The registry is the
+    // source of truth for whether row 18 applies; the Cargo.toml substring scan
+    // is only a fallback for shells not yet registered (freshly scaffolded, new,
+    // or under test).
+    let links = match ctx.shell_name.as_deref().and_then(registry::shell) {
+        Some(entry) => entry.links_chelis_crates,
+        None => ctx.cargo_toml.as_deref().is_some_and(links_chelis_crates),
+    };
     if !links {
         return (
             Verdict::Na,
@@ -757,9 +770,28 @@ fn claude_is_symlink_to_agents(root: &Path) -> bool {
 /// non-`X.Y.Z`, pre-release) must never audit green, or conform would bless a
 /// toolchain the shim cannot resolve.
 pub fn parse_compiler_pin(toml: &str) -> Option<String> {
-    // Lines before the first `[header]` are the root table; `[package]` is the
-    // canonical home. Any other table is out of scope.
-    let mut in_scope = true;
+    let raw = toml_string_field(toml, "compiler")?;
+    // Require the exact-pin leading `=` (conform is stricter than the shim
+    // here) and a version the installer can actually fetch.
+    let ver = raw.strip_prefix('=')?;
+    is_installable_version(ver).then(|| format!("={ver}"))
+}
+
+/// Parse the shell's package `name` from `reef.toml` (root or `[package]`),
+/// used to look the shell up in the registry.
+fn parse_package_name(toml: &str) -> Option<String> {
+    toml_string_field(toml, "name")
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
+/// Read a string field `key` from the root or `[package]` table of `toml`,
+/// returning the raw (unquoted) value. A same-named key under any other table
+/// is ignored — this reproduces the section scoping the chelisup shim's
+/// TOML-based resolver applies (`package.compiler` with a root-table fallback),
+/// without pulling in a TOML dependency.
+fn toml_string_field<'a>(toml: &'a str, key: &str) -> Option<&'a str> {
+    let mut in_scope = true; // root table, before the first `[header]`
     for line in toml.lines() {
         let t = line.trim();
         if let Some(header) = t.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
@@ -769,41 +801,29 @@ pub fn parse_compiler_pin(toml: &str) -> Option<String> {
         if !in_scope {
             continue;
         }
-        let Some(rest) = t.strip_prefix("compiler") else {
+        let Some(rest) = t.strip_prefix(key) else {
             continue;
         };
-        // Must be the `compiler` key itself, not `compiler_extra`/`compiler-x`.
-        let rest = rest.trim_start();
-        let Some(rest) = rest.strip_prefix('=') else {
+        // The key itself, not `<key>_extra`/`<key>-x`: next non-space is `=`.
+        let Some(rest) = rest.trim_start().strip_prefix('=') else {
             continue;
         };
         let Some(rest) = rest.trim_start().strip_prefix('"') else {
             continue;
         };
-        let Some(end) = rest.find('"') else {
-            continue;
-        };
-        if let Some(ver) = rest[..end].strip_prefix('=')
-            && is_installable_version(ver)
-        {
-            return Some(format!("={ver}"));
-        }
+        let end = rest.find('"')?;
+        return Some(&rest[..end]);
     }
     None
 }
 
-/// Whether `v` is a strict `X.Y.Z` version the chelisup installer accepts
-/// (mirrors `chelisup::version::validate_install_version`): exactly three
-/// non-empty numeric components — no `v` prefix, no pre-release suffix, no
-/// fourth component. Keeping this in lockstep with the installer is what stops
-/// conform from blessing a pin the shim cannot resolve.
+/// Whether `v` is a strict `X.Y.Z` version the chelisup installer accepts.
+///
+/// Delegates to the shared [`chelis_version::is_strict_semver`] — the single
+/// source of truth also used by `chelisup::version::validate_install_version`,
+/// so conform can never bless a pin the shim would reject.
 pub fn is_installable_version(v: &str) -> bool {
-    let mut parts = v.split('.');
-    matches!(
-        (parts.next(), parts.next(), parts.next(), parts.next()),
-        (Some(a), Some(b), Some(c), None)
-            if [a, b, c].iter().all(|p| !p.is_empty() && p.bytes().all(|x| x.is_ascii_digit()))
-    )
+    chelis_version::is_strict_semver(v)
 }
 
 fn read_workflows(root: &Path) -> Vec<(String, String)> {
@@ -1058,6 +1078,24 @@ mod tests {
         // A pin the shim cannot install must not parse (no free pass).
         assert_eq!(parse_compiler_pin("compiler = \"=garbage\"\n"), None);
         assert_eq!(parse_compiler_pin("compiler = \"=0.14.0-rc1\"\n"), None);
+    }
+
+    #[test]
+    fn package_name_is_section_scoped() {
+        assert_eq!(
+            parse_package_name("[package]\nname = \"octant\"\n").as_deref(),
+            Some("octant")
+        );
+        // A `name` under another table is not the package name.
+        assert_eq!(
+            parse_package_name("[dependencies]\nname = \"nope\"\n"),
+            None
+        );
+        // Root-table name is accepted.
+        assert_eq!(
+            parse_package_name("name = \"school\"\n").as_deref(),
+            Some("school")
+        );
     }
 
     #[test]

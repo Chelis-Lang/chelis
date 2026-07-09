@@ -229,3 +229,33 @@ fn sync_prunes_extra_skill_content() {
     );
     assert!(audit::audit(&root).ok(), "audit green after prune");
 }
+
+/// M3: row 18 applicability is driven by the registry's authoritative
+/// `links_chelis_crates` flag, not a Cargo.toml guess.
+#[test]
+fn chelis_src_trigger_comes_from_registry() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    // `octant` links chelis crates (registry flag true), so [chelis-src] is
+    // required even though the scaffolded tree has no Cargo path deps.
+    let octant = stamp(tmp.path(), "octant");
+    assert_eq!(
+        verdict_of(&audit::audit(&octant), "chelis-src"),
+        Verdict::Fail,
+        "a registry crate-linking shell without [chelis-src] must fail row 18"
+    );
+
+    // `school` is a Reef shell (registry flag false), so it is NA even when its
+    // Cargo.toml looks like it links crates — the registry overrides the guess.
+    let school = stamp(tmp.path(), "school");
+    std::fs::write(
+        school.join("Cargo.toml"),
+        "[dependencies]\nchelis-ir = { path = \"../chelis/crates/chelis-ir\" }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        verdict_of(&audit::audit(&school), "chelis-src"),
+        Verdict::Na,
+        "the registry's Reef classification must override the Cargo.toml heuristic"
+    );
+}
