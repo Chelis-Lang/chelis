@@ -304,6 +304,9 @@ impl CEmitter {
                     .iter()
                     .any(|(b, a)| !(b.as_lit() == Some(0) && a.as_lit() == Some(0))),
                 RiscOp::Stride { strides } => strides.iter().any(|s| s.as_lit() != Some(1)),
+                // A runtime reshape target's extent comes from its scalar,
+                // never from the input's dims.
+                RiscOp::Reshape { new_shape } => new_shape.iter().any(|d| d.node_input().is_some()),
                 _ => false,
             }
         }
@@ -345,6 +348,16 @@ impl CEmitter {
                     && first_input.output_type.dims.len() == new_ty.dims.len()
                 {
                     new_ty.dims = first_input.output_type.dims.clone();
+                } else if node.inputs.is_empty()
+                    && let Some(shape_source) =
+                        node.shape_deps.first().and_then(|dep| out.get(*dep))
+                    && shape_source.output_type.dims.len() == new_ty.dims.len()
+                {
+                    // chelis#616: an input-less node (a `lower_if` mask Const)
+                    // shaped like a sibling records the relation as a
+                    // shape-dep; tie its wildcard dims to the sibling's
+                    // instead of fragmenting them into a sourceless anon dim.
+                    new_ty.dims = shape_source.output_type.dims.clone();
                 } else {
                     new_ty.dims = new_ty
                         .dims
@@ -521,8 +534,8 @@ impl CEmitter {
             RiscOp::Argmin { axis } => {
                 self.emit_reduce_argcmp(id, *axis, &node.inputs, &node.output_type, dag, false);
             }
-            RiscOp::Reshape { .. } => {
-                self.emit_reshape(id, &node.inputs, &node.output_type, dag);
+            RiscOp::Reshape { new_shape } => {
+                self.emit_reshape(id, new_shape, &node.inputs, &node.output_type, dag);
             }
             RiscOp::Permute { axes } => {
                 self.emit_permute(id, axes, &node.inputs, &node.output_type, dag);
@@ -5018,11 +5031,49 @@ impl CEmitter {
     }
 
     // ---- Reshape ----
-    fn emit_reshape(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType, _dag: &Dag) {
+    fn emit_reshape(
+        &mut self,
+        id: usize,
+        new_shape: &[RtDim],
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: &Dag,
+    ) {
         let a = inputs[0].0;
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
         let dtype = Self::dtype_macro(ty);
+        // chelis#616: a node-valued (runtime) target extent is read from its
+        // rank-0 bound scalar behind a negativity guard, then declared (or
+        // equality-guarded) under the axis's symbolic dim name so the
+        // `shape_literal` allocation below references a real C variable.
+        // `chelis_alloc_view` performs NO numel check of its own, so when any
+        // target is runtime the emitted numel guard below is the only thing
+        // standing between a wrong extent and an out-of-bounds view.
+        let has_runtime_target = new_shape.iter().any(|d| d.node_input().is_some());
+        for (axis, dim) in new_shape.iter().enumerate() {
+            if dim.node_input().is_none() {
+                continue;
+            }
+            let extent = Self::bound_c_expr(dim, inputs, a, axis, dag);
+            self.line(&format!(
+                "if (({extent}) < 0) {{ fprintf(stderr, \"chelis: runtime reshape target \
+                 must be non-negative at node {id} axis {axis}\\n\"); abort(); }}"
+            ));
+            self.emit_runtime_dim_site(id, axis, &extent);
+        }
+        if has_runtime_target {
+            let numel = std::iter::once("(long long)1".to_string())
+                .chain(ty.dims.iter().map(|dim| {
+                    format!("(long long)({})", Self::emit_dim_expr(&DimExpr::from(dim)))
+                }))
+                .collect::<Vec<_>>()
+                .join(" * ");
+            self.line(&format!(
+                "if (({numel}) != (long long)t{a}->size) {{ fprintf(stderr, \"chelis: runtime \
+                 reshape numel mismatch at node {id}\\n\"); abort(); }}"
+            ));
+        }
         self.line(&format!("chelis_tensor *t{id};"));
         self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
         self.indent += 1;

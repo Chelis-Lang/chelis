@@ -53,6 +53,26 @@ fn concrete_shape(ty: &TensorType) -> Result<Vec<usize>, String> {
         .collect()
 }
 
+/// chelis#616: like [`concrete_shape`], but an unbound named dim may resolve
+/// through `runtime_dims` — the mid-evaluation bindings of op-declared
+/// runtime extents (node-valued movement / reshape output dims).
+fn concrete_shape_with(
+    ty: &TensorType,
+    runtime_dims: &HashMap<String, usize>,
+) -> Result<Vec<usize>, String> {
+    ty.dims
+        .iter()
+        .map(|dim| match dim {
+            DimInfo::Lit(n) => Ok(*n),
+            DimInfo::Named(_, Some(n)) => Ok(*n),
+            DimInfo::Named(name, None) => runtime_dims
+                .get(name)
+                .copied()
+                .ok_or_else(|| format!("cannot evaluate symbolic dimension `{name}`")),
+        })
+        .collect()
+}
+
 fn default_value(ty: &TensorType) -> TensorValue {
     let shape = concrete_shape(ty).unwrap_or_default();
     TensorValue {
@@ -1269,6 +1289,10 @@ fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
         live[id.0] = true;
         if let Some(node) = dag.get(id) {
             stack.extend(node.inputs.iter().copied());
+            // chelis#616: a runtime-dim declarer kept via `shape_deps` must
+            // actually EVALUATE so the mid-evaluation binding sees its
+            // extent (the consumer reads the dim, not the value).
+            stack.extend(node.shape_deps.iter().copied());
         }
     }
     live
@@ -1355,8 +1379,10 @@ where
         &symbolic_dim_load_inputs,
         &mut load_input,
     )?;
+    let mut prebound_dims: HashMap<String, usize> = HashMap::new();
     let bound_dag = if needs_symbolic_binding {
         let bindings = infer_symbolic_bindings_from_inputs(dag, &resolved_inputs)?;
+        prebound_dims = bindings.clone();
         let bound = bind_symbolic_dims(dag, &bindings)?;
         // chelis#523: `verify` (grad.rs, before eval) runs BEFORE binding, so
         // its C10 shrink/stride bound checks are SKIPPED on symbolic axes
@@ -1379,6 +1405,14 @@ where
 
     let mut values: HashMap<NodeId, TensorValue> = HashMap::new();
 
+    // chelis#616: op-declared runtime dims (node-valued movement / reshape
+    // output extents) have no pre-eval binding; each binds to its actual
+    // extent when its declaring node evaluates, seeded with the Load-bound
+    // dims so a declared-vs-computed disagreement errs loudly (the eval
+    // mirror of the C backend's runtime equality-abort guard).
+    let op_declared_axes = crate::dag::op_declared_axes_by_node(&bound_dag);
+    let mut runtime_dims = prebound_dims;
+
     for node in bound_dag.nodes() {
         if let Some(mask) = live
             && !mask[node.id.0]
@@ -1388,14 +1422,16 @@ where
 
         let value = match &node.op {
             RiscOp::Const { value } => {
-                let shape = concrete_shape(&node.output_type).unwrap_or_default();
+                let shape =
+                    concrete_shape_with(&node.output_type, &runtime_dims).unwrap_or_default();
                 TensorValue {
                     data: vec![*value; numel(&shape)],
                     shape,
                 }
             }
             RiscOp::ConstTensor { data } => {
-                let shape = concrete_shape(&node.output_type).unwrap_or_default();
+                let shape =
+                    concrete_shape_with(&node.output_type, &runtime_dims).unwrap_or_default();
                 TensorValue {
                     data: data.clone(),
                     shape,
@@ -1571,15 +1607,33 @@ where
                         }
                     })
                     .collect::<Result<_, _>>()?;
-                reshape(&values[&node.inputs[0]], shape)
+                // chelis#616: with runtime target extents the numel invariant
+                // is only checkable here — report a clean error (mirrored by
+                // the C backend's runtime numel abort), never a panic.
+                let input = &values[&node.inputs[0]];
+                let expected: usize = shape.iter().product();
+                if expected != input.data.len() {
+                    return Err(format!(
+                        "reshape at node {}: target shape {:?} has {} elements but the \
+                         input has {}",
+                        node.id.0,
+                        shape,
+                        expected,
+                        input.data.len()
+                    ));
+                }
+                reshape(input, shape)
             }
             RiscOp::Permute { axes } => permute(&values[&node.inputs[0]], axes),
             RiscOp::Expand { axis, size } => expand(
                 &values[&node.inputs[0]],
                 *axis,
-                size.as_concrete()
-                    .expect("symbolic expands must be rebound before evaluation"),
-                concrete_shape(&node.output_type)?,
+                // chelis#616: a symbolic size surviving `bind_symbolic_dims`
+                // is an op-declared runtime dim; resolve it (loudly) from the
+                // mid-evaluation bindings.
+                size.evaluate(&runtime_dims)
+                    .map_err(|e| format!("expand at node {}: {e}", node.id.0))?,
+                concrete_shape_with(&node.output_type, &runtime_dims)?,
             ),
             RiscOp::OneHot { vocab } => one_hot(&values[&node.inputs[0]], *vocab),
             RiscOp::Pad { padding, fill } => {
@@ -1771,6 +1825,34 @@ where
                 *axis,
             ),
         };
+        // chelis#616: bind this node's op-declared runtime dims from the
+        // value's actual extents. A disagreement with an existing binding
+        // (Load-bound or an earlier declarer for the same symbol) is a real
+        // shape error and must err loudly, mirroring the C runtime guard.
+        if let Some(axes) = op_declared_axes.get(&node.id) {
+            for (symbol, axis) in axes {
+                let extent = *value.shape.get(*axis).ok_or_else(|| {
+                    format!(
+                        "runtime dim `{symbol}`: node {} produced rank {} but axis {axis} \
+                         was expected",
+                        node.id.0,
+                        value.shape.len()
+                    )
+                })?;
+                match runtime_dims.get(symbol) {
+                    Some(previous) if *previous != extent => {
+                        return Err(format!(
+                            "runtime dim `{symbol}` mismatch: node {} axis {axis} computed \
+                             {extent}, but an earlier declaration bound {previous}",
+                            node.id.0
+                        ));
+                    }
+                    _ => {
+                        runtime_dims.insert(symbol.clone(), extent);
+                    }
+                }
+            }
+        }
         values.insert(node.id, value);
     }
 

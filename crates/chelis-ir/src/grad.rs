@@ -459,6 +459,12 @@ fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<Grad
         dag.add_root(grad);
     }
 
+    // chelis#616: a backward node may reference an op-declared runtime dim
+    // (e.g. the Sum adjoint's Expand over a runtime reshape extent) whose
+    // declaring forward node's VALUE is otherwise dead. Record shape-deps so
+    // the pruning below keeps each declarer and its bound-scalar chain.
+    crate::dag::record_runtime_dim_shape_deps(&mut dag);
+
     let (dag, output_node, grad_nodes) = prune_to_requested_outputs(&dag, output, &grad_nodes);
 
     let verify_errors = crate::verify::verify(&dag);
@@ -502,6 +508,12 @@ fn prune_to_requested_outputs(
         if live[i] {
             for &input in &dag.nodes()[i].inputs {
                 live[input.0] = true;
+            }
+            // chelis#384/#397/#616: a shape-only dep (a Form-3 `expand`
+            // source or a runtime-dim declarer) keeps its source alive; the
+            // consumer needs the extent even though it never reads the value.
+            for &dep in &dag.nodes()[i].shape_deps {
+                live[dep.0] = true;
             }
         }
     }

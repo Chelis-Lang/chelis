@@ -865,15 +865,24 @@ pub fn lower_mean(
     // concrete shape from the bound `output_type`. This carries the
     // operand's extent instead of demanding a concrete one in IR lowering.
     let divisor = match dim_size(ty, axis) {
-        Some(dim_size_val) => add_synth(
-            dag,
-            RiscOp::Const {
-                value: dim_size_val as f64,
-            },
-            vec![],
-            red_ty.clone(),
-            parent_span,
-        ),
+        Some(dim_size_val) => {
+            let count = add_synth(
+                dag,
+                RiscOp::Const {
+                    value: dim_size_val as f64,
+                },
+                vec![],
+                red_ty.clone(),
+                parent_span,
+            );
+            // chelis#616: the count Const is shaped like the reduced sum but
+            // has no input edge carrying that relation; record it as a
+            // shape-dep so the C backend's anon-dim renaming ties the two
+            // (instead of fragmenting the Const's wildcard dim into a fresh
+            // sourceless `_anon_dim_*`).
+            dag.add_shape_dep(count, sum_node);
+            count
+        }
         None => {
             // ones shaped exactly like the operand `x` (same symbolic dims).
             let ones = add_synth(
@@ -883,6 +892,7 @@ pub fn lower_mean(
                 ty.clone(),
                 parent_span,
             );
+            dag.add_shape_dep(ones, x);
             // sum the ones over `axis` -> the runtime extent, reduced shape.
             add_synth(
                 dag,

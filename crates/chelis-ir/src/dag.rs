@@ -251,6 +251,31 @@ impl DimExpr {
         }
     }
 
+    /// chelis#616: like [`Self::bind`], but a symbol in `exempt` (an
+    /// op-declared runtime dim, whose value does not exist until its owning
+    /// op evaluates) stays symbolic instead of raising the loud
+    /// missing-binding error. The evaluator resolves it mid-evaluation.
+    pub fn bind_except(
+        &self,
+        bindings: &HashMap<String, usize>,
+        exempt: &HashSet<String>,
+    ) -> Result<Self, String> {
+        match self {
+            Self::Sym(name) if exempt.contains(name) && !bindings.contains_key(name) => {
+                Ok(Self::Sym(name.clone()))
+            }
+            Self::Mul(lhs, rhs) => Ok(Self::Mul(
+                Box::new(lhs.bind_except(bindings, exempt)?),
+                Box::new(rhs.bind_except(bindings, exempt)?),
+            )),
+            Self::Div(lhs, rhs) => Ok(Self::Div(
+                Box::new(lhs.bind_except(bindings, exempt)?),
+                Box::new(rhs.bind_except(bindings, exempt)?),
+            )),
+            other => other.bind(bindings),
+        }
+    }
+
     pub fn normalized_key(&self) -> DimExprKey {
         match self {
             Self::Concrete(value) => DimExprKey::Concrete(*value),
@@ -1719,30 +1744,43 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
 }
 
 /// chelis#616: the output axes of `node` whose symbolic dim is sized at RUN
-/// TIME by the op itself — a movement op axis with a node-valued bound, which
-/// [`shape_source_for_axis`] deliberately refuses to trace to a Load (the
-/// extent is fresh, not the input axis's runtime dim). Each returned
+/// TIME by the op itself — a movement op axis with a non-identity bound,
+/// which [`shape_source_for_axis`] deliberately refuses to trace to a Load
+/// (the extent is fresh, not the input axis's runtime dim), or a `Reshape`
+/// axis whose target is a node-valued (`RtDim::Node`) extent. Each returned
 /// `(symbol, axis)` pair becomes an [`SymbolicDimSource::OpDeclared`]
 /// occurrence: the C emitter declares (or equality-guards) the dim inline at
 /// the op and the eval lane resolves it from actual values.
 fn op_declared_output_axes(dag: &Dag, node: &DagNode) -> Vec<(String, usize)> {
-    if !matches!(
-        node.op,
-        RiscOp::Shrink { .. } | RiscOp::Stride { .. } | RiscOp::Pad { .. }
-    ) {
-        return Vec::new();
+    match &node.op {
+        RiscOp::Shrink { .. } | RiscOp::Stride { .. } | RiscOp::Pad { .. } => node
+            .output_type
+            .dims
+            .iter()
+            .enumerate()
+            .filter_map(|(axis, dim)| match dim {
+                DimInfo::Named(symbol, None)
+                    if shape_source_for_axis(dag, node.id, axis).is_none() =>
+                {
+                    Some((symbol.clone(), axis))
+                }
+                _ => None,
+            })
+            .collect(),
+        RiscOp::Reshape { new_shape } => node
+            .output_type
+            .dims
+            .iter()
+            .enumerate()
+            .filter_map(|(axis, dim)| match (dim, new_shape.get(axis)) {
+                (DimInfo::Named(symbol, None), Some(RtDim::Node(_))) => {
+                    Some((symbol.clone(), axis))
+                }
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
     }
-    node.output_type
-        .dims
-        .iter()
-        .enumerate()
-        .filter_map(|(axis, dim)| match dim {
-            DimInfo::Named(symbol, None) if shape_source_for_axis(dag, node.id, axis).is_none() => {
-                Some((symbol.clone(), axis))
-            }
-            _ => None,
-        })
-        .collect()
 }
 
 /// chelis#616: every symbolic dim name that is op-declared somewhere in the
@@ -1755,6 +1793,63 @@ pub fn op_declared_dim_names(dag: &Dag) -> HashSet<String> {
         .flat_map(|node| op_declared_output_axes(dag, node))
         .map(|(symbol, _)| symbol)
         .collect()
+}
+
+/// chelis#616: per-node op-declared runtime dims (see
+/// [`op_declared_output_axes`]), for the evaluator's mid-evaluation binding:
+/// when the declaring node's value is computed, each `(symbol, axis)` binds
+/// the symbol to the value's actual extent on that axis.
+pub(crate) fn op_declared_axes_by_node(dag: &Dag) -> HashMap<NodeId, Vec<(String, usize)>> {
+    let mut out = HashMap::new();
+    for node in dag.nodes() {
+        let axes = op_declared_output_axes(dag, node);
+        if !axes.is_empty() {
+            out.insert(node.id, axes);
+        }
+    }
+    out
+}
+
+/// chelis#616: add a shape-dep from every node that references an
+/// op-declared runtime dim (in its output dims or op-internal fields) to the
+/// dim's declaring node. DCE and grad's output pruning honor `shape_deps`,
+/// so this keeps the declarer — and, transitively, its bound-scalar chain —
+/// alive for consumers that need the extent at run time even when the
+/// declarer's VALUE is dead (e.g. a backward `Expand` over a runtime reshape
+/// extent whose forward result the gradient never reads).
+pub fn record_runtime_dim_shape_deps(dag: &mut Dag) {
+    let mut declarers: HashMap<String, NodeId> = HashMap::new();
+    for node in dag.nodes() {
+        for (symbol, _) in op_declared_output_axes(dag, node) {
+            declarers.entry(symbol).or_insert(node.id);
+        }
+    }
+    if declarers.is_empty() {
+        return;
+    }
+    let mut deps: Vec<(NodeId, NodeId)> = Vec::new();
+    for node in dag.nodes() {
+        let mut names: Vec<String> = node
+            .output_type
+            .dims
+            .iter()
+            .filter_map(|dim| match dim {
+                DimInfo::Named(name, None) => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        names.extend(op_internal_symbolic_dims(&node.op));
+        for name in names {
+            if let Some(declarer) = declarers.get(&name)
+                && *declarer != node.id
+            {
+                deps.push((node.id, *declarer));
+            }
+        }
+    }
+    for (from, to) in deps {
+        dag.add_shape_dep(from, to);
+    }
 }
 
 /// Hunt for any Load whose type carries `symbol` (bound or unbound) and
@@ -2016,7 +2111,10 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
         let op = match &node.op {
             RiscOp::Expand { axis, size } => RiscOp::Expand {
                 axis: *axis,
-                size: size.bind(bindings)?,
+                // chelis#616: an op-declared size (e.g. the Sum adjoint's
+                // Expand over a runtime reshape extent) resolves during
+                // evaluation, not here.
+                size: size.bind_except(bindings, &op_declared)?,
             },
             RiscOp::Reshape { new_shape } => RiscOp::Reshape {
                 new_shape: new_shape

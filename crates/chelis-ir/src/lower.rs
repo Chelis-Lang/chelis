@@ -7423,21 +7423,28 @@ impl LowerCtx {
                 // a concrete `Lit` when the operand axis is static and to a
                 // Load-carried `Named` (kept live via a `shape_dep`) when
                 // symbolic, so the dim traces to a declaring input either way.
-                let (new_shape, shape_srcs) = if args.len() >= 2 {
-                    self.extract_reshape_dim_list(&args[1])
-                        .unwrap_or_else(|| (ty.dims.clone(), Vec::new()))
+                let mut inputs = vec![x];
+                let fallback = || {
+                    (
+                        ty.dims.iter().map(RtDim::from_dim_info).collect(),
+                        ty.dims.clone(),
+                        Vec::new(),
+                    )
+                };
+                let (new_shape, ty_dims, shape_srcs) = if args.len() >= 2 {
+                    let checker_dims = ty.dims.clone();
+                    self.extract_reshape_dim_list(&args[1], &checker_dims, &mut inputs)
+                        .unwrap_or_else(fallback)
                 } else {
-                    (ty.dims.clone(), Vec::new())
+                    fallback()
                 };
                 let out_ty = TensorType {
-                    dims: new_shape.clone(),
+                    dims: ty_dims,
                     precision: ty.precision,
                 };
                 let reshape_id = self.dag.add_node(
-                    RiscOp::Reshape {
-                        new_shape: new_shape.iter().map(RtDim::from_dim_info).collect(),
-                    },
-                    vec![x],
+                    RiscOp::Reshape { new_shape },
+                    inputs,
                     out_ty,
                     self.current_span_id.clone(),
                 );
@@ -9193,25 +9200,42 @@ impl LowerCtx {
     /// chelis#513 gap 1: a `shape(operand, axis)`-derived reshape target dim
     /// (directly or through the `let k = shape(x, 0); reshape(&x, [k, 1])`
     /// indirection) is resolved to the operand's declaring source dim instead
-    /// of a bare `Named(name, None)` symbol. Returns the dims plus the lowered
-    /// source nodes to record as `shape_dep`s so the declaring input survives
-    /// DCE. A static operand axis folds to `Lit`; a symbolic one becomes a
-    /// `Load`-carried `Named` that `symbolic_occurrences` can trace, closing
-    /// the reshape/reduce backward `Expand`/`Sum` symbolic-dim ICE.
-    fn extract_reshape_dim_list(&mut self, expr: &Expr) -> Option<(Vec<DimInfo>, Vec<NodeId>)> {
+    /// of a bare `Named(name, None)` symbol. Returns the op target dims, the
+    /// output-type dims, and the lowered source nodes to record as
+    /// `shape_dep`s so the declaring input survives DCE. A static operand
+    /// axis folds to `Lit`; a symbolic one becomes a `Load`-carried `Named`
+    /// that `symbolic_occurrences` can trace, closing the reshape/reduce
+    /// backward `Expand`/`Sum` symbolic-dim ICE.
+    ///
+    /// chelis#616: a target dim that is runtime integer arithmetic over
+    /// `shape()` reads (the former chelis#513 refuse-to-lower arm) or a term
+    /// variable bound to a rank-0 integer scalar (the inlined window count
+    /// `m`) now lowers to a real scalar node appended to `inputs`, referenced
+    /// as `RtDim::Node(slot)` exactly like a movement bound. Its output-type
+    /// dim keeps the checker's symbol for the axis so downstream types keep
+    /// resolving; the eval and C lanes size the axis from the scalar value.
+    fn extract_reshape_dim_list(
+        &mut self,
+        expr: &Expr,
+        checker_dims: &[DimInfo],
+        inputs: &mut Vec<NodeId>,
+    ) -> Option<(Vec<RtDim>, Vec<DimInfo>, Vec<NodeId>)> {
         let elements: Vec<Expr> = collect_cons_chain(expr)?.into_iter().cloned().collect();
-        let mut dims = Vec::with_capacity(elements.len());
+        let mut op_dims = Vec::with_capacity(elements.len());
+        let mut ty_dims = Vec::with_capacity(elements.len());
         let mut srcs = Vec::new();
-        for elem in &elements {
+        for (axis, elem) in elements.iter().enumerate() {
             if let Some(value) = extract_int_for_dim(elem) {
                 if value < 0 {
                     return None;
                 }
-                dims.push(DimInfo::Lit(value as usize));
+                op_dims.push(RtDim::Lit(value as usize));
+                ty_dims.push(DimInfo::Lit(value as usize));
             } else if let Some((dim_expr, src)) = self.dim_expr_from_shape_arg_with_source(elem)
                 && let Some(dim) = Self::dim_info_from_dim_expr(&dim_expr)
             {
-                dims.push(dim);
+                op_dims.push(RtDim::from_dim_info(&dim));
+                ty_dims.push(dim);
                 srcs.push(src);
             } else if let Some(value) = self.fold_shape_derived_static_size(elem) {
                 // chelis#513 gap 3: static integer arithmetic over shape()
@@ -9230,36 +9254,80 @@ impl LowerCtx {
                         elem.span_id().map(ToOwned::to_owned),
                     );
                 }
-                dims.push(DimInfo::Lit(value as usize));
-            } else if self.is_shape_derived_arith_dim(elem) {
-                // chelis#513: the exactness gate refused this shape()-derived
-                // arithmetic target (symbolic dim leaf, negative operand,
-                // non-positive divisor, or int overflow). The wildcard
-                // fallback is NOT safe for this family: under `grad` the
-                // anon dim can bind to a coincidental input extent and the
-                // written target expression is never checked, silently
-                // accepting an ill-formed program (the C lane ICEs on the
-                // same anon dim). Fail loud; forward host evaluation of this
-                // form is unaffected (see `is_shape_derived_arith_dim`).
-                raise_lowering_error(
-                    "reshape target dim is integer arithmetic over shape() reads that cannot \
-                     be folded to an exact static extent (symbolic dim leaf, negative \
-                     operand, non-positive divisor, or int overflow; chelis#513): refusing \
-                     to lower a guessed extent",
-                    Some(elem.span()),
-                    elem.span_id().map(ToOwned::to_owned),
-                );
+                op_dims.push(RtDim::Lit(value as usize));
+                ty_dims.push(DimInfo::Lit(value as usize));
+            } else if self.is_shape_derived_arith_dim(elem) || self.is_runtime_scalar_var(elem) {
+                // chelis#616: lower the runtime target expression to a rank-0
+                // integer scalar node (replacing the chelis#513 loud refusal).
+                // The extent is now checked at run time: the eval lane reads
+                // the scalar and enforces the numel invariant, and the C lane
+                // declares the dim from the scalar behind negativity + numel
+                // abort guards. A non-scalar or non-integer lowering is a
+                // producing-pass bug and stays fail-closed.
+                let node = self.lower_expr_node(elem, "reshape target dim");
+                let node_ty = self
+                    .dag
+                    .get(node)
+                    .map(|n| n.output_type.clone())
+                    .unwrap_or_else(Self::default_type);
+                if !node_ty.dims.is_empty() || !node_ty.precision.is_integer() {
+                    raise_lowering_error(
+                        format!(
+                            "reshape target dim expression must lower to a rank-0 integer \
+                             scalar, got rank {} `{}` (chelis#616)",
+                            node_ty.dims.len(),
+                            node_ty.precision.name()
+                        ),
+                        Some(elem.span()),
+                        elem.span_id().map(ToOwned::to_owned),
+                    );
+                }
+                let slot = inputs.len();
+                inputs.push(node);
+                op_dims.push(RtDim::Node(slot));
+                // The output-type dim keeps the checker's symbol for this
+                // axis (downstream types reference it; the C lane declares it
+                // from the scalar). A wildcard, concrete, or missing checker
+                // dim gets a fresh GENERATED name instead — never a guessed
+                // extent, and never the bare `*`/`""` wildcard (both lanes
+                // need one stable, unique name per runtime extent: the eval
+                // lane binds it from the scalar's value mid-evaluation and
+                // the C lane declares it at the op).
+                ty_dims.push(match checker_dims.get(axis) {
+                    Some(dim @ DimInfo::Named(name, None)) if !name.is_empty() && name != "*" => {
+                        dim.clone()
+                    }
+                    _ => DimInfo::Named(format!("_rt_dim_{}_{axis}", node.0), None),
+                });
             } else if let Some(name) = symbolic_dim_var_name(elem) {
-                dims.push(DimInfo::Named(name, None));
+                op_dims.push(RtDim::Sym(name.clone()));
+                ty_dims.push(DimInfo::Named(name, None));
             } else {
                 return None;
             }
         }
-        if dims.is_empty() {
+        if op_dims.is_empty() {
             None
         } else {
-            Some((dims, srcs))
+            Some((op_dims, ty_dims, srcs))
         }
+    }
+
+    /// chelis#616: whether `expr` is a term variable bound to a rank-0
+    /// integer scalar node (e.g. an inlined fn parameter carrying a runtime
+    /// window count). Such a var in a reshape target position is a runtime
+    /// extent, not a type-level symbolic dim.
+    fn is_runtime_scalar_var(&self, expr: &Expr) -> bool {
+        let Some(name) = symbolic_dim_var_name(expr) else {
+            return false;
+        };
+        matches!(
+            self.bindings.get(&name),
+            Some(LoweredValue::Node(node))
+                if self.dag.get(*node).is_some_and(|n| {
+                    n.output_type.dims.is_empty() && n.output_type.precision.is_integer()
+                })
+        )
     }
 
     /// Extract a list of (usize, usize) pairs from an expression (for
@@ -9855,6 +9923,13 @@ impl LowerCtx {
             out_ty.clone(),
             self.current_span_id.clone(),
         );
+        // chelis#616: `one` is shaped like the branch values, but as a leaf
+        // Const it has no input edge carrying that relation. Record it as a
+        // shape-dep so the C backend's anon-dim renaming can tie the Const's
+        // wildcard dims to the branch's (instead of fragmenting them into a
+        // fresh, sourceless `_anon_dim_*` that `symbolic_occurrences` must
+        // reject) and so the extent source stays alive under DCE.
+        self.dag.add_shape_dep(one, else_node);
         let neg_mask = self.dag.add_node(
             RiscOp::Neg,
             vec![mask],
