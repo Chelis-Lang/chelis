@@ -61,10 +61,22 @@ def planned_skill_copies(root: Path) -> list[tuple[Path, Path]]:
                 f"error: shared skill {skill!r} is not a directory at {src_dir}. "
                 f"Update SHARED_SKILLS (and the Rust mirror) if the skill set changed."
             )
-        for src in sorted(src_dir.rglob("*")):
-            if src.is_file():
-                rel = src.relative_to(src_root)
-                pairs.append((src, dest_root / rel))
+        # Lockstep with the Rust consumer: skills.rs embeds, scaffold.rs
+        # materializes, and audit.rs drift-checks ONLY `SKILL.md`. If this
+        # generator embedded extra files, they would be dead weight the shell
+        # never receives and the audit never checks. Refuse a multi-file skill
+        # until the Rust side is taught to handle it.
+        files = sorted(p for p in src_dir.rglob("*") if p.is_file())
+        skill_md = src_dir / "SKILL.md"
+        if files != [skill_md]:
+            found = [str(p.relative_to(src_dir)) for p in files]
+            raise SystemExit(
+                f"error: shared skill {skill!r} must contain exactly one file, SKILL.md "
+                f"(found {found}). The Rust embed/materialize/audit path only handles "
+                f"SKILL.md; teach skills.rs, scaffold.rs, and audit.rs about the extra "
+                f"files before this generator may embed them."
+            )
+        pairs.append((skill_md, dest_root / skill_md.relative_to(src_root)))
     return pairs
 
 

@@ -76,9 +76,55 @@ pub fn materialize_skills(root: &Path) -> Result<(), String> {
     manifest.push_str("]\n");
     write(root, "agent-skills/UPSTREAM.toml", &manifest)?;
 
+    // agent-skills/ is fully toolchain-owned, so remove anything the pinned set
+    // did not just write — a forked/renamed skill dir, an extra file inside a
+    // skill dir, or a stray top-level file. Without this, `sync` would leave
+    // drift that `conform audit`'s reverse-direction check then fails on.
+    prune_skill_drift(root)?;
+
     symlink_dir(root, "../agent-skills", ".claude/skills")?;
     symlink_dir(root, "../agent-skills", ".codex/skills")?;
     Ok(())
+}
+
+/// Remove any content under `agent-skills/` that the pinned embedded set does
+/// not own: skill dirs outside [`skills::SHARED_SKILLS`], files other than
+/// `SKILL.md` inside a pinned skill dir, and top-level files other than
+/// `UPSTREAM.toml`.
+fn prune_skill_drift(root: &Path) -> Result<(), String> {
+    let dir = root.join("agent-skills");
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Ok(());
+    };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let path = e.path();
+        if is_dir {
+            if !skills::SHARED_SKILLS.contains(&name.as_str()) {
+                fs::remove_dir_all(&path)
+                    .map_err(|err| format!("remove {}: {err}", path.display()))?;
+            } else if let Ok(inner) = fs::read_dir(&path) {
+                for f in inner.flatten() {
+                    if f.file_name().to_string_lossy() != "SKILL.md" {
+                        remove_path(&f.path())?;
+                    }
+                }
+            }
+        } else if name != "UPSTREAM.toml" {
+            fs::remove_file(&path).map_err(|err| format!("remove {}: {err}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_path(path: &Path) -> Result<(), String> {
+    let res = if path.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    };
+    res.map_err(|e| format!("remove {}: {e}", path.display()))
 }
 
 /// Regenerate every managed block in the shell's documents to `version` (the
@@ -256,6 +302,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          # Full history so `conform bump-check --base origin/main` can resolve
+          # the base pin. The default shallow clone does not fetch origin/main,
+          # which would make the pin-bump guard fail closed.
+          fetch-depth: 0
       - name: Install chelis toolchain
         run: chelisup install {version}
       - name: Conformance audit

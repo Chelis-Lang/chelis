@@ -15,8 +15,15 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::manifest::{ContractRow, MANIFEST, Tier};
-use crate::{managed_block, skills};
+use crate::manifest::{CONTRACT_BASELINE_VERSION, ContractRow, MANIFEST, Tier};
+use crate::{canonical, managed_block, skills};
+
+/// The version of the toolchain performing the audit — the crate's own build
+/// version, which equals `chelis_compiler_api::COMPILER_VERSION` (both are the
+/// workspace version). It is the only version whose canonical bodies this
+/// binary embeds, so a managed block's body can only be compared to canonical
+/// when the block is stamped for this same version (see `check_managed_block`).
+const AUDITOR_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The outcome of one row check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,9 +82,19 @@ impl AuditReport {
             .count()
     }
 
-    /// True iff there are no hard failures.
+    /// True iff there are no hard failures **and** the audit actually
+    /// evaluated something. An all-`Na`/`Manual` report (e.g. a pin below the
+    /// contract baseline that would otherwise gate every row out) evaluated
+    /// nothing and must not read as conformant.
     pub fn ok(&self) -> bool {
-        self.must_failures() == 0
+        self.must_failures() == 0 && self.evaluated_any()
+    }
+
+    /// Whether at least one row reached a mechanical `Pass`/`Fail` verdict.
+    pub fn evaluated_any(&self) -> bool {
+        self.rows
+            .iter()
+            .any(|r| matches!(r.verdict, Verdict::Pass | Verdict::Fail))
     }
 }
 
@@ -86,7 +103,7 @@ impl AuditReport {
 /// the row check emits `Na` when the trigger is absent, so treating them as MUST
 /// here is correct.
 fn tier_is_must(tier: Tier) -> bool {
-    !matches!(tier, Tier::Should)
+    tier.gates()
 }
 
 // ---------------------------------------------------------------- entry point
@@ -143,10 +160,12 @@ impl Ctx {
 }
 
 fn check_row(row: &ContractRow, ctx: &Ctx) -> RowResult {
-    // since_version gating: if the shell's pin predates the row, it does not yet
-    // apply (canary-safe).
+    // since_version gating: a stale shell is spared rows added *after* its pin
+    // (canary-safe), but never the baseline rows. The pin is floored at the
+    // contract baseline, so a pre-contract pin (e.g. `=0.1.0`) cannot gate the
+    // whole table out to `Na` and report a bare shell as conformant.
     if let Some(pin) = &ctx.reef_pin
-        && !version_ge(pin, row.since_version)
+        && !version_ge(&gate_version(pin), row.since_version)
     {
         return result(
             row,
@@ -219,6 +238,16 @@ fn fail(diag: impl Into<String>, fix: impl Into<String>) -> Check {
     (Verdict::Fail, diag.into(), fix.into())
 }
 
+/// Whether `text` has a markdown heading line (any level) containing `needle`.
+/// Stricter than a bare `contains`, so the section name merely appearing in
+/// prose or a code span does not satisfy a "has this section" check.
+fn has_heading(text: &str, needle: &str) -> bool {
+    text.lines().any(|l| {
+        let t = l.trim_start();
+        t.starts_with('#') && t.contains(needle)
+    })
+}
+
 // ---------------------------------------------------------------- row checks
 
 fn check_agents_md(ctx: &Ctx) -> Check {
@@ -231,7 +260,7 @@ fn check_agents_md(ctx: &Ctx) -> Check {
             "ln -sf AGENTS.md CLAUDE.md",
         );
     }
-    if !agents.contains("Repo Identity") {
+    if !has_heading(agents, "Repo Identity") {
         return fail(
             "AGENTS.md lacks a Repo Identity section",
             "add a Repo Identity section stating the shell's intent",
@@ -279,6 +308,13 @@ fn check_workflow_env_pins(ctx: &Ctx) -> Check {
             && t.trim_start_matches('v') != bare
         {
             mismatches.push(format!("{name}: CHELIS_TAG={t} != v{bare}"));
+        }
+        // A literal `chelisup install <ver>` is a pin location too — an env var
+        // is not the only way a workflow installs a version.
+        for v in extract_chelisup_install_versions(body) {
+            if v.trim_start_matches('v') != bare {
+                mismatches.push(format!("{name}: chelisup install {v} != {bare}"));
+            }
         }
     }
     if !mismatches.is_empty() {
@@ -383,7 +419,7 @@ fn check_upstream_bugs(ctx: &Ctx) -> Check {
     let missing: Vec<&str> = required
         .iter()
         .copied()
-        .filter(|s| !bugs.contains(s))
+        .filter(|s| !has_heading(&bugs, s))
         .collect();
     if missing.is_empty() {
         pass()
@@ -411,7 +447,10 @@ fn check_narrowing_coverage(ctx: &Ctx) -> Check {
     let upstream = ctx.read("docs/UPSTREAM_BUGS.md").unwrap_or_default();
     let readme = ctx.read("tests_blocked/README.md").unwrap_or_default();
     let corpus = format!("{blocked_text}\n{upstream}\n{readme}");
-    let mut orphans: Vec<String> = cited.into_iter().filter(|c| !corpus.contains(c)).collect();
+    let mut orphans: Vec<String> = cited
+        .into_iter()
+        .filter(|c| !corpus_covers(&corpus, c))
+        .collect();
     orphans.sort();
     orphans.dedup();
     if orphans.is_empty() {
@@ -487,7 +526,7 @@ fn check_tests_blocked(ctx: &Ctx) -> Check {
 
 fn check_agents_heading(ctx: &Ctx, heading: &str) -> Check {
     match &ctx.agents_md {
-        Some(a) if a.contains(heading) => pass(),
+        Some(a) if has_heading(a, heading) => pass(),
         Some(_) => fail(
             format!("AGENTS.md lacks a {heading} section"),
             format!("add a {heading} section (may be a managed block)"),
@@ -507,6 +546,30 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
             Some(_) => {}
         }
     }
+    // Reverse direction: the shell owns *zero* extra skill content, so an
+    // addition is drift too. Enumerate the on-disk tree and flag any skill dir
+    // outside the pinned set, or any file beyond `SKILL.md` inside a pinned dir
+    // (materialize never creates these, so their presence is a fork/leftover).
+    if let Ok(entries) = std::fs::read_dir(&skills_dir) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if is_dir {
+                if !skills::SHARED_SKILLS.contains(&name.as_str()) {
+                    problems.push(format!("{name}: not a pinned skill (remove)"));
+                } else if let Ok(inner) = std::fs::read_dir(e.path()) {
+                    for f in inner.flatten() {
+                        let fname = f.file_name().to_string_lossy().into_owned();
+                        if fname != "SKILL.md" {
+                            problems.push(format!("{name}/{fname}: unexpected skill file"));
+                        }
+                    }
+                }
+            } else if name != "UPSTREAM.toml" {
+                problems.push(format!("{name}: unexpected file in agent-skills/"));
+            }
+        }
+    }
     if !problems.is_empty() {
         return fail(
             format!(
@@ -516,13 +579,16 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
             "run `chelis reef conform sync` to re-materialize agent-skills/ from the toolchain",
         );
     }
-    // Skill-dir symlinks are a strong signal but optional across tool surfaces;
-    // require at least the .claude/skills symlink into agent-skills/.
-    if !path_is_symlink(&ctx.root.join(".claude/skills")) {
-        return fail(
-            ".claude/skills is not a symlink to agent-skills/",
-            "ln -s ../agent-skills .claude/skills",
-        );
+    // Both tool-surface skill dirs must be symlinks that actually resolve to
+    // `agent-skills/` — a symlink to somewhere else (or a real dir) is not the
+    // materialized-pointer model.
+    for link in [".claude/skills", ".codex/skills"] {
+        if !symlink_targets_agent_skills(&ctx.root.join(link)) {
+            return fail(
+                format!("{link} is not a symlink to agent-skills/"),
+                format!("ln -s ../agent-skills {link}"),
+            );
+        }
     }
     pass()
 }
@@ -549,10 +615,7 @@ fn check_parity_harness(ctx: &Ctx) -> Check {
 }
 
 fn check_chelis_src(ctx: &Ctx) -> Check {
-    let links = ctx
-        .cargo_toml
-        .as_deref()
-        .is_some_and(|c| c.contains("../chelis/crates") || c.contains("../chelis\""));
+    let links = ctx.cargo_toml.as_deref().is_some_and(links_chelis_crates);
     if !links {
         return (
             Verdict::Na,
@@ -569,8 +632,30 @@ fn check_chelis_src(ctx: &Ctx) -> Check {
     }
 }
 
-/// Shared managed-block freshness check: present, stamped to the reef pin, and
-/// untampered + matching nothing-stale (integrity vs its own fence hash).
+/// Heuristic: does this `Cargo.toml` link chelis crates from a local source (a
+/// path/git dep on a `chelis-*` crate, or a `[patch]` onto chelis)? The audit
+/// receives only a path, not the shell name, so it cannot consult the
+/// registry's authoritative `links_chelis_crates` flag — this is a best-effort
+/// trigger, broadened beyond the single `../chelis/crates` spelling to catch
+/// absolute paths and patch sections. A plain registry dep like
+/// `chelis-std = "=0.14.0"` (no `path`/`git`) is deliberately not matched.
+fn links_chelis_crates(cargo_toml: &str) -> bool {
+    if cargo_toml.contains("chelis/crates") || cargo_toml.contains("../chelis\"") {
+        return true;
+    }
+    if cargo_toml.contains("[patch") && cargo_toml.contains("chelis") {
+        return true;
+    }
+    cargo_toml.lines().any(|line| {
+        let l = line.trim_start();
+        (l.starts_with("chelis-") || l.starts_with("\"chelis-"))
+            && (l.contains("path") || l.contains("git"))
+    })
+}
+
+/// Shared managed-block freshness check: present, stamped to the reef pin,
+/// untampered (integrity vs its own fence hash), and — when stamped for the
+/// auditing version — byte-equal to the embedded canonical body.
 fn check_managed_block(ctx: &Ctx, doc: &str, id: &str, file: &str) -> Check {
     let Some(block) = managed_block::find(doc, id) else {
         return fail(
@@ -596,6 +681,25 @@ fn check_managed_block(ctx: &Ctx, doc: &str, id: &str, file: &str) -> Check {
             );
         }
     }
+    // Body must equal the embedded canonical text for this block id. This is
+    // the check that catches a *stale-but-self-consistent* block: `integrity_ok`
+    // only proves the body matches its own fence hash, so a hand-edit that also
+    // recomputes the stamp (or a genuine within-version drift) passes it. We can
+    // only compare against canonical when the block is stamped for the version
+    // this binary embeds; a stale shell audited by a newer HEAD canary
+    // (`block.version != AUDITOR_VERSION`) is spared here — no historical bodies
+    // are embedded — but the version-stamp and integrity checks still apply.
+    if block.version == AUDITOR_VERSION
+        && let Some(canon) = canonical::body(id)
+        && !block.matches_canonical(canon)
+    {
+        return fail(
+            format!(
+                "{file} managed block `{id}` body differs from the canonical upstream text for chelis@{AUDITOR_VERSION}"
+            ),
+            "run `chelis reef conform sync` (do not hand-edit inside the fences)",
+        );
+    }
     pass()
 }
 
@@ -605,10 +709,19 @@ fn read_opt(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
-fn path_is_symlink(path: &Path) -> bool {
-    std::fs::symlink_metadata(path)
+/// Whether `path` is a symlink whose target's final component is
+/// `agent-skills` (i.e. it resolves to the shell's `agent-skills/` dir).
+fn symlink_targets_agent_skills(path: &Path) -> bool {
+    let is_symlink = std::fs::symlink_metadata(path)
         .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if !is_symlink {
+        return false;
+    }
+    std::fs::read_link(path)
+        .ok()
+        .and_then(|t| t.file_name().map(|s| s.to_os_string()))
+        .is_some_and(|name| name == "agent-skills")
 }
 
 /// `CLAUDE.md` must be a symlink whose target is (or resolves to) `AGENTS.md`.
@@ -626,22 +739,71 @@ fn claude_is_symlink_to_agents(root: &Path) -> bool {
     }
 }
 
-/// Parse a `compiler = "=X.Y.Z"` pin (returns the value including the leading
-/// `=`, e.g. `"=0.14.0"`).
+/// Parse the exact `compiler = "=X.Y.Z"` pin from `reef.toml`, returning the
+/// value including the leading `=` (e.g. `"=0.14.0"`).
+///
+/// This is kept in lockstep with the chelisup shim's resolver
+/// (`chelisup::resolve::compiler_pin`) so conformance and the version manager
+/// agree on *which* value is the pin and *whether it is usable*:
+/// - only the top-level or `[package]` `compiler` key is read — a `compiler`
+///   under some other table is ignored, exactly as the shim reads
+///   `package.compiler` with a root-table fallback;
+/// - the version must be a strict `X.Y.Z` the shim can actually install
+///   ([`is_installable_version`], mirroring `validate_install_version`).
+///
+/// Conformance is *stricter* than the shim on one point — it requires the
+/// exact-pin leading `=`, because a conformant shell must pin exactly — but it
+/// is never *looser*: a value the shim would reject (unsafe path component,
+/// non-`X.Y.Z`, pre-release) must never audit green, or conform would bless a
+/// toolchain the shim cannot resolve.
 pub fn parse_compiler_pin(toml: &str) -> Option<String> {
+    // Lines before the first `[header]` are the root table; `[package]` is the
+    // canonical home. Any other table is out of scope.
+    let mut in_scope = true;
     for line in toml.lines() {
         let t = line.trim();
-        if let Some(rest) = t.strip_prefix("compiler") {
-            let rest = rest.trim_start().strip_prefix('=')?.trim_start();
-            let rest = rest.strip_prefix('"')?;
-            let end = rest.find('"')?;
-            let val = &rest[..end];
-            if val.starts_with('=') {
-                return Some(val.to_string());
-            }
+        if let Some(header) = t.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+            in_scope = header.trim() == "package";
+            continue;
+        }
+        if !in_scope {
+            continue;
+        }
+        let Some(rest) = t.strip_prefix("compiler") else {
+            continue;
+        };
+        // Must be the `compiler` key itself, not `compiler_extra`/`compiler-x`.
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix('=') else {
+            continue;
+        };
+        let Some(rest) = rest.trim_start().strip_prefix('"') else {
+            continue;
+        };
+        let Some(end) = rest.find('"') else {
+            continue;
+        };
+        if let Some(ver) = rest[..end].strip_prefix('=')
+            && is_installable_version(ver)
+        {
+            return Some(format!("={ver}"));
         }
     }
     None
+}
+
+/// Whether `v` is a strict `X.Y.Z` version the chelisup installer accepts
+/// (mirrors `chelisup::version::validate_install_version`): exactly three
+/// non-empty numeric components — no `v` prefix, no pre-release suffix, no
+/// fourth component. Keeping this in lockstep with the installer is what stops
+/// conform from blessing a pin the shim cannot resolve.
+pub fn is_installable_version(v: &str) -> bool {
+    let mut parts = v.split('.');
+    matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some(a), Some(b), Some(c), None)
+            if [a, b, c].iter().all(|p| !p.is_empty() && p.bytes().all(|x| x.is_ascii_digit()))
+    )
 }
 
 fn read_workflows(root: &Path) -> Vec<(String, String)> {
@@ -689,6 +851,23 @@ fn extract_env(body: &str, key: &str) -> Option<String> {
     None
 }
 
+/// Extract the version argument of each `chelisup install <ver>` occurrence,
+/// tolerating surrounding quotes. Only tokens that look like a version (start
+/// with a digit or `v`) are returned, so flags like `--force` are ignored.
+fn extract_chelisup_install_versions(body: &str) -> Vec<String> {
+    let needle = "chelisup install ";
+    body.match_indices(needle)
+        .filter_map(|(i, _)| {
+            let rest = body[i + needle.len()..].trim_start_matches(['"', '\'']);
+            let ver: String = rest
+                .chars()
+                .take_while(|c| !c.is_whitespace() && *c != '"' && *c != '\'')
+                .collect();
+            (ver.chars().next()).and_then(|c| (c.is_ascii_digit() || c == 'v').then_some(ver))
+        })
+        .collect()
+}
+
 fn dir_has_ch(dir: &Path) -> bool {
     walk_files(dir).any(|p| p.extension().and_then(|s| s.to_str()) == Some("ch"))
 }
@@ -707,6 +886,18 @@ fn collect_citations_in_dir(dir: &Path) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+/// Whether `corpus` covers `citation` as a whole `chelis#NNN` token — the
+/// digits must not continue past the citation. A bare `corpus.contains` would
+/// let `chelis#293` spuriously "cover" an orphaned `chelis#29`.
+fn corpus_covers(corpus: &str, citation: &str) -> bool {
+    corpus.match_indices(citation).any(|(i, _)| {
+        corpus[i + citation.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_ascii_digit())
+    })
 }
 
 fn extract_citations(text: &str) -> Vec<String> {
@@ -748,10 +939,13 @@ fn walk_files(dir: &Path) -> impl Iterator<Item = PathBuf> {
         if let Ok(entries) = std::fs::read_dir(&d) {
             for e in entries.flatten() {
                 let p = e.path();
-                if p.is_dir() {
-                    stack.push(p);
-                } else {
-                    files.push(p);
+                // Use the entry's own type, which does *not* traverse symlinks,
+                // so a symlinked directory is never descended into. An offline,
+                // hermetic audit must not be loopable by a symlink cycle.
+                match e.file_type() {
+                    Ok(ft) if ft.is_symlink() => {} // neither descend nor read
+                    Ok(ft) if ft.is_dir() => stack.push(p),
+                    _ => files.push(p),
                 }
             }
         }
@@ -759,8 +953,19 @@ fn walk_files(dir: &Path) -> impl Iterator<Item = PathBuf> {
     files.into_iter()
 }
 
-/// `a >= b` on `X.Y.Z` (leading `=`/`v` tolerated; non-digit patch suffixes
-/// truncated).
+/// The pin used for `since_version` gating: the shell's pin, floored at the
+/// contract baseline. Flooring is what stops a pre-baseline pin (e.g. `=0.1.0`)
+/// from gating every baseline row out to `Na` — the whole-audit bypass.
+fn gate_version(pin: &str) -> String {
+    if version_ge(pin, CONTRACT_BASELINE_VERSION) {
+        pin.to_string()
+    } else {
+        CONTRACT_BASELINE_VERSION.to_string()
+    }
+}
+
+/// `a >= b` on `X.Y.Z[-pre]` (leading `=`/`v` tolerated). A pre-release ranks
+/// immediately below its release (`0.14.0-rc1 < 0.14.0`).
 fn version_ge(a: &str, b: &str) -> bool {
     match (parse_semver(a), parse_semver(b)) {
         (Some(a), Some(b)) => a >= b,
@@ -768,7 +973,11 @@ fn version_ge(a: &str, b: &str) -> bool {
     }
 }
 
-fn parse_semver(v: &str) -> Option<(u64, u64, u64)> {
+/// Parse to `(major, minor, patch, release_rank)` where `release_rank` is `1`
+/// for a final release and `0` for a pre-release (`-rc1`, `-alpha`, …), so a
+/// pre-release orders just below its release. Pre-releases are not ordered
+/// among themselves (all rank `0`); that resolution is unneeded for gating.
+fn parse_semver(v: &str) -> Option<(u64, u64, u64, u8)> {
     let v = v.trim().trim_start_matches('=').trim_start_matches('v');
     let mut it = v.split('.');
     let major = it.next()?.parse().ok()?;
@@ -779,7 +988,8 @@ fn parse_semver(v: &str) -> Option<(u64, u64, u64)> {
         .take_while(|c| c.is_ascii_digit())
         .collect();
     let patch = digits.parse().unwrap_or(0);
-    Some((major, minor, patch))
+    let is_release = digits.len() == patch_raw.len();
+    Some((major, minor, patch, u8::from(is_release)))
 }
 
 #[cfg(test)]
@@ -807,6 +1017,64 @@ mod tests {
         assert!(version_ge("=0.14.0", "0.7.0"));
         assert!(!version_ge("0.7.0", "0.14.0"));
         assert!(version_ge("v0.8.1", "0.8.1"));
+    }
+
+    #[test]
+    fn prerelease_orders_below_release() {
+        assert!(version_ge("0.14.0", "0.14.0-rc1"));
+        assert!(!version_ge("0.14.0-rc1", "0.14.0"));
+        assert!(version_ge("0.14.0-rc1", "0.14.0-rc1")); // equal ranks
+    }
+
+    #[test]
+    fn gate_version_floors_at_baseline() {
+        assert_eq!(gate_version("=0.1.0"), CONTRACT_BASELINE_VERSION);
+        assert_eq!(gate_version("=0.14.0"), "=0.14.0");
+        assert_eq!(gate_version("=0.7.0"), "=0.7.0");
+    }
+
+    #[test]
+    fn installable_version_matches_installer_rules() {
+        for good in ["0.12.0", "10.0.255", "0.14.0"] {
+            assert!(is_installable_version(good), "{good} should be installable");
+        }
+        for bad in ["0.13", "1.2.3.4", "v0.1.0", "0.1.0-rc1", "", "abc", "0..0"] {
+            assert!(!is_installable_version(bad), "{bad} must be rejected");
+        }
+    }
+
+    #[test]
+    fn pin_parse_is_section_aware_and_strict() {
+        // A `compiler` under an unrelated table is not the pin.
+        assert_eq!(
+            parse_compiler_pin("[tool.other]\ncompiler = \"=9.9.9\"\n"),
+            None
+        );
+        // Package table is in scope.
+        assert_eq!(
+            parse_compiler_pin("[package]\ncompiler = \"=0.14.0\"\n").as_deref(),
+            Some("=0.14.0")
+        );
+        // A pin the shim cannot install must not parse (no free pass).
+        assert_eq!(parse_compiler_pin("compiler = \"=garbage\"\n"), None);
+        assert_eq!(parse_compiler_pin("compiler = \"=0.14.0-rc1\"\n"), None);
+    }
+
+    #[test]
+    fn corpus_covers_is_whole_token() {
+        assert!(corpus_covers("see chelis#293 here", "chelis#293"));
+        assert!(!corpus_covers("only chelis#293 here", "chelis#29"));
+        assert!(corpus_covers("chelis#29\n", "chelis#29"));
+    }
+
+    #[test]
+    fn chelisup_install_versions_extracted() {
+        let body = "run: chelisup install 0.13.0 --force\n  and chelisup install \"v0.14.0\"\n";
+        assert_eq!(
+            extract_chelisup_install_versions(body),
+            vec!["0.13.0".to_string(), "v0.14.0".to_string()]
+        );
+        assert!(extract_chelisup_install_versions("chelisup install --help").is_empty());
     }
 
     #[test]

@@ -124,3 +124,108 @@ fn stale_managed_block_stamp_fails_row_1() {
         "diag was: {diag}"
     );
 }
+
+/// B2: a managed block whose body is forged (edited *and* re-stamped so the
+/// fence hash matches) at the current version passes integrity + version but
+/// must be caught by the canonical-body comparison.
+#[test]
+fn self_consistent_forked_managed_block_fails() {
+    use chelis_conformance::managed_block;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "forge");
+    let agents = root.join("AGENTS.md");
+    let text = std::fs::read_to_string(&agents).unwrap();
+
+    let block = managed_block::find(&text, "agents-inheritance").unwrap();
+    let (start, end) = block.span;
+    let forged = managed_block::render(
+        "agents-inheritance",
+        VER,
+        "Forged inheritance text that is not the canonical upstream.",
+    );
+    // Sanity: the forgery is self-consistent (would fool integrity_ok alone).
+    let refound = managed_block::find(&forged, "agents-inheritance").unwrap();
+    assert!(refound.integrity_ok() && refound.version == VER);
+
+    std::fs::write(
+        &agents,
+        format!("{}{forged}{}", &text[..start], &text[end..]),
+    )
+    .unwrap();
+
+    let report = audit::audit(&root);
+    assert!(!report.ok(), "a self-consistent fork must fail the audit");
+    assert_eq!(verdict_of(&report, "agents-md"), Verdict::Fail);
+    assert!(diagnostic_of(&report, "agents-md").contains("canonical"));
+}
+
+/// B1: a shell pinning below the contract baseline must not gate every row out
+/// to `Na` and read as conformant.
+#[test]
+fn below_baseline_pin_does_not_pass_empty_shell() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("ancient");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("reef.toml"), "compiler = \"=0.1.0\"\n").unwrap();
+
+    let report = audit::audit(&root);
+    assert!(
+        !report.ok(),
+        "a bare shell pinning below baseline must not audit conformant"
+    );
+    assert!(
+        report.evaluated_any(),
+        "baseline rows must still apply under a floored pin"
+    );
+}
+
+/// M1: an extra skill dir outside the pinned set is drift (additions, not just
+/// edits/deletions, must fail).
+#[test]
+fn extra_skill_dir_fails_row_14() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "extra");
+    std::fs::create_dir_all(root.join("agent-skills/rogue")).unwrap();
+    std::fs::write(root.join("agent-skills/rogue/SKILL.md"), "forked\n").unwrap();
+
+    let report = audit::audit(&root);
+    assert!(!report.ok());
+    assert_eq!(verdict_of(&report, "vendored-skills"), Verdict::Fail);
+    assert!(diagnostic_of(&report, "vendored-skills").contains("rogue"));
+}
+
+/// M1: an extra file inside a pinned skill dir is drift too.
+#[test]
+fn extra_file_in_skill_dir_fails_row_14() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "extraf");
+    std::fs::write(root.join("agent-skills/spec-sync/EXTRA.md"), "x\n").unwrap();
+
+    let report = audit::audit(&root);
+    assert!(!report.ok());
+    assert_eq!(verdict_of(&report, "vendored-skills"), Verdict::Fail);
+    assert!(diagnostic_of(&report, "vendored-skills").contains("EXTRA.md"));
+}
+
+/// M1: `sync` (materialize) prunes drift so the tree converges back to green.
+#[test]
+fn sync_prunes_extra_skill_content() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "prune");
+    std::fs::create_dir_all(root.join("agent-skills/rogue")).unwrap();
+    std::fs::write(root.join("agent-skills/rogue/SKILL.md"), "forked\n").unwrap();
+    std::fs::write(root.join("agent-skills/spec-sync/EXTRA.md"), "x\n").unwrap();
+    assert!(!audit::audit(&root).ok(), "drift must be present first");
+
+    scaffold::materialize_skills(&root).unwrap();
+    assert!(
+        !root.join("agent-skills/rogue").exists(),
+        "rogue skill dir must be pruned"
+    );
+    assert!(
+        !root.join("agent-skills/spec-sync/EXTRA.md").exists(),
+        "extra skill file must be pruned"
+    );
+    assert!(audit::audit(&root).ok(), "audit green after prune");
+}

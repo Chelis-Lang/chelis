@@ -3291,35 +3291,62 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
                 Some(p) => p,
                 None => env::current_dir()?,
             };
-            let current = chelis_conformance::bump::bare_pin(&std::fs::read_to_string(
-                root.join("reef.toml"),
-            )?);
-            let base_pin = git_show_reef_pin(&root, &base);
-            match (current, base_pin) {
-                (Some(cur), Some(base_pin)) if cur != base_pin => {
+            // Current pin from the working tree. A missing or unpinned local
+            // reef.toml is a hard error (exit 2): the guard cannot vouch for a
+            // shell it cannot read, and this is *not* a base-resolution problem.
+            let current = match std::fs::read_to_string(root.join("reef.toml")) {
+                Ok(text) => chelis_conformance::bump::bare_pin(&text),
+                Err(e) => {
+                    eprintln!("bump-check: cannot read {}/reef.toml: {e}", root.display());
+                    std::process::exit(2);
+                }
+            };
+            let Some(current) = current else {
+                eprintln!(
+                    "bump-check: {}/reef.toml has no usable `compiler = \"=X.Y.Z\"` pin",
+                    root.display()
+                );
+                std::process::exit(2);
+            };
+
+            match git_show_reef_pin(&root, &base) {
+                Some(base_pin) if base_pin == current => {
+                    println!("reef pin unchanged vs {base} (={current}); bump-check passes");
+                }
+                Some(base_pin) => {
                     // The pin changed: require a green audit (fresh stamps,
                     // lockstep workflow pins, wired probes).
                     let report = chelis_conformance::audit::audit(&root);
                     if report.ok() {
-                        println!("pin change {base_pin} -> {cur}: conformance audit green");
+                        println!("pin change {base_pin} -> {current}: conformance audit green");
                     } else {
                         eprintln!(
-                            "pin changed {base_pin} -> {cur} but the checklist did not run \
-                             (audit not green). Bump via `chelis reef conform bump {cur}`, not a raw edit:"
+                            "pin changed {base_pin} -> {current} but the checklist did not run \
+                             (audit not green). Bump via `chelis reef conform bump {current}`, not a raw edit:"
                         );
                         print_audit_report(&report, false)?;
                         std::process::exit(1);
                     }
                 }
-                (Some(_), Some(_)) => {
-                    println!("reef pin unchanged vs {base}; bump-check passes");
-                }
-                _ => {
-                    // Could not read the base pin (shallow clone, first commit,
-                    // no git). The guard only fires on a provable change.
+                None if git_ref_resolvable(&root, &base) => {
+                    // The base commit exists but carries no readable pin: this
+                    // change is *introducing* the pin, so there is nothing to
+                    // cascade. Not a fail-open — the base was genuinely resolved.
                     println!(
-                        "bump-check: could not resolve base pin vs {base}; skipping (no provable pin change)"
+                        "bump-check: no reef pin at {base} (introducing the pin); nothing to cascade"
                     );
+                }
+                None => {
+                    // The base ref itself could not be resolved (bad ref, or a
+                    // shallow clone that never fetched it). FAIL CLOSED: the
+                    // guard exists to block a raw pin cascade, so it must never
+                    // silently pass when it cannot see the base.
+                    eprintln!(
+                        "bump-check: could not resolve `{base}` (bad ref, or a shallow clone that \
+                         did not fetch it). The guard fails closed rather than skip. Fetch the base \
+                         (actions/checkout with fetch-depth: 0), or pass a resolvable --base."
+                    );
+                    std::process::exit(2);
                 }
             }
         }
@@ -3361,11 +3388,13 @@ fn run_self_test_expect(
 }
 
 /// Read the `compiler` pin from `reef.toml` at git ref `base` (bare `X.Y.Z`),
-/// or `None` if git or the file is unavailable at that ref.
+/// or `None` if git or the file is unavailable at that ref. The pathspec is
+/// cwd-relative (`:./reef.toml`) so a shell nested inside a larger repo reads
+/// its *own* reef.toml at the base, matching the working-tree read.
 fn git_show_reef_pin(root: &Path, base: &str) -> Option<String> {
     let out = std::process::Command::new("git")
         .current_dir(root)
-        .args(["show", &format!("{base}:reef.toml")])
+        .args(["show", &format!("{base}:./reef.toml")])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -3373,6 +3402,24 @@ fn git_show_reef_pin(root: &Path, base: &str) -> Option<String> {
     }
     let text = String::from_utf8(out.stdout).ok()?;
     chelis_conformance::bump::bare_pin(&text)
+}
+
+/// Whether `base` resolves to a commit in the repo at `root`. Used to tell a
+/// base that genuinely predates the pin (resolvable ref, no `reef.toml`) from a
+/// base that could not be fetched at all (the shallow-clone / bad-ref case that
+/// must fail the guard closed).
+fn git_ref_resolvable(root: &Path, base: &str) -> bool {
+    std::process::Command::new("git")
+        .current_dir(root)
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{base}^{{commit}}"),
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// Print a conformance audit report as plain text or NDJSON.
@@ -3388,6 +3435,11 @@ fn print_audit_report(
                 "row": r.row,
                 "key": r.key,
                 "section": r.section,
+                "tier": r.tier.tag(),
+                // Whether a Fail on this row gates the audit — lets a machine
+                // consumer tell a gating MUST-fail from an advisory SHOULD-fail
+                // without re-deriving tier semantics.
+                "gating": r.tier.gates(),
                 "verdict": r.verdict.tag(),
                 "diagnostic": r.diagnostic,
                 "fix": r.fix,
@@ -4173,6 +4225,16 @@ fn cmd_test(
     batch_mode: TestBatchMode,
     expect: Option<ExpectArg>,
 ) -> Result<i32, String> {
+    // `--expect` runs an expected-failure suite over every probe; a name filter
+    // is both ignored by `run_expect` and a false-green risk (a no-match filter
+    // would otherwise short-circuit to "0 passed" before expect classification).
+    if expect.is_some() && filter.is_some() {
+        return Err(
+            "`--filter` cannot be combined with `--expect`; an expected-failure suite runs every probe"
+                .to_string(),
+        );
+    }
+
     let raw_cwd = env::current_dir().map_err(|e| format!("failed to read cwd: {e}"))?;
     let target = match path {
         Some(p) => p.to_path_buf(),
@@ -4214,6 +4276,17 @@ fn cmd_test(
 
     let test_files = discover_test_files(&target)?;
     if test_files.is_empty() {
+        // An `--expect` suite that finds zero probes is a misconfiguration, not
+        // a pass: a guard that runs nothing is silently green (the exact
+        // failure mode where renamed/removed probes disable a CI gate). Fail
+        // loudly instead of the `cargo test`/`pytest` "0 passed" ergonomics.
+        if expect.is_some() {
+            return Err(format!(
+                "no .ch test files under `{}`, but --expect requires a non-empty suite \
+                 (an expected-failure guard that runs zero probes is silently green)",
+                target.display()
+            ));
+        }
         // Empty test dir is a legitimate CI state (no tests yet, or all filtered
         // out before discovery). Report 0/0 and exit 0 — matches `cargo test` and
         // `pytest` ergonomics. A truly missing `tests/` dir already errored above.
@@ -4450,6 +4523,12 @@ fn run_expect(
             Ok(text) => match Sidecar::parse(&text) {
                 Ok(sidecar) => classify(mode, &outcome, Some(&sidecar)),
                 Err(reason) => chelis_conformance::expect::Verdict::ConfigError { reason },
+            },
+            // A present-but-unreadable sidecar (e.g. non-UTF8) is a config error
+            // with an accurate message, not the "missing sidecar" that
+            // `classify(.., None)` would report.
+            Err(e) if sidecar_path.exists() => chelis_conformance::expect::Verdict::ConfigError {
+                reason: format!("unreadable .expect sidecar {}: {e}", sidecar_path.display()),
             },
             Err(_) => classify(mode, &outcome, None),
         };

@@ -202,3 +202,35 @@ fn blocked_without_citation_is_config_error() {
         .code(1)
         .stdout(verdict_is("config-error"));
 }
+
+// ------------------------------------------------ empty suite / filter guards
+
+#[test]
+fn empty_expect_suite_is_rejected() {
+    // A `tests/` dir with zero `.ch` probes must not report green under
+    // --expect: a guard that runs nothing is silently disabled.
+    let (_d, pkg) = make_probe_package("empty-suite");
+    run_expect(&pkg, "neg")
+        .failure()
+        .stderr(predicate::str::contains("non-empty suite"));
+}
+
+#[test]
+fn filter_with_expect_is_rejected() {
+    let (_d, pkg) = make_probe_package("filter-expect");
+    write_probe(
+        &pkg,
+        "case",
+        "Case",
+        r#"def test_x() -> unit = test_assert(false, "boom")"#,
+        Some("boom\n"),
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "tests/", "--expect", "neg", "--filter", "nomatch"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be combined"));
+}

@@ -12,13 +12,22 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::audit::parse_compiler_pin;
+use crate::audit::{is_installable_version, parse_compiler_pin};
 
 /// Rewrite every pin location under `root` to `new_version`, in lockstep:
 /// `reef.toml`'s `compiler = "=X.Y.Z"` and every workflow's
 /// `CHELIS_TAG`/`CHELIS_VERSION` env plus `chelisup install` line. Returns the
 /// files changed (empty if already at `new_version`).
 pub fn rewrite_pins(root: &Path, new_version: &str) -> Result<Vec<PathBuf>, String> {
+    // Validate up front so a bump can only ever write a pin the chelisup shim
+    // can actually install — otherwise `conform bump garbage` would leave a
+    // `compiler = "=garbage"` that audits green but the toolchain cannot resolve.
+    if !is_installable_version(new_version) {
+        return Err(format!(
+            "{new_version:?} is not an installable X.Y.Z version (no `v`, no pre-release)"
+        ));
+    }
+
     let mut changed = Vec::new();
 
     let reef_path = root.join("reef.toml");
@@ -29,10 +38,15 @@ pub fn rewrite_pins(root: &Path, new_version: &str) -> Result<Vec<PathBuf>, Stri
     let old = old_pin.trim_start_matches('=').to_string();
 
     if old != new_version {
-        let new_reef = reef.replace(&format!("\"={old}\""), &format!("\"={new_version}\""));
-        fs::write(&reef_path, new_reef)
-            .map_err(|e| format!("write {}: {e}", reef_path.display()))?;
-        changed.push(reef_path);
+        // Rewrite only the `compiler` line under the root/`[package]` table —
+        // never a coincidental `"=X.Y.Z"` elsewhere (e.g. a lockstep-versioned
+        // `chelis-std = "=X.Y.Z"` dependency pinned to the same version).
+        let new_reef = rewrite_compiler_pin(&reef, &old, new_version);
+        if new_reef != reef {
+            fs::write(&reef_path, new_reef)
+                .map_err(|e| format!("write {}: {e}", reef_path.display()))?;
+            changed.push(reef_path);
+        }
     }
 
     let wf_dir = root.join(".github/workflows");
@@ -84,6 +98,34 @@ fn rewrite_workflow_pins(body: &str, old: &str, new: &str) -> String {
     )
 }
 
+/// Rewrite the `compiler = "=old"` value to `"=new"` on the `compiler` line
+/// under the root or `[package]` table only, leaving every other line — and any
+/// coincidental `"=old"` token elsewhere — untouched.
+fn rewrite_compiler_pin(reef: &str, old: &str, new: &str) -> String {
+    let old_tok = format!("\"={old}\"");
+    let new_tok = format!("\"={new}\"");
+    let mut in_scope = true;
+    let mut out = String::with_capacity(reef.len());
+    for line in reef.split_inclusive('\n') {
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        let trimmed = body.trim();
+        if let Some(header) = trimmed.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+            in_scope = header.trim() == "package";
+            out.push_str(line);
+            continue;
+        }
+        let is_compiler_key = trimmed
+            .strip_prefix("compiler")
+            .is_some_and(|r| r.trim_start().starts_with('='));
+        if in_scope && is_compiler_key {
+            out.push_str(&line.replace(&old_tok, &new_tok));
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
 /// The bare pin (`X.Y.Z`, no leading `=`) recorded in a `reef.toml` text.
 pub fn bare_pin(reef_toml: &str) -> Option<String> {
     parse_compiler_pin(reef_toml).map(|p| p.trim_start_matches('=').to_string())
@@ -110,5 +152,34 @@ mod tests {
             Some("0.14.0")
         );
         assert_eq!(bare_pin("no pin here"), None);
+    }
+
+    #[test]
+    fn compiler_pin_rewrite_leaves_lockstep_dependency_alone() {
+        let reef =
+            "[package]\ncompiler = \"=0.14.0\"\n\n[dependencies]\nchelis-std = \"=0.14.0\"\n";
+        let out = rewrite_compiler_pin(reef, "0.14.0", "0.15.0");
+        assert!(out.contains("compiler = \"=0.15.0\""));
+        assert!(
+            out.contains("chelis-std = \"=0.14.0\""),
+            "a same-version dependency pin must not be rewritten"
+        );
+    }
+
+    #[test]
+    fn rewrite_pins_rejects_non_installable_version() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("reef.toml"), "compiler = \"=0.14.0\"\n").unwrap();
+        for bad in ["garbage", "=0.15.0", "v0.15.0", "0.15", "0.15.0-rc1"] {
+            assert!(
+                rewrite_pins(dir.path(), bad).is_err(),
+                "bump to {bad:?} must be rejected"
+            );
+        }
+        // reef.toml is untouched by a rejected bump.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("reef.toml")).unwrap(),
+            "compiler = \"=0.14.0\"\n"
+        );
     }
 }

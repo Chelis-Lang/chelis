@@ -113,5 +113,41 @@ class RoundTripTests(unittest.TestCase):
         )
 
 
+class MultiFileSkillRejectedTests(unittest.TestCase):
+    """The generator must stay in lockstep with the SKILL.md-only Rust consumer:
+    a skill dir with anything besides SKILL.md is rejected, not silently
+    embedded (dead weight the shell never receives)."""
+
+    def _one_skill_root(self, tmp: Path, *files: str) -> Path:
+        skill = tmp / "agent-skills" / "spec-sync"
+        skill.mkdir(parents=True)
+        for name in files:
+            (skill / name).write_text("body\n")
+        return tmp
+
+    def test_extra_file_in_skill_dir_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self._one_skill_root(Path(td), "SKILL.md", "EXTRA.md")
+            saved = regen.SHARED_SKILLS
+            regen.SHARED_SKILLS = ["spec-sync"]
+            try:
+                with self.assertRaises(SystemExit):
+                    regen.planned_skill_copies(root)
+            finally:
+                regen.SHARED_SKILLS = saved
+
+    def test_single_file_skill_is_accepted(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self._one_skill_root(Path(td), "SKILL.md")
+            saved = regen.SHARED_SKILLS
+            regen.SHARED_SKILLS = ["spec-sync"]
+            try:
+                pairs = regen.planned_skill_copies(root)
+                self.assertEqual(len(pairs), 1)
+                self.assertTrue(str(pairs[0][0]).endswith("spec-sync/SKILL.md"))
+            finally:
+                regen.SHARED_SKILLS = saved
+
+
 if __name__ == "__main__":
     unittest.main()

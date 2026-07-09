@@ -28,6 +28,26 @@ pub enum Tier {
     MustIfCrateLinking,
 }
 
+impl Tier {
+    /// Stable machine tag for the tier.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Tier::Must => "must",
+            Tier::Should => "should",
+            Tier::MustIfBlocker => "must-if-blocker",
+            Tier::MustIfExternalOracles => "must-if-external-oracles",
+            Tier::MustIfCrateLinking => "must-if-crate-linking",
+        }
+    }
+
+    /// Whether a `Fail` on this tier gates the audit (everything but `Should`;
+    /// conditional tiers gate once their trigger fires, and the row emits `Na`
+    /// when it does not, so treating them as gating here is correct).
+    pub fn gates(&self) -> bool {
+        !matches!(self, Tier::Should)
+    }
+}
+
 /// One row of the §11 conformance table.
 #[derive(Debug, Clone, Copy)]
 pub struct ContractRow {

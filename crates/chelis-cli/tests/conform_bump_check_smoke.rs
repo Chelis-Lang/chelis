@@ -95,3 +95,28 @@ fn bump_check_fails_on_raw_pin_edit() {
         .code(1)
         .stderr(predicate::str::contains("checklist did not run"));
 }
+
+#[test]
+fn bump_check_fails_closed_on_unresolvable_base() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("shell");
+    init_committed_shell(&root);
+
+    // A base ref that cannot be resolved (the shallow-clone / bad-ref case that
+    // used to make the guard silently no-op). It must fail closed, not pass.
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "reef",
+            "conform",
+            "bump-check",
+            "--base",
+            "origin/definitely-not-a-real-ref",
+            "--path",
+        ])
+        .arg(&root)
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("fails closed"));
+}

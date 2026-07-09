@@ -39,15 +39,37 @@ pub struct ManagedBlock {
 }
 
 impl ManagedBlock {
-    /// The block's body hash recomputed from its bytes.
+    /// The block's body hash recomputed from its (normalized) bytes.
     pub fn actual_hash(&self) -> String {
-        body_hash(&self.body)
+        body_hash(&normalize_body(&self.body))
     }
 
     /// Whether the fence's declared hash matches the body (no hand-edit inside
     /// the block).
     pub fn integrity_ok(&self) -> bool {
         self.declared_hash == self.actual_hash()
+    }
+
+    /// Whether this block's body equals the given canonical body, up to the
+    /// same normalization `render` applies. This is the check that catches a
+    /// *stale-but-self-consistent* block: one whose fence hash matches its own
+    /// body (so [`integrity_ok`](Self::integrity_ok) passes) but whose body has
+    /// drifted from — or was forged against — the embedded upstream text.
+    pub fn matches_canonical(&self, canonical: &str) -> bool {
+        normalize_body(&self.body) == normalize_body(canonical)
+    }
+}
+
+/// Normalize a managed-block body the way [`render`] stamps it: line endings
+/// unified to `\n` (so a CRLF checkout does not spuriously fail integrity) and
+/// exactly one trailing newline. Hashing and canonical comparison both go
+/// through this so the stamp is stable across platforms.
+pub fn normalize_body(body: &str) -> String {
+    let unified = body.replace("\r\n", "\n").replace('\r', "\n");
+    if unified.ends_with('\n') {
+        unified
+    } else {
+        format!("{unified}\n")
     }
 }
 
@@ -68,11 +90,7 @@ pub fn body_hash(body: &str) -> String {
 /// Render a full managed block. The body is normalized to end with a single
 /// newline so `render` and [`find`] round-trip.
 pub fn render(id: &str, version: &str, body: &str) -> String {
-    let body = if body.ends_with('\n') {
-        body.to_string()
-    } else {
-        format!("{body}\n")
-    };
+    let body = normalize_body(body);
     let hash = body_hash(&body);
     format!(
         "{BEGIN_PREFIX}{id} chelis@{version} (sha256:{hash}){FENCE_SUFFIX}\n\
@@ -112,10 +130,14 @@ pub fn find(text: &str, id: &str) -> Option<ManagedBlock> {
     })
 }
 
-/// Find the byte offset where the BEGIN fence line for `id` starts.
+/// Find the byte offset where the BEGIN fence line for `id` starts. Only a
+/// match at the start of a line counts, so the literal fence prefix quoted in a
+/// shell's own prose (or a fenced code span) is not mistaken for a real fence.
 fn find_begin(text: &str, id: &str) -> Option<usize> {
     let needle = format!("{BEGIN_PREFIX}{id} chelis@");
-    text.find(&needle)
+    text.match_indices(&needle)
+        .find(|(i, _)| *i == 0 || text.as_bytes()[i - 1] == b'\n')
+        .map(|(i, _)| i)
 }
 
 /// Parse `chelis@<ver> (sha256:<hex>) -->` out of the BEGIN fence line.
@@ -257,5 +279,43 @@ mod tests {
         let block = render("chelis-surface-header", "1.2.3", "surface");
         let found = find(&block, "chelis-surface-header").unwrap();
         assert_eq!(found.version, "1.2.3");
+    }
+
+    #[test]
+    fn crlf_body_still_passes_integrity() {
+        // A block rendered with LF, then rewritten to CRLF by a Windows editor
+        // or `core.autocrlf`, must not spuriously fail integrity.
+        let block = render("x", "0.14.0", "line one\nline two");
+        let crlf = block.replace('\n', "\r\n");
+        let found = find(&crlf, "x").expect("found");
+        assert!(
+            found.integrity_ok(),
+            "CRLF re-encoding must not break the stamp"
+        );
+    }
+
+    #[test]
+    fn matches_canonical_detects_self_consistent_fork() {
+        // The dangerous case: body edited AND the fence hash recomputed, so
+        // integrity_ok passes but the body no longer matches upstream.
+        let forged = render("x", "0.14.0", "forged body");
+        let found = find(&forged, "x").expect("found");
+        assert!(found.integrity_ok(), "forged block is self-consistent");
+        assert!(
+            !found.matches_canonical("canonical body"),
+            "a self-consistent fork must not match canonical"
+        );
+        assert!(
+            found.matches_canonical("forged body"),
+            "trailing-newline normalization must round-trip"
+        );
+    }
+
+    #[test]
+    fn fence_prefix_in_prose_is_not_a_fence() {
+        // A shell that quotes the fence marker mid-sentence must not be parsed
+        // as owning a real managed block.
+        let doc = "See the `<!-- BEGIN CHELIS MANAGED BLOCK: x chelis@0.1.0 -->` marker.\n";
+        assert!(find(doc, "x").is_none());
     }
 }
