@@ -461,6 +461,49 @@ and from CPU at the ~1 ULP level on f32.
 | `shrink` | `pad(g, inverse_bounds)` — pad gradient back to original size |
 | `stride` | appropriate expand/scatter (implementation-specific) |
 
+#### 2.4.1 Runtime (node-valued) bounds and reshape targets (chelis#616)
+
+A movement bound (`pad` before/after, `shrink` start/end, `stride` step) and a
+`reshape` target extent are each represented as a `RtDim`:
+
+- `Lit(n)` — a compile-time-constant extent.
+- `ToEnd` — the full-axis sentinel; legal only as a `shrink` end (the identity
+  slice of a symbolic bystander axis).
+- `Node(i)` — a **runtime** extent read from the owning node's `inputs[i]`, a
+  rank-0 integer scalar (a `shape()` read or integer arithmetic over one:
+  `add`/`mul`/`floor_div`/`neg`/`cast`). The index is absolute: `inputs[0]` is
+  always the tensor operand and `inputs[1..]` are the bound scalars.
+- `Sym(name)` — a symbolic dim declared elsewhere (e.g. a bystander `batch`);
+  legal only as a `reshape` target.
+
+Runtime bounds are validated at run time in BOTH mandatory lanes with matching
+error paths: the eval lane raises a clean error and the C backend emits an
+abort guard for a negative bound, a shrink range overshoot, a non-positive
+stride step, a negative reshape target extent, and a reshape target whose
+element product disagrees with the input (`chelis_alloc_view` itself performs
+no numel check, so the emitted guard is the only defense). A dim whose extent
+is computed by the op at run time is an *op-declared* symbolic dim: the C
+backend declares it inline at the owning op (`int name = <extent>;`) and the
+evaluator binds it from the actual value mid-evaluation; a second site
+computing a different value for the same symbol aborts/errs loudly (the
+over-unification guard — a checker-unified `shrink -> stride` chain returned
+directly under one sig symbol fails loud rather than mis-size).
+
+The movement adjoints are runtime-capable on the same representation: the
+`shrink` adjoint pads with `after = shape(x, axis) - end`, the `pad` adjoint
+shrinks to `end = before + shape(x, axis)`, and the `stride` adjoint's
+upsample cascade reads `m_a = shape(g, axis)` and trims to
+`(0, shape(x, axis))` with a runtime `m_a * step` merge extent — all as
+node-valued bounds over fresh `Shape`/arithmetic scalars. Bound scalars are a
+**stop-gradient boundary**: they are index math, carry no cotangent, and do
+not pull their producers (e.g. a window-count `floor_div`) into the
+differentiability check. A runtime (node-valued) stride STEP has no
+structural adjoint yet and fails loud.
+
+Runtime movement bounds and reshape targets are canonical on the eval and C
+lanes; `--target hip` and `--target metal` reject them with a clean
+diagnostic naming `--target c` (chelis#616).
+
 ### 2.5 Memory
 
 | Name | Signature | Semantics |
@@ -515,11 +558,11 @@ such a read at runtime. Any path that forces DAG construction — notably
 (`shape(tensor, axis)` requires a compile-time-constant `axis`, citing
 chelis#616), rather than the pre-fix silent `Load { name: "shape" }`
 fabrication (which produced a wrong/fabricated gradient in the eval lane and a
-missing-input error in the C backend). Making a runtime axis DAG-representable —
-and, more broadly, using the extent as a runtime **movement-op bound** (a
-`shrink`/`stride` start/end derived from a `shape()` value, and the integer
-arithmetic feeding it) — is the remaining chelis#513 gap-2 / gap-3-value work
-(chelis#616) that builds on this node.
+missing-input error in the C backend). Using the extent as a runtime
+**movement-op bound** or **reshape target** (a `shrink`/`stride`/`pad` bound
+or window count derived from a `shape()` value, and the integer arithmetic
+feeding it) is the chelis#616 node-valued `RtDim` capability built on this
+node; see §2.4.1.
 
 ### 2.6 Effectful Primitive
 

@@ -880,6 +880,12 @@ fn compute_adjoints(
                 input_ty,
                 None,
             );
+            // chelis#616: the expand restores the forward input's shape; a
+            // non-concrete size (a runtime or wildcard axis) resolves at
+            // eval time from the input's actual value via this shape-dep.
+            if original_size.as_concrete().is_none() {
+                dag.add_shape_dep(dx, x);
+            }
             Some(vec![(x, dx)])
         }
         RiscOp::MaxReduce { axis } => {
@@ -1121,12 +1127,16 @@ fn compute_adjoints(
         RiscOp::Reshape { .. } => {
             let x = node.inputs[0];
             let input_ty = forward.get(x).unwrap().output_type.clone();
-            let original_shape = reshape_target(&input_ty.dims);
+            // chelis#616: a runtime input axis (a movement/reshape output
+            // extent, whose name is not Load-declarable) restores through an
+            // explicit Shape read of the forward input.
+            let mut inputs = vec![g];
+            let original_shape = restore_target(dag, forward, x, &input_ty.dims, &mut inputs);
             let dx = dag.add_node(
                 RiscOp::Reshape {
                     new_shape: original_shape,
                 },
-                vec![g],
+                inputs,
                 input_ty,
                 None,
             );
@@ -1231,14 +1241,9 @@ fn compute_adjoints(
                 // Same-rank broadcast of a size-1 axis: restore the
                 // collapsed size-1 axis so the cotangent matches the
                 // source shape `[..., 1, ...]`.
-                let dx = dag.add_node(
-                    RiscOp::Reshape {
-                        new_shape: reshape_target(&source_ty.dims),
-                    },
-                    vec![summed_in_source_prec],
-                    source_ty,
-                    None,
-                );
+                let mut inputs = vec![summed_in_source_prec];
+                let new_shape = restore_target(dag, forward, x, &source_ty.dims, &mut inputs);
+                let dx = dag.add_node(RiscOp::Reshape { new_shape }, inputs, source_ty, None);
                 Some(vec![(x, dx)])
             } else {
                 // Rank-increasing broadcast: the single `Sum` already
@@ -1263,27 +1268,33 @@ fn compute_adjoints(
             // axis's runtime extent before eval. A symbolic dim on an axis that
             // WAS padded would still need a concrete extent — that stays a
             // hard error via `dim_size` (no silent guess).
-            let bounds: Vec<(RtDim, RtDim)> = padding
-                .iter()
-                .zip(input_ty.dims.iter())
-                .map(|((before, after), dim)| match dim {
-                    DimInfo::Named(_, None)
-                        if before.as_lit() == Some(0) && after.as_lit() == Some(0) =>
-                    {
-                        (RtDim::Lit(0), RtDim::ToEnd)
-                    }
-                    // chelis#616 M1: the differentiable-concat Pad adjoint operates
-                    // on compile-time padding; a node-valued (runtime) forward pad
-                    // reaching here is M2 value-dependent territory.
-                    _ => {
-                        let before = before
-                            .as_lit()
-                            .expect("node-valued pad adjoint is chelis#616 M2 work");
-                        (RtDim::Lit(before), RtDim::Lit(before + dim_size(dim)))
-                    }
-                })
-                .collect();
-            let dx = dag.add_node(RiscOp::Shrink { bounds }, vec![g], input_ty, None);
+            let mut shrink_inputs = vec![g];
+            let mut bounds: Vec<(RtDim, RtDim)> = Vec::with_capacity(padding.len());
+            for (axis, ((before, after), dim)) in
+                padding.iter().zip(input_ty.dims.iter()).enumerate()
+            {
+                if matches!(dim, DimInfo::Named(_, None))
+                    && before.as_lit() == Some(0)
+                    && after.as_lit() == Some(0)
+                {
+                    bounds.push((RtDim::Lit(0), RtDim::ToEnd));
+                } else if let (Some(before), Some(n)) = (before.as_lit(), static_dim(dim)) {
+                    bounds.push((RtDim::Lit(before), RtDim::Lit(before + n)));
+                } else {
+                    // chelis#616: runtime bounds. `before` re-slots the
+                    // forward bound scalar; `end = before + shape(x, axis)`
+                    // is fresh runtime arithmetic over a Shape read of the
+                    // forward input.
+                    let start = reslot_bound(node, before, &mut shrink_inputs);
+                    let before_scalar = bound_scalar(dag, node, before);
+                    let extent = shape_scalar(dag, x, axis);
+                    let end_scalar = int_scalar_binary(dag, RiscOp::Add, before_scalar, extent);
+                    let slot = shrink_inputs.len();
+                    shrink_inputs.push(end_scalar);
+                    bounds.push((start, RtDim::Node(slot)));
+                }
+            }
+            let dx = dag.add_node(RiscOp::Shrink { bounds }, shrink_inputs, input_ty, None);
             Some(vec![(x, dx)])
         }
         RiscOp::Shrink { bounds } => {
@@ -1299,33 +1310,43 @@ fn compute_adjoints(
             // than let the `dim_size(dim) - end` subtraction wrap. A symbolic
             // dim under a CONCRETE sub-range bound still needs the runtime
             // size for `after` and stays a hard error via `dim_size`.
-            let padding: Vec<(RtDim, RtDim)> = bounds
-                .iter()
-                .zip(input_ty.dims.iter())
-                .map(|((start, end), dim)| {
-                    if matches!(end, RtDim::ToEnd) {
-                        assert_eq!(
-                            start.as_lit(),
-                            Some(0),
-                            "malformed ToEnd sentinel in shrink adjoint: nonzero start {start:?}"
-                        );
-                        (RtDim::Lit(0), RtDim::Lit(0))
-                    } else {
-                        // chelis#616 M1: a node-valued (runtime) forward shrink
-                        // bound reaching here is M2 value-dependent territory; a
-                        // concrete sub-range on a symbolic axis stays a hard error
-                        // via `dim_size`.
-                        let start = start
-                            .as_lit()
-                            .expect("node-valued shrink adjoint is chelis#616 M2 work");
-                        let end = end
-                            .as_lit()
-                            .expect("node-valued shrink adjoint is chelis#616 M2 work");
-                        (RtDim::Lit(start), RtDim::Lit(dim_size(dim) - end))
-                    }
-                })
-                .collect();
-            let dx = dag.add_node(RiscOp::Pad { padding, fill: 0.0 }, vec![g], input_ty, None);
+            let mut pad_inputs = vec![g];
+            let mut padding: Vec<(RtDim, RtDim)> = Vec::with_capacity(bounds.len());
+            for (axis, ((start, end), dim)) in bounds.iter().zip(input_ty.dims.iter()).enumerate() {
+                if matches!(end, RtDim::ToEnd) {
+                    assert_eq!(
+                        start.as_lit(),
+                        Some(0),
+                        "malformed ToEnd sentinel in shrink adjoint: nonzero start {start:?}"
+                    );
+                    padding.push((RtDim::Lit(0), RtDim::Lit(0)));
+                } else if let (Some(start), Some(end), Some(n)) =
+                    (start.as_lit(), end.as_lit(), static_dim(dim))
+                {
+                    padding.push((RtDim::Lit(start), RtDim::Lit(n - end)));
+                } else {
+                    // chelis#616: runtime bounds. `before` re-slots the
+                    // forward start scalar; `after = shape(x, axis) - end`
+                    // is fresh runtime arithmetic over a Shape read of the
+                    // forward input.
+                    let before = reslot_bound(node, start, &mut pad_inputs);
+                    let end_scalar = bound_scalar(dag, node, end);
+                    let extent = shape_scalar(dag, x, axis);
+                    let precision = dag.get(end_scalar).unwrap().output_type.precision;
+                    let neg_end =
+                        dag.add_node(RiscOp::Neg, vec![end_scalar], scalar_int(precision), None);
+                    let after_scalar = int_scalar_binary(dag, RiscOp::Add, extent, neg_end);
+                    let slot = pad_inputs.len();
+                    pad_inputs.push(after_scalar);
+                    padding.push((before, RtDim::Node(slot)));
+                }
+            }
+            let dx = dag.add_node(
+                RiscOp::Pad { padding, fill: 0.0 },
+                pad_inputs,
+                input_ty,
+                None,
+            );
             Some(vec![(x, dx)])
         }
         RiscOp::Stride { strides } => {
@@ -1358,25 +1379,17 @@ fn compute_adjoints(
             let x = node.inputs[0];
             let input_ty = forward.get(x).unwrap().output_type.clone();
             let precision = input_ty.precision;
-            // chelis#513 gap 3 (structural slice): only a STRIDED axis
-            // (step > 1) needs its concrete source size, for the trim bound
-            // that reconstructs the source extent. A symbolic bystander axis
-            // (step <= 1, the batched-pooling shape) flows through the
-            // reshape/pad/reshape cascade untouched and its trim bound is the
-            // `SHRINK_TO_END` full-axis sentinel. A symbolic STRIDED axis
-            // would need the runtime size (a shape() value read) and stays
-            // fail-closed loud -- no silent guess.
-            let strided_axis_size = |axis: usize, dim: &DimInfo| -> usize {
-                match dim {
-                    DimInfo::Lit(n) => *n,
-                    DimInfo::Named(_, Some(n)) => *n,
-                    DimInfo::Named(name, None) => panic!(
-                        "stride adjoint requires a concrete size for strided axis {axis}; \
-                         got symbolic dimension `{name}` (chelis#513: a runtime-symbolic \
-                         strided extent needs shape() value reads in the DAG)"
-                    ),
-                }
-            };
+            // chelis#513 gap 3 / chelis#616: a STRIDED axis (step > 1) needs
+            // its source size `n_a` for the trim bound and the strided size
+            // `m_a` for the merge extent. When both are compile-time the
+            // cascade stays fully static (the pre-#616 structural slice).
+            // When either is runtime-symbolic (a windowed axis), the cascade
+            // is built with runtime scalars instead: `m_a = shape(g, axis)`
+            // read from the cotangent, the merge extent `m_a * step` as a
+            // node-valued reshape target, and the trim bound
+            // `(0, shape(x, axis))` read from the forward input. A symbolic
+            // bystander axis (step <= 1) flows through untouched; its trim
+            // bound is the `SHRINK_TO_END` full-axis sentinel.
 
             // Running cotangent; its dims mutate axis-by-axis from the
             // strided shape back toward the source shape.
@@ -1384,27 +1397,57 @@ fn compute_adjoints(
             let mut cur_dims: Vec<DimInfo> = node.output_type.dims.clone();
 
             for (axis, step) in strides.iter().enumerate() {
-                // chelis#616 M1: a runtime (node-valued) stride step is M2
-                // value-dependent territory; the structural adjoint operates on
-                // compile-time steps.
+                // chelis#616: a runtime (node-valued) stride step would need
+                // a runtime-extent axis INSERTION (the pad's `step` axis);
+                // that stays fail-closed loud. The oracle's literal steps
+                // fold at lowering (`extract_int_for_dim` handles
+                // cast-of-literal), so only a genuinely runtime step lands
+                // here.
                 let step = step
                     .as_lit()
-                    .expect("node-valued stride adjoint is chelis#616 M2 work");
+                    .expect("a runtime (node-valued) stride STEP has no structural adjoint yet (chelis#616)");
                 if step <= 1 {
                     // Identity stride on this axis: m_a == n_a already.
                     continue;
                 }
-                let n_a = strided_axis_size(axis, &input_ty.dims[axis]);
-                let m_a = strided_axis_size(axis, &cur_dims[axis]);
+                let n_a_static = static_dim(&input_ty.dims[axis]);
+                let m_a_static = static_dim(&cur_dims[axis]);
+                let runtime_axis = n_a_static.is_none() || m_a_static.is_none();
 
-                // reshape: insert a size-1 axis after `axis`.
+                // reshape: insert a size-1 axis after `axis`. On the runtime
+                // path every non-static target extent is an explicit Shape
+                // read of the source cotangent (wildcard dim names are not
+                // stable symbols, so no Sym resolution is relied upon).
                 let mut split_dims = cur_dims.clone();
                 split_dims.insert(axis + 1, DimInfo::Lit(1));
+                let (split_targets, split_inputs) = if runtime_axis {
+                    let mut targets = Vec::with_capacity(split_dims.len());
+                    let mut inputs = vec![cur];
+                    for (j, dim) in split_dims.iter().enumerate() {
+                        if j == axis + 1 {
+                            targets.push(RtDim::Lit(1));
+                            continue;
+                        }
+                        let src_axis = if j <= axis { j } else { j - 1 };
+                        match static_dim(dim) {
+                            Some(n) => targets.push(RtDim::Lit(n)),
+                            None => {
+                                let read = shape_scalar(dag, cur, src_axis);
+                                let slot = inputs.len();
+                                inputs.push(read);
+                                targets.push(RtDim::Node(slot));
+                            }
+                        }
+                    }
+                    (targets, inputs)
+                } else {
+                    (reshape_target(&split_dims), vec![cur])
+                };
                 let split = dag.add_node(
                     RiscOp::Reshape {
-                        new_shape: reshape_target(&split_dims),
+                        new_shape: split_targets,
                     },
-                    vec![cur],
+                    split_inputs,
                     TensorType {
                         dims: split_dims.clone(),
                         precision,
@@ -1430,12 +1473,49 @@ fn compute_adjoints(
                 // reshape: merge axis and axis+1 back into one axis of
                 // size m_a * step.
                 let mut merged_dims = cur_dims.clone();
-                merged_dims[axis] = DimInfo::Lit(m_a * step);
+                let (merged_targets, merged_inputs) = if runtime_axis {
+                    let m_a_read = shape_scalar(dag, cur, axis);
+                    let step_const = dag.add_node(
+                        RiscOp::Const { value: step as f64 },
+                        vec![],
+                        scalar_int(Prim::Int32),
+                        None,
+                    );
+                    let merged_scalar = int_scalar_binary(dag, RiscOp::Mul, m_a_read, step_const);
+                    merged_dims[axis] =
+                        DimInfo::Named(format!("_rt_dim_{}_{axis}", merged_scalar.0), None);
+                    let mut targets = Vec::with_capacity(merged_dims.len());
+                    let mut inputs = vec![padded];
+                    for (j, dim) in merged_dims.iter().enumerate() {
+                        if j == axis {
+                            let slot = inputs.len();
+                            inputs.push(merged_scalar);
+                            targets.push(RtDim::Node(slot));
+                            continue;
+                        }
+                        match static_dim(dim) {
+                            Some(n) => targets.push(RtDim::Lit(n)),
+                            None => {
+                                // Bystander runtime axis: same extent as the
+                                // pre-split cotangent's axis `j`.
+                                let read = shape_scalar(dag, cur, j);
+                                let slot = inputs.len();
+                                inputs.push(read);
+                                targets.push(RtDim::Node(slot));
+                            }
+                        }
+                    }
+                    (targets, inputs)
+                } else {
+                    let m_a = m_a_static.expect("static path has a static strided size");
+                    merged_dims[axis] = DimInfo::Lit(m_a * step);
+                    (reshape_target(&merged_dims), vec![padded])
+                };
                 let merged = dag.add_node(
                     RiscOp::Reshape {
-                        new_shape: reshape_target(&merged_dims),
+                        new_shape: merged_targets,
                     },
-                    vec![padded],
+                    merged_inputs,
                     TensorType {
                         dims: merged_dims.clone(),
                         precision,
@@ -1446,7 +1526,11 @@ fn compute_adjoints(
                 // shrink axis back to [0, n_a). m_a * step >= n_a always
                 // (ceil), so this is a valid trim of the trailing
                 // overshoot from the final group. Symbolic bystander axes
-                // take the full-axis identity sentinel (chelis#513 gap 3).
+                // take the full-axis identity sentinel (chelis#513 gap 3);
+                // on the runtime path the trim bound reads the forward
+                // input's extent (`shape(x, axis)`) — the sentinel would be
+                // the MERGED extent, which overshoots.
+                let mut shrink_inputs = vec![merged];
                 let mut bounds: Vec<(RtDim, RtDim)> = merged_dims
                     .iter()
                     .map(|d| match d {
@@ -1454,12 +1538,20 @@ fn compute_adjoints(
                         dim => (RtDim::Lit(0), RtDim::Lit(dim_size(dim))),
                     })
                     .collect();
-                bounds[axis] = (RtDim::Lit(0), RtDim::Lit(n_a));
                 let mut trimmed_dims = merged_dims.clone();
-                trimmed_dims[axis] = DimInfo::Lit(n_a);
+                if let Some(n_a) = n_a_static {
+                    bounds[axis] = (RtDim::Lit(0), RtDim::Lit(n_a));
+                    trimmed_dims[axis] = DimInfo::Lit(n_a);
+                } else {
+                    let n_a_read = shape_scalar(dag, x, axis);
+                    let slot = shrink_inputs.len();
+                    shrink_inputs.push(n_a_read);
+                    bounds[axis] = (RtDim::Lit(0), RtDim::Node(slot));
+                    trimmed_dims[axis] = input_ty.dims[axis].clone();
+                }
                 let trimmed = dag.add_node(
                     RiscOp::Shrink { bounds },
-                    vec![merged],
+                    shrink_inputs,
                     TensorType {
                         dims: trimmed_dims.clone(),
                         precision,
@@ -1479,8 +1571,22 @@ fn compute_adjoints(
                 Some(vec![(x, g)])
             } else {
                 debug_assert_eq!(
-                    cur_dims, input_ty.dims,
-                    "stride adjoint must reconstruct the source shape",
+                    cur_dims.len(),
+                    input_ty.dims.len(),
+                    "stride adjoint must reconstruct the source rank",
+                );
+                debug_assert!(
+                    cur_dims
+                        .iter()
+                        .zip(input_ty.dims.iter())
+                        .all(|(got, want)| match (static_dim(got), static_dim(want)) {
+                            (Some(g), Some(w)) => g == w,
+                            // Runtime axes are reconstructed by runtime
+                            // bounds; only static extents are checkable here.
+                            _ => true,
+                        }),
+                    "stride adjoint must reconstruct the source shape: got {cur_dims:?}, want {:?}",
+                    input_ty.dims,
                 );
                 Some(vec![(x, cur)])
             }
@@ -1740,10 +1846,145 @@ fn reshape_target(dims: &[DimInfo]) -> Vec<RtDim> {
     dims.iter().map(RtDim::from_dim_info).collect()
 }
 
+/// The static extent of a dim, if it has one (a non-panicking [`dim_size`]).
+fn static_dim(dim: &DimInfo) -> Option<usize> {
+    match dim {
+        DimInfo::Lit(n) => Some(*n),
+        DimInfo::Named(_, Some(n)) => Some(*n),
+        DimInfo::Named(_, None) => None,
+    }
+}
+
+/// chelis#616: rank-0 integer scalar type for grad-built bound arithmetic.
+fn scalar_int(precision: Prim) -> TensorType {
+    TensorType {
+        dims: Vec::new(),
+        precision,
+    }
+}
+
+/// chelis#616: a fresh `Shape(x, axis)` read — the runtime extent of `x`
+/// along `axis` as a rank-0 int32 scalar (mirrors the Surf `shape()`
+/// lowering's precision pin).
+fn shape_scalar(dag: &mut Dag, x: NodeId, axis: usize) -> NodeId {
+    dag.add_node(
+        RiscOp::Shape { axis },
+        vec![x],
+        scalar_int(Prim::Int32),
+        None,
+    )
+}
+
+/// chelis#616: cast a rank-0 integer scalar to `precision` if needed.
+fn cast_scalar(dag: &mut Dag, scalar: NodeId, precision: Prim) -> NodeId {
+    let current = dag.get(scalar).unwrap().output_type.precision;
+    if current == precision {
+        return scalar;
+    }
+    dag.add_node(
+        RiscOp::Cast {
+            new_precision: precision,
+        },
+        vec![scalar],
+        scalar_int(precision),
+        None,
+    )
+}
+
+/// chelis#616: a rank-0 integer binary op over two scalars, unified to the
+/// wider of the two integer precisions (explicit casts; no implicit
+/// promotion).
+fn int_scalar_binary(dag: &mut Dag, op: RiscOp, a: NodeId, b: NodeId) -> NodeId {
+    let pa = dag.get(a).unwrap().output_type.precision;
+    let pb = dag.get(b).unwrap().output_type.precision;
+    let precision = if pa == Prim::Int64 || pb == Prim::Int64 {
+        Prim::Int64
+    } else {
+        Prim::Int32
+    };
+    let a = cast_scalar(dag, a, precision);
+    let b = cast_scalar(dag, b, precision);
+    dag.add_node(op, vec![a, b], scalar_int(precision), None)
+}
+
+/// chelis#616: materialize a forward movement bound as a rank-0 integer
+/// scalar node. A `Node` bound reuses the forward op's bound-source scalar
+/// directly (the backward DAG extends the forward one); a `Lit` becomes an
+/// int32 Const. `ToEnd`/`Sym` never reach the runtime adjoint paths (the
+/// sentinel is handled first and verify rejects `Sym` in movement bounds).
+fn bound_scalar(dag: &mut Dag, forward_node: &DagNode, bound: &RtDim) -> NodeId {
+    match bound {
+        RtDim::Node(i) => forward_node.inputs[*i],
+        RtDim::Lit(n) => dag.add_node(
+            RiscOp::Const { value: *n as f64 },
+            vec![],
+            scalar_int(Prim::Int32),
+            None,
+        ),
+        other => panic!("movement adjoint bound {other:?} has no runtime scalar form"),
+    }
+}
+
+/// chelis#616: re-slot a forward movement bound onto a new (backward) op:
+/// `Lit` passes through, a `Node` bound's forward scalar is appended to the
+/// new op's `inputs` and referenced by its new absolute slot.
+fn reslot_bound(forward_node: &DagNode, bound: &RtDim, inputs: &mut Vec<NodeId>) -> RtDim {
+    match bound {
+        RtDim::Node(i) => {
+            let slot = inputs.len();
+            inputs.push(forward_node.inputs[*i]);
+            RtDim::Node(slot)
+        }
+        other => other.clone(),
+    }
+}
+
+/// chelis#616: whether any forward `Load`'s type carries `name` — i.e. the
+/// symbol is declarable from an input shape in every lane (including HIP,
+/// which rejects `Shape` reads).
+fn load_declares(forward: &Dag, name: &str) -> bool {
+    forward.nodes().iter().any(|n| {
+        matches!(&n.op, RiscOp::Load { .. })
+            && n.output_type
+                .dims
+                .iter()
+                .any(|d| matches!(d, DimInfo::Named(s, _) if s == name))
+    })
+}
+
+/// chelis#616: build a `Reshape` target that restores `dims`, where `source`
+/// is a forward tensor whose axes correspond 1:1 to `dims`. Static extents
+/// become `Lit`; a Load-declared symbol stays `Sym` (resolvable in every
+/// lane with no extra nodes, the pre-#616 behavior); any other symbolic dim
+/// (a runtime movement/reshape extent, or a checker wildcard whose name is
+/// not a stable symbol) becomes an explicit runtime `Shape` read on
+/// `source`, appended to `inputs` and referenced as `Node`.
+fn restore_target(
+    dag: &mut Dag,
+    forward: &Dag,
+    source: NodeId,
+    dims: &[DimInfo],
+    inputs: &mut Vec<NodeId>,
+) -> Vec<RtDim> {
+    dims.iter()
+        .enumerate()
+        .map(|(axis, dim)| match dim {
+            DimInfo::Lit(n) | DimInfo::Named(_, Some(n)) => RtDim::Lit(*n),
+            DimInfo::Named(name, None) if load_declares(forward, name) => RtDim::Sym(name.clone()),
+            DimInfo::Named(_, None) => {
+                let read = shape_scalar(dag, source, axis);
+                let slot = inputs.len();
+                inputs.push(read);
+                RtDim::Node(slot)
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::eval::eval_scalar;
+    use crate::eval::{TensorValue, eval_scalar};
     use std::collections::HashMap;
 
     fn scalar_f32() -> TensorType {
@@ -4052,11 +4293,13 @@ mod tests {
         );
     }
 
-    /// NEGATIVE PARITY: a stride along the SYMBOLIC axis itself needs the
-    /// runtime source size and must stay fail-closed loud.
+    /// chelis#616: a stride along the SYMBOLIC axis itself now constructs a
+    /// RUNTIME adjoint cascade — the trim shrink's end bound is a
+    /// node-valued Shape read of the forward input's extent (`n_a`), and the
+    /// merge reshape's target extent is runtime `m_a * step` arithmetic —
+    /// instead of the pre-#616 loud panic.
     #[test]
-    #[should_panic(expected = "stride adjoint requires a concrete size for strided axis")]
-    fn stride_adjoint_symbolic_strided_axis_fails_loud() {
+    fn stride_adjoint_symbolic_strided_axis_builds_runtime_trim() {
         let mut dag = Dag::new();
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
@@ -4087,7 +4330,41 @@ mod tests {
             scalar_f32(),
             None,
         );
-        let _ = grad_dag(&dag, out, &[x]);
+        let grad_result =
+            grad_dag(&dag, out, &[x]).expect("runtime strided-axis adjoint must construct");
+        // The trim shrink's end bound is node-valued (a Shape read of the
+        // forward input), never a guessed literal.
+        let runtime_trim = grad_result.dag.nodes().iter().any(|node| {
+            matches!(
+                &node.op,
+                RiscOp::Shrink { bounds }
+                    if bounds.first().is_some_and(|(s, e)| {
+                        s.as_lit() == Some(0) && e.node_input().is_some()
+                    })
+            )
+        });
+        assert!(
+            runtime_trim,
+            "runtime strided-axis adjoint must trim to a node-valued end bound"
+        );
+        // The gradient of sum(stride(x, 2)) at n = 5 is the upsample mask
+        // [1, 0, 1, 0, 1].
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            "x".to_string(),
+            TensorValue {
+                data: vec![1.0, 2.0, 3.0, 4.0, 5.0],
+                shape: vec![5],
+            },
+        );
+        let grad_node = grad_result.grad_nodes[&x];
+        let values =
+            crate::eval::eval_tensor_roots_with_strict(&grad_result.dag, &[grad_node], |name| {
+                inputs.get(name).cloned()
+            })
+            .expect("runtime strided-axis adjoint must evaluate");
+        assert_eq!(values[&grad_node].shape, vec![5]);
+        assert_eq!(values[&grad_node].data, vec![1.0, 0.0, 1.0, 0.0, 1.0]);
     }
 
     /// ProdReduce along the concrete axis of a `[batch, 3]` input: backward

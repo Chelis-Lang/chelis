@@ -43,7 +43,7 @@
 //! the `shrink` lowering fix.
 
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtDim, TensorType};
-use chelis_ir::eval::{TensorValue, eval_tensor};
+use chelis_ir::eval::{TensorValue, eval_tensor, eval_tensor_roots_with_strict};
 use chelis_ir::grad::{AdError, grad_dag_checked};
 use chelis_types::types::Prim;
 use std::collections::HashMap;
@@ -497,16 +497,15 @@ fn issue_291_grad_stride_supports_higher_order_ad() {
     assert_eq!(vals[&grad2_x].shape, vec![4]);
 }
 
-// --- STRIDE: negative parity ---
+// --- STRIDE: runtime-symbolic strided axis (chelis#616) ---
 
-/// Negative parity: a stride over a SYMBOLIC (unsized) axis cannot be
-/// upsampled because the trim size is unknown. The adjoint relies on a
-/// concrete source size (`dim_size`), matching the existing Pad/Shrink
-/// adjoints. This pins that the construction does not silently fabricate
-/// a wrong shape; the symbolic source dim is unrepresentable here.
+/// chelis#616: a stride over a SYMBOLIC (unsized) axis now constructs a
+/// RUNTIME adjoint — the trim bound is a node-valued Shape read of the
+/// forward input and the merge extent is runtime `m * step` arithmetic —
+/// and evaluates to the exact upsample mask. (Pre-#616 this pinned the
+/// loud `dim_size` panic; the capability replaced the boundary.)
 #[test]
-#[should_panic(expected = "symbolic dimension")]
-fn issue_291_grad_stride_symbolic_axis_is_unrepresentable() {
+fn issue_291_grad_stride_symbolic_axis_is_runtime_upsample() {
     let mut dag = Dag::new();
     let in_ty = TensorType {
         dims: vec![DimInfo::Named("n".into(), None)],
@@ -531,10 +530,22 @@ fn issue_291_grad_stride_symbolic_axis_is_unrepresentable() {
         scalar_f32(),
         None,
     );
-    // The Stride adjoint must read concrete source sizes; a symbolic
-    // unsized source dim panics in `dim_size` (same fail-mode as the
-    // existing Pad/Shrink adjoints).
-    let _ = grad_dag_checked(&dag, out, &[x]);
+    let grad = grad_dag_checked(&dag, out, &[x]).expect("runtime strided adjoint constructs");
+    let grad_x = grad.grad_nodes[&x];
+    let mut inputs = HashMap::new();
+    inputs.insert(
+        "x".to_string(),
+        TensorValue {
+            data: vec![1.0, 2.0, 3.0, 4.0],
+            shape: vec![4],
+        },
+    );
+    let vals =
+        eval_tensor_roots_with_strict(&grad.dag, &[grad_x], |name| inputs.get(name).cloned())
+            .expect("runtime strided adjoint evaluates");
+    // f(x) = sum(stride(x, 2)) = x0 + x2, so df/dx = [1, 0, 1, 0].
+    assert_eq!(vals[&grad_x].shape, vec![4]);
+    assert_eq!(vals[&grad_x].data, vec![1.0, 0.0, 1.0, 0.0]);
 }
 
 // --- SHRINK: IR-level controls (the adjoint itself was already

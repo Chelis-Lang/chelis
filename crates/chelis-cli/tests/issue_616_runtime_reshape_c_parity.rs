@@ -244,6 +244,42 @@ int main(void) {{
     }
 }
 
+/// GRADIENT eval-vs-C parity for the full runtime window chain: the loss
+/// `sum(sum(w))` over the windowed `[1, m]` reshape reads elements
+/// 0, 2, ... of the input, so the gradient is the upsample mask
+/// `[1, 0, 1, 0]` — computed by the runtime movement adjoints (Shape-read
+/// trim bounds, runtime merge extents) identically in both lanes.
+#[test]
+fn issue_616_runtime_window_grad_eval_matches_c() {
+    let source = "module Repro.RtWindowGrad\nsig f: tensor[4, f32] -> f32\ndef f(x) = {\n\
+  m = add(floor_div(sub(cast(shape(x, cast(0, int32)), int64), cast(2, int64)), cast(2, int64)), cast(1, int64))\n\
+  extent = cast(add(mul(sub(m, cast(1, int64)), cast(2, int64)), cast(1, int64)), int32)\n\
+  w = reshape(stride(shrink(x, [[cast(0, int32), extent]]), cast(2, int32)), [cast(1, int64), m])\n\
+  sum(sum(w, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
+}\nout = grad(f)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)]))\n";
+
+    let eval_out = run_eval(source, "rtwindowgrad");
+    assert!(
+        eval_out.status.success(),
+        "runtime window grad eval failed: {}",
+        String::from_utf8_lossy(&eval_out.stderr)
+    );
+    let eval_grad = parse_tensor_data(&String::from_utf8_lossy(&eval_out.stdout));
+    assert_close("eval window grad", &eval_grad, &[1.0, 0.0, 1.0, 0.0]);
+
+    let (_dir, build_dir) = build_c(source, "rtwindowgrad");
+    let bin = gcc(&build_dir, "rtwindowgrad", None, "self_bin");
+    let run = StdCommand::new(&bin).output().expect("run emitted program");
+    assert!(
+        run.status.success(),
+        "emitted grad program exited non-zero: stdout={} stderr={}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let c_grad = parse_tensor_data(&String::from_utf8_lossy(&run.stdout));
+    assert_close("eval-vs-C window grad", &c_grad, &eval_grad);
+}
+
 /// Error-path parity (soundness): a runtime reshape target that resolves to
 /// a NEGATIVE extent must fail LOUDLY in both lanes — the eval lane rejects
 /// the negative scalar, the C lane aborts at the emitted negativity guard —

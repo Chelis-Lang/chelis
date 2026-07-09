@@ -253,15 +253,19 @@ impl DimExpr {
 
     /// chelis#616: like [`Self::bind`], but a symbol in `exempt` (an
     /// op-declared runtime dim, whose value does not exist until its owning
-    /// op evaluates) stays symbolic instead of raising the loud
-    /// missing-binding error. The evaluator resolves it mid-evaluation.
+    /// op evaluates) or an ANONYMOUS wildcard (resolved by the evaluator
+    /// from a shape-dep value) stays symbolic instead of raising the loud
+    /// missing-binding error.
     pub fn bind_except(
         &self,
         bindings: &HashMap<String, usize>,
         exempt: &HashSet<String>,
     ) -> Result<Self, String> {
         match self {
-            Self::Sym(name) if exempt.contains(name) && !bindings.contains_key(name) => {
+            Self::Sym(name)
+                if (exempt.contains(name) || name.is_empty() || name == "*")
+                    && !bindings.contains_key(name) =>
+            {
                 Ok(Self::Sym(name.clone()))
             }
             Self::Mul(lhs, rhs) => Ok(Self::Mul(
@@ -1651,6 +1655,15 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
             if let DimInfo::Named(symbol, None) = dim
                 && !named_dims_in_loads.contains(symbol)
                 && !op_declared.contains(symbol)
+                // chelis#616: a raw ANONYMOUS (wildcard) output dim is not a
+                // referenceable symbol — nothing renders it, and distinct
+                // runtime extents share it. The C backend renames every anon
+                // dim to a unique `_anon_dim_{id}_{axis}` BEFORE this pass
+                // (so a genuinely sourceless anon dim still fails loud
+                // there); the eval lane computes shapes from values and
+                // never reads a wildcard by name.
+                && !symbol.is_empty()
+                && symbol != "*"
             {
                 // Hunt for any Load whose own type contains the same
                 // unbound dim name. We have to widen the search because
@@ -1727,6 +1740,15 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
             if named_dims_in_loads.contains(&symbol) || op_declared.contains(&symbol) {
                 continue;
             }
+            // chelis#616: a raw ANONYMOUS op-internal reference (the
+            // `lower_if` mask expansion over a wildcard-typed branch) is
+            // resolved by the evaluator from the node's shape-dep value. The
+            // C lane cannot render it — but the emitted identifier `*` fails
+            // C compilation LOUDLY if such a node ever reaches codegen
+            // (guarded `if` programs route through the host lane).
+            if symbol.is_empty() || symbol == "*" {
+                continue;
+            }
             if !bind_symbol_from_any_load(dag, &symbol, &mut occurrences, &mut named_dims_in_loads)
             {
                 panic!(
@@ -1752,6 +1774,15 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
 /// occurrence: the C emitter declares (or equality-guards) the dim inline at
 /// the op and the eval lane resolves it from actual values.
 fn op_declared_output_axes(dag: &Dag, node: &DagNode) -> Vec<(String, usize)> {
+    // An ANONYMOUS (wildcard) dim name is not a stable symbol: distinct
+    // runtime extents share it, so binding/declaring it would falsely unify
+    // them. The C backend renames every anon dim to a unique
+    // `_anon_dim_{id}_{axis}` before its occurrence pass (making them
+    // eligible there); the eval lane computes shapes from values and never
+    // needs a wildcard bound.
+    fn is_anon(name: &str) -> bool {
+        name.is_empty() || name == "*"
+    }
     match &node.op {
         RiscOp::Shrink { .. } | RiscOp::Stride { .. } | RiscOp::Pad { .. } => node
             .output_type
@@ -1760,7 +1791,7 @@ fn op_declared_output_axes(dag: &Dag, node: &DagNode) -> Vec<(String, usize)> {
             .enumerate()
             .filter_map(|(axis, dim)| match dim {
                 DimInfo::Named(symbol, None)
-                    if shape_source_for_axis(dag, node.id, axis).is_none() =>
+                    if !is_anon(symbol) && shape_source_for_axis(dag, node.id, axis).is_none() =>
                 {
                     Some((symbol.clone(), axis))
                 }
@@ -1773,7 +1804,7 @@ fn op_declared_output_axes(dag: &Dag, node: &DagNode) -> Vec<(String, usize)> {
             .iter()
             .enumerate()
             .filter_map(|(axis, dim)| match (dim, new_shape.get(axis)) {
-                (DimInfo::Named(symbol, None), Some(RtDim::Node(_))) => {
+                (DimInfo::Named(symbol, None), Some(RtDim::Node(_))) if !is_anon(symbol) => {
                     Some((symbol.clone(), axis))
                 }
                 _ => None,
@@ -2083,7 +2114,10 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
     // chelis#616: an op-declared dim (a node-valued movement output extent)
     // has no pre-eval value — the evaluator computes it from actual bound
     // scalars. Leave it unbound instead of raising the loud missing-binding
-    // error; the eval movement arms never read the output type for it.
+    // error; the eval movement arms never read the output type for it. The
+    // same applies to a raw ANONYMOUS (wildcard) dim: it is not a
+    // referenceable symbol, and the evaluator computes the real extent from
+    // values.
     let op_declared = op_declared_dim_names(dag);
     let bind_dim = |dim: &DimInfo| -> Result<DimInfo, String> {
         match dim {
@@ -2091,7 +2125,9 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
             DimInfo::Named(name, Some(size)) => Ok(DimInfo::Named(name.clone(), Some(*size))),
             DimInfo::Named(name, None) => match bindings.get(name) {
                 Some(size) => Ok(DimInfo::Named(name.clone(), Some(*size))),
-                None if op_declared.contains(name) => Ok(dim.clone()),
+                None if op_declared.contains(name) || name.is_empty() || name == "*" => {
+                    Ok(dim.clone())
+                }
                 None => Err(format!("missing symbolic dimension binding `{name}`")),
             },
         }
@@ -2120,11 +2156,19 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
                 new_shape: new_shape
                     .iter()
                     .map(|dim| match dim {
-                        RtDim::Sym(name) => {
-                            Ok(RtDim::Lit(bindings.get(name).copied().ok_or_else(
-                                || format!("missing symbolic dimension binding `{name}`"),
-                            )?))
-                        }
+                        RtDim::Sym(name) => match bindings.get(name) {
+                            Some(size) => Ok(RtDim::Lit(*size)),
+                            // chelis#616: an op-declared symbol (and an
+                            // anonymous wildcard) resolves during evaluation,
+                            // not here.
+                            None if op_declared.contains(name)
+                                || name.is_empty()
+                                || name == "*" =>
+                            {
+                                Ok(dim.clone())
+                            }
+                            None => Err(format!("missing symbolic dimension binding `{name}`")),
+                        },
                         // `Lit` passes through; `Node` (runtime) targets are
                         // resolved by the evaluator from `inputs`, not here.
                         RtDim::Lit(n) => Ok(RtDim::Lit(*n)),
@@ -2159,6 +2203,20 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
                                 DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => {
                                     Ok((RtDim::Lit(start_lit), RtDim::Lit(start_lit + *size)))
                                 }
+                                // chelis#616: an op-declared (or wildcard)
+                                // axis has no pre-eval binding; keep the
+                                // sentinel — the evaluator resolves `ToEnd`
+                                // to the INPUT's runtime extent, which for
+                                // the full-axis identity slice (start 0) is
+                                // exactly the sentinel's meaning.
+                                DimInfo::Named(name, None)
+                                    if start_lit == 0
+                                        && (op_declared.contains(name)
+                                            || name.is_empty()
+                                            || name == "*") =>
+                                {
+                                    Ok((start.clone(), end.clone()))
+                                }
                                 DimInfo::Named(name, None) => Err(format!(
                                     "shrink-to-end sentinel left unbound for symbolic \
                                      dimension `{name}`"
@@ -2192,6 +2250,12 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
             other => other.clone(),
         };
         let new_id = rebound.add_node(op, node.inputs.clone(), output_type, None);
+        // chelis#616: binding is a 1:1 id-preserving rebuild; shape-only
+        // deps (runtime-dim declarers, `lower_if` placeholder shape sources)
+        // must survive it — the evaluator reads them.
+        if let Some(new_node) = rebound.node_mut(new_id) {
+            new_node.shape_deps = node.shape_deps.clone();
+        }
         if dag.is_root(node.id) {
             rebound.add_root(new_id);
         }

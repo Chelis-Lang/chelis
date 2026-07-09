@@ -1422,8 +1422,19 @@ where
 
         let value = match &node.op {
             RiscOp::Const { value } => {
-                let shape =
-                    concrete_shape_with(&node.output_type, &runtime_dims).unwrap_or_default();
+                // chelis#616: a Const whose symbolic dims resolve neither
+                // statically nor through the runtime bindings may carry a
+                // shape-dep naming its shape source (a `lower_if` branch
+                // placeholder / mask constant shaped like a sibling); size it
+                // from the dep's actual value.
+                let shape = concrete_shape_with(&node.output_type, &runtime_dims)
+                    .ok()
+                    .or_else(|| {
+                        node.shape_deps
+                            .iter()
+                            .find_map(|dep| values.get(dep).map(|v| v.shape.clone()))
+                    })
+                    .unwrap_or_default();
                 TensorValue {
                     data: vec![*value; numel(&shape)],
                     shape,
@@ -1599,9 +1610,11 @@ where
                         // chelis#616: a runtime target extent reads its rank-0
                         // integer scalar exactly like a movement bound.
                         RtDim::Node(_) => resolve_eval_bound(dim, node, &values, 0),
-                        RtDim::Sym(name) => {
-                            Err(format!("cannot reshape to symbolic dimension `{name}`"))
-                        }
+                        // chelis#616: an op-declared symbol resolves from the
+                        // mid-evaluation bindings.
+                        RtDim::Sym(name) => runtime_dims.get(name).copied().ok_or_else(|| {
+                            format!("cannot reshape to symbolic dimension `{name}`")
+                        }),
                         RtDim::ToEnd => {
                             Err("reshape target dim cannot be a shrink-to-end sentinel".to_string())
                         }
@@ -1625,16 +1638,39 @@ where
                 reshape(input, shape)
             }
             RiscOp::Permute { axes } => permute(&values[&node.inputs[0]], axes),
-            RiscOp::Expand { axis, size } => expand(
-                &values[&node.inputs[0]],
-                *axis,
+            RiscOp::Expand { axis, size } => {
                 // chelis#616: a symbolic size surviving `bind_symbolic_dims`
-                // is an op-declared runtime dim; resolve it (loudly) from the
-                // mid-evaluation bindings.
-                size.evaluate(&runtime_dims)
-                    .map_err(|e| format!("expand at node {}: {e}", node.id.0))?,
-                concrete_shape_with(&node.output_type, &runtime_dims)?,
-            ),
+                // is an op-declared runtime dim (resolved from the
+                // mid-evaluation bindings) or a wildcard whose extent comes
+                // from the node's shape-dep value (the `lower_if` mask
+                // expansion over a wildcard-typed branch). Loud when neither
+                // resolves.
+                let dep_shape = node
+                    .shape_deps
+                    .iter()
+                    .find_map(|dep| values.get(dep).map(|v| v.shape.clone()));
+                let size_value = match size.evaluate(&runtime_dims) {
+                    Ok(value) => value,
+                    Err(e) => dep_shape
+                        .as_ref()
+                        .and_then(|shape| shape.get(*axis).copied())
+                        .ok_or_else(|| format!("expand at node {}: {e}", node.id.0))?,
+                };
+                let out_shape = match concrete_shape_with(&node.output_type, &runtime_dims) {
+                    Ok(shape) => shape,
+                    // The mask chain expands one axis at a time, so an
+                    // intermediate step's shape is a PREFIX of the branch
+                    // value's shape.
+                    Err(e) => {
+                        let out_rank = node.output_type.dims.len();
+                        dep_shape
+                            .filter(|shape| shape.len() >= out_rank)
+                            .map(|shape| shape[..out_rank].to_vec())
+                            .ok_or_else(|| format!("expand at node {}: {e}", node.id.0))?
+                    }
+                };
+                expand(&values[&node.inputs[0]], *axis, size_value, out_shape)
+            }
             RiscOp::OneHot { vocab } => one_hot(&values[&node.inputs[0]], *vocab),
             RiscOp::Pad { padding, fill } => {
                 let input = &values[&node.inputs[0]];

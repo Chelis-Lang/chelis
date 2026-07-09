@@ -7943,6 +7943,40 @@ impl LowerCtx {
                 )
             }
 
+            // chelis#616: `fail(...)` in a DAG-lowered `if` branch. The mask
+            // lowering zeroes the untaken branch, so the placeholder's VALUE
+            // never matters on the taken path; real abort semantics live in
+            // the host lane (which owns entry-level `if`/`fail`). The
+            // pre-#616 terminal fallback fabricated a rank-0
+            // `Load { name: "fail" }` — a phantom input slot that broke the
+            // C lane and mixed ranks in the mask arithmetic. Emit a zero
+            // Const at the branch's rank instead, with ANONYMOUS symbolic
+            // dims (the checker's symbol may be declared later in program
+            // order; `lower_if` ties the placeholder's shape to the sibling
+            // branch via a shape-dep).
+            "fail" => {
+                for arg in args {
+                    let _ = self.lower_expr(arg);
+                }
+                let dims = ty
+                    .dims
+                    .iter()
+                    .map(|dim| match dim {
+                        DimInfo::Lit(n) | DimInfo::Named(_, Some(n)) => DimInfo::Lit(*n),
+                        DimInfo::Named(_, None) => DimInfo::Named(String::new(), None),
+                    })
+                    .collect();
+                self.dag.add_node(
+                    RiscOp::Const { value: 0.0 },
+                    vec![],
+                    TensorType {
+                        dims,
+                        precision: ty.precision,
+                    },
+                    self.current_span_id.clone(),
+                )
+            }
+
             // Fallback: unknown function.
             _ => {
                 for arg in args {
@@ -9916,19 +9950,24 @@ impl LowerCtx {
             return self.lower_unrepresentable("if", elems);
         }
 
-        let mask = self.lower_if_mask(cond, &out_ty);
+        // chelis#616: a leaf-Const branch (the `fail` placeholder) and the
+        // mask's `one` Const are shaped like the branch values, but as leaf
+        // nodes they have no input edge carrying that relation. Conform the
+        // placeholder to the if's rank (the checker types `fail` as bottom,
+        // which lowers rank-0) and record a shape-dep so (i) the C backend's
+        // anon-dim renaming ties the Const's wildcard dims to the sibling's
+        // instead of fragmenting them into fresh sourceless `_anon_dim_*`s,
+        // (ii) the evaluator can size the Const from the sibling's actual
+        // value, and (iii) the extent source stays alive under DCE.
+        let then_node = self.conform_branch_placeholder(then_node, &out_ty, else_node);
+        let else_node = self.conform_branch_placeholder(else_node, &out_ty, then_node);
+        let mask = self.lower_if_mask(cond, &out_ty, else_node);
         let one = self.dag.add_node(
             RiscOp::Const { value: 1.0 },
             vec![],
             out_ty.clone(),
             self.current_span_id.clone(),
         );
-        // chelis#616: `one` is shaped like the branch values, but as a leaf
-        // Const it has no input edge carrying that relation. Record it as a
-        // shape-dep so the C backend's anon-dim renaming can tie the Const's
-        // wildcard dims to the branch's (instead of fragmenting them into a
-        // fresh, sourceless `_anon_dim_*` that `symbolic_occurrences` must
-        // reject) and so the extent source stays alive under DCE.
         self.dag.add_shape_dep(one, else_node);
         let neg_mask = self.dag.add_node(
             RiscOp::Neg,
@@ -10362,7 +10401,71 @@ impl LowerCtx {
         )
     }
 
-    fn lower_if_mask(&mut self, cond: NodeId, out_ty: &TensorType) -> NodeId {
+    /// chelis#616: conform an `if` branch that lowered as an input-less
+    /// `Const` (the `fail` placeholder) to the if's type, and record the
+    /// sibling branch as its shape source (see `lower_if`). The checker
+    /// types `fail` as bottom, which lowers rank-0; a checked program's
+    /// branches otherwise agree in rank, so a rank-0 leaf Const under a
+    /// tensor-typed `if` is exactly the bottom placeholder. Returns the
+    /// branch node to use in the mask arithmetic: for the bottom
+    /// placeholder that is a FRESH conformed Const emitted here — after
+    /// both branches — so its shape source (the sibling) precedes it in
+    /// evaluation order.
+    fn conform_branch_placeholder(
+        &mut self,
+        node: NodeId,
+        out_ty: &TensorType,
+        sibling: NodeId,
+    ) -> NodeId {
+        if node == sibling || out_ty.dims.is_empty() {
+            return node;
+        }
+        let Some(n) = self.dag.get(node).cloned() else {
+            return node;
+        };
+        if !(matches!(n.op, RiscOp::Const { .. }) && n.inputs.is_empty() && n.shape_deps.is_empty())
+        {
+            return node;
+        }
+        if n.output_type.dims.is_empty() {
+            // Bottom placeholder: a fresh Const at the if's rank with
+            // anonymous symbolic dims (the checker's symbol for an unbound
+            // axis may be declared later in program order; the shape-dep
+            // carries the actual extent source). The rank-0 original is left
+            // unconsumed for DCE.
+            let dims = out_ty
+                .dims
+                .iter()
+                .map(|dim| match dim {
+                    DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => DimInfo::Lit(*size),
+                    DimInfo::Named(_, None) => DimInfo::Named(String::new(), None),
+                })
+                .collect();
+            let conformed = self.dag.add_node(
+                n.op,
+                Vec::new(),
+                TensorType {
+                    dims,
+                    precision: out_ty.precision,
+                },
+                self.current_span_id.clone(),
+            );
+            self.dag.add_shape_dep(conformed, sibling);
+            conformed
+        } else {
+            if n.output_type.dims.len() == out_ty.dims.len()
+                && n.output_type
+                    .dims
+                    .iter()
+                    .any(|d| matches!(d, DimInfo::Named(_, None)))
+            {
+                self.dag.add_shape_dep(node, sibling);
+            }
+            node
+        }
+    }
+
+    fn lower_if_mask(&mut self, cond: NodeId, out_ty: &TensorType, shape_source: NodeId) -> NodeId {
         let mut mask = cond;
         let cond_ty = self
             .dag
@@ -10399,6 +10502,9 @@ impl LowerCtx {
                     },
                     self.current_span_id.clone(),
                 );
+                // chelis#616: an unbound (possibly wildcard) `size` resolves
+                // from the branch value's actual shape at eval time.
+                self.dag.add_shape_dep(expanded, shape_source);
             }
             return expanded;
         }

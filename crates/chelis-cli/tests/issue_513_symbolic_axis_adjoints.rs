@@ -730,11 +730,12 @@ fn expect_grad_failure(source: &str, stem: &str, needle: &str, context: &str) {
     );
 }
 
-/// A stride along the SYMBOLIC axis itself needs the axis's runtime size to
-/// rebuild the source shape; that is a shape() VALUE read (chelis#513 gaps
-/// 2/3 residue) and must stay fail-closed with the adjoint's own message.
+/// chelis#616: a stride along the SYMBOLIC axis itself now builds the
+/// runtime adjoint cascade (Shape-read trim + runtime merge extent). For
+/// `f(x) = sum(stride(x, 2))` over `[1, 2, 3, 4]`, the loss reads elements
+/// 0 and 2, so the gradient is the upsample mask `[1, 0, 1, 0]`.
 #[test]
-fn issue_513_stride_on_symbolic_axis_stays_fail_closed() {
+fn issue_513_stride_on_symbolic_axis_grad_is_upsample_mask() {
     let source = "module Repro.StrideSymAxis\n\
 sig f: tensor[n, f32] -> f32\n\
 def f(x) = {\n\
@@ -742,11 +743,13 @@ def f(x) = {\n\
   sum(s, cast(0, int32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(f)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)]))\n";
-    expect_grad_failure(
-        source,
-        "stridesymaxis",
-        "stride adjoint requires a concrete size for strided axis",
-        "stride over symbolic strided axis",
+    let (shape, grad) = eval_grad(source);
+    assert_eq!(shape, vec![4]);
+    assert_close(
+        "symbolic strided-axis grad",
+        &grad,
+        &[1.0, 0.0, 1.0, 0.0],
+        1e-3,
     );
 }
 
@@ -770,11 +773,12 @@ out = grad(f)(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast
     );
 }
 
-/// A shrink with CONCRETE sub-range bounds on a symbolic axis needs the
-/// axis's runtime size for the Pad adjoint's `after` amount: shape() VALUE
-/// territory, stays fail-closed.
+/// chelis#616: a shrink with CONCRETE sub-range bounds on a symbolic axis
+/// now builds the runtime Pad adjoint (`after = shape(x, axis) - end`). For
+/// the `[[0,1], [1,3]]` sub-range over a `[2, 4]` input, the loss reads
+/// `x[0][1..3]`, so the gradient is 1 exactly there.
 #[test]
-fn issue_513_shrink_concrete_bounds_on_symbolic_axis_stays_fail_closed() {
+fn issue_513_shrink_concrete_bounds_on_symbolic_axis_grad_is_window_mask() {
     let source = "module Repro.ShrinkSymAxis\n\
 sig f: tensor[batch, 4, f32] -> f32\n\
 def f(x) = {\n\
@@ -782,11 +786,13 @@ def f(x) = {\n\
   sum(sum(s, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(f)(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)], [cast(5.0, f32), cast(6.0, f32), cast(7.0, f32), cast(8.0, f32)]]))\n";
-    expect_grad_failure(
-        source,
-        "shrinksymaxis",
-        "cannot determine size for symbolic dimension",
-        "shrink sub-range on symbolic axis",
+    let (shape, grad) = eval_grad(source);
+    assert_eq!(shape, vec![2, 4]);
+    assert_close(
+        "shrink sub-range on symbolic axis grad",
+        &grad,
+        &[0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        1e-3,
     );
 }
 

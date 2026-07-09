@@ -20,6 +20,15 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                 consumers[input_id.0] += 1;
             }
         }
+        // chelis#384/#397/#616: a shape-only dependency (a Form-3 `expand`
+        // source or a runtime-dim declarer kept alive for its extent) is a
+        // real consumption — the dependent reads the node's shape, not its
+        // value — so its target is not dangling.
+        for &dep in &node.shape_deps {
+            if dep.0 < consumers.len() {
+                consumers[dep.0] += 1;
+            }
+        }
 
         if let RiscOp::Load { name } = &node.op {
             if let Some(prev_ty) = load_types.get(name.as_str()) {
