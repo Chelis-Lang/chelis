@@ -9333,11 +9333,10 @@ impl LowerCtx {
                     }
                     _ => DimInfo::Named(format!("_rt_dim_{}_{axis}", node.0), None),
                 });
-            } else if let Some(name) = symbolic_dim_var_name(elem) {
+            } else {
+                let name = symbolic_dim_var_name(elem)?;
                 op_dims.push(RtDim::Sym(name.clone()));
                 ty_dims.push(DimInfo::Named(name, None));
-            } else {
-                return None;
             }
         }
         if op_dims.is_empty() {
