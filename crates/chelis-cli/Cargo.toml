@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+chelis-conformance.workspace = true
 chelis-deep.workspace = true
 chelis-reef.workspace = true
 # WS-C orchestration: reuse chelisup's toolchain-store path math (paths::Store)

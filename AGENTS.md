@@ -437,15 +437,25 @@ Current shared skill set:
 ## Downstream Shell Contract
 
 Downstream shell repos (every repo in the canonical-reference §Shell
-Ecosystem table) inherit this `AGENTS.md` verbatim (machine-local
-environment sections excepted; see the contract §1) AND must satisfy
+Ecosystem table) inherit this `AGENTS.md` through a **stamped pointer
+managed block** (not a verbatim copy; machine-local environment sections
+excepted — see the contract §1) AND must satisfy
 [`spec/design/shell_repo_contract.md`](spec/design/shell_repo_contract.md):
 pin hygiene with a mechanical multi-location consistency guard, a
 per-shell `docs/CHELIS_SURFACE.md` capability inventory, the
 narrowing-citation rule (every workaround cites `chelis#NNN` at the site —
 file upstream, never silently work around), expected-to-fail blocker
 probes under `tests_blocked/` re-run at every pin bump, negative-test
-sidecars, vendored shared skills, and uv-managed Python. The contract
-names `Chelis-Lang/school` as its reference implementation. Changes to the
-contract land here first and propagate to every shell per its scaffolding
-drift rule.
+sidecars, the shared skill set materialized as an upstream pointer, and
+uv-managed Python.
+
+The contract ships **in the toolchain** as `chelis reef conform`
+(audit / init / sync / bump / bump-check), backed by the
+`chelis-conformance` crate — the machine-readable form of the contract's
+§11 table (`MANIFEST`) and the §Shell-Ecosystem registry (`REGISTRY`),
+tripwire-locked to this doc and `.github/workflows/ecosystem-drift.yml`.
+Shells wire `conform audit` + `conform bump-check` into CI; pin bumps land
+as `conform bump` PRs (never direct to `main`). `Chelis-Lang/school` is the
+reference implementation. Changes to the contract land here first (edit the
+doc **and** `MANIFEST`/`REGISTRY` in lockstep, or the tripwire fails) and
+propagate to every shell via `conform sync` per the scaffolding drift rule.
