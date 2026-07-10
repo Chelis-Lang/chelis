@@ -10,7 +10,10 @@ use std::path::Path;
 use chelis_conformance::audit;
 use chelis_conformance::scaffold;
 
-const VER: &str = "0.14.0";
+// Must track the crate version: sync stamps at VER and the audit's
+// canonical-body comparison only applies at AUDITOR_VERSION, so a hardcoded
+// version quietly downgrades this round-trip to the stale-stamp path only.
+const VER: &str = env!("CARGO_PKG_VERSION");
 
 fn sentinel_line() -> &'static str {
     "SHELL-OWNED SENTINEL: do not let sync clobber me\n"
@@ -42,7 +45,7 @@ fn sync_restores_green_and_preserves_shell_content() {
     for rel in ["AGENTS.md", "docs/CHELIS_SURFACE.md"] {
         let p = root.join(rel);
         let t = std::fs::read_to_string(&p).unwrap();
-        let t = t.replace("chelis@0.14.0", "chelis@0.9.0"); // stale stamp
+        let t = t.replace(&format!("chelis@{VER}"), "chelis@0.9.0"); // stale stamp
         let t = t.replace("upstream", "UPSTREAM-TAMPERED"); // body hand-edit
         std::fs::write(&p, t).unwrap();
     }

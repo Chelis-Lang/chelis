@@ -11,7 +11,10 @@ use std::path::{Path, PathBuf};
 use chelis_conformance::audit::{self, Verdict};
 use chelis_conformance::scaffold;
 
-const VER: &str = "0.14.0";
+// Must track the crate version: the audit's canonical-body comparison only
+// applies to blocks stamped at AUDITOR_VERSION, so a hardcoded scaffold
+// version silently skips the forged-block oracle after every release bump.
+const VER: &str = env!("CARGO_PKG_VERSION");
 
 fn stamp(dir: &Path, name: &str) -> PathBuf {
     let root = dir.join(name);
@@ -80,7 +83,7 @@ fn editing_workflow_pin_fails_row_3() {
     let text = std::fs::read_to_string(&ci).unwrap();
     std::fs::write(
         &ci,
-        text.replace("CHELIS_VERSION: 0.14.0", "CHELIS_VERSION: 0.13.0"),
+        text.replace(&format!("CHELIS_VERSION: {VER}"), "CHELIS_VERSION: 0.13.0"),
     )
     .unwrap();
 
@@ -113,7 +116,11 @@ fn stale_managed_block_stamp_fails_row_1() {
     let text = std::fs::read_to_string(&agents).unwrap();
     // Restamp the managed block to an older version without touching the body,
     // simulating a pin bump that skipped `conform sync`.
-    std::fs::write(&agents, text.replace("chelis@0.14.0", "chelis@0.13.0")).unwrap();
+    std::fs::write(
+        &agents,
+        text.replace(&format!("chelis@{VER}"), "chelis@0.13.0"),
+    )
+    .unwrap();
 
     let report = audit::audit(&root);
     assert!(!report.ok());
