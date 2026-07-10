@@ -4,6 +4,69 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.15.0] — 2026-07-10
+
+### Added
+
+- **Runtime-symbolic movement bounds and reshape targets (chelis#616,
+  #627).** A `shrink`/`stride`/`pad` bound or a `reshape` target extent can
+  now be a runtime rank-0 integer scalar (a `shape()` read or integer
+  arithmetic over one, including an inlined window-count parameter),
+  represented as a node-valued `RtDim` and resolved in both the eval and C
+  lanes with matching value AND error paths (negativity, range, zero-size,
+  and reshape-numel runtime guards). The movement adjoints are
+  runtime-capable on the same representation, so the runtime-symbolic-window
+  `avgpool1d` gradient — the chelis#368/#513 residual — now computes exactly
+  (`[0.5, 0.5, 0.5, 0.5]`, locked by analytic + finite-difference +
+  forward-parity oracles in eval and by the compiled C binary). Runtime dims
+  are *op-declared*: the owning op declares the extent inline in C and the
+  evaluator binds it mid-evaluation, with runtime equality aborts across
+  sites. `--target hip`/`--target metal` reject runtime bounds and targets
+  with a clean diagnostic naming `--target c`. See
+  `spec/05-risc-primitives.md` §2.4.1 and `spec/06-transformations.md`
+  §2.7.1; residuals are tracked as chelis#631 (host-lane list-concat typing)
+  and chelis#632 (movement-chain over-unification), both loud.
+- **`RiscOp::Shape` runtime shape-value read (#558, #617).** A scalar
+  `shape(x, axis)` VALUE read lowers to a real rank-0 integer node instead
+  of the bogus `Load { name: "shape" }` fallthrough (which silently
+  mis-evaluated under `grad`). AD-transparent (zero cotangent); the C
+  backend reads the extent from the runtime input tensor.
+- **Multi-argument ADT gradients + multi-target grad display (chelis#520,
+  #614, #619).**
+
+### Fixed
+
+- **Per-axis movement typing (soundness, chelis#616 red team).** Type
+  inference no longer collapses every axis of a `shrink`/`pad`/`stride` to a
+  wildcard when one bound is runtime; a multi-axis shrink mixing a runtime
+  axis with a literal-bounded axis previously produced a silently mis-sized,
+  wrong-valued C tensor. Literal axes keep their precise infer-time
+  validation; the C backend additionally aborts if a runtime extent
+  disagrees with a statically-typed dim (defense in depth).
+- **Leading-axis symbolic concat heap overflow (chelis#593) closed
+  structurally.** The C backend's anonymous-dim renaming no longer copies an
+  operand's dims wholesale over an extent-altering movement output; the
+  formerly fail-closed reproducers now build and run correctly.
+- **Zero-size runtime shrink error parity.** The C runtime guard now rejects
+  `end <= start` exactly as the evaluator does (previously it silently
+  produced an empty tensor where eval errored).
+- **`fail(...)` in a DAG-lowered `if` branch** lowers to a properly-shaped
+  zero placeholder instead of a phantom rank-0 `Load { name: "fail" }` (which
+  broke the C lane and mixed ranks in the mask arithmetic).
+- **Zero-fill adjoint-free tensor slots in multi-target grad (#625).**
+- **rustc 1.97 toolchain compatibility.** Three new clippy lints on
+  pre-existing code, and the chelis-types small-stack guard tests no longer
+  drop their deep test chain on the 1 MiB worker thread (1.97's larger drop
+  frames overflowed it; the guard itself was measured sound at the existing
+  128 KiB red zone).
+
+### Changed
+
+- **Wire schema version 2 → 3 (chelis#616).** `WireRiscOp::Reshape` now
+  serializes `Vec<WireRtDim>` (a bound-tagged value: `lit` / `node` / `sym`)
+  instead of `Vec<WireDimInfo>`, and `WireRtDim` gained `Sym`. Pinned
+  consumers (Beacon, offline verifiers) must observe the bump.
+
 ## [0.14.0] — 2026-07-03
 
 ### Added
