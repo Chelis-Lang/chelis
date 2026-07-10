@@ -10,108 +10,75 @@
 //! The result is tagged `SpecialFunctionCertified` (not `Exact`) because it
 //! leans on the envelope certificate.
 //!
+//! # Function registry (chelis#434)
+//!
+//! The finder is driven by [`SpecialFnRegistry`]: it abstracts any
+//! `Apply(f, [arg])` where `f` is a known special function `{erf, exp, log,
+//! sqrt}` AND a certified envelope for `f` is committed. Today only `erf` has
+//! committed data, so `exp`/`log`/`sqrt` sites DECLINE (identity) — the honest
+//! floor until their certified envelopes land. Each function carries a
+//! [`Domain`] guard (`log` needs `arg > 0`, `sqrt` needs `arg >= 0`); a site
+//! whose argument range is not provably inside the domain declines.
+//!
 //! # Sound range evaluation
 //!
 //! The envelope's `bound(x)` gives a sound interval for a SINGLE point. This
-//! transformation needs a sound interval over the argument's ENTIRE RANGE. We
-//! compute `sound_erf_range_bound(arg_lo, arg_hi)` by evaluating the envelope
-//! across all boxes the range touches, taking the hull (min of all lo, max of
-//! all hi). This is sound because every box's eps is a sup-norm over that box.
+//! transformation needs a sound interval over the argument's ENTIRE RANGE, from
+//! [`SpecialFnEnvelope::sound_range_bound`] (the hull across every box the range
+//! touches; sound because every box's eps is a certified sup-norm).
 //!
 //! If the argument range is not statically boundable (no preconditions pin it),
-//! or extends outside the envelope's covered domain, the transformation DECLINES
-//! (returns identity). It never guesses.
+//! extends outside the envelope's covered domain, or violates the function's
+//! domain guard, the transformation DECLINES (returns identity). It never guesses.
+
+use std::collections::HashMap;
 
 use crate::discharge::{Goal, GoalShape};
-use crate::erf_envelope::{ErfEnvelope, ErfEnvelopeBox};
 use crate::solver::{BoolOp, CmpOp, SmtExpr, SmtSort};
+use crate::special_fn_envelope::{SpecialFnEnvelope, SpecialFnRegistry};
 use crate::tier_b::SmtProperty;
 use crate::transformation::Transformation;
 
-/// The abstract-subterm transformation for `erf`.
+/// The abstract-subterm transformation over the special-function registry.
 pub struct AbstractSubterm {
-    envelope: ErfEnvelope,
+    /// Committed certified envelopes to consult, keyed by function name. In
+    /// production this is loaded from [`SpecialFnRegistry::committed`] (today:
+    /// `erf` only). A function with no entry here DECLINES.
+    envelopes: HashMap<String, SpecialFnEnvelope>,
 }
 
 impl AbstractSubterm {
     pub fn new() -> Self {
-        Self {
-            envelope: ErfEnvelope::committed(),
+        let mut envelopes = HashMap::new();
+        for &f in SpecialFnRegistry::known_functions() {
+            if let Some(env) = SpecialFnRegistry::committed(f) {
+                envelopes.insert(f.to_string(), env);
+            }
         }
+        Self { envelopes }
+    }
+
+    /// The committed envelope for `fn_name`, if any is loaded.
+    fn envelope_for(&self, fn_name: &str) -> Option<&SpecialFnEnvelope> {
+        self.envelopes.get(fn_name)
+    }
+
+    /// Test-only constructor that injects synthetic certified-shaped envelopes,
+    /// so the generalized finder + domain guards can be exercised for
+    /// `exp`/`log`/`sqrt` before their real certified data lands. Production only
+    /// ever loads committed data via [`AbstractSubterm::new`].
+    #[cfg(test)]
+    fn with_envelopes(envelopes: HashMap<String, SpecialFnEnvelope>) -> Self {
+        Self { envelopes }
     }
 
     /// Compute a sound bound on `erf(x)` for ALL x in `[arg_lo, arg_hi]`.
     ///
-    /// Evaluates the envelope across every box the range touches, taking the
-    /// hull (min of all point-lo, max of all point-hi) PLUS considering
-    /// monotonicity within each box segment.
-    ///
-    /// Returns `None` if the range extends outside the envelope's domain.
+    /// Retained as the erf-specific entry point (the generic engine is
+    /// [`SpecialFnEnvelope::sound_range_bound`]); returns `None` if erf has no
+    /// loaded envelope or the range is outside its covered domain.
     pub fn sound_erf_range_bound(&self, arg_lo: f64, arg_hi: f64) -> Option<(f64, f64)> {
-        if arg_lo > arg_hi || !arg_lo.is_finite() || !arg_hi.is_finite() {
-            return None;
-        }
-
-        // Find all boxes the range intersects
-        let boxes: Vec<&ErfEnvelopeBox> = self
-            .envelope
-            .boxes
-            .iter()
-            .filter(|b| b.lo <= arg_hi && b.hi >= arg_lo)
-            .collect();
-
-        if boxes.is_empty() {
-            return None; // outside covered domain
-        }
-
-        // Check the range is fully covered by the envelope
-        let covered_lo = boxes.first().unwrap().lo;
-        let covered_hi = boxes.last().unwrap().hi;
-        if arg_lo < covered_lo || arg_hi > covered_hi {
-            return None; // extends outside domain
-        }
-
-        // For each box that the range intersects, compute the sound bound over
-        // the intersection. The sound bound over a box segment [a,b] is:
-        //   [min(approx(x) for x in [a,b]) - eps, max(approx(x) for x in [a,b]) + eps]
-        //
-        // For saturation arms: approx is constant, so trivial.
-        // For the central polynomial: we sample endpoints of each intersection
-        // and take min/max. This is sound for monotonic functions (erf is
-        // monotonically increasing), but for a general polynomial approximation
-        // we must be conservative. We evaluate at the intersection endpoints
-        // plus use the eps as a global error band.
-        //
-        // Since the ENTIRE purpose is to produce a SOUND over-approximation,
-        // we take the HULL of all point evaluations at the intersection
-        // boundaries of each box segment. For the polynomial arm, we evaluate
-        // at both endpoints of the intersection and take the hull.
-
-        let mut overall_lo = f64::INFINITY;
-        let mut overall_hi = f64::NEG_INFINITY;
-
-        for b in &boxes {
-            // The intersection of [arg_lo, arg_hi] with this box [b.lo, b.hi]
-            let seg_lo = arg_lo.max(b.lo);
-            let seg_hi = arg_hi.min(b.hi);
-
-            // Evaluate the approximation at both segment endpoints
-            let approx_at_lo = b.arm.approx(seg_lo);
-            let approx_at_hi = b.arm.approx(seg_hi);
-
-            // The sound bound for each evaluation point is [approx - eps, approx + eps]
-            let point_lo = approx_at_lo.min(approx_at_hi) - b.eps;
-            let point_hi = approx_at_lo.max(approx_at_hi) + b.eps;
-
-            overall_lo = overall_lo.min(point_lo);
-            overall_hi = overall_hi.max(point_hi);
-        }
-
-        // Clamp to [-1, 1] since erf is bounded by definition
-        overall_lo = overall_lo.max(-1.0);
-        overall_hi = overall_hi.min(1.0);
-
-        Some((overall_lo, overall_hi))
+        self.envelope_for("erf")?.sound_range_bound(arg_lo, arg_hi)
     }
 }
 
@@ -131,38 +98,49 @@ impl Transformation for AbstractSubterm {
             return vec![goal.clone()]; // identity for non-SMT goals
         };
 
-        // Find erf applications in the postcondition and collect their arguments
-        let erf_sites = find_erf_applications(&prop.postcondition);
-        if erf_sites.is_empty() {
+        // Find special-function applications in the postcondition.
+        let sites =
+            find_special_fn_applications(&prop.postcondition, SpecialFnRegistry::known_functions());
+        if sites.is_empty() {
             return vec![goal.clone()]; // no transcendentals to abstract
         }
 
-        // For each erf site, determine the argument's static range from preconditions
         let mut new_variables = prop.variables.clone();
         let mut new_preconditions = prop.preconditions.clone();
         let mut postcondition = prop.postcondition.clone();
 
-        for (fresh_counter, site) in erf_sites.iter().enumerate() {
-            // Try to determine the argument's range from the preconditions
-            let arg_range = extract_variable_range(&site.argument, &prop.preconditions);
-            let Some((arg_lo, arg_hi)) = arg_range else {
-                // Can't determine argument range statically → decline
+        for (fresh_counter, site) in sites.iter().enumerate() {
+            // A certified envelope must be committed for this function, else
+            // decline (the honest floor for exp/log/sqrt today).
+            let Some(envelope) = self.envelope_for(&site.fn_name) else {
                 return vec![goal.clone()];
             };
 
-            // Compute sound envelope bound over the argument range
-            let Some((env_lo, env_hi)) = self.sound_erf_range_bound(arg_lo, arg_hi) else {
-                // Range outside envelope domain → decline
+            // Determine the argument's static range from the preconditions.
+            let Some((arg_lo, arg_hi)) =
+                extract_variable_range(&site.argument, &prop.preconditions)
+            else {
+                // Can't determine argument range statically → decline.
                 return vec![goal.clone()];
             };
 
-            // Create a fresh variable
-            let fresh_name = format!("__erf_abs_{}", fresh_counter);
+            // Domain guard: the whole argument range must be provably inside the
+            // function's domain (log arg>0, sqrt arg>=0), else decline.
+            if !envelope.domain.covers(arg_lo, arg_hi) {
+                return vec![goal.clone()];
+            }
 
-            // Add variable declaration
+            // Sound envelope bound over the argument range.
+            let Some((env_lo, env_hi)) = envelope.sound_range_bound(arg_lo, arg_hi) else {
+                // Range outside envelope coverage → decline.
+                return vec![goal.clone()];
+            };
+
+            // Fresh variable, named by function: `__<fn>_abs_<n>`.
+            let fresh_name = format!("__{}_abs_{}", site.fn_name, fresh_counter);
             new_variables.push((fresh_name.clone(), SmtSort::Real));
 
-            // Add bounds as preconditions: env_lo <= fresh_var <= env_hi
+            // Bounds as preconditions: env_lo <= fresh_var <= env_hi.
             let fresh_var = SmtExpr::Var(fresh_name.clone());
             new_preconditions.push(SmtExpr::Cmp(
                 CmpOp::Le,
@@ -175,8 +153,8 @@ impl Transformation for AbstractSubterm {
                 Box::new(SmtExpr::RealLit(env_hi)),
             ));
 
-            // Substitute erf(arg) with fresh_var in postcondition
-            postcondition = substitute_erf_call(
+            // Substitute f(arg) with fresh_var in the postcondition.
+            postcondition = substitute_call(
                 &postcondition,
                 &site.original_expr,
                 &SmtExpr::Var(fresh_name),
@@ -194,57 +172,60 @@ impl Transformation for AbstractSubterm {
     }
 }
 
-/// A located erf application in an SmtExpr tree.
-struct ErfSite {
-    /// The argument expression inside erf(...)
+/// A located special-function application in an SmtExpr tree.
+struct SpecialFnSite {
+    /// The function name (`"erf"`, `"exp"`, ...).
+    fn_name: String,
+    /// The argument expression inside `f(...)`.
     argument: SmtExpr,
-    /// The full `Apply("erf", [arg])` expression for substitution matching
+    /// The full `Apply(f, [arg])` expression for substitution matching.
     original_expr: SmtExpr,
 }
 
-/// Find all `Apply("erf", [arg])` nodes in an expression.
-fn find_erf_applications(expr: &SmtExpr) -> Vec<ErfSite> {
+/// Find all `Apply(f, [arg])` nodes whose `f` is a known special function.
+fn find_special_fn_applications(expr: &SmtExpr, known: &[&str]) -> Vec<SpecialFnSite> {
     let mut sites = Vec::new();
-    find_erf_recursive(expr, &mut sites);
+    find_special_fn_recursive(expr, known, &mut sites);
     sites
 }
 
-fn find_erf_recursive(expr: &SmtExpr, sites: &mut Vec<ErfSite>) {
+fn find_special_fn_recursive(expr: &SmtExpr, known: &[&str], sites: &mut Vec<SpecialFnSite>) {
     match expr {
-        SmtExpr::Apply(name, args) if name == "erf" && args.len() == 1 => {
-            sites.push(ErfSite {
+        SmtExpr::Apply(name, args) if args.len() == 1 && known.contains(&name.as_str()) => {
+            sites.push(SpecialFnSite {
+                fn_name: name.clone(),
                 argument: args[0].clone(),
                 original_expr: expr.clone(),
             });
-            // Also recurse into the argument in case of nested erf
-            find_erf_recursive(&args[0], sites);
+            // Also recurse into the argument in case of a nested special fn.
+            find_special_fn_recursive(&args[0], known, sites);
         }
         SmtExpr::Arith(_, l, r) => {
-            find_erf_recursive(l, sites);
-            find_erf_recursive(r, sites);
+            find_special_fn_recursive(l, known, sites);
+            find_special_fn_recursive(r, known, sites);
         }
         SmtExpr::Cmp(_, l, r) => {
-            find_erf_recursive(l, sites);
-            find_erf_recursive(r, sites);
+            find_special_fn_recursive(l, known, sites);
+            find_special_fn_recursive(r, known, sites);
         }
         SmtExpr::Bool(_, children) => {
             for c in children {
-                find_erf_recursive(c, sites);
+                find_special_fn_recursive(c, known, sites);
             }
         }
-        SmtExpr::Not(inner) => find_erf_recursive(inner, sites),
+        SmtExpr::Not(inner) => find_special_fn_recursive(inner, known, sites),
         SmtExpr::Ite(c, t, e) => {
-            find_erf_recursive(c, sites);
-            find_erf_recursive(t, sites);
-            find_erf_recursive(e, sites);
+            find_special_fn_recursive(c, known, sites);
+            find_special_fn_recursive(t, known, sites);
+            find_special_fn_recursive(e, known, sites);
         }
         SmtExpr::Apply(_, args) => {
             for a in args {
-                find_erf_recursive(a, sites);
+                find_special_fn_recursive(a, known, sites);
             }
         }
         SmtExpr::Forall(_, body) | SmtExpr::Exists(_, body) => {
-            find_erf_recursive(body, sites);
+            find_special_fn_recursive(body, known, sites);
         }
         SmtExpr::Var(_) | SmtExpr::RealLit(_) | SmtExpr::IntLit(_) | SmtExpr::BoolLit(_) => {}
     }
@@ -309,49 +290,47 @@ fn extract_variable_range(expr: &SmtExpr, preconditions: &[SmtExpr]) -> Option<(
 }
 
 /// Substitute all occurrences of `target` with `replacement` in `expr`.
-fn substitute_erf_call(expr: &SmtExpr, target: &SmtExpr, replacement: &SmtExpr) -> SmtExpr {
+fn substitute_call(expr: &SmtExpr, target: &SmtExpr, replacement: &SmtExpr) -> SmtExpr {
     if expr == target {
         return replacement.clone();
     }
     match expr {
         SmtExpr::Arith(op, l, r) => SmtExpr::Arith(
             *op,
-            Box::new(substitute_erf_call(l, target, replacement)),
-            Box::new(substitute_erf_call(r, target, replacement)),
+            Box::new(substitute_call(l, target, replacement)),
+            Box::new(substitute_call(r, target, replacement)),
         ),
         SmtExpr::Cmp(op, l, r) => SmtExpr::Cmp(
             *op,
-            Box::new(substitute_erf_call(l, target, replacement)),
-            Box::new(substitute_erf_call(r, target, replacement)),
+            Box::new(substitute_call(l, target, replacement)),
+            Box::new(substitute_call(r, target, replacement)),
         ),
         SmtExpr::Bool(op, children) => SmtExpr::Bool(
             *op,
             children
                 .iter()
-                .map(|c| substitute_erf_call(c, target, replacement))
+                .map(|c| substitute_call(c, target, replacement))
                 .collect(),
         ),
-        SmtExpr::Not(inner) => {
-            SmtExpr::Not(Box::new(substitute_erf_call(inner, target, replacement)))
-        }
+        SmtExpr::Not(inner) => SmtExpr::Not(Box::new(substitute_call(inner, target, replacement))),
         SmtExpr::Ite(c, t, e) => SmtExpr::Ite(
-            Box::new(substitute_erf_call(c, target, replacement)),
-            Box::new(substitute_erf_call(t, target, replacement)),
-            Box::new(substitute_erf_call(e, target, replacement)),
+            Box::new(substitute_call(c, target, replacement)),
+            Box::new(substitute_call(t, target, replacement)),
+            Box::new(substitute_call(e, target, replacement)),
         ),
         SmtExpr::Apply(name, args) => SmtExpr::Apply(
             name.clone(),
             args.iter()
-                .map(|a| substitute_erf_call(a, target, replacement))
+                .map(|a| substitute_call(a, target, replacement))
                 .collect(),
         ),
         SmtExpr::Forall(vars, body) => SmtExpr::Forall(
             vars.clone(),
-            Box::new(substitute_erf_call(body, target, replacement)),
+            Box::new(substitute_call(body, target, replacement)),
         ),
         SmtExpr::Exists(vars, body) => SmtExpr::Exists(
             vars.clone(),
-            Box::new(substitute_erf_call(body, target, replacement)),
+            Box::new(substitute_call(body, target, replacement)),
         ),
         _ => expr.clone(),
     }
@@ -602,5 +581,192 @@ mod tests {
             SmtExpr::Forall(_, body) | SmtExpr::Exists(_, body) => contains_erf(body),
             _ => false,
         }
+    }
+
+    // ─── chelis#434: generalized-finder tests (exp/log/sqrt + domain guards) ──
+
+    use crate::erf_envelope::ProofKind;
+    use crate::special_fn_envelope::{
+        Domain, EnvelopeArm, SpecialFnEnvelope, SpecialFnEnvelopeBox,
+    };
+    use std::collections::HashMap;
+
+    /// A structurally-valid single-box synthetic envelope (a constant Saturation
+    /// arm) for exercising the finder's mechanics without certified data.
+    fn synthetic_env(
+        fn_name: &str,
+        domain: Domain,
+        lo: f64,
+        hi: f64,
+        value: f64,
+        eps: f64,
+    ) -> SpecialFnEnvelope {
+        SpecialFnEnvelope {
+            fn_name: fn_name.to_string(),
+            domain,
+            output_clamp: None,
+            boxes: vec![SpecialFnEnvelopeBox {
+                lo,
+                hi,
+                arm: EnvelopeArm::Saturation { value },
+                eps,
+                proof_kind: ProofKind::Gappa,
+            }],
+        }
+    }
+
+    /// `f(x)` postcondition `Apply(f, [x])` compared `< bound`, with `lo <= x <= hi`.
+    fn fn_of_bare_var_goal(f: &str, lo: f64, hi: f64, bound: f64) -> Goal {
+        let prop = SmtProperty {
+            variables: vec![("x".into(), SmtSort::Real)],
+            preconditions: vec![
+                SmtExpr::Cmp(
+                    CmpOp::Le,
+                    Box::new(SmtExpr::RealLit(lo)),
+                    Box::new(SmtExpr::Var("x".into())),
+                ),
+                SmtExpr::Cmp(
+                    CmpOp::Le,
+                    Box::new(SmtExpr::Var("x".into())),
+                    Box::new(SmtExpr::RealLit(hi)),
+                ),
+            ],
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Lt,
+                Box::new(SmtExpr::Apply(f.into(), vec![SmtExpr::Var("x".into())])),
+                Box::new(SmtExpr::RealLit(bound)),
+            ),
+        };
+        Goal::smt(prop)
+    }
+
+    fn contains_fn(expr: &SmtExpr, name: &str) -> bool {
+        match expr {
+            SmtExpr::Apply(n, args) => n == name || args.iter().any(|a| contains_fn(a, name)),
+            SmtExpr::Arith(_, l, r) | SmtExpr::Cmp(_, l, r) => {
+                contains_fn(l, name) || contains_fn(r, name)
+            }
+            SmtExpr::Bool(_, children) => children.iter().any(|c| contains_fn(c, name)),
+            SmtExpr::Not(inner) => contains_fn(inner, name),
+            SmtExpr::Ite(c, t, e) => {
+                contains_fn(c, name) || contains_fn(t, name) || contains_fn(e, name)
+            }
+            SmtExpr::Forall(_, body) | SmtExpr::Exists(_, body) => contains_fn(body, name),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn declines_exp_site_without_committed_envelope() {
+        // Production has no exp envelope yet, so an exp site is left intact (the
+        // honest floor). The goal is returned unchanged.
+        let t = AbstractSubterm::new();
+        let goal = fn_of_bare_var_goal("exp", 0.0, 1.0, 3.0);
+        let result = t.apply(&goal);
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].shape, goal.shape,
+            "exp site must decline unchanged"
+        );
+    }
+
+    #[test]
+    fn abstracts_exp_with_injected_envelope() {
+        // With a synthetic exp envelope over [0,1], the finder abstracts exp(x)
+        // into a fresh `__exp_abs_0` var and removes exp from the postcondition.
+        let mut envs = HashMap::new();
+        envs.insert(
+            "exp".to_string(),
+            synthetic_env("exp", Domain::AllReals, 0.0, 1.0, 2.0, 0.9),
+        );
+        let t = AbstractSubterm::with_envelopes(envs);
+        let goal = fn_of_bare_var_goal("exp", 0.0, 1.0, 3.0);
+        let result = t.apply(&goal);
+        assert_eq!(result.len(), 1);
+        let GoalShape::Smt(ref rp) = result[0].shape else {
+            panic!("expected Smt goal");
+        };
+        assert!(
+            rp.variables.iter().any(|(n, _)| n == "__exp_abs_0"),
+            "fresh var must be named by function: {:?}",
+            rp.variables
+        );
+        assert!(
+            !contains_fn(&rp.postcondition, "exp"),
+            "exp must be abstracted out"
+        );
+        assert!(rp.preconditions.len() > 2, "envelope bounds added");
+    }
+
+    #[test]
+    fn log_domain_guard_declines_nonpositive_range() {
+        // log needs arg > 0. A range that dips to/below 0 must DECLINE even with
+        // an envelope present; a strictly-positive range transforms.
+        let mut envs = HashMap::new();
+        envs.insert(
+            "log".to_string(),
+            synthetic_env("log", Domain::Positive, 0.25, 4.0, 0.0, 1.5),
+        );
+        let t = AbstractSubterm::with_envelopes(envs);
+
+        // range [-1, 2] includes non-positive x → decline
+        let bad = fn_of_bare_var_goal("log", -1.0, 2.0, 10.0);
+        assert_eq!(
+            t.apply(&bad)[0].shape,
+            bad.shape,
+            "log over [-1,2] must decline"
+        );
+
+        // range [0.5, 2] strictly positive → transform
+        let good = fn_of_bare_var_goal("log", 0.5, 2.0, 10.0);
+        let out = t.apply(&good);
+        let GoalShape::Smt(ref rp) = out[0].shape else {
+            panic!("expected Smt goal");
+        };
+        assert!(rp.variables.iter().any(|(n, _)| n == "__log_abs_0"));
+        assert!(!contains_fn(&rp.postcondition, "log"));
+    }
+
+    #[test]
+    fn sqrt_domain_guard_allows_zero_declines_negative() {
+        // sqrt needs arg >= 0: 0 is allowed, a negative lower edge declines.
+        let mut envs = HashMap::new();
+        envs.insert(
+            "sqrt".to_string(),
+            synthetic_env("sqrt", Domain::NonNegative, 0.0, 9.0, 0.0, 3.0),
+        );
+        let t = AbstractSubterm::with_envelopes(envs);
+
+        let neg = fn_of_bare_var_goal("sqrt", -0.1, 4.0, 10.0);
+        assert_eq!(
+            t.apply(&neg)[0].shape,
+            neg.shape,
+            "sqrt over [-0.1,4] must decline"
+        );
+
+        let ok = fn_of_bare_var_goal("sqrt", 0.0, 4.0, 10.0);
+        let out = t.apply(&ok);
+        let GoalShape::Smt(ref rp) = out[0].shape else {
+            panic!("expected Smt goal");
+        };
+        assert!(rp.variables.iter().any(|(n, _)| n == "__sqrt_abs_0"));
+    }
+
+    #[test]
+    fn declines_when_range_outside_envelope_coverage() {
+        // The envelope covers only [0,1]; a bounded arg range outside it declines
+        // (the sound_range_bound coverage check), even though the domain admits it.
+        let mut envs = HashMap::new();
+        envs.insert(
+            "exp".to_string(),
+            synthetic_env("exp", Domain::AllReals, 0.0, 1.0, 2.0, 0.9),
+        );
+        let t = AbstractSubterm::with_envelopes(envs);
+        let goal = fn_of_bare_var_goal("exp", 2.0, 3.0, 100.0); // outside [0,1]
+        assert_eq!(
+            t.apply(&goal)[0].shape,
+            goal.shape,
+            "outside coverage must decline"
+        );
     }
 }
