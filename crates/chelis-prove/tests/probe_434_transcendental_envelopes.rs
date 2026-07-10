@@ -47,10 +47,8 @@ fn p18_special_function_certified_alone_projects_to_unsupported() {
 /// certificate is not silently dropped.
 #[test]
 fn p18_special_function_certified_plus_real_arith_projects_to_proven_modulo_real_arith() {
-    let quals = QualifierSet::from_iter_kinds([
-        Qualifier::SpecialFunctionCertified,
-        Qualifier::RealArith,
-    ]);
+    let quals =
+        QualifierSet::from_iter_kinds([Qualifier::SpecialFunctionCertified, Qualifier::RealArith]);
     let verdict = base_verdict_from_discharge(Soundness::SoundApproximate, &quals);
     let token = serde_json::to_value(verdict).unwrap();
     assert_eq!(
@@ -129,7 +127,10 @@ mod p20 {
         let s = var("s");
         let e = var("__exp_abs_0");
         let prop = SmtProperty {
-            variables: vec![("s".into(), SmtSort::Real), ("__exp_abs_0".into(), SmtSort::Real)],
+            variables: vec![
+                ("s".into(), SmtSort::Real),
+                ("__exp_abs_0".into(), SmtSort::Real),
+            ],
             preconditions: vec![
                 cmp(CmpOp::Le, real(1.0), s.clone()),
                 cmp(CmpOp::Le, s.clone(), real(2.0)),
