@@ -10,12 +10,15 @@ reference implementation of the full recipe) that the abstract-subterm finder
 | fn    | committed data              | anchor        | notes |
 |-------|-----------------------------|---------------|-------|
 | `erf` | `../erf_envelope.json`      | Gappa + Arb   | `[-300,300]`, degree-21 central + saturation tails |
-| `exp` | `exp_envelope.json`         | Arb enclosure | `[-2,2]`, degree-12, `eps ~2.8e-5` (naive whole-box) |
-| `log` | — (BLOCKED)                 | —             | config only; see gap below |
-| `sqrt`| — (BLOCKED)                 | —             | config only; see gap below |
+| `exp` | `exp_envelope.json`         | Arb mean-value| `[-2,2]`, degree-12, `eps ~1.4e-8` |
+| `log` | `log_envelope.json`         | Arb mean-value| `[0.3,3.5]`, degree-12, `eps ~1.5e-4` |
+| `sqrt`| `sqrt_envelope.json`        | Arb mean-value| `[0.04,4]`, degree-12, `eps ~2.4e-3` |
 
-`SpecialFnEnvelope::committed(f)` serves `erf` and `exp`; `log`/`sqrt` return
-`None` and the finder DECLINES (the honest floor) until their data lands.
+`SpecialFnEnvelope::committed(f)` serves all four; the finder abstracts a
+transcendental site only when the argument's interval is inside the covered box
+(else it DECLINES — the honest floor). `exp`/`log`/`sqrt` use the **mean-value**
+Arb certifier (tight), cross-checked `<= naive` and `validate`-passing; each box
+is bounded away from the derivative singularity at 0 (`log`/`sqrt` need `lo>0`).
 
 ## The recipe (generalizes `docs/erf_envelope_regen.md`)
 

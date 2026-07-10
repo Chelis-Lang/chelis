@@ -953,16 +953,92 @@ mod tests {
     }
 
     #[test]
-    fn declines_log_site_without_committed_envelope() {
-        // log has no committed envelope yet, so a log site is left intact (the
-        // honest floor). The goal is returned unchanged.
+    fn log_and_sqrt_abstract_in_production_via_committed_envelopes() {
+        // milestone 2: log/sqrt now have committed Arb mean-value data, so a
+        // bounded log/sqrt site abstracts in PRODUCTION (no injection).
         let t = AbstractSubterm::new();
-        let goal = fn_of_bare_var_goal("log", 0.5, 2.0, 3.0);
-        let result = t.apply(&goal);
-        assert_eq!(result.len(), 1);
+        // log over [0.5,2] ⊆ committed [0.3,3.5] (positive) → abstracts.
+        let out = t.apply(&fn_of_bare_var_goal("log", 0.5, 2.0, 3.0));
+        let GoalShape::Smt(ref rp) = out[0].shape else {
+            panic!("expected Smt goal");
+        };
+        assert!(
+            rp.variables.iter().any(|(n, _)| n == "__log_abs_0"),
+            "log must abstract"
+        );
+        assert!(!contains_fn(&rp.postcondition, "log"));
+        // sqrt over [0.1,4] ⊆ committed [0.04,4] (non-negative) → abstracts.
+        let out2 = t.apply(&fn_of_bare_var_goal("sqrt", 0.1, 4.0, 3.0));
+        let GoalShape::Smt(ref rp2) = out2[0].shape else {
+            panic!("expected Smt goal");
+        };
+        assert!(
+            rp2.variables.iter().any(|(n, _)| n == "__sqrt_abs_0"),
+            "sqrt must abstract"
+        );
+        // A log arg reaching below the committed coverage (0.3) declines.
         assert_eq!(
-            result[0].shape, goal.shape,
-            "log site must decline unchanged"
+            t.apply(&fn_of_bare_var_goal("log", 0.1, 2.0, 3.0))[0].shape,
+            fn_of_bare_var_goal("log", 0.1, 2.0, 3.0).shape,
+            "log below committed coverage declines"
+        );
+    }
+
+    #[test]
+    fn bs_d1_shape_bounds_with_real_certified_envelopes() {
+        // milestone 1+2 acceptance: the REAL BS d1 argument, bounded via
+        // production interval propagation over the committed log/sqrt envelopes,
+        // matches an INDEPENDENTLY computed interval. d1 = (log(s/k) + (r + σ²/2)t)
+        // / (σ·sqrt(t)) at canon-like guards s,k∈[0.9,1.1], r∈[0,0.1],
+        // σ∈[0.1,0.5], t∈[0.5,2] (all inside the committed log/sqrt coverage).
+        let t = AbstractSubterm::new();
+        let pre = box_pre(&[
+            ("s", 0.9, 1.1),
+            ("k", 0.9, 1.1),
+            ("r", 0.0, 0.1),
+            ("sigma", 0.1, 0.5),
+            ("t", 0.5, 2.0),
+        ]);
+        // num = log(s/k) + (r + 0.5*sigma*sigma)*t ; den = sigma * sqrt(t)
+        let log_sk = SmtExpr::Apply("log".into(), vec![div(v("s"), v("k"))]);
+        let half_sig2 = mul(r(0.5), mul(v("sigma"), v("sigma")));
+        let drift = mul(add(v("r"), half_sig2), v("t"));
+        let num = add(log_sk, drift);
+        let den = mul(v("sigma"), SmtExpr::Apply("sqrt".into(), vec![v("t")]));
+        let d1 = div(num, den);
+
+        let (lo, hi) = t
+            .bound_argument(&d1, &pre)
+            .expect("d1 bounds via real envelopes");
+
+        // Independent interval: log(s/k) over s/k∈[0.9/1.1, 1.1/0.9] via the
+        // committed log hull; drift via interval arithmetic; den = sigma*sqrt(t)>0.
+        let log_env = SpecialFnEnvelope::committed("log").unwrap();
+        let sqrt_env = SpecialFnEnvelope::committed("sqrt").unwrap();
+        let (sk_lo, sk_hi) = (0.9 / 1.1, 1.1 / 0.9);
+        let (nlo, nhi) = log_env.sound_range_bound(sk_lo, sk_hi).unwrap();
+        // drift = (r + 0.5·σ²)·t by the SAME interval arithmetic the finder uses:
+        //   σ² = [0.1,0.5]² = [0.01,0.25]; 0.5·σ² = [0.005,0.125];
+        //   r + that = [0.005, 0.225]; ·t[0.5,2] = [0.0025, 0.45].
+        let sig2 = (0.1 * 0.1, 0.5 * 0.5);
+        let half_sig2 = (0.5 * sig2.0, 0.5 * sig2.1);
+        let r_plus = (0.0 + half_sig2.0, 0.1 + half_sig2.1);
+        let (dlo, dhi) = (r_plus.0 * 0.5, r_plus.1 * 2.0); // positive·positive
+        let (num_lo, num_hi) = (nlo + dlo, nhi + dhi);
+        let (slo, shi) = sqrt_env.sound_range_bound(0.5, 2.0).unwrap();
+        let (den_lo, den_hi) = (0.1 * slo, 0.5 * shi); // sigma*sqrt(t), all >0
+        // d1 = num / den, den>0: [min, max] of corner quotients.
+        let corners = [
+            num_lo / den_lo,
+            num_lo / den_hi,
+            num_hi / den_lo,
+            num_hi / den_hi,
+        ];
+        let exp_lo = corners.iter().copied().fold(f64::INFINITY, f64::min);
+        let exp_hi = corners.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            (lo - exp_lo).abs() < 1e-9 && (hi - exp_hi).abs() < 1e-9,
+            "d1 range [{lo},{hi}] must match independent [{exp_lo},{exp_hi}]"
         );
     }
 

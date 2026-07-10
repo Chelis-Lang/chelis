@@ -1,0 +1,36 @@
+{
+  "fn_name": "sqrt",
+  "domain": "non_negative",
+  "output_clamp": null,
+  "boxes": [
+    {
+      "lo": 0.04,
+      "hi": 4.0,
+      "arm": {
+        "kind": "central",
+        "coeffs": [
+          "-0x1.056de594f4c35p-11",
+          "0x1.a2d4ed87f3527p-7",
+          "-0x1.28a29c85b60bcp-3",
+          "0x1.e92b77aea825dp-1",
+          "-0x1.043513b12c776p+2",
+          "0x1.763021dae10cep+3",
+          "-0x1.7299756c4c237p+4",
+          "0x1.fa42deeb86511p+4",
+          "-0x1.d76a6e889ec39p+4",
+          "0x1.2573ddc61bacfp+4",
+          "-0x1.e6c56b3678da1p+2",
+          "0x1.58bf96664cf46p+1",
+          "0x1.b147bdd22a680p-4"
+        ]
+      },
+      "eps": 0.002447465389116518,
+      "proof_kind": "arb_enclosure"
+    }
+  ],
+  "provenance": {
+    "certify_prec": 128,
+    "certify_subdivisions": 65536,
+    "method": "Arb mean-value whole-box (sup |approx - sqrt|), cross-checked <= naive whole-box"
+  }
+}

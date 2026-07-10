@@ -1,0 +1,36 @@
+{
+  "fn_name": "log",
+  "domain": "positive",
+  "output_clamp": null,
+  "boxes": [
+    {
+      "lo": 0.3,
+      "hi": 3.5,
+      "arm": {
+        "kind": "central",
+        "coeffs": [
+          "-0x1.c8dbb73a8d29cp-11",
+          "0x1.5c49832f57410p-6",
+          "-0x1.db9318fbf9cdbp-3",
+          "0x1.800631b76f22cp+0",
+          "-0x1.981524815f730p+2",
+          "0x1.2c7a2fac75ecbp+4",
+          "-0x1.3a9f840ba71dep+5",
+          "0x1.d9780aad1a5b8p+5",
+          "-0x1.001715fba7511p+6",
+          "0x1.8bcc0bd4c9fe4p+5",
+          "-0x1.b36f8cd4eba74p+4",
+          "0x1.69685c10d3674p+3",
+          "-0x1.8a16a0fed2a74p+1"
+        ]
+      },
+      "eps": 0.00015191727411052646,
+      "proof_kind": "arb_enclosure"
+    }
+  ],
+  "provenance": {
+    "certify_prec": 128,
+    "certify_subdivisions": 65536,
+    "method": "Arb mean-value whole-box (sup |approx - log|), cross-checked <= naive whole-box"
+  }
+}

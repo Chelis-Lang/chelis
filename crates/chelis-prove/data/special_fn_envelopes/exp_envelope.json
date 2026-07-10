@@ -24,13 +24,13 @@
           "0x1.000000001ada1p+0"
         ]
       },
-      "eps": 0.00002822097375314693,
+      "eps": 1.4135085590588395e-8,
       "proof_kind": "arb_enclosure"
     }
   ],
   "provenance": {
     "certify_prec": 128,
-    "certify_subdivisions": 1048576,
-    "method": "Arb naive whole-box ball arithmetic (sup |approx - exp| over each subdivided box)"
+    "certify_subdivisions": 65536,
+    "method": "Arb mean-value whole-box (sup |approx - exp|), cross-checked <= naive whole-box"
   }
 }

@@ -20,14 +20,33 @@
 
 use chelis_prove::{
     DEFAULT_PREC, EnvelopeArm, ProofKind, SpecialFn, SpecialFnEnvelope, SpecialFnProvenance,
-    certify_sup_norm_over_box_general,
+    certify_sup_norm_over_box_general, certify_sup_norm_over_box_meanvalue,
 };
 use std::process::ExitCode;
 
 const CERTIFY_PREC: i64 = DEFAULT_PREC;
-/// Naive whole-box certification is looser than the erf mean-value form, so it
-/// needs a fine split for a tight `eps`. Overridable via `CERTIFY_SUBDIVISIONS`.
-const CERTIFY_SUBDIVISIONS: usize = 1_048_576;
+/// Subdivision count. The tight mean-value certifier converges fast, so this is
+/// modest; the naive cross-check reuses it. Overridable via `CERTIFY_SUBDIVISIONS`.
+const CERTIFY_SUBDIVISIONS: usize = 65_536;
+
+/// Certify one box: the TIGHT mean-value `eps`, cross-checked to never exceed the
+/// sound naive whole-box bound (both bound the true error; mean-value is tighter,
+/// so `mv <= naive` must hold — a violation means a certifier bug, so refuse).
+/// Returns the mean-value eps, or `None` if either bound is non-finite (out of
+/// domain / derivative singularity) or the cross-check fails.
+fn certify_box(f: SpecialFn, lo: f64, hi: f64, coeffs: &[f64], subdivisions: usize) -> Option<f64> {
+    let mv = certify_sup_norm_over_box_meanvalue(f, lo, hi, coeffs, subdivisions, CERTIFY_PREC);
+    let naive = certify_sup_norm_over_box_general(f, lo, hi, coeffs, subdivisions, CERTIFY_PREC);
+    if !mv.is_finite() || !naive.is_finite() {
+        eprintln!("  box [{lo}, {hi}]: non-finite bound (mv={mv:.3e} naive={naive:.3e})");
+        return None;
+    }
+    if mv > naive {
+        eprintln!("  box [{lo}, {hi}]: CROSS-CHECK FAIL mean-value {mv:.3e} > naive {naive:.3e}");
+        return None;
+    }
+    Some(mv)
+}
 
 fn subdivisions() -> usize {
     std::env::var("CERTIFY_SUBDIVISIONS")
@@ -76,24 +95,21 @@ fn stamp(draft_path: &str, out_path: &str) -> ExitCode {
     let subdivisions = subdivisions();
     for b in &mut env.boxes {
         let coeffs = arm_coeffs(&b.arm);
-        let eps =
-            certify_sup_norm_over_box_general(f, b.lo, b.hi, &coeffs, subdivisions, CERTIFY_PREC);
-        eprintln!(
-            "certified {} box [{}, {}]: eps = {:.6e}",
-            env.fn_name, b.lo, b.hi, eps
-        );
-        if !eps.is_finite() {
+        let Some(eps) = certify_box(f, b.lo, b.hi, &coeffs, subdivisions) else {
             eprintln!(
-                "error: box [{}, {}] certified to a non-finite eps (out of domain?) — refusing",
+                "error: box [{}, {}] failed certification (non-finite / cross-check) — refusing",
                 b.lo, b.hi
             );
             return ExitCode::from(1);
-        }
-        // Commit eps STRICTLY above the raw Arb bound by a tiny relative margin.
-        // The bound already soundly covers the truth; the margin (1 ppb, far above
-        // any f64 round-trip / re-cert jitter) keeps the committed eps >= a fresh
-        // Arb bound so `validate` is robust rather than knife-edge. Still sound —
-        // a larger eps only widens the (already sound) band.
+        };
+        eprintln!(
+            "certified {} box [{}, {}]: eps = {:.6e} (mean-value, <= naive)",
+            env.fn_name, b.lo, b.hi, eps
+        );
+        // Commit eps STRICTLY above the raw Arb bound by a tiny relative margin
+        // (1 ppb, far above any f64 round-trip / re-cert jitter) so `validate` is
+        // robust rather than knife-edge. Still sound — a larger eps only widens
+        // the already-sound band.
         b.eps = eps * (1.0 + 1e-9);
         b.proof_kind = ProofKind::ArbEnclosure;
     }
@@ -101,7 +117,7 @@ fn stamp(draft_path: &str, out_path: &str) -> ExitCode {
         certify_prec: CERTIFY_PREC,
         certify_subdivisions: subdivisions,
         method: format!(
-            "Arb naive whole-box ball arithmetic (sup |approx - {}| over each subdivided box)",
+            "Arb mean-value whole-box (sup |approx - {}|), cross-checked <= naive whole-box",
             env.fn_name
         ),
     };
@@ -144,8 +160,14 @@ fn validate(env_path: &str) -> ExitCode {
     let mut ok = true;
     for b in &env.boxes {
         let coeffs = arm_coeffs(&b.arm);
-        let arb_eps =
-            certify_sup_norm_over_box_general(f, b.lo, b.hi, &coeffs, subdivisions, CERTIFY_PREC);
+        let Some(arb_eps) = certify_box(f, b.lo, b.hi, &coeffs, subdivisions) else {
+            eprintln!(
+                "{} box [{}, {}]: re-certification failed",
+                env.fn_name, b.lo, b.hi
+            );
+            ok = false;
+            continue;
+        };
         let sound = b.eps >= arb_eps;
         eprintln!(
             "{} box [{}, {}]: committed eps {:.6e} {} Arb eps {:.6e}",

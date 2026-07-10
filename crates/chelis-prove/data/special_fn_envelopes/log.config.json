@@ -3,13 +3,14 @@
   "domain": "positive",
   "output_clamp": null,
   "boxes": [
-    { "lo": 0.01, "hi": 0.5, "arm": "central", "degree": 12 },
-    { "lo": 0.5, "hi": 4.0, "arm": "central", "degree": 12 }
+    { "lo": 0.3, "hi": 3.5, "arm": "central", "degree": 12 }
   ],
   "generator": {
-    "recipe": "scripts/generate_erf_envelope.py with mpmath.log truth (Chebyshev polyfit per box)",
-    "argument_ranges": "BS log(s/k) moneyness; s/k typically in ~[0.5, 2], widened to (0.01, 4] for tail coverage",
-    "domain_note": "log needs arg>0; the finder's Positive domain guard declines any argument range that reaches <=0"
+    "recipe": "scripts/generate_special_fn_envelope.py log (numpy.polyfit @ Chebyshev vs mpmath.log) -> certify_special_fn_envelope stamp (Arb mean-value, cross-checked <= naive)",
+    "committed": "data/special_fn_envelopes/log_envelope.json",
+    "argument_ranges": "BS log(s/k) moneyness s/k ~[0.5,2], widened to [0.3,3.5] with margin",
+    "box_note": "single box bounded away from 0 (lo=0.3>0): the mean-value certifier needs log'=1/x finite, so the box must exclude the x=0 singularity",
+    "domain_note": "log needs arg>0; the finder's Positive domain guard declines any argument range reaching <=0"
   },
-  "certify_status": "BLOCKED: sollya absent (Gappa half); arb_oracle hardcodes arb_hypgeom_erf (needs arb_log keying)"
+  "certify_status": "CERTIFIED: arb_enclosure (mean-value whole-box, cross-checked <= naive) over [0.3,3.5]"
 }

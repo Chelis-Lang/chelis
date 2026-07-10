@@ -853,6 +853,245 @@ pub fn certify_sup_norm_over_box_general(
     }
 }
 
+/// Enclose the derivative `f'(X)` over the ball `xv` into `out`, dispatching the
+/// closed form per function: `erf' = (2/√π)e^{−x²}`, `exp' = exp`, `log' = 1/x`,
+/// `sqrt' = 1/(2√x)`. SAFETY: `out`/`xv` are caller-init'd arbs; scratch is
+/// init/clear-paired here; FFI signatures match the linked Arb ABI. For `log`
+/// and `sqrt` the caller must ensure `xv` excludes 0 (finite derivative); the
+/// box domain guard in [`certify_sup_norm_over_box_meanvalue`] enforces it.
+#[cfg(feature = "arb")]
+unsafe fn special_fn_deriv(
+    f: SpecialFn,
+    out: &mut arb_sys::arb::arb_struct,
+    xv: &arb_sys::arb::arb_struct,
+    prec: i64,
+) {
+    use arb_sys::arb::{
+        arb_clear, arb_const_pi, arb_exp, arb_init, arb_inv, arb_mul, arb_neg, arb_rsqrt,
+        arb_set_d, arb_set_ui, arb_sqr,
+    };
+    use std::mem::MaybeUninit;
+    unsafe {
+        match f {
+            SpecialFn::Exp => arb_exp(out, xv, prec),
+            SpecialFn::Log => arb_inv(out, xv, prec), // 1/x
+            SpecialFn::Sqrt => {
+                // 1/(2√x) = 0.5 · rsqrt(x)
+                arb_rsqrt(out, xv, prec);
+                let mut half = MaybeUninit::uninit();
+                arb_init(half.as_mut_ptr());
+                let mut half = half.assume_init();
+                arb_set_d(&mut half, 0.5);
+                arb_mul(out, out, &half, prec);
+                arb_clear(&mut half);
+            }
+            SpecialFn::Erf => {
+                // (2/√π) · exp(−x²)
+                arb_sqr(out, xv, prec);
+                arb_neg(out, out);
+                arb_exp(out, out, prec);
+                let mut c = MaybeUninit::uninit();
+                arb_init(c.as_mut_ptr());
+                let mut c = c.assume_init();
+                arb_const_pi(&mut c, prec);
+                arb_rsqrt(&mut c, &c, prec); // 1/√π
+                let mut two = MaybeUninit::uninit();
+                arb_init(two.as_mut_ptr());
+                let mut two = two.assume_init();
+                arb_set_ui(&mut two, 2);
+                arb_mul(&mut c, &c, &two, prec); // 2/√π
+                arb_mul(out, out, &c, prec);
+                arb_clear(&mut two);
+                arb_clear(&mut c);
+            }
+        }
+    }
+}
+
+/// Sound upper bound of `|f(x) − p(x)|` over the sub-box `[lo, hi]` in
+/// **mean-value form** `g(X) ⊆ g(m) + g'(X)·(X−m)` with `g = f − p`, generalized
+/// to any [`SpecialFn`]. Tight where the fit is good (the width scales with
+/// `|g'|·r`), unlike the naive difference. `f` is the prebuilt `arb_poly`.
+#[cfg(feature = "arb")]
+unsafe fn sub_box_abs_err_general(
+    func: SpecialFn,
+    f: &mut arb_sys::arb_poly::arb_poly_struct,
+    lo: f64,
+    hi: f64,
+    prec: i64,
+) -> f64 {
+    use arb_sys::arb::{
+        arb_addmul, arb_clear, arb_get_abs_ubound_arf, arb_init, arb_set, arb_set_interval_arf,
+        arb_sub,
+    };
+    use arb_sys::arb_poly::arb_poly_evaluate2;
+    use arb_sys::arf::{arf_clear, arf_get_d, arf_init, arf_set_d};
+    use std::mem::MaybeUninit;
+
+    // SAFETY: every arb/arf is init/clear-paired before return; `f` is borrowed;
+    // FFI signatures match the linked Arb ABI; box edges are finite.
+    unsafe {
+        let mut xlo = MaybeUninit::uninit();
+        arf_init(xlo.as_mut_ptr());
+        let mut xlo = xlo.assume_init();
+        let mut xhi = MaybeUninit::uninit();
+        arf_init(xhi.as_mut_ptr());
+        let mut xhi = xhi.assume_init();
+        arf_set_d(&mut xlo, lo);
+        arf_set_d(&mut xhi, hi);
+        let mut x = MaybeUninit::uninit();
+        arb_init(x.as_mut_ptr());
+        let mut x = x.assume_init();
+        arb_set_interval_arf(&mut x, &xlo, &xhi, prec);
+
+        let m_mid = 0.5 * (lo + hi);
+        let mut m = MaybeUninit::uninit();
+        arb_init(m.as_mut_ptr());
+        let mut m = m.assume_init();
+        arb_sys::arb::arb_set_d(&mut m, m_mid);
+        let mut t = MaybeUninit::uninit();
+        arb_init(t.as_mut_ptr());
+        let mut t = t.assume_init();
+        arb_sub(&mut t, &x, &m, prec); // t = X − m
+
+        // g(m) = f(m) − p(m).
+        let mut f_m = MaybeUninit::uninit();
+        arb_init(f_m.as_mut_ptr());
+        let mut f_m = f_m.assume_init();
+        func.eval_ball(&mut f_m, &mut m, prec);
+        let mut p_m = MaybeUninit::uninit();
+        arb_init(p_m.as_mut_ptr());
+        let mut p_m = p_m.assume_init();
+        let mut sc_a = MaybeUninit::uninit();
+        arb_init(sc_a.as_mut_ptr());
+        let mut sc_a = sc_a.assume_init();
+        arb_poly_evaluate2(&mut p_m, &mut sc_a, f, &mut m, prec); // p(m)
+        let mut g_m = MaybeUninit::uninit();
+        arb_init(g_m.as_mut_ptr());
+        let mut g_m = g_m.assume_init();
+        arb_sub(&mut g_m, &f_m, &p_m, prec);
+
+        // g'(X) = f'(X) − p'(X).
+        let mut dp_x = MaybeUninit::uninit();
+        arb_init(dp_x.as_mut_ptr());
+        let mut dp_x = dp_x.assume_init();
+        let mut sc_b = MaybeUninit::uninit();
+        arb_init(sc_b.as_mut_ptr());
+        let mut sc_b = sc_b.assume_init();
+        arb_poly_evaluate2(&mut sc_b, &mut dp_x, f, &mut x, prec); // p'(X)
+        let mut df_x = MaybeUninit::uninit();
+        arb_init(df_x.as_mut_ptr());
+        let mut df_x = df_x.assume_init();
+        special_fn_deriv(func, &mut df_x, &x, prec); // f'(X)
+        let mut dg_x = MaybeUninit::uninit();
+        arb_init(dg_x.as_mut_ptr());
+        let mut dg_x = dg_x.assume_init();
+        arb_sub(&mut dg_x, &df_x, &dp_x, prec);
+
+        // g(X) ⊆ g(m) + g'(X)·t.
+        let mut g_enc = MaybeUninit::uninit();
+        arb_init(g_enc.as_mut_ptr());
+        let mut g_enc = g_enc.assume_init();
+        arb_set(&mut g_enc, &g_m);
+        arb_addmul(&mut g_enc, &dg_x, &t, prec);
+
+        let mut ub = MaybeUninit::uninit();
+        arf_init(ub.as_mut_ptr());
+        let mut ub = ub.assume_init();
+        arb_get_abs_ubound_arf(&mut ub, &g_enc, prec);
+        let result = arf_get_d(&ub, ARF_RND_CEIL);
+
+        arf_clear(&mut ub);
+        arb_clear(&mut g_enc);
+        arb_clear(&mut dg_x);
+        arb_clear(&mut df_x);
+        arb_clear(&mut sc_b);
+        arb_clear(&mut dp_x);
+        arb_clear(&mut g_m);
+        arb_clear(&mut sc_a);
+        arb_clear(&mut p_m);
+        arb_clear(&mut f_m);
+        arb_clear(&mut t);
+        arb_clear(&mut m);
+        arb_clear(&mut x);
+        arf_clear(&mut xlo);
+        arf_clear(&mut xhi);
+        result
+    }
+}
+
+/// Tight sup-norm certifier `sup_{x in [lo,hi]} |f(x) − p(x)|` for any
+/// [`SpecialFn`], in mean-value form (the generalization of the erf
+/// [`certify_sup_norm_over_box`]). Sound for any `subdivisions >= 1`. Returns
+/// `f64::INFINITY` if the box is outside the function's domain OR touches the
+/// derivative singularity at 0 (`log`/`sqrt` need `lo > 0` for a finite `f'`);
+/// the caller must decompose away from 0.
+#[cfg(feature = "arb")]
+pub fn certify_sup_norm_over_box_meanvalue(
+    func: SpecialFn,
+    lo: f64,
+    hi: f64,
+    coeffs: &[f64],
+    subdivisions: usize,
+    prec: i64,
+) -> f64 {
+    use arb_sys::arb::{arb_clear, arb_init, arb_set_d};
+    use arb_sys::arb_poly::{arb_poly_clear, arb_poly_init, arb_poly_set_coeff_arb};
+    use std::mem::MaybeUninit;
+
+    let prec = prec.max(2);
+    let n = subdivisions.max(1);
+    // Domain / singularity guard: log needs x>0, sqrt needs x>0 for a finite
+    // derivative (sqrt'(0)=∞). erf/exp are entire.
+    let ok_lo = match func {
+        SpecialFn::Log | SpecialFn::Sqrt => lo > 0.0,
+        SpecialFn::Erf | SpecialFn::Exp => true,
+    };
+    if !lo.is_finite() || !hi.is_finite() || lo > hi || !ok_lo {
+        return f64::INFINITY;
+    }
+    let width = (hi - lo) / n as f64;
+
+    // SAFETY: poly + scratch are init/clear-paired; coeffs are finite f64 set
+    // exactly; `f` is built once and evaluated read-only per sub-box.
+    unsafe {
+        let mut f = MaybeUninit::uninit();
+        arb_poly_init(f.as_mut_ptr());
+        let mut f = f.assume_init();
+        let mut c = MaybeUninit::uninit();
+        arb_init(c.as_mut_ptr());
+        let mut c = c.assume_init();
+        let len = coeffs.len();
+        for (i, &coeff) in coeffs.iter().enumerate() {
+            let degree = (len - 1 - i) as i64;
+            arb_set_d(&mut c, coeff);
+            arb_poly_set_coeff_arb(&mut f, degree, &c);
+        }
+
+        let mut worst = 0.0_f64;
+        for i in 0..n {
+            let a = lo + width * i as f64;
+            let b = if i + 1 == n {
+                hi
+            } else {
+                lo + width * (i + 1) as f64
+            };
+            let e = sub_box_abs_err_general(func, &mut f, a, b, prec);
+            if !e.is_finite() {
+                arb_clear(&mut c);
+                arb_poly_clear(&mut f);
+                return f64::INFINITY;
+            }
+            if e > worst {
+                worst = e;
+            }
+        }
+        arb_clear(&mut c);
+        arb_poly_clear(&mut f);
+        worst
+    }
+}
+
 #[cfg(all(test, feature = "arb"))]
 mod arb_live_tests {
     //! Live FLINT/Arb enclosure tests. These need the `arb` feature (the
@@ -861,8 +1100,8 @@ mod arb_live_tests {
     //!   cargo test -p chelis-prove --features arb arb_live_tests
     use super::{
         DEFAULT_PREC, SpecialFn, certify_sup_norm_at_samples, certify_sup_norm_over_box,
-        certify_sup_norm_over_box_general, rigorous_erf, rigorous_erf_enclosure,
-        rigorous_special_fn_enclosure,
+        certify_sup_norm_over_box_general, certify_sup_norm_over_box_meanvalue, rigorous_erf,
+        rigorous_erf_enclosure, rigorous_special_fn_enclosure,
     };
     use crate::erf_envelope::{ErfArm, ErfEnvelope};
 
@@ -1390,6 +1629,137 @@ mod arb_live_tests {
                 DEFAULT_PREC
             )
             .is_infinite()
+        );
+    }
+
+    // ─── chelis#434 m2: mean-value certifier {erf,exp,log,sqrt} ───────────────
+
+    #[test]
+    fn meanvalue_is_tight_and_sound_vs_naive_for_exp() {
+        // p(x)=1+x+x²/2 over [-0.25,0.25]. The mean-value bound must be SOUND
+        // (>= true error), TIGHTER than the naive whole-box bound, and both
+        // sound (naive >= meanvalue — the cross-check the design requires).
+        let coeffs = [0.5, 1.0, 1.0];
+        let mv = certify_sup_norm_over_box_meanvalue(
+            SpecialFn::Exp,
+            -0.25,
+            0.25,
+            &coeffs,
+            256,
+            DEFAULT_PREC,
+        );
+        let naive = certify_sup_norm_over_box_general(
+            SpecialFn::Exp,
+            -0.25,
+            0.25,
+            &coeffs,
+            256,
+            DEFAULT_PREC,
+        );
+        let true_err = (0.25_f64.exp() - (1.0 + 0.25 + 0.25 * 0.25 / 2.0)).abs();
+        assert!(
+            mv.is_finite() && mv >= true_err,
+            "mv {mv} must bound true {true_err}"
+        );
+        assert!(
+            mv <= naive,
+            "mean-value {mv} must be <= naive {naive} (tighter, both sound)"
+        );
+        assert!(
+            mv <= 5.0 * true_err,
+            "mean-value {mv} should be near the true error {true_err}"
+        );
+    }
+
+    #[test]
+    fn meanvalue_finite_and_tight_for_log_and_sqrt_positive_boxes() {
+        // log over [0.5,2] and sqrt over [0.05,4] (both bounded away from 0):
+        // finite, sound, and <= the naive bound. A rough linear proposer (poor
+        // fit on purpose) — the certifier just must be sound and tighter.
+        for (f, lo, hi, coeffs) in [
+            (SpecialFn::Log, 0.5_f64, 2.0_f64, vec![1.0, -0.7]),
+            (SpecialFn::Sqrt, 0.05_f64, 4.0_f64, vec![0.5, 0.5]),
+        ] {
+            let mv = certify_sup_norm_over_box_meanvalue(f, lo, hi, &coeffs, 4096, DEFAULT_PREC);
+            let naive = certify_sup_norm_over_box_general(f, lo, hi, &coeffs, 4096, DEFAULT_PREC);
+            assert!(
+                mv.is_finite() && mv > 0.0,
+                "{f:?} mv finite positive, got {mv}"
+            );
+            assert!(
+                mv <= naive,
+                "{f:?} mean-value {mv} must be <= naive {naive}"
+            );
+        }
+    }
+
+    #[test]
+    fn meanvalue_singularity_guard_returns_infinity() {
+        // log/sqrt with a box touching 0 → derivative singular → INFINITY.
+        let coeffs = [1.0, 0.0];
+        assert!(
+            certify_sup_norm_over_box_meanvalue(
+                SpecialFn::Log,
+                0.0,
+                1.0,
+                &coeffs,
+                16,
+                DEFAULT_PREC
+            )
+            .is_infinite()
+        );
+        assert!(
+            certify_sup_norm_over_box_meanvalue(
+                SpecialFn::Sqrt,
+                0.0,
+                1.0,
+                &coeffs,
+                16,
+                DEFAULT_PREC
+            )
+            .is_infinite()
+        );
+        // erf/exp are entire — a box across 0 is fine.
+        assert!(
+            certify_sup_norm_over_box_meanvalue(
+                SpecialFn::Exp,
+                -1.0,
+                1.0,
+                &coeffs,
+                16,
+                DEFAULT_PREC
+            )
+            .is_finite()
+        );
+    }
+
+    #[test]
+    fn meanvalue_erf_matches_the_erf_specific_certifier() {
+        // The generalized mean-value certifier on erf must agree with the
+        // erf-specific certify_sup_norm_over_box (same math) on the committed
+        // erf central polynomial.
+        let env = ErfEnvelope::committed();
+        let (lo, hi, coeffs) = env
+            .boxes
+            .iter()
+            .find_map(|b| match &b.arm {
+                ErfArm::Central { coeffs } => Some((b.lo, b.hi, coeffs.clone())),
+                _ => None,
+            })
+            .unwrap();
+        let specific = certify_sup_norm_over_box(lo, hi, &coeffs, 4096, DEFAULT_PREC);
+        let general = certify_sup_norm_over_box_meanvalue(
+            SpecialFn::Erf,
+            lo,
+            hi,
+            &coeffs,
+            4096,
+            DEFAULT_PREC,
+        );
+        let rel = (specific - general).abs() / specific.max(1e-12);
+        assert!(
+            rel < 1e-6,
+            "erf mean-value general {general} vs specific {specific} (rel {rel})"
         );
     }
 }
