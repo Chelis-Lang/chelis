@@ -89,8 +89,27 @@ class CorpusIntegrityTests(unittest.TestCase):
         self.assertEqual(self.manifest["eval_count"], eval_)
         self.assertEqual(self.manifest["reject_sentinel_count"], reject)
 
-    def test_pinned_version_is_0_14_0(self):
-        self.assertEqual(self.manifest["chelis_version_pinned"], "0.14.0")
+    def test_pinned_version_matches_workspace_version(self):
+        # The manifest pin must track the workspace version so a release bump
+        # cannot leave the conformance gate's STALE CORPUS check red on main
+        # (v0.15.0 lesson: the pin was a hardcoded per-release string here and
+        # a post-release chore in the manifest, so every release opened a red
+        # window). `scripts/bump_compiler_pins.py` now bumps the manifest in
+        # the release change set; the release PR's own conformance-gate run is
+        # what validates the frozen corpus against the new binary.
+        cargo_toml = HERE.parent.parent.parent / "Cargo.toml"
+        in_workspace_package = False
+        workspace_version = None
+        for line in cargo_toml.read_text().splitlines():
+            stripped = line.strip()
+            if stripped.startswith("["):
+                in_workspace_package = stripped == "[workspace.package]"
+                continue
+            if in_workspace_package and stripped.startswith("version"):
+                workspace_version = stripped.split('"')[1]
+                break
+        self.assertIsNotNone(workspace_version, "workspace version not found")
+        self.assertEqual(self.manifest["chelis_version_pinned"], workspace_version)
 
     def test_accept_check_records_have_canonical_type(self):
         for v in self.verdicts:
