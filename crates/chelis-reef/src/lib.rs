@@ -4283,7 +4283,8 @@ fn validate_manifest(manifest: &ReefManifest) -> Result<(), String> {
     }
     if manifest.package.compiler != CURRENT_COMPILER_VERSION {
         return Err(format!(
-            "package.compiler must be `{CURRENT_COMPILER_VERSION}` in 3a"
+            "package.compiler must be `{CURRENT_COMPILER_VERSION}` in `{}`",
+            manifest.package.name
         ));
     }
     let mut seen_additional = HashSet::new();
@@ -9869,6 +9870,47 @@ additional_sources = ["properties"]
             artifacts: BTreeMap::new(),
         };
         validate_manifest(&manifest).expect("valid additional_sources must pass");
+    }
+
+    /// A compiler-pin mismatch names both the required version AND the
+    /// offending package, so a drift/build failure points at the manifest
+    /// to fix. Regression guard: this diagnostic once hardcoded a literal
+    /// `in 3a` where the package name belonged, and because no test
+    /// covered it the typo survived from 2026-04 until the ecosystem drift
+    /// canary surfaced it against a downstream shell.
+    #[test]
+    fn compiler_pin_mismatch_names_the_package() {
+        let mismatched = "=0.0.0";
+        assert_ne!(
+            mismatched, CURRENT_COMPILER_VERSION,
+            "fixture must use a pin that cannot equal the real one"
+        );
+        let manifest = ReefManifest {
+            package: ManifestPackage {
+                name: "my-shell-pkg".to_string(),
+                version: "0.1.0".to_string(),
+                compiler: mismatched.to_string(),
+                module_prefix: "Demo".to_string(),
+                additional_sources: Vec::new(),
+            },
+            dependencies: BTreeMap::new(),
+            chelis_src: None,
+            artifacts: BTreeMap::new(),
+        };
+        let err =
+            validate_manifest(&manifest).expect_err("a mismatched compiler pin must be rejected");
+        assert!(
+            err.contains("my-shell-pkg"),
+            "diagnostic must name the offending package, got: {err}"
+        );
+        assert!(
+            err.contains(CURRENT_COMPILER_VERSION),
+            "diagnostic must state the required version, got: {err}"
+        );
+        assert!(
+            !err.contains(" in 3a"),
+            "the hardcoded `in 3a` literal must not reappear, got: {err}"
+        );
     }
 
     /// A `[chelis-src]` section parses into the typed spec, exposes its
