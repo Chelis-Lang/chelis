@@ -1,21 +1,22 @@
-//! chelis#434 oracle: transcendental finance properties (Black-Scholes
-//! positivity) must NEVER surface the internal "variable `d1` has no declared
-//! cvc5 term" leak and must NEVER be falsely `proven`. The minimum acceptable
-//! outcome is a clean, honest user-facing `unsupported` that names the
-//! transcendental capability boundary; the real discharge of a transcendental
-//! finance goal is the WS-7 / Beacon envelope seam (cited in the reason text),
-//! NOT in-tree cvc5 NRA.
+//! chelis#434 oracle: transcendental finance discharge — the certified
+//! special-function envelope lane, wired (milestone 4).
 //!
-//! Two invariants are locked here:
+//! Invariants locked here:
 //!   1. A let-bound intermediate passed into a NESTED CALL argument lowers
-//!      correctly (the `d1` substitution path) -- it proves at SMT when the
-//!      body is otherwise cvc5-lowerable. This is the sub-problem-1 regression
-//!      lock: a leak would re-surface "variable `<name>` has no declared cvc5
-//!      term".
-//!   2. The Black-Scholes positivity property (transcendental: `log`, `exp`,
-//!      `sqrt`) is HONESTLY `unsupported` under smt-only (naming the
-//!      transcendental, never the internal leak) and is NEVER falsely proven
-//!      under any tier (fail-closed).
+//!      correctly (the `d1` substitution path) — it proves at SMT when the body
+//!      is otherwise cvc5-lowerable. Regression lock: a leak would re-surface
+//!      "variable `<name>` has no declared cvc5 term".
+//!   2. A genuinely envelope-provable transcendental goal (`erf(x) <= 0.9` over a
+//!      bounded box) FLIPS to `proven_modulo_certified_envelope` — the distinct
+//!      honest tier, NEVER plain `proven` / `proven_modulo_real_arithmetic`
+//!      (`erf` is non-whitelisted, so it reaches the envelope lane; whitelisted
+//!      transcendentals `exp`/`log`/`sqrt` go through cvc5's native support).
+//!   3. Black-Scholes positivity is NOT envelope-provable — abstracting the
+//!      coupled `normal_cdf(d1)`/`normal_cdf(d2)` is falsifiable in the
+//!      over-approximation (chelis#637) — so it stays HONESTLY `unsupported`,
+//!      never green and never a false disproof, EVEN with the lane fully wired.
+//!   4. An envelope-covered FALSE goal HONESTLY declines (unsupported), never
+//!      green — the sound-direction forge guard.
 //!
 //! cvc5-only oracle (mirrors cross_engine_oracle.rs's file-level gate).
 #![cfg(feature = "smt")]
@@ -43,6 +44,7 @@ fn is_proven_badge(v: CompositeVerdict) -> bool {
         v,
         CompositeVerdict::Proven
             | CompositeVerdict::ProvenModuloRealArithmetic
+            | CompositeVerdict::ProvenModuloCertifiedEnvelope
             | CompositeVerdict::ProvenModuloFuzzValidatedContract
             | CompositeVerdict::ProvenModuloAssertedAxiom
     )
@@ -111,10 +113,16 @@ fn let_bound_intermediate_in_nested_call_lowers_to_smt() {
 
 #[test]
 fn bs_call_positive_smt_only_is_honest_unsupported() {
-    // Sub-problem-2 fail-closed: smt-only is terminal, so the transcendental
-    // Black-Scholes goal is an HONEST capability-boundary `unsupported` that
-    // NAMES the transcendental, never the internal "no declared cvc5 term"
-    // leak, and never a false proof.
+    // chelis#434 + chelis#637: EVEN WITH the certified-envelope lane fully wired,
+    // Black-Scholes positivity stays honestly `unsupported`. Two independent
+    // reasons keep it there: (1) the oracle's wide guards leave the transcendental
+    // arguments (`log(s/k)`, `sqrt(t)`) unbounded, so the envelope abstraction
+    // declines; and (2) even with bounded guards the free-variable abstraction of
+    // the coupled `normal_cdf(d1)`/`normal_cdf(d2)` is falsifiable in the
+    // over-approximation (chelis#637), so a residual disproof is spurious and the
+    // lane declines rather than reporting a false disproof. It NAMES the
+    // transcendental, never leaks the internal cvc5-var message, and is NEVER
+    // green — the canonical false-under-abstraction case (chelis#637).
     let outcome = run_one(BS_SOURCE, "smt-only", 0);
     assert_eq!(
         outcome.status,
@@ -134,9 +142,17 @@ fn bs_call_positive_smt_only_is_honest_unsupported() {
         !reason.contains("d1"),
         "must NOT leak the let-bound intermediate name: {reason:?}"
     );
+    // Strengthened for the wired envelope lane: never any proven badge, and in
+    // particular NEVER the certified-envelope tier (BS is not envelope-provable).
     assert!(
         !is_proven_badge(outcome.composite_verdict),
         "transcendental goal must never be laundered into a proof: {outcome:?}"
+    );
+    assert_ne!(
+        outcome.composite_verdict,
+        CompositeVerdict::ProvenModuloCertifiedEnvelope,
+        "BS positivity is NOT envelope-provable (chelis#637) — must never read the \
+         certified-envelope tier even fully wired: {outcome:?}"
     );
 }
 
@@ -159,5 +175,78 @@ fn bs_call_positive_is_never_falsely_proven_under_auto() {
     assert!(
         !is_proven_badge(outcome.composite_verdict),
         "auto fuzz pass must never read as proven: {outcome:?}"
+    );
+}
+
+// ─── chelis#434 milestone 4: the certified-envelope lane FLIP oracle ──────────
+//
+// The flip oracle uses `erf` — a NON-whitelisted transcendental (the whitelist
+// `[abs,min,max,sqrt,exp,log,sin,cos]` routes those through cvc5's native
+// transcendental support, i.e. the base `proven_modulo_real_arithmetic` path).
+// `erf` is not whitelisted, so it reaches the certified-envelope lane.
+
+/// A genuinely envelope-provable goal: `erf(x) <= 0.9` for `x in [0,1]`. `erf`
+/// over [0,1] is in `[0, 0.843]`, strictly under 0.9, argument bounded — so the
+/// certified `erf` envelope discharges the residual.
+const ERF_BOUND_SOURCE: &str = r#"module M
+@property erf_bounded forall(x: f32) where (x >= 0.0), (x <= 1.0):
+  (erf(x) <= 0.9)
+"#;
+
+/// FALSE-under-abstraction forge case: `erf(x) <= 0.5` for `x in [0,1]`. The real
+/// goal is FALSE (`erf(0.6) ≈ 0.604 > 0.5`); the certified envelope covers the
+/// argument but the residual is falsifiable, so the lane must HONESTLY DECLINE
+/// (unsupported under smt-only), NEVER green and NEVER a false disproof.
+const ERF_FALSE_SOURCE: &str = r#"module M
+@property erf_false forall(x: f32) where (x >= 0.0), (x <= 1.0):
+  (erf(x) <= 0.5)
+"#;
+
+#[test]
+fn envelope_provable_goal_flips_to_proven_modulo_certified_envelope() {
+    let outcome = run_one(ERF_BOUND_SOURCE, "smt-only", 0);
+    assert_eq!(
+        outcome.status,
+        PropertyStatus::Passed,
+        "envelope-provable erf goal must pass under smt-only: {outcome:?}"
+    );
+    assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{outcome:?}");
+    assert_eq!(
+        outcome.composite_verdict,
+        CompositeVerdict::ProvenModuloCertifiedEnvelope,
+        "must project to the distinct certified-envelope tier: {outcome:?}"
+    );
+    // NEVER plain proven / proven_modulo_real_arithmetic — the envelope
+    // dependency is disclosed, not laundered away.
+    assert_ne!(
+        outcome.composite_verdict,
+        CompositeVerdict::Proven,
+        "{outcome:?}"
+    );
+    assert_ne!(
+        outcome.composite_verdict,
+        CompositeVerdict::ProvenModuloRealArithmetic,
+        "{outcome:?}"
+    );
+}
+
+#[test]
+fn envelope_covered_false_goal_declines_never_green() {
+    // smt-only: the residual is falsifiable in the over-approximation, so the
+    // lane declines to an HONEST `unsupported` — never green, never a false proof.
+    let outcome = run_one(ERF_FALSE_SOURCE, "smt-only", 0);
+    assert_ne!(
+        outcome.status,
+        PropertyStatus::Passed,
+        "an envelope-covered FALSE goal must never be green: {outcome:?}"
+    );
+    assert!(
+        !is_proven_badge(outcome.composite_verdict),
+        "FALSE goal must never read as any proven badge: {outcome:?}"
+    );
+    assert_ne!(
+        outcome.composite_verdict,
+        CompositeVerdict::ProvenModuloCertifiedEnvelope,
+        "FALSE goal must never read the certified-envelope tier: {outcome:?}"
     );
 }
