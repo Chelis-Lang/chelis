@@ -4271,7 +4271,65 @@ const MISSING_REGISTRY_SENTINEL: &str = "__chelis_missing_from_registry_sentinel
 ///   `discover_test_files`; reef does not subsume test discovery.
 const RESERVED_ADDITIONAL_SOURCE_DIRS: &[&str] = &["src", "tests"];
 
+/// Environment toggle: when set to a non-empty, non-`0` value, a manifest
+/// whose `package.compiler` pin does not equal the running compiler is
+/// ACCEPTED (with a loud per-package warning) instead of rejected. Every
+/// other manifest validation stays enforced — this waives exactly the
+/// compiler-pin equality assertion, nothing else.
+///
+/// It exists for the ecosystem drift canary and local dev, which build a
+/// shell's real code against chelis HEAD: a released dependency pins the
+/// compiler it was cut against, so rejecting it at the manifest gate tests
+/// "has the release cascade happened" rather than the intended question,
+/// "does this code still compile against HEAD". It is NOT for a shell's own
+/// CI gate, where the pin equality is the whole point of the check.
+const ALLOW_DEP_COMPILER_DRIFT_ENV: &str = "CHELIS_REEF_ALLOW_DEP_COMPILER_DRIFT";
+
+fn allow_dep_compiler_drift() -> bool {
+    match env::var_os(ALLOW_DEP_COMPILER_DRIFT_ENV) {
+        Some(v) => !v.is_empty() && v != "0",
+        None => false,
+    }
+}
+
+/// Decide the compiler-pin check for one manifest.
+///
+/// - `Ok(None)` — the pin matches the running compiler.
+/// - `Ok(Some(warning))` — the pin mismatches but `allow_drift` waives it;
+///   the caller MUST emit `warning` so the waiver is visible in the log.
+/// - `Err(msg)` — the pin mismatches and is not waived.
+///
+/// Split out from [`validate_manifest_with`] so the waiver decision and its
+/// warning text are unit-testable without mutating process environment.
+fn compiler_pin_outcome(
+    manifest: &ReefManifest,
+    allow_drift: bool,
+) -> Result<Option<String>, String> {
+    if manifest.package.compiler == CURRENT_COMPILER_VERSION {
+        return Ok(None);
+    }
+    if allow_drift {
+        Ok(Some(format!(
+            "warning: allowing compiler-pin drift in `{}` (`{}` vs \
+             `{CURRENT_COMPILER_VERSION}`) — {ALLOW_DEP_COMPILER_DRIFT_ENV} set",
+            manifest.package.name, manifest.package.compiler
+        )))
+    } else {
+        Err(format!(
+            "package.compiler must be `{CURRENT_COMPILER_VERSION}` in `{}`",
+            manifest.package.name
+        ))
+    }
+}
+
 fn validate_manifest(manifest: &ReefManifest) -> Result<(), String> {
+    validate_manifest_with(manifest, allow_dep_compiler_drift())
+}
+
+fn validate_manifest_with(
+    manifest: &ReefManifest,
+    allow_compiler_drift: bool,
+) -> Result<(), String> {
     if manifest.package.name.trim().is_empty() {
         return Err("package.name must not be empty".to_string());
     }
@@ -4281,11 +4339,8 @@ fn validate_manifest(manifest: &ReefManifest) -> Result<(), String> {
     if manifest.package.module_prefix.trim().is_empty() {
         return Err("package.module_prefix must not be empty".to_string());
     }
-    if manifest.package.compiler != CURRENT_COMPILER_VERSION {
-        return Err(format!(
-            "package.compiler must be `{CURRENT_COMPILER_VERSION}` in `{}`",
-            manifest.package.name
-        ));
+    if let Some(warning) = compiler_pin_outcome(manifest, allow_compiler_drift)? {
+        eprintln!("{warning}");
     }
     let mut seen_additional = HashSet::new();
     for entry in &manifest.package.additional_sources {
@@ -9911,6 +9966,81 @@ additional_sources = ["properties"]
             !err.contains(" in 3a"),
             "the hardcoded `in 3a` literal must not reappear, got: {err}"
         );
+    }
+
+    fn manifest_with_compiler(name: &str, compiler: &str) -> ReefManifest {
+        ReefManifest {
+            package: ManifestPackage {
+                name: name.to_string(),
+                version: "0.1.0".to_string(),
+                compiler: compiler.to_string(),
+                module_prefix: "Demo".to_string(),
+                additional_sources: Vec::new(),
+            },
+            dependencies: BTreeMap::new(),
+            chelis_src: None,
+            artifacts: BTreeMap::new(),
+        }
+    }
+
+    /// Guardrail (a): with the drift env off (the default), a compiler-pin
+    /// mismatch is still rejected, naming the offending package.
+    #[test]
+    fn compiler_pin_outcome_rejects_mismatch_by_default() {
+        let manifest = manifest_with_compiler("my-shell-pkg", "=0.0.0");
+        let err = compiler_pin_outcome(&manifest, false)
+            .expect_err("a mismatch must be rejected when drift is not allowed");
+        assert!(
+            err.contains("my-shell-pkg"),
+            "must name the package, got: {err}"
+        );
+        assert!(
+            err.contains(CURRENT_COMPILER_VERSION),
+            "must state the required version, got: {err}"
+        );
+    }
+
+    /// Guardrail (b): with the drift env on, a mismatch is WAIVED and returns
+    /// a loud warning naming the package, both pins, and the enabling env —
+    /// so a canary log always shows exactly what was waived.
+    #[test]
+    fn compiler_pin_outcome_waives_mismatch_with_warning_when_allowed() {
+        let manifest = manifest_with_compiler("my-shell-pkg", "=0.0.0");
+        let warning = compiler_pin_outcome(&manifest, true)
+            .expect("a waived mismatch must not error")
+            .expect("a mismatch under the drift env must produce a warning");
+        assert!(
+            warning.contains("my-shell-pkg"),
+            "names the package: {warning}"
+        );
+        assert!(
+            warning.contains("=0.0.0"),
+            "names the manifest pin: {warning}"
+        );
+        assert!(
+            warning.contains(CURRENT_COMPILER_VERSION),
+            "names the running compiler: {warning}"
+        );
+        assert!(
+            warning.contains(ALLOW_DEP_COMPILER_DRIFT_ENV),
+            "names the enabling env: {warning}"
+        );
+        // A matching pin is a no-op regardless of the flag.
+        let ok = manifest_with_compiler("my-shell-pkg", CURRENT_COMPILER_VERSION);
+        assert_eq!(compiler_pin_outcome(&ok, true).unwrap(), None);
+        assert_eq!(compiler_pin_outcome(&ok, false).unwrap(), None);
+    }
+
+    /// Guardrail (c): the waiver is scoped to EXACTLY the compiler-pin
+    /// assertion. With drift allowed, an unrelated manifest violation is
+    /// still rejected — a leak past that one assertion would wrongly pass.
+    #[test]
+    fn drift_waiver_does_not_relax_other_validations() {
+        let mut manifest = manifest_with_compiler("my-shell-pkg", "=0.0.0");
+        manifest.package.module_prefix = String::new();
+        let err = validate_manifest_with(&manifest, true)
+            .expect_err("a non-pin violation must still fail under the drift env");
+        assert!(err.contains("module_prefix"), "got: {err}");
     }
 
     /// A `[chelis-src]` section parses into the typed spec, exposes its

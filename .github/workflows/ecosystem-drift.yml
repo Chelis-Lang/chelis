@@ -149,6 +149,19 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
+    env:
+      # Test the ecosystem's CODE against chelis HEAD, not its release
+      # cadence. A released dependency pins the compiler it was cut against,
+      # so under HEAD `chelis reef build` / `check` / `test` would reject the
+      # whole dep graph at the manifest gate before compiling anything — a
+      # false drift positive. This waives EXACTLY the dependency
+      # compiler-pin equality (every other manifest check stays enforced),
+      # with a loud per-package warning in the log. Pin freshness is each
+      # shell's own release-cadence concern, not a code-drift signal. See
+      # chelis-reef `validate_manifest` + spec/design/reef_distribution.md
+      # Item 8. NOTE: host env does not cross `docker run`, so the docker leg
+      # re-passes this into its container explicitly (below).
+      CHELIS_REEF_ALLOW_DEP_COMPILER_DRIFT: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -626,7 +639,11 @@ jobs:
         run: |
           set -euo pipefail
           img=hello-chelis:head
-          run() { docker run --rm -v "$PWD/shell:/workspace" -w /workspace "$img" "$@"; }
+          # Forward the dep-compiler-drift waiver (set at job level) INTO the
+          # container: the shell's deps live in the image's registry at their
+          # released pins, so `chelis check` / `test` would reject them under
+          # HEAD without it. `-e VAR` (no value) passes the host value through.
+          run() { docker run --rm -e CHELIS_REEF_ALLOW_DEP_COMPILER_DRIFT -v "$PWD/shell:/workspace" -w /workspace "$img" "$@"; }
           echo "::group::chelis check"
           run chelis check src/basics/hellotensor.ch
           echo "::endgroup::"
