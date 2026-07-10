@@ -268,51 +268,82 @@ mod tests {
         assert!(!contains_apply(&rp.postcondition, "erf"));
     }
 
+    fn le(l: SmtExpr, r: SmtExpr) -> SmtExpr {
+        SmtExpr::Cmp(CmpOp::Le, Box::new(l), Box::new(r))
+    }
+    fn lit(v: f64) -> SmtExpr {
+        SmtExpr::RealLit(v)
+    }
+    fn var(n: &str) -> SmtExpr {
+        SmtExpr::Var(n.into())
+    }
+
     #[test]
-    fn normal_cdf_of_nonlinear_arg_still_declines() {
-        // The REMAINING boundary after affine propagation: a NONLINEAR argument.
-        // normal_cdf(x·y) lowers to erf((x·y)/√2); (x·y)/√2 is var×var (non-affine),
-        // so abstract-subterm still DECLINES. Full compound propagation (the rest
-        // of the 60% — the BS log(s/k)/d1 shape) remains deferred.
+    fn normal_cdf_of_boundable_nonlinear_arg_now_abstracts() {
+        // chelis#434 milestone 1: a NONLINEAR-but-boundable argument now
+        // abstracts. normal_cdf(x·y) → erf((x·y)/√2); x·y over [0,1]² is bounded
+        // by interval arithmetic to [0,1], so /√2 ∈ [0,0.707] ⊆ erf coverage and
+        // the CDF abstracts via the certified erf envelope. (This DECLINED under
+        // the affine-only extractor — the boundary moved.)
         let goal = Goal::smt(SmtProperty {
             variables: vec![("x".into(), SmtSort::Real), ("y".into(), SmtSort::Real)],
             preconditions: vec![
-                SmtExpr::Cmp(
-                    CmpOp::Le,
-                    Box::new(SmtExpr::RealLit(0.0)),
-                    Box::new(SmtExpr::Var("x".into())),
-                ),
-                SmtExpr::Cmp(
-                    CmpOp::Le,
-                    Box::new(SmtExpr::Var("x".into())),
-                    Box::new(SmtExpr::RealLit(1.0)),
-                ),
-                SmtExpr::Cmp(
-                    CmpOp::Le,
-                    Box::new(SmtExpr::RealLit(0.0)),
-                    Box::new(SmtExpr::Var("y".into())),
-                ),
-                SmtExpr::Cmp(
-                    CmpOp::Le,
-                    Box::new(SmtExpr::Var("y".into())),
-                    Box::new(SmtExpr::RealLit(1.0)),
-                ),
+                le(lit(0.0), var("x")),
+                le(var("x"), lit(1.0)),
+                le(lit(0.0), var("y")),
+                le(var("y"), lit(1.0)),
             ],
-            postcondition: SmtExpr::Cmp(
-                CmpOp::Le,
-                Box::new(ncdf(SmtExpr::Arith(
+            postcondition: le(
+                ncdf(SmtExpr::Arith(
                     ArithOp::Mul,
-                    Box::new(SmtExpr::Var("x".into())),
-                    Box::new(SmtExpr::Var("y".into())),
-                ))),
-                Box::new(SmtExpr::RealLit(1.0)),
+                    Box::new(var("x")),
+                    Box::new(var("y")),
+                )),
+                lit(1.0),
+            ),
+        });
+        let lowered = NormalCdfToErf.apply(&goal);
+        let residual = AbstractSubterm::new().apply(&lowered[0]);
+        let GoalShape::Smt(ref rp) = residual[0].shape else {
+            panic!("expected Smt goal");
+        };
+        assert!(
+            rp.variables.iter().any(|(n, _)| n == "__erf_abs_0"),
+            "boundable nonlinear arg must now abstract: {:?}",
+            rp.variables
+        );
+        assert!(!contains_apply(&rp.postcondition, "erf"));
+        assert!(!contains_apply(&rp.postcondition, "normal_cdf"));
+    }
+
+    #[test]
+    fn normal_cdf_of_unboundable_arg_still_declines() {
+        // The remaining boundary: an argument that is NOT soundly boundable.
+        // normal_cdf(x/y) with y spanning 0 → erf((x/y)/√2), and x/y is unbounded
+        // (divisor interval contains 0), so the interval extractor fails closed
+        // and abstract-subterm DECLINES (never guesses a bound).
+        let goal = Goal::smt(SmtProperty {
+            variables: vec![("x".into(), SmtSort::Real), ("y".into(), SmtSort::Real)],
+            preconditions: vec![
+                le(lit(1.0), var("x")),
+                le(var("x"), lit(2.0)),
+                le(lit(-1.0), var("y")), // y ∈ [-1,1] spans 0
+                le(var("y"), lit(1.0)),
+            ],
+            postcondition: le(
+                ncdf(SmtExpr::Arith(
+                    ArithOp::Div,
+                    Box::new(var("x")),
+                    Box::new(var("y")),
+                )),
+                lit(1.0),
             ),
         });
         let lowered = NormalCdfToErf.apply(&goal);
         let residual = AbstractSubterm::new().apply(&lowered[0]);
         assert_eq!(
             residual[0].shape, lowered[0].shape,
-            "nonlinear (x·y)/√2 argument must still decline"
+            "unboundable x/y (divisor spans 0) argument must decline"
         );
         let GoalShape::Smt(ref rp) = residual[0].shape else {
             panic!("expected Smt goal");

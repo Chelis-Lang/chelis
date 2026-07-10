@@ -63,6 +63,22 @@ impl AbstractSubterm {
         self.envelopes.get(fn_name)
     }
 
+    /// Bound `expr`'s sound interval, resolving any transcendental SUB-term
+    /// through this transform's committed envelopes (so a compound/nested
+    /// argument like `log(s/k)` inside `d1` is boundable). Fail-closed: a
+    /// transcendental with no committed envelope, outside its domain, or outside
+    /// its covered range declines, and so does any unbounded leaf / zero-spanning
+    /// divisor / unsupported op.
+    fn bound_argument(&self, expr: &SmtExpr, pre: &[SmtExpr]) -> Option<(f64, f64)> {
+        interval_range(expr, pre, &|name, lo, hi| {
+            let env = self.envelope_for(name)?;
+            if !env.domain.covers(lo, hi) {
+                return None;
+            }
+            env.sound_range_bound(lo, hi)
+        })
+    }
+
     /// Test-only constructor that injects synthetic certified-shaped envelopes,
     /// so the generalized finder + domain guards can be exercised for
     /// `exp`/`log`/`sqrt` before their real certified data lands. Production only
@@ -116,11 +132,12 @@ impl Transformation for AbstractSubterm {
                 return vec![goal.clone()];
             };
 
-            // Determine the argument's static range from the preconditions.
-            let Some((arg_lo, arg_hi)) =
-                extract_variable_range(&site.argument, &prop.preconditions)
+            // Determine the argument's static range from the preconditions, via
+            // sound interval arithmetic that resolves any NESTED transcendental
+            // sub-term through the committed envelopes (chelis#434 milestone 1).
+            let Some((arg_lo, arg_hi)) = self.bound_argument(&site.argument, &prop.preconditions)
             else {
-                // Can't determine argument range statically → decline.
+                // Can't soundly bound the argument statically → decline.
                 return vec![goal.clone()];
             };
 
@@ -347,15 +364,140 @@ fn to_affine(expr: &SmtExpr) -> Option<AffineForm> {
     }
 }
 
+/// A well-formed finite interval `[lo, hi]`, or `None` (fail-closed) if either
+/// endpoint is non-finite or the interval is empty. Every interval op routes its
+/// result through here so a NaN/inf can never escape as a bound.
+fn finite_interval(lo: f64, hi: f64) -> Option<(f64, f64)> {
+    (lo.is_finite() && hi.is_finite() && lo <= hi).then_some((lo, hi))
+}
+
+/// Sound product of two intervals: the hull of the four corner products. Handles
+/// every sign case (incl. `x·x`: `[-1,1]·[-1,1] = [-1,1]`, sound over the true
+/// `[0,1]`).
+fn imul(a: (f64, f64), b: (f64, f64)) -> Option<(f64, f64)> {
+    let ps = [a.0 * b.0, a.0 * b.1, a.1 * b.0, a.1 * b.1];
+    let lo = ps.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = ps.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    finite_interval(lo, hi)
+}
+
+/// Sound quotient `a / b`. DOMAIN GUARD: if the divisor interval contains 0
+/// (`blo <= 0 <= bhi`) the quotient is unbounded, so DECLINE (fail-closed). Else
+/// the reciprocal `1/b` stays on one side of 0 and is `[1/bhi, 1/blo]`.
+fn idiv(a: (f64, f64), b: (f64, f64)) -> Option<(f64, f64)> {
+    if b.0 <= 0.0 && b.1 >= 0.0 {
+        return None; // divisor spans (or touches) 0
+    }
+    let (r0, r1) = (1.0 / b.1, 1.0 / b.0);
+    imul(a, (r0.min(r1), r0.max(r1)))
+}
+
+/// Sound `|·|` of an interval.
+fn iabs(lo: f64, hi: f64) -> Option<(f64, f64)> {
+    if lo >= 0.0 {
+        finite_interval(lo, hi)
+    } else if hi <= 0.0 {
+        finite_interval(-hi, -lo)
+    } else {
+        finite_interval(0.0, (-lo).max(hi))
+    }
+}
+
+/// Resolver for a transcendental sub-term: given its name and its argument's
+/// sound sub-interval `[arg_lo, arg_hi]`, return its envelope hull, or `None` to
+/// decline (no committed envelope / out of domain / outside coverage).
+type TranscendentalResolver<'a> = dyn Fn(&str, f64, f64) -> Option<(f64, f64)> + 'a;
+
+/// The sound static interval `[lo, hi]` of `expr` over the precondition leaf
+/// ranges, by interval arithmetic. The AFFINE fast-path (coefficient-merged) is
+/// tried first so affine subexpressions are EXACT (`x - x = [0,0]`, no dependency
+/// error); genuinely nonlinear nodes use sound interval arithmetic (looser but
+/// sound). `resolve` bounds a supported transcendental over its argument
+/// sub-interval via its envelope hull (`None` => decline).
+///
+/// FAIL-CLOSED: an unbounded leaf, a divisor interval spanning 0, an unsupported
+/// op, or a transcendental `resolve` declines all return `None`.
+fn interval_range(
+    expr: &SmtExpr,
+    pre: &[SmtExpr],
+    resolve: &TranscendentalResolver,
+) -> Option<(f64, f64)> {
+    // Affine fast-path (exact for the affine fragment; kills the dependency
+    // error that plain interval arithmetic would introduce for x - x etc.).
+    if let Some(form) = to_affine(expr)
+        && let Some(r) = affine_range(&form, pre)
+    {
+        return Some(r);
+    }
+    match expr {
+        SmtExpr::RealLit(v) => finite_interval(*v, *v),
+        SmtExpr::IntLit(v) => finite_interval(*v as f64, *v as f64),
+        SmtExpr::Var(n) => bare_var_range(n, pre),
+        SmtExpr::Arith(ArithOp::Neg, a, _) => {
+            let (lo, hi) = interval_range(a, pre, resolve)?;
+            finite_interval(-hi, -lo)
+        }
+        SmtExpr::Arith(ArithOp::Add, l, r) => {
+            let a = interval_range(l, pre, resolve)?;
+            let b = interval_range(r, pre, resolve)?;
+            finite_interval(a.0 + b.0, a.1 + b.1)
+        }
+        SmtExpr::Arith(ArithOp::Sub, l, r) => {
+            let a = interval_range(l, pre, resolve)?;
+            let b = interval_range(r, pre, resolve)?;
+            finite_interval(a.0 - b.1, a.1 - b.0)
+        }
+        SmtExpr::Arith(ArithOp::Mul, l, r) => {
+            let a = interval_range(l, pre, resolve)?;
+            let b = interval_range(r, pre, resolve)?;
+            imul(a, b)
+        }
+        SmtExpr::Arith(ArithOp::Div, l, r) => {
+            let a = interval_range(l, pre, resolve)?;
+            let b = interval_range(r, pre, resolve)?;
+            idiv(a, b)
+        }
+        SmtExpr::Apply(name, args) if name == "abs" && args.len() == 1 => {
+            let (lo, hi) = interval_range(&args[0], pre, resolve)?;
+            iabs(lo, hi)
+        }
+        SmtExpr::Apply(name, args) if (name == "min" || name == "max") && args.len() == 2 => {
+            let a = interval_range(&args[0], pre, resolve)?;
+            let b = interval_range(&args[1], pre, resolve)?;
+            if name == "min" {
+                finite_interval(a.0.min(b.0), a.1.min(b.1))
+            } else {
+                finite_interval(a.0.max(b.0), a.1.max(b.1))
+            }
+        }
+        // A supported transcendental: bound the argument, then the envelope hull.
+        SmtExpr::Apply(name, args) if args.len() == 1 => {
+            let (alo, ahi) = interval_range(&args[0], pre, resolve)?;
+            resolve(name, alo, ahi)
+        }
+        // The value is one of the two branches, both bounded: their sound hull
+        // (the condition is irrelevant to a sound bound).
+        SmtExpr::Ite(_cond, t, e) => {
+            let a = interval_range(t, pre, resolve)?;
+            let b = interval_range(e, pre, resolve)?;
+            finite_interval(a.0.min(b.0), a.1.max(b.1))
+        }
+        // Cmp / Bool / Not / quantifiers / bool-lit / multi-arg Apply: not a
+        // real-valued arithmetic term we can bound. Fail closed.
+        _ => None,
+    }
+}
+
 /// Extract the static range `[lo, hi]` of an argument expression from the
-/// preconditions. Handles a bare `Var` (its precondition bounds) AND any AFFINE
-/// form `a·x + b·y + … + c` over bounded variables, via sound interval
-/// arithmetic on the canonical (coefficient-merged) form. Returns `None`
-/// (fail-closed) if the expression is non-affine or any variable in it is not
-/// bounded by the preconditions.
+/// preconditions, by sound interval arithmetic (affine fast-path for the affine
+/// fragment) with NO transcendental resolver (all transcendental `Apply`s
+/// decline). The production transform uses [`AbstractSubterm::bound_argument`]
+/// (envelope-aware) so a NESTED transcendental in an argument (e.g. `log(s/k)`
+/// inside `d1`) is boundable; this envelope-free form is the unit-test entry
+/// point for the interval-arithmetic core. Fail-closed everywhere.
+#[cfg(test)]
 fn extract_variable_range(expr: &SmtExpr, preconditions: &[SmtExpr]) -> Option<(f64, f64)> {
-    let form = to_affine(expr)?;
-    affine_range(&form, preconditions)
+    interval_range(expr, preconditions, &|_, _, _| None)
 }
 
 /// Evaluate the sound interval of an affine form over the variable ranges pinned
@@ -1019,17 +1161,146 @@ mod tests {
     }
 
     #[test]
-    fn nonaffine_fails_closed() {
-        let pre = box_pre(&[("x", 1.0, 2.0), ("y", 1.0, 2.0)]);
-        // var × var
-        assert_eq!(extract_variable_range(&mul(v("x"), v("y")), &pre), None);
-        // division by a variable (could be zero)
+    fn nonlinear_interval_arithmetic_bounds_soundly() {
+        // chelis#434 milestone 1: nonlinear ops now bound by sound interval
+        // arithmetic (they DECLINED under the affine-only extractor).
+        let pre = box_pre(&[("x", 1.0, 2.0), ("y", 3.0, 4.0)]);
+        // x·y over [1,2]×[3,4] = [3, 8].
+        assert_eq!(
+            extract_variable_range(&mul(v("x"), v("y")), &pre),
+            Some((3.0, 8.0))
+        );
+        // x/y over [1,2]/[3,4] (y excludes 0) = [1/4, 2/3].
+        let (lo, hi) = extract_variable_range(&div(v("x"), v("y")), &pre).unwrap();
+        assert!(
+            (lo - 0.25).abs() < 1e-12 && (hi - 2.0 / 3.0).abs() < 1e-12,
+            "[{lo},{hi}]"
+        );
+        // abs over a sign-crossing range: |[-2,3]| = [0,3].
+        let p2 = box_pre(&[("z", -2.0, 3.0)]);
+        assert_eq!(
+            extract_variable_range(&SmtExpr::Apply("abs".into(), vec![v("z")]), &p2),
+            Some((0.0, 3.0))
+        );
+        // ITE hull: ite(c, x, y) over x∈[1,2], y∈[3,4] = [1,4].
+        let ite = SmtExpr::Ite(
+            Box::new(SmtExpr::BoolLit(true)),
+            Box::new(v("x")),
+            Box::new(v("y")),
+        );
+        assert_eq!(extract_variable_range(&ite, &pre), Some((1.0, 4.0)));
+    }
+
+    #[test]
+    fn interval_division_sign_cases() {
+        // Divisor strictly negative: x/y over [1,2]/[-4,-2] = [2/-2, 1/-4]=[-1,-0.25].
+        let pre = box_pre(&[("x", 1.0, 2.0), ("y", -4.0, -2.0)]);
+        let (lo, hi) = extract_variable_range(&div(v("x"), v("y")), &pre).unwrap();
+        assert!(
+            (lo - -1.0).abs() < 1e-12 && (hi - -0.25).abs() < 1e-12,
+            "[{lo},{hi}]"
+        );
+        // Sign-crossing numerator over a positive divisor: [-1,1]/[2,4].
+        let p2 = box_pre(&[("x", -1.0, 1.0), ("y", 2.0, 4.0)]);
+        let (lo, hi) = extract_variable_range(&div(v("x"), v("y")), &p2).unwrap();
+        assert!(
+            (lo - -0.5).abs() < 1e-12 && (hi - 0.5).abs() < 1e-12,
+            "[{lo},{hi}]"
+        );
+    }
+
+    #[test]
+    fn dependency_error_traps_stay_sound() {
+        // x·x over [-1,1]: sound interval mul gives [-1,1] (⊇ true [0,1]) — sound,
+        // just loose. It must NOT claim a tighter-than-sound bound.
+        let pre = box_pre(&[("x", -1.0, 1.0)]);
+        let (lo, hi) = extract_variable_range(&mul(v("x"), v("x")), &pre).unwrap();
+        assert!(
+            lo <= 0.0 && hi >= 1.0,
+            "x*x must be sound (⊇[0,1]), got [{lo},{hi}]"
+        );
+        // x − x: the affine fast-path makes it EXACTLY [0,0] (coefficient merge),
+        // not the naive interval [-2,2]. (Both sound; affine is exact.)
+        assert_eq!(
+            extract_variable_range(&sub(v("x"), v("x")), &pre),
+            Some((0.0, 0.0))
+        );
+    }
+
+    #[test]
+    fn interval_arithmetic_fails_closed() {
+        let pre = box_pre(&[("x", 1.0, 2.0), ("y", -1.0, 3.0)]);
+        // Divisor interval SPANS 0 → decline (quotient unbounded).
         assert_eq!(extract_variable_range(&div(v("x"), v("y")), &pre), None);
-        // division by a zero constant
+        // Division by the zero constant → decline.
         assert_eq!(extract_variable_range(&div(v("x"), r(0.0)), &pre), None);
-        // a transcendental Apply inside the argument
+        // Unbounded leaf inside a nonlinear op → decline.
+        let p2 = box_pre(&[("x", 1.0, 2.0)]);
+        assert_eq!(extract_variable_range(&mul(v("x"), v("w")), &p2), None);
+        // Transcendental in the free-fn extractor (no envelope resolver) → decline.
         let inner = SmtExpr::Apply("erf".into(), vec![v("x")]);
         assert_eq!(extract_variable_range(&add(inner, r(1.0)), &pre), None);
+    }
+
+    #[test]
+    fn bound_argument_resolves_nested_transcendental() {
+        // milestone 1: a compound argument containing a NESTED transcendental —
+        // log(s/k) — is bounded by resolving log through its (injected) envelope
+        // over the interval-arithmetic bound of s/k.
+        let mut envs = HashMap::new();
+        // log envelope over [0.25, 4], constant hull [-1.5, 1.5] (Saturation eps).
+        envs.insert(
+            "log".to_string(),
+            synthetic_env("log", Domain::Positive, 0.25, 4.0, 0.0, 1.5),
+        );
+        let t = AbstractSubterm::with_envelopes(envs);
+        // s/k over [1,2]/[1,2] = [0.5, 2] ⊆ [0.25,4] (positive) → log hull [-1.5,1.5].
+        let pre = box_pre(&[("s", 1.0, 2.0), ("k", 1.0, 2.0)]);
+        let arg = SmtExpr::Apply("log".into(), vec![div(v("s"), v("k"))]);
+        assert_eq!(t.bound_argument(&arg, &pre), Some((-1.5, 1.5)));
+
+        // s/k that can reach 0 (s∈[0,2]) → arg range includes 0 → log domain
+        // guard (Positive) declines the NESTED transcendental → whole bound None.
+        let pre_bad = box_pre(&[("s", 0.0, 2.0), ("k", 1.0, 2.0)]);
+        assert_eq!(t.bound_argument(&arg, &pre_bad), None);
+    }
+
+    #[test]
+    fn d1_like_shape_bounds_end_to_end_with_injected_envelopes() {
+        // A d1-shaped compound: (log(s/k) + drift) / (sigma * sqrt(t)), with
+        // injected log/sqrt envelopes. Exercises interval add/div (denominator
+        // must exclude 0) over nested transcendental hulls. The REAL BS d1 test
+        // (with certified log/sqrt data + an independent interval) lands in
+        // milestone 2 once that data is committed.
+        let mut envs = HashMap::new();
+        envs.insert(
+            "log".to_string(),
+            synthetic_env("log", Domain::Positive, 0.25, 4.0, 0.0, 1.5),
+        );
+        // sqrt envelope over [0.01, 4], constant hull [1.0, 3.0] (>0, so the
+        // denominator sigma*sqrt(t) excludes 0).
+        envs.insert(
+            "sqrt".to_string(),
+            synthetic_env("sqrt", Domain::NonNegative, 0.01, 4.0, 2.0, 1.0),
+        );
+        let t = AbstractSubterm::with_envelopes(envs);
+        let pre = box_pre(&[
+            ("s", 1.0, 2.0),
+            ("k", 1.0, 2.0),
+            ("sigma", 0.1, 0.5),
+            ("t", 0.25, 4.0),
+        ]);
+        // drift = 0 for simplicity; d1 = log(s/k) / (sigma * sqrt(t)).
+        let num = SmtExpr::Apply("log".into(), vec![div(v("s"), v("k"))]);
+        let den = mul(v("sigma"), SmtExpr::Apply("sqrt".into(), vec![v("t")]));
+        let d1 = div(num, den);
+        // log hull [-1.5,1.5]; denom = [0.1,0.5]*[1,3] = [0.1, 1.5] (excludes 0);
+        // d1 = [-1.5,1.5] / [0.1,1.5] = [-15, 15].
+        let (lo, hi) = t.bound_argument(&d1, &pre).expect("d1 shape bounds");
+        assert!(
+            (lo - -15.0).abs() < 1e-9 && (hi - 15.0).abs() < 1e-9,
+            "d1 range [{lo},{hi}]"
+        );
     }
 
     #[test]
