@@ -753,7 +753,7 @@ mod tests {
         let (wlo, whi) = wrong.sound_range_bound(0.0, 1.0).unwrap();
         assert!(
             wlo > -0.25,
-            "endpoint sampling (Increasing) misses the interior min — [{wlo},{whi}]"
+            "endpoint sampling (Increasing) misses the interior min -- [{wlo},{whi}]"
         );
     }
 

@@ -97,7 +97,7 @@ fn stamp(draft_path: &str, out_path: &str) -> ExitCode {
         let coeffs = arm_coeffs(&b.arm);
         let Some(eps) = certify_box(f, b.lo, b.hi, &coeffs, subdivisions) else {
             eprintln!(
-                "error: box [{}, {}] failed certification (non-finite / cross-check) — refusing",
+                "error: box [{}, {}] failed certification (non-finite / cross-check) -- refusing",
                 b.lo, b.hi
             );
             return ExitCode::from(1);
@@ -183,7 +183,7 @@ fn validate(env_path: &str) -> ExitCode {
         }
     }
     if !ok {
-        eprintln!("error: a committed eps is below the Arb-certified bound — unsound.");
+        eprintln!("error: a committed eps is below the Arb-certified bound -- unsound.");
         return ExitCode::from(1);
     }
     eprintln!("Arb cross-check passed: every committed eps bounds the Arb sup-norm error.");

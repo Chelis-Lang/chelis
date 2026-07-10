@@ -151,7 +151,7 @@ fn bs_call_positive_smt_only_is_honest_unsupported() {
     assert_ne!(
         outcome.composite_verdict,
         CompositeVerdict::ProvenModuloCertifiedEnvelope,
-        "BS positivity is NOT envelope-provable (chelis#637) — must never read the \
+        "BS positivity is NOT envelope-provable (chelis#637) -- must never read the \
          certified-envelope tier even fully wired: {outcome:?}"
     );
 }
