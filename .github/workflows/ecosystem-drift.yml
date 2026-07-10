@@ -598,6 +598,26 @@ jobs:
           echo "HEAD chelis version in image:"
           docker run --rm hello-chelis:head chelis --version
 
+      # Repin the checked-out shell to HEAD, same as the reef/cargo legs do
+      # (above). The docker leg needs its OWN repin step for two reasons:
+      #   1. It is a different position in the job. The reef/cargo repin runs
+      #      before their `chelis reef build`; here it must run AFTER the base
+      #      image is built, because that image installs the RELEASE chelis and
+      #      its Dockerfile `chelis check`s the source — it would fail the
+      #      manifest gate if the pin were already bumped to HEAD.
+      #   2. The gate below runs against `-v "$PWD/shell:/workspace"`: the HOST
+      #      checkout, not the image's baked copy. So it is the host `shell/`
+      #      that must carry the HEAD pin, or `chelis check` fails at the
+      #      manifest gate ("package.compiler must be `=X.Y.Z`") before any
+      #      language surface is exercised — a false drift positive. Covers
+      #      every reef.toml under the shell (root + nested), not just the root.
+      - name: Repin shell to HEAD chelis (docker)
+        if: matrix.type == 'docker'
+        run: |
+          set -euo pipefail
+          python3 "$CHELIS_TOOLCHAIN/scripts/drift_repin_compiler.py" \
+            shell "${{ needs.build-chelis.outputs.chelis_version }}"
+
       # Mirror hello-chelis ci.yml's `chelis-native` gates, run inside the
       # HEAD-overlaid image. `-v "$PWD/shell:/workspace"` mounts the checked-out
       # corpus so `chelis check` / `chelis test` / pytest see the source tree.

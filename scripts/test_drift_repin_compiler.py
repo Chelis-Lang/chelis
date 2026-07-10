@@ -93,6 +93,114 @@ class MainTests(unittest.TestCase):
     def test_returns_two_on_bad_args(self):
         self.assertEqual(drc.main(["drift_repin_compiler.py"]), 2)
 
+    def test_returns_one_on_missing_path(self):
+        with tempfile.TemporaryDirectory() as d:
+            missing = Path(d) / "nope" / "reef.toml"
+            rc = drc.main(["drift_repin_compiler.py", str(missing), "0.7.27"])
+            self.assertEqual(rc, 1)
+
+
+class DirTreeTests(unittest.TestCase):
+    """A shell checkout is a tree of nested reef packages, not one manifest.
+
+    These lock in that a directory target repins EVERY `reef.toml` under it
+    (root + nested), skips pinless manifests without failing, and fails
+    loudly when a run would repin nothing.
+    """
+
+    @staticmethod
+    def _write(path: Path, text: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def test_repins_root_and_nested(self):
+        with tempfile.TemporaryDirectory() as d:
+            shell = Path(d)
+            self._write(shell / "reef.toml", 'compiler = "=0.7.26"\n')
+            self._write(
+                shell / "examples" / "demo" / "reef.toml",
+                'compiler = "=0.7.26"\n',
+            )
+            self._write(
+                shell / "spike" / "probes" / "reef.toml",
+                'compiler = "=0.7.26"  # probe\n',
+            )
+            rc = drc.main(["drift_repin_compiler.py", str(shell), "0.7.27"])
+            self.assertEqual(rc, 0)
+            for rel in (
+                "reef.toml",
+                "examples/demo/reef.toml",
+                "spike/probes/reef.toml",
+            ):
+                text = (shell / rel).read_text(encoding="utf-8")
+                self.assertIn('compiler = "=0.7.27"', text, rel)
+                self.assertNotIn("0.7.26", text, rel)
+
+    def test_skips_pinless_manifest_but_repins_the_rest(self):
+        with tempfile.TemporaryDirectory() as d:
+            shell = Path(d)
+            self._write(shell / "reef.toml", 'compiler = "=0.7.26"\n')
+            # A workspace-style / negative-fixture manifest with no pin must
+            # be tolerated (skipped), not fail the whole tree.
+            self._write(
+                shell / "spike" / "callsite_bad" / "reef.toml",
+                'name = "callsite_bad"\n',
+            )
+            repinned, skipped = drc.repin_tree(shell, "0.7.27")
+            self.assertEqual((repinned, skipped), (1, 1))
+            rc = drc.main(["drift_repin_compiler.py", str(shell), "0.7.27"])
+            self.assertEqual(rc, 0)
+            self.assertIn(
+                "callsite_bad",
+                (shell / "spike" / "callsite_bad" / "reef.toml").read_text(
+                    encoding="utf-8"
+                ),
+            )
+
+    def test_only_touches_compiler_line_in_nested(self):
+        with tempfile.TemporaryDirectory() as d:
+            shell = Path(d)
+            self._write(shell / "reef.toml", 'compiler = "=0.7.26"\n')
+            nested = shell / "examples" / "demo" / "reef.toml"
+            self._write(
+                nested,
+                "[package]\n"
+                'version = "0.7.26"\n'
+                'compiler = "=0.7.26"\n'
+                "[dependencies]\n"
+                'nautilus = { version = "0.7.26" }\n',
+            )
+            drc.main(["drift_repin_compiler.py", str(shell), "0.7.27"])
+            text = nested.read_text(encoding="utf-8")
+            self.assertIn('version = "0.7.26"', text)
+            self.assertIn('nautilus = { version = "0.7.26" }', text)
+            self.assertIn('compiler = "=0.7.27"', text)
+
+    def test_idempotent_on_second_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            shell = Path(d)
+            self._write(shell / "reef.toml", 'compiler = "=0.7.27"\n')
+            self.assertEqual(
+                drc.main(["drift_repin_compiler.py", str(shell), "0.7.27"]), 0
+            )
+            self.assertEqual(
+                drc.main(["drift_repin_compiler.py", str(shell), "0.7.27"]), 0
+            )
+
+    def test_fails_loudly_when_no_reef_toml(self):
+        with tempfile.TemporaryDirectory() as d:
+            shell = Path(d)
+            self._write(shell / "src" / "main.ch", "x\n")
+            rc = drc.main(["drift_repin_compiler.py", str(shell), "0.7.27"])
+            self.assertEqual(rc, 1)
+
+    def test_fails_loudly_when_nothing_repinnable(self):
+        with tempfile.TemporaryDirectory() as d:
+            shell = Path(d)
+            self._write(shell / "reef.toml", 'name = "workspace-only"\n')
+            rc = drc.main(["drift_repin_compiler.py", str(shell), "0.7.27"])
+            self.assertEqual(rc, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
