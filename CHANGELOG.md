@@ -4,6 +4,41 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.16.0] — 2026-07-10
+
+### Added
+
+- **Transcendental discharge via certified special-function envelopes
+  (chelis#434).** A property whose goal carries a non-whitelisted transcendental
+  (`erf`, `normal_cdf`) can now be discharged through a machine-certified
+  envelope: the standard-normal CDF lowers to the exact `erf` identity
+  (`½(1+erf(x/√2))`), each `erf`/`exp`/`log`/`sqrt` sub-term whose argument is
+  soundly boundable is abstracted to a fresh variable ranging over its certified
+  envelope hull (Gappa-proved for `erf`; Arb mean-value enclosure, cross-checked
+  `<= naive`, for `exp`/`log`/`sqrt`), and the residual is solved over the reals.
+  Argument bounding is sound interval arithmetic over the whole goal expression
+  (affine forms exact; nonlinear `mul`/`div`-with-nonzero-divisor/`abs`/`min`/
+  `max`/`ite` and nested transcendentals soundly bounded; fail-closed on
+  unbounded leaves, zero-spanning divisors, and unsupported ops). A discharge
+  through this lane wears the distinct honest verdict
+  **`proven_modulo_certified_envelope`** — strictly weaker than
+  `proven_modulo_real_arithmetic` (it discloses the extra envelope
+  over-approximation), and an envelope-free over-reals proof never carries it.
+  The lane returns a green result ONLY on a residual proof; a residual
+  counterexample (possibly spurious under the over-approximation) declines rather
+  than reporting a false disproof.
+
+### Scope / known limitation
+
+- **Black-Scholes call-price positivity remains `unsupported` (chelis#637).**
+  The transcendental-envelope capability ships, but the flagship BS-positivity
+  goal is NOT reachable by it: abstracting the coupled `normal_cdf(d1)` /
+  `normal_cdf(d2)` into independent envelope-bounded variables discards the
+  functional coupling the property depends on, so the residual is falsifiable and
+  the goal stays honestly `unsupported`. The successor lanes (correlated/
+  relational abstraction, or whole-expression `BoxRange` interval evaluation) are
+  tracked in chelis#637.
+
 ## [0.15.0] — 2026-07-10
 
 ### Added
