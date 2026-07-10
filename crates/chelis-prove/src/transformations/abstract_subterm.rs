@@ -10,108 +10,92 @@
 //! The result is tagged `SpecialFunctionCertified` (not `Exact`) because it
 //! leans on the envelope certificate.
 //!
+//! # Function registry (chelis#434)
+//!
+//! The finder is driven by [`SpecialFnRegistry`]: it abstracts any
+//! `Apply(f, [arg])` where `f` is a known special function `{erf, exp, log,
+//! sqrt}` AND a certified envelope for `f` is committed. All four have committed
+//! data (`erf`: Gappa+Arb; `exp`/`log`/`sqrt`: Arb mean-value enclosure); a
+//! function with no committed envelope would DECLINE (identity) — the honest
+//! floor. Each function carries a [`Domain`] guard (`log` needs `arg > 0`,
+//! `sqrt` needs `arg >= 0`); a site whose argument range is not provably inside
+//! the domain declines.
+//!
 //! # Sound range evaluation
 //!
 //! The envelope's `bound(x)` gives a sound interval for a SINGLE point. This
-//! transformation needs a sound interval over the argument's ENTIRE RANGE. We
-//! compute `sound_erf_range_bound(arg_lo, arg_hi)` by evaluating the envelope
-//! across all boxes the range touches, taking the hull (min of all lo, max of
-//! all hi). This is sound because every box's eps is a sup-norm over that box.
+//! transformation needs a sound interval over the argument's ENTIRE RANGE, from
+//! [`SpecialFnEnvelope::sound_range_bound`] (the hull across every box the range
+//! touches; sound because every box's eps is a certified sup-norm).
 //!
 //! If the argument range is not statically boundable (no preconditions pin it),
-//! or extends outside the envelope's covered domain, the transformation DECLINES
-//! (returns identity). It never guesses.
+//! extends outside the envelope's covered domain, or violates the function's
+//! domain guard, the transformation DECLINES (returns identity). It never guesses.
+
+use std::collections::{BTreeMap, HashMap};
 
 use crate::discharge::{Goal, GoalShape};
-use crate::erf_envelope::{ErfEnvelope, ErfEnvelopeBox};
-use crate::solver::{BoolOp, CmpOp, SmtExpr, SmtSort};
+use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr, SmtSort};
+use crate::special_fn_envelope::{SpecialFnEnvelope, SpecialFnRegistry};
 use crate::tier_b::SmtProperty;
 use crate::transformation::Transformation;
 
-/// The abstract-subterm transformation for `erf`.
+/// The abstract-subterm transformation over the special-function registry.
 pub struct AbstractSubterm {
-    envelope: ErfEnvelope,
+    /// Committed certified envelopes to consult, keyed by function name. In
+    /// production this is loaded from [`SpecialFnRegistry::committed`] (today:
+    /// `erf` only). A function with no entry here DECLINES.
+    envelopes: HashMap<String, SpecialFnEnvelope>,
 }
 
 impl AbstractSubterm {
     pub fn new() -> Self {
-        Self {
-            envelope: ErfEnvelope::committed(),
+        let mut envelopes = HashMap::new();
+        for &f in SpecialFnRegistry::known_functions() {
+            if let Some(env) = SpecialFnRegistry::committed(f) {
+                envelopes.insert(f.to_string(), env);
+            }
         }
+        Self { envelopes }
+    }
+
+    /// The committed envelope for `fn_name`, if any is loaded.
+    fn envelope_for(&self, fn_name: &str) -> Option<&SpecialFnEnvelope> {
+        self.envelopes.get(fn_name)
+    }
+
+    /// Bound `expr`'s sound interval, resolving any transcendental SUB-term
+    /// through this transform's committed envelopes (so a compound/nested
+    /// argument like `log(s/k)` inside `d1` is boundable). Fail-closed: a
+    /// transcendental with no committed envelope, outside its domain, or outside
+    /// its covered range declines, and so does any unbounded leaf / zero-spanning
+    /// divisor / unsupported op.
+    fn bound_argument(&self, expr: &SmtExpr, pre: &[SmtExpr]) -> Option<(f64, f64)> {
+        interval_range(expr, pre, &|name, lo, hi| {
+            let env = self.envelope_for(name)?;
+            if !env.domain.covers(lo, hi) {
+                return None;
+            }
+            env.sound_range_bound(lo, hi)
+        })
+    }
+
+    /// Test-only constructor that injects synthetic certified-shaped envelopes,
+    /// so the generalized finder + domain guards can be exercised for
+    /// `exp`/`log`/`sqrt` before their real certified data lands. Production only
+    /// ever loads committed data via [`AbstractSubterm::new`].
+    #[cfg(test)]
+    fn with_envelopes(envelopes: HashMap<String, SpecialFnEnvelope>) -> Self {
+        Self { envelopes }
     }
 
     /// Compute a sound bound on `erf(x)` for ALL x in `[arg_lo, arg_hi]`.
     ///
-    /// Evaluates the envelope across every box the range touches, taking the
-    /// hull (min of all point-lo, max of all point-hi) PLUS considering
-    /// monotonicity within each box segment.
-    ///
-    /// Returns `None` if the range extends outside the envelope's domain.
+    /// Retained as the erf-specific entry point (the generic engine is
+    /// [`SpecialFnEnvelope::sound_range_bound`]); returns `None` if erf has no
+    /// loaded envelope or the range is outside its covered domain.
     pub fn sound_erf_range_bound(&self, arg_lo: f64, arg_hi: f64) -> Option<(f64, f64)> {
-        if arg_lo > arg_hi || !arg_lo.is_finite() || !arg_hi.is_finite() {
-            return None;
-        }
-
-        // Find all boxes the range intersects
-        let boxes: Vec<&ErfEnvelopeBox> = self
-            .envelope
-            .boxes
-            .iter()
-            .filter(|b| b.lo <= arg_hi && b.hi >= arg_lo)
-            .collect();
-
-        if boxes.is_empty() {
-            return None; // outside covered domain
-        }
-
-        // Check the range is fully covered by the envelope
-        let covered_lo = boxes.first().unwrap().lo;
-        let covered_hi = boxes.last().unwrap().hi;
-        if arg_lo < covered_lo || arg_hi > covered_hi {
-            return None; // extends outside domain
-        }
-
-        // For each box that the range intersects, compute the sound bound over
-        // the intersection. The sound bound over a box segment [a,b] is:
-        //   [min(approx(x) for x in [a,b]) - eps, max(approx(x) for x in [a,b]) + eps]
-        //
-        // For saturation arms: approx is constant, so trivial.
-        // For the central polynomial: we sample endpoints of each intersection
-        // and take min/max. This is sound for monotonic functions (erf is
-        // monotonically increasing), but for a general polynomial approximation
-        // we must be conservative. We evaluate at the intersection endpoints
-        // plus use the eps as a global error band.
-        //
-        // Since the ENTIRE purpose is to produce a SOUND over-approximation,
-        // we take the HULL of all point evaluations at the intersection
-        // boundaries of each box segment. For the polynomial arm, we evaluate
-        // at both endpoints of the intersection and take the hull.
-
-        let mut overall_lo = f64::INFINITY;
-        let mut overall_hi = f64::NEG_INFINITY;
-
-        for b in &boxes {
-            // The intersection of [arg_lo, arg_hi] with this box [b.lo, b.hi]
-            let seg_lo = arg_lo.max(b.lo);
-            let seg_hi = arg_hi.min(b.hi);
-
-            // Evaluate the approximation at both segment endpoints
-            let approx_at_lo = b.arm.approx(seg_lo);
-            let approx_at_hi = b.arm.approx(seg_hi);
-
-            // The sound bound for each evaluation point is [approx - eps, approx + eps]
-            let point_lo = approx_at_lo.min(approx_at_hi) - b.eps;
-            let point_hi = approx_at_lo.max(approx_at_hi) + b.eps;
-
-            overall_lo = overall_lo.min(point_lo);
-            overall_hi = overall_hi.max(point_hi);
-        }
-
-        // Clamp to [-1, 1] since erf is bounded by definition
-        overall_lo = overall_lo.max(-1.0);
-        overall_hi = overall_hi.min(1.0);
-
-        Some((overall_lo, overall_hi))
+        self.envelope_for("erf")?.sound_range_bound(arg_lo, arg_hi)
     }
 }
 
@@ -131,38 +115,50 @@ impl Transformation for AbstractSubterm {
             return vec![goal.clone()]; // identity for non-SMT goals
         };
 
-        // Find erf applications in the postcondition and collect their arguments
-        let erf_sites = find_erf_applications(&prop.postcondition);
-        if erf_sites.is_empty() {
+        // Find special-function applications in the postcondition.
+        let sites =
+            find_special_fn_applications(&prop.postcondition, SpecialFnRegistry::known_functions());
+        if sites.is_empty() {
             return vec![goal.clone()]; // no transcendentals to abstract
         }
 
-        // For each erf site, determine the argument's static range from preconditions
         let mut new_variables = prop.variables.clone();
         let mut new_preconditions = prop.preconditions.clone();
         let mut postcondition = prop.postcondition.clone();
 
-        for (fresh_counter, site) in erf_sites.iter().enumerate() {
-            // Try to determine the argument's range from the preconditions
-            let arg_range = extract_variable_range(&site.argument, &prop.preconditions);
-            let Some((arg_lo, arg_hi)) = arg_range else {
-                // Can't determine argument range statically → decline
+        for (fresh_counter, site) in sites.iter().enumerate() {
+            // A certified envelope must be committed for this function, else
+            // decline (the honest floor for exp/log/sqrt today).
+            let Some(envelope) = self.envelope_for(&site.fn_name) else {
                 return vec![goal.clone()];
             };
 
-            // Compute sound envelope bound over the argument range
-            let Some((env_lo, env_hi)) = self.sound_erf_range_bound(arg_lo, arg_hi) else {
-                // Range outside envelope domain → decline
+            // Determine the argument's static range from the preconditions, via
+            // sound interval arithmetic that resolves any NESTED transcendental
+            // sub-term through the committed envelopes (chelis#434 milestone 1).
+            let Some((arg_lo, arg_hi)) = self.bound_argument(&site.argument, &prop.preconditions)
+            else {
+                // Can't soundly bound the argument statically → decline.
                 return vec![goal.clone()];
             };
 
-            // Create a fresh variable
-            let fresh_name = format!("__erf_abs_{}", fresh_counter);
+            // Domain guard: the whole argument range must be provably inside the
+            // function's domain (log arg>0, sqrt arg>=0), else decline.
+            if !envelope.domain.covers(arg_lo, arg_hi) {
+                return vec![goal.clone()];
+            }
 
-            // Add variable declaration
+            // Sound envelope bound over the argument range.
+            let Some((env_lo, env_hi)) = envelope.sound_range_bound(arg_lo, arg_hi) else {
+                // Range outside envelope coverage → decline.
+                return vec![goal.clone()];
+            };
+
+            // Fresh variable, named by function: `__<fn>_abs_<n>`.
+            let fresh_name = format!("__{}_abs_{}", site.fn_name, fresh_counter);
             new_variables.push((fresh_name.clone(), SmtSort::Real));
 
-            // Add bounds as preconditions: env_lo <= fresh_var <= env_hi
+            // Bounds as preconditions: env_lo <= fresh_var <= env_hi.
             let fresh_var = SmtExpr::Var(fresh_name.clone());
             new_preconditions.push(SmtExpr::Cmp(
                 CmpOp::Le,
@@ -175,8 +171,8 @@ impl Transformation for AbstractSubterm {
                 Box::new(SmtExpr::RealLit(env_hi)),
             ));
 
-            // Substitute erf(arg) with fresh_var in postcondition
-            postcondition = substitute_erf_call(
+            // Substitute f(arg) with fresh_var in the postcondition.
+            postcondition = substitute_call(
                 &postcondition,
                 &site.original_expr,
                 &SmtExpr::Var(fresh_name),
@@ -194,80 +190,356 @@ impl Transformation for AbstractSubterm {
     }
 }
 
-/// A located erf application in an SmtExpr tree.
-struct ErfSite {
-    /// The argument expression inside erf(...)
+/// A located special-function application in an SmtExpr tree.
+struct SpecialFnSite {
+    /// The function name (`"erf"`, `"exp"`, ...).
+    fn_name: String,
+    /// The argument expression inside `f(...)`.
     argument: SmtExpr,
-    /// The full `Apply("erf", [arg])` expression for substitution matching
+    /// The full `Apply(f, [arg])` expression for substitution matching.
     original_expr: SmtExpr,
 }
 
-/// Find all `Apply("erf", [arg])` nodes in an expression.
-fn find_erf_applications(expr: &SmtExpr) -> Vec<ErfSite> {
+/// Find all `Apply(f, [arg])` nodes whose `f` is a known special function.
+fn find_special_fn_applications(expr: &SmtExpr, known: &[&str]) -> Vec<SpecialFnSite> {
     let mut sites = Vec::new();
-    find_erf_recursive(expr, &mut sites);
+    find_special_fn_recursive(expr, known, &mut sites);
     sites
 }
 
-fn find_erf_recursive(expr: &SmtExpr, sites: &mut Vec<ErfSite>) {
+fn find_special_fn_recursive(expr: &SmtExpr, known: &[&str], sites: &mut Vec<SpecialFnSite>) {
     match expr {
-        SmtExpr::Apply(name, args) if name == "erf" && args.len() == 1 => {
-            sites.push(ErfSite {
+        SmtExpr::Apply(name, args) if args.len() == 1 && known.contains(&name.as_str()) => {
+            sites.push(SpecialFnSite {
+                fn_name: name.clone(),
                 argument: args[0].clone(),
                 original_expr: expr.clone(),
             });
-            // Also recurse into the argument in case of nested erf
-            find_erf_recursive(&args[0], sites);
+            // Also recurse into the argument in case of a nested special fn.
+            find_special_fn_recursive(&args[0], known, sites);
         }
         SmtExpr::Arith(_, l, r) => {
-            find_erf_recursive(l, sites);
-            find_erf_recursive(r, sites);
+            find_special_fn_recursive(l, known, sites);
+            find_special_fn_recursive(r, known, sites);
         }
         SmtExpr::Cmp(_, l, r) => {
-            find_erf_recursive(l, sites);
-            find_erf_recursive(r, sites);
+            find_special_fn_recursive(l, known, sites);
+            find_special_fn_recursive(r, known, sites);
         }
         SmtExpr::Bool(_, children) => {
             for c in children {
-                find_erf_recursive(c, sites);
+                find_special_fn_recursive(c, known, sites);
             }
         }
-        SmtExpr::Not(inner) => find_erf_recursive(inner, sites),
+        SmtExpr::Not(inner) => find_special_fn_recursive(inner, known, sites),
         SmtExpr::Ite(c, t, e) => {
-            find_erf_recursive(c, sites);
-            find_erf_recursive(t, sites);
-            find_erf_recursive(e, sites);
+            find_special_fn_recursive(c, known, sites);
+            find_special_fn_recursive(t, known, sites);
+            find_special_fn_recursive(e, known, sites);
         }
         SmtExpr::Apply(_, args) => {
             for a in args {
-                find_erf_recursive(a, sites);
+                find_special_fn_recursive(a, known, sites);
             }
         }
         SmtExpr::Forall(_, body) | SmtExpr::Exists(_, body) => {
-            find_erf_recursive(body, sites);
+            find_special_fn_recursive(body, known, sites);
         }
         SmtExpr::Var(_) | SmtExpr::RealLit(_) | SmtExpr::IntLit(_) | SmtExpr::BoolLit(_) => {}
     }
 }
 
-/// Extract the static range [lo, hi] of an expression from preconditions.
-///
-/// Looks for patterns like `lo <= expr` and `expr <= hi` in the preconditions.
-/// For a simple `Var(x)`, also looks for `lo <= x` / `x <= hi`.
-/// Returns None if bounds cannot be determined.
-fn extract_variable_range(expr: &SmtExpr, preconditions: &[SmtExpr]) -> Option<(f64, f64)> {
-    let var_name = match expr {
-        SmtExpr::Var(n) => n.as_str(),
-        _ => return None, // only handle simple variable arguments for now
-    };
+/// A canonical affine form `Σ coeff_i · var_i + constant` over SMT variables.
+/// Each variable appears at most once (coefficients are merged), so evaluating
+/// the interval by summing per-variable contributions is EXACT — there is no
+/// interval-arithmetic dependency error from a repeated variable.
+#[derive(Debug, Clone, PartialEq)]
+struct AffineForm {
+    terms: BTreeMap<String, f64>,
+    constant: f64,
+}
 
+impl AffineForm {
+    fn constant(c: f64) -> Self {
+        Self {
+            terms: BTreeMap::new(),
+            constant: c,
+        }
+    }
+
+    fn var(name: &str) -> Self {
+        let mut terms = BTreeMap::new();
+        terms.insert(name.to_string(), 1.0);
+        Self {
+            terms,
+            constant: 0.0,
+        }
+    }
+
+    /// A pure constant (no variables) — the scalar for `Mul`/`Div` scaling.
+    fn as_constant(&self) -> Option<f64> {
+        self.terms.is_empty().then_some(self.constant)
+    }
+
+    /// Multiply the whole form by a scalar. Fails closed (`None`) if any
+    /// resulting coefficient/constant is non-finite (overflow guard).
+    fn scale(mut self, k: f64) -> Option<Self> {
+        if !k.is_finite() {
+            return None;
+        }
+        self.constant *= k;
+        if !self.constant.is_finite() {
+            return None;
+        }
+        for c in self.terms.values_mut() {
+            *c *= k;
+            if !c.is_finite() {
+                return None;
+            }
+        }
+        // A zero coefficient drops the variable (0·x contributes nothing and
+        // must NOT pull that variable's boundedness requirement in).
+        self.terms.retain(|_, c| *c != 0.0);
+        Some(self)
+    }
+
+    /// Add two forms (merge coefficients, add constants). Fails closed on a
+    /// non-finite result.
+    fn add(mut self, other: Self) -> Option<Self> {
+        self.constant += other.constant;
+        if !self.constant.is_finite() {
+            return None;
+        }
+        for (name, c) in other.terms {
+            let e = self.terms.entry(name).or_insert(0.0);
+            *e += c;
+            if !e.is_finite() {
+                return None;
+            }
+        }
+        self.terms.retain(|_, c| *c != 0.0);
+        Some(self)
+    }
+}
+
+/// Parse `expr` as an affine form over SMT variables, or `None` if it is not
+/// affine. FAIL-CLOSED by construction: any nonlinear node (variable×variable,
+/// division by a non-constant or by zero, a transcendental `Apply`, an `Ite`, a
+/// comparison/boolean) returns `None`. Only `+ - unary-neg`, and `× ÷` by a
+/// *nonzero constant*, are affine-preserving.
+fn to_affine(expr: &SmtExpr) -> Option<AffineForm> {
+    match expr {
+        SmtExpr::Var(n) => Some(AffineForm::var(n)),
+        SmtExpr::RealLit(v) => Some(AffineForm::constant(*v)),
+        SmtExpr::IntLit(v) => Some(AffineForm::constant(*v as f64)),
+        // Unary negation is lowered as Arith(Neg, inner, <dummy 0>).
+        SmtExpr::Arith(ArithOp::Neg, inner, _) => to_affine(inner)?.scale(-1.0),
+        SmtExpr::Arith(ArithOp::Add, l, r) => to_affine(l)?.add(to_affine(r)?),
+        SmtExpr::Arith(ArithOp::Sub, l, r) => {
+            let rn = to_affine(r)?.scale(-1.0)?;
+            to_affine(l)?.add(rn)
+        }
+        SmtExpr::Arith(ArithOp::Mul, l, r) => {
+            let (la, ra) = (to_affine(l)?, to_affine(r)?);
+            // Affine only if at least one side is a pure constant.
+            if let Some(k) = ra.as_constant() {
+                la.scale(k)
+            } else if let Some(k) = la.as_constant() {
+                ra.scale(k)
+            } else {
+                None // variable × variable is nonlinear
+            }
+        }
+        SmtExpr::Arith(ArithOp::Div, l, r) => {
+            // Affine only if the denominator is a NONZERO constant. Division by
+            // a variable (which could be zero) or by zero fails closed.
+            let k = to_affine(r)?.as_constant()?;
+            if k == 0.0 || !k.is_finite() {
+                return None;
+            }
+            to_affine(l)?.scale(1.0 / k)
+        }
+        // Everything else is non-affine: transcendental Apply, Ite, Cmp, Bool,
+        // Not, quantifiers, bool literals.
+        _ => None,
+    }
+}
+
+/// A well-formed finite interval `[lo, hi]`, or `None` (fail-closed) if either
+/// endpoint is non-finite or the interval is empty. Every interval op routes its
+/// result through here so a NaN/inf can never escape as a bound.
+fn finite_interval(lo: f64, hi: f64) -> Option<(f64, f64)> {
+    (lo.is_finite() && hi.is_finite() && lo <= hi).then_some((lo, hi))
+}
+
+/// Sound product of two intervals: the hull of the four corner products. Handles
+/// every sign case (incl. `x·x`: `[-1,1]·[-1,1] = [-1,1]`, sound over the true
+/// `[0,1]`).
+fn imul(a: (f64, f64), b: (f64, f64)) -> Option<(f64, f64)> {
+    let ps = [a.0 * b.0, a.0 * b.1, a.1 * b.0, a.1 * b.1];
+    let lo = ps.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = ps.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    finite_interval(lo, hi)
+}
+
+/// Sound quotient `a / b`. DOMAIN GUARD: if the divisor interval contains 0
+/// (`blo <= 0 <= bhi`) the quotient is unbounded, so DECLINE (fail-closed). Else
+/// the reciprocal `1/b` stays on one side of 0 and is `[1/bhi, 1/blo]`.
+fn idiv(a: (f64, f64), b: (f64, f64)) -> Option<(f64, f64)> {
+    if b.0 <= 0.0 && b.1 >= 0.0 {
+        return None; // divisor spans (or touches) 0
+    }
+    let (r0, r1) = (1.0 / b.1, 1.0 / b.0);
+    imul(a, (r0.min(r1), r0.max(r1)))
+}
+
+/// Sound `|·|` of an interval.
+fn iabs(lo: f64, hi: f64) -> Option<(f64, f64)> {
+    if lo >= 0.0 {
+        finite_interval(lo, hi)
+    } else if hi <= 0.0 {
+        finite_interval(-hi, -lo)
+    } else {
+        finite_interval(0.0, (-lo).max(hi))
+    }
+}
+
+/// Resolver for a transcendental sub-term: given its name and its argument's
+/// sound sub-interval `[arg_lo, arg_hi]`, return its envelope hull, or `None` to
+/// decline (no committed envelope / out of domain / outside coverage).
+type TranscendentalResolver<'a> = dyn Fn(&str, f64, f64) -> Option<(f64, f64)> + 'a;
+
+/// The sound static interval `[lo, hi]` of `expr` over the precondition leaf
+/// ranges, by interval arithmetic. The AFFINE fast-path (coefficient-merged) is
+/// tried first so affine subexpressions are EXACT (`x - x = [0,0]`, no dependency
+/// error); genuinely nonlinear nodes use sound interval arithmetic (looser but
+/// sound). `resolve` bounds a supported transcendental over its argument
+/// sub-interval via its envelope hull (`None` => decline).
+///
+/// FAIL-CLOSED: an unbounded leaf, a divisor interval spanning 0, an unsupported
+/// op, or a transcendental `resolve` declines all return `None`.
+fn interval_range(
+    expr: &SmtExpr,
+    pre: &[SmtExpr],
+    resolve: &TranscendentalResolver,
+) -> Option<(f64, f64)> {
+    // Affine fast-path (exact for the affine fragment; kills the dependency
+    // error that plain interval arithmetic would introduce for x - x etc.).
+    if let Some(form) = to_affine(expr)
+        && let Some(r) = affine_range(&form, pre)
+    {
+        return Some(r);
+    }
+    match expr {
+        SmtExpr::RealLit(v) => finite_interval(*v, *v),
+        SmtExpr::IntLit(v) => finite_interval(*v as f64, *v as f64),
+        SmtExpr::Var(n) => bare_var_range(n, pre),
+        SmtExpr::Arith(ArithOp::Neg, a, _) => {
+            let (lo, hi) = interval_range(a, pre, resolve)?;
+            finite_interval(-hi, -lo)
+        }
+        SmtExpr::Arith(ArithOp::Add, l, r) => {
+            let a = interval_range(l, pre, resolve)?;
+            let b = interval_range(r, pre, resolve)?;
+            finite_interval(a.0 + b.0, a.1 + b.1)
+        }
+        SmtExpr::Arith(ArithOp::Sub, l, r) => {
+            let a = interval_range(l, pre, resolve)?;
+            let b = interval_range(r, pre, resolve)?;
+            finite_interval(a.0 - b.1, a.1 - b.0)
+        }
+        SmtExpr::Arith(ArithOp::Mul, l, r) => {
+            let a = interval_range(l, pre, resolve)?;
+            let b = interval_range(r, pre, resolve)?;
+            imul(a, b)
+        }
+        SmtExpr::Arith(ArithOp::Div, l, r) => {
+            let a = interval_range(l, pre, resolve)?;
+            let b = interval_range(r, pre, resolve)?;
+            idiv(a, b)
+        }
+        SmtExpr::Apply(name, args) if name == "abs" && args.len() == 1 => {
+            let (lo, hi) = interval_range(&args[0], pre, resolve)?;
+            iabs(lo, hi)
+        }
+        SmtExpr::Apply(name, args) if (name == "min" || name == "max") && args.len() == 2 => {
+            let a = interval_range(&args[0], pre, resolve)?;
+            let b = interval_range(&args[1], pre, resolve)?;
+            if name == "min" {
+                finite_interval(a.0.min(b.0), a.1.min(b.1))
+            } else {
+                finite_interval(a.0.max(b.0), a.1.max(b.1))
+            }
+        }
+        // A supported transcendental: bound the argument, then the envelope hull.
+        SmtExpr::Apply(name, args) if args.len() == 1 => {
+            let (alo, ahi) = interval_range(&args[0], pre, resolve)?;
+            resolve(name, alo, ahi)
+        }
+        // The value is one of the two branches, both bounded: their sound hull
+        // (the condition is irrelevant to a sound bound).
+        SmtExpr::Ite(_cond, t, e) => {
+            let a = interval_range(t, pre, resolve)?;
+            let b = interval_range(e, pre, resolve)?;
+            finite_interval(a.0.min(b.0), a.1.max(b.1))
+        }
+        // Cmp / Bool / Not / quantifiers / bool-lit / multi-arg Apply: not a
+        // real-valued arithmetic term we can bound. Fail closed.
+        _ => None,
+    }
+}
+
+/// Extract the static range `[lo, hi]` of an argument expression from the
+/// preconditions, by sound interval arithmetic (affine fast-path for the affine
+/// fragment) with NO transcendental resolver (all transcendental `Apply`s
+/// decline). The production transform uses [`AbstractSubterm::bound_argument`]
+/// (envelope-aware) so a NESTED transcendental in an argument (e.g. `log(s/k)`
+/// inside `d1`) is boundable; this envelope-free form is the unit-test entry
+/// point for the interval-arithmetic core. Fail-closed everywhere.
+#[cfg(test)]
+fn extract_variable_range(expr: &SmtExpr, preconditions: &[SmtExpr]) -> Option<(f64, f64)> {
+    interval_range(expr, preconditions, &|_, _, _| None)
+}
+
+/// Evaluate the sound interval of an affine form over the variable ranges pinned
+/// by the preconditions. Each variable appears once (merged coefficient), so the
+/// per-variable interval sum is exact. Fails closed if any variable is unbounded
+/// or the result is non-finite / empty.
+fn affine_range(form: &AffineForm, preconditions: &[SmtExpr]) -> Option<(f64, f64)> {
+    let mut lo = form.constant;
+    let mut hi = form.constant;
+    for (var, &coeff) in &form.terms {
+        let (vlo, vhi) = bare_var_range(var, preconditions)?; // unbounded → fail closed
+        // coeff·[vlo,vhi]: flip endpoints for a negative coefficient.
+        let (tlo, thi) = if coeff >= 0.0 {
+            (coeff * vlo, coeff * vhi)
+        } else {
+            (coeff * vhi, coeff * vlo)
+        };
+        lo += tlo;
+        hi += thi;
+    }
+    if lo.is_finite() && hi.is_finite() && lo <= hi {
+        Some((lo, hi))
+    } else {
+        None
+    }
+}
+
+/// The static range `[lo, hi]` of a single bare variable from the preconditions:
+/// the tightest `lo <= x` / `x <= hi` (also under `And` conjunctions). `None` if
+/// either side is missing (the variable is unbounded). This is the pre-affine
+/// bare-`Var` extractor, unchanged in behavior.
+fn bare_var_range(var_name: &str, preconditions: &[SmtExpr]) -> Option<(f64, f64)> {
     let mut lo: Option<f64> = None;
     let mut hi: Option<f64> = None;
 
     for pre in preconditions {
         match pre {
-            // lo <= var
-            SmtExpr::Cmp(CmpOp::Le, left, right) | SmtExpr::Cmp(CmpOp::Ge, right, left) => {
+            SmtExpr::Cmp(CmpOp::Le, left, right)
+            | SmtExpr::Cmp(CmpOp::Ge, right, left)
+            | SmtExpr::Cmp(CmpOp::Lt, left, right)
+            | SmtExpr::Cmp(CmpOp::Gt, right, left) => {
                 if matches!(right.as_ref(), SmtExpr::Var(n) if n == var_name)
                     && let SmtExpr::RealLit(v) = left.as_ref()
                 {
@@ -279,21 +551,8 @@ fn extract_variable_range(expr: &SmtExpr, preconditions: &[SmtExpr]) -> Option<(
                     hi = Some(hi.map_or(*v, |cur: f64| cur.min(*v)));
                 }
             }
-            SmtExpr::Cmp(CmpOp::Lt, left, right) | SmtExpr::Cmp(CmpOp::Gt, right, left) => {
-                if matches!(right.as_ref(), SmtExpr::Var(n) if n == var_name)
-                    && let SmtExpr::RealLit(v) = left.as_ref()
-                {
-                    lo = Some(lo.map_or(*v, |cur: f64| cur.max(*v)));
-                }
-                if matches!(left.as_ref(), SmtExpr::Var(n) if n == var_name)
-                    && let SmtExpr::RealLit(v) = right.as_ref()
-                {
-                    hi = Some(hi.map_or(*v, |cur: f64| cur.min(*v)));
-                }
-            }
-            // And([...]) — recurse into conjunctions
             SmtExpr::Bool(BoolOp::And, children) => {
-                if let Some((clo, chi)) = extract_variable_range(expr, children) {
+                if let Some((clo, chi)) = bare_var_range(var_name, children) {
                     lo = Some(lo.map_or(clo, |cur: f64| cur.max(clo)));
                     hi = Some(hi.map_or(chi, |cur: f64| cur.min(chi)));
                 }
@@ -309,49 +568,47 @@ fn extract_variable_range(expr: &SmtExpr, preconditions: &[SmtExpr]) -> Option<(
 }
 
 /// Substitute all occurrences of `target` with `replacement` in `expr`.
-fn substitute_erf_call(expr: &SmtExpr, target: &SmtExpr, replacement: &SmtExpr) -> SmtExpr {
+fn substitute_call(expr: &SmtExpr, target: &SmtExpr, replacement: &SmtExpr) -> SmtExpr {
     if expr == target {
         return replacement.clone();
     }
     match expr {
         SmtExpr::Arith(op, l, r) => SmtExpr::Arith(
             *op,
-            Box::new(substitute_erf_call(l, target, replacement)),
-            Box::new(substitute_erf_call(r, target, replacement)),
+            Box::new(substitute_call(l, target, replacement)),
+            Box::new(substitute_call(r, target, replacement)),
         ),
         SmtExpr::Cmp(op, l, r) => SmtExpr::Cmp(
             *op,
-            Box::new(substitute_erf_call(l, target, replacement)),
-            Box::new(substitute_erf_call(r, target, replacement)),
+            Box::new(substitute_call(l, target, replacement)),
+            Box::new(substitute_call(r, target, replacement)),
         ),
         SmtExpr::Bool(op, children) => SmtExpr::Bool(
             *op,
             children
                 .iter()
-                .map(|c| substitute_erf_call(c, target, replacement))
+                .map(|c| substitute_call(c, target, replacement))
                 .collect(),
         ),
-        SmtExpr::Not(inner) => {
-            SmtExpr::Not(Box::new(substitute_erf_call(inner, target, replacement)))
-        }
+        SmtExpr::Not(inner) => SmtExpr::Not(Box::new(substitute_call(inner, target, replacement))),
         SmtExpr::Ite(c, t, e) => SmtExpr::Ite(
-            Box::new(substitute_erf_call(c, target, replacement)),
-            Box::new(substitute_erf_call(t, target, replacement)),
-            Box::new(substitute_erf_call(e, target, replacement)),
+            Box::new(substitute_call(c, target, replacement)),
+            Box::new(substitute_call(t, target, replacement)),
+            Box::new(substitute_call(e, target, replacement)),
         ),
         SmtExpr::Apply(name, args) => SmtExpr::Apply(
             name.clone(),
             args.iter()
-                .map(|a| substitute_erf_call(a, target, replacement))
+                .map(|a| substitute_call(a, target, replacement))
                 .collect(),
         ),
         SmtExpr::Forall(vars, body) => SmtExpr::Forall(
             vars.clone(),
-            Box::new(substitute_erf_call(body, target, replacement)),
+            Box::new(substitute_call(body, target, replacement)),
         ),
         SmtExpr::Exists(vars, body) => SmtExpr::Exists(
             vars.clone(),
-            Box::new(substitute_erf_call(body, target, replacement)),
+            Box::new(substitute_call(body, target, replacement)),
         ),
         _ => expr.clone(),
     }
@@ -602,5 +859,571 @@ mod tests {
             SmtExpr::Forall(_, body) | SmtExpr::Exists(_, body) => contains_erf(body),
             _ => false,
         }
+    }
+
+    // ─── chelis#434: generalized-finder tests (exp/log/sqrt + domain guards) ──
+
+    use crate::erf_envelope::ProofKind;
+    use crate::special_fn_envelope::{
+        Domain, EnvelopeArm, Monotonicity, SpecialFnEnvelope, SpecialFnEnvelopeBox,
+        SpecialFnProvenance,
+    };
+    use std::collections::HashMap;
+
+    /// A structurally-valid single-box synthetic envelope (a constant Saturation
+    /// arm) for exercising the finder's mechanics without certified data.
+    fn synthetic_env(
+        fn_name: &str,
+        domain: Domain,
+        lo: f64,
+        hi: f64,
+        value: f64,
+        eps: f64,
+    ) -> SpecialFnEnvelope {
+        SpecialFnEnvelope {
+            fn_name: fn_name.to_string(),
+            domain,
+            output_clamp: None,
+            boxes: vec![SpecialFnEnvelopeBox {
+                lo,
+                hi,
+                arm: EnvelopeArm::Saturation { value },
+                eps,
+                proof_kind: ProofKind::Gappa,
+            }],
+            monotonicity: Monotonicity::Increasing,
+            provenance: SpecialFnProvenance::default(),
+        }
+    }
+
+    /// `f(x)` postcondition `Apply(f, [x])` compared `< bound`, with `lo <= x <= hi`.
+    fn fn_of_bare_var_goal(f: &str, lo: f64, hi: f64, bound: f64) -> Goal {
+        let prop = SmtProperty {
+            variables: vec![("x".into(), SmtSort::Real)],
+            preconditions: vec![
+                SmtExpr::Cmp(
+                    CmpOp::Le,
+                    Box::new(SmtExpr::RealLit(lo)),
+                    Box::new(SmtExpr::Var("x".into())),
+                ),
+                SmtExpr::Cmp(
+                    CmpOp::Le,
+                    Box::new(SmtExpr::Var("x".into())),
+                    Box::new(SmtExpr::RealLit(hi)),
+                ),
+            ],
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Lt,
+                Box::new(SmtExpr::Apply(f.into(), vec![SmtExpr::Var("x".into())])),
+                Box::new(SmtExpr::RealLit(bound)),
+            ),
+        };
+        Goal::smt(prop)
+    }
+
+    fn contains_fn(expr: &SmtExpr, name: &str) -> bool {
+        match expr {
+            SmtExpr::Apply(n, args) => n == name || args.iter().any(|a| contains_fn(a, name)),
+            SmtExpr::Arith(_, l, r) | SmtExpr::Cmp(_, l, r) => {
+                contains_fn(l, name) || contains_fn(r, name)
+            }
+            SmtExpr::Bool(_, children) => children.iter().any(|c| contains_fn(c, name)),
+            SmtExpr::Not(inner) => contains_fn(inner, name),
+            SmtExpr::Ite(c, t, e) => {
+                contains_fn(c, name) || contains_fn(t, name) || contains_fn(e, name)
+            }
+            SmtExpr::Forall(_, body) | SmtExpr::Exists(_, body) => contains_fn(body, name),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn exp_abstracts_in_production_via_committed_envelope() {
+        // exp now has committed Arb-certified data over [-2,2], so a bounded exp
+        // site abstracts in PRODUCTION (AbstractSubterm::new(), no injection).
+        // The emitted band is sound: exp([0,1]) = [1, e] ⊆ the __exp_abs_0 bounds.
+        let t = AbstractSubterm::new();
+        let goal = fn_of_bare_var_goal("exp", 0.0, 1.0, 3.0);
+        let out = t.apply(&goal);
+        let GoalShape::Smt(ref rp) = out[0].shape else {
+            panic!("expected Smt goal");
+        };
+        assert!(
+            rp.variables.iter().any(|(n, _)| n == "__exp_abs_0"),
+            "exp must abstract"
+        );
+        assert!(!contains_fn(&rp.postcondition, "exp"));
+    }
+
+    #[test]
+    fn log_and_sqrt_abstract_in_production_via_committed_envelopes() {
+        // milestone 2: log/sqrt now have committed Arb mean-value data, so a
+        // bounded log/sqrt site abstracts in PRODUCTION (no injection).
+        let t = AbstractSubterm::new();
+        // log over [0.5,2] ⊆ committed [0.3,3.5] (positive) → abstracts.
+        let out = t.apply(&fn_of_bare_var_goal("log", 0.5, 2.0, 3.0));
+        let GoalShape::Smt(ref rp) = out[0].shape else {
+            panic!("expected Smt goal");
+        };
+        assert!(
+            rp.variables.iter().any(|(n, _)| n == "__log_abs_0"),
+            "log must abstract"
+        );
+        assert!(!contains_fn(&rp.postcondition, "log"));
+        // sqrt over [0.1,4] ⊆ committed [0.04,4] (non-negative) → abstracts.
+        let out2 = t.apply(&fn_of_bare_var_goal("sqrt", 0.1, 4.0, 3.0));
+        let GoalShape::Smt(ref rp2) = out2[0].shape else {
+            panic!("expected Smt goal");
+        };
+        assert!(
+            rp2.variables.iter().any(|(n, _)| n == "__sqrt_abs_0"),
+            "sqrt must abstract"
+        );
+        // A log arg reaching below the committed coverage (0.3) declines.
+        assert_eq!(
+            t.apply(&fn_of_bare_var_goal("log", 0.1, 2.0, 3.0))[0].shape,
+            fn_of_bare_var_goal("log", 0.1, 2.0, 3.0).shape,
+            "log below committed coverage declines"
+        );
+    }
+
+    #[test]
+    fn bs_d1_shape_bounds_with_real_certified_envelopes() {
+        // milestone 1+2 acceptance: the REAL BS d1 argument, bounded via
+        // production interval propagation over the committed log/sqrt envelopes,
+        // matches an INDEPENDENTLY computed interval. d1 = (log(s/k) + (r + σ²/2)t)
+        // / (σ·sqrt(t)) at canon-like guards s,k∈[0.9,1.1], r∈[0,0.1],
+        // σ∈[0.1,0.5], t∈[0.5,2] (all inside the committed log/sqrt coverage).
+        let t = AbstractSubterm::new();
+        let pre = box_pre(&[
+            ("s", 0.9, 1.1),
+            ("k", 0.9, 1.1),
+            ("r", 0.0, 0.1),
+            ("sigma", 0.1, 0.5),
+            ("t", 0.5, 2.0),
+        ]);
+        // num = log(s/k) + (r + 0.5*sigma*sigma)*t ; den = sigma * sqrt(t)
+        let log_sk = SmtExpr::Apply("log".into(), vec![div(v("s"), v("k"))]);
+        let half_sig2 = mul(r(0.5), mul(v("sigma"), v("sigma")));
+        let drift = mul(add(v("r"), half_sig2), v("t"));
+        let num = add(log_sk, drift);
+        let den = mul(v("sigma"), SmtExpr::Apply("sqrt".into(), vec![v("t")]));
+        let d1 = div(num, den);
+
+        let (lo, hi) = t
+            .bound_argument(&d1, &pre)
+            .expect("d1 bounds via real envelopes");
+
+        // Independent interval: log(s/k) over s/k∈[0.9/1.1, 1.1/0.9] via the
+        // committed log hull; drift via interval arithmetic; den = sigma*sqrt(t)>0.
+        let log_env = SpecialFnEnvelope::committed("log").unwrap();
+        let sqrt_env = SpecialFnEnvelope::committed("sqrt").unwrap();
+        let (sk_lo, sk_hi) = (0.9 / 1.1, 1.1 / 0.9);
+        let (nlo, nhi) = log_env.sound_range_bound(sk_lo, sk_hi).unwrap();
+        // drift = (r + 0.5·σ²)·t by the SAME interval arithmetic the finder uses:
+        //   σ² = [0.1,0.5]² = [0.01,0.25]; 0.5·σ² = [0.005,0.125];
+        //   r + that = [0.005, 0.225]; ·t[0.5,2] = [0.0025, 0.45].
+        let sig2 = (0.1 * 0.1, 0.5 * 0.5);
+        let half_sig2 = (0.5 * sig2.0, 0.5 * sig2.1);
+        let r_plus = (0.0 + half_sig2.0, 0.1 + half_sig2.1);
+        let (dlo, dhi) = (r_plus.0 * 0.5, r_plus.1 * 2.0); // positive·positive
+        let (num_lo, num_hi) = (nlo + dlo, nhi + dhi);
+        let (slo, shi) = sqrt_env.sound_range_bound(0.5, 2.0).unwrap();
+        let (den_lo, den_hi) = (0.1 * slo, 0.5 * shi); // sigma*sqrt(t), all >0
+        // d1 = num / den, den>0: [min, max] of corner quotients.
+        let corners = [
+            num_lo / den_lo,
+            num_lo / den_hi,
+            num_hi / den_lo,
+            num_hi / den_hi,
+        ];
+        let exp_lo = corners.iter().copied().fold(f64::INFINITY, f64::min);
+        let exp_hi = corners.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            (lo - exp_lo).abs() < 1e-9 && (hi - exp_hi).abs() < 1e-9,
+            "d1 range [{lo},{hi}] must match independent [{exp_lo},{exp_hi}]"
+        );
+    }
+
+    #[test]
+    fn abstracts_exp_with_injected_envelope() {
+        // With a synthetic exp envelope over [0,1], the finder abstracts exp(x)
+        // into a fresh `__exp_abs_0` var and removes exp from the postcondition.
+        let mut envs = HashMap::new();
+        envs.insert(
+            "exp".to_string(),
+            synthetic_env("exp", Domain::AllReals, 0.0, 1.0, 2.0, 0.9),
+        );
+        let t = AbstractSubterm::with_envelopes(envs);
+        let goal = fn_of_bare_var_goal("exp", 0.0, 1.0, 3.0);
+        let result = t.apply(&goal);
+        assert_eq!(result.len(), 1);
+        let GoalShape::Smt(ref rp) = result[0].shape else {
+            panic!("expected Smt goal");
+        };
+        assert!(
+            rp.variables.iter().any(|(n, _)| n == "__exp_abs_0"),
+            "fresh var must be named by function: {:?}",
+            rp.variables
+        );
+        assert!(
+            !contains_fn(&rp.postcondition, "exp"),
+            "exp must be abstracted out"
+        );
+        assert!(rp.preconditions.len() > 2, "envelope bounds added");
+    }
+
+    #[test]
+    fn log_domain_guard_declines_nonpositive_range() {
+        // log needs arg > 0. A range that dips to/below 0 must DECLINE even with
+        // an envelope present; a strictly-positive range transforms.
+        let mut envs = HashMap::new();
+        envs.insert(
+            "log".to_string(),
+            synthetic_env("log", Domain::Positive, 0.25, 4.0, 0.0, 1.5),
+        );
+        let t = AbstractSubterm::with_envelopes(envs);
+
+        // range [-1, 2] includes non-positive x → decline
+        let bad = fn_of_bare_var_goal("log", -1.0, 2.0, 10.0);
+        assert_eq!(
+            t.apply(&bad)[0].shape,
+            bad.shape,
+            "log over [-1,2] must decline"
+        );
+
+        // range [0.5, 2] strictly positive → transform
+        let good = fn_of_bare_var_goal("log", 0.5, 2.0, 10.0);
+        let out = t.apply(&good);
+        let GoalShape::Smt(ref rp) = out[0].shape else {
+            panic!("expected Smt goal");
+        };
+        assert!(rp.variables.iter().any(|(n, _)| n == "__log_abs_0"));
+        assert!(!contains_fn(&rp.postcondition, "log"));
+    }
+
+    #[test]
+    fn sqrt_domain_guard_allows_zero_declines_negative() {
+        // sqrt needs arg >= 0: 0 is allowed, a negative lower edge declines.
+        let mut envs = HashMap::new();
+        envs.insert(
+            "sqrt".to_string(),
+            synthetic_env("sqrt", Domain::NonNegative, 0.0, 9.0, 0.0, 3.0),
+        );
+        let t = AbstractSubterm::with_envelopes(envs);
+
+        let neg = fn_of_bare_var_goal("sqrt", -0.1, 4.0, 10.0);
+        assert_eq!(
+            t.apply(&neg)[0].shape,
+            neg.shape,
+            "sqrt over [-0.1,4] must decline"
+        );
+
+        let ok = fn_of_bare_var_goal("sqrt", 0.0, 4.0, 10.0);
+        let out = t.apply(&ok);
+        let GoalShape::Smt(ref rp) = out[0].shape else {
+            panic!("expected Smt goal");
+        };
+        assert!(rp.variables.iter().any(|(n, _)| n == "__sqrt_abs_0"));
+    }
+
+    #[test]
+    fn declines_when_range_outside_envelope_coverage() {
+        // The envelope covers only [0,1]; a bounded arg range outside it declines
+        // (the sound_range_bound coverage check), even though the domain admits it.
+        let mut envs = HashMap::new();
+        envs.insert(
+            "exp".to_string(),
+            synthetic_env("exp", Domain::AllReals, 0.0, 1.0, 2.0, 0.9),
+        );
+        let t = AbstractSubterm::with_envelopes(envs);
+        let goal = fn_of_bare_var_goal("exp", 2.0, 3.0, 100.0); // outside [0,1]
+        assert_eq!(
+            t.apply(&goal)[0].shape,
+            goal.shape,
+            "outside coverage must decline"
+        );
+    }
+
+    // ─── chelis#434: affine-argument propagation (a·x + b) + adversarial ──────
+
+    fn v(n: &str) -> SmtExpr {
+        SmtExpr::Var(n.into())
+    }
+    fn r(x: f64) -> SmtExpr {
+        SmtExpr::RealLit(x)
+    }
+    fn mul(a: SmtExpr, b: SmtExpr) -> SmtExpr {
+        SmtExpr::Arith(ArithOp::Mul, Box::new(a), Box::new(b))
+    }
+    fn add(a: SmtExpr, b: SmtExpr) -> SmtExpr {
+        SmtExpr::Arith(ArithOp::Add, Box::new(a), Box::new(b))
+    }
+    fn sub(a: SmtExpr, b: SmtExpr) -> SmtExpr {
+        SmtExpr::Arith(ArithOp::Sub, Box::new(a), Box::new(b))
+    }
+    fn div(a: SmtExpr, b: SmtExpr) -> SmtExpr {
+        SmtExpr::Arith(ArithOp::Div, Box::new(a), Box::new(b))
+    }
+    fn neg(a: SmtExpr) -> SmtExpr {
+        SmtExpr::Arith(ArithOp::Neg, Box::new(a), Box::new(SmtExpr::IntLit(0)))
+    }
+    /// preconditions `lo <= x <= hi` for each (name, lo, hi).
+    fn box_pre(bounds: &[(&str, f64, f64)]) -> Vec<SmtExpr> {
+        let mut out = Vec::new();
+        for (n, lo, hi) in bounds {
+            out.push(SmtExpr::Cmp(CmpOp::Le, Box::new(r(*lo)), Box::new(v(n))));
+            out.push(SmtExpr::Cmp(CmpOp::Le, Box::new(v(n)), Box::new(r(*hi))));
+        }
+        out
+    }
+
+    #[test]
+    fn affine_scale_and_shift_range() {
+        // 2·x + 1 over x∈[0,1] → [1, 3].
+        let pre = box_pre(&[("x", 0.0, 1.0)]);
+        let arg = add(mul(r(2.0), v("x")), r(1.0));
+        assert_eq!(extract_variable_range(&arg, &pre), Some((1.0, 3.0)));
+    }
+
+    #[test]
+    fn affine_negative_coeff_flips_endpoints() {
+        let pre = box_pre(&[("x", 0.0, 1.0)]);
+        assert_eq!(
+            extract_variable_range(&neg(v("x")), &pre),
+            Some((-1.0, 0.0))
+        );
+        // 1 - 2x over [0,1] → [1-2, 1-0] = [-1, 1].
+        let arg = sub(r(1.0), mul(r(2.0), v("x")));
+        assert_eq!(extract_variable_range(&arg, &pre), Some((-1.0, 1.0)));
+    }
+
+    #[test]
+    fn affine_div_by_constant() {
+        let pre = box_pre(&[("x", 0.0, 4.0)]);
+        assert_eq!(
+            extract_variable_range(&div(v("x"), r(2.0)), &pre),
+            Some((0.0, 2.0))
+        );
+        // x / √2 (the normal_cdf scale) over [0, √2] → [0, 1].
+        let inv = crate::transformations::normal_cdf_erf::INV_SQRT2;
+        let pre2 = box_pre(&[("x", 0.0, std::f64::consts::SQRT_2)]);
+        let (lo, hi) = extract_variable_range(&mul(v("x"), r(inv)), &pre2).unwrap();
+        assert!(
+            (lo - 0.0).abs() < 1e-12 && (hi - 1.0).abs() < 1e-12,
+            "[{lo},{hi}]"
+        );
+    }
+
+    #[test]
+    fn affine_multi_var_sums_intervals() {
+        let pre = box_pre(&[("x", 0.0, 1.0), ("y", 2.0, 3.0)]);
+        assert_eq!(
+            extract_variable_range(&add(v("x"), v("y")), &pre),
+            Some((2.0, 4.0))
+        );
+    }
+
+    #[test]
+    fn affine_repeated_var_merges_no_dependency_error() {
+        // The dependency-error guard: x - x must be EXACTLY [0,0] (merged to 0),
+        // not the naive interval [0-1, 1-0] = [-1, 1]; x + x must be 2·[0,1]=[0,2].
+        let pre = box_pre(&[("x", 0.0, 1.0)]);
+        assert_eq!(
+            extract_variable_range(&sub(v("x"), v("x")), &pre),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(
+            extract_variable_range(&add(v("x"), v("x")), &pre),
+            Some((0.0, 2.0))
+        );
+    }
+
+    #[test]
+    fn nonlinear_interval_arithmetic_bounds_soundly() {
+        // chelis#434 milestone 1: nonlinear ops now bound by sound interval
+        // arithmetic (they DECLINED under the affine-only extractor).
+        let pre = box_pre(&[("x", 1.0, 2.0), ("y", 3.0, 4.0)]);
+        // x·y over [1,2]×[3,4] = [3, 8].
+        assert_eq!(
+            extract_variable_range(&mul(v("x"), v("y")), &pre),
+            Some((3.0, 8.0))
+        );
+        // x/y over [1,2]/[3,4] (y excludes 0) = [1/4, 2/3].
+        let (lo, hi) = extract_variable_range(&div(v("x"), v("y")), &pre).unwrap();
+        assert!(
+            (lo - 0.25).abs() < 1e-12 && (hi - 2.0 / 3.0).abs() < 1e-12,
+            "[{lo},{hi}]"
+        );
+        // abs over a sign-crossing range: |[-2,3]| = [0,3].
+        let p2 = box_pre(&[("z", -2.0, 3.0)]);
+        assert_eq!(
+            extract_variable_range(&SmtExpr::Apply("abs".into(), vec![v("z")]), &p2),
+            Some((0.0, 3.0))
+        );
+        // ITE hull: ite(c, x, y) over x∈[1,2], y∈[3,4] = [1,4].
+        let ite = SmtExpr::Ite(
+            Box::new(SmtExpr::BoolLit(true)),
+            Box::new(v("x")),
+            Box::new(v("y")),
+        );
+        assert_eq!(extract_variable_range(&ite, &pre), Some((1.0, 4.0)));
+    }
+
+    #[test]
+    fn interval_division_sign_cases() {
+        // Divisor strictly negative: x/y over [1,2]/[-4,-2] = [2/-2, 1/-4]=[-1,-0.25].
+        let pre = box_pre(&[("x", 1.0, 2.0), ("y", -4.0, -2.0)]);
+        let (lo, hi) = extract_variable_range(&div(v("x"), v("y")), &pre).unwrap();
+        assert!(
+            (lo - -1.0).abs() < 1e-12 && (hi - -0.25).abs() < 1e-12,
+            "[{lo},{hi}]"
+        );
+        // Sign-crossing numerator over a positive divisor: [-1,1]/[2,4].
+        let p2 = box_pre(&[("x", -1.0, 1.0), ("y", 2.0, 4.0)]);
+        let (lo, hi) = extract_variable_range(&div(v("x"), v("y")), &p2).unwrap();
+        assert!(
+            (lo - -0.5).abs() < 1e-12 && (hi - 0.5).abs() < 1e-12,
+            "[{lo},{hi}]"
+        );
+    }
+
+    #[test]
+    fn dependency_error_traps_stay_sound() {
+        // x·x over [-1,1]: sound interval mul gives [-1,1] (⊇ true [0,1]) — sound,
+        // just loose. It must NOT claim a tighter-than-sound bound.
+        let pre = box_pre(&[("x", -1.0, 1.0)]);
+        let (lo, hi) = extract_variable_range(&mul(v("x"), v("x")), &pre).unwrap();
+        assert!(
+            lo <= 0.0 && hi >= 1.0,
+            "x*x must be sound (⊇[0,1]), got [{lo},{hi}]"
+        );
+        // x − x: the affine fast-path makes it EXACTLY [0,0] (coefficient merge),
+        // not the naive interval [-2,2]. (Both sound; affine is exact.)
+        assert_eq!(
+            extract_variable_range(&sub(v("x"), v("x")), &pre),
+            Some((0.0, 0.0))
+        );
+    }
+
+    #[test]
+    fn interval_arithmetic_fails_closed() {
+        let pre = box_pre(&[("x", 1.0, 2.0), ("y", -1.0, 3.0)]);
+        // Divisor interval SPANS 0 → decline (quotient unbounded).
+        assert_eq!(extract_variable_range(&div(v("x"), v("y")), &pre), None);
+        // Division by the zero constant → decline.
+        assert_eq!(extract_variable_range(&div(v("x"), r(0.0)), &pre), None);
+        // Unbounded leaf inside a nonlinear op → decline.
+        let p2 = box_pre(&[("x", 1.0, 2.0)]);
+        assert_eq!(extract_variable_range(&mul(v("x"), v("w")), &p2), None);
+        // Transcendental in the free-fn extractor (no envelope resolver) → decline.
+        let inner = SmtExpr::Apply("erf".into(), vec![v("x")]);
+        assert_eq!(extract_variable_range(&add(inner, r(1.0)), &pre), None);
+    }
+
+    #[test]
+    fn bound_argument_resolves_nested_transcendental() {
+        // milestone 1: a compound argument containing a NESTED transcendental —
+        // log(s/k) — is bounded by resolving log through its (injected) envelope
+        // over the interval-arithmetic bound of s/k.
+        let mut envs = HashMap::new();
+        // log envelope over [0.25, 4], constant hull [-1.5, 1.5] (Saturation eps).
+        envs.insert(
+            "log".to_string(),
+            synthetic_env("log", Domain::Positive, 0.25, 4.0, 0.0, 1.5),
+        );
+        let t = AbstractSubterm::with_envelopes(envs);
+        // s/k over [1,2]/[1,2] = [0.5, 2] ⊆ [0.25,4] (positive) → log hull [-1.5,1.5].
+        let pre = box_pre(&[("s", 1.0, 2.0), ("k", 1.0, 2.0)]);
+        let arg = SmtExpr::Apply("log".into(), vec![div(v("s"), v("k"))]);
+        assert_eq!(t.bound_argument(&arg, &pre), Some((-1.5, 1.5)));
+
+        // s/k that can reach 0 (s∈[0,2]) → arg range includes 0 → log domain
+        // guard (Positive) declines the NESTED transcendental → whole bound None.
+        let pre_bad = box_pre(&[("s", 0.0, 2.0), ("k", 1.0, 2.0)]);
+        assert_eq!(t.bound_argument(&arg, &pre_bad), None);
+    }
+
+    #[test]
+    fn d1_like_shape_bounds_end_to_end_with_injected_envelopes() {
+        // A d1-shaped compound: (log(s/k) + drift) / (sigma * sqrt(t)), with
+        // injected log/sqrt envelopes. Exercises interval add/div (denominator
+        // must exclude 0) over nested transcendental hulls. The REAL BS d1 test
+        // (with certified log/sqrt data + an independent interval) lands in
+        // milestone 2 once that data is committed.
+        let mut envs = HashMap::new();
+        envs.insert(
+            "log".to_string(),
+            synthetic_env("log", Domain::Positive, 0.25, 4.0, 0.0, 1.5),
+        );
+        // sqrt envelope over [0.01, 4], constant hull [1.0, 3.0] (>0, so the
+        // denominator sigma*sqrt(t) excludes 0).
+        envs.insert(
+            "sqrt".to_string(),
+            synthetic_env("sqrt", Domain::NonNegative, 0.01, 4.0, 2.0, 1.0),
+        );
+        let t = AbstractSubterm::with_envelopes(envs);
+        let pre = box_pre(&[
+            ("s", 1.0, 2.0),
+            ("k", 1.0, 2.0),
+            ("sigma", 0.1, 0.5),
+            ("t", 0.25, 4.0),
+        ]);
+        // drift = 0 for simplicity; d1 = log(s/k) / (sigma * sqrt(t)).
+        let num = SmtExpr::Apply("log".into(), vec![div(v("s"), v("k"))]);
+        let den = mul(v("sigma"), SmtExpr::Apply("sqrt".into(), vec![v("t")]));
+        let d1 = div(num, den);
+        // log hull [-1.5,1.5]; denom = [0.1,0.5]*[1,3] = [0.1, 1.5] (excludes 0);
+        // d1 = [-1.5,1.5] / [0.1,1.5] = [-15, 15].
+        let (lo, hi) = t.bound_argument(&d1, &pre).expect("d1 shape bounds");
+        assert!(
+            (lo - -15.0).abs() < 1e-9 && (hi - 15.0).abs() < 1e-9,
+            "d1 range [{lo},{hi}]"
+        );
+    }
+
+    #[test]
+    fn affine_unbounded_leaf_fails_closed() {
+        // 2x+1 with x unbounded → None.
+        assert_eq!(
+            extract_variable_range(&add(mul(r(2.0), v("x")), r(1.0)), &[]),
+            None
+        );
+        // x + y with only x bounded → None (y unbounded).
+        let pre = box_pre(&[("x", 0.0, 1.0)]);
+        assert_eq!(extract_variable_range(&add(v("x"), v("y")), &pre), None);
+    }
+
+    #[test]
+    fn bare_var_still_identical_after_affine_refactor() {
+        // The bare-Var path must be byte-identical to the pre-affine behavior.
+        let pre = box_pre(&[("x", -2.0, 5.0)]);
+        assert_eq!(extract_variable_range(&v("x"), &pre), Some((-2.0, 5.0)));
+        assert_eq!(extract_variable_range(&v("x"), &[]), None);
+    }
+
+    #[test]
+    fn transforms_erf_of_affine_argument_end_to_end() {
+        // erf(x/2 + 1) with x∈[0,2] → arg range [1,2] (covered) → abstracts.
+        let t = AbstractSubterm::new();
+        let arg = add(div(v("x"), r(2.0)), r(1.0));
+        let prop = SmtProperty {
+            variables: vec![("x".into(), SmtSort::Real)],
+            preconditions: box_pre(&[("x", 0.0, 2.0)]),
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Le,
+                Box::new(SmtExpr::Apply("erf".into(), vec![arg])),
+                Box::new(r(0.999)),
+            ),
+        };
+        let out = t.apply(&Goal::smt(prop));
+        let GoalShape::Smt(ref rp) = out[0].shape else {
+            panic!("expected Smt goal");
+        };
+        assert!(
+            rp.variables.iter().any(|(n, _)| n == "__erf_abs_0"),
+            "affine erf must abstract"
+        );
+        assert!(!contains_erf(&rp.postcondition), "erf must be gone");
     }
 }

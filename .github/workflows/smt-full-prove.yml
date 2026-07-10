@@ -153,6 +153,17 @@ jobs:
           cargo run -p chelis-prove --features arb --bin certify_erf_envelope \
             -- validate crates/chelis-prove/data/erf_envelope.json
 
+      - name: Arb cross-check exp/log/sqrt (certify_special_fn_envelope validate)
+        # chelis#434: the rigorous tamper gate for the exp/log/sqrt envelopes.
+        # Re-certifies each committed eps at its recorded subdivision count and
+        # fails if any committed eps is below the fresh Arb bound (a shrunk /
+        # tampered eps would forge a green). Mirrors the erf step above.
+        run: |
+          for fn in exp log sqrt; do
+            cargo run -p chelis-prove --features arb --bin certify_special_fn_envelope \
+              -- validate "crates/chelis-prove/data/special_fn_envelopes/${fn}_envelope.json"
+          done
+
       - name: Run arb-gated chelis-prove tests
         run: cargo test -p chelis-prove --features arb
 

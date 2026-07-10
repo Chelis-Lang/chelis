@@ -280,6 +280,7 @@ impl PropertyOutcome {
             // not-proven / disclosed-caveat distinction.
             CompositeVerdict::Proven
             | CompositeVerdict::ProvenModuloRealArithmetic
+            | CompositeVerdict::ProvenModuloCertifiedEnvelope
             | CompositeVerdict::ProvenModuloFuzzValidatedContract
             | CompositeVerdict::ProvenModuloAssertedAxiom
             | CompositeVerdict::SoundApproximate
@@ -706,6 +707,119 @@ fn expanded_contracts(property: &Property) -> Vec<String> {
     contracts
 }
 
+/// chelis#434 envelope lane: try to discharge a transcendental-bearing SMT goal
+/// through the certified special-function envelopes.
+///
+/// Pipeline: `NormalCdfToErf` (rewrite `normal_cdf(x)` to `½(1+erf(x/√2))`) then
+/// `AbstractSubterm` (replace each `erf`/`exp`/`log`/`sqrt` with a fresh variable
+/// bounded by its certified envelope over the argument's sound interval). If the
+/// residual has NO transcendentals left (fully abstracted) and is inlineable, it
+/// is solved over reals.
+///
+/// SOUNDNESS: the abstract-subterm transform is a sound OVER-approximation (the
+/// fresh variable ranges over a certified superset of the true transcendental
+/// value), so a residual **proof** entails the original goal. But an abstract
+/// **counterexample** may be SPURIOUS (a point in the over-approximation that no
+/// real input reaches — the coupled-subterm gap of chelis#637). Therefore this
+/// lane returns a green outcome ONLY on `Proved`; on `Disproved`, `Timeout`, or
+/// `Unknown` it returns `None` and the caller's existing honest paths run (the
+/// goal is never marked failed/disproved off an abstract counterexample). A
+/// `Proved` residual carries the `SpecialFunctionCertified` qualifier, so it
+/// projects to `proven_modulo_certified_envelope` (never plain `proven` /
+/// `proven_modulo_real_arithmetic`).
+fn try_envelope_lane(
+    property_name: &str,
+    smt_prop: &crate::tier_b::SmtProperty,
+    options: &PropertyRunOptions,
+    seed: u64,
+) -> Option<PropertyOutcome> {
+    use crate::transformation::Transformation;
+    use crate::transformations::abstract_subterm::AbstractSubterm;
+    use crate::transformations::normal_cdf_erf::NormalCdfToErf;
+
+    // Pre-pass (normal_cdf -> erf), then abstract-subterm. Each is a pure
+    // Goal -> Vec<Goal>; both yield exactly one goal here (no goal-splitting).
+    let goal = crate::discharge::Goal::smt(smt_prop.clone());
+    let lowered = NormalCdfToErf.apply(&goal);
+    let [lowered] = lowered.as_slice() else {
+        return None;
+    };
+    let abstracted = AbstractSubterm::new().apply(lowered);
+    let [residual] = abstracted.as_slice() else {
+        return None;
+    };
+    let crate::discharge::GoalShape::Smt(ref res_prop) = residual.shape else {
+        return None;
+    };
+    // The transform must have removed EVERY transcendental (residual inlineable)
+    // AND actually changed the goal (something was abstracted); else there is
+    // nothing the envelope lane can add over the base path — decline.
+    if res_prop.postcondition == smt_prop.postcondition
+        || !matches!(
+            crate::classify_inlineability(&res_prop.postcondition),
+            crate::Inlineability::Inlineable
+        )
+    {
+        return None;
+    }
+
+    // Solve the residual over reals. Only a genuine PROOF is accepted.
+    let discharge = crate::engine_registry::DischargeRegistry::with_builtin_engines()
+        .dispatch(residual, options.smt_timeout_ms);
+    let soundness = discharge.soundness();
+    let mut qualifiers = discharge.qualifier_set().clone();
+    if !matches!(discharge.into_result(), crate::tier_b::TierBResult::Proved) {
+        // Disproved (possibly spurious under the over-approximation), Timeout, or
+        // Unknown: decline. The caller falls through to the honest base paths.
+        return None;
+    }
+
+    // Proved: the certified envelope backed the discharge. Add the
+    // SpecialFunctionCertified qualifier so the badge is the distinct honest
+    // `proven_modulo_certified_envelope` (chelis#434 milestone 3).
+    qualifiers.insert(crate::discharge::Qualifier::SpecialFunctionCertified);
+    let base_discharge = Some((soundness, qualifiers));
+
+    // Non-vacuity of the ORIGINAL property (its preconditions must be
+    // satisfiable), mirroring the base SMT path.
+    let non_vacuity = smt_non_vacuity_record(smt_prop, options.smt_timeout_ms);
+    let reason = match non_vacuity.status {
+        NonVacuityStatus::Established => None,
+        NonVacuityStatus::Invalid | NonVacuityStatus::Unsupported => non_vacuity.reason.clone(),
+    };
+    let assumptions = property_assumption_records(
+        property_name,
+        smt_prop,
+        AssumptionDischarge::new(
+            DischargeMethod::Smt,
+            serde_json::json!({
+                "status": "proved",
+                "property": property_name,
+                "arith_model": "real",
+                "lane": "certified_envelope",
+            }),
+        ),
+        non_vacuity,
+    );
+    let status = if reason.is_some() {
+        PropertyStatus::Unsupported
+    } else {
+        PropertyStatus::Passed
+    };
+    Some(PropertyOutcome::with_base_discharge(
+        property_name.to_string(),
+        status,
+        PropertyTier::Smt,
+        0,
+        seed,
+        None,
+        reason,
+        false,
+        assumptions,
+        base_discharge,
+    ))
+}
+
 /// Try Tier B (SMT) for a surf property. Returns `Some(outcome)` for a
 /// determinate SMT verdict (Proved => Passed, Disproved => Failed), or
 /// `None` to fall through to Tier C (the property did not lower, or the
@@ -818,6 +932,16 @@ fn try_surf_tier_b(
         crate::classify_inlineability(&smt_prop.postcondition),
         crate::Inlineability::Inlineable
     ) {
+        // chelis#434 ENVELOPE LANE: the goal carries transcendentals the base
+        // lowering cannot inline. Try discharging through the certified
+        // special-function envelopes (normal_cdf -> erf, then abstract-subterm)
+        // BEFORE falling through to fuzz. Returns Some ONLY on a genuine proof of
+        // the residual (-> proven_modulo_certified_envelope); on any non-proof it
+        // declines and the existing honest paths (smt-only transcendental
+        // `unsupported`, or auto fuzz) run unchanged.
+        if let Some(outcome) = try_envelope_lane(&property.name, &smt_prop, options, seed) {
+            return Some(outcome);
+        }
         return None;
     }
     // Route the solve through the WI-9 discharge-engine registry. The registry
@@ -2171,6 +2295,16 @@ fn try_deep_tier_b(
         crate::classify_inlineability(&smt_prop.postcondition),
         crate::Inlineability::Inlineable
     ) {
+        // chelis#434 ENVELOPE LANE: the goal carries transcendentals the base
+        // lowering cannot inline. Try discharging through the certified
+        // special-function envelopes (normal_cdf -> erf, then abstract-subterm)
+        // BEFORE falling through to fuzz. Returns Some ONLY on a genuine proof of
+        // the residual (-> proven_modulo_certified_envelope); on any non-proof it
+        // declines and the existing honest paths (smt-only transcendental
+        // `unsupported`, or auto fuzz) run unchanged.
+        if let Some(outcome) = try_envelope_lane(&property.name, &smt_prop, options, seed) {
+            return Some(outcome);
+        }
         return None;
     }
     let discharge = crate::engine_registry::DischargeRegistry::with_builtin_engines().dispatch(

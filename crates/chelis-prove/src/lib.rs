@@ -21,6 +21,11 @@ pub mod clarabel_sos;
 // envelopes (saturation tails + central polynomial). Always present (pure f64,
 // no Arb link); the runtime / Beacon relaxation consume it without linking Arb.
 pub mod erf_envelope;
+// chelis#434: the function-keyed generalization of the erf envelope to a
+// registry of {erf, exp, log, sqrt}, all with committed certified data (erf:
+// Gappa+Arb; exp/log/sqrt: Arb mean-value). The abstract-subterm finder consumes
+// it; the property-runner certified-envelope lane wires it into dispatch.
+pub mod special_fn_envelope;
 // WI-16 Carcara auditability: re-check cvc5's Alethe proofs. The SMT-LIB
 // problem renderer and the audit-outcome type are always present (so the
 // renderer is unit-testable without cvc5/carcara linked); the live
@@ -60,14 +65,19 @@ pub mod z3_engine;
 pub use arb_oracle::ErfEnclosure;
 #[cfg(feature = "arb")]
 pub use arb_oracle::{
-    DEFAULT_PREC, certify_sup_norm_at_samples, certify_sup_norm_over_box, rigorous_erf,
-    rigorous_erf_enclosure,
+    DEFAULT_PREC, SpecialFn, certify_sup_norm_at_samples, certify_sup_norm_over_box,
+    certify_sup_norm_over_box_general, certify_sup_norm_over_box_meanvalue, rigorous_erf,
+    rigorous_erf_enclosure, rigorous_special_fn_enclosure,
 };
 pub use artifact::{
     Degradation, FailureSummary, ProofArtifact, ProofStatus, ProofTier, PropertyDependency,
 };
 // WI-13 committed erf-envelope consumer surface (always present, no Arb link).
 pub use erf_envelope::{ErfArm, ErfEnvelope, ErfEnvelopeBox, ErfEnvelopeProvenance, ProofKind};
+pub use special_fn_envelope::{
+    Domain, EnvelopeArm, Monotonicity, SpecialFnEnvelope, SpecialFnEnvelopeBox,
+    SpecialFnProvenance, SpecialFnRegistry,
+};
 // chelis#439: the Beacon subprocess shim (transport-only DischargeEngine for
 // GoalShape::BoxRange) and its dispatch-site-owned content-addressed byte store.
 pub use beacon_shim::{

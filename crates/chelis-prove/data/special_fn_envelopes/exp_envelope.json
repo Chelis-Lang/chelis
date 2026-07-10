@@ -1,0 +1,36 @@
+{
+  "fn_name": "exp",
+  "domain": "all_reals",
+  "output_clamp": null,
+  "boxes": [
+    {
+      "lo": -2.0,
+      "hi": 2.0,
+      "arm": {
+        "kind": "central",
+        "coeffs": [
+          "0x1.35ce2c69561f7p-29",
+          "0x1.d3abb96b3fe2cp-26",
+          "0x1.26e657c238130p-22",
+          "0x1.7064ac711ae31p-19",
+          "0x1.a024ebea77334p-16",
+          "0x1.a028412f4b43bp-13",
+          "0x1.6c168414b3fecp-10",
+          "0x1.1110ce524f61dp-7",
+          "0x1.5555569d4231cp-5",
+          "0x1.5555576ca6399p-3",
+          "0x1.fffffff5bc2f4p-2",
+          "0x1.ffffffecd8d06p-1",
+          "0x1.000000001ada1p+0"
+        ]
+      },
+      "eps": 1.4135085590588395e-8,
+      "proof_kind": "arb_enclosure"
+    }
+  ],
+  "provenance": {
+    "certify_prec": 128,
+    "certify_subdivisions": 65536,
+    "method": "Arb mean-value whole-box (sup |approx - exp|), cross-checked <= naive whole-box"
+  }
+}

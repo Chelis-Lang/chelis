@@ -153,3 +153,8 @@ path = "src/bin/mock_chelis_beacon.rs"
 name = "certify_erf_envelope"
 path = "src/bin/certify_erf_envelope.rs"
 required-features = ["arb"]
+
+[[bin]]
+name = "certify_special_fn_envelope"
+path = "src/bin/certify_special_fn_envelope.rs"
+required-features = ["arb"]

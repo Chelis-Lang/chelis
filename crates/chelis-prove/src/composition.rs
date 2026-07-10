@@ -56,6 +56,18 @@ pub enum CompositeVerdict {
     /// `proof_tier:"smt"` green carries this; plain `Proven` is reserved for a
     /// future exact-machine-arithmetic lowering.
     ProvenModuloRealArithmetic,
+    /// A proof discharged through a certified special-function ENVELOPE
+    /// (chelis#434): the transcendental subterm was abstracted to a fresh
+    /// variable bounded by its Sollya/Gappa/Arb-certified envelope, and the
+    /// residual proved over reals. Distinct from — and strictly weaker than —
+    /// `proven_modulo_real_arithmetic`: it discloses the ADDITIONAL dependency on
+    /// the certified envelope's over-approximation. The certificate is
+    /// machine-checked (sound), so it is STRONGER than the trusted/empirical
+    /// `proven_modulo_asserted_axiom` / `proven_modulo_fuzz_validated_contract`.
+    /// An envelope-FREE over-reals proof NEVER carries this token (it stays
+    /// `proven_modulo_real_arithmetic`); this token requires the
+    /// `SpecialFunctionCertified` qualifier.
+    ProvenModuloCertifiedEnvelope,
     ProvenModuloFuzzValidatedContract,
     ProvenModuloAssertedAxiom,
     /// A sound over-approximation backed the base (e.g. Beacon's interval
@@ -90,6 +102,7 @@ impl CompositeVerdict {
         match self {
             CompositeVerdict::Proven => "proven",
             CompositeVerdict::ProvenModuloRealArithmetic => "proven_modulo_real_arithmetic",
+            CompositeVerdict::ProvenModuloCertifiedEnvelope => "proven_modulo_certified_envelope",
             CompositeVerdict::ProvenModuloFuzzValidatedContract => {
                 "proven_modulo_fuzz_validated_contract"
             }
@@ -119,6 +132,10 @@ impl CompositeVerdict {
             CompositeVerdict::ProvenModuloRealArithmetic => VerdictGuarantee::Green {
                 soundness: Soundness::SoundApproximate,
                 qualifiers: QualifierSet::from_iter_kinds([Qualifier::RealArith]),
+            },
+            CompositeVerdict::ProvenModuloCertifiedEnvelope => VerdictGuarantee::Green {
+                soundness: Soundness::SoundApproximate,
+                qualifiers: QualifierSet::from_iter_kinds([Qualifier::SpecialFunctionCertified]),
             },
             CompositeVerdict::ProvenModuloFuzzValidatedContract => VerdictGuarantee::Green {
                 soundness: Soundness::Empirical,
@@ -285,6 +302,7 @@ impl VerdictRollup {
         //   SoundOverApproximation -> sound_approximate (over-approx base, not a proof)
         //   Axiom                  -> proven_modulo_asserted_axiom
         //   Fuzz (contract)        -> proven_modulo_fuzz_validated_contract
+        //   SpecialFunctionCertified -> proven_modulo_certified_envelope (chelis#434)
         //   RealArith              -> proven_modulo_real_arithmetic (proof over reals)
         //   Exact, no weaker       -> proven
         // The `FuzzBase` check is FIRST: a fuzz-only base is the weakest green
@@ -294,12 +312,14 @@ impl VerdictRollup {
         // that is not a proof, so it dominates the proven_* badges. The
         // `Axiom`-before-`Fuzz` order is preserved EXACTLY from the pre-422
         // lattice so existing rollups stay byte-identical (the wi6 oracle locks
-        // it). `RealArith` is the strongest qualifier below an exact proof: it
-        // discloses the proof is over reals. Covered-or-rejected: a green
-        // rollup at sub-`Exact` soundness carrying only a not-yet-badged
-        // qualifier (`DeltaComplete`, `SpecialFunctionCertified`,
-        // `CertificateBearing`) has no green badge yet, so it conservatively
-        // renders `Unsupported` rather than laundering into a proof.
+        // it). `SpecialFunctionCertified` (chelis#434) sits BELOW `Fuzz` and
+        // ABOVE `RealArith`: the envelope certificate is machine-checked (sound),
+        // so it is stronger than a trusted axiom or a fuzz-validated contract, but
+        // it discloses the extra over-approximation dependency, so it is weaker
+        // than a pure over-reals proof and MUST be checked before `RealArith` (an
+        // envelope-assisted proof never launders into `proven_modulo_real_arithmetic`).
+        // Covered-or-rejected: a green rollup carrying only a still-unbadged
+        // qualifier (`DeltaComplete`, `CertificateBearing`) renders `Unsupported`.
         if self.qualifiers.contains(Qualifier::FuzzBase) {
             CompositeVerdict::FuzzValidatedEmpirical
         } else if self.qualifiers.contains(Qualifier::SoundOverApproximation) {
@@ -308,6 +328,11 @@ impl VerdictRollup {
             CompositeVerdict::ProvenModuloAssertedAxiom
         } else if self.qualifiers.contains(Qualifier::Fuzz) {
             CompositeVerdict::ProvenModuloFuzzValidatedContract
+        } else if self
+            .qualifiers
+            .contains(Qualifier::SpecialFunctionCertified)
+        {
+            CompositeVerdict::ProvenModuloCertifiedEnvelope
         } else if self.qualifiers.contains(Qualifier::RealArith) {
             CompositeVerdict::ProvenModuloRealArithmetic
         } else if self.soundness == Soundness::Exact {
@@ -954,26 +979,33 @@ mod tests {
             // (an over-approximation base, then a fuzz-only base).
             CompositeVerdict::Proven => 0,
             CompositeVerdict::ProvenModuloRealArithmetic => 1,
-            CompositeVerdict::ProvenModuloFuzzValidatedContract => 2,
-            CompositeVerdict::ProvenModuloAssertedAxiom => 3,
-            CompositeVerdict::SoundApproximate => 4,
-            CompositeVerdict::FuzzValidatedEmpirical => 5,
+            // chelis#434: weaker than a pure over-reals proof (extra envelope
+            // caveat), stronger than the trusted/empirical fuzz+axiom badges
+            // (the certificate is machine-checked). Inserts at rank 2, shifting
+            // the weaker greens down one; relative order of every pre-existing
+            // badge is preserved, so the byte-identical fold matrix still holds.
+            CompositeVerdict::ProvenModuloCertifiedEnvelope => 2,
+            CompositeVerdict::ProvenModuloFuzzValidatedContract => 3,
+            CompositeVerdict::ProvenModuloAssertedAxiom => 4,
+            CompositeVerdict::SoundApproximate => 5,
+            CompositeVerdict::FuzzValidatedEmpirical => 6,
             // Terminals are weaker than every green (a terminal dominates a
             // green in the fold), ordered Unsupported < Invalid <
             // DisprovedModuloRealArithmetic < Failed. The reals-hedged disproof
             // is a hedged failure: it dominates greens + the Invalid/Unsupported
             // non-failure terminals, but loses to a definite Failed (chelis#422,
             // symmetric to proven_modulo_real_arithmetic on the proof side).
-            CompositeVerdict::Unsupported => 6,
-            CompositeVerdict::Invalid => 7,
-            CompositeVerdict::DisprovedModuloRealArithmetic => 8,
-            CompositeVerdict::Failed => 9,
+            CompositeVerdict::Unsupported => 7,
+            CompositeVerdict::Invalid => 8,
+            CompositeVerdict::DisprovedModuloRealArithmetic => 9,
+            CompositeVerdict::Failed => 10,
         }
     }
 
-    const ALL_VERDICTS: [CompositeVerdict; 10] = [
+    const ALL_VERDICTS: [CompositeVerdict; 11] = [
         CompositeVerdict::Proven,
         CompositeVerdict::ProvenModuloRealArithmetic,
+        CompositeVerdict::ProvenModuloCertifiedEnvelope,
         CompositeVerdict::ProvenModuloFuzzValidatedContract,
         CompositeVerdict::ProvenModuloAssertedAxiom,
         CompositeVerdict::SoundApproximate,
@@ -1152,15 +1184,10 @@ mod tests {
             CompositeVerdict::ProvenModuloRealArithmetic,
         );
 
-        // The producer qualifiers WI-9 will emit (DeltaComplete,
-        // SpecialFunctionCertified, CertificateBearing) still have no green
-        // badge yet, so they take the conservative rejection at sub-Exact
-        // soundness rather than laundering into a proof.
-        for qualifier in [
-            Qualifier::DeltaComplete,
-            Qualifier::SpecialFunctionCertified,
-            Qualifier::CertificateBearing,
-        ] {
+        // The still-unbadged producer qualifiers (DeltaComplete, CertificateBearing)
+        // take the conservative rejection at sub-Exact soundness rather than
+        // laundering into a proof.
+        for qualifier in [Qualifier::DeltaComplete, Qualifier::CertificateBearing] {
             let rolled = VerdictRollup::identity().fold(VerdictGuarantee::Green {
                 soundness: Soundness::SoundApproximate,
                 qualifiers: QualifierSet::from_iter_kinds([qualifier]),
@@ -1171,6 +1198,62 @@ mod tests {
                 "sub-Exact green carrying {qualifier:?} must render Unsupported, not proven"
             );
         }
+    }
+
+    #[test]
+    fn special_function_certified_projects_to_the_certified_envelope_tier() {
+        // chelis#434: a green discharge carrying SpecialFunctionCertified now
+        // projects to the distinct honest tier proven_modulo_certified_envelope
+        // (NOT unsupported anymore, and NEVER proven / proven_modulo_real_arithmetic).
+        let sfc = VerdictRollup::identity().fold(VerdictGuarantee::Green {
+            soundness: Soundness::SoundApproximate,
+            qualifiers: QualifierSet::from_iter_kinds([Qualifier::SpecialFunctionCertified]),
+        });
+        assert_eq!(
+            sfc.badge(),
+            CompositeVerdict::ProvenModuloCertifiedEnvelope,
+            "SpecialFunctionCertified must project to the certified-envelope tier"
+        );
+
+        // The real envelope discharge carries BOTH SpecialFunctionCertified (the
+        // envelope) AND RealArith (the residual's over-reals proof). The
+        // certified-envelope tier DOMINATES: the badge discloses the envelope
+        // dependency and must NEVER launder into proven_modulo_real_arithmetic.
+        let both = VerdictRollup::identity().fold(VerdictGuarantee::Green {
+            soundness: Soundness::SoundApproximate,
+            qualifiers: QualifierSet::from_iter_kinds([
+                Qualifier::SpecialFunctionCertified,
+                Qualifier::RealArith,
+            ]),
+        });
+        assert_eq!(
+            both.badge(),
+            CompositeVerdict::ProvenModuloCertifiedEnvelope
+        );
+        assert_ne!(both.badge(), CompositeVerdict::ProvenModuloRealArithmetic);
+        assert_ne!(both.badge(), CompositeVerdict::Proven);
+
+        // The reserved direction: an envelope-FREE over-reals proof (RealArith
+        // alone) STAYS proven_modulo_real_arithmetic — the new token never leaks
+        // onto envelope-free proofs.
+        let real_only = VerdictRollup::identity().fold(VerdictGuarantee::Green {
+            soundness: Soundness::SoundApproximate,
+            qualifiers: QualifierSet::from_iter_kinds([Qualifier::RealArith]),
+        });
+        assert_eq!(
+            real_only.badge(),
+            CompositeVerdict::ProvenModuloRealArithmetic
+        );
+        assert_ne!(
+            real_only.badge(),
+            CompositeVerdict::ProvenModuloCertifiedEnvelope
+        );
+
+        // Serialized token.
+        assert_eq!(
+            CompositeVerdict::ProvenModuloCertifiedEnvelope.as_str(),
+            "proven_modulo_certified_envelope"
+        );
     }
 
     // --- chelis#422 (symmetric): DisprovedModuloRealArithmetic (failure side) ---

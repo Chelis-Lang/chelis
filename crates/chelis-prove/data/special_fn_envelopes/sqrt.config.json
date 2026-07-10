@@ -1,0 +1,16 @@
+{
+  "function": "sqrt",
+  "domain": "non_negative",
+  "output_clamp": null,
+  "boxes": [
+    { "lo": 0.04, "hi": 4.0, "arm": "central", "degree": 12 }
+  ],
+  "generator": {
+    "recipe": "scripts/generate_special_fn_envelope.py sqrt (numpy.polyfit @ Chebyshev vs mpmath.sqrt) -> certify_special_fn_envelope stamp (Arb mean-value, cross-checked <= naive)",
+    "committed": "data/special_fn_envelopes/sqrt_envelope.json",
+    "argument_ranges": "BS sqrt(t), t (time-to-expiry) in ~[0.04, 4] (~2 weeks to 4y); box [0.04,4]",
+    "box_note": "single box bounded away from 0 (lo=0.04>0): the mean-value certifier needs sqrt'=1/(2sqrt(x)) finite, so the box must exclude the x=0 singularity. The finder's NonNegative domain guard still admits arg=0, but an arg range reaching below 0.04 falls outside envelope coverage and declines.",
+    "domain_note": "sqrt needs arg>=0; NonNegative domain guard declines any range with a negative lower edge"
+  },
+  "certify_status": "CERTIFIED: arb_enclosure (mean-value whole-box, cross-checked <= naive) over [0.04,4]"
+}
