@@ -35,6 +35,17 @@ changes, five categories of files must change with it:
    bundle, so they go stale the moment category (4) is regenerated. They
    are NOT auto-synced — they are literal on-disk strings.
 
+6. The Hull conformance corpus manifest
+   (`tests/conformance/hull/manifest.json`, `chelis_version_pinned`). The
+   conformance gate's STALE CORPUS check compares this pin to the live
+   binary's version, so leaving it behind turns the Hull Conformance
+   workflow red on main the moment the release merges (the 0.15.0
+   failure: the pin was a separate post-release chore, opening a red
+   window per release). Bumping it here is sound because the release
+   PR's own conformance-gate run then validates the frozen corpus
+   against the new binary — a real behavior change in the compiler
+   still fails that PR loudly.
+
 This script is the single, scriptable entry point for the release bump.
 Two tripwire tests fail loudly when these drift, pointing future operators
 at this script:
@@ -83,6 +94,12 @@ CHELIS_STD_DIST = CHELIS_STD_DIR / "dist"
 # lockstep with CHELIS_STD_DIST via the canonical bundle pipeline.
 BUNDLE_DIST = REPO_ROOT / "crates/chelis-std-bundle/dist"
 REGEN_BUNDLE_SCRIPT = REPO_ROOT / "scripts/regenerate_chelis_std_bundle.py"
+
+# The Hull conformance corpus manifest (category 6): its
+# `chelis_version_pinned` feeds the gate's STALE CORPUS check against the
+# live binary. `test_corpus_integrity.py` asserts it matches the workspace
+# version.
+HULL_MANIFEST = REPO_ROOT / "tests/conformance/hull/manifest.json"
 
 # Package roots whose committed `reef.lock` records a `chelis-std`
 # bundled dependency. Their synthesized pin and sha256s go stale the
@@ -201,6 +218,30 @@ def bump_compiler_pin(path: Path, version: str, dry_run: bool) -> FileChange | N
     if not dry_run:
         path.write_text(new_text)
     return FileChange(path, before, expected_after)
+
+
+def bump_hull_manifest_pin(version: str, dry_run: bool) -> FileChange | None:
+    """Rewrite `chelis_version_pinned` in the Hull conformance manifest.
+
+    Line-based rewrite (not json round-trip) so the frozen artifact's
+    formatting and key order stay byte-stable apart from the pin itself.
+    """
+    text = HULL_MANIFEST.read_text()
+    pattern = re.compile(r'^(\s*"chelis_version_pinned"\s*:\s*")([^"]+)(".*)$', re.MULTILINE)
+    m = pattern.search(text)
+    if m is None:
+        sys.exit(f"error: no `chelis_version_pinned` entry in {HULL_MANIFEST}")
+    before = m.group(2)
+    if before == version:
+        return None
+    new_text = pattern.sub(
+        lambda mm: f"{mm.group(1)}{version}{mm.group(3)}",
+        text,
+        count=1,
+    )
+    if not dry_run:
+        HULL_MANIFEST.write_text(new_text)
+    return FileChange(HULL_MANIFEST, before, version)
 
 
 def find_chelis_binary() -> Path | None:
@@ -333,6 +374,10 @@ def main(argv: list[str]) -> int:
         ch = bump_compiler_pin(toml_path, args.version, args.dry_run)
         if ch is not None:
             changes.append(ch)
+
+    manifest_change = bump_hull_manifest_pin(args.version, args.dry_run)
+    if manifest_change is not None:
+        changes.append(manifest_change)
 
     if not changes:
         print(f"All pins already at {args.version}; nothing to do.")

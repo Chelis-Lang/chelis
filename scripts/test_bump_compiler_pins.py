@@ -79,6 +79,62 @@ class BumpWorkspaceVersionTests(unittest.TestCase):
         self.assertEqual(bumped, original)
 
 
+class BumpHullManifestPinTests(unittest.TestCase):
+    """`chelis_version_pinned` in the Hull conformance manifest must ride the
+    release change set: the v0.15.0 release left main's Hull Conformance gate
+    red with STALE CORPUS because the pin was a post-release chore. Lock that
+    the bump rewrites exactly the pin line and nothing else in the frozen
+    artifact.
+    """
+
+    MANIFEST = (
+        "{\n"
+        '  "corpus_name": "hull-conformance-v1",\n'
+        '  "chelis_version_pinned": "0.14.0",\n'
+        '  "check_count": 120,\n'
+        '  "generator_note": "chelis_version_pinned is frozen"\n'
+        "}\n"
+    )
+
+    def _bump(self, original: str, new_version: str, dry_run: bool = False):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "manifest.json"
+            p.write_text(original)
+            saved = bump_mod.HULL_MANIFEST
+            bump_mod.HULL_MANIFEST = p
+            try:
+                change = bump_mod.bump_hull_manifest_pin(new_version, dry_run=dry_run)
+                return change, p.read_text()
+            finally:
+                bump_mod.HULL_MANIFEST = saved
+
+    def test_rewrites_only_the_pin_line(self):
+        change, bumped = self._bump(self.MANIFEST, "0.15.0")
+        self.assertIsNotNone(change)
+        self.assertEqual(change.before, "0.14.0")
+        self.assertEqual(change.after, "0.15.0")
+        self.assertEqual(bumped, self.MANIFEST.replace('"0.14.0"', '"0.15.0"'))
+        # The value-mentioning key elsewhere in the file must be untouched.
+        self.assertIn('"generator_note": "chelis_version_pinned is frozen"\n', bumped)
+
+    def test_no_op_when_pin_already_matches(self):
+        change, bumped = self._bump(self.MANIFEST, "0.14.0")
+        self.assertIsNone(change)
+        self.assertEqual(bumped, self.MANIFEST)
+
+    def test_dry_run_reports_but_does_not_write(self):
+        change, text = self._bump(self.MANIFEST, "0.15.0", dry_run=True)
+        self.assertIsNotNone(change)
+        self.assertEqual(change.after, "0.15.0")
+        self.assertEqual(text, self.MANIFEST)
+
+    def test_real_manifest_carries_the_pin_key(self):
+        # The constant must point at a file that actually has the entry, so
+        # the release-time rewrite target is real, not aspirational.
+        self.assertTrue(bump_mod.HULL_MANIFEST.is_file(), bump_mod.HULL_MANIFEST)
+        self.assertIn('"chelis_version_pinned"', bump_mod.HULL_MANIFEST.read_text())
+
+
 class CleanUntrackedDistTests(unittest.TestCase):
     """`chelis reef build` drops a `dist/` next to every package root it
     builds. Only `packages/chelis-std/dist/` is a tracked artifact dir; the
