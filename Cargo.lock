@@ -497,6 +497,7 @@ dependencies = [
  "chelis-backend-hip",
  "chelis-backend-metal",
  "chelis-compiler-api",
+ "chelis-conformance",
  "chelis-cove",
  "chelis-deep",
  "chelis-effects",
@@ -550,6 +551,15 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
+name = "chelis-conformance"
+version = "0.15.0"
+dependencies = [
+ "chelis-version",
  "sha2",
  "tempfile",
 ]
@@ -828,9 +838,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "chelis-version"
+version = "0.15.0"
+
+[[package]]
 name = "chelisup"
 version = "0.15.0"
 dependencies = [
+ "chelis-version",
  "clap",
  "flate2",
  "reqwest",

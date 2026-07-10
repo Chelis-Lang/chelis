@@ -620,6 +620,27 @@ jobs:
           run bash -c 'pip install pytest --break-system-packages 2>/dev/null || pip install pytest; python3 -m pytest -q tests/test_c_backend.py'
           echo "::endgroup::"
 
+      # ADVISORY conformance signal: run the HEAD toolchain's
+      # `chelis reef conform audit` against the shell checkout and print the
+      # report. This is the CONVENTION-drift counterpart to the FUNCTIONAL-drift
+      # gate above — it surfaces missing scaffolding (managed blocks, stamped
+      # CHELIS_SURFACE, materialized skills, wired probes) that a build/test pass
+      # cannot catch. It is deliberately `continue-on-error` + does NOT feed
+      # `job.status`: most shells predate the retrofit and will report gaps, and
+      # the HEAD binary auditing an older-pinned shell is inherently advisory
+      # (see the contract's since_version note). Reef + cargo legs only (the
+      # audit needs the shell tree on disk + the HEAD `chelis` on PATH; the
+      # docker leg's chelis lives inside the image). Filing a dedicated
+      # conformance issue is tracked follow-up; for now the signal is the log.
+      - name: Conformance audit (advisory, ${{ matrix.repo }} vs HEAD)
+        if: (matrix.type == 'reef' || matrix.type == 'cargo') && always()
+        continue-on-error: true
+        working-directory: shell
+        run: |
+          echo "::group::chelis reef conform audit (advisory)"
+          chelis reef conform audit || echo "::warning::conformance gaps in ${{ matrix.repo }} (advisory; retrofit via chelis reef conform init/sync)"
+          echo "::endgroup::"
+
       # Open-on-fail / close-on-pass tracking issue IN THE SHELL'S OWN
       # repo, via the minted App token (issues:write). Same logic as the
       # heavy-e2e.yml report job, retargeted cross-repo. if:always() so it

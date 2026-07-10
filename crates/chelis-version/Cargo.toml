@@ -1,0 +1,9 @@
+[package]
+name = "chelis-version"
+description = "Shared version-string and path-component primitives for the chelis toolchain (installer + conformance)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
