@@ -1,6 +1,6 @@
 ---
 name: packaging-install
-description: Use when changing or validating Chelis toolchain install, version routing, or the reef orchestration surface — chelisup (install/default/shim), the chelisup.sh bootstrap, chelis reef setup, and reef doctor. Covers the shim resolution order, the store layout, the shim-corruption trap, and the offline test seams.
+description: Use when changing or validating Chelis toolchain install, version routing, or the reef orchestration surface — chelisup (install/default/shim), the chelisup.sh bootstrap and its private-repo `gh` auth, chelis reef setup, and reef doctor. Covers the shim resolution order, the store layout, the shim-corruption trap, and the offline test seams.
 ---
 
 # Packaging & Install Orchestration
@@ -23,6 +23,22 @@ Three layers (design: `spec/design/chelis_packaging_and_install.md`):
   (`[artifacts]` / `LockSource::Binary`).
 - **Layer 2 — orchestration** (`crates/chelis-cli`): `chelis reef setup` and the
   unified `chelis reef doctor`.
+
+**Bootstrap & private-repo auth.** `chelisup.sh` drops the `chelisup` prebuilt on
+a bare machine; `chelisup install <ver>` then fetches toolchains. While
+`Chelis-Lang/chelis` is **private**, the public
+`curl -fsSL .../releases/latest/download/chelisup.sh | sh` line returns a **404**
+— GitHub serves no asset bytes for a private release to an unauthenticated client
+— so both the bootstrap and `chelisup install` require an authenticated `gh`. The
+checkout-free new-user command is the direct `gh` analogue of `curl | sh`:
+`gh release download --repo Chelis-Lang/chelis --pattern chelisup.sh --output - | sh`
+(the script itself then `gh release download`s the `chelisup-<slug>` binary when
+`gh` is present, falling back to the public curl URL only once releases are
+public). `chelisup` resolves the token as `GITHUB_TOKEN` first, then
+`gh auth token` (`install.rs::resolve_github_token`). A bootstrap 404 is **auth,
+not a bad URL** — never "fix" it by making the release public or hand-placing a
+binary. Docs to keep in sync: `docs/book/src/install.md` §1, `README.md`, and the
+design doc §5.5.
 
 ## Store Layout
 
