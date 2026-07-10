@@ -4,6 +4,48 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.15.1] — 2026-07-10
+
+### Added
+
+- **Downstream shell-repo conformance in the toolchain (#628).** New
+  `chelis reef conform <audit|init|sync|bump|bump-check>`, backed by the
+  `chelis-conformance` crate, so the shell-repo contract
+  (`spec/design/shell_repo_contract.md`) is enforced and propagated
+  mechanically from the pinned toolchain instead of via hand-copied scripts
+  that drift. Two arms on one command group: **convention conformance**
+  (`audit` checks the contract's §11 rows offline and hermetically —
+  managed-block stamps, lockstep workflow pins, narrowing coverage,
+  materialized-skill fork detection — with `init`/`sync` scaffolding and
+  regenerating the pointer managed blocks and shared skill set), and
+  **version propagation** (`bump` mechanizes the Pin Bump Checklist;
+  `bump-check --base <ref>` fails any diff that moves the reef pin without a
+  green audit, so a raw direct-to-main cascade cannot land). The contract's
+  §11 table (`MANIFEST`) and shell registry (`REGISTRY`) become
+  tripwire-locked single sources of truth (the `gate.py`/`test_gate.py`
+  pattern), ground-truthed to the `ecosystem-drift.yml` canary matrix, which
+  gains an advisory issue-only `conform-audit` leg.
+- **`chelis test --expect neg|blocked`.** Native expected-failure suites,
+  replacing the shells' vendored `run_negative_tests.py` /
+  `run_blocked_probes.py`. An empty `--expect` suite is a hard error (a
+  zero-probe directory can no longer silently disable the guard), and
+  `--filter` combined with `--expect` is rejected.
+- **`chelis-version` crate.** A zero-dependency leaf crate owning the strict
+  `X.Y.Z` semver and safe-path-component predicates, so the chelisup
+  installer and the conformance auditor cannot drift on what a valid pin is
+  (the auditor can no longer bless a pin the shim would reject).
+
+### Fixed
+
+- **Hull conformance manifest pin rides the release bump (#634).** The
+  gate's `STALE CORPUS` check compares
+  `tests/conformance/hull/manifest.json`'s `chelis_version_pinned` to the
+  live binary, so the previously-manual post-release pin bump opened a
+  red window on `main` at every release (0.14.0 and 0.15.0 both hit it).
+  It is now category 6 of `scripts/bump_compiler_pins.py` — rewritten in the
+  release change set, validated by that PR's own conformance-gate run, and
+  locked by `test_pinned_version_matches_workspace_version`.
+
 ## [0.15.0] — 2026-07-10
 
 ### Added
