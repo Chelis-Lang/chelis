@@ -3269,11 +3269,14 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
             chelis_conformance::scaffold::sync_managed_blocks(&root, &version)?;
             println!("restamped managed blocks + skills to chelis {version}");
 
-            // Offline gate, categorized (chelis#655). A failure the bump itself
-            // produces (its own pins/stamps/skills) is a real bump defect and
-            // exits non-zero. Rows that are author follow-up (CI wiring,
-            // pre-existing doc/citation fixes) the bump cannot write are listed
-            // as remaining steps, not treated as a bump failure.
+            // Offline gate, categorized (chelis#655). A failure on a row whose
+            // artifact the bump itself writes (its pins/managed-block stamps/
+            // skills) blocks and exits non-zero: the shell is not in a clean
+            // bumped state, whether from a bump-tool defect or a shell edit the
+            // bump could only preserve (e.g. a malformed shell-local block).
+            // Rows that are author follow-up (CI wiring, pre-existing doc/citation
+            // fixes, the prose Pin-Bump-Checklist/Scaffolding-Drift-Rule headings)
+            // the bump cannot write are listed as remaining steps, not a failure.
             let report = chelis_conformance::audit::audit(&root);
             let failing: Vec<&chelis_conformance::audit::RowResult> = report
                 .rows
@@ -3287,7 +3290,8 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
                 .collect();
             if !bump_owned.is_empty() {
                 eprintln!(
-                    "bump produced non-conformant output (a bump defect, not author follow-up):"
+                    "bump left a bump-owned artifact non-conformant (pins/managed blocks/skills); \
+                     the shell is not in a clean bumped state:"
                 );
                 for r in &bump_owned {
                     eprintln!("  row {:>2} {} ({})", r.row, r.key, r.section);

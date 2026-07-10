@@ -169,6 +169,69 @@ fn malformed_shell_local_block_fails_audit() {
     assert!(r.diagnostic.contains("shell-local:end"), "{}", r.diagnostic);
 }
 
+#[test]
+fn content_after_end_marker_fails_audit() {
+    let (_tmp, root) = green_shell();
+    append(
+        &root.join("agent-skills/spec-sync/SKILL.md"),
+        "\n<!-- shell-local:begin -->\n## override\n<!-- shell-local:end -->\ntrailing prose\n",
+    );
+    let report = audit::audit(&root);
+    let r = row(&report, "vendored-skills");
+    assert_eq!(r.verdict, audit::Verdict::Fail);
+    assert!(
+        r.diagnostic.contains("content after") && r.diagnostic.contains("file suffix"),
+        "a block that is not the file suffix must be rejected: {}",
+        r.diagnostic
+    );
+}
+
+#[test]
+fn two_begin_markers_fail_audit() {
+    let (_tmp, root) = green_shell();
+    append(
+        &root.join("agent-skills/spec-sync/SKILL.md"),
+        "\n<!-- shell-local:begin -->\n## a\n<!-- shell-local:end -->\n\
+         <!-- shell-local:begin -->\n## b\n<!-- shell-local:end -->\n",
+    );
+    let report = audit::audit(&root);
+    let r = row(&report, "vendored-skills");
+    assert_eq!(r.verdict, audit::Verdict::Fail);
+    assert!(
+        r.diagnostic.contains("exactly one"),
+        "two begin markers must be rejected: {}",
+        r.diagnostic
+    );
+}
+
+#[test]
+fn sync_with_a_block_is_byte_stable_across_repeated_runs() {
+    let (_tmp, root) = green_shell();
+    let skill = root.join("agent-skills/example-corpus/SKILL.md");
+    append(&skill, &format!("\n{BLOCK}"));
+
+    // First materialize normalizes the layout; every subsequent materialize must
+    // be a byte-for-byte no-op (no drift, no re-flagging, no block duplication).
+    scaffold::materialize_skills(&root).unwrap();
+    let once = std::fs::read_to_string(&skill).unwrap();
+    let notices = scaffold::materialize_skills(&root).unwrap();
+    let twice = std::fs::read_to_string(&skill).unwrap();
+    assert_eq!(
+        once, twice,
+        "re-materialize must be byte-stable under a block"
+    );
+    assert!(
+        notices.is_empty(),
+        "an unchanged upstream body must not re-flag: {notices:?}"
+    );
+    assert_eq!(
+        twice.matches("<!-- shell-local:begin -->").count(),
+        1,
+        "the block must not be duplicated"
+    );
+    assert!(audit::audit(&root).ok());
+}
+
 // ------------------------------------------------- #652 / #654 §4 citation seam
 
 #[test]
@@ -205,5 +268,13 @@ fn spaced_coverage_entry_covers_a_cite_and_explain_names_the_site() {
         audit::Verdict::Pass,
         "a whitespace-variant coverage entry must cover the cite (chelis#652); got: {}",
         staleness.diagnostic
+    );
+    // The now-passing §4 row carries no residual evidence (chelis#654: evidence
+    // is per-finding, so a pass is empty — the negative parity for the populated
+    // failing-row assertion above).
+    assert!(
+        staleness.evidence.is_empty(),
+        "a passing row must carry no explain evidence: {:?}",
+        staleness.evidence
     );
 }

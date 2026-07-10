@@ -151,13 +151,17 @@ pub fn materialize_skills(root: &Path) -> Result<Vec<String>, String> {
 /// not own: shared-skill dirs outside [`skills::SHARED_SKILLS`], files other than
 /// `SKILL.md` inside a pinned skill dir, and top-level files other than
 /// `UPSTREAM.toml`. Repo-local domain skills named in `local_skills` (chelis#651)
-/// are preserved. Returns the names of the top-level entries it deleted, so the
-/// caller can warn before an author-added skill vanishes silently.
+/// are preserved. Returns the names of the *pruned skill dirs* only — an
+/// author-added skill dir the caller should warn about before it vanishes
+/// (chelis#651). Stray non-`SKILL.md` files and top-level files are still removed
+/// but are not surfaced: the "add it to `[conform] local_skills`" hint applies
+/// only to whole skill dirs, and materialize never creates such files, so their
+/// presence is leftover/editor cruft, not author-authored content.
 fn prune_skill_drift(root: &Path, local_skills: &[String]) -> Result<Vec<String>, String> {
     let dir = root.join("agent-skills");
-    let mut pruned = Vec::new();
+    let mut pruned_dirs = Vec::new();
     let Ok(entries) = fs::read_dir(&dir) else {
-        return Ok(pruned);
+        return Ok(pruned_dirs);
     };
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
@@ -177,14 +181,13 @@ fn prune_skill_drift(root: &Path, local_skills: &[String]) -> Result<Vec<String>
             } else {
                 fs::remove_dir_all(&path)
                     .map_err(|err| format!("remove {}: {err}", path.display()))?;
-                pruned.push(name);
+                pruned_dirs.push(name);
             }
         } else if name != "UPSTREAM.toml" {
             fs::remove_file(&path).map_err(|err| format!("remove {}: {err}", path.display()))?;
-            pruned.push(name);
         }
     }
-    Ok(pruned)
+    Ok(pruned_dirs)
 }
 
 fn remove_path(path: &Path) -> Result<(), String> {

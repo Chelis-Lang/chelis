@@ -700,15 +700,33 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
 
 /// Parse the `local_skills` allowlist from a `[conform]` table in `reef.toml`
 /// (chelis#651). Hand-parsed — the crate has no `toml` dependency — accepting a
-/// single- or multi-line array of double-quoted names. `chelis-reef` ignores the
-/// `[conform]` table (no `deny_unknown_fields`), so this is its only reader.
+/// single- or multi-line array of double- or single-quoted names, tolerating
+/// inline `#` comments. `chelis-reef` ignores the `[conform]` table (no
+/// `deny_unknown_fields`), so this is its only reader.
 pub(crate) fn parse_local_skills(reef_toml: &str) -> Vec<String> {
+    // Skill names and TOML table headers never contain `#`, and the values are
+    // quoted names, so a bare `#` starts a comment. Cutting each physical line
+    // there keeps an inline comment from corrupting the entry that follows it in
+    // a multi-line array. (Narrow but sufficient; the crate has no TOML parser.)
+    fn strip_comment(line: &str) -> &str {
+        match line.find('#') {
+            Some(i) => &line[..i],
+            None => line,
+        }
+    }
     let mut in_conform = false;
     let mut collecting = false;
     let mut buf = String::new();
-    for line in reef_toml.lines() {
+    for raw in reef_toml.lines() {
+        let line = strip_comment(raw);
         let t = line.trim();
-        if !collecting && t.starts_with('[') && t.ends_with(']') {
+        if t.starts_with('[') && t.ends_with(']') {
+            // A new table header while still collecting means the array was
+            // never closed (malformed) — stop rather than swallow the header's
+            // name as a phantom skill.
+            if collecting {
+                break;
+            }
             in_conform = t == "[conform]";
             continue;
         }
@@ -740,7 +758,7 @@ pub(crate) fn parse_local_skills(reef_toml: &str) -> Vec<String> {
     }
     buf[open + 1..close]
         .split(',')
-        .map(|s| s.trim().trim_matches('"').trim().to_string())
+        .map(|s| s.trim().trim_matches(['"', '\'']).trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
 }
@@ -1228,7 +1246,12 @@ mod tests {
 
     #[test]
     fn citation_extraction() {
-        let cites = |t: &str| scan_citations(t).into_iter().map(|(c, _)| c).collect::<Vec<_>>();
+        let cites = |t: &str| {
+            scan_citations(t)
+                .into_iter()
+                .map(|(c, _)| c)
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
             cites("fail(...) // blocked on chelis#293 and chelis#345x"),
             vec!["chelis#293", "chelis#345"]
@@ -1351,6 +1374,32 @@ mod tests {
         assert!(parse_local_skills("[conform]\nother = 1\n").is_empty());
         // a `local_skills` outside [conform] is ignored
         assert!(parse_local_skills("[other]\nlocal_skills = [\"x\"]\n").is_empty());
+        // single-quoted (TOML literal) names are accepted
+        assert_eq!(
+            parse_local_skills("[conform]\nlocal_skills = ['chelis-std']\n"),
+            vec!["chelis-std".to_string()]
+        );
+        // inline comments do not corrupt the following entry
+        let commented = "[conform]\nlocal_skills = [ # keep these\n  \"a\", # first\n  \"b\",\n]\n";
+        assert_eq!(
+            parse_local_skills(commented),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        // a single-line array with a trailing comment
+        assert_eq!(
+            parse_local_skills("[conform]\nlocal_skills = [\"a\"] # note\n"),
+            vec!["a".to_string()]
+        );
+        // a key that merely has `local_skills` as a prefix is not the key
+        assert!(parse_local_skills("[conform]\nlocal_skills_extra = [\"x\"]\n").is_empty());
+        // an empty array yields no names
+        assert!(parse_local_skills("[conform]\nlocal_skills = []\n").is_empty());
+        // a malformed non-array value must not swallow the next table header as
+        // a phantom skill name
+        assert!(
+            parse_local_skills("[conform]\nlocal_skills = \"x\"\n[dependencies]\nfoo = 1\n")
+                .is_empty()
+        );
     }
 
     #[test]
