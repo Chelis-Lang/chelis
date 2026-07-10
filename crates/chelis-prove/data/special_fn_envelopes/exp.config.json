@@ -1,0 +1,15 @@
+{
+  "function": "exp",
+  "domain": "all_reals",
+  "output_clamp": null,
+  "boxes": [
+    { "lo": -15.0, "hi": -4.0, "arm": "central", "degree": 12 },
+    { "lo": -4.0, "hi": 2.0, "arm": "central", "degree": 14 }
+  ],
+  "generator": {
+    "recipe": "scripts/generate_erf_envelope.py with mpmath.exp truth (Chebyshev polyfit per box)",
+    "probe": "spec/design/probe_434_transcendental.md p19: degree-14 over [-2,2] fit exp to 1.76e-12 empirical sup-norm",
+    "argument_ranges": "BS discount exp(-r*t) in ~[-1,0]; normal-density exp(-x^2/2) tail down to ~-12.5; box covers [-15,2]"
+  },
+  "certify_status": "BLOCKED: sollya absent (Gappa half); arb_oracle hardcodes arb_hypgeom_erf (needs arb_exp keying)"
+}

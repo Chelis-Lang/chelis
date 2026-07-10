@@ -298,6 +298,67 @@ impl SpecialFnRegistry {
 mod tests {
     use super::*;
 
+    /// The exp/log/sqrt generation configs, embedded so a test locks them to the
+    /// registry. They are BLOCKED (no certified data yet); this only guards that
+    /// their declared function/domain stay consistent with the registry.
+    const EXP_CONFIG: &str = include_str!("../data/special_fn_envelopes/exp.config.json");
+    const LOG_CONFIG: &str = include_str!("../data/special_fn_envelopes/log.config.json");
+    const SQRT_CONFIG: &str = include_str!("../data/special_fn_envelopes/sqrt.config.json");
+
+    fn domain_token(d: Domain) -> &'static str {
+        match d {
+            Domain::AllReals => "all_reals",
+            Domain::Positive => "positive",
+            Domain::NonNegative => "non_negative",
+        }
+    }
+
+    #[test]
+    fn generation_configs_are_consistent_with_the_registry() {
+        for src in [EXP_CONFIG, LOG_CONFIG, SQRT_CONFIG] {
+            let cfg: serde_json::Value = serde_json::from_str(src).expect("config parses");
+            let f = cfg["function"].as_str().expect("function name");
+            // The function is a known registry special function.
+            assert!(
+                SpecialFnRegistry::known_functions().contains(&f),
+                "{f} must be a known special function"
+            );
+            // The config's declared domain matches the registry's domain guard.
+            let reg_domain = SpecialFnRegistry::domain(f).expect("registry domain");
+            assert_eq!(
+                cfg["domain"].as_str().unwrap(),
+                domain_token(reg_domain),
+                "{f} config domain must match the registry domain guard"
+            );
+            // It is honestly marked BLOCKED (no certified data committed yet), and
+            // committed() therefore returns None — the finder declines.
+            assert!(
+                cfg["certify_status"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("BLOCKED"),
+                "{f} config must be marked BLOCKED until its data lands"
+            );
+            assert!(
+                SpecialFnEnvelope::committed(f).is_none(),
+                "{f} must have no committed envelope while its config is BLOCKED"
+            );
+            // Boxes are a non-empty, ascending, contiguous decomposition.
+            let boxes = cfg["boxes"].as_array().expect("boxes array");
+            assert!(!boxes.is_empty(), "{f} config needs at least one box");
+            let mut prev_hi: Option<f64> = None;
+            for b in boxes {
+                let lo = b["lo"].as_f64().unwrap();
+                let hi = b["hi"].as_f64().unwrap();
+                assert!(lo < hi, "{f} box must have lo<hi");
+                if let Some(p) = prev_hi {
+                    assert_eq!(lo, p, "{f} boxes must be contiguous");
+                }
+                prev_hi = Some(hi);
+            }
+        }
+    }
+
     #[test]
     fn erf_committed_round_trips_through_generic_form() {
         let generic = SpecialFnEnvelope::committed("erf").expect("erf is committed");
@@ -417,7 +478,10 @@ mod tests {
                 },
             ],
         };
-        assert!(ok.is_well_formed(), "non-±1 saturation is structurally fine");
+        assert!(
+            ok.is_well_formed(),
+            "non-±1 saturation is structurally fine"
+        );
 
         let gap = SpecialFnEnvelope {
             fn_name: "synthetic".into(),

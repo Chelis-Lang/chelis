@@ -1,0 +1,15 @@
+{
+  "function": "log",
+  "domain": "positive",
+  "output_clamp": null,
+  "boxes": [
+    { "lo": 0.01, "hi": 0.5, "arm": "central", "degree": 12 },
+    { "lo": 0.5, "hi": 4.0, "arm": "central", "degree": 12 }
+  ],
+  "generator": {
+    "recipe": "scripts/generate_erf_envelope.py with mpmath.log truth (Chebyshev polyfit per box)",
+    "argument_ranges": "BS log(s/k) moneyness; s/k typically in ~[0.5, 2], widened to (0.01, 4] for tail coverage",
+    "domain_note": "log needs arg>0; the finder's Positive domain guard declines any argument range that reaches <=0"
+  },
+  "certify_status": "BLOCKED: sollya absent (Gappa half); arb_oracle hardcodes arb_hypgeom_erf (needs arb_log keying)"
+}

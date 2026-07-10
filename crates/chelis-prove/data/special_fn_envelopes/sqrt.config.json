@@ -1,0 +1,16 @@
+{
+  "function": "sqrt",
+  "domain": "non_negative",
+  "output_clamp": { "lo": 0.0, "hi": null },
+  "boxes": [
+    { "lo": 0.0, "hi": 0.25, "arm": "central", "degree": 10 },
+    { "lo": 0.25, "hi": 4.0, "arm": "central", "degree": 10 }
+  ],
+  "generator": {
+    "recipe": "scripts/generate_erf_envelope.py with mpmath.sqrt truth (Chebyshev polyfit per box)",
+    "argument_ranges": "BS sqrt(t) with t (time-to-expiry) in ~(0, 4]; box covers [0, 4]",
+    "domain_note": "sqrt needs arg>=0; the finder's NonNegative domain guard admits 0 but declines any range with a negative lower edge",
+    "clamp_note": "output_clamp lo=0 (sqrt>=0), hi=null means +inf (no finite upper); the loader maps to Option<(f64,f64)> = (0.0, f64::INFINITY)"
+  },
+  "certify_status": "BLOCKED: sollya absent (Gappa half); arb_oracle hardcodes arb_hypgeom_erf (needs arb_sqrt keying)"
+}
