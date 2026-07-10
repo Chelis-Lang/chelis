@@ -39,6 +39,8 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   relational abstraction, or whole-expression `BoxRange` interval evaluation) are
   tracked in chelis#637.
 
+## [0.15.2] — 2026-07-10
+
 ### Fixed
 
 - **`reef conform` downstream-adoption friction (chelis#651–#655).** Five fixes

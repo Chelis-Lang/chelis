@@ -1,5 +1,5 @@
 [package]
 name = "chelis-std"
 version = "0.4.0"
-compiler = "=0.16.0"
+compiler = "=0.15.2"
 module_prefix = "Std"
