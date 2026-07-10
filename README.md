@@ -20,10 +20,10 @@ one-command project orchestrator, **`chelis reef setup`**.
 
 ```sh
 # 1. Bootstrap chelisup (drops ~/.chelis/bin/chelisup and prints the PATH line).
-#    Once releases are public:
-curl -fsSL https://<host>/chelisup.sh | sh
-#    Private-repo pre-launch (needs an authenticated `gh`): run the vendored script
-sh crates/chelisup/bootstrap/chelisup.sh
+#    Private-repo pre-launch (needs an authenticated `gh`): fetch + run the script.
+gh release download --repo Chelis-Lang/chelis --pattern chelisup.sh --output - | sh
+#    (Or from a checkout: sh crates/chelisup/bootstrap/chelisup.sh)
+#    Once releases are public:  curl -fsSL https://<host>/chelisup.sh | sh
 export PATH="$HOME/.chelis/bin:$PATH"     # add to your shell rc
 
 # 2. Install a toolchain (side-by-side under ~/.chelis/toolchains/<ver>).
