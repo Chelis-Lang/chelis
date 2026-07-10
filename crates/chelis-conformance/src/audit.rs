@@ -13,6 +13,7 @@
 //! downgrades a row to `Na` when the shell's pin predates the row, so the HEAD
 //! canary does not fail a stale shell for a requirement that postdates its pin.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::manifest::{CONTRACT_BASELINE_VERSION, ContractRow, MANIFEST, Tier};
@@ -61,6 +62,10 @@ pub struct RowResult {
     pub diagnostic: String,
     /// Suggested remedy (may be empty).
     pub fix: String,
+    /// Per-finding evidence surfaced under `conform audit --explain` (chelis#654):
+    /// the exact site(s) and the per-candidate reasoning behind the verdict.
+    /// Empty for rows that carry no site-level detail.
+    pub evidence: Vec<String>,
 }
 
 /// The full audit result for a shell root.
@@ -132,6 +137,10 @@ struct Ctx {
     cargo_toml: Option<String>,
     /// `(filename, contents)` for every `.github/workflows/*.yml`.
     workflows: Vec<(String, String)>,
+    /// The `[conform] local_skills` allowlist from `reef.toml` (chelis#651):
+    /// repo-local domain skills the shell owns, which `sync` preserves and §8
+    /// exempts from the "not a pinned skill" drift check.
+    local_skills: Vec<String>,
 }
 
 impl Ctx {
@@ -139,6 +148,10 @@ impl Ctx {
         let reef_toml = read_opt(&root.join("reef.toml"));
         let reef_pin = reef_toml.as_deref().and_then(parse_compiler_pin);
         let shell_name = reef_toml.as_deref().and_then(parse_package_name);
+        let local_skills = reef_toml
+            .as_deref()
+            .map(parse_local_skills)
+            .unwrap_or_default();
         let agents_md = read_opt(&root.join("AGENTS.md"));
         let claude_symlink_ok = claude_is_symlink_to_agents(root);
         let cargo_toml = read_opt(&root.join("Cargo.toml"));
@@ -152,6 +165,7 @@ impl Ctx {
             reef_toml,
             cargo_toml,
             workflows,
+            local_skills,
         }
     }
 
@@ -180,10 +194,11 @@ fn check_row(row: &ContractRow, ctx: &Ctx) -> RowResult {
                 row.since_version
             ),
             "",
+            Vec::new(),
         );
     }
 
-    let (verdict, diagnostic, fix) = match row.key {
+    let (verdict, diagnostic, fix, evidence) = match row.key {
         "agents-md" => check_agents_md(ctx),
         "reef-pin" => check_reef_pin(ctx),
         "workflow-env-pins" => check_workflow_env_pins(ctx),
@@ -204,6 +219,7 @@ fn check_row(row: &ContractRow, ctx: &Ctx) -> RowResult {
             "≥2-config acceptance is review discipline, not mechanically decidable".to_string(),
             "reviewer must confirm each new public verb has ≥2 distinct shape/config cases"
                 .to_string(),
+            Vec::new(),
         ),
         "scaffolding-drift-rule" => check_agents_heading(ctx, "Scaffolding Drift Rule"),
         "chelis-src" => check_chelis_src(ctx),
@@ -211,9 +227,10 @@ fn check_row(row: &ContractRow, ctx: &Ctx) -> RowResult {
             Verdict::Manual,
             format!("no check implemented for row key {other:?}"),
             String::new(),
+            Vec::new(),
         ),
     };
-    result(row, verdict, diagnostic, fix)
+    result(row, verdict, diagnostic, fix, evidence)
 }
 
 fn result(
@@ -221,6 +238,7 @@ fn result(
     verdict: Verdict,
     diagnostic: impl Into<String>,
     fix: impl Into<String>,
+    evidence: Vec<String>,
 ) -> RowResult {
     RowResult {
         row: row.row,
@@ -230,17 +248,24 @@ fn result(
         verdict,
         diagnostic: diagnostic.into(),
         fix: fix.into(),
+        evidence,
     }
 }
 
-type Check = (Verdict, String, String);
+type Check = (Verdict, String, String, Vec<String>);
 
 fn pass() -> Check {
-    (Verdict::Pass, String::new(), String::new())
+    (Verdict::Pass, String::new(), String::new(), Vec::new())
 }
 
 fn fail(diag: impl Into<String>, fix: impl Into<String>) -> Check {
-    (Verdict::Fail, diag.into(), fix.into())
+    (Verdict::Fail, diag.into(), fix.into(), Vec::new())
+}
+
+/// Like [`fail`], but attaches per-finding `evidence` lines surfaced under
+/// `conform audit --explain` (chelis#654).
+fn fail_ex(diag: impl Into<String>, fix: impl Into<String>, evidence: Vec<String>) -> Check {
+    (Verdict::Fail, diag.into(), fix.into(), evidence)
 }
 
 /// Whether `text` has a markdown heading line (any level) containing `needle`.
@@ -336,6 +361,7 @@ fn check_workflow_env_pins(ctx: &Ctx) -> Check {
             Verdict::Manual,
             "no toolchain-installing workflow detected to cross-check".to_string(),
             "confirm the shell installs the toolchain in CI".to_string(),
+            Vec::new(),
         );
     }
     pass()
@@ -378,6 +404,7 @@ fn check_toolchain_installer(ctx: &Ctx) -> Check {
                 .to_string(),
             "install the toolchain via chelisup; never hand-symlink a machine-global default"
                 .to_string(),
+            Vec::new(),
         )
     }
 }
@@ -452,20 +479,65 @@ fn check_narrowing_coverage(ctx: &Ctx) -> Check {
     let upstream = ctx.read("docs/UPSTREAM_BUGS.md").unwrap_or_default();
     let readme = ctx.read("tests_blocked/README.md").unwrap_or_default();
     let corpus = format!("{blocked_text}\n{upstream}\n{readme}");
-    let mut orphans: Vec<String> = cited
-        .into_iter()
-        .filter(|c| !corpus_covers(&corpus, c))
-        .collect();
-    orphans.sort();
-    orphans.dedup();
-    if orphans.is_empty() {
-        pass()
-    } else {
-        fail(
-            format!("uncovered narrowing citation(s): {}", orphans.join(", ")),
-            "add a tests_blocked/ probe, a docs/UPSTREAM_BUGS.md entry, or a tests_blocked/README.md can't-be-probed note for each",
-        )
+
+    // Group every uncovered cite by token, preserving each site so `--explain`
+    // can name where the orphan is cited (chelis#654: the diagnostic used to
+    // list only the tokens, forcing an empirical bisect to localize them).
+    let mut orphans: BTreeMap<String, Vec<(PathBuf, usize)>> = BTreeMap::new();
+    for c in cited {
+        if !corpus_covers(&corpus, &c.token) {
+            orphans.entry(c.token).or_default().push((c.file, c.line));
+        }
     }
+    if orphans.is_empty() {
+        return pass();
+    }
+
+    let mut evidence = Vec::new();
+    for (token, sites) in &orphans {
+        for (file, line) in sites {
+            let rel = file.strip_prefix(&ctx.root).unwrap_or(file);
+            evidence.push(format!("{token} cited at {}:{}", rel.display(), line));
+        }
+        evidence.push(coverage_evidence(token, &blocked_text, &upstream, &readme));
+    }
+    let tokens: Vec<&str> = orphans.keys().map(String::as_str).collect();
+    fail_ex(
+        format!("uncovered narrowing citation(s): {}", tokens.join(", ")),
+        "add a tests_blocked/ probe, a docs/UPSTREAM_BUGS.md entry, or a tests_blocked/README.md can't-be-probed note for each",
+        evidence,
+    )
+}
+
+/// One `--explain` line naming which coverage sources were checked for an orphan
+/// `token` and why each failed, with a near-miss hint when the issue number
+/// appears in a non-canonical (non-`chelis#NNN`) form — the exact trap in
+/// chelis#654, where a space-form `chelis #316` (now matched, chelis#652) or a
+/// bare `#316` left the fix message ("add an UPSTREAM_BUGS entry") misleading.
+fn coverage_evidence(token: &str, blocked: &str, upstream: &str, readme: &str) -> String {
+    let num = token.trim_start_matches("chelis#");
+    let bare = format!("#{num}");
+    let upstream_note = if corpus_covers(upstream, token) {
+        "covered".to_string()
+    } else if upstream.contains(&bare) {
+        format!("mentions {bare} but not as a `chelis#{num}` token")
+    } else {
+        "no entry".to_string()
+    };
+    format!(
+        "  coverage checked: tests_blocked/ ({}), docs/UPSTREAM_BUGS.md ({}), tests_blocked/README.md ({})",
+        if corpus_covers(blocked, token) {
+            "covered"
+        } else {
+            "no probe"
+        },
+        upstream_note,
+        if corpus_covers(readme, token) {
+            "covered"
+        } else {
+            "no note"
+        },
+    )
 }
 
 fn check_issue_drafts(ctx: &Ctx) -> Check {
@@ -508,6 +580,7 @@ fn check_tests_blocked(ctx: &Ctx) -> Check {
             Verdict::Na,
             "no open upstream blocker with an expressible reproducer".to_string(),
             String::new(),
+            Vec::new(),
         );
     }
     if !dir_has_ch(&ctx.root.join("tests_blocked")) {
@@ -543,32 +616,59 @@ fn check_agents_heading(ctx: &Ctx, heading: &str) -> Check {
 fn check_vendored_skills(ctx: &Ctx) -> Check {
     let skills_dir = ctx.root.join("agent-skills");
     let mut problems = Vec::new();
+    // A `local_skills` entry may not shadow a shared skill — that would let a
+    // shell "own" (and silently fork) toolchain-managed content (chelis#651).
+    for local in &ctx.local_skills {
+        if skills::SHARED_SKILLS.contains(&local.as_str()) {
+            problems.push(format!(
+                "{local}: [conform] local_skills may not name a shared skill"
+            ));
+        }
+    }
     for (name, body) in skills::EMBEDDED_SKILLS {
         let path = skills_dir.join(name).join("SKILL.md");
         match read_opt(&path) {
             None => problems.push(format!("{name}: missing")),
-            Some(live) if live != *body => problems.push(format!("{name}: forked/stale")),
-            Some(_) => {}
+            Some(live) => {
+                // A trailing shell-local block (chelis#653) is shell-owned; §8
+                // byte-checks only the toolchain-owned managed span above it.
+                let (managed, block) = crate::scaffold::split_shell_local(&live);
+                if managed.trim_end() != body.trim_end() {
+                    problems.push(format!("{name}: forked/stale"));
+                }
+                if let Some(block) = block
+                    && let Err(why) = validate_shell_local_block(block)
+                {
+                    problems.push(format!("{name}: {why}"));
+                }
+            }
         }
     }
-    // Reverse direction: the shell owns *zero* extra skill content, so an
+    // Reverse direction: the shell owns *zero* extra shared-skill content, so an
     // addition is drift too. Enumerate the on-disk tree and flag any skill dir
-    // outside the pinned set, or any file beyond `SKILL.md` inside a pinned dir
-    // (materialize never creates these, so their presence is a fork/leftover).
+    // outside the pinned set (unless declared in `[conform] local_skills`), or
+    // any file beyond `SKILL.md` inside a pinned dir (materialize never creates
+    // these, so their presence is a fork/leftover).
     if let Ok(entries) = std::fs::read_dir(&skills_dir) {
         for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
             let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
             if is_dir {
-                if !skills::SHARED_SKILLS.contains(&name.as_str()) {
-                    problems.push(format!("{name}: not a pinned skill (remove)"));
-                } else if let Ok(inner) = std::fs::read_dir(e.path()) {
-                    for f in inner.flatten() {
-                        let fname = f.file_name().to_string_lossy().into_owned();
-                        if fname != "SKILL.md" {
-                            problems.push(format!("{name}/{fname}: unexpected skill file"));
+                if skills::SHARED_SKILLS.contains(&name.as_str()) {
+                    if let Ok(inner) = std::fs::read_dir(e.path()) {
+                        for f in inner.flatten() {
+                            let fname = f.file_name().to_string_lossy().into_owned();
+                            if fname != "SKILL.md" {
+                                problems.push(format!("{name}/{fname}: unexpected skill file"));
+                            }
                         }
                     }
+                } else if ctx.local_skills.iter().any(|s| s == &name) {
+                    // Repo-local domain skill (chelis#651): shell-owned, exempt.
+                } else {
+                    problems.push(format!(
+                        "{name}: not a pinned skill (remove, or declare in [conform] local_skills)"
+                    ));
                 }
             } else if name != "UPSTREAM.toml" {
                 problems.push(format!("{name}: unexpected file in agent-skills/"));
@@ -598,12 +698,82 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
     pass()
 }
 
+/// Parse the `local_skills` allowlist from a `[conform]` table in `reef.toml`
+/// (chelis#651). Hand-parsed — the crate has no `toml` dependency — accepting a
+/// single- or multi-line array of double-quoted names. `chelis-reef` ignores the
+/// `[conform]` table (no `deny_unknown_fields`), so this is its only reader.
+pub(crate) fn parse_local_skills(reef_toml: &str) -> Vec<String> {
+    let mut in_conform = false;
+    let mut collecting = false;
+    let mut buf = String::new();
+    for line in reef_toml.lines() {
+        let t = line.trim();
+        if !collecting && t.starts_with('[') && t.ends_with(']') {
+            in_conform = t == "[conform]";
+            continue;
+        }
+        if !in_conform {
+            continue;
+        }
+        if collecting {
+            buf.push_str(line);
+            buf.push('\n');
+            if line.contains(']') {
+                break;
+            }
+        } else if let Some(rest) = t.strip_prefix("local_skills")
+            && let Some(rest) = rest.trim_start().strip_prefix('=')
+        {
+            buf.push_str(rest);
+            buf.push('\n');
+            if rest.contains(']') {
+                break;
+            }
+            collecting = true;
+        }
+    }
+    let (Some(open), Some(close)) = (buf.find('['), buf.rfind(']')) else {
+        return Vec::new();
+    };
+    if close < open {
+        return Vec::new();
+    }
+    buf[open + 1..close]
+        .split(',')
+        .map(|s| s.trim().trim_matches('"').trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// A trailing shell-local block (chelis#653) must be well-formed: exactly one
+/// begin marker, an end marker after it, and nothing but whitespace past the end
+/// marker (the block is strictly the file suffix, so `sync` can regenerate the
+/// managed span above it without touching author content).
+fn validate_shell_local_block(block: &str) -> Result<(), String> {
+    use crate::scaffold::{SHELL_LOCAL_BEGIN, SHELL_LOCAL_END};
+    if block.matches(SHELL_LOCAL_BEGIN).count() != 1 {
+        return Err(format!(
+            "malformed shell-local block (expected exactly one `{SHELL_LOCAL_BEGIN}`)"
+        ));
+    }
+    let Some(end) = block.find(SHELL_LOCAL_END) else {
+        return Err(format!("shell-local block missing `{SHELL_LOCAL_END}`"));
+    };
+    if !block[end + SHELL_LOCAL_END.len()..].trim().is_empty() {
+        return Err(format!(
+            "content after `{SHELL_LOCAL_END}` (the shell-local block must be the file suffix)"
+        ));
+    }
+    Ok(())
+}
+
 fn check_parity_harness(ctx: &Ctx) -> Check {
     if !ctx.exists("parity") {
         return (
             Verdict::Na,
             "no parity/ harness (shell does not validate against external oracles)".to_string(),
             String::new(),
+            Vec::new(),
         );
     }
     if !ctx.exists("parity/pyproject.toml") {
@@ -616,6 +786,7 @@ fn check_parity_harness(ctx: &Ctx) -> Check {
         Verdict::Manual,
         "parity harness present; oracle-guard correctness needs review".to_string(),
         "confirm CI guards keep oracle libs out of shell code".to_string(),
+        Vec::new(),
     )
 }
 
@@ -634,6 +805,7 @@ fn check_chelis_src(ctx: &Ctx) -> Check {
             Verdict::Na,
             "shell does not link chelis crates as Cargo path deps".to_string(),
             String::new(),
+            Vec::new(),
         );
     }
     match &ctx.reef_toml {
@@ -892,50 +1064,88 @@ fn dir_has_ch(dir: &Path) -> bool {
     walk_files(dir).any(|p| p.extension().and_then(|s| s.to_str()) == Some("ch"))
 }
 
-/// Collect `chelis#NNN` citations appearing in any `.ch` file under `dir`.
-fn collect_citations_in_dir(dir: &Path) -> Vec<String> {
+/// One `chelis#NNN` citation and the source site it appears at (for `--explain`).
+struct Citation {
+    token: String,
+    file: PathBuf,
+    line: usize,
+}
+
+/// Collect `chelis#NNN` citations appearing in any `.ch` file under `dir`, each
+/// paired with its source site (file + 1-based line).
+fn collect_citations_in_dir(dir: &Path) -> Vec<Citation> {
     let mut out = Vec::new();
     for p in walk_files(dir) {
         if p.extension().and_then(|s| s.to_str()) != Some("ch") {
             continue;
         }
         if let Some(text) = read_opt(&p) {
-            out.extend(extract_citations(&text));
+            for (token, offset) in scan_citations(&text) {
+                out.push(Citation {
+                    token,
+                    file: p.clone(),
+                    line: line_of(&text, offset),
+                });
+            }
         }
     }
-    out.sort();
-    out.dedup();
     out
 }
 
-/// Whether `corpus` covers `citation` as a whole `chelis#NNN` token — the
-/// digits must not continue past the citation. A bare `corpus.contains` would
-/// let `chelis#293` spuriously "cover" an orphaned `chelis#29`.
-fn corpus_covers(corpus: &str, citation: &str) -> bool {
-    corpus.match_indices(citation).any(|(i, _)| {
-        corpus[i + citation.len()..]
-            .chars()
-            .next()
-            .is_none_or(|c| !c.is_ascii_digit())
-    })
+/// 1-based line number of the byte `offset` within `text`.
+fn line_of(text: &str, offset: usize) -> usize {
+    text[..offset].bytes().filter(|&b| b == b'\n').count() + 1
 }
 
-fn extract_citations(text: &str) -> Vec<String> {
+/// Whether `corpus` covers `citation` as a whole `chelis#NNN` token. The corpus
+/// is scanned with the same whitespace-tolerant scanner as the `src/` side, so a
+/// coverage entry written `chelis #316` (with a space) still covers a `chelis#316`
+/// cite (chelis#652). Whole-token by construction: [`scan_citations`] consumes all
+/// contiguous digits, so `chelis#293` never spuriously covers an orphan `chelis#29`.
+fn corpus_covers(corpus: &str, citation: &str) -> bool {
+    scan_citations(corpus)
+        .iter()
+        .any(|(tok, _)| tok == citation)
+}
+
+/// Scan `text` for narrowing citations, tolerating inline whitespace between
+/// `chelis`, `#`, and the number, so `chelis#316`, `chelis #316`, and
+/// `chelis # 316` all normalize to the canonical token `chelis#316`
+/// (chelis#652 — a space-form cite/coverage entry must not read as uncovered).
+/// Returns each canonical `chelis#NNN` token paired with the byte offset where
+/// the match starts, in source order (the offset feeds `--explain` site
+/// reporting, chelis#654). Newlines are NOT tolerated between the parts, so a
+/// sentence-final `chelis` followed by an unrelated `#heading` on the next line
+/// is not a false match.
+fn scan_citations(text: &str) -> Vec<(String, usize)> {
+    fn is_inline_ws(b: u8) -> bool {
+        b == b' ' || b == b'\t'
+    }
     let mut out = Vec::new();
     let bytes = text.as_bytes();
-    let needle = b"chelis#";
     let mut i = 0;
-    while let Some(rel) = text[i..].find("chelis#") {
+    while let Some(rel) = text[i..].find("chelis") {
         let start = i + rel;
-        let mut j = start + needle.len();
-        let num_start = j;
-        while j < bytes.len() && bytes[j].is_ascii_digit() {
+        let mut j = start + "chelis".len();
+        while j < bytes.len() && is_inline_ws(bytes[j]) {
             j += 1;
         }
-        if j > num_start {
-            out.push(text[start..j].to_string());
+        if j < bytes.len() && bytes[j] == b'#' {
+            j += 1;
+            while j < bytes.len() && is_inline_ws(bytes[j]) {
+                j += 1;
+            }
+            let num_start = j;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > num_start {
+                out.push((format!("chelis#{}", &text[num_start..j]), start));
+            }
         }
-        i = j.max(start + 1);
+        // Advance just past this `chelis` occurrence so overlapping tokens
+        // (`chelischelis#5`) are still found.
+        i = start + "chelis".len();
     }
     out
 }
@@ -1018,9 +1228,17 @@ mod tests {
 
     #[test]
     fn citation_extraction() {
-        let cites = extract_citations("fail(...) // blocked on chelis#293 and chelis#345x");
-        assert_eq!(cites, vec!["chelis#293", "chelis#345"]);
-        assert!(extract_citations("no citation, chelis# alone").is_empty());
+        let cites = |t: &str| scan_citations(t).into_iter().map(|(c, _)| c).collect::<Vec<_>>();
+        assert_eq!(
+            cites("fail(...) // blocked on chelis#293 and chelis#345x"),
+            vec!["chelis#293", "chelis#345"]
+        );
+        assert!(cites("no citation, chelis# alone").is_empty());
+        // A space between `chelis`, `#`, and the number canonicalizes to the
+        // no-space token (chelis#652). A newline in between does NOT match.
+        assert_eq!(cites("blocked on chelis #316"), vec!["chelis#316"]);
+        assert_eq!(cites("see chelis # 42 here"), vec!["chelis#42"]);
+        assert!(cites("chelis\n#316").is_empty());
     }
 
     #[test]
@@ -1103,6 +1321,36 @@ mod tests {
         assert!(corpus_covers("see chelis#293 here", "chelis#293"));
         assert!(!corpus_covers("only chelis#293 here", "chelis#29"));
         assert!(corpus_covers("chelis#29\n", "chelis#29"));
+        // A space-form coverage entry still covers the canonical cite
+        // (chelis#652: the whitespace variant must not read as uncovered).
+        assert!(corpus_covers(
+            "tracked upstream as chelis #316 (open)",
+            "chelis#316"
+        ));
+        assert!(corpus_covers("[chelis # 316] is the issue", "chelis#316"));
+        assert!(!corpus_covers("unrelated chelis #317 note", "chelis#316"));
+    }
+
+    #[test]
+    fn local_skills_parse() {
+        // single-line
+        assert_eq!(
+            parse_local_skills(
+                "[package]\nname = \"s\"\n[conform]\nlocal_skills = [\"chelis-std\"]\n"
+            ),
+            vec!["chelis-std".to_string()]
+        );
+        // multi-line, with a trailing comma
+        let toml = "[conform]\nlocal_skills = [\n  \"a\",\n  \"b\",\n]\n[dependencies]\n";
+        assert_eq!(
+            parse_local_skills(toml),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        // absent section / key
+        assert!(parse_local_skills("[package]\nname = \"s\"\n").is_empty());
+        assert!(parse_local_skills("[conform]\nother = 1\n").is_empty());
+        // a `local_skills` outside [conform] is ignored
+        assert!(parse_local_skills("[other]\nlocal_skills = [\"x\"]\n").is_empty());
     }
 
     #[test]

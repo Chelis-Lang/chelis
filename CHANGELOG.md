@@ -4,6 +4,35 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **`reef conform` downstream-adoption friction (chelis#651–#655).** Five fixes
+  surfaced by the first real downstream `conform bump` (Chelis-Lang/school#171 →
+  #172):
+  - **§8 repo-local domain skills (#651).** A shell declares skills it owns in
+    `reef.toml` under `[conform] local_skills = [...]`; `conform sync` preserves
+    them and `conform audit` §8 exempts them, instead of silently deleting a
+    shell's domain skill (e.g. School's `chelis-std`). An undeclared extra skill
+    is still pruned, now with a warning.
+  - **§8 shell-specific overrides (#653).** A trailing
+    `<!-- shell-local:begin -->…<!-- shell-local:end -->` block in a shared
+    `SKILL.md` is shell-owned: `conform sync` regenerates the toolchain body above
+    it verbatim (upstream edits still propagate downstream) and preserves the
+    block; §8 byte-checks only the managed span; `conform bump` flags a skill
+    whose upstream body changed underneath a block.
+  - **§4 whitespace-tolerant citations (#652).** `chelis #316` (with a space) now
+    matches a `chelis#316` cite on both the `src/` and `docs/UPSTREAM_BUGS.md`
+    sides, ending a false "uncovered narrowing citation".
+  - **`conform audit --explain` (#654).** Names the citation site(s) and the
+    per-candidate coverage reasoning behind a failing §4 row; the evidence is also
+    always emitted in `--json`.
+  - **Categorized `conform bump` report (#655).** The post-bump audit separates
+    bump-owned failures (its own pins/stamps/skills — a real defect, exit 1) from
+    author-follow-up rows (CI wiring, pre-existing doc fixes); a clean bump that
+    leaves only follow-up exits 0 and lists the remaining steps.
+
 ## [0.15.1] — 2026-07-10
 
 ### Added
