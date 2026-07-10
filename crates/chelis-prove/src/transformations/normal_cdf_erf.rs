@@ -18,11 +18,11 @@
 //!   envelope. The CDF value is then backed by a *certificate*, not a contract.
 //!
 //! This module implements ONLY the envelope-lane pre-pass. It does NOT remove or
-//! alter the contract lane, and — like every transformation — it has **no
-//! production caller** (the pipeline is unwired; see
-//! `spec/design/probe_434_transcendental.md` p16). It engages only when the
-//! transformation pipeline is run, which is the deferred de-narrowing step. It
-//! sits behind the SAME unwired engagement point as `abstract_subterm`.
+//! alter the contract lane. The property-runner dispatch runs it (then
+//! `abstract_subterm`) on a non-inlineable transcendental goal via the
+//! certified-envelope lane (chelis#434 milestone 4); a `normal_cdf` site whose
+//! argument is soundly boundable and whose `erf` residual proves over reals
+//! discharges as `proven_modulo_certified_envelope`.
 //!
 //! ## Soundness of the identity
 //!
@@ -30,9 +30,11 @@
 //! preserves the goal's meaning; the only approximation introduced downstream is
 //! the `erf` envelope's certified `eps`, tagged `SpecialFunctionCertified` by the
 //! abstract-subterm pass. `1/√2` is emitted as the nearest `f64`
-//! (`0.7071067811865476`); the multiply is exact-real in the SMT lowering
-//! (RealLit), so no rounding enters the *model* (any residual is inside the
-//! downstream envelope band, which the abstract-subterm certificate covers).
+//! (`0.7071067811865476`), so the argument scale carries a ~1e-17 relative
+//! rounding versus the exact `1/√2` — negligible and DOMINATED by the erf
+//! envelope's certified `eps` (~5.7e-7), which soundly bounds the resulting
+//! `erf` value regardless. (The multiply itself is an exact-real `RealLit` in the
+//! SMT lowering; the only inexactness is representing `1/√2` as an `f64`.)
 
 use crate::discharge::{Goal, GoalShape};
 use crate::solver::{ArithOp, SmtExpr};

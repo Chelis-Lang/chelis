@@ -23,12 +23,12 @@
 //!
 //! Soundness rests entirely on each box's certified `eps`. This module does NOT
 //! mint envelopes: [`SpecialFnEnvelope::committed`] serves ONLY committed,
-//! certified data. Today that is `erf` alone (converted from
-//! [`crate::erf_envelope::ErfEnvelope::committed`]); `exp`/`log`/`sqrt` return
-//! `None` until their certified data lands (the certify anchor is erf-specialized
-//! / env-blocked today — see `spec/design/probe_434_transcendental.md` p19 and
-//! `crates/chelis-prove/data/special_fn_envelopes/README.md`). An uncertified or
-//! absent envelope makes the consumer DECLINE, never guess.
+//! certified data — `erf` (converted from
+//! [`crate::erf_envelope::ErfEnvelope::committed`], Gappa+Arb) plus `exp`/`log`/
+//! `sqrt` (Arb mean-value enclosure, cross-checked `<= naive`; see
+//! `crates/chelis-prove/data/special_fn_envelopes/README.md`). Any other function
+//! returns `None`, and an absent envelope makes the consumer DECLINE, never
+//! guess.
 
 use serde::{Deserialize, Serialize};
 
@@ -64,6 +64,27 @@ impl Domain {
     }
 }
 
+/// The monotonicity of the special FUNCTION (not its polynomial approximation)
+/// over the envelope's covered range. This is what makes endpoint sampling in
+/// [`SpecialFnEnvelope::sound_range_bound`] SOUND: a monotone `f` satisfies
+/// `f([a,b]) ⊆ [f(a), f(b)]`, so its range is pinned by the endpoints. A
+/// `NonMonotonic` function needs the interior-extremum guard instead. Recorded
+/// per envelope so the soundness basis is machine-visible; unknown data defaults
+/// (via serde) to the conservative `NonMonotonic`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Monotonicity {
+    /// `f` is (non-strictly) increasing on the covered range (`erf`, `exp`,
+    /// `log`, `sqrt`).
+    Increasing,
+    /// `f` is (non-strictly) decreasing on the covered range.
+    Decreasing,
+    /// `f` is not monotone (or unknown) — endpoint sampling is unsound, so the
+    /// interior-extremum guard is used.
+    #[default]
+    NonMonotonic,
+}
+
 /// One approximation arm. Generalizes [`ErfArm`]: `Saturation` carries any
 /// constant (not just `±1`); `Central` is a Horner polynomial (descending
 /// degree, `coeffs[0]` highest). Central coeffs serialize as exact C99 hex-float
@@ -85,6 +106,22 @@ pub enum EnvelopeArm {
     },
 }
 
+/// Sound interval enclosure of a descending-degree polynomial over `[lo, hi]` by
+/// interval Horner. Over-approximates the true range (never narrower), so it is a
+/// sound bound of the polynomial's value — including any INTERIOR extremum that
+/// endpoint sampling would miss.
+fn interval_horner(coeffs: &[f64], lo: f64, hi: f64) -> (f64, f64) {
+    let mut acc = (0.0_f64, 0.0_f64);
+    for &c in coeffs {
+        // acc = acc * [lo, hi] + c  (interval mul then shift).
+        let ps = [acc.0 * lo, acc.0 * hi, acc.1 * lo, acc.1 * hi];
+        let mlo = ps.iter().copied().fold(f64::INFINITY, f64::min);
+        let mhi = ps.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        acc = (mlo + c, mhi + c);
+    }
+    acc
+}
+
 impl EnvelopeArm {
     /// Evaluate the arm's approximation at `x` (the center, before the `±eps`
     /// band). Horner for the polynomial; the constant for saturation.
@@ -97,6 +134,39 @@ impl EnvelopeArm {
                     acc = acc * x + c;
                 }
                 acc
+            }
+        }
+    }
+
+    /// A SOUND enclosure `[lo, hi]` of this arm's approximation over the whole
+    /// segment `[a, b]` — the interior-extremum guard. Saturation is constant;
+    /// the `Central` polynomial uses subdivided interval Horner (hull over the
+    /// sub-intervals), which soundly captures an interior extremum a
+    /// non-monotonic arm could have. Endpoint sampling alone is UNSOUND for a
+    /// non-monotonic polynomial; this makes no monotonicity assumption.
+    pub fn sound_approx_range(&self, a: f64, b: f64) -> (f64, f64) {
+        match self {
+            EnvelopeArm::Saturation { value } => (*value, *value),
+            EnvelopeArm::Central { coeffs } => {
+                // Fine subdivision keeps the interval-Horner dependency error
+                // small so the bound stays tight for the (monotonic) committed
+                // arms while remaining sound for any future arm.
+                const SUBDIV: usize = 256;
+                let width = (b - a) / SUBDIV as f64;
+                let mut lo = f64::INFINITY;
+                let mut hi = f64::NEG_INFINITY;
+                for i in 0..SUBDIV {
+                    let sa = a + width * i as f64;
+                    let sb = if i + 1 == SUBDIV {
+                        b
+                    } else {
+                        a + width * (i + 1) as f64
+                    };
+                    let (elo, ehi) = interval_horner(coeffs, sa, sb);
+                    lo = lo.min(elo);
+                    hi = hi.max(ehi);
+                }
+                (lo, hi)
             }
         }
     }
@@ -162,6 +232,12 @@ pub struct SpecialFnEnvelope {
     pub output_clamp: Option<(f64, f64)>,
     /// Boxes in ascending `lo` order, contiguous across the covered range.
     pub boxes: Vec<SpecialFnEnvelopeBox>,
+    /// Monotonicity of the FUNCTION over the covered range — the soundness basis
+    /// for endpoint sampling in [`SpecialFnEnvelope::sound_range_bound`].
+    /// `#[serde(default)]` = the conservative `NonMonotonic` (interior-extremum
+    /// guard) for any data that omits it. `committed()` stamps the true value.
+    #[serde(default)]
+    pub monotonicity: Monotonicity,
     /// How the boxes' `eps` were certified (audit trail; enables reproducible
     /// `validate`). Defaults to empty for proposer drafts.
     #[serde(default)]
@@ -202,6 +278,8 @@ impl SpecialFnEnvelope {
             domain: Domain::AllReals,
             output_clamp: Some((-1.0, 1.0)),
             boxes,
+            // erf is strictly increasing on the whole real line.
+            monotonicity: Monotonicity::Increasing,
             provenance: SpecialFnProvenance {
                 certify_prec: provenance.certify_prec,
                 certify_subdivisions: provenance.certify_subdivisions,
@@ -222,10 +300,12 @@ impl SpecialFnEnvelope {
             "sqrt" => SQRT_ENVELOPE_JSON,
             _ => return None,
         };
-        Some(
-            serde_json::from_str(json)
-                .unwrap_or_else(|e| panic!("committed {fn_name} envelope must be valid JSON: {e}")),
-        )
+        let mut env: SpecialFnEnvelope = serde_json::from_str(json)
+            .unwrap_or_else(|e| panic!("committed {fn_name} envelope must be valid JSON: {e}"));
+        // Stamp the FUNCTION's monotonicity (the endpoint-sampling soundness
+        // basis) from the registry — exp/log/sqrt are all strictly increasing.
+        env.monotonicity = SpecialFnRegistry::monotonicity(fn_name).unwrap_or_default();
+        Some(env)
     }
 
     /// Find the box containing `x`, if any (inclusive edges; a shared boundary
@@ -300,12 +380,25 @@ impl SpecialFnEnvelope {
         for b in &boxes {
             let seg_lo = arg_lo.max(b.lo);
             let seg_hi = arg_hi.min(b.hi);
-            let approx_at_lo = b.arm.approx(seg_lo);
-            let approx_at_hi = b.arm.approx(seg_hi);
-            let point_lo = approx_at_lo.min(approx_at_hi) - b.eps;
-            let point_hi = approx_at_lo.max(approx_at_hi) + b.eps;
-            overall_lo = overall_lo.min(point_lo);
-            overall_hi = overall_hi.max(point_hi);
+            // SOUND enclosure of the approximation over the WHOLE segment.
+            //
+            // For a MONOTONE function the range is pinned by the endpoints
+            // (`f([a,b]) ⊆ [f(a), f(b)]`), so `[approx(a), approx(b)]` (min/max)
+            // is a tight sound enclosure — this uses the FUNCTION's monotonicity,
+            // recorded per envelope, NOT the polynomial's. For a `NonMonotonic`
+            // function endpoint sampling is UNSOUND (an interior extremum could be
+            // missed), so we fall back to the subdivided interval-Horner
+            // interior-extremum guard (sound, looser).
+            let (approx_lo, approx_hi) = match self.monotonicity {
+                Monotonicity::Increasing | Monotonicity::Decreasing => {
+                    let a = b.arm.approx(seg_lo);
+                    let c = b.arm.approx(seg_hi);
+                    (a.min(c), a.max(c))
+                }
+                Monotonicity::NonMonotonic => b.arm.sound_approx_range(seg_lo, seg_hi),
+            };
+            overall_lo = overall_lo.min(approx_lo - b.eps);
+            overall_hi = overall_hi.max(approx_hi + b.eps);
         }
 
         // Per-function output clamp: a soundness-preserving tightening (the true
@@ -313,6 +406,15 @@ impl SpecialFnEnvelope {
         if let Some((clamp_lo, clamp_hi)) = self.output_clamp {
             overall_lo = overall_lo.max(clamp_lo);
             overall_hi = overall_hi.min(clamp_hi);
+        }
+
+        // Guard against a non-finite or INVERTED result (e.g. a clamp whose
+        // `lo > hi` cuts the band empty). An inverted band would emit
+        // `env_lo <= v <= env_hi` with `env_lo > env_hi` — an unsatisfiable
+        // precondition that makes the residual VACUOUSLY provable (a false
+        // proof). Fail closed instead.
+        if !overall_lo.is_finite() || !overall_hi.is_finite() || overall_lo > overall_hi {
+            return None;
         }
 
         Some((overall_lo, overall_hi))
@@ -337,6 +439,15 @@ impl SpecialFnRegistry {
             "erf" | "exp" => Some(Domain::AllReals),
             "log" => Some(Domain::Positive),
             "sqrt" => Some(Domain::NonNegative),
+            _ => None,
+        }
+    }
+
+    /// The monotonicity of `fn_name` over its covered range, or `None` if not a
+    /// known special function. erf/exp/log/sqrt are all strictly increasing.
+    pub fn monotonicity(fn_name: &str) -> Option<Monotonicity> {
+        match fn_name {
+            "erf" | "exp" | "log" | "sqrt" => Some(Monotonicity::Increasing),
             _ => None,
         }
     }
@@ -528,6 +639,7 @@ mod tests {
             domain: Domain::NonNegative,
             output_clamp: Some((0.0, 1.0)),
             boxes: boxes.clone(),
+            monotonicity: Monotonicity::Increasing,
             provenance: SpecialFnProvenance::default(),
         };
         let unclamped = SpecialFnEnvelope {
@@ -535,6 +647,7 @@ mod tests {
             domain: Domain::NonNegative,
             output_clamp: None,
             boxes,
+            monotonicity: Monotonicity::Increasing,
             provenance: SpecialFnProvenance::default(),
         };
         // raw band over [0,1] for p(x)=x, eps=0.5 is [-0.5, 1.5].
@@ -568,6 +681,7 @@ mod tests {
                     proof_kind: ProofKind::Gappa,
                 },
             ],
+            monotonicity: Monotonicity::Increasing,
             provenance: SpecialFnProvenance::default(),
         };
         assert!(
@@ -595,8 +709,80 @@ mod tests {
                     proof_kind: ProofKind::Gappa,
                 },
             ],
+            monotonicity: Monotonicity::Increasing,
             provenance: SpecialFnProvenance::default(),
         };
         assert!(!gap.is_well_formed(), "a coverage gap is not well formed");
+    }
+
+    #[test]
+    fn nonmonotonic_arm_interior_extremum_is_captured() {
+        // The red-team false-proof trap: for a NON-monotonic arm, endpoint
+        // sampling MISSES an interior extremum and is unsound. p(x) = x² − x has
+        // a minimum of −0.25 at x=0.5, but p(0)=p(1)=0 — so endpoint sampling
+        // would return [0,0]. A NonMonotonic envelope must use the interior guard
+        // and its band must CONTAIN the interior minimum.
+        let env = SpecialFnEnvelope {
+            fn_name: "synthetic".into(),
+            domain: Domain::AllReals,
+            output_clamp: None,
+            boxes: vec![SpecialFnEnvelopeBox {
+                lo: 0.0,
+                hi: 1.0,
+                arm: EnvelopeArm::Central {
+                    coeffs: vec![1.0, -1.0, 0.0], // x² − x
+                },
+                eps: 0.0,
+                proof_kind: ProofKind::Gappa,
+            }],
+            monotonicity: Monotonicity::NonMonotonic,
+            provenance: SpecialFnProvenance::default(),
+        };
+        let (lo, hi) = env.sound_range_bound(0.0, 1.0).unwrap();
+        assert!(
+            lo <= -0.25 && hi >= 0.0,
+            "NonMonotonic band must contain the interior min −0.25, got [{lo}, {hi}]"
+        );
+        // Contrast: the SAME polynomial declared Increasing (a caller error) would
+        // endpoint-sample to [0,0] — which is exactly why monotonicity must be a
+        // recorded property of the true function, not assumed.
+        let wrong = SpecialFnEnvelope {
+            monotonicity: Monotonicity::Increasing,
+            ..env.clone()
+        };
+        let (wlo, whi) = wrong.sound_range_bound(0.0, 1.0).unwrap();
+        assert!(
+            wlo > -0.25,
+            "endpoint sampling (Increasing) misses the interior min — [{wlo},{whi}]"
+        );
+    }
+
+    #[test]
+    fn clamp_inversion_declines_never_vacuous() {
+        // The red-team false-proof trap: an INVERTED output clamp would cut the
+        // band empty (lo > hi), which as fresh-var preconditions is unsatisfiable
+        // → the residual is VACUOUSLY provable (a false proof). sound_range_bound
+        // must DECLINE (return None) instead of emitting an inverted band.
+        let env = SpecialFnEnvelope {
+            fn_name: "synthetic".into(),
+            domain: Domain::AllReals,
+            output_clamp: Some((1.0, 0.0)), // inverted: lo > hi
+            boxes: vec![SpecialFnEnvelopeBox {
+                lo: 0.0,
+                hi: 1.0,
+                arm: EnvelopeArm::Central {
+                    coeffs: vec![1.0, 0.0],
+                }, // p(x) = x, band [0,1]
+                eps: 0.0,
+                proof_kind: ProofKind::Gappa,
+            }],
+            monotonicity: Monotonicity::Increasing,
+            provenance: SpecialFnProvenance::default(),
+        };
+        assert_eq!(
+            env.sound_range_bound(0.0, 1.0),
+            None,
+            "an inverted clamp must DECLINE, never emit a vacuous inverted band"
+        );
     }
 }

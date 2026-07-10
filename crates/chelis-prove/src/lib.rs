@@ -22,8 +22,9 @@ pub mod clarabel_sos;
 // no Arb link); the runtime / Beacon relaxation consume it without linking Arb.
 pub mod erf_envelope;
 // chelis#434: the function-keyed generalization of the erf envelope to a
-// registry of {erf, exp, log, sqrt}. Serves ONLY committed certified data
-// (erf today); the abstract-subterm finder consumes it. No production wiring.
+// registry of {erf, exp, log, sqrt}, all with committed certified data (erf:
+// Gappa+Arb; exp/log/sqrt: Arb mean-value). The abstract-subterm finder consumes
+// it; the property-runner certified-envelope lane wires it into dispatch.
 pub mod special_fn_envelope;
 // WI-16 Carcara auditability: re-check cvc5's Alethe proofs. The SMT-LIB
 // problem renderer and the audit-outcome type are always present (so the
@@ -74,8 +75,8 @@ pub use artifact::{
 // WI-13 committed erf-envelope consumer surface (always present, no Arb link).
 pub use erf_envelope::{ErfArm, ErfEnvelope, ErfEnvelopeBox, ErfEnvelopeProvenance, ProofKind};
 pub use special_fn_envelope::{
-    Domain, EnvelopeArm, SpecialFnEnvelope, SpecialFnEnvelopeBox, SpecialFnProvenance,
-    SpecialFnRegistry,
+    Domain, EnvelopeArm, Monotonicity, SpecialFnEnvelope, SpecialFnEnvelopeBox,
+    SpecialFnProvenance, SpecialFnRegistry,
 };
 // chelis#439: the Beacon subprocess shim (transport-only DischargeEngine for
 // GoalShape::BoxRange) and its dispatch-site-owned content-addressed byte store.

@@ -6,10 +6,10 @@
     { "lo": -2.0, "hi": 2.0, "arm": "central", "degree": 12 }
   ],
   "generator": {
-    "recipe": "scripts/generate_special_fn_envelope.py exp (numpy.polyfit @ Chebyshev vs mpmath.exp) -> certify_special_fn_envelope stamp (Arb naive whole-box)",
+    "recipe": "scripts/generate_special_fn_envelope.py exp (numpy.polyfit @ Chebyshev vs mpmath.exp) -> certify_special_fn_envelope stamp (Arb mean-value whole-box, cross-checked <= naive)",
     "committed": "data/special_fn_envelopes/exp_envelope.json",
-    "box_note": "single central box [-2,2] (BS discount exp(-r*t), density exp(-x^2/2) over a finance-realistic sub-range). Wider boxes (e.g. [-15,2]) need the mean-value certifier for a tight eps; the naive certifier is too loose there.",
-    "eps_note": "committed eps ~2.8e-5 is the SOUND naive Arb whole-box bound (true fit error ~4e-10); a tighter eps needs the exp mean-value form (exp'=exp), a scoped follow-up"
+    "box_note": "single central box [-2,2] (BS discount exp(-r*t), density exp(-x^2/2) over a finance-realistic sub-range). Wider boxes (e.g. [-15,2]) would need a piecewise decomposition.",
+    "eps_note": "committed eps ~1.4e-8 is the SOUND Arb mean-value whole-box bound (true fit error ~4e-10), cross-checked <= the naive bound; ~2000x tighter than the earlier naive-only slice"
   },
-  "certify_status": "CERTIFIED: arb_enclosure (naive whole-box), eps ~2.8e-5 over [-2,2]"
+  "certify_status": "CERTIFIED: arb_enclosure (mean-value whole-box, cross-checked <= naive), eps ~1.4e-8 over [-2,2]"
 }

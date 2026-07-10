@@ -167,6 +167,7 @@ fn obligation_display_status(outcome: &ObligationOutcome) -> &'static str {
         // not-proven / disclosed-caveat distinction (chelis#422).
         CompositeVerdict::Proven
         | CompositeVerdict::ProvenModuloRealArithmetic
+        | CompositeVerdict::ProvenModuloCertifiedEnvelope
         | CompositeVerdict::ProvenModuloFuzzValidatedContract
         | CompositeVerdict::ProvenModuloAssertedAxiom
         | CompositeVerdict::SoundApproximate

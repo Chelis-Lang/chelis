@@ -14,11 +14,12 @@
 //!
 //! The finder is driven by [`SpecialFnRegistry`]: it abstracts any
 //! `Apply(f, [arg])` where `f` is a known special function `{erf, exp, log,
-//! sqrt}` AND a certified envelope for `f` is committed. Today only `erf` has
-//! committed data, so `exp`/`log`/`sqrt` sites DECLINE (identity) — the honest
-//! floor until their certified envelopes land. Each function carries a
-//! [`Domain`] guard (`log` needs `arg > 0`, `sqrt` needs `arg >= 0`); a site
-//! whose argument range is not provably inside the domain declines.
+//! sqrt}` AND a certified envelope for `f` is committed. All four have committed
+//! data (`erf`: Gappa+Arb; `exp`/`log`/`sqrt`: Arb mean-value enclosure); a
+//! function with no committed envelope would DECLINE (identity) — the honest
+//! floor. Each function carries a [`Domain`] guard (`log` needs `arg > 0`,
+//! `sqrt` needs `arg >= 0`); a site whose argument range is not provably inside
+//! the domain declines.
 //!
 //! # Sound range evaluation
 //!
@@ -864,7 +865,8 @@ mod tests {
 
     use crate::erf_envelope::ProofKind;
     use crate::special_fn_envelope::{
-        Domain, EnvelopeArm, SpecialFnEnvelope, SpecialFnEnvelopeBox, SpecialFnProvenance,
+        Domain, EnvelopeArm, Monotonicity, SpecialFnEnvelope, SpecialFnEnvelopeBox,
+        SpecialFnProvenance,
     };
     use std::collections::HashMap;
 
@@ -889,6 +891,7 @@ mod tests {
                 eps,
                 proof_kind: ProofKind::Gappa,
             }],
+            monotonicity: Monotonicity::Increasing,
             provenance: SpecialFnProvenance::default(),
         }
     }
