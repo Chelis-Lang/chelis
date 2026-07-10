@@ -314,6 +314,18 @@ helper; the work is wiring it into the build error site, propagating
 the `--no-auto-fetch` flag through the build command, and refining the
 error catalog.
 
+**Canary/dev escape hatch — `CHELIS_REEF_ALLOW_DEP_COMPILER_DRIFT`.** When
+this env is set to a non-empty, non-`0` value, `validate_manifest` waives
+*only* the `package.compiler` equality assertion — every other manifest
+check stays enforced — and emits a loud per-package warning naming the
+package and both pins. Its sole purpose is to let the ecosystem drift
+canary (and local dev) build a shell's *code* against chelis HEAD while its
+released dependencies still pin the compiler they were cut against: the
+canary asks "does this code still compile against HEAD", whereas a
+dependency's pin freshness is that shell's own release-cadence concern, not
+a code-drift signal. It is **not** for a shell's own CI gate, where the pin
+equality is the whole point of the check; leave it unset there.
+
 ---
 
 ### Item 9 — Lockfile records remote origin
