@@ -4311,7 +4311,7 @@ fn compiler_pin_outcome(
     if allow_drift {
         Ok(Some(format!(
             "warning: allowing compiler-pin drift in `{}` (`{}` vs \
-             `{CURRENT_COMPILER_VERSION}`) — {ALLOW_DEP_COMPILER_DRIFT_ENV} set",
+             `{CURRENT_COMPILER_VERSION}`); {ALLOW_DEP_COMPILER_DRIFT_ENV} set",
             manifest.package.name, manifest.package.compiler
         )))
     } else {
