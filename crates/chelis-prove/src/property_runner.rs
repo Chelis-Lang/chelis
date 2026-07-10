@@ -280,6 +280,7 @@ impl PropertyOutcome {
             // not-proven / disclosed-caveat distinction.
             CompositeVerdict::Proven
             | CompositeVerdict::ProvenModuloRealArithmetic
+            | CompositeVerdict::ProvenModuloCertifiedEnvelope
             | CompositeVerdict::ProvenModuloFuzzValidatedContract
             | CompositeVerdict::ProvenModuloAssertedAxiom
             | CompositeVerdict::SoundApproximate

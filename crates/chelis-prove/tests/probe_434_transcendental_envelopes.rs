@@ -21,46 +21,56 @@
 use chelis_prove::composition::{base_verdict_from_discharge, composed_qualifier_strings};
 use chelis_prove::discharge::{Qualifier, QualifierSet, Soundness};
 
-/// p18: a green discharge carrying ONLY `SpecialFunctionCertified` (the tag the
-/// abstract-subterm transform stamps) has no badged kind yet, so the lattice
-/// projects it to `unsupported` — never a silent proof. This is the honest
-/// floor until the envelope path is both reachable AND paired with a badged
-/// qualifier (e.g. `RealArith` for the residual's over-reals discharge).
+/// p18 (updated for the chelis#434 honest tier, milestone 3): a green discharge
+/// carrying `SpecialFunctionCertified` — the tag the abstract-subterm transform
+/// stamps — now projects to the distinct honest tier
+/// `proven_modulo_certified_envelope` (it was the pre-tier `unsupported` floor).
+/// It NEVER reads as plain `proven` / `proven_modulo_real_arithmetic`.
 #[test]
-fn p18_special_function_certified_alone_projects_to_unsupported() {
+fn p18_special_function_certified_projects_to_certified_envelope_tier() {
     let quals = QualifierSet::from_iter_kinds([Qualifier::SpecialFunctionCertified]);
     let verdict = base_verdict_from_discharge(Soundness::SoundApproximate, &quals);
     let token = serde_json::to_value(verdict).unwrap();
     assert_eq!(
         token,
-        serde_json::json!("unsupported"),
-        "SpecialFunctionCertified alone must project to the honest `unsupported` \
-         floor, got {token}"
+        serde_json::json!("proven_modulo_certified_envelope"),
+        "SpecialFunctionCertified must project to the certified-envelope tier, got {token}"
     );
 }
 
-/// p18: the certified-envelope lane reaches a PROOF badge only when the
-/// residual's own over-reals discharge contributes the `RealArith` badged
-/// qualifier. The union {SpecialFunctionCertified, RealArith} at
-/// SoundApproximate projects to `proven_modulo_real_arithmetic`, and BOTH
-/// caveats are disclosed in the qualifier array — the special-function
-/// certificate is not silently dropped.
+/// p18: the real envelope discharge carries BOTH `SpecialFunctionCertified` (the
+/// envelope) AND `RealArith` (the residual's over-reals proof). The
+/// certified-envelope tier DOMINATES — the badge discloses the envelope
+/// dependency and NEVER launders into `proven_modulo_real_arithmetic` — while
+/// BOTH caveats remain in the disclosed qualifier array.
 #[test]
-fn p18_special_function_certified_plus_real_arith_projects_to_proven_modulo_real_arith() {
+fn p18_special_function_certified_plus_real_arith_projects_to_certified_envelope_tier() {
     let quals =
         QualifierSet::from_iter_kinds([Qualifier::SpecialFunctionCertified, Qualifier::RealArith]);
     let verdict = base_verdict_from_discharge(Soundness::SoundApproximate, &quals);
     let token = serde_json::to_value(verdict).unwrap();
     assert_eq!(
         token,
-        serde_json::json!("proven_modulo_real_arithmetic"),
-        "SpecialFunctionCertified + RealArith must project to \
-         proven_modulo_real_arithmetic, got {token}"
+        serde_json::json!("proven_modulo_certified_envelope"),
+        "SpecialFunctionCertified + RealArith must project to the certified-envelope \
+         tier (never proven_modulo_real_arithmetic), got {token}"
     );
     let disclosed = composed_qualifier_strings(Soundness::SoundApproximate, &quals, &[]);
     assert!(
         disclosed.contains(&"special_function_certified") && disclosed.contains(&"real_arithmetic"),
         "both caveats must be disclosed, got {disclosed:?}"
+    );
+
+    // Reserved direction: an envelope-FREE over-reals proof stays
+    // proven_modulo_real_arithmetic — the new token never leaks onto it.
+    let real_only = QualifierSet::from_iter_kinds([Qualifier::RealArith]);
+    assert_eq!(
+        serde_json::to_value(base_verdict_from_discharge(
+            Soundness::SoundApproximate,
+            &real_only
+        ))
+        .unwrap(),
+        serde_json::json!("proven_modulo_real_arithmetic"),
     );
 }
 
