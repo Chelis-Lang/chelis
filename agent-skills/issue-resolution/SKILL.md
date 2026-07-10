@@ -1,12 +1,15 @@
 ---
 name: issue-resolution
-description: Use when picking up a GitHub issue to investigate or fix. Claims the issue via assignee before any code is written so others can see it is in progress, scopes the work from the full issue thread, and links the PR with honest Closes/Part-of wording.
+description: Use when picking up, resolving, addressing, fixing, working, tackling, triaging, or closing out one or more GitHub issues (tickets, bug reports, feature requests) in chelis or a shell repo, whether referenced by number (#N) or URL or handed as a batch, and even when a PR already exists. Claims each issue via assignee (gh issue edit --add-assignee @me) before branching or writing any code so others can see it is in progress, scopes the work from the full issue thread (body and every comment), and links the PR with honest Closes/Part-of wording.
 ---
 
 # Issue Resolution
 
-Use this skill whenever a session or subagent picks up a GitHub issue
-(in chelis or a shell repo) to investigate or fix.
+Use this skill whenever a session or subagent picks up, resolves,
+addresses, fixes, works, tackles, or closes out one or more GitHub
+issues (tickets, bug reports, feature requests) in chelis or a shell
+repo, whether given an issue number, a URL, or a batch to work through,
+and even when a PR for the issue already exists.
 
 ## Claim The Issue First
 

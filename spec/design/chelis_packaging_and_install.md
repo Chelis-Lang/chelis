@@ -218,9 +218,16 @@ built in the glibc-2.31 container job so the first binary a bare machine runs
 loads on the oldest supported glibc, #330) and `chelisup.sh` itself, making the
 canonical bootstrap URL
 `https://github.com/Chelis-Lang/chelis/releases/latest/download/chelisup.sh`.
-**Private-repo caveat:** until chelis releases are public the bootstrap needs a
-PAT or an authenticated `gh` (the fallback the current School install script
-already uses).
+**Private-repo caveat:** until chelis releases are public the public release URL
+does not serve asset bytes (a plain `curl` gets a `404`), so the bootstrap needs
+an authenticated [`gh`](https://cli.github.com). The checkout-free equivalent of
+the `curl | sh` line fetches the published script asset through `gh` and pipes it
+to `sh` —
+`gh release download --repo Chelis-Lang/chelis --pattern chelisup.sh --output - | sh`
+— and the script then uses `gh release download` again for the `chelisup-<slug>`
+binary (the fallback the current School install script already uses). From a
+checkout, `sh crates/chelisup/bootstrap/chelisup.sh` runs the same script
+directly.
 
 ### 5.6 Relationship to binary distribution (chelis#468)
 

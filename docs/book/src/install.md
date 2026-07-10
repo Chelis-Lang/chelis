@@ -14,21 +14,29 @@ also owns upgrades, the recorded default, and uninstall.
 
 ### 1. Bootstrap chelisup
 
-Once chelis releases are public, one line drops the prebuilt `chelisup` at
-`~/.chelis/bin/chelisup` and prints the PATH line to add:
+`Chelis-Lang/chelis` is private during the pre-launch era, so the public release
+URL does not serve asset bytes — a plain `curl` gets a `404`. The bootstrap needs
+an authenticated [`gh`](https://cli.github.com). One line fetches the published
+bootstrap script through `gh` and runs it (the script then uses `gh` again to pull
+the `chelisup` prebuilt for your platform), dropping it at `~/.chelis/bin/chelisup`:
+
+```sh
+gh auth login    # once, if you have not already
+gh release download --repo Chelis-Lang/chelis --pattern chelisup.sh --output - | sh
+```
+
+Already have a checkout of the compiler repo? Run the vendored script directly
+instead:
+
+```sh
+sh crates/chelisup/bootstrap/chelisup.sh   # installs ~/.chelis/bin/chelisup
+```
+
+Once chelis releases are public, the checkout-free form becomes the usual
+unauthenticated one-liner:
 
 ```sh
 curl -fsSL https://github.com/Chelis-Lang/chelis/releases/latest/download/chelisup.sh | sh
-```
-
-During the private-repo pre-launch era the public release URL does not serve
-asset bytes, so the bootstrap needs an authenticated
-[`gh`](https://cli.github.com). Run the vendored bootstrap script, which uses
-`gh release download`:
-
-```sh
-gh auth login                              # once, if you have not already
-sh crates/chelisup/bootstrap/chelisup.sh   # installs ~/.chelis/bin/chelisup
 ```
 
 Then put `~/.chelis/bin` on your PATH (the bootstrap prints the exact line):

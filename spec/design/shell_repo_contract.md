@@ -312,22 +312,40 @@ pre-staging required changes, the unlock wave, and the re-probe table.
   `issue-resolution`) is a **materialized pointer upstream, not a fork**. It is
   **embedded in the pinned toolchain**; `chelis reef conform sync` (and
   `reef setup`) materialize it into the shell's `agent-skills/`, and
-  `conform audit` byte-checks every present skill against the embedded set for
-  the shell's pin — so the shell owns **zero skill content** and any drift is a
-  hard failure. A thin `agent-skills/UPSTREAM.toml` records the stamp. This
-  replaces the older hand-vendored copy, which drifted silently.
+  `conform audit` byte-checks the **toolchain-owned span** of every present
+  shared skill against the embedded set for the shell's pin — so the shell owns
+  **zero shared-skill content** and any drift is a hard failure. Two sanctioned,
+  propagation-safe escape hatches exist for the shell's *own* content (repo-local
+  domain skills and shell-specific overrides), described below. A thin
+  `agent-skills/UPSTREAM.toml` records the stamp. This replaces the older
+  hand-vendored copy, which drifted silently.
 - `.claude/skills` and `.codex/skills` are **symlinks** to `agent-skills/`;
   `.claude/commands/` and `.codex/commands/` wrappers stay mirrored; the
   `red-team` alias stays wired to `redteam-exec` (per monorepo `AGENTS.md`
   §Shared Local Skills). `conform sync` wires the skill-dir symlinks.
 - Because the set is materialized from the pinned toolchain, it is always in
-  lockstep with the monorepo at the shell's pin — a shell cannot fork a shared
-  skill in place, and a shared-skill change propagates on the next
-  `conform sync` / pin bump.
-- Shells MAY add domain-specific skills (and new shells SHOULD vendor
-  School's downstream-authoring skill,
+  lockstep with the monorepo at the shell's pin — a shell cannot *silently* fork
+  a shared skill, and a shared-skill change propagates on the next `conform sync`
+  / pin bump. The only shell-owned edits are the two declared escape hatches
+  below.
+- **Repo-local domain skills** (chelis#651): a shell MAY carry a skill outside
+  the shared set by declaring it in `reef.toml` under
+  `[conform] local_skills = ["<name>", ...]`. `conform sync` then preserves those
+  dirs and `conform audit` §8 exempts them; an *undeclared* extra skill is still
+  pruned, now with a warning rather than a silent delete. A `local_skills` entry
+  may not shadow a shared skill. New shells SHOULD vendor School's
+  downstream-authoring skill,
   [`agent-skills/chelis-std/`](https://github.com/Chelis-Lang/school/tree/main/agent-skills/chelis-std),
-  which packages the chelis-std SKILL.md guidance for shell authors).
+  declared this way.
+- **Shell-specific overrides on a shared skill** (chelis#653): a shell MAY append
+  a single trailing `<!-- shell-local:begin -->…<!-- shell-local:end -->` block to
+  a shared skill's `SKILL.md` to supersede toolchain guidance that does not fit
+  the shell. `conform sync` regenerates the toolchain-owned body *above* the block
+  verbatim — so upstream skill edits still propagate downstream — and preserves
+  the block; §8 byte-checks only the managed span. When a bump changes the
+  upstream body underneath a block, `conform bump` flags that skill so the author
+  re-checks the override against the new text. The block MUST be a well-formed
+  file suffix (exactly one begin/end pair, nothing after the end marker).
 
 ## 9. Acceptance & parity (conditional MUST)
 
