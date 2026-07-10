@@ -5,3 +5,4 @@
 
 pub mod abstract_subterm;
 pub mod goal_split;
+pub mod normal_cdf_erf;
