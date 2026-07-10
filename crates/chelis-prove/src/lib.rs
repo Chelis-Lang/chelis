@@ -64,8 +64,9 @@ pub mod z3_engine;
 pub use arb_oracle::ErfEnclosure;
 #[cfg(feature = "arb")]
 pub use arb_oracle::{
-    DEFAULT_PREC, certify_sup_norm_at_samples, certify_sup_norm_over_box, rigorous_erf,
-    rigorous_erf_enclosure,
+    DEFAULT_PREC, SpecialFn, certify_sup_norm_at_samples, certify_sup_norm_over_box,
+    certify_sup_norm_over_box_general, rigorous_erf, rigorous_erf_enclosure,
+    rigorous_special_fn_enclosure,
 };
 pub use artifact::{
     Degradation, FailureSummary, ProofArtifact, ProofStatus, ProofTier, PropertyDependency,
@@ -73,7 +74,8 @@ pub use artifact::{
 // WI-13 committed erf-envelope consumer surface (always present, no Arb link).
 pub use erf_envelope::{ErfArm, ErfEnvelope, ErfEnvelopeBox, ErfEnvelopeProvenance, ProofKind};
 pub use special_fn_envelope::{
-    Domain, EnvelopeArm, SpecialFnEnvelope, SpecialFnEnvelopeBox, SpecialFnRegistry,
+    Domain, EnvelopeArm, SpecialFnEnvelope, SpecialFnEnvelopeBox, SpecialFnProvenance,
+    SpecialFnRegistry,
 };
 // chelis#439: the Beacon subprocess shim (transport-only DischargeEngine for
 // GoalShape::BoxRange) and its dispatch-site-owned content-addressed byte store.

@@ -628,6 +628,18 @@ pub enum SpecialFn {
 
 #[cfg(feature = "arb")]
 impl SpecialFn {
+    /// Map a registry function name to its [`SpecialFn`], or `None` if the name
+    /// is not an Arb-certifiable special function.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "erf" => Some(SpecialFn::Erf),
+            "exp" => Some(SpecialFn::Exp),
+            "log" => Some(SpecialFn::Log),
+            "sqrt" => Some(SpecialFn::Sqrt),
+            _ => None,
+        }
+    }
+
     /// Whether `x` is inside this function's domain (`log` needs `>0`, `sqrt`
     /// needs `>=0`). Out-of-domain input fails closed to a NaN enclosure.
     fn in_domain(self, x: f64) -> bool {
@@ -1230,14 +1242,17 @@ mod arb_live_tests {
 
     // ─── chelis#434: function-general enclosure tests {exp,log,sqrt} ──────────
 
-    #[allow(clippy::excessive_precision)]
+    // High-precision reference truths (excess digits document the real value;
+    // the E / LN_2 near-matches are intentional reference literals, not the
+    // std consts). Each must sit strictly inside the oracle enclosure.
+    #[allow(clippy::excessive_precision, clippy::approx_constant)]
     const EXP_REFERENCE: &[(f64, f64)] = &[
         (0.0, 1.0),
         (1.0, 2.718_281_828_459_045_235_360_287_471_352_7),
         (-1.0, 0.367_879_441_171_442_321_595_523_770_161_5),
         (2.0, 7.389_056_098_930_650_227_230_427_460_575_0),
     ];
-    #[allow(clippy::excessive_precision)]
+    #[allow(clippy::excessive_precision, clippy::approx_constant)]
     const LOG_REFERENCE: &[(f64, f64)] = &[
         (1.0, 0.0),
         (2.0, 0.693_147_180_559_945_309_417_232_121_458_2),

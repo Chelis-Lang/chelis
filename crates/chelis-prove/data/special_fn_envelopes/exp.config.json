@@ -3,13 +3,13 @@
   "domain": "all_reals",
   "output_clamp": null,
   "boxes": [
-    { "lo": -15.0, "hi": -4.0, "arm": "central", "degree": 12 },
-    { "lo": -4.0, "hi": 2.0, "arm": "central", "degree": 14 }
+    { "lo": -2.0, "hi": 2.0, "arm": "central", "degree": 12 }
   ],
   "generator": {
-    "recipe": "scripts/generate_erf_envelope.py with mpmath.exp truth (Chebyshev polyfit per box)",
-    "probe": "spec/design/probe_434_transcendental.md p19: degree-14 over [-2,2] fit exp to 1.76e-12 empirical sup-norm",
-    "argument_ranges": "BS discount exp(-r*t) in ~[-1,0]; normal-density exp(-x^2/2) tail down to ~-12.5; box covers [-15,2]"
+    "recipe": "scripts/generate_special_fn_envelope.py exp (numpy.polyfit @ Chebyshev vs mpmath.exp) -> certify_special_fn_envelope stamp (Arb naive whole-box)",
+    "committed": "data/special_fn_envelopes/exp_envelope.json",
+    "box_note": "single central box [-2,2] (BS discount exp(-r*t), density exp(-x^2/2) over a finance-realistic sub-range). Wider boxes (e.g. [-15,2]) need the mean-value certifier for a tight eps; the naive certifier is too loose there.",
+    "eps_note": "committed eps ~2.8e-5 is the SOUND naive Arb whole-box bound (true fit error ~4e-10); a tighter eps needs the exp mean-value form (exp'=exp), a scoped follow-up"
   },
-  "certify_status": "BLOCKED: sollya absent (Gappa half); arb_oracle hardcodes arb_hypgeom_erf (needs arb_exp keying)"
+  "certify_status": "CERTIFIED: arb_enclosure (naive whole-box), eps ~2.8e-5 over [-2,2]"
 }

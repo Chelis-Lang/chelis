@@ -58,7 +58,7 @@ use serde::{Deserialize, Serialize};
 /// parsers, so the proof and the runtime could otherwise evaluate slightly
 /// different polynomials. With hex floats the proof certifies *exactly* the f64
 /// the runtime evaluates.
-mod hex_f64 {
+pub(crate) mod hex_f64 {
     /// Format an f64 as a canonical C99 hex-float literal that round-trips
     /// exactly (`0x1.<13 hex frac digits>p<exp>`, sign prefix for negatives,
     /// `0x0p+0` for zero). The 13 fractional hex digits hold all 52 mantissa

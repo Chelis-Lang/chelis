@@ -30,11 +30,14 @@
 //! `crates/chelis-prove/data/special_fn_envelopes/README.md`). An uncertified or
 //! absent envelope makes the consumer DECLINE, never guess.
 
+use serde::{Deserialize, Serialize};
+
 use crate::erf_envelope::{ErfArm, ErfEnvelope, ProofKind};
 
 /// The mathematical domain a function's argument must lie in for its envelope to
 /// apply.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Domain {
     /// Defined on all finite reals (`erf`, `exp`).
     AllReals,
@@ -63,14 +66,23 @@ impl Domain {
 
 /// One approximation arm. Generalizes [`ErfArm`]: `Saturation` carries any
 /// constant (not just `±1`); `Central` is a Horner polynomial (descending
-/// degree, `coeffs[0]` highest).
-#[derive(Debug, Clone, PartialEq)]
+/// degree, `coeffs[0]` highest). Central coeffs serialize as exact C99 hex-float
+/// strings (the erf codec), so the committed data recovers the bit-identical f64
+/// the certifier stamped an `eps` for — no decimal-parser drift.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EnvelopeArm {
     /// A saturating constant `value` over the box; `eps` bounds `|value - f(x)|`.
     Saturation { value: f64 },
     /// A polynomial approximation, coefficients highest-degree first, evaluated
     /// by Horner; `eps` bounds `|p(x) - f(x)|`.
-    Central { coeffs: Vec<f64> },
+    Central {
+        #[serde(
+            serialize_with = "crate::erf_envelope::hex_f64::serialize_vec",
+            deserialize_with = "crate::erf_envelope::hex_f64::deserialize_vec"
+        )]
+        coeffs: Vec<f64>,
+    },
 }
 
 impl EnvelopeArm {
@@ -92,7 +104,7 @@ impl EnvelopeArm {
 
 /// One box of the piecewise envelope: an interval, an arm, a certified sup-norm
 /// error for that arm over that interval, and how the error is certified.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpecialFnEnvelopeBox {
     /// Inclusive lower edge.
     pub lo: f64,
@@ -120,10 +132,25 @@ impl SpecialFnEnvelopeBox {
     }
 }
 
+/// How a committed envelope was certified, recorded so the `certify_special_fn_
+/// envelope validate` cross-check reproduces the exact Arb bound (the naive
+/// whole-box eps depends on the subdivision count) and the trust basis is
+/// machine-visible. Not a soundness input — soundness is each box's certified
+/// `eps`. `#[serde(default)]` so proposer drafts (no provenance) deserialize.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct SpecialFnProvenance {
+    /// Arb working precision (bits) used to certify each `eps`.
+    pub certify_prec: i64,
+    /// Number of equal sub-boxes the certifier split each box into.
+    pub certify_subdivisions: usize,
+    /// A note on the certification method, for the audit trail.
+    pub method: String,
+}
+
 /// A function-keyed piecewise envelope: ordered, contiguous, non-overlapping
 /// boxes over the covered range, plus the function's domain and optional global
 /// output clamp.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpecialFnEnvelope {
     /// The special function this envelope bounds (`"erf"`, `"exp"`, ...).
     pub fn_name: String,
@@ -135,7 +162,17 @@ pub struct SpecialFnEnvelope {
     pub output_clamp: Option<(f64, f64)>,
     /// Boxes in ascending `lo` order, contiguous across the covered range.
     pub boxes: Vec<SpecialFnEnvelopeBox>,
+    /// How the boxes' `eps` were certified (audit trail; enables reproducible
+    /// `validate`). Defaults to empty for proposer drafts.
+    #[serde(default)]
+    pub provenance: SpecialFnProvenance,
 }
+
+/// The committed, Arb-certified `exp` envelope over `[-2,2]` (naive whole-box
+/// enclosure; `proof_kind = arb_enclosure`), embedded at compile time. Generated
+/// by `scripts/generate_special_fn_envelope.py exp` + `certify_special_fn_envelope
+/// stamp` — see `data/special_fn_envelopes/README.md`.
+const EXP_ENVELOPE_JSON: &str = include_str!("../data/special_fn_envelopes/exp_envelope.json");
 
 impl SpecialFnEnvelope {
     /// Convert the committed, certified `erf` envelope into the generic form.
@@ -143,8 +180,8 @@ impl SpecialFnEnvelope {
     /// carry over verbatim, so the generic path evaluates the SAME certified
     /// bound the erf-specific path does.
     pub fn from_erf(env: ErfEnvelope) -> Self {
-        let boxes = env
-            .boxes
+        let ErfEnvelope { boxes, provenance } = env;
+        let boxes = boxes
             .into_iter()
             .map(|b| SpecialFnEnvelopeBox {
                 lo: b.lo,
@@ -162,15 +199,25 @@ impl SpecialFnEnvelope {
             domain: Domain::AllReals,
             output_clamp: Some((-1.0, 1.0)),
             boxes,
+            provenance: SpecialFnProvenance {
+                certify_prec: provenance.certify_prec,
+                certify_subdivisions: provenance.certify_subdivisions,
+                method: provenance.method,
+            },
         }
     }
 
     /// The committed, certified envelope for `fn_name`, or `None` if none is
-    /// committed. Today only `"erf"` has certified data; `exp`/`log`/`sqrt`
-    /// return `None` (the honest floor — the consumer declines).
+    /// committed. `erf` (Gappa+Arb) and `exp` (Arb enclosure over `[-2,2]`) have
+    /// certified data; `log`/`sqrt` return `None` (the honest floor — the
+    /// consumer declines) until their data lands.
     pub fn committed(fn_name: &str) -> Option<Self> {
         match fn_name {
             "erf" => Some(Self::from_erf(ErfEnvelope::committed())),
+            "exp" => Some(
+                serde_json::from_str(EXP_ENVELOPE_JSON)
+                    .expect("committed exp envelope data must be valid JSON"),
+            ),
             _ => None,
         }
     }
@@ -299,8 +346,8 @@ mod tests {
     use super::*;
 
     /// The exp/log/sqrt generation configs, embedded so a test locks them to the
-    /// registry. They are BLOCKED (no certified data yet); this only guards that
-    /// their declared function/domain stay consistent with the registry.
+    /// registry. `exp` is CERTIFIED (data committed); `log`/`sqrt` are BLOCKED.
+    /// The test keys committed()-presence off each config's `certify_status`.
     const EXP_CONFIG: &str = include_str!("../data/special_fn_envelopes/exp.config.json");
     const LOG_CONFIG: &str = include_str!("../data/special_fn_envelopes/log.config.json");
     const SQRT_CONFIG: &str = include_str!("../data/special_fn_envelopes/sqrt.config.json");
@@ -330,19 +377,21 @@ mod tests {
                 domain_token(reg_domain),
                 "{f} config domain must match the registry domain guard"
             );
-            // It is honestly marked BLOCKED (no certified data committed yet), and
-            // committed() therefore returns None — the finder declines.
-            assert!(
-                cfg["certify_status"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with("BLOCKED"),
-                "{f} config must be marked BLOCKED until its data lands"
-            );
-            assert!(
-                SpecialFnEnvelope::committed(f).is_none(),
-                "{f} must have no committed envelope while its config is BLOCKED"
-            );
+            // committed()-presence must agree with the config's certify_status:
+            // BLOCKED => no committed envelope (finder declines); certified =>
+            // committed Some. No config may silently disagree with the data.
+            let status = cfg["certify_status"].as_str().unwrap();
+            if status.starts_with("BLOCKED") {
+                assert!(
+                    SpecialFnEnvelope::committed(f).is_none(),
+                    "{f} is BLOCKED but has a committed envelope"
+                );
+            } else {
+                assert!(
+                    SpecialFnEnvelope::committed(f).is_some(),
+                    "{f} is certified ({status}) but has no committed envelope"
+                );
+            }
             // Boxes are a non-empty, ascending, contiguous decomposition.
             let boxes = cfg["boxes"].as_array().expect("boxes array");
             assert!(!boxes.is_empty(), "{f} config needs at least one box");
@@ -374,15 +423,44 @@ mod tests {
     }
 
     #[test]
-    fn exp_log_sqrt_have_no_committed_envelope_yet() {
+    fn log_sqrt_have_no_committed_envelope_yet() {
         // The honest floor: no certified data => None => the consumer declines.
-        for f in ["exp", "log", "sqrt"] {
+        for f in ["log", "sqrt"] {
             assert!(
                 SpecialFnEnvelope::committed(f).is_none(),
                 "{f} must have no committed envelope until its data lands"
             );
         }
         assert!(SpecialFnEnvelope::committed("tan").is_none());
+    }
+
+    #[test]
+    fn exp_committed_envelope_is_sound_and_well_formed() {
+        // The committed exp envelope (Arb-certified over [-2,2]) parses, is well
+        // formed, and its band SOUNDLY contains the true exp at sample points —
+        // the certified eps is not too tight (a cheap always-on soundness sanity;
+        // the rigorous re-check is the arb-lane certify_special_fn_envelope
+        // validate cross-check).
+        let env = SpecialFnEnvelope::committed("exp").expect("exp is committed");
+        assert_eq!(env.fn_name, "exp");
+        assert_eq!(env.domain, Domain::AllReals);
+        assert!(env.is_well_formed());
+        for b in &env.boxes {
+            assert_eq!(b.proof_kind, ProofKind::ArbEnclosure);
+        }
+        // Band contains true exp at samples across [-2,2].
+        let mut x = -2.0_f64;
+        while x <= 2.0 {
+            let (lo, hi) = env.bound(x).expect("covered");
+            let truth = x.exp();
+            assert!(
+                lo <= truth && truth <= hi,
+                "exp({x})={truth} not in [{lo},{hi}]"
+            );
+            x += 0.1;
+        }
+        // Outside coverage declines.
+        assert!(env.bound(2.5).is_none() && env.bound(-2.5).is_none());
     }
 
     #[test]
@@ -439,12 +517,14 @@ mod tests {
             domain: Domain::NonNegative,
             output_clamp: Some((0.0, 1.0)),
             boxes: boxes.clone(),
+            provenance: SpecialFnProvenance::default(),
         };
         let unclamped = SpecialFnEnvelope {
             fn_name: "synthetic".into(),
             domain: Domain::NonNegative,
             output_clamp: None,
             boxes,
+            provenance: SpecialFnProvenance::default(),
         };
         // raw band over [0,1] for p(x)=x, eps=0.5 is [-0.5, 1.5].
         let (ulo, uhi) = unclamped.sound_range_bound(0.0, 1.0).unwrap();
@@ -477,6 +557,7 @@ mod tests {
                     proof_kind: ProofKind::Gappa,
                 },
             ],
+            provenance: SpecialFnProvenance::default(),
         };
         assert!(
             ok.is_well_formed(),
@@ -503,6 +584,7 @@ mod tests {
                     proof_kind: ProofKind::Gappa,
                 },
             ],
+            provenance: SpecialFnProvenance::default(),
         };
         assert!(!gap.is_well_formed(), "a coverage gap is not well formed");
     }

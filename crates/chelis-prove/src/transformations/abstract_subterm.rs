@@ -722,7 +722,7 @@ mod tests {
 
     use crate::erf_envelope::ProofKind;
     use crate::special_fn_envelope::{
-        Domain, EnvelopeArm, SpecialFnEnvelope, SpecialFnEnvelopeBox,
+        Domain, EnvelopeArm, SpecialFnEnvelope, SpecialFnEnvelopeBox, SpecialFnProvenance,
     };
     use std::collections::HashMap;
 
@@ -747,6 +747,7 @@ mod tests {
                 eps,
                 proof_kind: ProofKind::Gappa,
             }],
+            provenance: SpecialFnProvenance::default(),
         }
     }
 
@@ -792,16 +793,34 @@ mod tests {
     }
 
     #[test]
-    fn declines_exp_site_without_committed_envelope() {
-        // Production has no exp envelope yet, so an exp site is left intact (the
-        // honest floor). The goal is returned unchanged.
+    fn exp_abstracts_in_production_via_committed_envelope() {
+        // exp now has committed Arb-certified data over [-2,2], so a bounded exp
+        // site abstracts in PRODUCTION (AbstractSubterm::new(), no injection).
+        // The emitted band is sound: exp([0,1]) = [1, e] ⊆ the __exp_abs_0 bounds.
         let t = AbstractSubterm::new();
         let goal = fn_of_bare_var_goal("exp", 0.0, 1.0, 3.0);
+        let out = t.apply(&goal);
+        let GoalShape::Smt(ref rp) = out[0].shape else {
+            panic!("expected Smt goal");
+        };
+        assert!(
+            rp.variables.iter().any(|(n, _)| n == "__exp_abs_0"),
+            "exp must abstract"
+        );
+        assert!(!contains_fn(&rp.postcondition, "exp"));
+    }
+
+    #[test]
+    fn declines_log_site_without_committed_envelope() {
+        // log has no committed envelope yet, so a log site is left intact (the
+        // honest floor). The goal is returned unchanged.
+        let t = AbstractSubterm::new();
+        let goal = fn_of_bare_var_goal("log", 0.5, 2.0, 3.0);
         let result = t.apply(&goal);
         assert_eq!(result.len(), 1);
         assert_eq!(
             result[0].shape, goal.shape,
-            "exp site must decline unchanged"
+            "log site must decline unchanged"
         );
     }
 
