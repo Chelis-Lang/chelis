@@ -655,6 +655,10 @@ enum ConformCommand {
         /// Emit one NDJSON record per contract row plus a summary line.
         #[arg(long)]
         json: bool,
+        /// Print the per-finding evidence under each failing row: the citation
+        /// site(s) and the per-candidate coverage reasoning behind the verdict.
+        #[arg(long)]
+        explain: bool,
     },
     /// Scaffold a new shell (or retrofit an existing one) from the embedded
     /// templates: reef.toml, AGENTS.md (+ CLAUDE.md symlink), the CHELIS_SURFACE
@@ -680,8 +684,10 @@ enum ConformCommand {
     /// Mechanize the Pin Bump Checklist: rewrite every pin location in lockstep,
     /// restamp the managed blocks + re-materialize skills, then run the offline
     /// audit and the blocked/negative suites. Produces the change set on the
-    /// working tree (git-agnostic; the caller opens the PR) and exits non-zero
-    /// if any gate fails.
+    /// working tree (git-agnostic; the caller opens the PR). Exits non-zero only
+    /// when the bump's OWN output is non-conformant (its pins/stamps/skills) or a
+    /// suite fails; a clean bump that leaves only author-follow-up rows (CI
+    /// wiring, pre-existing doc fixes) exits 0 and lists the remaining steps.
     Bump {
         /// Target chelis version (bare `X.Y.Z`).
         version: String,
@@ -3197,13 +3203,17 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
 /// Dispatch `chelis reef conform <verb>`.
 fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::Error>> {
     match command {
-        ConformCommand::Audit { root, json } => {
+        ConformCommand::Audit {
+            root,
+            json,
+            explain,
+        } => {
             let root = match root {
                 Some(p) => p,
                 None => env::current_dir()?,
             };
             let report = chelis_conformance::audit::audit(&root);
-            print_audit_report(&report, json)?;
+            print_audit_report(&report, json, explain)?;
             if !report.ok() {
                 std::process::exit(1);
             }
@@ -3235,7 +3245,9 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
                 .reef_pin
                 .map(|p| p.trim_start_matches('=').to_string())
                 .unwrap_or_else(|| chelis_compiler_api::COMPILER_VERSION.to_string());
-            chelis_conformance::scaffold::materialize_skills(&root)?;
+            for notice in chelis_conformance::scaffold::materialize_skills(&root)? {
+                eprintln!("note: {notice}");
+            }
             chelis_conformance::scaffold::sync_managed_blocks(&root, &version)?;
             println!(
                 "synced managed blocks + skills to chelis {version} at {}",
@@ -3251,17 +3263,55 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
             for p in &changed {
                 println!("repinned {}", p.display());
             }
-            chelis_conformance::scaffold::materialize_skills(&root)?;
+            for notice in chelis_conformance::scaffold::materialize_skills(&root)? {
+                eprintln!("note: {notice}");
+            }
             chelis_conformance::scaffold::sync_managed_blocks(&root, &version)?;
             println!("restamped managed blocks + skills to chelis {version}");
 
-            // Offline gate: the mechanical bump must leave a conformant tree.
+            // Offline gate, categorized (chelis#655). A failure on a row whose
+            // artifact the bump itself writes (its pins/managed-block stamps/
+            // skills) blocks and exits non-zero: the shell is not in a clean
+            // bumped state, whether from a bump-tool defect or a shell edit the
+            // bump could only preserve (e.g. a malformed shell-local block).
+            // Rows that are author follow-up (CI wiring, pre-existing doc/citation
+            // fixes, the prose Pin-Bump-Checklist/Scaffolding-Drift-Rule headings)
+            // the bump cannot write are listed as remaining steps, not a failure.
             let report = chelis_conformance::audit::audit(&root);
-            if !report.ok() {
-                eprintln!("bump left the shell non-conformant:");
-                print_audit_report(&report, false)?;
+            let failing: Vec<&chelis_conformance::audit::RowResult> = report
+                .rows
+                .iter()
+                .filter(|r| r.verdict == chelis_conformance::audit::Verdict::Fail && r.tier.gates())
+                .collect();
+            let bump_owned: Vec<&chelis_conformance::audit::RowResult> = failing
+                .iter()
+                .copied()
+                .filter(|r| chelis_conformance::bump::is_bump_owned(r.key))
+                .collect();
+            if !bump_owned.is_empty() {
+                eprintln!(
+                    "bump left a bump-owned artifact non-conformant (pins/managed blocks/skills); \
+                     the shell is not in a clean bumped state:"
+                );
+                for r in &bump_owned {
+                    eprintln!("  row {:>2} {} ({})", r.row, r.key, r.section);
+                    if !r.diagnostic.is_empty() {
+                        eprintln!("        {}", r.diagnostic);
+                    }
+                }
                 std::process::exit(1);
             }
+            let follow_up: Vec<String> = failing
+                .iter()
+                .copied()
+                .filter(|r| !chelis_conformance::bump::is_bump_owned(r.key))
+                .map(|r| {
+                    format!(
+                        "  row {:>2} {} ({})  {}",
+                        r.row, r.key, r.section, r.diagnostic
+                    )
+                })
+                .collect();
 
             // Executable gates: the blocked-probe + negative suites, run against
             // the bumped toolchain. A FIX-detected probe is the wanted outcome
@@ -3279,9 +3329,21 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
                 std::process::exit(1);
             }
 
+            // The bump's own output is clean. Report any remaining author
+            // follow-up steps, but exit 0 so an automated bump-pr flow sees the
+            // mechanical bump succeed (chelis#655).
+            println!("bump to chelis {version} is mechanically complete.");
+            if !follow_up.is_empty() {
+                println!(
+                    "{} conformance step(s) remain (author follow-up; see the Pin Bump Checklist):",
+                    follow_up.len()
+                );
+                for line in &follow_up {
+                    println!("{line}");
+                }
+            }
             println!(
-                "bump to chelis {version} is mechanically complete. Remaining manual checklist:\n\
-                 - `chelis reef conform staleness` (closed-but-cited workarounds; needs gh)\n\
+                "Remaining manual checklist:\n\
                  - re-probe every docs/UPSTREAM_BUGS.md §Tracking entry naming this release, per-verb\n\
                  Open a PR with this change set; do not push the pin directly to main."
             );
@@ -3324,7 +3386,7 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
                             "pin changed {base_pin} -> {current} but the checklist did not run \
                              (audit not green). Bump via `chelis reef conform bump {current}`, not a raw edit:"
                         );
-                        print_audit_report(&report, false)?;
+                        print_audit_report(&report, false, false)?;
                         std::process::exit(1);
                     }
                 }
@@ -3426,6 +3488,7 @@ fn git_ref_resolvable(root: &Path, base: &str) -> bool {
 fn print_audit_report(
     report: &chelis_conformance::audit::AuditReport,
     json: bool,
+    explain: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -3443,6 +3506,10 @@ fn print_audit_report(
                 "verdict": r.verdict.tag(),
                 "diagnostic": r.diagnostic,
                 "fix": r.fix,
+                // Per-finding site/coverage evidence (chelis#654); empty for rows
+                // that carry no site-level detail. Always emitted in JSON so a
+                // machine consumer never needs the `--explain` text mode.
+                "evidence": r.evidence,
             });
             writeln!(out, "{record}")?;
         }
@@ -3466,6 +3533,11 @@ fn print_audit_report(
                 writeln!(out, "        {}", r.diagnostic)?;
                 if !r.fix.is_empty() {
                     writeln!(out, "        fix: {}", r.fix)?;
+                }
+                if explain {
+                    for line in &r.evidence {
+                        writeln!(out, "        {line}")?;
+                    }
                 }
             }
         }
