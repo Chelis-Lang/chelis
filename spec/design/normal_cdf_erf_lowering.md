@@ -26,37 +26,43 @@ contract lane is not removed or altered. Both sit behind the same engagement
 point, and the pipeline has no production caller today (probe p16), so nothing in
 a real `chelis prove` run changes.
 
-## The wiring boundary — and a concrete blocker it exposes
+## The wiring boundary — affine argument propagation has landed
 
 `NormalCdfToErf` is a `Transformation` meant to run *before*
-`abstract_subterm::AbstractSubterm` in the (future) pipeline. Composing them
-today exposes a real limitation, test-locked in
-`lowering_is_exact_but_discharge_needs_compound_arg_propagation`:
+`abstract_subterm::AbstractSubterm` in the (future) pipeline. Composing them:
 
-- The lowering is **done and exact** — `normal_cdf` disappears, `erf` appears.
-- But the `erf` argument is `x/√2`, a **compound** expression (`Mul(x, 1/√2)`),
-  and the abstract-subterm range extractor handles **only a bare `Var`** in this
-  slice (extending it is compound-argument interval propagation — the deferred
-  research-risk 60%). So `AbstractSubterm` **declines**: the goal is returned
-  unchanged.
+- The lowering is **exact** — `normal_cdf` disappears, `erf` appears.
+- The `erf` argument `x/√2` is **affine** (`Mul(x, 1/√2)`). This bounded
+  increment added **affine-argument propagation** (`a·x + b·y + … + c`) to the
+  abstract-subterm range extractor, so `normal_cdf(x)` with a bounded `x` now
+  **abstracts** via the certified `erf` envelope — the case that declined before
+  this slice. Test-locked in
+  `normal_cdf_of_bare_var_abstracts_via_affine_propagation`.
 
-Even this trivial **affine** argument (`a·x`, a constant scale) needs argument
-propagation. The control test `bare_arg_erf_identity_would_abstract` confirms the
-identity shape itself is fine — an `erf(x)` with a bare bounded `x` DOES abstract
-— so the sole blocker is the `x/√2` scale.
+The **remaining** boundary is genuinely NONLINEAR arguments. `normal_cdf(x·y)`
+lowers to `erf((x·y)/√2)`, and `(x·y)/√2` is var×var — non-affine, so
+abstract-subterm still declines (test `normal_cdf_of_nonlinear_arg_still_declines`).
+The Black-Scholes `normal_cdf(d1)` with `d1 = (log(s/k) + …)/(σ√t)` is this
+nonlinear case: full compound propagation over `log`/`sqrt`/products is the
+remaining research-risk work (see `spec/design/probe_434_transcendental.md` p17).
 
-**Implication for the de-narrowing decision:** the first, smallest piece of the
-60% is affine-argument propagation (`a·x + b`). It is required even to discharge
-`normal_cdf(x)` with a bare `x`, let alone the Black-Scholes `normal_cdf(d1)`
-where `d1` is a full compound of `log`/`sqrt`. This reinforces
-`spec/design/probe_434_transcendental.md` p17: authoring conventions cannot
-sidestep it, because the CDF→erf identity itself manufactures a compound argument.
+**Soundness of affine propagation:** the extractor parses the argument into a
+canonical coefficient-merged affine form and evaluates its interval by summing
+`coeff·[var range]` per variable. Merging coefficients first removes the
+interval-arithmetic dependency error (`x − x` is exactly `[0,0]`, not `[−1,1]`).
+It is **fail-closed**: any non-affine node (var×var, division by a non-constant or
+by zero, a transcendental `Apply`, an `Ite`/comparison), or any unbounded leaf
+variable, returns `None` and the transform declines. Adversarial tests cover each
+in `abstract_subterm.rs` (`nonaffine_fails_closed`,
+`affine_unbounded_leaf_fails_closed`, `affine_repeated_var_merges_no_dependency_error`).
 
 ## When the pipeline is wired
 
 The intended order is `NormalCdfToErf` → `AbstractSubterm` → residual → SMT.
-Wiring is the deferred step; when it lands with (a) affine/compound argument
-propagation and (b) the erf envelope reachable, `normal_cdf` goals discharge as
-`proven_modulo_real_arithmetic` (the residual's over-reals `RealArith` qualifier
-composed with `SpecialFunctionCertified`; probe p18), not the trusted-contract
-badge.
+Wiring is the deferred step; when it lands with (a) the remaining compound
+argument propagation and (b) the erf envelope reachable, `normal_cdf` goals
+discharge behind the `SpecialFunctionCertified` qualifier. Note the eventual
+wiring must project this to the distinct honest tier
+`proven_modulo_certified_envelope` (per the sprint plan) rather than reusing
+`proven_modulo_real_arithmetic`; that verdict-projection change is deliberately
+out of this slice (probe p18 documents the current projection).

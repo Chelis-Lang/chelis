@@ -31,10 +31,10 @@
 //! extends outside the envelope's covered domain, or violates the function's
 //! domain guard, the transformation DECLINES (returns identity). It never guesses.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::discharge::{Goal, GoalShape};
-use crate::solver::{BoolOp, CmpOp, SmtExpr, SmtSort};
+use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr, SmtSort};
 use crate::special_fn_envelope::{SpecialFnEnvelope, SpecialFnRegistry};
 use crate::tier_b::SmtProperty;
 use crate::transformation::Transformation;
@@ -231,24 +231,172 @@ fn find_special_fn_recursive(expr: &SmtExpr, known: &[&str], sites: &mut Vec<Spe
     }
 }
 
-/// Extract the static range [lo, hi] of an expression from preconditions.
-///
-/// Looks for patterns like `lo <= expr` and `expr <= hi` in the preconditions.
-/// For a simple `Var(x)`, also looks for `lo <= x` / `x <= hi`.
-/// Returns None if bounds cannot be determined.
-fn extract_variable_range(expr: &SmtExpr, preconditions: &[SmtExpr]) -> Option<(f64, f64)> {
-    let var_name = match expr {
-        SmtExpr::Var(n) => n.as_str(),
-        _ => return None, // only handle simple variable arguments for now
-    };
+/// A canonical affine form `Σ coeff_i · var_i + constant` over SMT variables.
+/// Each variable appears at most once (coefficients are merged), so evaluating
+/// the interval by summing per-variable contributions is EXACT — there is no
+/// interval-arithmetic dependency error from a repeated variable.
+#[derive(Debug, Clone, PartialEq)]
+struct AffineForm {
+    terms: BTreeMap<String, f64>,
+    constant: f64,
+}
 
+impl AffineForm {
+    fn constant(c: f64) -> Self {
+        Self {
+            terms: BTreeMap::new(),
+            constant: c,
+        }
+    }
+
+    fn var(name: &str) -> Self {
+        let mut terms = BTreeMap::new();
+        terms.insert(name.to_string(), 1.0);
+        Self {
+            terms,
+            constant: 0.0,
+        }
+    }
+
+    /// A pure constant (no variables) — the scalar for `Mul`/`Div` scaling.
+    fn as_constant(&self) -> Option<f64> {
+        self.terms.is_empty().then_some(self.constant)
+    }
+
+    /// Multiply the whole form by a scalar. Fails closed (`None`) if any
+    /// resulting coefficient/constant is non-finite (overflow guard).
+    fn scale(mut self, k: f64) -> Option<Self> {
+        if !k.is_finite() {
+            return None;
+        }
+        self.constant *= k;
+        if !self.constant.is_finite() {
+            return None;
+        }
+        for c in self.terms.values_mut() {
+            *c *= k;
+            if !c.is_finite() {
+                return None;
+            }
+        }
+        // A zero coefficient drops the variable (0·x contributes nothing and
+        // must NOT pull that variable's boundedness requirement in).
+        self.terms.retain(|_, c| *c != 0.0);
+        Some(self)
+    }
+
+    /// Add two forms (merge coefficients, add constants). Fails closed on a
+    /// non-finite result.
+    fn add(mut self, other: Self) -> Option<Self> {
+        self.constant += other.constant;
+        if !self.constant.is_finite() {
+            return None;
+        }
+        for (name, c) in other.terms {
+            let e = self.terms.entry(name).or_insert(0.0);
+            *e += c;
+            if !e.is_finite() {
+                return None;
+            }
+        }
+        self.terms.retain(|_, c| *c != 0.0);
+        Some(self)
+    }
+}
+
+/// Parse `expr` as an affine form over SMT variables, or `None` if it is not
+/// affine. FAIL-CLOSED by construction: any nonlinear node (variable×variable,
+/// division by a non-constant or by zero, a transcendental `Apply`, an `Ite`, a
+/// comparison/boolean) returns `None`. Only `+ - unary-neg`, and `× ÷` by a
+/// *nonzero constant*, are affine-preserving.
+fn to_affine(expr: &SmtExpr) -> Option<AffineForm> {
+    match expr {
+        SmtExpr::Var(n) => Some(AffineForm::var(n)),
+        SmtExpr::RealLit(v) => Some(AffineForm::constant(*v)),
+        SmtExpr::IntLit(v) => Some(AffineForm::constant(*v as f64)),
+        // Unary negation is lowered as Arith(Neg, inner, <dummy 0>).
+        SmtExpr::Arith(ArithOp::Neg, inner, _) => to_affine(inner)?.scale(-1.0),
+        SmtExpr::Arith(ArithOp::Add, l, r) => to_affine(l)?.add(to_affine(r)?),
+        SmtExpr::Arith(ArithOp::Sub, l, r) => {
+            let rn = to_affine(r)?.scale(-1.0)?;
+            to_affine(l)?.add(rn)
+        }
+        SmtExpr::Arith(ArithOp::Mul, l, r) => {
+            let (la, ra) = (to_affine(l)?, to_affine(r)?);
+            // Affine only if at least one side is a pure constant.
+            if let Some(k) = ra.as_constant() {
+                la.scale(k)
+            } else if let Some(k) = la.as_constant() {
+                ra.scale(k)
+            } else {
+                None // variable × variable is nonlinear
+            }
+        }
+        SmtExpr::Arith(ArithOp::Div, l, r) => {
+            // Affine only if the denominator is a NONZERO constant. Division by
+            // a variable (which could be zero) or by zero fails closed.
+            let k = to_affine(r)?.as_constant()?;
+            if k == 0.0 || !k.is_finite() {
+                return None;
+            }
+            to_affine(l)?.scale(1.0 / k)
+        }
+        // Everything else is non-affine: transcendental Apply, Ite, Cmp, Bool,
+        // Not, quantifiers, bool literals.
+        _ => None,
+    }
+}
+
+/// Extract the static range `[lo, hi]` of an argument expression from the
+/// preconditions. Handles a bare `Var` (its precondition bounds) AND any AFFINE
+/// form `a·x + b·y + … + c` over bounded variables, via sound interval
+/// arithmetic on the canonical (coefficient-merged) form. Returns `None`
+/// (fail-closed) if the expression is non-affine or any variable in it is not
+/// bounded by the preconditions.
+fn extract_variable_range(expr: &SmtExpr, preconditions: &[SmtExpr]) -> Option<(f64, f64)> {
+    let form = to_affine(expr)?;
+    affine_range(&form, preconditions)
+}
+
+/// Evaluate the sound interval of an affine form over the variable ranges pinned
+/// by the preconditions. Each variable appears once (merged coefficient), so the
+/// per-variable interval sum is exact. Fails closed if any variable is unbounded
+/// or the result is non-finite / empty.
+fn affine_range(form: &AffineForm, preconditions: &[SmtExpr]) -> Option<(f64, f64)> {
+    let mut lo = form.constant;
+    let mut hi = form.constant;
+    for (var, &coeff) in &form.terms {
+        let (vlo, vhi) = bare_var_range(var, preconditions)?; // unbounded → fail closed
+        // coeff·[vlo,vhi]: flip endpoints for a negative coefficient.
+        let (tlo, thi) = if coeff >= 0.0 {
+            (coeff * vlo, coeff * vhi)
+        } else {
+            (coeff * vhi, coeff * vlo)
+        };
+        lo += tlo;
+        hi += thi;
+    }
+    if lo.is_finite() && hi.is_finite() && lo <= hi {
+        Some((lo, hi))
+    } else {
+        None
+    }
+}
+
+/// The static range `[lo, hi]` of a single bare variable from the preconditions:
+/// the tightest `lo <= x` / `x <= hi` (also under `And` conjunctions). `None` if
+/// either side is missing (the variable is unbounded). This is the pre-affine
+/// bare-`Var` extractor, unchanged in behavior.
+fn bare_var_range(var_name: &str, preconditions: &[SmtExpr]) -> Option<(f64, f64)> {
     let mut lo: Option<f64> = None;
     let mut hi: Option<f64> = None;
 
     for pre in preconditions {
         match pre {
-            // lo <= var
-            SmtExpr::Cmp(CmpOp::Le, left, right) | SmtExpr::Cmp(CmpOp::Ge, right, left) => {
+            SmtExpr::Cmp(CmpOp::Le, left, right)
+            | SmtExpr::Cmp(CmpOp::Ge, right, left)
+            | SmtExpr::Cmp(CmpOp::Lt, left, right)
+            | SmtExpr::Cmp(CmpOp::Gt, right, left) => {
                 if matches!(right.as_ref(), SmtExpr::Var(n) if n == var_name)
                     && let SmtExpr::RealLit(v) = left.as_ref()
                 {
@@ -260,21 +408,8 @@ fn extract_variable_range(expr: &SmtExpr, preconditions: &[SmtExpr]) -> Option<(
                     hi = Some(hi.map_or(*v, |cur: f64| cur.min(*v)));
                 }
             }
-            SmtExpr::Cmp(CmpOp::Lt, left, right) | SmtExpr::Cmp(CmpOp::Gt, right, left) => {
-                if matches!(right.as_ref(), SmtExpr::Var(n) if n == var_name)
-                    && let SmtExpr::RealLit(v) = left.as_ref()
-                {
-                    lo = Some(lo.map_or(*v, |cur: f64| cur.max(*v)));
-                }
-                if matches!(left.as_ref(), SmtExpr::Var(n) if n == var_name)
-                    && let SmtExpr::RealLit(v) = right.as_ref()
-                {
-                    hi = Some(hi.map_or(*v, |cur: f64| cur.min(*v)));
-                }
-            }
-            // And([...]) — recurse into conjunctions
             SmtExpr::Bool(BoolOp::And, children) => {
-                if let Some((clo, chi)) = extract_variable_range(expr, children) {
+                if let Some((clo, chi)) = bare_var_range(var_name, children) {
                     lo = Some(lo.map_or(clo, |cur: f64| cur.max(clo)));
                     hi = Some(hi.map_or(chi, |cur: f64| cur.min(chi)));
                 }
@@ -768,5 +903,158 @@ mod tests {
             goal.shape,
             "outside coverage must decline"
         );
+    }
+
+    // ─── chelis#434: affine-argument propagation (a·x + b) + adversarial ──────
+
+    fn v(n: &str) -> SmtExpr {
+        SmtExpr::Var(n.into())
+    }
+    fn r(x: f64) -> SmtExpr {
+        SmtExpr::RealLit(x)
+    }
+    fn mul(a: SmtExpr, b: SmtExpr) -> SmtExpr {
+        SmtExpr::Arith(ArithOp::Mul, Box::new(a), Box::new(b))
+    }
+    fn add(a: SmtExpr, b: SmtExpr) -> SmtExpr {
+        SmtExpr::Arith(ArithOp::Add, Box::new(a), Box::new(b))
+    }
+    fn sub(a: SmtExpr, b: SmtExpr) -> SmtExpr {
+        SmtExpr::Arith(ArithOp::Sub, Box::new(a), Box::new(b))
+    }
+    fn div(a: SmtExpr, b: SmtExpr) -> SmtExpr {
+        SmtExpr::Arith(ArithOp::Div, Box::new(a), Box::new(b))
+    }
+    fn neg(a: SmtExpr) -> SmtExpr {
+        SmtExpr::Arith(ArithOp::Neg, Box::new(a), Box::new(SmtExpr::IntLit(0)))
+    }
+    /// preconditions `lo <= x <= hi` for each (name, lo, hi).
+    fn box_pre(bounds: &[(&str, f64, f64)]) -> Vec<SmtExpr> {
+        let mut out = Vec::new();
+        for (n, lo, hi) in bounds {
+            out.push(SmtExpr::Cmp(CmpOp::Le, Box::new(r(*lo)), Box::new(v(n))));
+            out.push(SmtExpr::Cmp(CmpOp::Le, Box::new(v(n)), Box::new(r(*hi))));
+        }
+        out
+    }
+
+    #[test]
+    fn affine_scale_and_shift_range() {
+        // 2·x + 1 over x∈[0,1] → [1, 3].
+        let pre = box_pre(&[("x", 0.0, 1.0)]);
+        let arg = add(mul(r(2.0), v("x")), r(1.0));
+        assert_eq!(extract_variable_range(&arg, &pre), Some((1.0, 3.0)));
+    }
+
+    #[test]
+    fn affine_negative_coeff_flips_endpoints() {
+        let pre = box_pre(&[("x", 0.0, 1.0)]);
+        assert_eq!(
+            extract_variable_range(&neg(v("x")), &pre),
+            Some((-1.0, 0.0))
+        );
+        // 1 - 2x over [0,1] → [1-2, 1-0] = [-1, 1].
+        let arg = sub(r(1.0), mul(r(2.0), v("x")));
+        assert_eq!(extract_variable_range(&arg, &pre), Some((-1.0, 1.0)));
+    }
+
+    #[test]
+    fn affine_div_by_constant() {
+        let pre = box_pre(&[("x", 0.0, 4.0)]);
+        assert_eq!(
+            extract_variable_range(&div(v("x"), r(2.0)), &pre),
+            Some((0.0, 2.0))
+        );
+        // x / √2 (the normal_cdf scale) over [0, √2] → [0, 1].
+        let inv = crate::transformations::normal_cdf_erf::INV_SQRT2;
+        let pre2 = box_pre(&[("x", 0.0, std::f64::consts::SQRT_2)]);
+        let (lo, hi) = extract_variable_range(&mul(v("x"), r(inv)), &pre2).unwrap();
+        assert!(
+            (lo - 0.0).abs() < 1e-12 && (hi - 1.0).abs() < 1e-12,
+            "[{lo},{hi}]"
+        );
+    }
+
+    #[test]
+    fn affine_multi_var_sums_intervals() {
+        let pre = box_pre(&[("x", 0.0, 1.0), ("y", 2.0, 3.0)]);
+        assert_eq!(
+            extract_variable_range(&add(v("x"), v("y")), &pre),
+            Some((2.0, 4.0))
+        );
+    }
+
+    #[test]
+    fn affine_repeated_var_merges_no_dependency_error() {
+        // The dependency-error guard: x - x must be EXACTLY [0,0] (merged to 0),
+        // not the naive interval [0-1, 1-0] = [-1, 1]; x + x must be 2·[0,1]=[0,2].
+        let pre = box_pre(&[("x", 0.0, 1.0)]);
+        assert_eq!(
+            extract_variable_range(&sub(v("x"), v("x")), &pre),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(
+            extract_variable_range(&add(v("x"), v("x")), &pre),
+            Some((0.0, 2.0))
+        );
+    }
+
+    #[test]
+    fn nonaffine_fails_closed() {
+        let pre = box_pre(&[("x", 1.0, 2.0), ("y", 1.0, 2.0)]);
+        // var × var
+        assert_eq!(extract_variable_range(&mul(v("x"), v("y")), &pre), None);
+        // division by a variable (could be zero)
+        assert_eq!(extract_variable_range(&div(v("x"), v("y")), &pre), None);
+        // division by a zero constant
+        assert_eq!(extract_variable_range(&div(v("x"), r(0.0)), &pre), None);
+        // a transcendental Apply inside the argument
+        let inner = SmtExpr::Apply("erf".into(), vec![v("x")]);
+        assert_eq!(extract_variable_range(&add(inner, r(1.0)), &pre), None);
+    }
+
+    #[test]
+    fn affine_unbounded_leaf_fails_closed() {
+        // 2x+1 with x unbounded → None.
+        assert_eq!(
+            extract_variable_range(&add(mul(r(2.0), v("x")), r(1.0)), &[]),
+            None
+        );
+        // x + y with only x bounded → None (y unbounded).
+        let pre = box_pre(&[("x", 0.0, 1.0)]);
+        assert_eq!(extract_variable_range(&add(v("x"), v("y")), &pre), None);
+    }
+
+    #[test]
+    fn bare_var_still_identical_after_affine_refactor() {
+        // The bare-Var path must be byte-identical to the pre-affine behavior.
+        let pre = box_pre(&[("x", -2.0, 5.0)]);
+        assert_eq!(extract_variable_range(&v("x"), &pre), Some((-2.0, 5.0)));
+        assert_eq!(extract_variable_range(&v("x"), &[]), None);
+    }
+
+    #[test]
+    fn transforms_erf_of_affine_argument_end_to_end() {
+        // erf(x/2 + 1) with x∈[0,2] → arg range [1,2] (covered) → abstracts.
+        let t = AbstractSubterm::new();
+        let arg = add(div(v("x"), r(2.0)), r(1.0));
+        let prop = SmtProperty {
+            variables: vec![("x".into(), SmtSort::Real)],
+            preconditions: box_pre(&[("x", 0.0, 2.0)]),
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Le,
+                Box::new(SmtExpr::Apply("erf".into(), vec![arg])),
+                Box::new(r(0.999)),
+            ),
+        };
+        let out = t.apply(&Goal::smt(prop));
+        let GoalShape::Smt(ref rp) = out[0].shape else {
+            panic!("expected Smt goal");
+        };
+        assert!(
+            rp.variables.iter().any(|(n, _)| n == "__erf_abs_0"),
+            "affine erf must abstract"
+        );
+        assert!(!contains_erf(&rp.postcondition), "erf must be gone");
     }
 }

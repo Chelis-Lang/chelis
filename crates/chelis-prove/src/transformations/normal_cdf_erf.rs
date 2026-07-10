@@ -211,30 +211,30 @@ mod tests {
         assert_eq!(out[0].shape, goal.shape);
     }
 
+    fn bounded_x_pre() -> Vec<SmtExpr> {
+        vec![
+            SmtExpr::Cmp(
+                CmpOp::Le,
+                Box::new(SmtExpr::RealLit(0.0)),
+                Box::new(SmtExpr::Var("x".into())),
+            ),
+            SmtExpr::Cmp(
+                CmpOp::Le,
+                Box::new(SmtExpr::Var("x".into())),
+                Box::new(SmtExpr::RealLit(1.0)),
+            ),
+        ]
+    }
+
     #[test]
-    fn lowering_is_exact_but_discharge_needs_compound_arg_propagation() {
-        // The pre-pass rewrite is EXACT: normal_cdf(x) with bounded x becomes
-        // 0.5 + 0.5*erf(x/√2). But the erf argument x/√2 is a COMPOUND expression
-        // (Mul(x, 1/√2)), not a bare Var — so the abstract-subterm extractor
-        // (bare-Var only, by design in this slice) DECLINES. Even a trivial affine
-        // argument hits the compound-argument-propagation wall (the research-risk
-        // 60%; see spec/design/probe_434_transcendental.md p17). This test pins
-        // that honest boundary: the lowering is done, discharge is not, until
-        // argument propagation lands.
+    fn normal_cdf_of_bare_var_abstracts_via_affine_propagation() {
+        // normal_cdf(x) with bounded x lowers to 0.5 + 0.5·erf(x/√2). The erf
+        // argument x/√2 is AFFINE, so affine-argument propagation (chelis#434)
+        // now lets abstract-subterm ABSTRACT it via the certified erf envelope —
+        // the case that DECLINED before this slice. No normal_cdf, no erf left.
         let goal = Goal::smt(SmtProperty {
             variables: vec![("x".into(), SmtSort::Real)],
-            preconditions: vec![
-                SmtExpr::Cmp(
-                    CmpOp::Le,
-                    Box::new(SmtExpr::RealLit(0.0)),
-                    Box::new(SmtExpr::Var("x".into())),
-                ),
-                SmtExpr::Cmp(
-                    CmpOp::Le,
-                    Box::new(SmtExpr::Var("x".into())),
-                    Box::new(SmtExpr::RealLit(1.0)),
-                ),
-            ],
+            preconditions: bounded_x_pre(),
             postcondition: SmtExpr::Cmp(
                 CmpOp::Le,
                 Box::new(ncdf(SmtExpr::Var("x".into()))),
@@ -242,9 +242,7 @@ mod tests {
             ),
         });
 
-        // Pre-pass: normal_cdf -> erf identity (exact, done).
         let lowered = NormalCdfToErf.apply(&goal);
-        assert_eq!(lowered.len(), 1);
         let GoalShape::Smt(ref lp) = lowered[0].shape else {
             panic!("expected Smt goal");
         };
@@ -257,41 +255,27 @@ mod tests {
             "erf identity present"
         );
 
-        // Abstract-subterm DECLINES: x/√2 is a compound argument. The goal is
-        // returned unchanged (erf still present, no fresh __erf_abs var).
         let residual = AbstractSubterm::new().apply(&lowered[0]);
-        assert_eq!(residual.len(), 1);
-        assert_eq!(
-            residual[0].shape, lowered[0].shape,
-            "compound erf argument (x/√2) must decline until arg propagation lands"
-        );
         let GoalShape::Smt(ref rp) = residual[0].shape else {
             panic!("expected Smt goal");
         };
-        assert!(!rp.variables.iter().any(|(n, _)| n.starts_with("__erf_abs")));
+        assert!(
+            rp.variables.iter().any(|(n, _)| n == "__erf_abs_0"),
+            "affine x/√2 must now abstract: {:?}",
+            rp.variables
+        );
+        assert!(!contains_apply(&rp.postcondition, "normal_cdf"));
+        assert!(!contains_apply(&rp.postcondition, "erf"));
     }
 
     #[test]
-    fn bare_arg_erf_identity_would_abstract() {
-        // Control: if the lowering DIDN'T scale the argument (i.e. the erf arg
-        // were the bare bounded var), abstract-subterm WOULD engage. This isolates
-        // that the ONLY blocker above is the compound x/√2 scale, not the erf
-        // identity shape. Here we hand-build erf(x) (bare) inside the identity.
-        let post = SmtExpr::Cmp(
-            CmpOp::Le,
-            Box::new(SmtExpr::Arith(
-                ArithOp::Add,
-                Box::new(SmtExpr::RealLit(0.5)),
-                Box::new(SmtExpr::Arith(
-                    ArithOp::Mul,
-                    Box::new(SmtExpr::RealLit(0.5)),
-                    Box::new(SmtExpr::Apply("erf".into(), vec![SmtExpr::Var("x".into())])),
-                )),
-            )),
-            Box::new(SmtExpr::RealLit(2.0)),
-        );
+    fn normal_cdf_of_nonlinear_arg_still_declines() {
+        // The REMAINING boundary after affine propagation: a NONLINEAR argument.
+        // normal_cdf(x·y) lowers to erf((x·y)/√2); (x·y)/√2 is var×var (non-affine),
+        // so abstract-subterm still DECLINES. Full compound propagation (the rest
+        // of the 60% — the BS log(s/k)/d1 shape) remains deferred.
         let goal = Goal::smt(SmtProperty {
-            variables: vec![("x".into(), SmtSort::Real)],
+            variables: vec![("x".into(), SmtSort::Real), ("y".into(), SmtSort::Real)],
             preconditions: vec![
                 SmtExpr::Cmp(
                     CmpOp::Le,
@@ -303,18 +287,40 @@ mod tests {
                     Box::new(SmtExpr::Var("x".into())),
                     Box::new(SmtExpr::RealLit(1.0)),
                 ),
+                SmtExpr::Cmp(
+                    CmpOp::Le,
+                    Box::new(SmtExpr::RealLit(0.0)),
+                    Box::new(SmtExpr::Var("y".into())),
+                ),
+                SmtExpr::Cmp(
+                    CmpOp::Le,
+                    Box::new(SmtExpr::Var("y".into())),
+                    Box::new(SmtExpr::RealLit(1.0)),
+                ),
             ],
-            postcondition: post,
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Le,
+                Box::new(ncdf(SmtExpr::Arith(
+                    ArithOp::Mul,
+                    Box::new(SmtExpr::Var("x".into())),
+                    Box::new(SmtExpr::Var("y".into())),
+                ))),
+                Box::new(SmtExpr::RealLit(1.0)),
+            ),
         });
-        let residual = AbstractSubterm::new().apply(&goal);
+        let lowered = NormalCdfToErf.apply(&goal);
+        let residual = AbstractSubterm::new().apply(&lowered[0]);
+        assert_eq!(
+            residual[0].shape, lowered[0].shape,
+            "nonlinear (x·y)/√2 argument must still decline"
+        );
         let GoalShape::Smt(ref rp) = residual[0].shape else {
             panic!("expected Smt goal");
         };
         assert!(
-            rp.variables.iter().any(|(n, _)| n == "__erf_abs_0"),
-            "bare-arg erf must abstract: {:?}",
-            rp.variables
+            contains_apply(&rp.postcondition, "erf"),
+            "erf remains (declined)"
         );
-        assert!(!contains_apply(&rp.postcondition, "erf"));
+        assert!(!rp.variables.iter().any(|(n, _)| n.starts_with("__erf_abs")));
     }
 }
