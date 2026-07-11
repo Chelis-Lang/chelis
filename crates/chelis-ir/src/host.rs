@@ -2345,7 +2345,12 @@ fn lower_tensor_helper_dag(
     // helper lowering INLINES them into the DAG. A `grad`/`vmap`-carrying
     // expr is exempt: it can ONLY lower through the DAG lane, where the
     // guard-as-mask-arithmetic form (zero placeholder included) is the
-    // documented chelis#616 differentiation semantics.
+    // documented chelis#616 differentiation semantics. KNOWN RESIDUAL
+    // (chelis#662, pre-existing): the exemption is whole-expression, so a
+    // forward `fail` sitting BESIDE a grad call in one body keeps mask
+    // semantics and its C binary silently zeros where eval aborts; the
+    // precise fix is scoping the exemption to the differentiated
+    // sub-expression.
     if !expr_contains_grad_like(expr) && expr_reaches_fail(expr, &defs, &mut HashSet::new()) {
         return None;
     }

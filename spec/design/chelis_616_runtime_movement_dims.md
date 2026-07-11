@@ -158,6 +158,9 @@ leg is part of the oracle test now).
   control flow instead of the DAG lane's zero-placeholder mask form.
   Oracle: `issue_631_guarded_forward_concat_c_parity.rs` (build-and-run
   parity at two lengths plus fail-branch error parity in both lanes).
+  Residual: the gate's `grad`/`vmap` exemption is whole-expression, so a
+  forward `fail` beside a grad call in one body still keeps mask
+  semantics in C (chelis#662, pre-existing).
 - **Checker over-unification of movement chains** (a direct-return
   `shrink -> stride` under one sig symbol): the OBSERVABLE C-lane abort
   is resolved by the chelis#631 change set — the sig symbol was painted

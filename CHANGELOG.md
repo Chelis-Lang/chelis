@@ -39,6 +39,19 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   `chelis eval` aborts with the user's message. Such bodies now lower
   through host-lane `if`/`fail` control flow (`chelis_fail`), keeping
   error parity (`issue_631_data_dependent_fail_branch_aborts_in_c`).
+  Known residual (chelis#662, pre-existing): the `grad`/`vmap` exemption
+  is whole-expression, so a forward `fail` BESIDE a grad call in one
+  body still keeps mask semantics in C.
+
+### Changed
+
+- A return-only symbolic dim declared on a concat axis that chelis#631
+  now types concretely (e.g. `-> tensor[k, 2, f32]` over an axis-0
+  concat of two `[1, 2]` rows) is rejected by the §4.4.1 return-dim
+  rigidity rule, since `k` pins to the derived literal. Use the concrete
+  extent (`tensor[2, 2, f32]`) or an explicit wildcard (`tensor[*, 2,
+  f32]`); the symbolic spelling was the pre-#631 workaround for
+  chelis#594.
 
 ## [0.16.0] — 2026-07-10
 
