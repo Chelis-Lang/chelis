@@ -21,6 +21,17 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   eval-vs-C build-and-run parity
   (`issue_631_guarded_forward_concat_c_parity.rs`). Also fixes the
   misplaced-wildcard symptoms of chelis#594.
+- **Checker movement typing is identity-only for symbolic dims
+  (chelis#632).** A non-identity `stride`/`pad` axis (literal step != 1,
+  non-zero padding) over a symbolic dim now types a fresh
+  runtime-guarded extent instead of passing the input's symbol through —
+  the extent genuinely changes (`ceil(d/step)`, `d + lo + hi`), so the
+  pass-through was an annotation-level lie that also falsely rejected
+  `sig f: tensor[n, f32] -> tensor[u, f32]` over `stride(x, 2)` via the
+  §4.4.1 rigidity guard (that program now checks, builds, and has
+  eval-vs-C parity: `issue_632_literal_stride_under_sig_symbols_matches_c`).
+  Identity axes (stride step 1, zero pad) still pass the symbol through
+  (the `issue_513` contract); literal axes keep exact arithmetic.
 - **Anonymous dims are no longer dim-substitution keys (chelis#632,
   partial).** `tensor_dim_substitutions` recorded `"*" -> <actual>` and
   repainted every wildcard-typed node in a helper DAG with one symbol,

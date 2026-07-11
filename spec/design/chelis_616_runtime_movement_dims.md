@@ -161,20 +161,21 @@ leg is part of the oracle test now).
   Residual: the gate's `grad`/`vmap` exemption is whole-expression, so a
   forward `fail` beside a grad call in one body still keeps mask
   semantics in C (chelis#662, pre-existing).
-- **Checker over-unification of movement chains** (a direct-return
-  `shrink -> stride` under one sig symbol): the OBSERVABLE C-lane abort
-  is resolved by the chelis#631 change set — the sig symbol was painted
-  onto both movement nodes by the wildcard-KEYED dim substitution, not
-  by the checker; with anon keys excluded and the helper root retyped
-  positionally (op-declarable axes only), the degenerate chain has full
-  eval-vs-C parity (flipped pin:
-  `issue_632_direct_return_movement_chain_eval_matches_c`). The
-  checker-side residue — movement typing passes a symbolic dim through
-  unchanged on NON-IDENTITY stride/pad axes (an annotation-level lie,
-  e.g. `stride(&x, 2, 2)` on `tensor[batch, 4]` stamps `batch`) and the
-  false §4.4.1 rigidity rejection of `sig f: tensor[n] -> tensor[u]`
-  over `stride(x, 2)` — remains tracked as chelis#632 (fresh extents per
-  non-identity axis, mirroring `shape_source_for_axis`).
+- **Checker over-unification of movement chains** — RESOLVED
+  (chelis#632, in two parts). The OBSERVABLE C-lane abort on a
+  direct-return `shrink -> stride` chain was the wildcard-KEYED dim
+  substitution painting the sig symbol onto both movement nodes; anon
+  keys are excluded and the helper root retypes positionally
+  (op-declarable axes only), giving the degenerate chain full eval-vs-C
+  parity (flipped pin:
+  `issue_632_direct_return_movement_chain_eval_matches_c`). The checker
+  side now mints a FRESH extent for every non-identity stride/pad axis
+  (identity-only symbolic pass-through, mirroring
+  `shape_source_for_axis`; spec/04 §4.7): the `stride(&x, 2, 2)`-keeps-
+  `batch` annotation lie is gone, and the false §4.4.1 rigidity
+  rejection of `sig f: tensor[n] -> tensor[u]` over `stride(x, 2)` is
+  fixed (oracle: `issue_632_literal_stride_under_sig_symbols_matches_c`;
+  checker pins: `chelis-types/tests/issue_632_movement_fresh_extents.rs`).
 - **`shape_source_for_axis`'s Reshape arm** still recurses positionally into
   the input (axis-naive); unsound in principle for rank-shifting reshapes
   whose downstream symbolic axes trace through it. The oracle paths avoid

@@ -490,9 +490,13 @@ over-unification guard). Since chelis#631/#632 the guard no longer fires on
 a direct-return `shrink -> stride` chain under one sig symbol — anonymous
 dims are not substitution keys, so the sig symbol attaches positionally to
 the FINAL op only and each inner movement op declares its own extent (full
-eval-vs-C parity). The guard remains the soundness floor for a genuinely
-CLAIMED symbol equality (e.g. an explicit `-> tensor[n]` over
-`stride(x, 2)`) and for any future checker imprecision.
+eval-vs-C parity). The checker's movement typing matches: symbolic-dim
+pass-through is identity-only (stride step 1 / zero pad; see
+spec/04-type-system.md §4.7), so a non-identity movement axis types a
+fresh runtime-guarded extent rather than repeating the input's symbol.
+The guard remains the soundness floor for a genuinely CLAIMED symbol
+equality (e.g. an explicit `-> tensor[n]` over `stride(x, 2)`) and for
+any future checker imprecision.
 
 The movement adjoints are runtime-capable on the same representation: the
 `shrink` adjoint pads with `after = shape(x, axis) - end`, the `pad` adjoint
