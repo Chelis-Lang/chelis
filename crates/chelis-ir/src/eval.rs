@@ -89,7 +89,11 @@ fn default_value(ty: &TensorType) -> TensorValue {
 /// int->float preserves the value, and bool encodes as 0.0 / 1.0 (decoded via
 /// `!= 0.0`). `chelis-ir` sits below `chelis-compiler-api`, so the logic is
 /// duplicated here rather than shared (no upward dependency).
-fn convert_cast_data(x: f64, src: Prim, dst: Prim) -> f64 {
+///
+/// `pub(crate)` so lowering's static `if`-condition fold (chelis#620) applies
+/// the exact same cast semantics as this evaluator; a fold/eval divergence
+/// there would silently select the wrong branch.
+pub(crate) fn convert_cast_data(x: f64, src: Prim, dst: Prim) -> f64 {
     if src == dst {
         return x;
     }

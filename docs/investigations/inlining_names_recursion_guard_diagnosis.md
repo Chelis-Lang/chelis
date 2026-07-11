@@ -1,5 +1,16 @@
 # `inlining_names` recursion-guard over-application — diagnosis
 
+> **Superseded (chelis#620).** The refuse-on-reentry `inlining_names` set
+> this doc diagnoses was replaced by depth-bounded unrolling
+> (`inlining_depths` + `inlining_active` in
+> `crates/chelis-ir/src/lower.rs`): a re-entrant call now inlines
+> normally, statically-terminating recursion unrolls (its base case
+> prunes via the static `if`/`match` condition fold), and a chain the
+> pruning cannot bound errors loudly at a named cap instead of falling
+> through to the silent return-last-arg fallback documented below. The
+> fn-typed-parameter alias analysis in this doc (the `visited` set vs
+> guard-placement distinction) still describes the live code.
+
 Diagnoses **Inlining-F1** from the 0.7.6 toolchain hygiene workstream,
 surfaced by PR #37's call-site parity test for fn-typed-parameter pipe
 stages (`crates/chelis-ir/tests/pipe_evaluation.rs:422`–`425`).

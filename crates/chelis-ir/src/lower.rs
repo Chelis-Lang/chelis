@@ -3342,6 +3342,49 @@ fn collect_cons_chain(expr: &Expr) -> Option<Vec<&Expr>> {
     }
 }
 
+/// Walk a lowered `Cons`/`Nil` spine into its element values, in order.
+/// The VALUE-level companion of [`collect_cons_chain`] (chelis#620): a list
+/// that only becomes statically known after inlining/unrolling (e.g. a
+/// recursive patch collector's return value, or a `let`-bound append
+/// result) is invisible to the expr-level walk, which sees only a bound
+/// var; by then the list exists as a `LoweredValue::Adt` constructor
+/// chain. Returns `None` for anything that is not a closed chain.
+fn adt_cons_chain_values(value: &LoweredValue) -> Option<Vec<LoweredValue>> {
+    let mut out = Vec::new();
+    let mut cursor = value;
+    loop {
+        match cursor {
+            LoweredValue::Adt { ctor, fields, .. } if ctor == "Cons" && fields.len() == 2 => {
+                out.push(fields[0].clone());
+                cursor = &fields[1];
+            }
+            LoweredValue::Adt { ctor, fields, .. } if ctor == "Nil" && fields.is_empty() => {
+                return Some(out);
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Rebuild a `Cons`/`Nil` spine from element values (chelis#620): the
+/// inverse of [`adt_cons_chain_values`], used to materialize a static
+/// list-append result.
+fn rebuild_cons_chain(items: Vec<LoweredValue>) -> LoweredValue {
+    let mut chain = LoweredValue::Adt {
+        ctor: "Nil".to_string(),
+        field_names: None,
+        fields: Vec::new(),
+    };
+    for item in items.into_iter().rev() {
+        chain = LoweredValue::Adt {
+            ctor: "Cons".to_string(),
+            field_names: None,
+            fields: vec![item, chain],
+        };
+    }
+    chain
+}
+
 /// Extract a positive integer dim from a Deep expression. Handles
 /// the common shapes that appear inside `reshape`'s shape list after
 /// `chelis-surf::desugar`:
@@ -3570,6 +3613,20 @@ fn extract_cons_chain_tensor(expr: &Expr) -> Option<LiteralToTensor> {
     }
     Some(LiteralToTensor { shape, data })
 }
+
+/// chelis#620: recursion lowers by unrolling, and these caps bound it.
+/// Per-name limit on active inline levels for one callee. 512 covers an
+/// im2col-style unroll at a 22x22 kernel (484 levels) with margin; School's
+/// real kernels are at most 7x7 (49 levels). A well-founded recursion
+/// terminates through static `if`/`match` pruning long before the cap; a
+/// runtime-bounded recursion hits the cap in milliseconds and errors loudly
+/// instead of hanging.
+const MAX_STATIC_RECURSION_DEPTH: usize = 512;
+/// Total limit on simultaneously active inlined bodies across all names.
+/// Each level costs roughly ten lowering frames (a few KB of Rust stack), so
+/// this cap, not the per-name one, is what bounds the stack for mutually
+/// recursive cycles (k names at 512 each would otherwise stack k*512 levels).
+const MAX_TOTAL_INLINE_DEPTH: usize = 1024;
 
 /// Extract a numeric scalar from a Deep expression. Recognizes:
 ///   * `Atom::Int` / `Atom::Float` / `Atom::Bool`
@@ -3955,7 +4012,20 @@ struct LowerCtx {
     program_defs: HashMap<String, Expr>,
     random_seed: Option<u64>,
     linearity: LinearityInfo,
-    inlining_names: HashSet<String>,
+    /// chelis#620 (Inlining-F1 successor): per-callee active-inline depth.
+    /// Recursion lowers by unrolling, so a self- or mutually-recursive call
+    /// re-inlines up to [`MAX_STATIC_RECURSION_DEPTH`] levels per name; the
+    /// static `if`/`match` pruning is what terminates a well-founded
+    /// recursion before the cap. Entries are removed at depth 0 on unwind of
+    /// each `lower_plain_callable_app` body scope. A cap hit raises loudly
+    /// through the [`Self::reject_lowering_slice`] ladder; leak-on-panic is
+    /// acceptable because every lowering error unwinds through the per-entry
+    /// `catch_lowering` and the ctx is abandoned.
+    inlining_depths: HashMap<String, usize>,
+    /// Total active inlined bodies across all names. Bounds the Rust stack
+    /// (each level is roughly ten lowering frames) for deep or mutually
+    /// recursive chains that stay under every per-name cap.
+    inlining_active: usize,
     /// Parameter names whose declared type is `t-fn` — used by
     /// `resolve_callable_expr_inner` to distinguish a fn-typed parameter
     /// reference (legitimate `CallableExpr::Parameter`) from a truly
@@ -4044,7 +4114,8 @@ impl LowerCtx {
             program_defs,
             random_seed: None,
             linearity,
-            inlining_names: HashSet::new(),
+            inlining_depths: HashMap::new(),
+            inlining_active: 0,
             fn_typed_params: HashSet::new(),
             dim_substitutions: HashMap::new(),
             prec_substitutions: HashMap::new(),
@@ -5143,6 +5214,20 @@ impl LowerCtx {
                     fields,
                 };
             }
+            // chelis#620: `concat` over statically-known list VALUES. The
+            // builtin arm's expr-level path (`lower_tensor_concat` /
+            // `collect_cons_chain`) cannot see a list that only exists as a
+            // lowered `Cons`/`Nil` Adt spine (the return value of an
+            // unrolled recursive builder, or a prior static append bound to
+            // a var). Handle the two static shapes here, where a
+            // non-`Node` return is representable; anything else falls
+            // through to the builtin arm unchanged.
+            if func_name == "concat"
+                && elems.len() == 5
+                && let Some(value) = self.try_lower_static_list_concat(&elems[3], &elems[4])
+            {
+                return value;
+            }
             return LoweredValue::Node(self.lower_builtin_app(
                 func_name,
                 &elems[3..],
@@ -5233,7 +5318,14 @@ impl LowerCtx {
                     Expr::Atom(Atom::Symbol(name), _) => Some(name.clone()),
                     _ => None,
                 })?;
-                if !visited.insert(name.clone()) || self.inlining_names.contains(&name) {
+                // `visited` protects THIS resolution walk from alias cycles
+                // (`def a = b; def b = a`). It deliberately does NOT consult
+                // the active-inline state: a re-entrant call to a callee that
+                // is mid-inline resolves normally and unrolls, bounded by the
+                // depth caps in `lower_plain_callable_app` (chelis#620; the
+                // Inlining-F1 refuse-on-reentry rule previously fell through
+                // to `lower_app`'s silently wrong return-last-arg fallback).
+                if !visited.insert(name.clone()) {
                     return None;
                 }
                 // Item 2-extended: a function-valued parameter is a
@@ -6042,20 +6134,65 @@ impl LowerCtx {
         let rank_subst =
             tensor_rank_substitutions(&formal_type_exprs, &actual_types, &self.dim_axis_positions);
         self.rank_substitutions.extend(rank_subst);
-        // Inlining-F1: install the recursion guard *here*, after argument
+        // chelis#620 (Inlining-F1 successor): recursion lowers by BOUNDED
+        // UNROLLING. Depth accounting installs *here*, after argument
         // evaluation, so legitimate nested calls passed as arguments to
         // the same fn-typed-parameter alias (e.g. `outer(doubler, seed)`
         // with `outer(f, x) = f(f(x))`) finish lowering before the body
-        // lowering's guard takes effect. A true self-recursive call
-        // inside `body` (`def f(x) = f(x)`) still trips
-        // `resolve_callable_expr_inner`'s `inlining_names.contains(&name)`
-        // check at `lower.rs` and falls through to the `lower_app`
-        // fallback, terminating bounded. See
-        // `docs/investigations/inlining_names_recursion_guard_diagnosis.md`.
-        let guard_name = inlining_name.filter(|name| self.inlining_names.insert(name.clone()));
-        let result = self.lower_expr(body);
-        if let Some(name) = guard_name {
-            self.inlining_names.remove(&name);
+        // scope is counted. A re-entrant call to a callee that is
+        // mid-inline resolves and inlines normally; a well-founded
+        // recursion terminates through static `if`/`match` pruning of its
+        // base case, and the two caps are the loud backstop for chains the
+        // pruning cannot bound (the pre-#620 refuse-on-reentry rule
+        // instead fell through to `lower_app`'s silently wrong
+        // return-last-arg fallback; history in
+        // `docs/investigations/inlining_names_recursion_guard_diagnosis.md`).
+        // Decrements are skipped on raise: every lowering error unwinds
+        // through the per-entry `catch_lowering` and the ctx is abandoned.
+        self.inlining_active += 1;
+        if let Some(name) = &inlining_name {
+            *self.inlining_depths.entry(name.clone()).or_insert(0) += 1;
+        }
+        if self.inlining_active > MAX_TOTAL_INLINE_DEPTH {
+            self.reject_lowering_slice(
+                Some(fn_expr),
+                format!(
+                    "call inlining exceeded the total nesting limit of \
+                     {MAX_TOTAL_INLINE_DEPTH} active levels (a deep or mutually recursive \
+                     call chain): recursion lowers by bounded static unrolling (chelis#620)"
+                ),
+            );
+        }
+        if let Some(name) = &inlining_name
+            && self.inlining_depths.get(name).copied().unwrap_or(0) > MAX_STATIC_RECURSION_DEPTH
+        {
+            self.reject_lowering_slice(
+                Some(fn_expr),
+                format!(
+                    "recursive inlining of `{name}` exceeded the static unroll limit of \
+                     {MAX_STATIC_RECURSION_DEPTH} levels: recursion lowers by unrolling, so \
+                     a recursive call chain must terminate through a compile-time-resolvable \
+                     base case (a static `if` or `match` condition) within the limit; a \
+                     condition that is only known at runtime cannot bound the unroll \
+                     (chelis#620)"
+                ),
+            );
+        }
+        // Each unroll level costs multiple large lowering frames (debug
+        // builds overflow the default 8 MB main-thread stack well before the
+        // 512-level cap without this). `maybe_grow` at THIS site works where
+        // chelis-types' boundary `stacker::grow` pattern would not: the
+        // stack nears exhaustion mid-descent, and every additional level
+        // re-enters this function, so the grow site is always in reach.
+        let result = stacker::maybe_grow(64 * 1024, 4 * 1024 * 1024, || self.lower_expr(body));
+        self.inlining_active -= 1;
+        if let Some(name) = &inlining_name
+            && let Some(depth) = self.inlining_depths.get_mut(name)
+        {
+            *depth = depth.saturating_sub(1);
+            if *depth == 0 {
+                self.inlining_depths.remove(name);
+            }
         }
         self.bindings = saved;
         self.list_bindings = saved_list_bindings;
@@ -6605,16 +6742,17 @@ impl LowerCtx {
         if get_tag(params_list) != Some("params") {
             return None;
         }
+        // chelis#620: use the shared three-form walker. A param whose name
+        // collides with a reserved Deep tag (`params`, `match`, `if`, ...)
+        // desugars as a MetaExpr wrapper (chelis-surf's
+        // `typed_param_needs_meta_wrapper`), and the previous Atom/List-only
+        // match silently DROPPED that name from the list -- the param never
+        // bound, its body references lowered to bogus Loads, and a grad over
+        // a struct argument conventionally named `params` failed as a
+        // "runtime scrutinee" match.
         let names = children(params_list)
             .iter()
-            .filter_map(|param| match param {
-                Expr::Atom(Atom::Symbol(name), _) => Some(name.clone()),
-                Expr::List(list, _) => list.elements.first().and_then(|expr| match expr {
-                    Expr::Atom(Atom::Symbol(name), _) => Some(name.clone()),
-                    _ => None,
-                }),
-                _ => None,
-            })
+            .filter_map(|param| param_name_and_type_expr(param).map(|(name, _)| name))
             .collect();
         Some((names, body))
     }
@@ -6679,18 +6817,35 @@ impl LowerCtx {
 
             // Tier 1: unary elementwise
             "drop" if args.len() == 1 => {
-                let input = self.lower_expr_node(&args[0], "drop input");
-                let output_type = self
-                    .dag
-                    .get(input)
-                    .map(|node| node.output_type.clone())
-                    .unwrap_or_else(Self::default_type);
-                self.dag.add_node(
-                    RiscOp::Drop,
-                    vec![input],
-                    output_type,
-                    self.current_span_id.clone(),
-                )
+                // chelis#620: a drop over a tuple or ADT value (e.g. a
+                // params struct leaving scope) closes every tensor leaf's
+                // live range with its own Drop node; the arm's single-node
+                // contract returns the last one (a rank-0 Const for a
+                // leafless value such as a nullary constructor).
+                let input = self.lower_expr(&args[0]);
+                let leaves = input.flatten_nodes();
+                let mut last = None;
+                for leaf in leaves {
+                    let output_type = self
+                        .dag
+                        .get(leaf)
+                        .map(|node| node.output_type.clone())
+                        .unwrap_or_else(Self::default_type);
+                    last = Some(self.dag.add_node(
+                        RiscOp::Drop,
+                        vec![leaf],
+                        output_type,
+                        self.current_span_id.clone(),
+                    ));
+                }
+                last.unwrap_or_else(|| {
+                    self.dag.add_node(
+                        RiscOp::Const { value: 0.0 },
+                        vec![],
+                        Self::default_type(),
+                        self.current_span_id.clone(),
+                    )
+                })
             }
             "neg" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "neg input");
@@ -8083,19 +8238,33 @@ impl LowerCtx {
         }
         let raw_axis = extract_int_axis(axis_expr)?;
 
-        // Lower each element and snapshot its type. Bail out (fall through
-        // to the host fallback) if any element collapses to rank-0 — that
-        // is exactly the degenerate placeholder we are trying to avoid, and
-        // a Pad over it would be unsound.
+        // Lower each element. Bail out (fall through to the host fallback)
+        // if any element is not a single tensor node.
         let mut nodes = Vec::with_capacity(elements.len());
-        let mut elem_types = Vec::with_capacity(elements.len());
         for elem in &elements {
-            let node = self.lower_expr(elem).as_single_node()?;
-            let ty = self.dag.get(node)?.output_type.clone();
+            nodes.push(self.lower_expr(elem).as_single_node()?);
+        }
+        self.tensor_concat_from_nodes(&nodes, raw_axis)
+    }
+
+    /// The node-level tail of [`Self::lower_tensor_concat`]: type-check the
+    /// already-lowered elements and emit the Pad+Add cascade. Split out
+    /// (chelis#620) so a list that is only statically known as a lowered
+    /// VALUE (an [`adt_cons_chain_values`] spine from an unrolled recursive
+    /// builder) shares the exact same construction as the expr-level path.
+    fn tensor_concat_from_nodes(&mut self, nodes: &[NodeId], raw_axis: i64) -> Option<NodeId> {
+        if nodes.is_empty() {
+            return None;
+        }
+        // Snapshot each element's type. Bail out if any element collapses
+        // to rank-0 — that is exactly the degenerate placeholder we are
+        // trying to avoid, and a Pad over it would be unsound.
+        let mut elem_types = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            let ty = self.dag.get(*node)?.output_type.clone();
             if ty.dims.is_empty() {
                 return None;
             }
-            nodes.push(node);
             elem_types.push(ty);
         }
 
@@ -8171,6 +8340,51 @@ impl LowerCtx {
             });
         }
         accumulator
+    }
+
+    /// chelis#620: `concat` over list VALUES that are only statically known
+    /// after lowering (an [`adt_cons_chain_values`] spine). Two shapes:
+    ///
+    ///   * `concat(list, axis)` with a compile-time int axis — tensor
+    ///     concat; when the list expr is NOT expr-enumerable (so the
+    ///     builtin arm's `lower_tensor_concat` would fall to the host
+    ///     placeholder) but lowers to a static spine of single tensor
+    ///     nodes, emit the same Pad+Add cascade via
+    ///     [`Self::tensor_concat_from_nodes`].
+    ///   * `concat(list, list)` — static list append; rebuild the appended
+    ///     spine as a `LoweredValue::Adt`.
+    ///
+    /// Returns `None` to fall through to the builtin arm. A `None` after
+    /// argument lowering leaves orphan nodes behind, the same
+    /// lower-then-bail contract `lower_tensor_concat` already has; the
+    /// entry points' DCE sweeps them.
+    fn try_lower_static_list_concat(
+        &mut self,
+        list_arg: &Expr,
+        second_arg: &Expr,
+    ) -> Option<LoweredValue> {
+        if let Some(raw_axis) = extract_int_axis(second_arg) {
+            // Tensor concat. The expr-level path in the builtin arm owns
+            // an expr-enumerable list; only pick up the value-level case.
+            if collect_cons_chain(&self.resolved_list_expr(list_arg)).is_some() {
+                return None;
+            }
+            let value = self.lower_expr(list_arg);
+            let elements = adt_cons_chain_values(&value)?;
+            let nodes = elements
+                .iter()
+                .map(LoweredValue::as_single_node)
+                .collect::<Option<Vec<_>>>()?;
+            return self
+                .tensor_concat_from_nodes(&nodes, raw_axis)
+                .map(LoweredValue::Node);
+        }
+        // List append: both sides must be static spines.
+        let left = self.lower_expr(list_arg);
+        let mut items = adt_cons_chain_values(&left)?;
+        let right = self.lower_expr(second_arg);
+        items.extend(adt_cons_chain_values(&right)?);
+        Some(rebuild_cons_chain(items))
     }
 
     fn resolved_list_expr(&self, expr: &Expr) -> Expr {
@@ -8842,6 +9056,97 @@ impl LowerCtx {
             }
             _ => None,
         }
+    }
+
+    /// chelis#620: resolve an already-lowered `if` condition to a
+    /// compile-time boolean. `Some(b)` only when the condition's transitive
+    /// input subgraph is scalar, closed, and pure: no `Load` (definitionally
+    /// runtime), no `Shape` (a shape read participates in the #616
+    /// conform/mask machinery and must stay on the runtime path), no
+    /// `UniformLike`/`Dropout` (nondeterministic), no `shape_deps`, no
+    /// non-scalar node, and every op inside the whitelisted vocabulary whose
+    /// arms mirror `crate::eval` exactly (`Cast` shares
+    /// [`crate::eval::convert_cast_data`] so the two lanes cannot diverge).
+    ///
+    /// Works at the DAG-node level, not the Deep-expression level, because by
+    /// the time `lower_if` runs, inlined-function parameters are already
+    /// bound to lowered nodes (`static_size_bindings` is only populated by
+    /// `lower_let`, never at param-binding time), and the comparison/boolean
+    /// surface (`gte`/`lte`/`eq`/`and`/`or`/`not`) has already been lowered
+    /// to `CmpLt`/`MaxElem`/`Mul`/`Neg`/`Const` compositions by the tier2
+    /// builtins. Zero-divisor `FloorDiv`/`TruncDiv` refuses the fold rather
+    /// than folding a runtime trap away.
+    fn fold_static_cond(&self, cond: NodeId) -> Option<bool> {
+        let mut memo: HashMap<NodeId, f64> = HashMap::new();
+        // Iterative post-order: (node, inputs_pushed).
+        let mut stack: Vec<(NodeId, bool)> = vec![(cond, false)];
+        while let Some((id, inputs_pushed)) = stack.pop() {
+            if memo.contains_key(&id) {
+                continue;
+            }
+            let node = self.dag.get(id)?;
+            if !node.shape_deps.is_empty() || !node.output_type.dims.is_empty() {
+                return None;
+            }
+            if !inputs_pushed {
+                stack.push((id, true));
+                for input in &node.inputs {
+                    stack.push((*input, false));
+                }
+                continue;
+            }
+            let input0 = node
+                .inputs
+                .first()
+                .and_then(|input| memo.get(input))
+                .copied();
+            let input1 = node
+                .inputs
+                .get(1)
+                .and_then(|input| memo.get(input))
+                .copied();
+            let value = match &node.op {
+                RiscOp::Const { value } => *value,
+                RiscOp::Cast { new_precision } => {
+                    let input_id = *node.inputs.first()?;
+                    let src = self.dag.get(input_id)?.output_type.precision;
+                    crate::eval::convert_cast_data(input0?, src, *new_precision)
+                }
+                RiscOp::Add => input0? + input1?,
+                RiscOp::Mul => input0? * input1?,
+                RiscOp::Neg => -input0?,
+                RiscOp::Div => input0? / input1?,
+                RiscOp::FloorDiv => {
+                    let divisor = input1?;
+                    if divisor == 0.0 {
+                        return None;
+                    }
+                    (input0? / divisor).floor()
+                }
+                RiscOp::TruncDiv => {
+                    let divisor = input1?;
+                    if divisor == 0.0 {
+                        return None;
+                    }
+                    (input0? / divisor).trunc()
+                }
+                RiscOp::CmpLt => {
+                    if input0? < input1? {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                RiscOp::MaxElem => input0?.max(input1?),
+                RiscOp::Abs => input0?.abs(),
+                RiscOp::Floor => input0?.floor(),
+                RiscOp::Ceil => input0?.ceil(),
+                RiscOp::Round => input0?.round_ties_even(),
+                _ => return None,
+            };
+            memo.insert(id, value);
+        }
+        memo.get(&cond).map(|v| *v != 0.0)
     }
 
     /// chelis#513 gap 3 (school im2col witness): const-fold a `reshape`
@@ -9921,6 +10226,46 @@ impl LowerCtx {
     }
 
     /// `(if {} cond then else)` -- Phase 0: select via arithmetic on bools.
+    /// Runtime-condition `if` branches must be single tensor nodes: the mask
+    /// blend is scalar/tensor arithmetic and has no representation for an
+    /// ADT or tuple value. Static-condition ifs never reach this check (the
+    /// taken branch is returned verbatim by the chelis#620 pruning path).
+    /// Raised through the [`Self::reject_static_adt`] ladder so the host
+    /// lane's speculative DAG probe falls back to interpretation quietly and
+    /// the precise message survives inside a grad body.
+    ///
+    /// The leading "if {which} branch expected a single tensor value" prefix
+    /// is pinned by `issue_520_d1_runtime_ctor_through_if_still_rejected`;
+    /// keep it stable.
+    fn expect_runtime_if_branch(
+        &self,
+        branch: LoweredValue,
+        which: &str,
+        elems: &[Expr],
+    ) -> NodeId {
+        match branch {
+            LoweredValue::Node(id) => id,
+            LoweredValue::Tuple(_) => self.reject_static_adt(
+                elems,
+                format!(
+                    "if {which} branch expected a single tensor value, got a tuple value; \
+                     a tuple-valued branch requires a compile-time-resolvable condition \
+                     so the untaken branch is pruned statically (chelis#620)"
+                ),
+            ),
+            LoweredValue::Adt { ctor, .. } => self.reject_static_adt(
+                elems,
+                format!(
+                    "if {which} branch expected a single tensor value, got an ADT value \
+                     constructed with `{ctor}`; an `if` may produce an ADT or list value \
+                     only when its condition is compile-time-resolvable so the untaken \
+                     branch is pruned statically (chelis#620); runtime ADT-valued control \
+                     flow awaits the select/blend primitive (chelis#618)"
+                ),
+            ),
+        }
+    }
+
     fn lower_if(&mut self, elems: &[Expr]) -> LoweredValue {
         let Some(cond_expr) = elems.get(2) else {
             return LoweredValue::Node(self.dag.add_node(
@@ -9948,8 +10293,22 @@ impl LowerCtx {
         };
 
         let cond = self.lower_expr_node(cond_expr, "if condition");
-        let then_node = self.lower_expr_node(then_expr, "if then branch");
-        let else_node = self.lower_expr_node(else_expr, "if else branch");
+        // chelis#620: static branch pruning. A compile-time-resolvable
+        // condition lowers ONLY the taken branch and returns its value
+        // verbatim (Node, Tuple, or Adt, any precision). The untaken branch
+        // is never lowered: it may be `fail(...)`, an empty list, or a
+        // recursive call whose termination depends on this pruning. This is
+        // the `if` analogue of `lower_match`'s static arm selection and is
+        // semantics-preserving in both lanes (a static condition cannot vary
+        // under input perturbation, so the pruned gradient is exact). The
+        // now-dead condition subgraph is swept by the entry points' DCE.
+        if let Some(taken) = self.fold_static_cond(cond) {
+            return self.lower_expr(if taken { then_expr } else { else_expr });
+        }
+        let then_value = self.lower_expr(then_expr);
+        let then_node = self.expect_runtime_if_branch(then_value, "then", elems);
+        let else_value = self.lower_expr(else_expr);
+        let else_node = self.expect_runtime_if_branch(else_value, "else", elems);
         let out_ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
             self.type_from_meta(&meta.entries)
         } else {
@@ -10112,39 +10471,7 @@ impl LowerCtx {
     fn lower_copy(&mut self, elems: &[Expr]) -> LoweredValue {
         if elems.len() >= 3 {
             let input = self.lower_expr(&elems[2]);
-            if let LoweredValue::Tuple(items) = &input {
-                return LoweredValue::Tuple(
-                    items
-                        .iter()
-                        .map(|item| {
-                            let id = item.expect_node("copy tuple leaf");
-                            let output_type = self
-                                .dag
-                                .get(id)
-                                .map(|node| node.output_type.clone())
-                                .unwrap_or_else(Self::default_type);
-                            LoweredValue::Node(self.dag.add_node(
-                                RiscOp::Copy,
-                                vec![id],
-                                output_type,
-                                self.current_span_id.clone(),
-                            ))
-                        })
-                        .collect(),
-                );
-            }
-            let input = input.expect_node("copy input");
-            let output_type = self
-                .dag
-                .get(input)
-                .map(|node| node.output_type.clone())
-                .unwrap_or_else(Self::default_type);
-            LoweredValue::Node(self.dag.add_node(
-                RiscOp::Copy,
-                vec![input],
-                output_type,
-                self.current_span_id.clone(),
-            ))
+            self.copy_lowered_value(&input)
         } else {
             LoweredValue::Node(self.dag.add_node(
                 RiscOp::Const { value: 0.0 },
@@ -10152,6 +10479,47 @@ impl LowerCtx {
                 Self::default_type(),
                 self.current_span_id.clone(),
             ))
+        }
+    }
+
+    /// Structure-preserving copy of a lowered value: a `RiscOp::Copy` per
+    /// tensor leaf, recursing through tuples and ADTs (chelis#620; the
+    /// pre-existing behavior handled `Node` and flat `Tuple` only, so a
+    /// compiler-inserted linearity copy over a params ADT died in
+    /// `expect_node("copy input")` -- the issue's Blocker 2).
+    fn copy_lowered_value(&mut self, value: &LoweredValue) -> LoweredValue {
+        match value {
+            LoweredValue::Node(id) => {
+                let output_type = self
+                    .dag
+                    .get(*id)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(Self::default_type);
+                LoweredValue::Node(self.dag.add_node(
+                    RiscOp::Copy,
+                    vec![*id],
+                    output_type,
+                    self.current_span_id.clone(),
+                ))
+            }
+            LoweredValue::Tuple(items) => LoweredValue::Tuple(
+                items
+                    .iter()
+                    .map(|item| self.copy_lowered_value(item))
+                    .collect(),
+            ),
+            LoweredValue::Adt {
+                ctor,
+                field_names,
+                fields,
+            } => LoweredValue::Adt {
+                ctor: ctor.clone(),
+                field_names: field_names.clone(),
+                fields: fields
+                    .iter()
+                    .map(|field| self.copy_lowered_value(field))
+                    .collect(),
+            },
         }
     }
 
@@ -10366,21 +10734,28 @@ impl LowerCtx {
     /// recoverable everywhere else (so non-grad host-lane routing keeps
     /// falling back to interpretation).
     fn reject_static_adt(&self, elems: &[Expr], message: String) -> ! {
+        self.reject_lowering_slice(elems.first(), message)
+    }
+
+    /// Message-only core of [`Self::reject_static_adt`]: the same
+    /// suppression-aware raise ladder for callers that carry a span-source
+    /// expression rather than a tag's `elems` slice (chelis#620, e.g. the
+    /// recursion-unroll caps in `lower_plain_callable_app`).
+    fn reject_lowering_slice(&self, span_expr: Option<&Expr>, message: String) -> ! {
         if unrepresentable_panic_suppressed() {
             std::panic::panic_any(UnrepresentableDag);
         }
-        let expr = elems.first();
         if self.allow_host_list_ad_rewrites {
             raise_fatal_lowering_error(
                 message,
-                expr.map(Expr::span),
-                expr.and_then(Expr::span_id).map(ToOwned::to_owned),
+                span_expr.map(Expr::span),
+                span_expr.and_then(Expr::span_id).map(ToOwned::to_owned),
             )
         }
         raise_lowering_error(
             message,
-            expr.map(Expr::span),
-            expr.and_then(Expr::span_id).map(ToOwned::to_owned),
+            span_expr.map(Expr::span),
+            span_expr.and_then(Expr::span_id).map(ToOwned::to_owned),
         )
     }
 
@@ -13313,7 +13688,10 @@ mod regression_tests {
 
     #[test]
     fn float_if_lowers_via_masked_select() {
-        let dag = parse_and_lower("(if {} (lit {} true) (lit {} 1.0) (lit {} 0.0))");
+        // chelis#620: the condition must be a RUNTIME value (an unbound var
+        // lowers to a Load, which the static fold refuses) so the mask-blend
+        // path stays exercised; a literal condition now prunes statically.
+        let dag = parse_and_lower_unchecked("(if {} (var {} c) (lit {} 1.0) (lit {} 0.0))");
         assert!(
             dag.nodes()
                 .iter()
@@ -13329,16 +13707,233 @@ mod regression_tests {
     }
 
     #[test]
-    fn non_float_if_is_rejected_before_lowering() {
+    fn static_cond_if_prunes_untaken_branch() {
+        // chelis#620: a compile-time-resolvable condition selects the taken
+        // branch at lowering time; the untaken branch is never lowered and no
+        // mask arithmetic is synthesized. The `if` analogue of
+        // `static_ctor_scrutinee_match_selects_taken_arm`.
+        let dag = parse_and_lower(
+            "(if {} (lit {} true) \
+             (lit {type: (t-prim {} f32)} 2.5) \
+             (lit {type: (t-prim {} f32)} 9.0))",
+        );
+        assert!(
+            dag.nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Const { value } if value == 2.5)),
+            "taken branch's literal must be lowered: {dag:?}"
+        );
+        assert!(
+            !dag.nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Const { value } if value == 9.0)),
+            "untaken branch's literal must not be lowered: {dag:?}"
+        );
+        assert!(
+            !dag.nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Mul)),
+            "static pruning must not synthesize mask arithmetic: {dag:?}"
+        );
+    }
+
+    #[test]
+    fn static_cond_if_returns_adt_branch_verbatim() {
+        // chelis#620: with a static condition, an ADT-valued branch flows
+        // through the `if` verbatim; downstream static match selection sees
+        // the pruned constructor. Previously this panicked with "if then
+        // branch expected a single tensor value, got an ADT value".
+        let dag = parse_and_lower_unchecked(
+            "(match {} (if {} (lit {} true) (var {} ModeA) (var {} ModeB)) \
+             (arm {} (pat-ctor {} ModeA) () (lit {type: (t-prim {} f32)} 2.5)) \
+             (arm {} (pat-ctor {} ModeB) () (lit {type: (t-prim {} f32)} 9.0)))",
+        );
+        assert!(
+            dag.nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Const { value } if value == 2.5)),
+            "arm selected by the pruned constructor must lower: {dag:?}"
+        );
+        assert!(
+            !dag.nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Const { value } if value == 9.0)),
+            "dead arm must not lower: {dag:?}"
+        );
+    }
+
+    #[test]
+    fn static_cond_if_folds_int_comparison_chain() {
+        // chelis#620: the fold sees through the lowered comparison
+        // vocabulary (gte lowers to CmpLt + not) and integer arithmetic:
+        // gte(add(1, 2), mul(1, 3)) == gte(3, 3) == true.
+        let dag = parse_and_lower_unchecked(
+            "(if {} (app {} (var {} gte) \
+             (app {} (var {} add) (lit {} 1) (lit {} 2)) \
+             (app {} (var {} mul) (lit {} 1) (lit {} 3))) \
+             (lit {type: (t-prim {} f32)} 2.5) \
+             (lit {type: (t-prim {} f32)} 9.0))",
+        );
+        assert!(
+            dag.nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Const { value } if value == 2.5)),
+            "gte(3, 3) must fold true and take the then branch: {dag:?}"
+        );
+        assert!(
+            !dag.nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Const { value } if value == 9.0)),
+            "untaken branch must not lower: {dag:?}"
+        );
+    }
+
+    #[test]
+    fn static_cond_fold_applies_cast_truncation() {
+        // chelis#620 fold/eval parity: cast(0.9, int32) truncates toward
+        // zero (shared convert_cast_data), so gt(cast(0.9, int32), 0) is
+        // gt(0, 0) == false and the ELSE branch is taken. A fold that read
+        // the un-truncated 0.9 would wrongly select the then branch.
+        let dag = parse_and_lower_unchecked(
+            "(if {} (app {} (var {} gt) \
+             (cast {} (lit {} 0.9) int32) (cast {} (lit {} 0) int32)) \
+             (lit {type: (t-prim {} f32)} 2.5) \
+             (lit {type: (t-prim {} f32)} 9.0))",
+        );
+        assert!(
+            dag.nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Const { value } if value == 9.0)),
+            "cast truncation must select the else branch: {dag:?}"
+        );
+        assert!(
+            !dag.nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Const { value } if value == 2.5)),
+            "then branch must not lower: {dag:?}"
+        );
+    }
+
+    #[test]
+    fn static_cond_fold_refuses_zero_divisor() {
+        // chelis#620: floor_div by zero traps at runtime (chelis#550); the
+        // fold must refuse rather than fold the trap away, leaving the if on
+        // the runtime mask path (Mul nodes present).
+        let dag = parse_and_lower_unchecked(
+            "(if {} (app {} (var {} gt) \
+             (app {} (var {} floor_div) (cast {} (lit {} 1) int64) (cast {} (lit {} 0) int64)) \
+             (cast {} (lit {} 0) int64)) \
+             (lit {} 1.0) (lit {} 0.0))",
+        );
+        assert!(
+            dag.nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Mul)),
+            "zero-divisor condition must stay on the mask path: {dag:?}"
+        );
+    }
+
+    #[test]
+    fn runtime_cond_adt_branch_rejected_cites_618() {
+        // chelis#620 negative parity: a RUNTIME condition with ADT-valued
+        // branches stays rejected; the message keeps the pinned prefix and
+        // names the select/blend successor (chelis#618).
         let err = std::panic::catch_unwind(|| {
-            let _ = parse_and_lower(
+            let _ = parse_and_lower_unchecked("(if {} (var {} c) (var {} ModeA) (var {} ModeB))");
+        })
+        .expect_err("runtime-cond ADT branch should be rejected");
+        let message = captured_lower_message(err);
+        assert!(
+            message.contains("expected a single tensor value, got an ADT value"),
+            "pinned prefix must survive: {message}"
+        );
+        assert!(
+            message.contains("chelis#618"),
+            "message must cite the select/blend successor: {message}"
+        );
+    }
+
+    #[test]
+    fn static_list_append_then_tensor_concat_lowers_value_spine() {
+        // chelis#620: `concat([a], [b])` builds a static Cons spine as a
+        // lowered VALUE (invisible to the expr-level collect_cons_chain
+        // once bound to a var), and `concat(xs, axis)` over that value
+        // emits the same Pad+Add cascade as the expr-level path. This is
+        // the minimal shape of an unrolled recursive patch collector.
+        let dag = parse_and_lower_unchecked(
+            "(def {} xs (app {} (var {} concat) \
+              (app {} (var {} Cons) \
+                (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} a) (var {} Nil)) \
+              (app {} (var {} Cons) \
+                (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} b) (var {} Nil)))) \
+             (def {} out (app {} (var {} concat) (var {} xs) (cast {} (lit {} 0) int32)))",
+        );
+        let pads = dag
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.op, RiscOp::Pad { .. }))
+            .count();
+        assert_eq!(pads, 2, "one Pad per appended element: {dag:?}");
+        assert!(
+            !dag.nodes()
+                .iter()
+                .any(|node| matches!(&node.op, RiscOp::Load { name } if name.as_str() == "concat")),
+            "the host-lane concat placeholder must not appear: {dag:?}"
+        );
+    }
+
+    #[test]
+    fn copy_adt_lowers_field_wise() {
+        // chelis#620 Blocker 2: a copy over an ADT value produces one
+        // RiscOp::Copy per tensor leaf and preserves the ADT structure
+        // (previously it died in expect_node("copy input")).
+        let dag = parse_and_lower_unchecked("(copy {} (record {} Box (kv {} t (var {} w))))");
+        let load = dag
+            .nodes()
+            .iter()
+            .find(|node| matches!(&node.op, RiscOp::Load { name } if name.as_str() == "w"))
+            .expect("field expr must lower to a Load");
+        assert!(
+            dag.nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Copy) && node.inputs == vec![load.id]),
+            "copy must wrap the ADT field's leaf node: {dag:?}"
+        );
+    }
+
+    #[test]
+    fn drop_adt_closes_each_leaf() {
+        // chelis#620: a drop over an ADT value closes every tensor leaf's
+        // live range instead of dying in expect_node("drop input").
+        let dag = parse_and_lower_unchecked(
+            "(app {} (var {} drop) (record {} Box (kv {} t (var {} w))))",
+        );
+        let load = dag
+            .nodes()
+            .iter()
+            .find(|node| matches!(&node.op, RiscOp::Load { name } if name.as_str() == "w"))
+            .expect("field expr must lower to a Load");
+        assert!(
+            dag.nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Drop) && node.inputs == vec![load.id]),
+            "drop must close the ADT field's leaf: {dag:?}"
+        );
+    }
+
+    #[test]
+    fn non_float_if_is_rejected_before_lowering() {
+        // chelis#620: the condition must be a RUNTIME value (a literal
+        // condition now prunes statically and lowers any branch type).
+        let err = std::panic::catch_unwind(|| {
+            let _ = parse_and_lower_unchecked(
                 "(if {type: (t-prim {} bool)} \
-                (lit {type: (t-prim {} bool)} true) \
+                (var {} c) \
                 (lit {type: (t-prim {} bool)} true) \
                 (lit {type: (t-prim {} bool)} false))",
             );
         })
-        .expect_err("non-float if should be rejected");
+        .expect_err("non-float runtime-cond if should be rejected");
         assert!(captured_lower_message(err).contains("`if` is not supported by IR evaluation yet"));
     }
 

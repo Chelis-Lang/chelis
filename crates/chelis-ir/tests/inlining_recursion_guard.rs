@@ -1,58 +1,47 @@
-//! `inlining_names` recursion-guard fixtures (Inlining-F1).
+//! Recursion-unroll fixtures (Inlining-F1 successor, chelis#620).
 //!
-//! `try_lower_callable_app` (`crates/chelis-ir/src/lower.rs`) inserts the
-//! resolved callable's name into `self.inlining_names` before lowering the
-//! callable body, then removes it after. The intent is to prevent infinite
-//! recursion when a *truly* self-recursive named definition (e.g.
-//! `def f(x) = f(x)`) would otherwise loop forever during inlining.
+//! `lower_plain_callable_app` (`crates/chelis-ir/src/lower.rs`) tracks a
+//! per-callee active-inline depth (`inlining_depths`) plus a total active
+//! count (`inlining_active`). Recursion lowers by BOUNDED UNROLLING: a
+//! re-entrant call to a callee that is mid-inline resolves and inlines
+//! normally, and a well-founded recursion terminates through the static
+//! `if`/`match` pruning of its base case. Two caps
+//! (`MAX_STATIC_RECURSION_DEPTH` per name, `MAX_TOTAL_INLINE_DEPTH`
+//! overall) are the loud backstop for chains the pruning cannot bound.
 //!
-//! The guard fires inside `resolve_callable_expr_inner` at the `var` arm:
+//! History: the original Inlining-F1 guard (`inlining_names`, a
+//! refuse-on-reentry set consulted by `resolve_callable_expr_inner`) fixed
+//! the fn-typed-parameter alias bug (`outer(f, x) = f(f(x))` wrongly
+//! tripping on the non-recursive inner `f(x)`) but made a truly recursive
+//! call fall through to `lower_app`'s silently wrong return-last-arg
+//! fallback. chelis#620 replaces refuse-on-reentry with depth-bounded
+//! unrolling so statically-terminating recursive builders (the School
+//! im2col/pool patch collectors) lower for real, and non-terminating
+//! recursion errors loudly instead of silently returning its argument.
 //!
-//! ```ignore
-//! if !visited.insert(name.clone()) || self.inlining_names.contains(&name) {
-//!     return None;
-//! }
-//! ```
+//! The fixtures pin three contracts:
 //!
-//! The bug (Inlining-F1, surfaced by PR #37's call-site parity test
-//! comment): the guard tracks the *name* of the callee, not whether the
-//! recursion is real. When a fn-typed parameter `f` is substituted into
-//! `local_callables["f"] = doubler` by `lower_plain_callable_app` at the
-//! call site, and the inlined body contains a nested application like
-//! `f(f(x))`, the outer `f` call inserts `"f"` into `inlining_names`
-//! before lowering its arguments. When the inner `f(x)` is then lowered
-//! as one of those arguments, the resolver sees `"f"` in `inlining_names`
-//! and returns `None` — even though `f` resolves to `doubler` (a concrete
-//! callable whose body does not reference `f` at all, so no actual
-//! recursion is possible).
+//! 1. `nested_fn_param_call_lowers_via_substituted_callable` — the
+//!    Inlining-F1 target, unchanged: `outer(doubler, seed)` must evaluate
+//!    to `doubler(doubler(seed))`; the alias re-entry must not be treated
+//!    as recursion.
 //!
-//! The fixtures here pin both halves:
+//! 2. `true_self_recursion_errors_loudly_at_unroll_cap` — CONTROL.
+//!    `def loop_self(x) = loop_self(x)` has no base case; lowering must
+//!    terminate in bounded time with the named per-callee cap diagnostic,
+//!    never hang and never silently collapse to the argument.
 //!
-//! 1. `nested_fn_param_call_lowers_via_substituted_callable` — TARGET.
-//!    `def outer(f, x) = f(f(x))` called as `outer(doubler, seed)` must
-//!    evaluate to `doubler(doubler(seed))`. Today this silently lowers
-//!    the inner `f(x)` to its argument value (the `lower_app` fallback
-//!    "Not a recognized built-in — lower func and args, return last")
-//!    instead of applying `doubler`, so the result equals
-//!    `doubler(seed)` instead of `doubler(doubler(seed))`. The test
-//!    asserts the correct doubled-twice result and is gated
-//!    `#[ignore]` until the guard is narrowed.
-//!
-//! 2. `true_self_recursion_still_rejected_by_inlining_guard` — CONTROL.
-//!    `def loop_self(x) = loop_self(x)` is genuinely self-recursive: the
-//!    body references its own name, the substituted callable IS itself,
-//!    and naively inlining would loop forever. The guard must still
-//!    reject this case after the fix; otherwise we've disabled the
-//!    infinite-recursion protection. Today this lowers without panic
-//!    because the guard fires and `lower_app`'s fallback drops the call
-//!    silently. After the fix, the guard must still fire here.
+//! 3. `static_base_case_recursion_unrolls_within_cap` — a recursion whose
+//!    base case resolves through the chelis#620 static `if` pruning
+//!    unrolls to completion (~500 levels, near the 512 cap, which also
+//!    probes the Rust-stack headroom assumption in debug builds).
 
 use std::collections::HashMap;
 
 use chelis_deep::Expr;
 use chelis_ir::dag::{DimInfo, NodeId, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
-use chelis_ir::lower::lower_subexpr_program;
+use chelis_ir::lower::{lower_subexpr_program, try_lower_subexpr_program};
 use chelis_types::types::Prim;
 
 fn f32_vec(n: usize) -> TensorType {
@@ -151,24 +140,16 @@ fn nested_fn_param_call_lowers_via_substituted_callable() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Control: real self-recursion still rejected by the inlining guard.
+// Control: real self-recursion errors loudly at the unroll cap.
 //
-// `def loop_self(x) = loop_self(x)` — body references its own name. The
-// substituted callable for `loop_self` is itself; naive inlining would
-// recurse forever. The guard must still fire here after the Inlining-F1
-// fix, otherwise we've disabled the infinite-recursion protection.
-//
-// The check: lowering succeeds (no panic, no infinite loop), and the
-// resulting DAG node for the outer call evaluates to the *input*, not to
-// an infinitely-expanded chain. The guard makes the body lower as
-// "lower func and args, return last" — which for `loop_self(x)` returns
-// the lowered `x`, an identity. So a single application of `loop_self`
-// returns its argument unchanged. Two applications still return the
-// argument unchanged. The key behavioral invariant: lowering finishes
-// in bounded time and does not panic, which proves the guard fired.
+// `def loop_self(x) = loop_self(x)` — body references its own name and has
+// no base case, so no amount of static pruning can bound the unroll. The
+// contract (chelis#620): lowering terminates in bounded time with the
+// named per-callee cap diagnostic. It must NOT hang, and it must NOT
+// silently collapse the call to its argument (the pre-#620 fallback).
 // ─────────────────────────────────────────────────────────────────────────────
 #[test]
-fn true_self_recursion_still_rejected_by_inlining_guard() {
+fn true_self_recursion_errors_loudly_at_unroll_cap() {
     // `loop_self(x) = loop_self(x)` — self-referential.
     let loop_self_src = r#"
         (fn {}
@@ -189,8 +170,64 @@ fn true_self_recursion_still_rejected_by_inlining_guard() {
     program_defs.insert("loop_self".to_string(), parse_one(loop_self_src));
 
     let scoped = HashMap::from([("seed".to_string(), f32_vec(3))]);
-    // The contract: lowering finishes without panic or infinite loop. The
-    // guard fires; lower_app's fallback returns the lowered `x` argument.
+    let diagnostic =
+        try_lower_subexpr_program(&parse_one(call_src), scoped, HashMap::new(), program_defs)
+            .expect_err("unbounded self-recursion must be rejected, not silently dropped");
+    let message = diagnostic.to_string();
+    assert!(
+        message.contains("static unroll limit"),
+        "cap diagnostic must name the unroll limit: {message}"
+    );
+    assert!(
+        message.contains("loop_self"),
+        "cap diagnostic must name the recursive callee: {message}"
+    );
+    assert!(
+        message.contains("chelis#620"),
+        "cap diagnostic must cite the issue: {message}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Positive: a recursion with a statically-resolvable base case unrolls.
+//
+// `def count_up(x, k) = if gte(k, 500) then x else count_up(x, k + 1)`
+// called as `count_up(seed, 0)`: every level's condition folds (k is a
+// literal-rooted Add chain), the base case prunes at k == 500, and the
+// whole chain lowers to the identity on `seed`. 500 levels sits just
+// under the 512 per-name cap, so this also probes the Rust-stack headroom
+// assumption behind the caps in a debug build.
+// ─────────────────────────────────────────────────────────────────────────────
+#[test]
+fn static_base_case_recursion_unrolls_within_cap() {
+    let count_up_src = r#"
+        (fn {}
+          (params {}
+            (x {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))})
+            (k {type: (t-prim {} int64)}))
+          (if {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
+            (app {} (var {} gte)
+              (var {type: (t-prim {} int64)} k)
+              (cast {} (lit {} 500) int64))
+            (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
+            (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
+              (var {} count_up)
+              (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
+              (app {} (var {} add)
+                (var {type: (t-prim {} int64)} k)
+                (cast {} (lit {} 1) int64)))))
+    "#;
+    let call_src = r#"
+        (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
+          (var {} count_up)
+          (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} seed)
+          (cast {} (lit {} 0) int64))
+    "#;
+
+    let mut program_defs = HashMap::new();
+    program_defs.insert("count_up".to_string(), parse_one(count_up_src));
+
+    let scoped = HashMap::from([("seed".to_string(), f32_vec(3))]);
     let dag = lower_subexpr_program(&parse_one(call_src), scoped, HashMap::new(), program_defs);
 
     let inputs = HashMap::from([(
@@ -198,24 +235,14 @@ fn true_self_recursion_still_rejected_by_inlining_guard() {
         TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
     )]);
     let roots: Vec<NodeId> = dag.roots().to_vec();
-    assert!(
-        !roots.is_empty(),
-        "guard-protected lowering still produces a root"
-    );
+    assert!(!roots.is_empty(), "unrolled lowering must produce a root");
     let values = eval_tensor_roots_with_strict(&dag, &roots, |name| inputs.get(name).cloned())
-        .expect("eval succeeds; guard prevents infinite recursion");
+        .expect("eval succeeds after full static unroll");
     let out = &values[roots.last().unwrap()];
     assert_eq!(out.shape, vec![3]);
-    // Guard fired: the recursive call lowers to "return last arg", i.e. the
-    // seed itself. This is the expected fallback behaviour for a callable
-    // the DAG genuinely cannot represent (no `RiscOp::Call`). The point of
-    // this control is that lowering TERMINATES, not that it produces
-    // useful values.
     assert_eq!(
         out.data,
         vec![1.0, 2.0, 3.0],
-        "true self-recursion guard must finish lowering with a finite \
-         result (the fallback identity); changing this output means the \
-         guard has been disabled; fix is too aggressive."
+        "count_up is the identity on its tensor argument after 500 pruned levels"
     );
 }

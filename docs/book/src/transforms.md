@@ -32,8 +32,9 @@ parameter in the order listed. Apply the gradient function to get the values:
 `grad` returns gradients only, not the forward value alongside them. It composes with
 itself for higher derivatives: `grad(grad(f))` is the second derivative.
 
-Two chelis#520 slices extend the differentiated surface beyond flat tensors
-(`spec/06-transformations.md` §2.10.1 has the full contract and limits):
+Three control-flow/ADT slices extend the differentiated surface beyond flat
+tensors (`spec/06-transformations.md` §2.10.1 has the full contract and
+limits):
 
 - A `match` whose scrutinee is a compile-time-known constructor value (a
   constructor literal, a record construction, or an ADT-typed parameter of the
@@ -51,9 +52,22 @@ Two chelis#520 slices extend the differentiated surface beyond flat tensors
   tuple keeps full arity and every gradient stays in its own `out.0..out.N`
   position. Mixed types (a non-float field in any variant, even a variant
   other than the constructed one), pure enums with no fields, and compiled-lane
-  ADT-param gradient exports are rejected with named diagnostics. A
-  runtime-scrutinee `match` in a differentiated body also stays rejected,
-  pending the `RiscOp::Select` blend primitive (tracked in chelis#618).
+  ADT-param gradient exports are rejected with named diagnostics.
+- An `if` whose condition const-folds at lowering time prunes to the taken
+  branch, whatever its type (chelis#620) — so the eps fail-guard idiom
+  (`if eps <= 0.0 then fail(...) else body`) and constructor- or list-valued
+  branches differentiate when the guard's inputs are literal-rooted. A
+  recursive builder whose base case prunes statically
+  (`if k >= n then [] else concat([row], recurse)`) unrolls under grad, with
+  a loud diagnostic at the depth cap (512 per callee, 1024 total) for chains
+  static pruning cannot bound; the unrolled list value flows through list
+  append and tensor `concat`. Linearity copies over params ADTs lower
+  field-wise, which is what makes the curried single-argument closure
+  `grad(fn (p) -> loss(p, x, y))(params)` work.
+
+A runtime-scrutinee `match` in a differentiated body stays rejected, and so
+does an ADT- or tuple-valued `if` branch under a genuinely runtime condition
+— both pend the `RiscOp::Select` blend primitive (tracked in chelis#618).
 
 ## vmap
 
