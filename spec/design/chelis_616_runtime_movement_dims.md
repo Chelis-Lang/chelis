@@ -150,20 +150,28 @@ leg is part of the oracle test now).
   `prod_reduce_adjoint_symbolic_reduced_axis_fails_loud`.
 - **Runtime (node-valued) stride STEP** has no structural adjoint (a
   runtime-extent axis insertion); loud expect in the stride adjoint.
-- **Guarded (`if`/`fail`) FORWARD programs through `chelis build`** route
-  via the host-program lane, where the checker types a list `concat` as its
-  element type (`[1, m]` instead of `[2, m]`); the compiled binary aborts
-  loudly at the runtime-dim equality guard. A PRE-EXISTING host-lane typing
-  gap; the guarded GRADIENT path (the oracle) and unguarded forward twins
-  have full C parity. Tracked as chelis#631.
+- **Guarded (`if`/`fail`) FORWARD programs through `chelis build`** —
+  RESOLVED by chelis#631: the checker types `concat` from the concat axis
+  and the statically-counted element count (spec/04-type-system.md
+  §4.5.4), anon dims are no longer dim-substitution keys, and
+  fail-reaching forward bodies stay in the host lane's real `if`/`fail`
+  control flow instead of the DAG lane's zero-placeholder mask form.
+  Oracle: `issue_631_guarded_forward_concat_c_parity.rs` (build-and-run
+  parity at two lengths plus fail-branch error parity in both lanes).
 - **Checker over-unification of movement chains** (a direct-return
-  `shrink -> stride` under one sig symbol): the checker's movement typing
-  passes symbolic dims through unchanged, so two different extents share a
-  symbol. Guarded at run time (C abort + eval mismatch error; the eval lane
-  accepts when nothing consumes the symbol — pin
-  `issue_616_over_unified_movement_chain_fails_loud_not_mis_sized`). A
-  precise fix is checker-side movement typing (fresh extents per
-  non-identity axis). Tracked as chelis#632.
+  `shrink -> stride` under one sig symbol): the OBSERVABLE C-lane abort
+  is resolved by the chelis#631 change set — the sig symbol was painted
+  onto both movement nodes by the wildcard-KEYED dim substitution, not
+  by the checker; with anon keys excluded and the helper root retyped
+  positionally (op-declarable axes only), the degenerate chain has full
+  eval-vs-C parity (flipped pin:
+  `issue_632_direct_return_movement_chain_eval_matches_c`). The
+  checker-side residue — movement typing passes a symbolic dim through
+  unchanged on NON-IDENTITY stride/pad axes (an annotation-level lie,
+  e.g. `stride(&x, 2, 2)` on `tensor[batch, 4]` stamps `batch`) and the
+  false §4.4.1 rigidity rejection of `sig f: tensor[n] -> tensor[u]`
+  over `stride(x, 2)` — remains tracked as chelis#632 (fresh extents per
+  non-identity axis, mirroring `shape_source_for_axis`).
 - **`shape_source_for_axis`'s Reshape arm** still recurses positionally into
   the input (axis-naive); unsound in principle for rank-shifting reshapes
   whose downstream symbolic axes trace through it. The oracle paths avoid

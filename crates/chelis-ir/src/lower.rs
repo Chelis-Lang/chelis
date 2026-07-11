@@ -1284,7 +1284,20 @@ fn tensor_dim_substitutions(
         .filter(|(formal, actual)| formal.dims.len() == actual.dims.len())
         .flat_map(|(formal, actual)| formal.dims.iter().zip(actual.dims.iter()))
         .filter_map(|(formal_dim, actual_dim)| match formal_dim {
-            DimInfo::Named(name, None) => Some((name.clone(), actual_dim.clone())),
+            // chelis#632 (first hit via the chelis#631 oracle): an
+            // anonymous wildcard is not a stable symbol — keying a
+            // substitution by `""`/`"*"` painted ONE actual dim across
+            // every wildcard-typed node in the DAG, conflating distinct
+            // runtime extents under a single name (the C runtime-dim
+            // equality guard then aborts well-formed programs, e.g. a
+            // helper's inner shrink extent guarded against its stride
+            // extent). The declared-return-to-root attachment that this
+            // painting used to provide is now positional:
+            // `host::remap_tensor_helper_dim_symbols` retypes the helper
+            // root's anon axes from the expected output directly.
+            DimInfo::Named(name, None) if !name.is_empty() && name != "*" => {
+                Some((name.clone(), actual_dim.clone()))
+            }
             _ => None,
         })
         .collect()

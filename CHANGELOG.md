@@ -4,6 +4,42 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Concat result typing (chelis#631, spec §4.5.4).** The checker types
+  `concat(list, axis)` from the concat-axis VALUE and — for statically
+  enumerable lists, including `let`-bound list literals — the element
+  COUNT: an axis-0 concat of two `[1, m]` rows now types `[2, m]`
+  (previously the ELEMENT type with the last axis wildcarded — a wrong
+  concrete extent the host-program C lane baked into tensor-helper
+  signatures, aborting guarded `if`/`fail` forward binaries at run
+  time). Non-enumerable lists honestly wildcard the CONCAT axis, a
+  runtime axis wildcards every axis, and an out-of-bounds literal axis
+  is a check-time error. Guarded forward programs now have full
+  eval-vs-C build-and-run parity
+  (`issue_631_guarded_forward_concat_c_parity.rs`). Also fixes the
+  misplaced-wildcard symptoms of chelis#594.
+- **Anonymous dims are no longer dim-substitution keys (chelis#632,
+  partial).** `tensor_dim_substitutions` recorded `"*" -> <actual>` and
+  repainted every wildcard-typed node in a helper DAG with one symbol,
+  conflating distinct runtime extents (a direct-return `shrink ->
+  stride` chain under `sig ... -> tensor[u]` aborted its C binary at
+  the runtime-dim equality guard while eval computed correctly). The
+  declared return now retypes the helper ROOT positionally, on
+  op-declarable axes only; the formerly-pinned degenerate has full
+  eval-vs-C parity (`issue_632_direct_return_movement_chain_eval_matches_c`).
+  The checker-side movement-typing residue of chelis#632 is tracked on
+  that issue.
+- **`fail`-reaching forward bodies stay in the host lane (chelis#631).**
+  The DAG lane lowers `fail` to a mask-selected zero placeholder
+  (grad-lane semantics); a forward tensor helper built from a
+  fail-reaching body compiled into a binary that returned ZEROS where
+  `chelis eval` aborts with the user's message. Such bodies now lower
+  through host-lane `if`/`fail` control flow (`chelis_fail`), keeping
+  error parity (`issue_631_data_dependent_fail_branch_aborts_in_c`).
+
 ## [0.16.0] — 2026-07-10
 
 ### Added

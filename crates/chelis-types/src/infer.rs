@@ -5768,6 +5768,8 @@ fn annotate_fn_children(
         // chelis#397/#469: a fresh parameter has no size provenance; clear any
         // entry inherited from an outer name it shadows (BLOCKER C).
         fn_env.clear_size_provenance(name);
+        // chelis#631: same for a shadowed list-literal length.
+        fn_env.clear_list_literal_len(name);
     }
 
     // Only stamp parameter types when they come from the def's
@@ -5815,6 +5817,12 @@ fn annotate_let_children(
             let value = annotate_expr_with_scope(&bind_kids[i + 1], &let_env, vg, subst, adt_reg);
             let value_ty = infer_expr_in_scope(&bind_kids[i + 1], &let_env, vg, subst, adt_reg);
             if let Some(name) = symbol_name(&bind_kids[i]) {
+                // chelis#631: the annotation pass stamps each node's type
+                // through its own env walk (it does not share infer_let's
+                // scope), so the list-literal length must be recorded here
+                // too or the STAMPED concat type — what the host lane
+                // reads — degrades to the wildcard fallback.
+                note_list_literal_binding(&mut let_env, name, &bind_kids[i + 1]);
                 let_env.bind(name.to_string(), let_env.generalize(&value_ty, subst));
             }
             bind_elements.push(value);
@@ -7535,7 +7543,33 @@ fn param_bound_dvars(decl_ty: &Type) -> HashSet<DimVar> {
     out
 }
 
-fn tensor_concat_result_type(element_ty: &Type) -> Result<Type, String> {
+/// Result type of a tensor `concat(list, axis)` (spec/04-type-system.md
+/// §4.5.4, chelis#631), computed from the joined element type (§4.5.2),
+/// the concat-axis value, and — when the list expression is statically
+/// enumerable — the element count:
+///
+/// - literal axis + literal element extent `k` + known element count
+///   `n >= 1` → the concat axis is `Lit(k * n)`, every other axis the
+///   element type's axis unchanged. The §4.5.2 join only leaves a literal
+///   on an axis when every element asserted it (mismatched literals widen
+///   to `*`), so the sum is exactly as trustworthy as the join itself;
+///   the head-biased `(concrete, wildcard)` join boundary is inherited
+///   unchanged, and the runtime dim guards keep any violation loud,
+///   never mis-sized.
+/// - literal axis, extent or count unknown → `Wildcard` on the CONCAT
+///   axis. (Pre-chelis#631 the LAST axis was wildcarded unconditionally
+///   and the concat axis kept the element's dim — a wrong concrete
+///   extent the host-program C lane baked into its tensor-helper
+///   signatures, aborting guarded forward binaries at run time.)
+/// - literal axis out of bounds after negative-axis normalization → Err.
+/// - non-literal (runtime) axis → every axis `Wildcard` at the element
+///   rank: the host runtime concatenates along a computed axis, so rank
+///   is known (§4.5.1 rank uniformity) but no per-axis extent survives.
+fn tensor_concat_result_type(
+    element_ty: &Type,
+    raw_axis: Option<i64>,
+    static_len: Option<usize>,
+) -> Result<Type, String> {
     let Type::Tensor(dims, precision) = element_ty else {
         return Err(format!(
             "concat expects List[tensor[...]] for tensor concatenation, got {element_ty}"
@@ -7545,9 +7579,56 @@ fn tensor_concat_result_type(element_ty: &Type) -> Result<Type, String> {
         return Err("concat expects tensor inputs with at least one axis".to_string());
     }
     let mut out_dims = dims.clone();
-    let last_axis = out_dims.len() - 1;
-    out_dims[last_axis] = Dim::Wildcard;
+    let Some(raw) = raw_axis else {
+        out_dims.fill(Dim::Wildcard);
+        return Ok(Type::Tensor(out_dims, precision.clone()));
+    };
+    let Some(axis) = normalize_static_axis(out_dims.len(), raw) else {
+        return Err(format!(
+            "concat axis {raw} out of bounds for rank {}",
+            out_dims.len()
+        ));
+    };
+    out_dims[axis] = match (&out_dims[axis], static_len) {
+        (Dim::Lit(k), Some(n)) if n >= 1 => match k.checked_mul(n as i64) {
+            Some(total) => Dim::Lit(total),
+            None => Dim::Wildcard,
+        },
+        _ => Dim::Wildcard,
+    };
     Ok(Type::Tensor(out_dims, precision.clone()))
+}
+
+/// Statically-known element count of a list expression (chelis#631): a
+/// literal `Cons`/`Nil` chain counts directly; a variable carries a
+/// length only when it was bound to a list literal in an enclosing scope
+/// ([`Env::list_literal_len`]). `None` for anything else — a function
+/// result, a parameter, a `split` output.
+fn static_list_len(expr: Option<&deep::Expr>, env: &Env) -> Option<usize> {
+    let expr = expr?;
+    if let Some(elements) = collect_cons_chain_for_shape(expr) {
+        return Some(elements.len());
+    }
+    let deep::Expr::List(list, _) = expr else {
+        return None;
+    };
+    if get_tag(list) == Some("var") {
+        let name = children(list).first().and_then(|e| symbol_name(e))?;
+        return env.list_literal_len(name);
+    }
+    None
+}
+
+/// Record (or clear) the statically-known list-literal length of a
+/// binding so a later `concat(name, axis)` can count elements
+/// (chelis#631). Add-symmetric like the size-provenance marking beside
+/// it: a re-bind to a non-literal RHS must clear any stale entry. A
+/// `(var other)` RHS propagates an existing entry transitively.
+fn note_list_literal_binding(env: &mut Env, name: &str, rhs: &deep::Expr) {
+    match static_list_len(Some(rhs), env) {
+        Some(len) => env.mark_list_literal_len(name, len),
+        None => env.clear_list_literal_len(name),
+    }
 }
 
 fn infer_gather_result_type(
@@ -8622,6 +8703,8 @@ fn infer_top_level(
             }
             SizeClass::Sourceless | SizeClass::Unknown => env.clear_size_provenance(&name),
         }
+        // chelis#631: same discipline for list-literal lengths.
+        note_list_literal_binding(env, &name, &kids[1]);
         env.bind(name, scheme);
     } else {
         // Any other top-level expression
@@ -11427,7 +11510,14 @@ fn infer_app(
                                     && lhs_args.len() == 1
                                     && precision.is_integer() =>
                             {
-                                match tensor_concat_result_type(&lhs_args[0]) {
+                                // chelis#631 (spec §4.5.4): the concat axis
+                                // value and the statically-known element
+                                // count decide the concat-axis extent.
+                                // kids[1] is the list expr, kids[2] the
+                                // axis expr (cast-aware extraction, #216).
+                                let raw_axis = kids.get(2).and_then(extract_int_for_dim);
+                                let list_len = static_list_len(kids.get(1), env);
+                                match tensor_concat_result_type(&lhs_args[0], raw_axis, list_len) {
                                     Ok(ty) => return ty,
                                     Err(message) => {
                                         errors.push(CheckError::new(
@@ -16759,6 +16849,8 @@ fn infer_fn(
         // value parameter `d` shadowing an outer shape-sourced `d` (BLOCKER C)
         // is not wrongly treated as a materializable extent.
         fn_env.clear_size_provenance(pname);
+        // chelis#631: same for a shadowed list-literal length.
+        fn_env.clear_list_literal_len(pname);
         param_types.push(ty);
     }
 
@@ -16887,6 +16979,8 @@ fn infer_def_body_with_sig(
         // chelis#397/#469: a fresh parameter has no size provenance; clear any
         // entry inherited from an outer name it shadows (BLOCKER C).
         fn_env.clear_size_provenance(pname);
+        // chelis#631: same for a shadowed list-literal length.
+        fn_env.clear_list_literal_len(pname);
         param_types.push(ty);
     }
 
@@ -17097,6 +17191,8 @@ fn infer_let(
                         let_env.clear_size_provenance(name)
                     }
                 }
+                // chelis#631: same discipline for list-literal lengths.
+                note_list_literal_binding(&mut let_env, name, rhs_expr);
                 let_env.bind(name.to_string(), scheme);
             }
             i += 2;
@@ -17893,6 +17989,8 @@ fn infer_pipe_stage_lambda(
     // chelis#397/#469: a fresh parameter has no size provenance; clear any
     // entry inherited from an outer name it shadows (BLOCKER C).
     fn_env.clear_size_provenance(param_name);
+    // chelis#631: same for a shadowed list-literal length.
+    fn_env.clear_list_literal_len(param_name);
 
     let body_ty = infer_expr(
         body,
@@ -19086,6 +19184,8 @@ fn infer_def(
         }
         SizeClass::Sourceless | SizeClass::Unknown => env.clear_size_provenance(&name),
     }
+    // chelis#631: same discipline for list-literal lengths.
+    note_list_literal_binding(env, &name, &kids[1]);
     env.bind(name, scheme);
     body_ty
 }
@@ -21734,6 +21834,275 @@ def pack_heads(
 "#,
         );
         assert!(!checked.annotated_exprs().is_empty());
+    }
+
+    // ── chelis#631: concat result typing (spec/04-type-system.md §4.5.4) ──
+
+    /// Axis-0 concat of two `[1, 2]` rows types `[2, 2]`: the concat axis
+    /// is the element extent times the statically-counted element count,
+    /// every other axis unchanged. Pre-chelis#631 the result kept the
+    /// element's `1` on axis 0 and wildcarded the LAST axis, so this
+    /// concrete return annotation was rejected.
+    #[test]
+    fn issue631_concat_axis0_literal_list_counts_elements() {
+        let result = infer_surf(
+            r#"
+module Repro.ConcatCount
+def stack_rows(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[2, 2, f32] =
+  concat([a, b], 0)
+"#,
+        );
+        assert!(
+            result.errors.is_empty(),
+            "axis-0 concat of two [1, 2] rows must type [2, 2], got: {:?}",
+            result.errors
+        );
+    }
+
+    /// The chelis#631 reproducer shape: the list is LET-BOUND, so the
+    /// concat site sees a variable. The binding carries its literal
+    /// length to the concat (Env::list_literal_len).
+    #[test]
+    fn issue631_concat_axis0_let_bound_list_counts_elements() {
+        let result = infer_surf(
+            r#"
+module Repro.ConcatCountLet
+def stack_rows(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[2, 2, f32] = {
+  rows = [a, b]
+  concat(rows, 0)
+}
+"#,
+        );
+        assert!(
+            result.errors.is_empty(),
+            "let-bound list concat must count elements through the binding, got: {:?}",
+            result.errors
+        );
+    }
+
+    /// Negative parity: a wrong concat-axis sum is rejected — the
+    /// computed `Lit(2)` is a real claim, not a permissive wildcard.
+    #[test]
+    fn issue631_concat_wrong_sum_annotation_rejected() {
+        let result = infer_surf(
+            r#"
+module Repro.ConcatWrongSum
+def stack_rows(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[3, 2, f32] =
+  concat([a, b], 0)
+"#,
+        );
+        assert!(
+            !result.errors.is_empty(),
+            "an axis-0 concat of two [1, 2] rows must not satisfy [3, 2]"
+        );
+    }
+
+    /// A non-last-axis concat sizes the CONCAT axis and preserves the
+    /// trailing axes. Pre-chelis#631 the last axis was wildcarded
+    /// unconditionally (the chelis#594 symptom).
+    #[test]
+    fn issue631_concat_mid_axis_preserves_last_axis() {
+        let accepted = infer_surf(
+            r#"
+module Repro.ConcatMidAxis
+def stack_mid(a: tensor[2, 1, 5, f32], b: tensor[2, 1, 5, f32]) -> tensor[2, 2, 5, f32] =
+  concat([a, b], 1)
+"#,
+        );
+        assert!(
+            accepted.errors.is_empty(),
+            "axis-1 concat must type [2, 2, 5], got: {:?}",
+            accepted.errors
+        );
+        // The last axis is the element's `5`, not a wildcard: a wrong
+        // trailing extent no longer slips through.
+        let rejected = infer_surf(
+            r#"
+module Repro.ConcatMidAxisBad
+def stack_mid(a: tensor[2, 1, 5, f32], b: tensor[2, 1, 5, f32]) -> tensor[2, 2, 6, f32] =
+  concat([a, b], 1)
+"#,
+        );
+        assert!(
+            !rejected.errors.is_empty(),
+            "the non-concat trailing axis must stay 5; [2, 2, 6] must be rejected"
+        );
+    }
+
+    /// A non-enumerable list (a `List` parameter) wildcards the CONCAT
+    /// axis — and ONLY the concat axis: the trailing axis keeps the
+    /// element extent (pre-chelis#631 it was the wildcarded one).
+    #[test]
+    fn issue631_concat_param_list_wildcards_concat_axis_only() {
+        let accepted = infer_surf(
+            r#"
+module Repro.ConcatParamList
+def cat_all(xs: List[tensor[2, 3, f32]]) -> tensor[*, 3, f32] =
+  concat(xs, 0)
+"#,
+        );
+        assert!(
+            accepted.errors.is_empty(),
+            "param-list concat must type [*, 3], got: {:?}",
+            accepted.errors
+        );
+        let rejected = infer_surf(
+            r#"
+module Repro.ConcatParamListBad
+def cat_all(xs: List[tensor[2, 3, f32]]) -> tensor[*, 4, f32] =
+  concat(xs, 0)
+"#,
+        );
+        assert!(
+            !rejected.errors.is_empty(),
+            "the non-concat trailing axis must stay 3; [*, 4] must be rejected"
+        );
+    }
+
+    /// A runtime (non-literal) concat axis wildcards EVERY axis at the
+    /// element rank: any axis may be the one that grows. An
+    /// axis-0-concat-shaped annotation must typecheck even though axis 0
+    /// carried a literal in the element type (pre-chelis#631 the element's
+    /// `2` was pinned and `[4, 3]` was rejected).
+    #[test]
+    fn issue631_concat_dynamic_axis_wildcards_all_axes() {
+        let result = infer_surf(
+            r#"
+module Repro.ConcatDynAxis
+def cat_dyn(a: tensor[2, 3, f32], b: tensor[2, 3, f32], ax: int32) -> tensor[4, 3, f32] =
+  concat([a, b], ax)
+"#,
+        );
+        assert!(
+            result.errors.is_empty(),
+            "runtime-axis concat must not pin any per-axis extent, got: {:?}",
+            result.errors
+        );
+    }
+
+    /// An out-of-bounds literal concat axis is a check-time error.
+    #[test]
+    fn issue631_concat_axis_out_of_bounds_rejected() {
+        let result = infer_surf(
+            r#"
+module Repro.ConcatOob
+def cat_oob(a: tensor[2, f32], b: tensor[2, f32]) -> tensor[*, f32] =
+  concat([a, b], 5)
+"#,
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("concat axis 5 out of bounds for rank 1")),
+            "a literal axis past the element rank must error, got: {:?}",
+            result.errors
+        );
+    }
+
+    /// A negative literal axis indexes from the end (`-1` = last axis),
+    /// matching every other axis-taking builtin.
+    #[test]
+    fn issue631_concat_negative_axis_indexes_from_end() {
+        let accepted = infer_surf(
+            r#"
+module Repro.ConcatNegAxis
+def cat_neg(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[1, 4, f32] =
+  concat([a, b], -1)
+"#,
+        );
+        assert!(
+            accepted.errors.is_empty(),
+            "axis -1 concat of two [1, 2] rows must type [1, 4], got: {:?}",
+            accepted.errors
+        );
+        let rejected = infer_surf(
+            r#"
+module Repro.ConcatNegAxisBad
+def cat_neg(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[1, 5, f32] =
+  concat([a, b], -1)
+"#,
+        );
+        assert!(
+            !rejected.errors.is_empty(),
+            "axis -1 concat sum is 4; [1, 5] must be rejected"
+        );
+    }
+
+    /// Boundary pin: the §4.5.2 `(concrete, wildcard)` join is
+    /// head-biased — `[tensor[2], tensor[*]]` joins to element
+    /// `tensor[2]` — so the concat sum inherits that trust model
+    /// unchanged: `Lit(2) * 2 = Lit(4)`. The runtime dim guards keep a
+    /// violating wildcard element loud, never mis-sized.
+    #[test]
+    fn issue631_concat_head_biased_join_sums_from_head() {
+        let accepted = infer_surf(
+            r#"
+module Repro.ConcatHeadBias
+def cat_bias(a: tensor[2, f32], b: tensor[*, f32]) -> tensor[4, f32] =
+  concat([a, b], 0)
+"#,
+        );
+        assert!(
+            accepted.errors.is_empty(),
+            "head-biased join element is [2]; two-element concat must type [4], got: {:?}",
+            accepted.errors
+        );
+        let rejected = infer_surf(
+            r#"
+module Repro.ConcatHeadBiasBad
+def cat_bias(a: tensor[2, f32], b: tensor[*, f32]) -> tensor[5, f32] =
+  concat([a, b], 0)
+"#,
+        );
+        assert!(
+            !rejected.errors.is_empty(),
+            "head-biased join sum is 4; [5] must be rejected"
+        );
+    }
+
+    /// Add-symmetric staleness pin (mirrors the size-provenance BLOCKER-B
+    /// discipline): a name re-bound from a list literal to a non-literal
+    /// list must NOT keep the stale literal length. With the stale length
+    /// the concat would type `Lit(2)` and reject `[7, 2]`; the cleared
+    /// binding honestly wildcards the concat axis.
+    #[test]
+    fn issue631_concat_rebound_list_clears_stale_length() {
+        let result = infer_surf(
+            r#"
+module Repro.ConcatRebind
+def cat_rebind(a: tensor[1, 2, f32], b: tensor[1, 2, f32], xs: List[tensor[1, 2, f32]]) -> tensor[7, 2, f32] = {
+  rows = [a, b]
+  rows = xs
+  concat(rows, 0)
+}
+"#,
+        );
+        assert!(
+            result.errors.is_empty(),
+            "a re-bound list name must clear its stale literal length, got: {:?}",
+            result.errors
+        );
+    }
+
+    /// Shadow pin (mirrors size-provenance BLOCKER C): a `List` value
+    /// parameter that shadows an outer list-literal binding must not
+    /// inherit the outer literal length through the env clone.
+    #[test]
+    fn issue631_concat_param_shadow_clears_outer_length() {
+        let result = infer_surf(
+            r#"
+module Repro.ConcatShadow
+rows = [to_tensor([cast(1.0, f32), cast(2.0, f32)])]
+def cat_shadow(rows: List[tensor[2, f32]]) -> tensor[9, f32] =
+  concat(rows, 0)
+"#,
+        );
+        assert!(
+            result.errors.is_empty(),
+            "a shadowing List param must clear the outer literal length, got: {:?}",
+            result.errors
+        );
     }
 
     #[test]

@@ -1843,6 +1843,46 @@ fn op_declared_output_axes(dag: &Dag, node: &DagNode) -> Vec<(String, usize)> {
     }
 }
 
+/// chelis#632: axes of `node` whose extent the op itself can DECLARE at
+/// run time if the axis carries a real symbol — the same op family and
+/// per-axis conditions as [`op_declared_output_axes`], evaluated on
+/// ELIGIBILITY rather than on the current symbol. Used by the host
+/// lane's helper-root retype (`host::remap_tensor_helper_dim_symbols`):
+/// painting a declared-return symbol onto a root axis is sound only when
+/// the root op will declare that symbol's value; anywhere else the
+/// symbol would reach the `symbolic_occurrences` no-declaring-Load ICE.
+pub(crate) fn op_declarable_axes(dag: &Dag, node: &DagNode) -> Vec<usize> {
+    match &node.op {
+        RiscOp::Shrink { .. } | RiscOp::Stride { .. } | RiscOp::Pad { .. } => {
+            (0..node.output_type.dims.len())
+                .filter(|axis| shape_source_for_axis(dag, node.id, *axis).is_none())
+                .collect()
+        }
+        RiscOp::Reshape { new_shape } => new_shape
+            .iter()
+            .enumerate()
+            .filter_map(|(axis, target)| matches!(target, RtDim::Node(_)).then_some(axis))
+            .collect(),
+        RiscOp::Expand { axis, size } => {
+            fn size_is_anon(expr: &DimExpr) -> bool {
+                match expr {
+                    DimExpr::Sym(name) => name.is_empty() || name == "*",
+                    DimExpr::Concrete(_) => false,
+                    DimExpr::Mul(lhs, rhs) | DimExpr::Div(lhs, rhs) => {
+                        size_is_anon(lhs) || size_is_anon(rhs)
+                    }
+                }
+            }
+            if size_is_anon(size) && !node.shape_deps.is_empty() {
+                vec![*axis]
+            } else {
+                Vec::new()
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// chelis#616: every symbolic dim name that is op-declared somewhere in the
 /// DAG (see [`op_declared_output_axes`]). Used by [`bind_symbolic_dims`] to
 /// exempt these names from the pre-eval "missing symbolic dimension binding"

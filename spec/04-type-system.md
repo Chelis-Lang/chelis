@@ -874,7 +874,10 @@ oracle is `crates/chelis-cli/tests/issue_273_return_dvar_rigidity.rs`.
 
 `(d-name {} *)` represents an unknown/dynamic dimension. Produced by operations where the compiler cannot statically determine the dimension:
 
-- Concatenation along an axis: `concat(tensor[batch, seq1, f32], tensor[batch, seq2, f32], axis=1)` → `tensor[batch, *, f32]`
+- Concatenation along an axis whose operand extents are not statically
+  summable: `concat(tensor[batch, seq1, f32], tensor[batch, seq2, f32],
+  axis=1)` → `tensor[batch, *, f32]` (named `seq1`/`seq2` cannot be
+  summed; see §4.5.4 for when concat DOES produce a concrete extent)
 - Data loading with dynamic shapes
 - Results of control flow where branches have different known dimensions
 
@@ -1167,6 +1170,51 @@ arm is `check_reduction_signature`, the named-axis expand arm is
 spread's concrete run and resolves the named axis to a positional index at
 lowering, so a rank-poly reduce **builds and runs** on the C backend. The
 acceptance oracle is `crates/chelis-cli/tests/rank_poly_tier3.rs`.
+
+#### 4.5.4 Concat Result Typing (chelis#631)
+
+`concat(list, axis)` over a `List[tensor[...]]` types its result from the
+joined element type (§4.5.2), the **concat axis value**, and — when the
+list is statically enumerable — the **element count**. A list's length is
+not part of its type, so the count is recovered from the expression:
+a literal `Cons`/`Nil` chain is counted directly, and a variable bound
+to a list literal in an enclosing `let` (or top-level bind) carries its
+literal length to the concat site. The rules, in order:
+
+1. **Concrete sum.** Axis is a static integer literal (negative axes
+   normalize against the element rank), the element's concat-axis dim is
+   a literal `k`, and the list's element count `n` is statically known:
+   the concat axis types `Lit(k * n)`; every other axis is the element
+   type's axis unchanged. (An axis-0 concat of two `[1, m]` rows types
+   `[2, m]`.) Soundness note: the §4.5.2 join only leaves a literal on
+   an axis when every element asserted it (mismatched literals widen to
+   `*`), so the sum is exactly as trustworthy as the join itself; the
+   head-biased `(concrete, wildcard)` join boundary (§4.5.2) is
+   inherited unchanged, and the runtime dim guards keep any violation
+   loud, never mis-sized.
+2. **Honest wildcard.** Axis is a static literal but the element's
+   concat-axis dim is not a literal (a name, a variable, or `*`) or the
+   element count is unknown (a non-literal list expression — a function
+   result, a parameter, a `split` output): the **concat axis** — not the
+   last axis — types `(d-name {} *)`; every other axis is the element
+   type's axis unchanged.
+3. **Out-of-bounds axis.** A static literal axis outside the element
+   rank (after negative-axis normalization) is a check-time
+   `DimensionMismatch`.
+4. **Dynamic axis.** A non-static axis expression is legal (the host
+   runtime concatenates along a computed axis): every axis of the result
+   types `*` at the element rank — rank is still statically known
+   (§4.5.1 rank uniformity), per-axis extents are not.
+
+History: before chelis#631 the checker typed the result from the element
+type alone and wildcarded the **last** axis unconditionally, so an
+axis-0 concat of two `[1, m]` rows was typed `[1, m]` — a wrong concrete
+extent that the host-program C lane baked into tensor-helper signatures,
+turning valid guarded (`if`/`fail`) forward programs into runtime
+aborts. That misplaced-wildcard shape is also what chelis#594 reported.
+Enforcement is `tensor_concat_result_type` in
+`crates/chelis-types/src/infer.rs`; the acceptance oracle is
+`crates/chelis-cli/tests/issue_631_guarded_forward_concat_c_parity.rs`.
 
 ### 4.6 Property Definitions
 
