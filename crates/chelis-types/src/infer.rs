@@ -7543,20 +7543,34 @@ fn param_bound_dvars(decl_ty: &Type) -> HashSet<DimVar> {
     out
 }
 
+/// How the concat arm can see the list's elements (chelis#594).
+enum ConcatListInfo {
+    /// A literal `Cons` chain at the call site: each element's full dim
+    /// vector, in list order (re-inferred read-only at the concat site).
+    /// Ragged literal extents SUM.
+    Direct(Vec<Vec<Dim>>),
+    /// A variable (or anything else): only a binding-carried literal
+    /// LENGTH survives ([`Env::list_literal_len`]); the per-axis extents
+    /// come from the §4.5.2 joined element type, so the sum is
+    /// `joined extent x length` and requires uniform extents.
+    BindingLen(Option<usize>),
+}
+
 /// Result type of a tensor `concat(list, axis)` (spec/04-type-system.md
-/// §4.5.4, chelis#631), computed from the joined element type (§4.5.2),
-/// the concat-axis value, and — when the list expression is statically
-/// enumerable — the element count:
+/// §4.5.4, chelis#631/#594), computed from the joined element type
+/// (§4.5.2), the concat-axis value, and the statically-visible elements:
 ///
-/// - literal axis + literal element extent `k` + known element count
-///   `n >= 1` → the concat axis is `Lit(k * n)`, every other axis the
-///   element type's axis unchanged. The §4.5.2 join only leaves a literal
-///   on an axis when every element asserted it (mismatched literals widen
-///   to `*`), so the sum is exactly as trustworthy as the join itself;
-///   the head-biased `(concrete, wildcard)` join boundary is inherited
-///   unchanged, and the runtime dim guards keep any violation loud,
-///   never mis-sized.
-/// - literal axis, extent or count unknown → `Wildcard` on the CONCAT
+/// - literal axis + DIRECT literal list whose every element carries a
+///   literal extent on the concat axis → `Lit(sum of extents)` — ragged
+///   lists included (chelis#594). Any non-literal element extent (a
+///   name, a variable, a wildcard) makes the sum unknown → `Wildcard`.
+///   Every other axis is the joined element type's axis unchanged.
+/// - literal axis + BINDING-carried length `n >= 1` + joined element
+///   extent `Lit(k)` → `Lit(k * n)` (uniform extents only: the join has
+///   already widened ragged literals to `*`, and the head-biased
+///   `(concrete, wildcard)` join boundary is inherited on this path —
+///   the runtime dim guards keep any violation loud, never mis-sized).
+/// - literal axis, extents or count unknown → `Wildcard` on the CONCAT
 ///   axis. (Pre-chelis#631 the LAST axis was wildcarded unconditionally
 ///   and the concat axis kept the element's dim — a wrong concrete
 ///   extent the host-program C lane baked into its tensor-helper
@@ -7568,7 +7582,7 @@ fn param_bound_dvars(decl_ty: &Type) -> HashSet<DimVar> {
 fn tensor_concat_result_type(
     element_ty: &Type,
     raw_axis: Option<i64>,
-    static_len: Option<usize>,
+    list_info: ConcatListInfo,
 ) -> Result<Type, String> {
     let Type::Tensor(dims, precision) = element_ty else {
         return Err(format!(
@@ -7583,16 +7597,25 @@ fn tensor_concat_result_type(
         out_dims.fill(Dim::Wildcard);
         return Ok(Type::Tensor(out_dims, precision.clone()));
     };
-    let Some(axis) = normalize_static_axis(out_dims.len(), raw) else {
-        return Err(format!(
-            "concat axis {raw} out of bounds for rank {}",
-            out_dims.len()
-        ));
+    let rank = out_dims.len();
+    let Some(axis) = normalize_static_axis(rank, raw) else {
+        return Err(format!("concat axis {raw} out of bounds for rank {rank}"));
     };
-    out_dims[axis] = match (&out_dims[axis], static_len) {
-        (Dim::Lit(k), Some(n)) if n >= 1 => match k.checked_mul(n as i64) {
-            Some(total) => Dim::Lit(total),
-            None => Dim::Wildcard,
+    out_dims[axis] = match list_info {
+        ConcatListInfo::Direct(elements) if !elements.is_empty() => elements
+            .iter()
+            .try_fold(0i64, |total, dims| match dims.get(axis) {
+                Some(Dim::Lit(k)) if dims.len() == rank => total.checked_add(*k),
+                _ => None,
+            })
+            .map(Dim::Lit)
+            .unwrap_or(Dim::Wildcard),
+        ConcatListInfo::BindingLen(Some(n)) if n >= 1 => match &out_dims[axis] {
+            Dim::Lit(k) => match k.checked_mul(n as i64) {
+                Some(total) => Dim::Lit(total),
+                None => Dim::Wildcard,
+            },
+            _ => Dim::Wildcard,
         },
         _ => Dim::Wildcard,
     };
@@ -11510,14 +11533,41 @@ fn infer_app(
                                     && lhs_args.len() == 1
                                     && precision.is_integer() =>
                             {
-                                // chelis#631 (spec §4.5.4): the concat axis
-                                // value and the statically-known element
-                                // count decide the concat-axis extent.
+                                // chelis#631/#594 (spec §4.5.4): the concat
+                                // axis value and the statically-visible
+                                // elements decide the concat-axis extent.
                                 // kids[1] is the list expr, kids[2] the
                                 // axis expr (cast-aware extraction, #216).
+                                // A DIRECT literal chain re-infers each
+                                // element read-only (a fresh env/vg clone
+                                // per element; the elements were already
+                                // inferred as part of the list arg, so
+                                // this is a bounded second pass over
+                                // typically-tiny exprs) so ragged extents
+                                // can SUM; through a binding only the
+                                // length survives.
                                 let raw_axis = kids.get(2).and_then(extract_int_for_dim);
-                                let list_len = static_list_len(kids.get(1), env);
-                                match tensor_concat_result_type(&lhs_args[0], raw_axis, list_len) {
+                                let list_info =
+                                    match kids.get(1).and_then(collect_cons_chain_for_shape) {
+                                        Some(elements) => ConcatListInfo::Direct(
+                                            elements
+                                                .iter()
+                                                .map(|elem| {
+                                                    match subst.apply(&infer_expr_in_scope(
+                                                        elem, env, vg, subst, adt_reg,
+                                                    )) {
+                                                        Type::Tensor(dims, _) => dims,
+                                                        _ => Vec::new(),
+                                                    }
+                                                })
+                                                .collect(),
+                                        ),
+                                        None => ConcatListInfo::BindingLen(static_list_len(
+                                            kids.get(1),
+                                            env,
+                                        )),
+                                    };
+                                match tensor_concat_result_type(&lhs_args[0], raw_axis, list_info) {
                                     Ok(ty) => return ty,
                                     Err(message) => {
                                         errors.push(CheckError::new(
@@ -22056,35 +22106,131 @@ def cat_neg(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[1, 5, f32] =
         );
     }
 
-    /// Boundary pin: the §4.5.2 `(concrete, wildcard)` join is
-    /// head-biased — `[tensor[2], tensor[*]]` joins to element
-    /// `tensor[2]` — so the concat sum inherits that trust model
-    /// unchanged: `Lit(2) * 2 = Lit(4)`. The runtime dim guards keep a
-    /// violating wildcard element loud, never mis-sized.
+    /// chelis#594 CONSCIOUS FLIP of the original chelis#631 head-bias
+    /// boundary pin: a DIRECT literal list now sums PER-ELEMENT extents,
+    /// so `[tensor[2], tensor[*]]` no longer inherits the §4.5.2
+    /// head-biased join times the count (`Lit(4)`) — the wildcard
+    /// element makes the sum honestly unknown and the concat axis
+    /// wildcards (both `[4]` and `[5]` typecheck). The head bias remains
+    /// observable on the BINDING path, where only the joined element
+    /// type and the literal length survive.
     #[test]
-    fn issue631_concat_head_biased_join_sums_from_head() {
+    fn issue594_mixed_wildcard_element_wildcards_direct_concat_axis() {
+        for claim in ["4", "5"] {
+            let result = infer_surf(&format!(
+                r#"
+module Repro.ConcatHeadBias
+def cat_bias(a: tensor[2, f32], b: tensor[*, f32]) -> tensor[{claim}, f32] =
+  concat([a, b], 0)
+"#
+            ));
+            assert!(
+                result.errors.is_empty(),
+                "a wildcard element makes the direct sum unknown; [{claim}] must typecheck, got: {:?}",
+                result.errors
+            );
+        }
+        // Binding path: the join is head-biased to the element `[2]` and
+        // the length is 2, so the concat axis is `Lit(4)` — `[5]` rejects.
+        let rejected = infer_surf(
+            r#"
+module Repro.ConcatHeadBiasBinding
+def cat_bias(a: tensor[2, f32], b: tensor[*, f32]) -> tensor[5, f32] = {
+  rows = [a, b]
+  concat(rows, 0)
+}
+"#,
+        );
+        assert!(
+            !rejected.errors.is_empty(),
+            "the binding path keeps the head-biased join times count (Lit(4)); [5] must be rejected"
+        );
+    }
+
+    // ── chelis#594: ragged direct-literal concat sums per-element extents ──
+
+    /// A DIRECT literal list with ragged extents sums them: `[2] + [3]`
+    /// on axis 0 types `[5]`. Pre-chelis#594 the §4.5.2 join widened the
+    /// mismatched literals to `*` before the concat rule saw them, so
+    /// the sum was unrecoverable and the axis stayed a wildcard.
+    #[test]
+    fn issue594_ragged_direct_literal_concat_sums_extents() {
         let accepted = infer_surf(
             r#"
-module Repro.ConcatHeadBias
-def cat_bias(a: tensor[2, f32], b: tensor[*, f32]) -> tensor[4, f32] =
+module Repro.RaggedConcat
+def cat(a: tensor[2, f32], b: tensor[3, f32]) -> tensor[5, f32] =
   concat([a, b], 0)
 "#,
         );
         assert!(
             accepted.errors.is_empty(),
-            "head-biased join element is [2]; two-element concat must type [4], got: {:?}",
+            "ragged [2] + [3] must type [5], got: {:?}",
             accepted.errors
         );
         let rejected = infer_surf(
             r#"
-module Repro.ConcatHeadBiasBad
-def cat_bias(a: tensor[2, f32], b: tensor[*, f32]) -> tensor[5, f32] =
+module Repro.RaggedConcatBad
+def cat(a: tensor[2, f32], b: tensor[3, f32]) -> tensor[6, f32] =
   concat([a, b], 0)
 "#,
         );
         assert!(
             !rejected.errors.is_empty(),
-            "head-biased join sum is 4; [5] must be rejected"
+            "ragged sum is 5; [6] must be rejected"
+        );
+    }
+
+    /// Three ragged elements and a non-zero concat axis: concatenating
+    /// `[4, 1]`, `[4, 2]`, and `[4, 3]` on axis 1 types `[4, 6]`, with
+    /// the non-concat axis preserved.
+    #[test]
+    fn issue594_ragged_three_element_mid_axis_concat_sums_extents() {
+        let accepted = infer_surf(
+            r#"
+module Repro.RaggedConcat3
+def cat(a: tensor[4, 1, f32], b: tensor[4, 2, f32], c: tensor[4, 3, f32]) -> tensor[4, 6, f32] =
+  concat([a, b, c], 1)
+"#,
+        );
+        assert!(
+            accepted.errors.is_empty(),
+            "ragged axis-1 sum must type [4, 6], got: {:?}",
+            accepted.errors
+        );
+        let rejected = infer_surf(
+            r#"
+module Repro.RaggedConcat3Bad
+def cat(a: tensor[4, 1, f32], b: tensor[4, 2, f32], c: tensor[4, 3, f32]) -> tensor[4, 7, f32] =
+  concat([a, b, c], 1)
+"#,
+        );
+        assert!(
+            !rejected.errors.is_empty(),
+            "ragged axis-1 sum is 6; [4, 7] must be rejected"
+        );
+    }
+
+    /// Ragged extents are NOT recoverable through a binding — only the
+    /// literal length survives (`Env::list_literal_lens`), and the
+    /// §4.5.2 join has already widened the mismatched extents to `*`. A
+    /// let-bound ragged list therefore keeps the honest wildcard: a
+    /// claim the direct form would reject is accepted permissively.
+    /// Deliberate boundary, pinned so a future extension is conscious.
+    #[test]
+    fn issue594_ragged_let_bound_list_stays_wildcard() {
+        let result = infer_surf(
+            r#"
+module Repro.RaggedConcatLet
+def cat(a: tensor[2, f32], b: tensor[3, f32]) -> tensor[9, f32] = {
+  rows = [a, b]
+  concat(rows, 0)
+}
+"#,
+        );
+        assert!(
+            result.errors.is_empty(),
+            "a let-bound ragged list wildcards the concat axis (permissive), got: {:?}",
+            result.errors
         );
     }
 
