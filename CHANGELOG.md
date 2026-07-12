@@ -29,7 +29,26 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- **A function parameter named `params` (or any reserved Deep tag) now
+- **Deep DAGs from the bounded unroll no longer overflow the stack in
+  consumer passes (chelis#620 red team).** Lowering's per-level
+  `stacker::maybe_grow` protected the unroll itself, but the passes that
+  consume the resulting DAG inside the same entry (reverse-mode grad
+  construction, DCE, verify) recursed unprotected, so a ~484-level
+  combining builder (the cap's own im2col justification) lowered fine
+  and then SIGABRT'd BELOW the 512 cap. Every lowering entry now runs on
+  a grown 512 MiB stack segment (the chelis-types `with_grown_stack`
+  boundary pattern); the whole cap window returns values or the loud cap
+  diagnostic, never a crash.
+- **The static `if` fold refuses non-finite condition intermediates
+  (chelis#620 red team).** The lowered comparison composition evaluates
+  NaN opposite to the IEEE comparisons both forward lanes apply
+  (chelis#666), so folding e.g. `gte(div(0.0, 0.0), 0.0)` would prune to
+  a branch the forward pass never takes. Non-finite intermediates now
+  fall to the runtime path: float branches keep the pre-existing mask
+  behavior, ADT/list branches get the loud runtime-condition rejection
+  instead of a silent wrong-arm gradient.
+- **A function parameter named `params` (or any reserved Deep tag that
+  is not also a Surf keyword) now
   binds correctly in DAG lowering (chelis#620).** Such names desugar
   through chelis-surf's MetaExpr param wrapper, which the lowering's
   param-name walk silently dropped: the parameter never bound, body

@@ -385,9 +385,12 @@ nested destructuring beyond `pat-var`/`pat-wild` field bindings.
 static arm selection: when an `if` condition const-folds at lowering time
 (its lowered subgraph is scalar, closed over literals — no `Load`, no
 `shape()` read, no random op — and every op is in the pure scalar
-vocabulary, with `cast` truncation matching the evaluator exactly and a
+vocabulary, with `cast` truncation matching the evaluator exactly, a
 zero-divisor `floor_div`/`trunc_div` refusing the fold rather than folding
-a trap away), ONLY the taken branch is lowered, and its value passes
+a trap away, and any non-finite intermediate refusing the fold, because
+the lowered comparison composition disagrees with the forward lanes' IEEE
+semantics on NaN — chelis#666), ONLY the taken branch is lowered, and its
+value passes
 through verbatim — a tensor, a tuple, an ADT constructor, or a list. The
 untaken branch is never lowered, so a `fail(...)` guard arm, an empty-list
 base case, or a recursive call in the other branch cannot poison the DAG.

@@ -468,6 +468,19 @@ fn panic_payload_to_lower_diagnostic(payload: &(dyn Any + Send)) -> LowerDiagnos
     LowerDiagnostic::new(message, None, None)
 }
 
+/// chelis#620 red-team fix: stack segment for every lowering entry. The
+/// bounded unroll legally builds DAGs up to `MAX_STATIC_RECURSION_DEPTH`
+/// levels deep, and the passes that CONSUME that DAG inside the entry's
+/// dynamic extent (reverse-mode grad construction, DCE, verify) recurse
+/// per node without lowering's per-level `stacker::maybe_grow` -- so
+/// before this grow, a ~484-level combining builder (the cap's own im2col
+/// justification) lowered fine and then SIGABRT'd in a consumer below the
+/// cap, violating the "loud diagnostic, never a crash" contract. One grow
+/// at the boundary covers every pass in the closure, the same pattern as
+/// chelis-types' `with_grown_stack` (infer.rs WI-1) and the same 512 MiB
+/// segment size.
+const LOWERING_GROW_SEGMENT_BYTES: usize = 512 * 1024 * 1024;
+
 fn catch_lowering<R>(f: impl FnOnce() -> R + std::panic::UnwindSafe) -> Result<R, LowerDiagnostic> {
     struct Guard;
     impl Drop for Guard {
@@ -479,7 +492,8 @@ fn catch_lowering<R>(f: impl FnOnce() -> R + std::panic::UnwindSafe) -> Result<R
     install_chelis_panic_hook();
     SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.set(true));
     let _guard = Guard;
-    std::panic::catch_unwind(f).map_err(|payload| panic_payload_to_lower_diagnostic(&*payload))
+    std::panic::catch_unwind(|| stacker::grow(LOWERING_GROW_SEGMENT_BYTES, f))
+        .map_err(|payload| panic_payload_to_lower_diagnostic(&*payload))
 }
 
 /// Public alias for [`catch_lowering`] so other modules in this crate
@@ -6743,7 +6757,9 @@ impl LowerCtx {
             return None;
         }
         // chelis#620: use the shared three-form walker. A param whose name
-        // collides with a reserved Deep tag (`params`, `match`, `if`, ...)
+        // collides with a reserved Deep tag that is not also a Surf
+        // keyword (`params`, `record`, `block`, ...; keyword collisions
+        // like `match`/`if` are parse errors and never get here)
         // desugars as a MetaExpr wrapper (chelis-surf's
         // `typed_param_needs_meta_wrapper`), and the previous Atom/List-only
         // match silently DROPPED that name from the list -- the param never
@@ -9144,6 +9160,18 @@ impl LowerCtx {
                 RiscOp::Round => input0?.round_ties_even(),
                 _ => return None,
             };
+            // chelis#620 red-team fix: refuse the fold on any non-finite
+            // intermediate. The comparison surface reaching this walker is
+            // the lowered CmpLt/not composition, whose NaN behavior
+            // (`not(NaN < x)` is true) DISAGREES with the IEEE comparisons
+            // both forward lanes apply (host evaluator `>=`, C backend
+            // `>=`) -- so folding a NaN condition would prune to a branch
+            // the forward pass never takes. Falling to the runtime mask
+            // path keeps the pre-existing (pre-#620) behavior for such
+            // conditions instead of extending it to ADT/list pruning.
+            if !value.is_finite() {
+                return None;
+            }
             memo.insert(id, value);
         }
         memo.get(&cond).map(|v| *v != 0.0)
@@ -13830,6 +13858,27 @@ mod regression_tests {
                 .iter()
                 .any(|node| matches!(node.op, RiscOp::Mul)),
             "zero-divisor condition must stay on the mask path: {dag:?}"
+        );
+    }
+
+    #[test]
+    fn static_cond_fold_refuses_non_finite() {
+        // chelis#620 red-team fix: the lowered CmpLt/not comparison chain
+        // evaluates NaN comparisons opposite to the IEEE comparisons both
+        // forward lanes apply, so a non-finite intermediate must refuse
+        // the fold and stay on the runtime mask path (Mul nodes present)
+        // rather than pruning to a branch the forward pass never takes.
+        let dag = parse_and_lower_unchecked(
+            "(if {} (app {} (var {} gte) \
+             (app {} (var {} div) (lit {} 0.0) (lit {} 0.0)) \
+             (lit {} 0.0)) \
+             (lit {} 1.0) (lit {} 0.0))",
+        );
+        assert!(
+            dag.nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Mul)),
+            "NaN condition must stay on the mask path: {dag:?}"
         );
     }
 

@@ -263,6 +263,81 @@ fn issue_620_recursive_list_builder_grad_matches_fd() {
     }
 }
 
+/// Red-team regression (deep combining recursion INSIDE the cap window):
+/// a 484-level builder -- the exact im2col 22x22 depth the cap's own
+/// justification cites -- must return a correct gradient. Before the
+/// lowering-boundary stack grow, lowering survived (per-level
+/// `maybe_grow`) and then a consumer pass over the 484-deep DAG
+/// SIGABRT'd below the cap: the shipped 3-level builder test and the
+/// tail-recursive unroll test were both too shallow to catch it.
+/// loss = 484 * sum(x*x), so grad = 968x.
+#[test]
+fn issue_620_deep_combining_recursion_within_cap_grads() {
+    let base = [1.5, -0.5];
+    let source = format!(
+        "module Repro.Deep620\n\n\
+         def collect(x: &tensor[2, f32], k: int64, n: int64) -> List[tensor[2, f32]] = {{\n\
+         \x20 if gte(k, n) then [] else {{\n\
+         \x20   rest = collect(x, add(k, cast(1, int64)), n)\n\
+         \x20   concat([mul(x, x)], rest)\n\
+         \x20 }}\n\
+         }}\n\n\
+         def loss(x: tensor[2, f32]) -> f32 = {{\n\
+         \x20 stacked = concat(collect(&x, cast(0, int64), cast(484, int64)), cast(0, int32))\n\
+         \x20 sum(stacked, cast(0, int32)) |> tensor_to_scalar\n\
+         }}\n\n\
+         out = grad(loss)(to_tensor([{}]))\n",
+        fmt_f32_list(&base),
+    );
+    let (stdout, stderr, ok) = eval_program(&source);
+    assert!(ok, "484-level combining recursion grad failed: {stderr}");
+    let grad = parse_tensor_data(&stdout);
+    for (i, g) in grad.iter().enumerate() {
+        let want = 968.0 * base[i];
+        assert!(
+            (g - want).abs() < 1e-2,
+            "grad elem {i}: got {g}, want {want} (968x): {stdout}"
+        );
+    }
+}
+
+/// Red-team regression (fold/forward NaN divergence): a condition that
+/// folds through a NaN (`gte(div(0,0), 0)`) must NOT be statically
+/// pruned -- the lowered CmpLt/not comparison evaluates NaN opposite to
+/// the IEEE comparison both forward lanes apply, so pruning would select
+/// a branch the forward pass never takes. With the fold refusing
+/// non-finite intermediates, an ADT-branch NaN guard now gets the LOUD
+/// runtime-condition rejection instead of a silent wrong-arm gradient.
+/// (The float-branch case falls to the mask path, whose own NaN
+/// divergence from the IEEE forward lanes is pre-existing, pre-#620
+/// behavior tracked separately.)
+#[test]
+fn issue_620_nan_condition_adt_branch_rejected_not_mispruned() {
+    let source = format!(
+        "module Repro.Nan620\n\n\
+         type Mode =\n\
+         \x20 | ModeA\n\
+         \x20 | ModeB\n\n\
+         def fwd(x: tensor[2, f32]) -> f32 = {{\n\
+         \x20 match (if gte(div(cast(0.0, f32), cast(0.0, f32)), cast(0.0, f32)) then ModeA else ModeB) with {{\n\
+         \x20   | ModeA => sum(x, cast(0, int32)) |> tensor_to_scalar\n\
+         \x20   | ModeB => sum(mul(&x, &x), cast(0, int32)) |> tensor_to_scalar\n\
+         \x20 }}\n\
+         }}\n\n\
+         out = grad(fwd)(to_tensor([{}]))\n",
+        fmt_f32_list(&[3.0, 4.0]),
+    );
+    let (_stdout, stderr, ok) = eval_program(&source);
+    assert!(
+        !ok,
+        "a NaN-folding ADT guard must be rejected, never silently pruned to one arm"
+    );
+    assert!(
+        stderr.contains("expected a single tensor value, got an ADT value"),
+        "diagnostic must be the runtime-condition ADT-branch rejection: {stderr}"
+    );
+}
+
 // --- Multi-argument params loss (the issue's headline ask) ---------------------
 
 /// `grad(loss, wrt=(p))(params, x, y, eps)`: a real loss shape -- params
@@ -398,7 +473,9 @@ fn issue_620_owned_adt_double_read_stays_a_linearity_error() {
 /// wrapper form was silently dropped from the lowering's param-name walk,
 /// so `params` never bound, its body references lowered to bogus Loads,
 /// and the match failed as a "runtime scrutinee" (reproduced on 0.16.0).
-/// Same guard applies to any reserved-tag name (`match`, `if`, ...).
+/// Same guard applies to any reserved Deep tag that is not also a Surf
+/// keyword (e.g. `record`, `block`; `match`/`if` are parse errors and
+/// never reach the wrapper).
 #[test]
 fn issue_620_param_named_params_binds_and_differentiates() {
     let g = [1.0, 1.0];
