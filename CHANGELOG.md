@@ -32,8 +32,8 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   the binary exited 0 with wrong values while `chelis eval` rejected —
   the silent-divergence class. Pre-existing #616-era gap (reproducible
   through runtime-bounded `shrink`); rank-0-vs-rank-N operands (the
-  scalar-broadcast idiom) and rank-divergent operands stay unguarded and
-  tracked on #664. Pins:
+  scalar-broadcast idiom) are exempt by design, and rank-divergent
+  operands with both ranks > 0 stay unguarded — tracked as #668. Pins:
   `issue_664_runtime_wildcard_consumer_guards.rs` (five error-parity
   cases plus two no-false-abort twins); fully static codegen is
   byte-identical.
