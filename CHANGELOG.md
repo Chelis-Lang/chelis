@@ -42,6 +42,17 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   Known residual (chelis#662, pre-existing): the `grad`/`vmap` exemption
   is whole-expression, so a forward `fail` BESIDE a grad call in one
   body still keeps mask semantics in C.
+- **Ragged direct-literal concat sums per-element extents (chelis#594,
+  spec §4.5.4 rule 1).** A literal list at the concat site now re-infers
+  each element and SUMS literal concat-axis extents: `concat([a, b], 0)`
+  over `tensor[2, f32]` and `tensor[3, f32]` types `tensor[5, f32]`
+  (previously the §4.5.2 join widened the ragged literals to `*` before
+  the concat rule could see them). Conscious boundary flip on the direct
+  path: a wildcard element now makes the sum honestly unknown instead of
+  inheriting the head-biased join times the count — the head bias
+  remains observable only through a binding, where just the joined
+  element type and the literal length survive (uniform extents only;
+  let-bound ragged lists keep the honest wildcard).
 
 ### Changed
 

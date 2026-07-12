@@ -1171,37 +1171,45 @@ spread's concrete run and resolves the named axis to a positional index at
 lowering, so a rank-poly reduce **builds and runs** on the C backend. The
 acceptance oracle is `crates/chelis-cli/tests/rank_poly_tier3.rs`.
 
-#### 4.5.4 Concat Result Typing (chelis#631)
+#### 4.5.4 Concat Result Typing (chelis#631, chelis#594)
 
 `concat(list, axis)` over a `List[tensor[...]]` types its result from the
-joined element type (§4.5.2), the **concat axis value**, and — when the
-list is statically enumerable — the **element count**. A list's length is
-not part of its type, so the count is recovered from the expression:
-a literal `Cons`/`Nil` chain is counted directly, and a variable bound
-to a list literal in an enclosing `let` (or top-level bind) carries its
-literal length to the concat site. The rules, in order:
+joined element type (§4.5.2), the **concat axis value**, and the
+**statically-visible elements**. A list's length is not part of its
+type, so what survives depends on the expression: a literal `Cons`/`Nil`
+chain at the concat site exposes every element, while a variable bound
+to a list literal in an enclosing `let` (or top-level bind) carries only
+its literal **length** to the concat site. The rules, in order:
 
-1. **Concrete sum.** Axis is a static integer literal (negative axes
-   normalize against the element rank), the element's concat-axis dim is
-   a literal `k`, and the list's element count `n` is statically known:
-   the concat axis types `Lit(k * n)`; every other axis is the element
-   type's axis unchanged. (An axis-0 concat of two `[1, m]` rows types
-   `[2, m]`.) Soundness note: the §4.5.2 join only leaves a literal on
-   an axis when every element asserted it (mismatched literals widen to
-   `*`), so the sum is exactly as trustworthy as the join itself; the
-   head-biased `(concrete, wildcard)` join boundary (§4.5.2) is
-   inherited unchanged, and the runtime dim guards keep any violation
-   loud, never mis-sized.
-2. **Honest wildcard.** Axis is a static literal but the element's
-   concat-axis dim is not a literal (a name, a variable, or `*`) or the
-   element count is unknown (a non-literal list expression — a function
-   result, a parameter, a `split` output): the **concat axis** — not the
-   last axis — types `(d-name {} *)`; every other axis is the element
+1. **Direct per-element sum (chelis#594).** Axis is a static integer
+   literal (negative axes normalize against the element rank) and the
+   list is a literal chain at the concat site whose every element
+   carries a **literal** extent on the concat axis: the concat axis
+   types `Lit(sum of the extents)` — ragged lists included
+   (`[tensor[2], tensor[3]]` on axis 0 types `tensor[5]`; an axis-0
+   concat of two `[1, m]` rows types `[2, m]`). Any non-literal element
+   extent (a name, a variable, a wildcard) makes the sum unknown and
+   the axis falls to rule 3. Every other axis is the joined element
    type's axis unchanged.
-3. **Out-of-bounds axis.** A static literal axis outside the element
+2. **Binding-carried count.** Axis is a static literal and the list is
+   a variable carrying a literal length `n`: the concat axis types
+   `Lit(k * n)` when the **joined** element's concat-axis dim is a
+   literal `k` — uniform extents only, since the §4.5.2 join widens
+   mismatched literals to `*` before the concat rule sees them.
+   Soundness note: the head-biased `(concrete, wildcard)` join boundary
+   (§4.5.2) is inherited on this path (a wildcard tail behind a
+   concrete head still counts as `k`), and the runtime dim guards keep
+   any violation loud, never mis-sized. On the DIRECT path of rule 1
+   the head bias is gone: a wildcard element makes the sum unknown.
+3. **Honest wildcard.** Axis is a static literal but neither rule above
+   produces a literal (non-literal element extents, unknown count — a
+   function result, a parameter, a `split` output): the **concat
+   axis** — not the last axis — types `(d-name {} *)`; every other axis
+   is the element type's axis unchanged.
+4. **Out-of-bounds axis.** A static literal axis outside the element
    rank (after negative-axis normalization) is a check-time
    `DimensionMismatch`.
-4. **Dynamic axis.** A non-static axis expression is legal (the host
+5. **Dynamic axis.** A non-static axis expression is legal (the host
    runtime concatenates along a computed axis): every axis of the result
    types `*` at the element rank — rank is still statically known
    (§4.5.1 rank uniformity), per-axis extents are not.
