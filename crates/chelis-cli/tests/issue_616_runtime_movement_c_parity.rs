@@ -247,18 +247,23 @@ int main(void) {{
     }
 }
 
-/// The guarded degenerate (chelis#616 over-unification): a shrink -> stride
-/// chain returned DIRECTLY under a sig-named output dim gets both movement
-/// outputs unified to the one symbol `u` by the checker, though their
-/// runtime extents genuinely differ (`n-2` vs `ceil((n-2)/2)`). The C lane
-/// must fail LOUDLY at run time (the second site's equality guard), never
-/// allocate a mis-sized tensor. The eval lane, which computes shapes from
-/// actual values and never consults the over-unified type, accepts and
-/// computes the correct window — the asymmetry is the checker's typing
-/// imprecision, tracked as chelis#632 (fresh extents per non-identity
-/// movement axis), and the C guard is the soundness floor under it.
+/// The formerly-guarded degenerate (chelis#632, flipped by the chelis#631
+/// change set): a shrink -> stride chain returned DIRECTLY under a
+/// sig-named output dim. Through v0.16.x the sig symbol `u` was painted
+/// onto BOTH movement outputs by the wildcard-KEYED dim substitution
+/// (`tensor_dim_substitutions` recorded `"*" -> u` and repainted every
+/// wildcard-typed node), so the C binary declared `u` at the shrink
+/// (`n-2`) and equality-guarded it at the stride (`ceil((n-2)/2)`) — a
+/// loud abort on a well-formed program while eval computed the correct
+/// window. Anon dims are no longer substitution keys, and the helper
+/// root is retyped POSITIONALLY on op-declarable axes only: the inner
+/// shrink keeps its own per-node anon extent, the stride root declares
+/// `u` from its own extent, and the chain has full eval-vs-C parity.
+/// The checker-side residue of chelis#632 (movement typing passes a
+/// symbolic dim through non-identity axes — the annotation-level lie)
+/// is tracked separately on that issue.
 #[test]
-fn issue_616_over_unified_movement_chain_fails_loud_not_mis_sized() {
+fn issue_632_direct_return_movement_chain_eval_matches_c() {
     let input: Vec<f64> = (1..=6).map(|v| v as f64).collect();
     let body = "\
   extent = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(1, int64)), int32)\n\
@@ -271,7 +276,7 @@ fn issue_616_over_unified_movement_chain_fails_loud_not_mis_sized() {
     let eval_out = run_eval(&source, "rtdegen");
     assert!(
         eval_out.status.success(),
-        "eval computes the true window regardless of the over-unified type: {}",
+        "eval computes the true window: {}",
         String::from_utf8_lossy(&eval_out.stderr)
     );
     let eval_values = parse_tensor_data(&String::from_utf8_lossy(&eval_out.stdout));
@@ -281,15 +286,12 @@ fn issue_616_over_unified_movement_chain_fails_loud_not_mis_sized() {
     let bin = gcc(&build_dir, "rtdegen", None, "self_bin");
     let run = StdCommand::new(&bin).output().expect("run emitted program");
     assert!(
-        !run.status.success(),
-        "C binary must abort on the over-unified runtime dim; stdout={}",
-        String::from_utf8_lossy(&run.stdout)
+        run.status.success(),
+        "C binary must run the direct-return movement chain to success; stderr={}",
+        String::from_utf8_lossy(&run.stderr)
     );
-    let stderr = String::from_utf8_lossy(&run.stderr);
-    assert!(
-        stderr.contains("runtime dim `u` mismatch"),
-        "C abort must name the runtime-dim equality guard; stderr={stderr}"
-    );
+    let c_values = parse_tensor_data(&String::from_utf8_lossy(&run.stdout));
+    assert_close("C degenerate chain", &c_values, &eval_values);
 }
 
 /// RED-TEAM FINDING 1 (chelis#616): a MULTI-AXIS shrink mixing a runtime

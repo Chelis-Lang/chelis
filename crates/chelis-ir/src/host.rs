@@ -2334,6 +2334,26 @@ fn lower_tensor_helper_dag(
     scope: &HashMap<String, HostType>,
     expected: &TensorType,
 ) -> Option<crate::Dag> {
+    let defs = collect_program_defs(program.exprs());
+    // chelis#631: never swallow a fail-reaching FORWARD body into a
+    // tensor helper. The DAG lane lowers `fail` to a mask-selected zero
+    // placeholder, so a forward helper would compile into a binary that
+    // returns zeros where `chelis eval` aborts with the user's message
+    // (silent-wrong, the one outcome the soundness bar forbids). Bail to
+    // the host lane, whose `if`/`fail` are real control flow
+    // (`chelis_fail` in the C emit). Applied defs are consulted because
+    // helper lowering INLINES them into the DAG. A `grad`/`vmap`-carrying
+    // expr is exempt: it can ONLY lower through the DAG lane, where the
+    // guard-as-mask-arithmetic form (zero placeholder included) is the
+    // documented chelis#616 differentiation semantics. KNOWN RESIDUAL
+    // (chelis#662, pre-existing): the exemption is whole-expression, so a
+    // forward `fail` sitting BESIDE a grad call in one body keeps mask
+    // semantics and its C binary silently zeros where eval aborts; the
+    // precise fix is scoping the exemption to the differentiated
+    // sub-expression.
+    if !expr_contains_grad_like(expr) && expr_reaches_fail(expr, &defs, &mut HashSet::new()) {
+        return None;
+    }
     // Issue #197: surface a fatal AD rejection from the tensor-
     // helper sub-lowering instead of swallowing it; the host
     // fallback would otherwise emit an undefined-symbol call to
@@ -2342,7 +2362,7 @@ fn lower_tensor_helper_dag(
         expr,
         collect_tensor_scope(scope),
         program.type_env().clone(),
-        collect_program_defs(program.exprs()),
+        defs,
     ) {
         Ok(dag) => dag,
         Err(diagnostic) if diagnostic.fatal => {
@@ -6596,7 +6616,44 @@ fn remap_tensor_helper_dim_symbols(
         };
         actual_inputs.push(actual_output);
     }
-    let remapped = crate::lower::remap_tensor_dim_symbols(dag, &formal_params, &actual_inputs);
+    let mut remapped = crate::lower::remap_tensor_dim_symbols(dag, &formal_params, &actual_inputs);
+    // chelis#632 (needed by the chelis#631 oracle): anon wildcards are no
+    // longer substitution keys in `tensor_dim_substitutions`, so the
+    // declared return no longer paints its dims across every
+    // wildcard-typed node (distinct runtime extents conflated under one
+    // symbol → runtime-dim guard aborts on well-formed programs). The
+    // declared return still owns the ROOT's shape: retype the root
+    // POSITIONALLY, anon axis by anon axis — but ONLY on axes the root
+    // op itself can declare at run time (`dag::op_declarable_axes`). A
+    // symbol painted anywhere else has no declaring Load or op and trips
+    // the `symbolic_occurrences` ICE; those axes stay anon and size
+    // themselves per node.
+    if let (Some(root_id), Some(actual_output)) =
+        (dag.roots().first().copied(), actual_inputs.last())
+        && let Some(root) = remapped.get(root_id)
+        && root.output_type.dims.len() == actual_output.dims.len()
+    {
+        let is_anon = |dim: &crate::dag::DimInfo| matches!(dim, crate::dag::DimInfo::Named(name, None) if name.is_empty() || name == "*");
+        let declarable = crate::dag::op_declarable_axes(&remapped, root);
+        let mut output = root.output_type.clone();
+        let mut changed = false;
+        for (axis, (dim, actual_dim)) in output
+            .dims
+            .iter_mut()
+            .zip(actual_output.dims.iter())
+            .enumerate()
+        {
+            if declarable.contains(&axis) && is_anon(dim) && !is_anon(actual_dim) {
+                *dim = actual_dim.clone();
+                changed = true;
+            }
+        }
+        if changed {
+            let op = root.op.clone();
+            let inputs = root.inputs.clone();
+            remapped.replace_node(root_id, op, inputs, output);
+        }
+    }
     actualize_tensor_helper_types(&remapped, scope)
 }
 
@@ -6875,6 +6932,57 @@ fn actualize_tensor_helper_types(
     crate::lower::apply_dim_substitutions(&actualized, &synthetic_renames)
 }
 
+/// chelis#631: does this Deep expr contain a `grad`/`vmap`/`vmap-grad`
+/// node? Such exprs lower through the DAG lane only (the host lane
+/// cannot resolve them), so the fail-reachability gate must not divert
+/// them.
+fn expr_contains_grad_like(expr: &Expr) -> bool {
+    match expr {
+        Expr::List(list, _) => {
+            matches!(tag(list), Some("grad" | "vmap" | "vmap-grad"))
+                || list.elements.iter().any(expr_contains_grad_like)
+        }
+        Expr::MetaExpr(meta, _) => expr_contains_grad_like(&meta.expr),
+        _ => false,
+    }
+}
+
+/// chelis#631: does this Deep expr — or any def it (transitively)
+/// references — contain a `fail` application? Conservative: any `(var
+/// fail)` reference counts, and a referenced def is walked once (the
+/// `visiting` set both breaks recursion cycles and memoizes). Used by
+/// [`lower_tensor_helper_dag`] to keep fail-reaching bodies out of
+/// tensor-helper DAGs, where `fail` is a zero placeholder rather than an
+/// abort.
+fn expr_reaches_fail(
+    expr: &Expr,
+    defs: &HashMap<String, Expr>,
+    visiting: &mut HashSet<String>,
+) -> bool {
+    match expr {
+        Expr::List(list, _) => {
+            if tag(list) == Some("var")
+                && let Some(name) = children(list).first().and_then(symbol_name)
+            {
+                if name == "fail" {
+                    return true;
+                }
+                if let Some(body) = defs.get(name)
+                    && visiting.insert(name.to_string())
+                {
+                    return expr_reaches_fail(body, defs, visiting);
+                }
+                return false;
+            }
+            list.elements
+                .iter()
+                .any(|kid| expr_reaches_fail(kid, defs, visiting))
+        }
+        Expr::MetaExpr(meta, _) => expr_reaches_fail(&meta.expr, defs, visiting),
+        _ => false,
+    }
+}
+
 fn collect_program_defs(exprs: &[Expr]) -> HashMap<String, Expr> {
     let mut defs = HashMap::new();
     for expr in top_level_items(exprs) {
@@ -7115,6 +7223,22 @@ fn infer_app_expr_host_type(
             precision,
         }));
     }
+    // chelis#631: a tensor-list `concat`'s concat axis is sized at run
+    // time by `chelis_tensor_concat`; the coarse host type must not carry
+    // the ELEMENT's extent on that axis. (The precise type is the
+    // checker's `tensor_concat_result_type`, spec §4.5.4; this fallback
+    // fires when the checker annotation is absent or synthetic.)
+    if name == "concat"
+        && let Some(input) = kids.get(1)
+        && let HostType::List(inner) = expr_host_type(input, program, scope)
+        && let HostType::Tensor(element) = inner.as_ref()
+    {
+        let axis = kids
+            .get(2)
+            .and_then(expr_int_literal)
+            .and_then(|raw| normalize_host_axis(element.dims.len(), raw));
+        return Some(concat_host_tensor_type(element, axis));
+    }
     let arg_tys = kids[1..]
         .iter()
         .map(|arg| expr_host_type(arg, program, scope))
@@ -7255,6 +7379,47 @@ fn expr_int_literal(expr: &Expr) -> Option<i64> {
         }
         _ => None,
     }
+}
+
+/// chelis#631: an integer literal reaching this HostExpr position,
+/// seeing through the canonical `cast(N, int32)` spelling (the HostExpr
+/// analog of [`expr_int_literal`]'s cast peel).
+fn host_expr_int_literal(expr: &HostExpr) -> Option<i64> {
+    match &expr.kind {
+        HostExprKind::Int(value) => Some(*value),
+        HostExprKind::Builtin { name, args, .. } if name == "cast" => {
+            args.first().and_then(host_expr_int_literal)
+        }
+        _ => None,
+    }
+}
+
+/// chelis#631: normalize a possibly-negative literal axis against a rank
+/// (`-1` is the last axis); `None` when out of range — the checker owns
+/// the user-facing out-of-bounds diagnostic, this lane just degrades to
+/// all-wildcard.
+fn normalize_host_axis(rank: usize, raw: i64) -> Option<usize> {
+    let rank = rank as i64;
+    let axis = if raw < 0 { rank + raw } else { raw };
+    (0..rank).contains(&axis).then_some(axis as usize)
+}
+
+/// chelis#631: the coarse host-lane type of a tensor-list `concat` — the
+/// element type with the concat axis wildcarded (every axis when the
+/// axis is unknown in the calling lane). The wildcard renames to a
+/// per-node anon dim in the C emitter and is sized from the runtime
+/// `chelis_tensor_concat` result, so helper signatures stay honest.
+fn concat_host_tensor_type(element: &TensorType, axis: Option<usize>) -> HostType {
+    let anon = || crate::dag::DimInfo::Named("*".to_string(), None);
+    let mut dims = element.dims.clone();
+    match axis {
+        Some(axis) if axis < dims.len() => dims[axis] = anon(),
+        _ => dims.fill(anon()),
+    }
+    HostType::Tensor(TensorType {
+        dims,
+        precision: element.precision,
+    })
 }
 
 fn reduce_axis_tensor_type(tensor_ty: &TensorType, axis: usize) -> TensorType {
@@ -7673,6 +7838,22 @@ fn infer_builtin_host_type(name: &str, args: &[HostExpr]) -> Option<HostType> {
                 .or(Some(HostType::Unknown)),
             _ => Some(HostType::Unknown),
         },
+        // chelis#631: this lane still sees the axis ARGUMENT (unlike the
+        // arg-tys-only fallback), so a literal axis wildcards only the
+        // concat axis and keeps the element's other extents.
+        "concat" => match arg_tys.first() {
+            Some(HostType::List(inner)) => match inner.as_ref() {
+                HostType::Tensor(element) => {
+                    let axis = args
+                        .get(1)
+                        .and_then(host_expr_int_literal)
+                        .and_then(|raw| normalize_host_axis(element.dims.len(), raw));
+                    Some(concat_host_tensor_type(element, axis))
+                }
+                _ => infer_builtin_host_type_from_arg_tys(name, &arg_tys),
+            },
+            _ => infer_builtin_host_type_from_arg_tys(name, &arg_tys),
+        },
         _ => infer_builtin_host_type_from_arg_tys(name, &arg_tys),
     }
 }
@@ -7755,12 +7936,16 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
             _ => Some(HostType::Unknown),
         },
         "append" => arg_tys.first().cloned(),
+        // chelis#631: this arg-tys-only lane cannot see the axis VALUE, so
+        // every axis wildcards — returning the element type VERBATIM baked
+        // the element's concat-axis extent into tensor-helper signatures
+        // (the host-lane copy of the checker's pre-#631 concat bug).
         "concat" => match (arg_tys.first(), arg_tys.get(1)) {
             (Some(HostType::List(inner)), Some(HostType::Int64))
                 if matches!(inner.as_ref(), HostType::Tensor(_)) =>
             {
                 match inner.as_ref() {
-                    HostType::Tensor(tensor_ty) => Some(HostType::Tensor(tensor_ty.clone())),
+                    HostType::Tensor(element) => Some(concat_host_tensor_type(element, None)),
                     _ => Some(HostType::Unknown),
                 }
             }
@@ -8542,6 +8727,139 @@ mod tests {
             Some(HostType::Tensor(TensorType {
                 dims: vec![],
                 precision: Prim::Int64,
+            })),
+        );
+    }
+
+    // ── chelis#631: host-lane concat result typing ──
+    //
+    // The host lane must never carry the ELEMENT's extent on the concat
+    // axis: `chelis_tensor_concat` sizes that axis at run time, and a
+    // baked element extent aborts the binary at the runtime-dim guard.
+
+    fn rank2_element() -> TensorType {
+        TensorType {
+            dims: vec![DimInfo::Lit(1), DimInfo::Lit(2)],
+            precision: Prim::F32,
+        }
+    }
+
+    fn anon_dim() -> DimInfo {
+        DimInfo::Named("*".to_string(), None)
+    }
+
+    fn infer_concat_host_type(axis_src: &str) -> Option<HostType> {
+        let app = parse_deep_app(&format!(
+            "(app {{}} (var {{}} concat) (var {{}} rows) {axis_src})"
+        ));
+        let Expr::List(list, _) = &app else {
+            panic!("app expr must be a list");
+        };
+        let program = surf_check("unrelated = 1\n");
+        let mut scope = HashMap::new();
+        scope.insert(
+            "rows".to_string(),
+            HostType::List(Box::new(HostType::Tensor(rank2_element()))),
+        );
+        infer_app_expr_host_type(list, &program, &scope)
+    }
+
+    #[test]
+    fn concat_app_expr_host_type_wildcards_concat_axis_only() {
+        // Literal axis 0 (bare and cast-wrapped, the canonical spelling):
+        // the concat axis is anon, the trailing element extent survives.
+        for axis_src in ["(lit {} 0)", "(cast {} (lit {} 0) (t-prim {} int32))"] {
+            let inferred = infer_concat_host_type(axis_src);
+            assert_eq!(
+                inferred,
+                Some(HostType::Tensor(TensorType {
+                    dims: vec![anon_dim(), DimInfo::Lit(2)],
+                    precision: Prim::F32,
+                })),
+                "concat(rows, {axis_src}) must wildcard only axis 0",
+            );
+        }
+    }
+
+    #[test]
+    fn concat_app_expr_host_type_negative_axis_indexes_from_end() {
+        let inferred = infer_concat_host_type("(lit {} -1)");
+        assert_eq!(
+            inferred,
+            Some(HostType::Tensor(TensorType {
+                dims: vec![DimInfo::Lit(1), anon_dim()],
+                precision: Prim::F32,
+            })),
+            "concat(rows, -1) must wildcard the LAST axis and keep axis 0",
+        );
+    }
+
+    #[test]
+    fn concat_app_expr_host_type_unknown_axis_wildcards_all_axes() {
+        // Negative parity: a non-literal axis leaves no per-axis claim.
+        let inferred = infer_concat_host_type("(var {} ax)");
+        assert_eq!(
+            inferred,
+            Some(HostType::Tensor(TensorType {
+                dims: vec![anon_dim(), anon_dim()],
+                precision: Prim::F32,
+            })),
+            "a runtime concat axis must wildcard every axis",
+        );
+    }
+
+    #[test]
+    fn concat_arg_tys_fallback_wildcards_all_axes() {
+        // The arg-tys-only lane cannot see the axis value: pre-chelis#631
+        // it returned the element type VERBATIM (dims [1, 2]) — the baked
+        // extent that aborted guarded forward binaries.
+        let inferred = infer_builtin_host_type_from_arg_tys(
+            "concat",
+            &[
+                HostType::List(Box::new(HostType::Tensor(rank2_element()))),
+                HostType::Int64,
+            ],
+        );
+        assert_eq!(
+            inferred,
+            Some(HostType::Tensor(TensorType {
+                dims: vec![anon_dim(), anon_dim()],
+                precision: Prim::F32,
+            })),
+        );
+    }
+
+    #[test]
+    fn concat_host_expr_lane_peels_cast_wrapped_axis() {
+        // infer_builtin_host_type sees HostExpr args: a cast-wrapped int
+        // axis still selects the single concat axis.
+        let list_arg = HostExpr {
+            kind: HostExprKind::Var(
+                "rows".to_string(),
+                HostType::List(Box::new(HostType::Tensor(rank2_element()))),
+            ),
+            span_id: None,
+            merged_spans: Vec::new(),
+        };
+        let axis_arg = HostExpr {
+            kind: HostExprKind::Builtin {
+                name: "cast".to_string(),
+                args: vec![HostExpr {
+                    kind: HostExprKind::Int(0),
+                    span_id: None,
+                    merged_spans: Vec::new(),
+                }],
+                ty: HostType::Int64,
+            },
+            span_id: None,
+            merged_spans: Vec::new(),
+        };
+        let inferred = infer_builtin_host_type("concat", &[list_arg, axis_arg]);
+        assert_eq!(
+            inferred,
+            Some(HostType::Tensor(TensorType {
+                dims: vec![anon_dim(), DimInfo::Lit(2)],
+                precision: Prim::F32,
             })),
         );
     }

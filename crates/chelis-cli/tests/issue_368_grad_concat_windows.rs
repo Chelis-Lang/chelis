@@ -221,10 +221,11 @@ fn issue_368_three_way_concat_named_rows_grad_is_ones() {
 // stacked tensor.
 // ---------------------------------------------------------------------------
 
-// No rigid return annotation: the checker types `concat`'s axis as a `*`
-// wildcard (`tensor[1, *, f32]`), so a concrete `tensor[2, 2, f32]` sig would
-// be rejected at CHECK time for an unrelated (pre-existing) reason. The
-// forward VALUE is what this test pins.
+// No return annotation: the forward VALUE is what this test pins. (Since
+// chelis#631 the checker counts the literal list's elements and types this
+// concat `tensor[2, 2, f32]` concretely — a concrete return sig now
+// typechecks too; the annotation-acceptance pins live in chelis-types'
+// `issue631_*` tests.)
 const CONCAT_FWD_ONLY: &str = "module Repro.ConcatFwdOnly\n\
 def f(x: tensor[2, f32]) = {\n\
   r0 = reshape(&x, [cast(1, int64), cast(2, int64)])\n\
@@ -374,11 +375,11 @@ fn issue_368_symbolic_nonconcat_axis_grad_nonlinear() {
 /// finite-difference oracle, and (iii) forward parity of the pooled values.
 /// The eval-vs-C legs for the runtime-window machinery live in
 /// `issue_616_runtime_movement_c_parity.rs` /
-/// `issue_616_runtime_reshape_c_parity.rs` on `if`-free twins: this guarded
-/// form's C build routes through the host-program lane, which still types a
-/// list `concat` as its element type and cannot render the wildcard-typed
-/// `if` mask expansion — both PRE-EXISTING host-lane gaps that fail the
-/// build loudly (never a mis-sized binary).
+/// `issue_616_runtime_reshape_c_parity.rs` on `if`-free twins. The guarded
+/// FORWARD C build — formerly blocked on the host lane typing a list
+/// `concat` as its element type — has full eval-vs-C parity since
+/// chelis#631; its oracle is
+/// `issue_631_guarded_forward_concat_c_parity.rs`.
 #[test]
 fn issue_368_runtime_symbolic_window_grad_is_half_everywhere() {
     // The exact #368 reproducer: avgpool1d with a RUNTIME-derived window
@@ -466,9 +467,9 @@ out = loss(to_tensor([{literal}]))\n"
     // eval-vs-C GRADIENT parity: the grad DAG (which inlines the guard as
     // mask arithmetic) builds and runs through `chelis build --target c`,
     // producing the same [0.5, 0.5, 0.5, 0.5]. (The guarded FORWARD build
-    // routes through the host-program lane and stays loudly blocked on the
-    // pre-existing list-concat typing gap, chelis#631; the gradient path is
-    // the chelis#616 oracle and has full parity.)
+    // routes through the host-program lane and has its own eval-vs-C
+    // parity oracle since chelis#631:
+    // `issue_631_guarded_forward_concat_c_parity.rs`.)
     let dir = tempdir().expect("tempdir");
     let src_path = dir.path().join("symoraclec.ch");
     fs::write(&src_path, grad_source(base_literal)).expect("write source");

@@ -486,8 +486,13 @@ is computed by the op at run time is an *op-declared* symbolic dim: the C
 backend declares it inline at the owning op (`int name = <extent>;`) and the
 evaluator binds it from the actual value mid-evaluation; a second site
 computing a different value for the same symbol aborts/errs loudly (the
-over-unification guard — a checker-unified `shrink -> stride` chain returned
-directly under one sig symbol fails loud rather than mis-size).
+over-unification guard). Since chelis#631/#632 the guard no longer fires on
+a direct-return `shrink -> stride` chain under one sig symbol — anonymous
+dims are not substitution keys, so the sig symbol attaches positionally to
+the FINAL op only and each inner movement op declares its own extent (full
+eval-vs-C parity). The guard remains the soundness floor for a genuinely
+CLAIMED symbol equality (e.g. an explicit `-> tensor[n]` over
+`stride(x, 2)`) and for any future checker imprecision.
 
 The movement adjoints are runtime-capable on the same representation: the
 `shrink` adjoint pads with `after = shape(x, axis) - end`, the `pad` adjoint

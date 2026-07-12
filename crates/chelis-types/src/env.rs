@@ -45,6 +45,13 @@ pub struct Env {
     /// from serialization (it is a check-time-only analysis artifact).
     #[serde(skip)]
     size_provenance: HashMap<String, SizeProvenance>,
+    /// chelis#631: literal element counts of `let`-bound list expressions,
+    /// so `concat(rows, axis)` can size its concat axis through the
+    /// binding (a list's length is not part of its type). Same
+    /// lexical-scoping-by-`Clone` and add-symmetric mark/clear discipline
+    /// as `size_provenance`; check-time-only, dropped from serialization.
+    #[serde(skip)]
+    list_literal_lens: HashMap<String, usize>,
 }
 
 impl Env {
@@ -81,6 +88,26 @@ impl Env {
     /// The recorded size provenance of a name, if any (chelis#397/#469).
     pub fn size_provenance(&self, name: &str) -> Option<SizeProvenance> {
         self.size_provenance.get(name).copied()
+    }
+
+    /// Record the literal element count of a `let`-bound list (chelis#631).
+    pub fn mark_list_literal_len(&mut self, name: &str, len: usize) {
+        self.list_literal_lens.insert(name.to_string(), len);
+    }
+
+    /// Clear any recorded list-literal length for `name` (chelis#631).
+    ///
+    /// Add-symmetric like [`Self::clear_size_provenance`]: cleared at
+    /// every binding site whose RHS is not a list literal and at every
+    /// value-parameter bind, so a re-bind or shadow does not inherit a
+    /// stale length and mis-size a later `concat`.
+    pub fn clear_list_literal_len(&mut self, name: &str) {
+        self.list_literal_lens.remove(name);
+    }
+
+    /// The recorded list-literal length of a name, if any (chelis#631).
+    pub fn list_literal_len(&self, name: &str) -> Option<usize> {
+        self.list_literal_lens.get(name).copied()
     }
 
     /// True when some in-scope tensor binding carries the named dimension
