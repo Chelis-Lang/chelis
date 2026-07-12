@@ -481,7 +481,13 @@ error paths: the eval lane raises a clean error and the C backend emits an
 abort guard for a negative bound, a shrink range overshoot, a non-positive
 stride step, a negative reshape target extent, and a reshape target whose
 element product disagrees with the input (`chelis_alloc_view` itself performs
-no numel check, so the emitted guard is the only defense). A dim whose extent
+no numel check, so the emitted guard is the only defense). The reshape numel
+guard fires for ANY reshape whose output or input extents are not all static
+literals — Sym-resolved targets and literal targets over runtime-sized inputs
+included, not only node-valued targets — and same-shape elementwise ops guard
+operand-shape agreement at equal rank whenever a non-static extent is
+involved (chelis#664; rank-0 scalar operands are the backend's broadcast
+idiom and are exempt). A dim whose extent
 is computed by the op at run time is an *op-declared* symbolic dim: the C
 backend declares it inline at the owning op (`int name = <extent>;`) and the
 evaluator binds it from the actual value mid-evaluation; a second site
@@ -490,9 +496,13 @@ over-unification guard). Since chelis#631/#632 the guard no longer fires on
 a direct-return `shrink -> stride` chain under one sig symbol — anonymous
 dims are not substitution keys, so the sig symbol attaches positionally to
 the FINAL op only and each inner movement op declares its own extent (full
-eval-vs-C parity). The guard remains the soundness floor for a genuinely
-CLAIMED symbol equality (e.g. an explicit `-> tensor[n]` over
-`stride(x, 2)`) and for any future checker imprecision.
+eval-vs-C parity). The checker's movement typing matches: symbolic-dim
+pass-through is identity-only (stride step 1 / zero pad; see
+spec/04-type-system.md §4.7), so a non-identity movement axis types a
+fresh runtime-guarded extent rather than repeating the input's symbol.
+The guard remains the soundness floor for a genuinely CLAIMED symbol
+equality (e.g. an explicit `-> tensor[n]` over `stride(x, 2)`) and for
+any future checker imprecision.
 
 The movement adjoints are runtime-capable on the same representation: the
 `shrink` adjoint pads with `after = shape(x, axis) - end`, the `pad` adjoint

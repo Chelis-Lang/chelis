@@ -1253,6 +1253,18 @@ checker's output and which fall back to `(d-name {} *)` (see §4.5). The
 canonical examples live in
 [`examples/illustrative/runtime_shape_semantics.ch`](../examples/illustrative/runtime_shape_semantics.ch).
 
+For the movement primitives, symbolic-dim pass-through is
+**identity-only** (chelis#632, mirroring the IR-side rule in
+`chelis_ir::dag::shape_source_for_axis`): a `stride` axis with literal
+step 1 and a `pad` axis with zero padding keep the input's symbolic dim;
+every other movement axis — a non-identity literal step or padding, or
+any runtime bound — types a fresh `(d-name {} *)` whose extent the
+owning op declares and guards at run time (spec/05-risc-primitives.md
+§2.4.1). `shrink` has no checker-detectable identity form for a
+symbolic axis (a full-axis slice of a symbolic dim necessarily spells
+its end as a runtime value), so its symbolic axes always mint fresh
+extents.
+
 #### 4.7.1 `shape` axis form
 
 Both forms below produce an `int32` value and both pass the infer-time

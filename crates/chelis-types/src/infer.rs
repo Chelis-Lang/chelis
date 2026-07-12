@@ -13717,6 +13717,13 @@ fn infer_shrink_app(
     for (axis, (pair, dim)) in bounds.iter().zip(dims.iter()).enumerate() {
         let Some((start, end)) = pair else {
             // Runtime bounds on this axis: extent known only at run time.
+            // chelis#632 note: unlike stride/pad, shrink has no
+            // checker-detectable IDENTITY form for a symbolic axis — the
+            // IR-side full-axis sentinel (`start 0, end ToEnd`) has no
+            // `PairListShape` counterpart, because a full-axis slice of a
+            // symbolic dim necessarily spells its end as a runtime value
+            // and lands here. Identity-precision for shrink is a possible
+            // future refinement, not part of the chelis#632 fix.
             out_dims.push(Dim::Wildcard);
             continue;
         };
@@ -13925,7 +13932,19 @@ fn infer_stride_app(
                 let out = (*input_dim as usize).div_ceil(step_us);
                 out_dims.push(Dim::Lit(out as i64));
             }
-            other => out_dims.push(other.clone()),
+            // chelis#632: only an IDENTITY step (1) passes a symbolic dim
+            // through, mirroring the identity-only rule in
+            // `chelis_ir::dag::shape_source_for_axis`. A non-identity
+            // step changes the extent to `ceil(d/step)`, so keeping the
+            // input symbol was an annotation-level lie that also falsely
+            // tripped §4.4.1 rigidity on sig-symbol direct returns; the
+            // fresh wildcard's extent is op-declared and runtime-guarded
+            // by the chelis#616 machinery.
+            other => out_dims.push(if step_us == 1 {
+                other.clone()
+            } else {
+                Dim::Wildcard
+            }),
         }
     }
 
@@ -14135,7 +14154,15 @@ fn infer_pad_app(
             Dim::Lit(input_dim) => {
                 out_dims.push(Dim::Lit(input_dim + lo + hi));
             }
-            other => out_dims.push(other.clone()),
+            // chelis#632: only ZERO padding passes a symbolic dim through
+            // (identity; mirrors `shape_source_for_axis`'s zero-pad arm).
+            // Non-zero padding widens the extent to `d + lo + hi`; see
+            // the stride arm above for the full rationale.
+            other => out_dims.push(if *lo == 0 && *hi == 0 {
+                other.clone()
+            } else {
+                Dim::Wildcard
+            }),
         }
     }
 

@@ -21,6 +21,33 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   eval-vs-C build-and-run parity
   (`issue_631_guarded_forward_concat_c_parity.rs`). Also fixes the
   misplaced-wildcard symptoms of chelis#594.
+- **C-lane runtime guards for consumers of runtime-wildcard extents
+  (chelis#664).** Same-shape elementwise ops (`add`/`mul`/`div`/
+  `trunc_div`/`floor_div`/`max_elem`/`cmplt`) now emit an operand-shape
+  agreement abort when any involved extent is non-static, and the
+  reshape numel guard fires for ANY non-static reshape (Sym-resolved
+  targets like `[shape(x, 0)]` and literal targets over runtime-sized
+  inputs), not only Node-valued targets. Before, a movement-op runtime
+  wildcard beside a differently-sized sibling was read out of bounds and
+  the binary exited 0 with wrong values while `chelis eval` rejected —
+  the silent-divergence class. Pre-existing #616-era gap (reproducible
+  through runtime-bounded `shrink`); rank-0-vs-rank-N operands (the
+  scalar-broadcast idiom) are exempt by design, and rank-divergent
+  operands with both ranks > 0 stay unguarded — tracked as #668. Pins:
+  `issue_664_runtime_wildcard_consumer_guards.rs` (five error-parity
+  cases plus two no-false-abort twins); fully static codegen is
+  byte-identical.
+- **Checker movement typing is identity-only for symbolic dims
+  (chelis#632).** A non-identity `stride`/`pad` axis (literal step != 1,
+  non-zero padding) over a symbolic dim now types a fresh
+  runtime-guarded extent instead of passing the input's symbol through —
+  the extent genuinely changes (`ceil(d/step)`, `d + lo + hi`), so the
+  pass-through was an annotation-level lie that also falsely rejected
+  `sig f: tensor[n, f32] -> tensor[u, f32]` over `stride(x, 2)` via the
+  §4.4.1 rigidity guard (that program now checks, builds, and has
+  eval-vs-C parity: `issue_632_literal_stride_under_sig_symbols_matches_c`).
+  Identity axes (stride step 1, zero pad) still pass the symbol through
+  (the `issue_513` contract); literal axes keep exact arithmetic.
 - **Anonymous dims are no longer dim-substitution keys (chelis#632,
   partial).** `tensor_dim_substitutions` recorded `"*" -> <actual>` and
   repainted every wildcard-typed node in a helper DAG with one symbol,

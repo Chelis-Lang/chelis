@@ -294,6 +294,41 @@ fn issue_632_direct_return_movement_chain_eval_matches_c() {
     assert_close("C degenerate chain", &c_values, &eval_values);
 }
 
+/// chelis#632 (checker side): a LITERAL non-identity stride returned
+/// directly under distinct sig symbols. Before the fresh-extent fix the
+/// checker's pass-through arm unified `u := n` and the §4.4.1 return-dim
+/// rigidity guard REJECTED this well-formed program at check time; now
+/// axis 0 mints a fresh extent, the program checks, and both lanes agree
+/// on `[1, 3, 5]`.
+#[test]
+fn issue_632_literal_stride_under_sig_symbols_matches_c() {
+    let input: Vec<f64> = (1..=6).map(|v| v as f64).collect();
+    let source = format!(
+        "module Repro.LitStrideSig\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = stride(x, cast(2, int32))\nout = f(to_tensor([{}]))\n",
+        f32_literal(&input)
+    );
+
+    let eval_out = run_eval(&source, "litstride");
+    assert!(
+        eval_out.status.success(),
+        "eval must accept the sig-symbol literal stride: {}",
+        String::from_utf8_lossy(&eval_out.stderr)
+    );
+    let eval_values = parse_tensor_data(&String::from_utf8_lossy(&eval_out.stdout));
+    assert_close("eval literal stride", &eval_values, &[1.0, 3.0, 5.0]);
+
+    let (_dir, build_dir) = build_c(&source, "litstride");
+    let bin = gcc(&build_dir, "litstride", None, "self_bin");
+    let run = StdCommand::new(&bin).output().expect("run emitted program");
+    assert!(
+        run.status.success(),
+        "C binary must run the sig-symbol literal stride; stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let c_values = parse_tensor_data(&String::from_utf8_lossy(&run.stdout));
+    assert_close("C literal stride", &c_values, &eval_values);
+}
+
 /// RED-TEAM FINDING 1 (chelis#616): a MULTI-AXIS shrink mixing a runtime
 /// axis with a literal-bounded axis. Type inference used to collapse EVERY
 /// axis to a wildcard when any bound was non-literal; downstream

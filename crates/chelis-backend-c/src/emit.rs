@@ -374,8 +374,65 @@ impl CEmitter {
         out
     }
 
+    /// chelis#664: runtime operand-shape agreement guard for same-shape
+    /// elementwise ops. Their emitters index every operand through the
+    /// OUTPUT's indices (a shared flat `i` on the contiguous path;
+    /// `chelis_flat_to_indices` on the output shape applied to each
+    /// operand's strides on the strided path), so an operand whose
+    /// runtime shape disagrees is read out of bounds or partially —
+    /// SILENTLY, where the evaluator rejects with "tensor shapes must
+    /// match for elementwise op". The checker cannot rule the mismatch
+    /// out when a movement-op runtime wildcard is involved (wildcards
+    /// unify permissively, spec §4.5).
+    ///
+    /// Scope: operands are compared pairwise against `inputs[0]` at
+    /// EQUAL rank only — a rank-0 operand against a rank-N one is the
+    /// backend's established scalar-broadcast idiom on the strided path
+    /// (`chelis_indices_to_flat` with `ndim 0` resolves to element 0)
+    /// and must not abort. Skipped entirely when every extent of the
+    /// output and all inputs is a static literal: the checker proved
+    /// those equal, and fully static codegen stays byte-identical.
+    fn emit_elementwise_operand_guard(&mut self, node: &DagNode, dag: &Dag) {
+        let dims_static = |dims: &[DimInfo]| dims.iter().all(|d| matches!(d, DimInfo::Lit(_)));
+        let all_static = dims_static(&node.output_type.dims)
+            && node.inputs.iter().all(|input| {
+                dag.get(*input)
+                    .is_some_and(|n| dims_static(&n.output_type.dims))
+            });
+        if all_static || node.inputs.len() < 2 {
+            return;
+        }
+        let id = node.id.0;
+        let a = node.inputs[0].0;
+        for input in &node.inputs[1..] {
+            let b = input.0;
+            self.line(&format!(
+                "if (t{a}->ndim == t{b}->ndim) {{ for (int __d = 0; __d < t{a}->ndim; __d++) {{ \
+                 if (t{a}->shape[__d] != t{b}->shape[__d]) {{ fprintf(stderr, \"chelis: \
+                 elementwise operand shape mismatch at node {id} axis %d\\n\", __d); abort(); \
+                 }} }} }}"
+            ));
+        }
+    }
+
     fn emit_node(&mut self, node: &DagNode, dag: &Dag) {
         let id = node.id.0;
+        // chelis#664: same-shape elementwise family — guard operand
+        // agreement before the op emitters index operands through the
+        // output's shape. (`Sub`, `min`, and `where` have no RISC op of
+        // their own; they lower through this family.)
+        if matches!(
+            node.op,
+            RiscOp::Add
+                | RiscOp::Mul
+                | RiscOp::Div
+                | RiscOp::TruncDiv
+                | RiscOp::FloorDiv
+                | RiscOp::MaxElem
+                | RiscOp::CmpLt
+        ) {
+            self.emit_elementwise_operand_guard(node, dag);
+        }
         match &node.op {
             RiscOp::Const { value } => self.emit_const(id, *value, &node.output_type),
             RiscOp::ConstTensor { data } => self.emit_const_tensor(id, data, &node.output_type),
@@ -435,6 +492,11 @@ impl CEmitter {
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {
                     let fused_node = dag.get(input_id).unwrap();
+                    // chelis#664: the inlined elementwise node is skipped
+                    // by the emit loop, so the dispatch-level operand
+                    // guard never saw it; guard here before the fused
+                    // loops index its operands through the reduce shape.
+                    self.emit_elementwise_operand_guard(fused_node, dag);
                     self.emit_fused_reduce(
                         id,
                         *axis,
@@ -459,6 +521,9 @@ impl CEmitter {
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {
                     let fused_node = dag.get(input_id).unwrap();
+                    // chelis#664: see the Sum arm — the inlined node
+                    // bypassed the dispatch-level operand guard.
+                    self.emit_elementwise_operand_guard(fused_node, dag);
                     self.emit_fused_reduce(
                         id,
                         *axis,
@@ -5063,7 +5128,22 @@ impl CEmitter {
             self.emit_static_dim_guard(id, axis, &extent, ty.dims.get(axis));
             self.emit_runtime_dim_site(id, axis, &extent);
         }
-        if has_runtime_target {
+        // chelis#664: the numel guard must fire whenever static
+        // verification is incomplete — not only for Node-valued targets.
+        // A target that folds to a SYM (`[shape(x, 0)]` resolving to the
+        // Load-declared `n`) or a fully-LITERAL target over a
+        // runtime-sized input (`reshape(stride(x, 2), [6])`) previously
+        // got NO guard, so the view silently over- or under-read its
+        // input where the evaluator rejects the numel mismatch. The
+        // guard reuses exactly the dims `shape_literal` allocates from,
+        // so any variable valid for the allocation is valid here; a
+        // fully static reshape (all output and input extents literal) is
+        // checker-verified and keeps byte-identical codegen.
+        let dims_static = |dims: &[DimInfo]| dims.iter().all(|d| matches!(d, DimInfo::Lit(_)));
+        let input_static = dag
+            .get(inputs[0])
+            .is_some_and(|node| dims_static(&node.output_type.dims));
+        if has_runtime_target || !dims_static(&ty.dims) || !input_static {
             let numel = std::iter::once("(long long)1".to_string())
                 .chain(ty.dims.iter().map(|dim| {
                     format!("(long long)({})", Self::emit_dim_expr(&DimExpr::from(dim)))
