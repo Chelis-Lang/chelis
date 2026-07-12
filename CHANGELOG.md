@@ -6,8 +6,56 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **`grad` through static control flow over ADT/list values (chelis#620).**
+  An `if` whose condition const-folds at lowering time now prunes to the
+  taken branch, whatever its value type — tensor, tuple, ADT constructor, or
+  list — instead of dying in "if then branch expected a single tensor value".
+  This makes the eps fail-guard idiom (`if eps <= 0.0 then fail(...) else
+  body`) and constructor-valued guards differentiate, in both the eval and
+  compiled lanes. Recursive builders whose base case prunes statically
+  (`if k >= n then [] else concat([row], recurse)`) unroll under grad,
+  bounded by depth caps (512 per callee, 1024 total) with a loud diagnostic
+  past the cap; the unrolled `Cons`/`Nil` list value flows through list
+  append and tensor `concat` (the same Pad+Add construction as the
+  expression-level path). Compiler-inserted linearity `copy`/`drop` over
+  tuple and ADT values lower structurally (one node per tensor leaf), fixing
+  the "copy input expected a single tensor value, got an ADT value" failure
+  on the curried single-argument closure `grad(fn (p) -> loss(p, x, y))`.
+  Acceptance oracle: `crates/chelis-cli/tests/issue_620_static_if_adt_grad.rs`.
+  Runtime-condition control flow over ADT values remains rejected loudly and
+  is tracked in chelis#618 (`RiscOp::Select`).
+
 ### Fixed
 
+- **Deep DAGs from the bounded unroll no longer overflow the stack in
+  consumer passes (chelis#620 red team).** Lowering's per-level
+  `stacker::maybe_grow` protected the unroll itself, but the passes that
+  consume the resulting DAG inside the same entry (reverse-mode grad
+  construction, DCE, verify) recursed unprotected, so a ~484-level
+  combining builder (the cap's own im2col justification) lowered fine
+  and then SIGABRT'd BELOW the 512 cap. Every lowering entry now runs on
+  a grown 512 MiB stack segment (the chelis-types `with_grown_stack`
+  boundary pattern); the whole cap window returns values or the loud cap
+  diagnostic, never a crash.
+- **The static `if` fold refuses non-finite condition intermediates
+  (chelis#620 red team).** The lowered comparison composition evaluates
+  NaN opposite to the IEEE comparisons both forward lanes apply
+  (chelis#666), so folding e.g. `gte(div(0.0, 0.0), 0.0)` would prune to
+  a branch the forward pass never takes. Non-finite intermediates now
+  fall to the runtime path: float branches keep the pre-existing mask
+  behavior, ADT/list branches get the loud runtime-condition rejection
+  instead of a silent wrong-arm gradient.
+- **A function parameter named `params` (or any reserved Deep tag that
+  is not also a Surf keyword) now
+  binds correctly in DAG lowering (chelis#620).** Such names desugar
+  through chelis-surf's MetaExpr param wrapper, which the lowering's
+  param-name walk silently dropped: the parameter never bound, body
+  references lowered to bogus `Load` placeholders, and
+  `grad(loss, wrt=(params))(...)` over a struct conventionally named
+  `params` failed with a misleading "match on a runtime scrutinee"
+  diagnostic (reproduced on 0.16.0).
 - **Concat result typing (chelis#631, spec §4.5.4).** The checker types
   `concat(list, axis)` from the concat-axis VALUE and — for statically
   enumerable lists, including `let`-bound list literals — the element
@@ -90,6 +138,18 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   extent (`tensor[2, 2, f32]`) or an explicit wildcard (`tensor[*, 2,
   f32]`); the symbolic spelling was the pre-#631 workaround for
   chelis#594.
+- **Constant-condition `if` now prunes instead of mask-blending
+  (chelis#620).** Previously both branches were always lowered and blended
+  arithmetically even when the condition was a compile-time constant, so a
+  NaN/Inf in the untaken branch leaked through `0 * NaN`, and a non-float
+  constant-condition `if` was rejected outright. Pruning lowers only the
+  taken branch and admits any branch type. Runtime-condition `if` behavior
+  is unchanged (float mask blend; non-tensor branches rejected).
+- **Self-recursion in DAG lowering errors loudly instead of silently
+  collapsing (chelis#620).** The old Inlining-F1 guard made a recursive call
+  fall through to a fallback that returned its last argument — silently
+  wrong values in the build lane. Recursion now unrolls when statically
+  bounded and otherwise reports the unroll-cap diagnostic naming the callee.
 
 ## [0.16.0] — 2026-07-10
 

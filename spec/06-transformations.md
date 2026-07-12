@@ -381,6 +381,45 @@ lowering. Still rejected, loudly and by name: a runtime scrutinee (anything
 that lowers to a tensor node), an arm guard on the selected pattern, and
 nested destructuring beyond `pat-var`/`pat-wild` field bindings.
 
+**Static condition pruning for `if` (chelis#620).** The `if` analogue of
+static arm selection: when an `if` condition const-folds at lowering time
+(its lowered subgraph is scalar, closed over literals — no `Load`, no
+`shape()` read, no random op — and every op is in the pure scalar
+vocabulary, with `cast` truncation matching the evaluator exactly, a
+zero-divisor `floor_div`/`trunc_div` refusing the fold rather than folding
+a trap away, and any non-finite intermediate refusing the fold, because
+the lowered comparison composition disagrees with the forward lanes' IEEE
+semantics on NaN — chelis#666), ONLY the taken branch is lowered, and its
+value passes
+through verbatim — a tensor, a tuple, an ADT constructor, or a list. The
+untaken branch is never lowered, so a `fail(...)` guard arm, an empty-list
+base case, or a recursive call in the other branch cannot poison the DAG.
+This is the exact gradient for the same reason as static arm selection: a
+condition the fold can resolve cannot vary under input perturbation. Both
+lanes share the path. Two consequences ship with it:
+
+- **Bounded recursion unrolling.** A recursive function in a
+  differentiated body lowers by unrolling, terminated by the static
+  pruning of its base case (`if k >= n then [] else ...recurse...` with
+  literal-rooted bounds). Two caps backstop chains the pruning cannot
+  bound — 512 active levels per callee, 1024 total — and exceeding either
+  is a loud diagnostic naming the callee and the limit, never a hang. A
+  recursion whose base-case condition is only known at runtime cannot
+  unroll and hits the cap.
+- **Static list values through `concat`.** The `Cons`/`Nil` spine an
+  unrolled builder returns is consumed by list append
+  (`concat(list, list)`) and by tensor `concat(list, axis)`, which emits
+  the same Pad+Add cascade as the expression-level path.
+
+Compiler-inserted linearity `copy`/`drop` over tuple and ADT values lower
+structurally (one `Copy`/`Drop` per tensor leaf), closing the issue's
+"copy input expected a single tensor value" residue on the
+single-argument-closure path. Runtime-condition `if` keeps its previous
+contract: single-tensor float branches lower via the mask blend; an ADT-
+or tuple-valued branch under a runtime condition is rejected loudly,
+citing chelis#620 (the static alternative) and chelis#618 (the
+`RiscOp::Select` blend successor).
+
 **D2 slice — field-wise ADT gradients (eval lane).** `grad(f)(Ctor { .. })`
 over an ADT argument whose fields are all float tensors or float scalars
 returns a gradient with the same constructor shape, one gradient per field
@@ -419,7 +458,11 @@ The acceptance oracle for both slices is
 `crates/chelis-cli/tests/issue_520_adt_match_grad.rs` (analytic +
 finite-difference gradients, eval-vs-C-backend agreement for D1, the
 multi-argument issue-shaped reproducer, and the negative-parity pins for
-every listed rejection).
+every listed rejection). The static-condition-pruning slice's oracle is
+`crates/chelis-cli/tests/issue_620_static_if_adt_grad.rs` (guard and
+constructor pruning, the recursive-builder finite-difference witness, the
+params-loss and curried-closure shapes, eval-vs-C agreement, and the
+runtime-condition / unroll-cap negative pins).
 
 ### 2.11 Interaction With Phase 2a Effects
 
