@@ -21,6 +21,22 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   eval-vs-C build-and-run parity
   (`issue_631_guarded_forward_concat_c_parity.rs`). Also fixes the
   misplaced-wildcard symptoms of chelis#594.
+- **C-lane runtime guards for consumers of runtime-wildcard extents
+  (chelis#664).** Same-shape elementwise ops (`add`/`mul`/`div`/
+  `trunc_div`/`floor_div`/`max_elem`/`cmplt`) now emit an operand-shape
+  agreement abort when any involved extent is non-static, and the
+  reshape numel guard fires for ANY non-static reshape (Sym-resolved
+  targets like `[shape(x, 0)]` and literal targets over runtime-sized
+  inputs), not only Node-valued targets. Before, a movement-op runtime
+  wildcard beside a differently-sized sibling was read out of bounds and
+  the binary exited 0 with wrong values while `chelis eval` rejected —
+  the silent-divergence class. Pre-existing #616-era gap (reproducible
+  through runtime-bounded `shrink`); rank-0-vs-rank-N operands (the
+  scalar-broadcast idiom) and rank-divergent operands stay unguarded and
+  tracked on #664. Pins:
+  `issue_664_runtime_wildcard_consumer_guards.rs` (five error-parity
+  cases plus two no-false-abort twins); fully static codegen is
+  byte-identical.
 - **Checker movement typing is identity-only for symbolic dims
   (chelis#632).** A non-identity `stride`/`pad` axis (literal step != 1,
   non-zero padding) over a symbolic dim now types a fresh
