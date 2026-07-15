@@ -2899,22 +2899,72 @@ fn resolve_package_root(input: &Path, explicit: Option<&Path>) -> Option<PathBuf
     chelis_reef::find_package_root_for_dir(start).ok().flatten()
 }
 
+/// Whether the prove dispatch path can actually ROUTE a goal to Beacon (#673).
+///
+/// Probes the production registry with Beacon's native goal shape (`BoxRange`)
+/// and asks which engine would be selected. This is the dispatchability claim
+/// itself rather than a proxy for it: `BeaconShim` is the only engine whose
+/// fitness claims `BoxRange`, so selecting it is exactly "a box/range goal
+/// reaches Beacon". `DischargeRegistry::with_beacon` has no caller on the
+/// `with_builtin_engines` path every in-tree dispatch site uses, so this is
+/// false today and flips on its own when that wiring lands.
+#[cfg(feature = "chelis-prove")]
+fn beacon_is_wired() -> bool {
+    use chelis_prove::discharge::{Goal, IntervalBox, OutputRange};
+    use chelis_prove::engine_registry::DischargeRegistry;
+
+    let Ok(goal) = Goal::box_range(
+        IntervalBox {
+            dims: vec![("x".to_string(), 0.0, 1.0)],
+        },
+        OutputRange {
+            output: "y".to_string(),
+            lo: 0.0,
+            hi: 1.0,
+        },
+    ) else {
+        return false;
+    };
+    DischargeRegistry::with_builtin_engines().selected_engine_name(&goal) == Some("beacon")
+}
+
+#[cfg(not(feature = "chelis-prove"))]
+fn beacon_is_wired() -> bool {
+    false
+}
+
 /// Emit JSON describing this binary's prove capabilities (#488).
 pub fn prove_capabilities() -> serde_json::Value {
     let smt_available = cfg!(feature = "smt");
-    let beacon_available = std::env::var("CHELIS_BEACON_BIN").is_ok();
+    // #673: a discoverable binary is NOT dispatchability. `binary_present` is
+    // the env-var signal; `wired` is whether prove can route to it. Only the
+    // conjunction makes Beacon "available", so `beacon_available` keeps its
+    // name and its "can I use it" meaning instead of reporting env-var presence.
+    let beacon_binary_present = std::env::var("CHELIS_BEACON_BIN").is_ok();
+    let beacon_wired = beacon_is_wired();
+    let beacon_available = beacon_binary_present && beacon_wired;
     let dispatcher_available = cfg!(feature = "chelis-prove");
     let obligation_engine_available = cfg!(feature = "chelis-prove");
+    // The tier entries are prove TIERS, not `DischargeRegistry` engines, and
+    // `chelis-prove` is an optional dep, so the registry is not introspectable
+    // in every build; they stay a literal. The Beacon entry is the one that
+    // claimed more than it could do, so it is gated on the dispatch probe.
+    let mut engine_registry = vec!["tier_a_type_system", "tier_b_smt", "tier_c_fuzz"];
+    if beacon_wired {
+        engine_registry.push("beacon_shim");
+    }
     json!({
         "schema_version": 1,
         "prove_json_schema_version": 1,
         "supported_tiers": ["type_system", "smt", "fuzz"],
         "smt_available": smt_available,
         "beacon_available": beacon_available,
+        "beacon_binary_present": beacon_binary_present,
+        "beacon_wired": beacon_wired,
         "dispatcher_available": dispatcher_available,
         "obligation_engine_available": obligation_engine_available,
         "supported_flags": ["--json", "--only", "--samples", "--seed", "--tier", "--smt-timeout", "--package"],
-        "engine_registry": ["tier_a_type_system", "tier_b_smt", "tier_c_fuzz", "beacon_shim"]
+        "engine_registry": engine_registry
     })
 }
 
