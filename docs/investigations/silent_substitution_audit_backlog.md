@@ -85,18 +85,37 @@ that ranked items 1 and 2 highest. Given that item 1 was refuted and item 2
 over-stated by 7x, **discount that sweep's `.dp` reachability estimates
 accordingly** and execute before believing any of them.
 
-### 3. HIP's other seven `elem_kind` call sites
+### 3. HIP's other seven `elem_kind` call sites - **SETTLED, all confirmed + one extra** (chelis#689)
 
-Only `Neg` is proven (#689: `kernel_neg_f32` with `const float *a` / `float *out`
-over a `CHELIS_I64` allocation). Unproven, one-line probes each:
+Probed by building to HIP and reading the emitted kernel names (no GPU, no
+`hipcc` needed). An `_f32` name on an int64 program is the fallback firing.
 
-- `emit_const` (`crates/chelis-backend-hip/src/emit.rs:1806-1853`)
-- `MaxElem` (`:1199`), `Abs` (`:1214`)
-- `MinReduce` (`:1281`), `ProdReduce` (`:1285`), `Argmax` (`:1289`), `Argmin` (`:1293`)
+| op | emitted kernel | verdict |
+|---|---|---|
+| `add` | `kernel_add_i64` | correct - typed template (control) |
+| `mul` | `kernel_mul_i64` | correct - typed template (control) |
+| `neg` | `kernel_neg_f32` | F32 fallback |
+| `max_elem` | `kernel_max_elem_f32` | F32 fallback |
+| `min_elem` | `kernel_neg_f32` + `kernel_fused_3` | F32 fallback |
+| `min_reduce` | `kernel_min_ax0_f32` | F32 fallback |
+| `max_reduce` | `kernel_maxred_ax0_f32` | F32 fallback |
+| `prod_reduce` | `kernel_prod_ax0_f32` | F32 fallback |
+| **`sum`** | **`kernel_sum_ax0_f32`** | F32 fallback - **not predicted** |
+| `abs` | `kernel_fill_f32` | #699's zero placeholder reaching HIP |
 
-Verifiable **without a GPU**: `chelis build --target hip` emits the HIP source and
-prints the compile command without invoking `hipcc`. Grep the emitted kernel name
-for an `_f32` suffix on an int64 program.
+**8 broken, 2 correct.** `sum` was *not* on the suspect list: `emit.rs:1121-1126`
+claims "For Add/Mul/**Sum** ... each of those arms resolves the right template
+inline rather than touching the float-only `elem_kind` shorthand", and a
+verification agent accepted that claim without probing it. It is true for Add
+and Mul, false for Sum. Proof: `sum` on `tensor[2,2,int64]` and on
+`tensor[2,2,f32]` emit the **identical** kernel name, so the int64 sum *is* the
+f32 kernel.
+
+That also bypasses `RiscOp::Sum`'s `accumulator: Prim` field
+(`crates/chelis-ir/src/dag.rs:719-735`), which is documented as implementing
+spec §5.7's precision-widening rule and is checked by `verify`.
+
+Lesson: the one op an agent cleared by reading a comment was the one extra bug.
 
 ### 4. `Atom::Keyword` -> `Const 0.0`
 
@@ -159,24 +178,49 @@ check specifically forbids `fail` outside `if` was found.
 - **Metal's `Const 0`.** #699 explains the C lane's `lower_transcendental` zero;
   Metal's identical symptom was never re-confirmed to share that root cause
   after the diagnosis landed.
-- **`chelis-cli`'s parallel pipeline.** #697, #698 and #705 each found a gate in
-  `chelis-compiler-api` whose CLI twin is more permissive and guards the path
-  that actually runs. Nobody has enumerated how many such pairs exist.
+- **`chelis-cli`'s parallel pipeline - SWEPT, negative result.** Enumerated every
+  `reject_*` / gate fn in both crates and compared. Bounded, and smaller than
+  feared:
+
+  | gate | status |
+  |---|---|
+  | `reject_unsupported_hip_ops` | duplicated, **materially drifted** (CLI permissive) - chelis#698 |
+  | `reject_host_only_builtins` | compiler-api **only**, no CLI equivalent - chelis#705 |
+  | `reject_unsupported_reduce_window_precision` | duplicated, **semantically identical** (differs only in error construction) |
+  | `reject_symbolic_windowed_reduce` | duplicated, **semantically identical** |
+  | `reject_with_seed_for_build_target` | a no-op - but **intentional and honestly documented** ("Today it is a no-op", a forward-compatibility hook per Bucket-5 closure). Not a bug; the opposite of #694. |
+
+  CLI-only gates (`reject_unsupported_c_precisions`/`_host`,
+  `reject_unsupported_metal_ops`, `reject_unsupported_effect_ops`,
+  `reject_eval_only_builtins_host`) have no compiler-api twin, so they cannot drift.
+
+  **Zero new bugs.** The two real instances (#698, #705) were already found by
+  accident. The prediction that this was "the highest-yield unswept area" was
+  **wrong** - but the sweep is still worth having: the parallel-pipeline hazard is
+  now bounded at exactly two live instances plus two benign duplicates, rather
+  than an unknown mess.
 
 ## Recommended next step
 
 Items 1 and 2 are **settled** (2026-07-15): item 1 refuted, item 2 confirmed but
 low-severity and 7x narrower than claimed. Both are recorded in chelis#710.
 
-The next-highest-value item is **3** (HIP's seven unproven `elem_kind` call
-sites), because it needs no GPU - `chelis build --target hip` emits inspectable
-source without invoking `hipcc`, and #689's `Neg` probe is a one-line template
-for each.
+Item **3** is settled (all 8 confirmed, plus `sum` as an unpredicted extra), and
+the **`chelis-cli` parallel-pipeline sweep** is done with a negative result - both
+recorded above.
 
-After that, **the `chelis-cli` parallel-pipeline enumeration** under "Pathways
-not swept": #697, #698 and #705 each found a `chelis-compiler-api` gate whose CLI
-twin is more permissive and guards the path that actually runs. Three instances
-found by accident, none by search. That is the highest-yield unswept area.
+Remaining, in order:
+
+1. **Items 5, 6, 7, 8** - the low-confidence `unwrap_or` / placeholder paths.
+   Cheap to probe, low expected yield.
+2. **`grad` / `vmap` interaction** - genuinely unswept, and `transforms.rs:619-630`
+   marshals int64 scalars through `as f64` into the DAG, so there is a concrete
+   reason to look.
+3. **`chelis prove` Tier C** (#688) - code-confirmed, never executed.
+
+Scoring so far: of the areas predicted "high yield", the HIP probe paid off (one
+unpredicted bug) and the CLI gate sweep did not (zero). Of the claims agents
+ranked highest, two were refuted outright. Weight predictions accordingly.
 
 [chelis#695]: https://github.com/Chelis-Lang/chelis/issues/695
 [chelis#703]: https://github.com/Chelis-Lang/chelis/issues/703
