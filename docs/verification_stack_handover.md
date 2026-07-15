@@ -87,11 +87,12 @@ Five frozen surfaces, documented in `docs/design/phase2_seam_contract.md`:
 
 1. **Goal** — `GoalShape::BoxRange { inputs: IntervalBox, output: OutputRange }`
 2. **IrHandle** — sha256 of serialized WireDag bytes + root_index (no live IR)
-3. **WireDag** — JSON, schema_version 2 (v2 adds FloorDiv/TruncDiv; Beacon accepts 1+2)
+3. **WireDag** — JSON, schema_version 3 (v2 adds FloorDiv/TruncDiv, v3 adds runtime Reshape extents; Beacon accepts 1+2+3)
 4. **BeaconShim request** — schema_version 1, inline base64 of exact bytes, expected_dag_sha256
 5. **CheckReport → Discharge** — mapping table in `docs/design/beacon_subprocess_shim.md` §5
 
-**Current state:** Beacon accepts schema v2. The default CI oracle for
+**Current state:** chelis emits schema v3; Beacon accepts v1, v2, and v3 and
+fails closed above. The default CI oracle for
 `BeaconShim` remains the mock suite, while `beacon_e2e` is the ignored live
 cross-repo gate: with `CHELIS_BEACON_BIN` pointing at an Arb-enabled
 `chelis-beacon`, it exercises the real shim, real Beacon binary, Chelis-produced
