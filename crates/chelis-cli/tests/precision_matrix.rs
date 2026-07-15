@@ -1097,3 +1097,211 @@ fn int64_max_elem_tensor_agrees_across_lanes_at_f32_boundary() {
          mantissa. chelis#691"
     );
 }
+
+// ===========================================================================
+// REFUTATION LOCKS: probes that found NOTHING.
+//
+// During the #680 audit, three claims derived from reading code (and code
+// comments) were refuted by running it. Each is locked here, because a
+// refuted claim is exactly as valuable as a confirmed one: it stops the next
+// person re-deriving it from the same misleading source and scoping a fix
+// around a bug that does not exist.
+//
+// These pass today. They are locks, not bug reports.
+// ===========================================================================
+
+/// REFUTES: "int32 tensors lose precision above 2^24 because the C runtime
+/// stores them as f32."
+///
+/// Source of the claim: `crates/chelis-runtime/src/lib.rs:144-152`, verbatim:
+///
+/// > `CHELIS_I32` and `CHELIS_BOOL` tensors still store data as 4-byte f32 bit
+/// > patterns [...] the trait impl for `i32` exists but reads i32 bytes, which
+/// > is the wrong decode for the current f32-encoded storage convention [...]
+/// > A future §5 follow-on migrates `CHELIS_I32` and `CHELIS_BOOL`.
+///
+/// That predicts `16777217` (2^24+1) corrupts to `16777216`. It does not:
+/// verified exact in BOTH the eval and compiled-C lanes. Either the comment is
+/// stale or this path does not touch the f32-encoded slot.
+///
+/// The comment is tracked by chelis#694. This test pins the actual behavior so
+/// nobody "fixes" a bug the code does not have.
+#[test]
+fn int32_tensor_round_trip_is_exact_above_the_f32_boundary() {
+    let expr = "to_list(to_tensor([cast(16777217, int32)]))";
+    let eval_got = eval_lane_str(expr).expect("eval lane");
+    assert_eq!(
+        eval_got, "[16777217]",
+        "int32 tensor round-trip must be exact at 2^24+1. If this fails, the \
+         claim at crates/chelis-runtime/src/lib.rs:144-152 has become true and \
+         chelis#694 needs revisiting."
+    );
+    if c_toolchain_available() {
+        let c_got = c_lane_str(expr, "List[int32]", "i32_rt").expect("c lane");
+        assert_eq!(
+            c_got, eval_got,
+            "int32 tensor round-trip must agree across lanes"
+        );
+    }
+}
+
+/// REFUTES: "the C backend corrupts int64 literals above 2^53 via
+/// `RiscOp::Const { value: f64 }`."
+///
+/// The claim: `crates/chelis-ir/src/dag.rs:883` really is `Const { value: f64 }`
+/// and `crates/chelis-ir/src/lower.rs:4841` really does `*n as f64`, so a
+/// literal above 2^53 should be rounded before either lane sees it.
+///
+/// It is not. That is the DAG **tensor** lane, which rejects int64 outright;
+/// int64 scalars flow through the host lane and are exact. Verified: the
+/// emitted C contains `__arg0_1 = 9007199254740993;` and the binary prints it.
+///
+/// This matters for scoping: the corruption in #680 begins at the arithmetic
+/// ops, NOT at the literal. A fix aimed at literal lowering would be aimed at
+/// the wrong place.
+#[test]
+fn int64_literal_above_mantissa_boundary_is_exact_in_the_compiled_lane() {
+    let expr = "add(cast(9007199254740993, int64), cast(0, int64))";
+    let eval_got = eval_lane_str(expr).expect("eval lane");
+    // eval corrupts this via the ADD (chelis#680), not via the literal - see
+    // int64_literal_above_mantissa_boundary_is_exact_in_every_lane for the
+    // literal-only probe, which is exact in eval too.
+    let _ = eval_got;
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    let c_got = c_lane_str(expr, "int64", "lit_c").expect("c lane");
+    assert_eq!(
+        c_got, "9007199254740993",
+        "the compiled lane must carry an int64 literal above 2^53 exactly. \
+         The DAG-lane `RiscOp::Const {{ value: f64 }}` path does not apply to \
+         int64 scalars, which use the host lane."
+    );
+}
+
+/// The int64 scalar `abs` host-lane path in the compiled backend is EXACT,
+/// even though the eval lane is wrong on the same input (chelis#680) and the
+/// DAG-lane `fabsf` arm is wrong for tensors (chelis#691).
+///
+/// Locked to keep the three cases distinct: same operation, three lanes, three
+/// different verdicts. A fix must not collapse them by accident.
+#[test]
+fn int64_scalar_abs_is_exact_in_the_compiled_host_lane() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    let c_got =
+        c_lane_str("abs(cast(-9007199254740993, int64))", "int64", "abs_host").expect("c lane");
+    assert_eq!(
+        c_got, "9007199254740993",
+        "compiled int64 scalar abs goes through the host lane and is exact"
+    );
+}
+
+// ===========================================================================
+// Std.Decimal: the surface that started this investigation.
+//
+// The original report was "Decimal doesn't work". It does: every one of these
+// is exact today, and they are the cases a user actually writes. Locked so the
+// #680 fix cannot regress them, and so the real defect stays correctly scoped
+// (Decimal's own logic is sound; it is a victim of the evaluator's f64
+// arithmetic, not the cause).
+//
+// These need the staged chelis-std reef fixture, so they carry the same
+// manual-gate ignore as the rest of the std-dependent corpus.
+// ===========================================================================
+
+/// The classic fixed-point traps, all exact today. `0.1 + 0.2` renders `0.3`,
+/// where f64 gives `0.30000000000000004`.
+#[test]
+#[ignore = "needs the staged chelis-std reef fixture; exceeds the inner-loop \
+            budget. Run with `cargo test -p chelis-cli --test precision_matrix \
+            -- --ignored`."]
+fn decimal_classic_float_traps_are_exact() {
+    let (_dir, reef_home, app_pkg) = common::make_app("precision-decimal-traps");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        "module Demo.Main\n\
+         import Std.Decimal (decimal, decimal_add, decimal_sub, decimal_mul, \
+         decimal_to_string, decimal_from_int)\n\
+         a = print(decimal_to_string(decimal_add(decimal(\"0.1\"), decimal(\"0.2\"))))\n\
+         b = print(decimal_to_string(decimal_sub(decimal(\"1.00\"), decimal(\"0.90\"))))\n\
+         c = print(decimal_to_string(decimal_mul(decimal(\"1.1\"), decimal(\"1.1\"))))\n\
+         d = print(decimal_to_string(decimal_mul(decimal(\"19.99\"), \
+         decimal_from_int(cast(3, int64)))))\n",
+    );
+    let out = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args([
+            "eval",
+            "--file",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+        ])
+        .output()
+        .expect("chelis eval should run");
+    assert!(
+        out.status.success(),
+        "decimal traps program should evaluate"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let got: Vec<&str> = stdout.lines().take(4).map(str::trim).collect();
+    // f64 would give 0.30000000000000004, 0.09999999999999998, 1.2100000000000002.
+    assert_eq!(got[0], "0.3", "0.1 + 0.2 must be exactly 0.3");
+    assert_eq!(got[1], "0.1", "1.00 - 0.90 must be exactly 0.1");
+    assert_eq!(got[2], "1.21", "1.1 * 1.1 must be exactly 1.21");
+    assert_eq!(got[3], "59.97", "19.99 * 3 must be exactly 59.97");
+}
+
+/// All four rounding modes on the tie case `5 / 2`, including banker's
+/// rounding. Exact today.
+#[test]
+#[ignore = "needs the staged chelis-std reef fixture; exceeds the inner-loop \
+            budget. Run with `cargo test -p chelis-cli --test precision_matrix \
+            -- --ignored`."]
+fn decimal_rounding_modes_are_correct_on_the_tie_case() {
+    let (_dir, reef_home, app_pkg) = common::make_app("precision-decimal-rounding");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        "module Demo.Main\n\
+         import Std.Decimal (decimal, decimal_div, decimal_to_string, \
+         round_half_up, round_half_even, round_down, round_up)\n\
+         a = print(decimal_to_string(decimal_div(decimal(\"5\"), decimal(\"2\"), \
+         cast(0, int64), round_half_up())))\n\
+         b = print(decimal_to_string(decimal_div(decimal(\"5\"), decimal(\"2\"), \
+         cast(0, int64), round_half_even())))\n\
+         c = print(decimal_to_string(decimal_div(decimal(\"5\"), decimal(\"2\"), \
+         cast(0, int64), round_down())))\n\
+         d = print(decimal_to_string(decimal_div(decimal(\"5\"), decimal(\"2\"), \
+         cast(0, int64), round_up())))\n\
+         e = print(decimal_to_string(decimal_div(decimal(\"-5\"), decimal(\"2\"), \
+         cast(0, int64), round_half_up())))\n",
+    );
+    let out = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args([
+            "eval",
+            "--file",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+        ])
+        .output()
+        .expect("chelis eval should run");
+    assert!(
+        out.status.success(),
+        "decimal rounding program should evaluate"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let got: Vec<&str> = stdout.lines().take(5).map(str::trim).collect();
+    assert_eq!(got[0], "3", "5/2 half-up == 3");
+    assert_eq!(got[1], "2", "5/2 half-even == 2 (banker's)");
+    assert_eq!(got[2], "2", "5/2 down == 2");
+    assert_eq!(got[3], "3", "5/2 up == 3");
+    assert_eq!(got[4], "-3", "-5/2 half-up == -3 (away from zero)");
+}
