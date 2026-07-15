@@ -15,7 +15,7 @@ issues, not here.
 
 ## Ground rules learned the hard way
 
-Four claims in this audit came from reading code (and code comments) and were
+Five claims in this audit came from reading code (and code comments) and were
 **refuted by executing it**. Do not promote anything below to an issue without
 running it.
 
@@ -29,6 +29,8 @@ running it.
    code, but the pass has zero non-test call sites. Dormant.
 4. "A one-line neural-network layer returns zero" (an early draft of #704) -
    false. Tensor `relu` is correct; only the **scalar** overload stubs.
+5. "The unknown-Deep-tag catch-all silently returns the last trailing child" -
+   false; the parser enforces the 62-tag vocabulary first (item 1 below).
 
 All four are locked as refutation tests in
 `crates/chelis-cli/tests/precision_matrix.rs` and
@@ -36,42 +38,52 @@ All four are locked as refutation tests in
 
 ## Unverified, ranked by likelihood of being real
 
-### 1. The unknown-Deep-tag catch-all
+### 1. The unknown-Deep-tag catch-all - **REFUTED** (chelis#710)
 
-`crates/chelis-ir/src/lower.rs:4926-4938`. A sweep ranked this the single worst
-finding: a misspelled or unrecognized Deep form is not merely zeroed - for
-`elems.len() > 2` the arm **discards the tag's semantics and silently returns
-whatever the last trailing child evaluates to**.
+`crates/chelis-ir/src/lower.rs:4926-4938`. A sweep ranked this its single worst
+finding: a misspelled Deep form would be silently accepted and its last trailing
+child returned.
 
-Partially corroborated: #709 proves the checker's twin (`infer_expr`'s unknown-tag
-wildcard returning `Type::Error` with no diagnostic) is real and Surf-reachable.
-This is the same mistake one layer down.
+**Refuted by execution.** The Deep parser enforces the 62-tag closed vocabulary
+before lowering ever runs:
 
-Needs a hand-written `.dp` file to test.
+```
+$ chelis check unk.dp
+"score": 0
+"errors": [{"kind":"Other","message":"expected valid Deep tag, found unknown tag
+  'totally-bogus-tag'. Not in the 62-tag vocabulary at byte 42","severity":0.5}]
+```
 
-### 2. Malformed `.dp` type-checks clean
+The catch-all is dead code behind a real guard. This was the fifth claim in the
+audit sourced from reading code and refuted by running it.
 
-Fourteen arity/structural guards - `lower_def` (`:4943`), `lower_let` (`:4976`),
-`lower_fn` (`:9850`), `lower_app` (`:5191`), `lower_cast` (`:10214`),
-`lower_var` (`:5172`), `lower_if` (`:10297`, 3 sites), `lower_pipe` (`:9946`),
-`lower_par` (`:10419`), `lower_jit` (`:10438`), `lower_realize` (`:10452`),
-`lower_copy` (`:10499`), `lower_identity`/`borrow` (`:10554`) - all emit
-`RiscOp::Const { value: 0.0 }` for malformed input.
+### 2. Malformed `.dp` type-checks clean - **CONFIRMED, far milder than claimed** (chelis#710)
 
-The claim is that `infer.rs`'s matching guards return `Type::Error` **without
-pushing a `CheckError`**, so a truncated Deep form type-checks clean and lands
-on the zero placeholder. Reported as confirmed by static tracing for
-`infer_def`, `infer_let`, `infer_fn`, `infer_app`, `infer_cast`, and the
-`"borrow"` arm; extrapolated for the rest.
+The mechanism is real: `infer.rs`'s arity guards return `Type::Error` **without**
+pushing a `CheckError`, so `chelis check` reports `"score": 1, "errors": []` on
+malformed Deep.
 
-**High confidence** now that #709 has confirmed the mechanism by execution.
-Reachable via the documented `chelis build --deep` / `.dp` path (`cmd_build_deep`,
-`crates/chelis-cli/src/main.rs:2733`), which is a first-class ingestion route,
-not a test hook. Ordinary Surf cannot reach these guards: `desugar.rs`'s `node()`
-builder (`:158`) hard-codes tag+meta+children arity for every form it emits.
+But the sweep claimed fourteen guards were live. Executed, **4 of 6 tested are
+correctly rejected**:
 
-Unlike #709 - where the masked error still surfaces as a runtime error - these
-land on `Const 0.0`, i.e. #695 and #703 meeting.
+| form | `chelis check` | `chelis eval` |
+|---|---|---|
+| `(def {} orphan)` | **score 1, errors []** | `error: unknown runtime name 'orphan'` |
+| `(cast {} (lit ...))` | **score 1, errors []** | `error: cast missing target type` |
+| `(let {} (bind {} x))` | score 0 - rejected | - |
+| `(fn {} (params {}))` | score 0 - rejected | - |
+| `(app {})` | score 0 - rejected | - |
+| `(if {})` | score 0 - rejected | - |
+
+And critically: **the `Const 0.0` placeholders are never reached**. Both silent
+forms fail loudly at eval. This is a false green from `chelis check`, not a
+silent-wrong-answer generator. The predicted "#695 and #703 meeting" does not
+happen.
+
+Items 4, 5, 6 and 8 below are all `.dp`-reachability claims from the same sweep
+that ranked items 1 and 2 highest. Given that item 1 was refuted and item 2
+over-stated by 7x, **discount that sweep's `.dp` reachability estimates
+accordingly** and execute before believing any of them.
 
 ### 3. HIP's other seven `elem_kind` call sites
 
@@ -153,10 +165,18 @@ check specifically forbids `fail` outside `if` was found.
 
 ## Recommended next step
 
-**Item 2**, together with item 1. #709 confirmed the mechanism by execution and
-Surf-reachability; the open question is whether the same mechanism makes 14 more
-constructs silently checker-approved via `.dp`, landing on `Const 0.0` rather
-than a runtime error. One hand-written `.dp` file settles both.
+Items 1 and 2 are **settled** (2026-07-15): item 1 refuted, item 2 confirmed but
+low-severity and 7x narrower than claimed. Both are recorded in chelis#710.
+
+The next-highest-value item is **3** (HIP's seven unproven `elem_kind` call
+sites), because it needs no GPU - `chelis build --target hip` emits inspectable
+source without invoking `hipcc`, and #689's `Neg` probe is a one-line template
+for each.
+
+After that, **the `chelis-cli` parallel-pipeline enumeration** under "Pathways
+not swept": #697, #698 and #705 each found a `chelis-compiler-api` gate whose CLI
+twin is more permissive and guards the path that actually runs. Three instances
+found by accident, none by search. That is the highest-yield unswept area.
 
 [chelis#695]: https://github.com/Chelis-Lang/chelis/issues/695
 [chelis#703]: https://github.com/Chelis-Lang/chelis/issues/703
