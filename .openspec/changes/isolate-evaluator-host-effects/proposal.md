@@ -4,11 +4,11 @@ Chelis correctly tracks `IO` in the language type system, but the host evaluator
 
 ## What Changes
 
-- Define an explicit evaluator protocol covering filesystem reads and writes, directory queries, memory mapping, subprocess execution, and deterministic captured output events.
+- Define an explicit evaluator protocol covering filesystem reads and writes, directory queries, bounded immutable mapped-file snapshots, subprocess execution, and deterministic captured output events, with policy coverage keyed to host-capable builtin classifications rather than permanently hardcoded to today's single `IO` effect.
 - Make evaluator semantics a resumable state machine depending only on the checked program, runtime values, deterministic limits, explicit semantic policy, and typed host observations; resolved host execution and rendering configuration stays in adapters.
 - Provide a production operating-system handler that preserves current CLI behavior.
 - Provide deterministic in-memory and denying handlers for tests, Tide, Python, and restricted embeddings.
-- Require every effect request to carry a deterministic invocation-local correlation identity, builtin/source identity, bounded structured arguments, and non-secret policy context needed for diagnostics; suspensions are non-cloneable and consumed exactly once.
+- Require every effect request to carry a deterministic invocation-local correlation identity, builtin/source identity, bounded structured arguments, and non-secret policy context needed for diagnostics; suspensions are non-cloneable and consumed exactly once. Sensitive live payloads may be consumed transiently but disable persistent transcript caching and never enter identities, diagnostics, logs, or replay records.
 - Preserve Chelis `IO` effect typing and existing user-visible success and failure behavior under the production handler.
 - Add positive and negative parity tests for allowed, denied, failed, and malformed host operations.
 
@@ -24,4 +24,4 @@ None.
 
 ## Impact
 
-The main changes affect `chelis-compiler-api/src/runtime`, evaluator entry points, CLI eval/test orchestration, Python bindings, and Tide. Direct callers of evaluation APIs will need an explicit driver/policy or a clearly named compatibility entry point that selects the production adapter at the outer boundary. Tide is fail-closed immediately with a pre-migration IO rejection guard, then remains deny-all by default under the request protocol. Python's ordinary `eval_json` becomes deny-by-default; explicit `eval_json_with_policy` and `eval_json_unrestricted` entry points provide configured and trusted-local behavior. Trusted CLI compatibility selects the production policy explicitly.
+The main changes add dependency-minimal `chelis-eval-core` and affect `chelis-compiler-api/src/runtime` adapters, evaluator entry points, CLI eval/test orchestration, Python bindings, and Tide. Direct callers of evaluation APIs will need an explicit driver/policy or a clearly named compatibility entry point that selects the production adapter at the outer boundary. The independent prerequisite `deny-tide-evaluator-host-effects` makes Tide fail closed with a pre-migration runtime guard at external builtin dispatch—captured `print`/`debug` events remain available—and this change replaces that guard with deny-all request handling. Python's ordinary `eval_json` becomes deny-by-default; explicit `eval_json_with_policy` and `eval_json_unrestricted` entry points provide configured and trusted-local behavior. Trusted CLI compatibility selects the production policy explicitly. Persistent evaluation transcripts, stable evaluation digests, and final-result caching are deferred. Before implementation, `establish-fcis-contract-mechanics` registers stable coverage IDs, exact protocol bounds/result projection, the typed builtin-policy registry, prerequisite edge, boundary/threat model, and fail-closed slice/final oracles.

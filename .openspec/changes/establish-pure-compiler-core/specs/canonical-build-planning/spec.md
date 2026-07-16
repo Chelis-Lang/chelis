@@ -34,7 +34,7 @@ Surf and Deep ingestion SHALL have format-specific preparation, after which equi
 - **THEN** parity permits the documented source-map or span-comment difference while preserving equal semantic artifacts and diagnostics
 
 ### Requirement: Target capabilities have one authoritative validator
-C, HIP, and Metal SHALL each expose one authoritative capability validator or matrix used by every public build surface supporting that target. Validators SHALL return structured acceptance or rejection data and MUST NOT be duplicated in frontend-specific conditionals.
+C, HIP, and Metal SHALL each expose one authoritative capability validator in a dependency-lower pure `policy` module inside the owning backend crate. The canonical core and that backend's emitter SHALL call the same validator. Backend crates MUST NOT depend on `chelis-compiler-core`, and validators MUST NOT be duplicated in frontend-specific conditionals.
 
 #### Scenario: Supported restricted type path is accepted consistently
 - **WHEN** a type or operation satisfies a documented target restriction
@@ -44,8 +44,12 @@ C, HIP, and Metal SHALL each expose one authoritative capability validator or ma
 - **WHEN** the same type or operation violates the target restriction
 - **THEN** every public surface supporting that target rejects it with equivalent structured diagnostics
 
+#### Scenario: Target policy dependency graph is acyclic
+- **WHEN** the architecture gate resolves compiler-core and backend crate dependencies
+- **THEN** compiler-core may depend on backend policy/emission APIs while no backend has a dependency edge to compiler-core
+
 ### Requirement: Public target and preflight support is explicit
-Chelis SHALL publish the v1 capability matrix in which CLI supports check and C/HIP/Metal build with formatter/lint preflight; Rust compiler API, Python, and Tide support check and C/HIP build without that CLI preflight and explicitly exclude Metal; and the acceptance harness drives every core target plus supported adapter pair. Cross-surface parity MUST be required only for declared supported operation/target pairs after declared preparation/preflight differences, and unsupported pairs MUST fail explicitly rather than silently falling back.
+One typed registry SHALL own the v1 surface/operation/target/preflight capability matrix. Its documented table, CLI, Rust compiler API, Python, Tide, schemas, and acceptance corpus SHALL be generated projections or tripwire-checked consumers. The matrix declares that CLI supports check and C/HIP/Metal build with formatter/lint preflight; Rust compiler API, Python, and Tide support check and C/HIP build without that CLI preflight and explicitly exclude Metal; and the acceptance harness drives every core target plus supported adapter pair. Cross-surface parity MUST be required only for declared supported operation/target pairs after declared preparation/preflight differences, and unsupported pairs MUST fail explicitly rather than silently falling back.
 
 #### Scenario: Supported pair participates in parity
 - **WHEN** the capability matrix declares that a surface supports a target
@@ -86,7 +90,7 @@ Backend emission SHALL return platform-neutral compile/link requirements. Host d
 - **THEN** it returns equal command arguments and unmet requirements without probing the host
 
 ### Requirement: Build outcomes describe complete outputs
-A `BuildSuccess` SHALL describe all generated relative artifact names and bytes or content-addressed compiler-resource references, runtime artifact requirements, platform-neutral compile/link requirements, target notices, selected entry roots, and semantic observations needed by outer adapters. Relative names SHALL be duplicate-free and traversal-safe. `BuildSuccess` MUST contain no error diagnostics; `BuildRejection` MUST NOT contain a complete artifact manifest; `CompilerHostFailure` MUST remain distinct from both.
+A `BuildSuccess` SHALL have private validated construction and describe all generated relative artifact names and bytes or content-addressed compiler-resource references, runtime artifact requirements, platform-neutral compile/link requirements, target notices, selected entry roots, and semantic observations needed by outer adapters. Relative names SHALL be duplicate-free and traversal-safe. `BuildSuccess` MUST contain no error diagnostics; `BuildRejection` SHALL contain a nonempty diagnostic collection and MUST NOT contain a complete artifact manifest; `CompilerHostFailure` MUST remain distinct from both.
 
 #### Scenario: Successful C outcome is complete
 - **WHEN** a C-target build succeeds

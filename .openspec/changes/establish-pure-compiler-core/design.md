@@ -38,7 +38,7 @@ The change must retain the existing language, diagnostics, cache compatibility w
 
 Each stage receives an owned or borrowed context containing only semantic inputs required by that stage. The type-check context includes source provenance, the base type environment, deterministic recursion/fuel limits, and precomputed program metadata. Lowering contexts own recursion, inlining, fallback, and diagnostic state.
 
-`SemanticLimits::V1` is pinned to `max_type_recursion_depth = 16_384`, `max_lower_recursion_depth = 16_384`, `max_stage_steps = 100_000_000`, and `max_diagnostics = 10_000`. A caller may request smaller limits, but public compatibility adapters do not silently raise them. The counters advance by documented structural events rather than allocation count, wall time, or native frames. Limit diagnostics name the exhausted counter and configured value.
+`SemanticLimits::V1` is pinned to `max_type_recursion_depth = 16_384`, `max_lower_recursion_depth = 16_384`, `max_stage_steps = 100_000_000`, and `max_diagnostics = 10_000` for trusted local CLI, compiler API, Python, and acceptance callers. Tide's untrusted default is the explicit `ServiceSemanticLimits::V1`: type and lowering depth 4,096, stage steps 10,000,000, and diagnostics 1,000. A caller may request smaller limits, but compatibility adapters never silently raise them and untrusted service configuration cannot exceed its deployment ceiling. The counters advance by documented structural events rather than allocation count, wall time, or native frames. Limit diagnostics name the exhausted counter and configured value. Focused resource tests bound time and peak working memory for near-limit fixtures so the deterministic ceiling does not become an unmeasured denial-of-service allowance.
 
 Raw and Reef-linked programs enter through distinct preparation paths. Public command and machine APIs do not expose a user-controlled boolean that can mark arbitrary source as trusted linker output. The linked preparation path constructs the provenance value consumed by the checker.
 
@@ -71,7 +71,7 @@ Surf and Deep differ only in preparation. Span-attributed inputs may retain diff
 
 ### 5. Target policy and public capability support are explicit
 
-C, HIP, and Metal each expose one authoritative validator in `chelis-compiler-core::target`, with backend code generation retaining only defensive invariant checks that call the same validator rather than duplicate policy. Frontends do not implement target-admissibility conditionals.
+C, HIP, and Metal each expose one authoritative validator in a pure `policy` module inside its owning backend crate. The policy module is dependency-lower than that backend's emitter: it depends only on shared type/effect/IR data and never on `chelis-compiler-core`. The canonical core depends on and calls those validators before emission; each emitter may defensively call its own crate's same validator. Frontends do not implement target-admissibility conditionals. This yields `compiler-core -> backend::{policy,emit}` with no backend-to-core edge.
 
 The current v1 surface matrix is:
 
@@ -99,15 +99,25 @@ Compile-time backend capabilities that change emitted bytes, such as math-librar
 
 ### 7. Determinism, query keys, and output digests are explicit
 
-Diagnostics, roots, notices, requirements, and artifact manifests use canonical ordering. `CompilationQueryKey` includes every pre-execution input capable of changing core outputs, including prepared-program identity, compiler version, build capabilities, resource-bundle digests, target specification, options, provenance, and deterministic limits. `CompilationOutcomeDigest` hashes the normalized accepted or rejected core outcome. Measurement configuration, elapsed duration, cache location, style-preflight reporting, and host discovery results used only for command rendering are excluded from both.
+Diagnostics, roots, notices, requirements, and artifact manifests use canonical ordering. A core-computed `PreparedProgramFingerprint` covers the exact prepared input consumed by the core—including canonical module/expression structure, source/provenance attribution capable of changing returned diagnostics, and declared preparation version—under `chelis-fcis/compiler-prepared/v1\0`. It uses the same tagged, length-prefixed, fixed-width encoding discipline and independent golden fixtures as the query key. A caller-supplied prepared fingerprint is never authoritative: the core computes it from the prepared value or validates equality before cache lookup.
+
+`CompilationQueryKey` includes every pre-execution input capable of changing core outputs, including that core-validated prepared-program fingerprint, compiler version, build capabilities, resource-bundle digests, target specification, options, provenance, and deterministic limits. `CompilationOutcomeDigest` exists only for normalized accepted or rejected core outcomes; host failures are neither given a semantic outcome digest nor stored as source decisions. Query and outcome identities use SHA-256 over distinct `chelis-fcis/compiler-query/v1\0` and `chelis-fcis/compiler-outcome/v1\0` domains followed by tagged, length-prefixed canonical fields, fixed-width big-endian integers, and canonically ordered vectors, with checked-in golden vectors decoded by an implementation-independent fixture. Measurement configuration, elapsed duration, cache location, style-preflight reporting, and host discovery results used only for command rendering are excluded from all three identities.
 
 ### 8. Exact architecture boundaries are executable but not treated as a purity proof
 
-The designated boundary is all production source in the new `crates/chelis-compiler-core`, `crates/chelis-types`, `crates/chelis-effects`, and `crates/chelis-ir`; C code generation in `chelis-backend-c::{blas,emit,host_emit,memory}` and the production codegen portions of its `lib.rs`; and all production code generation in `chelis-backend-hip` and `chelis-backend-metal`. `chelis-backend-c::toolchain`, compiler API source/wire/cache/filesystem adapters, CLI, Python, Tide, measured wrappers, and native discovery/command execution are outside the core. The core crate may depend on backend codegen APIs but cannot import backend adapter modules.
+The designated boundary is all production source in the new `crates/chelis-compiler-core`, `crates/chelis-types`, `crates/chelis-effects`, and `crates/chelis-ir`; the pure target `policy` modules in each backend; C code generation in `chelis-backend-c::{blas,emit,host_emit,memory}` and the production codegen portions of its `lib.rs`; and all production code generation in `chelis-backend-hip` and `chelis-backend-metal`. Surf/Deep parsing, desugaring, style preflight, and standalone structural `chelis validate` preparation are outside this change's newly proven boundary; they remain subject to the canonical pure-stage rule and may receive a separate boundary audit. `chelis-backend-c::toolchain`, compiler API source/wire/cache/filesystem adapters, CLI, Python, Tide, measured wrappers, and native discovery/command execution are outside the core. The core crate may depend on backend policy/codegen APIs but cannot import backend adapter modules, and no backend crate may depend on `chelis-compiler-core`.
 
-A checked-in manifest records that exact transitive production set. Architecture tests reject direct and aliased references to filesystem, environment, process, network, clock, terminal output, global panic hooks, hidden native-resource decisions, mutable static or thread-local semantic state, and callback/trait capabilities that expose them. Fixtures cover aliases, re-exports, qualified paths, function pointers, callbacks, forbidden traits, and `cfg(test)` bodies without exempting an entire production file because it also contains tests.
+Cargo dependency allowlists on `chelis-compiler-core` and the already separated stage/backend crates are the primary architecture enforcement. A checked-in manifest records the exact mixed backend module set that cannot yet be expressed as a crate boundary. Resolved-API checks and fixtures reject the specifically documented direct, alias, re-export, qualified, function-pointer, callback, trait, macro, and `cfg(test)` forms for filesystem, environment, process, network, clock, terminal output, entropy, semantic thread-scheduling, unsafe FFI, global panic hooks, hidden native-resource decisions, and mutable static or thread-local semantic state. The checked-in threat model records the actual mechanism and blind spots and does not claim complete detection of arbitrary procedural-macro expansion, dynamic dispatch, or future Rust syntax.
 
 The gate also checks public core interfaces so effects cannot be hidden behind logger, clock, filesystem, or process traits. Behavioral determinism and parity suites remain authoritative; source/dependency checks are guardrails, not a proof of referential transparency.
+
+### 9. Capability matrices, stage transitions, and evidence have typed owners
+
+One typed surface/operation/target/preflight matrix owns the v1 rows above. CLI, compiler API, Python, Tide, wire schemas, docs, and parity-corpus generation are projections or tripwire-checked consumers. In particular, the machine API's closed target enum and its explicit Metal exclusion are checked against the matrix rather than maintained as unrelated frontend conditionals.
+
+Stage-specific input and output newtypes make canonical transitions explicit. `BuildSuccess` has private construction from a validated complete, duplicate-free, traversal-safe artifact manifest and cannot carry error diagnostics. `CheckRejection`/`BuildRejection` carry nonempty diagnostic collections. Host failure is a separate variant. Limit constructors enforce the trusted and service ceilings, and linked provenance can be constructed only by the trusted preparation path.
+
+Before stage implementation, this change registers stable requirement/scenario/fixture IDs, the exact result projection table, core/adapter/module boundaries, the capability matrix owner, all identity domains/field tags/golden vectors, and the failing `compiler-core --slice stage-purity` runner in the FCIS manifest. Missing fields or a caller-asserted identity block the slice.
 
 ## Risks / Trade-offs
 
@@ -123,15 +133,14 @@ The gate also checks public core interfaces so effects cannot be hidden behind l
 This change lands in independently reviewable slices with compatibility adapters:
 
 1. Add failing architecture, deterministic-limit, capability-matrix, and normalized cross-surface parity tests.
-2. Extract C, HIP, and Metal validators and lock the v1 target/preflight capability matrix.
-3. Introduce algebraic check/build outcomes, compiler resource bundles, query keys, and outcome digests; migrate Surf and Deep CLI build paths without changing check behavior beyond the specified deterministic limits.
-4. Migrate compiler API, Python, and Tide caller/target pairs declared supported.
-5. Replace checker and lowerer thread-local semantic state with explicit contexts and deterministic limits.
-6. Move profiling, compiler-build capability selection, and native toolchain discovery to adapters.
-7. Remove panic-hook installation and expected panic control flow.
-8. Delete deprecated paths after every slice passes compatibility and the final acceptance oracle.
+2. Replace checker and lowerer thread-local semantic state with explicit contexts and deterministic limits; move profiling out and remove panic-hook/expected-panic paths. This slice must pass `.venv/bin/python scripts/fcis_gate.py compiler-core --slice stage-purity` before any facade is described as pure.
+3. Extract dependency-lower C, HIP, and Metal backend policy modules and lock the v1 target/preflight capability matrix with `.venv/bin/python scripts/fcis_gate.py compiler-core --slice target-policy`.
+4. Introduce algebraic check/build outcomes, compiler resource bundles, canonical query/outcome identities, and the canonical facade; migrate Surf and Deep CLI paths. This slice uses `.venv/bin/python scripts/fcis_gate.py compiler-core --slice facade`.
+5. Migrate compiler API, Python, and Tide caller/target pairs declared supported and pass `.venv/bin/python scripts/fcis_gate.py compiler-core --slice surfaces`.
+6. Move compiler-build capability selection and native toolchain discovery to adapters and make resource-limit regression evidence green.
+7. Delete deprecated paths only after every focused command passes compatibility and the final acceptance oracle passes.
 
-Rollback is slice-scoped. Cache schema changes roll back by cleanly missing and rebuilding.
+Rollback is slice-scoped. A focused command is supporting evidence, not a change-completion claim. Cache schema changes roll back by cleanly missing and rebuilding.
 
 ## Acceptance Oracle
 
@@ -141,7 +150,7 @@ The authoritative completion oracle is:
 .venv/bin/python scripts/fcis_gate.py compiler-core
 ```
 
-The runner must execute exact-boundary fixtures, pinned deterministic-limit and checker/lowerer isolation tests, the target/preflight matrix, resource-bundle substitution tests, algebraic outcome invariants, query-key/outcome-digest and cached/uncached parity, and the declared CLI/compiler API/Python/Tide Surf/Deep corpus against one revision. Success means exit status 0, an empty reported error list, no contradictory success/error/artifact state, and no unsupported caller/target pair or CLI-only style failure falsely counted as core parity evidence. Crate-local green tests do not replace this oracle.
+The runner must execute exact-boundary fixtures, pinned local/service deterministic-limit and checker/lowerer isolation tests, near-limit time/working-memory regression checks, the acyclic target-policy dependency check, the target/preflight matrix, resource-bundle substitution tests, algebraic outcome invariants, canonical query-key/outcome-digest and cached/uncached parity, and the declared CLI/compiler API/Python/Tide Surf/Deep corpus against one revision. Success means exit status 0, an empty reported error list, no contradictory success/error/artifact state, no backend-to-core dependency edge, and no unsupported caller/target pair or CLI-only style failure falsely counted as core parity evidence. Crate-local or focused-slice green tests do not replace this oracle.
 
 ## Resolved Compatibility Decisions
 

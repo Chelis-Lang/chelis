@@ -12,7 +12,7 @@ Every value capable of changing proof engine selection, observation mapping, sou
 - **THEN** the changed semantic identity and any selection difference are attributable to that explicit input
 
 ### Requirement: Engine execution uses requests and observations
-Pure proof dispatch SHALL NOT invoke solver, FFI, worker, filesystem, clock, or subprocess APIs. It SHALL select a typed `EngineRequest` with a deterministic invocation-local sequence identity and resume a non-cloneable, consumed-by-value suspension with a correlated typed `EngineObservation` returned by an imperative adapter. Observation validation SHALL occur before continuation state changes.
+Pure proof dispatch SHALL NOT invoke solver, FFI, worker, filesystem, network, clock, terminal, entropy, thread-scheduling, mutable-global, or subprocess APIs. It SHALL select a typed `EngineRequest` with a deterministic invocation-local sequence identity and resume a non-cloneable, consumed-by-value suspension with a correlated typed `EngineObservation` returned by an imperative adapter. The FCIS contract manifest SHALL pin exact v1 request, observation, evidence, transcript, engine-count, and lane-specific transport bounds before protocol implementation. Observation validation SHALL occur before continuation state changes.
 
 #### Scenario: Supported goal yields a request
 - **WHEN** policy selects a configured engine for a supported goal
@@ -31,7 +31,7 @@ Pure proof dispatch SHALL NOT invoke solver, FFI, worker, filesystem, clock, or 
 - **THEN** dispatch returns a structured protocol failure without changing continuation state
 
 ### Requirement: Engine specifications are stable semantic data
-Each configured engine SHALL have a serializable and comparable specification containing stable identity, implementation version or digest, supported goal shapes, configuration fingerprint, and transport class. Ordered engine specifications SHALL participate in the pre-execution proof query key. An engine specification MUST NOT contain self-asserted maximum soundness or qualifier authorization.
+Each configured engine SHALL have a serializable and comparable specification containing stable identity, implementation version or digest, supported goal shapes, configuration fingerprint, and transport class. Ordered engine specifications SHALL be authoritative semantic inputs to selection and decision-record equality. An engine specification MUST NOT contain self-asserted maximum soundness or qualifier authorization.
 
 #### Scenario: Equal specifications select deterministically
 - **WHEN** two fitting engine specifications occur in the same explicit order
@@ -39,17 +39,17 @@ Each configured engine SHALL have a serializable and comparable specification co
 
 #### Scenario: Engine version changes identity
 - **WHEN** an engine implementation version or digest changes
-- **THEN** the proof query key changes even if its display name is unchanged
+- **THEN** descriptor equality, authorization lookup, and any resulting selection difference reflect the changed implementation even if its display name is unchanged
 
 ### Requirement: Trusted policy authorizes proof claims
-A separately trusted, versioned `EngineAuthorizationPolicy` SHALL map recognized engine fingerprints to maximum soundness, permitted qualifiers, and required evidence validation. Resolvers and adapters MAY provide engine specifications but MUST NOT create or strengthen authorization. Unknown fingerprints SHALL be untrusted and MUST NOT produce a green composite verdict.
+A separately trusted, versioned `EngineAuthorizationPolicy` SHALL map an exact typed structural `EngineAuthorizationKey` covering engine family, implementation digest, canonically ordered supported goal shapes, configuration fingerprint, and transport class to maximum soundness, permitted qualifiers, required evidence validation, and any freshness/revocation rule. Authorization MUST compare the full structural key; an adapter-provided or display-oriented hash MUST NOT grant authority. If serialized, the key/policy schema and canonical field encoding SHALL be versioned and golden-tested without implying proof-decision caching. Resolvers and adapters MAY provide engine specifications but MUST NOT create or strengthen authorization. Any unrecognized authority-bearing descriptor field SHALL make the descriptor untrusted and MUST NOT produce a green composite verdict.
 
 #### Scenario: Recognized engine receives bounded authorization
 - **WHEN** a descriptor fingerprint is recognized by the active authorization policy and its evidence passes the required validator
 - **THEN** common mapping may grant no more than that policy entry's maximum soundness and qualifiers
 
 #### Scenario: Self-authorized or unknown engine fails closed
-- **WHEN** an adapter supplies an unknown descriptor or claims a stronger trust ceiling than the trusted policy grants
+- **WHEN** an adapter supplies an unknown descriptor, changes an authorized descriptor's configuration/transport/support field, or claims a stronger trust ceiling than the trusted policy grants
 - **THEN** mapping ignores the self-assertion and produces no unauthorized green verdict
 
 ### Requirement: Environment variables cannot fabricate verdicts
@@ -122,24 +122,24 @@ Chelis SHALL be able to start a fresh dispatcher and replay a recorded normalize
 - **WHEN** a recorded observation's request identity, engine fingerprint, or payload integrity is changed
 - **THEN** replay fails closed with a structured mismatch
 
-### Requirement: Query keys, decision digests, and report metadata are distinct
-The pre-execution `ProofQueryKey` SHALL contain every authoritative initial input required for cache lookup and SHALL exclude observations. The `ProofDecisionDigest` SHALL include that query key plus the normalized observations and validated evidence used for the decision. Pure mapping SHALL return a decision without reading elapsed time. A measured adapter MAY add `duration_ms` to the existing artifact, but report duration SHALL NOT influence selection, observation mapping, soundness, qualifiers, degradation, either semantic identity, or equality.
+### Requirement: Replay, measurement, and persistence scope are explicit
+Pure mapping SHALL return a decision without reading elapsed time. A measured adapter MAY add `duration_ms` to the existing artifact, but report duration SHALL NOT influence selection, observation mapping, soundness, qualifiers, degradation, or decision-record equality. Fresh-machine replay SHALL accept explicitly supplied normalized non-secret observations and validate them through current selection, correlation, evidence, and authorization rules. This change SHALL NOT introduce `ProofQueryKey`, `ProofDecisionDigest`, a persistent observation store, or proof-result cache semantics.
 
-#### Scenario: Cache lookup precedes observations
-- **WHEN** proof orchestration checks a cache before executing an engine
-- **THEN** it computes the query key without requiring an observation that does not yet exist
-
-#### Scenario: Observation changes decision digest, not query key
-- **WHEN** equal proof queries receive different normalized observation sequences
-- **THEN** their query keys remain equal while their decision digests or decisions may differ
-
-#### Scenario: Different report duration preserves identity
+#### Scenario: Different report duration preserves the decision
 - **WHEN** two artifacts contain equal decisions but different measured durations
-- **THEN** they have the same proof query key and decision digest
+- **THEN** their semantic decision records remain equal
 
 #### Scenario: Timeout remains an explicit observation
 - **WHEN** adapter execution reaches its explicit timeout budget
-- **THEN** the resulting timeout observation affects the decision while unrelated report-duration metadata does not
+- **THEN** the resulting timeout observation may affect fallback or the decision while unrelated report-duration metadata does not
+
+#### Scenario: Explicit audit replay validates current policy
+- **WHEN** a caller supplies the original non-secret normalized observations to a fresh dispatcher under the current authorization policy
+- **THEN** replay validates and reproduces the decision without executing a solver
+
+#### Scenario: Persistent proof cache is not implied
+- **WHEN** callers use the proof protocol introduced by this change
+- **THEN** no stable hash, persistent evidence-retention, or final-result reuse contract exists; adding one requires a separate proposal
 
 ### Requirement: Public proof artifacts remain compatible
 The measured adapter SHALL preserve established serialized fields and fail-closed meanings, including nonnegative `duration_ms`, unless a separately versioned compatibility change is approved.
@@ -153,7 +153,7 @@ The measured adapter SHALL preserve established serialized fields and fail-close
 - **THEN** `duration_ms` is nonnegative while semantic identity excludes it
 
 ### Requirement: Scripted adapters use production mapping rules
-Scripted adapters SHALL implement the same request/observation contract as production adapters and SHALL NOT directly construct final verdicts. Any authorization for a scripted engine SHALL come from an explicit test-only policy that production constructors cannot select. Fixtures SHALL cover proved, disproved, timeout, unknown, malformed, oversized, crash, hang, unavailable, mismatched, unauthorized, and replayed observations.
+Scripted adapters SHALL implement the same request/observation contract as production adapters and SHALL NOT directly construct final verdicts. Any authorization for a scripted engine SHALL come from an explicit test-only policy compiled only into test-support targets and unavailable from production constructors or production features. Fixtures SHALL cover proved, disproved, timeout, unknown, malformed, oversized, crash, hang, unavailable, mismatched, unauthorized, stale-evidence, and replayed observations.
 
 #### Scenario: Complete observation matrix runs
 - **WHEN** the adapter contract suite executes

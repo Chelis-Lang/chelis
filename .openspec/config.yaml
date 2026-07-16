@@ -13,8 +13,16 @@ context: |
   returned data. Workflows whose next decision depends on a host result use a
   typed request/observation state machine. Imperative adapters acquire inputs,
   execute requests, measure, mutate, and render; they do not duplicate policy.
+  Semantic rejection, protocol failure, and host execution failure remain
+  distinct. Query keys locate cache candidates but never authorize reuse of
+  observation-dependent results without evidence validation and replay or
+  domain freshness checks.
   All FCIS changes follow .openspec/FCIS_ARCHITECTURE.md for boundary,
-  decision-algebra, protocol, identity, trust, ordering, and parity laws.
+  decision-algebra, protocol, identity, trust, ordering, parity, and evidence
+  laws. The `establish-fcis-contract-mechanics` change owns the typed manifest,
+  traceability, architecture-evidence, and oracle registry required before a
+  domain migration begins implementation; planned or missing evidence is
+  blocked, never skipped or green.
 
   Development is spec-first. Every active requirement needs positive and
   negative coverage before implementation. Passing crate-local tests is not a
@@ -23,21 +31,27 @@ context: |
 rules:
   proposal:
     - State explicit goals and non-goals.
-    - Identify the functional-core boundary, imperative adapters, affected public surfaces, and compatibility expectations.
+    - Identify the functional-core boundary, imperative adapters, affected public surfaces, compatibility expectations, prerequisite changes, and the independently owned final oracle.
     - Keep unrelated correctness or product-surface changes out of an FCIS refactor unless separately specified.
+    - Identify the typed registry or manifest that will mechanically own every behavior-bearing matrix or closed vocabulary introduced by the change.
   design:
     - Distinguish one-shot deterministic computation from resumable request/observation workflows.
-    - Define authoritative inputs, returned outputs, query keys, decision or evidence digests, report metadata, deterministic ordering, and trust or capability boundaries.
-    - Use sum types that distinguish accepted decisions, semantic rejection, and host execution failure without contradictory success/error/artifact states.
-    - Name the exact designated core modules or crate boundary and adapter modules before implementation, and explain how architecture tests avoid aliases, re-exports, cfg(test), and indirect capability bypasses.
-    - Include one exact acceptance command and its expected green condition.
-    - Resolve security-sensitive defaults and the authority that grants trust or capabilities before implementation rather than leaving them as open questions.
-    - For request workflows, define deterministic request identity, single-use continuation semantics, replay normalization, payload bounds, and secret exclusion.
+    - Define authoritative inputs, returned outputs, deterministic total ordering, and trust or capability boundaries; define query keys, evidence digests, and report identity only when the change actually ships caching, replay persistence, idempotency, or an externally compared identity.
+    - Use sum types that distinguish accepted decisions, semantic rejection, protocol failure where applicable, and host execution failure without contradictory success/error/artifact states; include an exact domain projection table for expected observations, policy denial, semantic rejection, protocol failure, host failure, and partial or indeterminate execution where applicable.
+    - Prefer a dependency-minimal core crate; when compatibility requires a module boundary, name the exact designated modules and adapters before implementation and state the actual mechanism, proven fixture classes, and blind spots for aliases, re-exports, cfg(test), macros, callbacks, and indirect capabilities.
+    - Include one exact acceptance command and its expected green condition; focused commands are supporting evidence and must be registered separately from the final oracle.
+    - Resolve security-sensitive defaults, exact v1 payload/path/argument/entry/transcript/total-memory bounds, and the authority that grants trust or capabilities before implementation rather than leaving them as open questions.
+    - For request workflows, define deterministic request identity, single-use continuation semantics, exact payload bounds, transient-sensitive-payload handling, and persistent secret exclusion; define replay normalization only when replay is in scope.
+    - When persistence or identity is in scope, define golden-tested versioned domain-separated canonical encoding, require identities to be core-computed or validated against their value, and distinguish cache candidate lookup from evidence validation, freshness, and reuse authorization; otherwise state explicitly that no persistent semantic identity is introduced.
+    - State the architecture gate threat model, resolved-API or dependency enforcement used, and known blind spots; do not present lexical source scanning as a transitive purity proof.
+    - Name one typed owner for every capability matrix, builtin/rule/engine/action registry, lock rank, report state, identity domain, or other machine-facing closed vocabulary, with generated projections or explicit tripwires.
   specs:
-    - Give every requirement positive and negative scenarios.
+    - Give every requirement a stable ID plus explicitly identified positive and negative scenarios; scenario polarity must not be inferred only from prose titles.
+    - Map every scenario through a fixture and focused slice to the owning final oracle once the FCIS contract manifest is registered.
     - Express cross-surface parity through an explicit semantic projection and capability matrix rather than assuming every surface supports every target.
     - State success invariants such as an empty error list and no claimed complete artifact set after failure.
   tasks:
-    - Put failing test stubs before implementation tasks.
-    - Include positive and negative coverage, architecture fixtures, public-surface parity, docs, examples, and the owning acceptance oracle.
-    - Split broad migrations into independently reviewable slices with compatibility adapters and rollback points.
+    - Put failing test stubs and the fail-closed focused runner before implementation tasks.
+    - Include positive and negative coverage, architecture fixtures, public-surface parity, docs, examples, typed-registry/tripwire work, and the owning acceptance oracle.
+    - Register the change, requirement/scenario IDs, fixtures, slices, prerequisite edges, architecture evidence, and final oracle in the FCIS contract manifest before domain implementation.
+    - Put independent security or product corrections in separately completable OpenSpec changes. A tightly coupled migration may use bounded slices under one umbrella oracle only when the design names the cross-slice invariant requiring end-to-end completion; every slice still needs a focused gate, compatibility/rollback boundary, and no premature completion claim.

@@ -26,15 +26,17 @@ This change is a one-shot FCIS migration: collect once in an imperative adapter,
 
 ### 1. Collection and analysis are separate
 
-`collect_workspace(request, policy)` is an adapter operation. It resolves one logical root and returns a `WorkspaceSnapshot` plus `CollectionDiagnostic` values. The snapshot contains stable path-sorted `SnapshotEntry` values with normalized logical paths, immutable bytes, optional decoded text, surface inputs, and declared metadata.
+`collect_workspace(request, policy)` is an adapter operation. It resolves one logical root and returns a `WorkspaceSnapshot` containing successful `SnapshotEntry` values and rejected-entry tombstones that carry canonical `CollectionDiagnostic` data. Entries are stable and path-sorted, with normalized logical paths, immutable bytes, optional decoded text, surface inputs, and declared metadata. Keeping failures inside structural snapshot equality prevents analysis from silently treating a partial collection as a complete collection.
 
 `lint_snapshot(snapshot, rule_set, exceptions)` is the pure core. Host changes after collection are invisible to analysis.
 
 ### 2. Collection policy and compatibility corrections are explicit
 
-`SnapshotPolicy` contains ignore rules, symlink/containment behavior, path normalization, decoding policy, selected file classes, and size limits. V1 uses the repository's current skip-directory policy, rejects symlink escape, sorts normalized paths bytewise, and decodes required text as UTF-8.
+`SnapshotPolicy` contains ignore rules, symlink/containment behavior, path normalization, decoding policy, selected file classes, and size limits. V1 uses the repository's current skip-directory policy. Logical paths are relative UTF-8 with `/` separators, preserved case, no `.`/`..` components, and bytewise UTF-8 ordering. A host path that cannot be represented losslessly in that form produces a blocking `non_utf8_path` tombstone rather than a lossy path. Because that entry has no logical UTF-8 path, its `HostEntryLocator` contains the normalized UTF-8 parent prefix, platform tag, and length-prefixed raw bytes of the first unrepresentable component; human rendering uses escaped hexadecimal bytes. This locator is diagnostic data, never a valid analysis path.
 
-Current silently skipped unreadable or invalid required text becomes a structured blocking collection diagnostic. Ignored and unselected entries remain absent without a diagnostic. CLI `lint --check` exits nonzero for a blocking collection diagnostic; advisory rule behavior is unchanged. These corrections receive dedicated CLI and machine-output fixtures.
+V1 does not follow directory symlinks. A selected file symlink may be read only through a containment-safe handle-relative open; its resolved target must remain under the logical root. If the platform cannot provide that guarantee, the symlink is rejected rather than canonicalized and reopened by path. The collector verifies entry identity and relevant metadata around each read; replacement or drift during collection produces a blocking `entry_changed_during_collection` tombstone and contributes no bytes. Required source text is decoded as UTF-8.
+
+Current silently skipped unreadable or invalid required text becomes a structured blocking collection diagnostic. Non-UTF-8 paths, unstable entries, oversized required entries, and escaping or unsupported symlinks are also blocking. Ignored and unselected entries remain absent without a diagnostic. Canonical diagnostic equality contains only operation, normalized failure class, stable entry locator, and policy-relevant fields; locale-dependent `std::io::Error` text and raw absolute host paths are optional report metadata and do not affect analysis equality. CLI `lint --check` exits nonzero for a blocking collection diagnostic; advisory rule behavior is unchanged. These corrections receive dedicated CLI and machine-output fixtures.
 
 ### 3. Rule requirements and indexes are values
 
@@ -48,13 +50,23 @@ A new versioned `SnapshotRule` interface receives only `SnapshotRuleContext` and
 
 ### 5. Exact boundary
 
-The designated core is planned `crates/chelis-lint/src/{snapshot,analysis,indexes,rule_v2}.rs` plus built-in `rules/**` after migration. Adapter modules are planned `collector.rs` and `legacy.rs`; CLI style/lint orchestration and fix application remain outer adapters. Designated modules cannot import the collector or legacy adapter.
+The designated core is a planned dependency-minimal `crates/chelis-lint-core` crate containing snapshot values, analysis, indexes, the versioned pure rule interface, and every built-in rule after migration. The existing `chelis-lint` crate remains the compatibility facade and imperative shell for collection, the legacy root-based API, and fix execution; CLI style/lint orchestration and rendering remain outer adapters. `chelis-lint-core` has no dependency on `walkdir` or an adapter crate and exposes no callback or trait capable of obtaining host state.
 
-The architecture manifest records the exact transitive production module set. Checks reject direct, aliased, re-exported, qualified, callback-hidden, and trait-hidden filesystem, environment, process, network, clock, or terminal capabilities. `cfg(test)` bodies are classified separately without exempting an entire production file. Behavioral snapshot determinism and host-change tests remain authoritative.
+The architecture gate uses Cargo dependency allowlists as its primary boundary. Resolved forbidden-API checks and fixtures cover the specifically listed direct, aliased, re-exported, qualified, callback, and trait forms; the threat model does not claim complete detection of arbitrary procedural-macro expansion or future Rust syntax. `cfg(test)` bodies are classified separately without exempting an entire production file. Behavioral snapshot determinism and host-change tests remain authoritative.
 
-### 6. Query and outcome identity
+### 6. Snapshot equality, not persistent identity
 
-`LintQueryKey` covers snapshot content/metadata digests, normalized snapshot policy version, pure rule ids/configuration/versions, indexes version, and exceptions. `LintOutcomeDigest` covers canonically ordered collection diagnostics and violations. Absolute host root spelling, collection time, terminal mode, and renderer configuration are excluded.
+This change introduces no persistent lint-result cache, replay record, query-key API, or stable hash encoding. `WorkspaceSnapshot` structural equality includes successful entries, canonical collection diagnostics, and rejected-entry tombstones. Equal snapshots, rule configurations, indexes, and exceptions must produce equal outcomes; unequal tombstones must make snapshots unequal. A future cache must define its identity and compatibility contract in a separate proposal after this boundary is accepted.
+
+### 7. Rule registration and snapshot access are mechanically complete
+
+One typed `RuleRegistration` registry owns rule ID, dispatch order, severity, blocking/advisory status, applicable surfaces, declared `RuleRequirements`, shared indexes, and compatibility status. The CLI, style gate, collector union, rule selection, docs, and acceptance corpus consume or tripwire that registry; separate blocking/advisory string or constructor lists are not authoritative.
+
+`SnapshotRuleContext` does not expose optional data with empty/default fallback. Access to decoded text, directory entries, package metadata, or an index checks the active rule's declared requirements and returns a named `MissingDeclaredInput` contract failure if the snapshot cannot supply it. Snapshot entry variants distinguish required text, bytes, and directory data so a rule cannot silently interpret absent required source as an empty file.
+
+Canonical locator order is total: representable logical paths sort first by their UTF-8 bytes and entry-kind rank; diagnostic-only unrepresentable locators sort afterward by normalized representable parent prefix, platform tag, raw-component length, and raw component bytes. Canonical diagnostic fields then break ties. Absolute root spelling and localized report text never participate.
+
+Before collector implementation, the FCIS manifest pins exact v1 per-entry, entry-count, and total-snapshot bounds, registers stable requirement/scenario/fixture IDs, records the pure/legacy boundary, and makes the failing `lint-snapshots --slice contracts` runner executable. An absent bound or fixture blocks implementation rather than selecting an adapter default.
 
 ## Risks / Trade-offs
 
@@ -62,12 +74,13 @@ The architecture manifest records the exact transitive production module set. Ch
 - **External rule compatibility:** the legacy adapter is clearly outside purity claims and expires after one minor version.
 - **Collection diagnostics change exit behavior:** pin the correction with positive/negative CLI fixtures and active-doc updates.
 - **Descriptor omissions can hide required data:** tests remove each declared requirement and require a named missing-input failure rather than a silent empty result.
+- **Non-UTF-8 diagnostics lack a logical path:** use `HostEntryLocator` only for collection reporting and never admit it into rule analysis as a fabricated path.
 
 ## Migration Plan
 
 1. Add snapshot policy, host-change, descriptor-completeness, collection-diagnostic, legacy-boundary, and parity tests.
 2. Add snapshot and logical-path data types plus one path-sorted collector.
-3. Add `SnapshotRule`, shared indexes, query keys, and outcome digests.
+3. Add `SnapshotRule`, shared indexes, structural snapshot equality, and explicit no-persistent-cache scope.
 4. Migrate built-in rules and remove all built-in hidden I/O.
 5. Route path-based CLI entry points through collect-once analysis; retain only the named legacy adapter for external rules.
 6. Add architecture gates, docs, examples, and the focused acceptance runner.
@@ -82,8 +95,8 @@ The authoritative completion oracle is:
 .venv/bin/python scripts/fcis_gate.py lint-snapshots
 ```
 
-The runner must execute collection policy, unreadable/invalid/escape diagnostics, equal-snapshot and host-change determinism, descriptor completeness, shared-index ordering, built-in no-I/O architecture fixtures, legacy-boundary tests, clean/negative corpus parity, and CLI/style-gate integration. Success means exit status 0, an empty reported error list, one content collection per invocation, and no host access from a built-in rule.
+The runner must execute collection policy, unreadable/invalid/non-UTF-8/unstable/escape diagnostics, canonical diagnostic versus report-metadata behavior, equal-snapshot and host-change determinism, descriptor completeness, shared-index ordering, built-in no-I/O architecture fixtures, legacy-boundary tests, clean/negative corpus parity, and CLI/style-gate integration. Success means exit status 0, an empty reported error list, one snapshot collection phase per invocation, no rule-initiated traversal or open from a built-in rule, and structurally unequal snapshots whenever rejected-entry tombstones differ. Stable-open metadata checks or handle-relative reads inside that single collector phase do not count as hidden second collections.
 
 ## Deferred Follow-ups
 
-Serialization or sharing of snapshots with Reef requires a separate proposal.
+Serialization, stable snapshot hashing, result caching, or sharing snapshots with Reef requires a separate proposal.

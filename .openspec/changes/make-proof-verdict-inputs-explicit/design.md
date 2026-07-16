@@ -15,7 +15,7 @@ The change keeps existing proof tiers, soundness lattice, qualifier rules, fail-
 - Represent engine execution as typed requests and observations at one auditable boundary.
 - Give each engine a stable descriptor and semantic fingerprint while keeping trust authorization in a separately trusted, versioned policy.
 - Keep selection and mapping deterministic for equal semantic inputs and equal normalized observations.
-- Separate the pre-execution query key, observation-bearing decision digest, and measured report identity.
+- Keep measured report metadata separate from semantic proof decisions without introducing a speculative persistent decision-cache identity.
 - Separate report measurement from semantic proof identity while preserving fail-closed timeout behavior.
 
 **Non-Goals:**
@@ -32,7 +32,7 @@ The change keeps existing proof tiers, soundness lattice, qualifier rules, fail-
 
 Semantic routing receives an ordered list of `EngineSpec` values rather than `Box<dyn DischargeEngine>`. An engine specification contains stable identity, implementation version or digest, supported goal shapes, configuration fingerprint, and transport class. It is comparable and serializable, but it contains no self-asserted soundness or qualifier authorization.
 
-A separately supplied, versioned `EngineAuthorizationPolicy` is part of the trusted proof-mapping implementation. It maps recognized engine family and implementation fingerprints to maximum soundness, permitted qualifiers, required evidence validators, and fallback behavior. Outer resolvers and adapters may construct or discover engine specifications, but cannot add or strengthen authorization. An unknown descriptor is untrusted and cannot produce a green composite verdict. Test-only scripted engines use an explicit test authorization policy unavailable from production constructors.
+A separately supplied, versioned `EngineAuthorizationPolicy` is part of the trusted proof-mapping implementation. It maps an exact typed structural `EngineAuthorizationKey`—covering engine family, implementation digest, canonically ordered supported shapes, configuration fingerprint, and transport class—to maximum soundness, permitted qualifiers, required evidence validators, and fallback behavior. Authorization lookup compares the full structural key; an adapter-provided or display-oriented hash cannot authorize a descriptor. If the policy/key is serialized, its schema and canonical field encoding are versioned and golden-tested, but this does not introduce a proof-decision cache identity. Outer resolvers and adapters may construct or discover engine specifications, but cannot add or strengthen authorization. A descriptor with any unrecognized or changed authority-bearing field is untrusted and cannot produce a green composite verdict. Test-only scripted engines use an explicit test authorization policy compiled only into test-support targets and unavailable from production constructors or production features.
 
 Pure selection returns an `EngineRequest` naming the selected specification, normalized goal input, explicit timeout budget, and deterministic invocation-local request identity. An imperative adapter registry maps the specification identity to a concrete in-process, subprocess, worker, or scripted executor and returns an `EngineObservation`.
 
@@ -54,7 +54,7 @@ Registration-order selection remains explicit and deterministic. Wall-clock sche
 
 The environment override is removed from `solve_property`. Tests use scripted adapters that implement the same request/observation transport contract as production adapters. They return raw proved, disproved, timeout, unknown, malformed, crash, hang, and unavailable observations; they do not construct final composite verdicts.
 
-Integration harnesses select scripted adapters and their test-only authorization policy through explicit test configuration, not a production environment variable interpreted by verdict code. The forced-result branch is removed in the first security slice, before the larger engine migration.
+Integration harnesses select scripted adapters and their test-only authorization policy through explicit test configuration, not a production environment variable interpreted by verdict code. The independent prerequisite `remove-ambient-proof-result-override` removes the forced-result branch and must pass `.venv/bin/python scripts/fcis_gate.py proof-forced-result-removal` before this protocol change begins.
 
 ### 4. Discovery and transport are imperative adapters
 
@@ -68,23 +68,33 @@ Engine observations contain raw status, evidence payload, protocol metadata, and
 
 An engine adapter cannot directly construct a green composite verdict or strengthen its own authority. Evidence that contradicts its raw status, fails the policy-selected validator, or exceeds the authorized engine fingerprint is rejected or degraded fail-closed.
 
-### 6. Query, decision, and report identities are separate
+### 6. Replay is explicit, but persistent proof caching is deferred
 
-The pre-execution `ProofQueryKey` includes goal, tier policy, timeout/fuzz configuration, ordered engine specifications, implementation versions or digests, authorization/mapping-policy version, and every other initial semantic input. It excludes observations and is the only key used for cache lookup.
+A fresh dispatcher can consume an explicitly supplied normalized, non-secret observation sequence for deterministic tests and audit. Replay validates request identity, descriptor fingerprint, payload bounds, integrity, evidence, and the current authorization/mapping policy through the same path as live dispatch. It never reuses a consumed suspension.
 
-The `ProofDecisionDigest` includes the query key plus the normalized observation sequence and validated evidence used to reach the decision. A replay API can feed that recorded sequence through the same pure selector and mapper and reproduce the same `DecisionRecord` without executing a solver. Adapter logging, cache location, terminal rendering, and elapsed duration belong only to report metadata and affect neither identity.
+This change introduces no `ProofQueryKey`, `ProofDecisionDigest`, persistent observation store, or proof-result cache. Engine descriptors and decision records remain comparable semantic data, but no stable cross-version hash encoding or result-reuse authorization is implied. Adding persistent proof caching requires a separate proposal covering evidence retention, freshness, revocation, confidentiality, and compatibility.
 
 ### 7. Decision records are separate from measured artifacts
 
 Pure mapping returns an accepted or rejected decision record containing tier, status, solver status, evidence, assumptions, qualifiers, degradation, selected engine identity, and observation classification. Protocol or host execution failure is represented separately and cannot masquerade as semantic rejection or a completed green record. A measured outer adapter records elapsed time and builds the existing `ProofArtifact`, preserving `duration_ms` for compatibility.
 
-The explicit timeout budget affects engine execution and may produce a timeout observation. Report duration is metadata only and does not affect selection, mapping, soundness, query keys, decision digests, or proof equivalence.
+The explicit timeout budget affects engine execution and may produce a timeout observation. Report duration is metadata only and does not affect selection, mapping, soundness, or decision-record equality.
 
 ### 8. Exact boundary and trust-boundary tests are mandatory
 
-The designated proof core is the planned `crates/chelis-prove/src/protocol.rs`, `selection.rs`, `mapping.rs`, `identity.rs`, and the existing pure goal, composition, transformation, and artifact-data modules they import. Engine implementations, `solver.rs`, `tier_b.rs` solver calls, `worker.rs`, `beacon_shim.rs`, optional solver/FFI modules, measured artifact assembly, and CLI/service resolution are adapters and may not be imported by those designated modules. The checked-in manifest records the exact transitive production module set and treats `cfg(test)` bodies separately rather than exempting a production file wholesale.
+The designated proof core is a planned dependency-minimal `crates/chelis-prove-core` crate containing protocol, selection, mapping, goal, composition, transformation, replay, and decision-record data. `chelis-prove` remains the engine-adapter facade containing solver implementations, `solver.rs`, `tier_b.rs` solver calls, `worker.rs`, `beacon_shim.rs`, optional solver/FFI modules, measured artifact assembly, and CLI/service resolution. `chelis-prove-core` cannot depend on `chelis-prove`, solver/FFI/process crates, or capability-bearing callbacks/traits; the facade may re-export compatibility data types during the migration window.
 
-Architecture fixtures reject direct, aliased, re-exported, qualified, callback-hidden, and trait-hidden solver, FFI, worker, process, environment, filesystem, or clock capabilities. Tests run proof orchestration under hostile values for known proof-related environment variables and assert that semantic selection and mapping do not change unless an outer resolver explicitly produces a different descriptor; even then, trust changes only through the trusted authorization policy. Negative fixtures cover unavailable, timeout, unknown, malformed, oversized, crash, hang, observation replay, engine mismatch, unauthorized descriptor, tampered policy reference, and invalid evidence.
+Cargo dependency allowlists are the primary architecture boundary. Resolved-API checks and fixtures reject the specifically documented direct, alias, re-export, qualified, callback, macro, trait, and `cfg(test)` forms for solver, FFI, worker, process, environment, filesystem, network, clock, terminal, entropy, thread-scheduling, unsafe-FFI, or mutable-global capabilities. The gate records blind spots and does not claim arbitrary procedural-macro or dynamic-dispatch completeness. Tests run proof orchestration under hostile values for known proof-related environment variables and assert that semantic selection and mapping do not change unless an outer resolver explicitly produces a different descriptor; even then, trust changes only through the trusted authorization policy. Negative fixtures cover unavailable, timeout, unknown, malformed, oversized, crash, hang, observation replay, engine mismatch, unauthorized descriptor, tampered policy reference, and invalid evidence.
+
+### 9. Engine authorization, payload bounds, and result projection have typed owners
+
+One typed engine catalog owns built-in engine order, exact `EngineSpec`, adapter binding identity, optional-feature availability, and the trusted authorization entry keyed by `EngineAuthorizationKey`. Registration order and feature projections are deterministic. Public compatibility `DischargeEngine` values are adapted only in the shell and cannot insert an authorization entry; unknown structural keys remain non-green.
+
+`EngineObservation` is a raw closed enum that cannot contain soundness, qualifiers, degradation, or composite verdict fields. `AuthorizedEngine` and accepted `DecisionRecord` have private constructors available only to common policy validation/mapping. Suspensions are non-cloneable and consumed by value. Test scripted adapters and their authorization policy live in dev-only targets with no production dependency or constructor path.
+
+The FCIS manifest pins exact v1 request, observation, evidence, transcript, engine-count, and per-engine transport payload bounds for each default/optional lane and owns the exact projection table from raw statuses, policy denial, malformed/correlation failure, timeout/unavailable/crash/hang, evidence failure, protocol failure, and host failure to decision/failure variants. Protocol implementation is blocked while a bound or projection is absent.
+
+Before implementation, stable requirement/scenario/fixture IDs, the engine/authorization registry, exact core/adapter boundary, prerequisite regression edge, and failing `proof-execution --slice protocol` runner are registered in the FCIS manifest.
 
 ## Risks / Trade-offs
 
@@ -96,15 +106,15 @@ Architecture fixtures reject direct, aliased, re-exported, qualified, callback-h
 
 ## Migration Plan
 
-1. Immediately add hostile-environment negative tests, add explicit scripted fixtures, remove the forced-result branch, and make that focused security gate green.
-2. Introduce `EngineSpec`, trusted `EngineAuthorizationPolicy`, `EngineRequest`, `EngineObservation`, deterministic request identity, `ProofQueryKey`, and `ProofDecisionDigest`.
-3. Split current engine implementations into descriptors plus imperative adapters without letting descriptors self-authorize trust.
-4. Migrate registration-order selection to the resumable request/observation dispatcher.
+1. Require the independently completed `remove-ambient-proof-result-override` oracle and retain its hostile-environment cases as regression inputs.
+2. Introduce `EngineSpec`, trusted `EngineAuthorizationPolicy`, `EngineRequest`, `EngineObservation`, deterministic request identity, and fresh-machine replay without persistent proof caching; pass `--slice protocol`.
+3. Split current engine implementations into descriptors plus imperative adapters without letting descriptors self-authorize trust; pass `--slice adapters` in default and optional-feature lanes.
+4. Migrate registration-order selection to the resumable request/observation dispatcher and pass `--slice dispatch`.
 5. Move Beacon, worker, and solver discovery to outer resolver code.
-6. Separate decision records, replay, measurement, cache lookup, and artifact construction while preserving JSON shape.
-7. Remove compatibility dispatch paths after default and optional-feature acceptance matrices pass.
+6. Separate decision records, explicit audit replay, measurement, and artifact construction while preserving JSON shape; pass `--slice artifacts`.
+7. Remove compatibility dispatch paths only after focused gates and the default/optional-feature final acceptance matrices pass.
 
-Rollback may retain compatibility adapters, but must not restore ambient result substitution or allow adapters to construct final green verdicts directly.
+Rollback may retain compatibility adapters, but must not restore ambient result substitution or allow adapters to construct final green verdicts directly. Focused slice commands are supporting evidence, not completion oracles.
 
 ## Acceptance Oracle
 
@@ -114,7 +124,7 @@ The authoritative completion oracle is:
 .venv/bin/python scripts/fcis_gate.py proof-execution
 ```
 
-The runner must execute hostile-environment, complete scripted-observation, deterministic identity/correlation/replay, deterministic selection, recognized/unknown authorization, evidence validation, query-key/decision-digest, fail-closed transport, duration-neutrality, and artifact-compatibility matrices in default and SMT-enabled configurations. Success means exit status 0, an empty error list, and no green verdict from an unavailable, malformed, oversized, mismatched, unauthorized, replayed, timed-out, crashed, or hanging observation.
+The runner must execute hostile-environment, complete scripted-observation, deterministic request identity/correlation/fresh-machine replay, deterministic selection, full-descriptor recognized/unknown authorization, evidence validation, fail-closed transport, duration-neutrality, no-persistent-cache surface checks, and artifact-compatibility matrices in default and SMT-enabled configurations. Success means exit status 0, an empty error list, no persistent proof-result identity introduced, and no green verdict from an unavailable, malformed, oversized, mismatched, unauthorized, invalid-evidence, replayed, timed-out, crashed, or hanging observation.
 
 ## Resolved Compatibility Decisions
 

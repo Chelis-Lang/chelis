@@ -10,7 +10,7 @@ Proof verdicts are trust-critical outputs, but current proof code can change a s
 - Replace effectful engine objects in semantic dispatch with stable engine descriptors, typed execution requests, and typed observations returned by imperative engine adapters.
 - Separate adapter-provided engine descriptors from a trusted, versioned authorization policy that alone grants maximum soundness, qualifiers, and evidence-validation rules; unknown descriptors cannot self-authorize a green verdict.
 - Make solver availability, binary paths, versions/digests, authorization policy, timeouts, and transport choices explicit orchestration inputs.
-- Move elapsed-time measurement to an outer adapter and distinguish the pre-execution proof query key, the observation-bearing decision digest, and non-semantic report metadata.
+- Move elapsed-time measurement to an outer adapter and keep it outside semantic proof decisions. This change introduces no proof-decision cache or persistent query/digest contract; deterministic fresh-machine replay remains test and audit functionality over explicitly supplied non-secret observations.
 - Preserve fail-closed timeout, unknown, malformed-output, crash, and unavailable-engine behavior.
 - Add negative tests proving ambient environment variables cannot manufacture a `Proved` result.
 
@@ -26,4 +26,4 @@ None.
 
 ## Impact
 
-This affects `chelis-prove` dispatch, Tier B solving, engine registration, Beacon integration, worker isolation, proof artifacts, and CLI proof orchestration. Test fixtures that currently force solver outcomes through environment variables will migrate to explicit scripted engine adapters that return raw observations through the same mapping path as production engines under a test-only authorization policy. The hostile environment test and deletion of the forced-result branch are an immediate security slice and do not wait for the rest of the protocol migration.
+This adds dependency-minimal `chelis-prove-core` and affects the `chelis-prove` engine-adapter facade, Tier B solving, engine registration, Beacon integration, worker isolation, proof artifacts, and CLI proof orchestration. Test fixtures that currently force solver outcomes through environment variables will migrate to explicit scripted engine adapters that return raw observations through the same mapping path as production engines under a test-only authorization policy. The independent prerequisite `remove-ambient-proof-result-override` owns the hostile-environment correction and `.venv/bin/python scripts/fcis_gate.py proof-forced-result-removal` oracle. This change retains those cases as regression coverage but does not delay or re-claim that prerequisite's completion. Before implementation, `establish-fcis-contract-mechanics` registers stable coverage IDs, exact protocol bounds/result projection, the typed engine/authorization registry, prerequisite edge, boundary/threat model, and fail-closed slice/final oracles.

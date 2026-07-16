@@ -12,7 +12,7 @@ Every designated compiler-core stage SHALL receive all values capable of changin
 - **THEN** any checker behavior difference is attributable to that input value and not to an ambient guard
 
 ### Requirement: Semantic acceptance is independent of native stack state
-Compiler acceptance and user-facing semantic diagnostics SHALL depend on explicit deterministic complexity limits rather than native remaining-stack measurements, thread stack size, or build profile. `SemanticLimits::V1` SHALL set type recursion depth to 16,384, lowering recursion depth to 16,384, stage steps to 100,000,000, and diagnostics to 10,000. Native stack growth and allocation MAY protect implementation execution but MUST NOT silently redefine the accepted language.
+Compiler acceptance and user-facing semantic diagnostics SHALL depend on explicit deterministic complexity limits rather than native remaining-stack measurements, thread stack size, or build profile. Trusted local `SemanticLimits::V1` SHALL set type recursion depth to 16,384, lowering recursion depth to 16,384, stage steps to 100,000,000, and diagnostics to 10,000. Tide's untrusted `ServiceSemanticLimits::V1` SHALL set both depths to 4,096, stage steps to 10,000,000, and diagnostics to 1,000; deployment configuration MAY lower but MUST NOT silently exceed its ceiling. Native stack growth and allocation MAY protect implementation execution but MUST NOT silently redefine semantic acceptance within the selected explicit limits.
 
 #### Scenario: Different thread stacks preserve semantics
 - **WHEN** the same program and deterministic limits are checked on threads with different stack sizes
@@ -21,6 +21,10 @@ Compiler acceptance and user-facing semantic diagnostics SHALL depend on explici
 #### Scenario: Explicit complexity limit rejects deterministically
 - **WHEN** a program exceeds an explicit supported recursion or complexity limit
 - **THEN** every execution rejects it with the same structured limit diagnostic before native stack exhaustion
+
+#### Scenario: Untrusted service uses its lower ceiling
+- **WHEN** Tide receives a program accepted under trusted local limits but exceeding `ServiceSemanticLimits::V1`
+- **THEN** Tide returns the named deterministic service-limit rejection without raising the ceiling or depending on wall-clock timeout
 
 #### Scenario: Host resource failure is not a semantic rejection
 - **WHEN** a fallible host allocation or stack-growth request cannot provide an implementation resource needed to execute an otherwise in-limit stage
@@ -42,14 +46,14 @@ Mutable working state used by checking, lowering, optimization, or code generati
 - **THEN** each result matches an isolated execution of that program and context
 
 ### Requirement: Compiler-core execution has no host side effects
-Designated compiler-core modules SHALL NOT directly or indirectly obtain capabilities to read or write the filesystem, inspect process environment, execute subprocesses, access a wall clock, emit terminal output, install panic hooks, access a network, or mutate static or thread-local semantic state.
+Designated post-preparation compiler-core modules SHALL NOT directly or indirectly obtain capabilities to read or write the filesystem, inspect process environment, execute subprocesses, access a wall clock, emit terminal output, install panic hooks, access a network, obtain entropy, make semantic decisions from thread scheduling, use unsafe FFI, or mutate static or thread-local semantic state. Surf/Deep parsing and desugaring are not newly certified by this change and MUST NOT be counted as acceptance evidence for this boundary.
 
 #### Scenario: Core compilation leaves the host unchanged
 - **WHEN** a prepared in-memory program is compiled by a core stage
 - **THEN** the only observable result is its returned value, diagnostic, or deterministic structural observation
 
 #### Scenario: Architecture gate rejects a hidden effect
-- **WHEN** a negative fixture adds a direct, aliased, re-exported, qualified, or trait-hidden forbidden host capability to a designated core module
+- **WHEN** a negative fixture adds a direct, aliased, re-exported, qualified, callback/macro/trait-hidden forbidden host capability to a designated core module
 - **THEN** the architecture gate fails and identifies the forbidden dependency class
 
 #### Scenario: Test-only code is classified intentionally
@@ -83,7 +87,7 @@ Every production path that accepts unsupported or potentially invalid lowering i
 - **THEN** it is not silently converted into an ordinary unsupported-input diagnostic
 
 ### Requirement: Pure and measured adapters preserve semantic results
-Compatibility, cache, instrumentation, and CLI adapters SHALL preserve the semantic result of the core operation they wrap. `CompilationQueryKey` SHALL include prepared-program identity, compiler version/build capabilities, compiler resource-bundle digests, target specification, options, provenance, and deterministic limits while excluding elapsed duration, style-preflight reporting, cache location, and rendering configuration. `CompilationOutcomeDigest` SHALL cover the normalized accepted or rejected core outcome.
+Compatibility, cache, instrumentation, and CLI adapters SHALL preserve the semantic result of the core operation they wrap. A core-computed or core-validated `PreparedProgramFingerprint` SHALL cover the exact prepared program and source/provenance attribution capable of changing returned core outputs under `chelis-fcis/compiler-prepared/v1\0`; a caller-asserted fingerprint MUST NOT authorize cache lookup without equality validation against the value. `CompilationQueryKey` SHALL include that fingerprint, compiler version/build capabilities, compiler resource-bundle digests, target specification, options, provenance, and deterministic limits while excluding elapsed duration, style-preflight reporting, cache location, and rendering configuration. `CompilationOutcomeDigest` SHALL cover only the normalized accepted or rejected core outcome; host failures SHALL have no semantic outcome digest. Prepared, query, and outcome identities SHALL use SHA-256 with distinct domains followed by tagged, length-prefixed canonical fields, fixed-width big-endian integers, and canonically ordered vectors. Checked-in golden vectors SHALL pin each encoding independently of the Rust implementation.
 
 #### Scenario: Cached and uncached stages agree
 - **WHEN** the same prepared program is compiled through cache-hit and cache-miss paths
