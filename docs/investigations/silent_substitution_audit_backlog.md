@@ -9,9 +9,18 @@ Status as of 2026-07-15. Companion to the two tracking issues:
 - **[chelis#709]** - the checker's analogue: a construct with no `infer.rs`
   case types as silent `Type::Error` and disables type checking for its body.
 
-This file records what the audit **did not** finish, so it is not lost. Every
-item below is either unverified or unswept. Verified findings live in the
-issues, not here.
+This file records what the audit **did not** finish, so it is not lost.
+
+**Status: closed out 2026-07-16.** Every item has been executed. The three that
+were still open when this doc was first written are now filed:
+
+- **chelis#711** - `fold_static_cond` folds integer `if` conditions in f64 and
+  **deletes the untaken branch at compile time**. The most severe finding in the
+  whole audit; see below.
+- **chelis#712** - the checker accepts scalar `relu`/`sigmoid`/`silu`/`gelu`/`tanh`
+  and eval rejects them; `tanh` even compiles correctly, so all three lanes disagree.
+- **chelis#713** - `pad_sequences` allocates an int32 output for int64 input; a
+  token id above `i32::MAX` saturates in the compiled lane while eval is exact.
 
 ## Ground rules learned the hard way
 
@@ -155,6 +164,39 @@ compiled C   : exit 1, stderr "dynamic message"
 
 The zero placeholder does not fire; `fail` aborts with the dynamic message as
 intended.
+
+## The one that nearly got away: `fold_static_cond` (chelis#711)
+
+An agent claimed `fold_static_cond` (`crates/chelis-ir/src/lower.rs:9095-9178`)
+folds `if` conditions in f64 and prunes the wrong branch. An early probe used
+`if lt(cast(2^53, int64), cast(2^53+1, int64)) ...`, saw **both** branches in the
+emitted C, and concluded no fold occurred. That probe was wrong: `cast(...)`
+creates a non-`Const` node, so the fold declines and the comparison falls through
+to the runtime.
+
+With bare suffixed literals the condition stays a pure `Const` DAG and the fold
+fires:
+
+```
+def pick() -> f32 = if lt(9007199254740992i64, 9007199254740993i64) then 111.0 else 222.0
+```
+
+The emitted C contains `chelis_fill_f32_bits(t0, 0x435e0000u)` = **222.0**, and
+`111.0`'s bit pattern (`0x42de0000`) **appears nowhere in the file**. The true
+answer is 111. The `then` branch was not miscomputed - it was **removed**.
+
+Two lessons:
+
+1. **A negative probe is only as good as its fixture.** "I tried it and it didn't
+   reproduce" was wrong here for a reason invisible in the output.
+2. A grep for `111` initially "found" the branch - in the hash constant
+   `0x94D049BB133111EBULL`. Check what your grep actually matched.
+
+This is also the third instance of the audit's signature shape: `fold_static_size`
+(`lower.rs:9032-9069`), ~900 lines earlier **in the same file**, folds the identical
+operators with `checked_i64` and correctly declines on overflow. The right
+implementation existed next door and was not used - exactly like `checked_int_binop`
+(#387 -> #680) and `raise_lowering_error` (`lower_unsupported` -> #699).
 
 ## The pattern across every `.dp` / lowering-placeholder claim
 
