@@ -220,6 +220,14 @@ hand-inlining); add:
   tripwire is a review-checklist line in the PR template plus the
   audit-file locks already committed.)
 
+## Now proposed formally
+
+Items 1, 2, 4, 6 and 7 of this document have been consolidated into a
+design proposal with a phase plan and per-phase oracles:
+[`spec/design/dtype_semantics.md`](../../spec/design/dtype_semantics.md),
+tracked as chelis#729. Items 3, 5 and 8 (the #703/#709 fixes and the
+tripwires) remain independent and should not wait for it.
+
 ## Sequencing against the open fix plan
 
 Unchanged from [#695]: **#687 first** (the oracle, now feasible via
