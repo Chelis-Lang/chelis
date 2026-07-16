@@ -2,7 +2,9 @@
 
 **Status:** Design proposal, pre-implementation. Tracking issue: chelis#731.
 **Owning specs:** `spec/03-deep-syntax.md` (the 62-tag closed vocabulary),
-`spec/04-type-system.md` (what "checked" means per construct), the repo
+`spec/04-type-system.md` (what "checked" means per construct; its §10 now
+carries this plan's decided contract as provisional atoms [04-TOT-1..3] -
+Phase 1 ratifies them), the repo
 Contract Invariants ("if a command reports perfect success, its error list
 must be empty"), and the audit record in
 `docs/investigations/numeric_audit_next_sweeps.md` (sweep 6) /

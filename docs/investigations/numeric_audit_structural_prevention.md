@@ -238,7 +238,14 @@ contracts. A fifth plan sits underneath them:
 which mechanizes away the two failures BENEATH this audit's classes:
 spec silence (the unauthored overflow/mean/bool cells) and stale spec
 claims (#694). Item 8's tripwire discipline and the #694 row of the
-kill table are its territory.
+kill table are its territory. Coordination across the whole set now
+lives in [`spec/design/remediation_roadmap.md`](../../spec/design/remediation_roadmap.md)
+(global sequencing, the unclaimed-issue ledger, the deferred-evidence
+ledger), and the op x dtype table's schema is owned by
+[`spec/design/capability_table.md`](../../spec/design/capability_table.md).
+The decided contracts themselves are now seeded into the numbered specs
+as provisional atoms (spec/04 §9-§10, spec/05 §7-§8) so the active spec
+is no longer silent on what has been decided.
 
 ## Sequencing against the open fix plan
 

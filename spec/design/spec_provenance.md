@@ -348,12 +348,13 @@ imminent spec deliverables (your first atoms).
    `spec-atom-wellformed` in chelis-lint, with the rule-spec
    registration and the lint crate's standard positive/negative rule
    tests; `--spec-report` JSON export.
-3. **First atoms**: the sibling plans' spec deliverables born atomized
-   (coordinate: #729's spec/04 overflow/rounding section, #730's
-   diagnostic format, #732's grammar rules - whichever have landed or
-   land next), plus atomization of the specific statements the audit
-   proved load-bearing (the §5.7 precision-widening rule, the §1.1.1
-   f8e4m3 deferral, the 62-tag vocabulary sentence).
+3. **First atoms**: PRE-SEEDED - spec/04 §9-§10 and spec/05 §7-§8
+   already carry the four sibling plans' decided contracts as
+   provisional atoms ([04-NUM-*], [04-TOT-*], [05-UNS-*], [05-OBS-*])
+   with status banners. This phase RATIFIES their grammar against the
+   finalized §C1, computes their revs, and additionally atomizes the
+   audit-proven load-bearing statements (the §5.7 precision-widening
+   rule, the §1.1.1 f8e4m3 deferral, the 62-tag vocabulary sentence).
 4. **First carriers**: the audit matrix tests annotated against those
    atoms (they were born from these exact claims; the mapping is
    mechanical).

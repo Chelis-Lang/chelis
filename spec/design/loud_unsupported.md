@@ -1,7 +1,9 @@
 # Loud Unsupported: the failure-channel contract
 
 **Status:** Design proposal, pre-implementation. Tracking issue: chelis#730.
-**Owning specs:** `spec/05-risc-primitives.md` (op support statements),
+**Owning specs:** `spec/05-risc-primitives.md` (op support statements;
+its §7 now carries this plan's decided contract as provisional atoms
+[05-UNS-1..4] - Phase 1 ratifies them),
 `spec/04-type-system.md` §1.1.1 (deferred dtypes precedent), the repo
 Contract Invariants ("if a command reports perfect success, its error list
 must be empty"), and the audit record in
@@ -246,7 +248,7 @@ The remediation work-list, from the audit record as of 2026-07-16.
 |---|---|---|---|---|
 | 1 | `lower.rs` `lower_transcendental` non-float arm | `Const 0.0`, operand dropped | #699 (+#722 via grad) | live |
 | 2 | `host_emit.rs:2300` builtin fallback | literal `0` | #682 #704 #705 #715 | live |
-| 3 | `host_emit.rs:2236` string fallback | `chelis_string_from_cstr("<value>")` | (census add) | unknown - probe |
+| 3 | `host_emit.rs:2236` string fallback | `chelis_string_from_cstr("<value>")` | #734 | **live** (probed 2026-07-16: `to_string` on tensors/lists prints the literal `<value>` in C; scalar arms correct - `issue_734_tostring_placeholder.rs`) |
 | 4 | `host_emit.rs:4305/4390` print of unclassifiable value | literal `<value>` text | #714 symptom | live |
 | 5 | HIP `emit.rs` `elem_kind` `_` arm | `ElemKind::F32` | #689 | live (emission-proven) |
 | 6 | `host.rs:7572-7583` `parse_host_type` `_` arm | `HostType::Unknown` -> downstream `int64_t`/`void*` | #714 | live |
@@ -493,7 +495,7 @@ boundary, pinned:
 | # | question | decided in | recorded where |
 |---|---|---|---|
 | 1 | `Unsupported` as one shared type across chelis-ir/backends vs per-crate mirrors with a conversion (constraint: no dependency cycles; lowering's existing error type may absorb it) | Phase 1, in the plumbing PR | §C2/§C3 of this doc |
-| 2 | whether `check` should pre-report target-independent unsupported constructs (would touch #709 territory) | explicitly deferred to #709's plan | Non-goals |
+| 2 | whether `check` should pre-report target-independent unsupported constructs | **RESOLVED** by `capability_table.md`: yes for semantic-table (A) rejections - they are target-independent type facts; target-level (B) rejections surface at build | `capability_table.md` §Derivations |
 | 3 | lint allowlist mechanics (inline justification comment vs allowlist file) - follow whatever §8.6's rule already does for exceptions | Phase 2 | lint rule spec |
 | 4 | which gates survive Phase 3 as early-UX vs die | Phase 3 | §C5 rows 17-18 + gate contract |
 

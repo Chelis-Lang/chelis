@@ -316,7 +316,7 @@ integration tier, not the workspace loop.
 | §C2 trap kinds + exact message strings | Phase 2 | this doc + #687 corpus update in the same PR |
 | §C4 formatting rules 1-4 | Phase 1 (Rust) / Phase 3 (C parity) | this doc + #687 corpus update |
 | §C5 kernel signatures | Phase 2 | this doc |
-| capability table schema | Phase 4 entry | this doc |
+| capability table schema | Phase 4 entry | `capability_table.md` (the owning doc) + this doc |
 
 "Frozen" means: later phases may ADD consumers but not reinterpret
 behavior. If your phase needs a frozen contract to change, stop, update
@@ -407,9 +407,12 @@ Part I as the spec of what to build.
    unit tests per cell of the §C1 table (positive AND negative per the
    repo's negative-test-parity rule: every rounding case, every trap
    case, every special value).
-2. **The spec/04 section**: overflow, rounding, domain, and trap text
-   matching §C1/§C2 verbatim in substance. Spec and module land in the
-   same PR so they cannot diverge at birth.
+2. **The spec/04 section**: SEEDED - spec/04 §9 now carries the decided
+   contract as provisional atoms [04-NUM-1..6] with an honest status
+   banner (authored 2026-07, implementation tracked here). This phase
+   RATIFIES and refines that section (and its §C1/§C2 correspondence)
+   in the same PR as the module, so spec and code cannot diverge at
+   the moment the semantics become real.
 3. **The storage decision at all four layers** (§C3): `TensorStorage`
    per-dtype buffers in eval, the versioned wire-schema change, the
    Python boundary, prove's env type swap can be deferred to Phase 2 ONLY
@@ -515,6 +518,11 @@ cross-lane byte-diff pass over the whole corpus (print/to_list/wire vs
 stored bits, both lanes, every dtype).
 
 ## Phase 4 - the capability table becomes the permanent guard
+
+The table's SCHEMA is owned by `spec/design/capability_table.md` (the
+two-table design: semantic table A, per-backend table B; per-Prim rows;
+scalar/tensor surfaces separate; atom citations mandatory) - read it
+before this phase; its seed-decision list is this phase's work-list.
 
 **You inherit:** two agreeing lanes and a hand-curated matrix of tests.
 
