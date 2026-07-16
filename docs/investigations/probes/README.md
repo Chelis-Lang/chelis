@@ -24,14 +24,15 @@ gate scripts).
 | `bat_f32_tensor_round.py` | which f32 tensor ops skip narrowing in eval (#717: div/recip skip, tan/sqrt narrow) |
 | `bat_matrix3.py` | bitwise at every width (#682), reductions across dtypes (#692 panics, #723 print, #724 mean), the Bool battery (clean except #726) |
 | `checker_holes.py` | the #709 wrapper battery: which constructs hide an ill-typed body from `chelis check` (answer: only `with seed`/`with device`; the ten other wrappers and the handler expressions all catch it) |
-| `fixtures/` | the hand-written probe programs, including every negative/cleared probe (see below). Files named `bat_*.ch` are NOT here - the batteries regenerate them. |
+| (no `fixtures/`) | the hand-written probe programs were REMOVED once every row gained a committed test twin (see "Test twins" below) - keeping both copies was an intentional duplicate without a tripwire, i.e. a drift hazard of exactly the #694 kind, and the canonical programs now live embedded in the test files. The raw point-in-time set is preserved in git history (removed by the same commit that added this paragraph). Battery runs regenerate their own probe programs locally; a `.gitignore` here keeps them out of commits. |
 
 ## Negative results worth as much as the findings
 
-These fixtures executed clean or bounded a claim, and are kept precisely
-so the clearance is reproducible rather than asserted:
+These probes executed clean or bounded a claim. Each is now a COMMITTED
+TEST (the canonical, CI-checked form); the notes below remain as the
+map from claim to evidence:
 
-- `part2.ch` - `partition` correct in both lanes (bounds the
+- partition correct in both lanes (`reduce_window_nonliteral_matrix.rs::partition_agrees_across_lanes`; bounds the
   `assign_partition` leftover: its `/* unsupported partition type */` arm
   needs an internal desync to reach; not reachable from the input surface).
 - `rw_nonlit.ch` - literal-window `reduce_window` correct in both lanes
@@ -65,9 +66,10 @@ so the clearance is reproducible rather than asserted:
 
 ```sh
 cargo build -p chelis-cli --bin chelis
-python3 docs/investigations/probes/probe.py eval  docs/investigations/probes/fixtures/frac_f16.ch
-python3 docs/investigations/probes/probe.py c     docs/investigations/probes/fixtures/frac_f16.ch
 (cd docs/investigations/probes && python3 battery.py bat_scalar_ops)
+# ad-hoc single probes: write any .ch locally and drive it with
+python3 docs/investigations/probes/probe.py eval <file.ch>
+python3 docs/investigations/probes/probe.py c    <file.ch>
 ```
 
 The batteries write their generated fixtures next to themselves under
@@ -80,9 +82,9 @@ the per-sweep outcomes are at the bottom of
 
 ## Test twins (added after the corpus landed)
 
-Every battery's broken rows and the meaningful controls now have committed
-test twins; the corpus remains the raw evidence and the negative-result
-archive, but nothing is probe-only anymore:
+Every battery row and every negative/cleared probe now has a committed
+test twin - the tests are the single source; the drivers here are the
+reusable tooling for FUTURE sweeps:
 
 | battery | test twin |
 |---|---|
@@ -93,4 +95,5 @@ archive, but nothing is probe-only anymore:
 | `bat_f32_tensor_round.py` | `eval_tensor_narrowing_matrix.rs` (broken rows + the tan/sqrt do-narrow control) |
 | `bat_matrix3.py` | `reduction_and_bitwise_matrix.rs` |
 | `checker_holes.py` | `issue_709_handle_effect_and_dp_roundtrip.rs` |
-| `tostring_*.ch` | `issue_734_tostring_placeholder.rs` |
+| `tostring_*` probes | `issue_734_tostring_placeholder.rs` |
+| partition / reduce_window probes | `reduce_window_nonliteral_matrix.rs` |

@@ -94,6 +94,29 @@ fn c_outcome(program: &str, name: &str) -> (bool, String, Option<String>) {
 
 const POOLED: &str = "tensor(shape=[5], data=[5.0, 5.0, 8.0, 8.0, 9.0])";
 
+/// **`partition` is correct in both lanes** - the control that bounds the
+/// `assign_partition` leftover from the audit backlog (its
+/// `/* unsupported partition type */` arm needs an internal desync to
+/// reach; not reachable from the input surface). Previously probe-only
+/// (`part2.ch` in the archived corpus); promoted to a test so the
+/// clearance is CI-checked rather than asserted.
+#[test]
+fn partition_agrees_across_lanes() {
+    let program = "xs: List[int64] = [cast(1, int64), cast(3, int64), cast(2, int64), cast(4, int64)]\n\
+         buckets = partition(fn (x: int64) -> gt(x, cast(2, int64)), xs)\n\
+         out = print(buckets)\n";
+    assert_eq!(
+        eval_first_line(program).expect("eval"),
+        "([3, 4], [1, 2])",
+        "partition splits pass/fail in order"
+    );
+    if c_toolchain_available() {
+        let (ok, stderr, stdout) = c_outcome(program, "partition_ctl");
+        assert!(ok, "partition must build: {stderr}");
+        assert_eq!(stdout.as_deref(), Some("([3, 4], [1, 2])"));
+    }
+}
+
 /// Literal windows pool correctly in BOTH lanes. The control that isolates
 /// the trigger to the non-literal extraction.
 #[test]

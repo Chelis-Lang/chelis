@@ -101,6 +101,25 @@ cleared. Additions to the existing red-team protocol:
 - Claim-before-work stays as the `issue-resolution` skill states
   (assignee set before branching).
 
+### 5b. Archive evidence once; never keep a second copy of a test
+
+Two rules that met in practice the day the probe corpus landed:
+
+1. **No duplicate without a tripwire** (mechanism 3): once every probe
+   row gained a committed test twin, the ~110 archived `.ch` fixtures
+   were an intentional duplicate of the tests' embedded programs with
+   nothing diffing them - a stale-copy hazard of exactly the #694 kind.
+   Resolution: the fixtures were DELETED (tests are the single source;
+   git history keeps the point-in-time set; the drivers and battery
+   definitions stay as reusable sweep tooling). Rule: negative results
+   are archived as TESTS, not as parallel fixture copies.
+2. **An artifact that is never edited again should cost the gate
+   nothing**: the fixtures were also the lint stage's long pole
+   (`chelis lint --check .` re-walks the tree per checked file - the
+   known quadratic behavior). The dedup resolved this instance; the
+   general lint-side ignore mechanism for genuinely un-editable archive
+   directories stays on chelis#740's backlog for the next case.
+
 ### 6. Standing detection (because prevention leaks)
 
 - **Ratchet metrics in CI**: counts that may only decrease - `_ =>`
@@ -112,7 +131,20 @@ cleared. Additions to the existing red-team protocol:
   rule" + the probe corpus). A periodic fresh-context agent runs the
   conformance matrices, the domain-validity invariant, and the debt
   reports against the week's landings. Execute everything; promote
-  nothing from reading.
+  nothing from reading. Must include **ignored-suite drift
+  monitoring**: run the `#[ignore]`d suites and diff observed failure
+  values against each ignore note's documented value - CI never runs
+  the red set, so a known-broken cell whose wrongness CHANGES is
+  otherwise invisible, and pinning wrong values as assertions is
+  forbidden (never document a bug as intended). Scheduled observation
+  is the only honest monitor for known-broken cells.
+- **Coverage honesty**: the committed matrices are POINT coverage
+  (specific ops x dtypes x values, mostly rank-1 contiguous), not
+  property coverage - clearances generalize by induction. The
+  property-level guards are the plan set's Phase 0 invariants
+  (domain-validity, round-trip, totality) and the endpoint is the
+  generated conformance matrix (#729 Phase 4); until those land,
+  treat "the matrix is green" as "the probed cells are green".
 - **Downstream**: shells currently have no compiled-lane numerical
   validation at all - tracked as chelis#738 (conform amendment
   candidate).
