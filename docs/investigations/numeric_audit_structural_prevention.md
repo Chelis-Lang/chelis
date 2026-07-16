@@ -232,7 +232,13 @@ tracked as chelis#730. Item 5 is now
 (chelis#731), and item 6 is
 [`spec/design/faithful_observation.md`](../../spec/design/faithful_observation.md)
 (chelis#732). All four classes now have formal plans with phase-handoff
-contracts.
+contracts. A fifth plan sits underneath them:
+[`spec/design/spec_provenance.md`](../../spec/design/spec_provenance.md)
+(chelis#733) - spec atoms with hash-linked claims and a coverage gate,
+which mechanizes away the two failures BENEATH this audit's classes:
+spec silence (the unauthored overflow/mean/bool cells) and stale spec
+claims (#694). Item 8's tripwire discipline and the #694 row of the
+kill table are its territory.
 
 ## Sequencing against the open fix plan
 
