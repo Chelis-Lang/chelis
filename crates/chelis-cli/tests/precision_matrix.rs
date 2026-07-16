@@ -1543,3 +1543,145 @@ fn f32_tensor_abs_is_correct_and_unaffected_by_the_placeholder() {
         "f32 abs must not be zeroed: got {stdout}"
     );
 }
+
+// ===========================================================================
+// COMPILE-TIME BRANCH DELETION (#711).
+//
+// `fold_static_cond` (crates/chelis-ir/src/lower.rs:9095-9178) evaluates `if`
+// conditions as f64 at lowering time, including integer comparisons, and
+// `lower_if` (`:10333`) then lowers ONLY the taken branch:
+//
+//     if let Some(taken) = self.fold_static_cond(cond) {
+//         return self.lower_expr(if taken { then_expr } else { else_expr });
+//     }
+//
+// So a wrong fold does not merely miscompute a value - it REMOVES the untaken
+// branch from the program. That makes this the most severe shape in the class:
+// every other instance produces a wrong value a corrected runtime would fix;
+// this one deletes code, and no downstream stage can recover it.
+//
+// The fold only fires when the condition is a pure `Const` DAG. `cast(...)`
+// introduces a non-Const node and the fold declines, which is why an earlier
+// probe using casts saw both branches and wrongly concluded no fold occurred.
+// Bare suffixed literals (`9007199254740992i64`) keep it foldable.
+//
+// Note `fold_static_size` (`lower.rs:9032-9069`), ~900 lines earlier in the
+// SAME file, folds the identical operators with `checked_i64` and correctly
+// declines on overflow. The right implementation exists next door.
+// ===========================================================================
+
+/// Verified: the emitted C contains `chelis_fill_f32_bits(t0, 0x435e0000u)`
+/// (= 222.0, the else branch) and `111.0`'s bit pattern `0x42de0000` appears
+/// NOWHERE in the file. `2^53 < 2^53 + 1` is true, so the answer is 111.0.
+#[test]
+#[ignore = "chelis#711: fold_static_cond folds the int64 comparison in f64, \
+            selects the wrong branch, and DELETES the then-branch at compile \
+            time. This test asserts the CORRECT behavior and fails until the \
+            fix lands. Run with `cargo test -p chelis-cli --test \
+            precision_matrix -- --ignored`."]
+fn static_int_condition_does_not_delete_the_correct_branch() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("fold.ch");
+    let out_dir = dir.path().join("fold-out");
+    write_file(
+        &path,
+        "def pick() -> f32 = \
+         if lt(9007199254740992i64, 9007199254740993i64) then 111.0 else 222.0\n\
+         out = pick()\n",
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let emitted = std::fs::read_to_string(out_dir.join("fold.c")).expect("emitted C");
+    // 111.0 == 0x42de0000, 222.0 == 0x435e0000 as f32 bit patterns. Compare the
+    // BITS, not the decimal text: the decimal `111` also occurs inside an
+    // unrelated hash constant (0x94D049BB133111EBULL), which is exactly how an
+    // earlier probe of this bug fooled itself.
+    let has_correct = emitted.contains("0x42de0000");
+    let has_wrong = emitted.contains("0x435e0000");
+    assert!(
+        has_correct || !has_wrong,
+        "fold_static_cond selected the WRONG branch and deleted the correct one. \
+         `if lt(2^53, 2^53+1) then 111.0 else 222.0` must yield 111.0 \
+         (0x42de0000), but the emitted C contains only 222.0 (0x435e0000). The \
+         then-branch was not miscomputed, it was REMOVED, so no runtime fix can \
+         recover it. chelis#711"
+    );
+}
+
+// ===========================================================================
+// pad_sequences narrows int64 to int32 in the compiled lane (#713).
+// ===========================================================================
+
+/// Verified: eval returns `3000000000.0`; compiled C returns `2147483647.0`
+/// (= i32::MAX). `chelis_pad_sequences` (crates/chelis-runtime/src/lib.rs:
+/// 2318-2330) allocates a `CHELIS_I32` output whenever the pad value is int64,
+/// and writes elements `i64 -> f64 -> i32`. The declared return type here is
+/// `tensor[2, 2, int64]`.
+#[test]
+#[ignore = "chelis#713: pad_sequences allocates an int32 output for int64 \
+            input, so a token id above i32::MAX saturates in the compiled lane \
+            while eval is exact. Run with `cargo test -p chelis-cli --test \
+            precision_matrix -- --ignored`."]
+fn pad_sequences_preserves_int64_ids_above_i32_max() {
+    let eval_expr = "pad_sequences([[cast(3000000000, int64), cast(1, int64)], \
+                     [cast(2, int64)]], cast(0, int64))";
+    let eval_got = eval_lane_str(eval_expr).expect("eval lane");
+    assert!(
+        eval_got.contains("3000000000"),
+        "eval must preserve a token id above i32::MAX; got {eval_got}"
+    );
+
+    if !c_toolchain_available() {
+        eprintln!("skipping compiled lane: no host C toolchain");
+        return;
+    }
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("pads.ch");
+    let out_dir = dir.path().join("pads-out");
+    write_file(
+        &path,
+        "def run(rows: List[List[int64]]) -> tensor[2, 2, int64] = \
+         pad_sequences(rows, cast(0, int64))\n\
+         out = run([[cast(3000000000, int64), cast(1, int64)], [cast(2, int64)]])\n",
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let status = common::link_generated(&out_dir, "pads.c", "pads");
+    assert!(status.success(), "link failed: {status}");
+    let run = std::process::Command::new(out_dir.join("pads"))
+        .output()
+        .expect("compiled binary should run");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        !stdout.contains("2147483647"),
+        "pad_sequences saturated a token id of 3000000000 to i32::MAX in the \
+         compiled lane while eval returned it exactly. The declared return type \
+         is tensor[2, 2, int64]. chelis#713. Got: {stdout}"
+    );
+}

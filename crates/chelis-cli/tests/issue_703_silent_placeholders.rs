@@ -468,3 +468,114 @@ fn no_build_ever_emits_a_silent_unsupported_builtin_stub() {
          An unimplemented builtin must fail the build. chelis#703"
     );
 }
+
+// ===========================================================================
+// #712: the checker accepts scalar activations that eval cannot run.
+//
+// Three lanes, three answers, for the same program:
+//
+//   type checker  -> accepts (score 1)
+//   chelis eval   -> `expected tensor arg at index 0, got Some(Scalar(...))`
+//   chelis build  -> silently returns 0 (#704), EXCEPT tanh which is correct
+//
+// The checker deliberately allows scalars: infer.rs:9944-9998 documents that
+// "shared builtins can operate on either tensors or host scalars", and
+// TENSOR_OPS (`infer.rs:9908-9925`) accepts `Type::Prim(prec) if prec.is_float()`
+// for relu|sigmoid|tanh|silu|gelu|... `chelis-ir/src/host.rs:7867-7876`
+// independently types them as HostType::Float32. Two type layers say legal.
+//
+// The evaluator's handlers (`eval.rs:2114-2148`) call `expect_tensor_arg`,
+// which rejects a bare RuntimeValue::Scalar. So the runtime guard contradicts
+// both type layers.
+//
+// This is the checker/eval half of #704; that issue is the codegen half.
+// Whichever way the contract is decided, all three lanes must agree.
+// ===========================================================================
+
+/// The whole program type-checks and the evaluator refuses to run it.
+///
+/// Verified for relu/sigmoid/silu/gelu/tanh. Asserts the checker and evaluator
+/// agree, without prejudging WHICH is right: either eval grows scalar arms, or
+/// the checker rejects scalars (which would also make #704 unreachable).
+fn assert_checker_and_eval_agree_on_scalar(op: &str) {
+    let program = format!("module M.Main\ndef f(x: f32) -> f32 = {op}(x)\nout = print(f(3.5))\n");
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("s.ch");
+    write_file(&path, &program);
+
+    let checked = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["check", path.to_str().unwrap()])
+        .output()
+        .expect("chelis check should run");
+    let check_out = String::from_utf8_lossy(&checked.stdout);
+    let checker_accepts = checked.status.success() && check_out.contains("\"score\": 1");
+
+    let evaled = eval_first_line(&program);
+
+    match (checker_accepts, evaled) {
+        // Both accept, or both reject: consistent either way.
+        (true, Ok(_)) | (false, Err(_)) => {}
+        (true, Err(e)) => panic!(
+            "LANE DISAGREEMENT on scalar `{op}`: the checker reports score 1 but \
+             the evaluator refuses to run it: {e}\n\
+             infer.rs:9908-9925 deliberately accepts float scalars for this op, \
+             and host.rs:7867-7876 types it HostType::Float32, but eval.rs's \
+             handler calls expect_tensor_arg. Either eval grows a scalar arm or \
+             the checker rejects scalars; all three lanes must agree. chelis#712"
+        ),
+        (false, Ok(v)) => panic!(
+            "the checker rejected scalar `{op}` but eval computed it ({v}), which \
+             is the same disagreement in reverse. chelis#712"
+        ),
+    }
+}
+
+macro_rules! scalar_lane_agreement_test {
+    ($fn_name:ident, $op:literal) => {
+        #[test]
+        #[ignore = "chelis#712: the checker reports score 1 for this scalar \
+                    activation and the evaluator rejects it with `expected tensor \
+                    arg at index 0`. This test asserts the lanes agree and fails \
+                    until the contract is settled. Run with `cargo test -p \
+                    chelis-cli --test issue_703_silent_placeholders -- --ignored`."]
+        fn $fn_name() {
+            assert_checker_and_eval_agree_on_scalar($op);
+        }
+    };
+}
+
+scalar_lane_agreement_test!(scalar_relu_checker_and_eval_agree, "relu");
+scalar_lane_agreement_test!(scalar_sigmoid_checker_and_eval_agree, "sigmoid");
+scalar_lane_agreement_test!(scalar_silu_checker_and_eval_agree, "silu");
+scalar_lane_agreement_test!(scalar_gelu_checker_and_eval_agree, "gelu");
+
+/// `tanh` is the sharpest case and gets its own test: the checker accepts it,
+/// the **C backend computes it correctly** (0.998, no stub emitted), and only
+/// the evaluator rejects it.
+///
+/// So this is not "scalar activations are unsupported" - two of three lanes
+/// agree the program is valid and one refuses to run it. `sqrt` and `exp` are
+/// the precedent: same TENSOR_OPS terms, both compile correctly on scalars, and
+/// eval accepts them (locked by `scalar_sqrt_and_exp_are_correct` above).
+#[test]
+#[ignore = "chelis#712: tanh's scalar form compiles CORRECTLY in the C lane and \
+            eval still rejects it, so eval is the odd lane out. Run with `cargo \
+            test -p chelis-cli --test issue_703_silent_placeholders -- --ignored`."]
+fn scalar_tanh_checker_and_eval_agree_even_though_c_is_correct() {
+    if c_toolchain_available() {
+        let (emitted, stdout) =
+            build_and_run_c("def f(x: f32) -> f32 = tanh(x)\nout = f(3.5)\n", "tanh_ok")
+                .expect("scalar tanh should build and run");
+        assert!(
+            !emitted.contains(STUB_MARKER),
+            "scalar tanh must not emit a stub (it is correct in the C lane today)"
+        );
+        assert!(
+            stdout.contains("0.99"),
+            "scalar tanh(3.5) must be ~0.9982 in the C lane; got: {stdout}"
+        );
+    }
+    assert_checker_and_eval_agree_on_scalar("tanh");
+}
