@@ -6,7 +6,8 @@ audit that produced chelis#680-#713 and the three tracking issues
 
 > **Status: every sweep below has been executed** (results in
 > [Sweep outcomes](#sweep-outcomes-2026-07-16) at the bottom; current
-> coordination lives in `spec/design/remediation_roadmap.md`). The body of
+> coordination lives in `spec/design/remediation_roadmap.md`, landing via
+> the design-set PR #742). The body of
 > this file is the audit-time prediction record, kept verbatim as evidence
 > of which claim sources were reliable - several predictions were wrong in
 > instructive ways, and that is the point of keeping them.

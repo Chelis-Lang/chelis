@@ -1,5 +1,13 @@
 # Making the numeric bug classes structurally impossible
 
+> **Status: derivation record.** Every mechanism in this document has been
+> formalized into an owning design plan (see the formalization map below);
+> the plans are authoritative and this file is NOT updated alongside them -
+> on any conflict, the plans win. It is kept, like the prediction record in
+> `numeric_audit_next_sweeps.md`, as the reasoning bridge from the audit's
+> findings to the mechanisms, which is evidence the plans themselves do not
+> carry.
+
 Written 2026-07-16, after the second sweep (chelis#714-#726). The first
 audit's conclusion was "nothing forces completeness, so each fix stops at
 the reported symptom" ([#695]). This document is the answer to the next
@@ -223,7 +231,11 @@ hand-inlining); add:
 ## The formalization map
 
 Every mechanism in this document is now owned by a formal plan; this
-investigation doc remains the evidence record behind them:
+investigation doc remains the evidence record behind them. The plans
+land via [PR #742](https://github.com/Chelis-Lang/chelis/pull/742) (the
+design set), split from the test/oracle PR #696 so evidence and
+decisions get separate review; the relative links below resolve once
+#742 merges:
 
 | this doc | formalized as |
 |---|---|
@@ -236,8 +248,8 @@ investigation doc remains the evidence record behind them:
 | cross-plan sequencing, unclaimed issues, deferred evidence | [`spec/design/remediation_roadmap.md`](../../spec/design/remediation_roadmap.md) |
 
 The decided contracts themselves are seeded into the numbered specs as
-provisional atoms (spec/04 §9-§10, spec/05 §7-§8), so the active spec is
-not silent on anything that has been decided.
+provisional atoms (spec/04 §9-§10, spec/05 §7-§8 - also in PR #742), so
+the active spec is not silent on anything that has been decided.
 
 ## Sequencing against the open fix plan
 
