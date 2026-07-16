@@ -117,50 +117,63 @@ spec §5.7's precision-widening rule and is checked by `verify`.
 
 Lesson: the one op an agent cleared by reading a comment was the one extra bug.
 
-### 4. `Atom::Keyword` -> `Const 0.0`
+### 4. `Atom::Keyword` -> `Const 0.0` - **REFUTED** (chelis#710)
 
-`crates/chelis-ir/src/lower.rs:4861-4866`. The `Atom::Str` sibling is protected
-by `def_body_requires_host_runtime` (`lower.rs:2338`), which treats any string
-literal in a def body as host-forcing. That filter does **not** special-case
-`Atom::Keyword` (`:2339`). `.dp`-only: Surf never emits a bare keyword atom in
-expression position.
+Guarded at runtime: a bare keyword atom in expression position gives
+`error: bare atom is not a runtime expression`. The `Const 0.0` never fires.
+`chelis check` does false-green it (score 1), which is #710.
 
-### 5. `reduce_window` `unwrap_or_default()`
+### 5. `reduce_window` `unwrap_or_default()` - **NOT TESTED**
 
-`crates/chelis-ir/src/lower.rs:7522-7537`. `window_shape` / `strides` come from
-`collect_cons_chain(...).and_then(...).unwrap_or_default()`, so a malformed or
-non-literal window shape silently becomes `vec![]`. The comment claims the type
-checker has already validated the shape; unverified for every input shape.
+`crates/chelis-ir/src/lower.rs:7522-7537`. Low priority: every sibling claim from
+the same sweep was refuted, and the pattern below suggests a runtime guard exists.
 
-### 6. `lower_cast`'s `Prim::parse_name(...).unwrap_or(Prim::F32)`
+### 6. `lower_cast`'s `Prim::parse_name(...).unwrap_or(Prim::F32)` - **REFUTED** (chelis#710)
 
-`crates/chelis-ir/src/lower.rs:10235`. A bare-symbol cast target that fails
-`Prim::parse_name` silently becomes `f32`. `infer_cast` (`infer.rs:18720-18725`)
-rejects the unsigned-int-family typo case explicitly, but it is unconfirmed that
-every malformed-symbol case is caught.
+Guarded at runtime: a typo'd cast target gives
+`error: cast target 'bogus_dtype' is not a recognized primitive type` rather than
+silently becoming f32. `chelis check` false-greens it (#710).
 
-### 7. "Should never happen" defaults
+### 7. "Should never happen" defaults - **NOT TESTED**
 
-- `crates/chelis-compiler-api/src/runtime/named_axis.rs:430` -
-  `dag.get(*root).map(...).unwrap_or(Prim::F32)` silently defaults precision on a
-  `values`/`dag` desync.
-- `crates/chelis-backend-c/src/host_emit.rs:4060-4070` - `assign_partition`'s
-  `let HostType::Tuple(parts) = ty else { ... return }` leaves the C target
-  variable **unassigned** (undefined-behavior read) if reached. Requires a
-  type-inference hole.
+`named_axis.rs:430`'s `unwrap_or(Prim::F32)` and `host_emit.rs:4060-4070`'s
+`assign_partition`. Both require an internal desync or a type-inference hole to
+reach. Lowest priority.
 
-Low confidence of reachability; same anti-pattern (silent default vs. loud
-`expect`).
+### 8. `fail(non_literal_string)` outside an `if` - **REFUTED**
 
-### 8. `fail(non_literal_string)` outside an `if`
+Works correctly in **both** lanes:
 
-`crates/chelis-ir/src/lower.rs:8130-8161`. The `fail` zero-placeholder is
-designed to be reachable only as the pruned side of an `if`, where `lower_if`'s
-mask arithmetic zeroes it. A *literal* string argument forces the whole def to
-the host lane, which normally keeps a bare `fail(...)` out of DAG lowering. A
-**non-literal** message (`fail(some_string_variable)`) could dodge that filter
-and reach the arm unmasked, producing a silent zero instead of aborting. No
-check specifically forbids `fail` outside `if` was found.
+```
+def boom(msg: string) -> tensor[2, f32] = fail(msg)
+def run() -> tensor[2, f32] = boom(string_concat("dynamic ", "message"))
+```
+```
+chelis eval  : error: dynamic message
+compiled C   : exit 1, stderr "dynamic message"
+```
+
+The zero placeholder does not fire; `fail` aborts with the dynamic message as
+intended.
+
+## The pattern across every `.dp` / lowering-placeholder claim
+
+Items 1, 4, 6 and 8 are refuted; item 2 is confirmed but low-severity. In **every**
+probe, the shape was the same:
+
+> **the `Const 0.0` / `unwrap_or` placeholder is never reached** - a parser or
+> runtime guard catches the input first - while **`chelis check` false-greens it**.
+
+So the 26 `Const { value: 0.0 }` sites in `lower.rs` are, on this evidence,
+almost entirely dead code behind real guards. The genuinely live instances of the
+#703 class are the ones found by other routes:
+
+- **#699** `lower_transcendental`'s non-float branch (Surf-reachable, 7 ops x 4 int widths)
+- **#682 / #704 / #705** `host_emit.rs:2300`'s `/* unsupported builtin */ 0`
+- **#689** HIP's `elem_kind` F32 fallback
+
+and the real residue of the `.dp` work is **#710** (checker false green), which is
+low severity because the runtime always catches it.
 
 ## Pathways not swept at all
 
@@ -173,8 +186,14 @@ check specifically forbids `fail` outside `if` was found.
 - **The `.dp` ingestion path generally.** A whole front end that bypasses Surf's
   structural guarantees. #709 proves the checker behind it is weaker than
   assumed. Items 1, 2 and 4 all live here.
-- **`grad` / `vmap` interaction** with any of the above. Untouched.
-  `transforms.rs:619-630` marshals int64 scalars through `as f64` into the DAG.
+- **`grad` / `vmap` interaction - SWEPT, negative result.** `transforms.rs:619-630`
+  really does marshal int64 scalars through `as f64`, but it introduces **no new
+  bug**: a `vmap` over an int64 tensor carrying `2^53+1` returns
+  `9007199254740992.0`, and the **no-vmap control returns the same**, so the
+  corruption is #684's `Vec<f64>` storage, not the marshalling. Likewise a
+  `grad`-shaped probe with an exact int64 scalar fails identically **without**
+  `grad`, because `sub(2^53+1, 2^53)` already returns `0` (#680). grad/vmap
+  inherit #680 and #684 rather than adding a third corruption.
 - **Metal's `Const 0`.** #699 explains the C lane's `lower_transcendental` zero;
   Metal's identical symptom was never re-confirmed to share that root cause
   after the diagnosis landed.
@@ -209,18 +228,28 @@ Item **3** is settled (all 8 confirmed, plus `sum` as an unpredicted extra), and
 the **`chelis-cli` parallel-pipeline sweep** is done with a negative result - both
 recorded above.
 
-Remaining, in order:
+The backlog is **effectively exhausted**. Remaining, both low priority:
 
-1. **Items 5, 6, 7, 8** - the low-confidence `unwrap_or` / placeholder paths.
-   Cheap to probe, low expected yield.
-2. **`grad` / `vmap` interaction** - genuinely unswept, and `transforms.rs:619-630`
-   marshals int64 scalars through `as f64` into the DAG, so there is a concrete
-   reason to look.
-3. **`chelis prove` Tier C** (#688) - code-confirmed, never executed.
+1. **Items 5 and 7** - `reduce_window`'s `unwrap_or_default()` and the two
+   "should never happen" defaults. Every sibling claim from the same sweep was
+   refuted, and each of these needs an internal desync or inference hole to reach.
+2. **`chelis prove` Tier C** (#688) - code-confirmed, never executed. Needs an
+   `@opaque` type with an int64 representation field, which today's std lib does
+   not have.
 
-Scoring so far: of the areas predicted "high yield", the HIP probe paid off (one
-unpredicted bug) and the CLI gate sweep did not (zero). Of the claims agents
-ranked highest, two were refuted outright. Weight predictions accordingly.
+## Final scoring
+
+| area | prediction | outcome |
+|---|---|---|
+| HIP `elem_kind` probes | high yield | **paid off** - all 7 confirmed **plus `sum`**, which no one predicted because a comment said it was safe |
+| `chelis-cli` gate sweep | "highest-yield unswept area" | **zero new bugs**; hazard bounded at 2 known instances |
+| `.dp` placeholder items (1, 2, 4, 6, 8) | 1 and 2 ranked highest by a sweep | **4 of 5 refuted**; the survivor (#710) is low severity |
+| `grad` / `vmap` | "concrete reason to look" | **no new bug**; inherits #680/#684 |
+
+Of the claims ranked highest by automated sweeps, **most were wrong**. The one
+real extra (`sum`) was found in the area an agent had explicitly *cleared* by
+reading a comment. Weight source-derived rankings accordingly, and probe the
+things that were cleared.
 
 [chelis#695]: https://github.com/Chelis-Lang/chelis/issues/695
 [chelis#703]: https://github.com/Chelis-Lang/chelis/issues/703
