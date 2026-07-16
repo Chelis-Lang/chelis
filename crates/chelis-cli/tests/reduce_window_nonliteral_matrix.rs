@@ -157,8 +157,8 @@ fn c_nonliteral_window_and_strides_pool_or_reject() {
 }
 
 /// Observed today: `thread 'main' panicked at crates/chelis-backend-c/src/
-/// emit.rs:4509 ... window_shape and strides must have equal length, left: 0`
-/// - the half-non-literal case trips the internal assertion instead of a
+/// emit.rs:4509 ... window_shape and strides must have equal length, left: 0`;
+/// the half-non-literal case trips the internal assertion instead of a
 /// diagnostic.
 #[test]
 #[ignore = "chelis#725: a non-literal window with a literal stride panics the compiler at \

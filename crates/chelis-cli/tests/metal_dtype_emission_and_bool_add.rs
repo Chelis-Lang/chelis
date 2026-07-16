@@ -3,8 +3,8 @@
 //!
 //! Metal came out of the sweep as the best-behaved backend, and this file
 //! locks that: rank-1 kernels are HONESTLY TYPED per dtype (`long*` for
-//! int64, `int*` for int32, `bool*` for bool, `half`/`bfloat` for f16/bf16
-//! - the narrow-float rows live in narrow_dtype_matrix.rs), f64 is rejected
+//! int64, `int*` for int32, `bool*` for bool, `half`/`bfloat` for f16/bf16;
+//! the narrow-float rows live in narrow_dtype_matrix.rs), f64 is rejected
 //! with a specific diagnostic, and rank-2+ falls back to a LOUD abort stub
 //! that names itself. No F32 substitution anywhere (contrast chelis#689).
 //!
