@@ -24,7 +24,7 @@ gate scripts).
 | `bat_f32_tensor_round.py` | which f32 tensor ops skip narrowing in eval (#717: div/recip skip, tan/sqrt narrow) |
 | `bat_matrix3.py` | bitwise at every width (#682), reductions across dtypes (#692 panics, #723 print, #724 mean), the Bool battery (clean except #726) |
 | `checker_holes.py` | the #709 wrapper battery: which constructs hide an ill-typed body from `chelis check` (answer: only `with seed`/`with device`; the ten other wrappers and the handler expressions all catch it) |
-| (no `fixtures/`) | the hand-written probe programs were REMOVED once every row gained a committed test twin (see "Test twins" below) - keeping both copies was an intentional duplicate without a tripwire, i.e. a drift hazard of exactly the #694 kind, and the canonical programs now live embedded in the test files. The raw point-in-time set is preserved in git history (removed by the same commit that added this paragraph). Battery runs regenerate their own probe programs locally; a `.gitignore` here keeps them out of commits. |
+| (no `fixtures/`) | probe programs live embedded in their test twins - the single source (an archived copy alongside the tests would be an intentional duplicate without a tripwire, the #694 drift shape). The raw point-in-time fixture set is preserved in git history. Battery runs regenerate their programs locally; a `.gitignore` keeps them out of commits. |
 
 ## Negative results worth as much as the findings
 
@@ -80,7 +80,7 @@ The prevention analysis these probes fed is
 the per-sweep outcomes are at the bottom of
 [`../numeric_audit_next_sweeps.md`](../numeric_audit_next_sweeps.md).
 
-## Test twins (added after the corpus landed)
+## Test twins
 
 Every battery row and every negative/cleared probe now has a committed
 test twin - the tests are the single source; the drivers here are the

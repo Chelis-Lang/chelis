@@ -2,8 +2,8 @@
 
 **Status:** Design proposal, pre-implementation. Tracking issue: chelis#730.
 **Owning specs:** `spec/05-risc-primitives.md` (op support statements;
-its §7 now carries this plan's decided contract as provisional atoms
-[05-UNS-1..4] - Phase 1 ratifies them),
+its §7 carries this plan's decided contract as provisional atoms
+[05-UNS-1..4], seeded ahead of Phase 1, which ratifies them),
 `spec/04-type-system.md` §1.1.1 (deferred dtypes precedent), the repo
 Contract Invariants ("if a command reports perfect success, its error list
 must be empty"), and the audit record in

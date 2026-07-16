@@ -1,9 +1,10 @@
 # Faithful Observation: one dtype-true formatter for every exit, both lanes
 
 **Status:** Design proposal, pre-implementation. Tracking issue: chelis#732.
-**Owning specs:** `spec/05-risc-primitives.md` (its §8 now carries this
-plan's decided contract as provisional atoms [05-OBS-1..3], with the
-per-op tolerance table landing into that section at Phase 3), `spec/04-type-system.md` (dtype value-set definitions, shared
+**Owning specs:** `spec/05-risc-primitives.md` (its §8 carries this
+plan's decided contract as provisional atoms [05-OBS-1..3], seeded ahead
+of Phase 1; the per-op tolerance table lands into the same section at
+Phase 3), `spec/04-type-system.md` (dtype value-set definitions, shared
 with `spec/design/dtype_semantics.md` §C1), and the audit record in
 `docs/investigations/numeric_audit_next_sweeps.md` (sweeps 1, 3) /
 `docs/investigations/numeric_audit_structural_prevention.md` (item 6).

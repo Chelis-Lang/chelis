@@ -220,32 +220,24 @@ hand-inlining); add:
   tripwire is a review-checklist line in the PR template plus the
   audit-file locks already committed.)
 
-## Now proposed formally
+## The formalization map
 
-Items 1, 2, 4, 6 and 7 of this document have been consolidated into a
-design proposal with a phase plan and per-phase oracles:
-[`spec/design/dtype_semantics.md`](../../spec/design/dtype_semantics.md),
-tracked as chelis#729. Items 3 and 8 (the #703 fixes and the tripwires) are now ALSO a formal
-proposal: [`spec/design/loud_unsupported.md`](../../spec/design/loud_unsupported.md),
-tracked as chelis#730. Item 5 is now
-[`spec/design/checker_totality.md`](../../spec/design/checker_totality.md)
-(chelis#731), and item 6 is
-[`spec/design/faithful_observation.md`](../../spec/design/faithful_observation.md)
-(chelis#732). All four classes now have formal plans with phase-handoff
-contracts. A fifth plan sits underneath them:
-[`spec/design/spec_provenance.md`](../../spec/design/spec_provenance.md)
-(chelis#733) - spec atoms with hash-linked claims and a coverage gate,
-which mechanizes away the two failures BENEATH this audit's classes:
-spec silence (the unauthored overflow/mean/bool cells) and stale spec
-claims (#694). Item 8's tripwire discipline and the #694 row of the
-kill table are its territory. Coordination across the whole set now
-lives in [`spec/design/remediation_roadmap.md`](../../spec/design/remediation_roadmap.md)
-(global sequencing, the unclaimed-issue ledger, the deferred-evidence
-ledger), and the op x dtype table's schema is owned by
-[`spec/design/capability_table.md`](../../spec/design/capability_table.md).
-The decided contracts themselves are now seeded into the numbered specs
-as provisional atoms (spec/04 §9-§10, spec/05 §7-§8) so the active spec
-is no longer silent on what has been decided.
+Every mechanism in this document is now owned by a formal plan; this
+investigation doc remains the evidence record behind them:
+
+| this doc | formalized as |
+|---|---|
+| items 1, 2, 7 (finalizer, kernel split, domain invariant) | [`spec/design/dtype_semantics.md`](../../spec/design/dtype_semantics.md) (chelis#729) |
+| items 3, 8 (no catch-alls, Err fallbacks, tripwires) | [`spec/design/loud_unsupported.md`](../../spec/design/loud_unsupported.md) (chelis#730) |
+| item 5 (DeepTag / totality) | [`spec/design/checker_totality.md`](../../spec/design/checker_totality.md) (chelis#731) |
+| item 6 (shared formatter) | [`spec/design/faithful_observation.md`](../../spec/design/faithful_observation.md) (chelis#732) |
+| the spec-silence root beneath all of it | [`spec/design/spec_provenance.md`](../../spec/design/spec_provenance.md) (chelis#733) |
+| item 4's table schema | [`spec/design/capability_table.md`](../../spec/design/capability_table.md) |
+| cross-plan sequencing, unclaimed issues, deferred evidence | [`spec/design/remediation_roadmap.md`](../../spec/design/remediation_roadmap.md) |
+
+The decided contracts themselves are seeded into the numbered specs as
+provisional atoms (spec/04 §9-§10, spec/05 §7-§8), so the active spec is
+not silent on anything that has been decided.
 
 ## Sequencing against the open fix plan
 

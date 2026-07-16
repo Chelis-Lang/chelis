@@ -4,12 +4,12 @@ A brief for whoever picks this up next. Written 2026-07-16, at the end of the
 audit that produced chelis#680-#713 and the three tracking issues
 [#695], [#703], [#709].
 
-> **STATUS UPDATE, later on 2026-07-16: every sweep below has been executed.**
-> The run produced thirteen new issues (chelis#714-#726) and seven new test
-> files; see [Sweep outcomes](#sweep-outcomes-2026-07-16) at the bottom for
-> the per-sweep results and what genuinely remains. The rest of this file is
-> kept as written, as the record of what was predicted - several predictions
-> were wrong in instructive ways.
+> **Status: every sweep below has been executed** (results in
+> [Sweep outcomes](#sweep-outcomes-2026-07-16) at the bottom; current
+> coordination lives in `spec/design/remediation_roadmap.md`). The body of
+> this file is the audit-time prediction record, kept verbatim as evidence
+> of which claim sources were reliable - several predictions were wrong in
+> instructive ways, and that is the point of keeping them.
 
 Read [`silent_substitution_audit_backlog.md`](silent_substitution_audit_backlog.md)
 first: it records what was settled, what was refuted, and why. This file is only
@@ -448,7 +448,7 @@ opaque produced-value chokepoint itself still needs the smt build.
    not a value bug, but the #687 exact-string oracle needs a per-op
    formatting contract before it can compare transcendental outputs.
 
-### Class bookkeeping and prevention (filed after the outcomes above)
+### Class bookkeeping and prevention
 
 Two further metas were filed once the findings were classified: **[#727]**
 (no dtype's semantics are enforced at any single point - the generalization

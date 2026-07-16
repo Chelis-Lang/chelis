@@ -348,9 +348,9 @@ imminent spec deliverables (your first atoms).
    `spec-atom-wellformed` in chelis-lint, with the rule-spec
    registration and the lint crate's standard positive/negative rule
    tests; `--spec-report` JSON export.
-3. **First atoms**: PRE-SEEDED - spec/04 §9-§10 and spec/05 §7-§8
-   already carry the four sibling plans' decided contracts as
-   provisional atoms ([04-NUM-*], [04-TOT-*], [05-UNS-*], [05-OBS-*])
+3. **First atoms**: spec/04 §9-§10 and spec/05 §7-§8 carry the four
+   sibling plans' decided contracts as provisional atoms (seeded ahead
+   of this plan) , i.e. ([04-NUM-*], [04-TOT-*], [05-UNS-*], [05-OBS-*])
    with status banners. This phase RATIFIES their grammar against the
    finalized §C1, computes their revs, and additionally atomizes the
    audit-proven load-bearing statements (the §5.7 precision-widening

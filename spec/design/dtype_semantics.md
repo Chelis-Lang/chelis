@@ -407,9 +407,9 @@ Part I as the spec of what to build.
    unit tests per cell of the §C1 table (positive AND negative per the
    repo's negative-test-parity rule: every rounding case, every trap
    case, every special value).
-2. **The spec/04 section**: SEEDED - spec/04 §9 now carries the decided
-   contract as provisional atoms [04-NUM-1..6] with an honest status
-   banner (authored 2026-07, implementation tracked here). This phase
+2. **The spec/04 section**: spec/04 §9 carries the decided contract as
+   provisional atoms [04-NUM-1..6] with an honest status banner (seeded
+   ahead of this phase; implementation tracked here). This phase
    RATIFIES and refines that section (and its §C1/§C2 correspondence)
    in the same PR as the module, so spec and code cannot diverge at
    the moment the semantics become real.

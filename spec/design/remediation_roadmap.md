@@ -14,7 +14,7 @@ The plan set: `dtype_semantics.md` (#729), `loud_unsupported.md` (#730),
 `spec_provenance.md` (#733), plus the `capability_table.md` schema (rides
 #729 Phase 4) and the audit record under `docs/investigations/`.
 
-## Global sequencing (authored; previously conversation-only)
+## Global sequencing
 
 The plans are deliberately independently landable - every pairwise
 interlock is pinned in both landing orders (each doc's §I1). The
