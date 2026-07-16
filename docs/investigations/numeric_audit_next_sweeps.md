@@ -4,6 +4,13 @@ A brief for whoever picks this up next. Written 2026-07-16, at the end of the
 audit that produced chelis#680-#713 and the three tracking issues
 [#695], [#703], [#709].
 
+> **STATUS UPDATE, later on 2026-07-16: every sweep below has been executed.**
+> The run produced thirteen new issues (chelis#714-#726) and seven new test
+> files; see [Sweep outcomes](#sweep-outcomes-2026-07-16) at the bottom for
+> the per-sweep results and what genuinely remains. The rest of this file is
+> kept as written, as the record of what was predicted - several predictions
+> were wrong in instructive ways.
+
 Read [`silent_substitution_audit_backlog.md`](silent_substitution_audit_backlog.md)
 first: it records what was settled, what was refuted, and why. This file is only
 about what is left.
@@ -312,3 +319,145 @@ behind all three metas, and the most efficient search heuristic available:
 [#703]: https://github.com/Chelis-Lang/chelis/issues/703
 [#709]: https://github.com/Chelis-Lang/chelis/issues/709
 [#711]: https://github.com/Chelis-Lang/chelis/issues/711
+
+## Sweep outcomes (2026-07-16)
+
+Every sweep above was executed the same day this brief was written. Thirteen
+new issues (chelis#714-#726), seven new test files (every broken row
+`#[ignore]`d with its issue, every control locked green), and comments with
+executed evidence on #682, #688, #692, #695, #699, #709. The one rule held:
+several of this brief's own predictions were refuted by running the code.
+
+### Sweep 1: bf16/f16 - the predicted "highest-value gap" over-delivered
+
+Six issues, most of them not the shape predicted:
+
+- **[#714]** f16/bf16 SCALARS have no C-host-lane representation: declared
+  narrow types parse to `HostType::Unknown`, arithmetic defaults to
+  `int64_t`, and `add(0.5f16, 0.25f16)` compiles to a binary that prints
+  `0`. Comparisons pick the wrong branch at threshold 2049; `abs` emits C
+  that does not compile. int8/int16 scalars take the same path.
+- **[#715]** found *next to* the target: scalar `tan`/`atan`/`floor`/`ceil`/
+  `round`/`recip`/`max_elem`/`min_elem` compile to the `/* unsupported
+  builtin */ 0` stub at EVERY dtype - plain f32 `floor(1.5)` returns 0 from
+  the compiled binary while eval is correct. Same site as #682.
+- **[#716]** the C DAG kernels for bf16/f16 are CORRECT (byte-decode proven)
+  and every host boundary around them is broken: print reads the 2-byte
+  buffers as f32 (garbage), to_list and to_tensor abort at runtime.
+- **[#717]** the eval tensor lane's narrowing is per-op chaos: f64 tensors
+  destroyed to f32 by every unary float op (`tensor_float_unop_f32`), f32
+  add/div/recip never narrowed, f16/bf16 never rounded. Compiled C is right
+  in every cell - the reverse of the usual direction.
+- **[#718]** integer width semantics are INVERTED between lanes and
+  surfaces: scalar C ignores width (eval wraps), tensor eval ignores width
+  (C wraps). Corrects #695's "the C backend wraps natively" (comment posted).
+- **[#719]** the contiguous f32 sqrt kernel uses Accelerate's vvsqrtf: not
+  correctly rounded (IEEE requires sqrt to be), and results change with
+  memory layout (the strided path uses sqrtf).
+- Clean, locked: HIP REJECTS bf16/f16 compute with a specific diagnostic;
+  Metal emits typed `half`/`bfloat` kernels; f8e4m3 is rejected everywhere;
+  the eval SCALAR lane rounds f16/bf16 per-op correctly.
+
+### Sweep 2 (grad): the compounding question had a bad answer
+
+- **[#722]** grad of a forward pass containing `abs`/`floor` on an integer
+  tensor returns ALL-ZERO gradients in BOTH lanes - #699's placeholder
+  poisons eval too, because grad is built over the lowered DAG. The forward
+  pass without grad is correct in eval; the same gradient without `abs` is
+  correct in both lanes. Both lanes agreeing on the wrong answer is
+  invisible to any cross-lane oracle, fixed or not.
+
+### Sweep 3 (matrix completion)
+
+- **[#723]** the C tensor print helper renders int64 through double: an
+  EXACT compiled sum of 2^53 + 1 prints as ...992.0. The C sum itself is
+  right (provable via to_list, locked) - the printed output manufactures
+  false evidence against the correct lane.
+- **[#724]** `mean` of an int64 tensor: eval 187.5 (a fractional value
+  inside an int64 tensor), C 187.0, checker score 1. Three stages, three
+  answers.
+- #682's stub confirmed at every width (comment posted); #692's reduce
+  panics executed end-to-end at three emit.rs sites (comment posted).
+- **Bool is clean** in both lanes (probed, not believed from the lib.rs
+  storage comment) - EXCEPT **[#726]**: `add` on bool tensors stores 2 in a
+  bool-typed tensor; print says 2.0, to_list says true, and Metal's
+  honestly-typed kernel would say 1.
+
+### Sweep 4 (Metal): best-behaved backend, confirmed and locked
+
+Typed long/int/bool kernels, specific f64 rejection, self-naming rank-2
+abort stub. #699's Metal symptom root-caused by emission: the `Const 0`
+arrives pre-planted from lowering; no separate Metal bug (comment posted).
+Metal RUNTIME execution remains unswept (needs a driver harness; this
+machine could run it).
+
+### Sweep 5 (#711 adjacents)
+
+- **[#720]** `fold_static_cond`'s Cast arm folds f16/bf16 conditions with
+  f32 semantics (via `convert_cast_data`) and DELETES the branch IEEE
+  semantics would take, at thresholds 2049/257. Distinct from #711: the
+  checked-i64 fix does not touch this arm.
+- Bounded: effectful (`fail`) branches keep the def host-lane where the
+  compiled int64 comparison is EXACT (locked); int8 conditions do not fold
+  but diverge across lanes at runtime through #714/#718's widening.
+
+### Sweep 6 (#709 adjacents) and the .dp path
+
+- The wrapper battery confirms #709's scoping exactly: `with seed` /
+  `with device` bodies are the ONLY checker holes (let/if/match/lambda/
+  pipe/tuple/list/grad/vmap/jit all catch the same error; the handler
+  expressions are checked). Locked as a canary test.
+- Escalations (commented on #709): the masked error now provably reaches a
+  RUNNABLE binary through the host lane, and `lower_handle_effect`'s
+  catch-all is live today via .dp (`effect: teleport` builds and runs).
+- **[#721]** found probing the controls: eval cannot ingest the canonical
+  Deep of a NULLARY fn (`value is not callable`); check scores it 1 and the
+  compiled lane runs it.
+
+### Sweep 7 (#688, prove): executed
+
+The class fires in the default build with no opaque type: prove's fuzz-tier
+interpreter collapses int64 offsets 2^53+1 vs 2^53 and reports a TRUE
+theorem failed with a spurious counterexample (x = 0). Comment posted; the
+opaque produced-value chokepoint itself still needs the smt build.
+
+### Sweep 8 (leftovers): the prediction was wrong
+
+- **[#725]** `reduce_window`'s `unwrap_or_default()` (item 5) is REAL and
+  silent - against the "every sibling was refuted, expect these to be too"
+  prediction. Non-literal window+strides lower to empty lists and the
+  compiled max-pool returns the UNPOOLED input with the wrong shape at
+  check score 1; the half-non-literal case panics the emitter instead.
+- Item 7 (named_axis `unwrap_or(Prim::F32)`, `assign_partition`): probed as
+  far as the input surface reaches; basic partition is correct in both
+  lanes, and both fallbacks need an internal desync. Left as inspected-only.
+
+### What genuinely remains
+
+1. **HIP runtime behavior** - unchanged from the brief: emission-only here;
+   the gfx1151 box should run #689's probes via `scripts/hip_test.py`.
+2. **Metal runtime execution** - emission is locked; running the kernels
+   needs a small driver harness (this arm64 macOS machine can compile and
+   run Metal).
+3. **The #688 opaque chokepoint** - needs `--features smt` plus an @opaque
+   int64-field type; the class is proven live in prove's fuzz tier either way.
+4. **`with seed` SEMANTICS under compilation** (does seeding actually
+   reproduce across lanes?) - noticed but not swept.
+5. **Print-formatting divergence between lanes** (eval prints
+   `1.4142135381698608`, C prints `1.414213538169861` for the same f32) -
+   not a value bug, but the #687 exact-string oracle needs a per-op
+   formatting contract before it can compare transcendental outputs.
+
+[#714]: https://github.com/Chelis-Lang/chelis/issues/714
+[#715]: https://github.com/Chelis-Lang/chelis/issues/715
+[#716]: https://github.com/Chelis-Lang/chelis/issues/716
+[#717]: https://github.com/Chelis-Lang/chelis/issues/717
+[#718]: https://github.com/Chelis-Lang/chelis/issues/718
+[#719]: https://github.com/Chelis-Lang/chelis/issues/719
+[#720]: https://github.com/Chelis-Lang/chelis/issues/720
+[#721]: https://github.com/Chelis-Lang/chelis/issues/721
+[#722]: https://github.com/Chelis-Lang/chelis/issues/722
+[#723]: https://github.com/Chelis-Lang/chelis/issues/723
+[#724]: https://github.com/Chelis-Lang/chelis/issues/724
+[#725]: https://github.com/Chelis-Lang/chelis/issues/725
+[#726]: https://github.com/Chelis-Lang/chelis/issues/726
