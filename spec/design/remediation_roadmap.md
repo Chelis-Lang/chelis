@@ -14,6 +14,20 @@ The plan set: `dtype_semantics.md` (#729), `loud_unsupported.md` (#730),
 `spec_provenance.md` (#733), plus the `capability_table.md` schema (rides
 #729 Phase 4) and the audit record under `docs/investigations/`.
 
+## The class map
+
+| meta (the class) | method (design spec) | tracker |
+|---|---|---|
+| #727 no dtype's semantics enforced at any single point (#695 = its integer instance) | `dtype_semantics.md` - per-dtype finalizer behind private constructors, int/float kernel split, one storage decision, generated backend dispatch | #729 |
+| #703 unsupported cases substitute values instead of failing | `loud_unsupported.md` - Result-typed failure channel, the 18-row census sweep, un-writability ratchets (lint, newtype, tripwire), gates demoted to UX | #730 |
+| #709 unrecognized constructs silently exempt from checking (+#710's silent half) | `checker_totality.md` - loud wildcard + handle-effect case, ErrorWitness token (silent Type::Error unconstructible), totality invariant, DeepTag exhaustiveness | #731 |
+| #728 the observation channel is not dtype-faithful | `faithful_observation.md` - one Rust formatter, generated C print helper, round-trip invariant, tolerance table; landable before #729; unblocks #687 | #732 |
+| spec silence + stale claims (#694; the unauthored cells) | `spec_provenance.md` - hash-addressed spec atoms, lint-checked @spec claims, test-carrier coverage, the PR authority gate | #733 |
+
+Supporting: `capability_table.md` (schema; rides #729 Phase 4),
+`docs/agent_quality_architecture.md` (#740), the seeded atoms
+(spec/04 §9-§10, spec/05 §7-§8), and PR #696 (the acceptance surface).
+
 ## Global sequencing
 
 The plans are deliberately independently landable - every pairwise
