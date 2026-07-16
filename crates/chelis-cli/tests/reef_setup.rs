@@ -11,6 +11,8 @@
 //!   * toolchain already installed, no reef.lock, no [chelis-src] -> clean.
 //!   * reef.lock present (bundled skip-class entry) -> install section runs.
 //!   * [chelis-src] present -> source-crate sync section runs.
+//!   * stale shared-skill command wrappers -> the shared agent surface is repaired.
+//!   * an unwritable command surface -> setup fails before the doctor summary.
 //!   * toolchain missing + chelisup available -> auto-installs; the shim at
 //!     `<home>/bin/chelis` is chelisup's, NOT the compiler (trap guard).
 //!   * toolchain missing + chelisup absent -> loud, actionable error naming
@@ -42,6 +44,14 @@ fn chelis(home: &Path) -> Command {
         .env_remove("CHELISUP_RELEASE_BASE")
         .env_remove("GITHUB_TOKEN");
     c
+}
+
+/// Install the test's real chelis binary as a synthetic pinned toolchain so
+/// setup's cross-version subprocess exercises the actual conform materializer.
+fn install_test_chelis_toolchain(home: &Path, version: &str) {
+    let destination = home.join("toolchains").join(version).join("bin/chelis");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    fs::copy(assert_cmd::cargo::cargo_bin("chelis"), &destination).unwrap();
 }
 
 // ---- toolchain present ----------------------------------------------------
@@ -94,6 +104,65 @@ fn setup_runs_install_section_when_reef_lock_present() {
         .stdout(predicate::str::contains(
             "Skipped bundled runtime chelis-std",
         ));
+}
+
+// ---- shared agent surface -------------------------------------------------
+
+#[test]
+fn setup_repairs_stale_shared_skill_command_wrappers() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let shell = tmp.path().join("shell");
+    chelis_conformance::scaffold::scaffold(&shell, "shelly", "Shelly", "0.9.9")
+        .expect("scaffold shell");
+    install_test_chelis_toolchain(&home, "0.9.9");
+    fs::write(
+        shell.join(".claude/commands/spec-sync.md"),
+        "stale Claude wrapper\n",
+    )
+    .unwrap();
+    fs::write(
+        shell.join(".codex/commands/spec-sync.md"),
+        "different stale Codex wrapper\n",
+    )
+    .unwrap();
+
+    chelis(&home)
+        .args(["reef", "setup", "--path"])
+        .arg(&shell)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("agent surface: synced"));
+
+    let effective = fs::read(shell.join("agent-skills/spec-sync/SKILL.md")).unwrap();
+    assert_eq!(
+        fs::read(shell.join(".claude/commands/spec-sync.md")).unwrap(),
+        effective
+    );
+    assert_eq!(
+        fs::read(shell.join(".codex/commands/spec-sync.md")).unwrap(),
+        effective
+    );
+}
+
+#[test]
+fn setup_stops_before_doctor_when_agent_surface_cannot_be_written() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let shell = tmp.path().join("shell");
+    chelis_conformance::scaffold::scaffold(&shell, "shelly", "Shelly", "0.9.9")
+        .expect("scaffold shell");
+    install_test_chelis_toolchain(&home, "0.9.9");
+    fs::remove_dir_all(shell.join(".claude/commands")).unwrap();
+    fs::write(shell.join(".claude/commands"), "blocks command directory\n").unwrap();
+
+    chelis(&home)
+        .args(["reef", "setup", "--path"])
+        .arg(&shell)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(".claude/commands"))
+        .stdout(predicate::str::contains("--- doctor ---").not());
 }
 
 // ---- source crates --------------------------------------------------------
@@ -170,7 +239,7 @@ fn write_release_tarball(base: &Path, ver: &str, slug: &str) {
     let mut tar_buf: Vec<u8> = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut tar_buf);
-        let payload = b"#!/bin/true\n";
+        let payload = b"#!/bin/sh\nexit 0\n";
         let mut header = tar::Header::new_gnu();
         header.set_size(payload.len() as u64);
         header.set_mode(0o755);
@@ -195,12 +264,24 @@ fn write_release_tarball(base: &Path, ver: &str, slug: &str) {
 /// built this is a fast no-op.
 fn chelisup_bin() -> PathBuf {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let status = Proc::new(cargo)
         .args(["build", "-p", "chelisup", "--bin", "chelisup"])
+        .current_dir(&repo_root)
         .status()
         .expect("spawn cargo build for chelisup");
     assert!(status.success(), "building chelisup failed");
-    let path = assert_cmd::cargo::cargo_bin("chelisup");
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root.join("target"));
+    let target_dir = if target_dir.is_absolute() {
+        target_dir
+    } else {
+        repo_root.join(target_dir)
+    };
+    let path = target_dir
+        .join("debug")
+        .join(format!("chelisup{}", std::env::consts::EXE_SUFFIX));
     assert!(path.exists(), "chelisup binary at {}", path.display());
     path
 }

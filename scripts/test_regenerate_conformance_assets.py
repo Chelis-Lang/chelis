@@ -6,10 +6,11 @@ repo root, or through the CI `unittest discover -s scripts` step.
 Locked here:
   (a) SHARED_SKILLS matches the live `agent-skills/` directory (the Python
       mirror of the Rust `skills::SHARED_SKILLS` tripwire);
-  (b) planned_skill_copies enumerates one dest per real source file, under the
-      crate's assets/skills/ tree;
-  (c) is_stale detects missing, differing, and orphaned embedded copies;
-  (d) a real regenerate makes --check pass (round-trip idempotence).
+  (b) planned_skill_copies enumerates one embedded destination per source;
+  (c) planned_command_copies enumerates byte-identical Claude and Codex
+      same-name command destinations for every shared skill;
+  (d) is_stale detects missing, differing, and orphaned generated copies;
+  (e) a real regenerate makes --check pass (round-trip idempotence).
 """
 
 import importlib.util
@@ -59,6 +60,17 @@ class PlannedCopiesTests(unittest.TestCase):
             )
 
 
+    def test_two_same_name_command_destinations_per_shared_skill(self):
+        pairs = regen.planned_command_copies(ROOT)
+        self.assertEqual(len(pairs), 2 * len(regen.SHARED_SKILLS))
+        destinations = {dest for _, dest in pairs}
+        for name in regen.SHARED_SKILLS:
+            source = ROOT / "agent-skills" / name / "SKILL.md"
+            self.assertIn((source, ROOT / ".claude" / "commands" / f"{name}.md"), pairs)
+            self.assertIn((source, ROOT / ".codex" / "commands" / f"{name}.md"), pairs)
+        self.assertEqual(len(destinations), len(pairs))
+
+
 class IsStaleTests(unittest.TestCase):
     def _fake_tree(self, tmp: Path):
         """Build a minimal agent-skills-shaped source tree + return (pairs, dest)."""
@@ -99,7 +111,7 @@ class IsStaleTests(unittest.TestCase):
 
 
 class RoundTripTests(unittest.TestCase):
-    def test_repo_assets_are_current(self):
+    def test_repo_assets_and_command_projections_are_current(self):
         # The committed assets must already be up to date: the regenerate script
         # in --check mode is a CI-safe guard, and this asserts the checked-in
         # tree matches the live agent-skills/.
@@ -111,6 +123,14 @@ class RoundTripTests(unittest.TestCase):
             "committed conformance assets are stale; run "
             "`python3 scripts/regenerate_conformance_assets.py`.",
         )
+        command_pairs = regen.planned_command_copies(ROOT)
+        for source, destination in command_pairs:
+            self.assertTrue(destination.is_file(), f"missing command projection: {destination}")
+            self.assertEqual(
+                source.read_bytes(),
+                destination.read_bytes(),
+                f"stale command projection: {destination}",
+            )
 
 
 class MultiFileSkillRejectedTests(unittest.TestCase):

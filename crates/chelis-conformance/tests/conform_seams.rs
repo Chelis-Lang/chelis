@@ -112,12 +112,15 @@ fn shell_local_block_passes_audit_and_survives_sync() {
     let skill = root.join("agent-skills/example-corpus/SKILL.md");
     append(&skill, &format!("\n{BLOCK}"));
 
-    assert!(
-        audit::audit(&root).ok(),
-        "a well-formed shell-local block is exempt from §8"
+    let before_sync = audit::audit(&root);
+    assert_eq!(
+        row(&before_sync, "vendored-skills").verdict,
+        audit::Verdict::Fail,
+        "the block is valid, but stale same-name commands must fail until sync"
     );
 
-    // Sync regenerates the managed span but keeps the block verbatim.
+    // Sync regenerates the managed span, keeps the block verbatim, and projects
+    // the complete effective skill to both command trees.
     let notices = scaffold::materialize_skills(&root).unwrap();
     assert!(
         notices.is_empty(),

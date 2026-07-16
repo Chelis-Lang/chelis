@@ -1,0 +1,1 @@
+../../agent-skills/packaging-install/SKILL.md

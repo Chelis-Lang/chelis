@@ -51,7 +51,7 @@ pub fn scaffold(root: &Path, name: &str, module_prefix: &str, version: &str) -> 
     write(root, "tests_blocked/README.md", TESTS_BLOCKED_README)?;
 
     write(root, ".github/workflows/ci.yml", &ci_yml(version))?;
-    write(root, ".github/workflows/bump-pr.yml", BUMP_PR_YML)?;
+    write(root, ".github/workflows/bump-pr.yml", &bump_pr_yml(version))?;
 
     materialize_skills(root)?;
 
@@ -76,54 +76,77 @@ pub(crate) fn split_shell_local(content: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// Materialize `agent-skills/` from the embedded pinned skill set and wire the
-/// `.claude`/`.codex` skill-dir symlinks. Shared by `init` and `sync`.
+/// Materialize the shared agent surface from the embedded pinned skill set.
+/// Shared by `init`, `sync`, `bump`, and `reef setup`.
 ///
-/// Preserves any trailing shell-local block in each shared `SKILL.md` (chelis#653)
-/// and repo-local domain skills declared in `[conform] local_skills` (chelis#651).
-/// Returns human-readable notices for the caller to surface: an upstream body that
-/// changed underneath a shell-local override, and any un-materialized skill it
-/// pruned.
+/// One effective value (the embedded body plus any valid trailing shell-local
+/// block) is written byte-for-byte to `agent-skills/<name>/SKILL.md` and both
+/// same-name command trees. Repo-local domain skills declared in `[conform]
+/// local_skills` are preserved. Retired command wrappers are removed only when
+/// the previous `agent-skills/UPSTREAM.toml` proves generated ownership; missing
+/// or malformed ownership data is non-destructive and produces a notice.
+///
+/// Returns human-readable notices for the caller to surface: an upstream body
+/// that changed underneath a shell-local override, unsafe retired-wrapper cleanup
+/// that was skipped, and any un-materialized skill it pruned.
 pub fn materialize_skills(root: &Path) -> Result<Vec<String>, String> {
     let local_skills = fs::read_to_string(root.join("reef.toml"))
         .ok()
         .map(|t| crate::audit::parse_local_skills(&t))
         .unwrap_or_default();
+    let surface_already_existed = root.join("agent-skills").exists()
+        || root.join(".claude/commands").exists()
+        || root.join(".codex/commands").exists();
+    let prior_manifest = read_prior_skill_manifest(root)?;
     let mut notices = Vec::new();
 
+    match &prior_manifest {
+        PriorSkillManifest::Missing if surface_already_existed => notices.push(
+            "agent-skills/UPSTREAM.toml is missing, so retired shared-command ownership cannot be proven; preserving unproven .claude/commands/ and .codex/commands/ files while repairing current shared wrappers (restore a valid manifest and run `chelis reef conform sync`)"
+                .to_string(),
+        ),
+        PriorSkillManifest::Malformed(reason) => notices.push(format!(
+            "agent-skills/UPSTREAM.toml is malformed ({reason}), so retired shared-command ownership cannot be proven; preserving unproven .claude/commands/ and .codex/commands/ files while repairing current shared wrappers (restore a valid manifest and run `chelis reef conform sync`)"
+        )),
+        PriorSkillManifest::Missing | PriorSkillManifest::Valid(_) => {}
+    }
+
     for (skill_name, body) in skills::EMBEDDED_SKILLS {
-        let rel = format!("agent-skills/{skill_name}/SKILL.md");
-        let existing = fs::read_to_string(root.join(&rel)).ok();
+        let skill_rel = format!("agent-skills/{skill_name}/SKILL.md");
+        let existing = fs::read_to_string(root.join(&skill_rel)).ok();
         let block = existing
             .as_deref()
-            .and_then(|c| split_shell_local(c).1.map(str::to_string));
+            .and_then(|content| split_shell_local(content).1.map(str::to_string));
         // The on-disk managed span IS the base the block was written against
         // (§8 keeps it byte-equal to the previous toolchain). If it diverges from
         // the new embedded body while a block is present, flag it so the agent
         // re-checks the override against the propagated upstream text.
-        if let Some(prev) = &existing {
-            let (prev_managed, prev_block) = split_shell_local(prev);
-            if prev_block.is_some() && prev_managed.trim_end() != body.trim_end() {
+        if let Some(previous) = &existing {
+            let (previous_managed, previous_block) = split_shell_local(previous);
+            if previous_block.is_some() && previous_managed.trim_end() != body.trim_end() {
                 notices.push(format!(
                     "{skill_name}: upstream skill body changed and a shell-local override is present; re-check it"
                 ));
             }
         }
-        let content = match &block {
-            Some(b) => format!(
+        let effective = match &block {
+            Some(block) => format!(
                 "{}\n{}",
                 body.trim_end(),
-                b.trim_start_matches(['\n', '\r'])
+                block.trim_start_matches(['\n', '\r'])
             ),
             None => (*body).to_string(),
         };
-        write(root, &rel, &content)?;
+        write_shared_agent_surface(root, skill_name, &effective)?;
     }
+
+    remove_retired_command_wrappers(root, &prior_manifest, &mut notices)?;
 
     // Record the pointer manifest so the shell commits a stamp, not opaque bytes.
     let mut manifest = String::from(
         "# Materialized from the pinned chelis toolchain's embedded skill set.\n\
-         # Do not edit skill bodies here; run `chelis reef conform sync`.\n\n\
+         # Shared skill bodies and same-name command wrappers are toolchain-owned.\n\
+         # Do not edit them independently; run `chelis reef conform sync`.\n\n\
          skills = [\n",
     );
     for name in skills::SHARED_SKILLS {
@@ -145,6 +168,117 @@ pub fn materialize_skills(root: &Path) -> Result<Vec<String>, String> {
     symlink_dir(root, "../agent-skills", ".claude/skills")?;
     symlink_dir(root, "../agent-skills", ".codex/skills")?;
     Ok(notices)
+}
+
+fn write_shared_agent_surface(root: &Path, name: &str, effective: &str) -> Result<(), String> {
+    for rel in [
+        format!("agent-skills/{name}/SKILL.md"),
+        format!(".claude/commands/{name}.md"),
+        format!(".codex/commands/{name}.md"),
+    ] {
+        write(root, &rel, effective)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+enum PriorSkillManifest {
+    Missing,
+    Valid(Vec<String>),
+    Malformed(String),
+}
+
+fn read_prior_skill_manifest(root: &Path) -> Result<PriorSkillManifest, String> {
+    let path = root.join("agent-skills/UPSTREAM.toml");
+    let body = match fs::read_to_string(&path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PriorSkillManifest::Missing);
+        }
+        Err(error) => return Err(format!("read {}: {error}", path.display())),
+    };
+    Ok(match parse_prior_skill_names(&body) {
+        Ok(names) => PriorSkillManifest::Valid(names),
+        Err(reason) => PriorSkillManifest::Malformed(reason),
+    })
+}
+
+/// Strictly parse the generated manifest's `skills = ["name", ...]` list.
+/// Ambiguous or unsafe input must never become deletion authority.
+fn parse_prior_skill_names(manifest: &str) -> Result<Vec<String>, String> {
+    // Trust only the narrow shape this materializer generated. Removing comments
+    // and blank lines permits historical prose changes without accepting other
+    // TOML keys or trailing malformed content as deletion authority.
+    let normalized = manifest
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or("").trim())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let assigned = normalized
+        .strip_prefix("skills")
+        .and_then(|rest| rest.trim_start().strip_prefix('='))
+        .map(str::trim)
+        .ok_or_else(|| "expected only a `skills = [...]` list".to_string())?;
+    let list = assigned
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .ok_or_else(|| "skills list must have one closing `]` and no trailing data".to_string())?;
+    let mut names = Vec::new();
+    for raw in list.split(',') {
+        let token = raw.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let name = token
+            .strip_prefix('"')
+            .and_then(|token| token.strip_suffix('"'))
+            .ok_or_else(|| format!("invalid quoted skill name {token:?}"))?;
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(format!("unsafe skill name {name:?}"));
+        }
+        if !names.iter().any(|existing| existing == name) {
+            names.push(name.to_string());
+        }
+    }
+    Ok(names)
+}
+
+fn remove_retired_command_wrappers(
+    root: &Path,
+    prior_manifest: &PriorSkillManifest,
+    notices: &mut Vec<String>,
+) -> Result<(), String> {
+    let PriorSkillManifest::Valid(previous_names) = prior_manifest else {
+        return Ok(());
+    };
+    for name in previous_names {
+        if skills::SHARED_SKILLS.contains(&name.as_str()) || name == "red-team" {
+            continue;
+        }
+        for tool in [".claude", ".codex"] {
+            let rel = format!("{tool}/commands/{name}.md");
+            let path = root.join(&rel);
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(format!("inspect {}: {error}", path.display())),
+            };
+            if metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+                fs::remove_file(&path)
+                    .map_err(|error| format!("remove {}: {error}", path.display()))?;
+            } else {
+                notices.push(format!(
+                    "preserved retired generated path {rel}: expected a regular command file; inspect it and rerun `chelis reef conform sync`"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Remove any content under `agent-skills/` that the pinned embedded set does
@@ -262,7 +396,10 @@ fn agents_md(name: &str, version: &str) -> String {
          {block}\n\
          ## Toolchain Policy\n\n\
          Install the pinned toolchain via `chelisup`; never hand-symlink a machine-global\n\
-         default. Python is uv-managed. See the managed block above for the upstream contract.\n\n\
+         default. Python is uv-managed. Shared skills and their same-name Claude/Codex\n\
+         commands are toolchain-owned; never edit generated command bodies independently.\n\
+         Run `chelis reef conform sync` to repair them. See the managed block above for the\n\
+         upstream contract.\n\n\
          ## Pin Bump Checklist\n\n\
          A pin bump is a de-narrowing event. Bump only through a `chelis reef conform bump`\n\
          PR that runs the blocked-probe suite, the staleness/narrowing audit, and restamps\n\
@@ -302,11 +439,12 @@ const UPSTREAM_BUGS: &str = "# Upstream Bugs\n\n\
 
 /// Shell-driven scheduled bump PR. Detects a newer chelis release, runs
 /// `conform bump` on a branch, and opens a PR whose CI runs the full checklist —
-/// so a bump that breaks the shell is a red PR, never a broken `main`. Uses a
-/// dynamic version (no static `CHELIS_VERSION` env) so it does not trip the
-/// pin-consistency audit. Requires branch protection on `main` to close the
-/// direct-push door.
-const BUMP_PR_YML: &str = r#"name: chelis pin bump
+/// so a bump that breaks the shell is a red PR, never a broken `main`. Runtime
+/// installation uses the dynamically discovered candidate; the static env pair
+/// remains an audit mirror of the current pin until `conform bump` rewrites the
+/// generated PR. Requires branch protection on `main` to close the direct-push
+/// door.
+const BUMP_PR_YML_TEMPLATE: &str = r#"name: chelis pin bump
 on:
   schedule:
     - cron: "0 8 * * 1"   # weekly; adjust to your cadence
@@ -315,6 +453,12 @@ on:
 permissions:
   contents: write
   pull-requests: write
+
+env:
+  # Audit-only mirror of the current reef pin. Runtime installation below uses
+  # the dynamically discovered bump candidate.
+  CHELIS_TAG: v__CHELIS_VERSION__
+  CHELIS_VERSION: __CHELIS_VERSION__
 
 jobs:
   bump:
@@ -343,6 +487,10 @@ jobs:
             checklist (conform audit + blocked/negative probes); do not merge red.
           commit-message: "chore: bump chelis pin to ${{ steps.latest.outputs.version }}"
 "#;
+
+fn bump_pr_yml(version: &str) -> String {
+    BUMP_PR_YML_TEMPLATE.replace("__CHELIS_VERSION__", version)
+}
 
 const ISSUE_DRAFTS_README: &str = "# Parked upstream issue drafts\n\n\
     Ready-to-file `chelis#` drafts with their filing condition. Cite the draft path\n\

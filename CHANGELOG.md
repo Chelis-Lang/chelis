@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Shell workflow-pin auditing now fails closed on incomplete or conflicting
+  audit mirrors.** Every detected toolchain-installing workflow must carry the
+  exact static `CHELIS_TAG` / `CHELIS_VERSION` pair matching `reef.toml`;
+  missing values, conflicting duplicate declarations, and direct
+  `gh release download --repo Chelis-Lang/chelis` installers are covered.
+  Non-installing workflows that merely mention the variable names remain out
+  of scope. Newly scaffolded pin-bump workflows carry the required audit-only
+  pair while continuing to install the dynamically discovered bump candidate.
+
 ## [0.16.1] — 2026-07-12
 
 ### Added

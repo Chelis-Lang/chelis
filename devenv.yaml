@@ -1,0 +1,42 @@
+# yaml-language-server: $schema=https://devenv.sh/devenv.schema.json
+inputs:
+  nixpkgs:
+    url: github:cachix/devenv-nixpkgs/rolling
+
+  # Rust toolchains consumed by both devenv and crate2nix.
+  rust-overlay:
+    url: github:oxalica/rust-overlay
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
+
+  # Nix packaging for the Cargo workspace.
+  crate2nix:
+    url: github:nix-community/crate2nix
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
+
+  # Nix packaging for py/ and its uv.lock.
+  uv2nix:
+    url: github:pyproject-nix/uv2nix
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
+  pyproject-nix:
+    url: github:pyproject-nix/pyproject.nix
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
+  pyproject-build-systems:
+    url: github:pyproject-nix/build-system-pkgs
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
+
+  # Supplies the exact Python 3.11 series requested by py/pyproject.toml.
+  nixpkgs-python:
+    url: github:cachix/nixpkgs-python
+    inputs:
+      nixpkgs:
+        follows: nixpkgs

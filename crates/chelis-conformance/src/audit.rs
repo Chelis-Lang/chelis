@@ -13,7 +13,7 @@
 //! downgrades a row to `Na` when the shell's pin predates the row, so the HEAD
 //! canary does not fail a stale shell for a requirement that postdates its pin.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::manifest::{CONTRACT_BASELINE_VERSION, ContractRow, MANIFEST, Tier};
@@ -322,6 +322,10 @@ fn check_workflow_env_pins(ctx: &Ctx) -> Check {
         );
     };
     let bare = pin.trim_start_matches('=');
+    let expected_pins = [
+        ("CHELIS_TAG", format!("v{bare}")),
+        ("CHELIS_VERSION", bare.to_string()),
+    ];
     let mut mismatches = Vec::new();
     let mut checked = 0;
     for (name, body) in &ctx.workflows {
@@ -329,15 +333,16 @@ fn check_workflow_env_pins(ctx: &Ctx) -> Check {
             continue;
         }
         checked += 1;
-        if let Some(v) = extract_env(body, "CHELIS_VERSION")
-            && v.trim_start_matches('v') != bare
-        {
-            mismatches.push(format!("{name}: CHELIS_VERSION={v} != {bare}"));
-        }
-        if let Some(t) = extract_env(body, "CHELIS_TAG")
-            && t.trim_start_matches('v') != bare
-        {
-            mismatches.push(format!("{name}: CHELIS_TAG={t} != v{bare}"));
+        for (key, expected) in &expected_pins {
+            let found = extract_static_env_values(body, key);
+            if found.len() != 1 || !found.contains(expected) {
+                let actual = if found.is_empty() {
+                    "missing".to_string()
+                } else {
+                    found.into_iter().collect::<Vec<_>>().join(", ")
+                };
+                mismatches.push(format!("{name}: {key}={actual}; expected {expected}"));
+            }
         }
         // A literal `chelisup install <ver>` is a pin location too — an env var
         // is not the only way a workflow installs a version.
@@ -631,15 +636,38 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
             None => problems.push(format!("{name}: missing")),
             Some(live) => {
                 // A trailing shell-local block (chelis#653) is shell-owned; §8
-                // byte-checks only the toolchain-owned managed span above it.
+                // byte-checks the toolchain-owned managed span above it, then
+                // treats the complete validated file as the effective value both
+                // same-name command wrappers must project byte-for-byte.
                 let (managed, block) = crate::scaffold::split_shell_local(&live);
+                let mut effective_is_valid = true;
                 if managed.trim_end() != body.trim_end() {
                     problems.push(format!("{name}: forked/stale"));
+                    effective_is_valid = false;
                 }
                 if let Some(block) = block
                     && let Err(why) = validate_shell_local_block(block)
                 {
                     problems.push(format!("{name}: {why}"));
+                    effective_is_valid = false;
+                }
+                if effective_is_valid {
+                    for tool in [".claude", ".codex"] {
+                        let rel = format!("{tool}/commands/{name}.md");
+                        let command_path = ctx.root.join(&rel);
+                        match std::fs::read(&command_path) {
+                            Ok(command) if command != live.as_bytes() => problems.push(format!(
+                                "{name}: {rel} differs from agent-skills/{name}/SKILL.md"
+                            )),
+                            Ok(_) => {}
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                                problems.push(format!("{name}: missing {rel}"));
+                            }
+                            Err(error) => {
+                                problems.push(format!("{name}: cannot read {rel}: {error}"));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -678,10 +706,10 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
     if !problems.is_empty() {
         return fail(
             format!(
-                "vendored skills drifted from the pinned set: {}",
+                "shared agent surface drifted from the pinned set: {}",
                 problems.join(", ")
             ),
-            "run `chelis reef conform sync` to re-materialize agent-skills/ from the toolchain",
+            "run `chelis reef conform sync` to re-materialize agent-skills/ and same-name .claude/commands/ + .codex/commands/ from the toolchain",
         );
     }
     // Both tool-surface skill dirs must be symlinks that actually resolve to
@@ -1039,26 +1067,46 @@ fn read_workflows(root: &Path) -> Vec<(String, String)> {
 }
 
 fn workflow_installs_toolchain(body: &str) -> bool {
-    body.contains("CHELIS_VERSION")
-        || body.contains("CHELIS_TAG")
-        || body.contains("chelisup install")
+    body.contains("chelisup install")
         || body.contains("install-chelis")
+        || (body.contains("gh release download") && body.contains("Chelis-Lang/chelis"))
 }
 
-/// Extract a `KEY: value` env value (first occurrence), tolerating quotes.
-fn extract_env(body: &str, key: &str) -> Option<String> {
-    for line in body.lines() {
-        let t = line.trim();
-        if let Some(rest) = t.strip_prefix(key)
-            && let Some(v) = rest.trim_start().strip_prefix(':')
-        {
-            let v = v.trim().trim_matches('"').trim_matches('\'');
-            if !v.is_empty() && !v.starts_with("${{") {
-                return Some(v.to_string());
-            }
-        }
+/// Collect every static literal assigned to `key` in a workflow.
+///
+/// GitHub Actions expressions are deliberately excluded: the shell contract
+/// requires the workflow-level pair to remain an auditable literal mirror of
+/// `reef.toml`. A set catches conflicting duplicate declarations while allowing
+/// harmless repeated declarations of the same expected value.
+fn extract_static_env_values(body: &str, key: &str) -> BTreeSet<String> {
+    body.lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix(key)?.trim_start();
+            let raw = rest.strip_prefix(':')?.trim();
+            parse_static_yaml_scalar(raw)
+        })
+        .collect()
+}
+
+fn parse_static_yaml_scalar(raw: &str) -> Option<String> {
+    if raw.is_empty() || raw.starts_with("${{") {
+        return None;
     }
-    None
+
+    let first = raw.chars().next()?;
+    if first == '\'' || first == '"' {
+        let tail = &raw[first.len_utf8()..];
+        let end = tail.find(first)?;
+        let value = &tail[..end];
+        let trailing = tail[end + first.len_utf8()..].trim();
+        if !trailing.is_empty() && !trailing.starts_with('#') {
+            return None;
+        }
+        return (!value.is_empty()).then(|| value.to_string());
+    }
+
+    let value = raw.split_once('#').map_or(raw, |(value, _)| value).trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 /// Extract the version argument of each `chelisup install <ver>` occurrence,
@@ -1413,15 +1461,24 @@ mod tests {
     }
 
     #[test]
-    fn env_extraction() {
-        assert_eq!(
-            extract_env("  CHELIS_VERSION: 0.14.0\n", "CHELIS_VERSION").as_deref(),
-            Some("0.14.0")
+    fn static_env_values_collect_literals_and_reject_expressions() {
+        let body = concat!(
+            "  CHELIS_VERSION: 0.14.0\n",
+            "  CHELIS_VERSION: '0.13.0' # stale duplicate\n",
+            "  CHELIS_TAG: \"v0.14.0\" # current\n",
+            "  DYNAMIC: ${{ env.CHELIS_VERSION }}\n",
+            "  CHELIS_VERSION_EXTRA: 9.9.9\n",
         );
         assert_eq!(
-            extract_env("  CHELIS_TAG: \"v0.14.0\"\n", "CHELIS_TAG").as_deref(),
-            Some("v0.14.0")
+            extract_static_env_values(body, "CHELIS_VERSION"),
+            ["0.13.0".to_string(), "0.14.0".to_string()]
+                .into_iter()
+                .collect()
         );
-        assert_eq!(extract_env("  X: ${{ env.Y }}\n", "X"), None);
+        assert_eq!(
+            extract_static_env_values(body, "CHELIS_TAG"),
+            ["v0.14.0".to_string()].into_iter().collect()
+        );
+        assert!(extract_static_env_values(body, "DYNAMIC").is_empty());
     }
 }

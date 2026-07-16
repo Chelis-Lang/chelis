@@ -618,11 +618,13 @@ enum ReefCommand {
     /// Reads the `reef.toml` compiler pin, then, in order:
     /// 1. ensures the pinned toolchain is installed, auto-installing it by
     ///    delegating to `chelisup` when it is missing;
-    /// 2. `reef install --from-lockfile` — source packages + binary
+    /// 2. materializes the pinned shared agent skills and their same-name
+    ///    `.claude/commands/` and `.codex/commands/` projections;
+    /// 3. `reef install --from-lockfile` — source packages + binary
     ///    artifacts (chelis#468) from `reef.lock`, when one is present;
-    /// 3. `reef src sync` — chelis source crates (chelis#571), when the
+    /// 4. `reef src sync` — chelis source crates (chelis#571), when the
     ///    manifest carries a `[chelis-src]` section;
-    /// 4. prints the `reef doctor` health summary.
+    /// 5. prints the `reef doctor` health summary.
     ///
     /// This is the current-chelis entry point for the cross-version case
     /// (§5.4): it may itself install the pinned toolchain, so a
@@ -662,7 +664,9 @@ enum ConformCommand {
     },
     /// Scaffold a new shell (or retrofit an existing one) from the embedded
     /// templates: reef.toml, AGENTS.md (+ CLAUDE.md symlink), the CHELIS_SURFACE
-    /// / UPSTREAM_BUGS docs, tests_neg/tests_blocked, CI, and materialized skills.
+    /// / UPSTREAM_BUGS docs, tests_neg/tests_blocked, CI, materialized skills,
+    /// skill-dir symlinks, and same-name `.claude/commands/` plus
+    /// `.codex/commands/` wrappers.
     Init {
         /// Package name.
         name: String,
@@ -673,19 +677,22 @@ enum ConformCommand {
         #[arg(long, short)]
         output: Option<PathBuf>,
     },
-    /// Regenerate the pointer managed blocks and re-materialize the skill set
-    /// from the pinned toolchain, restamping to the reef pin. Touches only
-    /// managed regions and `agent-skills/`.
+    /// Regenerate pointer managed blocks and the pinned shared agent surface:
+    /// `agent-skills/`, skill-dir symlinks, and toolchain-owned same-name files
+    /// under `.claude/commands/` and `.codex/commands/`. Preserves supported
+    /// aliases, unrelated local commands, and sanctioned shell-local blocks.
     Sync {
         /// Shell package root (defaults to `.`).
         #[arg(long)]
         path: Option<PathBuf>,
     },
     /// Mechanize the Pin Bump Checklist: rewrite every pin location in lockstep,
-    /// restamp the managed blocks + re-materialize skills, then run the offline
-    /// audit and the blocked/negative suites. Produces the change set on the
-    /// working tree (git-agnostic; the caller opens the PR). Exits non-zero only
-    /// when the bump's OWN output is non-conformant (its pins/stamps/skills) or a
+    /// restamp managed blocks + re-materialize shared skills and same-name
+    /// `.claude/commands/` plus `.codex/commands/` files, then run the offline
+    /// audit and blocked/negative
+    /// suites. Produces the change set on the working tree (git-agnostic; the
+    /// caller opens the PR). Exits non-zero only when the bump's OWN output is
+    /// non-conformant (its pins/stamps/shared agent surface) or a
     /// suite fails; a clean bump that leaves only author-follow-up rows (CI
     /// wiring, pre-existing doc fixes) exits 0 and lists the remaining steps.
     Bump {
@@ -3231,7 +3238,7 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
                 chelis_compiler_api::COMPILER_VERSION,
             )?;
             println!(
-                "scaffolded conformant shell `{name}` at {} (chelis {})",
+                "scaffolded conformant shell `{name}` at {} (chelis {}; shared skills + Claude/Codex commands materialized)",
                 root.display(),
                 chelis_compiler_api::COMPILER_VERSION
             );
@@ -3250,7 +3257,7 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
             }
             chelis_conformance::scaffold::sync_managed_blocks(&root, &version)?;
             println!(
-                "synced managed blocks + skills to chelis {version} at {}",
+                "synced managed blocks + shared skills + Claude/Codex commands to chelis {version} at {}",
                 root.display()
             );
         }
@@ -3267,7 +3274,9 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
                 eprintln!("note: {notice}");
             }
             chelis_conformance::scaffold::sync_managed_blocks(&root, &version)?;
-            println!("restamped managed blocks + skills to chelis {version}");
+            println!(
+                "restamped managed blocks + shared skills + Claude/Codex commands to chelis {version}"
+            );
 
             // Offline gate, categorized (chelis#655). A failure on a row whose
             // artifact the bump itself writes (its pins/managed-block stamps/
@@ -3290,7 +3299,7 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
                 .collect();
             if !bump_owned.is_empty() {
                 eprintln!(
-                    "bump left a bump-owned artifact non-conformant (pins/managed blocks/skills); \
+                    "bump left a bump-owned artifact non-conformant (pins/managed blocks/shared agent surface); \
                      the shell is not in a clean bumped state:"
                 );
                 for r in &bump_owned {
@@ -3656,10 +3665,11 @@ fn bare_compiler_pin(pin: &str) -> String {
 
 /// WS-C (§7): bring a freshly-cloned shell to its pins in one verb. Reads
 /// the `reef.toml` compiler pin, then in order: ensures the pinned
-/// toolchain (auto-installing via chelisup), installs source packages +
-/// binary artifacts from `reef.lock` (WS-A), syncs source crates when
-/// `[chelis-src]` is present (chelis#571), and prints the `reef doctor`
-/// health summary. This is the "clone -> one command -> build" entry point.
+/// toolchain (auto-installing via chelisup), converges the shared agent-skill
+/// and same-name command surfaces, installs source packages + binary artifacts
+/// from `reef.lock` (WS-A), syncs source crates when `[chelis-src]` is present
+/// (chelis#571), and prints the `reef doctor` health summary. This is the
+/// "clone -> one command -> build" entry point.
 fn cmd_reef_setup(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     let root = path
         .unwrap_or_else(|| PathBuf::from("."))
@@ -3679,14 +3689,19 @@ fn cmd_reef_setup(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error
     // compiler blocks the downstream build, so there is no point continuing.
     ensure_pinned_toolchain(&version)?;
 
-    // Step 2: source packages + binary artifacts from reef.lock (WS-A).
+    // Step 2: converge through the installed pinned toolchain, whose embedded
+    // shared-skill set is the source of truth. Do not use this current binary's
+    // embedded set when setup is provisioning a different pin.
+    sync_pinned_agent_surface(&root, &version)?;
+
+    // Step 3: source packages + binary artifacts from reef.lock (WS-A).
     if root.join("reef.lock").is_file() {
         run_install_from_lockfile(&root)?;
     } else {
         println!("  install:   no reef.lock; skipping source-package/binary install");
     }
 
-    // Step 3: source crates (chelis#571), only for crate-linking shells.
+    // Step 4: source crates (chelis#571), only for crate-linking shells.
     // The `is_some` guard avoids the "no [chelis-src]" error path in
     // `resolve_shell_src_context`.
     if manifest.chelis_src.is_some() {
@@ -3697,9 +3712,41 @@ fn cmd_reef_setup(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error
         println!("  src:       no [chelis-src]; skipping source-crate sync");
     }
 
-    // Step 4: read-only health summary across every dependency class.
+    // Step 5: read-only health summary across every dependency class.
     println!("--- doctor ---");
     cmd_reef_doctor(Some(&root))?;
+    Ok(())
+}
+
+/// Step 2 of `reef setup`: run the installed pinned toolchain's shared
+/// conformance materializer. Calling its `conform sync` path keeps setup on the
+/// same implementation as init/sync/bump and, critically, uses the embedded
+/// skill set belonging to `version` rather than whichever current chelis was
+/// used to provision the clone.
+fn sync_pinned_agent_surface(root: &Path, version: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let store = chelisup::paths::Store::from_env()?;
+    let pinned_chelis = store.toolchain_dir(version).join("bin/chelis");
+    let status = std::process::Command::new(&pinned_chelis)
+        .args(["reef", "conform", "sync", "--path"])
+        .arg(root)
+        .status()
+        .map_err(|error| {
+            format!(
+                "could not run pinned conformance sync with {}: {error}",
+                pinned_chelis.display()
+            )
+        })?;
+    if !status.success() {
+        let code = status
+            .code()
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "signal".to_string());
+        return Err(format!(
+            "pinned `chelis reef conform sync` failed for {version} (exit {code}); repair the shell agent surface and re-run `chelis reef setup`"
+        )
+        .into());
+    }
+    println!("  agent surface: synced shared skills + Claude/Codex commands");
     Ok(())
 }
 

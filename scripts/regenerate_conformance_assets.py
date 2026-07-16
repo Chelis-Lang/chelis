@@ -6,18 +6,21 @@ at compile time (`include_str!`), mirroring `chelis-std-bundle`. The repo files
 under `agent-skills/` (and, in later phases, canonical `spec/` slices and
 scaffolding templates) are the source of truth for the *content*; the committed
 copies under `crates/chelis-conformance/assets/` are the *embedded copy*. This
-script rebuilds the embedded copy from the repo files so the two cannot drift by
-hand.
+script rebuilds the embedded copy and the monorepo's same-name Claude/Codex
+command projections from the repo files so those generated surfaces cannot
+drift by hand. The monorepo projections retain its symlink convention;
+downstream shells receive regular files from the Rust materializer. Unrelated
+commands and aliases are never enumerated or pruned.
 
 `crates/chelis-conformance/tests/asset_drift_tripwire.rs` asserts the embedded
-bytes equal the live repo files, so a forgotten re-run fails the build with a
-pointer back here.
+and command-projection bytes equal the live repo files, so a forgotten re-run
+fails the build with a pointer back here.
 
 Usage:
     python3 scripts/regenerate_conformance_assets.py [--check]
 
---check exits non-zero (without writing) if the assets are already stale, for a
-CI guard that does not want to mutate the tree.
+--check exits non-zero (without writing) if embedded assets or same-name command
+projections are stale, for a CI guard that does not want to mutate the tree.
 
 stdlib-only, per the repository scripting policy.
 """
@@ -26,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import filecmp
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -80,6 +84,33 @@ def planned_skill_copies(root: Path) -> list[tuple[Path, Path]]:
     return pairs
 
 
+def planned_command_copies(root: Path) -> list[tuple[Path, Path]]:
+    """Return same-name Claude/Codex command projections for shared skills."""
+    command_pairs: list[tuple[Path, Path]] = []
+    for source, _ in planned_skill_copies(root):
+        name = source.parent.name
+        for tool in (".claude", ".codex"):
+            command_pairs.append(
+                (source, root / tool / "commands" / f"{name}.md")
+            )
+    return command_pairs
+
+
+def projection_drift(pairs: list[tuple[Path, Path]]) -> list[str]:
+    """Return missing/differing generated-projection diagnostics.
+
+    Extra files are intentionally ignored: command directories may contain
+    shell-owned aliases and unrelated local commands.
+    """
+    reasons: list[str] = []
+    for src, dest in pairs:
+        if not dest.exists():
+            reasons.append(f"missing generated copy: {dest}")
+        elif not filecmp.cmp(src, dest, shallow=False):
+            reasons.append(f"content differs: {dest}")
+    return reasons
+
+
 def is_stale(pairs: list[tuple[Path, Path]], dest_root: Path) -> list[str]:
     """Return a list of human-readable reasons the embedded copy is stale."""
     reasons: list[str] = []
@@ -109,37 +140,58 @@ def main() -> int:
 
     root = repo_root()
     dest_skills = root / "crates" / "chelis-conformance" / "assets" / "skills"
-    pairs = planned_skill_copies(root)
+    skill_pairs = planned_skill_copies(root)
+    command_pairs = planned_command_copies(root)
 
     if args.check:
-        reasons = is_stale(pairs, dest_skills)
+        reasons = is_stale(skill_pairs, dest_skills)
+        reasons.extend(projection_drift(command_pairs))
         if reasons:
-            print("conformance assets are STALE:", file=sys.stderr)
+            print("conformance generated surfaces are STALE:", file=sys.stderr)
             for r in reasons:
                 print(f"  - {r}", file=sys.stderr)
             print(
                 "Run `python3 scripts/regenerate_conformance_assets.py` and commit "
-                "crates/chelis-conformance/assets/.",
+                "crates/chelis-conformance/assets/ plus same-name command changes.",
                 file=sys.stderr,
             )
             return 1
-        print("conformance assets are up to date.")
+        print("conformance assets and command projections are up to date.")
         return 0
 
-    # Rebuild from scratch so a removed upstream file cannot linger.
-    reasons_before = is_stale(pairs, dest_skills)
+    # Rebuild embedded assets from scratch so a removed upstream file cannot
+    # linger. Command directories are not cleared because aliases and unrelated
+    # local commands are shell-owned; only current same-name projections write.
+    reasons_before = is_stale(skill_pairs, dest_skills)
+    reasons_before.extend(projection_drift(command_pairs))
     if dest_skills.exists():
         shutil.rmtree(dest_skills)
-    for src, dest in pairs:
+    for src, dest in skill_pairs:
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dest)
+    for src, dest in command_pairs:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.is_symlink() or dest.exists():
+            try:
+                if dest.samefile(src):
+                    continue
+            except FileNotFoundError:
+                pass
+            dest.unlink()
+        dest.symlink_to(os.path.relpath(src, dest.parent))
 
     if reasons_before:
-        print(f"regenerated {len(pairs)} embedded skill file(s); changes:")
+        print(
+            f"regenerated {len(skill_pairs)} embedded skill file(s) and "
+            f"{len(command_pairs)} command projection(s); changes:"
+        )
         for r in reasons_before:
             print(f"  - {r}")
     else:
-        print(f"embedded {len(pairs)} skill file(s); already up to date.")
+        print(
+            f"embedded {len(skill_pairs)} skill file(s) and projected "
+            f"{len(command_pairs)} command file(s); already up to date."
+        )
     return 0
 
 

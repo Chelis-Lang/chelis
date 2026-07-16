@@ -393,9 +393,10 @@ and [`docs/book/src/reef.md`](docs/book/src/reef.md).
   only).
 - **`chelis reef setup [--path]`** (`cmd_reef_setup` in `crates/chelis-cli`) is
   the orchestrator: ensure the pinned toolchain (auto-install via the chelisup
-  binary), `reef install --from-lockfile`, `reef src sync` when `[chelis-src]`
-  is present, then a `reef doctor` summary. `reef doctor` is its read-only
-  counterpart across all classes (toolchain, source crates, binary artifacts).
+  binary), run that pinned toolchain's conform materializer for shared skills
+  and same-name command wrappers, `reef install --from-lockfile`, `reef src
+  sync` when `[chelis-src]` is present, then a `reef doctor` summary. `reef
+  doctor` is its read-only counterpart across all dependency classes.
 - **Shim-corruption trap (do not regress):** `reef setup`'s toolchain step MUST
   subprocess the real `chelisup` binary. Never call `chelisup::install::install`
   in-process from `chelis-cli`: that helper copies `current_exe()` into
@@ -417,11 +418,12 @@ Use the `packaging-install` skill when changing or validating any of this.
 Project-local skills live in `agent-skills/`.
 `.claude/skills` and `.codex/skills` should resolve to that same directory so both tool
 surfaces load the same skill library.
-Command wrappers should stay mirrored too: `.claude/commands/` and `.codex/commands/`
-should stay behaviorally aligned so slash-command access does not drift between tool
-surfaces. Keep a `red-team` alias wired to `redteam-exec`, and make that wrapper enforce
-stale-agent cleanup plus a fresh local subagent before any validation is counted as a
-red team.
+Same-name command wrappers for shared skills are generated projections:
+`.claude/commands/<name>.md` and `.codex/commands/<name>.md` must be byte-identical to
+`agent-skills/<name>/SKILL.md` and must not be edited independently. Downstream shells
+repair them with `chelis reef conform sync`. Keep the separate, shell-owned `red-team`
+alias wired to `redteam-exec`, and make that wrapper enforce stale-agent cleanup plus a
+fresh local subagent before any validation is counted as a red team.
 
 Current shared skill set:
 

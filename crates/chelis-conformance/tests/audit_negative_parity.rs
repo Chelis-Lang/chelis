@@ -94,6 +94,125 @@ fn editing_workflow_pin_fails_row_3() {
 }
 
 #[test]
+fn matching_quoted_workflow_pin_pair_passes_row_3() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "s3quoted");
+    let ci = root.join(".github/workflows/ci.yml");
+    let text = std::fs::read_to_string(&ci).unwrap();
+    let text = text
+        .replace(
+            &format!("CHELIS_TAG: v{VER}"),
+            &format!("CHELIS_TAG: 'v{VER}' # audit mirror"),
+        )
+        .replace(
+            &format!("CHELIS_VERSION: {VER}"),
+            &format!("CHELIS_VERSION: \"{VER}\" # audit mirror"),
+        );
+    std::fs::write(&ci, text).unwrap();
+
+    assert_eq!(
+        verdict_of(&audit::audit(&root), "workflow-env-pins"),
+        Verdict::Pass
+    );
+}
+
+#[test]
+fn missing_workflow_pin_pair_member_fails_row_3() {
+    let tmp = tempfile::tempdir().unwrap();
+    for (name, declaration, key) in [
+        (
+            "s3missingtag",
+            format!("  CHELIS_TAG: v{VER}\n"),
+            "CHELIS_TAG",
+        ),
+        (
+            "s3missingversion",
+            format!("  CHELIS_VERSION: {VER}\n"),
+            "CHELIS_VERSION",
+        ),
+    ] {
+        let root = stamp(tmp.path(), name);
+        let ci = root.join(".github/workflows/ci.yml");
+        let text = std::fs::read_to_string(&ci).unwrap();
+        std::fs::write(&ci, text.replace(&declaration, "")).unwrap();
+
+        let report = audit::audit(&root);
+        assert_eq!(verdict_of(&report, "workflow-env-pins"), Verdict::Fail);
+        let diagnostic = diagnostic_of(&report, "workflow-env-pins");
+        assert!(
+            diagnostic.contains(key) && diagnostic.contains("missing"),
+            "diagnostic for {name} was: {diagnostic}"
+        );
+    }
+}
+
+#[test]
+fn conflicting_duplicate_workflow_pin_fails_row_3() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "s3duplicate");
+    let ci = root.join(".github/workflows/ci.yml");
+    let text = std::fs::read_to_string(&ci).unwrap();
+    let declaration = format!("  CHELIS_VERSION: {VER}");
+    std::fs::write(
+        &ci,
+        text.replace(
+            &declaration,
+            &format!("{declaration}\n  CHELIS_VERSION: 0.13.0"),
+        ),
+    )
+    .unwrap();
+
+    let report = audit::audit(&root);
+    assert_eq!(verdict_of(&report, "workflow-env-pins"), Verdict::Fail);
+    let diagnostic = diagnostic_of(&report, "workflow-env-pins");
+    assert!(diagnostic.contains("CHELIS_VERSION") && diagnostic.contains("0.13.0"));
+}
+
+#[test]
+fn direct_chelis_release_download_requires_pin_pair() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "s3download");
+    let ci = root.join(".github/workflows/ci.yml");
+    let text = std::fs::read_to_string(&ci).unwrap();
+    let direct_download = text.replace(
+        &format!("chelisup install {VER}"),
+        "gh release download --repo Chelis-Lang/chelis",
+    );
+    std::fs::write(&ci, &direct_download).unwrap();
+    assert_eq!(
+        verdict_of(&audit::audit(&root), "workflow-env-pins"),
+        Verdict::Pass,
+        "a direct release download with the exact audit pair must pass"
+    );
+
+    let missing_pair = direct_download
+        .replace(&format!("  CHELIS_TAG: v{VER}\n"), "")
+        .replace(&format!("  CHELIS_VERSION: {VER}\n"), "");
+    std::fs::write(&ci, missing_pair).unwrap();
+
+    let report = audit::audit(&root);
+    assert_eq!(verdict_of(&report, "workflow-env-pins"), Verdict::Fail);
+    let diagnostic = diagnostic_of(&report, "workflow-env-pins");
+    assert!(diagnostic.contains("CHELIS_TAG") && diagnostic.contains("CHELIS_VERSION"));
+}
+
+#[test]
+fn noninstalling_workflow_pin_text_is_ignored() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "s3noninstaller");
+    std::fs::write(
+        root.join(".github/workflows/release.yml"),
+        "name: docs\nenv:\n  CHELIS_VERSION: 0.13.0\njobs:\n  docs:\n    steps:\n      - run: echo CHELIS_VERSION\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        verdict_of(&audit::audit(&root), "workflow-env-pins"),
+        Verdict::Pass
+    );
+}
+
+#[test]
 fn forking_a_skill_fails_row_14() {
     let tmp = tempfile::tempdir().unwrap();
     let root = stamp(tmp.path(), "s14");

@@ -317,5 +317,11 @@ pub fn write_pinned_reef_toml(dir: &Path, pin: &str, extra: &str) {
 pub fn stub_toolchain(home: &Path, ver: &str) {
     let bin = home.join("toolchains").join(ver).join("bin");
     fs::create_dir_all(&bin).unwrap();
-    fs::write(bin.join("chelis"), b"#!/bin/true\n").unwrap();
+    let chelis = bin.join("chelis");
+    fs::write(&chelis, b"#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&chelis, fs::Permissions::from_mode(0o755)).unwrap();
+    }
 }

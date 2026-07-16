@@ -70,11 +70,14 @@ and, in order:
 
 1. ensures the pinned toolchain is installed, auto-installing it through
    `chelisup` when it is missing;
-2. installs source packages and binary artifacts from `reef.lock`
+2. runs the pinned toolchain's conformance materializer to refresh shared
+   skills, skill-dir symlinks, and same-name `.claude/commands/` plus
+   `.codex/commands/` files;
+3. installs source packages and binary artifacts from `reef.lock`
    (`reef install --from-lockfile`), when a lockfile is present;
-3. syncs chelis source crates when the manifest has a `[chelis-src]` section
+4. syncs chelis source crates when the manifest has a `[chelis-src]` section
    (`reef src sync`);
-4. prints a `reef doctor` health summary.
+5. prints a `reef doctor` health summary.
 
 That is the whole "clone and build" story: bootstrap `chelisup` once, then
 `chelis reef setup` per clone.

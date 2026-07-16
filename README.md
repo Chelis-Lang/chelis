@@ -33,10 +33,11 @@ chelisup install 0.12.1
 cd my-shell && chelis reef setup
 ```
 
-`chelis reef setup` reads the project's `reef.toml` pin and brings every
-dependency class to it: the toolchain (auto-installed via `chelisup`), source
-packages and binary artifacts (`reef install --from-lockfile`), and chelis
-source crates (`reef src sync`), then prints a `chelis reef doctor` summary.
+`chelis reef setup` reads the project's `reef.toml` pin and converges the
+pinned toolchain (auto-installed via `chelisup`), shared agent skills and their
+same-name Claude/Codex commands, source packages and binary artifacts (`reef
+install --from-lockfile`), and chelis source crates (`reef src sync`), then
+prints a `chelis reef doctor` summary.
 
 **Version management.** A small `chelis` shim resolves the active toolchain at
 each call, first match wins: a leading `+<ver>` (`chelis +0.13.0 build main.ch`)

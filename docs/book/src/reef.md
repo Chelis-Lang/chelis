@@ -122,9 +122,9 @@ hard-fails with a clear error if no token is available.
 
 ## One-command provisioning: `chelis reef setup`
 
-`chelis reef build` fetches source packages, but a freshly-cloned shell has
-three more dependency classes to satisfy first: the pinned **toolchain**,
-**binary artifacts**, and (for crate-linking shells) chelis **source crates**.
+`chelis reef build` fetches source packages, but a freshly-cloned shell also
+needs its pinned **toolchain**, generated **shared agent surface**, **binary
+artifacts**, and (for crate-linking shells) chelis **source crates** converged.
 `chelis reef setup` is the orchestrator that brings all of them to their pins
 in one verb:
 
@@ -142,11 +142,15 @@ It reads the `reef.toml` `compiler =` pin and runs, in order:
    is exempt from the shim's "never auto-install on `cd`" rule; the toolchain
    step deliberately subprocesses the real `chelisup` rather than installing
    in-process, so it never overwrites the shim with the compiler.
-2. **source packages + binaries**: `reef install --from-lockfile`, when a
+2. **shared agent surface**: runs the installed pinned toolchain's conformance
+   materializer, refreshing `agent-skills/`, its skill-dir symlinks, and the
+   byte-identical same-name files under `.claude/commands/` and
+   `.codex/commands/`.
+3. **source packages + binaries**: `reef install --from-lockfile`, when a
    `reef.lock` is present.
-3. **source crates**: `reef src sync`, when the manifest declares a
+4. **source crates**: `reef src sync`, when the manifest declares a
    `[chelis-src]` section.
-4. **summary**: prints the `reef doctor` report (below).
+5. **summary**: prints the `reef doctor` report (below).
 
 `reef setup` runs from a *current* chelis (it may itself install the pinned
 one), so a clone-and-`setup` does the right thing without reaching for

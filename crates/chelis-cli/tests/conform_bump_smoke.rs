@@ -58,6 +58,41 @@ fn bump_with_only_author_follow_up_exits_zero_and_lists_steps() {
 }
 
 #[test]
+fn bump_repairs_same_name_command_wrappers_in_lockstep() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("shell");
+    init_shell(&root);
+    std::fs::write(
+        root.join(".claude/commands/spec-sync.md"),
+        "stale Claude command\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join(".codex/commands/spec-sync.md"),
+        "different stale Codex command\n",
+    )
+    .unwrap();
+
+    let ver = chelis_compiler_api::COMPILER_VERSION;
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["reef", "conform", "bump", ver, "--path"])
+        .arg(&root)
+        .assert()
+        .success();
+
+    let effective = std::fs::read(root.join("agent-skills/spec-sync/SKILL.md")).unwrap();
+    assert_eq!(
+        std::fs::read(root.join(".claude/commands/spec-sync.md")).unwrap(),
+        effective
+    );
+    assert_eq!(
+        std::fs::read(root.join(".codex/commands/spec-sync.md")).unwrap(),
+        effective
+    );
+}
+
+#[test]
 fn bump_with_a_bump_owned_failure_exits_nonzero() {
     let dir = tempdir().unwrap();
     let root = dir.path().join("shell");

@@ -1,12 +1,10 @@
 //! Tripwire locking the embedded assets to the live repo files they copy.
 //!
 //! `scripts/regenerate_conformance_assets.py` copies `agent-skills/` into
-//! `assets/skills/`, which `src/skills.rs` embeds via `include_str!`. This test
-//! asserts three things agree: the embedded bytes, the `SHARED_SKILLS` list, and
-//! the live `agent-skills/` directory. A forgotten re-run (or a hand-edited
-//! embedded copy, or a skill added/removed upstream) fails here with a pointer
-//! back at the regenerate script — the same guarantee `chelis-std-bundle`'s
-//! `archive_self_consistency` gives for the runtime bytes.
+//! `assets/skills/`, which `src/skills.rs` embeds via `include_str!`, and projects
+//! the same bytes to both monorepo command trees. This test asserts the embedded
+//! bytes, `SHARED_SKILLS`, live skill files, and same-name command files agree. A
+//! forgotten re-run (or a hand edit) fails with a pointer back at the generator.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -62,5 +60,24 @@ fn embedded_skills_match_repo() {
         stale.is_empty(),
         "embedded skill copy is stale for {stale:?}. Run `{regen}` and commit \
          crates/chelis-conformance/assets/."
+    );
+
+    // 4. The monorepo's same-name command projections equal the live source.
+    let mut command_drift = Vec::new();
+    for name in SHARED_SKILLS {
+        let source = std::fs::read(root.join("agent-skills").join(name).join("SKILL.md"))
+            .unwrap_or_else(|error| panic!("read live skill {name}: {error}"));
+        for tool in [".claude", ".codex"] {
+            let command = root.join(tool).join("commands").join(format!("{name}.md"));
+            match std::fs::read(&command) {
+                Ok(bytes) if bytes == source => {}
+                Ok(_) => command_drift.push(format!("{} differs", command.display())),
+                Err(error) => command_drift.push(format!("{}: {error}", command.display())),
+            }
+        }
+    }
+    assert!(
+        command_drift.is_empty(),
+        "same-name command projections are stale: {command_drift:?}. Run `{regen}`"
     );
 }

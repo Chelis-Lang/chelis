@@ -310,42 +310,50 @@ pre-staging required changes, the unlock wave, and the re-probe table.
 - The shared skill set (`redteam-exec`, `spec-sync`, `phase-gate`,
   `backend-numerics`, `example-corpus`, `cli-surface`, `packaging-install`,
   `issue-resolution`) is a **materialized pointer upstream, not a fork**. It is
-  **embedded in the pinned toolchain**; `chelis reef conform sync` (and
-  `reef setup`) materialize it into the shell's `agent-skills/`, and
-  `conform audit` byte-checks the **toolchain-owned span** of every present
-  shared skill against the embedded set for the shell's pin — so the shell owns
-  **zero shared-skill content** and any drift is a hard failure. Two sanctioned,
-  propagation-safe escape hatches exist for the shell's *own* content (repo-local
-  domain skills and shell-specific overrides), described below. A thin
-  `agent-skills/UPSTREAM.toml` records the stamp. This replaces the older
-  hand-vendored copy, which drifted silently.
-- `.claude/skills` and `.codex/skills` are **symlinks** to `agent-skills/`;
-  `.claude/commands/` and `.codex/commands/` wrappers stay mirrored; the
-  `red-team` alias stays wired to `redteam-exec` (per monorepo `AGENTS.md`
-  §Shared Local Skills). `conform sync` wires the skill-dir symlinks.
+  **embedded in the pinned toolchain**. `chelis reef conform init`, `conform
+  sync`, `conform bump`, and `reef setup` compose one effective value per shared
+  name and write those exact bytes to all three generated surfaces:
+  `agent-skills/<name>/SKILL.md`, `.claude/commands/<name>.md`, and
+  `.codex/commands/<name>.md`. `conform audit` byte-checks the toolchain-owned
+  skill span against the pinned embedded set and both same-name commands against
+  the complete effective skill. A missing command or any byte difference is a
+  row-14 failure repaired with `chelis reef conform sync`.
+- `.claude/skills` and `.codex/skills` are **symlinks** to `agent-skills/`.
+  Current shared names are reserved generated outputs: neither `[conform]
+  local_skills` nor an independently edited same-name command can exempt them.
+  `agent-skills/UPSTREAM.toml` records the generated name set; synchronization
+  removes retired same-name wrappers only when that prior manifest proves
+  ownership. A missing or malformed prior manifest is non-destructive.
+  Unrelated shell-local commands remain untouched.
+- The `red-team.md` command is a preserved, shell-owned alias wired to
+  `redteam-exec` (per monorepo `AGENTS.md` §Shared Local Skills), not another
+  generated shared-name projection. Alias generation/auditing remains separate
+  scope; synchronization MUST neither overwrite nor prune it.
 - Because the set is materialized from the pinned toolchain, it is always in
   lockstep with the monorepo at the shell's pin — a shell cannot *silently* fork
-  a shared skill, and a shared-skill change propagates on the next `conform sync`
-  / pin bump. The only shell-owned edits are the two declared escape hatches
-  below.
+  a shared skill or generated same-name command, and a shared-skill change
+  propagates on the next `conform sync` / pin bump. The only shell-owned skill
+  edits are the two declared escape hatches below.
 - **Repo-local domain skills** (chelis#651): a shell MAY carry a skill outside
   the shared set by declaring it in `reef.toml` under
   `[conform] local_skills = ["<name>", ...]`. `conform sync` then preserves those
   dirs and `conform audit` §8 exempts them; an *undeclared* extra skill is still
-  pruned, now with a warning rather than a silent delete. A `local_skills` entry
-  may not shadow a shared skill. New shells SHOULD vendor School's
-  downstream-authoring skill,
+  pruned, now with a warning rather than a silent delete. Local skills do not
+  receive generated command wrappers, and a `local_skills` entry may not shadow
+  a shared skill. New shells SHOULD vendor School's downstream-authoring skill,
   [`agent-skills/chelis-std/`](https://github.com/Chelis-Lang/school/tree/main/agent-skills/chelis-std),
   declared this way.
 - **Shell-specific overrides on a shared skill** (chelis#653): a shell MAY append
   a single trailing `<!-- shell-local:begin -->…<!-- shell-local:end -->` block to
   a shared skill's `SKILL.md` to supersede toolchain guidance that does not fit
   the shell. `conform sync` regenerates the toolchain-owned body *above* the block
-  verbatim — so upstream skill edits still propagate downstream — and preserves
-  the block; §8 byte-checks only the managed span. When a bump changes the
-  upstream body underneath a block, `conform bump` flags that skill so the author
-  re-checks the override against the new text. The block MUST be a well-formed
-  file suffix (exactly one begin/end pair, nothing after the end marker).
+  and preserves the block verbatim, then projects that complete effective value
+  to both same-name command files. §8 byte-checks only the skill's managed span
+  against the embedded body but requires both commands to equal the full skill.
+  When a bump changes the upstream body underneath a block, `conform bump` flags
+  that skill so the author re-checks the override against the new text. The block
+  MUST be a well-formed file suffix (exactly one begin/end pair, nothing after
+  the end marker).
 
 ## 9. Acceptance & parity (conditional MUST)
 
@@ -401,7 +409,7 @@ self-audit.
 | 11 | `tests_neg/` + runner, in CI | MUST | §6 | `tests_neg/`, `scripts/run_negative_tests.py` |
 | 12 | `tests_blocked/` + runner, in CI | MUST once a blocker exists | §5 | `tests_blocked/`, `scripts/run_blocked_probes.py` |
 | 13 | Pin Bump Checklist in AGENTS.md | MUST | §7 | `AGENTS.md` §Pin Bump Checklist |
-| 14 | Vendored shared skills + symlinked skill dirs + mirrored commands | MUST | §8 | `agent-skills/`, `.claude/skills` |
+| 14 | Vendored shared skills + symlinked skill dirs + mirrored commands | MUST | §8 | `agent-skills/`, `.claude/skills`, `.codex/skills`, `.claude/commands/`, `.codex/commands/` |
 | 15 | Parity harness (own uv project, checked-in goldens, oracle guards) | MUST if external oracles | §9 | `parity/` |
 | 16 | ≥2-config acceptance for new public surface | MUST | §9 | `spec/vision.md` amendments |
 | 17 | Scaffolding Drift Rule in AGENTS.md | MUST | §10 | `AGENTS.md` §Scaffolding Drift Rule |

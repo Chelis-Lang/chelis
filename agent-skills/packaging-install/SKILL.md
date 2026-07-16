@@ -76,14 +76,21 @@ Invariants to preserve:
 ## `reef setup` And The Shim-Corruption Trap
 
 `chelis reef setup [--path]` (`cmd_reef_setup`) runs, in order: ensure the
-pinned toolchain → `reef install --from-lockfile` (if `reef.lock`) → `reef src
-sync` (if `[chelis-src]`) → `reef doctor` summary.
+pinned toolchain → run that installed toolchain's `conform sync` materializer
+(shared skills, skill-dir symlinks, and same-name Claude/Codex commands) →
+`reef install --from-lockfile` (if `reef.lock`) → `reef src sync` (if
+`[chelis-src]`) → `reef doctor` summary.
 
 - **The toolchain step auto-installs by subprocessing the real `chelisup`
   binary.** This is *explicit, user-invoked* provisioning, exempt from the
   shim's "no auto-install" rule (which governs only the implicit per-invocation
   shim). It is not exempt from good taste: it skips the install when the pin is
   already present, and errors loudly when `chelisup` itself is absent.
+- **The agent-surface step subprocesses the installed pinned `chelis`.** The
+  pinned binary's embedded skill set is authoritative; never materialize with
+  the current provisioner's in-process embedded set when the shell pin may
+  differ. The subprocess reuses `conform sync`, so setup does not duplicate
+  command-generation logic.
 - **NEVER call `chelisup::install::install(...)` in-process from `chelis-cli`.**
   That helper calls `ensure_shim_installed`, which copies `current_exe()` into
   `<home>/bin/{chelis,chelisup}`. From the `chelis` compiler binary that would
@@ -117,7 +124,9 @@ so a bogus token stays `InvalidSubcommand` and the hint still fires.
 - `reef setup`: toolchain present → proceeds; missing + chelisup available →
   auto-installs and the shim stays chelisup; missing + chelisup absent → loud
   error naming `chelisup install <ver>`, never `install_chelis_toolchain.py`;
-  bad/missing `reef.toml` → clear error.
+  stale shared command wrappers → pinned `conform sync` repairs both; an agent
+  surface write failure → setup stops before doctor; bad/missing `reef.toml` →
+  clear error.
 - `reef doctor`: toolchain installed → ok; absent → MISSING + `chelisup install`;
   artifact present/absent → ok/MISSING.
 - hint: unknown subcommand → hint fires; `--help`/`--version`/unknown-flag → no
@@ -152,7 +161,7 @@ honest.
 - User guide: `docs/book/src/install.md`, `docs/book/src/reef.md`
 - Shim + store: `crates/chelisup/src/{resolve,paths,install,shim,cli}.rs`
 - Orchestrator + doctor + hint: `crates/chelis-cli/src/main.rs`
-  (`cmd_reef_setup`, `ensure_pinned_toolchain`, `cmd_reef_doctor`,
-  `handle_parse_error`, `eprint_pin_hint`)
+  (`cmd_reef_setup`, `ensure_pinned_toolchain`, `sync_pinned_agent_surface`,
+  `cmd_reef_doctor`, `handle_parse_error`, `eprint_pin_hint`)
 - Binary artifacts: `crates/chelis-reef/src/lib.rs` (`LockSource::Binary`,
   `install_binary_artifact`, `which_artifact`)

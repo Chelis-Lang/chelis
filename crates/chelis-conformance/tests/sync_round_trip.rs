@@ -1,9 +1,9 @@
 //! Phase 3 oracle: `conform sync` round-trip.
 //!
 //! Scaffold a shell (green), break every managed block (stale stamp + hand-edited
-//! body) and fork every skill, then `sync` and confirm the audit is green again
-//! — AND that content *outside* the managed fences is preserved byte-for-byte
-//! (sync touches only fenced regions and `agent-skills/`).
+//! body), fork every skill, and drift both command trees, then `sync` and confirm
+//! the audit is green again — AND that content outside the managed surfaces is
+//! preserved byte-for-byte.
 
 use std::path::Path;
 
@@ -49,12 +49,18 @@ fn sync_restores_green_and_preserves_shell_content() {
         let t = t.replace("upstream", "UPSTREAM-TAMPERED"); // body hand-edit
         std::fs::write(&p, t).unwrap();
     }
-    // 2. fork every skill
+    // 2. fork every skill and independently drift both generated command trees.
     for name in chelis_conformance::skills::SHARED_SKILLS {
         let p = root.join(format!("agent-skills/{name}/SKILL.md"));
         let mut t = std::fs::read_to_string(&p).unwrap();
         t.push_str("\nforked\n");
         std::fs::write(&p, t).unwrap();
+
+        let claude = root.join(format!(".claude/commands/{name}.md"));
+        let mut command = std::fs::read_to_string(&claude).unwrap();
+        command.push_str("\nstale Claude command\n");
+        std::fs::write(claude, command).unwrap();
+        std::fs::remove_file(root.join(format!(".codex/commands/{name}.md"))).unwrap();
     }
 
     let broken = audit::audit(&root);

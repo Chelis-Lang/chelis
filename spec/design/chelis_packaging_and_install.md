@@ -273,15 +273,20 @@ freshly-cloned shell to its pins across every class in one verb:
    binary would overwrite the shim with the compiler. This is enforced at
    compile time — chelisup's `install`/`ensure_shim_installed` are `pub(crate)`,
    so an in-process call from `chelis-cli` is an `E0603` build error;
-2. **`reef install --from-lockfile`** — source packages + binaries (#468) from
+2. **converge the shared agent surface** — invoke the installed pinned
+   toolchain's `conform sync` path so `agent-skills/`, both skill-dir symlinks,
+   and byte-identical same-name Claude/Codex commands use the embedded set for
+   the shell's pin (not the current provisioner's embedded set);
+3. **`reef install --from-lockfile`** — source packages + binaries (#468) from
    `reef.lock`, when one is present;
-3. **`reef src sync`** — source crates (chelis#571) when `[chelis-src]` is
+4. **`reef src sync`** — source crates (chelis#571) when `[chelis-src]` is
    present;
-4. print the **`reef doctor`** summary.
+5. print the **`reef doctor`** summary.
 
-This is the **one-command reproduce** that unifies the three reproduction
-records (`reef.lock` + `Cargo.lock` + the `[chelis-src]` pin) behind a single
-command. `reef doctor` — already multi-class from chelis#571 — is extended to
+This is the **one-command reproduce** that unifies the generated agent surface
+and the three reproduction records (`reef.lock` + `Cargo.lock` + the
+`[chelis-src]` pin) behind a single command. `reef doctor` — already multi-class
+from chelis#571 — is extended to
 also report binary-artifact deps (#468) and the active toolchain/shim
 (chelisup), as the read-only health counterpart of `setup`.
 
@@ -319,6 +324,8 @@ build" walkthrough:
 1. `curl … | sh` → `chelisup` is present (WS-B).
 2. `git clone <shell> && cd <shell> && chelis reef setup` →
    - the toolchain at the `reef.toml` pin is on PATH via the shim (WS-B),
+   - shared skills, skill-dir symlinks, and same-name Claude/Codex commands are
+     converged from that pinned toolchain,
    - source packages + binaries are installed and SHA-verified from `reef.lock`
      (WS-A),
    - source crates are synced and `../chelis` is wired (chelis#571),
