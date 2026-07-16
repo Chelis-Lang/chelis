@@ -208,6 +208,65 @@ fn eval_scalar_bf16_rounds_per_op() {
     assert_eq!(eval_expr("cast(257.0, bf16)").unwrap(), "256");
 }
 
+/// The remaining f16/bf16 scalar op surface, distilled from the probe
+/// batteries (`docs/investigations/probes/bat_narrow*.py`) into one
+/// table-driven cross-lane row set. Every expected value is the locked
+/// eval answer (correct IEEE narrow-float semantics); the C lane must
+/// match it. Observed today: C returns int64_t-truncated or unrounded
+/// values for every row (1.25 -> 1, 0.333.. -> 0, -1.5 -> -1,
+/// sqrt -> 1, exp -> 2, inf -> 131008, cast(2049) -> 2049).
+#[test]
+#[ignore = "chelis#714: the full f16/bf16 scalar op surface diverges in the compiled lane \
+            (int64_t storage, no narrow-float rounding). Each row's expected value is the \
+            locked eval answer. Run with \
+            `cargo test -p chelis-cli --test narrow_dtype_matrix -- --ignored`."]
+fn f16_bf16_scalar_op_surface_agrees_across_lanes() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    let rows: &[(&str, &str, &str)] = &[
+        ("sub(cast(1.5, f16), cast(0.25, f16))", "f16", "1.25"),
+        (
+            "div(cast(1.0, f16), cast(3.0, f16))",
+            "f16",
+            "0.333251953125",
+        ),
+        ("neg(cast(1.5, f16))", "f16", "-1.5"),
+        ("sqrt(cast(2.0, f16))", "f16", "1.4140625"),
+        ("exp(cast(1.0, f16))", "f16", "2.71875"),
+        (
+            "mul(cast(0.1, f16), cast(0.1, f16))",
+            "f16",
+            "0.0099945068359375",
+        ),
+        ("mul(cast(65504.0, f16), cast(2.0, f16))", "f16", "inf"),
+        ("cast(2049.0, f16)", "f16", "2048"),
+        ("cast(cast(2049.0, f16), f32)", "f32", "2048"),
+        (
+            "mul(cast(0.1, bf16), cast(0.1, bf16))",
+            "bf16",
+            "0.010009765625",
+        ),
+        ("cast(257.0, bf16)", "bf16", "256"),
+    ];
+    for (i, (expr, ret_ty, expected)) in rows.iter().enumerate() {
+        let program =
+            format!("module M.Main\ndef run() -> {ret_ty} = {expr}\nout = print(run())\n");
+        assert_eq!(
+            eval_first_line(&program).expect("eval"),
+            *expected,
+            "eval drifted for `{expr}`; update the row"
+        );
+        let (_, stdout) = build_and_run_c(&program, &format!("f16_surface_{i}"))
+            .expect("C lane should build and run");
+        assert_eq!(
+            stdout.lines().next().unwrap_or("").trim(),
+            *expected,
+            "LANE DIVERGENCE for `{expr}`"
+        );
+    }
+}
+
 /// **The eval scalar comparison rounds casts before comparing.** cast(2049.0,
 /// f16) is 2048, so lt(2048, 2049) at f16 is FALSE. The compiled lane gets
 /// this wrong (chelis#714, wrong-branch row below).

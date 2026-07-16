@@ -242,6 +242,62 @@ fn i64_scalar_floor_is_identity_in_all_lanes() {
     assert_scalar_parity("floor(cast(5, int64))", "int64", "5", "i64_floor");
 }
 
+/// The f64 rows of the stub family, distilled from the probe battery
+/// (`docs/investigations/probes/bat_scalar_ops.py`) - chelis#715's title
+/// says EVERY dtype, so the f64 half is asserted too, not just f32.
+/// Observed today: C prints 0 for all seven rows; eval is correct.
+#[test]
+#[ignore = "chelis#715: the stub fires at f64 for the whole family - tan/atan/ceil/round/\
+            recip/max_elem/min_elem all print 0 from the compiled binary (floor has its \
+            own row above). Run with \
+            `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
+fn f64_scalar_stub_family_agrees_across_lanes() {
+    for (expr, expected, name) in [
+        ("tan(cast(1.0, f64))", "1.557407724654902", "f64_tan"),
+        ("atan(cast(1.0, f64))", "0.7853981633974483", "f64_atan"),
+        ("ceil(cast(1.5, f64))", "2", "f64_ceil"),
+        ("round(cast(1.5, f64))", "2", "f64_round"),
+        ("recip(cast(4.0, f64))", "0.25", "f64_recip"),
+        (
+            "max_elem(cast(1.5, f64), cast(0.25, f64))",
+            "1.5",
+            "f64_max_elem",
+        ),
+        (
+            "min_elem(cast(1.5, f64), cast(0.25, f64))",
+            "0.25",
+            "f64_min_elem",
+        ),
+    ] {
+        assert_scalar_parity(expr, "f64", expected, name);
+    }
+}
+
+/// The f64 working-op controls, mirroring the f32 set: bounds the f64 half
+/// of #715 to exactly the seven broken ops above.
+#[test]
+fn working_f64_scalar_ops_agree_across_lanes() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    for (op_expr, expected, name) in [
+        ("abs(cast(-1.5, f64))", "1.5", "ctl64_abs"),
+        ("neg(cast(1.5, f64))", "-1.5", "ctl64_neg"),
+        ("sqrt(cast(2.25, f64))", "1.5", "ctl64_sqrt"),
+        ("exp(cast(0.0, f64))", "1", "ctl64_exp"),
+        ("log(cast(1.0, f64))", "0", "ctl64_log"),
+        ("sin(cast(0.0, f64))", "0", "ctl64_sin"),
+        ("cos(cast(0.0, f64))", "1", "ctl64_cos"),
+        ("add(cast(1.5, f64), cast(0.25, f64))", "1.75", "ctl64_add"),
+        ("sub(cast(1.5, f64), cast(0.25, f64))", "1.25", "ctl64_sub"),
+        ("mul(cast(1.5, f64), cast(0.25, f64))", "0.375", "ctl64_mul"),
+        ("div(cast(1.5, f64), cast(0.25, f64))", "6", "ctl64_div"),
+    ] {
+        assert_scalar_parity(op_expr, "f64", expected, name);
+    }
+}
+
 // ===========================================================================
 // chelis#719 - vvsqrtf on the contiguous f32 tensor path (macOS/Accelerate)
 // ===========================================================================

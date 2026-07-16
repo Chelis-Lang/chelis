@@ -190,6 +190,42 @@ fn c_tensor_int8_add_overflow_traps() {
     );
 }
 
+/// The remaining scalar overflow cells from the probe battery
+/// (`docs/investigations/probes/bat_narrow.py`), one row per width and op
+/// shape. Observed today in compiled C: int8 mul prints 256, int16 add
+/// prints 60000, int32 add prints 4000000000 - values that do not exist
+/// in the declared types (the int64_t widening, chelis#714's mechanism).
+/// eval wraps to 0 / -5536 / -294967296 respectively. The contract says
+/// every cell traps.
+#[test]
+#[ignore = "chelis#718: compiled C narrow-int scalar overflow escapes the width at every \
+            width (int8 mul 256, int16 add 60000, int32 add 4000000000); eval wraps; the \
+            contract says both trap. Run with \
+            `cargo test -p chelis-cli --test int_width_lane_matrix -- --ignored`."]
+fn c_scalar_overflow_traps_at_every_width() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    let rows: &[(&str, &str)] = &[
+        ("mul(cast(16, int8), cast(16, int8))", "int8"),
+        ("add(cast(30000, int16), cast(30000, int16))", "int16"),
+        (
+            "add(cast(2000000000, int32), cast(2000000000, int32))",
+            "int32",
+        ),
+    ];
+    for (i, (expr, ret_ty)) in rows.iter().enumerate() {
+        let program =
+            format!("module M.Main\ndef run() -> {ret_ty} = {expr}\nout = print(run())\n");
+        let (line, stderr, ok) = c_lane(&program, &format!("c_ovf_{i}")).expect("C lane");
+        assert!(
+            !ok && stderr.contains("overflow"),
+            "`{expr}` must trap with a branded overflow diagnostic; \
+             got exit ok={ok}, stdout `{line}`, stderr `{stderr}`"
+        );
+    }
+}
+
 // ===========================================================================
 // CONTROLS: in-range narrow-int arithmetic agrees across lanes and surfaces.
 // A trap fix must not fire on values that fit.

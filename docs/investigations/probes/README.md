@@ -77,3 +77,20 @@ The prevention analysis these probes fed is
 [`../numeric_audit_structural_prevention.md`](../numeric_audit_structural_prevention.md);
 the per-sweep outcomes are at the bottom of
 [`../numeric_audit_next_sweeps.md`](../numeric_audit_next_sweeps.md).
+
+## Test twins (added after the corpus landed)
+
+Every battery's broken rows and the meaningful controls now have committed
+test twins; the corpus remains the raw evidence and the negative-result
+archive, but nothing is probe-only anymore:
+
+| battery | test twin |
+|---|---|
+| `bat_narrow*.py` scalar rows | `narrow_dtype_matrix.rs` (incl. the full-surface row set `f16_bf16_scalar_op_surface_agrees_across_lanes`) |
+| `bat_narrow.py` overflow rows | `int_width_lane_matrix.rs` (incl. `c_scalar_overflow_traps_at_every_width`) |
+| `bat_scalar_ops.py` | `scalar_stub_matrix.rs` (f32 + f64 broken rows, f32 + f64 working controls) |
+| `bat_int_scalar_ops.py` | `scalar_stub_matrix.rs` int rows |
+| `bat_f32_tensor_round.py` | `eval_tensor_narrowing_matrix.rs` (broken rows + the tan/sqrt do-narrow control) |
+| `bat_matrix3.py` | `reduction_and_bitwise_matrix.rs` |
+| `checker_holes.py` | `issue_709_handle_effect_and_dp_roundtrip.rs` |
+| `tostring_*.ch` | `issue_734_tostring_placeholder.rs` |

@@ -182,6 +182,37 @@ fn c_f32_tensor_add_rounds_to_f32() {
     );
 }
 
+/// **The other half of the inconsistency claim, locked**: eval's f32
+/// tensor `tan` and `sqrt` DO narrow to f32 (correctly), while `add`/
+/// `div`/`recip` do not (the broken rows below). Distilled from
+/// `docs/investigations/probes/bat_f32_tensor_round.py`. If this control
+/// ever fails, either the wrapper moved (re-check #717's table) or the
+/// fix landed and the broken rows should be flipping green with it.
+#[test]
+fn eval_f32_tensor_tan_and_sqrt_do_narrow_to_f32() {
+    let line = eval_first_line(
+        "module M.Main\n\
+         def f(x: tensor[2, f32]) -> tensor[2, f32] = tan(x)\n\
+         out = print(f(to_tensor([1.5, 3.0])))\n",
+    )
+    .expect("eval should run");
+    assert!(
+        line.contains("data=[14.101419448852539, -0.14254654943943024]"),
+        "eval f32 tensor tan narrows through f32 today; got: {line}"
+    );
+    let line = eval_first_line(
+        "module M.Main\n\
+         def f(x: tensor[2, f32]) -> tensor[2, f32] = sqrt(x)\n\
+         out = print(f(to_tensor([1.5, 3.0])))\n",
+    )
+    .expect("eval should run");
+    assert!(
+        line.contains("data=[1.2247449159622192, 1.7320507764816284]"),
+        "eval f32 tensor sqrt narrows through f32 today (and is correctly \
+         rounded, unlike the C lane's vvsqrtf - chelis#719); got: {line}"
+    );
+}
+
 // ===========================================================================
 // chelis#717 - f64 tensors destroyed to f32 by unary ops (eval)
 // ===========================================================================
