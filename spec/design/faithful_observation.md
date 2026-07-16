@@ -1,6 +1,6 @@
 # Faithful Observation: one dtype-true formatter for every exit, both lanes
 
-**Status:** Design proposal, pre-implementation. Tracking issue: chelis#732.
+**Status:** Design proposal, pre-implementation. Tracking issue: [#732].
 **Owning specs:** `spec/05-risc-primitives.md` (its §8 carries this
 plan's decided contract as provisional atoms [05-OBS-1..3], seeded ahead
 of Phase 1; the per-op tolerance table lands into the same section at
@@ -8,10 +8,10 @@ Phase 3), `spec/04-type-system.md` (dtype value-set definitions, shared
 with `spec/design/dtype_semantics.md` §C1), and the audit record in
 `docs/investigations/numeric_audit_next_sweeps.md` (sweeps 1, 3) /
 `docs/investigations/numeric_audit_structural_prevention.md` (item 6).
-**Class fixed:** chelis#728 (the observation channel is not dtype-faithful),
-concretely #716 (f16/bf16 buffers printed as f32 garbage), #723 (exact int64
+**Class fixed:** [#728] (the observation channel is not dtype-faithful),
+concretely [#716] (f16/bf16 buffers printed as f32 garbage), [#723] (exact int64
 printed through double), the bool `2.0`-vs-`true` exit split, and the
-eval-vs-C float-formatting divergence that blocks #687.
+eval-vs-C float-formatting divergence that blocks [#687].
 **Ownership note:** `spec/design/dtype_semantics.md` §C4 states these rules
 as the interface its phases rely on; THIS document is the authoritative
 elaboration and the delivery plan. The rules are identical by construction -
@@ -27,27 +27,27 @@ f16/bf16), and eval formats through its own f64-width path with different
 digit rules than the C side's `%.1f`/`%.16g` split. Measured consequences:
 
 - an **exact** compiled int64 sum of 2^53 + 1 prints as `...992.0` - the
-  correct lane manufactures evidence against itself (#723; provable only
+  correct lane manufactures evidence against itself ([#723]; provable only
   via `to_list`, which has its own per-dtype gaps);
 - **correct** f16/bf16 kernel results print as garbage
-  (`0.0004898309707641602` = two right answers read as one f32, #716);
+  (`0.0004898309707641602` = two right answers read as one f32, [#716]);
 - one bool tensor reads `2.0` from `print` and `true` from `to_list`
-  (#726's observation half);
+  ([#726]'s observation half);
 - the same correct f32 value prints `1.4142135381698608` from eval and
-  `1.414213538169861` from C - so byte-exact lane comparison (#687's
+  `1.414213538169861` from C - so byte-exact lane comparison ([#687]'s
   oracle) is impossible even where both lanes are RIGHT.
 
 Three audit probes initially mis-scored a lane because of this channel -
 inside an audit designed around exact strings. Anything validating the
-#680/#684/#695/#727 fixes against printed output inherits the same hazard,
+[#680]/[#684]/[#695]/[#727] fixes against printed output inherits the same hazard,
 which is why this class has its own meta and its own plan.
 
 **The central design fact:** observation-faithfulness ("print exactly what
 is stored, at its dtype") is separable from semantics-correctness ("store
-the right thing", chelis#729's job). The C lane's int64 sum is already
+the right thing", [#729]'s job). The C lane's int64 sum is already
 exact and merely printed wrong; the f16 kernels are already correct and
 merely read wrong. **This plan is therefore independently landable before
-#729** - it fixes real bugs on its own (#716, #723) and hands #729 the
+[#729]** - it fixes real bugs on its own ([#716], [#723]) and hands [#729] the
 instrument its phases are validated with. §I1 pins how the two compose in
 either landing order.
 
@@ -61,18 +61,18 @@ round-trip invariant that makes regressions mechanical to catch.
 ## Non-goals
 
 - **Not** value semantics. What gets STORED - eval's missing f16 rounding
-  (#717), the storage decision (#684), width traps (#718) - is #729. This
+  ([#717]), the storage decision ([#684]), width traps ([#718]) - is [#729]. This
   plan prints stored bits faithfully even when the stored bits are wrong;
-  that is a feature (it makes #729's bugs visible instead of laundered).
+  that is a feature (it makes [#729]'s bugs visible instead of laundered).
 - **Not** ingress. `to_tensor`'s narrow-float runtime abort and the host
-  literal paths are #714/#729 territory. This plan owns EXITS: `print`,
+  literal paths are [#714]/[#729] territory. This plan owns EXITS: `print`,
   `to_list`, diagnostics rendering of values, and the wire's *rendering*
-  (the wire's representational capacity is #729's storage decision - §I1).
+  (the wire's representational capacity is [#729]'s storage decision - §I1).
 - **Not** the `<value>` placeholder (an unclassifiable-value substitution:
   `loud_unsupported.md` census row 4, becomes a diagnostic there).
 - **Not** kernel accuracy. Where lanes legitimately compute different
-  VALUES (libm/SLEEF/vForce, #719), this plan documents the per-op bound
-  (§C4) and requires `sqrt` correctly rounded per #719; it does not
+  VALUES (libm/SLEEF/vForce, [#719]), this plan documents the per-op bound
+  (§C4) and requires `sqrt` correctly rounded per [#719]; it does not
   replace kernels. Formatting itself never has tolerance.
 
 ## Vocabulary
@@ -82,9 +82,9 @@ round-trip invariant that makes regressions mechanical to catch.
 - **Faithful** - the emitted text round-trips to exactly the stored bits
   at the value's own dtype width. The class's definition of "not lying".
 - **Rendering vs capacity** - `format(bits)` vs "can the channel carry
-  the bits at all". Rendering is this plan; capacity is storage (#729).
+  the bits at all". Rendering is this plan; capacity is storage ([#729]).
   Example: the CURRENT wire schema (`Vec<f64>`) cannot carry exact int64
-  above 2^53 no matter how it renders - a capacity limit, #686/#729.
+  above 2^53 no matter how it renders - a capacity limit, [#686]/[#729].
 - **The migration** - the one coordinated update of printed-string
   expectations across the test suite when the contract lands (§B2.1).
 
@@ -121,7 +121,7 @@ Per-dtype rules:
    `data=[...]`.
 5. **Containers**: tensor rendering stays `tensor(shape=[..],
    data=[..])`; `to_list` stays `[..]`; both use `format_element` for
-   every element, so the exits can no longer disagree (#726's split).
+   every element, so the exits can no longer disagree ([#726]'s split).
    The existing 32-element print truncation (`, ...`) is kept and
    documented.
 6. **Diagnostics that embed values** (traps, mismatch messages) use
@@ -137,18 +137,18 @@ For every dtype and every storable value:
 2. `print`, `to_list`, and diagnostics agree with each other and with the
    stored bits, within one lane.
 3. eval and compiled C emit **byte-identical** text for identical stored
-   bits. (Identical *values* across lanes is #729/#687 business; this
+   bits. (Identical *values* across lanes is [#729]/[#687] business; this
    contract is conditional on the bits.)
 4. The wire schema renders bits faithfully within its representational
-   capacity; capacity limits are #729's storage decision and are recorded
+   capacity; capacity limits are [#729]'s storage decision and are recorded
    there (§I1). Concretely today: JSON numbers carry f64 exactly; exact
-   int64 above 2^53 waits for the #729 schema change.
+   int64 above 2^53 waits for the [#729] schema change.
 
 ## C3. The single-source architecture
 
 1. **One Rust implementation.** `format_element` lives beside the dtype
-   definitions (final crate placement follows #729 open question 4;
-   pre-#729 it can live in `chelis-types`). Exhaustive over `Prim` - no
+   definitions (final crate placement follows [#729] open question 4;
+   pre-[#729] it can live in `chelis-types`). Exhaustive over `Prim` - no
    `_` arm (`loud_unsupported.md` §C4's lint patrols it and its
    generator).
 2. **The C side is generated, not written.** A Rust function emits the
@@ -175,24 +175,24 @@ For every dtype and every storable value:
    conversion helpers) instead of the current `runtime_fail!`, and its
    int64 path stays exact (it already is - the audit's proof instrument).
    NOTE the boundary: to_list VALUES leaving as list elements is an exit
-   (ours); constructing tensors is ingress (#729's).
+   (ours); constructing tensors is ingress ([#729]'s).
 
 ## C4. The tolerance table and the oracle handshake
 
 1. **The round-trip invariant** (§C2.1) lands as a property harness over
-   the probe corpus and the matrix tests' outputs - red today on #723 and
-   #716's cells, green after Phase 2, and permanent thereafter.
+   the probe corpus and the matrix tests' outputs - red today on [#723] and
+   [#716]'s cells, green after Phase 2, and permanent thereafter.
 2. **The per-op value-tolerance table** goes into
    `spec/05-risc-primitives.md`: for each transcendental, the documented
    cross-lane bound (default: 1 ulp at the computed width; `sqrt`: 0 -
-   correctly rounded per IEEE and #719; add/sub/mul/div/comparisons: 0).
-   The #687 oracle consults ONLY this table when values differ;
+   correctly rounded per IEEE and [#719]; add/sub/mul/div/comparisons: 0).
+   The [#687] oracle consults ONLY this table when values differ;
    formatting differences are never tolerated (they are bugs here).
-3. **The oracle handshake**: with §C1-§C3 landed, #687's exact-string
+3. **The oracle handshake**: with §C1-§C3 landed, [#687]'s exact-string
    comparison becomes implementable as: byte-equal or (value-parse +
    table-bounded for the listed ops). `parity.rs`'s silent float
    fallback and `eval_agreement.rs`'s f64 tolerance are replaced by
-   exactly that rule - delivered in Phase 3 jointly with #687.
+   exactly that rule - delivered in Phase 3 jointly with [#687].
 
 ---
 
@@ -205,7 +205,7 @@ For every dtype and every storable value:
 | §C1 rules + number grammar | Phase 1 | this doc + dtype_semantics.md §C4 + the migration corpus, one change set |
 | §C2 agreement contract | Phase 1 (intra-lane), Phase 2 (cross-lane byte equality) | same protocol |
 | §C3.3 C formatting routine behavior | Phase 2 | this doc; must stay grammar-identical to Rust `Display` |
-| §C4.2 tolerance table | Phase 3 | spec/05 edit + #687 corpus, one change set |
+| §C4.2 tolerance table | Phase 3 | spec/05 edit + [#687] corpus, one change set |
 
 ## B2. Invariants that hold across every boundary
 
@@ -220,9 +220,9 @@ For every dtype and every storable value:
 2. **Bits before text.** Any test updated by the migration asserts (or
    is accompanied by) the value at the bit level where exactness
    matters, so future formatting work can never again mask a value
-   change (the #711 bit-pattern lesson, generalized).
+   change (the [#711] bit-pattern lesson, generalized).
 3. **Red-to-green only by un-ignoring** for the class's `#[ignore]`d
-   tests (#716's print row, #723's row, the bool-exit row).
+   tests ([#716]'s print row, [#723]'s row, the bool-exit row).
 4. **No third formatter.** Any new exit added to either lane must route
    through `format_element` / the generated helper; a hand-rolled
    `printf`/`format!` of a tensor element in the numeric crates is a
@@ -236,11 +236,11 @@ For every dtype and every storable value:
 
 1. Read Part I, your phase, the previous phase's frozen-at-exit list,
    and §I1 if your work touches storage or ingress (it decides whether
-   the work is yours or #729's).
+   the work is yours or [#729]'s).
 2. Run the round-trip harness and your oracle suite first; the red set
    is the work-list.
 3. The probe corpus (`docs/investigations/probes/`) holds the byte-decode
-   evidence for #716/#723 if you need to re-derive what "faithful" must
+   evidence for [#716]/[#723] if you need to re-derive what "faithful" must
    produce for those cells.
 4. Gate with `scripts/gate.py --local`; macOS Smoke is the workspace
    oracle.
@@ -251,7 +251,7 @@ For every dtype and every storable value:
 
 ## Phase 0 - the round-trip harness and the exit census (small, land-first)
 
-**You inherit:** the audit's evidence (byte-decodes for #716/#723, the
+**You inherit:** the audit's evidence (byte-decodes for [#716]/[#723], the
 formatting-divergence rows) and the matrix test files.
 
 **You deliver:**
@@ -274,7 +274,7 @@ census baseline.
 
 **Explicitly not yours:** any production change.
 
-**Oracle:** the harness red on exactly #716/#723/bool-exit cells, green
+**Oracle:** the harness red on exactly [#716]/[#723]/bool-exit cells, green
 on the rest; every census row execution-verified.
 
 ## Phase 1 - the formatter and eval adoption (+ the eval-side migration)
@@ -328,16 +328,16 @@ bits); the generated-helper architecture (no hand-written dtype switch
 may return).
 
 **Explicitly not yours:** making the LANES' bits agree where they differ
-today - that divergence is #729's subject matter and stays visible
-(faithfully!) in the #687 corpus until fixed.
+today - that divergence is [#729]'s subject matter and stays visible
+(faithfully!) in the [#687] corpus until fixed.
 
-**Oracle:** `c_int64_tensor_print_is_exact_above_2p53` (#723) and
-`c_print_of_f16_tensor_prints_f16_values` (#716) green and un-ignored;
+**Oracle:** `c_int64_tensor_print_is_exact_above_2p53` ([#723]) and
+`c_print_of_f16_tensor_prints_f16_values` ([#716]) green and un-ignored;
 the round-trip harness green on every exit in both lanes; the
 `c_dag_kernels_compute_correct_f16_bits_despite_print` byte-decode lock
 retired per its own instructions (replaced by the direct print row).
 
-## Phase 3 - the tolerance table and the #687 handshake
+## Phase 3 - the tolerance table and the [#687] handshake
 
 **You inherit:** two lanes that render identically; value divergences now
 visible as exactly themselves.
@@ -346,8 +346,8 @@ visible as exactly themselves.
 
 1. The per-op tolerance table in `spec/05-risc-primitives.md` (§C4.2),
    authored from the audit's measurements (the vvsqrtf/SLEEF rows),
-   with `sqrt` at 0 pending #719's fix.
-2. Jointly with #687: `parity.rs` and `eval_agreement.rs` replaced by /
+   with `sqrt` at 0 pending [#719]'s fix.
+2. Jointly with [#687]: `parity.rs` and `eval_agreement.rs` replaced by /
    rebuilt on the byte-equal-or-table-bounded rule (§C4.3); the silent
    float-parse fallback deleted.
 3. The rejected-cells corpus (from `loud_unsupported.md` Phase 0) and
@@ -356,11 +356,11 @@ visible as exactly themselves.
 
 **Frozen at your exit:** the table (B1); the oracle rule.
 
-**Explicitly not yours:** closing #687's remaining scope if any lanes
-still disagree on VALUES - those are #729-tracked cells, now perfectly
+**Explicitly not yours:** closing [#687]'s remaining scope if any lanes
+still disagree on VALUES - those are [#729]-tracked cells, now perfectly
 visible.
 
-**Oracle:** the #687 oracle suite running in CI on the full corpus:
+**Oracle:** the [#687] oracle suite running in CI on the full corpus:
 byte-exact everywhere except table-listed ops within bounds; any
 remaining value divergence appears as a named, issue-linked ignore -
 never as tolerance.
@@ -369,26 +369,26 @@ never as tolerance.
 
 # Part IV - bookkeeping
 
-## I1. The interlock with #729 (dtype semantics)
+## I1. The interlock with [#729] (dtype semantics)
 
-- **Ownership**: this plan owns EXITS (rendering); #729 owns VALUES and
+- **Ownership**: this plan owns EXITS (rendering); [#729] owns VALUES and
   CAPACITY (what is stored, in what buffer, across which wire type).
   `dtype_semantics.md` §C4 and this §C1 are the same rules by
   construction; edits go to both in one change set.
-- **Landing order - this plan first (expected)**: #729 Phases 1-3 then
+- **Landing order - this plan first (expected)**: [#729] Phases 1-3 then
   inherit the formatter and validate against it; their "eval is the
   reference lane" claim strengthens to "reference bits AND reference
-  bytes". #723/#716 are fixed without waiting.
-- **Landing order - #729 first**: its Phase 1 delivers `format_element`'s
+  bytes". [#723]/[#716] are fixed without waiting.
+- **Landing order - [#729] first**: its Phase 1 delivers `format_element`'s
   Rust side per its §C4 and THIS doc's Phase 1 collapses into an
   adoption/migration pass; its Phase 3 delivers §C3.2's generation and
   this doc's Phase 2 collapses likewise. Either way the contracts here
   govern the result; the tracking issues cross-check the boxes.
 - **Capacity limits**: exact int64 across the wire and the Python
-  boundary wait for #729's storage decision (#686/#685); until then the
+  boundary wait for [#729]'s storage decision ([#686]/[#685]); until then the
   wire renders faithfully within f64 capacity and the limitation is
   documented at the schema, not papered over in rendering.
-- **With #730**: the `<value>` placeholder and the print helper's abort
+- **With [#730]**: the `<value>` placeholder and the print helper's abort
   default are its census rows; the shared tripwire carries this plan's
   `%.16g`/`%.1f` pattern. No delivery overlap.
 
@@ -398,8 +398,8 @@ never as tolerance.
 |---|---|
 | 0 | detection; the round-trip invariant exists |
 | 1 | eval-side exit splits (bool `1.0`-vs-`true`); the reference renderer exists |
-| 2 | #716, #723; cross-lane byte equality on agreeing bits; the hand-written-switch class |
-| 3 | #687 unblocked and largely closed; #719 gets its normative row |
+| 2 | [#716], [#723]; cross-lane byte equality on agreeing bits; the hand-written-switch class |
+| 3 | [#687] unblocked and largely closed; [#719] gets its normative row |
 
 ## Open questions and where they get decided
 
@@ -407,7 +407,7 @@ never as tolerance.
 |---|---|---|---|
 | 1 | exact number grammar edge set (exponent threshold where Display switches to e-notation; f16/bf16 shortest-digit definition) | Phase 1 | §C1.3 + the formatter's unit tests |
 | 2 | precision-escalation loop vs vendored Ryū for the C routine | Phase 2 (loop is the default; revisit only on measured cost) | §C3.3 |
-| 3 | whether the wire schema renders numbers as JSON numbers or strings for int64 once #729's storage lands | with #729 Phase 1 | schema.rs + both docs' §I1 |
+| 3 | whether the wire schema renders numbers as JSON numbers or strings for int64 once [#729]'s storage lands | with [#729] Phase 1 | schema.rs + both docs' §I1 |
 | 4 | truncation marker (`, ...`) threshold configurability | Phase 1, default keep-as-is | §C1.5 |
 
 ## The one-sentence summary for a reviewer
@@ -417,3 +417,23 @@ dtypes, with a parse-back-identity invariant standing over every exit in
 both lanes - so a stored value can no longer be misreported, the two lanes
 become byte-comparable, and every remaining numeric disagreement is
 guaranteed to be a real value bug wearing its own name.
+
+[#680]: https://github.com/Chelis-Lang/chelis/issues/680
+[#684]: https://github.com/Chelis-Lang/chelis/issues/684
+[#685]: https://github.com/Chelis-Lang/chelis/issues/685
+[#686]: https://github.com/Chelis-Lang/chelis/issues/686
+[#687]: https://github.com/Chelis-Lang/chelis/issues/687
+[#695]: https://github.com/Chelis-Lang/chelis/issues/695
+[#711]: https://github.com/Chelis-Lang/chelis/issues/711
+[#714]: https://github.com/Chelis-Lang/chelis/issues/714
+[#716]: https://github.com/Chelis-Lang/chelis/issues/716
+[#717]: https://github.com/Chelis-Lang/chelis/issues/717
+[#718]: https://github.com/Chelis-Lang/chelis/issues/718
+[#719]: https://github.com/Chelis-Lang/chelis/issues/719
+[#723]: https://github.com/Chelis-Lang/chelis/issues/723
+[#726]: https://github.com/Chelis-Lang/chelis/issues/726
+[#727]: https://github.com/Chelis-Lang/chelis/issues/727
+[#728]: https://github.com/Chelis-Lang/chelis/issues/728
+[#729]: https://github.com/Chelis-Lang/chelis/issues/729
+[#730]: https://github.com/Chelis-Lang/chelis/issues/730
+[#732]: https://github.com/Chelis-Lang/chelis/issues/732

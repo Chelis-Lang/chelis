@@ -1,6 +1,6 @@
 # Checker Totality: every construct is checked or loudly rejected
 
-**Status:** Design proposal, pre-implementation. Tracking issue: chelis#731.
+**Status:** Design proposal, pre-implementation. Tracking issue: [#731].
 **Owning specs:** `spec/03-deep-syntax.md` (the 62-tag closed vocabulary),
 `spec/04-type-system.md` (what "checked" means per construct; its §10
 carries this plan's decided contract as provisional atoms [04-TOT-1..3],
@@ -9,13 +9,13 @@ Contract Invariants ("if a command reports perfect success, its error list
 must be empty"), and the audit record in
 `docs/investigations/numeric_audit_next_sweeps.md` (sweep 6) /
 `docs/investigations/numeric_audit_structural_prevention.md` (item 5).
-**Class fixed:** chelis#709 (a construct with no `infer.rs` case silently
-disables type checking for its subtree) and the silent half of chelis#710
+**Class fixed:** [#709] (a construct with no `infer.rs` case silently
+disables type checking for its subtree) and the silent half of [#710]
 (`.dp` guard paths that return `Type::Error` without a diagnostic).
-**Sibling plans:** `spec/design/loud_unsupported.md` (chelis#730) is the
+**Sibling plans:** `spec/design/loud_unsupported.md` ([#730]) is the
 same disease in the lowering/codegen organ - there the default substitutes
 a *value*; here it substitutes a *verdict*. The `EffectKind` enum is
-delivered by #730 Phase 2 and consumed here (§I1).
+delivered by [#730] Phase 2 and consumed here (§I1).
 
 ## Summary
 
@@ -42,7 +42,7 @@ and the tensor variant produces emitted C that fails at clang - an internal
 toolchain error where a diagnostic belonged.
 
 **Scope verdict** (the question this document answers first): the immediate
-fix is genuinely SMALL (one checker case + one loud wildcard + the #710
+fix is genuinely SMALL (one checker case + one loud wildcard + the [#710]
 guard pushes - Phase 1 is days, not weeks). What merits design is the
 ratchet: (a) a **type-state change** that makes a silent `Type::Error`
 *unconstructible* - the variant carries a witness token obtainable only by
@@ -58,23 +58,23 @@ The three-sighting pattern, checker edition:
 
 | site | on unrecognized/malformed input | diagnostic pushed? |
 |---|---|---|
-| `infer_expr` unknown-tag wildcard | returns `Type::Error` | **no** (chelis#709) |
-| `.dp` arity guards (`(def {} orphan)`, `(cast {} ...)`) | return `Type::Error` | **no** (chelis#710) |
+| `infer_expr` unknown-tag wildcard | returns `Type::Error` | **no** ([#709]) |
+| `.dp` arity guards (`(def {} orphan)`, `(cast {} ...)`) | return `Type::Error` | **no** ([#710]) |
 | the same guards for `let`/`fn`/`app`/`if` | reject | yes - proof the correct pattern coexists |
 
-Exactly the #703 shape: the correct response exists in the same file and
+Exactly the [#703] shape: the correct response exists in the same file and
 the neighboring arm does not use it. A fix that adds the `handle-effect`
 case without changing the default fixes instance one of an open-ended
-series; #709's own point 2 says this, and this document is its execution
+series; [#709]'s own point 2 says this, and this document is its execution
 plan.
 
 ## Non-goals
 
 - **Not** the lowering-side effect catch-all (`lower_handle_effect`'s
   `_ => lower body, drop handler`) - that is a value substitution, census
-  row 9 of `loud_unsupported.md` (#730 Phase 1/2 delivers `EffectKind`;
+  row 9 of `loud_unsupported.md` ([#730] Phase 1/2 delivers `EffectKind`;
   §I1 here consumes it for the checker case).
-- **Not** chelis#721 (eval cannot ingest the canonical Deep of a nullary
+- **Not** [#721] (eval cannot ingest the canonical Deep of a nullary
   fn) - an eval-lane ingestion bug found while probing this class's
   controls; it involves no checker code. Independent fix.
 - **Not** a semantics change for `with seed` / `with device` beyond
@@ -122,12 +122,12 @@ Normative, for every node the checker visits:
    points.)
 3. **`Type::Error` implies a reported error.** At the end of any check,
    if the error vector is empty, NO expression in the typed result carries
-   `Type::Error`. This is the executable invariant (§C4.1) that both #709
-   and #710 violate today, and it is the class-level acceptance test:
+   `Type::Error`. This is the executable invariant (§C4.1) that both [#709]
+   and [#710] violate today, and it is the class-level acceptance test:
    whatever future code does, it cannot hold a silent exemption without
    tripping this.
 4. **Structural malformation is a checker error too**: the `.dp` arity
-   guards that today return silent `Type::Error` (the #710 half) push
+   guards that today return silent `Type::Error` (the [#710] half) push
    diagnostics like their correctly-rejecting siblings (`let`/`fn`/`app`/
    `if` guards). Runtime-catches-it-later (today's saving grace) is not a
    disposition.
@@ -185,7 +185,7 @@ pub enum Type {
   without re-reporting.
 - The compiler enumerates every current construction site during the
   migration (that is the point); each becomes `report(...)` (gaining its
-  missing diagnostic - the #710 sweep happens *here*, mechanically) or
+  missing diagnostic - the [#710] sweep happens *here*, mechanically) or
   `propagate(...)` (documented cascade).
 - Unification and equality treat `Type::Error(_)` exactly as before; the
   token carries no data and costs nothing.
@@ -209,7 +209,7 @@ recorded as the one non-constructor entry point (open question 2).
    validates strings against the closed vocabulary; it starts producing
    `DeepTag` (string kept alongside for spans/printing). `infer_expr`,
    `lower_expr`, and the `.dp` structural validators match the enum
-   **exhaustively - no `_` arm** (chelis#730's `rust-no-wildcard-dispatch`
+   **exhaustively - no `_` arm** ([#730]'s `rust-no-wildcard-dispatch`
    lint adds `DeepTag` to its enum list, §I1). Tag 63 then stops the build
    at every consumer that has not chosen a disposition. Raw-string entry
    points (anything that never went through the parser) keep the §C1.2
@@ -237,7 +237,7 @@ recorded as the one non-constructor entry point (open question 2).
 1. **The canary never weakens.** No phase may remove or loosen a
    wrapper-battery row; language additions extend it in the same PR.
 2. **Red-to-green only by un-ignoring** (the shared audit rule): the
-   `#[ignore]`d #709/#710 tests flip by deleting the attribute, never by
+   `#[ignore]`d [#709]/[#710] tests flip by deleting the attribute, never by
    editing assertions.
 3. **Cascade behavior is a control.** Existing multi-error programs must
    not spray new duplicate diagnostics after §C3; a before/after
@@ -269,8 +269,8 @@ recorded as the one non-constructor entry point (open question 2).
 
 ## Phase 0 - census + red invariant (small, land-first)
 
-**You inherit:** the wrapper battery canary and the #709/#710
-`#[ignore]`d tests (already committed on the PR #696 branch).
+**You inherit:** the wrapper battery canary and the [#709]/[#710]
+`#[ignore]`d tests (already committed on the PR [#696] branch).
 
 **You deliver:**
 
@@ -282,7 +282,7 @@ recorded as the one non-constructor entry point (open question 2).
    check` where reachable.)
 2. **The totality invariant as a red harness**: §C4.1 implemented as a
    test-only validation over check results, `#[ignore]`d red on the
-   known holes (`with seed`, `with device`, the two #710 forms), green
+   known holes (`with seed`, `with device`, the two [#710] forms), green
    on a clean-program corpus.
 
 **Frozen at your exit:** the census baseline; the invariant's definition.
@@ -300,10 +300,10 @@ probe or test.
 **You deliver:**
 
 1. `infer_expr`'s wildcard pushes `UnknownForm` (§C1.2).
-2. **The `handle-effect` case** (§C1.5), consuming `EffectKind` if #730
+2. **The `handle-effect` case** (§C1.5), consuming `EffectKind` if [#730]
    Phase 2 has landed, else matching the two known kind strings with a
    loud else (and a note to migrate; §I1).
-3. **The #710 guard sweep**: the silent arity guards push
+3. **The [#710] guard sweep**: the silent arity guards push
    `MalformedForm`; the correctly-rejecting siblings are the template.
 4. Diagnostic-shape conformance per §C2.
 
@@ -316,8 +316,8 @@ probe or test.
 `#[ignore]`d tests green and un-ignored (with-seed/with-device bodies
 checked; the masked-return-type program rejected at build with a type
 diagnostic; the bogus-effect `.dp` rejected loudly - the last one via the
-checker OR via #730's lowering raise, whichever lands first, per §I1);
-the #710 false-green `.dp` tests green; the canary green; the Phase 0
+checker OR via [#730]'s lowering raise, whichever lands first, per §I1);
+the [#710] false-green `.dp` tests green; the canary green; the Phase 0
 invariant harness green on the four former holes.
 
 ## Phase 2 - the witness token (silent exemption becomes unconstructible)
@@ -361,7 +361,7 @@ phase is about the NEXT tag, not the current ones.
    Some("...")` chains at those three chokepoints retire. (Printers and
    producers may migrate opportunistically; they are not chokepoints -
    they cannot exempt or substitute.)
-3. `DeepTag` added to #730's lint enum list (§I1); the §C1.2 loud arm
+3. `DeepTag` added to [#730]'s lint enum list (§I1); the §C1.2 loud arm
    retained only at raw-string entry boundaries.
 
 **Frozen at your exit:** the variant set = the vocabulary, changing only
@@ -380,7 +380,7 @@ the scratch variant deleted); the canary and full matrix stay green.
 
 ## I1. Interlocks
 
-- **With #730 (`loud_unsupported.md`)**: `EffectKind` is delivered there
+- **With [#730] (`loud_unsupported.md`)**: `EffectKind` is delivered there
   (Phase 2) and consumed here (§C1.5) - if this plan's Phase 1 lands
   first, it matches the two kind strings with a loud else and migrates to
   the enum when available; the bogus-effect `.dp` repro must be rejected
@@ -388,11 +388,11 @@ the scratch variant deleted); the canary and full matrix stay green.
   kind is `MalformedForm`; lowering: its catch-all raises). `DeepTag`
   joins the `rust-no-wildcard-dispatch` enum list on landing (their B1
   freeze anticipates the addition).
-- **With #729 (`dtype_semantics.md`)**: none structural. Phase 4's
+- **With [#729] (`dtype_semantics.md`)**: none structural. Phase 4's
   capability table derives op x dtype acceptance; this plan governs
   CONSTRUCT-level totality. The two meet only in that both make `chelis
   check`'s score-1 claim honest.
-- **With #721**: none (eval ingestion, no checker code); listed so nobody
+- **With [#721]**: none (eval ingestion, no checker code); listed so nobody
   searches for it here.
 
 ## Issue map
@@ -400,7 +400,7 @@ the scratch variant deleted); the canary and full matrix stay green.
 | phase | goes green / becomes unwritable |
 |---|---|
 | 0 | detection; the invariant exists |
-| 1 | #709 (all three escalations), #710's silent half |
+| 1 | [#709] (all three escalations), [#710]'s silent half |
 | 2 | the future supply of silent exemptions (type-state) |
 | 3 | the future supply of undecided TAGS (compile-time totality) |
 
@@ -415,9 +415,18 @@ the scratch variant deleted); the canary and full matrix stay green.
 
 ## The one-sentence summary for a reviewer
 
-Make the checker's default loud (one wildcard, one new case, the #710
+Make the checker's default loud (one wildcard, one new case, the [#710]
 guards), then take the pen away twice: `Type::Error` without a pushed
 diagnostic becomes unconstructible (witness token), and a Deep tag without
 a checker disposition becomes uncompilable (`DeepTag` exhaustive matches) -
 with an always-on invariant (empty errors implies no `Type::Error` in the
 tree) standing guard over both claims.
+
+[#696]: https://github.com/Chelis-Lang/chelis/pull/696
+[#703]: https://github.com/Chelis-Lang/chelis/issues/703
+[#709]: https://github.com/Chelis-Lang/chelis/issues/709
+[#710]: https://github.com/Chelis-Lang/chelis/issues/710
+[#721]: https://github.com/Chelis-Lang/chelis/issues/721
+[#729]: https://github.com/Chelis-Lang/chelis/issues/729
+[#730]: https://github.com/Chelis-Lang/chelis/issues/730
+[#731]: https://github.com/Chelis-Lang/chelis/issues/731

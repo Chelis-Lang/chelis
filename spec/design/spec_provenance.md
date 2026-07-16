@@ -1,6 +1,6 @@
 # Spec Provenance: atoms, hash-linked claims, and the coverage gate
 
-**Status:** Design proposal, pre-implementation. Tracking issue: chelis#733.
+**Status:** Design proposal, pre-implementation. Tracking issue: [#733].
 **Owning specs:** every file under `spec/` (this plan changes how normative
 text in them is WRITTEN and REFERENCED, not what any of them says);
 `spec/design/ears_chelis_bridge.md` (the existing EARS anchor, developed in
@@ -10,11 +10,11 @@ made machine-checkable).
 **Class fixed:** the recurring failure BENEATH the four numeric-audit
 classes: **spec silence and stale spec claims**. `spec/04-type-system.md`
 said nothing about integer overflow, which is why int8-wraps and
-int64-saturates coexisted unauthored (chelis#680/#718); integer `mean`
-(#724) and bool arithmetic (#726) were never decided by anyone; and four
-code comments asserted safety properties the code lacked (#694) because
+int64-saturates coexisted unauthored ([#680]/[#718]); integer `mean`
+([#724]) and bool arithmetic ([#726]) were never decided by anyone; and four
+code comments asserted safety properties the code lacked ([#694]) because
 nothing invalidates a prose claim when reality moves.
-**Sibling plans:** chelis#729/#730/#731/#732 fix the four classes; this
+**Sibling plans:** [#729]/[#730]/[#731]/[#732] fix the four classes; this
 plan is the fifth and sits underneath them - it makes "there is no spec
 for this" and "the spec moved under this claim" mechanically detectable,
 which none of the four can do for themselves.
@@ -86,7 +86,7 @@ honestly:
   the atom grammar; openspec.dev's spec-delta-before-code flow shapes the
   PR gate; both are implemented in-repo.
 - **Not** a replacement for the four sibling plans' enforcement. The
-  capability table still makes undecided cells unbuildable (#729); this
+  capability table still makes undecided cells unbuildable ([#729]); this
   plan makes the table's rows CITE their authority and makes authoring
   that authority a visible, gated act.
 - **Not** prose policing. Only text inside atom blocks is normative,
@@ -148,8 +148,8 @@ Rules:
    decision, not per paragraph of exposition.
 5. **Scope of atomization** (the incremental rule): (a) all NEW normative
    text lands atomized from Phase 1 onward - in particular the spec
-   sections the sibling plans deliver (#729's overflow/rounding section,
-   #732's tolerance table, #731's disposition rules, #730's diagnostic
+   sections the sibling plans deliver ([#729]'s overflow/rounding section,
+   [#732]'s tolerance table, [#731]'s disposition rules, [#730]'s diagnostic
    format) are born as atoms; (b) EXISTING text is atomized when it is
    first cited, amended, or found load-bearing by an audit - never as a
    standalone bulk pass. Un-atomized normative prose is a known-debt
@@ -191,7 +191,7 @@ like §8.6):
 **The freshness protocol** (the point of the whole mechanism): a PR that
 edits an atom's text MUST, in the same change set, visit every carrier of
 that atom - the lint enumerates them - and re-affirm or downgrade each.
-This is the #694 fix generalized: a safety claim can no longer outlive
+This is the [#694] fix generalized: a safety claim can no longer outlive
 the text it was made against. The cost (spec edits fan out) is the
 feature: editing normative text SHOULD be a deliberate act that confronts
 its consequences, and the normalization rule (§C1.3) keeps purely
@@ -231,7 +231,7 @@ mechanical weight.
 2. **The two honest states**: a green test carrier = "specified and
    honored"; an `#[ignore]`d carrier naming an issue = "specified, not
    yet honored" (exactly the audit's red-test discipline - the ~70
-   ignored tests on PR #696 become carriers for the atoms the sibling
+   ignored tests on PR [#696] become carriers for the atoms the sibling
    plans author). There is no representable state for "specified,
    silently unhonored" - that is the point.
 3. **The debt reports** (CI artifacts, advisory): atoms with no carrier;
@@ -245,18 +245,18 @@ mechanical weight.
 Where the sibling plans create machine-readable surface, atoms become
 build-relevant, which is the strongest form of this plan:
 
-1. **Capability-table rows cite atoms** (#729 Phase 4): every
+1. **Capability-table rows cite atoms** ([#729] Phase 4): every
    `Supported | Rejected(reason)` cell carries the atom ID that decided
    it; the table's conformance generator fails on a row with no citation.
-   Undecided-cell bugs (#724, #726) become unwritable-without-an-atom -
+   Undecided-cell bugs ([#724], [#726]) become unwritable-without-an-atom -
    the signoff flow the user-facing question asked for, enforced by the
    build.
-2. **Tag dispositions cite atoms** (#731 Phase 3): each `DeepTag`
+2. **Tag dispositions cite atoms** ([#731] Phase 3): each `DeepTag`
    variant's checker disposition names its spec/03 atom.
-3. **Tolerance rows are atoms** (#732 Phase 3): the per-op cross-lane
-   bounds land as a blockquoted atom table in spec/05; the #687 oracle
+3. **Tolerance rows are atoms** ([#732] Phase 3): the per-op cross-lane
+   bounds land as a blockquoted atom table in spec/05; the [#687] oracle
    reads the same rows the lint hashes.
-4. **Diagnostic strings cite atoms** (#730): the frozen `unsupported:`
+4. **Diagnostic strings cite atoms** ([#730]): the frozen `unsupported:`
    and trap message constants carry code-carrier annotations to their
    atoms, so a message edit and its spec move together or the gate says
    why not.
@@ -389,7 +389,7 @@ watch carriers fail, re-affirm, green).
 the debt report runs in CI on every PR; the exemption report shows only
 discharged or in-flight entries.
 
-## Phase 3 - the structural tier (jointly with #729/#731/#732)
+## Phase 3 - the structural tier (jointly with [#729]/[#731]/[#732])
 
 **You inherit:** the mechanism, the coverage gate, and the sibling
 plans' tables as they land.
@@ -410,7 +410,7 @@ lint; recorded once in each joint PR.
 ## Phase 4 - executable atoms (opportunistic, long-term)
 
 **You inherit:** everything above, plus a trustworthy prove lane
-(gated on #688's fix for integer properties).
+(gated on [#688]'s fix for integer properties).
 
 **You deliver:** semantic atoms mapped to in-language `@property`
 declarations carrying `@spec` annotations - spec claims checked by
@@ -427,7 +427,7 @@ section, run per the repo's manual-gate documentation rules.
 
 ## I1. Interlocks
 
-- **#729/#730/#731/#732**: their spec deliverables are born atomized
+- **[#729]/[#730]/[#731]/[#732]**: their spec deliverables are born atomized
   (Phase 1 here coordinates with whichever of their phases is in
   flight); their tables are the structural tier (Phase 3 here ships
   inside their table-bearing phases). Nothing here blocks them: if this
@@ -450,9 +450,9 @@ section, run per the repo's manual-gate documentation rules.
 | phase | what becomes impossible |
 |---|---|
 | 0 | a PR with no spec story at all; unsignposted spec edits |
-| 1 | stale spec claims (#694's class); citations to nothing |
+| 1 | stale spec claims ([#694]'s class); citations to nothing |
 | 2 | "specified, silently unhonored" atoms in ratcheted files; new spec-silent surface in them |
-| 3 | undecided table cells without an authoring act (#724/#726's class, at the build) |
+| 3 | undecided table cells without an authoring act ([#724]/[#726]'s class, at the build) |
 | 4 | (additive) semantic atoms drifting from checked behavior |
 
 ## Open questions and where they get decided
@@ -473,3 +473,17 @@ claims gone stale, and require every PR to name its authority or visibly
 ask for forgiveness - so that "the spec was silent" and "the comment was
 stale" (the two failures beneath this year's forty numeric bugs) stop
 being discoverable only by a three-day adversarial audit.
+
+[#680]: https://github.com/Chelis-Lang/chelis/issues/680
+[#687]: https://github.com/Chelis-Lang/chelis/issues/687
+[#688]: https://github.com/Chelis-Lang/chelis/issues/688
+[#694]: https://github.com/Chelis-Lang/chelis/issues/694
+[#696]: https://github.com/Chelis-Lang/chelis/pull/696
+[#718]: https://github.com/Chelis-Lang/chelis/issues/718
+[#724]: https://github.com/Chelis-Lang/chelis/issues/724
+[#726]: https://github.com/Chelis-Lang/chelis/issues/726
+[#729]: https://github.com/Chelis-Lang/chelis/issues/729
+[#730]: https://github.com/Chelis-Lang/chelis/issues/730
+[#731]: https://github.com/Chelis-Lang/chelis/issues/731
+[#732]: https://github.com/Chelis-Lang/chelis/issues/732
+[#733]: https://github.com/Chelis-Lang/chelis/issues/733
