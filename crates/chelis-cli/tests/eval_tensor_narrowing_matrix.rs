@@ -127,9 +127,16 @@ fn c_f64_tensor_unary_ops_are_f64_precise() {
     }
     let line = c_first_line(&f64_unop_program("tan", "1.5", "3.0"), "c_f64_tan")
         .expect("C lane should run");
+    // Property-based, not an exact string: double tan is not required to
+    // be correctly rounded and may differ by a few ulp between platform
+    // libms (see the eval tan control above). f64 PRECISION is the claim:
+    // the #717 bug's f32-destroyed value is ~5e-7 away from true tan,
+    // while any reasonable libm is within ~1e-15.
+    let v = parse_data(&line)[0];
+    let truth = 14.10141994717172_f64;
     assert!(
-        line.contains("14.10141994717172"),
-        "C f64 tan(1.5) must be the true f64 value; got: {line}"
+        (v - truth).abs() < 1e-12,
+        "C f64 tan(1.5) must be f64-precise (within 1e-12 of {truth}); got {v} in: {line}"
     );
     let line = c_first_line(&f64_unop_program("sqrt", "2.0", "3.0"), "c_f64_sqrt")
         .expect("C lane should run");
@@ -182,12 +189,33 @@ fn c_f32_tensor_add_rounds_to_f32() {
     );
 }
 
+/// Parse the flat `data=[..]` payload of a printed tensor line.
+fn parse_data(line: &str) -> Vec<f64> {
+    let start = line.find("data=[").expect("data marker") + "data=[".len();
+    let end = start + line[start..].find(']').expect("closing bracket");
+    line[start..end]
+        .split(',')
+        .map(|s| s.trim().parse::<f64>().expect("numeric"))
+        .collect()
+}
+
 /// **The other half of the inconsistency claim, locked**: eval's f32
-/// tensor `tan` and `sqrt` DO narrow to f32 (correctly), while `add`/
-/// `div`/`recip` do not (the broken rows below). Distilled from
-/// `docs/investigations/probes/bat_f32_tensor_round.py`. If this control
-/// ever fails, either the wrapper moved (re-check #717's table) or the
-/// fix landed and the broken rows should be flipping green with it.
+/// tensor `tan` and `sqrt` DO narrow to f32, while `add`/`div`/`recip` do
+/// not (the broken rows below). Distilled from
+/// `docs/investigations/probes/bat_f32_tensor_round.py`.
+///
+/// The `tan` assertion is PROPERTY-BASED (every element must be exactly
+/// f32-representable and near the true value), not an exact string:
+/// `tanf` is not required to be correctly rounded and its result differs
+/// by 1 ulp between platform libms (macOS `14.101419448852539` vs glibc
+/// `14.101420402526855` - CI caught exactly this, and it is the
+/// transcendental-variance class the chelis#732 tolerance table exists
+/// for). `sqrt` IS required correctly rounded by IEEE-754, so its exact
+/// strings are safe on every platform.
+///
+/// If this control ever fails, either the wrapper moved (re-check
+/// #717's table) or the fix landed and the broken rows should be
+/// flipping green with it.
 #[test]
 fn eval_f32_tensor_tan_and_sqrt_do_narrow_to_f32() {
     let line = eval_first_line(
@@ -196,10 +224,21 @@ fn eval_f32_tensor_tan_and_sqrt_do_narrow_to_f32() {
          out = print(f(to_tensor([1.5, 3.0])))\n",
     )
     .expect("eval should run");
-    assert!(
-        line.contains("data=[14.101419448852539, -0.14254654943943024]"),
-        "eval f32 tensor tan narrows through f32 today; got: {line}"
-    );
+    let values = parse_data(&line);
+    for (v, truth) in values
+        .iter()
+        .zip([14.10141994717172_f64, -0.1425465430742778])
+    {
+        assert!(
+            (*v as f32) as f64 == *v,
+            "eval f32 tensor tan must produce f32-representable values \
+             (the narrowing under test); got non-f32 {v} in: {line}"
+        );
+        assert!(
+            (v - truth).abs() < 1e-4 * truth.abs().max(1.0),
+            "tan value implausibly far from tan(x); got {v} in: {line}"
+        );
+    }
     let line = eval_first_line(
         "module M.Main\n\
          def f(x: tensor[2, f32]) -> tensor[2, f32] = sqrt(x)\n\
@@ -209,7 +248,8 @@ fn eval_f32_tensor_tan_and_sqrt_do_narrow_to_f32() {
     assert!(
         line.contains("data=[1.2247449159622192, 1.7320507764816284]"),
         "eval f32 tensor sqrt narrows through f32 today (and is correctly \
-         rounded, unlike the C lane's vvsqrtf - chelis#719); got: {line}"
+         rounded on every platform per IEEE-754, unlike the C lane's \
+         vvsqrtf - chelis#719); got: {line}"
     );
 }
 
