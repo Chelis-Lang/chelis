@@ -6,8 +6,10 @@ use chelis_ir::eval::{TensorValue as IrTensorValue, eval_tensor_roots_with};
 use chelis_ir::tier2;
 use chelis_types::{BUILTIN_NAMES, types::Prim};
 
-use super::transforms::*;
-use super::*;
+use super::transforms::{as_list, var_name};
+use super::{
+    RuntimeTensorValue, RuntimeValue, TransformKind, children, symbol_name, tag, top_level_items,
+};
 
 pub(super) fn pattern_matches(
     value: &RuntimeValue,
@@ -536,7 +538,7 @@ pub(super) fn tensor_float_unop_f32(
                 .value
                 .data
                 .iter()
-                .map(|value| op(*value as f32) as f64)
+                .map(|value| f64::from(op(*value as f32)))
                 .collect(),
         ),
         precision: tensor.precision,
@@ -1237,7 +1239,7 @@ fn convert_scalar_data(x: f64, src: Prim, dst: Prim) -> f64 {
     // Floats stay floats; ints route through i64; bools route through 0/1.
     let as_int: Option<i64> = match src {
         Prim::Int8 | Prim::Int32 | Prim::Int64 => Some(x as i64),
-        Prim::Bool => Some(if x != 0.0 { 1 } else { 0 }),
+        Prim::Bool => Some(i64::from(x != 0.0)),
         _ => None,
     };
     // Step 2: emit the value in the target precision's storage convention.
@@ -1247,16 +1249,16 @@ fn convert_scalar_data(x: f64, src: Prim, dst: Prim) -> f64 {
             None => x,
         },
         Prim::F32 => match as_int {
-            Some(i) => (i as f32) as f64,
-            None => (x as f32) as f64,
+            Some(i) => f64::from(i as f32),
+            None => f64::from(x as f32),
         },
         Prim::Int8 => match as_int {
-            Some(i) => (i as i8) as f64,
-            None => (x as i8) as f64,
+            Some(i) => f64::from(i as i8),
+            None => f64::from(x as i8),
         },
         Prim::Int32 => match as_int {
-            Some(i) => (i as i32) as f64,
-            None => (x as i32) as f64,
+            Some(i) => f64::from(i as i32),
+            None => f64::from(x as i32),
         },
         Prim::Int64 => match as_int {
             Some(i) => i as f64,
@@ -1271,10 +1273,10 @@ fn convert_scalar_data(x: f64, src: Prim, dst: Prim) -> f64 {
                 }
             }
             None => {
-                if x != 0.0 {
-                    1.0
-                } else {
+                if x == 0.0 {
                     0.0
+                } else {
+                    1.0
                 }
             }
         },
@@ -1690,8 +1692,10 @@ pub(super) fn tensor_reduce_host(
         out[out_linear] = match op {
             ReduceOp::Sum => {
                 if sum_in_f32 {
-                    ((sum_lanes_f32[0] + sum_lanes_f32[1]) + (sum_lanes_f32[2] + sum_lanes_f32[3]))
-                        as f64
+                    f64::from(
+                        (sum_lanes_f32[0] + sum_lanes_f32[1])
+                            + (sum_lanes_f32[2] + sum_lanes_f32[3]),
+                    )
                 } else {
                     (sum_lanes[0] + sum_lanes[1]) + (sum_lanes[2] + sum_lanes[3])
                 }
@@ -2093,7 +2097,7 @@ pub(super) fn tensor_shrink_host(
 
 /// Strided view -- take every `strides[i]`-th element along axis i. Output
 /// dim i is `ceil(input_dim[i] / strides[i])`. Zero strides are rejected
-/// upstream (the eval_builtin arm validates positivity) but checked again
+/// upstream (the `eval_builtin` arm validates positivity) but checked again
 /// here to keep the function self-contained and to match the IR-level
 /// `c10_stride_zero_step_is_error` invariant.
 pub(super) fn tensor_stride_host(
@@ -2688,8 +2692,7 @@ pub(super) fn tensor_scatter_value(
             "replace" => {
                 if !seen.insert(out_linear) {
                     return Err(format!(
-                        "scatter replace mode rejects duplicate target index {}",
-                        out_linear
+                        "scatter replace mode rejects duplicate target index {out_linear}"
                     ));
                 }
                 out[out_linear] = updates.value.data[linear];
@@ -2775,10 +2778,10 @@ pub(super) fn tensor_where_value(
         .zip(&then_tensor.value.data)
         .zip(&else_tensor.value.data)
         .map(|((cond, then_value), else_value)| {
-            if *cond != 0.0 {
-                *then_value
-            } else {
+            if *cond == 0.0 {
                 *else_value
+            } else {
+                *then_value
             }
         })
         .collect();

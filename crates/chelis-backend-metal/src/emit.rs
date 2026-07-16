@@ -42,6 +42,7 @@ use std::collections::{HashMap, HashSet};
 /// Distinct input labels in DAG order.
 ///
 /// Mirrors `chelis_backend_hip::emit::HipEmitter::input_labels`.
+#[must_use]
 pub fn input_labels(dag: &Dag) -> Vec<String> {
     let mut labels = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -107,21 +108,24 @@ fn output_specs(dag: &Dag) -> Vec<OutputSpec> {
 /// no-Store roots, mirroring `output_specs`. The CLI's `cmd_build_metal`
 /// passes this through to the result struct so users can map positional
 /// outputs back to symbolic names.
+#[must_use]
 pub fn output_labels(dag: &Dag) -> Vec<String> {
     output_specs(dag).into_iter().map(|s| s.label).collect()
 }
 
 /// Old M1-stub helper kept for tests that built against it before M2 emit
 /// landed. New callers should use `emit_dag` directly.
+#[must_use]
 pub fn stub_mm_source(func_name: &str) -> String {
     stub_mm_source_with_reason(func_name, "")
 }
 
 /// Stub mm-source carrying a structured reason in its abort message.
-/// Used when emit_dag returns Err so the runtime diagnostic explains
+/// Used when `emit_dag` returns Err so the runtime diagnostic explains
 /// why the DAG was rejected (e.g., integer matmul per spec §5.7.2)
 /// instead of the bare "not yet implemented" string. The hint is
 /// embedded as a comment in the source AND printed at abort time.
+#[must_use]
 pub fn stub_mm_source_with_reason(func_name: &str, hint: &str) -> String {
     let trimmed = hint.trim();
     let hint_comment = if trimmed.is_empty() {
@@ -163,15 +167,16 @@ extern "C" void {func_name}(chelis_tensor **inputs, int n_in,
     )
 }
 
-/// Inspect the DAG and the emit_dag error message to derive a more
+/// Inspect the DAG and the `emit_dag` error message to derive a more
 /// precise hint than the bare error. Called by `codegen_metal` when
-/// emit_dag returns Err.
+/// `emit_dag` returns Err.
 ///
 /// Currently surfaces the integer-matmul §5.7.2 hint when the DAG
 /// contains a Sum-rooted matmul subgraph at integer precision (the
 /// shape that `blas::detect_matmul_pattern` rejects, falling through
 /// to the stub). Additional reason categories slot in here as the
 /// stub gains more failure modes.
+#[must_use]
 pub fn stub_reason_hint(dag: &Dag, base_reason: &str) -> String {
     use chelis_types::types::Prim;
     // If any Sum node has integer operand precision and matches the
@@ -288,7 +293,7 @@ struct Emitter {
     /// Expand or Mul intermediate. The emitter skips these when walking
     /// the DAG; the matmul kernel emits at the Sum node instead.
     matmul_consumed: HashSet<usize>,
-    /// Sum-node-id → MatmulInfo. emit_node looks up the MatmulInfo here
+    /// Sum-node-id → `MatmulInfo`. `emit_node` looks up the `MatmulInfo` here
     /// when reaching the Sum and emits a matmul kernel + dispatch.
     matmuls: HashMap<usize, blas::MatmulInfo>,
 }
@@ -332,7 +337,7 @@ impl Emitter {
             .map(String::as_str)
             .filter(|s| node.span_id.as_deref() != Some(*s))
             .collect();
-        merged.sort();
+        merged.sort_unstable();
         merged.dedup();
         for span in merged {
             let safe = chelis_ir::span_sanitize::sanitize_for_comment(span);
@@ -1413,7 +1418,7 @@ impl Emitter {
         match prec {
             Prim::F32 => format!("{value:?}f"),
             Prim::F16 | Prim::Bf16 => format!("{value:?}"),
-            Prim::Bool => (if value != 0.0 { "true" } else { "false" }).to_string(),
+            Prim::Bool => if value == 0.0 { "false" } else { "true" }.to_string(),
             Prim::Int8 | Prim::Int16 | Prim::Int32 => format!("{}", value as i64),
             Prim::Int64 => format!("{}LL", value as i64),
             other => format!("/* unsupported pad fill dtype {} */ 0", other.name()),

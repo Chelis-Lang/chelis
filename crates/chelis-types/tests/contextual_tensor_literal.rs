@@ -287,14 +287,12 @@ fn negative_bare_int_list_does_not_silently_default_to_int64() {
     let combined = printed.join("\n");
     assert!(
         combined.contains("(t-prim {} int32)"),
-        "expected int32 literal default, got:\n{}",
-        combined
+        "expected int32 literal default, got:\n{combined}"
     );
     assert!(
         !combined.contains("(t-prim {} int64)"),
         "bare unannotated [1, 2, 3] must not silently default to \
-         int64; got:\n{}",
-        combined
+         int64; got:\n{combined}"
     );
 }
 
@@ -304,14 +302,12 @@ fn negative_bare_float_list_does_not_silently_default_to_f64() {
     let combined = printed.join("\n");
     assert!(
         combined.contains("(t-prim {} f32)"),
-        "expected f32 literal default, got:\n{}",
-        combined
+        "expected f32 literal default, got:\n{combined}"
     );
     assert!(
         !combined.contains("(t-prim {} f64)"),
         "bare unannotated [1.0, 2.0, 3.0] must not silently default \
-         to f64; got:\n{}",
-        combined
+         to f64; got:\n{combined}"
     );
 }
 
@@ -387,8 +383,7 @@ fn outside_closed_set_let_in_block_no_annotation_uses_default() {
     let combined = printed.join("\n");
     assert!(
         combined.contains("(t-prim {} f32)"),
-        "expected f32 default in non-contextual let, got:\n{}",
-        combined
+        "expected f32 default in non-contextual let, got:\n{combined}"
     );
 }
 

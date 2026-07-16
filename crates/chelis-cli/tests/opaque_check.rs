@@ -35,7 +35,7 @@ def prob_value(p: Probability) -> f32 = p.value
 /// Two-module Deep check unit: the defining module plus an
 /// out-of-module record construction. Surf admits one `module` per
 /// file, so the single-file multi-module encoding is Deep.
-const VIOLATION_DP: &str = r#"(module {}
+const VIOLATION_DP: &str = r"(module {}
   stats.prob
   (export {} probability)
   (deftype {opaque: true}
@@ -55,10 +55,10 @@ const VIOLATION_DP: &str = r#"(module {}
     (fn {}
       (params {} (x {type: (t-prim {} f32)}))
       (record {} Probability (kv {} value (var {} x))))))
-"#;
+";
 
 /// Defining module only: everything stays in-module and clean.
-const CLEAN_DP: &str = r#"(module {}
+const CLEAN_DP: &str = r"(module {}
   stats.prob
   (export {} probability)
   (deftype {opaque: true}
@@ -71,7 +71,7 @@ const CLEAN_DP: &str = r#"(module {}
     (fn {}
       (params {} (x {type: (t-prim {} f32)}))
       (record {} Probability (kv {} value (var {} x))))))
-"#;
+";
 
 const EXPECTED_DP_VIOLATION_MSG: &str = "in def `bad`: record construction of opaque type \
      `Probability` outside its defining module `stats.prob`; exported producers of \
@@ -79,7 +79,7 @@ const EXPECTED_DP_VIOLATION_MSG: &str = "in def `bad`: record construction of op
 
 /// RT-1 F2: the opaque defining module is RE-OPENED by a second
 /// `(module ...)` wrapper that forges + accesses the type.
-const MODULE_REOPEN_DP: &str = r#"(module {}
+const MODULE_REOPEN_DP: &str = r"(module {}
   stats.prob
   (deftype {opaque: true}
     Probability
@@ -98,7 +98,7 @@ const MODULE_REOPEN_DP: &str = r#"(module {}
     (fn {}
       (params {} (x {type: (t-prim {} f32)}))
       (record {} Probability (kv {} value (var {} x))))))
-"#;
+";
 
 const EXPECTED_REOPEN_MSG: &str = "module `stats.prob` is opened by more than one module wrapper in this check unit; \
      a named module may be opened at most once";
@@ -106,7 +106,7 @@ const EXPECTED_REOPEN_MSG: &str = "module `stats.prob` is opened by more than on
 /// RT-1 F2 bypass (RFC v5): pure-flat program of reef-internal mangled
 /// names, NO wrappers. The mangled deftype + def stem-key to module
 /// `foo` and forge + inspect the opaque type as in-module.
-const STEM_ONLY_DP: &str = r#"(deftype {opaque: true}
+const STEM_ONLY_DP: &str = r"(deftype {opaque: true}
   Pkg__foo__Secret
   ()
   (variant {} Pkg__foo__Secret (field {} value (t-prim {} f32))))
@@ -122,11 +122,11 @@ const STEM_ONLY_DP: &str = r#"(deftype {opaque: true}
   (fn {}
     (params {} (p {type: (t-adt {} Pkg__foo__Secret)}))
     (access {} (var {} p) value)))
-"#;
+";
 
 /// RT-1 F2 bypass: stem deftype + a lexical `(module {} foo ...)`
 /// wrapper re-opening it.
-const STEM_DOTFREE_DP: &str = r#"(deftype {opaque: true}
+const STEM_DOTFREE_DP: &str = r"(deftype {opaque: true}
   Pkg__foo__Secret
   ()
   (variant {} Pkg__foo__Secret (field {} value (t-prim {} f32))))
@@ -137,10 +137,10 @@ const STEM_DOTFREE_DP: &str = r#"(deftype {opaque: true}
     (fn {}
       (params {} (x {type: (t-prim {} f32)}))
       (record {} Pkg__foo__Secret (kv {} value (var {} x))))))
-"#;
+";
 
 /// RT-1 F2 bypass: dotted-key variant of the stem-plus-wrapper forge.
-const STEM_COLLIDE_DP: &str = r#"(deftype {opaque: true}
+const STEM_COLLIDE_DP: &str = r"(deftype {opaque: true}
   Pkg__foo__bar__Secret
   ()
   (variant {} Pkg__foo__bar__Secret (field {} value (t-prim {} f32))))
@@ -151,7 +151,7 @@ const STEM_COLLIDE_DP: &str = r#"(deftype {opaque: true}
     (fn {}
       (params {} (x {type: (t-prim {} f32)}))
       (record {} Pkg__foo__bar__Secret (kv {} value (var {} x))))))
-"#;
+";
 
 fn write_file(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
@@ -959,7 +959,7 @@ fn decompile_opaque_module_round_trips_through_check() {
     // A single-module opaque fixture: deftype + smart constructor.
     write_file(
         &dp,
-        r#"(module {}
+        r"(module {}
   stats.prob
   (deftype {opaque: true}
     Probability
@@ -971,7 +971,7 @@ fn decompile_opaque_module_round_trips_through_check() {
     (fn {}
       (params {} (x {type: (t-prim {} f32)}))
       (record {} Probability (kv {} value (var {} x))))))
-"#,
+",
     );
 
     let decompiled = decompile_dp(&dp);
@@ -1020,7 +1020,7 @@ fn decompile_non_opaque_multi_segment_module_round_trips() {
     let dp = dir.path().join("plain.dp");
     write_file(
         &dp,
-        r#"(module {}
+        r"(module {}
   geo.units
   (deftype {} Meters () (variant {} Meters (t-prim {} f32)))
   (defsig {} meters (t-fn {} (t-prim {} f32) (t-adt {} Meters)))
@@ -1029,7 +1029,7 @@ fn decompile_non_opaque_multi_segment_module_round_trips() {
     (fn {}
       (params {} (x {type: (t-prim {} f32)}))
       (app {} (var {} Meters) (var {} x)))))
-"#,
+",
     );
 
     let decompiled = decompile_dp(&dp);

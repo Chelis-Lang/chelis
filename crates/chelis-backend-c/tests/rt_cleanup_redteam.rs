@@ -1,5 +1,5 @@
 //! RT-Cleanup adversarial tests for WS-1 (C backend bf16/f16 admission)
-//! and WS-2 (Metal emit_const fix).
+//! and WS-2 (Metal `emit_const` fix).
 //!
 //! Categories (per the RT-Cleanup brief and plan §RT-Cleanup):
 //!   1. Edge-value bit-pattern preservation (subnormals, +/-0, +/-inf,
@@ -11,7 +11,7 @@
 //!      dispatch even when the output is f32; scratch buffer
 //!      alloc/free shape; pattern-detected matmul routing).
 //!   4. Additional pinned Const bit-pattern sweep (0.1, 0.01, pi).
-//!   5. Metal Const-rooted DAGs (non-pinned values; uint16_t cast vs
+//!   5. Metal Const-rooted DAGs (non-pinned values; `uint16_t` cast vs
 //!      bfloat/half cast).
 //!   6. Cross-backend agreement on a bf16 program.
 //!   7. Sibling-sweep regression locks.
@@ -55,21 +55,20 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
         .expect("canonical lib path has no parent")
         .join("deps");
     let hashed = find_newest_runtime_archive(&deps_dir)?;
-    let hashed = match hashed {
-        Some(path) => path,
-        None => {
-            Command::new(env!("CARGO"))
-                .args(["build", "-p", "chelis-runtime", "--lib"])
-                .status()
-                .map_err(|e| std::io::Error::other(format!("cargo build chelis-runtime: {e}")))?;
-            find_newest_runtime_archive(&deps_dir)?.ok_or_else(|| {
-                std::io::Error::other(format!(
-                    "no libchelis_runtime-*.a found in {} after explicit \
-                     `cargo build -p chelis-runtime --lib`",
-                    deps_dir.display()
-                ))
-            })?
-        }
+    let hashed = if let Some(path) = hashed {
+        path
+    } else {
+        Command::new(env!("CARGO"))
+            .args(["build", "-p", "chelis-runtime", "--lib"])
+            .status()
+            .map_err(|e| std::io::Error::other(format!("cargo build chelis-runtime: {e}")))?;
+        find_newest_runtime_archive(&deps_dir)?.ok_or_else(|| {
+            std::io::Error::other(format!(
+                "no libchelis_runtime-*.a found in {} after explicit \
+                 `cargo build -p chelis-runtime --lib`",
+                deps_dir.display()
+            ))
+        })?
     };
     let tmp = canonical.with_extension("a.tmp");
     fs::copy(&hashed, &tmp)?;
@@ -115,8 +114,7 @@ fn gcc_available() -> bool {
     Command::new("gcc")
         .arg("--version")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 #[allow(dead_code)]
@@ -138,8 +136,7 @@ fn cblas_available() -> bool {
             out.to_str().unwrap(),
         ])
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 fn compile_and_run_kernel(
@@ -515,8 +512,8 @@ fn f16_abs_preserves_smallest_normal() {
 // Category 2: §5.7.1 enforcement at scale (4096 elements)
 // =====================================================================
 
-/// A 4096 x bf16(0.001) reduce_sum is dominated by the accumulator
-/// precision: the mathematical sum 4.096 stays within BF16_TOL only if
+/// A 4096 x bf16(0.001) `reduce_sum` is dominated by the accumulator
+/// precision: the mathematical sum 4.096 stays within `BF16_TOL` only if
 /// the accumulator is f32. A naive bf16-direct accumulator loses the
 /// per-add residuals (0.001 in bf16 is ~9.77e-4 after round-trip, and
 /// each running-sum truncation drops mantissa bits) and diverges by
@@ -596,13 +593,13 @@ int main(void) {{
 // Category 3: convert-then-sgemm routing on operand precision (not output)
 // =====================================================================
 
-/// The matmul-pattern detector emits BlasMatmul nodes whose output
+/// The matmul-pattern detector emits `BlasMatmul` nodes whose output
 /// precision is the accumulator precision (f32 for bf16/f16 operands),
-/// not the operand precision. WS-1's emit_blas_matmul dispatches the
+/// not the operand precision. WS-1's `emit_blas_matmul` dispatches the
 /// reduced-float path on `spec.operand_precision`, NOT on output type,
 /// so a bf16-input/f32-output matmul still routes through the
 /// convert-then-sgemm wrapper. Lock this behavior: building a
-/// BlasMatmul with bf16 operands and an f32-typed output node must
+/// `BlasMatmul` with bf16 operands and an f32-typed output node must
 /// still emit `chelis_bf16_buffer_to_f32` in the generated C.
 #[test]
 fn bf16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
@@ -947,7 +944,7 @@ int main(void) {{
 /// Cast bf16 → f32: the bf16 storage is `uint16_t` bit pattern 0x3FC0
 /// (= 1.5). Post WS-Cleanup-Fixups, the cast routes through
 /// `chelis_bf16_to_f32` so the result is f32(1.5) (= 0x3FC00000), not
-/// the previous int-to-float widening of the uint16_t value (16320.0).
+/// the previous int-to-float widening of the `uint16_t` value (16320.0).
 #[test]
 fn cast_bf16_to_f32_preserves_value_per_ieee_754() {
     if !gcc_available() {
@@ -1044,7 +1041,7 @@ int main(void) {{
 // =====================================================================
 
 /// A small bf16 program (add then mul) executed via the C backend
-/// produces values within BF16_TOL of the IR evaluator's output for
+/// produces values within `BF16_TOL` of the IR evaluator's output for
 /// each element. The matmul-pattern path is not exercised here (Sum
 /// is not in the chain); this exercises the bare elementwise stack.
 #[test]
@@ -1132,7 +1129,7 @@ int main(void) {{
         .collect();
     assert_eq!(c_out.len(), n);
     for (idx, (g, e)) in c_out.iter().zip(eval_out.iter()).enumerate() {
-        let diff = (*g as f64 - e).abs();
+        let diff = (f64::from(*g) - e).abs();
         assert!(
             diff <= BF16_TOL,
             "bf16 chain elem {idx}: C={g}, eval={e}, diff={diff} > {BF16_TOL}"
@@ -1246,8 +1243,7 @@ fn sibling_sweep_no_em_dash_in_string_literals_in_touched_crates() {
     }
     assert!(
         hits.is_empty(),
-        "em-dash in string literal (CLAUDE.md §8.6): {:?}",
-        hits
+        "em-dash in string literal (CLAUDE.md §8.6): {hits:?}"
     );
 
     fn walk(p: &Path, out: &mut Vec<String>) {

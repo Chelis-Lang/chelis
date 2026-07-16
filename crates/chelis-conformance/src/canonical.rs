@@ -20,6 +20,7 @@ pub const CANONICAL: &[(&str, &str)] = &[
 ];
 
 /// The canonical body for a managed-block id, if known.
+#[must_use]
 pub fn body(id: &str) -> Option<&'static str> {
     CANONICAL.iter().find(|(k, _)| *k == id).map(|(_, v)| *v)
 }

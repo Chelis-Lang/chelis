@@ -56,9 +56,9 @@ fn surf_to_deep(source: &str) -> Vec<Expr> {
 /// silently skipped.
 #[test]
 fn issue216_sum_cast_wrapped_oob_axis_is_error() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[2, 4, f32]) -> tensor[2, f32] = sum(x, cast(99, int32))
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB sum axis");
@@ -80,9 +80,9 @@ def f(x: tensor[2, 4, f32]) -> tensor[2, f32] = sum(x, cast(99, int32))
 /// `sum`-specific.
 #[test]
 fn issue216_max_reduce_cast_wrapped_oob_axis_is_error() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[2, 4, f32]) -> tensor[2, f32] = max_reduce(x, cast(7, int32))
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB max_reduce axis");
@@ -105,9 +105,9 @@ def f(x: tensor[2, 4, f32]) -> tensor[2, f32] = max_reduce(x, cast(7, int32))
 /// dropped as "non-literal."
 #[test]
 fn issue216_sum_cast_wrapped_negative_axis_typechecks() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[2, 4, f32]) -> tensor[2, f32] = sum(x, cast(-1, int32))
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -131,9 +131,9 @@ def f(x: tensor[2, 4, f32]) -> tensor[2, f32] = sum(x, cast(-1, int32))
 /// with an out-of-bounds axis diagnostic.
 #[test]
 fn issue216_softmax_cast_wrapped_oob_axis_is_error() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = softmax(x, cast(5, int32))
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB softmax axis");
@@ -163,9 +163,9 @@ def f(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = softmax(x, cast(5, int32))
 /// the extractor, then `axis < 0` fires).
 #[test]
 fn issue216_shape_cast_wrapped_negative_axis_is_error() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[2, 4, f32]) -> int32 = shape(x, cast(-1, int32))
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped negative shape axis");
@@ -186,9 +186,9 @@ def f(x: tensor[2, 4, f32]) -> int32 = shape(x, cast(-1, int32))
 /// out-of-bounds axis diagnostic.
 #[test]
 fn issue216_shape_cast_wrapped_oob_axis_is_error() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[2, 4, f32]) -> int32 = shape(x, cast(9, int32))
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB shape axis");
@@ -215,9 +215,9 @@ def f(x: tensor[2, 4, f32]) -> int32 = shape(x, cast(9, int32))
 /// `split axis ... out of bounds` diagnostic.
 #[test]
 fn issue216_split_cast_wrapped_oob_axis_is_error() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[2, 4, f32]) -> List[tensor[2, 4, f32]] = split(x, cast(9, int32), [cast(2, int32), cast(2, int32)])
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB split axis");
@@ -245,9 +245,9 @@ def f(x: tensor[2, 4, f32]) -> List[tensor[2, 4, f32]] = split(x, cast(9, int32)
 /// rejected with an OOB axis diagnostic.
 #[test]
 fn issue216_gather_cast_wrapped_oob_axis_is_error() {
-    let src = r#"
+    let src = r"
 def f(table: tensor[10, 4, f32], ids: tensor[3, int64]) -> tensor[3, 4, f32] = gather(table, ids, cast(9, int32))
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB gather axis");
@@ -275,9 +275,9 @@ def f(table: tensor[10, 4, f32], ids: tensor[3, int64]) -> tensor[3, 4, f32] = g
 /// matrix is rejected with an OOB axis diagnostic.
 #[test]
 fn issue216_trace_cast_wrapped_oob_axis_is_error() {
-    let src = r#"
+    let src = r"
 def f(m: tensor[4, 4, f32]) -> f32 = trace(m, cast(9, int32), cast(1, int32))
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB trace axis1");
@@ -299,9 +299,9 @@ def f(m: tensor[4, 4, f32]) -> f32 = trace(m, cast(9, int32), cast(1, int32))
 /// member calls, not just one).
 #[test]
 fn issue216_diagonal_cast_wrapped_oob_axis2_is_error() {
-    let src = r#"
+    let src = r"
 def f(m: tensor[4, 4, f32]) -> tensor[4, f32] = diagonal(m, cast(0, int32), cast(9, int32))
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB diagonal axis2");
@@ -335,10 +335,10 @@ def f(m: tensor[4, 4, f32]) -> tensor[4, f32] = diagonal(m, cast(0, int32), cast
 /// `positive stride` check fires.
 #[test]
 fn issue216_conv2d_cast_wrapped_zero_stride_is_error() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
   conv2d(&x, &k, cast(0, int32), 0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped zero conv2d stride");
@@ -364,10 +364,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
 /// as the zero-stride case.
 #[test]
 fn issue216_conv2d_cast_wrapped_negative_padding_is_error() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
   conv2d(&x, &k, 1, cast(-1, int32))
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped negative conv2d padding");
@@ -390,10 +390,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
 /// a regression on well-formed cast-wrapped stride/padding.
 #[test]
 fn issue216_conv2d_cast_wrapped_wellformed_typechecks() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
   conv2d(&x, &k, cast(1, int32), cast(0, int32))
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {

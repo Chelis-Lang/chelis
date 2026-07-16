@@ -220,28 +220,25 @@ pub fn resolve_commit(
     version: &str,
     explicit: Option<&str>,
 ) -> Result<String, ChelisSrcError> {
-    match explicit {
-        Some(commit) => {
-            let rev = format!("{commit}^{{commit}}");
-            run_git(
-                ["rev-parse", "--verify", "--quiet", &rev],
-                Some(mirror),
-                "verify pinned commit",
-            )
-            .map_err(|_| ChelisSrcError::CommitNotFound {
-                commit: commit.to_string(),
-            })
-        }
-        None => {
-            let tag = format!("v{version}");
-            let rev = format!("refs/tags/{tag}^{{commit}}");
-            run_git(
-                ["rev-parse", "--verify", "--quiet", &rev],
-                Some(mirror),
-                "resolve release tag",
-            )
-            .map_err(|_| ChelisSrcError::TagNotFound { tag })
-        }
+    if let Some(commit) = explicit {
+        let rev = format!("{commit}^{{commit}}");
+        run_git(
+            ["rev-parse", "--verify", "--quiet", &rev],
+            Some(mirror),
+            "verify pinned commit",
+        )
+        .map_err(|_| ChelisSrcError::CommitNotFound {
+            commit: commit.to_string(),
+        })
+    } else {
+        let tag = format!("v{version}");
+        let rev = format!("refs/tags/{tag}^{{commit}}");
+        run_git(
+            ["rev-parse", "--verify", "--quiet", &rev],
+            Some(mirror),
+            "resolve release tag",
+        )
+        .map_err(|_| ChelisSrcError::TagNotFound { tag })
     }
 }
 

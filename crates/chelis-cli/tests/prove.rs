@@ -50,10 +50,10 @@ fn prove_passes_filtered_samples() {
     // build (which would print "proved (smt)", not "3/3 passed"), so the
     // tier must be pinned for the fuzz assertion to be deterministic.
     let dir = write_prop(
-        r#"
+        r"
 @property non_negative forall(x: f32) where x >= 0.0:
   x >= 0.0
-"#,
+",
     );
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -77,10 +77,10 @@ fn prove_passes_filtered_samples() {
 #[test]
 fn prove_reports_counterexample_exit_one() {
     let dir = write_prop(
-        r#"
+        r"
 @property always_non_negative forall(x: f32):
   x >= 0.0
-"#,
+",
     );
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -102,10 +102,10 @@ fn prove_reports_counterexample_exit_one() {
 #[test]
 fn prove_fuzz_json_shrinks_counterexample() {
     let dir = write_prop(
-        r#"
+        r"
 @property always_positive forall(x: f32):
   x > 0.0
-"#,
+",
     );
     let output = Command::cargo_bin("chelis")
         .expect("binary")
@@ -139,10 +139,10 @@ fn prove_fuzz_json_shrinks_counterexample() {
 #[test]
 fn prove_json_schema_has_property_and_summary_records() {
     let dir = write_prop(
-        r#"
+        r"
 @property truth forall(x: bool):
   x == x
-"#,
+",
     );
     let output = Command::cargo_bin("chelis")
         .expect("binary")
@@ -794,10 +794,10 @@ import Std.Contracts (normal_cdf)
 #[test]
 fn property_binder_types_are_required() {
     let dir = write_prop(
-        r#"
+        r"
 @property missing_type forall(x):
   true
-"#,
+",
     );
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -810,10 +810,10 @@ fn property_binder_types_are_required() {
 #[test]
 fn symbolic_tensor_binder_is_unsupported_exit_two() {
     let dir = write_prop(
-        r#"
+        r"
 @property symbolic_tensor forall(x: tensor[n, f32]):
   true
-"#,
+",
     );
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -828,12 +828,12 @@ fn symbolic_tensor_binder_is_unsupported_exit_two() {
 #[test]
 fn duplicate_property_name_is_parse_error() {
     let dir = write_prop(
-        r#"
+        r"
 @property repeated forall(x: f32):
   true
 @property repeated forall(y: f32):
   true
-"#,
+",
     );
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -851,12 +851,12 @@ fn cli_samples_and_seed_override_source_options() {
     // `--features smt` builds (under `--tier auto` in the smt build, the
     // trivial `x == x` property auto-proves at the SMT tier => samples:0).
     let dir = write_prop(
-        r#"
+        r"
 @property source_options forall(x: f32):
   x == x
   with samples = 5
   with seed = 7
-"#,
+",
     );
     let output = Command::cargo_bin("chelis")
         .expect("binary")
@@ -890,13 +890,13 @@ fn cli_samples_and_seed_override_source_options() {
 #[test]
 fn f64_tensor_binder_is_supported() {
     let dir = write_prop(
-        r#"
+        r"
 @property f64_tensor forall(x: tensor[2, 3, f64]):
   {
     _ = drop(x)
     true
   }
-"#,
+",
     );
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -916,14 +916,14 @@ fn f64_tensor_binder_is_supported() {
 #[test]
 fn tensor_binder_can_be_used_by_shape_queries() {
     let dir = write_prop(
-        r#"
+        r"
 @property tensor_shape forall(x: tensor[3, f32]):
   {
     n = shape(x, 0)
     _ = drop(x)
     n == 3
   }
-"#,
+",
     );
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -945,12 +945,12 @@ fn tensor_binder_can_be_used_by_shape_queries() {
 #[test]
 fn desugared_deep_property_uses_source_samples_and_seed() {
     let dir = write_prop(
-        r#"
+        r"
 @property source_options forall(x: f32):
   x == x
   with samples = 2
   with seed = 7
-"#,
+",
     );
     let deep_path = dir.path().join("prop.dp");
     let deep = Command::cargo_bin("chelis")
@@ -1179,8 +1179,7 @@ fn wi7_deep_user_green_without_preconditions_carries_no_assumption() {
     assert_eq!(
         records[0]["assumptions"]
             .as_array()
-            .map(Vec::len)
-            .unwrap_or(usize::MAX),
+            .map_or(usize::MAX, Vec::len),
         0,
         "a no-precondition green records no non-vacuity assumption: {}",
         records[0]
@@ -1706,10 +1705,10 @@ fn chelis_prove_without_smt_still_warns_obligations_not_smt_verified() {
 #[test]
 fn non_smt_prove_does_not_warn_for_plain_property_file() {
     let dir = write_prop(
-        r#"
+        r"
 @property nonneg forall(x: f32):
   (x * x) >= 0.0
-"#,
+",
     );
     let assert = Command::cargo_bin("chelis")
         .expect("binary")
@@ -1739,10 +1738,10 @@ fn non_smt_prove_does_not_warn_for_plain_property_file() {
 #[test]
 fn non_smt_measure_zero_false_property_is_not_a_proven_green() {
     let dir = write_prop(
-        r#"
+        r"
 @property always_positive forall(x: f32) where x > 0.0:
   (x - 12345.0) * (x - 12345.0) > 0.0
-"#,
+",
     );
     let output = Command::cargo_bin("chelis")
         .expect("binary")
@@ -1793,10 +1792,10 @@ fn non_smt_measure_zero_false_property_is_not_a_proven_green() {
 #[test]
 fn non_smt_true_property_green_is_empirical_not_proven() {
     let dir = write_prop(
-        r#"
+        r"
 @property nonneg forall(x: f32):
   (x * x) >= 0.0
-"#,
+",
     );
     let output = Command::cargo_bin("chelis")
         .expect("binary")
@@ -2098,10 +2097,10 @@ fn obligation_records(output: &[u8]) -> Vec<Value> {
 #[test]
 fn goal_field_carries_the_full_proposition_for_a_guarded_fuzz_pass() {
     let dir = write_prop(
-        r#"
+        r"
 @property log_below_self forall(x: f32) where x > 0.0:
   log(x) < x
-"#,
+",
     );
     let output = Command::cargo_bin("chelis")
         .expect("binary")
@@ -2274,10 +2273,10 @@ fn goal_field_carries_the_invariant_predicate_for_an_obligation() {
 #[test]
 fn goal_for_an_if_as_binary_operand_does_not_misparenthesize() {
     let dir = write_prop(
-        r#"
+        r"
 @property if_operand forall(x: f32, y: f32):
   (if x > y then x else y) + 1.0 >= x
-"#,
+",
     );
     let output = Command::cargo_bin("chelis")
         .expect("binary")
@@ -2315,10 +2314,10 @@ fn goal_for_an_if_as_binary_operand_does_not_misparenthesize() {
 #[test]
 fn goal_for_a_guarded_property_is_not_the_unconditional_body() {
     let dir = write_prop(
-        r#"
+        r"
 @property guarded forall(x: f32) where x > 0.0:
   x <= x
-"#,
+",
     );
     let output = Command::cargo_bin("chelis")
         .expect("binary")
@@ -2706,10 +2705,10 @@ fn issue_434_transcendental_auto_is_fuzz_validated_never_proven() {
 #[test]
 fn prove_json_failure_summary_present_on_failed_property() {
     let dir = write_prop(
-        r#"
+        r"
 @property always_positive forall(x: f32):
   x > 0.0
-"#,
+",
     );
     let output = Command::cargo_bin("chelis")
         .expect("binary")
@@ -2749,12 +2748,12 @@ fn prove_json_failure_summary_present_on_failed_property() {
 #[test]
 fn prove_json_dependency_edges_in_summary() {
     let dir = write_prop(
-        r#"
+        r"
 def my_add(x: f32, y: f32) -> f32 = x + y
 
 @property test_my_add forall(x: f32, y: f32):
   my_add(x, y) == my_add(y, x)
-"#,
+",
     );
     let output = Command::cargo_bin("chelis")
         .expect("binary")

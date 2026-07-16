@@ -34,11 +34,11 @@ fn def_head_re() -> &'static Regex {
 pub struct SurfDefArrowForm;
 
 impl Rule for SurfDefArrowForm {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "surf-def-arrow-form"
     }
 
-    fn spec_ref(&self) -> &str {
+    fn spec_ref(&self) -> &'static str {
         "§3.5"
     }
 
@@ -46,7 +46,7 @@ impl Rule for SurfDefArrowForm {
         &[Surface::SurfSource]
     }
 
-    fn summary(&self) -> &str {
+    fn summary(&self) -> &'static str {
         "Surf `def` declarations use `def name(params) -> T = expr`, not the colon form `def name(params) : T = expr`"
     }
 

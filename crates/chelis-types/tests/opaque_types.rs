@@ -1,11 +1,11 @@
 //! W1 checker-enforced opacity: the spec-first acceptance suite for
-//! RFC D-CHECK (spec/design/opaque_invariants_rfc.md).
+//! RFC D-CHECK (`spec/design/opaque_invariants_rfc.md`).
 //!
 //! Written RED-FIRST per AGENTS.md spec-first development: every
 //! rejection test in this file was committed before the enforcement
 //! existed and verified to fail (the checker passed the violation
 //! clean). Baseline-behavior tests (inside-module passes, the
-//! DuplicateDefinition lock, the wildcard-arm pass, and the nested
+//! `DuplicateDefinition` lock, the wildcard-arm pass, and the nested
 //! pat-var negative-parity pin) pass before and after.
 //!
 //! Message contract (RFC D-CHECK error contract, pinned here):
@@ -69,7 +69,7 @@ fn opaque_violations(errors: &[CheckError]) -> Vec<&CheckError> {
         .collect()
 }
 
-/// Exactly one error total, it is an OpaqueTypeViolation, and its
+/// Exactly one error total, it is an `OpaqueTypeViolation`, and its
 /// message is byte-exact. "Exactly one error total" also locks the
 /// D-CHECK no-cascade rule (the hook returns the true type).
 fn assert_single_violation(errors: &[CheckError], expected_msg: &str) {
@@ -204,7 +204,7 @@ def read_pos(m: Meters) -> f32 = match m with {
 
 #[test]
 fn inside_module_record_update_passes() {
-    let src = r#"(module {}
+    let src = r"(module {}
   stats.prob
   (export {} probability)
   (deftype {opaque: true}
@@ -222,7 +222,7 @@ fn inside_module_record_update_passes() {
     (fn {}
       (params {} (p {type: (t-adt {} Probability)}))
       (record-update {} (var {} p) (kv {} value (lit {type: (t-prim {} f32)} 0.9))))))
-"#;
+";
     let exprs = deep_of_dp(src);
     assert_clean(&errors_ir(&exprs));
 }
@@ -468,7 +468,7 @@ def leak(p: Probability) -> f32 = {
     );
 }
 
-const RECORD_UPDATE_DEFINING_DP: &str = r#"(module {}
+const RECORD_UPDATE_DEFINING_DP: &str = r"(module {}
   stats.prob
   (export {} probability prob_value)
   (deftype {opaque: true}
@@ -487,18 +487,18 @@ const RECORD_UPDATE_DEFINING_DP: &str = r#"(module {}
     (fn {}
       (params {} (p {type: (t-adt {} Probability)}))
       (access {} (var {} p) value))))
-"#;
+";
 
 #[test]
 fn outside_module_record_update_typed_target_rejected() {
-    let agent = r#"(module {}
+    let agent = r"(module {}
   agent.strategy
   (def {}
     tweak
     (fn {}
       (params {} (p {type: (t-adt {} Probability)}))
       (record-update {} (var {} p) (kv {} value (lit {type: (t-prim {} f32)} 0.5))))))
-"#;
+";
     let exprs = deep_of_dp(&format!("{RECORD_UPDATE_DEFINING_DP}{agent}"));
     assert_single_violation(
         &errors_ir(&exprs),
@@ -514,7 +514,7 @@ fn outside_module_record_update_deferred_target_rejected() {
     // The update target is an unannotated lambda parameter pinned to
     // the opaque type only by the later `prob_value` call: the
     // deferred ledger must catch it at def-level resolution.
-    let agent = r#"(module {}
+    let agent = r"(module {}
   agent.strategy
   (def {}
     tweak
@@ -523,7 +523,7 @@ fn outside_module_record_update_deferred_target_rejected() {
       (let {}
         (bind {} q (record-update {} (var {} p) (kv {} value (lit {type: (t-prim {} f32)} 0.5))))
         (app {} (var {} prob_value) (var {} p))))))
-"#;
+";
     let exprs = deep_of_dp(&format!("{RECORD_UPDATE_DEFINING_DP}{agent}"));
     assert_single_violation(
         &errors_ir(&exprs),
@@ -536,14 +536,14 @@ fn outside_module_record_update_deferred_target_rejected() {
 
 #[test]
 fn outside_module_cast_into_t_prim_shape_rejected() {
-    let agent = r#"(module {}
+    let agent = r"(module {}
   agent.strategy
   (def {}
     forge
     (fn {}
       (params {} (x {type: (t-prim {} f32)}))
       (cast {} (var {} x) (t-prim {} Probability)))))
-"#;
+";
     let exprs = deep_of_dp(&format!("{RECORD_UPDATE_DEFINING_DP}{agent}"));
     assert_single_violation(
         &errors_ir(&exprs),
@@ -556,14 +556,14 @@ fn outside_module_cast_into_t_prim_shape_rejected() {
 
 #[test]
 fn outside_module_cast_into_t_adt_shape_rejected() {
-    let agent = r#"(module {}
+    let agent = r"(module {}
   agent.strategy
   (def {}
     forge
     (fn {}
       (params {} (x {type: (t-prim {} f32)}))
       (cast {} (var {} x) (t-adt {} Probability)))))
-"#;
+";
     let exprs = deep_of_dp(&format!("{RECORD_UPDATE_DEFINING_DP}{agent}"));
     assert_single_violation(
         &errors_ir(&exprs),
@@ -576,14 +576,14 @@ fn outside_module_cast_into_t_adt_shape_rejected() {
 
 #[test]
 fn outside_module_cast_out_rejected() {
-    let agent = r#"(module {}
+    let agent = r"(module {}
   agent.strategy
   (def {}
     extract
     (fn {}
       (params {} (p {type: (t-adt {} Probability)}))
       (cast {} (var {} p) (t-prim {} f32)))))
-"#;
+";
     let exprs = deep_of_dp(&format!("{RECORD_UPDATE_DEFINING_DP}{agent}"));
     assert_single_violation(
         &errors_ir(&exprs),
@@ -632,10 +632,10 @@ def forge(x: f32) -> f32 = {
 
 #[test]
 fn outside_module_lit_forge_dp_metadata_rejected() {
-    let agent = r#"(module {}
+    let agent = r"(module {}
   agent.strategy
   (def {} forged (lit {type: (t-adt {} Probability)} 0.5)))
-"#;
+";
     let exprs = deep_of_dp(&format!("{RECORD_UPDATE_DEFINING_DP}{agent}"));
     assert_single_violation(
         &errors_ir(&exprs),
@@ -755,7 +755,7 @@ def forge(x: f32) -> P2 = 0.5 : P2
 
 #[test]
 fn alias_laundering_cast_rejected() {
-    let agent = r#"(module {}
+    let agent = r"(module {}
   agent.alias
   (typealias {} P2 () (t-adt {} Probability))
   (def {}
@@ -763,7 +763,7 @@ fn alias_laundering_cast_rejected() {
     (fn {}
       (params {} (x {type: (t-prim {} f32)}))
       (cast {} (var {} x) (t-adt {} P2)))))
-"#;
+";
     let exprs = deep_of_dp(&format!("{RECORD_UPDATE_DEFINING_DP}{agent}"));
     assert_single_violation(
         &errors_ir(&exprs),
@@ -802,7 +802,7 @@ fn macro_expansion_attributes_to_call_site_module() {
     // by the reef-package fixture in
     // crates/chelis-cli/tests/opaque_check.rs, because the lexical
     // expander scopes a module's macros to that module.
-    let program = r#"(defmacro {} forge_prob (params {} x) (record {} Probability (kv {} value (var {} x))))
+    let program = r"(defmacro {} forge_prob (params {} x) (record {} Probability (kv {} value (var {} x))))
 (module {}
   stats.prob
   (export {} probability)
@@ -823,7 +823,7 @@ fn macro_expansion_attributes_to_call_site_module() {
     (fn {}
       (params {} (x {type: (t-prim {} f32)}))
       (app {} (var {} forge_prob) (var {} x)))))
-"#;
+";
     // Non-strict Deep parse: `defmacro` is a desugar-time node that
     // the expander removes, not one of the 61 strict-vocabulary tags,
     // so this program models the post-desugar/pre-expansion state of
@@ -954,7 +954,7 @@ fn module_reopen_same_name_rejected() {
     // second wrapper constructs and accesses the opaque type as if it
     // were inside the defining module. A named module may be opened
     // at most once per check unit.
-    let program = r#"(module {}
+    let program = r"(module {}
   stats.prob
   (deftype {opaque: true}
     Probability
@@ -973,7 +973,7 @@ fn module_reopen_same_name_rejected() {
     (fn {}
       (params {} (x {type: (t-prim {} f32)}))
       (record {} Probability (kv {} value (var {} x))))))
-"#;
+";
     let exprs = deep_of_dp(program);
     let errors = errors_ir(&exprs);
     let dup: Vec<&CheckError> = errors
@@ -1013,10 +1013,10 @@ def fine(x: f32) -> f32 = prob_value(probability(x))
 fn module_reopen_reported_once_per_name() {
     // Three wrappers of the same name yield ONE DuplicateModule error
     // for that name (reported once, not once per extra wrapper).
-    let program = r#"(module {} a.b (def {} f (lit {type: (t-prim {} f32)} 1.0)))
+    let program = r"(module {} a.b (def {} f (lit {type: (t-prim {} f32)} 1.0)))
 (module {} a.b (def {} g (lit {type: (t-prim {} f32)} 2.0)))
 (module {} a.b (def {} h (lit {type: (t-prim {} f32)} 3.0)))
-"#;
+";
     let exprs = deep_of_dp(program);
     let errors = errors_ir(&exprs);
     let dup: Vec<&CheckError> = errors
@@ -1049,7 +1049,7 @@ fn stem_only_mangled_names_rejected() {
     // treated as in-module and constructs/inspects the opaque type
     // clean. The reserved-name format is the reef linker's private
     // output; a raw program using it is a declaration error.
-    let program = r#"(deftype {opaque: true}
+    let program = r"(deftype {opaque: true}
   Pkg__foo__Secret
   ()
   (variant {} Pkg__foo__Secret (field {} value (t-prim {} f32))))
@@ -1059,7 +1059,7 @@ fn stem_only_mangled_names_rejected() {
   (fn {}
     (params {} (x {type: (t-prim {} f32)}))
     (record {} Pkg__foo__Secret (kv {} value (var {} x)))))
-"#;
+";
     let exprs = deep_of_dp(program);
     let errors = errors_ir(&exprs);
     let reserved = reserved_name_violations(&errors);
@@ -1081,7 +1081,7 @@ fn stem_with_lexical_wrapper_collision_rejected() {
     // colliding with a lexical `(module {} foo ...)` wrapper is BOTH a
     // ReservedLinkerName (the mangled name) AND a DuplicateModule (the
     // stem-vs-wrapper collision).
-    let program = r#"(deftype {opaque: true}
+    let program = r"(deftype {opaque: true}
   Pkg__foo__Secret
   ()
   (variant {} Pkg__foo__Secret (field {} value (t-prim {} f32))))
@@ -1092,7 +1092,7 @@ fn stem_with_lexical_wrapper_collision_rejected() {
     (fn {}
       (params {} (x {type: (t-prim {} f32)}))
       (record {} Pkg__foo__Secret (kv {} value (var {} x))))))
-"#;
+";
     let exprs = deep_of_dp(program);
     let errors = errors_ir(&exprs);
     assert!(
@@ -1123,7 +1123,7 @@ fn stem_collision_belt_fires_even_when_linker_name_check_is_off() {
     // fires as DuplicateModule. Genuine linker output never has lexical
     // wrappers, so this never false-fires on it; here a lexical
     // wrapper is present, exposing the forge.
-    let program = r#"(deftype {opaque: true}
+    let program = r"(deftype {opaque: true}
   Pkg__foo__bar__Secret
   ()
   (variant {} Pkg__foo__bar__Secret (field {} value (t-prim {} f32))))
@@ -1134,7 +1134,7 @@ fn stem_collision_belt_fires_even_when_linker_name_check_is_off() {
     (fn {}
       (params {} (x {type: (t-prim {} f32)}))
       (record {} Pkg__foo__bar__Secret (kv {} value (var {} x))))))
-"#;
+";
     let exprs = deep_of_dp(program);
     let _linked = chelis_types::install_linked_program_guard();
     let errors = errors_ir(&exprs);
@@ -1154,7 +1154,7 @@ fn mangled_names_accepted_when_linked_flag_is_set() {
     // (no ReservedLinkerName) when the linked-program provenance flag
     // is set -- this is what keeps the reef linker's own output
     // checking clean.
-    let program = r#"(deftype {opaque: true}
+    let program = r"(deftype {opaque: true}
   Pkg__foo__Secret
   ()
   (variant {} Pkg__foo__Secret (field {} value (t-prim {} f32))))
@@ -1164,7 +1164,7 @@ fn mangled_names_accepted_when_linked_flag_is_set() {
   (fn {}
     (params {} (x {type: (t-prim {} f32)}))
     (record {} Pkg__foo__Secret (kv {} value (var {} x)))))
-"#;
+";
     let exprs = deep_of_dp(program);
     let _linked = chelis_types::install_linked_program_guard();
     let errors = errors_ir(&exprs);

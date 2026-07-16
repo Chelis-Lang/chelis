@@ -50,46 +50,55 @@ impl Store {
     }
 
     /// The store root (`$CHELIS_HOME` or `~/.chelis`).
+    #[must_use]
     pub fn home(&self) -> &Path {
         &self.home
     }
 
     /// `<home>/toolchains`.
+    #[must_use]
     pub fn toolchains_dir(&self) -> PathBuf {
         self.home.join("toolchains")
     }
 
     /// `<home>/toolchains/<ver>`.
+    #[must_use]
     pub fn toolchain_dir(&self, version: &str) -> PathBuf {
         self.toolchains_dir().join(version)
     }
 
     /// `<home>/toolchains/<ver>/bin/chelis`, the real compiler binary.
+    #[must_use]
     pub fn toolchain_bin(&self, version: &str) -> PathBuf {
         self.toolchain_dir(version).join("bin").join("chelis")
     }
 
     /// `<home>/bin`, where the shim and installer copies live.
+    #[must_use]
     pub fn bin_dir(&self) -> PathBuf {
         self.home.join("bin")
     }
 
     /// `<home>/bin/chelis`, the pin-resolving shim.
+    #[must_use]
     pub fn shim_path(&self) -> PathBuf {
         self.bin_dir().join("chelis")
     }
 
     /// `<home>/bin/chelisup`, the installer copy.
+    #[must_use]
     pub fn chelisup_path(&self) -> PathBuf {
         self.bin_dir().join("chelisup")
     }
 
     /// `<home>/default`, the recorded default-version file.
+    #[must_use]
     pub fn default_file(&self) -> PathBuf {
         self.home.join("default")
     }
 
     /// The recorded default version, or `None` if unset/empty/unreadable.
+    #[must_use]
     pub fn read_default(&self) -> Option<String> {
         let raw = fs::read_to_string(self.default_file()).ok()?;
         let trimmed = raw.trim();
@@ -113,16 +122,18 @@ impl Store {
     }
 
     /// True iff a toolchain with a real `bin/chelis` is installed.
+    #[must_use]
     pub fn is_installed(&self, version: &str) -> bool {
         self.toolchain_bin(version).is_file()
     }
 
     /// Sorted list of installed toolchain versions (those with a real
     /// `bin/chelis`). Empty when none are installed.
+    #[must_use]
     pub fn installed_versions(&self) -> Vec<String> {
         let mut out: Vec<String> = match fs::read_dir(self.toolchains_dir()) {
             Ok(rd) => rd
-                .filter_map(|e| e.ok())
+                .filter_map(std::result::Result::ok)
                 .filter_map(|e| {
                     let name = e.file_name().to_string_lossy().into_owned();
                     if self.is_installed(&name) {

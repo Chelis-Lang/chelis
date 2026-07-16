@@ -1,5 +1,5 @@
 //! Thread-local opacity context for checker-enforced opaque types
-//! (RFC D-CHECK, spec/design/opaque_invariants_rfc.md).
+//! (RFC D-CHECK, `spec/design/opaque_invariants_rfc.md`).
 //!
 //! Enforcement runs INSIDE inference (post-annotation passes are
 //! unsound: type stamps are dropped on Error-typed nodes and `var`s),
@@ -122,6 +122,7 @@ thread_local! {
 /// returned guard (RFC v5). Call this at the reef link boundary before
 /// running the checker over linker-mangled decls; nested installs are
 /// saved and restored. See [`linked_program`].
+#[must_use]
 pub fn install_linked_program_guard() -> LinkedProgramGuard {
     let previous = LINKED_PROGRAM.with(|cell| cell.replace(true));
     LinkedProgramGuard { previous }
@@ -412,6 +413,7 @@ pub(crate) fn reef_module_stem(name: &str) -> Option<String> {
 /// Public so the eval value renderer (chelis-compiler-api) shows the
 /// user-facing constructor name rather than the internal mangled form,
 /// matching the de-mangling already applied to diagnostics (chelis#399).
+#[must_use]
 pub fn demangle_ident(name: &str) -> String {
     if name.starts_with("Pkg__") || name.starts_with("pkg__") {
         terminal_segment(name).to_string()
@@ -422,11 +424,11 @@ pub fn demangle_ident(name: &str) -> String {
 
 /// Best-effort de-mangle of a module key for display (RFC v4c). A reef
 /// module key is `<package>.<Module.Path>` where the module path
-/// segments are PascalCase (TypeIdent, spec §3.1) and the package
+/// segments are `PascalCase` (`TypeIdent`, spec §3.1) and the package
 /// segments are lowercase; drop the leading package segments. A
 /// lexical module key is fully lowercased by the Surf desugar
 /// (`module Stats.Prob` -> `stats.prob`) and is shown as-is, so a key
-/// with no PascalCase segment is treated as lexical.
+/// with no `PascalCase` segment is treated as lexical.
 pub(crate) fn demangle_module(key: &str) -> String {
     let segments: Vec<&str> = key.split('.').collect();
     let has_pascal = segments
@@ -666,6 +668,7 @@ pub(crate) fn unresolved_target_error(
 /// Public so the reef package linker shares this single definition of
 /// the reserved-name predicate (CR-7); reef rejects the format on
 /// user-authored entry/test decls (RFC v6) using exactly this rule.
+#[must_use]
 pub fn is_linker_format_name(name: &str) -> bool {
     reef_module_stem(name).is_some()
 }

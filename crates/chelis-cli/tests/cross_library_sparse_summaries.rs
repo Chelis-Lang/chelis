@@ -107,10 +107,10 @@ fn function_body(c: &str, function: &str) -> String {
     // definition with `{`. Scan candidate positions.
     let mut search_start = 0;
     let def_start = loop {
-        let pos = c[search_start..]
-            .find(&needle)
-            .map(|p| search_start + p)
-            .unwrap_or_else(|| panic!("function `{function}` not present in generated C"));
+        let pos = c[search_start..].find(&needle).map_or_else(
+            || panic!("function `{function}` not present in generated C"),
+            |p| search_start + p,
+        );
         let after = &c[pos + needle.len()..];
         // The function header opens with `... ) {`; the prototype
         // ends with `);`. Pick the definition occurrence.

@@ -119,7 +119,7 @@ fn reef_package_mode_preserves_split_map_and_runtime_reshape_typing() {
     let (_dir, reef_home, app_pkg) = make_app("phase3i-package-typing");
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 source = pad_sequences_to([[1.0, 2.0], [3.0, 4.0]], cast(2, int64), 0.0)
 rows = split(source, cast(0, int32), [cast(1, int64), cast(1, int64)])
@@ -128,7 +128,7 @@ flat_rows = map(
   rows
 )
 first = index(flat_rows, cast(0, int64))
-"#,
+",
     );
 
     Command::cargo_bin("chelis")

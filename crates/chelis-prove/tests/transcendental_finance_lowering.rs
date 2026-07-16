@@ -18,7 +18,7 @@
 //!   4. An envelope-covered FALSE goal HONESTLY declines (unsupported), never
 //!      green — the sound-direction forge guard.
 //!
-//! cvc5-only oracle (mirrors cross_engine_oracle.rs's file-level gate).
+//! cvc5-only oracle (mirrors `cross_engine_oracle.rs`'s file-level gate).
 #![cfg(feature = "smt")]
 
 use chelis_prove::composition::CompositeVerdict;

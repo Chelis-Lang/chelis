@@ -42,10 +42,10 @@ fn issue185_max_reduce_axis0_runs_and_matches_ir_eval() {
     // x = [[1.0, 4.0, 2.0],
     //      [3.0, 0.5, 5.0]]
     // max_reduce(x, 0) reduces axis 0 -> shape [3], data [3.0, 4.0, 5.0]
-    let src = r#"
+    let src = r"
 make = pad_sequences([[1.0, 4.0, 2.0], [3.0, 0.5, 5.0]], 0.0)
 out = max_reduce(&make, 0)
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![3], "max_reduce axis-0 shape");
@@ -55,10 +55,10 @@ out = max_reduce(&make, 0)
 #[test]
 fn issue185_max_reduce_axis1_runs_and_matches_ir_eval() {
     // max_reduce(x, 1) reduces axis 1 -> shape [2], data [4.0, 5.0]
-    let src = r#"
+    let src = r"
 make = pad_sequences([[1.0, 4.0, 2.0], [3.0, 0.5, 5.0]], 0.0)
 out = max_reduce(&make, 1)
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![2], "max_reduce axis-1 shape");

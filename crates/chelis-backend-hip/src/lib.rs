@@ -49,6 +49,7 @@ impl HipCodegenResult {
 }
 
 /// Return the path to the HIP runtime directory (relative to the crate root).
+#[must_use]
 pub fn runtime_dir() -> &'static str {
     "runtime"
 }
@@ -63,6 +64,7 @@ pub fn runtime_dir() -> &'static str {
 ///
 /// Inputs arrive as host tensors, are transferred to GPU, processed via
 /// HIP kernels, and results are transferred back to host tensors in outputs.
+#[must_use]
 pub fn codegen_hip(dag: &chelis_ir::dag::Dag, func_name: &str) -> HipCodegenResult {
     let specialized = chelis_ir::specialize::specialize_for_blas(dag);
     let dag = &specialized;

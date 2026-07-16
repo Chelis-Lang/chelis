@@ -1,4 +1,4 @@
-//! Evaluator-agreement tests: compare eval_tensor results with C codegen+compile+run.
+//! Evaluator-agreement tests: compare `eval_tensor` results with C codegen+compile+run.
 //!
 //! WS-1 (dtype + Metal cleanup cycle) extension: bf16 / f16 cases are
 //! added below. The HIP cross-validation lives behind the
@@ -60,8 +60,9 @@ fn runtime_library_path() -> PathBuf {
                 if path
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
+                    .is_some_and(|name| {
+                        name.starts_with("libchelis_runtime") && name.ends_with(".a")
+                    })
                 {
                     return path;
                 }
@@ -75,8 +76,7 @@ fn gcc_available() -> bool {
     Command::new(chelis_backend_c::toolchain::c_compiler())
         .arg("--version")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 fn write_temp_file(dir: &std::path::Path, name: &str, content: &str) -> PathBuf {
@@ -92,7 +92,7 @@ fn c_test_extra_flags() -> Vec<String> {
         .map(|flags| {
             flags
                 .split_whitespace()
-                .map(|flag| flag.to_string())
+                .map(std::string::ToString::to_string)
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default()

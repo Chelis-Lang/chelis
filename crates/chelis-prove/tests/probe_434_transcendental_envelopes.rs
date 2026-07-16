@@ -5,7 +5,7 @@
 //! scoping needs, so the decision to invest in compound-argument interval
 //! propagation + hot-path wiring rests on run evidence, not source reading:
 //!
-//!   p18 — the CompositeVerdict a `SpecialFunctionCertified` discharge projects
+//!   p18 — the `CompositeVerdict` a `SpecialFunctionCertified` discharge projects
 //!         to today, END-TO-END through the SAME `base_verdict_from_discharge`
 //!         seam the property runner uses. Captures the exact serialized token.
 //!

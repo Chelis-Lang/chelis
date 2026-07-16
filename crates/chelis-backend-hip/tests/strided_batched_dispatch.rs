@@ -78,7 +78,7 @@ fn assert_no_substring(source: &str, forbidden: &str) {
 
 /// ADV-HIP-1: Rank-4 uniform-stride batched. `(2, 3, 4, 5) @ (2, 3, 5, 6)
 /// → (2, 3, 4, 6)` with leading axes [2,3]. Strided-batched should be
-/// chosen with batch_count = `(2 * 3)`. Strides:
+/// chosen with `batch_count` = `(2 * 3)`. Strides:
 ///   a: m*k = 4*5 = 20
 ///   b: k*n = 5*6 = 30
 ///   out: m*n = 4*6 = 24
@@ -126,7 +126,7 @@ fn rank4_uniform_batched_matmul_dispatches_strided_batched_with_product_batch_co
 /// ADV-HIP-2: Rank-3 F64 uniform layout. The HIP backend fail-closes at
 /// codegen time when the operand and accumulator precision pair has no
 /// hipBLAS dispatch entry. WS-A2 lifted f64 support for the (f64, f64)
-/// pair (cblas_dgemm equivalent); the (f64, f32) combination this test
+/// pair (`cblas_dgemm` equivalent); the (f64, f32) combination this test
 /// constructs is still rejected because the IR-pinned accumulator and
 /// operand are inconsistent (spec §5.7.1).
 #[test]
@@ -169,8 +169,8 @@ fn rank3_f64_uniform_batched_does_not_dispatch_strided_batched() {
 /// ADV-HIP-3: Symbolic batch dim with concrete m/n/k. `as_concrete()` on
 /// the symbolic batch returns Some only via `Concrete` — wait, the brief
 /// says the plan reads m/n/k as concrete and accepts `DimExpr::Sym` for
-/// batch_dims via `is_simple_runtime_dim`. So this case SHOULD dispatch
-/// strided-batched with a symbolic batch_count.
+/// `batch_dims` via `is_simple_runtime_dim`. So this case SHOULD dispatch
+/// strided-batched with a symbolic `batch_count`.
 #[test]
 fn symbolic_batch_concrete_mnk_dispatches_strided_batched_with_symbolic_batch_count() {
     let mut dag = Dag::new();
@@ -541,8 +541,8 @@ fn perf_f1_uniform_rank3_batched_matmul_dispatches_strided_batched() {
 /// uniform non-zero leading strides.
 ///
 /// Shape:
-///   base_a : (4, 5)   (rank-2)
-///   a      : expand(base_a, axis=0, size=3) -> (3, 4, 5)
+///   `base_a` : (4, 5)   (rank-2)
+///   a      : `expand(base_a`, axis=0, size=3) -> (3, 4, 5)
 ///            (statically non-contiguous; stride[0] == 0 broadcast)
 ///   b      : (3, 5, 6)
 ///   out    : (3, 4, 6)

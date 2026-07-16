@@ -8,7 +8,7 @@
 //! caller resolves a variable via [`Subst::apply`] or [`Subst::apply_dim`],
 //! the resolver iteratively follows the chain to its terminal value AND
 //! writes the resolved value back into the substitution so future lookups
-//! land in O(1). The HashMaps live behind a `RefCell` so this in-place
+//! land in O(1). The `HashMaps` live behind a `RefCell` so this in-place
 //! compression remains available to callers that hold an immutable
 //! borrow of `Subst` (annotation passes, `Env::generalize`, occurs checks).
 //!
@@ -26,7 +26,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::*;
+use crate::types::{Dim, DimVar, RankVar, TensorPrec, Type, TypeVar};
 
 /// Type error produced during unification.
 #[derive(Debug, Clone)]
@@ -47,7 +47,7 @@ pub enum TypeErrorKind {
 
 /// Substitution: maps type variables to types and dim variables to dims.
 ///
-/// The HashMaps are wrapped in `Mutex` so [`Subst::apply`] and
+/// The `HashMaps` are wrapped in `Mutex` so [`Subst::apply`] and
 /// [`Subst::apply_dim`] can perform in-place path compression while
 /// keeping the public method receiver `&self`. The Mutex is uncontended
 /// in normal use (each `compile_new_source_in_context` call clones the
@@ -123,6 +123,7 @@ impl Clone for Subst {
 }
 
 impl Subst {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -1016,6 +1017,7 @@ fn occurs_in_dim(v: DimVar, dim: &Dim, subst: &Subst) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{Prim, VarGen};
 
     fn var_gen() -> VarGen {
         VarGen::default()

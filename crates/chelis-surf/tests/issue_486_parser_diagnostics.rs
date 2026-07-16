@@ -14,18 +14,15 @@ fn split_if_after_def_gives_targeted_message() {
     // We test the case where the body is literally empty — just `=` then newline then `if`.
     let src = "def f(x: int32) =\ndef g(y: int32) = if y > 0 then y else 0\n";
     let result = parse_str(src);
-    match result {
-        Err(e) => {
-            let msg = e.to_string();
-            assert!(
-                msg.contains("expression") || msg.contains("end of"),
-                "error should mention expression context; got: {msg}"
-            );
-        }
-        Ok(_) => {
-            // If it parses, the test is still valid — the parser handles
-            // the boundary correctly on its own.
-        }
+    if let Err(e) = result {
+        let msg = e.to_string();
+        assert!(
+            msg.contains("expression") || msg.contains("end of"),
+            "error should mention expression context; got: {msg}"
+        );
+    } else {
+        // If it parses, the test is still valid — the parser handles
+        // the boundary correctly on its own.
     }
 }
 
@@ -71,7 +68,7 @@ fn match_without_braces_gives_helpful_error() {
     );
     let msg = result.unwrap_err().to_string();
     assert!(
-        msg.contains("{") || msg.contains("brace"),
+        msg.contains('{') || msg.contains("brace"),
         "error should mention braces requirement for match arms; got: {msg}"
     );
 }

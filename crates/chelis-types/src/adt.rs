@@ -7,13 +7,13 @@ use std::collections::HashMap;
 use chelis_deep::ast as deep;
 use serde::{Deserialize, Serialize};
 
-use crate::types::*;
+use crate::types::{Dim, Prim, Scheme, TensorPrec, Type, TypeVar, VarGen};
 
 /// Information about a single variant of an ADT.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VariantInfo {
     pub name: String,
-    /// (field_name, field_type) -- name is None for positional args.
+    /// (`field_name`, `field_type`) -- name is None for positional args.
     pub fields: Vec<(Option<String>, Type)>,
 }
 
@@ -76,6 +76,7 @@ impl Default for AdtRegistry {
 }
 
 impl AdtRegistry {
+    #[must_use]
     pub fn new() -> Self {
         #[allow(clippy::default_constructed_unit_structs)]
         AdtRegistry {
@@ -85,7 +86,7 @@ impl AdtRegistry {
     }
 
     /// Register an ADT from a deftype Deep node.
-    /// `children` should be the children after tag+metadata: name, type_params_list, variant...
+    /// `children` should be the children after tag+metadata: name, `type_params_list`, variant...
     /// `opaque` is the `opaque: true` metadata flag and
     /// `defining_module` the module identity computed by the caller
     /// (RFC D-CHECK); both are recorded on the [`AdtDef`].
@@ -268,6 +269,7 @@ impl AdtRegistry {
     }
 
     /// Look up an ADT definition by name.
+    #[must_use]
     pub fn lookup(&self, name: &str) -> Option<&AdtDef> {
         self.defs.get(name)
     }
@@ -282,6 +284,7 @@ impl AdtRegistry {
     /// `deftype Foo` cannot coexist with either a second `deftype Foo`
     /// or a `typealias Foo = ...` — `HashMap::insert` is last-write-
     /// wins and silently corrupts the registry otherwise.
+    #[must_use]
     pub fn existing_kind(&self, name: &str) -> Option<&'static str> {
         if self.defs.contains_key(name) {
             Some("deftype")
@@ -293,6 +296,7 @@ impl AdtRegistry {
     }
 
     /// Get all variant names for an ADT (for exhaustiveness checking).
+    #[must_use]
     pub fn variant_names(&self, adt_name: &str) -> Option<Vec<String>> {
         self.defs
             .get(adt_name)
@@ -301,6 +305,7 @@ impl AdtRegistry {
 
     /// Look up a variant by constructor name across all ADTs.
     /// Returns the ADT name and variant info.
+    #[must_use]
     pub fn lookup_variant(&self, ctor_name: &str) -> Option<(&str, &VariantInfo)> {
         for (adt_name, def) in &self.defs {
             for variant in &def.variants {
@@ -313,6 +318,7 @@ impl AdtRegistry {
     }
 
     /// Look up an imported or qualified constructor by its unique terminal segment.
+    #[must_use]
     pub fn lookup_variant_terminal_unique(&self, ctor_name: &str) -> Option<(&str, &VariantInfo)> {
         let mut matches = self.defs.iter().flat_map(|(adt_name, def)| {
             def.variants.iter().filter_map(move |variant| {
@@ -337,8 +343,9 @@ impl AdtRegistry {
     /// Candidates are sorted by ADT name before the shape filter, so
     /// dispatch is deterministic across runs even when multiple variants
     /// of the same shape collide. Without the sort, `self.defs.iter()`
-    /// (HashMap) leaks iteration-order non-determinism into the choice
+    /// (`HashMap`) leaks iteration-order non-determinism into the choice
     /// of "first match" in both the shape-match and the fallback path.
+    #[must_use]
     pub fn lookup_variant_preferring_shape(
         &self,
         ctor_name: &str,
@@ -386,11 +393,13 @@ impl AdtRegistry {
     }
 
     /// Resolve a type alias definition by name. Returns None if not an alias.
+    #[must_use]
     pub fn resolve_alias(&self, name: &str) -> Option<&TypeAliasDef> {
         self.aliases.get(name)
     }
 
     /// Instantiate a type alias with the given type arguments.
+    #[must_use]
     pub fn instantiate_alias(&self, name: &str, args: &[Type]) -> Option<Type> {
         let alias = self.aliases.get(name)?;
         if alias.param_vars.len() != args.len() {
@@ -425,6 +434,7 @@ impl AdtRegistry {
     /// `register_deftype`'s `&mut self` borrow. The `seen` set guards against
     /// infinite recursion on a (mutually) recursive alias chain, matching the
     /// `infer.rs` guard.
+    #[must_use]
     pub fn expand_aliases(&self, ty: &Type) -> Type {
         let mut seen = std::collections::HashSet::new();
         self.expand_aliases_inner(ty, &mut seen)
@@ -534,9 +544,7 @@ fn deep_type_to_type_with_params(expr: &deep::Expr, param_map: &HashMap<String, 
             match tag {
                 "t-prim" => {
                     if let Some(deep::Expr::Atom(deep::Atom::Symbol(name), _)) = children.first() {
-                        Prim::parse_name(name)
-                            .map(Type::Prim)
-                            .unwrap_or(Type::Error)
+                        Prim::parse_name(name).map_or(Type::Error, Type::Prim)
                     } else {
                         Type::Error
                     }

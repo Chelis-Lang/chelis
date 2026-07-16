@@ -14,9 +14,9 @@ fn checked_surf(source: &str) -> CheckedProgram {
 #[test]
 fn unannotated_read_only_tensor_param_gets_display_ref() {
     let checked = checked_surf(
-        r#"
+        r"
 def readonly(x, y: tensor[4, f32]) = add(x, y)
-"#,
+",
     );
 
     let func = checked
@@ -37,12 +37,12 @@ def readonly(x, y: tensor[4, f32]) = add(x, y)
 #[test]
 fn consuming_param_use_stays_owned_for_display() {
     let checked = checked_surf(
-        r#"
+        r"
 def consume(x, y: tensor[4, f32]) = {
   z: tensor[4, f32] = add(x, y)
   realize(x)
 }
-"#,
+",
     );
 
     let func = checked
@@ -61,9 +61,9 @@ def consume(x, y: tensor[4, f32]) = {
 #[test]
 fn written_param_annotation_is_authoritative() {
     let checked = checked_surf(
-        r#"
+        r"
 def annotated(x: tensor[4, f32]) = relu(x)
-"#,
+",
     );
 
     let func = checked
@@ -82,13 +82,13 @@ def annotated(x: tensor[4, f32]) = relu(x)
 #[test]
 fn earlier_inferred_signature_makes_later_call_read_only() {
     let checked = checked_surf(
-        r#"
+        r"
 def helper(x, y: tensor[4, f32]) = add(x, y)
 def caller(a, b: tensor[4, f32]) = {
   z: tensor[4, f32] = helper(a, b)
   add(a, z)
 }
-"#,
+",
     );
 
     let helper = checked
@@ -117,13 +117,13 @@ fn later_helper_does_not_retroactively_make_earlier_unconstrained_call_read_only
     // unconstrained, `a` stays unconstrained, and read-only inference
     // correctly defaults to owned for the unknown-type param.
     let checked = checked_surf(
-        r#"
+        r"
 def caller(a, b: tensor[4, f32]) = {
   z = helper(a, b)
   add(a, z)
 }
 def helper(x, y: tensor[4, f32]) = add(x, y)
-"#,
+",
     );
 
     let helper = checked
@@ -158,14 +158,14 @@ fn module_wrapped_helper_signature_visible_to_caller_annotation() {
     // above.) Together the two tests document the intentional
     // asymmetry between bare-decl and module-wrapped programs.
     let checked = checked_surf(
-        r#"
+        r"
 module Foo
 def caller(a, b: tensor[4, f32]) = {
   z = helper(a, b)
   add(a, z)
 }
 def helper(x, y: tensor[4, f32]) = add(x, y)
-"#,
+",
     );
 
     let helper = checked
@@ -189,10 +189,10 @@ def helper(x, y: tensor[4, f32]) = add(x, y)
 #[test]
 fn recursive_cycle_member_does_not_infer_read_only_param() {
     let checked = checked_surf(
-        r#"
+        r"
 def recur(x, y: tensor[4, f32], n: int32) =
   if eq(n, 0) then add(x, y) else recur(x, y, sub(n, 1))
-"#,
+",
     );
 
     let recur = checked
@@ -208,13 +208,13 @@ def recur(x, y: tensor[4, f32], n: int32) =
 #[test]
 fn mutual_recursive_cycle_members_do_not_infer_read_only_params() {
     let checked = checked_surf(
-        r#"
+        r"
 def ping(x, y: tensor[4, f32], n: int32) =
   if eq(n, 0) then add(x, y) else pong(x, y, sub(n, 1))
 
 def pong(x, y: tensor[4, f32], n: int32) =
   if eq(n, 0) then add(x, y) else ping(x, y, sub(n, 1))
-"#,
+",
     );
 
     let ping = checked
@@ -236,9 +236,9 @@ def pong(x, y: tensor[4, f32], n: int32) =
 #[test]
 fn context_signature_metadata_makes_imported_call_read_only() {
     let library_decls = parse_str(
-        r#"
+        r"
 def helper(x, y: tensor[4, f32]) = add(x, y)
-"#,
+",
     )
     .expect("library surf parse");
     let library_deep = desugar_program(&library_decls);
@@ -246,12 +246,12 @@ def helper(x, y: tensor[4, f32]) = add(x, y)
         build_compiled_library_context(&library_deep).expect("library context");
 
     let app_decls = parse_str(
-        r#"
+        r"
 def caller(a, b: tensor[4, f32]) = {
   z: tensor[4, f32] = helper(a, b)
   add(a, z)
 }
-"#,
+",
     )
     .expect("app surf parse");
     let app_deep = desugar_program(&app_decls);

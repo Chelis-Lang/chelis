@@ -10,7 +10,7 @@
 //! invoked the CLI.
 //!
 //! This test wires the corpus into the default workspace gate. It stages
-//! chelis-std into a tempdir, points CHELIS_REEF_HOME at a tempdir reef home
+//! chelis-std into a tempdir, points `CHELIS_REEF_HOME` at a tempdir reef home
 //! for isolation from any developer-local reef state, and runs
 //! `chelis test tests/` from inside the staged package. The summary line
 //! `N passed, 0 failed` is parsed and N is asserted >= 120 so we leave

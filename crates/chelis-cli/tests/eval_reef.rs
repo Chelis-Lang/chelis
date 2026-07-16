@@ -31,17 +31,17 @@ module_prefix = "Demo"
     );
     write_file(
         &app_pkg.join("src/special.ch"),
-        r#"module Demo.Special
+        r"module Demo.Special
 
 def answer() -> i64 = 7
-"#,
+",
     );
     write_file(
         &external,
-        r#"import Demo.Special (answer)
+        r"import Demo.Special (answer)
 
 bench = answer()
-"#,
+",
     );
 
     Command::cargo_bin("chelis")

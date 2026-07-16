@@ -130,6 +130,7 @@ pub struct StdLibContext {
 /// such divergence while keeping it byte-identical across every fixture
 /// that consumes the unmodified bundled stdlib (their linked stdlib
 /// decls are bit-identical, see the module docs).
+#[must_use]
 pub fn stdlib_cache_key(stdlib_decls: &[chelis_surf::ast::Decl]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"chelis_std_typecheck_v");
@@ -199,6 +200,7 @@ fn hex_prefix(data: &[u8], n: usize) -> String {
 /// Both the chelis-std typecheck cache ([`typecheck_cache_dir`]) and the
 /// whole-package `CompiledContext` cache (`context.rs`) resolve through
 /// this one helper so the XDG fallback applies uniformly.
+#[must_use]
 pub fn cache_dir_for(name: &str) -> Option<PathBuf> {
     if let Some(reef_home) = non_empty_env("CHELIS_REEF_HOME") {
         return Some(PathBuf::from(reef_home).join(".cache").join(name));
@@ -214,6 +216,7 @@ pub fn cache_dir_for(name: &str) -> Option<PathBuf> {
 
 /// Resolve the directory the chelis-std typecheck cache lives in. See
 /// [`cache_dir_for`] for the resolution order.
+#[must_use]
 pub fn typecheck_cache_dir() -> Option<PathBuf> {
     cache_dir_for("typecheck")
 }
@@ -235,10 +238,9 @@ fn stdlib_cache_path(cache_dir: &Path, key: [u8; 32]) -> PathBuf {
 }
 
 /// Whether the disk cache is disabled for this process.
+#[must_use]
 pub fn cache_disabled() -> bool {
-    std::env::var_os("CHELIS_STDLIB_CACHE_DISABLE")
-        .map(|v| v == "1")
-        .unwrap_or(false)
+    std::env::var_os("CHELIS_STDLIB_CACHE_DISABLE").is_some_and(|v| v == "1")
 }
 
 /// Load the bundled chelis-std's [`StdLibContext`] from disk if a fresh

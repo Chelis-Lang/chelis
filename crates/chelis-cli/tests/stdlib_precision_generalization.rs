@@ -30,7 +30,7 @@
 //! requires that rejection at the type-check entry, but the current
 //! type-check infrastructure routes transcendentals through the
 //! polymorphic `tensor_unop` scheme without a kind restriction; the
-//! IR lowering's float-only enforcement (lower_transcendental) silently
+//! IR lowering's float-only enforcement (`lower_transcendental`) silently
 //! produces a zero-constant placeholder for integer tensors instead of
 //! emitting a diagnostic. Closing this gap is a compiler-side change
 //! (kind-restriction syntax in Surf sigs OR a transcendental-only
@@ -132,10 +132,10 @@ fn stub_sig_min_shape_accepts_all_arithmetic_dtypes() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("min.ch");
         let src = format!(
-            r#"sig min: &tensor[a, b, p] -> int32 -> tensor[b, p]
+            r"sig min: &tensor[a, b, p] -> int32 -> tensor[b, p]
 def call_min(xs: &tensor[2, 3, {dtype}]) -> tensor[3, {dtype}] =
   min(xs, cast(0, int32))
-"#
+"
         );
         write_file(&path, &src);
         let json = run_check(&path);
@@ -151,10 +151,10 @@ fn stub_sig_prod_shape_accepts_all_arithmetic_dtypes() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("prod.ch");
         let src = format!(
-            r#"sig prod: &tensor[a, b, p] -> int32 -> tensor[b, p]
+            r"sig prod: &tensor[a, b, p] -> int32 -> tensor[b, p]
 def call_prod(xs: &tensor[2, 3, {dtype}]) -> tensor[3, {dtype}] =
   prod(xs, cast(0, int32))
-"#
+"
         );
         write_file(&path, &src);
         let json = run_check(&path);
@@ -187,7 +187,7 @@ fn stub_sig_argmax_argmin_shape_returns_int64_indices_at_all_arithmetic_input_dt
     }
 }
 
-/// School.Nn.Conv.conv1d / conv2d_small: production sig shapes with
+/// School.Nn.Conv.conv1d / `conv2d_small`: production sig shapes with
 /// concrete dims; the precision tvar admits every dtype the sig itself
 /// does not restrict. Surf has no kind-restriction syntax in this
 /// cycle, so the test covers every active dtype rather than only
@@ -230,9 +230,9 @@ fn stub_sig_xavier_sample_shape_accepts_all_dtypes_at_sig_level() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("xavier.ch");
         let src = format!(
-            r#"sig sample: tensor[32, 128, p] -> p -> tensor[32, 128, p] ! {{ Random }}
+            r"sig sample: tensor[32, 128, p] -> p -> tensor[32, 128, p] ! {{ Random }}
 def call_xavier(t: tensor[32, 128, {dtype}], gain: {dtype}) -> tensor[32, 128, {dtype}] ! {{ Random }} = sample(t, gain)
-"#
+"
         );
         write_file(&path, &src);
         let json = run_check(&path);
@@ -277,9 +277,9 @@ fn neg_conv1d_rejects_mismatched_input_weight_precision() {
     let path = dir.path().join("neg_conv1d.ch");
     write_file(
         &path,
-        r#"sig conv1d: &tensor[1, 4, 1, 16, p] -> &tensor[8, 4, 1, 3, p] -> tensor[1, 8, 1, 14, p]
+        r"sig conv1d: &tensor[1, 4, 1, 16, p] -> &tensor[8, 4, 1, 3, p] -> tensor[1, 8, 1, 14, p]
 def bad(x: &tensor[1, 4, 1, 16, f32], w: &tensor[8, 4, 1, 3, bf16]) -> tensor[1, 8, 1, 14, f32] = conv1d(x, w)
-"#,
+",
     );
     let json = run_check(&path);
     expect_any_error(&json, "conv1d mismatched input/weight precision");
@@ -293,10 +293,10 @@ fn neg_argmax_return_must_be_int64_not_input_precision() {
     let path = dir.path().join("neg_argmax.ch");
     write_file(
         &path,
-        r#"sig argmax: &tensor[a, b, p] -> int32 -> tensor[b, int64]
+        r"sig argmax: &tensor[a, b, p] -> int32 -> tensor[b, int64]
 def bad(xs: &tensor[2, 3, f32]) -> tensor[3, f32] =
   argmax(xs, cast(0, int32))
-"#,
+",
     );
     let json = run_check(&path);
     expect_any_error(&json, "argmax must return int64");
@@ -310,9 +310,9 @@ fn neg_xavier_sample_rejects_mismatched_gain_precision() {
     let path = dir.path().join("neg_xavier.ch");
     write_file(
         &path,
-        r#"sig sample: tensor[32, 128, p] -> p -> tensor[32, 128, p] ! { Random }
+        r"sig sample: tensor[32, 128, p] -> p -> tensor[32, 128, p] ! { Random }
 def bad(t: tensor[32, 128, f32], gain: f64) -> tensor[32, 128, f32] ! { Random } = sample(t, gain)
-"#,
+",
     );
     let json = run_check(&path);
     expect_any_error(&json, "xavier sample mismatched gain precision");
@@ -338,9 +338,9 @@ fn float_matmul_accepted_at_all_float_dtypes() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("float_matmul.ch");
         let src = format!(
-            r#"def call_matmul(a: tensor[3, 4, {dtype}], b: tensor[4, 5, {dtype}]) -> tensor[3, 5, {dtype}] =
+            r"def call_matmul(a: tensor[3, 4, {dtype}], b: tensor[4, 5, {dtype}]) -> tensor[3, 5, {dtype}] =
   matmul(a, b)
-"#
+"
         );
         write_file(&path, &src);
         let json = run_check(&path);

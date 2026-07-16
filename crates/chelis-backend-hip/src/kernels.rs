@@ -56,7 +56,7 @@ __device__ float chelis_uniform_sample_f32(unsigned long long seed, unsigned lon
 }
 ";
 
-/// Maximum tensor dimensions (must match CHELIS_MAX_DIM in runtime).
+/// Maximum tensor dimensions (must match `CHELIS_MAX_DIM` in runtime).
 pub const MAX_DIM: usize = 8;
 
 /// Floating-point element kind for kernel emission. WS-A2 admits f64
@@ -78,6 +78,7 @@ pub enum ElemKind {
 }
 
 impl ElemKind {
+    #[must_use]
     pub fn c_type(self) -> &'static str {
         match self {
             ElemKind::F32 => "float",
@@ -85,6 +86,7 @@ impl ElemKind {
         }
     }
 
+    #[must_use]
     pub fn suffix(self) -> &'static str {
         match self {
             ElemKind::F32 => "f32",
@@ -93,6 +95,7 @@ impl ElemKind {
     }
 
     /// Most-negative finite literal for `max` reductions.
+    #[must_use]
     pub fn init_min(self) -> &'static str {
         match self {
             ElemKind::F32 => "-3.402823466e+38F",
@@ -101,6 +104,7 @@ impl ElemKind {
     }
 
     /// Most-positive finite literal for `min` reductions.
+    #[must_use]
     pub fn init_max(self) -> &'static str {
         match self {
             ElemKind::F32 => "3.402823466e+38F",
@@ -109,6 +113,7 @@ impl ElemKind {
     }
 
     /// Additive identity literal for `sum` reductions.
+    #[must_use]
     pub fn zero(self) -> &'static str {
         match self {
             ElemKind::F32 => "0.0f",
@@ -117,6 +122,7 @@ impl ElemKind {
     }
 
     /// Multiplicative identity literal for `prod` reductions.
+    #[must_use]
     pub fn one(self) -> &'static str {
         match self {
             ElemKind::F32 => "1.0f",
@@ -125,6 +131,7 @@ impl ElemKind {
     }
 
     /// Boolean-as-element constants for `cmplt` outputs in this precision.
+    #[must_use]
     pub fn one_lit_bool(self) -> &'static str {
         match self {
             ElemKind::F32 => "1.0f",
@@ -132,6 +139,7 @@ impl ElemKind {
         }
     }
 
+    #[must_use]
     pub fn zero_lit_bool(self) -> &'static str {
         match self {
             ElemKind::F32 => "0.0f",
@@ -143,6 +151,7 @@ impl ElemKind {
     /// matching name for this kind. f64 drops the trailing `f`; everything
     /// else is passed through. Used by `unary_func` and the fused
     /// elementwise generator.
+    #[must_use]
     pub fn func(self, libm_f32_name: &str) -> String {
         match self {
             ElemKind::F32 => libm_f32_name.to_string(),
@@ -212,6 +221,7 @@ fn build_int_array(var_name: &str, prefix: &str, suffix: &str) -> String {
 /// (no implicit promotion); both inputs and the output share
 /// `elem_c_ty`. The accompanying kernel name should already encode the
 /// dtype suffix (e.g. `kernel_add_f64`, `kernel_add_i8`).
+#[must_use]
 pub fn binary_elementwise_typed(kernel_name: &str, op: &str, elem_c_ty: &str) -> String {
     format!(
         "{DEVICE_HELPERS}\
@@ -244,6 +254,7 @@ extern \"C\" __global__ void {kernel_name}(
 /// for callers that already have an `ElemKind` in hand. Forwards to the
 /// dtype-parameterized [`binary_elementwise_typed`] using the
 /// `ElemKind`'s C-type spelling (`float` or `double`).
+#[must_use]
 pub fn binary_elementwise(kernel_name: &str, op: &str, kind: ElemKind) -> String {
     binary_elementwise_typed(kernel_name, op, kind.c_type())
 }
@@ -254,6 +265,7 @@ pub fn binary_elementwise(kernel_name: &str, op: &str, kind: ElemKind) -> String
 ///   correction, matching the C backend and evaluator.
 /// - `is_int == false` (float dtype): `floorf(a / b)` (the device `floorf`
 ///   handles the f32/f64 promotion through the C type).
+#[must_use]
 pub fn binary_floor_div_typed(kernel_name: &str, elem_c_ty: &str, is_int: bool) -> String {
     let compute = if is_int {
         format!(
@@ -294,9 +306,10 @@ extern \"C\" __global__ void {kernel_name}(
     )
 }
 
-/// Generate kernel source for a binary function op (fmaxf for max_elem).
+/// Generate kernel source for a binary function op (fmaxf for `max_elem`).
 /// `func` is the f32-suffixed libm name (e.g. `fmaxf`); for f64 the
 /// f-suffix is dropped per [`ElemKind::func`].
+#[must_use]
 pub fn binary_func(kernel_name: &str, func: &str, kind: ElemKind) -> String {
     let ty = kind.c_type();
     let resolved = kind.func(func);
@@ -329,6 +342,7 @@ extern \"C\" __global__ void {kernel_name}(
 
 /// Generate kernel source for cmplt. Returns the in-precision boolean
 /// constants (`1.0f`/`0.0f` for f32; `1.0`/`0.0` for f64).
+#[must_use]
 pub fn cmplt(kernel_name: &str, kind: ElemKind) -> String {
     let ty = kind.c_type();
     let one = kind.one_lit_bool();
@@ -361,6 +375,7 @@ extern \"C\" __global__ void {kernel_name}(
 }
 
 /// Generate kernel source for a unary prefix op (neg: `-`).
+#[must_use]
 pub fn unary_prefix(kernel_name: &str, op: &str, kind: ElemKind) -> String {
     let ty = kind.c_type();
     format!(
@@ -392,8 +407,9 @@ extern \"C\" __global__ void {kernel_name}(
 ///
 /// f32 / f64 only by `ElemKind` definition. Half-precision (`f16`,
 /// `bf16`) coverage is tracked under the WS-A1 backlog (issue #174);
-/// a future ElemKind extension that admits those dtypes must update
+/// a future `ElemKind` extension that admits those dtypes must update
 /// this `match` exhaustively.
+#[must_use]
 pub fn unary_recip(kernel_name: &str, kind: ElemKind) -> String {
     let ty = kind.c_type();
     let one = match kind {
@@ -425,6 +441,7 @@ extern \"C\" __global__ void {kernel_name}(
 /// Generate kernel source for a unary function op (expf, logf, sinf,
 /// sqrtf). `func` is the f32-suffixed libm name; for f64 the f-suffix is
 /// dropped per [`ElemKind::func`].
+#[must_use]
 pub fn unary_func(kernel_name: &str, func: &str, kind: ElemKind) -> String {
     let ty = kind.c_type();
     let resolved = kind.func(func);
@@ -467,6 +484,7 @@ extern \"C\" __global__ void {kernel_name}(
 /// source strides + source shape + per-axis low offsets as runtime
 /// arguments, so a single kernel per dtype serves every pad node of that
 /// dtype regardless of rank or padding amounts.
+#[must_use]
 pub fn pad_typed(kernel_name: &str, elem_c_ty: &str) -> String {
     format!(
         "{DEVICE_HELPERS}\
@@ -519,6 +537,7 @@ extern \"C\" __global__ void {kernel_name}(
 /// out_index[d] + start[d]` (the `start` of each axis bound). Mirrors the
 /// C backend's `emit_shrink` and the evaluator's `shrink`
 /// (spec/05-risc-primitives.md).
+#[must_use]
 pub fn shrink_typed(kernel_name: &str, elem_c_ty: &str) -> String {
     format!(
         "{DEVICE_HELPERS}\
@@ -550,11 +569,12 @@ extern \"C\" __global__ void {kernel_name}(
     )
 }
 
-/// Generate kernel source for uniform_like random fill. The PRNG itself
+/// Generate kernel source for `uniform_like` random fill. The PRNG itself
 /// always runs in f32 — the f64 variant simply widens at the final store
 /// because `chelis_uniform_sample_f32` is the only PRNG the runtime ships
 /// today and the spec does not pin a higher-precision tensor random
 /// surface.
+#[must_use]
 pub fn uniform_like(kernel_name: &str, kind: ElemKind) -> String {
     let ty = kind.c_type();
     format!(
@@ -582,6 +602,7 @@ extern \"C\" __global__ void {kernel_name}(
 /// read. The WS-A4 i8/i16 → i32 promoted integer path lives in
 /// [`reduce_sum_promoted`] because the integer dtypes are not (yet)
 /// admitted by `ElemKind`.
+#[must_use]
 pub fn reduce_sum(
     kernel_name: &str,
     axis: usize,
@@ -627,13 +648,14 @@ extern \"C\" __global__ void {kernel_name}(
     )
 }
 
-/// WS-A4: integer reduce_sum with a wider accumulator dtype.
+/// WS-A4: integer `reduce_sum` with a wider accumulator dtype.
 /// `src_c_ty` is the element type of the input tensor (e.g. `int8_t`,
 /// `int16_t`); `acc_c_ty` is the running-sum AND output element type
 /// (e.g. `int32_t` for the spec/04-type-system.md §5.7.1 i8/i16 → i32
 /// promoted path). Each source element is widened to `acc_c_ty` before
 /// being added so partial sums of e.g. 200 i8 ones produce 200, not the
 /// wrap-around result of accumulating at the source width.
+#[must_use]
 pub fn reduce_sum_promoted(
     kernel_name: &str,
     axis: usize,
@@ -677,8 +699,9 @@ extern \"C\" __global__ void {kernel_name}(
 }
 
 /// Generate kernel source for max reduction (naive: one thread per
-/// output element). MaxReduce result precision matches the operand
+/// output element). `MaxReduce` result precision matches the operand
 /// precision; the accumulator runs at the operand precision.
+#[must_use]
 pub fn reduce_max(kernel_name: &str, axis: usize, kind: ElemKind) -> String {
     let ty = kind.c_type();
     let init = kind.init_min();
@@ -722,6 +745,7 @@ extern \"C\" __global__ void {kernel_name}(
 /// Generate kernel source for min reduction. Mirrors `reduce_max` but
 /// seeds the accumulator with `+max` and uses `fmin`. WS-A2 lifts this
 /// from the previous "C backend only" deferral.
+#[must_use]
 pub fn reduce_min(kernel_name: &str, axis: usize, kind: ElemKind) -> String {
     let ty = kind.c_type();
     let init = kind.init_max();
@@ -765,6 +789,7 @@ extern \"C\" __global__ void {kernel_name}(
 /// Generate kernel source for product reduction. Identity is `1.0`.
 /// The eval-side `prod` adjoint needs special handling for zero elements;
 /// that's a host-side AD concern, not a kernel concern.
+#[must_use]
 pub fn reduce_prod(kernel_name: &str, axis: usize, kind: ElemKind) -> String {
     let ty = kind.c_type();
     let one = kind.one();
@@ -807,6 +832,7 @@ extern \"C\" __global__ void {kernel_name}(
 /// Generate kernel source for argmax reduction. Output dtype is `i64`
 /// (matching the spec/05 §2.3 argmax/argmin signature). Tie-break is
 /// "first index wins", matching the C backend.
+#[must_use]
 pub fn reduce_argmax(kernel_name: &str, axis: usize, kind: ElemKind) -> String {
     let ty = kind.c_type();
     let init = kind.init_min();
@@ -849,6 +875,7 @@ extern \"C\" __global__ void {kernel_name}(
 }
 
 /// Mirror of [`reduce_argmax`] for argmin.
+#[must_use]
 pub fn reduce_argmin(kernel_name: &str, axis: usize, kind: ElemKind) -> String {
     let ty = kind.c_type();
     let init = kind.init_max();
@@ -900,7 +927,7 @@ fn resolve_fused_input(input: &chelis_ir::dag::FusedInput) -> String {
     }
 }
 
-/// Generate the `{ty} v{i} = {expr};` body lines for a FusedStep chain.
+/// Generate the `{ty} v{i} = {expr};` body lines for a `FusedStep` chain.
 /// `kind` selects the libm function names (e.g. `expf` vs `exp`) and the
 /// register type.
 fn fused_step_lines(
@@ -1026,6 +1053,7 @@ fn fused_step_lines(
     step_lines
 }
 
+#[must_use]
 pub fn reduce_fused(
     kernel_name: &str,
     axis: usize,
@@ -1140,6 +1168,7 @@ pub enum ReduceKind {
 /// the legacy non-`__restrict__` parameter list is preserved (the HIP
 /// fused kernel has historically not used `__restrict__` for either
 /// the non-aliased nor aliased case).
+#[must_use]
 pub fn fused_elementwise(
     kernel_name: &str,
     steps: &[chelis_ir::dag::FusedStep],
@@ -1217,6 +1246,7 @@ extern \"C\" __global__ void {kernel_name}(
 /// The value is passed in the destination precision so the host-side
 /// emitter does not need a per-precision launch shim beyond casting the
 /// literal.
+#[must_use]
 pub fn fill(kernel_name: &str, kind: ElemKind) -> String {
     let ty = kind.c_type();
     format!(
@@ -1233,6 +1263,7 @@ extern \"C\" __global__ void {kernel_name}({ty} *data, {ty} value, int size) {{
 /// Generate kernel source for cast / Realize / Copy (in-precision identity).
 /// Mixed-precision casts (e.g. f32→f64) emit the dedicated
 /// [`cast_convert`] kernel.
+#[must_use]
 pub fn cast(kernel_name: &str, kind: ElemKind) -> String {
     let ty = kind.c_type();
     format!(
@@ -1260,6 +1291,7 @@ extern \"C\" __global__ void {kernel_name}(
 /// Generate kernel source for a true cross-precision cast (e.g.
 /// `f32 → f64`). Differs from [`cast`] only in that the source and
 /// destination types may disagree.
+#[must_use]
 pub fn cast_convert(kernel_name: &str, src: ElemKind, dst: ElemKind) -> String {
     let src_ty = src.c_type();
     let dst_ty = dst.c_type();
@@ -1286,6 +1318,7 @@ extern \"C\" __global__ void {kernel_name}(
 }
 
 /// Generate sparse gather kernel for typed payload precision and typed integer indices.
+#[must_use]
 pub fn gather(kernel_name: &str, index_ty: &str, kind: ElemKind) -> String {
     let ty = kind.c_type();
     format!(
@@ -1319,6 +1352,7 @@ extern \"C\" __global__ void {kernel_name}(
 
 /// Generate sparse scatter-add kernel for typed payload precision and typed integer indices.
 /// HIP's `atomicAdd` is overloaded for `float` and `double` on supported devices.
+#[must_use]
 pub fn scatter_add(kernel_name: &str, index_ty: &str, kind: ElemKind) -> String {
     let ty = kind.c_type();
     format!(
@@ -1364,6 +1398,7 @@ extern \"C\" __global__ void {kernel_name}(
 /// segmented scan) require a tie-breaker that picks the max flat
 /// index per target cell; they are a future optimization but must
 /// preserve this exact tie-breaking rule.
+#[must_use]
 pub fn scatter_replace(kernel_name: &str, index_ty: &str) -> String {
     format!(
         "{DEVICE_HELPERS}\
@@ -1405,6 +1440,7 @@ extern \"C\" __global__ void {kernel_name}(
 /// shapes are passed as `MAX_DIM` scalar ints each (the launch site
 /// reads `d_t->shape[d]`), matching the scalar-param convention used by
 /// the elementwise kernels.
+#[must_use]
 pub fn scatter_elements(kernel_name: &str, index_ty: &str) -> String {
     format!(
         "{DEVICE_HELPERS}\

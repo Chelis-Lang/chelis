@@ -47,7 +47,7 @@ fn eval_dag(dag: &Dag, inputs: &HashMap<String, TensorValue>) -> Vec<TensorValue
     roots.iter().map(|id| vals[id].clone()).collect()
 }
 
-/// Assert two TensorValue vecs are close within tolerance.
+/// Assert two `TensorValue` vecs are close within tolerance.
 fn assert_outputs_close(a: &[TensorValue], b: &[TensorValue], tol: f64, context: &str) {
     assert_eq!(a.len(), b.len(), "{context}: different number of outputs");
     for (i, (va, vb)) in a.iter().zip(b.iter()).enumerate() {
@@ -221,7 +221,7 @@ fn f5_elementwise_into_reduction_fuses() {
     // Verify correctness: fused matches unfused
     let inputs: HashMap<String, TensorValue> = [(
         "x".to_string(),
-        TensorValue::from_vec(vec![3, 4], (0..12).map(|i| i as f64).collect()),
+        TensorValue::from_vec(vec![3, 4], (0..12).map(f64::from).collect()),
     )]
     .into_iter()
     .collect();
@@ -253,7 +253,7 @@ fn f5_neg_reduction_into_elementwise_does_not_fuse() {
     // The sum and neg should remain separate
     let inputs: HashMap<String, TensorValue> = [(
         "x".to_string(),
-        TensorValue::from_vec(vec![3, 4], (0..12).map(|i| i as f64).collect()),
+        TensorValue::from_vec(vec![3, 4], (0..12).map(f64::from).collect()),
     )]
     .into_iter()
     .collect();
@@ -465,7 +465,7 @@ fn f11_double_multi_consumer_no_fusion() {
 // ===========================================================================
 
 /// A -> B (2 consumers) -> C and D: A->B fuses (B at chain tail), C and D
-/// reference the FusedElem output which IS B's value.
+/// reference the `FusedElem` output which IS B's value.
 #[test]
 fn f12_multi_consumer_at_chain_tail() {
     let mut dag = Dag::new();
@@ -647,7 +647,7 @@ fn fr1_reduction_inlined_identifies_fused_elem_into_sum() {
     // Either way, correctness holds:
     let inputs: HashMap<String, TensorValue> = [(
         "x".to_string(),
-        TensorValue::from_vec(vec![3, 4], (0..12).map(|i| i as f64).collect()),
+        TensorValue::from_vec(vec![3, 4], (0..12).map(f64::from).collect()),
     )]
     .into_iter()
     .collect();
@@ -716,7 +716,7 @@ fn fr3_chain_into_sum_correctness() {
 
     let inputs: HashMap<String, TensorValue> = [(
         "x".to_string(),
-        TensorValue::from_vec(vec![3, 4], (0..12).map(|i| i as f64).collect()),
+        TensorValue::from_vec(vec![3, 4], (0..12).map(f64::from).collect()),
     )]
     .into_iter()
     .collect();

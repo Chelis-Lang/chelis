@@ -45,6 +45,7 @@ const BUNDLED_CHELIS_STD_VERSION: &str = chelis_std_bundle::BUNDLED_CHELIS_STD_V
 /// compiler. Use this when you need to emit a `LockSource::Bundled`
 /// entry, surface a soft-verify mismatch error, or otherwise reason
 /// about the runtime version.
+#[must_use]
 pub fn compiler_bundled_chelis_std_version() -> &'static str {
     BUNDLED_CHELIS_STD_VERSION
 }
@@ -291,6 +292,7 @@ impl LockSource {
     /// This is the canonical writer for lockfile entries that came from
     /// `install_from_github`. Use [`Self::local_registry_no_origin`] for
     /// monorepo-installed entries.
+    #[must_use]
     pub fn local_registry_from_github(spec: &GitHubReleaseSpec) -> Self {
         Self::LocalRegistry {
             remote_origin: Some(format_github_origin(&spec.org, &spec.repo, &spec.tag)),
@@ -301,6 +303,7 @@ impl LockSource {
     /// by `install_from_monorepo` (which has no remote source) and for
     /// backward-compat when reading old lockfiles that did not carry
     /// the field.
+    #[must_use]
     pub fn local_registry_no_origin() -> Self {
         Self::LocalRegistry {
             remote_origin: None,
@@ -311,6 +314,7 @@ impl LockSource {
     /// compiler that supplied the runtime. Used for the soft-verify
     /// path on explicit `chelis-std` declarations and for the
     /// implicit-runtime synthesis path.
+    #[must_use]
     pub fn bundled_for_current_compiler() -> Self {
         // CARGO_PKG_VERSION is the compiler crate (chelis-reef) version,
         // which version-marches with the toolchain.
@@ -325,6 +329,7 @@ impl LockSource {
     /// unrecorded. The `Bundled` variant intentionally has no remote
     /// origin: there is no archive on the network — integrity comes
     /// from the compiler binary itself.
+    #[must_use]
     pub fn remote_origin(&self) -> Option<&str> {
         match self {
             Self::LocalRegistry { remote_origin } => remote_origin.as_deref(),
@@ -394,15 +399,15 @@ pub fn parse_remote_origin(input: &str) -> Result<GitHubReleaseSpec, RemoteOrigi
             },
         });
     }
-    let scheme = input
-        .split_once("://")
-        .map(|(s, _)| format!("{s}://"))
-        .unwrap_or_else(|| {
+    let scheme = input.split_once("://").map_or_else(
+        || {
             // No `://` at all — treat the whole input as the "scheme"
             // for diagnostic purposes so the error names exactly what
             // the user wrote.
             input.to_string()
-        });
+        },
+        |(s, _)| format!("{s}://"),
+    );
     Err(RemoteOriginParseError::UnknownScheme {
         input: input.to_string(),
         scheme,
@@ -503,7 +508,7 @@ impl PreparedReefGraph {
     /// graph, including path-dep packages. The result is the load-bearing
     /// input to `chelis_compiler_api::ContextHash` and the Phase I disk
     /// cache; deterministic ordering is guaranteed by sorting on
-    /// (package_name, package_version, module_name) before returning.
+    /// (`package_name`, `package_version`, `module_name`) before returning.
     ///
     /// `LocalRegistry` packages are not yet supported — Phase B fixtures
     /// only use `Root` + `Path`. Phase I will extend `LoadedPackage` to
@@ -591,6 +596,7 @@ impl PreparedReefGraph {
     /// Panics only if the graph was constructed with a missing root —
     /// `prepare_reef_graph` enforces this invariant on construction, so
     /// callers can treat this as infallible.
+    #[must_use]
     pub fn root_package_id(&self) -> (&str, &str) {
         let pkg = self
             .graph
@@ -1409,7 +1415,7 @@ const REEF_HOME_LOCK_FILE: &str = ".reef-lock";
 /// `chelis-std-0.3.0.tar.zst` at well under 1 MB) and short enough to
 /// surface a deadlocked / wedged peer process within a developer's
 /// single iteration loop. Locked by `phaseA_item8_autofetch_build_oracle`.
-const REEF_HOME_LOCK_TIMEOUT: Duration = Duration::from_secs(60);
+const REEF_HOME_LOCK_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// RAII guard for the Item 8 process-level advisory lock on
 /// `$CHELIS_REEF_HOME/.reef-lock`. Drop releases the underlying
@@ -1432,6 +1438,7 @@ pub struct ReefHomeLock {
 impl ReefHomeLock {
     /// Path of the on-disk lock file backing this guard. Exposed so
     /// tests can assert the file exists during the lock window.
+    #[must_use]
     pub fn lock_path(&self) -> &Path {
         &self.path
     }
@@ -1727,9 +1734,9 @@ pub fn install_from_monorepo(
         let mut out = Vec::new();
         let mut entries: Vec<_> = fs::read_dir(&packages_dir)
             .map_err(|e| format!("failed to read {}: {e}", packages_dir.display()))?
-            .filter_map(|entry| entry.ok())
+            .filter_map(std::result::Result::ok)
             .collect();
-        entries.sort_by_key(|entry| entry.file_name());
+        entries.sort_by_key(std::fs::DirEntry::file_name);
         for entry in entries {
             let pkg_root = entry.path();
             if !pkg_root.is_dir() {
@@ -1996,6 +2003,7 @@ fn resolve_github_token() -> Result<String, GitHubFetchError> {
 /// `gh auth token`, else `None`. Unlike the install path, a source sync may
 /// still succeed without a token (a cached mirror, or a local/public
 /// remote in tests), so this returns `Option` rather than erroring.
+#[must_use]
 pub fn try_github_token() -> Option<String> {
     resolve_github_token().ok()
 }
@@ -2040,7 +2048,7 @@ fn map_http_error_status(
             .get("Retry-After")
             .or_else(|| response.headers().get("X-RateLimit-Reset"))
             .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
         return GitHubFetchError::RateLimited {
             url: url.to_string(),
             retry_after,
@@ -2126,11 +2134,12 @@ fn parse_release_metadata(body: &str, url: &str) -> Result<Vec<ReleaseAsset>, Gi
         })?;
     let mut out = Vec::with_capacity(assets.len());
     for (i, entry) in assets.iter().enumerate() {
-        let id = entry.get("id").and_then(|v| v.as_u64()).ok_or_else(|| {
-            GitHubFetchError::Validation {
+        let id = entry
+            .get("id")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| GitHubFetchError::Validation {
                 message: format!("release metadata at {url}: assets[{i}] is missing numeric `id`"),
-            }
-        })?;
+            })?;
         let name = entry
             .get("name")
             .and_then(|v| v.as_str())
@@ -2549,7 +2558,10 @@ fn extract_and_place_binary(
 /// than guess which of several files is the binary.
 fn locate_binary(root: &Path, logical_name: &str) -> Result<PathBuf, GitHubFetchError> {
     let mut regular_files: Vec<PathBuf> = Vec::new();
-    for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(root)
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+    {
         if entry.file_type().is_file() {
             regular_files.push(entry.path().to_path_buf());
         }
@@ -3497,7 +3509,10 @@ pub fn install_bootstrap(
         }
         for (name, versions) in &by_name {
             if versions.len() > 1 {
-                let mut sorted: Vec<String> = versions.iter().map(|s| s.to_string()).collect();
+                let mut sorted: Vec<String> = versions
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect();
                 sorted.sort();
                 sorted.dedup();
                 if sorted.len() > 1 {
@@ -3658,7 +3673,7 @@ pub fn export_bundle(package_root: &Path, output_dir: &Path) -> Result<BundleMan
     Ok(manifest)
 }
 
-/// Copy a package's source tree (reef.toml, src/, additional_sources) into `dst`.
+/// Copy a package's source tree (reef.toml, src/, `additional_sources`) into `dst`.
 fn copy_package_source(src: &Path, dst: &Path) -> Result<(), String> {
     fs::create_dir_all(dst).map_err(|e| format!("create {}: {e}", dst.display()))?;
     // Copy reef.toml
@@ -3680,7 +3695,12 @@ fn copy_package_source(src: &Path, dst: &Path) -> Result<(), String> {
     };
     let roots: Vec<&str> = if let Some(ref m) = manifest {
         std::iter::once("src")
-            .chain(m.package.additional_sources.iter().map(|s| s.as_str()))
+            .chain(
+                m.package
+                    .additional_sources
+                    .iter()
+                    .map(std::string::String::as_str),
+            )
             .collect()
     } else {
         vec!["src"]
@@ -3882,7 +3902,7 @@ pub fn package_schema(root: &Path) -> Result<PackageSchema, String> {
 fn canonical_root(root: &Path) -> Result<PathBuf, String> {
     let root = root
         .canonicalize()
-        .or_else(|_| fs::create_dir_all(root).map(|_| root.to_path_buf()))
+        .or_else(|_| fs::create_dir_all(root).map(|()| root.to_path_buf()))
         .map_err(|e| format!("failed to resolve {}: {e}", root.display()))?;
     if root.join("reef.toml").exists() {
         Ok(root)
@@ -3922,6 +3942,7 @@ pub fn registry_home() -> Result<PathBuf, String> {
 /// Returns `None` for host OS/arch combinations with no defined slug
 /// (e.g. Windows), so the install path can surface a clear "no artifact
 /// for this platform" error rather than guessing.
+#[must_use]
 pub fn host_platform_slug() -> Option<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => Some("darwin-arm64"),
@@ -4350,8 +4371,7 @@ fn validate_manifest_with(
         if RESERVED_ADDITIONAL_SOURCE_DIRS.contains(&entry.as_str()) {
             return Err(format!(
                 "package.additional_sources entry `{entry}` is reserved \
-                 (reserved: {:?})",
-                RESERVED_ADDITIONAL_SOURCE_DIRS
+                 (reserved: {RESERVED_ADDITIONAL_SOURCE_DIRS:?})"
             ));
         }
         if entry.contains('/') || entry.contains('\\') {
@@ -4621,7 +4641,7 @@ fn resolve_package_recursive(
                 let dep_root = dep_root
                     .canonicalize()
                     .map_err(|e| format!("failed to resolve path dependency `{dep_name}`: {e}"))?;
-                let relative = path.to_string();
+                let relative = path.clone();
                 resolve_package_recursive(
                     dep_name,
                     dep_root,
@@ -4961,7 +4981,7 @@ fn load_registry_package_or_autofetch(
 
     // Run the fetch. Auto-fetch event becomes observable here via the
     // emitted log message; tests assert against this signal.
-    eprintln!("chelis reef: auto-fetching `{name}` `{version}` from {source_origin}",);
+    eprintln!("chelis reef: auto-fetching `{name}` `{version}` from {source_origin}");
     let fetch_err = match install_from_github(&source_origin, &registry_root_path) {
         Ok(_artifact) => {
             // Retry the registry lookup. If retry still fails, the
@@ -5024,6 +5044,7 @@ fn lockfile_remote_origin(dep: &LockedDependency) -> Option<String> {
 ///
 /// Locked by [`CANONICAL_REEF_ORG`] = `"chelis-lang"`. Multi-publisher
 /// generalization is post-launch (Item 10).
+#[must_use]
 pub fn canonical_origin_for(name: &str, version: &str) -> String {
     format!("{CANONICAL_REEF_ORG}/{name}@v{version}")
 }
@@ -5073,8 +5094,7 @@ fn format_missing_dep_error(
             // have skipped the fetch.
             format!(
                 "missing dependency `{name}` `{version}` and auto-fetch \
-                 from `{source_origin}` did not run ({auth})",
-                auth = token_state,
+                 from `{source_origin}` did not run ({token_state})",
             )
         }
         None => {
@@ -5332,7 +5352,7 @@ fn load_package_modules(
                 .package
                 .additional_sources
                 .iter()
-                .map(|s| s.as_str()),
+                .map(std::string::String::as_str),
         )
         .collect();
 
@@ -5430,11 +5450,10 @@ fn load_package_modules(
                     prev.source_root,
                     prev.file_rel.display(),
                     source_root_name,
-                    entry
-                        .path()
-                        .strip_prefix(&abs_root)
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|_| entry.path().display().to_string())
+                    entry.path().strip_prefix(&abs_root).map_or_else(
+                        |_| entry.path().display().to_string(),
+                        |p| p.display().to_string()
+                    )
                 ));
             }
         }
@@ -5656,7 +5675,7 @@ fn build_archive(root: &Path, out_path: &Path) -> Result<(), String> {
                     .package
                     .additional_sources
                     .iter()
-                    .map(|s| s.as_str()),
+                    .map(std::string::String::as_str),
             )
             .collect();
         for source_root_name in &roots {
@@ -5828,7 +5847,7 @@ fn build_shell_package(
             .keys()
             .map(|name| PackageId {
                 name: name.clone(),
-                version: "".to_string(),
+                version: String::new(),
             })
             .collect(),
         archive_sha256: archive_sha256.to_string(),
@@ -6053,8 +6072,7 @@ fn build_name_resolver(
                         );
                         if chelis_types::BUILTIN_NAMES.contains(&name.as_str()) {
                             msg.push_str(&format!(
-                                ". Note: `{}` is a Chelis built-in function; call it directly without importing",
-                                name
+                                ". Note: `{name}` is a Chelis built-in function; call it directly without importing"
                             ));
                         }
                         msg
@@ -7093,7 +7111,7 @@ fn access_segments(expr: &Expr) -> Option<(Vec<String>, chelis_deep::Span)> {
 fn expanded_desugared_program(decls: &[Decl]) -> Result<Vec<chelis_deep::ast::Expr>, String> {
     let deep = chelis_surf::desugar::desugar_program(decls);
     chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
-        .map(|expanded| expanded.into_exprs())
+        .map(chelis_macros::ExpandedProgram::into_exprs)
         .map_err(|err| err.to_string())
 }
 
@@ -7188,7 +7206,7 @@ mod tests {
     /// (or other process env). Cargo runs unit tests in this binary
     /// in parallel by default; without serialization, test A's
     /// `set_var` plus test B's `remove_var` race and one of them
-    /// reads a CHELIS_REEF_HOME different from what it set.
+    /// reads a `CHELIS_REEF_HOME` different from what it set.
     /// Poison-tolerant: a panicking test doesn't cascade.
     static CHELIS_REEF_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -7198,7 +7216,7 @@ mod tests {
     fn lock_reef_home_env() -> std::sync::MutexGuard<'static, ()> {
         CHELIS_REEF_HOME_LOCK
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn write(path: &Path, contents: &str) {
@@ -7322,20 +7340,19 @@ mod tests {
                 let name = e.file_name().to_string_lossy();
                 name != "target" && name != "node_modules" && !name.starts_with('.')
             })
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|e| e.file_type().is_file() && e.file_name().to_str() == Some("reef.lock"))
-            .map(|e| e.into_path())
+            .map(walkdir::DirEntry::into_path)
             .filter(|path| {
                 fs::read_to_string(path)
                     .ok()
                     .and_then(|text| toml::from_str::<ReefLock>(&text).ok())
-                    .map(|lock| {
+                    .is_some_and(|lock| {
                         lock.dependencies.iter().any(|dep| {
                             dep.name == CHELIS_STD_PACKAGE_NAME
                                 && matches!(dep.source, LockSource::Bundled { .. })
                         })
                     })
-                    .unwrap_or(false)
             })
             .collect();
         locks.sort();
@@ -7648,10 +7665,9 @@ kind = "local_registry"
             r#"[package]
 name = "demo"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Demo"
-"#,
-            ver = CURRENT_COMPILER_VERSION
+"#
         );
         let parsed: ReefManifest = toml::from_str(&toml_text).expect("parse");
         assert!(
@@ -7674,7 +7690,7 @@ module_prefix = "Demo"
             r#"[package]
 name = "demo"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Demo"
 
 [artifacts.octant-translator]
@@ -7682,8 +7698,7 @@ repo = "Chelis-Lang/octant"
 tag = "v0.4.2"
 platforms.linux-x86_64 = {{ asset = "octant-translator-linux-x86_64.tar.gz", sha256 = "{sha}" }}
 platforms.darwin-arm64 = {{ asset = "octant-translator-darwin-arm64.tar.gz", sha256 = "{sha}" }}
-"#,
-            ver = CURRENT_COMPILER_VERSION
+"#
         );
         let parsed: ReefManifest = toml::from_str(&toml_text).expect("parse");
         let spec = parsed
@@ -8104,10 +8119,9 @@ module_prefix = "Demo"
                 r#"[package]
 name = "mylib"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Mylib"
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         write(
@@ -8122,13 +8136,12 @@ module_prefix = "Mylib"
                 r#"[package]
 name = "myapp"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Myapp"
 
 [dependencies]
 mylib = {{ path = "./mylib" }}
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         write(
@@ -8195,7 +8208,7 @@ path = "./mylib"
         let result = run_with_timeout(
             || {
                 // Simulate a slow operation — longer than the timeout.
-                std::thread::sleep(Duration::from_secs(60));
+                std::thread::sleep(Duration::from_mins(1));
                 Ok::<i32, String>(42)
             },
             Duration::from_millis(50),
@@ -8223,13 +8236,12 @@ path = "./mylib"
                 r#"[package]
 name = "myapp"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Myapp"
 
 [dependencies]
 some-registry-lib = {{ version = "0.1.0" }}
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         write(
@@ -8285,7 +8297,7 @@ some-registry-lib = {{ version = "0.1.0" }}
 
     // ---- ADVERSARIAL TESTS: fast path edge cases ----
 
-    /// H: prepare_program_for_eval_file with a file that has an import but NO
+    /// H: `prepare_program_for_eval_file` with a file that has an import but NO
     /// reef.toml anywhere in the ancestor chain (no package root at all).
     /// Must return Ok(None) immediately — not hang, not panic, not Err.
     #[test]
@@ -8321,7 +8333,7 @@ some-registry-lib = {{ version = "0.1.0" }}
         }
     }
 
-    /// G: Fast path with a reef.lock containing a registry dep (LocalRegistry source).
+    /// G: Fast path with a reef.lock containing a registry dep (`LocalRegistry` source).
     /// With an empty registry cache, the 5-second per-dep timeout must fire and return
     /// an actionable error mentioning "chelis reef build", not hang for 5 seconds.
     ///
@@ -8338,13 +8350,12 @@ some-registry-lib = {{ version = "0.1.0" }}
                 r#"[package]
 name = "myapp"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Myapp"
 
 [dependencies]
 some-lib = {{ version = "0.1.0" }}
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         write(
@@ -8417,7 +8428,7 @@ kind = "local_registry"
 
     /// I: Negative test — timeout error message must contain "chelis reef build".
     /// This is already tested via `run_with_timeout_returns_error_on_timeout`,
-    /// but we test the TIMEOUT_MSG constant directly so a change to the message
+    /// but we test the `TIMEOUT_MSG` constant directly so a change to the message
     /// can't silently break the invariant.
     #[test]
     fn adv_timeout_msg_contains_chelis_reef_build() {
@@ -8440,13 +8451,12 @@ kind = "local_registry"
                 r#"[package]
 name = "myapp"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Myapp"
 
 [dependencies]
 missing = {{ path = "./nonexistent_dep" }}
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         write(
@@ -8500,7 +8510,7 @@ path = "./nonexistent_dep"
     // ---- Shared-graph split: prepare_reef_graph + compile_with_reef_graph ----
 
     /// Build a minimal reef fixture with a lockfile-backed path dependency.
-    /// Returns (tempdir, package_root) — the tempdir must be kept alive for
+    /// Returns (tempdir, `package_root`) — the tempdir must be kept alive for
     /// the filesystem to persist.
     fn shared_graph_fixture() -> (tempfile::TempDir, PathBuf) {
         let dir = tempdir().expect("tempdir");
@@ -8513,10 +8523,9 @@ path = "./nonexistent_dep"
                 r#"[package]
 name = "mylib"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Mylib"
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         write(
@@ -8530,13 +8539,12 @@ module_prefix = "Mylib"
                 r#"[package]
 name = "myapp"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Myapp"
 
 [dependencies]
 mylib = {{ path = "./mylib" }}
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         write(
@@ -8590,10 +8598,9 @@ path = "./mylib"
                 r#"[package]
 name = "coral"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Coral"
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         write(
@@ -8610,13 +8617,12 @@ module_prefix = "Coral"
                 r#"[package]
 name = "school"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "School"
 
 [dependencies]
 coral = {{ path = "./coral" }}
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         write(
@@ -8724,10 +8730,9 @@ path = "./coral"
                 r#"[package]
 name = "school"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "School"
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         write(
@@ -8793,10 +8798,9 @@ version = "0.1.0"
                 r#"[package]
 name = "school"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "School"
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         // `classify` covers only `Left`, omitting `Right`. With the scrutinee
@@ -8861,10 +8865,9 @@ version = "0.1.0"
                 r#"[package]
 name = "coral"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Coral"
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         write(
@@ -8886,13 +8889,12 @@ module_prefix = "Coral"
                 r#"[package]
 name = "school"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "School"
 
 [dependencies]
 coral = {{ path = "./coral" }}
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         write(
@@ -8953,10 +8955,9 @@ path = "./coral"
                 r#"[package]
 name = "coral"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Coral"
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         write(
@@ -8972,13 +8973,12 @@ module_prefix = "Coral"
                 r#"[package]
 name = "school"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "School"
 
 [dependencies]
 coral = {{ path = "./coral" }}
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         write(
@@ -9040,10 +9040,9 @@ path = "./coral"
                 r#"[package]
 name = "coral"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Coral"
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         write(
@@ -9062,13 +9061,12 @@ module_prefix = "Coral"
                 r#"[package]
 name = "school"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "School"
 
 [dependencies]
 coral = {{ path = "./coral" }}
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         write(
@@ -9175,10 +9173,9 @@ path = "./coral"
                 r#"[package]
 name = "demo"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Demo"
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         write(
@@ -9289,10 +9286,9 @@ version = "0.1.0"
                 r#"[package]
 name = "demo"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Demo"
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         write(
@@ -9343,10 +9339,9 @@ version = "0.1.0"
                 r#"[package]
 name = "demo"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Demo"
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         write(
@@ -9451,10 +9446,9 @@ version = "0.1.0"
                 r#"[package]
 name = "demo"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Demo"
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         write(
@@ -9587,7 +9581,7 @@ version = "0.1.0"
     /// timing dependency. This test stays as a documented manual perf gate:
     ///
     ///   cargo test -p chelis-reef -- --ignored \
-    ///     prepare_reef_graph_amortizes_work_across_multiple_files
+    ///     `prepare_reef_graph_amortizes_work_across_multiple_files`
     ///
     /// Expected success condition: the assertion passes on an unloaded
     /// machine (run it serially, not under a full workspace test pass).
@@ -9663,19 +9657,19 @@ version = "0.1.0"
         // there isn't already one there (we don't want to clobber a real
         // user file). If a stray already exists, the test still validates
         // the fix because the lookup below must STILL return None.
-        let planted = if !stray.exists() {
+        let planted = if stray.exists() {
+            false
+        } else {
             std::fs::write(
                 &stray,
                 r#"[package]
-name = "stray"
-version = "0.0.0"
-compiler = "=0.0.0"
-module_prefix = "Stray"
-"#,
+        name = "stray"
+        version = "0.0.0"
+        compiler = "=0.0.0"
+        module_prefix = "Stray"
+        "#,
             )
             .is_ok()
-        } else {
-            false
         };
 
         let dir = tempdir().expect("tempdir");
@@ -9741,9 +9735,9 @@ module_prefix = "Stray"
         assert!(digests.iter().all(|d| d.sha256 != [0u8; 32]));
     }
 
-    /// Phase A foundation: PreparedReefGraph round-trips through bincode.
-    /// This is prerequisite for the Phase I disk cache (CompiledContext::save/
-    /// load_if_fresh will use the same bincode + content-hash pattern).
+    /// Phase A foundation: `PreparedReefGraph` round-trips through bincode.
+    /// This is prerequisite for the Phase I disk cache (`CompiledContext::save`/
+    /// `load_if_fresh` will use the same bincode + content-hash pattern).
     #[test]
     fn prepared_reef_graph_round_trips_through_bincode() {
         let (_dir, root) = shared_graph_fixture();
@@ -9781,10 +9775,9 @@ module_prefix = "Stray"
             r#"[package]
 name = "demo"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Demo"
-"#,
-            ver = CURRENT_COMPILER_VERSION
+"#
         );
         let parsed: ReefManifest = toml::from_str(&toml_text).expect("parse");
         assert!(
@@ -9817,11 +9810,10 @@ module_prefix = "Demo"
                 r#"[package]
 name = "multi"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Pkg"
 additional_sources = ["properties"]
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         // src/foo.ch defines call_price; module Pkg.Foo.
@@ -9898,7 +9890,10 @@ additional_sources = ["properties"]
                     version: "0.1.0".to_string(),
                     compiler: CURRENT_COMPILER_VERSION.to_string(),
                     module_prefix: "Demo".to_string(),
-                    additional_sources: entries.iter().map(|s| s.to_string()).collect(),
+                    additional_sources: entries
+                        .iter()
+                        .map(std::string::ToString::to_string)
+                        .collect(),
                 },
                 dependencies: BTreeMap::new(),
                 chelis_src: None,
@@ -10052,14 +10047,13 @@ additional_sources = ["properties"]
             r#"[package]
 name = "shelly"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Shelly"
 
 [chelis-src]
 crates = ["chelis-ir", "chelis-types"]
 pin_commit = "b741149b23db7c05849ebd8f5cccc5ce95ca626b"
-"#,
-            ver = CURRENT_COMPILER_VERSION
+"#
         );
         let parsed: ReefManifest = toml::from_str(&toml_text).expect("parse [chelis-src]");
         let src = parsed.chelis_src.as_ref().expect("chelis_src present");
@@ -10194,11 +10188,10 @@ pin_commit = "b741149b23db7c05849ebd8f5cccc5ce95ca626b"
                 r#"[package]
 name = "multi"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Pkg"
 additional_sources = ["properties"]
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         write(
@@ -10220,7 +10213,7 @@ additional_sources = ["properties"]
         let mut entries: Vec<String> = archive
             .entries()
             .expect("entries")
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .map(|e| e.path().expect("entry path").to_string_lossy().into_owned())
             .collect();
         entries.sort();
@@ -10254,10 +10247,9 @@ additional_sources = ["properties"]
             r#"[package]
 name = "invalidation"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Invalidation"
-"#,
-            ver = CURRENT_COMPILER_VERSION
+"#
         );
         write(&manifest_path, &pre_manifest);
         write(
@@ -10276,11 +10268,10 @@ module_prefix = "Invalidation"
             r#"[package]
 name = "invalidation"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Invalidation"
 additional_sources = ["properties"]
-"#,
-            ver = CURRENT_COMPILER_VERSION
+"#
         );
         write(&manifest_path, &post_manifest);
         // Sanity: the file set is genuinely unchanged.
@@ -10430,13 +10421,12 @@ additional_sources = ["properties"]
                 r#"[package]
 name = "downstream-publish-test"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Demo"
 
 [dependencies]
 chelis-std = {{ version = "0.3.0" }}
 "#,
-                ver = CURRENT_COMPILER_VERSION,
             ),
         );
         write(&app_root.join("src/main.ch"), main);
@@ -10482,10 +10472,9 @@ chelis-std = {{ version = "0.3.0" }}
                 r#"[package]
 name = "atomicpkg"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Atomic"
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         write(
@@ -10519,7 +10508,7 @@ module_prefix = "Atomic"
         // No orphan staging directory remains in the cache parent.
         let leftover: Vec<_> = fs::read_dir(dir.path().join("cache"))
             .expect("read cache dir")
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.starts_with(".extract-"))
             .collect();
@@ -10541,10 +10530,9 @@ module_prefix = "Atomic"
                 r#"[package]
 name = "mypkg"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "My"
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         write(
@@ -10586,10 +10574,9 @@ module_prefix = "My"
                 r#"[package]
 name = "nolockpkg"
 version = "0.1.0"
-compiler = "{ver}"
+compiler = "{CURRENT_COMPILER_VERSION}"
 module_prefix = "Nl"
-"#,
-                ver = CURRENT_COMPILER_VERSION
+"#
             ),
         );
         write(
@@ -10642,7 +10629,7 @@ module_prefix = "Nl"
         assert!(cache_root.join("src/main.ch").exists());
         let leftover: Vec<_> = fs::read_dir(dir.path().join("cache"))
             .expect("read cache dir")
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.starts_with(".extract-"))
             .collect();
@@ -10661,13 +10648,11 @@ module_prefix = "Nl"
         let name = "sum";
         let module_name = "Main";
         let mut msg = format!(
-            "module `{}` does not export `{}` for import into {}",
-            import_module, name, module_name
+            "module `{import_module}` does not export `{name}` for import into {module_name}"
         );
         if chelis_types::BUILTIN_NAMES.contains(&name) {
             msg.push_str(&format!(
-                ". Note: `{}` is a Chelis built-in function; call it directly without importing",
-                name
+                ". Note: `{name}` is a Chelis built-in function; call it directly without importing"
             ));
         }
         assert!(

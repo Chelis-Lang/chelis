@@ -32,6 +32,7 @@ pub struct EffectError {
 /// which joins these effect rows with the type-level signature
 /// inference so a machine consumer (Hull) can reconstruct each
 /// function's `(Type, EffectRow)` without re-parsing a printer.
+#[must_use]
 pub fn def_effect_rows(program: &CheckedProgram) -> std::collections::BTreeMap<String, EffectSet> {
     let (effects_by_def, _top_level_callables) = infer_program_effects(program.annotated_exprs());
     effects_by_def.into_iter().collect()
@@ -1061,10 +1062,10 @@ mod tests {
     #[test]
     fn def_effect_rows_reports_io_and_empty_rows() {
         let program = surf_checked(
-            r#"
+            r"
 def logged(msg: string) -> string = debug(msg)
 def pure_add(x: int64, y: int64) -> int64 = add(x, y)
-"#,
+",
         );
         let rows = def_effect_rows(&program);
         let logged = rows.get("logged").expect("logged effect row present");
@@ -1131,11 +1132,11 @@ def pure_add(x: int64, y: int64) -> int64 = add(x, y)
     #[test]
     fn map_propagates_io_effect_from_callback() {
         let program = surf_checked(
-            r#"
+            r"
 def emit(x: int64) -> int64 = debug(add(x, cast(1, int64)))
 xs: List[int64] = [cast(1, int64), cast(2, int64)]
 ys = map(emit, xs)
-"#,
+",
         );
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
         assert!(
@@ -1150,10 +1151,10 @@ ys = map(emit, xs)
     #[test]
     fn fold_propagates_io_effect_from_inline_callback() {
         let program = surf_checked(
-            r#"
+            r"
 xs: List[int64] = [cast(1, int64), cast(2, int64)]
 total = fold(fn (acc: int64, x: int64) -> debug(add(acc, x)), cast(0, int64), xs)
-"#,
+",
         );
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
         assert!(
@@ -1168,10 +1169,10 @@ total = fold(fn (acc: int64, x: int64) -> debug(add(acc, x)), cast(0, int64), xs
     #[test]
     fn scan_propagates_io_effect_from_inline_callback() {
         let program = surf_checked(
-            r#"
+            r"
 xs: List[int64] = [cast(1, int64), cast(2, int64)]
 totals = scan(fn (acc: int64, x: int64) -> debug(add(acc, x)), cast(0, int64), xs)
-"#,
+",
         );
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
         assert!(
@@ -1186,14 +1187,14 @@ totals = scan(fn (acc: int64, x: int64) -> debug(add(acc, x)), cast(0, int64), x
     #[test]
     fn partition_propagates_random_effect_to_root() {
         let decls = parse_surf(
-            r#"
+            r"
 def keep(x: tensor[f32]) -> bool = gt(tensor_to_scalar(dropout(x, 0.5)), 0.0)
 xs: List[tensor[f32]] = [
   trace(pad_sequences_to([[1.0]], cast(1, int64), cast(0.0, f32)), 0, 1),
   trace(pad_sequences_to([[2.0]], cast(1, int64), cast(0.0, f32)), 0, 1)
 ]
 buckets = partition(keep, xs)
-"#,
+",
         )
         .expect("surf parse");
         let deep = desugar_program(&decls);
@@ -1204,18 +1205,17 @@ buckets = partition(keep, xs)
                 .iter()
                 .any(|error| error.kind == EffectErrorKind::UnhandledEffect
                     && error.message.contains("Random")),
-            "expected unhandled Random effect, got {:?}",
-            errors
+            "expected unhandled Random effect, got {errors:?}"
         );
     }
 
     #[test]
     fn flat_map_propagates_io_effect_from_callback() {
         let program = surf_checked(
-            r#"
+            r"
 xs: List[int64] = [cast(1, int64), cast(2, int64)]
 ys = flat_map(fn (x: int64) -> debug([x, add(x, cast(10, int64))]), xs)
-"#,
+",
         );
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
         assert!(
@@ -1230,14 +1230,14 @@ ys = flat_map(fn (x: int64) -> debug([x, add(x, cast(10, int64))]), xs)
     #[test]
     fn map_propagates_random_effect_to_root() {
         let decls = parse_surf(
-            r#"
+            r"
 def step(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)
 xs: List[tensor[8, f32]] = [
   (to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]) : tensor[8, f32]),
   (to_tensor([8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]) : tensor[8, f32])
 ]
 ys = map(step, xs)
-"#,
+",
         )
         .expect("surf parse");
         let deep = desugar_program(&decls);
@@ -1248,8 +1248,7 @@ ys = map(step, xs)
                 .iter()
                 .any(|error| error.kind == EffectErrorKind::UnhandledEffect
                     && error.message.contains("Random")),
-            "expected unhandled Random effect, got {:?}",
-            errors
+            "expected unhandled Random effect, got {errors:?}"
         );
     }
 
@@ -1274,14 +1273,14 @@ contents = read_file("dataset.txt")
         assert!(
             inferred
                 .get("prefix")
-                .is_none_or(|effects| effects.is_empty()),
+                .is_none_or(chelis_types::types::EffectSet::is_empty),
             "expected mmap_read to stay pure, got {:?}",
             inferred.get("prefix")
         );
         assert!(
             inferred
                 .get("width")
-                .is_none_or(|effects| effects.is_empty()),
+                .is_none_or(chelis_types::types::EffectSet::is_empty),
             "expected mmap_len to stay pure, got {:?}",
             inferred.get("width")
         );
@@ -1316,7 +1315,7 @@ pure_value = add(cast(1, int64), cast(2, int64))
         assert!(
             inferred
                 .get("pure_value")
-                .is_none_or(|effects| effects.is_empty()),
+                .is_none_or(chelis_types::types::EffectSet::is_empty),
             "expected pure arithmetic binding to stay effect-free, got {:?}",
             inferred.get("pure_value")
         );
@@ -1442,7 +1441,7 @@ def g() -> unit ! {} = f()
         assert!(
             errors.iter().any(|error| {
                 error.kind == EffectErrorKind::UnhandledEffect
-                    && error.message.contains("g")
+                    && error.message.contains('g')
                     && error.message.contains("Test")
             }),
             "expected UnhandledEffect on g with Test, got {errors:?}"
@@ -1508,11 +1507,11 @@ def leak() -> unit ! {IO} = test_assert(true, "sneak")
         // performs Random. Wrapped in `(module ...)`, the declared-vs-inferred
         // validator must still fire after descending into the wrapper.
         let checked = typed_module(
-            r#"module Frag.Effect
+            r"module Frag.Effect
 export (entry)
 def noisy(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)
 def entry(x: tensor[8, f32]) -> tensor[8, f32] ! { } = noisy(x)
-"#,
+",
         );
         let errors = check_program(&checked)
             .expect_err("module-wrapped declared-pure body performing Random must be rejected");
@@ -1531,10 +1530,10 @@ def entry(x: tensor[8, f32]) -> tensor[8, f32] ! { } = noisy(x)
         // The IO counterpart: a declared-pure function whose body calls a
         // file-IO builtin must be rejected module-wrapped, the same as Random.
         let checked = typed_module(
-            r#"module Frag.Io
+            r"module Frag.Io
 export (entry)
 def entry(path: string) -> string ! { } = read_file(path)
-"#,
+",
         );
         let errors = check_program(&checked)
             .expect_err("module-wrapped declared-pure body performing IO must be rejected");
@@ -1553,10 +1552,10 @@ def entry(path: string) -> string ! { } = read_file(path)
         // A value-binding (non-fn) root that performs Random inside a module
         // wrapper must still be caught by the unhandled-random-roots validator.
         let checked = typed_module(
-            r#"module Frag.Root
+            r"module Frag.Root
 export (sampled)
 sampled: tensor[8, f32] = dropout(to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]), 0.5)
-"#,
+",
         );
         let errors = check_program(&checked)
             .expect_err("module-wrapped unhandled Random value root must be rejected");
@@ -1573,11 +1572,11 @@ sampled: tensor[8, f32] = dropout(to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 
         // The negative-parity case: a pure module must still check clean after
         // the descent change (no effects -> no rejection).
         let checked = typed_module(
-            r#"module Frag.Pure
+            r"module Frag.Pure
 export (entry)
 def helper(x: f32) -> f32 = add(x, x)
 def entry(x: f32) -> f32 = helper(mul(x, x))
-"#,
+",
         );
         check_program(&checked).expect("pure module-wrapped program must check clean");
     }
@@ -1588,11 +1587,11 @@ def entry(x: f32) -> f32 = helper(mul(x, x))
         // handles the effect with `with seed(...)` must check clean: the
         // descent fix tightens the unsound-accept path only, not honest code.
         let checked = typed_module(
-            r#"module Frag.Honest
+            r"module Frag.Honest
 export (entry)
 def entry(x: tensor[8, f32]) -> tensor[8, f32] =
   with seed(7) { dropout(x, 0.5) }
-"#,
+",
         );
         check_program(&checked).expect("handled-Random module-wrapped program must check clean");
     }

@@ -52,10 +52,10 @@ fn assert_close(actual: f64, expected: f64, tol: f64, label: &str) {
 
 #[test]
 fn issue185_abs_runs_and_matches_ir_eval() {
-    let src = r#"
+    let src = r"
 make = to_tensor([cast(-3.0, f32), cast(-1.5, f32), cast(0.0, f32), cast(1.5, f32), cast(3.0, f32)])
 out = abs(&make)
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![5]);
@@ -67,10 +67,10 @@ out = abs(&make)
 
 #[test]
 fn issue185_cos_runs_and_matches_ir_eval() {
-    let src = r#"
+    let src = r"
 make = to_tensor([cast(0.0, f32), cast(1.0, f32), cast(2.0, f32)])
 out = cos(&make)
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![3]);
@@ -78,9 +78,9 @@ out = cos(&make)
     // f32 to mirror the C backend's `cosf`. So we use the f32 reference
     // for byte-identical agreement with the host-runtime emit path.
     let expected = [
-        (0.0_f32).cos() as f64,
-        (1.0_f32).cos() as f64,
-        (2.0_f32).cos() as f64,
+        f64::from((0.0_f32).cos()),
+        f64::from((1.0_f32).cos()),
+        f64::from((2.0_f32).cos()),
     ];
     for (i, &want) in expected.iter().enumerate() {
         assert_close(out.data[i], want, 1e-6, &format!("cos[{i}]"));
@@ -89,17 +89,17 @@ out = cos(&make)
 
 #[test]
 fn issue185_tan_runs_and_matches_ir_eval() {
-    let src = r#"
+    let src = r"
 make = to_tensor([cast(0.0, f32), cast(0.5, f32), cast(1.0, f32)])
 out = tan(&make)
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![3]);
     let expected = [
-        (0.0_f32).tan() as f64,
-        (0.5_f32).tan() as f64,
-        (1.0_f32).tan() as f64,
+        f64::from((0.0_f32).tan()),
+        f64::from((0.5_f32).tan()),
+        f64::from((1.0_f32).tan()),
     ];
     for (i, &want) in expected.iter().enumerate() {
         assert_close(out.data[i], want, 1e-5, &format!("tan[{i}]"));
@@ -108,10 +108,10 @@ out = tan(&make)
 
 #[test]
 fn issue185_floor_runs_and_matches_ir_eval() {
-    let src = r#"
+    let src = r"
 make = to_tensor([cast(-1.5, f32), cast(-0.5, f32), cast(0.5, f32), cast(1.5, f32), cast(2.0, f32)])
 out = floor(&make)
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![5]);
@@ -123,10 +123,10 @@ out = floor(&make)
 
 #[test]
 fn issue185_ceil_runs_and_matches_ir_eval() {
-    let src = r#"
+    let src = r"
 make = to_tensor([cast(-1.5, f32), cast(-0.5, f32), cast(0.5, f32), cast(1.5, f32), cast(2.0, f32)])
 out = ceil(&make)
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![5]);
@@ -138,17 +138,17 @@ out = ceil(&make)
 
 #[test]
 fn issue185_atan_runs_and_matches_ir_eval() {
-    let src = r#"
+    let src = r"
 make = to_tensor([cast(-1.0, f32), cast(0.0, f32), cast(1.0, f32)])
 out = atan(&make)
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![3]);
     let expected = [
-        (-1.0_f32).atan() as f64,
-        (0.0_f32).atan() as f64,
-        (1.0_f32).atan() as f64,
+        f64::from((-1.0_f32).atan()),
+        f64::from((0.0_f32).atan()),
+        f64::from((1.0_f32).atan()),
     ];
     for (i, &want) in expected.iter().enumerate() {
         assert_close(out.data[i], want, 1e-6, &format!("atan[{i}]"));

@@ -1,4 +1,4 @@
-pub const TENSOR_DEEP: &str = r#"(module {}
+pub const TENSOR_DEEP: &str = r"(module {}
   frag.tensor
   (export {} passthrough)
   (defsig {}
@@ -12,7 +12,7 @@ pub const TENSOR_DEEP: &str = r#"(module {}
       (params {}
         (x {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}))
       (var {} x))))
-"#;
+";
 
 pub const TENSOR_WELL_TYPED_BODY: &str = "(app {} (var {} relu) (var {} x))";
 
@@ -24,7 +24,7 @@ pub const TENSOR_LINEARITY_BODY: &str =
 
 pub const LIVE_MALFORMED_CAST_BODY: &str = "70.0(as)(f32)";
 
-pub const ADD_TENSOR_IDENTITY: &str = r#"(defsig {}
+pub const ADD_TENSOR_IDENTITY: &str = r"(defsig {}
   added_passthrough
   (t-fn {eff: (effects {})}
     (t-tensor {} (d-lit {} 4) (t-prim {} f32))
@@ -35,9 +35,9 @@ pub const ADD_TENSOR_IDENTITY: &str = r#"(defsig {}
     (params {}
       (y {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}))
     (var {} y)))
-"#;
+";
 
-pub const ADD_TENSOR_EFFECTING: &str = r#"(defsig {}
+pub const ADD_TENSOR_EFFECTING: &str = r"(defsig {}
   added_noisy
   (t-fn {eff: (effects {})}
     (t-tensor {} (d-lit {} 4) (t-prim {} f32))
@@ -48,9 +48,9 @@ pub const ADD_TENSOR_EFFECTING: &str = r#"(defsig {}
     (params {}
       (y {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}))
     (app {} (var {} dropout) (var {} y) (lit {type: (t-prim {} f32)} 0.5))))
-"#;
+";
 
-pub const ADD_TENSOR_LINEARITY: &str = r#"(defsig {}
+pub const ADD_TENSOR_LINEARITY: &str = r"(defsig {}
   added_alias_twice
   (t-fn {eff: (effects {})}
     (t-tensor {} (d-lit {} 4) (t-prim {} f32))
@@ -63,6 +63,6 @@ pub const ADD_TENSOR_LINEARITY: &str = r#"(defsig {}
     (let {}
       (bind {} z (realize {} (var {} y)))
       (app {} (var {} add) (var {} y) (var {} z)))))
-"#;
+";
 
 pub const ADD_DECL_SHAPE_ERROR: &str = "(export {} added_passthrough)";

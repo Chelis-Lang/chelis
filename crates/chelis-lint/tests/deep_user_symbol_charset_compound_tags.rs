@@ -37,10 +37,10 @@ fn run(src: &str) -> Vec<Violation> {
 fn accepts_t_ref_compound_tag() {
     // A typed function parameter `x: &Tensor[f32, [n]]` desugars to a
     // `(t-ref {} (t-tensor ...))` annotation in Deep.
-    let src = r#"(def {type: (t-fn {} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32))}
+    let src = r"(def {type: (t-fn {} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32))}
   read_only (params {} x)
   (app {} (var {} sum) (var {} x)))
-"#;
+";
     let v = run(src);
     assert!(
         v.is_empty(),
@@ -66,7 +66,7 @@ fn accepts_all_emitted_compound_tags() {
     // canonical 62-tag vocabulary. Stringing them into one Deep
     // program keeps the fixture compact while asserting every tag is
     // on the allowlist.
-    let src = r#"(module {} demo
+    let src = r"(module {} demo
   (import-all {} other_mod)
   (defsig {} f
     (t-fn {}
@@ -82,7 +82,7 @@ fn accepts_all_emitted_compound_tags() {
   (def {} use_tuple (params {} t) (tuple-get {} (var {} t) 0))
   (def {} use_update (params {} r) (record-update {} (var {} r) (kv {} a (lit {} 1))))
   (def {} use_effect (params {} k) (handle-effect {effect: Log} (var {} k) (var {} body))))
-"#;
+";
     let v = run(src);
     assert!(
         v.is_empty(),
@@ -113,9 +113,9 @@ fn closed_tags_match_canonical_deep_vocabulary() {
 /// expansion that accidentally widens to arbitrary hyphenated tokens.
 #[test]
 fn still_flags_user_defined_hyphenated_symbol_alongside_canonical_tags() {
-    let src = r#"(def {type: (t-ref {} (t-prim {} f32))}
+    let src = r"(def {type: (t-ref {} (t-prim {} f32))}
   my-bad-name (params {} x) (var {} x))
-"#;
+";
     let v = run(src);
     assert!(
         v.iter().any(|viol| viol.message.contains("my-bad-name")),

@@ -18,6 +18,7 @@ use crate::version::is_safe_path_component;
 /// Run the shim. `argv` is the full process argv (including `argv[0]`).
 /// On success this never returns (it replaces the process image); any
 /// return value is therefore an error exit code.
+#[must_use]
 pub fn run_shim(argv: &[OsString]) -> i32 {
     let args: Vec<OsString> = argv.iter().skip(1).cloned().collect();
 
@@ -44,12 +45,11 @@ pub fn run_shim(argv: &[OsString]) -> i32 {
         store: &store,
     };
 
-    let resolution = match resolve(&input) {
-        Some(r) => r,
-        None => {
-            eprintln!("{}", no_toolchain_message(&store, &cwd));
-            return 1;
-        }
+    let resolution = if let Some(r) = resolve(&input) {
+        r
+    } else {
+        eprintln!("{}", no_toolchain_message(&store, &cwd));
+        return 1;
     };
 
     if !is_safe_path_component(&resolution.version) {

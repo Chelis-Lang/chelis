@@ -19,11 +19,11 @@ use chelis_surf::ast::{Decl, Expr, TypeExpr};
 pub struct UnreachableProducer;
 
 impl Rule for UnreachableProducer {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "unreachable-producer"
     }
 
-    fn spec_ref(&self) -> &str {
+    fn spec_ref(&self) -> &'static str {
         "§12.1"
     }
 
@@ -31,7 +31,7 @@ impl Rule for UnreachableProducer {
         &[Surface::SurfSource]
     }
 
-    fn summary(&self) -> &str {
+    fn summary(&self) -> &'static str {
         "An opaque type with no exported producers is fully sealed and has an empty obligation set"
     }
 

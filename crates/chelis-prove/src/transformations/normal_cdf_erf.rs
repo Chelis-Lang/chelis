@@ -121,7 +121,7 @@ pub fn lower_normal_cdf(expr: &SmtExpr) -> SmtExpr {
 pub struct NormalCdfToErf;
 
 impl Transformation for NormalCdfToErf {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "normal-cdf-to-erf"
     }
 

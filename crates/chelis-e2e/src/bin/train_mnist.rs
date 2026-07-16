@@ -34,7 +34,7 @@ fn parse_args() -> Result<Config, String> {
         match arg.as_str() {
             "--mnist-dir" => config.mnist_dir = PathBuf::from(value),
             "--epochs" => {
-                config.epochs = value.parse().map_err(|_| format!("bad epochs `{value}`"))?
+                config.epochs = value.parse().map_err(|_| format!("bad epochs `{value}`"))?;
             }
             "--lr" => config.lr = value.parse().map_err(|_| format!("bad lr `{value}`"))?,
             "--seed" => config.seed = value.parse().map_err(|_| format!("bad seed `{value}`"))?,
@@ -43,21 +43,21 @@ fn parse_args() -> Result<Config, String> {
                     value
                         .parse()
                         .map_err(|_| format!("bad train limit `{value}`"))?,
-                )
+                );
             }
             "--test-limit" => {
                 config.test_limit = Some(
                     value
                         .parse()
                         .map_err(|_| format!("bad test limit `{value}`"))?,
-                )
+                );
             }
             "--min-acc" => {
                 config.min_acc = Some(
                     value
                         .parse()
                         .map_err(|_| format!("bad min acc `{value}`"))?,
-                )
+                );
             }
             _ => return Err(format!("unknown arg `{arg}`")),
         }

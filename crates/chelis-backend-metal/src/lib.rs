@@ -80,6 +80,7 @@ impl MetalCodegenResult {
 }
 
 /// Return the path to the Metal runtime directory (relative to the crate root).
+#[must_use]
 pub fn runtime_dir() -> &'static str {
     "runtime"
 }
@@ -98,6 +99,7 @@ pub fn runtime_dir() -> &'static str {
 /// broadcasts/strides incremental). The stub still links and emits the
 /// correct ABI, so CLI/structural tests remain stable as the supported
 /// surface grows.
+#[must_use]
 pub fn codegen_metal(dag: &chelis_ir::dag::Dag, func_name: &str) -> MetalCodegenResult {
     let input_labels = emit::input_labels(dag);
     let output_labels = emit::output_labels(dag);

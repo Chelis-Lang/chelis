@@ -31,15 +31,14 @@ fn main() {
     let shell = dist.join(format!("chelis-std-{BUNDLED_VERSION}.chb"));
 
     for path in [&archive, &shell] {
-        if !path.exists() {
-            panic!(
-                "chelis-std bundle artifact missing at {}.\n\
-                 Run `python3 scripts/regenerate_chelis_std_bundle.py` from the\n\
-                 repository root to rebuild and copy the bytes into\n\
-                 crates/chelis-std-bundle/dist/, then commit them.",
-                path.display()
-            );
-        }
+        assert!(
+            path.exists(),
+            "chelis-std bundle artifact missing at {}.\n\
+             Run `python3 scripts/regenerate_chelis_std_bundle.py` from the\n\
+             repository root to rebuild and copy the bytes into\n\
+             crates/chelis-std-bundle/dist/, then commit them.",
+            path.display()
+        );
         println!("cargo:rerun-if-changed={}", path.display());
     }
 

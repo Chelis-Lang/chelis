@@ -34,13 +34,13 @@ fn pure_sig_dim_mismatch_is_caught() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-tc-pure-sig");
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 sig do_thing: tensor[32, 128, f32] -> f32
 sig make_3: tensor[1, 3, f32]
 
 result = do_thing(make_3)
-"#,
+",
     );
     // Issue #207: `chelis check` now exits non-zero (exit 2) when the
     // JSON `errors` array is non-empty. We assert on the JSON
@@ -69,7 +69,7 @@ fn defsig_dim_enforcement_leaks_through_wildcard_body_in_callers() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-tc-defsig-leak");
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 sig do_thing: tensor[32, 128, f32] -> f32
 
@@ -77,7 +77,7 @@ def make() -> tensor[1, 3, f32] =
   pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]], cast(3, int64), cast(0.0, f32))
 
 result = do_thing(make())
-"#,
+",
     );
     // Issue #207: `chelis check` exits non-zero (exit 2) when the
     // JSON `errors` array is non-empty. We assert on the JSON

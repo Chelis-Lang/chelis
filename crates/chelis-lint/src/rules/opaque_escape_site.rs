@@ -34,11 +34,11 @@ use chelis_surf::ast::{Decl, Expr, Param, TypeExpr, VariantFields};
 pub struct OpaqueEscapeSite;
 
 impl Rule for OpaqueEscapeSite {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "opaque-escape-site"
     }
 
-    fn spec_ref(&self) -> &str {
+    fn spec_ref(&self) -> &'static str {
         "§12.1"
     }
 
@@ -46,7 +46,7 @@ impl Rule for OpaqueEscapeSite {
         &[Surface::SurfSource]
     }
 
-    fn summary(&self) -> &str {
+    fn summary(&self) -> &'static str {
         "Enumerates in-module argument-egress sites of an opaque type passed to out-of-module callees"
     }
 

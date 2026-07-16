@@ -82,7 +82,7 @@ fn stdlib_corpus(scratch: &Path) -> Vec<PathBuf> {
     paths
 }
 
-/// Copy the pseudo_nautilus fixture into `scratch` and return the path
+/// Copy the `pseudo_nautilus` fixture into `scratch` and return the path
 /// to the staged `src/special.ch`. Staging is required because `chelis
 /// check`/`build` writes `reef.lock` next to the resolved `reef.toml`;
 /// running directly against the real fixture path leaks the lockfile
@@ -354,7 +354,7 @@ fn cache_artifacts(cache_home: &Path) -> Vec<(String, Vec<u8>)> {
         return Vec::new();
     };
     entries
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .map(|e| e.path())
         .filter(|p| p.is_file())
         .map(|p| {

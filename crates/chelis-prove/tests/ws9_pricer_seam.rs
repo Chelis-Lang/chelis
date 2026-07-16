@@ -1,6 +1,6 @@
 //! WS-9: Vectorized Black-Scholes pricer byte-seam integration test.
 //!
-//! Verifies that bs_call_vec is a WireDag root, round-trips through the
+//! Verifies that `bs_call_vec` is a `WireDag` root, round-trips through the
 //! content-addressed byte seam, and produces a deterministic hash.
 
 use chelis_compiler_api::schema::{SourceKind, WIRE_DAG_SCHEMA_VERSION};
@@ -58,7 +58,7 @@ fn make_output() -> OutputRange {
     }
 }
 
-/// bs_call_vec must lower to a WireDag root via entry-scoped lowering.
+/// `bs_call_vec` must lower to a `WireDag` root via entry-scoped lowering.
 #[test]
 fn bs_call_vec_is_wire_dag_root() {
     let extracted = box_range_goal_from_source_entry(
@@ -93,7 +93,7 @@ fn bs_call_vec_is_wire_dag_root() {
     );
 }
 
-/// The WireDag bytes round-trip: sha256 matches, store+retrieve works.
+/// The `WireDag` bytes round-trip: sha256 matches, store+retrieve works.
 #[test]
 fn bs_call_vec_byte_seam_round_trip() {
     let extracted = box_range_goal_from_source_entry(
@@ -130,10 +130,7 @@ fn bs_call_vec_byte_seam_round_trip() {
         Some(u64::from(WIRE_DAG_SCHEMA_VERSION))
     );
     assert!(
-        parsed["roots"]
-            .as_array()
-            .map(|r| !r.is_empty())
-            .unwrap_or(false),
+        parsed["roots"].as_array().is_some_and(|r| !r.is_empty()),
         "must have roots"
     );
 
@@ -172,7 +169,7 @@ fn bs_call_vec_deterministic_hash() {
     );
 }
 
-/// No non-finite floats in the WireDag (content-address precondition).
+/// No non-finite floats in the `WireDag` (content-address precondition).
 #[test]
 fn bs_call_vec_no_non_finite_floats() {
     let extracted = box_range_goal_from_source_entry(

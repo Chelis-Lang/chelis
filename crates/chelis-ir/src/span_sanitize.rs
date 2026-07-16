@@ -45,6 +45,7 @@ use std::borrow::Cow;
 /// `spec/03-deep-syntax.md` §1.1.1: U+0000..=U+001F except U+0020 (space),
 /// or U+007F (DEL).
 #[inline]
+#[must_use]
 pub fn is_forbidden_byte(b: u8) -> bool {
     // U+0000..=U+001F except U+0020 (space). Space is 0x20 which is not
     // in 0x00..=0x1F, so we can just check the low control range.
@@ -57,6 +58,7 @@ pub fn is_forbidden_byte(b: u8) -> bool {
 /// The sanitizer and the Deep-side parser validation both use this so the
 /// definitions can never drift.
 #[inline]
+#[must_use]
 pub fn find_forbidden_byte(s: &str) -> Option<(usize, u8)> {
     s.as_bytes()
         .iter()
@@ -101,6 +103,7 @@ fn escape_forbidden(b: u8) -> String {
 /// Returns `Cow::Owned(escaped)` when one or more forbidden bytes are
 /// present, with each forbidden byte replaced by its canonical
 /// backslash-escape form (`\n`, `\r`, `\0`, `\t`, or `\xNN`).
+#[must_use]
 pub fn sanitize_for_comment(s: &str) -> Cow<'_, str> {
     if find_forbidden_byte(s).is_none() {
         return Cow::Borrowed(s);
@@ -188,6 +191,7 @@ fn escape_forbidden_in_format_string(b: u8) -> String {
 ///
 /// See `spec/upstream-bugs/producer-string-sanitization.md` for the
 /// architectural rule.
+#[must_use]
 pub fn sanitize_for_format_string(s: &str) -> Cow<'_, str> {
     let needs_escape = s
         .as_bytes()

@@ -33,6 +33,7 @@ impl Surface {
     /// Classify a filesystem path by extension and location. Returns `None`
     /// for entries the lint doesn't care about (binary blobs, build outputs,
     /// other unknown file types).
+    #[must_use]
     pub fn classify(path: &Path, is_dir: bool) -> Option<Self> {
         if is_dir {
             return Some(Surface::Directory);
@@ -74,6 +75,7 @@ impl Surface {
     /// Whether the rule driver should read the file's text content for this
     /// surface. Source/text surfaces yes; directory entries and snapshot
     /// binaries no.
+    #[must_use]
     pub fn needs_source(self) -> bool {
         !matches!(self, Surface::Directory)
     }

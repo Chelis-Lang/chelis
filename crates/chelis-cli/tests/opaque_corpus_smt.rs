@@ -9,7 +9,7 @@
 //! binary, and the prove performance-sanity check.
 //!
 //! Run:
-//!   cargo nextest run -p chelis-cli --features smt --test opaque_corpus_smt
+//!   cargo nextest run -p chelis-cli --features smt --test `opaque_corpus_smt`
 //! with `LD_LIBRARY_PATH` set to the uv python lib (AGENTS.md).
 #![cfg(feature = "smt")]
 

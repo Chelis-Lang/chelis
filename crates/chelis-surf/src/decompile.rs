@@ -15,6 +15,7 @@ pub struct DecompileOptions {
 }
 
 impl DecompileOptions {
+    #[must_use]
     pub const fn idiomatic() -> Self {
         Self {
             strip_redundant_types: true,
@@ -23,6 +24,7 @@ impl DecompileOptions {
         }
     }
 
+    #[must_use]
     pub const fn verbose() -> Self {
         Self {
             strip_redundant_types: false,
@@ -37,14 +39,17 @@ impl DecompileOptions {
 }
 
 /// Decompile a list of top-level Deep expressions to Surf source.
+#[must_use]
 pub fn decompile_program(exprs: &[Expr]) -> String {
     decompile_program_with_context(exprs, &DecompileOptions::idiomatic(), None)
 }
 
+#[must_use]
 pub fn decompile_program_with_options(exprs: &[Expr], options: &DecompileOptions) -> String {
     decompile_program_with_context(exprs, options, None)
 }
 
+#[must_use]
 pub fn decompile_program_with_context(
     exprs: &[Expr],
     options: &DecompileOptions,
@@ -730,22 +735,22 @@ impl<'a> IdiomaticDecompiler<'a> {
                     "vmap()".to_string()
                 }
             }
-            Some("jit") => children(list)
-                .first()
-                .map(|expr| format!("jit({})", self.decompile_expr(expr)))
-                .unwrap_or_else(|| "jit()".to_string()),
-            Some("realize") => children(list)
-                .first()
-                .map(|expr| format!("realize({})", self.decompile_expr(expr)))
-                .unwrap_or_else(|| "realize()".to_string()),
-            Some("copy") => children(list)
-                .first()
-                .map(|expr| format!("copy({})", self.decompile_expr(expr)))
-                .unwrap_or_else(|| "copy()".to_string()),
-            Some("borrow") => children(list)
-                .first()
-                .map(|expr| format!("&{}", self.decompile_expr(expr)))
-                .unwrap_or_else(|| "&()".to_string()),
+            Some("jit") => children(list).first().map_or_else(
+                || "jit()".to_string(),
+                |expr| format!("jit({})", self.decompile_expr(expr)),
+            ),
+            Some("realize") => children(list).first().map_or_else(
+                || "realize()".to_string(),
+                |expr| format!("realize({})", self.decompile_expr(expr)),
+            ),
+            Some("copy") => children(list).first().map_or_else(
+                || "copy()".to_string(),
+                |expr| format!("copy({})", self.decompile_expr(expr)),
+            ),
+            Some("borrow") => children(list).first().map_or_else(
+                || "&()".to_string(),
+                |expr| format!("&{}", self.decompile_expr(expr)),
+            ),
             Some("handle-effect") => self.decompile_handle_effect(list),
             Some("par") => format!(
                 "par({})",
@@ -1188,7 +1193,7 @@ fn is_mm_temp(name: &str) -> bool {
 
 fn is_numeric_suffix_temp(name: &str) -> bool {
     let mut chars = name.chars().rev();
-    let digits = chars.by_ref().take_while(|ch| ch.is_ascii_digit()).count();
+    let digits = chars.by_ref().take_while(char::is_ascii_digit).count();
     digits > 0 && chars.next().is_some()
 }
 
@@ -1510,7 +1515,7 @@ fn decompile_import(list: &List) -> String {
     if names.is_empty() {
         format!("import {cap_module}")
     } else {
-        format!("import {cap_module} ({})", names)
+        format!("import {cap_module} ({names})")
     }
 }
 
@@ -1865,7 +1870,7 @@ fn decompile_pattern(expr: &Expr) -> String {
             }
             Some("pat-lit") => {
                 let kids = children(list);
-                return kids.first().map(brief).unwrap_or_else(|| "_".to_string());
+                return kids.first().map_or_else(|| "_".to_string(), brief);
             }
             Some("pat-ctor") => {
                 let kids = children(list);
@@ -2243,7 +2248,7 @@ fn capitalize(s: &str) -> String {
 /// `stats.prob`), so the decompiler must re-PascalCase every segment
 /// to produce a parseable `module Stats.Prob`; capitalizing only the
 /// first char of the whole string yields `Stats.prob`, whose `prob`
-/// segment the parser rejects (module path segments are TypeIdent).
+/// segment the parser rejects (module path segments are `TypeIdent`).
 fn capitalize_module_path(path: &str) -> String {
     path.split('.')
         .map(capitalize)
@@ -2474,11 +2479,11 @@ mod tests {
     #[test]
     fn decompile_property_metadata_to_property_surface() {
         let rendered = surf_to_surf(
-            r#"
+            r"
 @property non_negative forall(x: f32) where x >= 0.0:
   x >= 0.0
   with samples = 3
-"#,
+",
         );
         assert!(rendered.contains("@property non_negative forall(x: f32) where"));
         assert!(rendered.contains("with samples = 3"));

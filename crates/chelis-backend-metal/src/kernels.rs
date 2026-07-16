@@ -77,6 +77,7 @@ fn maybe_wrap_msl_320(body: String, precs: &[Prim]) -> String {
 ///
 /// Returns a self-contained MSL source string suitable for embedding in a
 /// `static NSString *const ... = @R"MSL(...)MSL";` literal.
+#[must_use]
 pub fn elementwise_kernel(kernel_name: &str, params: &[String], body: &str) -> String {
     let header = msl_header();
     let params_block = params.join(",\n    ");
@@ -97,6 +98,7 @@ pub fn elementwise_kernel(kernel_name: &str, params: &[String], body: &str) -> S
 /// WS-M1: same as [`elementwise_kernel`] but wraps the body in the
 /// `#if __METAL_VERSION__ >= 320` guard when any of `precs` requires
 /// it (bf16 today). Preferred call shape for new emit sites.
+#[must_use]
 pub fn elementwise_kernel_for(
     kernel_name: &str,
     params: &[String],
@@ -109,12 +111,14 @@ pub fn elementwise_kernel_for(
 
 /// Build a parameter declaration for a `device const T*` input buffer at
 /// `[[buffer(idx)]]`.
+#[must_use]
 pub fn input_param(idx: usize, ty: &str, name: &str) -> String {
     format!("device const {ty}* {name} [[buffer({idx})]]")
 }
 
 /// Build a parameter declaration for a `device T*` output buffer at
 /// `[[buffer(idx)]]`.
+#[must_use]
 pub fn output_param(idx: usize, ty: &str, name: &str) -> String {
     format!("device {ty}* {name} [[buffer({idx})]]")
 }
@@ -122,6 +126,7 @@ pub fn output_param(idx: usize, ty: &str, name: &str) -> String {
 /// Map a Chelis precision to the MSL type spelling. Thin re-export of
 /// [`crate::dtype::msl_type`] kept here so existing call sites compile
 /// without churn.
+#[must_use]
 pub fn msl_type(prec: Prim) -> &'static str {
     dtype::msl_type(prec)
 }
@@ -132,6 +137,7 @@ pub fn msl_type(prec: Prim) -> &'static str {
 /// will widen the Metal-specific f32 tolerance for transcendental-heavy
 /// kernels, and switch individual call sites to `precise::exp` etc. when
 /// numerical agreement requires it.
+#[must_use]
 pub fn unary_func(op: &chelis_ir::dag::RiscOp) -> Option<&'static str> {
     use chelis_ir::dag::RiscOp;
     match op {
@@ -155,6 +161,7 @@ pub fn unary_func(op: &chelis_ir::dag::RiscOp) -> Option<&'static str> {
 }
 
 /// MSL spelling for a binary elementwise operator.
+#[must_use]
 pub fn binary_op(op: &chelis_ir::dag::RiscOp) -> Option<&'static str> {
     use chelis_ir::dag::RiscOp;
     match op {
@@ -174,6 +181,7 @@ pub enum ReduceKind {
 
 impl ReduceKind {
     /// Short label used in kernel names (`reduce_sum`, `reduce_max`, …).
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Sum => "sum",
@@ -187,6 +195,7 @@ impl ReduceKind {
     /// dtype's minimum-representable value, min uses the maximum.
     /// Integer types use literal zero/INT*_MIN/INT*_MAX rather than
     /// `INFINITY` so the resulting kernel actually compiles.
+    #[must_use]
     pub fn identity(self, prec: Prim) -> &'static str {
         match (self, prec) {
             (Self::Sum, Prim::F32) => "0.0f",
@@ -222,6 +231,7 @@ impl ReduceKind {
 
     /// Combine expression at the accumulator dtype: given two MSL
     /// expressions `lhs` and `rhs`, produce the merged scalar.
+    #[must_use]
     pub fn combine_at(self, prec: Prim, lhs: &str, rhs: &str) -> String {
         let _ = prec; // currently MSL handles the operator overloads itself.
         match self {
@@ -262,6 +272,7 @@ pub const MATMUL_TILE: usize = 16;
 /// `emit::Emitter::emit_matmul`; this template still admits integer
 /// dtypes defensively for future generalization (using same-type
 /// accumulator for ints).
+#[must_use]
 pub fn matmul_tiled_kernel_for(kernel_name: &str, prec: Prim) -> String {
     let acc_prec = dtype::matmul_accumulator(prec);
     matmul_tiled_kernel_with_acc(kernel_name, prec, acc_prec)
@@ -272,6 +283,7 @@ pub fn matmul_tiled_kernel_for(kernel_name: &str, prec: Prim) -> String {
 /// accumulator (e.g., from a `BlasMatmul` node) should use this entry
 /// point so the kernel template never has to re-derive the spec
 /// promotion rules.
+#[must_use]
 pub fn matmul_tiled_kernel_with_acc(
     kernel_name: &str,
     operand_prec: Prim,
@@ -360,6 +372,7 @@ kernel void {kernel_name}(
 /// f32-only legacy entry point retained for any callers that haven't
 /// migrated to [`matmul_tiled_kernel_for`]. New code should call the
 /// `_for` variant.
+#[must_use]
 pub fn matmul_tiled_kernel(kernel_name: &str) -> String {
     matmul_tiled_kernel_for(kernel_name, Prim::F32)
 }
@@ -392,6 +405,7 @@ pub const REDUCE_TG_SIZE: usize = 256;
 ///
 /// Two-pass reduction for `n > REDUCE_TG_SIZE * REDUCE_TG_SIZE` is
 /// M4.next; the emitter rejects oversized inputs at the host site.
+#[must_use]
 pub fn reduce_full_kernel_for(
     kernel_name: &str,
     kind: ReduceKind,
@@ -459,6 +473,7 @@ kernel void {kernel_name}(
 /// f32-only legacy entry point retained for callers that haven't
 /// migrated to [`reduce_full_kernel_for`]. New code should call the
 /// `_for` variant.
+#[must_use]
 pub fn reduce_full_kernel(kernel_name: &str, kind: ReduceKind) -> String {
     reduce_full_kernel_for(kernel_name, kind, Prim::F32, Prim::F32)
 }
@@ -514,6 +529,7 @@ static inline uint chelis_indices_to_flat(thread const uint* indices, constant u
 /// write `fill`. Semantics mirror the C backend `emit_pad`, the evaluator
 /// `pad`, and the HIP `pad_typed` kernel (spec/05-risc-primitives.md
 /// §2.4). bf16 outputs wrap in the `__METAL_VERSION__ >= 320` guard.
+#[must_use]
 pub fn pad_kernel(kernel_name: &str, prec: Prim) -> String {
     let ty = msl_type(prec);
     let max_dim = MOVEMENT_MAX_DIM;
@@ -561,6 +577,7 @@ kernel void {kernel_name}(
 /// output is always strictly inside the source, so no bounds margin
 /// exists. Mirrors the C backend `emit_shrink`, the evaluator `shrink`,
 /// and the HIP `shrink_typed` kernel (spec/05-risc-primitives.md §2.4).
+#[must_use]
 pub fn shrink_kernel(kernel_name: &str, prec: Prim) -> String {
     let ty = msl_type(prec);
     let max_dim = MOVEMENT_MAX_DIM;

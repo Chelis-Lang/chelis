@@ -7,10 +7,16 @@ use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::lower::{try_lower_subexpr_program, type_expr_has_rank_var};
 use chelis_types::types::Prim;
 
-use super::transforms::*;
-use super::*;
+use super::transforms::{
+    extract_prim_from_type_expr, find_reachable_host_only_builtin_call, make_var_with_type,
+    param_type_expr_at, runtime_value_to_dag_input, var_name,
+};
+use super::{
+    EvalContext, RuntimeTensorValue, RuntimeValue, ScalarBits, children, get_meta, int_value,
+    symbol_name, tag,
+};
 
-impl<'a> EvalContext<'a> {
+impl EvalContext<'_> {
     /// chelis#338: does evaluating a call to `resolved_name` require
     /// routing through IR lowering because a *named-axis* op is
     /// involved? True when the def's body contains a reduction whose
@@ -58,8 +64,7 @@ impl<'a> EvalContext<'a> {
             let rank_poly_sig = self
                 .type_env
                 .get(&referenced)
-                .map(type_expr_has_rank_var)
-                .unwrap_or(false);
+                .is_some_and(type_expr_has_rank_var);
             if rank_poly_sig && self.def_requires_named_axis_routing(&referenced) {
                 return true;
             }
@@ -225,19 +230,18 @@ impl<'a> EvalContext<'a> {
                 RuntimeValue::Tensor(tensor) => {
                     let from_formal = param_type_expr_at(def_expr, index)
                         .and_then(|formal| declared_tensor_type_for_value(formal, tensor).ok());
-                    let resolved_ty = match from_formal {
-                        Some(ty) => ty,
-                        None => {
-                            let from_arg = kids
-                                .get(1 + index)
-                                .and_then(|arg_expr| self.static_type_expr_of(arg_expr))
-                                .and_then(|ty_expr| {
-                                    declared_tensor_type_for_value(&ty_expr, tensor).ok()
-                                });
-                            match from_arg {
-                                Some(ty) => ty,
-                                None => return Ok(None),
-                            }
+                    let resolved_ty = if let Some(ty) = from_formal {
+                        ty
+                    } else {
+                        let from_arg = kids
+                            .get(1 + index)
+                            .and_then(|arg_expr| self.static_type_expr_of(arg_expr))
+                            .and_then(|ty_expr| {
+                                declared_tensor_type_for_value(&ty_expr, tensor).ok()
+                            });
+                        match from_arg {
+                            Some(ty) => ty,
+                            None => return Ok(None),
                         }
                     };
                     (tensor.value.clone(), resolved_ty)
@@ -426,8 +430,7 @@ pub(super) fn pack_dag_roots(
         })?;
         let precision = dag
             .get(*root)
-            .map(|node| node.output_type.precision)
-            .unwrap_or(Prim::F32);
+            .map_or(Prim::F32, |node| node.output_type.precision);
         packed.push(RuntimeValue::Tensor(RuntimeTensorValue {
             value: tensor,
             precision,
@@ -557,13 +560,12 @@ fn collect_var_names(expr: &Expr, vars: &mut Vec<String>) {
     }
 }
 
-/// Strip `t-ref` wrappers (and MetaExpr shells) off a Deep type expr.
+/// Strip `t-ref` wrappers (and `MetaExpr` shells) off a Deep type expr.
 fn strip_type_wrappers(ty_expr: &Expr) -> &Expr {
     match ty_expr {
-        Expr::List(list, _) if tag(list) == Some("t-ref") => children(list)
-            .first()
-            .map(strip_type_wrappers)
-            .unwrap_or(ty_expr),
+        Expr::List(list, _) if tag(list) == Some("t-ref") => {
+            children(list).first().map_or(ty_expr, strip_type_wrappers)
+        }
         Expr::MetaExpr(meta, _) => strip_type_wrappers(&meta.expr),
         _ => ty_expr,
     }

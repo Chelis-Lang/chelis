@@ -8,12 +8,16 @@ use std::collections::{HashMap, HashSet};
 use chelis_deep::Span;
 use chelis_deep::ast as deep;
 
-use crate::ast::*;
+use crate::ast::{
+    BinOp, Decl, EffectExpr, Expr, ImportKind, LetBinding, LetPattern, Literal, Param, Pattern,
+    PropertyOption, TypeExpr, TypeInvariant, UnaryOp, Variant, VariantFields,
+};
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
+#[must_use]
 pub fn desugar_program(decls: &[Decl]) -> Vec<deep::Expr> {
     let ctx = DesugarCtx::new(decls);
     decls
@@ -22,10 +26,12 @@ pub fn desugar_program(decls: &[Decl]) -> Vec<deep::Expr> {
         .collect()
 }
 
+#[must_use]
 pub fn desugar_decl_only(decl: &Decl) -> Vec<deep::Expr> {
     DesugarCtx::default().desugar_decl(decl)
 }
 
+#[must_use]
 pub fn desugar_expr_only(expr: &Expr) -> deep::Expr {
     DesugarCtx::default().desugar_expr(expr)
 }
@@ -916,9 +922,7 @@ impl DesugarCtx {
             //   to the WS-A5 implicit collection over typed params and
             //   the return type (spec/04-type-system.md §5.8) so a
             //   bare `def f(x: tensor[3, p])` continues to work.
-            let tvar_set: HashSet<String> = if !dim_params.is_empty() {
-                dim_params.iter().cloned().collect()
-            } else {
+            let tvar_set: HashSet<String> = if dim_params.is_empty() {
                 let mut acc: HashSet<String> = HashSet::new();
                 for p in params {
                     if let Some(ty) = &p.ty {
@@ -929,6 +933,8 @@ impl DesugarCtx {
                     collect_sig_type_vars(ty, &mut acc);
                 }
                 acc
+            } else {
+                dim_params.iter().cloned().collect()
             };
             let mut type_parts: Vec<deep::Expr> = params
                 .iter()
@@ -1278,11 +1284,10 @@ impl DesugarCtx {
             Expr::Match(scrutinee, arms, _) => {
                 let mut children = vec![self.desugar_expr_with_scope(scrutinee, local_fn_params)];
                 for arm in arms {
-                    let guard = arm
-                        .guard
-                        .as_ref()
-                        .map(|expr| self.desugar_expr_with_scope(expr, local_fn_params))
-                        .unwrap_or_else(|| bare_list(vec![]));
+                    let guard = arm.guard.as_ref().map_or_else(
+                        || bare_list(vec![]),
+                        |expr| self.desugar_expr_with_scope(expr, local_fn_params),
+                    );
                     children.push(node(
                         "arm",
                         vec![
@@ -1549,7 +1554,7 @@ impl DesugarCtx {
                     }
                 }
                 pattern => {
-                    let temp_name = format!("__chelis_tmp{}", next_tmp);
+                    let temp_name = format!("__chelis_tmp{next_tmp}");
                     next_tmp += 1;
                     let value = self.desugar_expr(&binding.value);
                     out = destructure_pattern(pattern, &temp_name, out, &mut next_tmp);
@@ -2163,6 +2168,7 @@ fn desugar_pattern(pat: &Pattern) -> deep::Expr {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::{LiteralSuffix, MatchArm};
     use chelis_deep::printer::print_expr;
 
     fn s() -> Span {

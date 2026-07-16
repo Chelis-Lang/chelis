@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 pub type BatchVec = Vec<(TensorValue, TensorValue)>;
 
 /// Generate synthetic random data for sanity checking
+#[must_use]
 pub fn synthetic_data(
     n_samples: usize,
     batch_size: usize,
@@ -53,6 +54,7 @@ pub fn load_mnist(dir: &Path) -> Result<(BatchVec, BatchVec), String> {
     Ok((train, test))
 }
 
+#[must_use]
 pub fn default_mnist_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("MNIST_DIR") {
         return PathBuf::from(dir);
@@ -83,7 +85,7 @@ fn load_idx_images(path: &Path) -> Result<Vec<Vec<f64>>, String> {
         let start = 16 + i * rows * cols;
         let pixels: Vec<f64> = buf[start..start + rows * cols]
             .iter()
-            .map(|&b| b as f64 / 255.0)
+            .map(|&b| f64::from(b) / 255.0)
             .collect();
         images.push(pixels);
     }

@@ -20,6 +20,7 @@
 /// loudly rather than paper over. It is also what conformance requires of a
 /// reef pin, so that a pinned toolchain the auditor accepts is one the
 /// installer can actually fetch.
+#[must_use]
 pub fn is_strict_semver(v: &str) -> bool {
     let mut parts = v.split('.');
     matches!(
@@ -41,6 +42,7 @@ pub fn is_strict_semver(v: &str) -> bool {
 /// an attacker-influenceable source (a `reef.toml` pin, a `chelis-toolchain`
 /// file, `$CHELIS_TOOLCHAIN`), so it must never contain a separator or a `..`
 /// traversal before it is joined under `~/.chelis/toolchains/`.
+#[must_use]
 pub fn is_safe_path_component(v: &str) -> bool {
     if v.is_empty() || v == "." || v == ".." {
         return false;

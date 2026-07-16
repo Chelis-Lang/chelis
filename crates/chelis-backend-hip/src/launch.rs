@@ -22,12 +22,14 @@ pub struct SegmentedLaunch {
 }
 
 /// Compute grid dimensions for a 1D launch over `total_elements` threads.
+#[must_use]
 pub fn grid_1d(total_elements: usize) -> (usize, usize) {
     let block = BLOCK_SIZE;
     let grid = total_elements.div_ceil(block);
     (grid, block)
 }
 
+#[must_use]
 pub fn floor_pow2(value: usize) -> usize {
     if value <= 1 {
         1
@@ -36,10 +38,12 @@ pub fn floor_pow2(value: usize) -> usize {
     }
 }
 
+#[must_use]
 pub fn reduction_block_size(axis_size: usize) -> usize {
     floor_pow2(axis_size.clamp(1, BLOCK_SIZE))
 }
 
+#[must_use]
 pub fn segmented_strategy(axis_size: usize) -> SegmentedStrategy {
     if axis_size <= TINY_SEGMENT_MAX {
         SegmentedStrategy::Tiny
@@ -50,6 +54,7 @@ pub fn segmented_strategy(axis_size: usize) -> SegmentedStrategy {
     }
 }
 
+#[must_use]
 pub fn segmented_launch(out_size: usize, axis_size: usize) -> SegmentedLaunch {
     match segmented_strategy(axis_size) {
         SegmentedStrategy::Tiny => SegmentedLaunch {
@@ -82,10 +87,12 @@ pub fn segmented_launch(out_size: usize, axis_size: usize) -> SegmentedLaunch {
     }
 }
 
+#[must_use]
 pub fn staged_partial_count(total_elements: usize, block_size: usize) -> usize {
     total_elements.div_ceil(block_size.max(1))
 }
 
+#[must_use]
 pub fn staged_chain_partial_counts(total_elements: usize, block_size: usize) -> Vec<usize> {
     let mut counts = Vec::new();
     let mut current = total_elements;
@@ -101,6 +108,7 @@ pub fn staged_chain_partial_counts(total_elements: usize, block_size: usize) -> 
     counts
 }
 
+#[must_use]
 pub fn staged_chain_scratch_elements(total_elements: usize, block_size: usize) -> usize {
     let counts = staged_chain_partial_counts(total_elements, block_size);
     counts

@@ -74,23 +74,27 @@ fn parse_tensor(stdout: &str, name: &str) -> (Vec<usize>, Vec<f64>) {
     let shape = line
         .split_once("shape=[")
         .and_then(|(_, r)| r.split_once(']'))
-        .map(|(s, _)| {
-            if s.trim().is_empty() {
-                vec![]
-            } else {
-                s.split(',').map(|t| t.trim().parse().unwrap()).collect()
-            }
-        })
-        .unwrap_or_else(|| panic!("no shape in `{name}` line: {line}"));
+        .map_or_else(
+            || panic!("no shape in `{name}` line: {line}"),
+            |(s, _)| {
+                if s.trim().is_empty() {
+                    vec![]
+                } else {
+                    s.split(',').map(|t| t.trim().parse().unwrap()).collect()
+                }
+            },
+        );
     let data = line
         .split_once("data=[")
         .and_then(|(_, r)| r.split_once(']'))
-        .map(|(s, _)| {
-            s.split(',')
-                .map(|t| t.trim().parse::<f64>().unwrap())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_else(|| panic!("no data in `{name}` line: {line}"));
+        .map_or_else(
+            || panic!("no data in `{name}` line: {line}"),
+            |(s, _)| {
+                s.split(',')
+                    .map(|t| t.trim().parse::<f64>().unwrap())
+                    .collect::<Vec<_>>()
+            },
+        );
     (shape, data)
 }
 

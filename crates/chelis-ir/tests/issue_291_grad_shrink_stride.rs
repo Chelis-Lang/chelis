@@ -276,7 +276,7 @@ fn issue_291_grad_stride_two_axes() {
     let mut inputs = HashMap::new();
     inputs.insert(
         "x".into(),
-        TensorValue::from_vec(vec![4, 4], (0..16).map(|v| v as f64).collect()),
+        TensorValue::from_vec(vec![4, 4], (0..16).map(f64::from).collect()),
     );
     let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
     #[rustfmt::skip]
@@ -326,7 +326,7 @@ fn issue_291_grad_stride_mixed_identity_axis() {
     let mut inputs = HashMap::new();
     inputs.insert(
         "x".into(),
-        TensorValue::from_vec(vec![3, 4], (0..12).map(|v| v as f64).collect()),
+        TensorValue::from_vec(vec![3, 4], (0..12).map(f64::from).collect()),
     );
     let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
     #[rustfmt::skip]

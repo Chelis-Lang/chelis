@@ -47,10 +47,10 @@ fn root_tensor<'a>(
 ///                          row 1 wins col 2  =>  [1, 0, 1].
 #[test]
 fn issue230_argmax_reduce_axis0_runs_and_produces_index_data() {
-    let src = r#"
+    let src = r"
 make = pad_sequences([[1.0, 4.0, 2.0], [3.0, 0.5, 5.0]], 0.0)
 out = argmax_reduce(&make, 0)
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![3], "argmax_reduce axis-0 shape");
@@ -76,10 +76,10 @@ out = argmax_reduce(&make, 0)
 /// for row 1 max is 5.0 at col 2 (=> 2). So result = [1.0, 2.0].
 #[test]
 fn issue230_argmax_reduce_axis1_runs_and_produces_index_data() {
-    let src = r#"
+    let src = r"
 make = pad_sequences([[1.0, 4.0, 2.0], [3.0, 0.5, 5.0]], 0.0)
 out = argmax_reduce(&make, 1)
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![2], "argmax_reduce axis-1 shape");
@@ -105,10 +105,10 @@ out = argmax_reduce(&make, 1)
 /// = [0.0, 1.0, 0.0].
 #[test]
 fn issue230_argmin_reduce_axis0_runs_and_produces_index_data() {
-    let src = r#"
+    let src = r"
 make = pad_sequences([[1.0, 4.0, 2.0], [3.0, 0.5, 5.0]], 0.0)
 out = argmin_reduce(&make, 0)
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![3], "argmin_reduce axis-0 shape");
@@ -133,10 +133,10 @@ out = argmin_reduce(&make, 0)
 /// at col 1 => 1. So result = [0.0, 1.0].
 #[test]
 fn issue230_argmin_reduce_axis1_runs_and_produces_index_data() {
-    let src = r#"
+    let src = r"
 make = pad_sequences([[1.0, 4.0, 2.0], [3.0, 0.5, 5.0]], 0.0)
 out = argmin_reduce(&make, 1)
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![2], "argmin_reduce axis-1 shape");

@@ -61,13 +61,13 @@ fn assert_linearity_clean(source: &str) {
 #[test]
 fn aliasing_consume_control_passes() {
     assert_linearity_clean(
-        r#"
+        r"
 def f(w: tensor[4, f32]): tensor[4, f32] =
   {
     y: tensor[4, f32] = w
     realize(y)
   }
-"#,
+",
     );
 }
 
@@ -82,13 +82,13 @@ def f(w: tensor[4, f32]): tensor[4, f32] =
 #[test]
 fn structural_consume_control_errors() {
     let errors = linearity_errors(
-        r#"
+        r"
 def f(w: tensor[4, f32]): tensor[4, f32] =
   {
     y: tensor[4, f32] = realize(w)
     add(w, y)
   }
-"#,
+",
     );
     assert!(
         errors.iter().any(|e| {
@@ -110,14 +110,14 @@ def f(w: tensor[4, f32]): tensor[4, f32] =
 #[test]
 fn tuple_destructure_double_realize_errors() {
     let errors = linearity_errors(
-        r#"
+        r"
 def f(pair: (tensor[4, f32], tensor[4, f32])): tensor[4, f32] =
   {
     (a, b) = pair
     r1: tensor[4, f32] = realize(a)
     realize(a)
   }
-"#,
+",
     );
     assert!(
         errors.iter().any(|e| {
@@ -136,12 +136,12 @@ def f(pair: (tensor[4, f32], tensor[4, f32])): tensor[4, f32] =
 #[test]
 fn tuple_destructure_single_consume_each_passes() {
     assert_linearity_clean(
-        r#"
+        r"
 def f(pair: (tensor[4, f32], tensor[4, f32])): tensor[4, f32] =
   {
     (a, b) = pair
     add(realize(a), realize(b))
   }
-"#,
+",
     );
 }

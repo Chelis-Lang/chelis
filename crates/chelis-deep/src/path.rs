@@ -76,11 +76,13 @@ pub struct DeepPath {
 
 impl DeepPath {
     /// An empty path addressing the def node itself.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// A path that addresses the body of a function definition.
+    #[must_use]
     pub fn body() -> Self {
         Self {
             segments: vec![PathSegment::Body],
@@ -88,17 +90,20 @@ impl DeepPath {
     }
 
     /// Append a [`PathSegment`], returning the extended path.
+    #[must_use]
     pub fn then(mut self, segment: PathSegment) -> Self {
         self.segments.push(segment);
         self
     }
 
     /// Append a [`PathSegment::Child`] index, returning the extended path.
+    #[must_use]
     pub fn child(self, index: usize) -> Self {
         self.then(PathSegment::Child(index))
     }
 
     /// The ordered segments of this path.
+    #[must_use]
     pub fn segments(&self) -> &[PathSegment] {
         &self.segments
     }
@@ -572,6 +577,7 @@ pub fn module_excluding_function_def(
 /// Returns `None` when the target has no matching `(defsig ...)`. Pair it with
 /// [`module_has_defsig_for`] to distinguish a declared-signature target from a
 /// defsig-less one whose signature is inferred from its body.
+#[must_use]
 pub fn function_defsig(module_exprs: &[Expr], qualified_name: &str) -> Option<Expr> {
     let module = find_module(module_exprs)?;
     let (_prefix, bare_name) = split_qualified_name(qualified_name);
@@ -595,19 +601,19 @@ pub fn function_defsig(module_exprs: &[Expr], qualified_name: &str) -> Option<Ex
 /// [`resolve_function`] matches them. Resolution-shape errors (no module,
 /// more than one module, wrong prefix) are not reported here; a `false`
 /// result means no matching `(defsig ...)` was found in the located module.
+#[must_use]
 pub fn module_has_defsig_for(module_exprs: &[Expr], qualified_name: &str) -> bool {
     let Some(module) = find_module(module_exprs) else {
         return false;
     };
     let (_prefix, bare_name) = split_qualified_name(qualified_name);
     decls(module).iter().any(|decl| {
-        as_tagged_list(decl, "defsig")
-            .map(|sig| def_name(sig) == Some(bare_name))
-            .unwrap_or(false)
+        as_tagged_list(decl, "defsig").is_some_and(|sig| def_name(sig) == Some(bare_name))
     })
 }
 
 /// Borrow the body subtree of a function `(def ...)` node, if present.
+#[must_use]
 pub fn function_body(def: &Expr) -> Option<&Expr> {
     let Expr::List(def_list, _) = def else {
         return None;

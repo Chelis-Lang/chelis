@@ -8,9 +8,9 @@ use chelis_ir::dag::{Dag, DagNode, DimInfo, NodeId, RiscOp};
 /// Information about a detected matmul pattern.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatmulInfo {
-    /// NodeId of the left matrix operand.
+    /// `NodeId` of the left matrix operand.
     pub a: NodeId,
-    /// NodeId of the right matrix operand.
+    /// `NodeId` of the right matrix operand.
     pub b: NodeId,
     /// Rows of the output (M dimension).
     pub m: usize,
@@ -21,6 +21,7 @@ pub struct MatmulInfo {
 }
 
 /// Try to detect a matmul pattern rooted at the given Sum node.
+#[must_use]
 pub fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
     let sum_node = dag.get(sum_id)?;
     let axis = match &sum_node.op {

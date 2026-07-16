@@ -16,7 +16,7 @@
 //! `param_name_and_type` / `param_names` did not, so the parameter was
 //! declared into the linear scope with NO type. A borrow of it
 //! (`&params`) then failed `expr_is_owned_or_borrow_linear` and tripped the
-//! spurious InvalidBorrow. The fix teaches the two linearity helpers the
+//! spurious `InvalidBorrow`. The fix teaches the two linearity helpers the
 //! `MetaExpr` param form, mirroring `extract_params`.
 //!
 //! Negative test parity: the fix must NOT blanket-accept any borrow of a
@@ -66,7 +66,7 @@ fn error_messages(json: &Value) -> Vec<String> {
 }
 
 /// The borrow-then-move shape from the issue, with the parameter named
-/// `params`. Pre-fix: InvalidBorrow. Post-fix: clean.
+/// `params`. Pre-fix: `InvalidBorrow`. Post-fix: clean.
 const PARAMS_BODY: &str = "module Repro.Borrow\n\
      def take_ref[n](x: &tensor[n, f32]) -> tensor[n, f32] = copy(x)\n\
      def repro[n](params: tensor[n, f32]) -> tensor[n, f32] = {\n\

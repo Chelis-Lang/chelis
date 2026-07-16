@@ -113,7 +113,8 @@ fn f64_tenth_literal_is_exact_dyadic_not_f32_rounded() {
         "cast(0.1, f64) must bind at f64, not the f32-widened 0.1"
     );
     assert_ne!(
-        v, 0.10000000149011612_f32 as f64,
+        v,
+        f64::from(0.10000000149011612_f32),
         "must not be the f32-rounded-then-widened value"
     );
 }

@@ -42,7 +42,7 @@ const MULTIPLE_PROPERTIES: &str = "module M
 fn u4_discovers_multiple_properties() {
     let outcomes = run_surf(MULTIPLE_PROPERTIES, "auto");
     assert_eq!(outcomes.len(), 2, "two properties: {outcomes:?}");
-    assert!(outcomes.iter().all(|o| o.is_pass()));
+    assert!(outcomes.iter().all(super::PropertyOutcome::is_pass));
 }
 
 const NO_PROPERTY: &str = "module M

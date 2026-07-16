@@ -68,7 +68,7 @@ pub enum CheckErrorKind {
     /// once per check unit (the same ambiguity rationale as the
     /// named-module requirement for `@opaque`).
     DuplicateModule,
-    /// RFC D-CHECK (spec/design/opaque_invariants_rfc.md): a type
+    /// RFC D-CHECK (`spec/design/opaque_invariants_rfc.md)`: a type
     /// declared `@opaque` was constructed, inspected, forged, or
     /// reached through an unexported binding outside its defining
     /// module, or `@opaque` was declared outside a named module. The
@@ -101,6 +101,7 @@ pub enum CheckErrorKind {
 }
 
 impl CheckErrorKind {
+    #[must_use]
     pub fn default_severity(&self) -> f64 {
         match self {
             CheckErrorKind::PrecisionMismatch | CheckErrorKind::DimensionMismatch => 0.8,
@@ -129,7 +130,8 @@ impl CheckErrorKind {
 }
 
 impl CheckError {
-    /// Create a new CheckError with default severity for its kind.
+    /// Create a new `CheckError` with default severity for its kind.
+    #[must_use]
     pub fn new(kind: CheckErrorKind, message: String, suggestions: Vec<String>) -> Self {
         let severity = kind.default_severity();
         CheckError {
@@ -145,6 +147,7 @@ impl CheckError {
     }
 
     /// Create with expected/got for structured error reports.
+    #[must_use]
     pub fn with_types(
         kind: CheckErrorKind,
         message: String,
@@ -166,12 +169,14 @@ impl CheckError {
     }
 
     /// Set the byte offset into the source where this error occurred.
+    #[must_use]
     pub fn at_offset(mut self, offset: usize) -> Self {
         self.span_offset = Some(offset);
         self
     }
 
     /// Set the external span identifier for this error.
+    #[must_use]
     pub fn with_span_id(mut self, id: String) -> Self {
         self.span_id = Some(id);
         self
@@ -215,7 +220,7 @@ impl From<TypeError> for CheckError {
     }
 }
 
-/// Enrich TypeMismatch suggestions by detecting common patterns:
+/// Enrich `TypeMismatch` suggestions by detecting common patterns:
 /// - Opaque type used where a primitive is expected
 /// - Option[T] used where T is expected
 pub fn enrich_type_mismatch_suggestions(message: &str, suggestions: &mut Vec<String>) {

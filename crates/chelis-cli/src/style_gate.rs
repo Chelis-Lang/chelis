@@ -155,9 +155,7 @@ pub struct FmtDiff {
 const STYLE_GATE_DISABLE_ENV: &str = "CHELIS_STYLE_GATE_DISABLE";
 
 fn env_disables_gate() -> bool {
-    std::env::var(STYLE_GATE_DISABLE_ENV)
-        .map(|v| !v.is_empty() && v != "0")
-        .unwrap_or(false)
+    std::env::var(STYLE_GATE_DISABLE_ENV).is_ok_and(|v| !v.is_empty() && v != "0")
 }
 
 pub fn disabled_by_env() -> bool {

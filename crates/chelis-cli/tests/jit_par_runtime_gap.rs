@@ -215,8 +215,7 @@ fn build_c_and_run(out_dir: &Path, src_path: &Path) -> String {
     let stem = src_path.file_stem().expect("file_stem").to_str().unwrap();
     let c_source = format!("{stem}.c");
     let needs_blas = fs::read_to_string(out_dir.join(&c_source))
-        .map(|text| text.contains("cblas_sgemm(") || text.contains("\"chelis_blas.h\""))
-        .unwrap_or(false);
+        .is_ok_and(|text| text.contains("cblas_sgemm(") || text.contains("\"chelis_blas.h\""));
     let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
         chelis_backend_c::toolchain::CodegenRequirements {
             wants_openmp: true,

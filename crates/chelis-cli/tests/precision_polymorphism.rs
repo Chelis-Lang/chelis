@@ -1,7 +1,7 @@
 //! WS-A5 acceptance tests: precision polymorphism in the type system.
 //!
-//! Pin the bug surfaced during the WS-C investigation (poly_id +
-//! use_mismatch silently type-checking) and the new positive shapes
+//! Pin the bug surfaced during the WS-C investigation (`poly_id` +
+//! `use_mismatch` silently type-checking) and the new positive shapes
 //! enabled by adding a precision-variable slot to `Type::Tensor`.
 //!
 //! See `spec/04-type-system.md` §5.8 and `spec/02-surf-syntax.md` for
@@ -46,10 +46,10 @@ fn ws_c_blocker_polymorphic_precision_does_not_silently_accept_mismatch() {
     let path = dir.path().join("ws_c_blocker.ch");
     write_file(
         &path,
-        r#"sig poly_id: tensor[d, p] -> tensor[d, p]
+        r"sig poly_id: tensor[d, p] -> tensor[d, p]
 def poly_id(x) = x
 def use_mismatch(x: tensor[3, int32]) -> tensor[3, f32] = poly_id(x)
-"#,
+",
     );
 
     let json = run_json_check(&path);
@@ -95,11 +95,11 @@ fn polymorphic_precision_accepts_distinct_consistent_instantiations() {
     let path = dir.path().join("poly_distinct.ch");
     write_file(
         &path,
-        r#"sig poly_id: tensor[d, p] -> tensor[d, p]
+        r"sig poly_id: tensor[d, p] -> tensor[d, p]
 def poly_id(x) = x
 def use_f32(x: tensor[3, f32]) -> tensor[3, f32] = poly_id(x)
 def use_int32(x: tensor[3, int32]) -> tensor[3, int32] = poly_id(x)
-"#,
+",
     );
 
     let json = run_json_check(&path);
@@ -125,10 +125,10 @@ fn polymorphic_precision_only_with_concrete_dims() {
     let path = dir.path().join("poly_prec_only.ch");
     write_file(
         &path,
-        r#"sig same_prec: tensor[3, p] -> tensor[3, p]
+        r"sig same_prec: tensor[3, p] -> tensor[3, p]
 def same_prec(x) = x
 def use_bf16(x: tensor[3, bf16]) -> tensor[3, bf16] = same_prec(x)
-"#,
+",
     );
 
     let json = run_json_check(&path);
@@ -155,10 +155,10 @@ fn polymorphic_precision_rejects_inconsistent_within_call() {
     let path = dir.path().join("poly_inconsistent.ch");
     write_file(
         &path,
-        r#"sig poly_id: tensor[d, p] -> tensor[d, p]
+        r"sig poly_id: tensor[d, p] -> tensor[d, p]
 def poly_id(x) = x
 def break_it(x: tensor[3, int32]) -> tensor[3, f32] = poly_id(x)
-"#,
+",
     );
 
     let json = run_json_check(&path);
@@ -173,17 +173,17 @@ def break_it(x: tensor[3, int32]) -> tensor[3, f32] = poly_id(x)
 
 /// Concrete-precision baseline: the equivalent fully-concrete sig
 /// already errored before WS-A5; verify it still does, so we know the
-/// existing PrecisionMismatch path is intact.
+/// existing `PrecisionMismatch` path is intact.
 #[test]
 fn concrete_precision_still_rejects_mismatch_baseline() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("concrete_baseline.ch");
     write_file(
         &path,
-        r#"sig f32_id: tensor[d, f32] -> tensor[d, f32]
+        r"sig f32_id: tensor[d, f32] -> tensor[d, f32]
 def f32_id(x) = x
 def break_it(x: tensor[3, int32]) -> tensor[3, f32] = f32_id(x)
-"#,
+",
     );
 
     let json = run_json_check(&path);

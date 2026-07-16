@@ -89,6 +89,7 @@ struct TopLevelIndex {
     imports: HashMap<String, String>,
 }
 
+#[must_use]
 pub fn analyze_document(uri: &Url, text: &str) -> DocumentAnalysis {
     let source_kind = source_kind_from_uri(uri);
     match source_kind {
@@ -97,6 +98,7 @@ pub fn analyze_document(uri: &Url, text: &str) -> DocumentAnalysis {
     }
 }
 
+#[must_use]
 pub fn hover_markdown(
     state: &DocumentState,
     position: Position,
@@ -129,6 +131,7 @@ pub fn hover_markdown(
         })
 }
 
+#[must_use]
 pub fn completion_items(state: &DocumentState, position: Position) -> Vec<CompletionItem> {
     let Some(offset) = position_to_offset(&state.text, position) else {
         return Vec::new();
@@ -150,6 +153,7 @@ pub fn completion_items(state: &DocumentState, position: Position) -> Vec<Comple
     items.into_values().collect()
 }
 
+#[must_use]
 pub fn definition_location(
     state: &DocumentState,
     position: Position,
@@ -179,6 +183,7 @@ pub fn deep_view(state: &DocumentState, _selection: Option<Range>) -> Result<Str
     })
 }
 
+#[must_use]
 pub fn document_status(state: &DocumentState) -> serde_json::Value {
     serde_json::json!({
         "score": state.analysis.score,
@@ -442,10 +447,10 @@ fn build_top_level_index_decl(text: &str, decl: &Decl, index: &mut TopLevelIndex
                 TopLevelSymbol {
                     name: name.clone(),
                     range: range_for_span(text, *span),
-                    hover: ty
-                        .as_ref()
-                        .map(|ty| format!("{name}: {}", format_type_expr(ty)))
-                        .unwrap_or_else(|| name.clone()),
+                    hover: ty.as_ref().map_or_else(
+                        || name.clone(),
+                        |ty| format!("{name}: {}", format_type_expr(ty)),
+                    ),
                     kind: CompletionItemKind::VARIABLE,
                 },
             );
@@ -550,8 +555,10 @@ fn collect_decl_symbols(
                 hover: top_level
                     .defs
                     .get(function_name_from_decl(decl))
-                    .map(|symbol| symbol.hover.clone())
-                    .unwrap_or_else(|| function_name_from_decl(decl).to_string()),
+                    .map_or_else(
+                        || function_name_from_decl(decl).to_string(),
+                        |symbol| symbol.hover.clone(),
+                    ),
                 target: DefinitionTarget::CurrentDocument(fun_range),
             });
         }
@@ -623,8 +630,7 @@ fn collect_decl_symbols(
                 hover: top_level
                     .defs
                     .get(name)
-                    .map(|symbol| symbol.hover.clone())
-                    .unwrap_or_else(|| name.clone()),
+                    .map_or_else(|| name.clone(), |symbol| symbol.hover.clone()),
                 target: DefinitionTarget::CurrentDocument(range),
             });
         }
@@ -644,10 +650,10 @@ fn collect_decl_symbols(
                 completions,
             );
             let range = range_for_span(text, *span);
-            let hover = ty
-                .as_ref()
-                .map(|ty| format!("{name}: {}", format_type_expr(ty)))
-                .unwrap_or_else(|| name.clone());
+            let hover = ty.as_ref().map_or_else(
+                || name.clone(),
+                |ty| format!("{name}: {}", format_type_expr(ty)),
+            );
             definitions.push(Definition {
                 name: name.clone(),
                 range,
@@ -894,11 +900,10 @@ fn collect_expr_symbols(
                 );
                 let pattern_defs = pattern_definitions(text, &binding.pattern, body);
                 for (name, def_range, visible_in) in pattern_defs {
-                    let hover = binding
-                        .ty
-                        .as_ref()
-                        .map(|ty| format!("{name}: {}", format_type_expr(ty)))
-                        .unwrap_or_else(|| name.clone());
+                    let hover = binding.ty.as_ref().map_or_else(
+                        || name.clone(),
+                        |ty| format!("{name}: {}", format_type_expr(ty)),
+                    );
                     locals.push(LocalBinding {
                         name: name.clone(),
                         definition: def_range,
@@ -1261,6 +1266,7 @@ fn keyword_completion(name: &str, visible_in: Range) -> VisibleName {
     }
 }
 
+#[must_use]
 pub fn source_kind_from_uri(uri: &Url) -> SourceKind {
     match uri.path().rsplit('.').next() {
         Some("dp") => SourceKind::Deep,
@@ -1268,6 +1274,7 @@ pub fn source_kind_from_uri(uri: &Url) -> SourceKind {
     }
 }
 
+#[must_use]
 pub fn full_document_range(text: &str) -> Range {
     let end = offset_to_position(text, text.len());
     Range::new(Position::new(0, 0), end)
@@ -1352,6 +1359,7 @@ fn range_for_offset(text: &str, offset: usize) -> Range {
     Range::new(position, position)
 }
 
+#[must_use]
 pub fn offset_to_position(text: &str, offset: usize) -> Position {
     let clamped = offset.min(text.len());
     let mut line = 0u32;
@@ -1376,6 +1384,7 @@ pub fn offset_to_position(text: &str, offset: usize) -> Position {
     Position::new(line, column)
 }
 
+#[must_use]
 pub fn position_to_offset(text: &str, position: Position) -> Option<usize> {
     let mut line = 0u32;
     let mut column = 0u32;

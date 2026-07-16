@@ -9,7 +9,7 @@
 //!
 //! Coverage matrix (one test per (dtype, op) pair the dtype admits):
 //!
-//! | dtype | add | mul | reduce_sum (acc per §5.7.1) | matmul        |
+//! | dtype | add | mul | `reduce_sum` (acc per §5.7.1) | matmul        |
 //! |-------|-----|-----|----------------------------|---------------|
 //! | f32   |  X  |  X  | f32 → f32                  | MPS           |
 //! | f16   |  X  |  X  | f16 → f32                  | MPS           |

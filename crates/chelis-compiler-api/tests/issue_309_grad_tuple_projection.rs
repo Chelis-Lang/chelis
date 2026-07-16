@@ -44,11 +44,11 @@ fn compile_c(source: &str, entry: &str) -> String {
         .contents
 }
 
-const MULTI_WRT_SOURCE: &str = r#"module Repro.GradTupleProj
+const MULTI_WRT_SOURCE: &str = r"module Repro.GradTupleProj
 def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =
   tensor_to_scalar(sum(mul(x, w), cast(0, int32)))
 def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = (grad(loss)(x, w)).0
-"#;
+";
 
 /// Positive: the projection's `chelis_tuple_get` receiver must be a real
 /// `chelis_tuple*` assembled from the helper outputs, NOT the raw
@@ -126,11 +126,11 @@ fn issue309_multi_wrt_grad_call_sizes_two_output_slots() {
 fn issue309_single_wrt_grad_call_stays_single_tensor() {
     // `wrt=x` selects only `x`, so the grad result is a single tensor;
     // the function returns it directly (no projection).
-    let source = r#"module Repro.GradSingle
+    let source = r"module Repro.GradSingle
 def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =
   tensor_to_scalar(sum(mul(x, w), cast(0, int32)))
 def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = grad(loss, wrt=x)(x, w)
-"#;
+";
     let c = compile_c(source, "single");
 
     let calls_helper_with_one_output = c

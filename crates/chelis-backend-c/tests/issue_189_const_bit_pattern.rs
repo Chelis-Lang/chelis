@@ -92,7 +92,7 @@ fn issue_189_f64_const_emits_exact_bit_pattern() {
 fn issue_189_f32_const_does_not_use_lossy_format() {
     let values: &[f64] = &[
         0.000000123456789_f64,
-        f32::MIN_POSITIVE as f64,
+        f64::from(f32::MIN_POSITIVE),
         // Smallest positive denormal.
         f32::from_bits(0x0000_0001).into(),
         0.1_f64,
@@ -121,7 +121,9 @@ fn issue_189_f32_const_smallest_denormal_round_trips() {
     let v = f32::from_bits(0x0000_0001);
     let mut dag = Dag::new();
     dag.add_node(
-        RiscOp::Const { value: v as f64 },
+        RiscOp::Const {
+            value: f64::from(v),
+        },
         vec![],
         scalar(Prim::F32),
         None,
@@ -203,30 +205,29 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
             }
         }
     }
-    let hashed = match newest {
-        Some((_, p)) => p,
-        None => {
-            Command::new(env!("CARGO"))
-                .args(["build", "-p", "chelis-runtime", "--lib"])
-                .status()
-                .map_err(|e| std::io::Error::other(format!("cargo build chelis-runtime: {e}")))?;
-            let entries = fs::read_dir(&deps_dir)?;
-            let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name = name.to_string_lossy().to_string();
-                if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
-                    let meta = entry.metadata()?;
-                    let mtime = meta.modified()?;
-                    if newest.as_ref().is_none_or(|(cur, _)| mtime > *cur) {
-                        newest = Some((mtime, entry.path()));
-                    }
+    let hashed = if let Some((_, p)) = newest {
+        p
+    } else {
+        Command::new(env!("CARGO"))
+            .args(["build", "-p", "chelis-runtime", "--lib"])
+            .status()
+            .map_err(|e| std::io::Error::other(format!("cargo build chelis-runtime: {e}")))?;
+        let entries = fs::read_dir(&deps_dir)?;
+        let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy().to_string();
+            if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
+                let meta = entry.metadata()?;
+                let mtime = meta.modified()?;
+                if newest.as_ref().is_none_or(|(cur, _)| mtime > *cur) {
+                    newest = Some((mtime, entry.path()));
                 }
             }
-            newest
-                .map(|(_, p)| p)
-                .ok_or_else(|| std::io::Error::other("no libchelis_runtime-*.a after rebuild"))?
         }
+        newest
+            .map(|(_, p)| p)
+            .ok_or_else(|| std::io::Error::other("no libchelis_runtime-*.a after rebuild"))?
     };
     let tmp = canonical.with_extension(format!("a.tmp.{}", std::process::id()));
     fs::copy(&hashed, &tmp)?;

@@ -36,7 +36,7 @@
 //!
 //! Spec authority: spec/04-type-system.md §5.7 (grad), §5.8 / §5.8.1
 //! (precision monomorphization); spec/05-risc-primitives.md (matmul /
-//! permute lowering); the §B2 row of spec/design/grad_surface_audit.md.
+//! permute lowering); the §B2 row of `spec/design/grad_surface_audit.md`.
 //!
 //! These tests drive the `chelis_compiler_api` host pipeline the issue's
 //! reproducer used (`eval` for the single-module shape, and the full
@@ -329,16 +329,14 @@ fn assert_separate_sig_grad_matches_inline(
     let inline_src = format!(
         "def verb({inline_params}) = {body}\n\
          def loss({loss_params}) -> f32 =\n  \
-           tensor_to_scalar(sum(sum(verb({call_args}), cast(0, int32)), cast(0, int32)))\n\
+           tensor_to_scalar(sum(sum(verb({bare_params}), cast(0, int32)), cast(0, int32)))\n\
          out = grad(loss, wrt=(q))({call})\n",
-        call_args = bare_params,
     );
     let sep_src = format!(
         "{sig}\ndef verb({bare_params}) = {body}\n\
          def loss({loss_params}) -> f32 =\n  \
-           tensor_to_scalar(sum(sum(verb({call_args}), cast(0, int32)), cast(0, int32)))\n\
+           tensor_to_scalar(sum(sum(verb({bare_params}), cast(0, int32)), cast(0, int32)))\n\
          out = grad(loss, wrt=(q))({call})\n",
-        call_args = bare_params,
     );
     let inline = out_tensor(&try_eval(&inline_src).unwrap_or_else(|err| {
         panic!(

@@ -4,6 +4,7 @@ use crate::Rule;
 use crate::rules;
 
 /// Return every rule the lint enforces.
+#[must_use]
 pub fn all_rules() -> Vec<Box<dyn Rule>> {
     vec![
         Box::new(rules::no_shell_scripts::NoShellScripts),
@@ -26,6 +27,7 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
 /// Return non-blocking user-facing rules. They run in the standalone lint
 /// command and selected user-facing warnings, but are excluded from the
 /// blocking style gate.
+#[must_use]
 pub fn non_blocking_rules() -> Vec<Box<dyn Rule>> {
     vec![
         Box::new(rules::redundant_linearity_call::RedundantLinearityCall),
@@ -38,10 +40,12 @@ pub fn non_blocking_rules() -> Vec<Box<dyn Rule>> {
 }
 
 /// Backward-compatible name used by older call sites.
+#[must_use]
 pub fn advisory_rules() -> Vec<Box<dyn Rule>> {
     non_blocking_rules()
 }
 
+#[must_use]
 pub fn selectable_rules() -> Vec<Box<dyn Rule>> {
     let mut rules = all_rules();
     rules.extend(non_blocking_rules());

@@ -40,15 +40,14 @@ fn main() {
 
     for skill in SHARED_SKILLS {
         let path = skills.join(skill).join("SKILL.md");
-        if !path.exists() {
-            panic!(
-                "conformance asset missing at {}.\n\
-                 Run `python3 scripts/regenerate_conformance_assets.py` from the\n\
-                 repository root to rebuild crates/chelis-conformance/assets/ from\n\
-                 the live agent-skills/, then commit them.",
-                path.display()
-            );
-        }
+        assert!(
+            path.exists(),
+            "conformance asset missing at {}.\n\
+             Run `python3 scripts/regenerate_conformance_assets.py` from the\n\
+             repository root to rebuild crates/chelis-conformance/assets/ from\n\
+             the live agent-skills/, then commit them.",
+            path.display()
+        );
         println!("cargo:rerun-if-changed={}", path.display());
     }
 
@@ -58,9 +57,11 @@ fn main() {
     let canonical = manifest_dir.join("assets").join("canonical");
     for id in ["agents-inheritance", "chelis-surface-header"] {
         let path = canonical.join(format!("{id}.md"));
-        if !path.exists() {
-            panic!("conformance canonical body missing at {}", path.display());
-        }
+        assert!(
+            path.exists(),
+            "conformance canonical body missing at {}",
+            path.display()
+        );
         println!("cargo:rerun-if-changed={}", path.display());
     }
 

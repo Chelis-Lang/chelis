@@ -50,21 +50,20 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
         .expect("canonical lib path has no parent")
         .join("deps");
     let hashed = find_newest_runtime_archive(&deps_dir)?;
-    let hashed = match hashed {
-        Some(path) => path,
-        None => {
-            Command::new(env!("CARGO"))
-                .args(["build", "-p", "chelis-runtime", "--lib"])
-                .status()
-                .map_err(|e| std::io::Error::other(format!("cargo build chelis-runtime: {e}")))?;
-            find_newest_runtime_archive(&deps_dir)?.ok_or_else(|| {
-                std::io::Error::other(format!(
-                    "no libchelis_runtime-*.a found in {} after explicit \
-                     `cargo build -p chelis-runtime --lib`",
-                    deps_dir.display()
-                ))
-            })?
-        }
+    let hashed = if let Some(path) = hashed {
+        path
+    } else {
+        Command::new(env!("CARGO"))
+            .args(["build", "-p", "chelis-runtime", "--lib"])
+            .status()
+            .map_err(|e| std::io::Error::other(format!("cargo build chelis-runtime: {e}")))?;
+        find_newest_runtime_archive(&deps_dir)?.ok_or_else(|| {
+            std::io::Error::other(format!(
+                "no libchelis_runtime-*.a found in {} after explicit \
+                 `cargo build -p chelis-runtime --lib`",
+                deps_dir.display()
+            ))
+        })?
     };
     // Use a PID-suffixed tmp filename so concurrent test binaries (this
     // file and exec_compile.rs both call into this helper, and nextest
@@ -135,8 +134,7 @@ fn gcc_available() -> bool {
     Command::new("gcc")
         .arg("--version")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 fn cblas_available() -> bool {
@@ -149,10 +147,10 @@ fn cblas_available() -> bool {
     let probe = dir.join("probe.c");
     fs::write(
         &probe,
-        r#"
+        r"
 extern void cblas_sgemm();
 int main(void) { (void)cblas_sgemm; return 0; }
-"#,
+",
     )
     .unwrap();
     let out = dir.join("probe_bin");
@@ -164,8 +162,7 @@ int main(void) { (void)cblas_sgemm; return 0; }
             out.to_str().unwrap(),
         ])
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 /// Build a C source + main harness, gcc-compile, run, return stdout.
@@ -316,7 +313,7 @@ fn bf16_const_fill_produces_exact_bit_pattern() {
         let n = 4;
         dag.add_node(
             RiscOp::Const {
-                value: value as f64,
+                value: f64::from(value),
             },
             vec![],
             vec_ty(n, Prim::Bf16),
@@ -369,7 +366,7 @@ fn f16_const_fill_produces_exact_bit_pattern() {
         let n = 4;
         dag.add_node(
             RiscOp::Const {
-                value: value as f64,
+                value: f64::from(value),
             },
             vec![],
             vec_ty(n, Prim::F16),

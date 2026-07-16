@@ -3,7 +3,7 @@
 //!
 //! Shape A: borrow-to-owned at return position.
 //! `def identity_dim[a](x: &tensor[a, f32]) -> tensor[a, f32] = x` fails
-//! today with a type mismatch ("def 'identity_dim' body doesn't match
+//! today with a type mismatch ("def '`identity_dim`' body doesn't match
 //! declared signature"). The body's inferred type is `&tensor[a, f32]`
 //! and the declared return is owned `tensor[a, f32]`. The existing
 //! auto-borrow path at `chelis_types::infer::auto_borrow_call_arg_types`
@@ -53,16 +53,15 @@ fn shape_a_borrow_return_position_lowers_cleanly() {
     // user expects the compiler to insert an implicit copy at the return
     // position so the function value is owned, matching the declared
     // signature.
-    let source = r#"
+    let source = r"
 module Repro.ImplicitCopyShapeA
 
 def identity_dim[a](x: &tensor[a, f32]) -> tensor[a, f32] = x
-"#;
+";
     let result = surf_to_dag(source);
     assert!(
         result.is_ok(),
-        "Shape A must lower cleanly after the v3 fix; got {:?}",
-        result
+        "Shape A must lower cleanly after the v3 fix; got {result:?}"
     );
 }
 
@@ -71,7 +70,7 @@ fn shape_a_borrow_return_with_use_site_lowers_cleanly() {
     // Shape A with a downstream caller that consumes the returned owned
     // tensor. Confirms the inserted copy participates as a normal owned
     // value at the call site.
-    let source = r#"
+    let source = r"
 module Repro.ImplicitCopyShapeAUse
 
 def identity_dim[a](x: &tensor[a, f32]) -> tensor[a, f32] = x
@@ -80,12 +79,11 @@ def driver(x: tensor[3, f32]) -> tensor[3, f32] = {
   y = identity_dim(&x)
   add(y, y)
 }
-"#;
+";
     let result = surf_to_dag(source);
     assert!(
         result.is_ok(),
-        "Shape A use-site composition must lower cleanly after the v3 fix; got {:?}",
-        result
+        "Shape A use-site composition must lower cleanly after the v3 fix; got {result:?}"
     );
 }
 
@@ -95,7 +93,7 @@ fn shape_b_grad_fanout_with_trailing_borrow_lowers_cleanly() {
     // borrow-read of the same arg. Mirrors the hello-chelis linreg.ch
     // `sgd_step` shape that today requires explicit `copy(w)` /
     // `copy(b)` workaround wrappers at the grad call sites.
-    let source = r#"
+    let source = r"
 module Repro.ImplicitCopyShapeB
 
 def my_loss(w: tensor[3, f32], b: tensor[3, f32]) -> tensor[f32] = {
@@ -110,12 +108,11 @@ def step(w: tensor[3, f32], b: tensor[3, f32]) -> tensor[3, f32] = {
   trailing = sub(w, dw)
   add(trailing, db)
 }
-"#;
+";
     let result = surf_to_dag(source);
     assert!(
         result.is_ok(),
-        "Shape B grad-fan-out with trailing borrow must lower cleanly after the v3 fix; got {:?}",
-        result
+        "Shape B grad-fan-out with trailing borrow must lower cleanly after the v3 fix; got {result:?}"
     );
 }
 
@@ -128,7 +125,7 @@ fn shape_b_grad_fanout_four_arg_mse_shape_lowers_cleanly() {
     // single sum(..., axis) so the test isolates the implicit-copy
     // fan-out behavior without depending on the nested-sum lowering
     // path used by the larger linreg fixture.
-    let source = r#"
+    let source = r"
 module Repro.ImplicitCopyShapeBMse
 
 def mse_loss(x: tensor[3, f32], y: tensor[3, f32], w: tensor[3, f32], b: tensor[3, f32]) -> tensor[f32] = {
@@ -146,12 +143,11 @@ def sgd_step(x: tensor[3, f32], y: tensor[3, f32], w: tensor[3, f32], b: tensor[
   new_b = sub(b, db)
   add(new_w, new_b)
 }
-"#;
+";
     let result = surf_to_dag(source);
     assert!(
         result.is_ok(),
-        "Shape B 4-arg mse-shape must lower cleanly after the v3 fix; got {:?}",
-        result
+        "Shape B 4-arg mse-shape must lower cleanly after the v3 fix; got {result:?}"
     );
 }
 
@@ -161,7 +157,7 @@ fn shape_b_vmap_call_with_trailing_borrow_lowers_cleanly() {
     // the linearity checker per the v3 fix.  This fixture pins that the
     // arg-is-borrowed promotion also covers vmap-app, so a vmap-app
     // followed by a borrow-read of the same arg lowers cleanly.
-    let source = r#"
+    let source = r"
 module Repro.ImplicitCopyShapeBVmap
 
 def my_op(w: tensor[3, f32]) -> tensor[f32] = sum(w, 0)
@@ -171,12 +167,11 @@ def step(ws: tensor[5, 3, f32]) -> tensor[5, f32] = {
   trailing = sub(out, out)
   trailing
 }
-"#;
+";
     let result = surf_to_dag(source);
     assert!(
         result.is_ok(),
-        "Shape B vmap fan-out must lower cleanly after the v3 fix; got {:?}",
-        result
+        "Shape B vmap fan-out must lower cleanly after the v3 fix; got {result:?}"
     );
 }
 
@@ -188,7 +183,7 @@ fn shape_b_single_grad_call_already_lowers_today_control() {
     // a single Structural consume which (per spec) the implicit-copy
     // pass would fork.  This fixture pins that the v3 fix does not
     // regress this already-working case.
-    let source = r#"
+    let source = r"
 module Repro.ImplicitCopyShapeBControl
 
 def my_loss(w: tensor[3, f32], b: tensor[3, f32]) -> tensor[f32] = {
@@ -202,11 +197,10 @@ def step(w: tensor[3, f32], b: tensor[3, f32]) -> tensor[3, f32] = {
   trailing = sub(w, dw)
   add(trailing, b)
 }
-"#;
+";
     let result = surf_to_dag(source);
     assert!(
         result.is_ok(),
-        "Shape B single-grad control should lower cleanly today and after the fix; got {:?}",
-        result
+        "Shape B single-grad control should lower cleanly today and after the fix; got {result:?}"
     );
 }

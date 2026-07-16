@@ -48,11 +48,11 @@ fn parse_one(src: &str) -> Expr {
 #[test]
 fn pipe_unary_builtin_stage_lowers_and_evaluates() {
     // (pipe {} (var {} x) (var {} relu))
-    let pipe_src = r#"
+    let pipe_src = r"
         (pipe {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
           (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
           (var {} relu))
-    "#;
+    ";
     let pipe_expr = parse_one(pipe_src);
     let scoped = HashMap::from([("x".to_string(), f32_vec(3))]);
     let dag = lower_subexpr_program(&pipe_expr, scoped, HashMap::new(), HashMap::new());
@@ -83,7 +83,7 @@ fn pipe_unary_builtin_stage_lowers_and_evaluates() {
 
 #[test]
 fn pipe_plain_callable_with_args_lowers_and_evaluates() {
-    let pipe_src = r#"
+    let pipe_src = r"
         (pipe {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
           (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
           (fn {type: (t-fn {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)) (t-tensor {} (d-lit {} 3) (t-prim {} f32)))}
@@ -92,7 +92,7 @@ fn pipe_plain_callable_with_args_lowers_and_evaluates() {
               (var {} add)
               (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} __chelis_pipe)
               (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} a))))
-    "#;
+    ";
     let pipe_expr = parse_one(pipe_src);
     let scoped = HashMap::from([("x".to_string(), f32_vec(3)), ("a".to_string(), f32_vec(3))]);
     let dag = lower_subexpr_program(&pipe_expr, scoped, HashMap::new(), HashMap::new());
@@ -125,7 +125,7 @@ fn pipe_plain_callable_with_args_lowers_and_evaluates() {
 
 #[test]
 fn pipe_grad_stage_matches_non_pipe_application() {
-    let fn_src = r#"
+    let fn_src = r"
         (fn {}
           (params {}
             (x {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}))
@@ -136,21 +136,21 @@ fn pipe_grad_stage_matches_non_pipe_application() {
               (copy {} (var {} x))
               (copy {} (var {} x)))
             (lit {type: (t-prim {} int32)} 0)))
-    "#;
+    ";
     // `x |> grad(f)` -- the seed is the input tensor, the stage is the
     // bare `(grad {} (var {} f))` callable (no lambda wrap; Surf does not
     // wrap `Grad`-stage pipes in a lambda).
-    let pipe_src = r#"
+    let pipe_src = r"
         (pipe {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
           (var {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} input)
           (grad {} (var {} loss)))
-    "#;
+    ";
     // Non-pipe reference: `grad(f)(x)`.
-    let app_src = r#"
+    let app_src = r"
         (app {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
           (grad {} (var {} loss))
           (var {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} input))
-    "#;
+    ";
 
     let mut program_defs = HashMap::new();
     program_defs.insert("loss".to_string(), parse_one(fn_src));
@@ -210,7 +210,7 @@ fn pipe_grad_stage_matches_non_pipe_application() {
 
 #[test]
 fn pipe_vmap_grad_stage_matches_non_pipe_application() {
-    let fn_src = r#"
+    let fn_src = r"
         (fn {}
           (params {}
             (x {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}))
@@ -221,19 +221,19 @@ fn pipe_vmap_grad_stage_matches_non_pipe_application() {
               (copy {} (var {} x))
               (copy {} (var {} x)))
             (lit {type: (t-prim {} int32)} 0)))
-    "#;
+    ";
     // `xs |> vmap(grad(f))` -- the seed is the batched input, the stage is the
     // bare `(vmap {} (grad {} f) axis=0)` callable.
-    let pipe_src = r#"
+    let pipe_src = r"
         (pipe {type: (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} f32))}
           (var {type: (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} f32))} xs)
           (vmap {} (grad {} (var {} loss)) (lit {type: (t-prim {} int32)} 0)))
-    "#;
-    let app_src = r#"
+    ";
+    let app_src = r"
         (app {type: (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} f32))}
           (vmap {} (grad {} (var {} loss)) (lit {type: (t-prim {} int32)} 0))
           (var {type: (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} f32))} xs))
-    "#;
+    ";
 
     let mut program_defs = HashMap::new();
     program_defs.insert("loss".to_string(), parse_one(fn_src));
@@ -303,19 +303,19 @@ fn pipe_vmap_def_stage_lowers_and_evaluates() {
     // `local_callables` nor `program_defs`, so a bare `(var {} relu)` inside
     // `(vmap ...)` would itself trip the `None`-resolution path; that case is
     // a separate gap from G10, see the diagnosis note).
-    let relu_row_src = r#"
+    let relu_row_src = r"
         (fn {}
           (params {}
             (x {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}))
           (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
             (var {} relu)
             (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)))
-    "#;
-    let pipe_src = r#"
+    ";
+    let pipe_src = r"
         (pipe {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}
           (var {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} xs)
           (vmap {} (var {} relu_row) (lit {type: (t-prim {} int32)} 0)))
-    "#;
+    ";
     let mut program_defs = HashMap::new();
     program_defs.insert("relu_row".to_string(), parse_one(relu_row_src));
     let scoped = HashMap::from([("xs".to_string(), f32_mat(2, 3))]);
@@ -379,7 +379,7 @@ fn pipe_fn_typed_parameter_stage_lowers_standalone_def() {
     // Lowering this in isolation (without a caller to inline `f`) is the
     // exact path `try_lower_program` takes for every top-level def, which is
     // what `chelis eval --file` and `chelis build` exercise.
-    let fn_src = r#"
+    let fn_src = r"
         (fn {}
           (params {}
             (f {type: (t-fn {}
@@ -390,7 +390,7 @@ fn pipe_fn_typed_parameter_stage_lowers_standalone_def() {
             (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
             (var {} f)
             (var {} f)))
-    "#;
+    ";
     let result = try_lower_subexpr_program(
         &parse_one(fn_src),
         HashMap::new(),
@@ -410,7 +410,7 @@ fn pipe_fn_typed_parameter_stage_lowers_standalone_def() {
 fn pipe_fn_typed_parameter_stage_matches_non_pipe_call_site() {
     // `doubler(x) = add(x, x)` — distinguishes identity (`x |> f` would
     // collapse to `x` if the stage no-oped).
-    let doubler_src = r#"
+    let doubler_src = r"
         (fn {}
           (params {}
             (x {type: (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)))}))
@@ -418,12 +418,12 @@ fn pipe_fn_typed_parameter_stage_matches_non_pipe_call_site() {
             (var {} add)
             (copy {} (var {} x))
             (copy {} (var {} x))))
-    "#;
+    ";
     // Pipe form: `def apply_one(f, x) = x |> f`. Single pipe stage isolates
     // the fn-typed-parameter pipe gap from the unrelated `inlining_names`
     // recursion guard interaction that a nested `f(f(x))` non-pipe shape
     // would expose (separate bug; out of scope for Item 2-extended).
-    let apply_one_pipe_src = r#"
+    let apply_one_pipe_src = r"
         (fn {}
           (params {}
             (f {type: (t-fn {}
@@ -433,9 +433,9 @@ fn pipe_fn_typed_parameter_stage_matches_non_pipe_call_site() {
           (pipe {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
             (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
             (var {} f)))
-    "#;
+    ";
     // Non-pipe equivalent: `def apply_one_app(f, x) = f(x)`.
-    let apply_one_app_src = r#"
+    let apply_one_app_src = r"
         (fn {}
           (params {}
             (f {type: (t-fn {}
@@ -445,20 +445,20 @@ fn pipe_fn_typed_parameter_stage_matches_non_pipe_call_site() {
           (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
             (var {} f)
             (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)))
-    "#;
+    ";
     // Call-site app expressions.
-    let pipe_call_src = r#"
+    let pipe_call_src = r"
         (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
           (var {} apply_one_pipe)
           (var {} doubler)
           (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} seed))
-    "#;
-    let app_call_src = r#"
+    ";
+    let app_call_src = r"
         (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
           (var {} apply_one_app)
           (var {} doubler)
           (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} seed))
-    "#;
+    ";
 
     let mut program_defs = HashMap::new();
     program_defs.insert("apply_one_pipe".to_string(), parse_one(apply_one_pipe_src));

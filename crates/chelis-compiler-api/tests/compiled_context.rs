@@ -365,7 +365,7 @@ fn eval_in_context_resolves_library_string_call_in_host_runtime() {
 }
 
 /// Phase G' — same parity check, but verified end-to-end after the
-/// CompiledContext round-trips through bincode (the worker path used
+/// `CompiledContext` round-trips through bincode (the worker path used
 /// by `chelis test`). Catches a host-runtime regression that ships in
 /// the wire-bytes but not in the in-process-only path.
 #[test]

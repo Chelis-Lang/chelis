@@ -37,11 +37,14 @@ fn embedded_skills_match_repo() {
     let skills_dir = root.join("agent-skills");
     let on_disk: BTreeSet<String> = std::fs::read_dir(&skills_dir)
         .unwrap_or_else(|e| panic!("read {skills_dir:?}: {e}"))
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|e| e.path().is_dir())
         .map(|e| e.file_name().to_string_lossy().to_string())
         .collect();
-    let shared_owned: BTreeSet<String> = SHARED_SKILLS.iter().map(|s| s.to_string()).collect();
+    let shared_owned: BTreeSet<String> = SHARED_SKILLS
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     assert_eq!(
         on_disk, shared_owned,
         "agent-skills/ directory does not match SHARED_SKILLS. If the shared skill \

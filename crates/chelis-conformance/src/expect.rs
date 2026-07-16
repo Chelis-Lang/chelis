@@ -26,6 +26,7 @@ pub enum ExpectMode {
 }
 
 impl ExpectMode {
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             ExpectMode::Neg => "neg",
@@ -59,7 +60,7 @@ impl Sidecar {
         let citations = lines
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         Ok(Sidecar {
             substring,
@@ -69,6 +70,7 @@ impl Sidecar {
 
     /// Does any citation line reference an upstream blocker in a
     /// mechanically-auditable form (contract §4: never a prose name)?
+    #[must_use]
     pub fn has_blocker_citation(&self) -> bool {
         self.citations.iter().any(|c| is_blocker_citation(c))
     }
@@ -76,6 +78,7 @@ impl Sidecar {
 
 /// A citation is auditable iff it names `chelis#NNN`, a parked draft under
 /// `docs/issue_drafts/`, or the `docs/UPSTREAM_BUGS.md` tracker.
+#[must_use]
 pub fn is_blocker_citation(line: &str) -> bool {
     if line.contains("docs/issue_drafts/") || line.contains("docs/UPSTREAM_BUGS.md") {
         return true;
@@ -149,11 +152,13 @@ pub enum Verdict {
 impl Verdict {
     /// Only [`Verdict::Ok`] passes the gate. FIX-detected is the *wanted*
     /// outcome at a pin bump but still fails loudly so it is acted on.
+    #[must_use]
     pub fn is_ok(&self) -> bool {
         matches!(self, Verdict::Ok)
     }
 
     /// Short stable tag for machine output.
+    #[must_use]
     pub fn tag(&self) -> &'static str {
         match self {
             Verdict::Ok => "ok",
@@ -168,6 +173,7 @@ impl Verdict {
 
 /// Classify one expected-failure file. `sidecar` is `None` when the `.expect`
 /// file is absent (fail-closed).
+#[must_use]
 pub fn classify(mode: ExpectMode, outcome: &FileOutcome, sidecar: Option<&Sidecar>) -> Verdict {
     let Some(sidecar) = sidecar else {
         return Verdict::ConfigError {

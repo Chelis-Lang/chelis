@@ -29,6 +29,7 @@ use std::collections::HashMap;
 /// comparison semantics: `==`/`!=` carry a `1e-10` tolerance. This is the
 /// user-property postcondition evaluator and must NOT be used for
 /// invariant-sample acceptance (use [`eval_bool_strict`] there).
+#[must_use]
 pub fn eval_bool(expr: &SmtExpr, env: &HashMap<String, f64>) -> bool {
     eval_bool_with(expr, env, false)
 }
@@ -40,6 +41,7 @@ pub fn eval_bool(expr: &SmtExpr, env: &HashMap<String, f64>) -> bool {
 /// weaken exactly the soundness that validation provides). NaN operands
 /// compare false under both `==` and (per IEEE) yield `true` for `!=`, so
 /// a NaN representation never spuriously satisfies an equality invariant.
+#[must_use]
 pub fn eval_bool_strict(expr: &SmtExpr, env: &HashMap<String, f64>) -> bool {
     eval_bool_with(expr, env, true)
 }
@@ -80,12 +82,10 @@ fn eval_bool_with(expr: &SmtExpr, env: &HashMap<String, f64>, strict: bool) -> b
         SmtExpr::Bool(BoolOp::Implies, children) => {
             let antecedent = children
                 .split_last()
-                .map(|(_, rest)| rest.iter().all(|c| eval_bool_with(c, env, strict)))
-                .unwrap_or(true);
+                .is_none_or(|(_, rest)| rest.iter().all(|c| eval_bool_with(c, env, strict)));
             let consequent = children
                 .last()
-                .map(|c| eval_bool_with(c, env, strict))
-                .unwrap_or(true);
+                .is_none_or(|c| eval_bool_with(c, env, strict));
             !antecedent || consequent
         }
         SmtExpr::Not(inner) => !eval_bool_with(inner, env, strict),
@@ -136,6 +136,7 @@ fn eval_cmp(op: CmpOp, l: f64, r: f64, strict: bool) -> bool {
 /// environment with the fuzz comparison semantics (`1e-10` tolerance for
 /// any nested `==`/`!=`). Unbound variables read as `0.0`; division by
 /// zero and out-of-domain transcendentals yield `NaN`.
+#[must_use]
 pub fn eval_arith(expr: &SmtExpr, env: &HashMap<String, f64>) -> f64 {
     eval_arith_with(expr, env, false)
 }
@@ -160,10 +161,10 @@ fn eval_arith_with(expr: &SmtExpr, env: &HashMap<String, f64>, strict: bool) -> 
                 ArithOp::Sub => l - r,
                 ArithOp::Mul => l * r,
                 ArithOp::Div => {
-                    if r != 0.0 {
-                        l / r
-                    } else {
+                    if r == 0.0 {
                         f64::NAN
+                    } else {
+                        l / r
                     }
                 }
                 ArithOp::Neg => -l,

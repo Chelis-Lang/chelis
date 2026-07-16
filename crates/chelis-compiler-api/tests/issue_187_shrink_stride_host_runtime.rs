@@ -51,10 +51,10 @@ fn root_tensor<'a>(
 /// `unsupported builtin in host runtime` (bare form).
 #[test]
 fn issue187_shrink_parameterized_runs_and_matches_ir_eval() {
-    let src = r#"
+    let src = r"
 make = pad_sequences([[0.0, 1.0, 2.0, 3.0], [4.0, 5.0, 6.0, 7.0]], 0.0)
 windowed = shrink(&make, [[0, 1], [1, 3]])
-"#;
+";
     let result = eval_surf(src);
     let win = root_tensor(&result, "windowed");
     assert_eq!(win.shape, vec![1, 2], "windowed shape");
@@ -67,10 +67,10 @@ windowed = shrink(&make, [[0, 1], [1, 3]])
 ///   row 1: [4.0, 6.0]
 #[test]
 fn issue187_stride_parameterized_runs_and_matches_ir_eval() {
-    let src = r#"
+    let src = r"
 make = pad_sequences([[0.0, 1.0, 2.0, 3.0], [4.0, 5.0, 6.0, 7.0]], 0.0)
 strided = stride(&make, 1, 2)
-"#;
+";
     let result = eval_surf(src);
     let s = root_tensor(&result, "strided");
     assert_eq!(s.shape, vec![2, 2], "strided shape");
@@ -87,10 +87,10 @@ strided = stride(&make, 1, 2)
 /// silently returning garbage.
 #[test]
 fn issue187_shrink_out_of_range_bounds_fails_loud() {
-    let src = r#"
+    let src = r"
 make = pad_sequences([[0.0, 1.0, 2.0, 3.0], [4.0, 5.0, 6.0, 7.0]], 0.0)
 bad = shrink(&make, [[0, 5], [1, 3]])
-"#;
+";
     let outcome = eval(EvalRequest {
         source_kind: SourceKind::Surf,
         source: src.to_string(),
@@ -104,13 +104,13 @@ bad = shrink(&make, [[0, 5], [1, 3]])
 
 /// EXPECT: a `stride` with a zero step fails (either at type-check or at
 /// host-runtime), matching the spec-level invariant locked by
-/// `c10_stride_zero_step_is_error` on the RiscOp side.
+/// `c10_stride_zero_step_is_error` on the `RiscOp` side.
 #[test]
 fn issue187_stride_zero_step_fails_loud() {
-    let src = r#"
+    let src = r"
 make = pad_sequences([[0.0, 1.0, 2.0, 3.0], [4.0, 5.0, 6.0, 7.0]], 0.0)
 bad = stride(&make, 0, 2)
-"#;
+";
     let outcome = eval(EvalRequest {
         source_kind: SourceKind::Surf,
         source: src.to_string(),

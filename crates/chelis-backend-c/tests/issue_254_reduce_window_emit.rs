@@ -5,7 +5,7 @@
 //! silent regressions where (for example) `Mean` forgets to divide by
 //! the window volume or `Min` uses `fmaxf`. Numerical
 //! evaluator-vs-C-backend parity is exercised through the host-runtime
-//! reduce_window tests in `chelis-compiler-api`, which evaluate the
+//! `reduce_window` tests in `chelis-compiler-api`, which evaluate the
 //! same Surf programs through the IR evaluator path. The IR evaluator
 //! is the authoritative oracle per `spec/05-risc-primitives.md` §6.
 

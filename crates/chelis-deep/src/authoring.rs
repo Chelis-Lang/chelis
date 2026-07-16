@@ -642,7 +642,7 @@ fn collect_call_edges(
             caller,
             module_name,
             out,
-        )
+        );
     });
 }
 
@@ -675,7 +675,7 @@ fn collect_symbol_references(
             child_path,
             caller,
             out,
-        )
+        );
     });
 }
 

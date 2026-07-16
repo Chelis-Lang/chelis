@@ -21,12 +21,14 @@ pub struct FuseResult {
 }
 
 /// Apply greedy kernel fusion to a DAG.
-/// Returns a new DAG with fusible chains replaced by FusedElem nodes.
+/// Returns a new DAG with fusible chains replaced by `FusedElem` nodes.
+#[must_use]
 pub fn fuse(dag: &Dag) -> Dag {
     fuse_with_remap(dag).dag
 }
 
 /// Apply greedy kernel fusion to a DAG and return the old→new node remap.
+#[must_use]
 pub fn fuse_with_remap(dag: &Dag) -> FuseResult {
     if dag.is_empty() {
         return FuseResult {
@@ -92,7 +94,7 @@ fn is_fusible_elementwise(op: &RiscOp) -> bool {
     )
 }
 
-/// Convert a RiscOp to its FusedStepOp equivalent.
+/// Convert a `RiscOp` to its `FusedStepOp` equivalent.
 fn to_fused_step_op(op: &RiscOp) -> FusedStepOp {
     match op {
         RiscOp::Add => FusedStepOp::Add,
@@ -183,7 +185,7 @@ fn find_chains(dag: &Dag, consumer_count: &[usize]) -> Vec<Chain> {
     chains
 }
 
-/// Rebuild the DAG, replacing chain nodes with FusedElem nodes.
+/// Rebuild the DAG, replacing chain nodes with `FusedElem` nodes.
 fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, HashMap<NodeId, NodeId>) {
     // Map old node ID → chain index (if part of a chain).
     let mut node_to_chain: HashMap<usize, usize> = HashMap::new();
@@ -333,7 +335,7 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, HashMap<NodeId, Nod
 
 /// Build a `FusedElem` op from a chain of nodes.
 ///
-/// Returns the `RiscOp::FusedElem` and the list of external input NodeIds
+/// Returns the `RiscOp::FusedElem` and the list of external input `NodeIds`
 /// (in the original DAG's ID space).
 fn build_fused_elem(
     dag: &Dag,
@@ -402,12 +404,13 @@ fn reusable_external_input(dag: &Dag, chain: &Chain, external_inputs: &[NodeId])
     reusable
 }
 
-/// Identify FusedElem nodes whose sole consumer is a reduction (Sum or MaxReduce).
+/// Identify `FusedElem` nodes whose sole consumer is a reduction (Sum or `MaxReduce`).
 ///
 /// These nodes can be inlined into the reduction's inner loop at emit time,
 /// eliminating the intermediate buffer. Returns a set of node IDs that the
 /// emitter should skip (no allocation, no standalone emission) and the
 /// reduction should handle by inlining the fused steps.
+#[must_use]
 pub fn reduction_inlined_fused_elems(dag: &Dag) -> HashSet<NodeId> {
     let consumer_count = build_consumer_counts(dag);
     let mut inlined = HashSet::new();

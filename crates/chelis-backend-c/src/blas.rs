@@ -1,7 +1,7 @@
 //! BLAS pattern matching for matmul subgraphs.
 //!
 //! Phase 0: detect matmul pattern (Sum whose input is Mul whose inputs are Expand).
-//! Actual BLAS emission deferred to when OpenBLAS is available.
+//! Actual BLAS emission deferred to when `OpenBLAS` is available.
 
 use chelis_ir::dag::{Dag, DagNode, DimInfo, NodeId, RiscOp};
 use chelis_types::types::Prim;
@@ -16,9 +16,9 @@ use chelis_types::types::Prim;
 /// tell sgemm from dgemm without reaching back into the DAG.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatmulInfo {
-    /// NodeId of the left matrix operand.
+    /// `NodeId` of the left matrix operand.
     pub a: NodeId,
-    /// NodeId of the right matrix operand.
+    /// `NodeId` of the right matrix operand.
     pub b: NodeId,
     /// Rows of the output (M dimension).
     pub m: usize,
@@ -29,7 +29,7 @@ pub struct MatmulInfo {
     /// Accumulator precision for the inner product per
     /// `spec/04-type-system.md` §5.7.1. Sourced from the originating
     /// `RiscOp::Sum`'s `accumulator` field. Drives BLAS dispatch
-    /// (F32 → cblas_sgemm, F64 → cblas_dgemm).
+    /// (F32 → `cblas_sgemm`, F64 → `cblas_dgemm`).
     pub accumulator: Prim,
 }
 
@@ -37,6 +37,7 @@ pub struct MatmulInfo {
 ///
 /// The pattern is: Sum { axis } of Mul(Expand(A), Expand(B)).
 /// Returns `Some(MatmulInfo)` if the pattern matches, `None` otherwise.
+#[must_use]
 pub fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
     let sum_node = dag.get(sum_id)?;
 

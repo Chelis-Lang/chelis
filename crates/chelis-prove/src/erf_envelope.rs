@@ -187,6 +187,7 @@ impl ErfArm {
     /// Evaluate the arm's approximation at `x` (the *center* value, before the
     /// `+-eps` band is applied). Horner for the polynomial; the constant for
     /// saturation.
+    #[must_use]
     pub fn approx(&self, x: f64) -> f64 {
         match self {
             ErfArm::Saturation { value } => *value,
@@ -246,6 +247,7 @@ pub struct ErfEnvelopeBox {
 
 impl ErfEnvelopeBox {
     /// Whether `x` lies in this box's `[lo, hi]` (inclusive).
+    #[must_use]
     pub fn contains(&self, x: f64) -> bool {
         self.lo <= x && x <= self.hi
     }
@@ -254,6 +256,7 @@ impl ErfEnvelopeBox {
     /// this box. Because `eps` is a certified sup-norm error over the box, the
     /// true `erf(x)` is guaranteed to lie in this interval for any `x` in the
     /// box.
+    #[must_use]
     pub fn bound(&self, x: f64) -> (f64, f64) {
         let a = self.arm.approx(x);
         (a - self.eps, a + self.eps)
@@ -313,6 +316,7 @@ impl ErfEnvelope {
     /// # Panics
     /// Panics if the embedded data fails to parse, which would mean a corrupt
     /// committed artifact -- a build-time invariant, caught by tests.
+    #[must_use]
     pub fn committed() -> Self {
         serde_json::from_str(ERF_ENVELOPE_JSON)
             .expect("committed erf envelope data must be valid JSON")
@@ -320,6 +324,7 @@ impl ErfEnvelope {
 
     /// Find the box containing `x`, if any. Boxes are inclusive on both edges,
     /// so a shared boundary point resolves to the first (lower) box.
+    #[must_use]
     pub fn box_for(&self, x: f64) -> Option<&ErfEnvelopeBox> {
         self.boxes.iter().find(|b| b.contains(x))
     }
@@ -328,6 +333,7 @@ impl ErfEnvelope {
     /// `x` is outside the covered range. This is the consumer entry point: the
     /// runtime discharge and Beacon's relaxation read `erf(x)`'s certified
     /// bound from here with no Arb call.
+    #[must_use]
     pub fn bound(&self, x: f64) -> Option<(f64, f64)> {
         self.box_for(x).map(|b| b.bound(x))
     }
@@ -337,6 +343,7 @@ impl ErfEnvelope {
     /// `eps >= 0` and finite, and saturation values are exactly `+-1`. This is
     /// a structural invariant of the committed data, locked by a test; it is
     /// not a soundness check (soundness is the per-box certified `eps`).
+    #[must_use]
     pub fn is_well_formed(&self) -> bool {
         if self.boxes.is_empty() {
             return false;
@@ -1051,7 +1058,7 @@ mod tests {
             .trim()
     }
 
-    /// Parse the rounding bound from central_rounding.gappa's goal line:
+    /// Parse the rounding bound from `central_rounding.gappa`'s goal line:
     ///   `{ x in [-3, 3] -> |P - Pexact| in [0, BOUND] }`
     fn parse_gappa_rounding_goal_bound(gappa_src: &str) -> &str {
         let goal_line = gappa_src

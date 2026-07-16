@@ -50,11 +50,11 @@ fn issue185_tensor_and_runs_and_matches_ir_eval() {
     // a = [true,  true,  false, false]
     // b = [true,  false, true,  false]
     // a and b = [true, false, false, false]
-    let src = r#"
+    let src = r"
 a = to_tensor([true, true, false, false])
 b = to_tensor([true, false, true, false])
 out = and(&a, &b)
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![4], "tensor and shape");
@@ -64,11 +64,11 @@ out = and(&a, &b)
 #[test]
 fn issue185_tensor_or_runs_and_matches_ir_eval() {
     // a or b = [true, true, true, false]
-    let src = r#"
+    let src = r"
 a = to_tensor([true, true, false, false])
 b = to_tensor([true, false, true, false])
 out = or(&a, &b)
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![4], "tensor or shape");
@@ -78,10 +78,10 @@ out = or(&a, &b)
 #[test]
 fn issue185_tensor_not_runs_and_matches_ir_eval() {
     // not(a) = [false, false, true, true]
-    let src = r#"
+    let src = r"
 a = to_tensor([true, true, false, false])
 out = not(&a)
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![4], "tensor not shape");
@@ -98,11 +98,11 @@ out = not(&a)
 fn issue185_tensor_and_rejects_non_bool_tensor_input() {
     // f32 tensors must be rejected — the typer pins the input precision
     // to bool.
-    let src = r#"
+    let src = r"
 a = to_tensor([1.0, 2.0])
 b = to_tensor([3.0, 4.0])
 out = and(&a, &b)
-"#;
+";
     let outcome = eval(EvalRequest {
         source_kind: SourceKind::Surf,
         source: src.to_string(),
@@ -116,11 +116,11 @@ out = and(&a, &b)
 
 #[test]
 fn issue185_tensor_or_rejects_non_bool_tensor_input() {
-    let src = r#"
+    let src = r"
 a = to_tensor([1.0, 2.0])
 b = to_tensor([3.0, 4.0])
 out = or(&a, &b)
-"#;
+";
     let outcome = eval(EvalRequest {
         source_kind: SourceKind::Surf,
         source: src.to_string(),
@@ -134,10 +134,10 @@ out = or(&a, &b)
 
 #[test]
 fn issue185_tensor_not_rejects_non_bool_tensor_input() {
-    let src = r#"
+    let src = r"
 a = to_tensor([1.0, 2.0])
 out = not(&a)
-"#;
+";
     let outcome = eval(EvalRequest {
         source_kind: SourceKind::Surf,
         source: src.to_string(),

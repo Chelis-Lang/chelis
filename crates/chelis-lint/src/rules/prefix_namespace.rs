@@ -8,7 +8,7 @@
 //! a single Surf source file. For each detected prefix, it checks whether
 //! the prefix matches the module's expected shorthand:
 //!
-//! - The lowercase initials of the last PascalCase compound component
+//! - The lowercase initials of the last `PascalCase` compound component
 //!   (e.g., `Nautilus.LinAlg` → `la`)
 //! - The full lowercased component name (e.g., `Frame` → `frame`)
 //! - The first 2–4 characters of the lowercased component name
@@ -20,7 +20,7 @@
 //! or amend §7.1.1 to record it as a model/algorithm sub-namespace.
 //!
 //! Snapshot §8 #6 (`la_*` in Nautilus.LinAlg): accepted — `la` matches
-//! LinAlg's initials.
+//! `LinAlg`'s initials.
 //! Snapshot §8 #7 (`bs_*` in Shoals.Pricing): flagged — `bs` doesn't
 //! match Pricing's shorthand. Orchestrator's closer-read will determine
 //! whether to drop or escalate to §7.1.1 amendment.
@@ -44,11 +44,11 @@ fn def_name_re() -> &'static Regex {
 pub struct PrefixNamespace;
 
 impl Rule for PrefixNamespace {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "prefix-namespace"
     }
 
-    fn spec_ref(&self) -> &str {
+    fn spec_ref(&self) -> &'static str {
         "§7.1"
     }
 
@@ -56,7 +56,7 @@ impl Rule for PrefixNamespace {
         &[Surface::SurfSource]
     }
 
-    fn summary(&self) -> &str {
+    fn summary(&self) -> &'static str {
         "function-name prefixes within a module are the module's domain shorthand (§7.1 helper-marker) or a documented model/algorithm sub-namespace (§7.1.1)"
     }
 
@@ -106,7 +106,7 @@ impl Rule for PrefixNamespace {
             // Fire one violation per function, naming the prefix and the
             // module's expected shorthand for closer-read context.
             let module_path = decl.components.join(".");
-            let allowed_list: Vec<String> = allowed_prefixes.to_vec();
+            let allowed_list: Vec<String> = allowed_prefixes.clone();
             let allowed_hint = if allowed_list.is_empty() {
                 "no shorthand could be derived".to_string()
             } else {
@@ -236,7 +236,7 @@ fn extract_short_prefix(name: &str) -> Option<String> {
         if end >= bytes.len() {
             break;
         }
-        if bytes[end] == b'_' && bytes[..end].iter().all(|b| b.is_ascii_lowercase()) {
+        if bytes[end] == b'_' && bytes[..end].iter().all(u8::is_ascii_lowercase) {
             let prefix = &name[..end];
             if COMMON_VERB_PREFIXES.contains(&prefix) {
                 return None;
@@ -256,15 +256,15 @@ fn extract_short_prefix(name: &str) -> Option<String> {
 /// Compute the set of acceptable shorthands derived from a module-component
 /// name. Any of these is a valid private-helper prefix per §7.1.
 ///
-/// - Initials of compound (LinAlg → "la", OrderBook → "ob", CurveFit → "cf")
-/// - Full lowercased name (Frame → "frame", LinAlg → "linalg")
+/// - Initials of compound (`LinAlg` → "la", `OrderBook` → "ob", `CurveFit` → "cf")
+/// - Full lowercased name (Frame → "frame", `LinAlg` → "linalg")
 /// - First 2–4 lowercase letters (Pricing → "pr", "pri", "pric")
 fn expected_shorthand_set(component: &str) -> Vec<String> {
     let mut out = Vec::new();
     // Initials of PascalCase compound.
     let initials: String = component
         .chars()
-        .filter(|c| c.is_ascii_uppercase())
+        .filter(char::is_ascii_uppercase)
         .map(|c| c.to_ascii_lowercase())
         .collect();
     if (2..=4).contains(&initials.len()) {

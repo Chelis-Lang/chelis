@@ -172,8 +172,7 @@ fn gcc_available() -> bool {
     Command::new("gcc")
         .arg("--version")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 /// Compile `c_source` (host C) under strict ISO-C with `-pedantic-errors -Werror`.

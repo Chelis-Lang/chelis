@@ -25,6 +25,7 @@ pub struct CopyCostSummary {
     pub total_byte_formula: Option<String>,
 }
 
+#[must_use]
 pub fn analyze_copy_costs(dag: &Dag, roots: &[(String, NodeId)]) -> CopyCostSummary {
     let root_sets = roots
         .iter()
@@ -33,6 +34,7 @@ pub fn analyze_copy_costs(dag: &Dag, roots: &[(String, NodeId)]) -> CopyCostSumm
     analyze_copy_costs_for_roots(dag, &root_sets)
 }
 
+#[must_use]
 pub fn analyze_copy_costs_for_roots(dag: &Dag, roots: &[(String, Vec<NodeId>)]) -> CopyCostSummary {
     let functions = roots
         .iter()
@@ -56,10 +58,12 @@ pub fn analyze_copy_costs_for_roots(dag: &Dag, roots: &[(String, Vec<NodeId>)]) 
     }
 }
 
+#[must_use]
 pub fn analyze_function_copy_cost(dag: &Dag, name: &str, root: NodeId) -> FunctionCopyCost {
     analyze_function_copy_cost_for_roots(dag, name, &[root])
 }
 
+#[must_use]
 pub fn analyze_function_copy_cost_for_roots(
     dag: &Dag,
     name: &str,

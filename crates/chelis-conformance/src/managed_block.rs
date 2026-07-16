@@ -40,12 +40,14 @@ pub struct ManagedBlock {
 
 impl ManagedBlock {
     /// The block's body hash recomputed from its (normalized) bytes.
+    #[must_use]
     pub fn actual_hash(&self) -> String {
         body_hash(&normalize_body(&self.body))
     }
 
     /// Whether the fence's declared hash matches the body (no hand-edit inside
     /// the block).
+    #[must_use]
     pub fn integrity_ok(&self) -> bool {
         self.declared_hash == self.actual_hash()
     }
@@ -55,6 +57,7 @@ impl ManagedBlock {
     /// *stale-but-self-consistent* block: one whose fence hash matches its own
     /// body (so [`integrity_ok`](Self::integrity_ok) passes) but whose body has
     /// drifted from — or was forged against — the embedded upstream text.
+    #[must_use]
     pub fn matches_canonical(&self, canonical: &str) -> bool {
         normalize_body(&self.body) == normalize_body(canonical)
     }
@@ -64,6 +67,7 @@ impl ManagedBlock {
 /// unified to `\n` (so a CRLF checkout does not spuriously fail integrity) and
 /// exactly one trailing newline. Hashing and canonical comparison both go
 /// through this so the stamp is stable across platforms.
+#[must_use]
 pub fn normalize_body(body: &str) -> String {
     let unified = body.replace("\r\n", "\n").replace('\r', "\n");
     if unified.ends_with('\n') {
@@ -75,6 +79,7 @@ pub fn normalize_body(body: &str) -> String {
 
 /// sha256 of a body, as the first 16 lowercase hex chars (64 bits — ample to
 /// catch edits, short enough to keep the fence readable).
+#[must_use]
 pub fn body_hash(body: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(body.as_bytes());
@@ -89,6 +94,7 @@ pub fn body_hash(body: &str) -> String {
 
 /// Render a full managed block. The body is normalized to end with a single
 /// newline so `render` and [`find`] round-trip.
+#[must_use]
 pub fn render(id: &str, version: &str, body: &str) -> String {
     let body = normalize_body(body);
     let hash = body_hash(&body);
@@ -101,6 +107,7 @@ pub fn render(id: &str, version: &str, body: &str) -> String {
 
 /// Locate the managed block with `id`. Returns `None` if absent; a malformed
 /// block (open fence without a matching close) also returns `None`.
+#[must_use]
 pub fn find(text: &str, id: &str) -> Option<ManagedBlock> {
     let begin_line_start = find_begin(text, id)?;
     let begin_line_end = text[begin_line_start..]
@@ -118,8 +125,7 @@ pub fn find(text: &str, id: &str) -> Option<ManagedBlock> {
     // Span runs to the end of the END fence line (through its newline if present).
     let end_line_end = text[end_marker_start..]
         .find('\n')
-        .map(|i| end_marker_start + i + 1)
-        .unwrap_or(text.len());
+        .map_or(text.len(), |i| end_marker_start + i + 1);
 
     Some(ManagedBlock {
         id: id.to_string(),
@@ -171,6 +177,7 @@ pub enum Anchor<'a> {
 /// Replace the managed block `id` in place, or insert a freshly rendered one at
 /// `anchor` if absent. Only the fenced region is touched; everything else is
 /// preserved byte-for-byte.
+#[must_use]
 pub fn upsert(text: &str, id: &str, version: &str, body: &str, anchor: Anchor) -> String {
     let rendered = render(id, version, body);
     if let Some(block) = find(text, id) {

@@ -5,7 +5,7 @@
 //! these tests pin `chelis build` and the reachable C-codegen
 //! pipeline against the production stdlib polymorphic sigs.
 //!
-//! Per the project's "acceptance_surface" memory rule: codegen tests
+//! Per the project's "`acceptance_surface`" memory rule: codegen tests
 //! must compile generated output, not just check string patterns.
 //! At least two tests in this file invoke gcc on the emitted C and
 //! assert the link/compile step succeeds, so the suite catches
@@ -187,18 +187,18 @@ fn build_must_reject(src: &str, name: &str, expected_in_stderr: &str) {
 
 #[test]
 fn build_rejects_polymorphic_matmul_at_int_call_site() {
-    let src = r#"sig my_linear: &tensor[a, b, p] -> &tensor[b, c, p] -> tensor[a, c, p]
+    let src = r"sig my_linear: &tensor[a, b, p] -> &tensor[b, c, p] -> tensor[a, c, p]
 def my_linear(x, w) = matmul(x, w)
 def use_int(x: &tensor[2, 3, int32], w: &tensor[3, 4, int32]) -> tensor[2, 4, int32] = my_linear(x, w)
-"#;
+";
     build_must_reject(src, "poly_int_matmul", "5.7.2");
 }
 
 #[test]
 fn build_rejects_polymorphic_softmax_at_int_call_site() {
-    let src = r#"sig wrap: &tensor[n, m, p] -> tensor[n, m, p]
+    let src = r"sig wrap: &tensor[n, m, p] -> tensor[n, m, p]
 def wrap(x) = softmax(x, -1)
 def use_int(x: &tensor[3, 4, int32]) -> tensor[3, 4, int32] = wrap(x)
-"#;
+";
     build_must_reject(src, "poly_int_softmax", "5.4");
 }

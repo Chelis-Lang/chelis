@@ -15,6 +15,7 @@ pub struct TensorValue {
 }
 
 impl TensorValue {
+    #[must_use]
     pub fn scalar(value: f64) -> Self {
         Self {
             data: vec![value],
@@ -22,6 +23,7 @@ impl TensorValue {
         }
     }
 
+    #[must_use]
     pub fn from_vec(shape: Vec<usize>, data: Vec<f64>) -> Self {
         assert_eq!(numel(&shape), data.len());
         Self { data, shape }
@@ -101,7 +103,7 @@ pub(crate) fn convert_cast_data(x: f64, src: Prim, dst: Prim) -> f64 {
     // through i64, bools through 0/1, floats stay floats.
     let as_int: Option<i64> = match src {
         Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => Some(x as i64),
-        Prim::Bool => Some(if x != 0.0 { 1 } else { 0 }),
+        Prim::Bool => Some(i64::from(x != 0.0)),
         _ => None,
     };
     // Emit in the target precision's storage convention.
@@ -111,20 +113,20 @@ pub(crate) fn convert_cast_data(x: f64, src: Prim, dst: Prim) -> f64 {
             None => x,
         },
         Prim::F32 => match as_int {
-            Some(i) => (i as f32) as f64,
-            None => (x as f32) as f64,
+            Some(i) => f64::from(i as f32),
+            None => f64::from(x as f32),
         },
         Prim::Int8 => match as_int {
-            Some(i) => (i as i8) as f64,
-            None => (x as i8) as f64,
+            Some(i) => f64::from(i as i8),
+            None => f64::from(x as i8),
         },
         Prim::Int16 => match as_int {
-            Some(i) => (i as i16) as f64,
-            None => (x as i16) as f64,
+            Some(i) => f64::from(i as i16),
+            None => f64::from(x as i16),
         },
         Prim::Int32 => match as_int {
-            Some(i) => (i as i32) as f64,
-            None => (x as i32) as f64,
+            Some(i) => f64::from(i as i32),
+            None => f64::from(x as i32),
         },
         Prim::Int64 => match as_int {
             Some(i) => i as f64,
@@ -141,8 +143,8 @@ pub(crate) fn convert_cast_data(x: f64, src: Prim, dst: Prim) -> f64 {
         // evaluator; string is not a tensor element type. Fall back to the
         // f32 narrowing for reduced floats and pass other targets through.
         Prim::Bf16 | Prim::F16 => match as_int {
-            Some(i) => (i as f32) as f64,
-            None => (x as f32) as f64,
+            Some(i) => f64::from(i as f32),
+            None => f64::from(x as f32),
         },
         _ => x,
     }
@@ -981,7 +983,7 @@ fn reduce(input: &TensorValue, axis: usize, init: f64, f: impl Fn(f64, f64) -> f
 ///
 /// Ties are broken by the smallest index (first-seen wins), matching numpy's
 /// default argmax/argmin semantics. The output stores integer indices as f64
-/// in the same precision-erased TensorValue layout other reductions use; the
+/// in the same precision-erased `TensorValue` layout other reductions use; the
 /// host-runtime adapter (`tensor_reduce_host`) is responsible for attaching
 /// the `Prim::Int64` precision tag on the produced `RuntimeTensorValue` per
 /// chelis#233. See `RiscOp::Argmax` for the spec-level invariants.
@@ -1822,8 +1824,7 @@ where
                 let input = &values[&node.inputs[0]];
                 let src_prec = bound_dag
                     .get(node.inputs[0])
-                    .map(|n| n.output_type.precision)
-                    .unwrap_or(*new_precision);
+                    .map_or(*new_precision, |n| n.output_type.precision);
                 let converted = input
                     .data
                     .iter()
@@ -1970,6 +1971,7 @@ pub fn eval_tensor(
 }
 
 /// Evaluate a DAG on scalar inputs. Each node produces a single f64.
+#[must_use]
 pub fn eval_scalar(dag: &Dag, inputs: &HashMap<String, f64>) -> HashMap<NodeId, f64> {
     let tensor_inputs: HashMap<String, TensorValue> = inputs
         .iter()
@@ -2324,7 +2326,7 @@ mod tests {
         let inputs = HashMap::from([
             (
                 "values".to_string(),
-                TensorValue::from_vec(vec![2, 4, 2], (0..16).map(|x| x as f64).collect()),
+                TensorValue::from_vec(vec![2, 4, 2], (0..16).map(f64::from).collect()),
             ),
             (
                 "indices".to_string(),
@@ -2588,10 +2590,10 @@ mod tests {
 
     #[test]
     fn lowered_relu_has_correct_numeric_result() {
-        let src = r#"
+        let src = r"
             (def {} x (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))
             (def {} y (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} (var {} relu) (var {} x)))
-        "#;
+        ";
         let dag = lower(src);
         let mut inputs = HashMap::new();
         inputs.insert(
@@ -2609,13 +2611,13 @@ mod tests {
     /// `[2.7, -2.7, 3.0]`; it must be `[2.0, -2.0, 3.0]`.
     #[test]
     fn lowered_cast_float_to_int_truncates_toward_zero() {
-        let src = r#"
+        let src = r"
             (def {} x (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))
             (def {} y
               (cast {type: (t-tensor {} (d-lit {} 3) (t-prim {} int32))}
                     (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
                     (t-prim {} int32)))
-        "#;
+        ";
         let dag = lower(src);
         let mut inputs = HashMap::new();
         inputs.insert(
@@ -2638,13 +2640,13 @@ mod tests {
     #[test]
     fn lowered_cast_int_to_float_preserves_value() {
         // int32 input carries integral f64 storage; cast to f64 must keep it.
-        let src = r#"
+        let src = r"
             (def {} x (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} int32))} x))
             (def {} y
               (cast {type: (t-tensor {} (d-lit {} 2) (t-prim {} f64))}
                     (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} int32))} x)
                     (t-prim {} f64)))
-        "#;
+        ";
         let dag = lower(src);
         let mut inputs = HashMap::new();
         inputs.insert("x".into(), TensorValue::from_vec(vec![2], vec![7.0, -3.0]));
@@ -2659,13 +2661,13 @@ mod tests {
 
     #[test]
     fn lowered_matmul_has_correct_numeric_result() {
-        let src = r#"
+        let src = r"
             (def {} a (var {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} a))
             (def {} b (var {type: (t-tensor {} (d-lit {} 3) (d-lit {} 2) (t-prim {} f32))} b))
             (def {} c
               (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))}
                    (var {} matmul) (var {} a) (var {} b)))
-        "#;
+        ";
         let dag = lower(src);
         let mut inputs = HashMap::new();
         inputs.insert(
@@ -2686,12 +2688,12 @@ mod tests {
 
     #[test]
     fn lowered_softmax_has_correct_numeric_result() {
-        let src = r#"
+        let src = r"
             (def {} x (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
                    (var {} softmax) (var {} x) (lit {} 0)))
-        "#;
+        ";
         let dag = lower(src);
         let mut inputs = HashMap::new();
         inputs.insert(
@@ -2708,14 +2710,14 @@ mod tests {
 
     #[test]
     fn lowered_layer_norm_has_correct_numeric_result() {
-        let src = r#"
+        let src = r"
             (def {} x (var {type: (t-tensor {} (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))} x))
             (def {} gamma (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} gamma))
             (def {} beta (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} beta))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))}
                    (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta)))
-        "#;
+        ";
         let dag = lower(src);
         let mut inputs = HashMap::new();
         inputs.insert(
@@ -2740,13 +2742,13 @@ mod tests {
 
     #[test]
     fn lowered_conv2d_1x1_has_correct_numeric_result() {
-        let src = r#"
+        let src = r"
             (def {} x (var {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))} x))
             (def {} k (var {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 1) (d-lit {} 1) (t-prim {} f32))} k))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))}
                    (var {} conv2d) (var {} x) (var {} k) (lit {} 1) (lit {} 0)))
-        "#;
+        ";
         let dag = lower(src);
         let mut inputs = HashMap::new();
         inputs.insert(
@@ -2767,13 +2769,13 @@ mod tests {
 
     #[test]
     fn lowered_conv2d_2x2_has_correct_numeric_result() {
-        let src = r#"
+        let src = r"
             (def {} x (var {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 3) (d-lit {} 3) (t-prim {} f32))} x))
             (def {} k (var {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))} k))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))}
                    (var {} conv2d) (var {} x) (var {} k) (lit {} 1) (lit {} 0)))
-        "#;
+        ";
         let dag = lower(src);
         let mut inputs = HashMap::new();
         inputs.insert(
@@ -2797,13 +2799,13 @@ mod tests {
 
     #[test]
     fn lowered_dropout_is_deterministic_for_same_seed() {
-        let src = r#"
+        let src = r"
             (def {} x (lit {type: (t-tensor {} (d-lit {} 32) (t-prim {} f32))} 1.0))
             (def {} y
               (handle-effect {effect: random}
                 (lit {type: (t-prim {} int32)} 42)
                 (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
-        "#;
+        ";
         let dag = lower(src);
         let vals_a = eval_tensor(&dag, &HashMap::new()).unwrap();
         let vals_b = eval_tensor(&dag, &HashMap::new()).unwrap();
@@ -2816,20 +2818,20 @@ mod tests {
 
     #[test]
     fn lowered_dropout_changes_with_different_seed() {
-        let src_a = r#"
+        let src_a = r"
             (def {} x (lit {type: (t-tensor {} (d-lit {} 32) (t-prim {} f32))} 1.0))
             (def {} y
               (handle-effect {effect: random}
                 (lit {type: (t-prim {} int32)} 42)
                 (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
-        "#;
-        let src_b = r#"
+        ";
+        let src_b = r"
             (def {} x (lit {type: (t-tensor {} (d-lit {} 32) (t-prim {} f32))} 1.0))
             (def {} y
               (handle-effect {effect: random}
                 (lit {type: (t-prim {} int32)} 43)
                 (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
-        "#;
+        ";
         let dag_a = lower(src_a);
         let dag_b = lower(src_b);
         let out_a = eval_tensor(&dag_a, &HashMap::new())
@@ -2972,7 +2974,7 @@ mod tests {
     }
 
     /// Pins the IR-level argmax/argmin storage: the precision-erased
-    /// TensorValue stores integer indices as integer-valued f64. The
+    /// `TensorValue` stores integer indices as integer-valued f64. The
     /// host-runtime adapter widens the surrounding precision tag to
     /// `Prim::Int64` per chelis#233. See `RiscOp::Argmax` doc comment.
     #[test]
@@ -2989,7 +2991,7 @@ mod tests {
     }
 
     /// Negative test: reduction verify rejects axes that are out of range
-    /// for the new reduction variants. Mirrors the existing c3_sum check.
+    /// for the new reduction variants. Mirrors the existing `c3_sum` check.
     #[test]
     fn adv_new_reductions_reject_out_of_range_axis() {
         use crate::verify::verify;

@@ -1,5 +1,5 @@
 //! Issue chelis#345 — 0.7.24 regression: `grad` through a symbolic-dim
-//! wrapper ICEd in the IR-to-backend handoff with
+//! wrapper `ICEd` in the IR-to-backend handoff with
 //! `internal compiler error: symbolic dim `dN` is referenced by a
 //! non-Load node (id 1, op Const { value: 0.0 } ...)`.
 //!
@@ -23,10 +23,10 @@
 //! cannot regress silently again:
 //!
 //! - row A — separate-`sig` wrapper (the 0.7.24 regression)
-//! - row B — bare inline-annotated wrapper (latent: ICEd on 0.7.23 too)
+//! - row B — bare inline-annotated wrapper (latent: `ICEd` on 0.7.23 too)
 //! - row C — explicit-quantifier wrapper (latent, same as B)
 //! - row D — `[n]`-quantified shim composing a sig-form verb (green on
-//!   0.7.23, ICEd on 0.7.24)
+//!   0.7.23, `ICEd` on 0.7.24)
 //! - row E — Tier-2 `..r` rank-polymorphic wrapper (green on 0.7.24;
 //!   must stay green — call-site rank monomorphization is the working
 //!   model the dim-var routes were missing)
@@ -69,7 +69,7 @@ fn row_a_sig_form() -> String {
 }
 
 /// Row B — bare contextual inline annotation. Latent sibling: this
-/// form ICEd on 0.7.23 as well (the sig form only survived 0.7.23 via
+/// form `ICEd` on 0.7.23 as well (the sig form only survived 0.7.23 via
 /// the accidental operand-type fallback).
 fn row_b_inline_form() -> String {
     format!(

@@ -341,10 +341,10 @@ fn assert_parity_mw(
 
 /// Real: economoist Gordon growth (`src/growth.ch`). Single real function
 /// `gordon_pv(d, r, g) = d / (r - g)`. Checks clean standalone.
-const ECONOMOIST_GROWTH: &str = r#"module Economoist.Growth
+const ECONOMOIST_GROWTH: &str = r"module Economoist.Growth
 export (gordon_pv)
 def gordon_pv(d: f32, r: f32, g: f32) -> f32 = (d / (r - g))
-"#;
+";
 
 /// Real: the shoals f64 Black-Scholes chain
 /// (`bs_call_scalar -> bs_call_f64 -> n_cdf64 -> erf64`), copied from
@@ -352,7 +352,7 @@ def gordon_pv(d: f32, r: f32, g: f32) -> f32 = (d / (r - g))
 /// imports `Nautilus.Distributions.normal_sample`) omitted so the module
 /// checks clean standalone with no reef context. The chain is the real
 /// cross-def type-and-effect propagation path the brief names.
-const SHOALS_CHAIN: &str = r#"module Shoals.Pricing
+const SHOALS_CHAIN: &str = r"module Shoals.Pricing
 export (bs_call_scalar)
 def abs_f64(x: f64) -> f64 = if lt(x, cast(0.0, f64)) then neg(x) else x
 def erf64(x: f64) -> f64 = {
@@ -389,25 +389,25 @@ def bs_call_f64(s: f64, k: f64, r: f64, sigma: f64, t: f64) -> f64 = {
   sub(mul(s, nd1), mul(k, mul(disc, nd2)))
 }
 def bs_call_scalar(s: f32, k: f32, r: f32, sigma: f32, t: f32) -> f32 = cast(bs_call_f64(cast(s, f64), cast(k, f64), cast(r, f64), cast(sigma, f64), cast(t, f64)), f32)
-"#;
+";
 
 /// Constructed: a recursive integer countdown. The new body of `count_down`
 /// references `count_down` itself, so it must resolve against the function's
 /// `defsig` (whole-module inference re-derives the signature). Checks clean
 /// standalone.
-const RECURSIVE_MODULE: &str = r#"module Frag.Recursive
+const RECURSIVE_MODULE: &str = r"module Frag.Recursive
 export (count_down)
 def count_down(n: int32) -> int32 = if eq(n, 0) then 0 else count_down(sub(n, 1))
-"#;
+";
 
 /// Constructed: a mutually-recursive `is_even` / `is_odd` pair. A new body for
 /// `is_even` references `is_odd` (a sibling) and vice versa; both must resolve
 /// against their sibling's `defsig`. Checks clean standalone.
-const MUTUAL_RECURSION_MODULE: &str = r#"module Frag.Mutual
+const MUTUAL_RECURSION_MODULE: &str = r"module Frag.Mutual
 export (is_even, is_odd)
 def is_even(n: int32) -> bool = if eq(n, 0) then true else is_odd(sub(n, 1))
 def is_odd(n: int32) -> bool = if eq(n, 0) then false else is_even(sub(n, 1))
-"#;
+";
 
 /// Constructed: an effect-propagation module. `entry` is declared pure
 /// (`! { }`) and currently calls only the pure `pure_sibling`. `noisy`
@@ -416,13 +416,13 @@ def is_odd(n: int32) -> bool = if eq(n, 0) then false else is_even(sub(n, 1))
 /// an effect under a pure signature; full check rejects it under both shapes
 /// (the declared-vs-inferred validator descends into the module wrapper).
 /// Checks clean standalone.
-const EFFECT_MODULE: &str = r#"module Frag.Effect
+const EFFECT_MODULE: &str = r"module Frag.Effect
 export (entry)
 def noisy(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)
 def logger(x: tensor[8, f32]) -> tensor[8, f32] = debug(x)
 def pure_sibling(x: tensor[8, f32]) -> tensor[8, f32] = add(x, x)
 def entry(x: tensor[8, f32]) -> tensor[8, f32] ! { } = pure_sibling(add(x, x))
-"#;
+";
 
 /// Constructed: cross-def effect propagation to a held caller (the red-team
 /// finding). `t` is declared `! { Random }` but its body is pure (`add(x, x)`),
@@ -435,21 +435,21 @@ def entry(x: tensor[8, f32]) -> tensor[8, f32] ! { } = pure_sibling(add(x, x))
 /// violates its declared purity. Only the whole-module check sees that
 /// propagation, so it REJECTS on the effect pass. This is the divergence a
 /// single-def-scoped check would have missed.
-const CROSS_DEF_RANDOM_MODULE: &str = r#"module Frag.CrossRandom
+const CROSS_DEF_RANDOM_MODULE: &str = r"module Frag.CrossRandom
 export (caller)
 def t(x: tensor[8, f32]) -> tensor[8, f32] ! { Random } = add(x, x)
 def caller(x: tensor[8, f32]) -> tensor[8, f32] ! { } = t(x)
-"#;
+";
 
 /// The IO analog of [`CROSS_DEF_RANDOM_MODULE`]. `t` is declared `! { IO }` with
 /// a pure body; `caller` is declared pure and calls `t`. Splicing `t`'s body to
 /// perform `Io` (via `debug`) makes `caller` inherit `Io` and violate its
 /// declared purity. Checks clean standalone.
-const CROSS_DEF_IO_MODULE: &str = r#"module Frag.CrossIo
+const CROSS_DEF_IO_MODULE: &str = r"module Frag.CrossIo
 export (caller)
 def t(x: tensor[8, f32]) -> tensor[8, f32] ! { IO } = add(x, x)
 def caller(x: tensor[8, f32]) -> tensor[8, f32] ! { } = t(x)
-"#;
+";
 
 /// Constructed: a `ping` / `pong` mutually-recursive pair where `ping` holds
 /// the sole base case (`if eq(n, 0) then 0 ...`) and `pong` is unconditional.
@@ -458,11 +458,11 @@ def caller(x: tensor[8, f32]) -> tensor[8, f32] ! { } = t(x)
 /// `detect_trivial_non_terminating_fns` detector flags. The detector is a
 /// recursion-group property, so it fires only when the full rewritten module is
 /// analyzed. Checks clean standalone (the base case is present).
-const PINGPONG_MODULE: &str = r#"module Frag.PingPong
+const PINGPONG_MODULE: &str = r"module Frag.PingPong
 export (ping, pong)
 def ping(n: int32) -> int32 = if eq(n, 0) then 0 else pong(sub(n, 1))
 def pong(n: int32) -> int32 = ping(sub(n, 1))
-"#;
+";
 
 /// Constructed: a module carrying a top-level value-binding cycle
 /// (`a` reads `b`, `b` reads `a`), which the whole-module
@@ -472,22 +472,22 @@ def pong(n: int32) -> int32 = ping(sub(n, 1))
 /// cycle cannot be introduced through a splice; this fixture verifies the
 /// oracle ([`full_check_verdict`]) mirrors `cmd_check_one_deep` by running
 /// `check_ir_fitness` first and so REJECTS the cycle.
-const BINDING_CYCLE_MODULE: &str = r#"module Frag.BindingCycle
+const BINDING_CYCLE_MODULE: &str = r"module Frag.BindingCycle
 export (a, b)
 a: int32 = add(b, 1)
 b: int32 = add(a, 1)
-"#;
+";
 
 /// Constructed: a linearity module. `target(x)` takes an owned tensor
 /// parameter. A body that consumes `x` (via the consuming `realize`) and then
 /// uses it again is a `UseAfterConsume` violation; a body that consumes it
 /// exactly once is clean. `consumer` is a sibling that references `target` so
 /// the rewritten module retains a real call site. Checks clean standalone.
-const LINEARITY_MODULE: &str = r#"module Frag.Linearity
+const LINEARITY_MODULE: &str = r"module Frag.Linearity
 export (target)
 def target(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)
 def consumer(y: tensor[4, f32]) -> tensor[4, f32] = target(y)
-"#;
+";
 
 // ── Real-module cases ─────────────────────────────────────────────────────
 
@@ -533,14 +533,14 @@ fn shoals_chain_well_typed_body_agrees_accept() {
     // Re-derive bs_call_f64 through the same n_cdf64 chain, reorganized but
     // type-equivalent. Exercises type propagation up the real chain.
     let body = render_body(
-        r#"module M
+        r"module M
 def f(s: f64, k: f64, r: f64, sigma: f64, t: f64) -> f64 = {
   nd1 = n_cdf64(d1_64(s, k, r, sigma, t))
   nd2 = n_cdf64(d2_64(s, k, r, sigma, t))
   disc = exp(neg(mul(r, t)))
   add(mul(s, nd1), neg(mul(k, mul(disc, nd2))))
 }
-"#,
+",
         "f",
     );
     assert_parity_mw(
@@ -808,12 +808,12 @@ fn linearity_use_after_consume_agrees_reject() {
     // UseAfterConsume. The per-body linearity walk recurses into module-wrapped
     // bodies, so the full check rejects on linearity.
     let body = render_body(
-        r#"module M
+        r"module M
 def f(x: tensor[4, f32]) -> tensor[4, f32] = {
   y = realize(x)
   add(x, y)
 }
-"#,
+",
         "f",
     );
     assert_parity_mw(

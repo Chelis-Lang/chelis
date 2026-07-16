@@ -62,7 +62,7 @@ const REQUEST_SCHEMA_VERSION: u32 = 1;
 /// to a child that has not yet started DRAINING stdin blocks `write_all` on the
 /// full pipe forever: `wait_timeout` is never reached, so the hard-kill
 /// guarantee (`docs/design/beacon_subprocess_shim.md` §6) silently fails and the
-/// call hangs for the child's whole lifetime. A WireDag artifact base64s to well
+/// call hangs for the child's whole lifetime. A `WireDag` artifact base64s to well
 /// past this for non-trivial programs, so this is a real path, not a corner.
 ///
 /// 32 KiB is comfortably under the typical 64 KiB pipe buffer, so a request at
@@ -119,6 +119,7 @@ pub struct WireDagByteStore {
 
 impl WireDagByteStore {
     /// An empty store.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -204,6 +205,7 @@ impl BeaconShim {
     ///
     /// Use [`BeaconShim::new`] when the dispatch site has an explicit path; use
     /// this when discovery is entirely env-driven.
+    #[must_use]
     pub fn from_env(store: WireDagByteStore) -> Option<Self> {
         let path = std::env::var_os(BEACON_BIN_ENV)?;
         if path.is_empty() {
@@ -215,6 +217,7 @@ impl BeaconShim {
     /// Set the request transport (stdin vs temp file). Stdin is the default for
     /// small requests; see [`Self::effective_transport`] for the large-request
     /// auto-fallback.
+    #[must_use]
     pub fn with_transport(mut self, transport: RequestTransport) -> Self {
         self.transport = transport;
         self
@@ -222,7 +225,8 @@ impl BeaconShim {
 
     /// Select the Beacon oracle lane requested from the subprocess. This only
     /// changes the request JSON; the report-to-discharge mapping remains the
-    /// same fail-closed #439 CheckReport mapping.
+    /// same fail-closed #439 `CheckReport` mapping.
+    #[must_use]
     pub fn with_oracle_mode(mut self, oracle_mode: BeaconOracleMode) -> Self {
         self.oracle_mode = oracle_mode;
         self
@@ -435,7 +439,7 @@ enum ReportVerdict {
 /// mapping keys off are pinned here.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 struct CheckReport {
-    /// The verdict (proved / proved_oracle_unverified / refuted).
+    /// The verdict (proved / `proved_oracle_unverified` / refuted).
     verdict: ReportVerdict,
     /// Whether Beacon's soundness oracle verified this result. SYMMETRIC across
     /// proofs and refutations: `proved` already implies verified, but a

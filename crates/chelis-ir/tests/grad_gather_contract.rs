@@ -8,7 +8,7 @@
 //! `Sum`→`Expand` automatically scatter-adds. No hand-written backward.
 //!
 //! This test builds the post-§3.5 RISC DAG by hand for a 3-token / 2-vocab
-//! gather where every token routes to vocab=0 (the MoE / embedding stress
+//! gather where every token routes to vocab=0 (the `MoE` / embedding stress
 //! case), and verifies that `grad_dag_checked` accumulates the duplicate-row
 //! gradients correctly. It is the durable defense against the "library author
 //! wrote a naive backward and silently dropped 99/100 of the batch" bug class

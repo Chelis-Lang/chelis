@@ -24,7 +24,7 @@ use tempfile::tempdir;
 
 /// Build a minimal fixture: `src/example.ch` plus
 /// `docs/0_leading_digit.md` (the latter triggers `doc-filename-convention`
-/// §8.3 since narrative docs require snake_case starting with a lowercase
+/// §8.3 since narrative docs require `snake_case` starting with a lowercase
 /// letter, not a leading digit).
 fn write_fixture(root: &std::path::Path) {
     fs::create_dir_all(root.join("src")).expect("mkdir src");
@@ -34,7 +34,7 @@ fn write_fixture(root: &std::path::Path) {
 }
 
 /// Run `chelis lint --check <args...>` from `cwd` and return
-/// (exit_code, stdout) for assertions.
+/// (`exit_code`, stdout) for assertions.
 fn run_lint(cwd: &std::path::Path, extra_args: &[&str]) -> (i32, String) {
     let mut cmd = Command::cargo_bin("chelis").expect("binary");
     cmd.current_dir(cwd);

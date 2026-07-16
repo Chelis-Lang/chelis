@@ -193,9 +193,10 @@ impl ObligationOutcome {
     }
 
     /// The full disclosed qualifier set of this obligation's composed verdict,
-    /// as sorted snake_case strings for the `qualifiers:[...]` JSON array. A
+    /// as sorted `snake_case` strings for the `qualifiers:[...]` JSON array. A
     /// reals-hedged disproof discloses `real_arithmetic` (symmetric to the proof
     /// side); every other non-green outcome discloses none.
+    #[must_use]
     pub fn disclosed_qualifiers(&self) -> Vec<&'static str> {
         if self.composite_verdict == CompositeVerdict::DisprovedModuloRealArithmetic {
             return crate::composition::disclosed_qualifier_strings_for_base(
@@ -316,6 +317,7 @@ pub enum ObligationTier {
 }
 
 impl ObligationTier {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             ObligationTier::Smt => "smt",
@@ -448,6 +450,7 @@ pub fn run_deep_source_obligations(
 /// `sigs` is the checker-inferred def-name -> type map (from
 /// `chelis_types::check_typed_program`). Returns one outcome per
 /// obligation plus one `Error` outcome per collection error.
+#[must_use]
 pub fn run_module_obligations(
     exprs: &[Expr],
     sigs: &BTreeMap<String, Type>,
@@ -1211,6 +1214,7 @@ fn obligation_assumption_records(
 /// for constructor-based generation, computing the inferred signatures
 /// from the program. Used by the user-property injection path (D-INJECT)
 /// so it shares the obligation engine's producer-resolution rules.
+#[must_use]
 pub fn generation_producers_for(
     exprs: &[Expr],
     input_inv: &OpaqueInvariant,
@@ -1268,15 +1272,14 @@ fn generation_producers(
                             _ => None,
                         })
                         .collect();
-                    match lit {
-                        Some(d) => kinds.push(GenParamKind::Tensor {
+                    if let Some(d) = lit {
+                        kinds.push(GenParamKind::Tensor {
                             dims: d,
                             precision: "f32".to_string(),
-                        }),
-                        None => {
-                            raw_ok = false;
-                            break;
-                        }
+                        });
+                    } else {
+                        raw_ok = false;
+                        break;
                     }
                 }
                 // A producer that itself takes the opaque type is
@@ -1461,8 +1464,7 @@ fn module_zero_arg_scalar_defs(exprs: &[Expr]) -> Vec<String> {
                     // A fn with an empty params node.
                     node_children(body)
                         .first()
-                        .map(|p| node_children(p).is_empty())
-                        .unwrap_or(false)
+                        .is_some_and(|p| node_children(p).is_empty())
                 } else {
                     // A non-fn value binding.
                     true
@@ -1560,10 +1562,7 @@ fn literal_const_value(exprs: &[Expr], name: &str) -> Option<f64> {
                 // Zero-arg constant fn: `(fn (params) <lit>)`.
                 if list_tag(body) == Some("fn") {
                     let kids = node_children(body);
-                    if kids
-                        .first()
-                        .map(|p| node_children(p).is_empty())
-                        .unwrap_or(false)
+                    if kids.first().is_some_and(|p| node_children(p).is_empty())
                         && let Some(fn_body) = kids.get(1)
                         && let Some(v) = lit_number(fn_body)
                     {

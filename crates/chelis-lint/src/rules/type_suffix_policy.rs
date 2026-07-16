@@ -80,11 +80,11 @@ const SUFFIXES: &[Suffix] = &[
 ];
 
 impl Rule for TypeSuffixPolicy {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "type-suffix-policy"
     }
 
-    fn spec_ref(&self) -> &str {
+    fn spec_ref(&self) -> &'static str {
         "§7.2"
     }
 
@@ -92,7 +92,7 @@ impl Rule for TypeSuffixPolicy {
         &[Surface::SurfSource]
     }
 
-    fn summary(&self) -> &str {
+    fn summary(&self) -> &'static str {
         "type/shape suffixes (_int/_f32/_bool/_string) describe element type, not container or dispatch form"
     }
 

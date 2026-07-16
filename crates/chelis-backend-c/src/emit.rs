@@ -15,7 +15,7 @@ pub struct CEmitter {
     use_blas: bool,
     /// Which vectorized math library to target for fused-elem SIMD emission (Level 3b).
     math_lib: crate::MathLib,
-    /// FusedElem nodes inlined into a trailing reduction (no standalone emission).
+    /// `FusedElem` nodes inlined into a trailing reduction (no standalone emission).
     reduction_inlined: std::collections::HashSet<usize>,
     /// Backing-slot plan for materialized C tensors.
     memory_plan: MemoryPlan,
@@ -68,6 +68,7 @@ struct FusedInPlaceSpec {
 
 impl CEmitter {
     /// Emit C source for an entire DAG as a function.
+    #[must_use]
     pub fn emit_dag(dag: &Dag, func_name: &str) -> String {
         Self::emit_dag_with_options(dag, func_name, crate::CodegenOptions::default())
     }
@@ -250,8 +251,7 @@ impl CEmitter {
         for (slot, output) in output_specs.iter().enumerate() {
             let is_load = dag
                 .get(output.id)
-                .map(|n| matches!(n.op, RiscOp::Load { .. }))
-                .unwrap_or(false);
+                .is_some_and(|n| matches!(n.op, RiscOp::Load { .. }));
             if output.is_store {
                 e.line(&format!("outputs[{slot}] = t{};", output.id.0));
             } else {
@@ -471,7 +471,7 @@ impl CEmitter {
             // `f64::round_ties_even`. (`roundf` would be ties-away-from-zero.)
             RiscOp::Round => self.emit_unary_func(id, "rintf", &node.inputs, &node.output_type),
             RiscOp::UniformLike { low, high, seed } => {
-                self.emit_uniform_like(id, *low, *high, *seed, &node.output_type)
+                self.emit_uniform_like(id, *low, *high, *seed, &node.output_type);
             }
             RiscOp::Dropout { .. } => {
                 unreachable!("dropout should be rejected before C code generation")
@@ -709,7 +709,7 @@ impl CEmitter {
             .map(String::as_str)
             .filter(|s| node.span_id.as_deref() != Some(*s))
             .collect();
-        merged.sort();
+        merged.sort_unstable();
         merged.dedup();
         for span in merged {
             let safe = chelis_ir::span_sanitize::sanitize_for_comment(span);
@@ -864,8 +864,7 @@ impl CEmitter {
                 if let Some(prev_ty) = seen.get(name.as_str()) {
                     assert_eq!(
                         prev_ty, &node.output_type,
-                        "Load name '{}' used with inconsistent tensor types in C codegen",
-                        name
+                        "Load name '{name}' used with inconsistent tensor types in C codegen"
                     );
                 } else {
                     seen.insert(name.as_str().to_string(), node.output_type.clone());
@@ -960,19 +959,17 @@ impl CEmitter {
                     }
                     let values_ty = &dag.get(node.inputs[0]).unwrap().output_type;
                     let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
-                    if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
-                        panic!(
-                            "C backend sparse gather requires int32/int64 indices, got {} at node {}",
-                            indices_ty.precision.name(),
-                            node.id.0
-                        );
-                    }
-                    if node.output_type.precision != values_ty.precision {
-                        panic!(
-                            "C backend sparse gather output precision must match values at node {}",
-                            node.id.0
-                        );
-                    }
+                    assert!(
+                        matches!(indices_ty.precision, Prim::Int32 | Prim::Int64),
+                        "C backend sparse gather requires int32/int64 indices, got {} at node {}",
+                        indices_ty.precision.name(),
+                        node.id.0
+                    );
+                    assert!(
+                        node.output_type.precision == values_ty.precision,
+                        "C backend sparse gather output precision must match values at node {}",
+                        node.id.0
+                    );
                 }
                 RiscOp::ScatterAdd { .. } => {
                     if node.inputs.len() != 3 {
@@ -981,13 +978,12 @@ impl CEmitter {
                     let target_ty = &dag.get(node.inputs[0]).unwrap().output_type;
                     let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
                     let updates_ty = &dag.get(node.inputs[2]).unwrap().output_type;
-                    if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
-                        panic!(
-                            "C backend sparse scatter_add requires int32/int64 indices, got {} at node {}",
-                            indices_ty.precision.name(),
-                            node.id.0
-                        );
-                    }
+                    assert!(
+                        matches!(indices_ty.precision, Prim::Int32 | Prim::Int64),
+                        "C backend sparse scatter_add requires int32/int64 indices, got {} at node {}",
+                        indices_ty.precision.name(),
+                        node.id.0
+                    );
                     if updates_ty.precision != target_ty.precision
                         || node.output_type.precision != target_ty.precision
                     {
@@ -1004,13 +1000,12 @@ impl CEmitter {
                     let target_ty = &dag.get(node.inputs[0]).unwrap().output_type;
                     let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
                     let updates_ty = &dag.get(node.inputs[2]).unwrap().output_type;
-                    if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
-                        panic!(
-                            "C backend sparse scatter_replace requires int32/int64 indices, got {} at node {}",
-                            indices_ty.precision.name(),
-                            node.id.0
-                        );
-                    }
+                    assert!(
+                        matches!(indices_ty.precision, Prim::Int32 | Prim::Int64),
+                        "C backend sparse scatter_replace requires int32/int64 indices, got {} at node {}",
+                        indices_ty.precision.name(),
+                        node.id.0
+                    );
                     if updates_ty.precision != target_ty.precision
                         || node.output_type.precision != target_ty.precision
                     {
@@ -1346,8 +1341,8 @@ impl CEmitter {
     }
 
     /// Double-precision equivalent of a single-precision C math symbol used
-    /// by the emitter. Only the set we actually route through emit_unary_func
-    /// and emit_binary_func is mapped here; unmapped symbols pass through
+    /// by the emitter. Only the set we actually route through `emit_unary_func`
+    /// and `emit_binary_func` is mapped here; unmapped symbols pass through
     /// unchanged so the emitter never silently renames an unexpected function.
     fn double_math_fn(scalar_f: &str) -> &str {
         match scalar_f {
@@ -2924,16 +2919,15 @@ impl CEmitter {
         // spec/04-type-system.md §5.7.1. The fuse pass currently only
         // produces f32 fused chains in practice; this guard catches a
         // future regression that admits non-f32 fused chains.
-        if !matches!(ty.precision, Prim::F32) {
-            panic!(
-                "WS-A1 / F1: emit_fused_elem path is f32-hardcoded; node {id} has \
-                 output precision `{}`. The silent f32 truncation that would \
-                 result is exactly the destructure-`..` footgun RT-1 surfaced. \
-                 Widen the fused-elem emit path before admitting non-f32 fused \
-                 chains.",
-                ty.precision.name(),
-            );
-        }
+        assert!(
+            matches!(ty.precision, Prim::F32),
+            "WS-A1 / F1: emit_fused_elem path is f32-hardcoded; node {id} has \
+             output precision `{}`. The silent f32 truncation that would \
+             result is exactly the destructure-`..` footgun RT-1 surfaced. \
+             Widen the fused-elem emit path before admitting non-f32 fused \
+             chains.",
+            ty.precision.name(),
+        );
         if let Some(spec) = in_place {
             self.emit_fused_in_place_wrapper(id, ty, spec);
         } else {
@@ -3258,13 +3252,12 @@ impl CEmitter {
         };
         // The IR contract is that the matmul accumulator for bf16/f16
         // operands is f32 (spec §5.7.1). The verifier enforces it.
-        if spec.accumulator != Prim::F32 {
-            panic!(
-                "WS-1: bf16/f16 matmul wrapper expects f32 accumulator per \
-                 spec/04-type-system.md §5.7.1, got `{}` at node {id}",
-                spec.accumulator.name()
-            );
-        }
+        assert!(
+            spec.accumulator == Prim::F32,
+            "WS-1: bf16/f16 matmul wrapper expects f32 accumulator per \
+             spec/04-type-system.md §5.7.1, got `{}` at node {id}",
+            spec.accumulator.name()
+        );
         // Promote operands to contiguous row-major if they don't
         // already satisfy `cblas_sgemm`'s leading-dimension contract.
         // Same shape as the f32/f64 path.
@@ -3871,7 +3864,7 @@ impl CEmitter {
         self.emit_reduce_sum_general(id, axis, inputs, ty, dag);
     }
 
-    /// WS-A1 dtype-parameterized reduce_sum. Drives accumulator type
+    /// WS-A1 dtype-parameterized `reduce_sum`. Drives accumulator type
     /// and zero initializer from `Self::elem_type` /
     /// `Self::scalar_zero_literal` / `Self::fill_zero_call` so every
     /// (operand, accumulator) combo the C backend's helpers know about
@@ -4031,12 +4024,12 @@ impl CEmitter {
         }
     }
 
-    /// WS-A4: integer reduce_sum where the accumulator dtype is wider
+    /// WS-A4: integer `reduce_sum` where the accumulator dtype is wider
     /// than the source dtype (the i8/i16 → i32 promoted path per spec
     /// §5.7.1). `src_c_ty` and `acc_c_ty` are the C type spellings used
     /// for the reinterpret cast on `t->data` and for the accumulator
     /// variable respectively. Output buffer is sized for `acc_c_ty` by
-    /// `chelis_alloc` honoring the `dtype_macro(ty)` value (CHELIS_I32
+    /// `chelis_alloc` honoring the `dtype_macro(ty)` value (`CHELIS_I32`
     /// for the i8/i16 → i32 lowering).
     // WS-A4: dtype-parameterized reduction needs both source and
     // accumulator C-type spellings plus the standard set of
@@ -4133,7 +4126,7 @@ impl CEmitter {
     }
 
     /// WS-1: bf16 / f16 source -> f32 accumulator -> f32 output
-    /// reduce_sum, per spec/04-type-system.md §5.7.1. Loads each
+    /// `reduce_sum`, per spec/04-type-system.md §5.7.1. Loads each
     /// reduced-float source element through `chelis_<x>_to_f32`,
     /// accumulates in `f32`, and writes the result into an f32
     /// destination tensor. The output tensor's dtype IS `CHELIS_F32`
@@ -4304,7 +4297,7 @@ impl CEmitter {
         }
     }
 
-    /// WS-1: bf16 / f16 reduce_max. Per spec §2.3 max_reduce keeps
+    /// WS-1: bf16 / f16 `reduce_max`. Per spec §2.3 `max_reduce` keeps
     /// operand precision, so the output is also bf16 / f16. We load
     /// each operand through `chelis_<x>_to_f32`, fold with `fmaxf`,
     /// and convert the final accumulator back to the operand
@@ -4527,15 +4520,14 @@ impl CEmitter {
         // path reaches here unguarded, abort loudly rather than emit a
         // mis-allocated kernel. See spec/05-risc-primitives.md §2.3.1.
         for (offset, dim) in ty.dims.iter().enumerate().skip(leading) {
-            if Self::known_dim_size(dim).is_none() {
-                panic!(
-                    "emit_reduce_window: node {id} windowed axis {offset} has a \
-                     runtime-only symbolic extent ({dim:?}); the windowed output \
-                     extent floor((d - window) / stride) + 1 is not statically \
-                     representable. This must be rejected before C codegen \
-                     (reject_symbolic_windowed_reduce); reaching emit is a bug."
-                );
-            }
+            assert!(
+                Self::known_dim_size(dim).is_some(),
+                "emit_reduce_window: node {id} windowed axis {offset} has a \
+                 runtime-only symbolic extent ({dim:?}); the windowed output \
+                 extent floor((d - window) / stride) + 1 is not statically \
+                 representable. This must be rejected before C codegen \
+                 (reject_symbolic_windowed_reduce); reaching emit is a bug."
+            );
         }
         let window_volume: usize = window_shape.iter().product();
         self.emit_slot_wrapper(id, ty);
@@ -4591,7 +4583,7 @@ impl CEmitter {
             self.line("}");
         }
         if matches!(reducer, ReduceWindowKind::Mean) {
-            self.line(&format!("acc /= {}.0f;", window_volume));
+            self.line(&format!("acc /= {window_volume}.0f;"));
         }
         self.line(&format!("t{id}->data[outer] = acc;"));
         self.indent -= 1;
@@ -4773,15 +4765,14 @@ impl CEmitter {
         // but the INPUT may be F64; reading f64 storage as float*
         // would silently truncate. Reject loudly until follow-on
         // widens the input read.
-        if !matches!(input_node.output_type.precision, Prim::F32) {
-            panic!(
-                "WS-A1 / F1: emit_reduce_argcmp path is f32-hardcoded; node {id} \
-                 has input precision `{}`. Widening argmax/argmin to non-f32 \
-                 inputs is follow-on work (the F32-encoded output index is \
-                 deliberate per the doc comment).",
-                input_node.output_type.precision.name(),
-            );
-        }
+        assert!(
+            matches!(input_node.output_type.precision, Prim::F32),
+            "WS-A1 / F1: emit_reduce_argcmp path is f32-hardcoded; node {id} \
+             has input precision `{}`. Widening argmax/argmin to non-f32 \
+             inputs is follow-on work (the F32-encoded output index is \
+             deliberate per the doc comment).",
+            input_node.output_type.precision.name(),
+        );
         let init = if is_argmax { "-INFINITY" } else { "INFINITY" };
         let cmp = if is_argmax { ">" } else { "<" };
         let simd_fn = if is_argmax {
@@ -5788,7 +5779,7 @@ mod tests {
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("chelis_flat_to_indices"));
         assert!(c.contains("chelis_indices_to_flat"));
-        assert!(c.contains("+"));
+        assert!(c.contains('+'));
     }
 
     #[test]
@@ -5962,7 +5953,7 @@ mod tests {
         let b = dag.add_node(RiscOp::Const { value: 4.0 }, vec![], scalar_f32(), None);
         dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
-        assert!(c.contains("*"));
+        assert!(c.contains('*'));
     }
 
     #[test]
@@ -6591,7 +6582,7 @@ mod tests {
     // ---- SIMD Level 1b fast-path tests ----
 
     /// Binary add for two contiguous-capable inputs must emit the fast path
-    /// containing restrict pointers, #pragma omp parallel for simd, and chelis_is_contiguous.
+    /// containing restrict pointers, #pragma omp parallel for simd, and `chelis_is_contiguous`.
     #[test]
     fn binary_add_fast_path_emits_restrict_and_simd() {
         let mut dag = Dag::new();
@@ -6614,8 +6605,8 @@ mod tests {
     }
 
     /// When inputs have non-unit strides (via Expand with stride 0),
-    /// chelis_is_contiguous returns false at runtime, so the emitted C must
-    /// include the slow-path chelis_flat_to_indices fallback code.
+    /// `chelis_is_contiguous` returns false at runtime, so the emitted C must
+    /// include the slow-path `chelis_flat_to_indices` fallback code.
     #[test]
     fn binary_add_with_expanded_input_includes_slow_path() {
         let mut dag = Dag::new();

@@ -90,9 +90,9 @@ impl ScalarBits {
     /// already used pre-refactor).
     pub(crate) fn as_i64(&self) -> i64 {
         match self {
-            ScalarBits::I8(v) => *v as i64,
-            ScalarBits::I16(v) => *v as i64,
-            ScalarBits::I32(v) => *v as i64,
+            ScalarBits::I8(v) => i64::from(*v),
+            ScalarBits::I16(v) => i64::from(*v),
+            ScalarBits::I32(v) => i64::from(*v),
             ScalarBits::I64(v) => *v,
             ScalarBits::F16(v) => f32::from(*v) as i64,
             ScalarBits::Bf16(v) => f32::from(*v) as i64,
@@ -106,13 +106,13 @@ impl ScalarBits {
     /// double semantics, which is what the pre-refactor host lane did).
     pub(crate) fn as_f64(&self) -> f64 {
         match self {
-            ScalarBits::I8(v) => *v as f64,
-            ScalarBits::I16(v) => *v as f64,
-            ScalarBits::I32(v) => *v as f64,
+            ScalarBits::I8(v) => f64::from(*v),
+            ScalarBits::I16(v) => f64::from(*v),
+            ScalarBits::I32(v) => f64::from(*v),
             ScalarBits::I64(v) => *v as f64,
-            ScalarBits::F16(v) => f32::from(*v) as f64,
-            ScalarBits::Bf16(v) => f32::from(*v) as f64,
-            ScalarBits::F32(v) => *v as f64,
+            ScalarBits::F16(v) => f64::from(f32::from(*v)),
+            ScalarBits::Bf16(v) => f64::from(f32::from(*v)),
+            ScalarBits::F32(v) => f64::from(*v),
             ScalarBits::F64(v) => *v,
         }
     }
@@ -377,6 +377,7 @@ impl RuntimeValue {
     }
 
     /// View this value as i64 if it is an integer-typed scalar.
+    #[must_use]
     pub fn as_i64(&self) -> Option<i64> {
         match self {
             RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
@@ -388,6 +389,7 @@ impl RuntimeValue {
 
     /// View this value as f64 if it is a float-typed scalar. Mirrors
     /// `as_i64` for the float row.
+    #[must_use]
     pub fn as_f64(&self) -> Option<f64> {
         match self {
             RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
@@ -398,6 +400,7 @@ impl RuntimeValue {
     }
 
     /// View this value as a bool if it is a [`RuntimeValue::Bool`].
+    #[must_use]
     pub fn as_bool(&self) -> Option<bool> {
         match self {
             RuntimeValue::Bool(value) => Some(*value),
@@ -409,6 +412,7 @@ impl RuntimeValue {
     /// Read accessor for the decode chokepoint's consumers; field names are
     /// available via the public `RuntimeValue::Adt { field_names, .. }`
     /// variant binding when needed.
+    #[must_use]
     pub fn as_adt(&self) -> Option<(&str, &[RuntimeValue])> {
         match self {
             RuntimeValue::Adt { ctor, fields, .. } => Some((ctor.as_str(), fields.as_slice())),
@@ -871,7 +875,7 @@ fn get_meta(list: &List) -> Option<&MetaMap> {
 
 /// Extract the primitive dtype written into a `(lit {type: ...})` meta
 /// by the type checker, if any. Returns `None` for non-primitive type
-/// metadata (e.g. tensor literal types) or missing metadata; eval_lit
+/// metadata (e.g. tensor literal types) or missing metadata; `eval_lit`
 /// then falls back to the spec §5.3 literal default.
 fn lit_meta_prim(meta: &MetaMap) -> Option<Prim> {
     let (_, ty_expr) = meta.entries.iter().find(|(k, _)| k == "type")?;

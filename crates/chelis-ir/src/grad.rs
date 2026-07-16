@@ -80,6 +80,7 @@ pub enum AdError {
 
 impl AdError {
     /// Construct a `NotSupported` error.
+    #[must_use]
     pub fn not_supported(op: &'static str, reason: AdRejectionReason) -> Self {
         AdError::NotSupported { op, reason }
     }
@@ -364,6 +365,7 @@ fn stamp_grad_marker(dag: &mut Dag, dag_size_before: usize, forward_node: &DagNo
 /// Run reverse-mode AD on `forward`, differentiating `output` with respect to each node in `wrt`.
 ///
 /// Returns `None` if the forward DAG is empty or the output node doesn't exist.
+#[must_use]
 pub fn grad_dag(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<GradResult> {
     grad_dag_result(forward, output, wrt).ok()
 }
@@ -1429,14 +1431,13 @@ fn compute_adjoints(
                             continue;
                         }
                         let src_axis = if j <= axis { j } else { j - 1 };
-                        match static_dim(dim) {
-                            Some(n) => targets.push(RtDim::Lit(n)),
-                            None => {
-                                let read = shape_scalar(dag, cur, src_axis);
-                                let slot = inputs.len();
-                                inputs.push(read);
-                                targets.push(RtDim::Node(slot));
-                            }
+                        if let Some(n) = static_dim(dim) {
+                            targets.push(RtDim::Lit(n));
+                        } else {
+                            let read = shape_scalar(dag, cur, src_axis);
+                            let slot = inputs.len();
+                            inputs.push(read);
+                            targets.push(RtDim::Node(slot));
                         }
                     }
                     (targets, inputs)
@@ -1493,16 +1494,15 @@ fn compute_adjoints(
                             targets.push(RtDim::Node(slot));
                             continue;
                         }
-                        match static_dim(dim) {
-                            Some(n) => targets.push(RtDim::Lit(n)),
-                            None => {
-                                // Bystander runtime axis: same extent as the
-                                // pre-split cotangent's axis `j`.
-                                let read = shape_scalar(dag, cur, j);
-                                let slot = inputs.len();
-                                inputs.push(read);
-                                targets.push(RtDim::Node(slot));
-                            }
+                        if let Some(n) = static_dim(dim) {
+                            targets.push(RtDim::Lit(n));
+                        } else {
+                            // Bystander runtime axis: same extent as the
+                            // pre-split cotangent's axis `j`.
+                            let read = shape_scalar(dag, cur, j);
+                            let slot = inputs.len();
+                            inputs.push(read);
+                            targets.push(RtDim::Node(slot));
                         }
                     }
                     (targets, inputs)
@@ -3806,10 +3806,10 @@ mod tests {
     ///
     /// Input: [2, 0, 4, 5]
     /// prod = 0
-    /// ∂prod/∂x_0 = 0*4*5 = 0
-    /// ∂prod/∂x_1 = 2*4*5 = 40   (the interesting one — nonzero even though x_1=0)
-    /// ∂prod/∂x_2 = 2*0*5 = 0
-    /// ∂prod/∂x_3 = 2*0*4 = 0
+    /// ∂`prod/∂x_0` = 0*4*5 = 0
+    /// ∂`prod/∂x_1` = 2*4*5 = 40   (the interesting one — nonzero even though `x_1=0`)
+    /// ∂`prod/∂x_2` = 2*0*5 = 0
+    /// ∂`prod/∂x_3` = 2*0*4 = 0
     #[test]
     fn adv_prod_reduce_gradient_with_zero_element() {
         use crate::eval::{TensorValue, eval_tensor};
@@ -4061,7 +4061,7 @@ mod tests {
     // ---- ADVERSARIAL TESTS: missing coverage from red-team spec ----
 
     /// abs(x) at x=0 must give exactly 0.0 (sign convention: sign(0) = 0).
-    /// This is NOT covered by grad_abs_positive (x=2.0) or grad_abs_negative (x=-2.0).
+    /// This is NOT covered by `grad_abs_positive` (x=2.0) or `grad_abs_negative` (x=-2.0).
     #[test]
     fn adv_grad_abs_at_zero_is_zero() {
         let (dag, x, out) =
@@ -4149,7 +4149,7 @@ mod tests {
     }
 
     /// floor must give a CLEAN structured error, not a silent zero gradient.
-    /// Pattern-matches on the AdError enum, not the rendered string.
+    /// Pattern-matches on the `AdError` enum, not the rendered string.
     #[test]
     fn adv_floor_grad_dag_checked_error_is_not_silent_zero() {
         let (dag, x, out) =
@@ -4367,7 +4367,7 @@ mod tests {
         assert_eq!(values[&grad_node].data, vec![1.0, 0.0, 1.0, 0.0, 1.0]);
     }
 
-    /// ProdReduce along the concrete axis of a `[batch, 3]` input: backward
+    /// `ProdReduce` along the concrete axis of a `[batch, 3]` input: backward
     /// construction must succeed and the per-slice Shrinks must carry the
     /// sentinel on the symbolic bystander axis.
     #[test]
@@ -4418,7 +4418,7 @@ mod tests {
         );
     }
 
-    /// NEGATIVE PARITY: prod_reduce along the SYMBOLIC axis needs one slice
+    /// NEGATIVE PARITY: `prod_reduce` along the SYMBOLIC axis needs one slice
     /// per runtime element; stays fail-closed loud.
     #[test]
     #[should_panic(expected = "prod_reduce adjoint requires a concrete axis size")]

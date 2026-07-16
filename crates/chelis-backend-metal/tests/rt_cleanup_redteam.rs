@@ -1,4 +1,4 @@
-//! RT-Cleanup adversarial tests for WS-2 (Metal emit_const f16/bf16
+//! RT-Cleanup adversarial tests for WS-2 (Metal `emit_const` f16/bf16
 //! host-fill fix). Runs on Linux without a Metal toolchain since the
 //! attack surface is the string shape of the emitted Objective-C++
 //! source. The macOS compile-and-run gate lives in
@@ -105,8 +105,7 @@ fn rt_metal_emit_const_bf16_host_block_has_no_bfloat_token() {
     let after = &src[pos..];
     let next_node = after[const_marker.len()..]
         .find("// node ")
-        .map(|off| const_marker.len() + off)
-        .unwrap_or(after.len());
+        .map_or(after.len(), |off| const_marker.len() + off);
     let fill_block = &after[..next_node];
     assert!(
         !fill_block.contains("bfloat"),

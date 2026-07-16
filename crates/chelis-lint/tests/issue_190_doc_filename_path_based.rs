@@ -2,7 +2,7 @@
 //!
 //! `doc-filename-convention` previously classified any `.md` under
 //! `docs/` into one of two disjoint slots based solely on `book.toml`
-//! ancestry: snake_case (§8.3) when no `book.toml` ancestor existed,
+//! ancestry: `snake_case` (§8.3) when no `book.toml` ancestor existed,
 //! kebab-case (§8.5) when one did. The discriminator was retroactive:
 //! dropping a `book.toml` into `docs/` flipped every narrative
 //! `docs/foo_bar.md` from accepted to rejected (and vice versa when

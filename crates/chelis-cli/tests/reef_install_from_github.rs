@@ -319,13 +319,12 @@ fn lib_install_from_github(
     let prior_path = std::env::var_os("PATH");
     unsafe {
         std::env::set_var("CHELIS_REEF_GITHUB_BASE_API", api_base_url);
-        match token {
-            Some(t) => std::env::set_var("GITHUB_TOKEN", t),
-            None => {
-                std::env::remove_var("GITHUB_TOKEN");
-                // Empty PATH so `gh auth token` fallback is unreachable.
-                std::env::set_var("PATH", "");
-            }
+        if let Some(t) = token {
+            std::env::set_var("GITHUB_TOKEN", t);
+        } else {
+            std::env::remove_var("GITHUB_TOKEN");
+            // Empty PATH so `gh auth token` fallback is unreachable.
+            std::env::set_var("PATH", "");
         }
     }
     let result = chelis_reef::install_from_github(spec, registry_root);
@@ -369,24 +368,22 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn file_lock() -> std::sync::MutexGuard<'static, ()> {
     ENV_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Count entries directly under `$TMPDIR` whose names start with
 /// `.tmp` — the prefix `tempfile::tempdir()` uses. Comparing before
 /// and after a fetch lets the oracle assert the tempdir was removed.
 fn count_tempfile_entries(root: &Path) -> usize {
-    fs::read_dir(root)
-        .map(|it| {
-            it.filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.file_name()
-                        .to_str()
-                        .is_some_and(|s| s.starts_with(".tmp"))
-                })
-                .count()
-        })
-        .unwrap_or(0)
+    fs::read_dir(root).map_or(0, |it| {
+        it.filter_map(std::result::Result::ok)
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|s| s.starts_with(".tmp"))
+            })
+            .count()
+    })
 }
 
 // ============================================================

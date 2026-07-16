@@ -183,8 +183,7 @@ pub fn save<T: Serialize>(path: &Path, key: [u8; 32], payload: &T) -> Result<(),
         .collect::<String>();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.subsec_nanos());
     let tmp_name = format!(
         ".{}.tmp.{}.{}.{}",
         path.file_name().and_then(|n| n.to_str()).unwrap_or("cache"),
@@ -194,8 +193,7 @@ pub fn save<T: Serialize>(path: &Path, key: [u8; 32], payload: &T) -> Result<(),
     );
     let tmp_path = path
         .parent()
-        .map(|p| p.join(&tmp_name))
-        .unwrap_or_else(|| PathBuf::from(&tmp_name));
+        .map_or_else(|| PathBuf::from(&tmp_name), |p| p.join(&tmp_name));
 
     {
         let mut f = fs::OpenOptions::new()

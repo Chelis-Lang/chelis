@@ -96,7 +96,7 @@ fn find_runtime_library() -> Result<PathBuf, Box<dyn std::error::Error>> {
         exe_dir.parent().map(|p| p.join("deps")).unwrap_or_default(),
         exe_dir
             .parent()
-            .map(|p| p.to_path_buf())
+            .map(std::path::Path::to_path_buf)
             .unwrap_or_default(),
         exe_dir.parent().map(|p| p.join("lib")).unwrap_or_default(),
     ] {
@@ -661,12 +661,12 @@ enum ConformCommand {
         explain: bool,
     },
     /// Scaffold a new shell (or retrofit an existing one) from the embedded
-    /// templates: reef.toml, AGENTS.md (+ CLAUDE.md symlink), the CHELIS_SURFACE
-    /// / UPSTREAM_BUGS docs, tests_neg/tests_blocked, CI, and materialized skills.
+    /// templates: reef.toml, AGENTS.md (+ CLAUDE.md symlink), the `CHELIS_SURFACE`
+    /// / `UPSTREAM_BUGS` docs, `tests_neg/tests_blocked`, CI, and materialized skills.
     Init {
         /// Package name.
         name: String,
-        /// Module namespace (PascalCase).
+        /// Module namespace (`PascalCase`).
         #[arg(long)]
         module_prefix: String,
         /// Output directory (defaults to `./<name>`).
@@ -1205,9 +1205,8 @@ fn run_eval_in_context(
     source: &str,
     json: bool,
 ) -> Result<(), EvalInContextError> {
-    let reef_home = env::var_os("CHELIS_REEF_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(""));
+    let reef_home =
+        env::var_os("CHELIS_REEF_HOME").map_or_else(|| PathBuf::from(""), PathBuf::from);
     // Phase K: route through `load_or_compile_for_package` so the disk
     // cache amortizes cold-compile cost across invocations. On a hit
     // (source unchanged since last run), the library compile is skipped
@@ -1338,17 +1337,16 @@ fn copy_cost_for_file(
     }
 
     let prepared = chelis_reef::prepare_program_for_file(file).map_err(boxed_string_error)?;
-    let (decls, entry_decls, linked_program) = match prepared {
-        Some(prepared) => (prepared.decls, prepared.entry_decls, true),
-        None => {
-            let source = fs::read_to_string(file)?;
-            (
-                chelis_surf::parser::parse_str(&source)
-                    .map_err(|e| format!("{}: {e}", file.display()))?,
-                Vec::new(),
-                false,
-            )
-        }
+    let (decls, entry_decls, linked_program) = if let Some(prepared) = prepared {
+        (prepared.decls, prepared.entry_decls, true)
+    } else {
+        let source = fs::read_to_string(file)?;
+        (
+            chelis_surf::parser::parse_str(&source)
+                .map_err(|e| format!("{}: {e}", file.display()))?,
+            Vec::new(),
+            false,
+        )
     };
     let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
     let entry_deep_exprs = expanded_desugared_program(&entry_decls).map_err(boxed_string_error)?;
@@ -1688,10 +1686,7 @@ fn discover_check_files(target: &Path) -> Result<Vec<PathBuf>, String> {
         // directory checks both surfaces. The per-file `cmd_check_one`
         // routes `.dp` through the Deep ingestion helper; both surfaces
         // emit the same CheckResult JSON shape.
-        let is_checkable = matches!(
-            path.extension().and_then(|e| e.to_str()),
-            Some("ch") | Some("dp")
-        );
+        let is_checkable = matches!(path.extension().and_then(|e| e.to_str()), Some("ch" | "dp"));
         if !is_checkable {
             continue;
         }
@@ -1742,15 +1737,12 @@ fn cmd_check_one_on_grown_stack(
     // `cmd_surf`, `cmd_fmt`, and `copy_cost_for_file`.
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
     if ext.eq_ignore_ascii_case("dp") {
-        let source = match &source {
-            Some(source) => source,
-            None => {
-                let json = synthetic_check_report_with_error(&format!(
-                    "failed to read {}",
-                    file.display()
-                ));
-                return Ok((json, true));
-            }
+        let source = if let Some(source) = &source {
+            source
+        } else {
+            let json =
+                synthetic_check_report_with_error(&format!("failed to read {}", file.display()));
+            return Ok((json, true));
         };
         return cmd_check_one_deep(source, show_inferred);
     }
@@ -1826,20 +1818,19 @@ fn cmd_check_one_on_grown_stack(
             // program. Used when the input is not inside a reef package,
             // when the cache is disabled, or when the non-chelis-std
             // decls do not type-check clean.
-            let decls = match &prepared {
-                Some(prepared) => prepared.decls.clone(),
-                None => {
-                    let source = fs::read_to_string(file)?;
-                    // Wave-1 red-team M1 (#207 follow-up): same handling
-                    // as the prepared-path parse error above, for the
-                    // raw `parse_str` branch used when no reef context
-                    // resolves.
-                    match chelis_surf::parser::parse_str(&source) {
-                        Ok(decls) => decls,
-                        Err(err) => {
-                            let json = synthetic_check_report_with_error(&err.to_string());
-                            return Ok((json, true));
-                        }
+            let decls = if let Some(prepared) = &prepared {
+                prepared.decls.clone()
+            } else {
+                let source = fs::read_to_string(file)?;
+                // Wave-1 red-team M1 (#207 follow-up): same handling
+                // as the prepared-path parse error above, for the
+                // raw `parse_str` branch used when no reef context
+                // resolves.
+                match chelis_surf::parser::parse_str(&source) {
+                    Ok(decls) => decls,
+                    Err(err) => {
+                        let json = synthetic_check_report_with_error(&err.to_string());
+                        return Ok((json, true));
                     }
                 }
             };
@@ -1859,8 +1850,7 @@ fn cmd_check_one_on_grown_stack(
                 typed_program
                     .as_ref()
                     .ok()
-                    .map(format_inferred_signatures_json)
-                    .unwrap_or_else(|| "[]".to_string())
+                    .map_or_else(|| "[]".to_string(), format_inferred_signatures_json)
             } else {
                 String::new()
             };
@@ -2060,8 +2050,7 @@ fn cmd_check_one_deep(
         typed_program
             .as_ref()
             .ok()
-            .map(format_inferred_signatures_json)
-            .unwrap_or_else(|| "[]".to_string())
+            .map_or_else(|| "[]".to_string(), format_inferred_signatures_json)
     } else {
         String::new()
     };
@@ -2292,7 +2281,7 @@ fn format_cli_type(ty: &Type) -> String {
         Type::Ref(inner) => format!("&{}", format_cli_type(inner)),
         Type::Tensor(dims, prim) => {
             let mut parts = dims.iter().map(format_cli_dim).collect::<Vec<_>>();
-            parts.push(prim.name().to_string());
+            parts.push(prim.name().clone());
             format!("tensor[{}]", parts.join(", "))
         }
         Type::Adt(name, args) if args.is_empty() => name.clone(),
@@ -2408,13 +2397,12 @@ fn cmd_build(
     let _linked_guard = prepared
         .is_some()
         .then(chelis_types::install_linked_program_guard);
-    let (decls, entry_decls) = match &prepared {
-        Some(prepared) => (prepared.decls.clone(), prepared.entry_decls.clone()),
-        None => {
-            let source = fs::read_to_string(file)?;
-            let decls = chelis_surf::parser::parse_str(&source)?;
-            (decls.clone(), decls)
-        }
+    let (decls, entry_decls) = if let Some(prepared) = &prepared {
+        (prepared.decls.clone(), prepared.entry_decls.clone())
+    } else {
+        let source = fs::read_to_string(file)?;
+        let decls = chelis_surf::parser::parse_str(&source)?;
+        (decls.clone(), decls)
     };
     // Wave-1 red-team M2 (#207 follow-up): align with `chelis check`
     // and reject a zero-declaration program rather than emitting a
@@ -2476,8 +2464,7 @@ fn cmd_build(
             .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?
             .host
             .as_ref()
-            .map(chelis_ir::host::host_program_requires_host_backend)
-            .unwrap_or(false)
+            .is_some_and(chelis_ir::host::host_program_requires_host_backend)
     } else {
         false
     };
@@ -2625,8 +2612,7 @@ fn cmd_build(
             let host_requires_host_backend = compiled_program
                 .host
                 .as_ref()
-                .map(chelis_ir::host::host_program_requires_host_backend)
-                .unwrap_or(false);
+                .is_some_and(chelis_ir::host::host_program_requires_host_backend);
             // NOTE: for programs without a `main` and with multiple
             // sibling tensor-signature defs, the "preferred" entry falls
             // back to the last fn and silently drops the others. This is a
@@ -2667,8 +2653,7 @@ fn cmd_build(
             let host_requires_host_backend = compiled_program
                 .host
                 .as_ref()
-                .map(chelis_ir::host::host_program_requires_host_backend)
-                .unwrap_or(false);
+                .is_some_and(chelis_ir::host::host_program_requires_host_backend);
             // Same single-entry limitation as HIP: programs without a `main`
             // and with multiple sibling tensor-signature defs fall back to
             // the preferred entry; others are silently dropped. Tracked as
@@ -2756,8 +2741,7 @@ fn cmd_build_deep(
                 .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?
                 .host
                 .as_ref()
-                .map(chelis_ir::host::host_program_requires_host_backend)
-                .unwrap_or(false)
+                .is_some_and(chelis_ir::host::host_program_requires_host_backend)
         } else {
             false
         };
@@ -2870,8 +2854,7 @@ fn cmd_build_deep(
             let host_requires_host_backend = compiled_program
                 .host
                 .as_ref()
-                .map(chelis_ir::host::host_program_requires_host_backend)
-                .unwrap_or(false);
+                .is_some_and(chelis_ir::host::host_program_requires_host_backend);
             let preferred_entry_dag = compiled_program
                 .host
                 .as_ref()
@@ -2907,8 +2890,7 @@ fn cmd_build_deep(
             let host_requires_host_backend = compiled_program
                 .host
                 .as_ref()
-                .map(chelis_ir::host::host_program_requires_host_backend)
-                .unwrap_or(false);
+                .is_some_and(chelis_ir::host::host_program_requires_host_backend);
             let preferred_entry_dag = compiled_program
                 .host
                 .as_ref()
@@ -3243,8 +3225,10 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
             };
             let version = chelis_conformance::audit::audit(&root)
                 .reef_pin
-                .map(|p| p.trim_start_matches('=').to_string())
-                .unwrap_or_else(|| chelis_compiler_api::COMPILER_VERSION.to_string());
+                .map_or_else(
+                    || chelis_compiler_api::COMPILER_VERSION.to_string(),
+                    |p| p.trim_start_matches('=').to_string(),
+                );
             for notice in chelis_conformance::scaffold::materialize_skills(&root)? {
                 eprintln!("note: {notice}");
             }
@@ -3480,8 +3464,7 @@ fn git_ref_resolvable(root: &Path, base: &str) -> bool {
             &format!("{base}^{{commit}}"),
         ])
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 /// Print a conformance audit report as plain text or NDJSON.
@@ -3751,8 +3734,7 @@ fn ensure_pinned_toolchain(version: &str) -> Result<(), Box<dyn std::error::Erro
     if !status.success() {
         let code = status
             .code()
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "signal".to_string());
+            .map_or_else(|| "signal".to_string(), |c| c.to_string());
         return Err(format!(
             "`chelisup install {version}` failed (exit {code}). \
              Install the toolchain manually and re-run `chelis reef setup`."
@@ -3777,7 +3759,7 @@ fn ensure_pinned_toolchain(version: &str) -> Result<(), Box<dyn std::error::Erro
 /// Resolve the `chelisup` binary `reef setup` delegates installs to:
 /// `$CHELISUP_BIN` (the test seam) if it names a non-empty path, else the
 /// installed copy at `<home>/bin/chelisup`, else bare `chelisup` on PATH
-/// (the spawn surfaces a clear NotFound if it is absent).
+/// (the spawn surfaces a clear `NotFound` if it is absent).
 fn chelisup_binary(store: &chelisup::paths::Store) -> PathBuf {
     if let Some(bin) = std::env::var_os("CHELISUP_BIN")
         && !bin.is_empty()
@@ -4005,8 +3987,7 @@ fn check_cargo_lock_at_pin(root: &Path, crates: &[String], version: &str) -> Res
 
 fn cmd_reef_doctor(root: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
     let scan_root = root
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+        .map_or_else(|| PathBuf::from("."), PathBuf::from)
         .canonicalize()
         .map_err(|e| format!("cannot resolve --root: {e}"))?;
 
@@ -4189,9 +4170,7 @@ enum TestJobs {
 impl TestJobs {
     fn resolve(self, test_file_count: usize) -> usize {
         let requested = match self {
-            TestJobs::Auto => std::thread::available_parallelism()
-                .map(usize::from)
-                .unwrap_or(1),
+            TestJobs::Auto => std::thread::available_parallelism().map_or(1, usize::from),
             TestJobs::Count(count) => count,
         };
         requested.max(1).min(test_file_count.max(1))
@@ -4332,8 +4311,7 @@ fn cmd_test(
     } else {
         target
             .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| raw_cwd.clone())
+            .map_or_else(|| raw_cwd.clone(), std::path::Path::to_path_buf)
     };
     let cwd = match chelis_reef::find_package_root_for_dir(&target_dir_for_reef) {
         Ok(Some(root)) => root,
@@ -4548,7 +4526,7 @@ fn cmd_test(
         writeln!(out, "\n{passed} passed, {failed} failed").map_err(|e| e.to_string())?;
     }
 
-    Ok(if failed == 0 { 0 } else { 1 })
+    Ok(i32::from(failed != 0))
 }
 
 /// Run the expected-failure suites (`tests_neg/` / `tests_blocked/`) with
@@ -4623,7 +4601,7 @@ fn run_expect(
         writeln!(out, "\n{ok} ok, {bad} failing ({} mode)", mode.as_str())
             .map_err(|e| e.to_string())?;
     }
-    Ok(if bad == 0 { 0 } else { 1 })
+    Ok(i32::from(bad != 0))
 }
 
 /// Human-readable one-line detail for an expected-failure verdict.
@@ -4989,7 +4967,7 @@ fn run_test_batch_subprocess(
         let message = value
             .get("message")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
         rows.push(TestRow {
             file: file.to_string(),
             test: test.to_string(),
@@ -5529,7 +5507,7 @@ fn estimate_selected_test_count(file: &Path, filter: Option<&str>, rel_display: 
 }
 
 /// Spawn `chelis __test_file <file> --rel-display ... --filter ... --timeout N`
-/// as a subprocess. Capture its NDJSON stdout and parse into TestRows. A
+/// as a subprocess. Capture its NDJSON stdout and parse into `TestRows`. A
 /// child crash (stack overflow, panic in the evaluator) only kills the child;
 /// the parent attributes the loss as a file-level worker crash and moves on.
 fn run_test_file_subprocess(
@@ -5609,7 +5587,7 @@ fn run_test_file_subprocess(
         let message = value
             .get("message")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
         let file_str = value
             .get("file")
             .and_then(|v| v.as_str())
@@ -5771,7 +5749,7 @@ fn cmd_internal_test_file(
         out.flush().map_err(|e| e.to_string())?;
         failed += 1;
     }
-    Ok(if failed == 0 { 0 } else { 1 })
+    Ok(i32::from(failed != 0))
 }
 
 fn load_test_execution_context() -> Result<TestExecutionContext, String> {
@@ -5881,7 +5859,7 @@ fn cmd_internal_test_batch(manifest_path: &Path, timeout: Duration) -> Result<i3
     if let Some(e) = io_err {
         return Err(e);
     }
-    Ok(if failed == 0 { 0 } else { 1 })
+    Ok(i32::from(failed != 0))
 }
 
 fn run_test_batch<F>(
@@ -6265,10 +6243,10 @@ fn compile_check_in_exec_context(
 ) -> Result<(), String> {
     chelis_reef::compile_with_reef_graph(exec_context.reef_graph(), flat_decls)
         .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.clone())
 }
 
-/// Compile the synth_decls once and return a `PreparedEval` handle so
+/// Compile the `synth_decls` once and return a `PreparedEval` handle so
 /// per-test evals share the compile. Routes through the legacy
 /// `compile_with_reef_graph` + `prepare_eval` path for the
 /// `ReefGraph` variant, and `prepare_eval_in_context` for the
@@ -6341,7 +6319,7 @@ fn prepare_eval_in_exec_context(
         TestExecutionContext::ReefGraph(_) => {
             let prepared =
                 chelis_reef::compile_with_reef_graph(exec_context.reef_graph(), synth_decls)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| e.clone())?;
             let source_text = chelis_surf::format::format_program(&prepared.decls);
             // Phase K: `prepare_eval` is deprecated externally but retained
             // as the LocalRegistry fallback path until source_digests grows
@@ -6469,7 +6447,11 @@ fn run_test_with_timeout<T: Send + 'static>(
                     let msg = panic_payload
                         .downcast_ref::<String>()
                         .cloned()
-                        .or_else(|| panic_payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                        .or_else(|| {
+                            panic_payload
+                                .downcast_ref::<&str>()
+                                .map(std::string::ToString::to_string)
+                        })
                         .unwrap_or_else(|| "test panicked (no message)".to_string());
                     Err(format!("panic: {msg}"))
                 }
@@ -6545,7 +6527,7 @@ fn eval_module_init(
 
     match outcome {
         Err(msg) => Some(msg),
-        Ok(Ok(_)) => None,
+        Ok(Ok(())) => None,
         Ok(Err(err)) => Some(
             err.errors
                 .iter()
@@ -7023,7 +7005,7 @@ fn c_backend_supports_precision(precision: chelis_types::types::Prim) -> bool {
 /// The C backend's `codegen_host_program` recursively invokes
 /// `CEmitter::emit_dag_with_options` on every `tensor_helper`'s DAG, which
 /// internally panics on unsupported precisions (`validate_supported_precisions`
-/// at chelis-backend-c::emit). For the DAG-only path the CLI guards the
+/// at `chelis-backend-c::emit`). For the DAG-only path the CLI guards the
 /// panic with `reject_unsupported_c_precisions`; this function does the
 /// same for the host-program lane (RT-4 F4: `def f(x: tensor[3, bf16]) ...`
 /// previously panicked with a Rust stack trace).
@@ -7153,7 +7135,7 @@ fn reject_unsupported_c_precisions_host(
         for param in &function.params {
             check_host_type(&param.ty, &format!("{} param `{}`", context, param.name))?;
         }
-        check_host_type(&function.ret_ty, &format!("{} return", context))?;
+        check_host_type(&function.ret_ty, &format!("{context} return"))?;
         for helper in &function.tensor_helpers {
             check_helper(helper, &context)?;
         }
@@ -7411,9 +7393,7 @@ fn cmd_build_c_result(
     output: Option<&std::path::Path>,
     symbolic_dims: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let out_dir = output
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
+    let out_dir = output.map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf);
     let c_path = if out_dir.extension().and_then(|e| e.to_str()) == Some("c") {
         out_dir.clone()
     } else {
@@ -7467,12 +7447,10 @@ fn cmd_build_hip_host(
     func_name: &str,
     output: Option<&std::path::Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let out_dir = output
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
+    let out_dir = output.map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf);
     let c_path = if matches!(
         out_dir.extension().and_then(|e| e.to_str()),
-        Some("c") | Some("cc") | Some("cpp") | Some("cxx")
+        Some("c" | "cc" | "cpp" | "cxx")
     ) {
         out_dir.clone()
     } else {
@@ -7545,12 +7523,10 @@ fn cmd_build_hip(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let result = chelis_backend_hip::codegen_hip(dag, func_name);
 
-    let out_dir = output
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
+    let out_dir = output.map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf);
     let c_path = if matches!(
         out_dir.extension().and_then(|e| e.to_str()),
-        Some("c") | Some("cc") | Some("cpp") | Some("cxx")
+        Some("c" | "cc" | "cpp" | "cxx")
     ) {
         out_dir.clone()
     } else {
@@ -7596,9 +7572,9 @@ fn cmd_build_hip(
         .compile_flags
         .iter()
         .chain(result.link_flags.iter())
-        .map(|s| s.as_str())
+        .map(std::string::String::as_str)
         .collect();
-    flags.sort();
+    flags.sort_unstable();
     flags.dedup();
     println!(
         "Compile: hipcc {} {} -L{} -lchelis_runtime -lpthread -ldl -o {}",
@@ -7619,12 +7595,10 @@ fn cmd_build_metal(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let result = chelis_backend_metal::codegen_metal(dag, func_name);
 
-    let out_dir = output
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
+    let out_dir = output.map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf);
     let mm_path = if matches!(
         out_dir.extension().and_then(|e| e.to_str()),
-        Some("mm") | Some("cpp") | Some("cxx") | Some("cc")
+        Some("mm" | "cpp" | "cxx" | "cc")
     ) {
         out_dir.clone()
     } else {
@@ -7673,7 +7647,7 @@ fn cmd_build_metal(
         .compile_flags
         .iter()
         .chain(result.link_flags.iter())
-        .map(|s| s.as_str())
+        .map(std::string::String::as_str)
         .collect();
     println!(
         "Compile: clang++ {} -O2 {} -L{} -lchelis_runtime -o {}",
@@ -7752,7 +7726,7 @@ fn run_tide_repl() -> Result<(), Box<dyn std::error::Error>> {
             accumulated_source.push('\n');
             println!("  defined.");
         } else {
-            let eval_source = format!("{}\n__tide_result = {}", accumulated_source, trimmed);
+            let eval_source = format!("{accumulated_source}\n__tide_result = {trimmed}");
             match try_eval(SourceKind::Surf, &eval_source, None) {
                 Ok(result) => println!("= {result}"),
                 Err(e) => eprintln!("error: {e}"),
@@ -7933,7 +7907,7 @@ fn expanded_desugared_program(
 ) -> Result<Vec<chelis_deep::ast::Expr>, String> {
     let deep = chelis_surf::desugar::desugar_program(decls);
     chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
-        .map(|expanded| expanded.into_exprs())
+        .map(chelis_macros::ExpandedProgram::into_exprs)
         .map_err(|err| err.to_string())
 }
 
@@ -7954,8 +7928,7 @@ fn lower_checked_for_cli(
         Err(diagnostic)
             if !diagnostic.fatal
                 && host_program
-                    .map(chelis_ir::host::host_program_requires_host_backend)
-                    .unwrap_or(false) =>
+                    .is_some_and(chelis_ir::host::host_program_requires_host_backend) =>
         {
             Ok(chelis_ir::Dag::new())
         }
@@ -8168,11 +8141,7 @@ fn drop_unreachable_eval_only_defs(
 
     exprs
         .into_iter()
-        .filter(|expr| {
-            deep_named_decl_name(expr)
-                .map(|name| !drop_names.contains(name))
-                .unwrap_or(true)
-        })
+        .filter(|expr| deep_named_decl_name(expr).is_none_or(|name| !drop_names.contains(name)))
         .collect()
 }
 
@@ -8223,8 +8192,7 @@ fn host_display_root_name(full_name: &str, entry_root_names: &[String]) -> Optio
 fn host_display_tuple_root_prefix(full_name: &str, entry_root_names: &[String]) -> Option<String> {
     let terminal = full_name
         .rsplit_once("__")
-        .map(|(_, tail)| tail)
-        .unwrap_or(full_name);
+        .map_or(full_name, |(_, tail)| tail);
     let prefix_dot = format!("{terminal}.");
     entry_root_names
         .iter()
@@ -8517,19 +8485,18 @@ fn cmd_lint(
     // detection failure means "no workspace, no workspace-anchored
     // exceptions", not a second detection mechanism with different
     // semantics.
-    let probe_dir = targets
-        .first()
-        .map(|first| {
+    let probe_dir = targets.first().map_or_else(
+        || PathBuf::from("."),
+        |first| {
             if first.is_dir() {
                 first.clone()
             } else {
                 first
                     .parent()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| PathBuf::from("."))
+                    .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
             }
-        })
-        .unwrap_or_else(|| PathBuf::from("."));
+        },
+    );
     let workspace_root = style_gate::detect_lint_workspace_root(&probe_dir).ok();
     // The exception list is sourced from `style_gate::exceptions()` so
     // the standalone `chelis lint` subcommand and the build-time style
@@ -8584,10 +8551,10 @@ fn cmd_lint(
             match severity {
                 chelis_lint::Severity::Error => error_lines.push(format!("{v}{suffix}")),
                 chelis_lint::Severity::Warning => {
-                    warning_lines.push(format!("warning: {v}{suffix}"))
+                    warning_lines.push(format!("warning: {v}{suffix}"));
                 }
                 chelis_lint::Severity::Advisory => {
-                    advisory_lines.push(format!("advisory: {v}{suffix}"))
+                    advisory_lines.push(format!("advisory: {v}{suffix}"));
                 }
             }
         }
@@ -8624,8 +8591,7 @@ fn rule_severity(rules: &[Box<dyn chelis_lint::Rule>], id: &str) -> chelis_lint:
     rules
         .iter()
         .find(|rule| rule.id() == id)
-        .map(|rule| rule.severity())
-        .unwrap_or(chelis_lint::Severity::Error)
+        .map_or(chelis_lint::Severity::Error, |rule| rule.severity())
 }
 
 /// Apply the workspace-rooted exception list when a workspace root was

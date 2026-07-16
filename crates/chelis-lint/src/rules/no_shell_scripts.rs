@@ -6,11 +6,11 @@ use crate::{Context, Rule, Surface, Violation};
 pub struct NoShellScripts;
 
 impl Rule for NoShellScripts {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "no-shell-scripts"
     }
 
-    fn spec_ref(&self) -> &str {
+    fn spec_ref(&self) -> &'static str {
         "§2.9"
     }
 
@@ -18,7 +18,7 @@ impl Rule for NoShellScripts {
         &[Surface::ShellScript]
     }
 
-    fn summary(&self) -> &str {
+    fn summary(&self) -> &'static str {
         "shell scripts are prohibited; port to Python (CLAUDE.md Scripting Language Policy)"
     }
 

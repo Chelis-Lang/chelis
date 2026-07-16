@@ -177,7 +177,7 @@ fn int64_matmul_helper_specializer_stays_off_blas_path() {
     );
 }
 
-/// Positive regression: F32 matmul MUST still produce BlasMatmul.
+/// Positive regression: F32 matmul MUST still produce `BlasMatmul`.
 /// Prevents an overshooting fix that accidentally rejects F32 too.
 #[test]
 fn f32_matmul_helper_specializer_still_hits_blas_path() {

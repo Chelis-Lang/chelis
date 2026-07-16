@@ -18,7 +18,7 @@
 //!   `(soundness, qualifier_set)` and the underlying evidence.
 //! - [`DischargeEngine`]: the trait each engine implements. cvc5 is one engine
 //!   ([`Cvc5Engine`]) that internally keeps the
-//!   `SmtProperty -> SmtExpr -> Solver` pipeline, so the SmtExpr lowering sites
+//!   `SmtProperty -> SmtExpr -> Solver` pipeline, so the `SmtExpr` lowering sites
 //!   stay cvc5-internal.
 //!
 //! WI-5 note: [`Goal`] is designed once with the interval-box-input plus
@@ -63,6 +63,7 @@ pub struct IrHandle {
 
 impl IrHandle {
     /// The unpopulated handle used on the Phase 1 cvc5 path.
+    #[must_use]
     pub fn unpopulated() -> Self {
         Self {
             dag_hash: None,
@@ -74,6 +75,7 @@ impl IrHandle {
     /// content hash and the root index this goal's output selects. Reserved for
     /// the WI-3 graph-extraction producer; unused on the cvc5 path. `dag_hash`
     /// is the lowercase-hex sha256 of the serialized artifact bytes.
+    #[must_use]
     pub fn from_wire_dag(dag_hash: String, root_index: u64) -> Self {
         Self {
             dag_hash: Some(dag_hash),
@@ -82,16 +84,19 @@ impl IrHandle {
     }
 
     /// Whether this handle has been populated by a producer.
+    #[must_use]
     pub const fn is_populated(&self) -> bool {
         self.dag_hash.is_some()
     }
 
     /// The content hash of the addressed `WireDag` v1 artifact, if populated.
+    #[must_use]
     pub fn dag_hash(&self) -> Option<&str> {
         self.dag_hash.as_deref()
     }
 
     /// The root index this goal's output selects, if populated.
+    #[must_use]
     pub const fn root_index(&self) -> Option<u64> {
         self.root_index
     }
@@ -165,6 +170,7 @@ fn interval_is_non_empty(lo: f64, hi: f64) -> bool {
 impl Goal {
     /// Build a structured-SMT goal from an existing [`SmtProperty`]. The IR
     /// handle is left unpopulated (the Phase 1 cvc5 path).
+    #[must_use]
     pub fn smt(property: SmtProperty) -> Self {
         Self {
             shape: GoalShape::Smt(property),
@@ -198,6 +204,7 @@ impl Goal {
 
     /// Attach an IR back-reference (WI-3 producer surface; unused on the cvc5
     /// path in Phase 1).
+    #[must_use]
     pub fn with_ir(mut self, ir: IrHandle) -> Self {
         self.ir = ir;
         self
@@ -205,6 +212,7 @@ impl Goal {
 
     /// Borrow the underlying [`SmtProperty`] when this is a structured-SMT
     /// goal, else `None`.
+    #[must_use]
     pub fn as_smt(&self) -> Option<&SmtProperty> {
         match &self.shape {
             GoalShape::Smt(p) => Some(p),
@@ -259,7 +267,7 @@ pub enum Qualifier {
     /// soundness (chelis#422). The legacy `arith_model:"real"` side field
     /// mirrors this qualifier.
     RealArith,
-    /// Carries an independently checkable certificate (e.g. an SoS witness).
+    /// Carries an independently checkable certificate (e.g. an `SoS` witness).
     CertificateBearing,
     /// Established by randomized fuzz sampling only.
     Fuzz,
@@ -276,6 +284,7 @@ pub enum Qualifier {
 }
 
 impl Qualifier {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Qualifier::Exact => "exact",
@@ -331,6 +340,7 @@ pub struct QualifierSet {
 }
 
 impl QualifierSet {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -351,10 +361,12 @@ impl QualifierSet {
         }
     }
 
+    #[must_use]
     pub fn contains(&self, q: Qualifier) -> bool {
         self.qualifiers.binary_search(&q).is_ok()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.qualifiers.is_empty()
     }
@@ -364,6 +376,7 @@ impl QualifierSet {
     }
 
     /// Union with another set (WI-6 rollup primitive).
+    #[must_use]
     pub fn union(&self, other: &Self) -> Self {
         let mut out = self.clone();
         for q in other.iter() {
@@ -450,24 +463,29 @@ impl Discharge {
         })
     }
 
+    #[must_use]
     pub fn soundness(&self) -> Soundness {
         self.soundness
     }
 
+    #[must_use]
     pub fn qualifier_set(&self) -> &QualifierSet {
         &self.qualifier_set
     }
 
+    #[must_use]
     pub fn result(&self) -> &TierBResult {
         &self.result
     }
 
     /// Consume the discharge, returning the underlying tier-B result. Lets the
     /// migrated callers keep their exact `match` on `TierBResult` unchanged.
+    #[must_use]
     pub fn into_result(self) -> TierBResult {
         self.result
     }
 
+    #[must_use]
     pub fn evidence(&self) -> &serde_json::Value {
         &self.evidence
     }
@@ -517,6 +535,7 @@ impl Discharge {
 /// This is what lets the dispatcher fall through cvc5 -> Z3 without one engine
 /// laundering the other's guarantee: neither can mint a stronger badge than
 /// this shared classification allows.
+#[must_use]
 pub fn classify_smt_outcome(result: &TierBResult) -> (Soundness, QualifierSet) {
     match result {
         TierBResult::Proved | TierBResult::Disproved(_) => (

@@ -197,9 +197,9 @@ fn spec_correct_program_fitness_1() {
 #[test]
 fn spec_precision_mismatch_is_error() {
     // add(tensor[n, f32], tensor[n, bf16]) should produce PrecisionMismatch.
-    let surf_src = r#"
+    let surf_src = r"
 def bad(a: tensor[n, f32], b: tensor[n, bf16]): tensor[n, f32] = add(a, b)
-    "#;
+    ";
     let decls = chelis_surf::parser::parse_str(surf_src).expect("Surf parse failed");
     let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
     let result = chelis_types::infer_program(&deep_exprs);
@@ -218,9 +218,9 @@ def bad(a: tensor[n, f32], b: tensor[n, bf16]): tensor[n, f32] = add(a, b)
 #[test]
 fn spec_dimension_mismatch_is_error() {
     // add(tensor[batch, f32], tensor[seq, f32]) should produce DimensionMismatch.
-    let surf_src = r#"
+    let surf_src = r"
 def bad(a: tensor[batch, f32], b: tensor[seq, f32]): tensor[batch, f32] = add(a, b)
-    "#;
+    ";
     let decls = chelis_surf::parser::parse_str(surf_src).expect("Surf parse failed");
     let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
     let result = chelis_types::infer_program(&deep_exprs);
@@ -238,9 +238,9 @@ def bad(a: tensor[batch, f32], b: tensor[seq, f32]): tensor[batch, f32] = add(a,
 
 #[test]
 fn spec_unbound_variable_is_error() {
-    let src = r#"
+    let src = r"
         (def {} y (app {} (var {} nonexistent_function) (lit {type: (t-prim {} f32)} 1.0)))
-    "#;
+    ";
     let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
     let result = chelis_types::infer_program(&exprs);
     let has_unbound = result
@@ -260,11 +260,11 @@ fn spec_unbound_variable_is_error() {
 
 #[test]
 fn spec_relu_decomposes_to_max_elem() {
-    let src = r#"
+    let src = r"
         (def {} x (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))
         (def {} y (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
             (var {} relu) (var {} x)))
-    "#;
+    ";
     let dag = lower_deep(src);
     let has_max_elem = dag.nodes().iter().any(|n| matches!(n.op, RiscOp::MaxElem));
     let has_const_zero = dag
@@ -285,12 +285,12 @@ fn spec_relu_decomposes_to_max_elem() {
 
 #[test]
 fn spec_sub_decomposes_to_add_neg() {
-    let src = r#"
+    let src = r"
         (def {} a (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} a))
         (def {} b (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} b))
         (def {} c (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
             (var {} sub) (var {} a) (var {} b)))
-    "#;
+    ";
     let dag = lower_deep(src);
     let has_add = dag.nodes().iter().any(|n| matches!(n.op, RiscOp::Add));
     let has_neg = dag.nodes().iter().any(|n| matches!(n.op, RiscOp::Neg));
@@ -300,11 +300,11 @@ fn spec_sub_decomposes_to_add_neg() {
 
 #[test]
 fn spec_sigmoid_decomposes() {
-    let src = r#"
+    let src = r"
         (def {} x (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))
         (def {} y (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
             (var {} sigmoid) (var {} x)))
-    "#;
+    ";
     let dag = lower_deep(src);
     // sigmoid(x) = recip(1 + exp(-x)) decomposes to Exp + Neg + Add
     // + Recip (4 ops). An `exp(neg(log(_)))` reciprocal chain would
@@ -331,12 +331,12 @@ fn spec_sigmoid_decomposes() {
 
 #[test]
 fn spec_matmul_decomposes() {
-    let src = r#"
+    let src = r"
         (def {} a (var {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} a))
         (def {} b (var {type: (t-tensor {} (d-lit {} 3) (d-lit {} 2) (t-prim {} f32))} b))
         (def {} c (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))}
             (var {} matmul) (var {} a) (var {} b)))
-    "#;
+    ";
     let dag = lower_deep(src);
     let has_expand = dag
         .nodes()
@@ -363,8 +363,7 @@ fn gcc_available() -> bool {
     Command::new(chelis_backend_c::toolchain::c_compiler())
         .arg("--version")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 fn runtime_src_dir() -> std::path::PathBuf {
@@ -394,8 +393,9 @@ fn runtime_library_path() -> std::path::PathBuf {
                 if path
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
+                    .is_some_and(|name| {
+                        name.starts_with("libchelis_runtime") && name.ends_with(".a")
+                    })
                 {
                     return path;
                 }
@@ -709,13 +709,13 @@ fn spec_grad_composed_chain() {
 
 #[test]
 fn spec_vmap_grad_matches_per_example_loop_baseline() {
-    let src = r#"
+    let src = r"
 def loss(x: tensor[features, f32]) -> tensor[f32] =
   sum(mul(copy(x), x), 0)
 
 def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] =
   vmap(grad(loss))(xs)
-"#;
+";
     let compiled = compile_surf(src).expect("vmap(grad(...)) program should compile");
     let root = compiled.root_nodes["per_example_grad"];
     let xs = TensorValue::from_vec(
@@ -796,7 +796,7 @@ def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features
 
 #[test]
 fn spec_vmap_grad_multiple_wrt_matches_per_example_loop_baseline() {
-    let vmapped_src = r#"
+    let vmapped_src = r"
 def loss(
   x: tensor[4, f32],
   w: tensor[4, f32],
@@ -810,7 +810,7 @@ def per_example_grads(
   vs: tensor[3, 4, f32]
 ) -> (tensor[3, 4, f32], tensor[3, 4, f32]) =
   vmap(grad(loss, wrt=(w, v)))(xs, ws, vs)
-"#;
+";
     let vmapped = compile_surf(vmapped_src).expect("vmapped multi-wrt grad program should compile");
     let dw_root = vmapped.root_nodes["per_example_grads.0"];
     let dv_root = vmapped.root_nodes["per_example_grads.1"];
@@ -844,7 +844,7 @@ def per_example_grads(
     let actual_dw = vmapped_values[&dw_root].clone();
     let actual_dv = vmapped_values[&dv_root].clone();
 
-    let single_src = r#"
+    let single_src = r"
 def loss(
   x: tensor[4, f32],
   w: tensor[4, f32],
@@ -855,7 +855,7 @@ def loss(
 def grads(x: tensor[4, f32], w: tensor[4, f32], v: tensor[4, f32])
     -> (tensor[4, f32], tensor[4, f32]) =
   grad(loss, wrt=(w, v))(x, w, v)
-"#;
+";
     let single =
         compile_surf(single_src).expect("single-example multi-wrt grad program should compile");
     let single_dw_root = single.root_nodes["grads.0"];
@@ -905,12 +905,12 @@ fn spec_eval_matmul_correct() {
     // 2x3 @ 3x2 => 2x2, using known values.
     // A = [[1,2,3],[4,5,6]], B = [[7,8],[9,10],[11,12]]
     // Expected: [[58,64],[139,154]]
-    let src = r#"
+    let src = r"
         (def {} a (var {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} a))
         (def {} b (var {type: (t-tensor {} (d-lit {} 3) (d-lit {} 2) (t-prim {} f32))} b))
         (def {} c (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))}
             (var {} matmul) (var {} a) (var {} b)))
-    "#;
+    ";
     let dag = lower_deep(src);
 
     let mut inputs = HashMap::new();
@@ -933,11 +933,11 @@ fn spec_eval_matmul_correct() {
 
 #[test]
 fn spec_eval_softmax_sums_to_one() {
-    let src = r#"
+    let src = r"
         (def {} x (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))
         (def {} y (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
             (var {} softmax) (var {} x) (lit {} 0)))
-    "#;
+    ";
     let dag = lower_deep(src);
 
     let mut inputs = HashMap::new();
@@ -968,11 +968,11 @@ fn spec_eval_softmax_sums_to_one() {
 
 #[test]
 fn spec_eval_relu_preserves_positive() {
-    let src = r#"
+    let src = r"
         (def {} x (var {type: (t-tensor {} (d-lit {} 5) (t-prim {} f32))} x))
         (def {} y (app {type: (t-tensor {} (d-lit {} 5) (t-prim {} f32))}
             (var {} relu) (var {} x)))
-    "#;
+    ";
     let dag = lower_deep(src);
 
     let mut inputs = HashMap::new();

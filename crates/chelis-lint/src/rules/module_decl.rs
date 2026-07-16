@@ -26,6 +26,7 @@ pub struct ModuleDecl {
 }
 
 /// Find every `module Foo.Bar` declaration in `source`.
+#[must_use]
 pub fn find_module_decls(source: &str) -> Vec<ModuleDecl> {
     let mut out = Vec::new();
     for caps in module_re().captures_iter(source) {
@@ -36,7 +37,10 @@ pub fn find_module_decls(source: &str) -> Vec<ModuleDecl> {
             .filter(|&b| b == b'\n')
             .count()
             + 1;
-        let components = path.split('.').map(|s| s.to_string()).collect();
+        let components = path
+            .split('.')
+            .map(std::string::ToString::to_string)
+            .collect();
         out.push(ModuleDecl { line, components });
     }
     out

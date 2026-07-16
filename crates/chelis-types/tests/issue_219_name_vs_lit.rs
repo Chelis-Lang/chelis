@@ -63,10 +63,10 @@ fn issue_219_named_dim_sig_accepts_concrete_caller_via_load_lit() {
     // f32]) = f(copy(x))`, then the literal-dim test reduces to
     // Name <-> Lit at the parameter unification point.
     let errors = typecheck_surf(
-        r#"
+        r"
 def f(x: tensor[batch, hidden, f32]) -> tensor[batch, hidden, f32] = copy(x)
 def caller(x: &tensor[1, 3, f32]) -> tensor[1, 3, f32] = f(copy(x))
-"#,
+",
     );
     assert!(
         errors.is_empty(),
@@ -81,10 +81,10 @@ fn issue_219_named_dim_sig_accepts_concrete_caller_symmetric() {
     // calling function gives a `Name`-typed value. The arm must work
     // in both orientations.
     let errors = typecheck_surf(
-        r#"
+        r"
 def f(x: tensor[3, 5, f32]) -> tensor[3, 5, f32] = copy(x)
 def g(y: &tensor[batch, hidden, f32]) -> tensor[3, 5, f32] = f(copy(y))
-"#,
+",
     );
     assert!(
         errors.is_empty(),
@@ -99,9 +99,9 @@ fn issue_219_distinct_names_still_reject() {
     // Returning a `tensor[seq, ...]` from a body declared to return
     // `tensor[batch, ...]` must still be a TypeMismatch / DimensionMismatch.
     let errors = typecheck_surf(
-        r#"
+        r"
 def f(a: &tensor[batch, f32], b: &tensor[seq, f32]) -> tensor[batch, f32] = copy(b)
-"#,
+",
     );
     assert!(
         any_dim_or_type_mismatch(&errors) && any_error_mentions(&errors, "batch"),
@@ -115,9 +115,9 @@ fn issue_219_distinct_lits_still_reject() {
     // Regression-lock: `Lit(2)` vs `Lit(3)` still errors. The
     // permissive arm only covers Name<->Lit, not Lit<->Lit.
     let errors = typecheck_surf(
-        r#"
+        r"
 def f(x: &tensor[2, f32]) -> tensor[3, f32] = copy(x)
-"#,
+",
     );
     assert!(
         any_dim_or_type_mismatch(&errors),
@@ -138,10 +138,10 @@ fn issue_219_shared_var_across_two_args_still_couples() {
     // the test should fail with a body-signature mismatch because the
     // declared return is `tensor[n, p]` (i.e. dim of first param).
     let errors = typecheck_surf(
-        r#"
+        r"
 def f[n, p](x: &tensor[n, p], y: &tensor[n, p]) -> tensor[n, p] = copy(y)
 def caller(a: &tensor[2, f32], b: &tensor[3, f32]) -> tensor[2, f32] = f(copy(a), copy(b))
-"#,
+",
     );
     assert!(
         !errors.is_empty(),

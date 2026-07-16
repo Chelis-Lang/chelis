@@ -67,10 +67,9 @@ fn build_test_archive(name: &str, version: &str, deps: &[(&str, &str)]) -> Vec<u
         r#"[package]
 name = "{name}"
 version = "{version}"
-compiler = "{compiler}"
+compiler = "{CURRENT_COMPILER_PIN}"
 module_prefix = "Test"
 {deps_toml}"#,
-        compiler = CURRENT_COMPILER_PIN,
     );
     let main_text = "module Test.Main\n\nexport (placeholder)\ndef placeholder -> int32 = 0\n";
     let mut tar_bytes = Vec::new();
@@ -274,7 +273,7 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn file_lock() -> std::sync::MutexGuard<'static, ()> {
     ENV_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Read `index.json` and assert the synthetic nautilus@0.2.0 was

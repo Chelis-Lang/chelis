@@ -395,10 +395,7 @@ fn eval_bool_in_module(
     // Inject into the module that defines the first opaque type (any will
     // do; binders are constructed via that module's ctors). If there are
     // none, append at top level.
-    let type_name = invariants
-        .first()
-        .map(|i| i.type_name.as_str())
-        .unwrap_or("");
+    let type_name = invariants.first().map_or("", |i| i.type_name.as_str());
     let stripped: Vec<Expr> = exprs.iter().map(strip_invariant_meta).collect();
     let program = inject_into_module(&stripped, type_name, probe_def);
     let source = chelis_deep::printer::print_canonical(&program);

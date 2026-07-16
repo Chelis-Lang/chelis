@@ -77,8 +77,7 @@ fn hipcc_available() -> bool {
     Command::new("hipcc")
         .arg("--version")
         .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|out| out.status.success())
 }
 
 fn hip_runtime_src_dir() -> PathBuf {
@@ -101,8 +100,9 @@ fn cpu_runtime_library_path() -> PathBuf {
             entries.flatten().map(|entry| entry.path()).find(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
+                    .is_some_and(|name| {
+                        name.starts_with("libchelis_runtime") && name.ends_with(".a")
+                    })
             })
         }) {
             return path;
@@ -113,8 +113,9 @@ fn cpu_runtime_library_path() -> PathBuf {
             entries.flatten().map(|entry| entry.path()).find(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
+                    .is_some_and(|name| {
+                        name.starts_with("libchelis_runtime") && name.ends_with(".a")
+                    })
             })
         }) {
             return path;

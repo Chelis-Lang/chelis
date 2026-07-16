@@ -26,14 +26,17 @@ pub struct ExpandedProgram {
 }
 
 impl ExpandedProgram {
+    #[must_use]
     pub fn exprs(&self) -> &[Expr] {
         &self.exprs
     }
 
+    #[must_use]
     pub fn into_exprs(self) -> Vec<Expr> {
         self.exprs
     }
 
+    #[must_use]
     pub fn expansions(&self) -> usize {
         self.expansions
     }
@@ -493,7 +496,7 @@ fn extract_macro_def(expr: &Expr) -> Result<Option<MacroDef>, ExpansionError> {
         .iter()
         .map(|param| {
             symbol_name(param)
-                .map(|name| name.to_string())
+                .map(std::string::ToString::to_string)
                 .ok_or_else(|| ExpansionError::MalformedDefinition {
                     message: format!("defmacro `{name}` params must be symbols"),
                 })
@@ -965,7 +968,7 @@ fn params_blockers(expr: &Expr) -> Vec<String> {
             .filter_map(|param| match param {
                 Expr::Atom(Atom::Symbol(name), _) => Some(name.clone()),
                 Expr::List(param_list, _) if param_list.elements.len() == 2 => {
-                    symbol_name(&param_list.elements[0]).map(|name| name.to_string())
+                    symbol_name(&param_list.elements[0]).map(std::string::ToString::to_string)
                 }
                 _ => None,
             })

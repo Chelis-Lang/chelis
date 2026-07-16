@@ -2,9 +2,9 @@
 //! These test numerical correctness, not just source patterns.
 //!
 //! The generated kernel signature is:
-//!   void func(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out)
-//! The kernel allocates output tensors internally via chelis_alloc.
-//! We link against the chelis_runtime .a to resolve those symbols.
+//!   void `func(chelis_tensor`** inputs, int `n_in`, `chelis_tensor`** outputs, int `n_out`)
+//! The kernel allocates output tensors internally via `chelis_alloc`.
+//! We link against the `chelis_runtime` .a to resolve those symbols.
 
 use chelis_backend_c::{CodegenOptions, MathLib, codegen_with_options};
 use chelis_ir::dag::{Dag, DimInfo, ReduceWindowKind, RiscOp, TensorType};
@@ -30,7 +30,7 @@ fn runtime_include_dir() -> PathBuf {
 ///
 /// `chelis_simd.h` and the generated kernels are arch-aware (`#ifdef
 /// __AVX2__` on x86, `#elif defined(__ARM_NEON)` on ARM, scalar
-/// fallback otherwise). On x86_64 we pass `-mavx2` to exercise the AVX2
+/// fallback otherwise). On `x86_64` we pass `-mavx2` to exercise the AVX2
 /// path; on aarch64 NEON is a baseline ISA feature (so `__ARM_NEON` is
 /// already defined and the NEON path activates with no flag), and
 /// `-mavx2` is an `unsupported option` clang error there. Returning an
@@ -81,21 +81,20 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
     // emits both crate-types declared in chelis-runtime/Cargo.toml,
     // producing the `libchelis_runtime-<hash>.a` artifact the
     // gcc-link harness needs.
-    let hashed = match hashed {
-        Some(path) => path,
-        None => {
-            std::process::Command::new(env!("CARGO"))
-                .args(["build", "-p", "chelis-runtime", "--lib"])
-                .status()
-                .map_err(|e| std::io::Error::other(format!("cargo build chelis-runtime: {e}")))?;
-            find_newest_runtime_archive(&deps_dir)?.ok_or_else(|| {
-                std::io::Error::other(format!(
-                    "no libchelis_runtime-*.a found in {} after explicit `cargo build -p \
-                     chelis-runtime --lib`",
-                    deps_dir.display()
-                ))
-            })?
-        }
+    let hashed = if let Some(path) = hashed {
+        path
+    } else {
+        std::process::Command::new(env!("CARGO"))
+            .args(["build", "-p", "chelis-runtime", "--lib"])
+            .status()
+            .map_err(|e| std::io::Error::other(format!("cargo build chelis-runtime: {e}")))?;
+        find_newest_runtime_archive(&deps_dir)?.ok_or_else(|| {
+            std::io::Error::other(format!(
+                "no libchelis_runtime-*.a found in {} after explicit `cargo build -p \
+                 chelis-runtime --lib`",
+                deps_dir.display()
+            ))
+        })?
     };
     // Use a PID-suffixed tmp filename so concurrent test binaries (this
     // file and dtype_matrix_bf16_f16.rs both call into this helper, and
@@ -500,7 +499,7 @@ fn reduce_window_3x3_dag(reducer: ReduceWindowKind, kernel: &str) -> String {
 }
 
 // Build a contiguous 1x1x3x3 input view holding [[1..9]] row-major.
-const RW_HARNESS_4D_HEADER: &str = r#"
+const RW_HARNESS_4D_HEADER: &str = r"
 static chelis_tensor make_view_1x1x3x3(float* data) {
     chelis_tensor t;
     memset(&t, 0, sizeof(t));
@@ -513,7 +512,7 @@ static chelis_tensor make_view_1x1x3x3(float* data) {
     t.owns_data = 0;
     return t;
 }
-"#;
+";
 
 #[test]
 fn exec_reduce_window_max_matches_evaluator_oracle() {
@@ -626,7 +625,7 @@ fn reduce_window_grad_dag(reducer: ReduceWindowKind, kernel: &str) -> String {
     chelis_backend_c::codegen(&dag, kernel).c_source
 }
 
-const RW_GRAD_HARNESS_HEADER: &str = r#"
+const RW_GRAD_HARNESS_HEADER: &str = r"
 static chelis_tensor make_view_1x1x2x2(float* data) {
     chelis_tensor t;
     memset(&t, 0, sizeof(t));
@@ -639,7 +638,7 @@ static chelis_tensor make_view_1x1x2x2(float* data) {
     t.owns_data = 0;
     return t;
 }
-"#;
+";
 
 #[test]
 fn exec_reduce_window_grad_sum_matches_evaluator_oracle() {
@@ -1275,7 +1274,6 @@ int main() {{
     return got_bits == expected_bits ? 0 : 1;
 }}
 "#,
-        HARNESS_HEADER = HARNESS_HEADER,
     );
 
     let src = &result.c_source;
@@ -2306,7 +2304,7 @@ static chelis_tensor make_view_1d_i16(int16_t* data, int n) {
 
 /// Build a `Load → Op → Op` DAG with two same-precision i8 inputs and
 /// emit the C source. Covers the i8 add path through the dtype-aware
-/// `elem_type` and `dtype_macro`. Tensors are vec_i8(N) so the codegen
+/// `elem_type` and `dtype_macro`. Tensors are `vec_i8(N)` so the codegen
 /// reinterpret-casts `t->data` to `int8_t*`.
 #[test]
 fn exec_i8_add_correct_output() {
@@ -2470,7 +2468,7 @@ int main() {{
     assert!(output.contains("PASS"), "i8 mul wrong output:\n{output}");
 }
 
-/// i16 add: pick values that exercise the int16_t path through the
+/// i16 add: pick values that exercise the `int16_t` path through the
 /// codegen without overflowing. Mirrors `exec_i8_add_correct_output`
 /// for the i16 dtype.
 #[test]
@@ -2529,7 +2527,7 @@ int main() {{
     assert!(output.contains("PASS"), "i16 add wrong output:\n{output}");
 }
 
-/// i8 reduce_sum into the spec-default i32 accumulator (the WS-0
+/// i8 `reduce_sum` into the spec-default i32 accumulator (the WS-0
 /// pinned promotion rule per §5.7.1). 200 ones at i8 source overflows
 /// i8 (max +127); the i32 accumulator + i32 result must yield exactly
 /// 200, no overflow, no panic.
@@ -2590,7 +2588,7 @@ int main() {{
     );
 }
 
-/// i16 reduce_sum into i32: same accumulator-promotion path as i8.
+/// i16 `reduce_sum` into i32: same accumulator-promotion path as i8.
 /// 200 i16 values of 1000 each = 200000 — overflows i16 (max +32767)
 /// but fits in i32. Pin both the source-int16 path and the i32 result.
 #[test]
@@ -2754,7 +2752,7 @@ fn run_cmplt_parity(
     let b_init = fmt_vals(b_vals);
     let exp_init = expected
         .iter()
-        .map(|v| format!("{:.1}f", v))
+        .map(|v| format!("{v:.1}f"))
         .collect::<Vec<_>>()
         .join(", ");
 

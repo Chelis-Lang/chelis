@@ -1072,8 +1072,7 @@ fn build_compile_run(source: &str, name: &str) -> String {
 
     let c_source = format!("{name}.c");
     let needs_blas = fs::read_to_string(out_dir.join(&c_source))
-        .map(|t| t.contains("cblas_sgemm(") || t.contains("\"chelis_blas.h\""))
-        .unwrap_or(false);
+        .is_ok_and(|t| t.contains("cblas_sgemm(") || t.contains("\"chelis_blas.h\""));
     let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
         chelis_backend_c::toolchain::CodegenRequirements {
             wants_openmp: true,
@@ -1136,7 +1135,7 @@ fn build_expecting_failure(source: &str, name: &str) -> String {
 
 /// Build `source` to C and return the generated `<name>.c` file contents
 /// (chelis#469 codegen-determinism oracle). Each call is an independent
-/// `chelis build` subprocess, so two calls exercise two fresh HashMap seeds —
+/// `chelis build` subprocess, so two calls exercise two fresh `HashMap` seeds —
 /// the condition under which the pre-fix non-deterministic tensor-kernel input
 /// ordering surfaced.
 fn build_c_source(source: &str, name: &str) -> String {
@@ -1638,7 +1637,7 @@ fn vmap_over_dim_var_formal_named_reduce_evals_and_matches_backend() {
 /// chelis#351 non-zero-axis arm: `vmap(f, 1)` over the named rank-poly callee
 /// must route through the same formal-typed placeholder synthesis (the batch
 /// `Lit` is inserted at the vmap axis, between the formal's named dims), with
-/// eval-vs-backend agreement. Before the fix this ICEd like the axis-0 form.
+/// eval-vs-backend agreement. Before the fix this `ICEd` like the axis-0 form.
 #[test]
 fn vmap_axis_one_over_rank_poly_named_reduce_evals_and_matches_backend() {
     let source = "def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
@@ -2638,7 +2637,7 @@ fn form3_static_arithmetic_expand_size_matches_backend() {
 /// BUILD-ONLY oracle: unlike the shape-sourced forms, `chelis eval` on this
 /// exact form is blocked by a SEPARATE, PRE-EXISTING checker gap — the checker
 /// annotates a shape-sensitive `expand` app's `type:` metadata for
-/// ShapeSourced sizes but not for `let`-bound Static sizes, so the eval
+/// `ShapeSourced` sizes but not for `let`-bound Static sizes, so the eval
 /// lowering's `assert_ir_typed` rejects it ("shape-sensitive IR app nodes must
 /// carry explicit type metadata"). That is a chelis-types annotation issue,
 /// independent of this #469 IR/backend lowering work; the DAG-level fold is
@@ -2713,7 +2712,7 @@ fn form3_arith_over_shape_expand_size_rejected_at_build() {
 /// (`inputs[0]`/`inputs[1]`) build-to-build — a codegen-determinism-invariant
 /// violation the `bias_broadcast` oracle could otherwise never assert
 /// "byte-identical". Sorting the pre-creation by name makes the kernel ABI
-/// stable. Two independent subprocess builds (each a fresh HashMap seed) must
+/// stable. Two independent subprocess builds (each a fresh `HashMap` seed) must
 /// emit identical `.c`.
 #[test]
 fn form3_bias_broadcast_c_is_byte_deterministic() {

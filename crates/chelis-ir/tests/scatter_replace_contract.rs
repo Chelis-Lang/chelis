@@ -475,7 +475,7 @@ fn scatter_add_ad_path_unchanged_after_scatter_landed() {
 
 /// Part (c) — companion: the verifier accepts `RiscOp::Scatter` with
 /// well-formed shapes and rejects axis-out-of-bounds. Mirrors the
-/// existing ScatterAdd verifier coverage.
+/// existing `ScatterAdd` verifier coverage.
 #[test]
 fn scatter_replace_verifier_rejects_out_of_bounds_axis() {
     let mut dag = Dag::new();

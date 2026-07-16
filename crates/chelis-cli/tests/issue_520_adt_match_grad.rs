@@ -12,7 +12,7 @@
 //! D2 slice (field-wise ADT gradient, eval lane): `grad(f)(Ctor { .. })`
 //! over an ADT argument whose fields are all float tensors returns a
 //! structurally matching gradient value (`Ctor(grad_t, ...)`), the pytree
-//! contract of spec/design/differentiable_language.md Decision 6 / Phase 2.
+//! contract of `spec/design/differentiable_language.md` Decision 6 / Phase 2.
 //! The ADT argument may appear ALONGSIDE plain tensor arguments (the
 //! chelis#520 closing bar `grad(model_forward, wrt=params)(x, params)`):
 //! the result is a tuple whose ADT slot is the field-wise gradient struct
@@ -283,7 +283,7 @@ fn issue_520_d1_static_tag_runtime_field_gradient_flows() {
         xp[i] += h;
         xm[i] -= h;
         let fwd = |xs: &[f64]| {
-            let src = format!("{body}out = fwd_field(to_tensor([{}]))\n", fmt_f32_list(xs),);
+            let src = format!("{body}out = fwd_field(to_tensor([{}]))\n", fmt_f32_list(xs));
             let (stdout, stderr, ok) = eval_program(&src);
             assert!(ok, "forward eval failed: {stderr}");
             parse_scalar(&stdout)

@@ -188,7 +188,7 @@ fn write_release_tarball(base: &Path, ver: &str, slug: &str) {
 
 /// Build and return the path to the real `chelisup` binary that
 /// `reef setup` delegates installs to. The build runs *before* the
-/// assert_cmd resolution: `cargo_bin` panics (rather than returning a
+/// `assert_cmd` resolution: `cargo_bin` panics (rather than returning a
 /// candidate path) when the binary is absent, so a build-on-miss fallback
 /// after it is unreachable, and a fresh target dir (e.g. an isolated
 /// `CARGO_TARGET_DIR`) starts without chelisup built. When it is already

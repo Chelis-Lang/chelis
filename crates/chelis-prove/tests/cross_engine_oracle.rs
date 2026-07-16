@@ -9,7 +9,7 @@
 //!   [`classify_smt_outcome`] guarantees this for any matching outcome).
 //!
 //! The two engines lower the SAME [`SmtExpr`] to the SAME exact-f64 rationals
-//! (`BigRational::from_float`, the #444 cvc5 RealLit fix mirrored in the Z3
+//! (`BigRational::from_float`, the #444 cvc5 `RealLit` fix mirrored in the Z3
 //! lowering), so they reason about IDENTICAL numbers. A divergence here is a
 //! real bug in one lowering, not a modelling difference.
 //!

@@ -15,7 +15,7 @@
 //!      `(double*)t->data`, so subsequent ops produce garbage.
 //!      Authoritative offending code:
 //!        crates/chelis-runtime/src/lib.rs lines 1517, 1538, 1588
-//!        (chelis_nested_list_shape and chelis_flatten_nested_list).
+//!        (`chelis_nested_list_shape` and `chelis_flatten_nested_list`).
 //!
 //!   F2 (BLOCKER): `chelis_host_reshape_tensor` and `emit_cast` hardcode
 //!      `sizeof(float)` in their memcpy regardless of dtype. f64 reshape
@@ -106,8 +106,7 @@ fn gcc_available() -> bool {
     StdCommand::new("gcc")
         .arg("--version")
         .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|out| out.status.success())
 }
 
 fn compile_and_run(work_dir: &Path, c_file: &str, bin_name: &str) -> Option<String> {
@@ -115,8 +114,7 @@ fn compile_and_run(work_dir: &Path, c_file: &str, bin_name: &str) -> Option<Stri
         return None;
     }
     let needs_blas = fs::read_to_string(work_dir.join(c_file))
-        .map(|t| t.contains("cblas_sgemm(") || t.contains("\"chelis_blas.h\""))
-        .unwrap_or(false);
+        .is_ok_and(|t| t.contains("cblas_sgemm(") || t.contains("\"chelis_blas.h\""));
     let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
         chelis_backend_c::toolchain::CodegenRequirements {
             wants_openmp: true,
@@ -154,9 +152,9 @@ fn rt4_f1_f64_literal_storage_must_be_f64() {
     let out_dir = dir.path().join("out");
     write_file(
         &src,
-        r#"x: tensor[3, f64] = [1.1, 2.2, 3.3]
+        r"x: tensor[3, f64] = [1.1, 2.2, 3.3]
 y: tensor[3, f64] = [1.0e-9, 1.0e9, 0.1]
-"#,
+",
     );
     let build = run_build_in(dir.path(), &src, Some(&out_dir));
     assert!(
@@ -195,8 +193,8 @@ fn rt4_f1_i64_literal_storage_must_be_i64() {
     // nearest float to i64::MAX-100).
     write_file(
         &src,
-        r#"x: tensor[3, int64] = [9223372036854775000i64, 200i64, 1i64]
-"#,
+        r"x: tensor[3, int64] = [9223372036854775000i64, 200i64, 1i64]
+",
     );
     let build = run_build_in(dir.path(), &src, Some(&out_dir));
     assert!(build.status.success(), "RT-4 F1: build must succeed");
@@ -216,10 +214,10 @@ fn rt4_f1_f64_add_must_compute_in_f64() {
     let out_dir = dir.path().join("out");
     write_file(
         &src,
-        r#"x: tensor[3, f64] = [1.000000000000001, 2.0, 3.0]
+        r"x: tensor[3, f64] = [1.000000000000001, 2.0, 3.0]
 y: tensor[3, f64] = [1.000000000000001, 2.0, 3.0]
 z: tensor[3, f64] = add(x, y)
-"#,
+",
     );
     let build = run_build_in(dir.path(), &src, Some(&out_dir));
     assert!(build.status.success(), "RT-4 F1: build must succeed");
@@ -239,7 +237,7 @@ z: tensor[3, f64] = add(x, y)
 // regardless of dtype.
 // =====================================================================
 
-/// The host_emit.rs reshape helper must NOT contain a hardcoded
+/// The `host_emit.rs` reshape helper must NOT contain a hardcoded
 /// `sizeof(float)` once F2 is fixed. This is a source-level pin to
 /// catch the regression even on machines where gcc is unavailable.
 #[test]
@@ -304,8 +302,8 @@ fn rt4_f4_c_backend_must_not_panic_on_bf16_input() {
     let src = dir.path().join("bf16_input.ch");
     write_file(
         &src,
-        r#"def my_add(x: tensor[3, bf16], y: tensor[3, bf16]) -> tensor[3, bf16] = add(x, y)
-"#,
+        r"def my_add(x: tensor[3, bf16], y: tensor[3, bf16]) -> tensor[3, bf16] = add(x, y)
+",
     );
     let build = run_build_in(dir.path(), &src, None);
     let stderr = String::from_utf8_lossy(&build.stderr);
@@ -330,8 +328,8 @@ fn rt4_f5_hip_must_admit_bf16_input() {
     let src = dir.path().join("bf16_hip.ch");
     write_file(
         &src,
-        r#"def my_add(x: tensor[3, bf16], y: tensor[3, bf16]) -> tensor[3, bf16] = add(x, y)
-"#,
+        r"def my_add(x: tensor[3, bf16], y: tensor[3, bf16]) -> tensor[3, bf16] = add(x, y)
+",
     );
     let build = run_build_target(dir.path(), &src, "hip");
     let stderr = String::from_utf8_lossy(&build.stderr);
@@ -357,8 +355,8 @@ fn rt4_f5_hip_bf16_matmul_builds_through_hip_target() {
     let src = dir.path().join("bf16_mm.ch");
     write_file(
         &src,
-        r#"def my_mm(x: tensor[3, 4, bf16], y: tensor[4, 5, bf16]) -> tensor[3, 5, bf16] = matmul(x, y)
-"#,
+        r"def my_mm(x: tensor[3, 4, bf16], y: tensor[4, 5, bf16]) -> tensor[3, 5, bf16] = matmul(x, y)
+",
     );
     let build = run_build_target(dir.path(), &src, "hip");
     let stderr = String::from_utf8_lossy(&build.stderr);
@@ -377,8 +375,8 @@ fn rt4_f5_hip_f64_add_builds_through_hip_target() {
     let src = dir.path().join("f64_hip.ch");
     write_file(
         &src,
-        r#"def my_add(x: tensor[3, f64], y: tensor[3, f64]) -> tensor[3, f64] = add(x, y)
-"#,
+        r"def my_add(x: tensor[3, f64], y: tensor[3, f64]) -> tensor[3, f64] = add(x, y)
+",
     );
     let build = run_build_target(dir.path(), &src, "hip");
     let stderr = String::from_utf8_lossy(&build.stderr);
@@ -397,8 +395,8 @@ fn rt4_f5_hip_int8_add_builds_through_hip_target() {
     let src = dir.path().join("int8_hip.ch");
     write_file(
         &src,
-        r#"def my_add(x: tensor[3, int8], y: tensor[3, int8]) -> tensor[3, int8] = add(x, y)
-"#,
+        r"def my_add(x: tensor[3, int8], y: tensor[3, int8]) -> tensor[3, int8] = add(x, y)
+",
     );
     let build = run_build_target(dir.path(), &src, "hip");
     let stderr = String::from_utf8_lossy(&build.stderr);
@@ -422,7 +420,7 @@ fn rt4_f6_metal_runtime_must_not_contain_emdash_in_user_strings() {
     // user-facing.
     for (i, line) in header.lines().enumerate() {
         let has_emdash = line.contains('\u{2014}');
-        let in_fprintf = line.contains("fprintf(") || line.contains("\"");
+        let in_fprintf = line.contains("fprintf(") || line.contains('"');
         if has_emdash && in_fprintf {
             // Allow comment-only em-dashes (lines starting with `*` or
             // `//`). Conservative: only flag when the line is an
@@ -586,10 +584,10 @@ fn rt4_invariant_polymorphic_int_matmul_rejected_through_dead_branch() {
     let src = dir.path().join("dead_int_matmul.ch");
     write_file(
         &src,
-        r#"sig wrap: bool -> &tensor[2, 3, p] -> &tensor[3, 4, p] -> tensor[2, 4, p]
+        r"sig wrap: bool -> &tensor[2, 3, p] -> &tensor[3, 4, p] -> tensor[2, 4, p]
 def wrap(branch, x, y) = if branch then matmul(x, y) else matmul(x, y)
 def use_int(x: &tensor[2, 3, int32], y: &tensor[3, 4, int32]) -> tensor[2, 4, int32] = wrap(false, x, y)
-"#,
+",
     );
     let json = run_check(&src);
     let messages: Vec<String> = json["errors"]
@@ -684,7 +682,7 @@ fn rt4_invariant_float_literal_default_is_f32() {
     );
 }
 
-/// Working: bf16 + f32 add rejected with PrecisionMismatch (no
+/// Working: bf16 + f32 add rejected with `PrecisionMismatch` (no
 /// implicit promotion §5.1).
 #[test]
 fn rt4_invariant_bf16_plus_f32_rejected() {
@@ -707,7 +705,7 @@ fn rt4_invariant_bf16_plus_f32_rejected() {
     );
 }
 
-/// Working: bf16 reduce_sum returns operand precision per §5.7.1
+/// Working: bf16 `reduce_sum` returns operand precision per §5.7.1
 /// (not the f32 accumulator).
 #[test]
 fn rt4_invariant_bf16_reduce_sum_returns_bf16() {
@@ -732,7 +730,7 @@ fn rt4_invariant_bf16_reduce_sum_returns_bf16() {
     );
 }
 
-/// Working: int8 reduce_sum returns int32 per §5.7.1 (accumulator
+/// Working: int8 `reduce_sum` returns int32 per §5.7.1 (accumulator
 /// precision for narrow integers).
 #[test]
 fn rt4_invariant_int8_reduce_sum_returns_int32() {
@@ -759,12 +757,12 @@ fn rt4_invariant_polymorphic_id_specialized_at_multiple_dtypes() {
     let src = dir.path().join("multi_specialize.ch");
     write_file(
         &src,
-        r#"sig poly_id: tensor[n, p] -> tensor[n, p]
+        r"sig poly_id: tensor[n, p] -> tensor[n, p]
 def poly_id(x) = x
 def use_f32(x: tensor[3, f32]) -> tensor[3, f32] = poly_id(x)
 def use_i32(x: tensor[3, int32]) -> tensor[3, int32] = poly_id(x)
 def use_i64(x: tensor[3, int64]) -> tensor[3, int64] = poly_id(x)
-"#,
+",
     );
     let build = run_build_in(dir.path(), &src, Some(&dir.path().join("out")));
     assert!(

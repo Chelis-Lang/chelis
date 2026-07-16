@@ -4,18 +4,18 @@ use serde_json::json;
 mod replace_fixtures;
 
 const HELLO_TENSOR: &str = include_str!("../../../examples/hello_tensor.ch");
-const MATMUL_PROGRAM: &str = r#"a = (a : tensor[2, 3, f32])
+const MATMUL_PROGRAM: &str = r"a = (a : tensor[2, 3, f32])
 b = (b : tensor[3, 4, f32])
 out = (matmul(a, b) : tensor[2, 4, f32])
-"#;
-const LOSS_PROGRAM: &str = r#"x = (x : tensor[4, f32])
+";
+const LOSS_PROGRAM: &str = r"x = (x : tensor[4, f32])
 loss = (mean(x, 0) : tensor[f32])
-"#;
-const NON_SCALAR_PROGRAM: &str = r#"x = (x : tensor[4, f32])
+";
+const NON_SCALAR_PROGRAM: &str = r"x = (x : tensor[4, f32])
 out = (add(copy(x), x) : tensor[4, f32])
-"#;
-const SIMPLE_DEEP: &str = r#"(def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
-"#;
+";
+const SIMPLE_DEEP: &str = r"(def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
+";
 
 /// The canonical Deep `chelis deep` emits for `economoist/src/growth.ch`:
 /// the Gordon-growth present-value model, one `f32 -> f32 -> f32 -> f32`
@@ -57,7 +57,7 @@ const GROWTH_ILL_TYPED_BODY: &str = "(cast {} (var {} d) (t-prim {} f64))";
 /// case (`if eq(n, 0) then 0 ...`). The held context retains `pong` (which is
 /// unconditional) and `ping`'s defsig, so the 2-decl fragment never sees the
 /// full recursion group. Checks clean standalone.
-const PINGPONG_DEEP: &str = r#"(module {}
+const PINGPONG_DEEP: &str = r"(module {}
   frag.pingpong
   (export {} ping pong)
   (defsig {} ping (t-fn {} (t-prim {} int32) (t-prim {} int32)))
@@ -75,7 +75,7 @@ const PINGPONG_DEEP: &str = r#"(module {}
     (fn {}
       (params {} (n {type: (t-prim {} int32)}))
       (app {} (var {} ping) (app {} (var {} sub) (var {} n) (lit {type: (t-prim {} int32)} 1))))))
-"#;
+";
 
 /// A replacement body for `ping` that drops the base case: it calls `pong`
 /// unconditionally, closing a base-case-free `ping`/`pong` recursion group. The
@@ -113,14 +113,14 @@ fn call_tool(name: &str, arguments: serde_json::Value) -> serde_json::Value {
     .expect("tool response")
 }
 
-const DEEP_AUTHORING_RENAME_MODULE: &str = r#"(module {}
+const DEEP_AUTHORING_RENAME_MODULE: &str = r"(module {}
   tide.rename
   (export {} first second)
   (defsig {} first (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32)))
   (def {} first (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))
   (defsig {} second (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32)))
   (def {} second (fn {} (params {} (x {type: (t-prim {} f32)})) (app {} (var {} first) (var {} x)))))
-"#;
+";
 
 #[test]
 fn deep_query_and_rename_tools_are_model_facing_contracts() {
@@ -296,8 +296,8 @@ fn add_function_effect_and_linearity_failures_have_no_result_payload() {
 
 /// Success case: replacing `gordon_pv`'s body with a well-typed expression
 /// returns the changed def and the rewritten module as canonical Deep. The
-/// returned `module_deep` is asserted to round-trip (parse_str_strict +
-/// print_canonical is idempotent) and to be accepted by a full
+/// returned `module_deep` is asserted to round-trip (`parse_str_strict` +
+/// `print_canonical` is idempotent) and to be accepted by a full
 /// `chelis_compiler_api` check, so the verdict the tool reports equals the
 /// verdict full `chelis check` reaches (the tool runs that check by construction).
 #[test]
@@ -846,7 +846,7 @@ fn grad_tool_response_carries_validated_schema_version() {
     // WI-2 validate-on-consume (WS-5 Part A): the gradient DAG the MCP tool
     // hands back to the client is validated at the boundary, so it carries the
     // supported `schema_version` and the response is not a schema-stage error.
-    let supported = chelis_tide::schema::WIRE_DAG_SCHEMA_VERSION as u64;
+    let supported = u64::from(chelis_tide::schema::WIRE_DAG_SCHEMA_VERSION);
     let response = handle_message(&json!({
         "jsonrpc":"2.0",
         "id":42,
@@ -903,7 +903,7 @@ def probability(x: f32) -> Option[Probability] =
 /// RFC D-PARITY: a prove invoked through the tide MCP tool runs the SAME
 /// derived obligations as the CLI on the same module. We assert tide's
 /// obligation records match the shared chelis-prove engine the CLI also
-/// drives (same obligation set AND same proof_tier per obligation).
+/// drives (same obligation set AND same `proof_tier` per obligation).
 #[test]
 fn tide_runs_obligations_via_shared_engine() {
     // Tide path.

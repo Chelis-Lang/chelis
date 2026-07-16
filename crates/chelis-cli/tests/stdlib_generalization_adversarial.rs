@@ -18,7 +18,7 @@
 //!
 //! Findings (each test name maps back here):
 //!
-//! 1. polymorphic_linear_silently_accepts_integer_call_site:
+//! 1. `polymorphic_linear_silently_accepts_integer_call_site`:
 //!    BLOCKER. `linear.forward` (sig + bare-def, the production
 //!    stdlib shape) accepts integer dtypes at the call site even
 //!    though the body uses `matmul`. Spec sec 5.7.2 says "integer
@@ -32,14 +32,14 @@
 //!    still fires at the IR-lowering / monomorphization layer";
 //!    that claim is falsified here at type-check entry.
 //!
-//! 2. polymorphic_attention_silently_accepts_integer_call_site:
+//! 2. `polymorphic_attention_silently_accepts_integer_call_site`:
 //!    BLOCKER. Same shape as 1, for `attention.scaled_dot_product_attention`.
 //!    Body uses both `matmul` (sec 5.7.2) and `softmax` (sec 5.4
 //!    transcendental row); both should reject integers; neither does
 //!    when the sig is instantiated at integer precision through a
 //!    sig+bare-def shape.
 //!
-//! 3. tensor_form_transcendentals_accept_integers:
+//! 3. `tensor_form_transcendentals_accept_integers`:
 //!    SPEC-DIVERGENCE. `exp(tensor[N, int32])`, `log(tensor[N,
 //!    int32])`, `sin(tensor[N, int32])`, `sqrt(tensor[N, int32])`,
 //!    and `softmax(tensor[N, M, int32], -1)` are silently accepted
@@ -48,7 +48,7 @@
 //!    *scalar* form (`exp(int32)`) IS rejected; the tensor form has
 //!    no analog. This is the upstream root cause of findings 1 and 2.
 //!
-//! 4. wsa6_fresh_hashmap_per_param_breaks_matmul_def_quantifier:
+//! 4. `wsa6_fresh_hashmap_per_param_breaks_matmul_def_quantifier`:
 //!    BLOCKER for the def-explicit-quantifier syntax. A def with
 //!    explicit `[..p]` quantifiers using `p` for two parameters in a
 //!    matmul body fails type-check with `?274 ?275`-style raw tvar
@@ -57,7 +57,7 @@
 //!    This is the WS-A6 gap documented in the WS-C v3 commit body
 //!    under "fresh-HashMap-per-param".
 //!
-//! 5. multi_letter_dim_in_sig_rejects_concrete_caller:
+//! 5. `multi_letter_dim_in_sig_rejects_concrete_caller`:
 //!    SPEC-DIVERGENCE. A sig `tensor[batch, p]` rejects a call with
 //!    `tensor[3, p]` because `batch` is parsed as `d-name`
 //!    (concrete) instead of `d-var`. Single-letter dims are treated
@@ -65,7 +65,7 @@
 //!    Active spec carries no warning of this rule, so a user reading
 //!    spec sec P4b would write `tensor[batch, p]` and be confused.
 //!
-//! 6. polymorphic_sig_panics_at_chelis_build_even_with_concrete_call_site:
+//! 6. `polymorphic_sig_panics_at_chelis_build_even_with_concrete_call_site`:
 //!    BLOCKER. `chelis build` panics on every polymorphic sig that
 //!    survives `chelis check`, even when there is a concrete call
 //!    site that should drive monomorphization. The panic message
@@ -73,7 +73,7 @@
 //!    site". This is the executable acceptance gap: the entire WS-C
 //!    surface is invisible from the build path.
 //!
-//! 7. production_stdlib_linear_panics_on_chelis_build:
+//! 7. `production_stdlib_linear_panics_on_chelis_build`:
 //!    BLOCKER. Same shape as 6, observed against the actual production
 //!    `packages/chelis-std/src/nn/linear.ch`. The user sees a Rust
 //!    `thread 'main' panicked at lower.rs:2153:17` plus a stderr
@@ -85,7 +85,7 @@
 //! cross-position precision mismatch (e.g. linear with f32+bf16
 //! mixed) but no test for cross-cutting integer-via-polymorphic-sig
 //! rejection (the gap pinned above as 1 + 2). The WS-A5 RT-3a
-//! "Type::Error narrowing" test covers the unbound-name-and-mismatch
+//! "`Type::Error` narrowing" test covers the unbound-name-and-mismatch
 //! co-existence case; we add a stdlib-specific repro for
 //! `embedding.forward` to verify it still surfaces both errors.
 
@@ -173,7 +173,7 @@ fn polymorphic_linear_rejects_integer_call_site() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("linear_int.ch");
         let src = format!(
-            r#"sig forward: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
+            r"sig forward: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
 def forward(x, w, b) = {{
   bias = expand(b, 0, shape(x, cast(0, int32)))
   wx = matmul(x, w)
@@ -183,7 +183,7 @@ def forward(x, w, b) = {{
   out
 }}
 def call(x: &tensor[2, 3, {dtype}], w: &tensor[3, 4, {dtype}], bias_in: &tensor[4, {dtype}]) -> tensor[2, 4, {dtype}] = forward(x, w, bias_in)
-"#
+"
         );
         write_file(&path, &src);
         let json = run_check(&path);
@@ -228,7 +228,7 @@ fn polymorphic_linear_accepts_float_call_site() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("linear_float.ch");
         let src = format!(
-            r#"sig forward: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
+            r"sig forward: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
 def forward(x, w, b) = {{
   bias = expand(b, 0, shape(x, cast(0, int32)))
   wx = matmul(x, w)
@@ -238,7 +238,7 @@ def forward(x, w, b) = {{
   out
 }}
 def call(x: &tensor[2, 3, {dtype}], w: &tensor[3, 4, {dtype}], bias_in: &tensor[4, {dtype}]) -> tensor[2, 4, {dtype}] = forward(x, w, bias_in)
-"#
+"
         );
         write_file(&path, &src);
         let json = run_check(&path);
@@ -262,7 +262,7 @@ fn polymorphic_attention_rejects_integer_call_site() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("attn_int.ch");
         let src = format!(
-            r#"sig sdpa: &tensor[4, 4, p] -> &tensor[4, 4, p] -> &tensor[4, 4, p] -> &tensor[4, 4, p] -> tensor[4, 4, p]
+            r"sig sdpa: &tensor[4, 4, p] -> &tensor[4, 4, p] -> &tensor[4, 4, p] -> &tensor[4, 4, p] -> tensor[4, 4, p]
 def sdpa(q, k, v, scale) = {{
   kt = permute(k, 1, 0)
   scores = matmul(q, kt)
@@ -276,7 +276,7 @@ def sdpa(q, k, v, scale) = {{
   out
 }}
 def call(q: &tensor[4, 4, {dtype}], k: &tensor[4, 4, {dtype}], v: &tensor[4, 4, {dtype}], scale: &tensor[4, 4, {dtype}]) -> tensor[4, 4, {dtype}] = sdpa(q, k, v, scale)
-"#
+"
         );
         write_file(&path, &src);
         let json = run_check(&path);
@@ -321,10 +321,10 @@ fn polymorphic_div_wrapper_rejects_integer_call_site() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("div_wrapper_int.ch");
         let src = format!(
-            r#"sig my_div: tensor[4, p] -> tensor[4, p] -> tensor[4, p]
+            r"sig my_div: tensor[4, p] -> tensor[4, p] -> tensor[4, p]
 def my_div(a, b) = div(a, b)
 def call(x: tensor[4, {dtype}], y: tensor[4, {dtype}]) -> tensor[4, {dtype}] = my_div(x, y)
-"#
+"
         );
         write_file(&path, &src);
         let json = run_check(&path);
@@ -355,10 +355,10 @@ fn polymorphic_floor_div_wrapper_accepts_integer_call_site() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("floor_div_wrapper_int.ch");
         let src = format!(
-            r#"sig my_fd: tensor[4, p] -> tensor[4, p] -> tensor[4, p]
+            r"sig my_fd: tensor[4, p] -> tensor[4, p] -> tensor[4, p]
 def my_fd(a, b) = floor_div(a, b)
 def call(x: tensor[4, {dtype}], y: tensor[4, {dtype}]) -> tensor[4, {dtype}] = my_fd(x, y)
-"#
+"
         );
         write_file(&path, &src);
         let json = run_check(&path);
@@ -380,10 +380,10 @@ fn polymorphic_trunc_div_wrapper_accepts_integer_call_site() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("trunc_div_wrapper_int.ch");
         let src = format!(
-            r#"sig my_td: tensor[4, p] -> tensor[4, p] -> tensor[4, p]
+            r"sig my_td: tensor[4, p] -> tensor[4, p] -> tensor[4, p]
 def my_td(a, b) = trunc_div(a, b)
 def call(x: tensor[4, {dtype}], y: tensor[4, {dtype}]) -> tensor[4, {dtype}] = my_td(x, y)
-"#
+"
         );
         write_file(&path, &src);
         let json = run_check(&path);
@@ -403,10 +403,10 @@ fn polymorphic_recip_wrapper_rejects_integer_call_site() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("recip_wrapper_int.ch");
         let src = format!(
-            r#"sig my_recip: tensor[4, p] -> tensor[4, p]
+            r"sig my_recip: tensor[4, p] -> tensor[4, p]
 def my_recip(x) = recip(x)
 def call(y: tensor[4, {dtype}]) -> tensor[4, {dtype}] = my_recip(y)
-"#
+"
         );
         write_file(&path, &src);
         let json = run_check(&path);
@@ -455,8 +455,8 @@ fn tensor_exp_log_sin_sqrt_softmax_now_reject_int32() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join(format!("trans_int_{name}.ch"));
         let src = format!(
-            r#"def call(x: tensor[3, int32]) -> tensor[3, int32] = {body}
-"#
+            r"def call(x: tensor[3, int32]) -> tensor[3, int32] = {body}
+"
         );
         write_file(&path, &src);
         let json = run_check(&path);
@@ -480,8 +480,8 @@ fn tensor_exp_log_sin_sqrt_softmax_now_reject_int32() {
     let path = dir.path().join("softmax_int.ch");
     write_file(
         &path,
-        r#"def call(x: tensor[3, 4, int32]) -> tensor[3, 4, int32] = softmax(x, -1)
-"#,
+        r"def call(x: tensor[3, 4, int32]) -> tensor[3, 4, int32] = softmax(x, -1)
+",
     );
     let json = run_check(&path);
     let errs = errors(&json);
@@ -507,8 +507,8 @@ fn tensor_div_rejects_int32() {
     let path = dir.path().join("div_int.ch");
     write_file(
         &path,
-        r#"def call(x: tensor[3, int32], y: tensor[3, int32]) -> tensor[3, int32] = div(x, y)
-"#,
+        r"def call(x: tensor[3, int32], y: tensor[3, int32]) -> tensor[3, int32] = div(x, y)
+",
     );
     let json = run_check(&path);
     let errs = errors(&json);
@@ -537,8 +537,8 @@ fn tensor_floor_div_trunc_div_accept_int32() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join(format!("{name}_int.ch"));
         let src = format!(
-            r#"def call(x: tensor[3, int32], y: tensor[3, int32]) -> tensor[3, int32] = {body}
-"#
+            r"def call(x: tensor[3, int32], y: tensor[3, int32]) -> tensor[3, int32] = {body}
+"
         );
         write_file(&path, &src);
         let json = run_check(&path);
@@ -558,8 +558,8 @@ fn tensor_trunc_div_rejects_f32() {
     let path = dir.path().join("trunc_div_f32.ch");
     write_file(
         &path,
-        r#"def call(x: tensor[3, f32], y: tensor[3, f32]) -> tensor[3, f32] = trunc_div(x, y)
-"#,
+        r"def call(x: tensor[3, f32], y: tensor[3, f32]) -> tensor[3, f32] = trunc_div(x, y)
+",
     );
     let json = run_check(&path);
     let errs = errors(&json);
@@ -579,8 +579,8 @@ fn finding_3_scalar_form_correctly_rejects_integer() {
     let path = dir.path().join("exp_scalar_int.ch");
     write_file(
         &path,
-        r#"def call(x: int32) -> int32 = exp(x)
-"#,
+        r"def call(x: int32) -> int32 = exp(x)
+",
     );
     let json = run_check(&path);
     let errs = errors(&json);
@@ -613,9 +613,9 @@ fn finding_4_wsa6_fresh_hashmap_breaks_matmul_def_quantifier() {
     let path = dir.path().join("a6_mm.ch");
     write_file(
         &path,
-        r#"def mm[a, b, c, p](x: &tensor[a, b, p], y: &tensor[b, c, p]) -> tensor[a, c, p] = matmul(x, y)
+        r"def mm[a, b, c, p](x: &tensor[a, b, p], y: &tensor[b, c, p]) -> tensor[a, c, p] = matmul(x, y)
 def call(x: &tensor[3, 4, f32], y: &tensor[4, 5, f32]) -> tensor[3, 5, f32] = mm(x, y)
-"#,
+",
     );
     let json = run_check(&path);
     let kinds = error_kinds(&json);
@@ -627,7 +627,7 @@ def call(x: &tensor[3, 4, f32], y: &tensor[4, 5, f32]) -> tensor[3, 5, f32] = mm
     assert!(
         messages
             .iter()
-            .any(|m| m.contains("matmul") && m.contains("?")),
+            .any(|m| m.contains("matmul") && m.contains('?')),
         "finding-4 expected raw tvar leakage in diagnostic, got {messages:?}"
     );
 }
@@ -641,10 +641,10 @@ fn finding_4_workaround_sig_plus_bare_def_works() {
     let path = dir.path().join("a6_workaround.ch");
     write_file(
         &path,
-        r#"sig mm: &tensor[a, b, p] -> &tensor[b, c, p] -> tensor[a, c, p]
+        r"sig mm: &tensor[a, b, p] -> &tensor[b, c, p] -> tensor[a, c, p]
 def mm(x, y) = matmul(x, y)
 def call(x: &tensor[3, 4, f32], y: &tensor[4, 5, f32]) -> tensor[3, 5, f32] = mm(x, y)
-"#,
+",
     );
     let json = run_check(&path);
     let errs = errors(&json);
@@ -663,9 +663,9 @@ fn finding_4_def_quantifier_with_add_does_not_trigger_bug() {
     let path = dir.path().join("a6_add.ch");
     write_file(
         &path,
-        r#"def add_t[n, p](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = add(lhs, rhs)
+        r"def add_t[n, p](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = add(lhs, rhs)
 def call(x: &tensor[3, f32], y: &tensor[3, f32]) -> tensor[3, f32] = add_t(x, y)
-"#,
+",
     );
     let json = run_check(&path);
     let errs = errors(&json);
@@ -697,10 +697,10 @@ fn finding_5_multi_letter_dim_in_sig_accepts_concrete_caller() {
     // name and bare shadowing defs are now rejected at declaration time.
     write_file(
         &path,
-        r#"sig grab: &tensor[batch, p] -> &tensor[batch, p]
+        r"sig grab: &tensor[batch, p] -> &tensor[batch, p]
 def grab(x) = x
 def call(xs: &tensor[3, f32]) -> &tensor[3, f32] = grab(xs)
-"#,
+",
     );
     let json = run_check(&path);
     let errs = errors(&json);
@@ -719,10 +719,10 @@ fn finding_5_workaround_single_letter_dim_works() {
     let path = dir.path().join("single_letter.ch");
     write_file(
         &path,
-        r#"sig grab: &tensor[n, p] -> &tensor[n, p]
+        r"sig grab: &tensor[n, p] -> &tensor[n, p]
 def grab(x) = x
 def call(xs: &tensor[3, f32]) -> &tensor[3, f32] = grab(xs)
-"#,
+",
     );
     let json = run_check(&path);
     let errs = errors(&json);
@@ -748,10 +748,10 @@ fn polymorphic_sig_with_concrete_call_site_now_builds() {
     let path = dir.path().join("simple_poly_build.ch");
     write_file(
         &path,
-        r#"sig id_t: tensor[n, p] -> tensor[n, p]
+        r"sig id_t: tensor[n, p] -> tensor[n, p]
 def id_t(x) = x
 def call(x: tensor[3, f32]) -> tensor[3, f32] = id_t(x)
-"#,
+",
     );
     let output = run_build(&path);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -776,8 +776,8 @@ fn finding_6_concrete_only_program_builds_clean() {
     let path = dir.path().join("concrete.ch");
     write_file(
         &path,
-        r#"def call(x: tensor[3, f32]) -> tensor[3, f32] = x
-"#,
+        r"def call(x: tensor[3, f32]) -> tensor[3, f32] = x
+",
     );
     let output = run_build(&path);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -813,9 +813,9 @@ fn embedding_table_integer_dtypes_legitimately_accepted() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("emb_int.ch");
         let src = format!(
-            r#"def forward[batch, seq, vocab, hidden, p](ids: &tensor[batch, seq, int64], table: &tensor[vocab, hidden, p]) -> tensor[batch, seq, hidden, p] = gather(table, ids, 0)
+            r"def forward[batch, seq, vocab, hidden, p](ids: &tensor[batch, seq, int64], table: &tensor[vocab, hidden, p]) -> tensor[batch, seq, hidden, p] = gather(table, ids, 0)
 def call(ids: &tensor[1, 2, int64], t: &tensor[4, 3, {dtype}]) -> tensor[1, 2, 3, {dtype}] = forward(ids, t)
-"#
+"
         );
         write_file(&path, &src);
         let json = run_check(&path);
@@ -839,13 +839,13 @@ fn rt3a_narrowing_still_surfaces_through_generalized_stdlib_shape() {
     let path = dir.path().join("narrow.ch");
     write_file(
         &path,
-        r#"sig add_t: &tensor[n, p] -> &tensor[n, p] -> tensor[n, p]
+        r"sig add_t: &tensor[n, p] -> &tensor[n, p] -> tensor[n, p]
 def add_t(a, b) = add(a, b)
 def call(x: &tensor[3, f32], y: &tensor[3, bf16]) -> tensor[3, f32] = {
   z = add_t(x, y)
   fictional_unbound_name_xyz123(z)
 }
-"#,
+",
     );
     let json = run_check(&path);
     let kinds = error_kinds(&json);

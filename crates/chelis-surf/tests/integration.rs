@@ -52,11 +52,11 @@ fn roundtrip_simple_def() {
 
 #[test]
 fn roundtrip_property_decl_desugars_to_property_metadata() {
-    let source = r#"
+    let source = r"
 @property non_negative forall(x: f32) where x >= 0.0:
   x >= 0.0
   with samples = 3
-"#;
+";
     let decls = surf_parse(source).expect("property parses");
     let deep_exprs = desugar_program(&decls);
     let deep_text = print_canonical(&deep_exprs);
@@ -70,10 +70,10 @@ fn roundtrip_property_decl_desugars_to_property_metadata() {
 
 #[test]
 fn opaque_type_decl_desugars_to_metadata() {
-    let source = r#"
+    let source = r"
 @opaque
 type Probability = | Probability { value: f32 }
-"#;
+";
     let decls = surf_parse(source).expect("opaque type parses");
     let deep_exprs = desugar_program(&decls);
     let deep_text = print_canonical(&deep_exprs);

@@ -14,7 +14,7 @@ use crate::{canonical, managed_block, skills};
 
 /// Write a fully-conformant shell tree rooted at `root`, pinned to `version`.
 /// Existing files are overwritten (idempotent re-stamp). `name` is the package
-/// name; `module_prefix` its module namespace (PascalCase).
+/// name; `module_prefix` its module namespace (`PascalCase`).
 pub fn scaffold(root: &Path, name: &str, module_prefix: &str, version: &str) -> Result<(), String> {
     fs::create_dir_all(root).map_err(|e| format!("create {}: {e}", root.display()))?;
 
@@ -165,7 +165,7 @@ fn prune_skill_drift(root: &Path, local_skills: &[String]) -> Result<Vec<String>
     };
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
         let path = e.path();
         if is_dir {
             if skills::SHARED_SKILLS.contains(&name.as_str()) {
@@ -358,7 +358,7 @@ const TESTS_BLOCKED_README: &str = "# Blocked-probe suite\n\n\
 
 fn ci_yml(version: &str) -> String {
     format!(
-        r#"name: CI
+        r"name: CI
 on:
   push:
     branches: [main]
@@ -387,7 +387,7 @@ jobs:
         run: chelis reef conform bump-check --base origin/main
       - name: Negative tests
         run: chelis test tests_neg/ --expect neg
-"#
+"
     )
 }
 

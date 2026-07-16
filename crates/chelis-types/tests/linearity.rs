@@ -21,13 +21,13 @@ fn typecheck_surf(source: &str) -> Result<(), Vec<chelis_types::errors::CheckErr
 #[test]
 fn detects_use_after_consume() {
     let errors = check_surf(
-        r#"
+        r"
 def bad(x: tensor[4, f32]): tensor[4, f32] =
   {
     y: tensor[4, f32] = realize(x)
     add(x, y)
   }
-"#,
+",
     )
     .expect_err("linearity should reject reusing a consumed tensor");
 
@@ -41,7 +41,7 @@ def bad(x: tensor[4, f32]): tensor[4, f32] =
 #[test]
 fn copy_allows_reuse() {
     check_surf(
-        r#"
+        r"
 def ok(x: tensor[4, f32]): tensor[4, f32] =
   {
     y: tensor[4, f32] = relu(copy(x))
@@ -50,7 +50,7 @@ def ok(x: tensor[4, f32]): tensor[4, f32] =
     _ = drop(y)
     out
   }
-"#,
+",
     )
     .expect("copy should preserve a later consuming use");
 }
@@ -58,7 +58,7 @@ def ok(x: tensor[4, f32]): tensor[4, f32] =
 #[test]
 fn auto_borrowed_read_only_primitives_allow_fanout() {
     check_surf(
-        r#"
+        r"
 def ok(x: tensor[4, f32]): tensor[4, f32] =
   {
     y: tensor[4, f32] = relu(x)
@@ -69,7 +69,7 @@ def ok(x: tensor[4, f32]): tensor[4, f32] =
     _ = drop(z)
     out
   }
-"#,
+",
     )
     .expect("read-only tensor primitives should borrow their tensor inputs");
 }
@@ -77,14 +77,14 @@ def ok(x: tensor[4, f32]): tensor[4, f32] =
 #[test]
 fn pipe_auto_borrows_read_only_stage_input() {
     check_surf(
-        r#"
+        r"
 def ok(x: tensor[4, f32]): tensor[4, f32] =
   {
     y: tensor[4, f32] = x |> relu |> sigmoid
     _ = drop(x)
     y
   }
-"#,
+",
     )
     .expect("pipe stages should use the same call-site auto-borrow rule");
 }
@@ -94,14 +94,14 @@ fn explicit_borrow_does_not_satisfy_owned_parameter() {
     // Fixture renamed from `take` for chelis#353: `take` is a builtin
     // name and bare shadowing defs are now rejected at declaration time.
     let errors = typecheck_surf(
-        r#"
+        r"
 def grab(x: tensor[4, f32]): tensor[4, f32] = x
 
 def bad(x: tensor[4, f32]): tensor[4, f32] =
   {
     grab(&x)
   }
-"#,
+",
     )
     .expect_err("borrow-to-owned must require an explicit copy");
 
@@ -115,14 +115,14 @@ def bad(x: tensor[4, f32]): tensor[4, f32] =
 #[test]
 fn copy_accepts_explicit_borrow_and_returns_owned_tensor() {
     check_surf(
-        r#"
+        r"
 def ok(x: tensor[4, f32]): tensor[4, f32] =
   {
     y: tensor[4, f32] = copy(&x)
     _ = drop(x)
     y
   }
-"#,
+",
     )
     .expect("copy(&x) should fork ownership from a borrowed tensor");
 }
@@ -130,14 +130,14 @@ def ok(x: tensor[4, f32]): tensor[4, f32] =
 #[test]
 fn borrowed_but_never_consumed_is_auto_dropped() {
     check_surf(
-        r#"
+        r"
 def ok(): tensor[4, f32] =
   {
     x: tensor[4, f32] = to_tensor([1.0, 2.0, 3.0, 4.0])
     y: tensor[4, f32] = relu(x)
     y
   }
-"#,
+",
     )
     .expect("implicit drop handles borrowed local owners at scope end");
 }
@@ -145,9 +145,9 @@ def ok(): tensor[4, f32] =
 #[test]
 fn borrow_cannot_escape_as_function_result() {
     let errors = check_surf(
-        r#"
+        r"
 def bad(x: tensor[4, f32]): &tensor[4, f32] = &x
-"#,
+",
     )
     .expect_err("borrows cannot be returned from functions");
 
@@ -161,13 +161,13 @@ def bad(x: tensor[4, f32]): &tensor[4, f32] = &x
 #[test]
 fn closure_capture_consumes_outer_tensor() {
     let errors = check_surf(
-        r#"
+        r"
 def bad(x: tensor[4, f32]): tensor[4, f32] =
   {
     f = fn () -> x
     realize(x)
   }
-"#,
+",
     )
     .expect_err("capturing a tensor should consume it");
 
@@ -189,7 +189,7 @@ fn closure_capture_consumes_outer_tensor_carrying_adt() {
     // the second `use_params(p)` would type-check, hiding a use-after-
     // consume.
     let errors = check_surf(
-        r#"
+        r"
 type Params[n] =
   | Params { weight: tensor[n, f32] }
 
@@ -201,7 +201,7 @@ def bad[n](p: Params[n]): bool =
     f = fn () -> use_params(p)
     use_params(p)
   }
-"#,
+",
     )
     .expect_err("capturing a tensor-carrying ADT must consume it");
 
@@ -217,7 +217,7 @@ def bad[n](p: Params[n]): bool =
 #[test]
 fn match_consumes_tuple_scrutinee() {
     let errors = check_surf(
-        r#"
+        r"
 def bad(pair: (tensor[4, f32], int32)): int32 =
   {
     n: int32 = match pair with {
@@ -226,7 +226,7 @@ def bad(pair: (tensor[4, f32], int32)): int32 =
     again: (tensor[4, f32], int32) = pair
     n
   }
-"#,
+",
     )
     .expect_err("reusing a tuple carrying a tensor after match should fail");
 
@@ -240,7 +240,7 @@ def bad(pair: (tensor[4, f32], int32)): int32 =
 #[test]
 fn tensor_shape_queries_do_not_consume_tensor_inputs() {
     check_surf(
-        r#"
+        r"
 def ok(x: tensor[2, 3, f32]): int32 =
   {
     r: int32 = rank(x)
@@ -249,7 +249,7 @@ def ok(x: tensor[2, 3, f32]): int32 =
     _ = drop(x)
     c
   }
-"#,
+",
     )
     .expect("shape queries should be observational, not consuming");
 }
@@ -257,7 +257,7 @@ def ok(x: tensor[2, 3, f32]): int32 =
 #[test]
 fn to_list_does_not_consume_tensor_input() {
     check_surf(
-        r#"
+        r"
 def ok(x: tensor[4, f32]): tensor[4, f32] =
   {
     xs: List[f32] = to_list(x)
@@ -266,7 +266,7 @@ def ok(x: tensor[4, f32]): tensor[4, f32] =
     _ = drop(x)
     y
   }
-"#,
+",
     )
     .expect("to_list reads the tensor without freeing it, so x must remain live");
 }
@@ -274,14 +274,14 @@ def ok(x: tensor[4, f32]): tensor[4, f32] =
 #[test]
 fn to_list_still_flags_use_after_genuine_consume() {
     let errors = check_surf(
-        r#"
+        r"
 def bad(x: tensor[4, f32]): tensor[4, f32] =
   {
     y: tensor[4, f32] = realize(x)
     xs: List[f32] = to_list(x)
     y
   }
-"#,
+",
     )
     .expect_err("to_list after a consuming use of x should still be rejected");
 
@@ -294,7 +294,7 @@ def bad(x: tensor[4, f32]): tensor[4, f32] =
 #[test]
 fn tensor_to_scalar_does_not_consume_tensor_input() {
     check_surf(
-        r#"
+        r"
 def ok(x: tensor[f32]): tensor[f32] =
   {
     v: f32 = tensor_to_scalar(x)
@@ -303,7 +303,7 @@ def ok(x: tensor[f32]): tensor[f32] =
     _ = drop(x)
     y
   }
-"#,
+",
     )
     .expect("tensor_to_scalar reads the tensor without freeing it, so x must remain live");
 }
@@ -311,14 +311,14 @@ def ok(x: tensor[f32]): tensor[f32] =
 #[test]
 fn tensor_to_scalar_still_flags_use_after_genuine_consume() {
     let errors = check_surf(
-        r#"
+        r"
 def bad(x: tensor[f32]): tensor[f32] =
   {
     y: tensor[f32] = realize(x)
     v: f32 = tensor_to_scalar(x)
     y
   }
-"#,
+",
     )
     .expect_err("tensor_to_scalar after a consuming use of x should still be rejected");
 
@@ -337,13 +337,13 @@ fn len_does_not_consume_list_argument() {
     // param form #343 began consume-tracking — so this is a faithful
     // regression for the School `_step_list` read-then-reuse shape.
     check_surf(
-        r#"
+        r"
 def ok(params: List[tensor[k, f32]]): List[tensor[k, f32]] =
   {
     n: int64 = len(params)
     params
   }
-"#,
+",
     )
     .expect("len reads the list without freeing it, so params must remain live (chelis#527)");
 }
@@ -353,14 +353,14 @@ fn index_does_not_consume_list_argument() {
     // chelis#527: `index` retains the element it returns and reads the
     // list via a `const *` (`chelis_list_index`), never freeing it.
     check_surf(
-        r#"
+        r"
 def ok(params: List[tensor[k, f32]]): List[tensor[k, f32]] =
   {
     first: tensor[k, f32] = index(params, 0)
     _ = drop(first)
     params
   }
-"#,
+",
     )
     .expect(
         "index reads an element without freeing the list, so params must remain live (chelis#527)",
@@ -373,7 +373,7 @@ fn list_len_then_index_then_reuse_compiles() {
     // length and an element, then hand the list onward.  Compiled
     // clean at 0.10.0, regressed at 0.10.1 (chelis#527).
     check_surf(
-        r#"
+        r"
 def step(params: List[tensor[k, f32]]): List[tensor[k, f32]] =
   {
     n: int64 = len(params)
@@ -381,7 +381,7 @@ def step(params: List[tensor[k, f32]]): List[tensor[k, f32]] =
     _ = drop(first)
     params
   }
-"#,
+",
     )
     .expect("read length + element then reuse the list must compile (chelis#527)");
 }
@@ -392,14 +392,14 @@ fn len_still_flags_use_after_genuine_consume() {
     // to a real prior consume.  An explicit `drop` frees `params`, so
     // the later `len(params)` borrow-read is a use-after-consume.
     let errors = check_surf(
-        r#"
+        r"
 def bad(params: List[tensor[k, f32]]): int64 =
   {
     _ = drop(params)
     n: int64 = len(params)
     n
   }
-"#,
+",
     )
     .expect_err("len after dropping params should still be rejected");
 
@@ -413,14 +413,14 @@ def bad(params: List[tensor[k, f32]]): int64 =
 fn index_still_flags_use_after_genuine_consume() {
     // Negative parity for `index`, mirroring the `len` case above.
     let errors = check_surf(
-        r#"
+        r"
 def bad(params: List[tensor[k, f32]]): tensor[k, f32] =
   {
     _ = drop(params)
     first: tensor[k, f32] = index(params, 0)
     first
   }
-"#,
+",
     )
     .expect_err("index after dropping params should still be rejected");
 
@@ -442,13 +442,13 @@ fn len_explicit_container_borrow_is_a_type_error() {
     // the rejection so a future signature change cannot silently admit
     // `len(&xs)`.
     let errors = typecheck_surf(
-        r#"
+        r"
 def bad(params: List[tensor[k, f32]]): int64 =
   {
     n: int64 = len(&params)
     n
   }
-"#,
+",
     )
     .expect_err("explicit &List is not a supported surface form for len");
 
@@ -469,13 +469,13 @@ fn index_explicit_container_borrow_is_a_type_error() {
     // Negative parity for `index`, mirroring the `len` case above:
     // `index(&xs, i)` is rejected at check time (chelis#527).
     let errors = typecheck_surf(
-        r#"
+        r"
 def bad(params: List[tensor[k, f32]]): tensor[k, f32] =
   {
     first: tensor[k, f32] = index(&params, 0)
     first
   }
-"#,
+",
     )
     .expect_err("explicit &List is not a supported surface form for index");
 
@@ -498,13 +498,13 @@ fn len_of_non_container_does_not_mention_auto_borrow() {
     // input" diagnostic and must NOT misleadingly claim `len` auto-borrows
     // an argument that is not even a container.
     let errors = typecheck_surf(
-        r#"
+        r"
 def bad(x: f32): int64 =
   {
     n: int64 = len(x)
     n
   }
-"#,
+",
     )
     .expect_err("len of a scalar is a type error");
 
@@ -518,7 +518,7 @@ def bad(x: f32): int64 =
 #[test]
 fn grad_accepts_function_with_borrowed_tensor_parameter() {
     check_surf(
-        r#"
+        r"
 def loss(x: &tensor[4, f32]): tensor[f32] = sum(mul(x, x), 0)
 
 def ok(x: tensor[4, f32]): tensor[4, f32] =
@@ -527,7 +527,7 @@ def ok(x: tensor[4, f32]): tensor[4, f32] =
     _ = drop(x)
     g
   }
-"#,
+",
     )
     .expect("grad(f)(x) should auto-borrow when f takes a borrowed tensor");
 }
@@ -535,7 +535,7 @@ def ok(x: tensor[4, f32]): tensor[4, f32] =
 #[test]
 fn vmap_lifts_function_with_borrowed_tensor_parameter() {
     check_surf(
-        r#"
+        r"
 def activate(x: &tensor[4, f32]): tensor[4, f32] = relu(x)
 
 def ok(xs: tensor[batch, 4, f32]): tensor[batch, 4, f32] =
@@ -544,7 +544,7 @@ def ok(xs: tensor[batch, 4, f32]): tensor[batch, 4, f32] =
     _ = drop(xs)
     ys
   }
-"#,
+",
     )
     .expect("vmap should preserve borrowed tensor parameters while adding the batch axis");
 }

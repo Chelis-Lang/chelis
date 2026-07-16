@@ -66,8 +66,7 @@ fn cpu_toolchain_for_source(
     source: &str,
 ) -> chelis_backend_c::toolchain::NativeToolchain {
     let needs_blas = fs::read_to_string(out_dir.join(source))
-        .map(|text| text.contains("cblas_sgemm(") || text.contains("\"chelis_blas.h\""))
-        .unwrap_or(false);
+        .is_ok_and(|text| text.contains("cblas_sgemm(") || text.contains("\"chelis_blas.h\""));
     chelis_backend_c::toolchain::runtime_toolchain(
         chelis_backend_c::toolchain::CodegenRequirements {
             wants_openmp: true,
@@ -115,7 +114,7 @@ fn reef_std_io_module_checks_and_builds() {
     write_file(
         &app_pkg.join("src/main.ch"),
         &format!(
-            r#"module Demo.Main
+            r"module Demo.Main
 
 import Std.Io (read_trimmed_lines, read_head_bytes, exists, mmap_size)
 
@@ -127,7 +126,7 @@ lines_view = print(lines)
 head_view = print(head)
 exists_view = print(file_is_present)
 size_view = print(size)
-"#
+"
         ),
     );
 
@@ -300,13 +299,13 @@ fn reef_std_json_module_fails_loudly_on_malformed_input() {
     write_file(
         &app_pkg.join("src/main.ch"),
         &format!(
-            r#"module Demo.Main
+            r"module Demo.Main
 
 import Std.Io.Json (load_json)
 
 cfg = load_json({bad})
 view = print(cfg)
-"#
+"
         ),
     );
 
@@ -350,7 +349,7 @@ fn reef_std_json_try_module_reports_none_on_malformed_input() {
     write_file(
         &app_pkg.join("src/main.ch"),
         &format!(
-            r#"module Demo.Main
+            r"module Demo.Main
 
 import Std.Io.Json (try_load_json)
 
@@ -359,7 +358,7 @@ ok = match try_load_json({bad}) with {{
   | None => false
 }}
 view = print(ok)
-"#
+"
         ),
     );
 
@@ -408,13 +407,13 @@ fn reef_std_csv_module_fails_loudly_on_unclosed_quote_rows() {
     write_file(
         &app_pkg.join("src/main.ch"),
         &format!(
-            r#"module Demo.Main
+            r"module Demo.Main
 
 import Std.Io.Csv (read_csv)
 
 rows = read_csv({bad})
 view = print(rows)
-"#
+"
         ),
     );
 
@@ -458,7 +457,7 @@ fn reef_std_csv_try_module_reports_none_on_unclosed_quote_rows() {
     write_file(
         &app_pkg.join("src/main.ch"),
         &format!(
-            r#"module Demo.Main
+            r"module Demo.Main
 
 import Std.Io.Csv (try_read_csv)
 
@@ -467,7 +466,7 @@ ok = match try_read_csv({bad}) with {{
   | None => false
 }}
 view = print(ok)
-"#
+"
         ),
     );
 
@@ -562,13 +561,13 @@ fn reef_std_parquet_module_builds_cleanly() {
     );
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 import Std.Io.Parquet (read_parquet, write_parquet)
 
 def load_rows(path: string) -> List[Dict[string, string]] = read_parquet(path)
 def save_rows(path: string, rows: List[Dict[string, string]]) -> unit = write_parquet(path, rows)
-"#,
+",
     );
 
     Command::cargo_bin("chelis")

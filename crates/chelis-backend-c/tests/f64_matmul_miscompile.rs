@@ -32,7 +32,7 @@ fn t(prim: Prim, dims: Vec<usize>) -> TensorType {
     }
 }
 
-/// Regression lock: end-to-end F64 matmul must NOT emit cblas_sgemm.
+/// Regression lock: end-to-end F64 matmul must NOT emit `cblas_sgemm`.
 #[test]
 #[ignore = "WS-A2: F64 matmul is now ON the BLAS path (cblas_dgemm); the W5 P0 fail-closed assertion this test checks no longer applies."]
 fn f64_matmul_subgraph_stays_off_blas_path_in_c_backend() {

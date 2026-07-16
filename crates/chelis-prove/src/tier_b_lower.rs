@@ -136,6 +136,7 @@ pub struct LoweredObligation {
 ///
 /// `exprs` is the desugared Deep program (for producer-body lookup),
 /// `consts` resolves in-module predicate constants.
+#[must_use]
 pub fn lower_obligation(
     exprs: &[Expr],
     inv: &OpaqueInvariant,
@@ -384,7 +385,7 @@ fn lower_inner_obligation(
 
 /// Apply the invariant predicate to a produced record value `r` by
 /// binding the invariant binder to `r` and reducing the field
-/// projections via record beta-reduction, then lowering to SmtExpr.
+/// projections via record beta-reduction, then lowering to `SmtExpr`.
 fn apply_invariant(
     r: &Expr,
     inv: &OpaqueInvariant,
@@ -632,7 +633,7 @@ fn rebuild_app(callee: &str, args: Vec<Expr>) -> Expr {
 // Lowering reduced Deep -> SmtExpr (guard + invariant predicate)
 // ===========================================================================
 
-/// Lower a reduced boolean guard expression to SmtExpr (the `if`
+/// Lower a reduced boolean guard expression to `SmtExpr` (the `if`
 /// condition of a producer body).
 /// Lower the invariant predicate body with the binder's field
 /// projections substituted by the produced record's field exprs (already
@@ -727,8 +728,7 @@ fn pred_arg_is_int_sorted(
             return binder_fields
                 .iter()
                 .find(|(n, _)| n == field)
-                .map(|(_, f)| f.scalar_sort() == Some(crate::solver::SmtSort::Int))
-                .unwrap_or(false);
+                .is_some_and(|(_, f)| f.scalar_sort() == Some(crate::solver::SmtSort::Int));
         }
     }
     false
@@ -811,7 +811,7 @@ fn lower_pred_arith(
 }
 
 /// Lower a produced field expression (the value bound to a record field)
-/// to SmtExpr — it is already in free-var arithmetic form.
+/// to `SmtExpr` — it is already in free-var arithmetic form.
 fn lower_field_expr(expr: &Expr) -> Option<SmtExpr> {
     match expr {
         Expr::Atom(Atom::Float(v), _) => return Some(SmtExpr::RealLit(*v)),

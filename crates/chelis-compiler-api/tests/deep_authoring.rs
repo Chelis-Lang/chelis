@@ -8,7 +8,7 @@ use chelis_deep::{Atom, Expr};
 use schemars::schema_for;
 use serde_json::Value;
 
-const BASE_TWO_FUNCTIONS: &str = r#"(module {}
+const BASE_TWO_FUNCTIONS: &str = r"(module {}
   handoff.demo
   (export {} first second)
   (defsig {}
@@ -27,9 +27,9 @@ const BASE_TWO_FUNCTIONS: &str = r#"(module {}
     (fn {}
       (params {} (x {type: (t-prim {} f32)}))
       (var {} x))))
-"#;
+";
 
-const ADD_IDENTITY: &str = r#"(defsig {}
+const ADD_IDENTITY: &str = r"(defsig {}
   added
   (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32)))
 (def {}
@@ -37,9 +37,9 @@ const ADD_IDENTITY: &str = r#"(defsig {}
   (fn {}
     (params {} (x {type: (t-prim {} f32)}))
     (var {} x)))
-"#;
+";
 
-const TENSOR_MODULE: &str = r#"(module {}
+const TENSOR_MODULE: &str = r"(module {}
   handoff.tensor
   (export {} passthrough)
   (defsig {}
@@ -53,9 +53,9 @@ const TENSOR_MODULE: &str = r#"(module {}
       (params {}
         (x {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}))
       (var {} x))))
-"#;
+";
 
-const ADD_EFFECTING: &str = r#"(defsig {}
+const ADD_EFFECTING: &str = r"(defsig {}
   noisy
   (t-fn {eff: (effects {})}
     (t-tensor {} (d-lit {} 4) (t-prim {} f32))
@@ -66,9 +66,9 @@ const ADD_EFFECTING: &str = r#"(defsig {}
     (params {}
       (x {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}))
     (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
-"#;
+";
 
-const ADD_LINEARITY_VIOLATION: &str = r#"(defsig {}
+const ADD_LINEARITY_VIOLATION: &str = r"(defsig {}
   alias_twice
   (t-fn {eff: (effects {})}
     (t-tensor {} (d-lit {} 4) (t-prim {} f32))
@@ -81,9 +81,9 @@ const ADD_LINEARITY_VIOLATION: &str = r#"(defsig {}
     (let {}
       (bind {} y (realize {} (var {} x)))
       (app {} (var {} add) (var {} x) (var {} y)))))
-"#;
+";
 
-const ADD_ILL_TYPED: &str = r#"(defsig {}
+const ADD_ILL_TYPED: &str = r"(defsig {}
   bad_type
   (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32)))
 (def {}
@@ -91,7 +91,7 @@ const ADD_ILL_TYPED: &str = r#"(defsig {}
   (fn {}
     (params {} (x {type: (t-prim {} f32)}))
     (lit {type: (t-prim {} bool)} true)))
-"#;
+";
 
 const ADD_PROPERTY_ALWAYS_TRUE: &str = r#"(defsig {}
   always_true
@@ -241,14 +241,14 @@ fn deep_outline_and_call_graph_are_machine_contracts() {
 
 #[test]
 fn rename_fails_closed_on_stale_preimage_and_cascades_calls() {
-    let caller_module = r#"(module {}
+    let caller_module = r"(module {}
   handoff.rename
   (export {} first second)
   (defsig {} first (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32)))
   (def {} first (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))
   (defsig {} second (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32)))
   (def {} second (fn {} (params {} (x {type: (t-prim {} f32)})) (app {} (var {} first) (var {} x)))))
-"#;
+";
     let stale = compiler::result_envelope(compiler::rename(RenameRequest {
         module: caller_module.to_string(),
         function_name: "first".to_string(),
@@ -310,7 +310,7 @@ fn rename_cascades_property_precondition_metadata() {
 
 #[test]
 fn replace_function_and_change_signature_validate_whole_module() {
-    let new_decls = r#"(defsig {}
+    let new_decls = r"(defsig {}
   first
   (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32)))
 (def {}
@@ -318,7 +318,7 @@ fn replace_function_and_change_signature_validate_whole_module() {
   (fn {}
     (params {} (x {type: (t-prim {} f32)}))
     (lit {type: (t-prim {} bool)} true)))
-"#;
+";
     let rejected = compiler::result_envelope(compiler::replace_function(ReplaceFunctionRequest {
         module: BASE_TWO_FUNCTIONS.to_string(),
         function_name: "first".to_string(),
@@ -330,13 +330,13 @@ fn replace_function_and_change_signature_validate_whole_module() {
     assert_eq!(rejected_json["stage"], "check");
     assert!(rejected_json.get("result").is_none());
 
-    let sig_module = r#"(module {}
+    let sig_module = r"(module {}
   handoff.sig
   (defsig {} pair (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32)))
   (def {} pair (fn {} (params {} (x {type: (t-prim {} f32)}) (y {type: (t-prim {} f32)})) (app {} (var {} sub) (var {} x) (var {} y))))
   (defsig {} caller (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32)))
   (def {} caller (fn {} (params {} (a {type: (t-prim {} f32)}) (b {type: (t-prim {} f32)})) (app {} (var {} pair) (var {} a) (var {} b)))))
-"#;
+";
     let changed = compiler::change_signature(ChangeSignatureRequest {
         module: sig_module.to_string(),
         function_name: "pair".to_string(),
@@ -467,8 +467,8 @@ fn add_function_rejects_bad_request_shapes_before_editing() {
     );
     assert_failure(
         BASE_TWO_FUNCTIONS,
-        r#"(defsig {} sig_name (t-fn {} (t-prim {} f32) (t-prim {} f32)))
-           (def {} def_name (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))"#,
+        r"(defsig {} sig_name (t-fn {} (t-prim {} f32) (t-prim {} f32)))
+           (def {} def_name (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))",
         None,
         "add-function",
         "deep_decl_error",
@@ -490,11 +490,11 @@ fn add_function_unknown_insert_target_is_name_resolution_error() {
 fn add_function_semantic_rejections_come_from_whole_module_check() {
     assert_failure(
         BASE_TWO_FUNCTIONS,
-        r#"(def {}
+        r"(def {}
              first
              (fn {}
                (params {} (x {type: (t-prim {} f32)}))
-               (var {} x)))"#,
+               (var {} x)))",
         None,
         "check",
         "type_error",

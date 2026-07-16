@@ -87,7 +87,7 @@ fn collect_decl_root_names(
 ) {
     match decl {
         Decl::FunDef { name, .. } | Decl::LetDef { name, .. } => {
-            extend_root_names(name, type_env.get(name), out)
+            extend_root_names(name, type_env.get(name), out);
         }
         Decl::Module { decls, .. } => {
             for decl in decls {

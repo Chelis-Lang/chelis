@@ -137,8 +137,7 @@ fn compile_emitted(build_dir: &Path, kernel_c: &Path) -> (std::process::Output, 
     // emits `vvexpf`). `needs_blas` is read from the emitted C so a BLAS kernel
     // links cblas too.
     let needs_blas = fs::read_to_string(kernel_c)
-        .map(|t| t.contains("cblas_sgemm(") || t.contains("\"chelis_blas.h\""))
-        .unwrap_or(false);
+        .is_ok_and(|t| t.contains("cblas_sgemm(") || t.contains("\"chelis_blas.h\""));
     let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
         chelis_backend_c::toolchain::CodegenRequirements {
             wants_openmp: true,
@@ -815,8 +814,8 @@ out = add(w, to_tensor([1.0, 2.0]))\n";
 
 /// POSITIVE + emit-shape: a `max_reduce` backward materializes a `Bool`
 /// comparison mask. The mask const must fill through `chelis_fill_bool_bits`
-/// (dtype-correct for CHELIS_BOOL), NOT `chelis_fill_f32_bits` (which asserts
-/// CHELIS_F32). The build links the debug `libchelis_runtime.a`, so the
+/// (dtype-correct for `CHELIS_BOOL`), NOT `chelis_fill_f32_bits` (which asserts
+/// `CHELIS_F32`). The build links the debug `libchelis_runtime.a`, so the
 /// debug-build dtype assertion is active: a regression aborts the run.
 /// Pre-fix the Bool const used `chelis_fill_f32_bits` and aborted here.
 #[test]
@@ -906,7 +905,7 @@ out = df(to_tensor([1.0, 2.0, 3.0]))\n";
 
 /// POSITIVE + parity: `gather` with the DEFAULT int32 index dtype agrees
 /// byte-for-byte between eval and the C backend. The gather is the program
-/// root, so it lowers to the inline WireDag tensor-lane emit
+/// root, so it lowers to the inline `WireDag` tensor-lane emit
 /// (`emit_sparse_gather`), which is the buggy path — NOT the runtime helper
 /// `chelis_tensor_gather` (that path always read indices at the correct
 /// width via `read_index_slot`).
@@ -1107,7 +1106,7 @@ out = f(to_tensor([[0.0, 1.0], [2.0, 3.0]]), to_tensor([[0.0, 1.0], [1.0, 1.0]])
     );
 }
 
-/// POSITIVE control: a NaN-FREE max_reduce still agrees byte-for-byte; the
+/// POSITIVE control: a NaN-FREE `max_reduce` still agrees byte-for-byte; the
 /// NaN-propagation fix must not perturb ordinary reductions.
 #[test]
 fn issue_172_max_reduce_no_nan_unchanged_backend_matches_eval() {

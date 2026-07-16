@@ -60,7 +60,7 @@ fn parse_errors_array(stdout: &str) -> Vec<Value> {
 }
 
 /// Issue #207 reproducer: a def body that does not match its declared
-/// signature must trip a TypeMismatch and the process must exit
+/// signature must trip a `TypeMismatch` and the process must exit
 /// non-zero. Pre-fix this exited 0.
 #[test]
 fn issue_207_check_exits_nonzero_on_type_mismatch() {
@@ -115,8 +115,8 @@ fn issue_207_check_exits_zero_on_clean_program() {
 /// fixture the helper asserts `errors_non_empty <=> exit != 0`.
 ///
 /// Categories:
-/// * TypeMismatch (def body vs declared sig)
-/// * DimensionMismatch (concrete dim literal vs sig)
+/// * `TypeMismatch` (def body vs declared sig)
+/// * `DimensionMismatch` (concrete dim literal vs sig)
 /// * Validator rejection (conv2d stride 0; same shape RT-205 F7 used,
 ///   but now exits non-zero per the inverted contract)
 #[test]

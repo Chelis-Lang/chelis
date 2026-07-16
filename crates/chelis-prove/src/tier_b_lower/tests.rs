@@ -488,7 +488,7 @@ def mk(x: int32) -> Option[Counter] =
     );
 }
 
-/// F4: the shared reconciliation rewrites an integral RealLit on the other
+/// F4: the shared reconciliation rewrites an integral `RealLit` on the other
 /// side when one operand is integer-sorted, in both operand orders, and is
 /// a no-op for a fractional real or two reals.
 #[test]
@@ -606,7 +606,7 @@ m = 3.0
 // producer-body path AND the invariant-application path.
 // ===========================================================================
 
-/// True if any leaf of an SmtExpr is a `RealLit`.
+/// True if any leaf of an `SmtExpr` is a `RealLit`.
 fn contains_real_lit(e: &SmtExpr) -> bool {
     match e {
         SmtExpr::RealLit(_) => true,
@@ -625,7 +625,7 @@ fn contains_real_lit(e: &SmtExpr) -> bool {
     }
 }
 
-/// True if any leaf of an SmtExpr is an `IntLit`.
+/// True if any leaf of an `SmtExpr` is an `IntLit`.
 fn contains_int_lit(e: &SmtExpr) -> bool {
     match e {
         SmtExpr::IntLit(_) => true,
@@ -645,7 +645,7 @@ fn contains_int_lit(e: &SmtExpr) -> bool {
 /// An int-field opaque type whose INVARIANT compares the int field against
 /// an int-typed module constant `lo`, AND whose producer guards the int
 /// param against the SAME constant. Under the old code the producer-body
-/// path lowered `lo` as IntLit (CR2-4) while the invariant path hardcoded
+/// path lowered `lo` as `IntLit` (CR2-4) while the invariant path hardcoded
 /// `RealLit`, so the SAME constant lowered with two different sorts within
 /// one property -- comparing an Int var against a Real literal -- and cvc5
 /// ABORTED the process ("Subexpressions must have the same type: Int/Real").

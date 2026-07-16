@@ -26,6 +26,7 @@ pub enum LiteralSuffix {
 
 impl LiteralSuffix {
     /// Returns the lowercase suffix string (`"f32"`, `"i64"`, etc.).
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             LiteralSuffix::F32 => "f32",
@@ -40,6 +41,7 @@ impl LiteralSuffix {
     }
 
     /// True if the suffix binds to a float dtype.
+    #[must_use]
     pub fn is_float(self) -> bool {
         matches!(
             self,
@@ -48,6 +50,7 @@ impl LiteralSuffix {
     }
 
     /// True if the suffix binds to an integer dtype.
+    #[must_use]
     pub fn is_integer(self) -> bool {
         matches!(
             self,
@@ -56,6 +59,7 @@ impl LiteralSuffix {
     }
 
     /// Returns the canonical Deep `t-prim` precision name, e.g. `"int64"`.
+    #[must_use]
     pub fn t_prim_name(self) -> &'static str {
         match self {
             LiteralSuffix::F32 => "f32",

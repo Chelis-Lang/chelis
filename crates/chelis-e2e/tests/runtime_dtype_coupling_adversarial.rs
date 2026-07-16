@@ -119,7 +119,7 @@ fn data_ptr_i64_rejects_bool_tensor() {
 /// Largest representable i64 must round-trip through `chelis_tensor_to_f64`
 /// with the value preserved at full precision (i64 max is well within
 /// f64 representable range above 2^53 it loses precision but stays exact
-/// for values where bit_count <= 53).
+/// for values where `bit_count` <= 53).
 #[test]
 fn i64_round_trip_at_low_value_byte_exact() {
     unsafe {

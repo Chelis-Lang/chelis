@@ -19,7 +19,7 @@ use chelis_deep::ast::Expr;
 /// The defining module exports `make`, an in-module constructor, so the
 /// evaluator can build oracle values from text (in-module construction is
 /// legal under opacity).
-const PROBABILITY_SRC: &str = r#"
+const PROBABILITY_SRC: &str = r"
 module Stats.Prob
 
 @opaque
@@ -27,12 +27,12 @@ module Stats.Prob
 type Probability = | Probability { value: f32 }
 
 def make(x: f32) -> Probability = Probability { value: x }
-"#;
+";
 
 /// A non-opaque wrapper carrying an opaque field, to exercise nested-record
 /// decode (valid inner accepted, inner-violating rejected naming the inner
 /// type). `wrap` builds it in-module.
-const WRAPPER_SRC: &str = r#"
+const WRAPPER_SRC: &str = r"
 module Stats.Prob
 
 @opaque
@@ -43,7 +43,7 @@ type Pair = | Pair { prob: Probability, weight: f32 }
 
 def make(x: f32) -> Probability = Probability { value: x }
 def wrap(x: f32, w: f32) -> Pair = Pair { prob: make(x), weight: w }
-"#;
+";
 
 /// Desugar Surf to the Deep program exprs the chokepoint needs (deftype
 /// declarations supply the field tables and invariants).
@@ -156,7 +156,7 @@ fn valid_payload_decodes_to_evaluator_value_oracle_agreement() {
     );
 
     // And the field value matches the evaluator's stored f32.
-    assert_eq!(probability_field(&decoded), 0.3_f32 as f64);
+    assert_eq!(probability_field(&decoded), f64::from(0.3_f32));
 }
 
 #[test]
@@ -164,7 +164,7 @@ fn interior_non_trivial_value_accepted() {
     let exprs = program_exprs(PROBABILITY_SRC);
     let payload = prob_payload(0.7);
     let decoded = decode_adt_value(&exprs, &payload).expect("0.7 is admissible");
-    assert_eq!(probability_field(&decoded), 0.7_f32 as f64);
+    assert_eq!(probability_field(&decoded), f64::from(0.7_f32));
 }
 
 // ── Boundary acceptance (closed [0, 1] invariant) ─────────────────────────
@@ -362,7 +362,7 @@ fn nested_valid_opaque_field_accepted_oracle_agreement() {
     assert_eq!(ctor, "Pair");
     assert_eq!(fields.len(), 2);
     // Inner opaque field is the first field.
-    assert_eq!(probability_field(&fields[0]), 0.7_f32 as f64);
+    assert_eq!(probability_field(&fields[0]), f64::from(0.7_f32));
 }
 
 #[test]
@@ -465,7 +465,7 @@ fn prob_payload(value: f64) -> ExecutionValue {
 /// load-bearing: a payload of `1.0005` is admissible only because `eps`
 /// widens the upper bound to `1.001`, and decode must resolve `eps` to its
 /// value to evaluate the predicate at all.
-const CONST_INVARIANT_SRC: &str = r#"
+const CONST_INVARIANT_SRC: &str = r"
 module Stats.Tol
 
 def eps() -> f32 = 0.001
@@ -475,7 +475,7 @@ def eps() -> f32 = 0.001
 type Tol = | Tol { value: f32 }
 
 def make(x: f32) -> Tol = Tol { value: x }
-"#;
+";
 
 /// A `Tol` wire payload carrying `value`.
 fn tol_payload(value: f64) -> ExecutionValue {
@@ -497,7 +497,7 @@ fn constant_referencing_invariant_accepts_valid_payload() {
         .expect("a valid payload of a constant-referencing invariant must decode");
     let (ctor, fields) = decoded.as_adt().expect("decoded an ADT");
     assert_eq!(ctor, "Tol");
-    assert_eq!(fields[0].as_f64(), Some(0.5_f32 as f64));
+    assert_eq!(fields[0].as_f64(), Some(f64::from(0.5_f32)));
 }
 
 #[test]
@@ -593,7 +593,7 @@ fn value_binding_constant_invariant_accepts_valid_payload() {
         .expect("a valid payload of a value-binding-constant invariant must decode");
     let (ctor, fields) = decoded.as_adt().expect("decoded an ADT");
     assert_eq!(ctor, "Tol");
-    assert_eq!(fields[0].as_f64(), Some(0.5_f32 as f64));
+    assert_eq!(fields[0].as_f64(), Some(f64::from(0.5_f32)));
 }
 
 #[test]
@@ -779,7 +779,7 @@ fn well_formed_deep_invariant_still_decodes_after_fix() {
         .expect("a well-formed invariant accepts an in-band value");
     let (ctor, fields) = decoded.as_adt().expect("decoded an ADT");
     assert_eq!(ctor, "Probability");
-    assert_eq!(fields[0].as_f64(), Some(0.3_f32 as f64));
+    assert_eq!(fields[0].as_f64(), Some(f64::from(0.3_f32)));
 
     let err = try_decode_adt_value(&exprs, &prob_payload(1.5))
         .expect_err("a well-formed invariant still rejects an out-of-band value");

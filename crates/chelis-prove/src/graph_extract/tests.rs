@@ -240,7 +240,7 @@ fn lowering_is_deterministic_within_run() {
 // Negative twins.
 // ===========================================================================
 
-/// Build a future-version `WireDag` (schema_version above the supported
+/// Build a future-version `WireDag` (`schema_version` above the supported
 /// ceiling) over a single trivial root, to exercise the producer's
 /// fail-closed boundary check.
 fn future_version_wire_dag() -> WireDag {
@@ -585,7 +585,7 @@ const ENTRY_ISOLATION_SOURCE: &str = "module Demo.Pricer\n\
     def priced[n](v: tensor[n, f32], k: tensor[n, f32], b: tensor[n, f32]) -> tensor[n, f32] = add(scaled(v, k), b)\n\
     def unrelated[n](v: tensor[n, f32]) -> tensor[n, f32] = missing_sym(v)\n";
 
-/// chelis#506 decision fixture: scalar host entries are not WireDag roots.
+/// chelis#506 decision fixture: scalar host entries are not `WireDag` roots.
 /// Beacon's seam is tensor-DAG-root based, so the scalar path must fail with a
 /// clear named-root diagnostic rather than fabricating a rank-0 root.
 const SCALAR_HOST_ENTRY_SOURCE: &str = "module Demo.ScalarHost\n\

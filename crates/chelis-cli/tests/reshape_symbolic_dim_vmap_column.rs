@@ -1,6 +1,6 @@
 //! WS-3 build ICE (FIXED, chelis#405) — `vmap` over a shape-erased column
 //! reshape USED TO ICE in the IR-to-backend handoff with
-//! `internal compiler error: symbolic dim `_anon_dim_N_0` is referenced
+//! `internal compiler error: symbolic dim `_`anon_dim_N_0`` is referenced
 //! by a non-Load node (Sum ...) but no Load input declares it`
 //! (`crates/chelis-ir/src/dag.rs` `symbolic_occurrences`). The chelis-types
 //! fix (see `## Test status`) closed it; this test now pins the clean

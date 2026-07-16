@@ -13,7 +13,7 @@ fn coral_prerequisites() {
 
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 type Column =
   | FloatCol(tensor[4, f32])
@@ -25,7 +25,7 @@ def get_float(c: Column) -> tensor[4, f32] = match c with {
 }
 
 value = get_float(FloatCol((to_tensor([1.0, 2.0, 3.0, 4.0]) : tensor[4, f32])))
-"#,
+",
     );
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -63,11 +63,11 @@ value = make_dict()
 
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 def filter_bools(mask: tensor[4, bool], indices: tensor[2, int64]) -> tensor[2, bool] =
   gather(mask, indices, 0)
-"#,
+",
     );
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -87,13 +87,13 @@ def filter_bools(mask: tensor[4, bool], indices: tensor[2, int64]) -> tensor[2, 
 
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 import Std.Tensor.Construct (arange)
 
 ar_0_4 = arange(cast(0, int32), cast(4, int32))
 ar_2_6 = arange(cast(2, int32), cast(6, int32))
-"#,
+",
     );
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -121,7 +121,7 @@ fn coral_where_indices_builds_and_matches_reference_values() {
     let (_dir, reef_home, app_pkg) = make_app("coral-where-indices");
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 import Std.Tensor.Mask (where_indices)
 
@@ -130,7 +130,7 @@ all_true = cmplt((to_tensor([0.0, 0.0, 0.0]) : tensor[3, f32]), (to_tensor([1.0,
 
 mixed_idx = where_indices(mixed_mask)
 all_true_idx = where_indices(all_true)
-"#,
+",
     );
 
     Command::cargo_bin("chelis")
@@ -190,13 +190,13 @@ fn coral_where_indices_all_false_returns_empty_tensor() {
     let (_dir, reef_home, app_pkg) = make_app("coral-where-indices-empty");
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 import Std.Tensor.Mask (where_indices)
 
 all_false = cmplt((to_tensor([1.0, 1.0, 1.0]) : tensor[3, f32]), (to_tensor([0.0, 0.0, 0.0]) : tensor[3, f32]))
 value = where_indices(all_false)
-"#,
+",
     );
 
     Command::cargo_bin("chelis")
@@ -216,7 +216,7 @@ value = where_indices(all_false)
 }
 
 /// Coral upstream blocker (v0.2.5/v0.3.0): `to_tensor` previously rejected
-/// `List[bool]` at type-check time with "to_tensor expects numeric List
+/// `List[bool]` at type-check time with "`to_tensor` expects numeric List
 /// elements, got bool". After this fix, bool lists produce `tensor[N, bool]`
 /// at both `chelis check` and `chelis eval` time, which unblocks
 /// `bool_list_to_tensor` and CSV/JSON bool round trips.
@@ -226,11 +226,11 @@ fn coral_to_tensor_accepts_bool_list() {
     let (_dir, reef_home, app_pkg) = make_app("coral-to-tensor-bool");
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 mask = to_tensor([true, false, true])
 roundtrip = to_list(mask)
-"#,
+",
     );
 
     Command::cargo_bin("chelis")
@@ -279,10 +279,10 @@ fn coral_to_tensor_rejects_mixed_bool_and_float_list() {
     // bool and a float must fail unification at the List[α] element type.
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 bad = to_tensor([true, 1.0])
-"#,
+",
     );
     // Issue #207: type errors now produce exit 2; assert on stdout
     // content only (the dedicated invariant test covers the exit
@@ -316,7 +316,7 @@ fn coral_comparison_ops_broadcast_tensor_scalar() {
     let (_dir, reef_home, app_pkg) = make_app("coral-cmp-broadcast");
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 def mk_xs() -> tensor[3, f32] = (to_tensor([1.0, 2.0, 3.0]) : tensor[3, f32])
 def mk_ints() -> tensor[3, int64] = (to_tensor([cast(1, int64), cast(2, int64), cast(3, int64)]) : tensor[3, int64])
@@ -333,7 +333,7 @@ cmplt_mask = cmplt(mk_xs(), 2.0)
 gt_left = gt(1.5, mk_xs())
 gt_ints = gt(mk_ints(), cast(1, int64))
 eq_bools = eq(mk_bools(), true)
-"#,
+",
     );
 
     Command::cargo_bin("chelis")
@@ -416,11 +416,11 @@ fn coral_comparison_ops_reject_mismatched_precision() {
     // content only (the dedicated invariant test covers the exit code).
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 xs = (to_tensor([1.0, 2.0, 3.0]) : tensor[3, f32])
 bad = gt(xs, cast(1, int64))
-"#,
+",
     );
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -437,11 +437,11 @@ bad = gt(xs, cast(1, int64))
     // Ordered comparison on bool tensor must fail (bool isn't ordered).
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 bools = to_tensor([true, false, true])
 bad = gt(bools, true)
-"#,
+",
     );
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -475,7 +475,7 @@ fn coral_comparison_ops_broadcast_scalar_first_with_declared_signature() {
     let (_dir, reef_home, app_pkg) = make_app("coral-cmp-broadcast-issue5");
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 def above -> tensor[3, bool] = gt(to_tensor([1.0, 2.0, 3.0]), 1.5)
 def below -> tensor[3, bool] = gt(1.5, to_tensor([1.0, 2.0, 3.0]))
@@ -483,7 +483,7 @@ def lt_right -> tensor[3, bool] = lt(to_tensor([1.0, 2.0, 3.0]), 2.5)
 def lt_left -> tensor[3, bool] = lt(2.5, to_tensor([1.0, 2.0, 3.0]))
 def eq_right -> tensor[3, bool] = eq(to_tensor([1.0, 2.0, 3.0]), 2.0)
 def eq_left -> tensor[3, bool] = eq(2.0, to_tensor([1.0, 2.0, 3.0]))
-"#,
+",
     );
 
     Command::cargo_bin("chelis")

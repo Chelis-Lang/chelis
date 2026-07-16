@@ -295,8 +295,7 @@ impl TextBuffer {
         let start = self.line_start(line);
         let rest = &self.text[start..];
         rest.find('\n')
-            .map(|offset| start + offset)
-            .unwrap_or(self.text.len())
+            .map_or(self.text.len(), |offset| start + offset)
     }
 
     fn offset_for_line_col(&self, line: usize, col: usize) -> usize {
@@ -317,8 +316,7 @@ fn prev_boundary(text: &str, cursor: usize) -> usize {
     text[..cursor]
         .char_indices()
         .last()
-        .map(|(idx, _)| idx)
-        .unwrap_or(0)
+        .map_or(0, |(idx, _)| idx)
 }
 
 fn next_boundary(text: &str, cursor: usize) -> usize {
@@ -327,9 +325,7 @@ fn next_boundary(text: &str, cursor: usize) -> usize {
     }
     let mut iter = text[cursor..].char_indices();
     iter.next();
-    iter.next()
-        .map(|(idx, _)| cursor + idx)
-        .unwrap_or(text.len())
+    iter.next().map_or(text.len(), |(idx, _)| cursor + idx)
 }
 
 pub fn render_highlighted_lines(

@@ -48,6 +48,7 @@ pub enum Prim {
 
 impl Prim {
     /// Parse a primitive type from its canonical name.
+    #[must_use]
     pub fn parse_name(s: &str) -> Option<Prim> {
         match s {
             "f32" => Some(Prim::F32),
@@ -65,6 +66,7 @@ impl Prim {
         }
     }
 
+    #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
             Prim::F32 => "f32",
@@ -84,6 +86,7 @@ impl Prim {
     /// True for the active float dtypes per `spec/04-type-system.md` §1.1.
     /// `f8e4m3` is deferred (§1.1.1) and is NOT a float for any active
     /// classification purpose.
+    #[must_use]
     pub fn is_float(&self) -> bool {
         matches!(self, Prim::F32 | Prim::F64 | Prim::F16 | Prim::Bf16)
     }
@@ -91,11 +94,13 @@ impl Prim {
     /// True for any numeric precision in the active set, including `f8e4m3`
     /// (so deferred-dtype rejection sites can still treat it as numeric for
     /// surface diagnostics). `Bool` and `String` are not numeric.
+    #[must_use]
     pub fn is_numeric(&self) -> bool {
         !matches!(self, Prim::Bool | Prim::String)
     }
 
     /// True for all signed integer dtypes in the active set per §1.1.
+    #[must_use]
     pub fn is_integer(&self) -> bool {
         matches!(self, Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64)
     }
@@ -103,11 +108,12 @@ impl Prim {
     /// The representable `[min, max]` range of a signed integer width, or
     /// `None` for a non-integer primitive. The single type-system source for
     /// the per-width integer range.
+    #[must_use]
     pub fn integer_range(&self) -> Option<(i64, i64)> {
         Some(match self {
-            Prim::Int8 => (i8::MIN as i64, i8::MAX as i64),
-            Prim::Int16 => (i16::MIN as i64, i16::MAX as i64),
-            Prim::Int32 => (i32::MIN as i64, i32::MAX as i64),
+            Prim::Int8 => (i64::from(i8::MIN), i64::from(i8::MAX)),
+            Prim::Int16 => (i64::from(i16::MIN), i64::from(i16::MAX)),
+            Prim::Int32 => (i64::from(i32::MIN), i64::from(i32::MAX)),
             Prim::Int64 => (i64::MIN, i64::MAX),
             _ => return None,
         })
@@ -120,6 +126,7 @@ impl Prim {
     /// injection path, and the CLI fuzz sampler) shares, so a narrow width
     /// (e.g. int8) samples in `[-128, 127]` everywhere -- never an
     /// unrepresentable value that would yield a spurious counterexample.
+    #[must_use]
     pub fn integer_fuzz_bounds(&self) -> Option<(i64, i64)> {
         let (lo, hi) = self.integer_range()?;
         Some((lo.max(-1000), hi.min(1000)))
@@ -130,6 +137,7 @@ impl Prim {
     /// (§1.1.1). Use this predicate as the canonical "is this dtype
     /// admitted in this cycle?" check across the type checker, IR builder,
     /// and backends.
+    #[must_use]
     pub fn is_admissible_active(&self) -> bool {
         !matches!(self, Prim::F8e4m3)
     }
@@ -144,6 +152,7 @@ impl Prim {
     /// because the spec lists them as active dtypes. Backends that cannot
     /// yet emit them are expected to produce their own targeted diagnostic
     /// rather than let them slip through silently.
+    #[must_use]
     pub fn is_valid_tensor_precision(&self) -> bool {
         matches!(
             self,
@@ -163,6 +172,7 @@ impl Prim {
     /// Mirrors `is_valid_tensor_precision` in this cycle: the host scalar
     /// lane carries the same active dtype set per spec §1.1, and the
     /// deferred `f8e4m3` (§1.1.1) is rejected here too.
+    #[must_use]
     pub fn is_valid_scalar_cast_target(&self) -> bool {
         matches!(
             self,
@@ -288,6 +298,7 @@ impl TensorPrec {
     /// or `None` if it is still a type variable. Backends and IR
     /// builders that must have a concrete dtype call this and treat
     /// `None` as a monomorphization bug.
+    #[must_use]
     pub fn as_concrete(&self) -> Option<Prim> {
         match self {
             TensorPrec::Concrete(p) => Some(*p),
@@ -298,6 +309,7 @@ impl TensorPrec {
     /// Convenience: short rendering of the slot, suitable for diagnostics.
     /// Concrete precisions render as their canonical name; vars render
     /// as `?N` matching `Type::Var` formatting.
+    #[must_use]
     pub fn render(&self) -> String {
         match self {
             TensorPrec::Concrete(p) => p.name().to_string(),
@@ -309,6 +321,7 @@ impl TensorPrec {
     /// `Prim::name()` ergonomic for call sites that previously took a
     /// bare `Prim`. Returns an owned `String` because var precisions
     /// have no `'static` representation.
+    #[must_use]
     pub fn name(&self) -> String {
         self.render()
     }
@@ -318,6 +331,7 @@ impl TensorPrec {
     /// a not-yet-resolved precision is not yet known to be float, so
     /// any "this op needs a float" check should not silently accept a
     /// `Var` slot.
+    #[must_use]
     pub fn is_float(&self) -> bool {
         matches!(self, TensorPrec::Concrete(p) if p.is_float())
     }
@@ -325,17 +339,19 @@ impl TensorPrec {
     /// True iff this precision is concretely an integer per
     /// [`Prim::is_integer`]. `Var` returns `false` for the same reason
     /// as [`TensorPrec::is_float`].
+    #[must_use]
     pub fn is_integer(&self) -> bool {
         matches!(self, TensorPrec::Concrete(p) if p.is_integer())
     }
 
     /// True iff this precision is concretely numeric per
     /// [`Prim::is_numeric`]. `Var` returns `false`.
+    #[must_use]
     pub fn is_numeric(&self) -> bool {
         matches!(self, TensorPrec::Concrete(p) if p.is_numeric())
     }
 
-    /// Resolve the spec/04-type-system.md §5.7.1 reduce_sum result
+    /// Resolve the spec/04-type-system.md §5.7.1 `reduce_sum` result
     /// precision. Forwards to [`Prim::default_reduce_sum_result_precision`]
     /// for `Concrete`. For `Var`, returns an error: a polymorphic
     /// precision must be resolved (or rejected) before the reduce-sum
@@ -416,6 +432,7 @@ pub struct EffectSet {
 }
 
 impl EffectSet {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -428,10 +445,12 @@ impl EffectSet {
         self.effects.remove(effect);
     }
 
+    #[must_use]
     pub fn contains(&self, effect: &Effect) -> bool {
         self.effects.contains(effect)
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.effects.is_empty()
     }
@@ -475,6 +494,7 @@ pub struct Scheme {
 
 impl Scheme {
     /// A monomorphic scheme (no quantified variables).
+    #[must_use]
     pub fn mono(ty: Type) -> Scheme {
         Scheme {
             tvars: vec![],
@@ -490,22 +510,25 @@ impl fmt::Display for Type {
         match self {
             Type::Prim(p) => write!(f, "{}", p.name()),
             Type::Fn(args, ret) => {
-                let arg_strs: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+                let arg_strs: Vec<String> =
+                    args.iter().map(std::string::ToString::to_string).collect();
                 write!(f, "({}) -> {}", arg_strs.join(", "), ret)
             }
             Type::Ref(inner) => write!(f, "&{inner}"),
             Type::Tensor(dims, prec) => {
-                let dim_strs: Vec<String> = dims.iter().map(|d| d.to_string()).collect();
+                let dim_strs: Vec<String> =
+                    dims.iter().map(std::string::ToString::to_string).collect();
                 write!(f, "tensor[{}, {}]", dim_strs.join(", "), prec.render())
             }
             Type::Adt(name, args) if args.is_empty() => write!(f, "{name}"),
             Type::Adt(name, args) => {
-                let arg_strs: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+                let arg_strs: Vec<String> =
+                    args.iter().map(std::string::ToString::to_string).collect();
                 write!(f, "{name} {}", arg_strs.join(" "))
             }
             Type::Var(v) => write!(f, "?{}", v.0),
             Type::Tuple(ts) => {
-                let strs: Vec<String> = ts.iter().map(|t| t.to_string()).collect();
+                let strs: Vec<String> = ts.iter().map(std::string::ToString::to_string).collect();
                 write!(f, "({})", strs.join(", "))
             }
             Type::Unit => write!(f, "unit"),

@@ -14,7 +14,7 @@
 //!
 //! Numerical tolerance: MSL's default `exp`/`log`/`sqrt`/`sin` are fast-math
 //! variants. We use a Metal-specific tolerance that's wider than HIP's
-//! for transcendental-heavy kernels — see ABS_TOL/REL_TOL constants and
+//! for transcendental-heavy kernels — see `ABS_TOL/REL_TOL` constants and
 //! the per-test relaxations.
 
 use chelis_backend_metal::codegen_metal;
@@ -90,8 +90,9 @@ fn cpu_runtime_library_path() -> PathBuf {
             entries.flatten().map(|entry| entry.path()).find(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
+                    .is_some_and(|name| {
+                        name.starts_with("libchelis_runtime") && name.ends_with(".a")
+                    })
             })
         }) {
             return path;
@@ -102,8 +103,9 @@ fn cpu_runtime_library_path() -> PathBuf {
             entries.flatten().map(|entry| entry.path()).find(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
+                    .is_some_and(|name| {
+                        name.starts_with("libchelis_runtime") && name.ends_with(".a")
+                    })
             })
         }) {
             return path;
@@ -172,7 +174,7 @@ fn build_driver_mm(func_name: &str, input_labels: &[String], inputs: &[TestInput
             } else {
                 let dims = c_dims
                     .iter()
-                    .map(|d| d.to_string())
+                    .map(std::string::ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(", ");
                 body.push(format!("    int shape_{slot}[{ndim}] = {{ {dims} }};"));
@@ -325,12 +327,11 @@ fn assert_close(actual: &[f32], expected: &[f32], abs_tol: f32, rel_tol: f32, la
         let abs_err = (a - e).abs();
         let scale = e.abs().max(1.0);
         let rel_err = abs_err / scale;
-        if abs_err > abs_tol && rel_err > rel_tol {
-            panic!(
-                "{label}: index {i} mismatch. Actual={a} expected={e} \
-                 abs_err={abs_err} rel_err={rel_err} (tol abs={abs_tol} rel={rel_tol})"
-            );
-        }
+        assert!(
+            !(abs_err > abs_tol && rel_err > rel_tol),
+            "{label}: index {i} mismatch. Actual={a} expected={e} \
+             abs_err={abs_err} rel_err={rel_err} (tol abs={abs_tol} rel={rel_tol})"
+        );
     }
 }
 

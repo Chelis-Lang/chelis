@@ -60,7 +60,7 @@ fn main() {
     // reachable; this scenario exists to prove that. All other scenarios drain
     // the request first (a normal child reads its input before responding).
     if scenario == "hang_no_drain" {
-        std::thread::sleep(std::time::Duration::from_secs(600));
+        std::thread::sleep(std::time::Duration::from_mins(10));
         return;
     }
 
@@ -109,7 +109,7 @@ fn main() {
         "hang" => {
             // Sleep far beyond any test timeout so the shim's hard-kill fires
             // (this scenario DOES drain its input first).
-            std::thread::sleep(std::time::Duration::from_secs(600));
+            std::thread::sleep(std::time::Duration::from_mins(10));
         }
         "echo_request" => {
             // Echo the received request so a test can assert its exact shape.

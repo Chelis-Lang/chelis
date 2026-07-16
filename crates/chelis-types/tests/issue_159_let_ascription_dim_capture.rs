@@ -80,7 +80,7 @@ fn let_ascription_with_sig_dim_name_typechecks_when_dim_matches() {
     // the same instantiated dim var; the let-ascriptions are
     // consistent with that. No error expected.
     let errors = typecheck_surf(
-        r#"
+        r"
 sig pair_id: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
 def pair_id(a: &tensor[n, f32], b: &tensor[n, f32]) -> tensor[n, f32] =
   {
@@ -88,7 +88,7 @@ def pair_id(a: &tensor[n, f32], b: &tensor[n, f32]) -> tensor[n, f32] =
     y: &tensor[n, f32] = b
     pair_id(x, y)
   }
-"#,
+",
     );
     assert!(
         !has_dimension_mismatch(&errors),
@@ -104,13 +104,13 @@ fn let_ascription_with_concrete_dim_mismatch_against_rhs_errors() {
     // dim disagrees with the RHS's concrete dim. unify_dim must
     // produce DimensionMismatch via the patch's surfaced diagnostic.
     let errors = typecheck_surf(
-        r#"
+        r"
 def caller(t: &tensor[2, f32]) -> &tensor[2, f32] =
   {
     x: &tensor[3, f32] = t
     x
   }
-"#,
+",
     );
     assert!(
         has_dimension_mismatch(&errors),
@@ -147,14 +147,14 @@ fn dim_name_is_a_label_not_a_capture() {
     // tries to "make let-ascription dim names capture" doesn't silently
     // change the semantics without trip-wiring this test.
     let errors = typecheck_surf(
-        r#"
+        r"
 def caller(a: &tensor[n, f32], b: &tensor[m, f32]) -> &tensor[n, f32] =
   {
     x: &tensor[n, f32] = a
     y: &tensor[n, f32] = b
     x
   }
-"#,
+",
     );
     assert!(
         !has_dimension_mismatch(&errors),

@@ -60,7 +60,7 @@ fn literal_2_pow_31_rejected_with_spec_5_3_range_diagnostic() {
     );
 }
 
-/// Negative-parity twin: `2147483647` = i32::MAX fits exactly and must
+/// Negative-parity twin: `2147483647` = `i32::MAX` fits exactly and must
 /// type-check cleanly. Off-by-one regression check.
 #[test]
 fn literal_i32_max_does_not_trip_d1_range_diagnostic() {
@@ -110,7 +110,7 @@ fn cast_to_int32_of_out_of_range_literal_still_rejected() {
     );
 }
 
-/// Lower-bound twin: `-2147483648` = i32::MIN fits exactly. The
+/// Lower-bound twin: `-2147483648` = `i32::MIN` fits exactly. The
 /// negation in Surf is parsed as `(neg 2147483648)` which would itself
 /// hit the D1 path on the inner literal — so this test pins the
 /// expected behavior. If the negation path produces the same out-of-

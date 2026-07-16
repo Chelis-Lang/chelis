@@ -49,12 +49,10 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
         inner_height.max(1),
         inner_width.max(1),
     );
-    let title = app
-        .editor
-        .path
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "[unsaved]".to_string());
+    let title = app.editor.path.as_ref().map_or_else(
+        || "[unsaved]".to_string(),
+        |path| path.display().to_string(),
+    );
     let paragraph = Paragraph::new(Text::from(lines))
         .block(Block::default().borders(Borders::ALL).title(title))
         .wrap(Wrap { trim: false });

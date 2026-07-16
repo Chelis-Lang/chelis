@@ -160,7 +160,7 @@ fn gcc(build_dir: &Path, stem: &str, bin_name: &str) -> std::path::PathBuf {
 /// value has 2 rows.
 #[test]
 fn issue_631_guarded_forward_avgpool_eval_matches_c() {
-    let input: Vec<f64> = (1..=4).map(|v| v as f64).collect();
+    let input: Vec<f64> = (1..=4).map(f64::from).collect();
     let source = avgpool_source(&input);
 
     let eval_out = run_eval(&source, "avgpoolfwd");
@@ -189,7 +189,7 @@ fn issue_631_guarded_forward_avgpool_eval_matches_c() {
 /// resolved at run time, not baked for one length.
 #[test]
 fn issue_631_guarded_forward_avgpool_matches_c_at_n6() {
-    let input: Vec<f64> = (1..=6).map(|v| v as f64).collect();
+    let input: Vec<f64> = (1..=6).map(f64::from).collect();
     let source = avgpool_source(&input);
 
     let eval_out = run_eval(&source, "avgpoolfwd6");

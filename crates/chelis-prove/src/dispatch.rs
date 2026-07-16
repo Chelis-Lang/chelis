@@ -55,6 +55,7 @@ pub enum SmtAmenability {
 
 impl SmtAmenability {
     /// Whether this property should attempt Tier B.
+    #[must_use]
     pub fn is_smt_amenable(self) -> bool {
         matches!(self, Self::Linear | Self::Polynomial | Self::Transcendental)
     }
@@ -63,6 +64,7 @@ impl SmtAmenability {
 /// Dispatch a single property through the tier pipeline.
 ///
 /// Returns a proof artifact indicating which tier produced the result.
+#[must_use]
 pub fn dispatch_property(
     _property_source: &str,
     _property_name: &str,
@@ -72,31 +74,29 @@ pub fn dispatch_property(
     let start = Instant::now();
 
     // Tier A: Type system check
-    match options.tier_mode {
-        TierMode::FuzzOnly => {}
-        _ => {
-            let tier_a_result = crate::tier_a::check(_property_source, _property_name);
-            match tier_a_result {
-                TierAResult::Rejected(reason) => {
-                    return artifact(
-                        _property_name,
-                        ProofTier::TypeSystem,
-                        ProofStatus::Rejected { reason },
-                        start,
-                        None,
-                    );
-                }
-                TierAResult::Proved => {
-                    return artifact(
-                        _property_name,
-                        ProofTier::TypeSystem,
-                        ProofStatus::Proved,
-                        start,
-                        None,
-                    );
-                }
-                TierAResult::Inconclusive => {}
+    if options.tier_mode == TierMode::FuzzOnly {
+    } else {
+        let tier_a_result = crate::tier_a::check(_property_source, _property_name);
+        match tier_a_result {
+            TierAResult::Rejected(reason) => {
+                return artifact(
+                    _property_name,
+                    ProofTier::TypeSystem,
+                    ProofStatus::Rejected { reason },
+                    start,
+                    None,
+                );
             }
+            TierAResult::Proved => {
+                return artifact(
+                    _property_name,
+                    ProofTier::TypeSystem,
+                    ProofStatus::Proved,
+                    start,
+                    None,
+                );
+            }
+            TierAResult::Inconclusive => {}
         }
     }
 
@@ -114,19 +114,7 @@ pub fn dispatch_property(
 
     // Tier B: SMT
     if options.tier_mode != TierMode::FuzzOnly {
-        if !amenability.is_smt_amenable() {
-            if options.tier_mode == TierMode::SmtOnly {
-                return artifact(
-                    _property_name,
-                    ProofTier::Smt,
-                    ProofStatus::NotAmenable {
-                        reason: "property not amenable to SMT verification; use --tier auto for fuzz fallback".to_string(),
-                    },
-                    start,
-                    Some(SmtStatus::NotAmenable),
-                );
-            }
-        } else {
+        if amenability.is_smt_amenable() {
             let tier_b_result =
                 crate::tier_b::solve(_property_source, _property_name, options.smt_timeout_ms);
             match tier_b_result {
@@ -194,6 +182,16 @@ pub fn dispatch_property(
                     // Fall through to Tier C
                 }
             }
+        } else if options.tier_mode == TierMode::SmtOnly {
+            return artifact(
+                _property_name,
+                ProofTier::Smt,
+                ProofStatus::NotAmenable {
+                    reason: "property not amenable to SMT verification; use --tier auto for fuzz fallback".to_string(),
+                },
+                start,
+                Some(SmtStatus::NotAmenable),
+            );
         }
     }
 

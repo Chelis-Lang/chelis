@@ -1,4 +1,4 @@
-//! Wave 5 red-team — DimExpr canonicalization edges (Perf-F2(a)).
+//! Wave 5 red-team — `DimExpr` canonicalization edges (Perf-F2(a)).
 //!
 //! The existing `dim_canonicalization.rs` covers the v2 ruleset
 //! (GCD reduction, atom cancellation, nested-Div flattening, Mul × Div

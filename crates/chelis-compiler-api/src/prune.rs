@@ -51,6 +51,7 @@ const MODULE_DECL_OFFSET: usize = 3;
 /// Returns the program unchanged if `entry` is not a local `def` (so an
 /// unknown entry surfaces downstream as the same "unbound"/unknown-output
 /// path it would without pruning, rather than silently emptying the program).
+#[must_use]
 pub fn prune_to_entry(exprs: Vec<DeepExpr>, entry: &str) -> Vec<DeepExpr> {
     if let [DeepExpr::List(list, _)] = exprs.as_slice()
         && list_tag(list) == Some("module")
@@ -84,6 +85,7 @@ pub fn prune_to_entry(exprs: Vec<DeepExpr>, entry: &str) -> Vec<DeepExpr> {
 /// than emptied), so an unknown entry fails downstream the same way it would
 /// without pruning. This is the WI-3 single-entry contract; the build path
 /// uses [`prune_to_reachable_seeds`] directly with its multi-name seed set.
+#[must_use]
 pub fn prune_top_level_to_reachable_defs(exprs: Vec<DeepExpr>, entry: &str) -> Vec<DeepExpr> {
     let is_local_def = exprs.iter().any(|expr| deep_def_name(expr) == Some(entry));
     if !is_local_def {
@@ -129,17 +131,14 @@ pub fn prune_to_reachable_seeds(
 
     exprs
         .into_iter()
-        .filter(|expr| {
-            deep_named_decl_name(expr)
-                .map(|name| reachable.contains(name))
-                .unwrap_or(true)
-        })
+        .filter(|expr| deep_named_decl_name(expr).is_none_or(|name| reachable.contains(name)))
         .collect()
 }
 
 /// The name of a `def` declaration (not `defsig`), or `None`. This is the
 /// reachability seed key: only a `def` provides a body to follow references
 /// through.
+#[must_use]
 pub fn deep_def_name(expr: &DeepExpr) -> Option<&str> {
     let DeepExpr::List(list, _) = expr else {
         return None;
@@ -156,6 +155,7 @@ pub fn deep_def_name(expr: &DeepExpr) -> Option<&str> {
 /// The name of a `def` or `defsig` declaration, or `None`. Used to decide
 /// which elements the reachable filter applies to (both a function's `def`
 /// and its `defsig` are dropped together when unreachable).
+#[must_use]
 pub fn deep_named_decl_name(expr: &DeepExpr) -> Option<&str> {
     let DeepExpr::List(list, _) = expr else {
         return None;
@@ -171,6 +171,7 @@ pub fn deep_named_decl_name(expr: &DeepExpr) -> Option<&str> {
 
 /// Every `var` reference name in `expr`, in pre-order. A `var` node is the
 /// 3-tuple `(var {} name)`.
+#[must_use]
 pub fn deep_referenced_vars(expr: &DeepExpr) -> Vec<&str> {
     let mut out = Vec::new();
     collect_deep_referenced_vars(expr, &mut out);

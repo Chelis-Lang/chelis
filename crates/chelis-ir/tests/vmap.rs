@@ -214,7 +214,7 @@ const VMAP_RUNTIME_AXIS_DEEP: &str = r#"
 /// The same program with a CONSTANT (`lit`) mapped axis — the negative
 /// parity control. Identical except the axis node is a literal, so it must
 /// lower cleanly.
-const VMAP_CONST_AXIS_DEEP: &str = r#"
+const VMAP_CONST_AXIS_DEEP: &str = r"
 (defsig {} process
   (t-fn {} (t-tensor {} (d-name {} features) (t-prim {} f32))
            (t-tensor {} (d-name {} features) (t-prim {} f32))))
@@ -229,7 +229,7 @@ const VMAP_CONST_AXIS_DEEP: &str = r#"
            (xs {type: (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))}))
     (pipe {} (var {} xs)
       (vmap {} (var {} process) (lit {type: (t-prim {} int32)} 0)))))
-"#;
+";
 
 fn check_effects_linearity_deep(deep_src: &str) -> chelis_types::CheckedProgram {
     let exprs = chelis_deep::parser::parse_str(deep_src).expect("deep parse");

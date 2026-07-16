@@ -11,24 +11,24 @@ use tower::ServiceExt;
 mod replace_fixtures;
 
 const HELLO_TENSOR: &str = include_str!("../../../examples/hello_tensor.ch");
-const MATMUL_PROGRAM: &str = r#"a = (a : tensor[2, 3, f32])
+const MATMUL_PROGRAM: &str = r"a = (a : tensor[2, 3, f32])
 b = (b : tensor[3, 4, f32])
 out = (matmul(a, b) : tensor[2, 4, f32])
-"#;
-const LOSS_PROGRAM: &str = r#"x = (x : tensor[4, f32])
+";
+const LOSS_PROGRAM: &str = r"x = (x : tensor[4, f32])
 loss = (mean(x, 0) : tensor[f32])
-"#;
-const NON_SCALAR_PROGRAM: &str = r#"x = (x : tensor[4, f32])
+";
+const NON_SCALAR_PROGRAM: &str = r"x = (x : tensor[4, f32])
 out = (add(copy(x), x) : tensor[4, f32])
-"#;
-const DEEP_AUTHORING_RENAME_MODULE: &str = r#"(module {}
+";
+const DEEP_AUTHORING_RENAME_MODULE: &str = r"(module {}
   tide.rename
   (export {} first second)
   (defsig {} first (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32)))
   (def {} first (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))
   (defsig {} second (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32)))
   (def {} second (fn {} (params {} (x {type: (t-prim {} f32)})) (app {} (var {} first) (var {} x)))))
-"#;
+";
 
 async fn post_json(app: Router, path: &str, value: Value) -> (u16, Value) {
     post_raw_json(app, path, value.to_string()).await
@@ -172,7 +172,7 @@ async fn lower_and_grad_responses_carry_validated_schema_version() {
     // back across the process edge is validated at the boundary, so the DAG
     // the client receives carries the supported `schema_version` and the
     // response is never a `schema`-stage failure on the happy path.
-    let supported = chelis_tide::schema::WIRE_DAG_SCHEMA_VERSION as u64;
+    let supported = u64::from(chelis_tide::schema::WIRE_DAG_SCHEMA_VERSION);
 
     let (_, lowered) = post_json(
         router(),
@@ -361,10 +361,10 @@ entries = dict_entries(vocab)
 
 #[tokio::test]
 async fn eval_endpoint_returns_list_from_tensor_bridge() {
-    let source = r#"
+    let source = r"
 x = (x : tensor[4, f32])
 items = to_list(x)
-"#;
+";
     let (_, ok) = post_json(
         router(),
         "/eval",

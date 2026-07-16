@@ -59,6 +59,7 @@ pub struct SmtProperty {
 /// Run Tier B SMT check on a property source string.
 ///
 /// Without the `smt` feature, returns Timeout (forces Tier C fallback).
+#[must_use]
 pub fn solve(_property_source: &str, _property_name: &str, _timeout_ms: u64) -> TierBResult {
     #[cfg(feature = "smt")]
     {
@@ -75,7 +76,8 @@ pub fn solve(_property_source: &str, _property_name: &str, _timeout_ms: u64) -> 
 /// Solve a structured SMT property.
 ///
 /// This is the primary entry point for Tier B when the caller has already
-/// parsed the property into SmtExpr form.
+/// parsed the property into `SmtExpr` form.
+#[must_use]
 pub fn solve_property(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
     if let Some(forced) = forced_smt_result_from_env() {
         return forced;
@@ -107,6 +109,7 @@ pub fn solve_property(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
 /// non-vacuity oracle: SAT establishes that the assumed domain is inhabited;
 /// UNSAT invalidates any claimed green proof under those assumptions; unknown
 /// and timeout are unsupported, never failed.
+#[must_use]
 pub fn check_assumptions_satisfiable(
     property: &SmtProperty,
     timeout_ms: u64,

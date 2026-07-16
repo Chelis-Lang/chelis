@@ -361,8 +361,8 @@ fn borrow_of_scalar_tuple_is_rejected() {
 /// Negative parity for the inference-layer catch-all: a `&unit` borrow
 /// (or any `Type::Unit` inner) must still hit the inference `borrow` arm
 /// `_ => TypeMismatch` and never reach linearity. This locks the
-/// boundary between "deferred classification" (accepted Type::Var) and
-/// "concretely-non-tensor" (Type::Prim, Type::Unit, Type::Fn).
+/// boundary between "deferred classification" (accepted `Type::Var`) and
+/// "concretely-non-tensor" (`Type::Prim`, `Type::Unit`, `Type::Fn`).
 #[test]
 fn borrow_of_unit_is_rejected_at_inference() {
     let dir = tempdir().expect("tempdir");

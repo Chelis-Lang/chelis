@@ -37,9 +37,9 @@ fn surf_to_deep(source: &str) -> Vec<Expr> {
 /// to `tensor[1, 2, f32]` (the windowed sub-tensor shape).
 #[test]
 fn issue187_surf_shrink_parameterized_typechecks() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[0, 1], [1, 3]])
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -58,9 +58,9 @@ def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[0, 1], [1, 3]])
 /// 2 and ceil(4/2) = 2).
 #[test]
 fn issue187_surf_stride_parameterized_typechecks() {
-    let src = r#"
+    let src = r"
 def g(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = stride(&x, 1, 2)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -85,9 +85,9 @@ def g(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = stride(&x, 1, 2)
 /// had no arm for it, so it was a silent-corruption surface.
 #[test]
 fn issue187_surf_shrink_bare_no_bounds_is_arity_error() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = shrink(&x)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on bare shrink(&x)");
@@ -108,9 +108,9 @@ def f(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = shrink(&x)
 /// because the axis-0 bound (0, 5) ends past the input dimension (2).
 #[test]
 fn issue187_surf_shrink_out_of_range_bound_is_error() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[2, 4, f32]) -> tensor[5, 2, f32] = shrink(&x, [[0, 5], [1, 3]])
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on out-of-range shrink bound");
@@ -131,9 +131,9 @@ def f(x: tensor[2, 4, f32]) -> tensor[5, 2, f32] = shrink(&x, [[0, 5], [1, 3]])
 /// the bounds list has fewer pairs than the input rank.
 #[test]
 fn issue187_surf_shrink_wrong_rank_bounds_is_error() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[2, 4, f32]) -> tensor[1, 4, f32] = shrink(&x, [[0, 1]])
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on rank-mismatched shrink bounds");
@@ -155,9 +155,9 @@ def f(x: tensor[2, 4, f32]) -> tensor[1, 4, f32] = shrink(&x, [[0, 1]])
 /// arithmetic or a no-shrink/no-advance footgun).
 #[test]
 fn issue187_surf_stride_zero_step_is_error() {
-    let src = r#"
+    let src = r"
 def g(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = stride(&x, 0, 2)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on zero stride");
@@ -178,9 +178,9 @@ def g(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = stride(&x, 0, 2)
 /// strides list has fewer entries than the input rank.
 #[test]
 fn issue187_surf_stride_wrong_rank_is_error() {
-    let src = r#"
+    let src = r"
 def g(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = stride(&x, 1)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on rank-mismatched stride");
@@ -232,9 +232,9 @@ def g(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = stride(&x, "two")
 /// type-checks to `tensor[3, 5, f32]` (input dim plus lo plus hi per axis).
 #[test]
 fn issue187_sibling_pad_parameterized_typechecks() {
-    let src = r#"
+    let src = r"
 def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[0, 1], [0, 1]], 0.0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -251,9 +251,9 @@ def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[0, 1], [0, 1]], 0.0
 /// EXPECT: bare `pad(&x)` is rejected with an arity error.
 #[test]
 fn issue187_sibling_pad_bare_is_arity_error() {
-    let src = r#"
+    let src = r"
 def p(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = pad(&x)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on bare pad(&x)");
@@ -274,9 +274,9 @@ def p(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = pad(&x)
 /// (wrong-rank padding list).
 #[test]
 fn issue187_sibling_pad_wrong_rank_is_error() {
-    let src = r#"
+    let src = r"
 def p(x: tensor[2, 4, f32]) -> tensor[3, 4, f32] = pad(&x, [[0, 1]], 0.0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on wrong-rank pad padding");
@@ -305,9 +305,9 @@ def p(x: tensor[2, 4, f32]) -> tensor[3, 4, f32] = pad(&x, [[0, 1]], 0.0)
 /// Must be rejected at infer time with a message naming the offending axis.
 #[test]
 fn red_team_214_r1_f1_shrink_triple_inner_pair_is_error() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[0, 1, 2]])
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on triple-element inner pair");
@@ -329,9 +329,9 @@ def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[0, 1, 2]])
 /// R1-F1: `shrink(&x, [[0]])` -- inner pair is a singleton missing the end.
 #[test]
 fn red_team_214_r1_f1_shrink_singleton_inner_pair_is_error() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[0]])
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on singleton inner pair");
@@ -353,9 +353,9 @@ def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[0]])
 /// R1-F1: `pad(&x, [[1]], 0.0)` -- inner singleton inside pad's pair list.
 #[test]
 fn red_team_214_r1_f1_pad_singleton_inner_pair_is_error() {
-    let src = r#"
+    let src = r"
 def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[1]], 0.0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on singleton inner pair in pad");
@@ -378,9 +378,9 @@ def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[1]], 0.0)
 /// list. Mirror of the shrink triple case.
 #[test]
 fn red_team_214_r1_f1_pad_triple_inner_pair_is_error() {
-    let src = r#"
+    let src = r"
 def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[1, 0, 99]], 0.0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on triple inner pair in pad");
@@ -409,9 +409,9 @@ def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[1, 0, 99]], 0.0)
 /// rejected at infer.
 #[test]
 fn red_team_214_r1_f2_pad_list_fill_is_error() {
-    let src = r#"
+    let src = r"
 def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[1, 0], [0, 1]], [0.0])
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on list pad fill");
@@ -432,9 +432,9 @@ def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[1, 0], [0, 1]], [0.
 /// precision. Must be rejected at infer.
 #[test]
 fn red_team_214_r1_f2_pad_bool_fill_is_error() {
-    let src = r#"
+    let src = r"
 def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[1, 0], [0, 1]], true)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on bool pad fill");
@@ -458,9 +458,9 @@ def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[1, 0], [0, 1]], tru
 /// forbidden."
 #[test]
 fn red_team_214_r1_f2_pad_matching_scalar_fill_still_typechecks() {
-    let src = r#"
+    let src = r"
 def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[1, 0], [0, 1]], 0.0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -487,9 +487,9 @@ def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[1, 0], [0, 1]], 0.0
 /// arities.
 #[test]
 fn red_team_214_r2_m1_shrink_empty_inner_list_is_error() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[], [0, 1]])
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on empty inner list");
@@ -509,9 +509,9 @@ def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[], [0, 1]])
 /// R2-M1 (pad sibling): same empty-inner-list bug in pad's pair list.
 #[test]
 fn red_team_214_r2_m1_pad_empty_inner_list_is_error() {
-    let src = r#"
+    let src = r"
 def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[], [1, 1]], 0.0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on empty inner list in pad");
@@ -535,9 +535,9 @@ def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[], [1, 1]], 0.0)
 /// handles cast peeling, per reshape) to bring this check forward.
 #[test]
 fn red_team_214_r2_l1_shrink_cast_wrapped_negative_bound_is_error() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[2, 4, f32]) -> tensor[2, 1, f32] = shrink(&x, [[cast(-1, int32), cast(1, int32)], [cast(0, int32), cast(1, int32)]])
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped negative bound");
@@ -560,9 +560,9 @@ def f(x: tensor[2, 4, f32]) -> tensor[2, 1, f32] = shrink(&x, [[cast(-1, int32),
 /// `cast(5, int32)` exceeds axis-0 dim 2.
 #[test]
 fn red_team_214_r2_l1_shrink_cast_wrapped_out_of_range_bound_is_error() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[2, 4, f32]) -> tensor[5, 1, f32] = shrink(&x, [[cast(0, int32), cast(5, int32)], [cast(0, int32), cast(1, int32)]])
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped out-of-range bound");
@@ -583,9 +583,9 @@ def f(x: tensor[2, 4, f32]) -> tensor[5, 1, f32] = shrink(&x, [[cast(0, int32), 
 /// type-check cleanly with a precise output shape.
 #[test]
 fn red_team_214_r2_l1_shrink_cast_wrapped_well_formed_typechecks() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[cast(0, int32), cast(1, int32)], [cast(1, int32), cast(3, int32)]])
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -614,9 +614,9 @@ def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[cast(0, int32), 
 /// Host runtime catches it, but the diagnostic should land at check.
 #[test]
 fn red_team_214_r3_high1_stride_cast_wrapped_zero_is_error() {
-    let src = r#"
+    let src = r"
 def g(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = stride(&x, cast(0, int32), 2)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped zero stride");
@@ -636,9 +636,9 @@ def g(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = stride(&x, cast(0, int32), 2)
 /// R3-HIGH1 sibling: cast-wrapped negative stride.
 #[test]
 fn red_team_214_r3_high1_stride_cast_wrapped_negative_is_error() {
-    let src = r#"
+    let src = r"
 def g(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = stride(&x, cast(-1, int32), 2)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped negative stride");
@@ -664,9 +664,9 @@ def g(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = stride(&x, cast(-1, int32), 2
 /// accept int64 endpoints must intentionally update this fixture.
 #[test]
 fn red_team_214_r3_high2_int64_cast_bound_rejected_at_unification() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[cast(0, int64), cast(1, int64)], [cast(1, int64), cast(3, int64)]])
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on int64 cast endpoints");
@@ -695,9 +695,9 @@ def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[cast(0, int64), 
 /// slips through.
 #[test]
 fn red_team_214_r3_med1_neg_of_cast_int_is_error() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[2, 4, f32]) -> tensor[2, 1, f32] = shrink(&x, [[neg(cast(1, int32)), cast(1, int32)], [cast(0, int32), cast(1, int32)]])
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on neg(cast(...))-wrapped negative bound");
@@ -722,9 +722,9 @@ def f(x: tensor[2, 4, f32]) -> tensor[2, 1, f32] = shrink(&x, [[neg(cast(1, int3
 /// depth greater than one falls back to `NonLiteral`.
 #[test]
 fn red_team_214_r3_med2_double_cast_negative_is_error() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[2, 4, f32]) -> tensor[2, 1, f32] = shrink(&x, [[cast(cast(-1, int32), int32), cast(1, int32)], [cast(0, int32), cast(1, int32)]])
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on doubly-nested cast negative bound");
@@ -757,9 +757,9 @@ def f(x: tensor[2, 4, f32]) -> tensor[2, 1, f32] = shrink(&x, [[cast(cast(-1, in
 /// back to original-dim order).
 #[test]
 fn red_team_214_r3_permute_cast_wrapped_axes_typechecks() {
-    let src = r#"
+    let src = r"
 def g(k: tensor[2, 4, f32]) -> tensor[4, 2, f32] = permute(&k, cast(1, int32), cast(0, int32))
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -777,9 +777,9 @@ def g(k: tensor[2, 4, f32]) -> tensor[4, 2, f32] = permute(&k, cast(1, int32), c
 /// infer (was masked by the wrong-fallback type mismatch).
 #[test]
 fn red_team_214_r3_permute_cast_wrapped_out_of_bounds_axis_is_error() {
-    let src = r#"
+    let src = r"
 def g(k: tensor[2, 4, f32]) -> tensor[4, 2, f32] = permute(&k, cast(99, int32), cast(0, int32))
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB permute axis");
@@ -800,9 +800,9 @@ def g(k: tensor[2, 4, f32]) -> tensor[4, 2, f32] = permute(&k, cast(99, int32), 
 /// produce the correct output shape.
 #[test]
 fn red_team_214_r3_expand_cast_wrapped_axis_and_size_typechecks() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[2, f32]) -> tensor[3, 2, f32] = expand(&x, cast(0, int32), cast(3, int32))
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -820,9 +820,9 @@ def f(x: tensor[2, f32]) -> tensor[3, 2, f32] = expand(&x, cast(0, int32), cast(
 /// infer (was bypassing the positive-size check).
 #[test]
 fn red_team_214_r3_expand_cast_wrapped_zero_size_is_error() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[2, f32]) -> tensor[0, 2, f32] = expand(&x, cast(0, int32), cast(0, int32))
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped zero expand size");

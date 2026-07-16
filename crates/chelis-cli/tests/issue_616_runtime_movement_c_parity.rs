@@ -154,7 +154,7 @@ fn gcc(
 /// must not propagate the shrink's extent onto the stride).
 #[test]
 fn issue_616_runtime_shrink_stride_forward_eval_matches_c() {
-    let input: Vec<f64> = (1..=6).map(|v| v as f64).collect();
+    let input: Vec<f64> = (1..=6).map(f64::from).collect();
     let source = format!(
         "module Repro.RtChain\nsig f: tensor[n, f32] -> tensor[2, f32]\ndef f(x) = {{\n{CHAIN_ANCHORED_BODY}\n}}\nout = f(to_tensor([{}]))\n",
         f32_literal(&input)
@@ -264,7 +264,7 @@ int main(void) {{
 /// is tracked separately on that issue.
 #[test]
 fn issue_632_direct_return_movement_chain_eval_matches_c() {
-    let input: Vec<f64> = (1..=6).map(|v| v as f64).collect();
+    let input: Vec<f64> = (1..=6).map(f64::from).collect();
     let body = "\
   extent = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(1, int64)), int32)\n\
   stride(shrink(x, [[cast(1, int32), extent]]), cast(2, int32))";
@@ -302,7 +302,7 @@ fn issue_632_direct_return_movement_chain_eval_matches_c() {
 /// on `[1, 3, 5]`.
 #[test]
 fn issue_632_literal_stride_under_sig_symbols_matches_c() {
-    let input: Vec<f64> = (1..=6).map(|v| v as f64).collect();
+    let input: Vec<f64> = (1..=6).map(f64::from).collect();
     let source = format!(
         "module Repro.LitStrideSig\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = stride(x, cast(2, int32))\nout = f(to_tensor([{}]))\n",
         f32_literal(&input)

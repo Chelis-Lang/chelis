@@ -80,6 +80,7 @@ fn find_reachable_load(dag: &Dag, reachable: &HashSet<NodeId>, name: &str) -> Op
 }
 
 /// Initialize random parameters
+#[must_use]
 pub fn init_params(rng_seed: u64) -> HashMap<String, TensorValue> {
     // Simple LCG for reproducibility
     let mut state = rng_seed;
@@ -204,5 +205,5 @@ pub fn accuracy(
         }
     }
 
-    Ok(correct as f64 / total as f64)
+    Ok(f64::from(correct) / f64::from(total))
 }

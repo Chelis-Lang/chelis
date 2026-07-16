@@ -95,6 +95,7 @@ pub enum EditValidationError {
 
 impl EditValidationError {
     /// The pass that produced this error, as a stable lowercase stage tag.
+    #[must_use]
     pub fn stage(&self) -> &'static str {
         match self {
             EditValidationError::Type { .. } => "check",
@@ -104,6 +105,7 @@ impl EditValidationError {
     }
 
     /// The diagnostic text the underlying pass produced.
+    #[must_use]
     pub fn message(&self) -> &str {
         match self {
             EditValidationError::Type { message, .. }
@@ -167,6 +169,7 @@ impl ReplacementError {
     /// The pass that produced this error, as a stable lowercase tag matching
     /// the `stage` strings used elsewhere in the compiler API (`check`,
     /// `effects`, `linearity`) plus `name-resolution` for the resolve miss.
+    #[must_use]
     pub fn stage(&self) -> &'static str {
         match self {
             ReplacementError::NameResolution { .. } => "name-resolution",
@@ -177,6 +180,7 @@ impl ReplacementError {
     }
 
     /// The diagnostic text the underlying pass produced.
+    #[must_use]
     pub fn message(&self) -> &str {
         match self {
             ReplacementError::NameResolution { message, .. }

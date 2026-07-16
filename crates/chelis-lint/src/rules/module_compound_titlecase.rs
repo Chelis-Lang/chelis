@@ -8,11 +8,11 @@ use crate::{Context, Rule, Surface, Violation};
 pub struct ModuleCompoundTitlecase;
 
 impl Rule for ModuleCompoundTitlecase {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "module-compound-titlecase"
     }
 
-    fn spec_ref(&self) -> &str {
+    fn spec_ref(&self) -> &'static str {
         "§6.2"
     }
 
@@ -20,7 +20,7 @@ impl Rule for ModuleCompoundTitlecase {
         &[Surface::SurfSource]
     }
 
-    fn summary(&self) -> &str {
+    fn summary(&self) -> &'static str {
         "module compound names use Title-case (Hamt), never ALL-CAPS abbreviations (HAMT)"
     }
 

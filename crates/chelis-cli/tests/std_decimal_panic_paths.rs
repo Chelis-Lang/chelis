@@ -75,12 +75,12 @@ fn decimal_div_by_zero_calls_fail_with_branded_message() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-decimal-panic-divzero");
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 import Std.Decimal (decimal_div, decimal_from_int, round_half_even)
 
 quotient = decimal_div(decimal_from_int(cast(1, int64)), decimal_from_int(cast(0, int64)), cast(0, int64), round_half_even())
-"#,
+",
     );
     // Std.Decimal.decimal_div/4 fails with the literal:
     //   "decimal_div: division by zero"

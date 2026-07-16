@@ -109,10 +109,9 @@ fn build_test_archive(name: &str, version: &str, deps: &[(&str, &str)]) -> Vec<u
         r#"[package]
 name = "{name}"
 version = "{version}"
-compiler = "{compiler}"
+compiler = "{CURRENT_COMPILER_PIN}"
 module_prefix = "Test"
 {deps_toml}"#,
-        compiler = CURRENT_COMPILER_PIN,
     );
     let main_text = "module Test.Main\n\nexport (placeholder)\ndef placeholder -> int32 = 0\n";
     let mut tar_bytes = Vec::new();
@@ -284,7 +283,7 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn file_lock() -> std::sync::MutexGuard<'static, ()> {
     ENV_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 // ============================================================
@@ -317,7 +316,7 @@ version = "0.2.0"
 [[dependencies]]
 name = "chelis-std"
 version = "0.2.0"
-compiler = "{compiler}"
+compiler = "{CURRENT_COMPILER_PIN}"
 archive_sha256 = "deadbeef"
 shell_sha256 = "cafebabe"
 
@@ -327,7 +326,7 @@ kind = "local_registry"
 [[dependencies]]
 name = "neighbor"
 version = "0.2.0"
-compiler = "{compiler}"
+compiler = "{CURRENT_COMPILER_PIN}"
 archive_sha256 = "abcd"
 shell_sha256 = "ef01"
 
@@ -335,7 +334,6 @@ shell_sha256 = "ef01"
 kind = "path"
 path = "../neighbor"
 "#,
-        compiler = CURRENT_COMPILER_PIN,
     );
     let lock: ReefLock = toml::from_str(&toml).expect("old-schema lockfile must deserialize");
     assert_eq!(lock.dependencies.len(), 2);
@@ -817,10 +815,9 @@ fn phaseA_item9_old_chelis_std_lockfile_migrates_to_bundled() {
             r#"[package]
 name = "downstream"
 version = "0.2.0"
-compiler = "{compiler}"
+compiler = "{CURRENT_COMPILER_PIN}"
 module_prefix = "Downstream"
 "#,
-            compiler = CURRENT_COMPILER_PIN,
         ),
     )
     .unwrap();
@@ -837,14 +834,13 @@ version = "0.2.0"
 [[dependencies]]
 name = "chelis-std"
 version = "0.2.0"
-compiler = "{compiler}"
+compiler = "{CURRENT_COMPILER_PIN}"
 archive_sha256 = "abc"
 shell_sha256 = "def"
 
 [dependencies.source]
 kind = "local_registry"
 "#,
-            compiler = CURRENT_COMPILER_PIN,
         ),
     )
     .unwrap();
@@ -956,7 +952,7 @@ version = "0.2.0"
 [[dependencies]]
 name = "nautilus"
 version = "9.9.9"
-compiler = "{compiler}"
+compiler = "{CURRENT_COMPILER_PIN}"
 archive_sha256 = "abc"
 shell_sha256 = "def"
 
@@ -964,7 +960,6 @@ shell_sha256 = "def"
 kind = "local_registry"
 remote_origin = "github://chelis-lang/nautilus@v9.9.9"
 "#,
-            compiler = CURRENT_COMPILER_PIN,
         ),
     )
     .unwrap();

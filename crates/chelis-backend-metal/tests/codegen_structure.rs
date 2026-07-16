@@ -74,7 +74,11 @@ fn m1_stub_carries_link_flags_for_metal_and_foundation() {
 
     // Pairs are emitted as ("-framework", "Metal") so a downstream consumer
     // can pass them to clang++ verbatim.
-    let flat: Vec<&str> = result.link_flags.iter().map(|s| s.as_str()).collect();
+    let flat: Vec<&str> = result
+        .link_flags
+        .iter()
+        .map(std::string::String::as_str)
+        .collect();
     assert!(
         flat.windows(2).any(|w| w == ["-framework", "Metal"]),
         "link_flags missing -framework Metal: {:?}",
@@ -739,8 +743,7 @@ fn ws2_emit_const_f16_bf16_use_uint16_bit_pattern_not_msl_kernel_types() {
         let after_marker = &src[const_pos..];
         let next_node = after_marker[const_marker.len()..]
             .find("// node ")
-            .map(|off| const_marker.len() + off)
-            .unwrap_or(after_marker.len());
+            .map_or(after_marker.len(), |off| const_marker.len() + off);
         let fill_block = &after_marker[..next_node];
 
         assert!(
@@ -776,7 +779,7 @@ fn ws2_emit_const_f16_bf16_use_uint16_bit_pattern_not_msl_kernel_types() {
 }
 
 /// WS-2 byte-identity lock: F32 / integer / bool Const emission must be
-/// unchanged by the host-fill refactor (no msl_ty drift, no widened cast).
+/// unchanged by the host-fill refactor (no `msl_ty` drift, no widened cast).
 /// This pins the pre-WS-2 shape so a future refactor doesn't accidentally
 /// route F32 through the bit-pattern path.
 #[test]
@@ -798,8 +801,7 @@ fn ws2_emit_const_f32_integer_bool_paths_unchanged() {
         let after = &src[const_pos..];
         let next_node = after[const_marker.len()..]
             .find("// node ")
-            .map(|off| const_marker.len() + off)
-            .unwrap_or(after.len());
+            .map_or(after.len(), |off| const_marker.len() + off);
         &after[..next_node]
     }
 

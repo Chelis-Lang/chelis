@@ -41,7 +41,7 @@ fn pipeline_linreg_model_lowers() {
 
 #[test]
 fn pipeline_transformer_structural_smoke_lowers() {
-    let src = r#"
+    let src = r"
 def forward(
   x: tensor[seq, 16, f32],
   wq: tensor[16, 8, f32],
@@ -67,7 +67,7 @@ def forward(
     _ = drop(attn)
     out
   }
-"#;
+";
     let result = compile_surf(src).expect("transformer structural smoke should compile");
     assert!(
         !result.dag.is_empty(),
@@ -108,10 +108,10 @@ fn pipeline_tier2_relu_decomposes() {
 
 #[test]
 fn pipeline_macro_composition_lowers() {
-    let src = r#"
+    let src = r"
 macro residual_relu(x) = add(copy(x), relu(x))
 def f(x: tensor[n, f32]): tensor[n, f32] = residual_relu(x)
-"#;
+";
     let result = compile_surf(src).expect("macro program should compile");
     assert!(
         !result.dag.is_empty(),
@@ -133,10 +133,10 @@ fn pipeline_vmap_example_lowers() {
 
 #[test]
 fn pipeline_vmap_explicit_axis_lowers() {
-    let src = r#"
+    let src = r"
 def process(x: tensor[features, f32]): tensor[features, f32] = relu(x)
 def batch_process(xs: tensor[features, batch, f32]): tensor[features, batch, f32] = vmap(process, axis=1)(xs)
-"#;
+";
     let result = compile_surf(src).expect("axis=1 vmap example should compile");
     assert!(
         !result.dag.is_empty(),
@@ -147,7 +147,7 @@ def batch_process(xs: tensor[features, batch, f32]): tensor[features, batch, f32
 
 #[test]
 fn pipeline_grad_with_multiple_wrt_lowers_to_tuple_roots() {
-    let src = r#"
+    let src = r"
 def loss(
   x: tensor[features, f32],
   w: tensor[features, f32],
@@ -158,7 +158,7 @@ def loss(
 def grads(x: tensor[features, f32], w: tensor[features, f32], v: tensor[features, f32])
     -> (tensor[features, f32], tensor[features, f32]) =
   grad(loss, wrt=(w, v))(x, w, v)
-"#;
+";
     let result = compile_surf(src).expect("multi-wrt grad program should compile");
     assert!(result.root_nodes.contains_key("loss"));
     assert!(result.root_nodes.contains_key("grads.0"));
@@ -167,7 +167,7 @@ def grads(x: tensor[features, f32], w: tensor[features, f32], v: tensor[features
 
 #[test]
 fn pipeline_vmap_grad_with_multiple_wrt_lowers_to_tuple_roots() {
-    let src = r#"
+    let src = r"
 def loss(x: tensor[4, f32], w: tensor[4, f32], v: tensor[4, f32]) -> tensor[f32] =
   sum(mul(x, add(w, v)), 0)
 
@@ -177,7 +177,7 @@ def per_example_grads(
   vs: tensor[3, 4, f32]
 ) -> (tensor[3, 4, f32], tensor[3, 4, f32]) =
   vmap(grad(loss, wrt=(w, v)))(xs, ws, vs)
-"#;
+";
     let result = compile_surf(src).expect("vmapped multi-wrt grad program should compile");
     assert!(result.root_nodes.contains_key("loss"));
     assert!(result.root_nodes.contains_key("per_example_grads.0"));

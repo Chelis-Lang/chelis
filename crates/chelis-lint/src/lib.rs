@@ -66,6 +66,7 @@ pub enum Severity {
 }
 
 impl Severity {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Severity::Error => "error",
@@ -74,6 +75,7 @@ impl Severity {
         }
     }
 
+    #[must_use]
     pub fn blocks_check(self) -> bool {
         matches!(self, Severity::Error)
     }
@@ -264,6 +266,7 @@ fn inline_allows(source: Option<&str>, surface: Surface, violation: &Violation) 
     inline_line_allows(current, surface, rule) || inline_line_allows(previous, surface, rule)
 }
 
+#[must_use]
 pub fn inline_keeps(source: &str, surface: Surface, line_no: usize, rule: &str) -> bool {
     let lines: Vec<&str> = source.lines().collect();
     let current = lines.get(line_no.saturating_sub(1)).copied().unwrap_or("");
@@ -282,8 +285,7 @@ fn inline_line_allows(line: &str, surface: Surface, rule: &str) -> bool {
     let directive = directive.trim();
     directive
         .strip_prefix("allow")
-        .map(|rest| rest.split_whitespace().any(|name| name == rule))
-        .unwrap_or(false)
+        .is_some_and(|rest| rest.split_whitespace().any(|name| name == rule))
 }
 
 fn inline_line_keeps(line: &str, surface: Surface, rule: &str) -> bool {
@@ -293,8 +295,7 @@ fn inline_line_keeps(line: &str, surface: Surface, rule: &str) -> bool {
     let directive = directive.trim();
     directive
         .strip_prefix("keep")
-        .map(|rest| rest.split_whitespace().any(|name| name == rule))
-        .unwrap_or(false)
+        .is_some_and(|rest| rest.split_whitespace().any(|name| name == rule))
 }
 
 fn file_level_allows(source: &str, rule: &str) -> bool {

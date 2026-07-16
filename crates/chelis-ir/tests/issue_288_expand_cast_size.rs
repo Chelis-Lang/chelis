@@ -51,10 +51,10 @@ fn lower_surf(src: &str) -> Result<chelis_ir::dag::Dag, String> {
 /// rank-1 `tensor[2]` output — not the default size-1 `tensor[1]`.
 #[test]
 fn issue_288_expand_with_cast_size_lowers_to_requested_size() {
-    let src = r#"
+    let src = r"
 sig run: tensor[2, f32] -> tensor[2, f32]
 def run(x) = mul(x, expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int32)))
-"#;
+";
     let dag = lower_surf(src).expect("expand-with-cast-size must lower");
     assert!(
         verify::verify(&dag).is_empty(),
@@ -87,10 +87,10 @@ def run(x) = mul(x, expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cas
 /// the literal path.
 #[test]
 fn issue_288_expand_with_plain_size_still_lowers() {
-    let src = r#"
+    let src = r"
 sig run: tensor[2, f32] -> tensor[2, f32]
 def run(x) = mul(x, expand(scalar_to_tensor(cast(2.5, f32)), 0, 2))
-"#;
+";
     let dag = lower_surf(src).expect("expand-with-plain-size must lower");
     assert!(
         verify::verify(&dag).is_empty(),
@@ -113,10 +113,10 @@ def run(x) = mul(x, expand(scalar_to_tensor(cast(2.5, f32)), 0, 2))
 /// `tensor[1]` and the DAG was malformed.
 #[test]
 fn issue_288_constant_broadcast_forward_lowers_clean() {
-    let src = r#"
+    let src = r"
 sig f: tensor[2, f32] -> f32
 def f(x) = tensor_to_scalar(sum(mul(x, expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int32))), cast(0, int32)))
-"#;
+";
     let dag = lower_surf(src).expect("issue #288 forward must lower");
     let errors = verify::verify(&dag);
     assert!(

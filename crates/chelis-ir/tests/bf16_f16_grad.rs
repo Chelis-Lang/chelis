@@ -5,7 +5,7 @@
 //! → grad → bf16 tensor (gradient precision = operand precision)".
 //! This test pins the IR-level shape of that contract so a future
 //! AD-rule refactor that accidentally widens the adjoint to f32 fails
-//! loudly. The HIP backend integration test (tests/gpu_correctness.rs)
+//! loudly. The HIP backend integration test (`tests/gpu_correctness.rs`)
 //! exercises the full host→device→host execution; this test exercises
 //! the AD construction without requiring a HIP-capable GPU.
 

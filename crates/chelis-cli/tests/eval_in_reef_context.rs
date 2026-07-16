@@ -1,4 +1,4 @@
-//! Phase H, cmd_eval slice — integration probes for the
+//! Phase H, `cmd_eval` slice — integration probes for the
 //! `compile_reef_context + eval_in_context` refactor of `chelis eval`.
 //!
 //! What the CLI tests need to lock in:
@@ -256,7 +256,7 @@ fn cmd_eval_reef_package_simple_def_matches_baseline() {
 }
 
 /// Hull Phase 0a Packet B, commit 2: `chelis eval --json --file` routed
-/// through the reef-context fast path emits the raw EvalResult JSON on
+/// through the reef-context fast path emits the raw `EvalResult` JSON on
 /// stdout. This covers the `run_eval_in_context` JSON branch, distinct
 /// from the legacy `try_eval_result` branch the non-reef `--file` test
 /// in `cli.rs` exercises.

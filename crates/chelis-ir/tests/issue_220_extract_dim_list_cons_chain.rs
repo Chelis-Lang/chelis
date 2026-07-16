@@ -48,7 +48,7 @@ use chelis_types::types::Prim;
 /// the exact shape `chelis-surf::desugar` produces for the surface
 /// list literal `[cast(2, int64), cast(3, int64)]`.
 fn cons_chain_reshape_expr() -> Expr {
-    let src = r#"
+    let src = r"
         (app {}
              (var {} reshape)
              (var {} x)
@@ -59,7 +59,7 @@ fn cons_chain_reshape_expr() -> Expr {
                  (var {} Cons)
                  (cast {} (lit {} 3) (t-prim {} int64))
                  (var {} Nil))))
-    "#;
+    ";
     let mut exprs = chelis_deep::parser::parse_str(src).expect("deep parse");
     assert_eq!(exprs.len(), 1, "expected exactly one top-level expr");
     exprs.pop().unwrap()

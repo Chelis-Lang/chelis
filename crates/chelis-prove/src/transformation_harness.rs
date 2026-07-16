@@ -61,19 +61,16 @@ pub fn run_harness(
             continue;
         }
 
-        match &entry.discharge {
-            Some(_) => {
-                for (j, output_goal) in outputs.iter().enumerate() {
-                    if discharge_fn(output_goal).is_none() {
-                        results.push((i, HarnessResult::BrokeDischarged { output_index: j }));
-                    }
+        if entry.discharge.is_some() {
+            for (j, output_goal) in outputs.iter().enumerate() {
+                if discharge_fn(output_goal).is_none() {
+                    results.push((i, HarnessResult::BrokeDischarged { output_index: j }));
                 }
             }
-            None => {
-                let all_discharged = outputs.iter().all(|g| discharge_fn(g).is_some());
-                if all_discharged {
-                    results.push((i, HarnessResult::LaunderedUndischargeable));
-                }
+        } else {
+            let all_discharged = outputs.iter().all(|g| discharge_fn(g).is_some());
+            if all_discharged {
+                results.push((i, HarnessResult::LaunderedUndischargeable));
             }
         }
     }

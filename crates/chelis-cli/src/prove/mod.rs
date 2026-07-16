@@ -180,7 +180,7 @@ pub fn cmd_prove(options: ProveOptions<'_>) -> Result<i32, String> {
 }
 
 /// Compute property dependency edges for a single input file (chelis#490).
-/// Returns (property_name, referenced_exports) pairs.
+/// Returns (`property_name`, `referenced_exports`) pairs.
 fn compute_dependency_edges(path: &Path) -> Result<Vec<(String, Vec<String>)>, String> {
     let source = fs::read_to_string(path).map_err(|e| e.to_string())?;
     match path.extension().and_then(|ext| ext.to_str()) {
@@ -360,7 +360,7 @@ fn is_single_explicit_deep_input(path: Option<&Path>, inputs: &[PathBuf]) -> boo
 }
 
 fn combine_status(lhs: Status, rhs: Status) -> Status {
-    use Status::*;
+    use Status::{Error, Failed, Passed, Unsupported};
     // Precedence, worst wins: Error > Failed > Unsupported > Passed. A
     // DISPROVED property (Failed, exit 1) outranks an Unsupported one
     // (exit 2), so a genuine falsification is never masked by a co-occurring
@@ -2744,15 +2744,13 @@ fn emit_deep_error(options: &ProveOptions<'_>, property: &DeepProperty, message:
                 "source": source_json_deep(property, options),
             })
         );
+    } else if let Some(source) = bridge_source_details(property, options) {
+        println!(
+            "property error: {}: {message}\n  --> {}:{}:{} {}\n  | {}",
+            property.name, source.file, source.line, source.column, source.id, source.text
+        );
     } else {
-        if let Some(source) = bridge_source_details(property, options) {
-            println!(
-                "property error: {}: {message}\n  --> {}:{}:{} {}\n  | {}",
-                property.name, source.file, source.line, source.column, source.id, source.text
-            );
-        } else {
-            println!("property error: {}: {message}", property.name);
-        }
+        println!("property error: {}: {message}", property.name);
     }
 }
 

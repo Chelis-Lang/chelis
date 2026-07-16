@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::*;
+use crate::types::{Dim, DimVar, RankVar, Scheme, TensorPrec, Type, TypeVar, VarGen};
 use crate::unify::Subst;
 
 /// Provenance of a let-bound `int`-valued name, tracked so a runtime
@@ -55,11 +55,13 @@ pub struct Env {
 }
 
 impl Env {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Look up a name. Returns None if unbound.
+    #[must_use]
     pub fn lookup(&self, name: &str) -> Option<&Scheme> {
         self.bindings.get(name)
     }
@@ -86,6 +88,7 @@ impl Env {
     }
 
     /// The recorded size provenance of a name, if any (chelis#397/#469).
+    #[must_use]
     pub fn size_provenance(&self, name: &str) -> Option<SizeProvenance> {
         self.size_provenance.get(name).copied()
     }
@@ -106,6 +109,7 @@ impl Env {
     }
 
     /// The recorded list-literal length of a name, if any (chelis#631).
+    #[must_use]
     pub fn list_literal_len(&self, name: &str) -> Option<usize> {
         self.list_literal_lens.get(name).copied()
     }
@@ -115,6 +119,7 @@ impl Env {
     /// with a real tensor source the backend can read the extent from
     /// (chelis#397/#469). The check-layer analog of the IR layer's
     /// `LowerCtx::symbol_has_tensor_source`.
+    #[must_use]
     pub fn tensor_carries_dim(&self, name: &str) -> bool {
         self.bindings
             .values()
@@ -122,6 +127,7 @@ impl Env {
     }
 
     /// Look up an imported or qualified name by its unique terminal segment.
+    #[must_use]
     pub fn lookup_terminal_unique(&self, name: &str) -> Option<&Scheme> {
         let mut matches = self
             .bindings
@@ -253,6 +259,7 @@ fn terminal_name(name: &str) -> &str {
 }
 
 /// Collect all free type variables in a type.
+#[must_use]
 pub fn free_tvars(ty: &Type) -> Vec<TypeVar> {
     let mut vars = Vec::new();
     collect_tvars(ty, &mut vars);
@@ -298,6 +305,7 @@ fn collect_tvars(ty: &Type, vars: &mut Vec<TypeVar>) {
 }
 
 /// Collect all free dimension variables in a type.
+#[must_use]
 pub fn free_dvars(ty: &Type) -> Vec<DimVar> {
     let mut vars = Vec::new();
     collect_dvars(ty, &mut vars);
@@ -368,6 +376,7 @@ pub fn collect_dims(ty: &Type, dims: &mut Vec<Dim>) {
 }
 
 /// Collect all free rank variables in a type (Tier-2 rank polymorphism).
+#[must_use]
 pub fn free_rvars(ty: &Type) -> Vec<RankVar> {
     let mut vars = Vec::new();
     collect_rvars(ty, &mut vars);

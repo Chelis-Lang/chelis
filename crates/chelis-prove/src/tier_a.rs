@@ -22,6 +22,7 @@ pub enum TierAResult {
 /// Validates that the property source type-checks. If the type checker reports
 /// errors, the property is rejected as ill-formed. Otherwise, inconclusive
 /// (positive discharge for dimension/effect/linearity is future work).
+#[must_use]
 pub fn check(property_source: &str, _property_name: &str) -> TierAResult {
     let result = compiler::check(CheckRequest {
         source_kind: SourceKind::Surf,

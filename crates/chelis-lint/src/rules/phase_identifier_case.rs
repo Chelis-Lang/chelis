@@ -1,7 +1,7 @@
 //! Rule `phase-identifier-case` — Phase identifiers are
 //! `phase` + digit/letter in lowercase form when embedded in filenames
 //! (§9.1). The historic `phaseA_*.rs` style (camelCase chunk inside an
-//! otherwise snake_case filename) is the violation; the corrected form is
+//! otherwise `snake_case` filename) is the violation; the corrected form is
 //! `phase_a_*.rs`.
 
 use crate::{Context, Rule, Surface, Violation};
@@ -22,11 +22,11 @@ fn phase_re() -> &'static Regex {
 pub struct PhaseIdentifierCase;
 
 impl Rule for PhaseIdentifierCase {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "phase-identifier-case"
     }
 
-    fn spec_ref(&self) -> &str {
+    fn spec_ref(&self) -> &'static str {
         "§9.1"
     }
 
@@ -38,7 +38,7 @@ impl Rule for PhaseIdentifierCase {
         &[Surface::RustSource, Surface::SurfSource]
     }
 
-    fn summary(&self) -> &str {
+    fn summary(&self) -> &'static str {
         "phase identifiers in filenames use `phase_a` (snake), not `phaseA` (camelCase chunk)"
     }
 

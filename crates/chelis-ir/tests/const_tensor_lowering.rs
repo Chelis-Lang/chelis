@@ -22,13 +22,13 @@ fn surf_to_dag(source: &str) -> Result<Dag, String> {
     try_lower_program(&checked).map_err(|diag| format!("lowering failed: {diag:?}"))
 }
 
-/// A non-uniform literal `to_tensor` should produce a ConstTensor node.
+/// A non-uniform literal `to_tensor` should produce a `ConstTensor` node.
 #[test]
 fn to_tensor_non_uniform_lowers_to_const_tensor() {
-    let source = r#"
+    let source = r"
 def main() -> tensor[3, f32] =
   to_tensor([1.0, 2.0, 3.0])
-"#;
+";
     let dag = surf_to_dag(source).expect("pipeline succeeds");
 
     // Look for a ConstTensor node in the DAG.
@@ -54,13 +54,13 @@ def main() -> tensor[3, f32] =
     assert!(!has_pad, "expected no Pad nodes (old cascade pattern)");
 }
 
-/// Evaluate a ConstTensor node and verify it produces the correct values.
+/// Evaluate a `ConstTensor` node and verify it produces the correct values.
 #[test]
 fn const_tensor_evaluates_correctly() {
-    let source = r#"
+    let source = r"
 def main() -> tensor[3, f32] =
   to_tensor([1.0, 2.0, 3.0])
-"#;
+";
     let dag = surf_to_dag(source).expect("pipeline succeeds");
 
     let roots: Vec<NodeId> = dag.roots().to_vec();
@@ -72,13 +72,13 @@ def main() -> tensor[3, f32] =
     assert_eq!(result.data, vec![1.0, 2.0, 3.0]);
 }
 
-/// A uniform-value to_tensor still uses the efficient Const (single-value) path.
+/// A uniform-value `to_tensor` still uses the efficient Const (single-value) path.
 #[test]
 fn to_tensor_uniform_stays_as_const() {
-    let source = r#"
+    let source = r"
 def main() -> tensor[3, f32] =
   to_tensor([5.0, 5.0, 5.0])
-"#;
+";
     let dag = surf_to_dag(source).expect("pipeline succeeds");
 
     // Should use the uniform-value Const fast path, NOT ConstTensor.
@@ -102,14 +102,14 @@ def main() -> tensor[3, f32] =
 // RED TEAM: adversarial ConstTensor tests
 // ══════════════════════════════════════════════════════════════════════
 
-/// Edge case: single-element to_tensor should NOT produce ConstTensor
+/// Edge case: single-element `to_tensor` should NOT produce `ConstTensor`
 /// (it should stay as Const since 1-element is effectively uniform).
 #[test]
 fn to_tensor_single_element_is_const_not_const_tensor() {
-    let source = r#"
+    let source = r"
 def main() -> tensor[1, f32] =
   to_tensor([42.0])
-"#;
+";
     let dag = surf_to_dag(source).expect("pipeline succeeds");
 
     // A single element is trivially uniform: Const should be used.
@@ -123,45 +123,42 @@ def main() -> tensor[1, f32] =
     );
 }
 
-/// Edge case: to_tensor with a variable argument must NOT produce ConstTensor
+/// Edge case: `to_tensor` with a variable argument must NOT produce `ConstTensor`
 /// (it should fall back to the host-routing path / add-tree).
 #[test]
 fn to_tensor_variable_arg_does_not_produce_const_tensor() {
     // Use a function parameter instead of a literal. This should NOT
     // be lowered to ConstTensor because the data is not known at compile time.
-    let source = r#"
+    let source = r"
 def make_tensor(x: f32, y: f32) -> tensor[2, f32] =
   to_tensor([x, y])
-"#;
+";
     let result = surf_to_dag(source);
-    match result {
-        Ok(dag) => {
-            // If it lowers, it should NOT have a ConstTensor node.
-            let has_const_tensor = dag
-                .nodes()
-                .iter()
-                .any(|n| matches!(&n.op, RiscOp::ConstTensor { .. }));
-            assert!(
-                !has_const_tensor,
-                "to_tensor with variable args must not produce ConstTensor; \
-                 it should use the fallback path"
-            );
-        }
-        Err(_) => {
-            // Acceptable: if lowering rejects it entirely, that's fine too.
-            // The key invariant is that ConstTensor is NOT emitted for
-            // non-literal data.
-        }
+    if let Ok(dag) = result {
+        // If it lowers, it should NOT have a ConstTensor node.
+        let has_const_tensor = dag
+            .nodes()
+            .iter()
+            .any(|n| matches!(&n.op, RiscOp::ConstTensor { .. }));
+        assert!(
+            !has_const_tensor,
+            "to_tensor with variable args must not produce ConstTensor; \
+             it should use the fallback path"
+        );
+    } else {
+        // Acceptable: if lowering rejects it entirely, that's fine too.
+        // The key invariant is that ConstTensor is NOT emitted for
+        // non-literal data.
     }
 }
 
-/// Verify ConstTensor evaluates correctly with negative values.
+/// Verify `ConstTensor` evaluates correctly with negative values.
 #[test]
 fn const_tensor_negative_values_evaluate_correctly() {
-    let source = r#"
+    let source = r"
 def main() -> tensor[4, f32] =
   to_tensor([-1.0, 0.0, -3.5, 2.5])
-"#;
+";
     let dag = surf_to_dag(source).expect("pipeline succeeds");
 
     let roots: Vec<NodeId> = dag.roots().to_vec();
@@ -173,14 +170,14 @@ def main() -> tensor[4, f32] =
     assert_eq!(result.data, vec![-1.0, 0.0, -3.5, 2.5]);
 }
 
-/// Verify ConstTensor data is preserved exactly (bit-for-bit) through
+/// Verify `ConstTensor` data is preserved exactly (bit-for-bit) through
 /// the lowering for values that have tricky floating-point representations.
 #[test]
 fn const_tensor_preserves_exact_values() {
-    let source = r#"
+    let source = r"
 def main() -> tensor[3, f32] =
   to_tensor([0.1, 0.2, 0.3])
-"#;
+";
     let dag = surf_to_dag(source).expect("pipeline succeeds");
 
     let roots: Vec<NodeId> = dag.roots().to_vec();
@@ -195,13 +192,13 @@ def main() -> tensor[3, f32] =
     assert!((result.data[2] - 0.3).abs() < 1e-15, "third element");
 }
 
-/// Verify a 2D tensor literal with non-uniform rows lowers to ConstTensor.
+/// Verify a 2D tensor literal with non-uniform rows lowers to `ConstTensor`.
 #[test]
 fn to_tensor_2d_non_uniform_lowers_to_const_tensor() {
-    let source = r#"
+    let source = r"
 def main() -> tensor[2, 3, f32] =
   to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
-"#;
+";
     let dag = surf_to_dag(source).expect("pipeline succeeds");
 
     let has_const_tensor = dag
@@ -221,11 +218,11 @@ def main() -> tensor[2, 3, f32] =
     assert_eq!(result.data, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
 }
 
-/// Verify ConstTensor works through grad: constant has zero gradient.
-/// The gradient of f(x) = tensor_to_scalar(sum(x * c, 0)) w.r.t. x is c.
+/// Verify `ConstTensor` works through grad: constant has zero gradient.
+/// The gradient of f(x) = `tensor_to_scalar(sum(x` * c, 0)) w.r.t. x is c.
 #[test]
 fn const_tensor_through_grad_is_zero() {
-    let source = r#"
+    let source = r"
 def f(x: tensor[3, f32]) -> f32 = {
     c = to_tensor([1.0, 2.0, 3.0])
     tensor_to_scalar(sum(mul(x, c), 0))
@@ -233,7 +230,7 @@ def f(x: tensor[3, f32]) -> f32 = {
 
 def main(x: tensor[3, f32]) -> tensor[3, f32] =
     grad(f)(x)
-"#;
+";
     // The key assertion: grad through a ConstTensor-lowered literal
     // must compile without errors, not produce NaN or crash.
     let dag = surf_to_dag(source).expect("grad through ConstTensor should succeed");
@@ -268,13 +265,13 @@ def main(x: tensor[3, f32]) -> tensor[3, f32] =
     }
 }
 
-/// Verify that DAG verification passes for a ConstTensor node.
+/// Verify that DAG verification passes for a `ConstTensor` node.
 #[test]
 fn const_tensor_passes_dag_verification() {
-    let source = r#"
+    let source = r"
 def main() -> tensor[3, f32] =
   to_tensor([1.0, 2.0, 3.0])
-"#;
+";
     let dag = surf_to_dag(source).expect("pipeline succeeds");
     let errors = verify::verify(&dag);
     assert!(
@@ -283,13 +280,13 @@ def main() -> tensor[3, f32] =
     );
 }
 
-/// Verify ConstTensor with all-different integer values.
+/// Verify `ConstTensor` with all-different integer values.
 #[test]
 fn const_tensor_integer_values() {
-    let source = r#"
+    let source = r"
 def main() -> tensor[4, int32] =
   to_tensor([10, 20, 30, 40])
-"#;
+";
     let dag = surf_to_dag(source).expect("pipeline succeeds");
 
     let has_const_tensor = dag
@@ -308,31 +305,31 @@ def main() -> tensor[4, int32] =
 }
 
 /// Diagnostic: verify that the dangling-node issue in full-pipeline grad
-/// is NOT specific to ConstTensor. If this test passes, it confirms the
+/// is NOT specific to `ConstTensor`. If this test passes, it confirms the
 /// dangling node is a pre-existing condition in the full Surf->grad->DAG pipeline.
 #[test]
 fn grad_dangling_node_is_preexisting_not_const_tensor_specific() {
     // Use UNIFORM values (regular Const path, no ConstTensor).
-    let source_uniform = r#"
+    let source_uniform = r"
 def f(x: tensor[3, f32]) -> f32 = {
     c = to_tensor([2.0, 2.0, 2.0])
     tensor_to_scalar(sum(mul(x, c), 0))
 }
 def main(x: tensor[3, f32]) -> tensor[3, f32] =
     grad(f)(x)
-"#;
+";
     let dag_uniform = surf_to_dag(source_uniform).expect("uniform pipeline succeeds");
     let errors_uniform = verify::verify(&dag_uniform);
 
     // Use NON-UNIFORM values (ConstTensor path).
-    let source_nonuniform = r#"
+    let source_nonuniform = r"
 def f(x: tensor[3, f32]) -> f32 = {
     c = to_tensor([1.0, 2.0, 3.0])
     tensor_to_scalar(sum(mul(x, c), 0))
 }
 def main(x: tensor[3, f32]) -> tensor[3, f32] =
     grad(f)(x)
-"#;
+";
     let dag_nonuniform = surf_to_dag(source_nonuniform).expect("nonuniform pipeline succeeds");
     let errors_nonuniform = verify::verify(&dag_nonuniform);
 

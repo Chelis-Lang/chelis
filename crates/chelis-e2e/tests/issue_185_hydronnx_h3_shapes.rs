@@ -13,7 +13,7 @@
 //! Part 2 (deferred to #218); they are out of scope for this test.
 //!
 //! Three cases, one per Hydronnx H3.x shape category:
-//!   * MaxPool 2x2 stride 2: decomposes into `shrink` + `stride` +
+//!   * `MaxPool` 2x2 stride 2: decomposes into `shrink` + `stride` +
 //!     `max_reduce` on a `[1, 4, 8, 8, f32]` input, producing
 //!     `[1, 4, 4, 4, f32]`.
 //!   * `layer_norm` on `[2, 4, f32]` with rank-1 gamma/beta of size 4.
@@ -107,7 +107,7 @@ fn nested_list_literal(shape: &[usize], data: &[f32]) -> String {
     recurse(shape, data)
 }
 
-/// Build a deterministic ramp tensor for the MaxPool fixture. Values are
+/// Build a deterministic ramp tensor for the `MaxPool` fixture. Values are
 /// `sin(i)` over the flat row-major index so adjacent positions have
 /// different magnitudes and the max-of-window result depends on which
 /// element wins. Returns the flat row-major data in f32.
@@ -117,7 +117,7 @@ fn maxpool_input_data() -> Vec<f32> {
     (0..n).map(|i| (i as f32 * 0.137).sin()).collect()
 }
 
-/// Reference MaxPool 2x2 stride 2 over `[1, 4, 8, 8]` -> `[1, 4, 4, 4]`.
+/// Reference `MaxPool` 2x2 stride 2 over `[1, 4, 8, 8]` -> `[1, 4, 4, 4]`.
 /// Pure Rust f32 reference; the test asserts the chelis host-runtime
 /// output matches this elementwise within f32 tolerance.
 fn maxpool_reference(input: &[f32]) -> Vec<f32> {
@@ -220,7 +220,7 @@ fn hydronnx_h3_maxpool_2x2_stride2_no_padding_matches_ir_eval() {
     // concats them on a new last axis and `max_reduce`s along that
     // axis. The result has the H3.x MaxPool shape `[1, 4, 4, 4]`.
     let src = format!(
-        r#"
+        r"
 x = to_tensor({input_literal})
 shifted_col = shrink(&x, [[0, 1], [0, 4], [0, 8], [1, 8]])
 shifted_row = shrink(&x, [[0, 1], [0, 4], [1, 8], [0, 8]])
@@ -235,7 +235,7 @@ bl5 = reshape(&bl, [cast(1, int64), cast(4, int64), cast(4, int64), cast(4, int6
 br5 = reshape(&br, [cast(1, int64), cast(4, int64), cast(4, int64), cast(4, int64), cast(1, int64)])
 stacked = concat([tl5, tr5, bl5, br5], 4)
 out = max_reduce(&stacked, 4)
-"#,
+",
     );
     let result = eval_surf(&src);
     let out = root_tensor(&result, "out");
@@ -246,7 +246,7 @@ out = max_reduce(&stacked, 4)
         "maxpool element count mismatch"
     );
     for (i, &want) in expected.iter().enumerate() {
-        assert_close(out.data[i], want as f64, 1e-5, &format!("maxpool[{i}]"));
+        assert_close(out.data[i], f64::from(want), 1e-5, &format!("maxpool[{i}]"));
     }
 }
 
@@ -265,12 +265,12 @@ fn hydronnx_h3_layer_norm_batch2_hidden4_matches_ir_eval() {
     // x[0, :] = [1.0, 2.0, 3.0, 4.0]   -> mean=2.5, var=1.25
     // x[1, :] = [4.0, 2.0, 0.0, 6.0]   -> mean=3.0, var=4.5
     // gamma = [1, 2, 3, 4], beta = [0.1, 0.2, 0.3, 0.4]
-    let src = r#"
+    let src = r"
 x = pad_sequences([[1.0, 2.0, 3.0, 4.0], [4.0, 2.0, 0.0, 6.0]], 0.0)
 g = to_tensor([1.0, 2.0, 3.0, 4.0])
 b = to_tensor([0.1, 0.2, 0.3, 0.4])
 out = layer_norm(&x, &g, &b)
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![2, 4], "layer_norm shape");
@@ -324,12 +324,12 @@ fn hydronnx_h3_conv2d_1x3x8x8_kernel_8x3x3x3_matches_ir_eval() {
     let kernel_literal = nested_list_literal(&[8, 3, 3, 3], &kernel);
 
     let src = format!(
-        r#"
+        r"
 def run_conv2d(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] = conv2d(&x, &k, 1, 0)
 def make_x() -> tensor[1, 3, 8, 8, f32] = to_tensor({input_literal})
 def make_k() -> tensor[8, 3, 3, 3, f32] = to_tensor({kernel_literal})
 out = run_conv2d(make_x(), make_k())
-"#,
+",
     );
     let result = eval_surf_selected(&src, &["out"]);
     let out = root_tensor(&result, "out");
@@ -345,7 +345,7 @@ out = run_conv2d(make_x(), make_k())
     // accumulators and values in roughly [-1.5, 1.5], 1e-4 absolute
     // tolerance comfortably covers the worst-case rounding noise.
     for (i, &want) in expected.iter().enumerate() {
-        assert_close(out.data[i], want as f64, 1e-4, &format!("conv2d[{i}]"));
+        assert_close(out.data[i], f64::from(want), 1e-4, &format!("conv2d[{i}]"));
     }
 
     // Hand-computed lock for the top-left output pixel of output channel 0:
@@ -360,8 +360,8 @@ out = run_conv2d(make_x(), make_k())
     for ic in 0..3usize {
         for ky in 0..3usize {
             for kx in 0..3usize {
-                let i_in = input[(ic * 8 + ky) * 8 + kx] as f64;
-                let i_k = kernel[(ic * 3 + ky) * 3 + kx] as f64;
+                let i_in = f64::from(input[(ic * 8 + ky) * 8 + kx]);
+                let i_k = f64::from(kernel[(ic * 3 + ky) * 3 + kx]);
                 hand += i_in * i_k;
             }
         }

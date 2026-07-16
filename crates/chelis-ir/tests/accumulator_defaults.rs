@@ -1,7 +1,7 @@
 //! WS-A0 acceptance tests (d)–(f): the IR `Sum` and `BlasMatmul`
 //! constructors must default the `accumulator` precision per
 //! spec/04-type-system.md §5.7.1, must reject integer matmul per
-//! §5.7.2, and must reject explicitly-narrower-than-default reduce_sum
+//! §5.7.2, and must reject explicitly-narrower-than-default `reduce_sum`
 //! accumulators per §5.7.1.
 //!
 //! These pin the spec table directly so any drift in the default

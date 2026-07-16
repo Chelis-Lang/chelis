@@ -136,14 +136,13 @@ fn ws_b2_int8_context_at_boundary_negative_accepted() {
     //   (b) int8 -128 errors because the literal-128 inner overflows.
     // Document which one ships. If (b), this is a footgun: user-facing
     // -128 is rejected at the int8 boundary because of a parser quirk.
-    if res.is_err() {
-        panic!(
-            "boundary footgun: int8 boundary value -128 (i8::MIN) is rejected \
-             because the parser produces (neg 128) and 128 overflows int8 max. \
-             User-facing literal -128 should be admitted as i8::MIN; \
-             errs={errs:?}"
-        );
-    }
+    assert!(
+        res.is_ok(),
+        "boundary footgun: int8 boundary value -128 (i8::MIN) is rejected \
+         because the parser produces (neg 128) and 128 overflows int8 max. \
+         User-facing literal -128 should be admitted as i8::MIN; \
+         errs={errs:?}"
+    );
 }
 
 // ----------------------------------------------------------------
@@ -160,11 +159,11 @@ fn ws_b2_int8_context_at_boundary_negative_accepted() {
 
 #[test]
 fn ws_a4_matmul_int8_must_be_rejected_with_spec_5_7_2_diagnostic() {
-    let src = r#"
+    let src = r"
         a: tensor[2, 3, int8] = [[1i8, 2i8, 3i8], [4i8, 5i8, 6i8]]
         b: tensor[3, 2, int8] = [[1i8, 2i8], [3i8, 4i8], [5i8, 6i8]]
         out: tensor[2, 2, int8] = matmul(&a, &b)
-    "#;
+    ";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let errs = match res {
@@ -187,11 +186,11 @@ fn ws_a4_matmul_int8_must_be_rejected_with_spec_5_7_2_diagnostic() {
 
 #[test]
 fn ws_a4_matmul_int32_must_be_rejected_with_spec_5_7_2_diagnostic() {
-    let src = r#"
+    let src = r"
         a: tensor[2, 3, int32] = [[1, 2, 3], [4, 5, 6]]
         b: tensor[3, 2, int32] = [[1, 2], [3, 4], [5, 6]]
         out: tensor[2, 2, int32] = matmul(&a, &b)
-    "#;
+    ";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let errs = match res {

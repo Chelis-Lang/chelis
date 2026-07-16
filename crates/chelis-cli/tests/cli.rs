@@ -129,10 +129,10 @@ fn editor_file(rel: &str) -> PathBuf {
 fn write_matmul_program(path: &Path) {
     fs::write(
         path,
-        r#"a = (a : tensor[2, 3, f32])
+        r"a = (a : tensor[2, 3, f32])
 b = (b : tensor[3, 4, f32])
 out = (matmul(a, b) : tensor[2, 4, f32])
-"#,
+",
     )
     .expect("write matmul program");
 }
@@ -286,19 +286,19 @@ module_prefix = "LinkedCost"
     );
     write_file(
         &pkg.join("src/helper.ch"),
-        r#"module LinkedCost.Helper
+        r"module LinkedCost.Helper
 export (double)
 def double(x: tensor[2, f32]) -> tensor[2, f32] = add(x, x)
-"#,
+",
     );
     let main_path = pkg.join("src/main.ch");
     write_file(
         &main_path,
-        r#"module LinkedCost.Main
+        r"module LinkedCost.Main
 import LinkedCost.Helper (double)
 export (main)
 def main(x: tensor[2, f32]) -> tensor[2, f32] = double(x)
-"#,
+",
     );
 
     let json = run_cost_json(&main_path);
@@ -339,8 +339,7 @@ fn cost_json_fixture_baseline_matches_documented_examples() {
 fn generated_source_needs_blas(out_dir: &Path, sources: &[&str]) -> bool {
     sources.iter().any(|source| {
         fs::read_to_string(out_dir.join(source))
-            .map(|text| text.contains("cblas_sgemm(") || text.contains("\"chelis_blas.h\""))
-            .unwrap_or(false)
+            .is_ok_and(|text| text.contains("cblas_sgemm(") || text.contains("\"chelis_blas.h\""))
     })
 }
 
@@ -652,8 +651,9 @@ fn runtime_library_path() -> PathBuf {
                 if path
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
+                    .is_some_and(|name| {
+                        name.starts_with("libchelis_runtime") && name.ends_with(".a")
+                    })
                 {
                     return path;
                 }
@@ -769,8 +769,8 @@ fn eval_prints_labeled_tuple_components() {
     let path = dir.path().join("tuple_eval.ch");
     write_file(
         &path,
-        r#"grads = (1.0, 2.5)
-"#,
+        r"grads = (1.0, 2.5)
+",
     );
 
     Command::cargo_bin("chelis")
@@ -808,7 +808,7 @@ fn eval_supports_integer_mod_and_bitwise_helpers() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "eval",
-            r#"bitxor(bitand(cast(7, int64), cast(3, int64)), shl(cast(1, int64), cast(2, int64)))"#,
+            r"bitxor(bitand(cast(7, int64), cast(3, int64)), shl(cast(1, int64), cast(2, int64)))",
         ])
         .assert()
         .success()
@@ -1002,34 +1002,34 @@ fn check_collection_callback_errors_name_the_helper_contract() {
     let cases = [
         (
             "filter_non_bool.ch",
-            r#"
+            r"
 xs: List[int64] = [cast(1, int64)]
 bad = filter(fn (x: int64) -> add(x, cast(1, int64)), xs)
-"#,
+",
             vec!["filter", "callback", "bool"],
         ),
         (
             "partition_non_bool.ch",
-            r#"
+            r"
 xs: List[int64] = [cast(1, int64)]
 bad = partition(fn (x: int64) -> add(x, cast(1, int64)), xs)
-"#,
+",
             vec!["partition", "callback", "bool"],
         ),
         (
             "fold_acc_mismatch.ch",
-            r#"
+            r"
 xs: List[int64] = [cast(1, int64)]
 bad = fold(fn (acc: string, x: int64) -> string_concat(acc, to_string(x)), cast(0, int64), xs)
-"#,
+",
             vec!["fold", "accumulator", "string", "int64"],
         ),
         (
             "scan_acc_mismatch.ch",
-            r#"
+            r"
 xs: List[int64] = [cast(1, int64)]
 bad = scan(fn (acc: string, x: int64) -> string_concat(acc, to_string(x)), cast(0, int64), xs)
-"#,
+",
             vec!["scan", "accumulator", "string", "int64"],
         ),
     ];
@@ -2301,7 +2301,7 @@ fn build_c_scalar_grad_recursive_callee_fails_closed() {
     let assert = Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(std::time::Duration::from_mins(1))
         .args([
             "build",
             path.to_str().unwrap(),
@@ -2448,7 +2448,7 @@ fn build_c_scalar_grad_black_scholes_greeks_are_numerically_correct() {
     );
 }
 
-/// Regression test for the Coral UPSTREAM_BUGS.md pattern:
+/// Regression test for the Coral `UPSTREAM_BUGS.md` pattern:
 /// `grad(loss, wrt=theta)(theta, x)` applied to a multi-param named top-level def
 /// (two tensor arguments, differentiating w.r.t. the first).
 /// Verifies: build exits 0, generated C compiles with gcc, and the gradient values
@@ -2676,7 +2676,7 @@ fn build_c_grad_locally_bound_alias_form_matches_inline_form_output() {
     );
 }
 
-/// Regression test for the Coral UPSTREAM_BUGS.md pattern:
+/// Regression test for the Coral `UPSTREAM_BUGS.md` pattern:
 /// `grad(loss, wrt=(x))(theta, x)` differentiates w.r.t. the second argument.
 /// Verifies: build exits 0, generated C compiles, and grad of sum(theta*x) w.r.t. x equals theta.
 #[test]
@@ -3128,7 +3128,7 @@ chelis-std = {{ version = "0.4.0" }}
     );
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 export (main)
 
@@ -3137,7 +3137,7 @@ def main(
   table: tensor[8, 4, f32]
 ) -> tensor[2, 3, 4, f32] =
   gather(table, ids, 0)
-"#,
+",
     );
 
     Command::cargo_bin("chelis")
@@ -3268,7 +3268,7 @@ fn phase3h_numeric_acceptance_oracle() {
 ///   - On macOS: contains both `#include "chelis_math.h"` AND a `vvexpf`
 ///     call. If either is missing, the regression is back.
 ///   - On Linux without sleef: must NOT contain `chelis_math.h` (the
-///     inner CEmitter selects MathLib::None and the include should stay
+///     inner `CEmitter` selects `MathLib::None` and the include should stay
 ///     out — confirms the `needs_math_header` flag is platform-driven).
 #[test]
 fn build_c_host_emits_chelis_math_h_when_program_uses_transcendentals() {
@@ -3281,9 +3281,9 @@ fn build_c_host_emits_chelis_math_h_when_program_uses_transcendentals() {
     // generated `main.c` that #includes `chelis_math.h`.
     write_file(
         &path,
-        r#"
+        r"
 def softplus(x: tensor[4, f32]) -> tensor[4, f32] = exp(x)
-"#,
+",
     );
 
     Command::cargo_bin("chelis")
@@ -4527,7 +4527,7 @@ chelis-std = {{ version = "0.4.0" }}
     );
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 export (main)
 
@@ -4540,7 +4540,7 @@ def main(
   wx = matmul(&x, &w)
   add(wx, bias)
 }
-"#,
+",
     );
 
     Command::cargo_bin("chelis")
@@ -4610,7 +4610,7 @@ chelis-std = {{ version = "0.4.0" }}
     );
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 import Std.Io.Safetensors (load_tensors)
 
@@ -4618,7 +4618,7 @@ export (main)
 
 def main(path: string) -> string =
   load_tensors(path)
-"#,
+",
     );
 
     Command::cargo_bin("chelis")
@@ -4653,12 +4653,12 @@ module_prefix = "Common"
     );
     write_file(
         &dep_pkg.join("src/helper.ch"),
-        r#"module Common.Helper
+        r"module Common.Helper
 
 export (shared)
 
 def shared(x: f32) -> f32 = x
-"#,
+",
     );
 
     write_file(
@@ -4678,14 +4678,14 @@ dep = {{ path = "../dep" }}
     );
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 import Common.Helper (shared)
 
 export (main)
 
 def main(x: f32) -> f32 = shared(x)
-"#,
+",
     );
 
     Command::cargo_bin("chelis")
@@ -4720,13 +4720,13 @@ module_prefix = "Common"
     );
     write_file(
         &dep_pkg.join("src/api.ch"),
-        r#"module Common.Api
+        r"module Common.Api
 
 export (public)
 
 def public(x: f32) -> f32 = hidden(x)
 def hidden(x: f32) -> f32 = x
-"#,
+",
     );
 
     Command::cargo_bin("chelis")
@@ -4777,14 +4777,14 @@ dep = {{ version = "0.1.0" }}
     );
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 import Common.Api (hidden)
 
 export (main)
 
 def main(x: f32) -> f32 = hidden(x)
-"#,
+",
     );
 
     // Wave-1 red-team M1 (#207 follow-up): `chelis check` now routes
@@ -5369,10 +5369,10 @@ fn check_reports_macro_provenance_for_type_errors() {
     let path = dir.path().join("macro_type_error.ch");
     write_file(
         &path,
-        r#"
+        r"
 macro bad_bool(x) = and(x, x)
 def bad(x: tensor[4, f32]): tensor[4, f32] = bad_bool(x)
-"#,
+",
     );
 
     let json = run_json_check(&path);
@@ -5390,10 +5390,10 @@ fn check_reports_macro_provenance_for_linearity_errors() {
     let path = dir.path().join("macro_linearity.ch");
     write_file(
         &path,
-        r#"
+        r"
 macro dup_relu(x) = add(realize(x), x)
 def bad(x: tensor[4, f32]): tensor[4, f32] = dup_relu(x)
-"#,
+",
     );
 
     let json = run_json_check(&path);
@@ -5412,14 +5412,14 @@ fn check_reports_match_linearity_without_old_ir_rejection() {
     let path = dir.path().join("match_linearity.ch");
     write_file(
         &path,
-        r#"def bad(pair: (tensor[4, f32], int32)): int32 = {
+        r"def bad(pair: (tensor[4, f32], int32)): int32 = {
   n: int32 = match pair with {
     | (x, _) => 1
   }
   again: (tensor[4, f32], int32) = pair
   n
 }
-"#,
+",
     );
 
     let json = run_json_check(&path);
@@ -5444,10 +5444,10 @@ fn deep_expands_macros_and_emits_provenance() {
     let path = dir.path().join("macro_deep.ch");
     write_file(
         &path,
-        r#"
+        r"
 macro relu_ref(x) = max_elem(x, 0.0)
 def f(x: tensor[4, f32]): tensor[4, f32] = relu_ref(x)
-"#,
+",
     );
 
     let output = Command::cargo_bin("chelis")
@@ -5472,10 +5472,10 @@ fn fmt_preserves_macro_syntax() {
     let path = dir.path().join("macro_fmt.ch");
     write_file(
         &path,
-        r#"
+        r"
 macro keep(x)=x
 def f(x: tensor[4, f32]): tensor[4, f32] = keep(x)
-"#,
+",
     );
 
     Command::cargo_bin("chelis")
@@ -5497,10 +5497,10 @@ fn validate_desugar_accepts_macro_program() {
     let path = dir.path().join("macro_validate.ch");
     write_file(
         &path,
-        r#"
+        r"
 macro relu_ref(x) = max_elem(x, 0.0)
 def f(x: tensor[4, f32]): tensor[4, f32] = relu_ref(x)
-"#,
+",
     );
 
     Command::cargo_bin("chelis")
@@ -6692,7 +6692,7 @@ fn check_directory_walks_ch_files_and_aggregates_json() {
             entry
                 .get("file")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
+                .map(std::string::ToString::to_string)
         })
         .collect();
     assert!(
@@ -7873,9 +7873,9 @@ fn eval_vmap_does_not_regress_to_host_runtime_unsupported() {
 
 fn write_seeded_uniform(path: &Path, low_seed: u64) {
     let contents = format!(
-        r#"template = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])
+        r"template = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])
 sampled = with seed({low_seed}) {{ uniform_like(copy(template), cast(0.0, f32), cast(1.0, f32)) }}
-"#
+"
     );
     write_file(path, &contents);
 }
@@ -8057,12 +8057,12 @@ fn cross_function_seed_local_wrapper_uses_handler_seed_in_c_backend() {
     let out_dir = dir.path().join("out");
     write_file(
         &src,
-        r#"template = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])
+        r"template = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])
 def sample(t: tensor[4, f32]) -> tensor[4, f32] ! { Random } =
   uniform_like(copy(t), 0.0, 1.0)
 seven = with seed(7) { sample(copy(template)) }
 forty_two = with seed(42) { sample(copy(template)) }
-"#,
+",
     );
 
     Command::cargo_bin("chelis")
@@ -8118,13 +8118,13 @@ fn build_c_mnist_loss_tail_tensor_pipeline_compiles_object() {
     let out_dir = dir.path().join("out");
     write_file(
         &src,
-        r#"def loss_tail(logits: tensor[2, 3, f32], labels: tensor[2, 3, f32]) -> tensor[f32] = {
+        r"def loss_tail(logits: tensor[2, 3, f32], labels: tensor[2, 3, f32]) -> tensor[f32] = {
   softmax(logits, 1) |> log |> mul(labels) |> sum(1) |> neg |> mean(0)
 }
 logits = to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(0.5, f32), cast(1.5, f32), cast(2.5, f32)]])
 labels = to_tensor([[cast(0.0, f32), cast(0.0, f32), cast(1.0, f32)], [cast(1.0, f32), cast(0.0, f32), cast(0.0, f32)]])
 loss_value = loss_tail(logits, labels)
-"#,
+",
     );
 
     Command::cargo_bin("chelis")
@@ -8600,8 +8600,7 @@ fn build_c_grad_program_has_zero_definitely_lost_under_valgrind() {
         StdCommand::new(tool)
             .arg("--version")
             .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+            .is_ok_and(|o| o.status.success())
     }
 
     if !tool_available("valgrind") {
@@ -8755,8 +8754,7 @@ fn assert_built_c_has_zero_definitely_lost(name: &str, source: &str, expected_st
         StdCommand::new(tool)
             .arg("--version")
             .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+            .is_ok_and(|o| o.status.success())
     }
 
     if !tool_available("valgrind") {

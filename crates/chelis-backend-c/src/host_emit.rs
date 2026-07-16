@@ -580,6 +580,7 @@ fn append_tensor_reshape_helper(out: &mut Vec<String>) {
     out.push("}".to_string());
 }
 
+#[must_use]
 pub fn emit_host_header(program: &HostProgram, program_name: &str) -> String {
     emit_host_header_with_linkage(program, program_name, false)
 }
@@ -639,8 +640,7 @@ fn append_helper(
 ) -> HelperRequirements {
     if let Some((_input_name, _input_ty)) = identity_helper_input(helper) {
         out.push(format!(
-            "static void {}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out) {{",
-            helper_name,
+            "static void {helper_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out) {{",
         ));
         out.push("    (void)n_in;".to_string());
         out.push("    (void)n_out;".to_string());
@@ -696,7 +696,7 @@ fn append_helper(
             }
             continue;
         }
-        if line.is_empty() && out.last().is_some_and(|last| last.is_empty()) {
+        if line.is_empty() && out.last().is_some_and(std::string::String::is_empty) {
             continue;
         }
         out.push(line.to_string());
@@ -1170,7 +1170,7 @@ impl<'a> HostEmitter<'a> {
             .map(String::as_str)
             .filter(|s| expr.span_id.as_deref() != Some(*s))
             .collect();
-        merged.sort();
+        merged.sort_unstable();
         merged.dedup();
         for span in merged {
             let safe = chelis_ir::span_sanitize::sanitize_for_comment(span);
@@ -1197,18 +1197,18 @@ impl<'a> HostEmitter<'a> {
                 self.indent, value
             )),
             HostExprKind::List(items, expr_ty) => {
-                let effective_ty = if !matches!(ty, HostType::Unknown) {
-                    ty
-                } else {
+                let effective_ty = if matches!(ty, HostType::Unknown) {
                     expr_ty
+                } else {
+                    ty
                 };
                 self.assign_list_literal(target, items, effective_ty);
             }
             HostExprKind::Tuple(items, expr_ty) => {
-                let effective_ty = if !matches!(ty, HostType::Unknown) {
-                    ty
-                } else {
+                let effective_ty = if matches!(ty, HostType::Unknown) {
                     expr_ty
+                } else {
+                    ty
                 };
                 self.assign_tuple_literal(target, items, effective_ty);
             }
@@ -1250,10 +1250,10 @@ impl<'a> HostEmitter<'a> {
                 args,
                 ty: expr_ty,
             } => {
-                let effective_ty = if !matches!(ty, HostType::Unknown) {
-                    ty
-                } else {
+                let effective_ty = if matches!(ty, HostType::Unknown) {
                     expr_ty
+                } else {
+                    ty
                 };
                 self.assign_builtin(target, name, args, effective_ty);
             }
@@ -1262,10 +1262,10 @@ impl<'a> HostEmitter<'a> {
                 fields,
                 ty: expr_ty,
             } => {
-                let effective_ty = if !matches!(ty, HostType::Unknown) {
-                    ty
-                } else {
+                let effective_ty = if matches!(ty, HostType::Unknown) {
                     expr_ty
+                } else {
+                    ty
                 };
                 self.assign_adt_construct(target, ctor, fields, effective_ty);
             }
@@ -1274,10 +1274,10 @@ impl<'a> HostEmitter<'a> {
                 field_index,
                 ty: expr_ty,
             } => {
-                let effective_ty = if !matches!(ty, HostType::Unknown) {
-                    ty
-                } else {
+                let effective_ty = if matches!(ty, HostType::Unknown) {
                     expr_ty
+                } else {
+                    ty
                 };
                 self.assign_adt_field_access(target, base, *field_index, effective_ty);
             }
@@ -1287,10 +1287,10 @@ impl<'a> HostEmitter<'a> {
                 else_expr,
                 ty: expr_ty,
             } => {
-                let effective_ty = if !matches!(ty, HostType::Unknown) {
-                    ty
-                } else {
+                let effective_ty = if matches!(ty, HostType::Unknown) {
                     expr_ty
+                } else {
+                    ty
                 };
                 let cond_var = self.next_temp("cond");
                 self.emit_expr_to_var(cond, &cond_var, &HostType::Bool);
@@ -1314,10 +1314,10 @@ impl<'a> HostEmitter<'a> {
                 none_expr,
                 ty: expr_ty,
             } => {
-                let effective_ty = if !matches!(ty, HostType::Unknown) {
-                    ty
-                } else {
+                let effective_ty = if matches!(ty, HostType::Unknown) {
                     expr_ty
+                } else {
+                    ty
                 };
                 let option_var = self.next_temp("option");
                 let option_ty = host_type(scrutinee);
@@ -1368,10 +1368,10 @@ impl<'a> HostEmitter<'a> {
                 default_expr,
                 ty: expr_ty,
             } => {
-                let effective_ty = if !matches!(ty, HostType::Unknown) {
-                    ty
-                } else {
+                let effective_ty = if matches!(ty, HostType::Unknown) {
                     expr_ty
+                } else {
+                    ty
                 };
                 self.assign_match_adt(
                     target,
@@ -1386,10 +1386,10 @@ impl<'a> HostEmitter<'a> {
                 body,
                 ty: expr_ty,
             } => {
-                let effective_ty = if !matches!(ty, HostType::Unknown) {
-                    ty
-                } else {
+                let effective_ty = if matches!(ty, HostType::Unknown) {
                     expr_ty
+                } else {
+                    ty
                 };
                 self.lines.push(format!("{}{{", self.indent));
                 let nested_indent = format!("{}    ", self.indent);
@@ -2760,8 +2760,7 @@ impl<'a> HostEmitter<'a> {
         let root_count = self
             .tensor_helpers
             .get(helper)
-            .map(|host_helper| host_helper.dag.roots().len().max(1))
-            .unwrap_or(1);
+            .map_or(1, |host_helper| host_helper.dag.roots().len().max(1));
         self.lines.push(format!(
             "{}chelis_tensor *{}[{}] = {{ NULL }};",
             self.indent, outputs_name, root_count
@@ -3086,7 +3085,7 @@ impl<'a> HostEmitter<'a> {
             })
     }
 
-    /// Emit a summary-derived inline sparse op (Gather / ScatterAdd /
+    /// Emit a summary-derived inline sparse op (Gather / `ScatterAdd` /
     /// Scatter-replace). The loop body mirrors the direct-call C
     /// emission at `chelis_backend_c::emit::CEmitter::emit_sparse_*`
     /// so a user-`def` wrapper compiles to the same bounded sparse
@@ -3363,9 +3362,9 @@ impl<'a> HostEmitter<'a> {
         ));
     }
 
-    /// Emit the ScatterAdd or Scatter-replace loop body for a
+    /// Emit the `ScatterAdd` or Scatter-replace loop body for a
     /// summary-derived callsite. Operands are `[target_in, indices,
-    /// updates]`. `accumulate=true` selects `+=` (ScatterAdd);
+    /// updates]`. `accumulate=true` selects `+=` (`ScatterAdd`);
     /// `accumulate=false` selects `=` (last-write-wins Scatter, single
     /// threaded to preserve the deterministic order documented in
     /// `spec/05-risc-primitives.md` §3.5).
@@ -3554,8 +3553,7 @@ impl<'a> HostEmitter<'a> {
             self.indent,
             self.emitted_names
                 .get(function)
-                .map(String::as_str)
-                .unwrap_or(function),
+                .map_or(function, String::as_str),
             arg_vars.join(", ")
         ));
         self.retain_call_escaped_args(target, function, args, ty);
@@ -4862,7 +4860,7 @@ fn sparse_dtype_macro(prim: Prim) -> &'static str {
 /// and write the tensor's `data` buffer through a typed pointer.
 ///
 /// The `Int32` and `Bool` arms reuse `float` as the element type
-/// because CHELIS_I32 and CHELIS_BOOL tensor storage today is
+/// because `CHELIS_I32` and `CHELIS_BOOL` tensor storage today is
 /// 4-byte f32-encoded (see `crates/chelis-runtime/src/lib.rs`
 /// `chelis_alloc` and the f32-routed runtime accessors at
 /// L2178-L2192 / L2222-L2223 plus
@@ -4917,7 +4915,7 @@ impl DtypeArm {
 
     /// Subset of the operator arms covered by the libm-f32 func
     /// form (`expf`, `sinf`, `fmaxf`, `chelis_host_relu_f32`, ...).
-    /// CHELIS_F64 and CHELIS_I64 cannot be covered by these names
+    /// `CHELIS_F64` and `CHELIS_I64` cannot be covered by these names
     /// without precision loss or type-mismatch; those arms emit a
     /// `runtime_fail`-style `abort()` until per-precision helper
     /// names land in a future PR.

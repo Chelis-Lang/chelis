@@ -46,7 +46,7 @@ fn checked_surf(source: &str) -> CheckedProgram {
 #[test]
 fn with_seed_uniform_like_evaluates_body() {
     let checked = checked_surf(
-        r#"
+        r"
 x = with seed(7) {
   tensor_to_scalar(
 uniform_like(
@@ -56,7 +56,7 @@ uniform_like(
 )
   )
 }
-"#,
+",
     );
 
     let outcome = evaluate_host_program(&checked, &HashMap::new())
@@ -71,7 +71,7 @@ uniform_like(
 #[test]
 fn ownership_drop_is_unit_and_does_not_shadow_list_drop_runtime() {
     let checked = checked_surf(
-        r#"
+        r"
 x = {
   t = to_tensor([cast(1.0, f32), cast(2.0, f32)])
   values = to_list(t)
@@ -80,7 +80,7 @@ x = {
   actual
 }
 y = index(drop([cast(10, int64), cast(20, int64)], cast(1, int64)), cast(0, int64))
-"#,
+",
     );
 
     let outcome = evaluate_host_program(&checked, &HashMap::new())
@@ -125,7 +125,7 @@ fn test_assert_eq_f32_mismatch_includes_actual_and_expected() {
     let checked = checked_surf(r#"x = test_assert_eq_f32(1.0, 2.0, "label")"#);
     let err = evaluate_host_program(&checked, &HashMap::new())
         .expect_err("mismatched f32 assert should surface as host Err");
-    assert!(err.contains("1") && err.contains("2"), "got: {err}");
+    assert!(err.contains('1') && err.contains('2'), "got: {err}");
     assert!(err.contains("label"), "expected label in error, got: {err}");
 }
 
@@ -151,7 +151,7 @@ fn test_assert_eq_int_match_and_mismatch() {
     let err =
         evaluate_host_program(&bad, &HashMap::new()).expect_err("int mismatch should surface Err");
     assert!(
-        err.contains("3") && err.contains("5") && err.contains("i"),
+        err.contains('3') && err.contains('5') && err.contains('i'),
         "got: {err}"
     );
 }
@@ -165,7 +165,7 @@ fn test_assert_eq_bool_match_and_mismatch() {
     let err =
         evaluate_host_program(&bad, &HashMap::new()).expect_err("bool mismatch should surface Err");
     assert!(
-        err.contains("true") && err.contains("false") && err.contains("b"),
+        err.contains("true") && err.contains("false") && err.contains('b'),
         "got: {err}"
     );
 }
@@ -179,7 +179,7 @@ fn test_assert_eq_string_match_and_mismatch() {
     let err = evaluate_host_program(&bad, &HashMap::new())
         .expect_err("string mismatch should surface Err");
     assert!(
-        err.contains("foo") && err.contains("bar") && err.contains("s"),
+        err.contains("foo") && err.contains("bar") && err.contains('s'),
         "got: {err}"
     );
 }
@@ -352,11 +352,11 @@ fn first_tensor_shape(outcome: &RuntimeOutcome, name: &str) -> Vec<usize> {
 #[test]
 fn host_runtime_matmul_2x2_identity_passthrough() {
     let checked = checked_surf(
-        r#"
+        r"
 a = pad_sequences_to([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(1.0, f32)]], cast(2, int64), cast(0.0, f32))
 b = pad_sequences_to([[cast(3.0, f32), cast(5.0, f32)], [cast(7.0, f32), cast(11.0, f32)]], cast(2, int64), cast(0.0, f32))
 y = matmul(a, b)
-"#,
+",
     );
     let outcome = evaluate_host_program(&checked, &HashMap::new())
         .expect("matmul should evaluate under host runtime");
@@ -371,11 +371,11 @@ y = matmul(a, b)
 #[test]
 fn host_runtime_div_negative_divisor_returns_finite_value() {
     let checked = checked_surf(
-        r#"
+        r"
 a = to_tensor([cast(5.0, f32)])
 b = to_tensor([cast(-2.0, f32)])
 y = div(a, b)
-"#,
+",
     );
     let outcome = evaluate_host_program(&checked, &HashMap::new())
         .expect("div with negative divisor should evaluate");
@@ -387,11 +387,11 @@ y = div(a, b)
 #[test]
 fn host_runtime_div_by_positive_zero_is_positive_infinity() {
     let checked = checked_surf(
-        r#"
+        r"
 a = to_tensor([cast(1.0, f32)])
 b = to_tensor([cast(0.0, f32)])
 y = div(a, b)
-"#,
+",
     );
     let outcome =
         evaluate_host_program(&checked, &HashMap::new()).expect("div by zero should evaluate");
@@ -407,11 +407,11 @@ y = div(a, b)
 #[test]
 fn host_runtime_div_negative_one_by_zero_is_negative_infinity() {
     let checked = checked_surf(
-        r#"
+        r"
 a = to_tensor([cast(-1.0, f32)])
 b = to_tensor([cast(0.0, f32)])
 y = div(a, b)
-"#,
+",
     );
     let outcome = evaluate_host_program(&checked, &HashMap::new()).expect("-1/0 should evaluate");
     let v = first_tensor_data(&outcome, "y");
@@ -426,11 +426,11 @@ y = div(a, b)
 #[test]
 fn host_runtime_div_zero_by_zero_is_nan() {
     let checked = checked_surf(
-        r#"
+        r"
 a = to_tensor([cast(0.0, f32)])
 b = to_tensor([cast(0.0, f32)])
 y = div(a, b)
-"#,
+",
     );
     let outcome =
         evaluate_host_program(&checked, &HashMap::new()).expect("0/0 should evaluate (NaN)");
@@ -493,10 +493,10 @@ fn issue_458_dispatch_scalar_binop_rejects_mixed_f32_i32_not_folds_to_quarter() 
 #[test]
 fn host_runtime_recip_negative_value_is_negative_reciprocal() {
     let checked = checked_surf(
-        r#"
+        r"
 a = to_tensor([cast(-2.0, f32)])
 y = recip(a)
-"#,
+",
     );
     let outcome =
         evaluate_host_program(&checked, &HashMap::new()).expect("recip(-2.0) should evaluate");
@@ -508,11 +508,11 @@ y = recip(a)
 #[test]
 fn host_runtime_matmul_2x3_3x2_basic() {
     let checked = checked_surf(
-        r#"
+        r"
 a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, int64), cast(0.0, f32))
 b = pad_sequences_to([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(1.0, f32)], [cast(1.0, f32), cast(1.0, f32)]], cast(2, int64), cast(0.0, f32))
 y = matmul(a, b)
-"#,
+",
     );
     let outcome = evaluate_host_program(&checked, &HashMap::new())
         .expect("rectangular matmul should evaluate");
@@ -525,10 +525,10 @@ y = matmul(a, b)
 #[test]
 fn host_runtime_permute_2x2_transpose_swaps_off_diagonal() {
     let checked = checked_surf(
-        r#"
+        r"
 a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]], cast(2, int64), cast(0.0, f32))
 y = permute(a, 1, 0)
-"#,
+",
     );
     let outcome = evaluate_host_program(&checked, &HashMap::new())
         .expect("permute should evaluate under host runtime");
@@ -540,10 +540,10 @@ y = permute(a, 1, 0)
 #[test]
 fn host_runtime_permute_2x3_transpose_to_3x2() {
     let checked = checked_surf(
-        r#"
+        r"
 a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, int64), cast(0.0, f32))
 y = permute(a, 1, 0)
-"#,
+",
     );
     let outcome = evaluate_host_program(&checked, &HashMap::new())
         .expect("rectangular permute should evaluate");
@@ -558,10 +558,10 @@ y = permute(a, 1, 0)
 #[test]
 fn host_runtime_sum_axis1_reduces_2x3_to_2() {
     let checked = checked_surf(
-        r#"
+        r"
 a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, int64), cast(0.0, f32))
 y = sum(a, cast(1, int32))
-"#,
+",
     );
     let outcome = evaluate_host_program(&checked, &HashMap::new())
         .expect("sum should evaluate under host runtime");
@@ -572,10 +572,10 @@ y = sum(a, cast(1, int32))
 #[test]
 fn host_runtime_sum_axis0_reduces_2x3_to_3() {
     let checked = checked_surf(
-        r#"
+        r"
 a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, int64), cast(0.0, f32))
 y = sum(a, cast(0, int32))
-"#,
+",
     );
     let outcome =
         evaluate_host_program(&checked, &HashMap::new()).expect("sum on axis 0 should evaluate");
@@ -597,7 +597,7 @@ y = sum(a, cast(0, int32))
 fn host_runtime_sum_f32_uses_pairwise_order_for_issue_163_repro() {
     // right-pad: [v0, v1, v2, v3, v4, v5, v4, v3, v2, v1, v0]
     let checked_right = checked_surf(
-        r#"
+        r"
 seq = to_tensor([
 cast(0.49625658988952637, f32),
 cast(0.7682217955589294, f32),
@@ -612,7 +612,7 @@ cast(0.7682217955589294, f32),
 cast(0.49625658988952637, f32)
 ])
 y = sum(seq, cast(0, int32))
-"#,
+",
     );
     let outcome_right = evaluate_host_program(&checked_right, &HashMap::new())
         .expect("right-pad reflected sum should evaluate");
@@ -656,7 +656,7 @@ y = sum(seq, cast(0, int32))
     // left-fold happen to agree here — pinning to prove parity stays
     // intact across the algorithm change.
     let checked_left = checked_surf(
-        r#"
+        r"
 seq = to_tensor([
 cast(0.30742114782333374, f32),
 cast(0.13203048706054688, f32),
@@ -671,7 +671,7 @@ cast(0.30742114782333374, f32),
 cast(0.6340786814689636, f32)
 ])
 y = sum(seq, cast(0, int32))
-"#,
+",
     );
     let outcome_left = evaluate_host_program(&checked_left, &HashMap::new())
         .expect("left-pad reflected sum should evaluate");
@@ -688,7 +688,7 @@ y = sum(seq, cast(0, int32))
 /// #170: `trace` (= sum over the diagonal) must use the SAME stride-4 ILP
 /// f32 cascade as `RiscOp::Sum`, so `chelis trace` is bit-exact with
 /// `torch.trace` (== `torch.sum(diagonal)`). The 20-element diagonal below
-/// (torch.rand, manual_seed(7)) is longer than 16, so the cascade and the
+/// (torch.rand, `manual_seed(7)`) is longer than 16, so the cascade and the
 /// prior f32 left-fold differ by 1 ULP: torch trace = `0x4125e023`
 /// (10.367220878601074), the old left-fold = `0x4125e024`. Pinning the
 /// torch bit pattern catches a regression back to a left-fold (or to f64
@@ -944,7 +944,7 @@ fn host_runtime_sum_f32_propagates_nan() {
     // lane combine that hides NaN through e.g. min/max can't slip
     // by.
     let checked = checked_surf(
-        r#"
+        r"
 seq = to_tensor([
 cast(1.0, f32),
 cast(2.0, f32),
@@ -953,7 +953,7 @@ cast(4.0, f32),
 cast(5.0, f32)
 ])
 y = sum(seq, cast(0, int32))
-"#,
+",
     );
     let outcome =
         evaluate_host_program(&checked, &HashMap::new()).expect("nan-bearing sum should evaluate");
@@ -973,7 +973,7 @@ fn host_runtime_sum_f32_inf_plus_neg_inf_is_nan() {
     // land in (`x[0]` and `x[1]` here land in acc0/acc1; under
     // stride-4 the cascade still adds them and the result is NaN).
     let checked = checked_surf(
-        r#"
+        r"
 seq = to_tensor([
 cast(1.0, f32) / cast(0.0, f32),
 cast(-1.0, f32) / cast(0.0, f32),
@@ -981,7 +981,7 @@ cast(2.0, f32),
 cast(3.0, f32)
 ])
 y = sum(seq, cast(0, int32))
-"#,
+",
     );
     let outcome =
         evaluate_host_program(&checked, &HashMap::new()).expect("inf-pair sum should evaluate");
@@ -998,11 +998,11 @@ y = sum(seq, cast(0, int32))
 fn host_runtime_matmul_shared_axis_mismatch_errors() {
     // Build a 2x3 and a 2x2 — shared axis is 3 vs 2, must fail.
     let checked = checked_surf(
-        r#"
+        r"
 a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, int64), cast(0.0, f32))
 b = pad_sequences_to([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(1.0, f32)]], cast(2, int64), cast(0.0, f32))
 y = matmul(a, b)
-"#,
+",
     );
     let err = evaluate_host_program(&checked, &HashMap::new())
         .expect_err("matmul shared-axis mismatch must fail");
@@ -1024,10 +1024,10 @@ fn host_runtime_expand_inserts_new_leading_axis() {
     // Linear.forward calls `expand(b, 0, batch)` where `b` is a 1-D
     // bias [out_dim] and the output is [batch, out_dim]. Pin that.
     let checked = checked_surf(
-        r#"
+        r"
 b = to_tensor([cast(10.0, f32), cast(100.0, f32)])
 y = expand(b, cast(0, int32), cast(3, int32))
-"#,
+",
     );
     let outcome = evaluate_host_program(&checked, &HashMap::new())
         .expect("expand should evaluate under host runtime");
@@ -1043,10 +1043,10 @@ y = expand(b, cast(0, int32), cast(3, int32))
 fn host_runtime_expand_inserts_trailing_axis() {
     // axis == rank inserts a new last axis.
     let checked = checked_surf(
-        r#"
+        r"
 b = to_tensor([cast(1.0, f32), cast(2.0, f32)])
 y = expand(b, cast(1, int32), cast(2, int32))
-"#,
+",
     );
     let outcome = evaluate_host_program(&checked, &HashMap::new())
         .expect("expand at trailing axis should evaluate");
@@ -1065,10 +1065,10 @@ fn host_runtime_expand_singleton_input_inserts_not_replicates() {
     // replicated the singleton in-place, producing `[count]` and
     // diverging from `chelis check` on `examples/linreg.ch`.
     let checked = checked_surf(
-        r#"
+        r"
 b = to_tensor([cast(7.0, f32)])
 y = expand(b, cast(0, int32), cast(4, int32))
-"#,
+",
     );
     let outcome = evaluate_host_program(&checked, &HashMap::new())
         .expect("expand([1], 0, 4) should evaluate under host runtime");
@@ -1090,11 +1090,11 @@ fn host_runtime_expand_negative_count_errors() {
     // the count is built from arithmetic that the infer-time literal
     // extractor cannot resolve.
     let checked = checked_surf(
-        r#"
+        r"
 b = to_tensor([cast(1.0, f32), cast(2.0, f32)])
 zero_count = sub(cast(0, int32), cast(0, int32))
 y = expand(b, cast(0, int32), zero_count)
-"#,
+",
     );
     let err = evaluate_host_program(&checked, &HashMap::new())
         .expect_err("expand with non-positive count must fail");
@@ -1111,9 +1111,9 @@ fn host_runtime_to_tensor_accepts_2d_float_literal() {
     // Bucket 4b: previously rejected with
     // "to_tensor expects numeric or bool List elements, got List f32".
     let checked = checked_surf(
-        r#"
+        r"
 y = to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]])
-"#,
+",
     );
     let outcome = evaluate_host_program(&checked, &HashMap::new())
         .expect("to_tensor of [[1,2],[3,4]] must evaluate to a rank-2 tensor");
@@ -1126,12 +1126,12 @@ fn host_runtime_to_tensor_accepts_3d_float_literal() {
     // 2x2x2 cube — exercises 3-deep recursion in
     // `nested_list_to_tensor_data`.
     let checked = checked_surf(
-        r#"
+        r"
 y = to_tensor([
   [[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]],
   [[cast(5.0, f32), cast(6.0, f32)], [cast(7.0, f32), cast(8.0, f32)]]
 ])
-"#,
+",
     );
     let outcome = evaluate_host_program(&checked, &HashMap::new())
         .expect("to_tensor of 2x2x2 nested list must evaluate to a rank-3 tensor");
@@ -1148,9 +1148,9 @@ fn host_runtime_to_tensor_rejects_ragged_2d_literal() {
     // out at the host runtime, not silently produce a malformed
     // tensor.
     let checked = checked_surf(
-        r#"
+        r"
 y = to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32)]])
-"#,
+",
     );
     let err = evaluate_host_program(&checked, &HashMap::new())
         .expect_err("ragged nested list must fail to_tensor");
@@ -1164,10 +1164,10 @@ y = to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32)]])
 fn host_runtime_softmax_uniform_input_is_uniform_output() {
     // softmax of all-zeros along axis 0 of length 3 is [1/3, 1/3, 1/3].
     let checked = checked_surf(
-        r#"
+        r"
 x = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])
 y = softmax(x, cast(0, int32))
-"#,
+",
     );
     let outcome = evaluate_host_program(&checked, &HashMap::new())
         .expect("softmax should evaluate under host runtime");
@@ -1186,10 +1186,10 @@ fn host_runtime_softmax_two_class_matches_reference() {
     // softmax([1.0, 0.0], 0) = [exp(1)/(exp(1)+1), 1/(exp(1)+1)]
     //                         ≈ [0.7310585, 0.2689414]
     let checked = checked_surf(
-        r#"
+        r"
 x = to_tensor([cast(1.0, f32), cast(0.0, f32)])
 y = softmax(x, cast(0, int32))
-"#,
+",
     );
     let outcome =
         evaluate_host_program(&checked, &HashMap::new()).expect("softmax 2-class should evaluate");
@@ -1211,10 +1211,10 @@ fn host_runtime_softmax_numerical_stability_handles_large_inputs() {
     // inf and produce NaN. The stable lowering must still produce
     // a normalized distribution.
     let checked = checked_surf(
-        r#"
+        r"
 x = to_tensor([cast(1000.0, f32), cast(1000.0, f32)])
 y = softmax(x, cast(0, int32))
-"#,
+",
     );
     let outcome = evaluate_host_program(&checked, &HashMap::new())
         .expect("softmax with large inputs should remain numerically stable");
@@ -1347,10 +1347,10 @@ fn host_runtime_softmax_axis_out_of_bounds_errors() {
     // host-runtime defense-in-depth layer. The user-facing contract
     // is unchanged (the program is still rejected); only the layer
     // emitting the diagnostic moved upstream.
-    let src = r#"
+    let src = r"
 x = to_tensor([cast(1.0, f32), cast(2.0, f32)])
 y = softmax(x, cast(5, int32))
-"#;
+";
     let res = chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(
         &chelis_surf::parser::parse_str(src).expect("surf parse"),
     ));
@@ -1613,9 +1613,9 @@ fn prim_from_name_resolves_active_dtype_names() {
 /// in-tree program.
 #[test]
 fn type_checker_rejects_mixed_narrow_float_binop_per_spec_5_1() {
-    let src = r#"
+    let src = r"
 def main -> bf16 = add(cast(1.0, bf16), cast(1.0, f16))
-"#;
+";
     let res = chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(
         &chelis_surf::parser::parse_str(src).expect("surf parse"),
     ));

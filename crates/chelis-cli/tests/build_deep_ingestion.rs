@@ -66,7 +66,7 @@ fn build_dp_extension_auto_detects_deep_path() {
     let span_count = src.matches("// span:").count();
     let sidecar_text = fs::read_to_string(wrapped_spans_json()).expect("read spans sidecar");
     let sidecar: serde_json::Value = serde_json::from_str(&sidecar_text).expect("parse spans json");
-    let sidecar_entries: usize = sidecar["spans"].as_array().map(Vec::len).unwrap_or(0);
+    let sidecar_entries: usize = sidecar["spans"].as_array().map_or(0, Vec::len);
     assert!(
         span_count >= sidecar_entries,
         ".dp auto-detect must produce >= sidecar entry count `// span:` lines \
@@ -130,7 +130,7 @@ fn build_dp_with_deep_flag_is_a_noop_relative_to_auto_detect() {
     let span_count = auto_src.matches("// span:").count();
     let sidecar_text = fs::read_to_string(wrapped_spans_json()).expect("read spans sidecar");
     let sidecar: serde_json::Value = serde_json::from_str(&sidecar_text).expect("parse spans json");
-    let sidecar_entries: usize = sidecar["spans"].as_array().map(Vec::len).unwrap_or(0);
+    let sidecar_entries: usize = sidecar["spans"].as_array().map_or(0, Vec::len);
     assert!(
         span_count >= sidecar_entries,
         "`.dp` auto-detect must emit >= sidecar entry count `// span:` lines \
@@ -221,7 +221,7 @@ fn build_span_free_deep_matches_surf_shape() {
     let dp_path = dir.path().join("nospan.dp");
     fs::write(
         &dp_path,
-        r#"(def {} hello
+        r"(def {} hello
   (fn {}
     (params {} (x {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}))
     (let {}
@@ -233,7 +233,7 @@ fn build_span_free_deep_matches_surf_shape() {
           (let {}
             (bind {} __drop_x2 (app {} (var {} drop) (var {} x2)))
             (var {} out)))))))
-"#,
+",
     )
     .expect("write dp");
     let out = dir.path().join("nospan.c");
@@ -381,7 +381,7 @@ fn build_deep_audit_chain_is_recoverable_from_emitted_c() {
     // on at least one emitted node, so the strict equality holds.
     let emitted_count = src.matches("// span:").count();
     let sidecar: serde_json::Value = serde_json::from_str(&sidecar_text).expect("parse spans json");
-    let sidecar_entries: usize = sidecar["spans"].as_array().map(Vec::len).unwrap_or(0);
+    let sidecar_entries: usize = sidecar["spans"].as_array().map_or(0, Vec::len);
     assert!(
         emitted_count >= sidecar_entries,
         "audit canary: emitted `// span:` count must be >= sidecar entry count \

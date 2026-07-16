@@ -17,7 +17,7 @@
 //!    Reshape nodes) must NOT specialize: there's no cancel-pair recognizer.
 //! 4. **Permute pair that cancels** (`[1,0]` then `[1,0]` again) must NOT
 //!    specialize: the cleanup checks identity individually, not pair-wise.
-//! 5. **Identity reshape with NEW DimInfo shape kind** (Lit ↔ Named with same
+//! 5. **Identity reshape with NEW `DimInfo` shape kind** (Lit ↔ Named with same
 //!    numeric value) — the M1 cleanup only collapses when `input.dims ==
 //!    node.output_type.dims` literally. A `Lit(4)` vs `Named("a", Some(4))`
 //!    pair is structurally distinct even though numerically equal; verify
@@ -411,8 +411,8 @@ fn single_identity_permute_does_collapse_to_blas() {
     );
 }
 
-/// ADV-6: A Reshape that round-trips with shape DimInfo::Named-vs-Lit
-/// (semantically same numeric value, structurally distinct DimInfo). The
+/// ADV-6: A Reshape that round-trips with shape `DimInfo::Named-vs-Lit`
+/// (semantically same numeric value, structurally distinct `DimInfo`). The
 /// M1 cleanup compares `input.output_type.dims == node.output_type.dims`
 /// literally, so even though `DimInfo::Named("k", Some(3))` and
 /// `DimInfo::Lit(3)` evaluate to the same size, they don't compare equal

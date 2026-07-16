@@ -155,7 +155,7 @@ fn gcc(
 /// from runtime scalars.
 #[test]
 fn issue_616_runtime_reshape_window_forward_eval_matches_c() {
-    let input: Vec<f64> = (1..=6).map(|v| v as f64).collect();
+    let input: Vec<f64> = (1..=6).map(f64::from).collect();
     let source = window_source(&format!(
         "out = window(to_tensor([{}]))",
         f32_literal(&input)

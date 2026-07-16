@@ -66,7 +66,7 @@ fn closure_that_only_borrow_reads_capture_does_not_consume_outer_var() {
     // consume `c`, so the later `add(c, inner(...))` still sees `c`
     // as live.
     check_surf(
-        r#"
+        r"
 type Frame[n] =
   | Frame { col: tensor[n, f32] }
 def get_col[n](df: Frame[n]) -> tensor[n, f32] = {
@@ -79,7 +79,7 @@ def f[n](df: Frame[n]) -> tensor[n, f32] = {
   inner = fn (i: int64) -> add(c, c)
   add(c, inner(cast(0, int64)))
 }
-"#,
+",
     )
     .expect(
         "issue #237: a closure that only borrow-reads its capture must not \
@@ -94,12 +94,12 @@ fn closure_that_only_reads_capture_via_outer_let_binding_is_a_borrow_capture() {
     // regression in the destructure path does not mask a regression
     // in the bare-binding path.
     check_surf(
-        r#"
+        r"
 def f(x: tensor[4, f32]) -> tensor[4, f32] = {
   g = fn (i: int64) -> add(x, x)
   add(x, g(cast(0, int64)))
 }
-"#,
+",
     )
     .expect(
         "issue #237: bare-binding closure capture that only borrow-reads must \
@@ -113,7 +113,7 @@ fn closure_chain_with_only_borrow_reads_does_not_consume_outer() {
     // none consumes it. The final `add(x, ...)` outside both closures
     // must still see `x` as live.
     check_surf(
-        r#"
+        r"
 def f(x: tensor[4, f32], y: tensor[4, f32]) -> tensor[4, f32] = {
   g = fn (v: tensor[4, f32]) -> add(x, v)
   h = fn (v: tensor[4, f32]) -> mul(x, v)
@@ -121,7 +121,7 @@ def f(x: tensor[4, f32], y: tensor[4, f32]) -> tensor[4, f32] = {
   b = h(y)
   add(x, add(a, b))
 }
-"#,
+",
     )
     .expect(
         "issue #237: multiple closures each borrow-reading the same outer var \
@@ -136,13 +136,13 @@ fn closure_that_actually_consumes_capture_still_trips_use_after_consume() {
     // outside the closure must still trip `UseAfterConsume`. The fix
     // must not over-permit.
     let errors = check_surf(
-        r#"
+        r"
 def f(x: tensor[4, f32], y: tensor[4, f32]) -> tensor[4, f32] = {
   g = fn (other: tensor[4, f32]) -> realize(x)
   z = g(y)
   add(x, z)
 }
-"#,
+",
     )
     .expect_err(
         "issue #237 fix must preserve detection: a closure that structurally \
@@ -164,13 +164,13 @@ fn closure_that_consumes_via_returning_capture_still_trips_use_after_consume() {
     // the closure scope). The outer scope must still see `x` as
     // consumed.
     let errors = check_surf(
-        r#"
+        r"
 def f(x: tensor[4, f32]) -> tensor[4, f32] = {
   g = fn (i: int64) -> x
   z = g(cast(0, int64))
   add(x, z)
 }
-"#,
+",
     )
     .expect_err(
         "issue #237 fix must preserve detection: returning a captured tensor \
@@ -192,14 +192,14 @@ fn closure_that_consumes_via_app_arg_still_trips_use_after_consume() {
     // (Fixture renamed from `take` for chelis#353: `take` is a builtin
     // name and bare shadowing defs are now rejected at declaration time.)
     let errors = check_surf(
-        r#"
+        r"
 def grab(t: tensor[4, f32]) -> tensor[4, f32] = t
 def f(x: tensor[4, f32]) -> tensor[4, f32] = {
   g = fn (i: int64) -> grab(x)
   z = g(cast(0, int64))
   add(x, z)
 }
-"#,
+",
     )
     .expect_err(
         "issue #237 fix must preserve detection: a closure that passes its \
@@ -229,13 +229,13 @@ fn auto_borrow_inference_through_pipe_stage_with_explicit_args() {
     // marks `reader.t` as owned, the call `reader(x, k)` consumes
     // `x`, and the later `add(x, y)` trips `UseAfterConsume`.
     check_surf(
-        r#"
+        r"
 def reader(t, k: tensor[4, f32]) = t |> add(k)
 def caller(x: tensor[4, f32], k: tensor[4, f32]) -> tensor[4, f32] = {
   y = reader(x, k)
   add(x, y)
 }
-"#,
+",
     )
     .expect(
         "issue #229: pipe_consumes_param must peer through the synthesized \
@@ -250,13 +250,13 @@ fn auto_borrow_inference_through_pipe_stage_chain_with_explicit_args() {
     // synthesized lambda. The inferencer must see both stages as
     // borrow-reads and conclude `reader.t` is read-only.
     check_surf(
-        r#"
+        r"
 def reader(t, k: tensor[4, f32]) = t |> add(k) |> add(k)
 def caller(x: tensor[4, f32], k: tensor[4, f32]) -> tensor[4, f32] = {
   y = reader(x, k)
   add(x, y)
 }
-"#,
+",
     )
     .expect(
         "issue #229: composed pipe-stage chains with explicit args must be \
@@ -272,14 +272,14 @@ fn auto_borrow_pipe_stage_consuming_user_fn_keeps_param_owned() {
     // then keeps `reader.t` owned, and `reader(x, k)` legitimately
     // consumes `x`. A later `add(x, y)` IS a use-after-consume.
     let errors = check_surf(
-        r#"
+        r"
 def consume_two(t: tensor[4, f32], k: tensor[4, f32]) -> tensor[4, f32] = t
 def reader(t, k: tensor[4, f32]) = t |> consume_two(k)
 def caller(x: tensor[4, f32], k: tensor[4, f32]) -> tensor[4, f32] = {
   y = reader(x, k)
   add(x, y)
 }
-"#,
+",
     )
     .expect_err(
         "issue #229 fix must preserve detection: a pipe stage wrapping a \

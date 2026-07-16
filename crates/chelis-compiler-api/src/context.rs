@@ -76,6 +76,7 @@ impl CacheIdentity {
     /// trailing slashes) resolve to one identity; if canonicalization
     /// fails (path removed mid-build, permission error), the raw path is
     /// used so the identity is still distinct rather than empty.
+    #[must_use]
     pub fn for_package_root(package_root: &Path) -> Self {
         let canonical = fs::canonicalize(package_root)
             .unwrap_or_else(|_| package_root.to_path_buf())
@@ -105,6 +106,7 @@ impl ContextHash {
     /// fixed-width hash. Strings are length-prefixed (u64 little-endian)
     /// to disambiguate concatenation collisions; per-file `sha256` is
     /// fixed-width so it's appended directly.
+    #[must_use]
     pub fn from_digests(digests: &[SourceDigest]) -> Self {
         let mut hasher = Sha256::new();
         for d in digests {
@@ -264,8 +266,7 @@ impl CompiledContext {
             .collect::<String>();
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(0);
+            .map_or(0, |d| d.subsec_nanos());
         let tmp_name = format!(
             ".{}.tmp.{}.{}.{}",
             path.file_name()
@@ -277,8 +278,7 @@ impl CompiledContext {
         );
         let tmp_path = path
             .parent()
-            .map(|p| p.join(&tmp_name))
-            .unwrap_or_else(|| PathBuf::from(&tmp_name));
+            .map_or_else(|| PathBuf::from(&tmp_name), |p| p.join(&tmp_name));
 
         // Open + write + sync + close; a crash before sync is fine because
         // we never touch the canonical path until rename.
@@ -470,6 +470,7 @@ impl CompiledContext {
     /// verification of both still happens inside `load_if_fresh`, so a
     /// prefix collision on the path is recoverable (returns `Ok(None)`,
     /// not a silent hit).
+    #[must_use]
     pub fn cache_path_for(
         reef_home: &Path,
         package_id: (&str, &str),
@@ -487,6 +488,7 @@ impl CompiledContext {
     /// resolve the cache directory via the XDG-fallback helper
     /// (`stdlib_cache::cache_dir_for`) can join the same file name onto
     /// it.
+    #[must_use]
     pub fn cache_file_name(
         package_id: (&str, &str),
         source_hash: ContextHash,
@@ -515,6 +517,7 @@ impl CompiledContext {
     /// chelis-std test corpus, this accessor is the safe correctness
     /// path for `chelis test`. The performance win still comes from
     /// skipping the per-worker reef walk.
+    #[must_use]
     pub fn reef_state(&self) -> &PreparedReefGraph {
         &self.reef_state
     }
@@ -822,9 +825,7 @@ pub fn compile_reef_context(
     // Phase K profile instrumentation: when `CHELIS_PROFILE_COMPILE_CONTEXT=1`
     // is set, emit per-phase wall-clock to stderr so the operator can see
     // which stage dominates. Off by default — zero cost on the hot path.
-    let profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT")
-        .map(|v| v == "1")
-        .unwrap_or(false);
+    let profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT").is_some_and(|v| v == "1");
     let mut t = std::time::Instant::now();
     let log_phase = |name: &str, t: &mut std::time::Instant| {
         if profile {
@@ -856,8 +857,7 @@ pub fn compile_reef_context(
     log_phase("source_digests", &mut t);
     let source_hash = digests
         .as_deref()
-        .map(ContextHash::from_digests)
-        .unwrap_or(ContextHash([0u8; 32]));
+        .map_or(ContextHash([0u8; 32]), ContextHash::from_digests);
     log_phase("hash_digests", &mut t);
 
     // Phase C+0e / chelis#451: build the `(TypeEnv, library CheckedProgram,
@@ -892,8 +892,7 @@ pub fn compile_reef_context(
             if profile {
                 let (modules, decls) = library_structural_summary(&deep_library_decls);
                 eprintln!(
-                    "compile_reef_context: structural_summary modules={} top_level_decls={}",
-                    modules, decls
+                    "compile_reef_context: structural_summary modules={modules} top_level_decls={decls}"
                 );
             }
 
@@ -1101,7 +1100,7 @@ fn build_library_triple_layered(
     // `compile_reef_context` (and every `_with_context` consumer) expects.
     let library_checked = CheckedProgram::compose(&stdlib_ctx.library_checked, &package_checked);
 
-    if std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT").map(|v| v == "1") == Some(true) {
+    if std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT").is_some_and(|v| v == "1") {
         eprintln!(
             "compile_reef_context: {:>32} {:>8.3}s",
             "layered_stdlib_cached_check",

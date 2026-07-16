@@ -1,4 +1,7 @@
-use crate::ast::*;
+use crate::ast::{
+    BinOp, Decl, EffectExpr, Expr, ImportKind, LetBinding, LetPattern, Literal, MatchArm, Param,
+    Pattern, PropertyOption, TypeExpr, TypeInvariant, UnaryOp, Variant, VariantFields,
+};
 use crate::lexer::{self, LexError};
 use crate::token::{Token, TokenKind};
 use chelis_deep::Span;
@@ -100,8 +103,7 @@ impl Parser {
     fn raw_peek(&self) -> &TokenKind {
         self.tokens
             .get(self.pos)
-            .map(|t| &t.kind)
-            .unwrap_or(&TokenKind::Eof)
+            .map_or(&TokenKind::Eof, |t| &t.kind)
     }
 
     fn peek(&self) -> &TokenKind {
@@ -112,10 +114,7 @@ impl Parser {
         ) {
             pos += 1;
         }
-        self.tokens
-            .get(pos)
-            .map(|t| &t.kind)
-            .unwrap_or(&TokenKind::Eof)
+        self.tokens.get(pos).map_or(&TokenKind::Eof, |t| &t.kind)
     }
 
     fn at_eof(&self) -> bool {
@@ -123,7 +122,7 @@ impl Parser {
     }
 
     /// True when the next two significant tokens are `.` followed by a
-    /// PascalCase `TypeIdent` — the shape of a module-qualified path segment
+    /// `PascalCase` `TypeIdent` — the shape of a module-qualified path segment
     /// (`.Dropout`, `.Train`). Used to extend a constructor pattern head into
     /// a qualified path (`Demo.Dropout.Train`, chelis#316) without consuming
     /// the `.` when it is not part of such a path.
@@ -161,8 +160,9 @@ impl Parser {
         }
         self.tokens
             .get(pos)
-            .map(|t| t.span.offset)
-            .unwrap_or(self.tokens.last().map(|t| t.span.end()).unwrap_or(0))
+            .map_or(self.tokens.last().map_or(0, |t| t.span.end()), |t| {
+                t.span.offset
+            })
     }
 
     fn advance_raw(&mut self) -> Token {
@@ -447,7 +447,7 @@ impl Parser {
     /// way a def's `[..]` quantifier clause overrides the case-split for
     /// type variables (spec/02 §P4a). This admits finance/math notation
     /// (`S`, `K`, `T`, `N`, `P`) as value names (chelis#437) without
-    /// weakening the PascalCase convention for multi-letter type and
+    /// weakening the `PascalCase` convention for multi-letter type and
     /// constructor names.
     fn expect_value_ident(&mut self) -> Result<(String, Span), ParseError> {
         match self.peek().clone() {
@@ -653,8 +653,7 @@ impl Parser {
         }
         let end = options
             .last()
-            .map(PropertyOption::span)
-            .unwrap_or_else(|| expr_span(&body));
+            .map_or_else(|| expr_span(&body), PropertyOption::span);
         Ok(Decl::Property {
             name,
             params,
@@ -941,8 +940,7 @@ impl Parser {
         let end = effects
             .as_ref()
             .and_then(|effects| effects.last())
-            .map(EffectExpr::span)
-            .unwrap_or_else(|| type_span(&ty));
+            .map_or_else(|| type_span(&ty), EffectExpr::span);
         let span = start.merge(end);
         Ok(Decl::Sig {
             name,
@@ -983,7 +981,7 @@ impl Parser {
         } else {
             None
         };
-        let end = ty.as_ref().map(type_span).unwrap_or(span);
+        let end = ty.as_ref().map_or(span, type_span);
         Ok(Param {
             name,
             ty,
@@ -1153,7 +1151,7 @@ impl Parser {
         while !self.at_eof() {
             decls.push(self.parse_decl()?);
         }
-        let end = decls.last().map(decl_span).unwrap_or(start);
+        let end = decls.last().map_or(start, decl_span);
         Ok(Decl::Module {
             name,
             decls,
@@ -2707,7 +2705,7 @@ impl Parser {
 
 /// True for a single ASCII-uppercase letter (`S`, `K`, `T`, `N`, `P`,
 /// …). The value-binding case-split override (chelis#437) is limited to
-/// single-letter names so multi-letter PascalCase stays unambiguously a
+/// single-letter names so multi-letter `PascalCase` stays unambiguously a
 /// type or constructor name (§1.1, §3.1).
 fn is_single_letter_upper(name: &str) -> bool {
     let mut chars = name.chars();
@@ -3670,7 +3668,7 @@ mod tests {
         let e = body("x = grad(f, wrt=(w, b))");
         match e {
             Expr::Grad(_, Some(wrt), _) => {
-                assert_eq!(wrt, vec!["w".to_string(), "b".to_string()])
+                assert_eq!(wrt, vec!["w".to_string(), "b".to_string()]);
             }
             _ => panic!("expected Grad with wrt tuple, got {e:?}"),
         }

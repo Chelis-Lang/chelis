@@ -2,16 +2,16 @@
 //!
 //! Attacks:
 //!   - End-to-end accumulator plumbing: a hand-built IR with a
-//!     non-default accumulator (e.g., int8 reduce_sum + int64
+//!     non-default accumulator (e.g., int8 `reduce_sum` + int64
 //!     accumulator) must verify and the verify must respect the
 //!     non-default field, not silently use the operand precision.
-//!   - Result-precision invariant per spec §5.7.1: for reduce_sum,
-//!     output_type.precision MUST equal the accumulator field. The
+//!   - Result-precision invariant per spec §5.7.1: for `reduce_sum`,
+//!     `output_type.precision` MUST equal the accumulator field. The
 //!     verifier enforces this; pin a hand-built IR that violates it.
 //!   - Unusual-but-spec-admitted accumulator (f32 operand + f64
-//!     accumulator on reduce_sum) must verify and the output precision
+//!     accumulator on `reduce_sum`) must verify and the output precision
 //!     must follow the accumulator.
-//!   - F1 BlasMatmul guard residual state: ONLY integer matmul
+//!   - F1 `BlasMatmul` guard residual state: ONLY integer matmul
 //!     (§5.7.2) and f8e4m3 matmul (§1.1.1) should remain rejected;
 //!     all four float dtypes must be admitted at the verify layer.
 

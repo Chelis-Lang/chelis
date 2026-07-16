@@ -41,6 +41,7 @@ pub enum MathLib {
 
 impl MathLib {
     /// Select the appropriate variant based on compile-time feature flags.
+    #[must_use]
     pub fn detect() -> Self {
         #[cfg(feature = "sleef")]
         return MathLib::Sleef;
@@ -54,7 +55,7 @@ impl MathLib {
 /// Optional backend features for C code generation.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CodegenOptions {
-    /// Emit BLAS-backed matmul code and surface the required OpenBLAS link flags.
+    /// Emit BLAS-backed matmul code and surface the required `OpenBLAS` link flags.
     ///
     /// When false, matmul-shaped DAGs still compile via the generic reduction path.
     pub use_blas: bool,
@@ -83,10 +84,12 @@ pub struct CodegenOptions {
 /// Repeated `Load(name)` nodes share one input slot, surfaced via `input_labels`.
 /// `Store(name)` nodes are exported as named outputs in `output_labels`; any
 /// remaining DAG roots are appended afterward as `root{index}`.
+#[must_use]
 pub fn codegen(dag: &chelis_ir::dag::Dag, func_name: &str) -> CodegenResult {
     codegen_with_options(dag, func_name, CodegenOptions::default())
 }
 
+#[must_use]
 pub fn codegen_host_program(
     program: &chelis_ir::host::HostProgram,
     func_name: &str,
@@ -111,6 +114,7 @@ pub fn codegen_host_program(
 }
 
 /// Generate C source code from a RISC DAG with explicit backend options.
+#[must_use]
 pub fn codegen_with_options(
     dag: &chelis_ir::dag::Dag,
     func_name: &str,
@@ -457,22 +461,19 @@ mod tests {
         // `emit_host_program` names the helper as `{emitted_fn_name}__tensor_{index}`.
         assert!(
             src.contains("static void my_fn__tensor_0("),
-            "tensor helper must carry static linkage to avoid PLT export;\ngenerated source:\n{}",
-            src
+            "tensor helper must carry static linkage to avoid PLT export;\ngenerated source:\n{src}"
         );
 
         // The user-facing entry function must NOT be static (library mode: no globals).
         // Without globals, internal_linkage=false, so the function has external linkage.
         assert!(
             !src.contains("static void my_fn(") && !src.contains("static inline void my_fn("),
-            "exported entry function my_fn must not be static;\ngenerated source:\n{}",
-            src
+            "exported entry function my_fn must not be static;\ngenerated source:\n{src}"
         );
         // Confirm the external-linkage definition is present.
         assert!(
             src.contains(" my_fn("),
-            "exported entry function my_fn must have an external-linkage definition;\ngenerated source:\n{}",
-            src
+            "exported entry function my_fn must have an external-linkage definition;\ngenerated source:\n{src}"
         );
     }
 
@@ -725,8 +726,7 @@ mod tests {
         Command::new(crate::toolchain::c_compiler())
             .arg("--version")
             .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+            .is_ok_and(|o| o.status.success())
     }
 
     fn c_test_extra_flags() -> Vec<String> {
@@ -735,7 +735,7 @@ mod tests {
             .map(|flags| {
                 flags
                     .split_whitespace()
-                    .map(|flag| flag.to_string())
+                    .map(std::string::ToString::to_string)
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default()
@@ -752,7 +752,7 @@ mod tests {
     ///
     /// `chelis_simd.h` and the generated math kernels are arch-aware:
     /// `#ifdef __AVX2__` on x86, `#elif defined(__ARM_NEON)` on ARM, with
-    /// a scalar fallback. On x86_64 we pass `-mavx2` to guarantee the AVX2
+    /// a scalar fallback. On `x86_64` we pass `-mavx2` to guarantee the AVX2
     /// path is exercised regardless of the host's `-march=native` baseline.
     /// On aarch64 (e.g. Apple Silicon CI runners) NEON is part of the
     /// architecture baseline, so `__ARM_NEON` is already defined and the
@@ -786,7 +786,7 @@ mod tests {
             .args(extra_args)
             .arg("-o")
             .arg(tmp.path().join("probe").to_str().unwrap());
-        cmd.output().map(|o| o.status.success()).unwrap_or(false)
+        cmd.output().is_ok_and(|o| o.status.success())
     }
 
     fn openmp_available() -> bool {
@@ -803,7 +803,7 @@ mod tests {
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            r#"
+            r"
 #include <omp.h>
 int main(void) {
     int n = 0;
@@ -811,7 +811,7 @@ int main(void) {
     n += 1;
     return 0;
 }
-"#,
+",
         )
     }
 
@@ -826,7 +826,7 @@ int main(void) {
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            r#"
+            r"
 #ifdef __APPLE__
 #include <Accelerate/Accelerate.h>
 #else
@@ -839,7 +839,7 @@ int main(void) {
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, 1, 1, 1, 1.0f, a, 1, b, 1, 0.0f, c, 1);
     return c[0] == 2.0f ? 0 : 1;
 }
-"#,
+",
         )
     }
 
@@ -966,7 +966,7 @@ int main() {
 
     // ---- Numerical tests (compile + run + check output) ----
 
-    /// Helper: build a DAG, generate C, compile with a main() wrapper, run, return stdout.
+    /// Helper: build a DAG, generate C, compile with a `main()` wrapper, run, return stdout.
     fn compile_and_run(dag: &Dag, func_name: &str) -> String {
         compile_and_run_with_codegen_options(dag, func_name, CodegenOptions::default(), &[])
     }
@@ -981,9 +981,7 @@ int main() {
         options: CodegenOptions,
         extra_args: &[&str],
     ) -> String {
-        if !gcc_available() {
-            panic!("gcc not available");
-        }
+        assert!(gcc_available(), "gcc not available");
         let result = codegen_with_options(dag, func_name, options);
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1120,9 +1118,7 @@ int main() {{
         options: CodegenOptions,
         cases: &[Vec<TestInput>],
     ) -> Vec<String> {
-        if !gcc_available() {
-            panic!("gcc not available");
-        }
+        assert!(gcc_available(), "gcc not available");
         let result = codegen_with_options(dag, func_name, options);
         let n_out = result.output_labels.len();
 
@@ -1152,7 +1148,7 @@ int main() {{
                 let (ndim, c_dims) = c_shape(&input.shape);
                 let shape_vals = c_dims
                     .iter()
-                    .map(|d| d.to_string())
+                    .map(std::string::ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(", ");
                 let shape_arg = if ndim == 0 {
@@ -1745,11 +1741,11 @@ int main(void) {{
         for (slot, label) in result.input_labels.iter().enumerate() {
             match label.as_str() {
                 "values" => input_lines.push(
-                    r#"int shape_values[2] = { 4, 2 };
+                    r"int shape_values[2] = { 4, 2 };
     chelis_tensor *values = chelis_alloc(2, shape_values, CHELIS_F32);
     float values_data[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
     for (int i = 0; i < 8; i++) values->data[i] = values_data[i];
-    inputs[SLOT] = values;"#
+    inputs[SLOT] = values;"
                         .replace("SLOT", &slot.to_string()),
                 ),
                 // #476: a CHELIS_I32 index tensor stores int32 values
@@ -1761,25 +1757,25 @@ int main(void) {{
                 // truncated the float back. Writing the int32 value directly is
                 // what real generated input code and the runtime do.
                 "indices" => input_lines.push(
-                    r#"int shape_indices[1] = { 3 };
+                    r"int shape_indices[1] = { 3 };
     chelis_tensor *indices = chelis_alloc(1, shape_indices, CHELIS_I32);
     int32_t *indices_i32 = (int32_t*)indices->data;
     indices_i32[0] = 0; indices_i32[1] = 2; indices_i32[2] = 0;
-    inputs[SLOT] = indices;"#
+    inputs[SLOT] = indices;"
                         .replace("SLOT", &slot.to_string()),
                 ),
                 "target" => input_lines.push(
-                    r#"int shape_target[2] = { 4, 2 };
+                    r"int shape_target[2] = { 4, 2 };
     chelis_tensor *target = chelis_alloc(2, shape_target, CHELIS_F32);
-    inputs[SLOT] = target;"#
+    inputs[SLOT] = target;"
                         .replace("SLOT", &slot.to_string()),
                 ),
                 "updates" => input_lines.push(
-                    r#"int shape_updates[2] = { 3, 2 };
+                    r"int shape_updates[2] = { 3, 2 };
     chelis_tensor *updates = chelis_alloc(2, shape_updates, CHELIS_F32);
     float updates_data[6] = { 1, 10, 2, 20, 3, 30 };
     for (int i = 0; i < 6; i++) updates->data[i] = updates_data[i];
-    inputs[SLOT] = updates;"#
+    inputs[SLOT] = updates;"
                         .replace("SLOT", &slot.to_string()),
                 ),
                 other => panic!("unexpected input label {other}"),
@@ -2792,7 +2788,7 @@ int main(void) {{
 
     /// Acceptance oracle for Level 3b SIMD math.
     ///
-    /// Runs exp(add(a, b)) via the Sleef-path C (compiled without CHELIS_HAS_SLEEF
+    /// Runs exp(add(a, b)) via the Sleef-path C (compiled without `CHELIS_HAS_SLEEF`
     /// so the #else Level-1 scalar path executes) and verifies the result matches
     /// a pure scalar reference implementation within 1 ULP (< 2e-7 relative error).
     #[test]
@@ -3058,7 +3054,7 @@ int main(void) {{
 
     // ---- ADVERSARIAL TESTS: static linkage, C compilation, and scalar builtin coverage ----
 
-    /// E: When globals are present (internal_linkage=true), user functions become
+    /// E: When globals are present (`internal_linkage=true`), user functions become
     /// `static inline`. The tensor helper must remain `static void` (not `static inline`).
     /// This case is NOT tested by `host_program_tensor_helpers_are_static_entry_not_exported`
     /// which only tests the no-globals case.
@@ -3242,9 +3238,10 @@ int main(void) {{
         let absf_count = src.matches("fabsf(").count();
         let abs_occurrences: Vec<_> = src.match_indices("absf(").collect();
         for (pos, _) in &abs_occurrences {
-            if *pos == 0 || src.as_bytes()[pos - 1] != b'f' {
-                panic!("found bare `absf(` at position {pos}. Should be `fabsf(`;\n{src}");
-            }
+            assert!(
+                !(*pos == 0 || src.as_bytes()[pos - 1] != b'f'),
+                "found bare `absf(` at position {pos}. Should be `fabsf(`;\n{src}"
+            );
         }
         assert!(absf_count >= 1, "no `fabsf(` in output:\n{src}");
     }
@@ -3377,9 +3374,7 @@ int main(void) {{
     /// that reinterprets outputs[0]->data as `double*`, and return the printed
     /// line-separated values with 17 significant digits each.
     fn compile_and_run_f64(dag: &Dag, func_name: &str, expected_size: usize) -> Vec<f64> {
-        if !gcc_available() {
-            panic!("gcc not available");
-        }
+        assert!(gcc_available(), "gcc not available");
         let result = codegen(dag, func_name);
 
         let tmp = tempfile::tempdir().unwrap();

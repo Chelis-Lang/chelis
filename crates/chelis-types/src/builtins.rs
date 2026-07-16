@@ -1,15 +1,15 @@
 //! Built-in function signatures for RISC primitives and derived operations.
 //!
 //! Signature templates:
-//! - tensor_binop: ∀D,p. (tensor[D,p], tensor[D,p]) → tensor[D,p]
-//! - tensor_unop:  ∀D,p. tensor[D,p] → tensor[D,p]
+//! - `tensor_binop`: ∀D,p. (tensor[D,p], tensor[D,p]) → tensor[D,p]
+//! - `tensor_unop`:  ∀D,p. tensor[D,p] → tensor[D,p]
 //! - cmplt:        ∀D,p. (tensor[D,p], tensor[D,p]) → tensor[D, bool]
-//! - logical_binop: ∀D. (tensor[D,bool], tensor[D,bool]) → tensor[D,bool]
-//! - logical_unop:  ∀D. tensor[D,bool] → tensor[D,bool]
+//! - `logical_binop`: ∀D. (tensor[D,bool], tensor[D,bool]) → tensor[D,bool]
+//! - `logical_unop`:  ∀D. tensor[D,bool] → tensor[D,bool]
 
 use crate::adt::{AdtDef, AdtRegistry, VariantInfo};
 use crate::env::Env;
-use crate::types::*;
+use crate::types::{Prim, Scheme, Type, VarGen};
 
 pub const BUILTIN_NAMES: &[&str] = &[
     "add",
@@ -193,6 +193,7 @@ pub enum ShapeClass {
 /// rank-poly body, so a missed classification can only over-reject, never open
 /// a §4.2 hole. The `shape_class_identity_set_is_pinned` test pins the sets so
 /// any change is deliberate.
+#[must_use]
 pub fn shape_class(name: &str) -> ShapeClass {
     match name {
         // Pure elementwise — output shape == input shape (precision may change
@@ -234,6 +235,7 @@ pub fn shape_class(name: &str) -> ShapeClass {
 }
 
 /// Create the built-in type environment with all RISC Tier 1 + Tier 2 signatures.
+#[must_use]
 pub fn builtin_env() -> (Env, VarGen) {
     let mut env = Env::new();
     let mut vg = VarGen::default();
@@ -1224,6 +1226,7 @@ pub const COMPARISON_OPS: &[&str] = &["cmplt", "eq", "neq", "lt", "gt", "lte", "
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{Dim, TensorPrec};
 
     #[test]
     fn builtin_env_has_add() {
@@ -1368,7 +1371,7 @@ mod tests {
             .expect("§4 must contain a fenced code block");
         // Skip the rest of the opening fence line (any info string).
         let body = &after_heading[fence_open + 3..];
-        let body = &body[body.find('\n').map(|i| i + 1).unwrap_or(0)..];
+        let body = &body[body.find('\n').map_or(0, |i| i + 1)..];
         let block = body
             .split_once("```")
             .expect("§4 fenced code block must be closed")

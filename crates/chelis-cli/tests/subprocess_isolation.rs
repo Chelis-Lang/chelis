@@ -362,10 +362,10 @@ def test_foo() -> unit = test_assert(true, "ok")
     // entirely silent. A real parse error fires regardless of filter.)
     write_file(
         &pkg.join("tests/broken.ch"),
-        r#"module Iso.Tests.Broken
+        r"module Iso.Tests.Broken
 
 this is not valid chelis syntax at all !!
-"#,
+",
     );
 
     let output = Command::cargo_bin("chelis")
@@ -441,10 +441,10 @@ fn filter_inactive_marker_only_under_filter() {
 
     write_file(
         &pkg.join("tests/broken.ch"),
-        r#"module Iso.Tests.Broken
+        r"module Iso.Tests.Broken
 
 this is not valid chelis syntax at all !!
-"#,
+",
     );
 
     let output = Command::cargo_bin("chelis")

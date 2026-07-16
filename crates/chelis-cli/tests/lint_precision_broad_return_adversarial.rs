@@ -136,7 +136,7 @@ fn lp_copy_borrow_in_let_rhs_warning_suppressed() {
     );
 }
 
-/// LP-3: Positive control: genuine-redundant copy() on an OWNED tensor.
+/// LP-3: Positive control: genuine-redundant `copy()` on an OWNED tensor.
 /// The strip is safe under implicit linearity, so the warning must fire
 /// with a `[fix]` marker. Pins that the opt-in does not over-suppress.
 #[test]
@@ -470,7 +470,7 @@ fn sr_chained_let_aliases_lower_cleanly() {
 
 /// SR-2: NEGATIVE CONTROL. If-branches return different variables.
 /// The descent's "same name across siblings" rule rejects; the existing
-/// TypeMismatch must surface. Pins that PR #109 does not over-relax.
+/// `TypeMismatch` must surface. Pins that PR #109 does not over-relax.
 #[test]
 fn sr_if_branches_with_different_vars_still_fail() {
     let dir = tempdir().expect("tempdir");
@@ -490,7 +490,7 @@ fn sr_if_branches_with_different_vars_still_fail() {
 }
 
 /// SR-3: NEGATIVE CONTROL. Tail expression is a call, not a bare var.
-/// The descent rejects `(app realize_it y)`; the existing TypeMismatch
+/// The descent rejects `(app realize_it y)`; the existing `TypeMismatch`
 /// must surface.
 #[test]
 fn sr_tail_call_not_var_still_fails() {
@@ -539,7 +539,7 @@ fn sr_match_complex_scrutinee_with_bare_var_arms_lowers_cleanly() {
 }
 
 /// SR-5: NEGATIVE CONTROL. Match with one arm being a non-bare-var
-/// (a fn call). The descent rejects; existing TypeMismatch surfaces.
+/// (a fn call). The descent rejects; existing `TypeMismatch` surfaces.
 #[test]
 fn sr_match_one_arm_call_other_var_still_fails() {
     let dir = tempdir().expect("tempdir");
@@ -725,7 +725,7 @@ fn sr_leak_a_path_a_match_tail_same_dim_passes() {
 /// at all. `def g[n, m](x: tensor[n, f32], y: tensor[m, f32]) ->
 /// tensor[n, f32] = y` collapses two distinct declared dim params via
 /// free `unify_dim`. The post-body `declared_dvars` rigidity check must
-/// flag the `Var->Var` collapse with a DimensionMismatch.
+/// flag the `Var->Var` collapse with a `DimensionMismatch`.
 #[test]
 fn sr_leak_a_path_b_plain_owned_divergent_dim_fails() {
     let dir = tempdir().expect("tempdir");

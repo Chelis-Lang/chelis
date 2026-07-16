@@ -822,8 +822,7 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
             let host_requires_host_backend = host_compiled
                 .host
                 .as_ref()
-                .map(chelis_ir::host::host_program_requires_host_backend)
-                .unwrap_or(false);
+                .is_some_and(chelis_ir::host::host_program_requires_host_backend);
             let preferred_entry_dag = host_compiled
                 .host
                 .as_ref()
@@ -903,6 +902,7 @@ pub fn eval_selected(request: EvalRequest, selected_root_names: &[String]) -> Re
     since = "0.3.0",
     note = "use eval_many_in_context with a CompiledContext for ~5x faster amortized eval; see crates/chelis-compiler-api/src/compiler.rs::eval_many_in_context"
 )]
+#[must_use]
 pub fn eval_many(request: EvalRequest, test_roots: &[String]) -> Vec<(String, Result<EvalResult>)> {
     let compiled = match compile_source(request.source_kind, &request.source) {
         Ok(compiled) => compiled,
@@ -1217,6 +1217,7 @@ pub fn check_in_context(
 /// entry in `roots`. Mirrors the contract of `eval_many` but on the
 /// in-context API: the per-root iteration shares the new-source compile,
 /// and a failing root does not short-circuit the others.
+#[must_use]
 pub fn eval_many_in_context(
     context: &crate::context::CompiledContext,
     new_source: &str,
@@ -1404,11 +1405,7 @@ fn eval_compiled(
                 &host_outcome.host_bindings,
                 &tensor_values_by_name,
             )?;
-            let node_id = compiled
-                .named_roots
-                .get(name)
-                .map(|id| id.0)
-                .unwrap_or(index);
+            let node_id = compiled.named_roots.get(name).map_or(index, |id| id.0);
             Some((node_id, name.clone(), value))
         })
         .map(|(node_id, name, value)| {
@@ -1513,6 +1510,7 @@ pub fn decompile(request: DecompileRequest) -> Result<DecompileResult> {
     })
 }
 
+#[must_use]
 pub fn batch(requests: Vec<BatchRequest>) -> BatchResultEnvelope {
     BatchResultEnvelope {
         results: requests
@@ -1563,7 +1561,7 @@ struct CompiledSource {
 /// references when called from new code.
 #[derive(Clone)]
 struct LibraryRuntime {
-    /// Library `def` annotated_exprs. Pulled into `top_level_defs`
+    /// Library `def` `annotated_exprs`. Pulled into `top_level_defs`
     /// before the new-code defs so new-code can shadow on collision.
     exprs: Vec<DeepExpr>,
     /// Library-side type-env. Bucket 1 (`grad`/`vmap`/`realize` host
@@ -1697,7 +1695,7 @@ fn deep_exprs_from_source(source_kind: SourceKind, source: &str) -> Result<Vec<D
                 &chelis_surf::desugar::desugar_program(&decls),
                 &chelis_macros::ExpansionOptions::default(),
             )
-            .map(|expanded| expanded.into_exprs())
+            .map(chelis_macros::ExpandedProgram::into_exprs)
             .map_err(|err| stage_error("desugar", err.to_string(), "macro_error"))
         }
         SourceKind::Deep => parse_deep(source),
@@ -3794,10 +3792,10 @@ mod tests {
         // mis-allocated kernel whose output diverges from the evaluator
         // (issue #261). The host runtime / IR evaluator handle this case
         // correctly; only the ahead-of-time build path is restricted.
-        let source = r#"
+        let source = r"
 padded = pad_sequences([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], 0.0)
 windowed = reduce_window_max(padded, [2], [1])
-"#;
+";
         let err = compile(CompileRequest {
             source_kind: SourceKind::Surf,
             source: source.to_string(),
@@ -3965,13 +3963,13 @@ windowed = reduce_window_max(padded, [2], [1])
 
     #[test]
     fn compile_source_keeps_all_lowered_tensor_roots() {
-        let source = r#"
+        let source = r"
 def logits(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[2, 2, f32] =
   matmul(x, w)
 
 def loss(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[f32] =
   matmul(x, w) |> sum(1) |> mean(0)
-"#;
+";
 
         let compiled = compile_source(SourceKind::Surf, source).expect("compile");
 
@@ -4012,11 +4010,11 @@ def logits(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[2, 2, f32] =
     fn compile_new_source_in_context_matches_monolithic_copy_insertion() {
         let monolithic = compile_source(
             SourceKind::Surf,
-            r#"
+            r"
 def consume(x: tensor[2, f32]) -> tensor[2, f32] = realize(x)
 
 def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
-"#,
+",
         )
         .expect("monolithic compile");
         let monolithic_root = monolithic.named_roots["out"];
@@ -4071,9 +4069,9 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
 
     #[test]
     fn compile_source_accepts_typed_param_named_let() {
-        let source = r#"
+        let source = r"
 def id(let: int64) -> int64 = let
-"#;
+";
 
         let compiled = compile_source(SourceKind::Surf, source).expect("compile");
         let deep = chelis_deep::printer::print_canonical(compiled.checked.exprs());
@@ -4157,10 +4155,10 @@ result = describe(sample)
     fn eval_supports_shape_queries_with_tensor_bindings() {
         let result = eval(EvalRequest {
             source_kind: SourceKind::Surf,
-            source: r#"
+            source: r"
 x: tensor[2, 3, f32] = x
 dims = (rank(x), shape(x, 1), numel(x))
-"#
+"
             .to_string(),
             bindings: BTreeMap::from([(
                 "x".to_string(),
@@ -4233,11 +4231,11 @@ result = if matches_path then parsed else cast(0, int64)
     fn eval_supports_integer_mod_and_bitwise_helpers() {
         let result = eval(EvalRequest {
             source_kind: SourceKind::Surf,
-            source: r#"
+            source: r"
 bits = bitxor(bitand(cast(7, int64), cast(3, int64)), shl(cast(1, int64), cast(2, int64)))
 rem = mod(cast(17, int64), cast(5, int64))
 shifted = shr(cast(8, int64), cast(1, int64))
-"#
+"
             .to_string(),
             bindings: BTreeMap::new(),
         })
@@ -4270,12 +4268,12 @@ shifted = shr(cast(8, int64), cast(1, int64))
     fn eval_supports_recursive_top_level_defs() {
         let result = eval(EvalRequest {
             source_kind: SourceKind::Surf,
-            source: r#"
+            source: r"
 def sum_to(n: int64) -> int64 =
   if lte(n, cast(0, int64)) then cast(0, int64) else add(n, sum_to(sub(n, cast(1, int64))))
 
 value = sum_to(cast(3, int64))
-"#
+"
             .to_string(),
             bindings: BTreeMap::new(),
         })
@@ -4356,13 +4354,13 @@ label = if eq(year, cast(2024, int64)) then "leap" else "plain"
     fn compile_host_records_emit_runtime_adt_access() {
         let artifact = compile(CompileRequest {
             source_kind: SourceKind::Surf,
-            source: r#"
+            source: r"
 type Date =
   | Date { year: int64, month: int64, day: int64 }
 
 mk_date = Date { year: cast(2024, int64), month: cast(2, int64), day: cast(29, int64) }
 year = mk_date.year
-"#
+"
             .to_string(),
             target: CompileTarget::C,
             entry_name: Some("record_demo".to_string()),
@@ -4391,7 +4389,7 @@ year = mk_date.year
     fn host_lowering_preserves_rich_host_function_types() {
         let compiled = compile_source(
             SourceKind::Surf,
-            r#"
+            r"
 module Std.Test
 
 type Json =
@@ -4418,7 +4416,7 @@ def json_string(value: Option[Json]) -> Option[string] =
 
 def load_tokenizer(path: string) -> Option[Tokenizer] =
   Some(BpeTokenizer(dict_of([]), dict_of([]), dict_of([]), cast(0, int64)))
-"#,
+",
         )
         .expect("compile");
 
@@ -4478,10 +4476,10 @@ def load_tokenizer(path: string) -> Option[Tokenizer] =
         // DAG evaluation to the selected root's subgraph, so the missing-input
         // error for `b` surfaces independently of `a`'s success.
         // eval_many must preserve input order and carry both outcomes.
-        let source = r#"
+        let source = r"
 a: tensor[2, f32] = a
 b: tensor[2, f32] = b
-"#;
+";
 
         let mut bindings = BTreeMap::new();
         bindings.insert(
@@ -4537,10 +4535,10 @@ b: tensor[2, f32] = b
         // order. The successful root must still succeed after the failing
         // root — there must be no hidden shared state that outlives a
         // per-root eval_compiled call.
-        let source = r#"
+        let source = r"
 a: tensor[2, f32] = a
 b: tensor[2, f32] = b
-"#;
+";
 
         let mut bindings = BTreeMap::new();
         bindings.insert(
@@ -4609,10 +4607,10 @@ b: tensor[2, f32] = b
         // rank-0 tensor rather than a host int scalar.
         let error = eval(EvalRequest {
             source_kind: SourceKind::Surf,
-            source: r#"
+            source: r"
 axis = tensor_to_scalar(scalar_to_tensor(cast(0 - 1, int32)))
 bad = shape(scalar_to_tensor(cast(3, int64)), axis)
-"#
+"
             .to_string(),
             bindings: BTreeMap::new(),
         })

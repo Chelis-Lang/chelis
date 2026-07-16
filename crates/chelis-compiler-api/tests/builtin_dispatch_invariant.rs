@@ -70,8 +70,7 @@ fn extracted_dispatched_names() -> HashSet<String> {
     .iter()
     .filter_map(|marker| source[after_start..].find(marker))
     .min()
-    .map(|offset| after_start + offset)
-    .unwrap_or(source.len());
+    .map_or(source.len(), |offset| after_start + offset);
     let body = &source[start..end];
 
     let mut out = HashSet::new();

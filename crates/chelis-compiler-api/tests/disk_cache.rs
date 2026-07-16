@@ -3,7 +3,7 @@
 //! Coverage:
 //! - (a) cold-build-then-load: build a context, save it, load it on a
 //!   fresh handle, run `eval_in_context`, result identical to pre-save.
-//! - (b) source-change invalidation: load_if_fresh returns `Ok(None)`
+//! - (b) source-change invalidation: `load_if_fresh` returns `Ok(None)`
 //!   after a chelis-std (path-dep) source byte changes.
 //! - (c) cross-process load: parent saves, child subprocess loads and
 //!   evaluates correctly.
@@ -202,7 +202,7 @@ const CHILD_PACKAGE_ENV: &str = "CHELIS_PHASE_I_CHILD_PACKAGE";
 
 /// "Child mode" — when the parent test re-execs this binary with
 /// `CHILD_ENV=1`, this entry point loads the cache from the env-provided
-/// path, runs eval_in_context, and asserts the result matches a known
+/// path, runs `eval_in_context`, and asserts the result matches a known
 /// good shape. The child writes its result JSON to stdout for the parent
 /// to compare.
 ///
@@ -310,11 +310,13 @@ fn truncated_file_is_rejected_not_silently_loaded() {
 
     let outcome = CompiledContext::load_if_fresh(&cache_path, Path::new("/tmp/x"), &root);
     match outcome {
-        Err(CacheError::Corrupt(_))
-        | Err(CacheError::Decode(_))
-        | Err(CacheError::Io { .. })
-        | Err(CacheError::UnsupportedVersion { .. })
-        | Err(CacheError::HashMismatch { .. }) => { /* ok */ }
+        Err(
+            CacheError::Corrupt(_)
+            | CacheError::Decode(_)
+            | CacheError::Io { .. }
+            | CacheError::UnsupportedVersion { .. }
+            | CacheError::HashMismatch { .. },
+        ) => { /* ok */ }
         Ok(None) => {
             // Acceptable per spec: source-hash mismatch on the truncated
             // bytes also means "do not use this cache". The non-negotiable
@@ -510,13 +512,12 @@ fn save_is_atomic_no_partial_file_at_canonical_path() {
     let cache_dir = cache_path.parent().unwrap();
     let leftovers: Vec<PathBuf> = fs::read_dir(cache_dir)
         .expect("read cache dir")
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .map(|e| e.path())
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
-                .map(|n| n.contains(".tmp."))
-                .unwrap_or(false)
+                .is_some_and(|n| n.contains(".tmp."))
         })
         .collect();
     assert!(

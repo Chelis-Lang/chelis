@@ -20,7 +20,7 @@
 //! The floor/ceil pair is the load-bearing half: pre-fix code accepted
 //! the build cleanly and emitted a zero gradient with no diagnostic, so
 //! the assertion that `chelis build` exits non-zero is what catches the
-//! silent-corruption mode. Per feedback_ad_reduction_pitfalls: silent
+//! silent-corruption mode. Per `feedback_ad_reduction_pitfalls`: silent
 //! zero-grad is the worse half because downstream code receives wrong
 //! results without a signal.
 //!

@@ -94,6 +94,7 @@ pub enum WarningKind {
     Arity,
 }
 
+#[must_use]
 pub fn validate(exprs: &[Expr]) -> Vec<ValidationWarning> {
     let mut warnings = Vec::new();
     for expr in exprs {
@@ -124,7 +125,9 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
 
                 match list.elements.get(1) {
                     Some(Expr::Map(_, _)) => {
-                        if !VALID_TAGS.contains(&tag.as_str()) {
+                        if VALID_TAGS.contains(&tag.as_str()) {
+                            validate_tag_shape(tag, list, span.offset, warnings);
+                        } else {
                             warnings.push(ValidationWarning {
                                 kind: WarningKind::UnknownTag,
                                 offset: span.offset,
@@ -132,8 +135,6 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
                                     "unknown tag '{tag}'. Not in the 62-tag vocabulary"
                                 ),
                             });
-                        } else {
-                            validate_tag_shape(tag, list, span.offset, warnings);
                         }
                     }
                     _ if VALID_TAGS.contains(&tag.as_str()) => warnings.push(ValidationWarning {

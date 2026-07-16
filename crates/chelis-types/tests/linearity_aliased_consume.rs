@@ -50,14 +50,14 @@ fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
 #[test]
 fn aliased_consume_bypass_errors_after_fix() {
     let errors = linearity_errors(
-        r#"
+        r"
 def f(w: tensor[4, f32]): tensor[4, f32] =
   {
     y: tensor[4, f32] = w
     z: tensor[4, f32] = realize(y)
     add(w, z)
   }
-"#,
+",
     );
     assert!(
         errors.iter().any(|e| {
@@ -82,7 +82,7 @@ def f(w: tensor[4, f32]): tensor[4, f32] =
 #[test]
 fn destructure_then_alias_consume_errors() {
     let errors = linearity_errors(
-        r#"
+        r"
 def f(pair: (tensor[4, f32], tensor[4, f32])): tensor[4, f32] =
   {
     (a, b) = pair
@@ -90,7 +90,7 @@ def f(pair: (tensor[4, f32], tensor[4, f32])): tensor[4, f32] =
     r: tensor[4, f32] = realize(y)
     add(a, r)
   }
-"#,
+",
     );
     assert!(
         errors.iter().any(|e| {

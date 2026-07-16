@@ -6,11 +6,11 @@ use crate::dag::{Dag, NodeId, RiscOp};
 
 /// Constant folding: if a binary op has two Const inputs, evaluate it.
 ///
-/// Span propagation per spec/design/chelis_span_survival.md §2.3
+/// Span propagation per `spec/design/chelis_span_survival.md` §2.3
 /// Constant fold row: the replacement node inherits the **operation
 /// node's** `span_id` (preserved automatically by `replace_node`, which
-/// rewrites op/inputs/output_type but leaves span metadata in place).
-/// Operand spans (canonical and merged_spans) that differ from the
+/// rewrites `op/inputs/output_type` but leaves span metadata in place).
+/// Operand spans (canonical and `merged_spans`) that differ from the
 /// operation's `span_id` append to the folded node's `merged_spans`,
 /// lex-sorted and deduped. No `__synthesized_*__` marker is minted —
 /// the operation node had a real source span (or `None`) before the
@@ -115,14 +115,16 @@ fn collect_operand_spans(
 ///
 /// Marks the last node and all Store nodes as live, propagates liveness
 /// backward through inputs, then rebuilds the DAG with only live nodes
-/// and remapped NodeIds.
+/// and remapped `NodeIds`.
+#[must_use]
 pub fn dead_code_eliminate(dag: &Dag) -> Dag {
     dead_code_eliminate_with_remap(dag).0
 }
 
 /// Same as [`dead_code_eliminate`] but also returns the `old_id -> new_id`
 /// remapping. Phase F (`lower_program_with_context`) needs the remap to
-/// rewrite the library's name → NodeId symbol table after DCE renumbering.
+/// rewrite the library's name → `NodeId` symbol table after DCE renumbering.
+#[must_use]
 pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId>) {
     let n = dag.len();
     if n == 0 {
@@ -231,9 +233,9 @@ pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId
 }
 
 /// Common subexpression elimination: build a new DAG, merging nodes
-/// that have identical (op, remapped_inputs) keys.
+/// that have identical (op, `remapped_inputs`) keys.
 ///
-/// Span propagation per spec/design/chelis_span_survival.md §2.3 CSE
+/// Span propagation per `spec/design/chelis_span_survival.md` §2.3 CSE
 /// row: the survivor (first node seen with a given key) keeps its own
 /// `span_id`. When a duplicate is found, the duplicate's full
 /// provenance — its `span_id` and its existing `merged_spans` — folds
@@ -241,6 +243,7 @@ pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId
 /// `crate::span_merge::merge_duplicate_into_survivor`. Survivor's
 /// canonical span and any duplicate-canonical that equals it are
 /// dedup'd by the helper.
+#[must_use]
 pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
     let mut new_dag = Dag::new();
     let mut id_map: HashMap<usize, NodeId> = HashMap::new();

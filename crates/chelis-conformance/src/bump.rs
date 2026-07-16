@@ -44,6 +44,7 @@ use crate::audit::{is_installable_version, parse_compiler_pin};
 /// Keyed on the stable row `key`, deliberately NOT a field on `ContractRow`:
 /// bump-ownership is a property of *this tool*, not of the contract, so it must
 /// not ride the doc-locked manifest.
+#[must_use]
 pub fn is_bump_owned(key: &str) -> bool {
     matches!(
         key,
@@ -169,6 +170,7 @@ fn rewrite_compiler_pin(reef: &str, old: &str, new: &str) -> String {
 }
 
 /// The bare pin (`X.Y.Z`, no leading `=`) recorded in a `reef.toml` text.
+#[must_use]
 pub fn bare_pin(reef_toml: &str) -> Option<String> {
     parse_compiler_pin(reef_toml).map(|p| p.trim_start_matches('=').to_string())
 }

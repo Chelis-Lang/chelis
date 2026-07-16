@@ -10,11 +10,11 @@
 //!   - bincode tamper / cache-poisoning (G4)
 //!   - cold-path overhead (G5)
 //!   - source-hash invalidation (G6)
-//!   - eval_many isolation (G7)
-//!   - parity vs prepare_eval on richer fixtures (G8)
+//!   - `eval_many` isolation (G7)
+//!   - parity vs `prepare_eval` on richer fixtures (G8)
 //!   - shadowing across C/D/E/F stages (G9)
 //!   - cross-boundary linearity (G10)
-//!   - check_in_context does not eval (G11)
+//!   - `check_in_context` does not eval (G11)
 //!   - source-hash collision-resistance smoke (G12)
 
 use std::collections::BTreeMap;
@@ -70,7 +70,7 @@ fn write_pkg(
 /// Reef package with one path-dep `mylib`. Caller controls library + main
 /// source. The library lives at `mylib/src/math.ch` and must declare
 /// `module Mylib.Math` for the reef name resolver to accept it.
-/// Lockfile is hand-written so prepare_reef_graph does not try to resolve
+/// Lockfile is hand-written so `prepare_reef_graph` does not try to resolve
 /// over the network.
 fn build_pkg(library_src: &str, main_src: &str) -> (TempDir, PathBuf) {
     let dir = TempDir::new().expect("tempdir");
@@ -795,18 +795,15 @@ fn g4_deep_tamper_keeps_referenced_lib_eval_correct_or_fails_loudly() {
     };
 
     let post = eval_in_context(&restored, snippet);
-    match post {
-        Ok(result) => {
-            let post_by = collect_named_roots_json(&result.roots, &["out"]);
-            // If tampering changed `out`'s value silently, that's the bug.
-            assert_eq!(
-                post_by, pristine_by,
-                "tampering an unreferenced library def must not silently alter referenced eval output"
-            );
-        }
-        Err(_) => {
-            // Erroring is acceptable — the cache detected corruption.
-        }
+    if let Ok(result) = post {
+        let post_by = collect_named_roots_json(&result.roots, &["out"]);
+        // If tampering changed `out`'s value silently, that's the bug.
+        assert_eq!(
+            post_by, pristine_by,
+            "tampering an unreferenced library def must not silently alter referenced eval output"
+        );
+    } else {
+        // Erroring is acceptable — the cache detected corruption.
     }
 }
 
@@ -951,7 +948,7 @@ fn gextra_eval_many_parity_with_eval_in_context_for_each_root_individually() {
 
     let names: Vec<String> = ["root_a", "root_b", "root_c"]
         .iter()
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .collect();
     let many = eval_many_in_context(&ctx, snippet, &names);
     assert_eq!(many.len(), 3);

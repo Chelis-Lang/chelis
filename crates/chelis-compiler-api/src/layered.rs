@@ -229,7 +229,7 @@ fn reconstitute_clean_fitness(
 fn expand(decls: &[chelis_surf::ast::Decl]) -> Result<Vec<chelis_deep::Expr>, String> {
     let desugared = chelis_surf::desugar::desugar_program(decls);
     chelis_macros::expand_program(&desugared, &chelis_macros::ExpansionOptions::default())
-        .map(|expanded| expanded.into_exprs())
+        .map(chelis_macros::ExpandedProgram::into_exprs)
         .map_err(|err| err.to_string())
 }
 

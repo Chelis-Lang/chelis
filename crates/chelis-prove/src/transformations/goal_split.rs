@@ -14,7 +14,7 @@ use crate::transformation::Transformation;
 pub struct GoalSplit;
 
 impl Transformation for GoalSplit {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "goal-split"
     }
 
@@ -55,7 +55,7 @@ impl Transformation for GoalSplit {
 /// 2. If ANY sub-discharge has result Error/Timeout/Unknown → composite is
 ///    that result at Untrusted soundness.
 /// 3. Soundness = min across all sub-discharges.
-/// 4. QualifierSet = union across all sub-discharges.
+/// 4. `QualifierSet` = union across all sub-discharges.
 ///
 /// Non-vacuity is NOT checked here — it's a property of the shared
 /// precondition, checked once before the split, not per sub-goal.
@@ -93,7 +93,11 @@ pub fn recombine_split_discharges(discharges: &[Discharge]) -> Result<Discharge,
     }
 
     // All proved: min soundness, union qualifiers
-    let min_soundness = discharges.iter().map(|d| d.soundness()).min().unwrap(); // non-empty guaranteed by assert
+    let min_soundness = discharges
+        .iter()
+        .map(super::super::discharge::Discharge::soundness)
+        .min()
+        .unwrap(); // non-empty guaranteed by assert
 
     let union_qualifiers = discharges
         .iter()

@@ -1,4 +1,4 @@
-//! chelis#579 (residue of chelis#397): school's BatchNorm broadcasts
+//! chelis#579 (residue of chelis#397): school's `BatchNorm` broadcasts
 //! (batchnorm1d rank-1 -> rank-2, batchnorm2d `broadcast_to_achw` rank-1 ->
 //! rank-4) were reported check-clean and `reef build`-clean at chelis 0.12.0
 //! yet failing `chelis test`/eval with the rank-monomorphization ICE
@@ -280,8 +280,7 @@ fn build_compile_run(source: &str, name: &str) -> String {
 
     let c_source = format!("{name}.c");
     let needs_blas = fs::read_to_string(out_dir.join(&c_source))
-        .map(|t| t.contains("cblas_sgemm(") || t.contains("\"chelis_blas.h\""))
-        .unwrap_or(false);
+        .is_ok_and(|t| t.contains("cblas_sgemm(") || t.contains("\"chelis_blas.h\""));
     let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
         chelis_backend_c::toolchain::CodegenRequirements {
             wants_openmp: true,
@@ -583,7 +582,7 @@ fn issue_579_let_bound_shape_extent_chained_c_backend_agrees() {
 /// The batchnorm1d-flavor bare-scalar sourceless spelling must be rejected
 /// at CHECK with the #469 sourceless-size diagnostic, and no error may carry
 /// the `rank mismatch` ICE text the issue reported. (The rank-1 -> rank-4
-/// chain's check reject is pinned in rank_poly_tier3.rs; this pins the 1d
+/// chain's check reject is pinned in `rank_poly_tier3.rs`; this pins the 1d
 /// flavor.)
 #[test]
 fn issue_579_sourceless_bn1d_expand_rejected_at_check_without_rank_ice() {

@@ -49,6 +49,7 @@ struct OwnerRequirement {
 }
 
 impl MemoryPlan {
+    #[must_use]
     pub fn build(dag: &Dag, output_ids: &[NodeId], skipped: &HashSet<NodeId>) -> Self {
         let mut node_kinds = classify_nodes(dag, skipped);
         let owner_of = compute_owner_map(dag, &node_kinds);
@@ -57,18 +58,22 @@ impl MemoryPlan {
         Self { node_kinds, slots }
     }
 
+    #[must_use]
     pub fn node_kind(&self, id: NodeId) -> &NodeMemoryKind {
         &self.node_kinds[id.0]
     }
 
+    #[must_use]
     pub fn slot(&self, id: usize) -> &SlotPlan {
         &self.slots[id]
     }
 
+    #[must_use]
     pub fn slots(&self) -> &[SlotPlan] {
         &self.slots
     }
 
+    #[must_use]
     pub fn emit_cleanup(&self, output_ids: &[NodeId]) -> Vec<String> {
         let mut lines = Vec::new();
         for (idx, kind) in self.node_kinds.iter().enumerate() {

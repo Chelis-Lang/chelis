@@ -10,7 +10,7 @@
 //! obligations must fall to Tier C, not crash the process).
 //!
 //! Run:
-//!   cargo nextest run -p chelis-cli --features smt --test prove_isolation
+//!   cargo nextest run -p chelis-cli --features smt --test `prove_isolation`
 //! with `LD_LIBRARY_PATH` set to the uv python lib (AGENTS.md).
 #![cfg(feature = "smt")]
 

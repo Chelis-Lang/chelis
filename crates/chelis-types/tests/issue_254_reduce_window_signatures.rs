@@ -39,24 +39,24 @@ fn check_reducer(
 ) -> Result<Vec<String>, Vec<String>> {
     let shape_str = input_shape
         .iter()
-        .map(|d| d.to_string())
+        .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join(", ");
     let window_str = window
         .iter()
-        .map(|w| w.to_string())
+        .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join(", ");
     let strides_str = strides
         .iter()
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join(", ");
     let src = format!(
-        r#"
+        r"
 sig run: tensor[{shape_str}, f32] -> tensor[{shape_str}, f32]
 def run(x) = {reducer_name}(x, [{window_str}], [{strides_str}])
-"#
+"
     );
     check_surf(&src)
 }
@@ -67,10 +67,10 @@ def run(x) = {reducer_name}(x, [{window_str}], [{strides_str}])
 /// [2, 2] + strides [1, 1] produces a rank-4 [2, 3, 7, 7] output.
 #[test]
 fn issue254_reduce_window_max_acceptance_shape_typechecks() {
-    let src = r#"
+    let src = r"
 sig run: tensor[2, 3, 8, 8, f32] -> tensor[2, 3, 7, 7, f32]
 def run(x) = reduce_window_max(x, [2, 2], [1, 1])
-"#;
+";
     check_surf(src).expect("acceptance shape must typecheck");
 }
 
@@ -78,10 +78,10 @@ def run(x) = reduce_window_max(x, [2, 2], [1, 1])
 /// rank-4 input: [2, 3, 8, 8] + [2, 2] + [2, 2] → [2, 3, 4, 4].
 #[test]
 fn issue254_reduce_window_max_nonoverlapping_pool2d_typechecks() {
-    let src = r#"
+    let src = r"
 sig run: tensor[2, 3, 8, 8, f32] -> tensor[2, 3, 4, 4, f32]
 def run(x) = reduce_window_max(x, [2, 2], [2, 2])
-"#;
+";
     check_surf(src).expect("non-overlapping pool2d must typecheck");
 }
 
@@ -95,10 +95,10 @@ fn issue254_all_four_reducers_typecheck_with_same_shape_contract() {
         "reduce_window_mean",
     ] {
         let src = format!(
-            r#"
+            r"
 sig run: tensor[1, 1, 3, 3, f32] -> tensor[1, 1, 2, 2, f32]
 def run(x) = {name}(x, [2, 2], [1, 1])
-"#
+"
         );
         check_surf(&src).unwrap_or_else(|errors| panic!("{name} must typecheck, got {errors:?}"));
     }
@@ -166,10 +166,10 @@ fn issue254_reduce_window_rejects_window_strides_length_mismatch_at_check() {
 fn issue254_reduce_window_rejects_wrong_declared_output_shape_at_check() {
     // Real output is [1,1,7,7] (input 8 - window 2 + 1 = 7); declared
     // is [1,1,8,8]. Type checker must reject.
-    let src = r#"
+    let src = r"
 sig run: tensor[1, 1, 8, 8, f32] -> tensor[1, 1, 8, 8, f32]
 def run(x) = reduce_window_max(x, [2, 2], [1, 1])
-"#;
+";
     let errors = check_surf(src).expect_err("wrong declared output shape must NOT typecheck");
     assert!(
         !errors.is_empty(),

@@ -24,6 +24,7 @@ pub struct TensorType {
 
 impl TensorType {
     /// A default scalar F32 type (no dimensions).
+    #[must_use]
     pub fn scalar_f32() -> Self {
         Self {
             dims: vec![],
@@ -92,6 +93,7 @@ pub enum RtDim {
 
 impl RtDim {
     /// The compile-time value, if this bound is a literal.
+    #[must_use]
     pub fn as_lit(&self) -> Option<usize> {
         match self {
             RtDim::Lit(n) => Some(*n),
@@ -102,11 +104,13 @@ impl RtDim {
     /// Whether this bound is only known at runtime (`Node` or `ToEnd`).
     /// `Sym` is not "runtime" in this sense: its extent is bound from an
     /// input shape before evaluation, not computed by a node.
+    #[must_use]
     pub fn is_runtime(&self) -> bool {
         matches!(self, RtDim::Node(_) | RtDim::ToEnd)
     }
 
     /// The `inputs` slot index if this bound is node-valued.
+    #[must_use]
     pub fn node_input(&self) -> Option<usize> {
         match self {
             RtDim::Node(i) => Some(*i),
@@ -118,6 +122,7 @@ impl RtDim {
     /// a known extent (literal or bound named dim) becomes `Lit`, an unbound
     /// named dim becomes `Sym`. Used wherever a `Reshape` target is built
     /// from an existing `TensorType` (grad adjoints, tier2 lowering, vmap).
+    #[must_use]
     pub fn from_dim_info(dim: &DimInfo) -> RtDim {
         match dim {
             DimInfo::Lit(n) | DimInfo::Named(_, Some(n)) => RtDim::Lit(*n),
@@ -192,10 +197,12 @@ impl DimExpr {
         }
     }
 
+    #[must_use]
     pub fn is_concrete(&self) -> bool {
         self.as_concrete().is_some()
     }
 
+    #[must_use]
     pub fn as_concrete(&self) -> Option<usize> {
         match self {
             Self::Concrete(value) => Some(*value),
@@ -213,6 +220,7 @@ impl DimExpr {
         }
     }
 
+    #[must_use]
     pub fn symbolic_names(&self) -> HashSet<String> {
         let mut names = HashSet::new();
         self.collect_symbolic_names(&mut names);
@@ -280,6 +288,7 @@ impl DimExpr {
         }
     }
 
+    #[must_use]
     pub fn normalized_key(&self) -> DimExprKey {
         match self {
             Self::Concrete(value) => DimExprKey::Concrete(*value),
@@ -630,6 +639,7 @@ impl ReduceWindowKind {
     /// Canonical Surf builtin name. Used by [`crate::grad::risc_op_name`]
     /// and by the AD rejection error so error messages reference the
     /// user-visible builtin rather than an internal variant.
+    #[must_use]
     pub fn surf_name(self) -> &'static str {
         match self {
             ReduceWindowKind::Max => "reduce_window_max",
@@ -643,7 +653,7 @@ impl ReduceWindowKind {
 /// Input reference within a fused chain.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum FusedInput {
-    /// Index into the FusedElem node's `inputs` vec (external inputs from the DAG).
+    /// Index into the `FusedElem` node's `inputs` vec (external inputs from the DAG).
     External(usize),
     /// Output of a previous step in the chain (index into the `ops` vec).
     PreviousStep(usize),
@@ -1157,6 +1167,7 @@ impl RiscOp {
     /// claim that it can never be targeted; it records that, today, the
     /// pinned target surface does not include it, so a producer pinning
     /// to this surface must not assume Beacon bounds it.
+    #[must_use]
     pub fn is_verifier_targetable(&self) -> bool {
         match self {
             // --- Elementwise arithmetic and comparison ---
@@ -1285,7 +1296,7 @@ impl RiscOp {
 /// documented default for that operand precision. Width is measured by
 /// `prim_width_rank` (a per-Prim ordering that reflects bit width and
 /// integer-vs-float lane). Exposed for the verifier (`crate::verify`)
-/// so the BlasMatmul rule can be checked without duplicating the
+/// so the `BlasMatmul` rule can be checked without duplicating the
 /// width-rank table.
 pub(crate) fn accumulator_at_least_as_wide(
     operand: Prim,
@@ -1386,7 +1397,7 @@ pub struct DagNode {
     /// data, so `x` is not in `inputs`. Without recording the dependency,
     /// `x`'s `Load` is dead-code-eliminated and the symbolic dim it declares
     /// loses its only source. DCE keeps the shape source live through this
-    /// edge; eval and the backends never read it (op/inputs/output_type are
+    /// edge; eval and the backends never read it (`op/inputs/output_type` are
     /// unchanged), so it does not alter the Expand operator's arity or
     /// codegen.
     #[serde(default)]
@@ -1401,6 +1412,7 @@ pub struct Dag {
 }
 
 impl Dag {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -1479,18 +1491,22 @@ impl Dag {
         }
     }
 
+    #[must_use]
     pub fn get(&self, id: NodeId) -> Option<&DagNode> {
         self.nodes.get(id.0)
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.nodes.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
 
+    #[must_use]
     pub fn nodes(&self) -> &[DagNode] {
         &self.nodes
     }
@@ -1508,6 +1524,7 @@ impl Dag {
         }
     }
 
+    #[must_use]
     pub fn roots(&self) -> &[NodeId] {
         &self.roots
     }
@@ -1516,6 +1533,7 @@ impl Dag {
         self.roots = roots;
     }
 
+    #[must_use]
     pub fn is_root(&self, id: NodeId) -> bool {
         self.roots.contains(&id)
     }
@@ -1541,6 +1559,7 @@ impl Dag {
     }
 }
 
+#[must_use]
 pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
     let mut occurrences = Vec::new();
     let mut seen_inputs = HashSet::new();
@@ -1622,14 +1641,15 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
                 || op_internal_symbolic_dims(&node.op)
                     .iter()
                     .any(|name| name == symbol);
-            if references && node.id.0 < declarer.0 {
-                panic!(
-                    "internal compiler error: symbolic dim `{symbol}` is declared at run time \
-                     by node {} but referenced by EARLIER node {} (op {:?}); the C declaration \
-                     would not dominate the reference. Fix the producing IR pass.",
-                    declarer.0, node.id.0, node.op
-                );
-            }
+            assert!(
+                !(references && node.id.0 < declarer.0),
+                "internal compiler error: symbolic dim `{symbol}` is declared at run time \
+                 by node {} but referenced by EARLIER node {} (op {:?}); the C declaration \
+                 would not dominate the reference. Fix the producing IR pass.",
+                declarer.0,
+                node.id.0,
+                node.op
+            );
         }
     }
 
@@ -1693,26 +1713,25 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
                     named_dims_in_loads.insert(symbol.clone());
                     bound = true;
                 }
-                if !bound {
-                    // chelis#616: a node-valued movement op computes a FRESH
-                    // runtime output extent with no Load source, and so does a
-                    // runtime-`shape()`-derived `reshape` target (the window
-                    // count `m`). The C backend can declare a movement output dim
-                    // from its bound scalars (`emit_shrink`/`emit_stride`/
-                    // `emit_pad`), but a `reshape` target has no node-valued dim
-                    // source threaded through yet, so a full runtime-symbolic
-                    // program still reaches an undeclarable dim. Until node-valued
-                    // Reshape/Const dims land (the runtime-dim-from-Shape-arith
-                    // declaration capability), this stays FAIL-CLOSED and LOUD
-                    // rather than emit a silently mis-sized allocation.
-                    panic!(
-                        "internal compiler error: symbolic dim `{symbol}` is referenced by a \
-                         non-Load node (id {}, op {:?}, inputs {:?}, type {:?}) but no Load input \
-                         declares it. The C codegen would emit an undeclared identifier; fix the \
-                         producing IR pass.",
-                        node.id.0, node.op, node.inputs, node.output_type
-                    );
-                }
+                // chelis#616: a node-valued movement op computes a FRESH
+                // runtime output extent with no Load source, and so does a
+                // runtime-`shape()`-derived `reshape` target (the window
+                // count `m`). The C backend can declare a movement output dim
+                // from its bound scalars (`emit_shrink`/`emit_stride`/
+                // `emit_pad`), but a `reshape` target has no node-valued dim
+                // source threaded through yet, so a full runtime-symbolic
+                // program still reaches an undeclarable dim. Until node-valued
+                // Reshape/Const dims land (the runtime-dim-from-Shape-arith
+                // declaration capability), this stays FAIL-CLOSED and LOUD
+                // rather than emit a silently mis-sized allocation.
+                assert!(
+                    bound,
+                    "internal compiler error: symbolic dim `{symbol}` is referenced by a \
+                                         non-Load node (id {}, op {:?}, inputs {:?}, type {:?}) but no Load input \
+                                         declares it. The C codegen would emit an undeclared identifier; fix the \
+                                         producing IR pass.",
+                    node.id.0, node.op, node.inputs, node.output_type
+                );
             }
         }
     }
@@ -1749,16 +1768,17 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
             if symbol.is_empty() || symbol == "*" {
                 continue;
             }
-            if !bind_symbol_from_any_load(dag, &symbol, &mut occurrences, &mut named_dims_in_loads)
-            {
-                panic!(
-                    "internal compiler error: symbolic dim `{symbol}` is referenced by a \
-                     non-Load node (id {}, op {:?}, inputs {:?}, type {:?}) through an \
-                     op-internal field but no Load input declares it. The C codegen would emit \
-                     an undeclared identifier; fix the producing IR pass.",
-                    node.id.0, node.op, node.inputs, node.output_type
-                );
-            }
+            assert!(
+                bind_symbol_from_any_load(dag, &symbol, &mut occurrences, &mut named_dims_in_loads),
+                "internal compiler error: symbolic dim `{symbol}` is referenced by a \
+                 non-Load node (id {}, op {:?}, inputs {:?}, type {:?}) through an \
+                 op-internal field but no Load input declares it. The C codegen would emit \
+                 an undeclared identifier; fix the producing IR pass.",
+                node.id.0,
+                node.op,
+                node.inputs,
+                node.output_type
+            );
         }
     }
 
@@ -1887,6 +1907,7 @@ pub(crate) fn op_declarable_axes(dag: &Dag, node: &DagNode) -> Vec<usize> {
 /// DAG (see [`op_declared_output_axes`]). Used by [`bind_symbolic_dims`] to
 /// exempt these names from the pre-eval "missing symbolic dimension binding"
 /// error — their values do not exist until the owning op evaluates.
+#[must_use]
 pub fn op_declared_dim_names(dag: &Dag) -> HashSet<String> {
     dag.nodes()
         .iter()
@@ -2139,6 +2160,7 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
     }
 }
 
+#[must_use]
 pub fn symbolic_bindings(dag: &Dag) -> Vec<SymbolicDimBinding> {
     let mut grouped = std::collections::BTreeMap::<String, Vec<SymbolicDimOccurrence>>::new();
     for occurrence in symbolic_occurrences(dag) {
@@ -2171,6 +2193,7 @@ pub fn symbolic_bindings(dag: &Dag) -> Vec<SymbolicDimBinding> {
 /// The symbolic dims a caller can (and must) supply — those bound from input
 /// shape metadata. chelis#616: op-declared dims are computed at run time by
 /// their owning op and are deliberately excluded; they are not parameters.
+#[must_use]
 pub fn symbolic_params(dag: &Dag) -> Vec<String> {
     symbolic_bindings(dag)
         .into_iter()

@@ -50,6 +50,7 @@ pub enum PredAmenability {
 
 impl PredAmenability {
     /// The canonical metadata string for this class.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             PredAmenability::Linear => "linear",
@@ -67,6 +68,7 @@ impl PredAmenability {
     /// `std::str::FromStr` trait, so the std-trait shadowing lint is
     /// suppressed deliberately.
     #[allow(clippy::should_implement_trait)]
+    #[must_use]
     pub fn from_str(s: &str) -> Option<PredAmenability> {
         match s {
             "linear" => Some(PredAmenability::Linear),
@@ -206,22 +208,21 @@ fn fn_parts(fn_node: &Expr) -> Option<(String, &Expr)> {
 /// a bare symbol, a `(var {} name)`, or a typed-param list whose head is
 /// the name symbol.
 fn binder_name(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Atom(Atom::Symbol(s), _) => Some(s.clone()),
-        _ => {
-            if let Some(name) = var_name(expr) {
-                return Some(name.to_string());
-            }
-            if let Expr::List(list, _) = expr
-                && let Some(Expr::Atom(Atom::Symbol(s), _)) = list.elements.first()
-                && s != "var"
-                && s != "params"
-            {
-                // typed-param list `(name {type: ...})`
-                return Some(s.clone());
-            }
-            None
+    if let Expr::Atom(Atom::Symbol(s), _) = expr {
+        Some(s.clone())
+    } else {
+        if let Some(name) = var_name(expr) {
+            return Some(name.to_string());
         }
+        if let Expr::List(list, _) = expr
+            && let Some(Expr::Atom(Atom::Symbol(s), _)) = list.elements.first()
+            && s != "var"
+            && s != "params"
+        {
+            // typed-param list `(name {type: ...})`
+            return Some(s.clone());
+        }
+        None
     }
 }
 
@@ -233,6 +234,7 @@ fn binder_name(expr: &Expr) -> Option<String> {
 /// the body that is not the binder. Field-projection names (the `value`
 /// in `p.value`) are NOT variables — they are field selectors. The
 /// returned list is deduplicated, in first-seen order.
+#[must_use]
 pub fn predicate_free_vars(fn_node: &Expr) -> Vec<String> {
     let mut out = Vec::new();
     let Some((binder, body)) = fn_parts(fn_node) else {
@@ -405,6 +407,7 @@ fn node_desc(expr: &Expr) -> String {
 /// `sum` over a literal-shape tensor field is treated as an affine
 /// combination of its scalar terms (it does not by itself raise the
 /// class above Linear).
+#[must_use]
 pub fn classify_predicate(fn_node: &Expr) -> PredAmenability {
     let Some((binder, body)) = fn_parts(fn_node) else {
         return PredAmenability::Opaque;
@@ -451,7 +454,7 @@ fn subexprs(expr: &Expr) -> Vec<&Expr> {
         return args.iter().collect();
     }
     match tag(expr) {
-        Some("if") | Some("access") => children(expr).iter().collect(),
+        Some("if" | "access") => children(expr).iter().collect(),
         _ => Vec::new(),
     }
 }
@@ -476,9 +479,7 @@ fn is_constant(expr: &Expr, binder: &str) -> bool {
                 }
                 // An arithmetic combination is constant only if all
                 // operands are constant.
-                as_app(expr)
-                    .map(|(_, args)| args.iter().all(|a| is_constant(a, binder)))
-                    .unwrap_or(false)
+                as_app(expr).is_some_and(|(_, args)| args.iter().all(|a| is_constant(a, binder)))
             }
             _ => false,
         },

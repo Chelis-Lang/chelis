@@ -443,9 +443,9 @@ fn load_if_fresh_never_panics_on_adversarial_byte_patterns() {
         fs::write(&cache_path, pattern).expect("write hostile pattern");
         let outcome =
             CompiledContext::load_if_fresh(&cache_path, Path::new("/tmp/unused"), &pkg_dir);
-        match outcome {
-            Ok(Some(_)) => panic!("hostile pattern #{i} must NEVER load as Ok(Some(_))"),
-            Ok(None) | Err(_) => { /* both acceptable: never a silent hit, never a panic */ }
+        if let Ok(Some(_)) = outcome {
+            panic!("hostile pattern #{i} must NEVER load as Ok(Some(_))")
+        } else { /* both acceptable: never a silent hit, never a panic */
         }
     }
 }

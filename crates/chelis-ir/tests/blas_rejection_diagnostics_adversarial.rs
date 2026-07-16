@@ -18,9 +18,9 @@
 //!
 //! Plus boundary tests on the `is_matmul_near` pre-eligibility check:
 //!
-//!   * almost-matmul: `Sum(Mul(Load, Load))` — no Expand wrapping → NotEligible
-//!   * almost-matmul: `Sum(Mul(Expand, Load))` — one Expand → NotEligible
-//!   * almost-matmul: `Sum(Add(Expand, Expand))` — wrong inner op → NotEligible
+//!   * almost-matmul: `Sum(Mul(Load, Load))` — no Expand wrapping → `NotEligible`
+//!   * almost-matmul: `Sum(Mul(Expand, Load))` — one Expand → `NotEligible`
+//!   * almost-matmul: `Sum(Add(Expand, Expand))` — wrong inner op → `NotEligible`
 //!   * `is_matmul_near` correctly recognizes both BlasMatmul-rooted and
 //!     Sum(Mul(Expand,Expand))-rooted helpers as near.
 //!

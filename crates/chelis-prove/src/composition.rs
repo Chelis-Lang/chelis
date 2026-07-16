@@ -24,6 +24,7 @@ pub enum DischargeMethod {
 }
 
 impl DischargeMethod {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             DischargeMethod::Smt => "smt",
@@ -35,6 +36,7 @@ impl DischargeMethod {
     /// The canonical discharging-engine name for this method (WI-8). cvc5 is
     /// the SMT engine; the fuzz sampler discharges fuzz-validated assumptions;
     /// an axiom is asserted, not discharged by an engine.
+    #[must_use]
     pub fn engine(self) -> &'static str {
         match self {
             DischargeMethod::Smt => "cvc5",
@@ -98,6 +100,7 @@ pub enum CompositeVerdict {
 }
 
 impl CompositeVerdict {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             CompositeVerdict::Proven => "proven",
@@ -353,6 +356,7 @@ pub struct AssumptionDischarge {
 }
 
 impl AssumptionDischarge {
+    #[must_use]
     pub fn new(method: DischargeMethod, evidence: serde_json::Value) -> Self {
         Self { method, evidence }
     }
@@ -461,6 +465,7 @@ pub struct NonVacuityRecord {
 }
 
 impl NonVacuityRecord {
+    #[must_use]
     pub fn established(evidence: serde_json::Value) -> Self {
         Self {
             status: NonVacuityStatus::Established,
@@ -617,6 +622,7 @@ impl AssumptionRecord {
     /// Stamp the prover-side discharge tier (WI-8). The tier records which
     /// engine discharged this assumption and with what guarantee, keyed to the
     /// given source identity.
+    #[must_use]
     pub fn with_discharge_tier(mut self, tier: DischargeTier) -> Self {
         self.discharge_tier = Some(tier);
         self
@@ -631,16 +637,14 @@ impl AssumptionRecord {
     /// contributes `Unestablished`: an assumption with no recorded discharge
     /// established nothing and cannot support a green.
     fn fold_into(&self, rollup: VerdictRollup) -> VerdictRollup {
-        let discharge = self
-            .discharge
-            .as_ref()
-            .map(AssumptionDischarge::guarantee)
-            .unwrap_or(VerdictGuarantee::Unestablished);
+        let discharge = self.discharge.as_ref().map_or(
+            VerdictGuarantee::Unestablished,
+            AssumptionDischarge::guarantee,
+        );
         let non_vacuity = self
             .non_vacuity
             .as_ref()
-            .map(NonVacuityRecord::guarantee)
-            .unwrap_or(VerdictGuarantee::Unestablished);
+            .map_or(VerdictGuarantee::Unestablished, NonVacuityRecord::guarantee);
         rollup.fold(discharge).fold(non_vacuity)
     }
 }
@@ -650,6 +654,7 @@ impl AssumptionRecord {
 /// door every discharge does, and the rolled-up badge is PROJECTED from the
 /// union of qualifiers and the minimum soundness, so a weak guarantee among
 /// the dependencies cannot be laundered into a strong badge.
+#[must_use]
 pub fn rollup_composite(
     base: CompositeVerdict,
     assumptions: &[AssumptionRecord],
@@ -671,6 +676,7 @@ pub fn rollup_composite(
 /// `sound_approximate` rather than being flattened to a single hardcoded
 /// `proven`. A green discharge whose qualifier set has no badged kind yet
 /// projects to `Unsupported` (covered-or-rejected), never a silent proof.
+#[must_use]
 pub fn base_verdict_from_discharge(
     soundness: Soundness,
     qualifiers: &QualifierSet,
@@ -684,7 +690,7 @@ pub fn base_verdict_from_discharge(
 }
 
 /// The full DISCLOSED qualifier set of a composed green verdict, as sorted
-/// snake_case strings for the `qualifiers:[...]` JSON array (chelis#422, D2).
+/// `snake_case` strings for the `qualifiers:[...]` JSON array (chelis#422, D2).
 /// The single `composite_verdict` token is the WEAKEST badge; this array
 /// carries every caveat in the union so a consumer sees them all -- e.g. an
 /// over-reals proof modulo a fuzz contract is token
@@ -697,6 +703,7 @@ pub fn base_verdict_from_discharge(
 /// the failure as on the pass. The base re-enters the lattice through the same
 /// door every discharge does, so the array is consistent with the rendered
 /// badge.
+#[must_use]
 pub fn composed_qualifier_strings(
     base_soundness: Soundness,
     base_qualifiers: &QualifierSet,
@@ -723,7 +730,11 @@ fn disclosed_from_rollup(rollup: &VerdictRollup) -> Vec<&'static str> {
     match rollup.terminal {
         Some(Terminal::DisprovedOverReals) => vec![Qualifier::RealArith.as_str()],
         Some(_) => Vec::new(),
-        None => rollup.qualifiers.iter().map(|q| q.as_str()).collect(),
+        None => rollup
+            .qualifiers
+            .iter()
+            .map(super::discharge::Qualifier::as_str)
+            .collect(),
     }
 }
 
@@ -735,6 +746,7 @@ fn disclosed_from_rollup(rollup: &VerdictRollup) -> Vec<&'static str> {
 /// `composed_qualifier_strings` cannot express a terminal base. The base
 /// re-enters through `guarantee()` -- the same door `rollup_composite` uses --
 /// so the disclosed array stays consistent with the rendered badge.
+#[must_use]
 pub fn disclosed_qualifier_strings_for_base(
     base: CompositeVerdict,
     assumptions: &[AssumptionRecord],
@@ -762,6 +774,7 @@ pub struct AssumptionRegistry {
 }
 
 impl AssumptionRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }

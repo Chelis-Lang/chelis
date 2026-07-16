@@ -6,11 +6,11 @@ use crate::{Context, Replacement, Rule, Severity, Surface, Violation};
 pub struct NoEmDashInPublicStrings;
 
 impl Rule for NoEmDashInPublicStrings {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "no-em-dash-in-public-strings"
     }
 
-    fn spec_ref(&self) -> &str {
+    fn spec_ref(&self) -> &'static str {
         "§8.6"
     }
 
@@ -23,7 +23,7 @@ impl Rule for NoEmDashInPublicStrings {
         ]
     }
 
-    fn summary(&self) -> &str {
+    fn summary(&self) -> &'static str {
         "Public-facing string literals should not contain em dashes"
     }
 
@@ -74,8 +74,7 @@ impl Rule for NoEmDashInPublicStrings {
         let line_start = line_start_offset(source, violation.line?)?;
         let line_end = source[line_start..]
             .find('\n')
-            .map(|idx| line_start + idx)
-            .unwrap_or(source.len());
+            .map_or(source.len(), |idx| line_start + idx);
         let line = &source[line_start..line_end];
         let spacing = dash_spacing(line, line_start, dash)?;
         if !spacing.both_sides {
@@ -318,12 +317,12 @@ fn dash_spacing(line: &str, line_start: usize, dash: usize) -> Option<DashSpacin
     let before = dash_in_line
         .checked_sub(1)
         .and_then(|idx| line.as_bytes().get(idx))
-        .is_some_and(|b| b.is_ascii_whitespace());
+        .is_some_and(u8::is_ascii_whitespace);
     let after_start_in_line = dash_in_line + '—'.len_utf8();
     let after = line
         .as_bytes()
         .get(after_start_in_line)
-        .is_some_and(|b| b.is_ascii_whitespace());
+        .is_some_and(u8::is_ascii_whitespace);
     if before != after {
         return None;
     }

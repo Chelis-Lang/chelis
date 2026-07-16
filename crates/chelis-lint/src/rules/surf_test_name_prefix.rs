@@ -59,11 +59,11 @@ fn test_def_re() -> &'static Regex {
 pub struct SurfTestNamePrefix;
 
 impl Rule for SurfTestNamePrefix {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "surf-test-name-prefix"
     }
 
-    fn spec_ref(&self) -> &str {
+    fn spec_ref(&self) -> &'static str {
         "§10.1"
     }
 
@@ -71,7 +71,7 @@ impl Rule for SurfTestNamePrefix {
         &[Surface::SurfSource]
     }
 
-    fn summary(&self) -> &str {
+    fn summary(&self) -> &'static str {
         "Surf functions carrying the `Test` effect are named `test_*` for unit tests or `example_*` for illustrative examples"
     }
 

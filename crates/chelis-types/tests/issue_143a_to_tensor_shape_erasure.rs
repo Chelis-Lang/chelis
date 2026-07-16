@@ -37,7 +37,7 @@
 //! tensor-builder shape erasure, not `unify_dim`.
 //!
 //! Tracking: chelis#158 (sub-issue (A) of chelis#143)
-//! Diagnosis: docs/investigations/issue_143a_to_tensor_shape_erasure_diagnosis.md
+//! Diagnosis: `docs/investigations/issue_143a_to_tensor_shape_erasure_diagnosis.md`
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
@@ -84,7 +84,7 @@ fn to_tensor_mismatched_list_lengths_should_trip_dim_mismatch() {
     // reported (the failure surfaces only at runtime, as documented in
     // chelis#143).
     let errors = typecheck_surf(
-        r#"
+        r"
 sig pair_id: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
 def pair_id(x, y) = x
 def caller() -> tensor[3, f32] =
@@ -93,7 +93,7 @@ def caller() -> tensor[3, f32] =
     b = to_tensor([1.0, 2.0, 3.0, 4.0, 5.0])
     pair_id(&a, &b)
   }
-"#,
+",
     );
     assert!(
         has_dimension_mismatch(&errors),
@@ -110,12 +110,12 @@ fn parameter_ascription_with_shared_sig_dim_does_trip_dim_mismatch() {
     // shared dim var unification works correctly. This isolates the
     // bug above to tensor-builder shape erasure, not unify_dim.
     let errors = typecheck_surf(
-        r#"
+        r"
 sig pair_id: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
 def pair_id(x, y) = x
 def caller(a: &tensor[3, f32], b: &tensor[5, f32]) -> tensor[3, f32] =
   pair_id(a, b)
-"#,
+",
     );
     assert!(
         has_dimension_mismatch(&errors),
@@ -131,7 +131,7 @@ fn matched_to_tensor_lengths_does_not_trip_dim_mismatch_today() {
     // does not produce a spurious DimensionMismatch. (This will remain
     // true post-fix; it's an invariant lock against over-corrections.)
     let errors = typecheck_surf(
-        r#"
+        r"
 sig pair_id: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
 def pair_id(x, y) = x
 def caller() -> tensor[3, f32] =
@@ -140,7 +140,7 @@ def caller() -> tensor[3, f32] =
     b = to_tensor([1.0, 2.0, 3.0])
     pair_id(&a, &b)
   }
-"#,
+",
     );
     assert!(
         !has_dimension_mismatch(&errors),

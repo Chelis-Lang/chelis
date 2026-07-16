@@ -302,10 +302,7 @@ fn hip_pentaop_scatter_add_wrapper_does_not_emit_kernel_scatter_add() {
     } else if c_path.exists() {
         fs::read_to_string(&c_path).expect("read host-fallback c")
     } else {
-        panic!(
-            "expected either hip cpp or host-fallback c output; out_dir is {out_dir:?}",
-            out_dir = out_dir,
-        );
+        panic!("expected either hip cpp or host-fallback c output; out_dir is {out_dir:?}");
     };
     assert!(
         !emitted.contains("kernel_scatter_add_i32"),

@@ -70,11 +70,11 @@ pub(crate) struct PeakDeviceBytesBreakdown {
 pub struct HipEmitter {
     lines: Vec<String>,
     indent: usize,
-    /// Collected kernel sources: (kernel_name, kernel_source_string).
+    /// Collected kernel sources: (`kernel_name`, `kernel_source_string`).
     kernel_sources: Vec<(String, String)>,
     /// Planner-driven slot/wrapper ownership.
     plan: MemoryPlan,
-    /// FusedElem nodes inlined into a trailing reduction (no standalone emission).
+    /// `FusedElem` nodes inlined into a trailing reduction (no standalone emission).
     reduction_inlined: std::collections::HashSet<usize>,
     /// Worst-case inline staged-reduction scratch requirement outside the slot plan.
     extra_peak_device_bytes_estimate: usize,
@@ -195,19 +195,18 @@ impl HipEmitter {
                 && let Some(lhs) = dag.get(node.inputs[0])
             {
                 let operand = lhs.output_type.precision;
-                if !matches!(operand, Prim::F32 | Prim::F64 | Prim::Bf16 | Prim::F16) {
-                    panic!(
-                        "F1: BlasMatmul on operand precision `{}` is not yet \
-                         supported by the HIP backend; node {}. \
-                         spec/04-type-system.md §5.7.1 documents the per-precision \
-                         accumulator defaults; the HIP backend dispatches \
-                         `hipblasSgemm`/`hipblasDgemm` for f32/f64 (WS-A2) and \
-                         `hipblasGemmEx` for bf16/f16 (WS-A3). WS-A4 lifts the \
-                         integer matmul arm per spec §5.7.2.",
-                        operand.name(),
-                        node.id.0,
-                    );
-                }
+                assert!(
+                    matches!(operand, Prim::F32 | Prim::F64 | Prim::Bf16 | Prim::F16),
+                    "F1: BlasMatmul on operand precision `{}` is not yet \
+                     supported by the HIP backend; node {}. \
+                     spec/04-type-system.md §5.7.1 documents the per-precision \
+                     accumulator defaults; the HIP backend dispatches \
+                     `hipblasSgemm`/`hipblasDgemm` for f32/f64 (WS-A2) and \
+                     `hipblasGemmEx` for bf16/f16 (WS-A3). WS-A4 lifts the \
+                     integer matmul arm per spec §5.7.2.",
+                    operand.name(),
+                    node.id.0,
+                );
             }
         }
 
@@ -320,8 +319,7 @@ impl HipEmitter {
             let id = output.id.0;
             let is_load = dag
                 .get(output.id)
-                .map(|n| matches!(n.op, RiscOp::Load { .. }))
-                .unwrap_or(false);
+                .is_some_and(|n| matches!(n.op, RiscOp::Load { .. }));
 
             if is_load {
                 // Root loads are borrowed inputs. Return an owned host tensor so
@@ -561,7 +559,7 @@ impl HipEmitter {
         }
     }
 
-    /// True when a kernel name is unique to a single DagNode (i.e. its
+    /// True when a kernel name is unique to a single `DagNode` (i.e. its
     /// suffix encodes a node id). Used to decide whether prepending span
     /// comments inside the kernel source is unambiguous.
     fn is_per_node_kernel_name(name: &str) -> bool {
@@ -1385,7 +1383,7 @@ impl HipEmitter {
         }
     }
 
-    /// Extract the fused steps and number of external inputs from a FusedElem op.
+    /// Extract the fused steps and number of external inputs from a `FusedElem` op.
     fn extract_fused_steps(op: &RiscOp) -> (&[chelis_ir::dag::FusedStep], usize) {
         match op {
             RiscOp::FusedElem { ops } => {
@@ -1398,8 +1396,7 @@ impl HipEmitter {
                         _ => None,
                     })
                     .max()
-                    .map(|m| m + 1)
-                    .unwrap_or(0);
+                    .map_or(0, |m| m + 1);
                 (ops, n_ext)
             }
             _ => panic!("expected FusedElem op"),
@@ -1479,52 +1476,122 @@ impl HipEmitter {
                 &node.output_type,
             ),
             RiscOp::Neg => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
+                self.emit_unary_launch(
+                    id,
+                    &resolved_kernel_name(),
+                    &node.inputs,
+                    &node.output_type,
+                );
             }
             RiscOp::Recip => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
+                self.emit_unary_launch(
+                    id,
+                    &resolved_kernel_name(),
+                    &node.inputs,
+                    &node.output_type,
+                );
             }
             RiscOp::Exp => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
+                self.emit_unary_launch(
+                    id,
+                    &resolved_kernel_name(),
+                    &node.inputs,
+                    &node.output_type,
+                );
             }
             RiscOp::Log => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
+                self.emit_unary_launch(
+                    id,
+                    &resolved_kernel_name(),
+                    &node.inputs,
+                    &node.output_type,
+                );
             }
             RiscOp::Sin => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
+                self.emit_unary_launch(
+                    id,
+                    &resolved_kernel_name(),
+                    &node.inputs,
+                    &node.output_type,
+                );
             }
             RiscOp::Sqrt => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
+                self.emit_unary_launch(
+                    id,
+                    &resolved_kernel_name(),
+                    &node.inputs,
+                    &node.output_type,
+                );
             }
             RiscOp::Cos => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
+                self.emit_unary_launch(
+                    id,
+                    &resolved_kernel_name(),
+                    &node.inputs,
+                    &node.output_type,
+                );
             }
             RiscOp::Tan => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
+                self.emit_unary_launch(
+                    id,
+                    &resolved_kernel_name(),
+                    &node.inputs,
+                    &node.output_type,
+                );
             }
             RiscOp::Atan => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
+                self.emit_unary_launch(
+                    id,
+                    &resolved_kernel_name(),
+                    &node.inputs,
+                    &node.output_type,
+                );
             }
             RiscOp::Abs => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
+                self.emit_unary_launch(
+                    id,
+                    &resolved_kernel_name(),
+                    &node.inputs,
+                    &node.output_type,
+                );
             }
             RiscOp::Floor => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
+                self.emit_unary_launch(
+                    id,
+                    &resolved_kernel_name(),
+                    &node.inputs,
+                    &node.output_type,
+                );
             }
             RiscOp::Ceil => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
+                self.emit_unary_launch(
+                    id,
+                    &resolved_kernel_name(),
+                    &node.inputs,
+                    &node.output_type,
+                );
             }
             RiscOp::Round => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
+                self.emit_unary_launch(
+                    id,
+                    &resolved_kernel_name(),
+                    &node.inputs,
+                    &node.output_type,
+                );
             }
             RiscOp::UniformLike { low, high, seed } => {
-                self.emit_uniform_like_launch(id, *low, *high, *seed, &node.output_type)
+                self.emit_uniform_like_launch(id, *low, *high, *seed, &node.output_type);
             }
             RiscOp::Dropout { .. } => {
                 unreachable!("dropout should be rejected before HIP code generation")
             }
             RiscOp::Copy => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
+                self.emit_unary_launch(
+                    id,
+                    &resolved_kernel_name(),
+                    &node.inputs,
+                    &node.output_type,
+                );
             }
             RiscOp::Drop => {}
             // WS-A4: bind `accumulator` instead of `..` and thread it
@@ -1649,13 +1716,23 @@ impl HipEmitter {
                 );
             }
             RiscOp::Realize => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
+                self.emit_unary_launch(
+                    id,
+                    &resolved_kernel_name(),
+                    &node.inputs,
+                    &node.output_type,
+                );
             }
             RiscOp::Cast { .. } => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
+                self.emit_unary_launch(
+                    id,
+                    &resolved_kernel_name(),
+                    &node.inputs,
+                    &node.output_type,
+                );
             }
             RiscOp::Store { name } => {
-                self.emit_store(id, name.as_str(), &node.inputs, &node.output_type)
+                self.emit_store(id, name.as_str(), &node.inputs, &node.output_type);
             }
             RiscOp::FusedElem { ops } => {
                 let kernel_name = format!("kernel_fused_{}", node.id.0);
@@ -1702,16 +1779,16 @@ impl HipEmitter {
                 );
             }
             RiscOp::Gather { axis } => {
-                self.emit_gather_launch(id, *axis, &node.inputs, &node.output_type, dag)
+                self.emit_gather_launch(id, *axis, &node.inputs, &node.output_type, dag);
             }
             RiscOp::ScatterAdd { axis } => {
-                self.emit_scatter_add_launch(id, *axis, &node.inputs, &node.output_type, dag)
+                self.emit_scatter_add_launch(id, *axis, &node.inputs, &node.output_type, dag);
             }
             RiscOp::Scatter { axis } => {
-                self.emit_scatter_replace_launch(id, *axis, &node.inputs, &node.output_type, dag)
+                self.emit_scatter_replace_launch(id, *axis, &node.inputs, &node.output_type, dag);
             }
             RiscOp::ScatterElements { axis } => {
-                self.emit_scatter_elements_launch(id, *axis, &node.inputs, &node.output_type, dag)
+                self.emit_scatter_elements_launch(id, *axis, &node.inputs, &node.output_type, dag);
             }
         }
     }
@@ -2108,12 +2185,11 @@ impl HipEmitter {
                 ty.precision.name(),
             );
         }
-        if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
-            panic!(
-                "HIP backend sparse gather requires int32/int64 indices, got {}",
-                indices_ty.precision.name()
-            );
-        }
+        assert!(
+            matches!(indices_ty.precision, Prim::Int32 | Prim::Int64),
+            "HIP backend sparse gather requires int32/int64 indices, got {}",
+            indices_ty.precision.name()
+        );
         let before = Self::dim_product_expr(&values_ty.dims[..axis]);
         let axis_size = Self::emit_dim_info(&values_ty.dims[axis]);
         let after = Self::dim_product_expr(&values_ty.dims[axis + 1..]);
@@ -2172,12 +2248,11 @@ impl HipEmitter {
                 ty.precision.name(),
             );
         }
-        if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
-            panic!(
-                "HIP backend sparse scatter_add requires int32/int64 indices, got {}",
-                indices_ty.precision.name()
-            );
-        }
+        assert!(
+            matches!(indices_ty.precision, Prim::Int32 | Prim::Int64),
+            "HIP backend sparse scatter_add requires int32/int64 indices, got {}",
+            indices_ty.precision.name()
+        );
         let before = Self::dim_product_expr(&target_ty.dims[..axis]);
         let axis_size = Self::emit_dim_info(&target_ty.dims[axis]);
         let after = Self::dim_product_expr(&target_ty.dims[axis + 1..]);
@@ -2221,7 +2296,7 @@ impl HipEmitter {
     /// writes so duplicate target indices resolve in the same order
     /// the IR evaluator and C backend use. This is intentionally low
     /// throughput; the AD policy for this op is `no_grad` and the
-    /// design assumes scatter_replace is used in inference / data
+    /// design assumes `scatter_replace` is used in inference / data
     /// pipelines, not on a hot training path. A parallel
     /// implementation would have to preserve the same tie-breaking
     /// (max-flat-index wins per cell) — see `kernels::scatter_replace`.
@@ -2245,12 +2320,11 @@ impl HipEmitter {
         {
             panic!("HIP backend sparse scatter_replace currently supports f32 payloads only");
         }
-        if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
-            panic!(
-                "HIP backend sparse scatter_replace requires int32/int64 indices, got {}",
-                indices_ty.precision.name()
-            );
-        }
+        assert!(
+            matches!(indices_ty.precision, Prim::Int32 | Prim::Int64),
+            "HIP backend sparse scatter_replace requires int32/int64 indices, got {}",
+            indices_ty.precision.name()
+        );
         let before = Self::dim_product_expr(&target_ty.dims[..axis]);
         let axis_size = Self::emit_dim_info(&target_ty.dims[axis]);
         let after = Self::dim_product_expr(&target_ty.dims[axis + 1..]);
@@ -2305,12 +2379,11 @@ impl HipEmitter {
         {
             panic!("HIP backend sparse scatter_elements currently supports f32 payloads only");
         }
-        if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
-            panic!(
-                "HIP backend sparse scatter_elements requires int32/int64 indices, got {}",
-                indices_ty.precision.name()
-            );
-        }
+        assert!(
+            matches!(indices_ty.precision, Prim::Int32 | Prim::Int64),
+            "HIP backend sparse scatter_elements requires int32/int64 indices, got {}",
+            indices_ty.precision.name()
+        );
         let axis_size = Self::emit_dim_info(&data_ty.dims[axis]);
         let kernel_name = match indices_ty.precision {
             Prim::Int32 => "kernel_scatter_elements_i32",
@@ -2406,9 +2479,9 @@ impl HipEmitter {
         self.line("}");
     }
 
-    /// Emit the host-side wrapper for an in-place FusedElem launch on
+    /// Emit the host-side wrapper for an in-place `FusedElem` launch on
     /// HIP. At runtime, if the reusable input's device storage is
-    /// contiguous, the FusedElem output view is aliased onto the
+    /// contiguous, the `FusedElem` output view is aliased onto the
     /// reusable input's device buffer (saving one slot's worth of GPU
     /// allocation + the eventual `hipFree`). Otherwise we fall back to
     /// the slot-backed view exactly as the non-in-place path would.
@@ -2728,7 +2801,7 @@ impl HipEmitter {
             // after WS-A2 lands `chelis_hipblas_dgemm`. Reject at
             // codegen with a clean diagnostic rather than silently
             // downgrading the user's accumulator request to f32.
-            (Prim::Bf16, _) | (Prim::F16, _) => panic!(
+            (Prim::Bf16 | Prim::F16, _) => panic!(
                 "F1: HIP BlasMatmul on operand `{}` with accumulator `{}` requires a \
                  wider-than-default GEMM compute path (operand promotion to `{}`); \
                  the corresponding mixed-precision wrapper is not implemented in \
@@ -3079,7 +3152,7 @@ impl HipEmitter {
     // Stride/shape variable helpers
     // ------------------------------------------------------------------
 
-    /// Emit `int t{node_id}_{prefix}_s{0..7} = d_t{src_id}->strides[i];` for MAX_DIM dims.
+    /// Emit `int t{node_id}_{prefix}_s{0..7} = d_t{src_id}->strides[i];` for `MAX_DIM` dims.
     fn emit_stride_vars(&mut self, node_id: usize, prefix: &str, src_id: usize) {
         for i in 0..kernels::MAX_DIM {
             self.line(&format!(
@@ -3088,7 +3161,7 @@ impl HipEmitter {
         }
     }
 
-    /// Emit `int t{node_id}_{prefix}_sh{0..7} = d_t{src_id}->shape[i];` for MAX_DIM dims.
+    /// Emit `int t{node_id}_{prefix}_sh{0..7} = d_t{src_id}->shape[i];` for `MAX_DIM` dims.
     fn emit_shape_vars(&mut self, node_id: usize, prefix: &str, src_id: usize) {
         for i in 0..kernels::MAX_DIM {
             self.line(&format!(
@@ -3442,7 +3515,7 @@ impl HipEmitter {
             .map(String::as_str)
             .filter(|s| node.span_id.as_deref() != Some(*s))
             .collect();
-        merged.sort();
+        merged.sort_unstable();
         merged.dedup();
         for span in merged {
             let safe = chelis_ir::span_sanitize::sanitize_for_comment(span);
@@ -3453,7 +3526,7 @@ impl HipEmitter {
 
     /// Prepend `// span:` comment lines (followed by a newline) to a
     /// kernel source string. Returns the augmented source. No-op when the
-    /// node carries no spans. Used for per-node kernels (FusedElem,
+    /// node carries no spans. Used for per-node kernels (`FusedElem`,
     /// fused reductions) where the kernel string is unique to the
     /// originating DAG node.
     fn prepend_span_comments_to_kernel_source(node: &DagNode, source: String) -> String {
@@ -3641,6 +3714,7 @@ impl HipEmitter {
     // Input/output label logic (identical to C backend)
     // ------------------------------------------------------------------
 
+    #[must_use]
     pub fn input_labels(dag: &Dag) -> Vec<String> {
         let mut labels = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -3654,6 +3728,7 @@ impl HipEmitter {
         labels
     }
 
+    #[must_use]
     pub fn output_labels(dag: &Dag) -> Vec<String> {
         Self::output_specs(dag)
             .into_iter()
@@ -3794,7 +3869,7 @@ mod tests {
     }
 
     /// Perf-F2(b) shipped: with a single-consumer reusable input
-    /// (here `x`, the FusedElem's first external), the kernel ships
+    /// (here `x`, the `FusedElem`'s first external), the kernel ships
     /// the in-place shape — `__restrict__` only on non-aliased
     /// externals (`ext1`), never on the aliased external (`ext0`) or
     /// `out`.
@@ -3813,7 +3888,7 @@ mod tests {
         assert!(hip.contains("const float *__restrict__ ext1"));
     }
 
-    /// Negative: a FusedElem with no `reusable_input` set must still
+    /// Negative: a `FusedElem` with no `reusable_input` set must still
     /// emit the legacy non-`__restrict__` kernel parameter list.
     /// The in-place shape is opt-in via the upstream linearity-marked
     /// hint, not the default.

@@ -321,9 +321,10 @@ pub(super) fn deep_expr_to_smt(
                 _ => None,
             }
         }
-        _ => match deep_bool_lit(expr) {
-            Some(value) => Some(SmtExpr::BoolLit(value)),
-            None => {
+        _ => {
+            if let Some(value) = deep_bool_lit(expr) {
+                Some(SmtExpr::BoolLit(value))
+            } else {
                 if let Some((left, right)) = deep_builtin_cmp(expr, "cmplt") {
                     return Some(SmtExpr::Cmp(
                         SC::Lt,
@@ -333,7 +334,7 @@ pub(super) fn deep_expr_to_smt(
                 }
                 None
             }
-        },
+        }
     }
 }
 
@@ -539,9 +540,10 @@ fn deep_expr_to_smt_subst(
                 _ => None,
             }
         }
-        _ => match deep_bool_lit(expr) {
-            Some(value) => Some(SmtExpr::BoolLit(value)),
-            None => {
+        _ => {
+            if let Some(value) = deep_bool_lit(expr) {
+                Some(SmtExpr::BoolLit(value))
+            } else {
                 if let Some((left, right)) = deep_builtin_cmp(expr, "cmplt") {
                     return Some(SmtExpr::Cmp(
                         SC::Lt,
@@ -551,7 +553,7 @@ fn deep_expr_to_smt_subst(
                 }
                 None
             }
-        },
+        }
     }
 }
 
@@ -1112,7 +1114,7 @@ mod tests {
         Expr::Lit(Literal::Float(v), sp())
     }
 
-    fn ctx<'a>(decls: &'a [Decl]) -> InlineCtx<'a> {
+    fn ctx(decls: &[Decl]) -> InlineCtx<'_> {
         InlineCtx {
             decls,
             depth: 0,

@@ -63,7 +63,7 @@ use assert_cmd::cargo::CommandCargoExt;
 use tempfile::tempdir;
 
 /// Parse `chelis_alloc` calls and compute a polynomial in `seq` describing
-/// the working set. Returns (constant_bytes, seq1_bytes, seq2_bytes) such
+/// the working set. Returns (`constant_bytes`, `seq1_bytes`, `seq2_bytes`) such
 /// that total ≈ constant + seq * seq1 + seq * seq * seq2.
 ///
 /// Unhandled allocations (e.g. `chelis_alloc(0, NULL, ...)`) contribute

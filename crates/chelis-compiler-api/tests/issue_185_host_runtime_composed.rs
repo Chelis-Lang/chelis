@@ -78,10 +78,10 @@ fn issue185_mean_axis0_runs_and_matches_ir_eval() {
     // x = [[1.0, 4.0, 2.0],
     //      [3.0, 6.0, 4.0]]
     // mean(x, 0) -> shape [3], data [(1+3)/2, (4+6)/2, (2+4)/2] = [2, 5, 3]
-    let src = r#"
+    let src = r"
 make = pad_sequences([[1.0, 4.0, 2.0], [3.0, 6.0, 4.0]], 0.0)
 out = mean(&make, 0)
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![3], "mean axis-0 shape");
@@ -94,10 +94,10 @@ out = mean(&make, 0)
 #[test]
 fn issue185_mean_axis1_runs_and_matches_ir_eval() {
     // mean(x, 1) -> shape [2], data [(1+4+2)/3, (3+6+4)/3] = [7/3, 13/3]
-    let src = r#"
+    let src = r"
 make = pad_sequences([[1.0, 4.0, 2.0], [3.0, 6.0, 4.0]], 0.0)
 out = mean(&make, 1)
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![2], "mean axis-1 shape");
@@ -121,12 +121,12 @@ fn issue185_layer_norm_runs_and_matches_ir_eval() {
     // With gamma = [1, 1, 1, 1] and beta = [0, 0, 0, 0]: result == normed.
     // gamma and beta are rank-1 per `layer_norm`'s typer signature
     // (`crates/chelis-types/src/infer.rs` rejects rank-2 gamma).
-    let src = r#"
+    let src = r"
 x = pad_sequences([[1.0, 2.0, 3.0, 4.0]], 0.0)
 g = to_tensor([1.0, 1.0, 1.0, 1.0])
 b = to_tensor([0.0, 0.0, 0.0, 0.0])
 out = layer_norm(&x, &g, &b)
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![1, 4], "layer_norm shape");
@@ -168,12 +168,12 @@ fn issue185_conv2d_runs_and_matches_ir_eval() {
     // wrapping the assertion in a Test-effect fn forces the host
     // runtime to invoke the lowered conv2d on the DAG-evaluated input
     // and then call `tensor_to_scalar` to read out a single value.
-    let src = r#"
+    let src = r"
 def run_conv2d(x: tensor[1, 1, 2, 2, f32], k: tensor[1, 1, 2, 2, f32]) -> tensor[1, 1, 1, 1, f32] = conv2d(&x, &k, 1, 0)
 def make_x() -> tensor[1, 1, 2, 2, f32] = to_tensor([[[[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]]]])
 def make_k() -> tensor[1, 1, 2, 2, f32] = to_tensor([[[[cast(0.5, f32), cast(1.0, f32)], [cast(1.5, f32), cast(2.0, f32)]]]])
 out = run_conv2d(make_x(), make_k())
-"#;
+";
     let result = eval_surf_selected(src, &["out"]);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![1, 1, 1, 1], "conv2d shape");

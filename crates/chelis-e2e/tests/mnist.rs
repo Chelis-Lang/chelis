@@ -75,12 +75,11 @@ fn mnist_synthetic_loss_decreases() {
 fn mnist_subset_full_pipeline() {
     let mnist_path = default_mnist_dir();
 
-    if !mnist_path.exists() {
-        panic!(
-            "MNIST data not found at {}. Set MNIST_DIR or populate data/mnist.",
-            mnist_path.display()
-        );
-    }
+    assert!(
+        mnist_path.exists(),
+        "MNIST data not found at {}. Set MNIST_DIR or populate data/mnist.",
+        mnist_path.display()
+    );
 
     let (train_data, test_data) = load_mnist(&mnist_path).unwrap();
     let train_subset: Vec<_> = train_data.into_iter().take(31).collect();
@@ -124,12 +123,11 @@ fn mnist_subset_full_pipeline() {
 fn mnist_real_over_90_percent() {
     let mnist_path = default_mnist_dir();
 
-    if !mnist_path.exists() {
-        panic!(
-            "MNIST data not found at {}. Set MNIST_DIR or populate data/mnist.",
-            mnist_path.display()
-        );
-    }
+    assert!(
+        mnist_path.exists(),
+        "MNIST data not found at {}. Set MNIST_DIR or populate data/mnist.",
+        mnist_path.display()
+    );
 
     let (train_data, test_data) = load_mnist(&mnist_path).unwrap();
     println!(

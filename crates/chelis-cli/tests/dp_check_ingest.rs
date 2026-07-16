@@ -4,7 +4,7 @@
 //! `chelis check path.dp --json` and `chelis eval --file path.dp` must
 //! accept already-lowered Deep IR directly, run the SAME
 //! type/effect/linearity pipeline the `.ch` path uses, and emit the
-//! SAME structured JSON (CheckResult / EvalResult schema). A standalone
+//! SAME structured JSON (`CheckResult` / `EvalResult` schema). A standalone
 //! `.dp` is post-desugar IR by construction; it skips the Surf
 //! desugar + macro-expand stage but is otherwise checked identically.
 //!
@@ -45,7 +45,7 @@ const WELL_TYPED_DP: &str = "(def {}\n  \
 /// The byte-equivalent-meaning Surf for `WELL_TYPED_DP`. `chelis deep`
 /// desugars this to exactly the Deep above (single use of `x`, no
 /// implicit copy inserted), so the two surfaces must produce
-/// field-for-field identical CheckResult values.
+/// field-for-field identical `CheckResult` values.
 const WELL_TYPED_CH: &str = "def negate(x: f32) -> f32 = neg(x)\n";
 
 /// An ill-typed standalone `.dp`: `add` of an int literal and a bool

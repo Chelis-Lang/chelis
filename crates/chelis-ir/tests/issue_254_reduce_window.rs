@@ -81,7 +81,7 @@ fn reduce_window_max_strided_overlap_smoke() {
     //  [ 5  6  7  8]
     //  [ 9 10 11 12]
     //  [13 14 15 16]]
-    let data = (1u32..=16).map(|v| v as f64).collect();
+    let data = (1u32..=16).map(f64::from).collect();
     let out = eval_with_input(&dag, &name, vec![1, 1, 4, 4], data);
     assert_eq!(out.shape, vec![1, 1, 3, 3]);
     // Each 2x2 window's max:
@@ -121,7 +121,7 @@ fn reduce_window_min_strided_overlap_smoke() {
         vec![1, 1],
         &[1, 1, 3, 3],
     );
-    let data = (1u32..=16).map(|v| v as f64).collect();
+    let data = (1u32..=16).map(f64::from).collect();
     let out = eval_with_input(&dag, &name, vec![1, 1, 4, 4], data);
     assert_eq!(out.shape, vec![1, 1, 3, 3]);
     assert_eq!(
@@ -179,7 +179,7 @@ fn reduce_window_max_non_overlapping_pool2d() {
         vec![2, 2],
         &[1, 1, 2, 2],
     );
-    let data = (1u32..=16).map(|v| v as f64).collect();
+    let data = (1u32..=16).map(f64::from).collect();
     let out = eval_with_input(&dag, &name, vec![1, 1, 4, 4], data);
     assert_eq!(out.shape, vec![1, 1, 2, 2]);
     // Four non-overlapping 2x2 blocks:
@@ -205,8 +205,8 @@ fn reduce_window_max_passes_through_leading_axes() {
     );
     // First slice [0..]: as in the sum-smoke above.
     // Second slice [1..]: same values + 100 so the max windows differ.
-    let mut data: Vec<f64> = (1u32..=9).map(|v| v as f64).collect();
-    data.extend((1u32..=9).map(|v| (v as f64) + 100.0));
+    let mut data: Vec<f64> = (1u32..=9).map(f64::from).collect();
+    data.extend((1u32..=9).map(|v| f64::from(v) + 100.0));
     let out = eval_with_input(&dag, &name, vec![2, 3, 3], data);
     assert_eq!(out.shape, vec![2, 2, 2]);
     // Slice 0: max windows of 1..9 with window [2,2] stride [1,1]

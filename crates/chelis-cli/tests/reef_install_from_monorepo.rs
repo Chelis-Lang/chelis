@@ -1,6 +1,6 @@
 //! Phase 3t — `chelis reef install --from-monorepo` integration test.
 //!
-//! Closes Nautilus's UPSTREAM_BUGS N1: a fresh runner with no
+//! Closes Nautilus's `UPSTREAM_BUGS` N1: a fresh runner with no
 //! `~/.chelis/reef/` cache could not install chelis-std declaratively
 //! because no `chelis reef install / add / fetch` subcommand existed.
 //!

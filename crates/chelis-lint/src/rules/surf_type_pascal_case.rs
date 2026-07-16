@@ -1,10 +1,10 @@
-//! Rule `surf-type-pascal-case` — Surf type declarations are PascalCase.
+//! Rule `surf-type-pascal-case` — Surf type declarations are `PascalCase`.
 //!
 //! Spec authority: `spec/01-nomenclature.md` §3.1 (Types and ADT
 //! constructors).
 //!
 //! Detects `^type Name[...]? = ...` lines where `Name` is not strictly
-//! PascalCase. PascalCase here means: ASCII alphanumeric, starting with
+//! `PascalCase`. `PascalCase` here means: ASCII alphanumeric, starting with
 //! an uppercase ASCII letter, no underscores. ADT constructor checking
 //! is intentionally deferred — `|` introduces both constructors (in a
 //! `type` body) and pattern-match alternatives, so distinguishing them
@@ -28,11 +28,11 @@ fn type_re() -> &'static Regex {
 pub struct SurfTypePascalCase;
 
 impl Rule for SurfTypePascalCase {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "surf-type-pascal-case"
     }
 
-    fn spec_ref(&self) -> &str {
+    fn spec_ref(&self) -> &'static str {
         "§3.1"
     }
 
@@ -40,7 +40,7 @@ impl Rule for SurfTypePascalCase {
         &[Surface::SurfSource]
     }
 
-    fn summary(&self) -> &str {
+    fn summary(&self) -> &'static str {
         "Surf type declarations are PascalCase: ASCII alphanumeric, leading uppercase, no underscores"
     }
 

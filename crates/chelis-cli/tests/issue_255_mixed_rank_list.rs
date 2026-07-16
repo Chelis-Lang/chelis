@@ -133,7 +133,7 @@ fn issue_255_mixed_rank_list_of_tensor_rejects_with_actionable_hint() {
         .iter()
         .find(|m| m.contains("list element rank mismatch"))
         .unwrap_or_else(|| {
-            panic!("expected a 'list element rank mismatch' diagnostic; got messages={msgs:?}",)
+            panic!("expected a 'list element rank mismatch' diagnostic; got messages={msgs:?}")
         });
 
     // The original wording ("1 dims vs 2 dims") must remain so existing

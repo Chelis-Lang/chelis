@@ -35,6 +35,7 @@ pub const TIER_B_SCALAR_CAP: usize = 64;
 /// or build a literal" routes through this (and [`prim_to_smt_sort`] /
 /// [`int_sample_bounds`]), so a new integer width added to the type system
 /// cannot silently diverge across the prove paths.
+#[must_use]
 pub fn is_int_width(prim: &str) -> bool {
     chelis_types::types::Prim::parse_name(prim).is_some_and(|p| p.is_integer())
 }
@@ -45,6 +46,7 @@ pub fn is_int_width(prim: &str) -> bool {
 /// field [`FieldType::scalar_sort`], the producer-param sort in
 /// `tier_b_lower`, the `@property` param sort in `property_runner`, and the
 /// in-module constant lowering -- route through this one function.
+#[must_use]
 pub fn prim_to_smt_sort(prim: &str) -> SmtSort {
     if is_int_width(prim) {
         SmtSort::Int
@@ -62,6 +64,7 @@ pub fn prim_to_smt_sort(prim: &str) -> SmtSort {
 /// wider widths keep the convenience range. Single source for every
 /// opaque-field integer sampling site. Returns `None` for a non-integer
 /// primitive.
+#[must_use]
 pub fn int_sample_bounds(prim: &str) -> Option<(i64, i64)> {
     // The single workspace source for integer fuzz bounds is
     // `Prim::integer_fuzz_bounds` (the per-width representable range clamped
@@ -86,6 +89,7 @@ pub enum FieldType {
 impl FieldType {
     /// The number of scalar leaves this field flattens to (RFC D-TIERB
     /// cap accounting).
+    #[must_use]
     pub fn scalar_count(&self) -> usize {
         match self {
             FieldType::Scalar(_) => 1,
@@ -97,6 +101,7 @@ impl FieldType {
     /// The SMT sort of a scalar field; `None` for non-scalar fields. Routes
     /// through the single-source [`prim_to_smt_sort`] (F3) so an integer
     /// field of ANY width is `Int`, matching the constant lowering.
+    #[must_use]
     pub fn scalar_sort(&self) -> Option<SmtSort> {
         match self {
             FieldType::Scalar(name) => Some(prim_to_smt_sort(name)),
@@ -130,6 +135,7 @@ pub struct OpaqueInvariant {
 
 impl OpaqueInvariant {
     /// Total scalar leaves across all fields (RFC D-TIERB cap).
+    #[must_use]
     pub fn scalar_count(&self) -> usize {
         self.fields.iter().map(|(_, f)| f.scalar_count()).sum()
     }
@@ -141,6 +147,7 @@ impl OpaqueInvariant {
     /// carries exactly what it discharged. Falls back to the full predicate fn
     /// node if the body cannot be isolated (a malformed predicate that never
     /// reaches a real obligation outcome anyway).
+    #[must_use]
     pub fn goal_text(&self) -> String {
         let node = predicate_body(&self.predicate).unwrap_or(&self.predicate);
         // Strip lowering/producer metadata (spans, types) so the goal is the
@@ -201,6 +208,7 @@ fn meta_value<'a>(expr: &'a Expr, key: &str) -> Option<&'a Expr> {
 /// opaque type. Non-opaque types, and opaque types without an invariant,
 /// are skipped (the latter is plain opacity, unaffected by injection;
 /// RFC D-INJECT test-lock).
+#[must_use]
 pub fn collect_opaque_invariants(exprs: &[Expr]) -> Vec<OpaqueInvariant> {
     collect_opaque_invariants_and_rejections(exprs).0
 }
@@ -219,6 +227,7 @@ pub struct OpaqueInvariantRejection {
 /// Collect the modelable invariants AND the rejections in one pass. Building
 /// the program's `deftype` index once lets a nested-record field resolve the
 /// record it references.
+#[must_use]
 pub fn collect_opaque_invariants_and_rejections(
     exprs: &[Expr],
 ) -> (Vec<OpaqueInvariant>, Vec<OpaqueInvariantRejection>) {
@@ -234,6 +243,7 @@ pub fn collect_opaque_invariants_and_rejections(
 
 /// Collect ONLY the rejections (see
 /// [`collect_opaque_invariants_and_rejections`]).
+#[must_use]
 pub fn collect_opaque_invariant_rejections(exprs: &[Expr]) -> Vec<OpaqueInvariantRejection> {
     collect_opaque_invariants_and_rejections(exprs).1
 }
@@ -306,8 +316,7 @@ fn opaque_invariant_from_deftype(
     let type_name = kids
         .first()
         .and_then(|n| symbol_text(n))
-        .map(str::to_string)
-        .unwrap_or_else(|| "<anonymous>".to_string());
+        .map_or_else(|| "<anonymous>".to_string(), str::to_string);
     let reject = |reason: String| {
         Some(Err(OpaqueInvariantRejection {
             type_name: type_name.clone(),
@@ -698,6 +707,7 @@ pub(crate) fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<Stri
 ///
 /// `prefix` is the dotted path of the binder value (e.g. `"p"` at top
 /// level, `"p.inner"` for a nested record binder).
+#[must_use]
 pub fn lower_predicate_flattened(
     inv: &OpaqueInvariant,
     prefix: &str,
@@ -712,6 +722,7 @@ pub fn lower_predicate_flattened(
 /// (sound for the concrete-eval-only callers); the cvc5 precondition path
 /// (`tier_b_lower::lower_obligation`) passes the real module so an int
 /// constant against an int field is a sound integer comparison.
+#[must_use]
 pub fn lower_predicate_flattened_in(
     inv: &OpaqueInvariant,
     prefix: &str,
@@ -1039,6 +1050,7 @@ pub enum PredShape {
 }
 
 impl PredShape {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             PredShape::EqualityAtoms => "equality-atoms",
@@ -1067,6 +1079,7 @@ pub struct StarvationDiagnostic {
 
 impl StarvationDiagnostic {
     /// The best acceptance rate achieved across both tiers.
+    #[must_use]
     pub fn best_rate(&self) -> f64 {
         let rej = rate(self.rejection_accepted, self.rejection_attempted);
         let ctor = rate(self.constructor_accepted, self.constructor_attempted);
@@ -1074,6 +1087,7 @@ impl StarvationDiagnostic {
     }
 
     /// A one-line human-facing diagnostic string.
+    #[must_use]
     pub fn message(&self) -> String {
         format!(
             "generator starvation for opaque type `{}`: rejection sampling \
@@ -1109,6 +1123,7 @@ pub struct GenRng {
 }
 
 impl GenRng {
+    #[must_use]
     pub fn new(seed: u64) -> Self {
         Self {
             state: seed ^ 0x9E37_79B9_7F4A_7C15,
@@ -1508,53 +1523,49 @@ fn read_produced_field(
         _ => return None,
     };
     use chelis_compiler_api::schema::ExecutionValue;
-    match fty {
-        FieldType::Tensor { dims, .. } => {
-            // A tensor field access yields a Tensor value.
-            let ExecutionValue::Tensor { value } = &root.value else {
-                return None;
-            };
-            // A None result yields the NaN-filled sentinel: treat as failure.
-            if value.data.iter().any(|v| v.is_nan()) {
-                return Some(false);
-            }
-            let count = dims.iter().product::<usize>().max(1);
-            if value.data.len() != count {
-                return None;
-            }
-            for (i, v) in value.data.iter().enumerate() {
-                env.insert(format!("{field_path}.{i}"), *v);
-            }
+    if let FieldType::Tensor { dims, .. } = fty {
+        // A tensor field access yields a Tensor value.
+        let ExecutionValue::Tensor { value } = &root.value else {
+            return None;
+        };
+        // A None result yields the NaN-filled sentinel: treat as failure.
+        if value.data.iter().any(|v| v.is_nan()) {
+            return Some(false);
         }
-        _ => {
-            // A scalar field access yields a scalar ExecutionValue (RT3-F3:
-            // a rank-0 access returns Float64 / Int64 / Bool, not a
-            // single-element Tensor). Extract the scalar; a NaN result is
-            // the None-sentinel and counts as a producer failure.
-            let v = match &root.value {
-                ExecutionValue::Float64 { value } => *value,
-                ExecutionValue::Int64 { value } => *value as f64,
-                ExecutionValue::Bool { value } => {
-                    if *value {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                }
-                // A rank-0/single-element tensor scalar, defensively.
-                ExecutionValue::Tensor { value }
-                    if value.shape.iter().product::<usize>().max(1) == 1
-                        && !value.data.is_empty() =>
-                {
-                    value.data[0]
-                }
-                _ => return None,
-            };
-            if v.is_nan() {
-                return Some(false);
-            }
-            env.insert(field_path.to_string(), v);
+        let count = dims.iter().product::<usize>().max(1);
+        if value.data.len() != count {
+            return None;
         }
+        for (i, v) in value.data.iter().enumerate() {
+            env.insert(format!("{field_path}.{i}"), *v);
+        }
+    } else {
+        // A scalar field access yields a scalar ExecutionValue (RT3-F3:
+        // a rank-0 access returns Float64 / Int64 / Bool, not a
+        // single-element Tensor). Extract the scalar; a NaN result is
+        // the None-sentinel and counts as a producer failure.
+        let v = match &root.value {
+            ExecutionValue::Float64 { value } => *value,
+            ExecutionValue::Int64 { value } => *value as f64,
+            ExecutionValue::Bool { value } => {
+                if *value {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            // A rank-0/single-element tensor scalar, defensively.
+            ExecutionValue::Tensor { value }
+                if value.shape.iter().product::<usize>().max(1) == 1 && !value.data.is_empty() =>
+            {
+                value.data[0]
+            }
+            _ => return None,
+        };
+        if v.is_nan() {
+            return Some(false);
+        }
+        env.insert(field_path.to_string(), v);
     }
     Some(true)
 }
@@ -1764,6 +1775,7 @@ fn deep_cons_list(items: Vec<Expr>) -> Expr {
 /// `to_tensor`/`pad_sequences` of typed float literals) for a sampled
 /// producer input. Used by the obligation engine's Tier C tensor-input
 /// sampling.
+#[must_use]
 pub fn tensor_value_expr_pub(dims: &[usize], precision: &str, values: &[f64]) -> Expr {
     tensor_value_expr(dims, precision, values)
 }

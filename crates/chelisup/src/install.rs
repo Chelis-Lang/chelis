@@ -57,6 +57,7 @@ pub fn detect_slug() -> Result<&'static str, String> {
 }
 
 /// The release-asset file name for a version + slug.
+#[must_use]
 pub fn asset_name(version: &str, slug: &str) -> String {
     format!("chelis-v{version}-{slug}.tar.gz")
 }
@@ -219,8 +220,8 @@ struct GithubAuth<'a> {
 /// (the `CHELISUP_RELEASE_BASE` http branch).
 fn http_get_to_file(url: &str, target: &Path, auth: Option<GithubAuth>) -> Result<(), String> {
     let owned_client;
-    let (client, builder) = match &auth {
-        Some(a) => (
+    let (client, builder) = if let Some(a) = &auth {
+        (
             a.client,
             a.client
                 .get(url)
@@ -228,15 +229,14 @@ fn http_get_to_file(url: &str, target: &Path, auth: Option<GithubAuth>) -> Resul
                 .header("User-Agent", "chelisup")
                 .header("Accept", "application/octet-stream")
                 .header("X-GitHub-Api-Version", "2022-11-28"),
-        ),
-        None => {
-            owned_client = reqwest::blocking::Client::builder()
-                .connect_timeout(Duration::from_secs(15))
-                .build()
-                .map_err(|e| format!("could not build the HTTP client: {e}"))?;
-            let b = owned_client.get(url).header("User-Agent", "chelisup");
-            (&owned_client, b)
-        }
+        )
+    } else {
+        owned_client = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .build()
+            .map_err(|e| format!("could not build the HTTP client: {e}"))?;
+        let b = owned_client.get(url).header("User-Agent", "chelisup");
+        (&owned_client, b)
     };
     let _ = client;
 
@@ -293,7 +293,7 @@ fn find_asset_id(body: &str, asset: &str, url: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("release metadata at {url} has no assets array"))?;
     for entry in assets {
         if entry.get("name").and_then(|n| n.as_str()) == Some(asset)
-            && let Some(id) = entry.get("id").and_then(|i| i.as_u64())
+            && let Some(id) = entry.get("id").and_then(serde_json::Value::as_u64)
         {
             return Ok(id);
         }
@@ -375,7 +375,7 @@ fn extract_tarball(tarball: &Path, dest: &Path) -> Result<PathBuf, String> {
 
     let mut candidates: Vec<PathBuf> = fs::read_dir(dest)
         .map_err(|e| format!("could not read {}: {e}", dest.display()))?
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .map(|e| e.path())
         .filter(|p| {
             p.is_dir()

@@ -50,10 +50,10 @@ fn surf_to_deep(source: &str) -> Vec<Expr> {
 /// because the app's `:type` metadata was unpopulated at validator time.
 #[test]
 fn issue186_surf_conv2d_concrete_shapes_typechecks() {
-    let src = r#"
+    let src = r"
 def call_conv(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
   conv2d(x, k, 1, 0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -77,10 +77,10 @@ def call_conv(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[
 /// the concrete-tensor-arg-metadata error.
 #[test]
 fn issue186_surf_conv2d_borrowed_args_typechecks() {
-    let src = r#"
+    let src = r"
 def call_conv(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
   conv2d(&x, &k, 1, 0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -125,10 +125,10 @@ fn issue186_deep_conv2d_concrete_tensors_typechecks() {
 /// remains a real constraint even after the fix.
 #[test]
 fn issue186_surf_conv2d_nonconcrete_input_dim_rejected() {
-    let src = r#"
+    let src = r"
 def call_conv(x: tensor[1, 3, h, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
   conv2d(x, k, 1, 0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for non-concrete input dim");
@@ -148,9 +148,9 @@ def call_conv(x: tensor[1, 3, h, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[
 /// "concrete reduced axis extent" error never fired for borrowed inputs.
 #[test]
 fn issue186_surf_mean_borrowed_nonconcrete_axis_rejected() {
-    let src = r#"
+    let src = r"
 def call_mean(x: tensor[32, n, f32]) -> tensor[32, f32] = mean(&x, 1)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for borrowed mean with non-concrete axis");
@@ -168,10 +168,10 @@ def call_mean(x: tensor[32, n, f32]) -> tensor[32, f32] = mean(&x, 1)
 /// borrow-blindness root cause as the mean arm above.
 #[test]
 fn issue186_surf_layer_norm_borrowed_nonconcrete_axis_rejected() {
-    let src = r#"
+    let src = r"
 def call_ln(x: tensor[32, n, f32], g: tensor[n, f32], b: tensor[n, f32]) -> tensor[32, n, f32] =
   layer_norm(&x, &g, &b)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep =
@@ -195,10 +195,10 @@ def call_ln(x: tensor[32, n, f32], g: tensor[n, f32], b: tensor[n, f32]) -> tens
 /// `positive stride` diagnostic.
 #[test]
 fn red_team_205_f1_zero_stride_rejected() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
   conv2d(&x, &k, 0, 0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for stride == 0");
@@ -216,10 +216,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
 /// sign check on the extracted value is required.
 #[test]
 fn red_team_205_f2_negative_stride_rejected() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
   conv2d(&x, &k, -1, 0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for negative stride");
@@ -237,10 +237,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
 /// zero in the output formula.
 #[test]
 fn red_team_205_f3_negative_padding_rejected() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
   conv2d(&x, &k, 1, -100)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for negative padding");
@@ -258,10 +258,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
 /// the canonical happy path.
 #[test]
 fn red_team_205_f1_f2_stride_one_padding_zero_accepted() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
   conv2d(&x, &k, 1, 0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -282,10 +282,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
 /// the validator and only failed during back-end lowering.
 #[test]
 fn red_team_205_f4_oversize_kernel_rejected() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 2, 2, f32], k: tensor[8, 3, 5, 5, f32]) -> tensor[1, 8, 1, 1, f32] =
   conv2d(&x, &k, 1, 0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for oversize kernel");
@@ -305,10 +305,10 @@ def f(x: tensor[1, 3, 2, 2, f32], k: tensor[8, 3, 5, 5, f32]) -> tensor[1, 8, 1,
 /// well as negative.
 #[test]
 fn red_team_205_f4_zero_output_rejected() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 4, 8, f32], k: tensor[8, 3, 5, 3, f32]) -> tensor[1, 8, 1, 6, f32] =
   conv2d(&x, &k, 2, 0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for zero-extent output");
@@ -326,10 +326,10 @@ def f(x: tensor[1, 3, 4, 8, f32], k: tensor[8, 3, 5, 3, f32]) -> tensor[1, 8, 1,
 /// the error fires before the back-end lowering pass.
 #[test]
 fn red_team_205_f4_rank3_input_rejected() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
   conv2d(&x, &k, 1, 0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for rank-3 input");
@@ -346,10 +346,10 @@ def f(x: tensor[3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6,
 /// `floor((8 + 0 - 3) / 1) + 1 = 6` shape continues to be accepted.
 #[test]
 fn red_team_205_f4_canonical_output_accepted() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
   conv2d(&x, &k, 1, 0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -370,12 +370,12 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
 /// resolve to a concrete tensor type.
 #[test]
 fn red_team_205_f5_chained_conv2d_via_let_typechecks() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
   y = conv2d(&x, &k1, 1, 0)
   conv2d(&y, &k2, 1, 0)
 }
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -397,12 +397,12 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
 /// F4 formula evaluates against them.
 #[test]
 fn red_team_205_f5_chained_conv2d_second_call_ill_formed_rejected() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 9, 9, f32]) -> tensor[1, 16, 1, 1, f32] = {
   y = conv2d(&x, &k1, 1, 0)
   conv2d(&y, &k2, 1, 0)
 }
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for ill-formed second conv2d");
@@ -415,17 +415,17 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
     );
 }
 
-/// EXPECT (RT-205 F6): validator errors flow through CheckError with
+/// EXPECT (RT-205 F6): validator errors flow through `CheckError` with
 /// `DimensionMismatch` kind (severity 0.8) rather than `Other`
-/// (severity 0.5), matching the surface DimensionMismatch already
+/// (severity 0.5), matching the surface `DimensionMismatch` already
 /// uses for inference-layer shape errors.
 #[test]
 fn red_team_205_f6_validator_error_uses_dimension_mismatch_kind() {
     use chelis_types::errors::CheckErrorKind;
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
   conv2d(&x, &k, 0, 0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for stride 0");
@@ -453,10 +453,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
 /// presence of the `(at surf:` prefix and the `..` separator.
 #[test]
 fn red_team_205_f6_validator_error_has_span_suffix() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
   conv2d(&x, &k, 0, 0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for stride 0");
@@ -479,13 +479,13 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
 /// `tensor[1, 8, 100, 100]` for the canonical 8x8 input + 3x3
 /// kernel (real output 6x6) silently type-checked. With the fix the
 /// inferred output shape is concrete `[1, 8, 6, 6]`, so the def's
-/// body-vs-declared-sig check (TypeMismatch) catches the mismatch.
+/// body-vs-declared-sig check (`TypeMismatch`) catches the mismatch.
 #[test]
 fn red_team_205_f8_wrong_declared_output_dims_rejected() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 100, 100, f32] =
   conv2d(&x, &k, 1, 0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for wrong declared output dims");
@@ -505,10 +505,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 10
 /// the call still type-checks cleanly.
 #[test]
 fn red_team_205_f8_correct_declared_output_accepted() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
   conv2d(&x, &k, 1, 0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -528,10 +528,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
 /// `tensor[1, 8, 4, 4]` must be rejected.
 #[test]
 fn red_team_205_f8_off_by_one_output_rejected() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 4, 4, f32] =
   conv2d(&x, &k, 2, 0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for off-by-one declared output");
@@ -553,7 +553,7 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 4,
 /// `conv2d_output_extent` did `input + 2 * padding` unchecked and
 /// triggered `attempt to multiply with overflow` at runtime. The
 /// fix routes through `checked_mul`/`checked_add`/`checked_sub`
-/// and emits a DimensionMismatch instead.
+/// and emits a `DimensionMismatch` instead.
 ///
 /// Driven through the direct-Deep entry so we can pass an i64
 /// literal without tripping Surf's int32 default-literal range
@@ -625,10 +625,10 @@ fn red_team_205_round2_f1_input_plus_padding_overflow_does_not_panic() {
 /// regress the happy path.
 #[test]
 fn red_team_205_round2_f1_canonical_shape_still_accepted() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
   conv2d(&x, &k, 1, 0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -649,12 +649,12 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
 /// unary point-wise ops so the wrapper does not break the chain.
 #[test]
 fn red_team_205_round2_f2_relu_wrapped_chained_conv2d_typechecks() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
   y = relu(conv2d(&x, &k1, 1, 0))
   conv2d(&y, &k2, 1, 0)
 }
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -671,12 +671,12 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
 /// EXPECT (RT-205 round-2 F2): tanh wrapper is also shape-preserving.
 #[test]
 fn red_team_205_round2_f2_tanh_wrapped_chained_conv2d_typechecks() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
   y = tanh(conv2d(&x, &k1, 1, 0))
   conv2d(&y, &k2, 1, 0)
 }
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -696,12 +696,12 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
 /// `y` to the conv2d output shape via the binary derivation.
 #[test]
 fn red_team_205_round2_f2_add_wrapped_chained_conv2d_typechecks() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], b: tensor[1, 8, 6, 6, f32]) -> tensor[1, 16, 4, 4, f32] = {
   y = add(conv2d(&x, &k1, 1, 0), &b)
   conv2d(&y, &k2, 1, 0)
 }
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -732,12 +732,12 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
 /// accept either diagnostic source.
 #[test]
 fn red_team_205_round2_f2_sum_wrapped_chained_conv2d_still_rejected() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
   y = sum(conv2d(&x, &k1, 1, 0), 1)
   conv2d(&y, &k2, 1, 0)
 }
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for sum-wrapped chain");
@@ -762,12 +762,12 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
 /// pushed a diagnostic.
 #[test]
 fn red_team_205_round2_f3_cascading_errors_dedupe() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
   y = conv2d(&x, &k1, 1, 0)
   conv2d(&y, &k2, 1, 0)
 }
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for non-concrete input dim");
@@ -796,13 +796,13 @@ def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8
 /// not "any duplicate-shaped message".
 #[test]
 fn red_team_205_round2_f3_independent_failures_not_suppressed() {
-    let src = r#"
+    let src = r"
 def f(x1: tensor[1, 3, h, 16, f32], x2: tensor[1, 3, h, 16, f32], k: tensor[8, 3, 3, 3, f32]) -> (tensor[1, 8, 6, 6, f32], tensor[1, 8, 6, 6, f32]) = {
   y1 = conv2d(&x1, &k, 1, 0)
   y2 = conv2d(&x2, &k, 1, 0)
   (y1, y2)
 }
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for non-concrete input dim");
@@ -833,10 +833,10 @@ def f(x1: tensor[1, 3, h, 16, f32], x2: tensor[1, 3, h, 16, f32], k: tensor[8, 3
 /// the HM-side has already emitted the equivalent.
 #[test]
 fn red_team_205_round2_f4_rank5_input_single_diagnostic() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 8, 8, 2, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
   conv2d(&x, &k, 1, 0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for rank-5 input");
@@ -858,10 +858,10 @@ def f(x: tensor[1, 3, 8, 8, 2, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8,
 /// should reach the user.
 #[test]
 fn red_team_205_round2_f4_rank5_kernel_single_diagnostic() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, 2, f32]) -> tensor[1, 8, 6, 6, f32] =
   conv2d(&x, &k, 1, 0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for rank-5 kernel");
@@ -889,12 +889,12 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, 2, f32]) -> tensor[1, 8,
 /// error.
 #[test]
 fn red_team_205_round3_f_a_cascade_through_passthrough_relu() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
   y = relu(conv2d(&x, &k1, 1, 0))
   conv2d(&y, &k2, 1, 0)
 }
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for non-concrete input dim");
@@ -923,12 +923,12 @@ def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8
 /// when the inner conv2d fails.
 #[test]
 fn red_team_205_round3_f_a_cascade_through_passthrough_add() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], b: tensor[1, 8, 6, 6, f32]) -> tensor[1, 16, 4, 4, f32] = {
   y = add(conv2d(&x, &k1, 1, 0), &b)
   conv2d(&y, &k2, 1, 0)
 }
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for non-concrete input dim");
@@ -963,12 +963,12 @@ fn red_team_205_round3_f_a_independent_second_failure_not_suppressed() {
     // (tensor[8, 3, 3, f32]) instead of rank 4, so HM + validator
     // both surface the kernel rank-4 error. There's no f64 cascade
     // here, so we just count any errors with "rank-4 kernel" wording.
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
   y = relu(conv2d(&x, &k1, 1, 0))
   conv2d(&y, &k2, 1, 0)
 }
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure on second conv2d kernel rank");
@@ -988,12 +988,12 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
 /// silently broken.
 #[test]
 fn red_team_205_round3_f_b_max_elem_passthrough() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], b: tensor[1, 8, 6, 6, f32]) -> tensor[1, 16, 4, 4, f32] = {
   y = max_elem(conv2d(&x, &k1, 1, 0), &b)
   conv2d(&y, &k2, 1, 0)
 }
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -1008,15 +1008,15 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
 }
 
 /// EXPECT (RT-205 round-3 F-B): `min_elem` is the canonical IR name
-/// per spec/05 §3.4, not `minimum`. Same shape as the max_elem fix.
+/// per spec/05 §3.4, not `minimum`. Same shape as the `max_elem` fix.
 #[test]
 fn red_team_205_round3_f_b_min_elem_passthrough() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], b: tensor[1, 8, 6, 6, f32]) -> tensor[1, 16, 4, 4, f32] = {
   y = min_elem(conv2d(&x, &k1, 1, 0), &b)
   conv2d(&y, &k2, 1, 0)
 }
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -1045,12 +1045,12 @@ fn red_team_205_round3_f_b_unary_passthrough_audit() {
     ];
     for op in &unary_ops {
         let src = format!(
-            r#"
+            r"
 def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {{
   y = {op}(conv2d(&x, &k1, 1, 0))
   conv2d(&y, &k2, 1, 0)
 }}
-"#
+"
         );
         let deep = surf_to_deep(&src);
         let res = check_ir_program(&deep);
@@ -1082,12 +1082,12 @@ fn red_team_205_round3_f_b_binary_passthrough_audit_arith() {
     let arith_ops = ["add", "sub", "mul", "div", "max_elem", "min_elem"];
     for op in &arith_ops {
         let src = format!(
-            r#"
+            r"
 def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], b: tensor[1, 8, 6, 6, f32]) -> tensor[1, 16, 4, 4, f32] = {{
   y = {op}(conv2d(&x, &k1, 1, 0), &b)
   conv2d(&y, &k2, 1, 0)
 }}
-"#
+"
         );
         let deep = surf_to_deep(&src);
         let res = check_ir_program(&deep);
@@ -1118,12 +1118,12 @@ fn red_team_205_round3_f_b_binary_compare_cascade_dedup() {
         // x has non-concrete h, so conv2d(&x, ...) fails. y = op(conv2d(...), &b);
         // downstream conv2d(&y, ...) should NOT produce its own cascade error.
         let src = format!(
-            r#"
+            r"
 def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], b: tensor[1, 8, 6, 6, f32]) -> tensor[1, 16, 4, 4, f32] = {{
   y = {op}(conv2d(&x, &k1, 1, 0), &b)
   conv2d(&y, &k2, 1, 0)
 }}
-"#
+"
         );
         let deep = surf_to_deep(&src);
         let res = check_ir_program(&deep);
@@ -1156,10 +1156,10 @@ def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8
 /// requiring concrete `in_c`, `h`, `w` and a fully-concrete kernel.
 #[test]
 fn red_team_205_round3_f_c_symbolic_batch_single_call() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[batch, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[batch, 8, 6, 6, f32] =
   conv2d(&x, &k, 1, 0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -1180,12 +1180,12 @@ def f(x: tensor[batch, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[batc
 /// signature is `tensor[batch, 16, 4, 4, f32]`.
 #[test]
 fn red_team_205_round3_f_c_symbolic_batch_chained() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[batch, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[batch, 16, 4, 4, f32] = {
   y = conv2d(&x, &k1, 1, 0)
   conv2d(&y, &k2, 1, 0)
 }
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -1205,10 +1205,10 @@ def f(x: tensor[batch, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16
 /// stride formula and must be concrete.
 #[test]
 fn red_team_205_round3_f_c_nonconcrete_spatial_still_rejected() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, h, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
   conv2d(&x, &k, 1, 0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected rejection for non-concrete spatial dim");
@@ -1221,16 +1221,16 @@ def f(x: tensor[1, 3, h, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
     );
 }
 
-/// EXPECT (RT-205 round-3 F-C negative parity): non-concrete in_c
-/// (input axis 1) is still rejected. in_c must equal kernel axis 1
-/// and feeds the matmul lowering, so symbolic in_c is not
+/// EXPECT (RT-205 round-3 F-C negative parity): non-concrete `in_c`
+/// (input axis 1) is still rejected. `in_c` must equal kernel axis 1
+/// and feeds the matmul lowering, so symbolic `in_c` is not
 /// supported per the F-C scope.
 #[test]
 fn red_team_205_round3_f_c_nonconcrete_in_channels_still_rejected() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, in_c, 8, 8, f32], k: tensor[8, in_c, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
   conv2d(&x, &k, 1, 0)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected rejection for non-concrete in_c");
@@ -1254,12 +1254,12 @@ def f(x: tensor[1, in_c, 8, 8, f32], k: tensor[8, in_c, 3, 3, f32]) -> tensor[1,
 fn red_team_205_round3_f_c_batch_dim_mismatch_detected() {
     // Declared return uses `b2`, but the body's chain carries
     // `batch` through, so HM should refuse the def.
-    let src = r#"
+    let src = r"
 def f(x: tensor[batch, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[b2, 16, 4, 4, f32] = {
   y = conv2d(&x, &k1, 1, 0)
   conv2d(&y, &k2, 1, 0)
 }
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected rejection on batch dim mismatch");

@@ -70,6 +70,7 @@ pub struct DischargeRegistry {
 impl DischargeRegistry {
     /// An empty registry with no engines. A goal dispatched against an empty
     /// registry takes the no-fit path (see [`Self::dispatch`]).
+    #[must_use]
     pub fn new() -> Self {
         Self {
             engines: Vec::new(),
@@ -85,6 +86,7 @@ impl DischargeRegistry {
     ///
     /// An out-of-tree consumer that wants the box/range lane (Beacon) starts
     /// from here and [`register`](Self::register)s its own engine on top.
+    #[must_use]
     pub fn with_builtin_engines() -> Self {
         let mut registry = Self::new();
         // WI-15: the Clarabel SoS certificate engine registers AHEAD of cvc5 so a
@@ -110,8 +112,9 @@ impl DischargeRegistry {
     /// Extend this registry with the Beacon subprocess shim, using the given
     /// content-addressed byte store. The shim is registered only if a binary
     /// is discoverable (explicit path or `CHELIS_BEACON_BIN` env). If no binary
-    /// is found, the registry is unchanged and BoxRange goals take the existing
+    /// is found, the registry is unchanged and `BoxRange` goals take the existing
     /// no-fit path.
+    #[must_use]
     pub fn with_beacon(mut self, store: WireDagByteStore) -> Self {
         if let Some(shim) = BeaconShim::from_env(store) {
             self.register(Box::new(shim));
@@ -131,11 +134,13 @@ impl DischargeRegistry {
     }
 
     /// The number of registered engines.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.engines.len()
     }
 
     /// Whether the registry has no engines.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.engines.is_empty()
     }
@@ -195,6 +200,7 @@ impl DischargeRegistry {
     /// [`crate::discharge::classify_smt_outcome`], so the exhausted result can
     /// only ever be `Untrusted` -- it can never carry a badge a fallen-through
     /// engine did not earn.
+    #[must_use]
     pub fn dispatch(&self, goal: &Goal, timeout_ms: u64) -> Discharge {
         let mut any_fit = false;
         let mut last_non_verdict: Option<Discharge> = None;
@@ -239,6 +245,7 @@ fn is_definite_verdict(result: &TierBResult) -> bool {
 /// last-tried engine's own non-verdict result is preserved as the carried
 /// result when available, so its honest reason (a timeout vs an unknown vs a
 /// lowering error) is not discarded; otherwise a synthesized Error is used.
+#[must_use]
 pub fn exhausted_discharge(goal: &Goal, last_non_verdict: Option<&Discharge>) -> Discharge {
     let reason = format!(
         "all fitting discharge engines were exhausted without a verdict for goal shape `{}`",
@@ -283,6 +290,7 @@ pub fn exhausted_discharge(goal: &Goal, last_non_verdict: Option<&Discharge>) ->
 /// outcome a mismatched in-tree engine already returns. It never carries a
 /// proof qualifier and never claims any soundness above the bottom of the
 /// lattice.
+#[must_use]
 pub fn no_fit_discharge(goal: &Goal) -> Discharge {
     let reason = format!(
         "no registered discharge engine fits goal shape `{}`",
@@ -325,6 +333,7 @@ pub struct SolvePropertyEngine;
 
 #[cfg(not(feature = "smt"))]
 impl SolvePropertyEngine {
+    #[must_use]
     pub const fn new() -> Self {
         Self
     }
@@ -444,7 +453,7 @@ mod tests {
     }
 
     impl MockEngine {
-        /// A sound-over-approximation BoxRange engine (Beacon's stand-in): a
+        /// A sound-over-approximation `BoxRange` engine (Beacon's stand-in): a
         /// `SoundApproximate` discharge carrying `SoundOverApproximation`.
         fn box_range_sound(name: &'static str) -> Self {
             Self {
@@ -475,7 +484,7 @@ mod tests {
         }
 
         /// An SMT-fitting engine returning a DEFINITE over-reals verdict
-        /// (`Proved` / `Disproved`), classified SoundApproximate + RealArith,
+        /// (`Proved` / `Disproved`), classified `SoundApproximate` + `RealArith`,
         /// mirroring how a real SMT engine (cvc5 / Z3) classifies it. The
         /// dispatcher must NOT fall through past this.
         fn smt_real_arith_verdict(name: &'static str, result: TierBResult) -> Self {
@@ -838,7 +847,7 @@ mod tests {
 
     /// Each of the three non-verdict kinds (Timeout / Unknown / Error) falls
     /// through. Pinned as a table so no non-verdict kind is left uncovered: a
-    /// future TierBResult variant that should fall through but does not is
+    /// future `TierBResult` variant that should fall through but does not is
     /// caught here.
     #[test]
     fn every_non_verdict_kind_falls_through() {
@@ -1022,8 +1031,8 @@ mod tests {
         );
     }
 
-    /// Fall-through respects the BoxRange lane too: a non-verdict BoxRange
-    /// engine falls through to a later fitting BoxRange engine that discharges.
+    /// Fall-through respects the `BoxRange` lane too: a non-verdict `BoxRange`
+    /// engine falls through to a later fitting `BoxRange` engine that discharges.
     /// (Beacon could register two interval engines; the weaker-first one
     /// declining must not block the stronger one.)
     #[test]

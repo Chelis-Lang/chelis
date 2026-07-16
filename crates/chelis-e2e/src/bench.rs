@@ -225,9 +225,8 @@ fn oracle_command(models: &[Model], emit_json: Option<&Path>) -> String {
         [Model::Linreg, Model::Mnist, Model::Transformer] => "all",
         _ => "all",
     };
-    let emit_json = emit_json
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "<stdout>".to_string());
+    let emit_json =
+        emit_json.map_or_else(|| "<stdout>".to_string(), |path| path.display().to_string());
     format!(
         "cargo run --release -p chelis-e2e --bin bench_phase1e -- --model {model} --emit-json {emit_json}"
     )
@@ -435,14 +434,12 @@ fn compare_training(
         .report
         .loss_history
         .as_ref()
-        .map(|v| is_decreasing(v))
-        .unwrap_or(false);
+        .is_some_and(|v| is_decreasing(v));
     let right_loss = right
         .report
         .loss_history
         .as_ref()
-        .map(|v| is_decreasing(v))
-        .unwrap_or(false);
+        .is_some_and(|v| is_decreasing(v));
     let mut ok = left_loss && right_loss;
     let mut note = "both runs decreased training loss".to_string();
 
@@ -451,7 +448,7 @@ fn compare_training(
     {
         let acc_gap = (a - b).abs();
         ok &= acc_gap <= 0.15;
-        note = format!("loss trends decrease; final accuracy gap = {:.4}", acc_gap);
+        note = format!("loss trends decrease; final accuracy gap = {acc_gap:.4}");
     }
 
     ComparisonReport {
@@ -481,7 +478,7 @@ fn compare_forward(name: &str, left: &RunArtifacts, right: &RunArtifacts) -> Com
         } else {
             "warn"
         },
-        note: format!("forward tolerance target {:.1e}", FORWARD_TOL),
+        note: format!("forward tolerance target {FORWARD_TOL:.1e}"),
         max_abs_diff: Some(max_abs_diff),
         mean_abs_diff: Some(mean_abs_diff),
     }
@@ -736,7 +733,7 @@ fn parse_run_output(
 
     match serde_json::from_str::<RawRun>(stdout.trim()) {
         Ok(raw) => {
-            let checksum: f64 = raw.output.iter().map(|v| *v as f64).sum();
+            let checksum: f64 = raw.output.iter().map(|v| f64::from(*v)).sum();
             RunArtifacts {
                 report: BackendReport {
                     status: "ok",
@@ -1023,8 +1020,7 @@ fn tool_available(tool: &str, args: &[&str]) -> bool {
     Command::new(tool)
         .args(args)
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 fn cpu_runtime_dir() -> PathBuf {
@@ -1043,8 +1039,9 @@ fn cpu_runtime_library() -> PathBuf {
                 if path
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
+                    .is_some_and(|name| {
+                        name.starts_with("libchelis_runtime") && name.ends_with(".a")
+                    })
                 {
                     return path;
                 }
@@ -1506,64 +1503,64 @@ fn build_training_main_c(
 
     let (param_allocs, param_fills, update_code, free_params) = if uses_accuracy {
         (
-            r#"
+            r"
     chelis_tensor *w1_tensor = chelis_alloc(2, w1_shape, CHELIS_F32);
     chelis_tensor *b1_tensor = chelis_alloc(1, b1_shape, CHELIS_F32);
     chelis_tensor *w2_tensor = chelis_alloc(2, w2_shape, CHELIS_F32);
     chelis_tensor *b2_tensor = chelis_alloc(1, b2_shape, CHELIS_F32);
-"#,
-            r#"
+",
+            r"
     memcpy(w1_tensor->data, w1_init, sizeof(float) * 784 * 128);
     memcpy(b1_tensor->data, b1_init, sizeof(float) * 128);
     memcpy(w2_tensor->data, w2_init, sizeof(float) * 128 * 10);
     memcpy(b2_tensor->data, b2_init, sizeof(float) * 10);
-"#,
+",
             format!(
-                r#"
+                r"
             for (int i = 0; i < 784 * 128; i++) w1_tensor->data[i] -= lr * train_outputs[{gw1}]->data[i];
             for (int i = 0; i < 128; i++) b1_tensor->data[i] -= lr * train_outputs[{gb1}]->data[i];
             for (int i = 0; i < 128 * 10; i++) w2_tensor->data[i] -= lr * train_outputs[{gw2}]->data[i];
             for (int i = 0; i < 10; i++) b2_tensor->data[i] -= lr * train_outputs[{gb2}]->data[i];
-"#,
+",
                 gw1 = grad_w1_idx.unwrap(),
                 gb1 = grad_b1_idx.unwrap(),
                 gw2 = grad_w2_idx.unwrap(),
                 gb2 = grad_b2_idx.unwrap(),
             ),
-            r#"
+            r"
     chelis_free(w1_tensor);
     chelis_free(b1_tensor);
     chelis_free(w2_tensor);
     chelis_free(b2_tensor);
-"#,
+",
         )
     } else {
         (
-            r#"
+            r"
     chelis_tensor *w_tensor = chelis_alloc(2, w_shape, CHELIS_F32);
     chelis_tensor *b_tensor = chelis_alloc(1, b_shape, CHELIS_F32);
-"#,
-            r#"
+",
+            r"
     memcpy(w_tensor->data, w_init, sizeof(float) * features);
     memcpy(b_tensor->data, b_init, sizeof(float) * 1);
-"#,
+",
             format!(
-                r#"
+                r"
             for (int i = 0; i < features; i++) w_tensor->data[i] -= lr * train_outputs[{gw}]->data[i];
             b_tensor->data[0] -= lr * train_outputs[{gb}]->data[0];
-"#,
+",
                 gw = grad_w_idx.unwrap(),
                 gb = grad_b_idx.unwrap(),
             ),
-            r#"
+            r"
     chelis_free(w_tensor);
     chelis_free(b_tensor);
-"#,
+",
         )
     };
 
     let metric_calc = if uses_accuracy {
-        r#"
+        r"
     int correct = 0;
     for (uint64_t batch = 0; batch < test_batches; batch++) {
         memcpy(x_tensor->data, x_test + batch * batch_size * x_dim, sizeof(float) * batch_size * x_dim);
@@ -1589,9 +1586,9 @@ TRAIN_INPUT_ASSIGNMENTS
         for (int i = 0; i < TRAIN_OUTPUT_COUNT; i++) if (infer_outputs[i]) chelis_free(infer_outputs[i]);
     }
     final_accuracy = (float)correct / (float)(test_batches * batch_size);
-"#
+"
     } else {
-        r#"
+        r"
     for (uint64_t batch = 0; batch < test_batches; batch++) {
         memcpy(x_tensor->data, x_test + batch * batch_size * x_dim, sizeof(float) * batch_size * x_dim);
         memcpy(y_tensor->data, y_test + batch * batch_size * y_dim, sizeof(float) * batch_size * y_dim);
@@ -1602,7 +1599,7 @@ TRAIN_INPUT_ASSIGNMENTS
         memcpy(eval_output + batch * batch_size, infer_outputs[EVAL_OUTPUT_INDEX]->data, sizeof(float) * batch_size);
         for (int i = 0; i < TRAIN_OUTPUT_COUNT; i++) if (infer_outputs[i]) chelis_free(infer_outputs[i]);
     }
-"#
+"
     };
 
     let final_json = if uses_accuracy {
@@ -1767,21 +1764,21 @@ int main(void) {{
         },
         y_dim = if uses_accuracy { 10 } else { 1 },
         shape_decls = if uses_accuracy {
-            r#"
+            r"
     int w1_shape[2] = { 784, 128 };
     int b1_shape[1] = { 128 };
     int w2_shape[2] = { 128, 10 };
     int b2_shape[1] = { 10 };
-"#
+"
         } else {
-            r#"
+            r"
     int w_shape[2] = { (int)features, 1 };
     int b_shape[1] = { 1 };
-"#
+"
         },
         features_read = if uses_accuracy { "0" } else { "read_u64(f)" },
         init_allocs = if uses_accuracy {
-            r#"
+            r"
     float *w1_init = (float*)malloc(sizeof(float) * 784 * 128);
     float *b1_init = (float*)malloc(sizeof(float) * 128);
     float *w2_init = (float*)malloc(sizeof(float) * 128 * 10);
@@ -1790,14 +1787,14 @@ int main(void) {{
     read_f32s(f, b1_init, 128);
     read_f32s(f, w2_init, 128 * 10);
     read_f32s(f, b2_init, 10);
-"#
+"
         } else {
-            r#"
+            r"
     float *w_init = (float*)malloc(sizeof(float) * features);
     float *b_init = (float*)malloc(sizeof(float) * 1);
     read_f32s(f, w_init, features);
     read_f32s(f, b_init, 1);
-"#
+"
         },
         param_allocs = param_allocs,
         param_fills = param_fills,
@@ -1830,17 +1827,17 @@ int main(void) {{
             .replace("EVAL_OUTPUT_INDEX", &eval_output_index.to_string()),
         final_json = final_json,
         free_inits = if uses_accuracy {
-            r#"
+            r"
     free(w1_init);
     free(b1_init);
     free(w2_init);
     free(b2_init);
-"#
+"
         } else {
-            r#"
+            r"
     free(w_init);
     free(b_init);
-"#
+"
         },
         free_params = free_params,
     )

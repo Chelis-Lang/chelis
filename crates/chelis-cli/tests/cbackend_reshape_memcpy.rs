@@ -204,7 +204,7 @@ extern chelis_tensor* chelis_host_reshape_tensor(
 "#;
 
 /// Build a `chelis_list` of int64 shape values in the harness.
-const BUILD_SHAPE_LIST_HELPER: &str = r#"
+const BUILD_SHAPE_LIST_HELPER: &str = r"
 static chelis_list* build_shape_list_i64(const int64_t* dims, int64_t len) {
     chelis_value* items = (chelis_value*)malloc(sizeof(chelis_value) * (size_t)len);
     for (int64_t i = 0; i < len; ++i) {
@@ -214,7 +214,7 @@ static chelis_list* build_shape_list_i64(const int64_t* dims, int64_t len) {
     free(items);
     return list;
 }
-"#;
+";
 
 /// f64 reshape. Source buffer is 4 f64 elements; reshape to [2, 2]
 /// must preserve all 8 bytes of each element. With the

@@ -80,12 +80,12 @@ fn root_tensor<'a>(
 /// argmax storage was still tagged f32 (= input precision).
 #[test]
 fn issue233_argmax_reduce_eq_int64_literal_comparator_succeeds() {
-    let src = r#"
+    let src = r"
 make = pad_sequences([[1.0, 4.0, 2.0], [3.0, 0.5, 5.0]], 0.0)
 preds = argmax_reduce(&make, 1)
 refs = to_tensor([cast(1, int64), cast(2, int64)])
 out = eq(preds, refs)
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![2], "eq output shape");
@@ -96,16 +96,16 @@ out = eq(preds, refs)
     );
 }
 
-/// EXPECT: same shape, but for argmin_reduce against the row-wise
+/// EXPECT: same shape, but for `argmin_reduce` against the row-wise
 /// minimum indices.
 #[test]
 fn issue233_argmin_reduce_eq_int64_literal_comparator_succeeds() {
-    let src = r#"
+    let src = r"
 make = pad_sequences([[1.0, 4.0, 2.0], [3.0, 0.5, 5.0]], 0.0)
 preds = argmin_reduce(&make, 1)
 refs = to_tensor([cast(0, int64), cast(1, int64)])
 out = eq(preds, refs)
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![2], "eq output shape");
@@ -121,12 +121,12 @@ out = eq(preds, refs)
 /// cast(1, int64)])` succeeds.
 #[test]
 fn issue233_argmax_reduce_axis0_eq_int64_literal_comparator_succeeds() {
-    let src = r#"
+    let src = r"
 make = pad_sequences([[1.0, 4.0, 2.0], [3.0, 0.5, 5.0]], 0.0)
 preds = argmax_reduce(&make, 0)
 refs = to_tensor([cast(1, int64), cast(0, int64), cast(1, int64)])
 out = eq(preds, refs)
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![3], "eq output shape");
@@ -141,13 +141,13 @@ out = eq(preds, refs)
 fn issue233_argmax_reduce_f64_input_storage_is_int64() {
     // `cast(_, f64)` widens the f32 input to f64; the argmax storage
     // tag must still be int64 regardless of the input's float width.
-    let src = r#"
+    let src = r"
 make = pad_sequences([[1.0, 4.0, 2.0], [3.0, 0.5, 5.0]], 0.0)
 casted = cast(make, f64)
 preds = argmax_reduce(&casted, 1)
 refs = to_tensor([cast(1, int64), cast(2, int64)])
 out = eq(preds, refs)
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![2]);
@@ -159,16 +159,16 @@ out = eq(preds, refs)
 // ---------------------------------------------------------------------
 
 /// EXPECT: `to_list` of an `argmax_reduce` result yields int64 scalars
-/// (ExecutionValue::Int64), not Float64. The Phase 3j-pre caveat said
+/// (`ExecutionValue::Int64`), not Float64. The Phase 3j-pre caveat said
 /// "we store integer-valued floats"; with the storage widening, the
 /// per-element schema dtype now matches the type-system label.
 #[test]
 fn issue233_argmax_reduce_to_list_returns_int64_scalars() {
-    let src = r#"
+    let src = r"
 make = pad_sequences([[1.0, 4.0, 2.0], [3.0, 0.5, 5.0]], 0.0)
 preds = argmax_reduce(&make, 1)
 out = to_list(preds)
-"#;
+";
     let result = eval_surf(src);
     let ExecutionValue::List { value: items } = root(&result, "out") else {
         panic!("expected list for `out`");
@@ -194,11 +194,11 @@ out = to_list(preds)
 /// EXPECT: `to_list` of an `argmin_reduce` result yields int64 scalars.
 #[test]
 fn issue233_argmin_reduce_to_list_returns_int64_scalars() {
-    let src = r#"
+    let src = r"
 make = pad_sequences([[1.0, 4.0, 2.0], [3.0, 0.5, 5.0]], 0.0)
 preds = argmin_reduce(&make, 1)
 out = to_list(preds)
-"#;
+";
     let result = eval_surf(src);
     let ExecutionValue::List { value: items } = root(&result, "out") else {
         panic!("expected list for `out`");
@@ -226,14 +226,14 @@ fn issue233_school_accuracy_pattern_works() {
     // logits[0] = [0.1, 0.7, 0.2]  -> argmax = 1
     // logits[1] = [0.8, 0.1, 0.1]  -> argmax = 0
     // labels    = [1, 0]           -> matches both -> accuracy = 1.0
-    let src = r#"
+    let src = r"
 logits = pad_sequences([[0.1, 0.7, 0.2], [0.8, 0.1, 0.1]], 0.0)
 labels = to_tensor([cast(1, int64), cast(0, int64)])
 preds = argmax_reduce(&logits, 1)
 hits_mask = eq(preds, labels)
 hits = cast(hits_mask, int64)
 all_correct = eq(hits, to_tensor([cast(1, int64), cast(1, int64)]))
-"#;
+";
     let result = eval_surf(src);
     let all_correct = root_tensor(&result, "all_correct");
     assert_eq!(all_correct.shape, vec![2]);
@@ -258,13 +258,13 @@ all_correct = eq(hits, to_tensor([cast(1, int64), cast(1, int64)]))
 /// detection for genuinely dtype-distinct comparators.
 #[test]
 fn issue233_argmax_reduce_eq_non_int64_comparator_rejects() {
-    let src = r#"
+    let src = r"
 make = pad_sequences([[1.0, 4.0, 2.0], [3.0, 0.5, 5.0]], 0.0)
 preds = argmax_reduce(&make, 1)
 refs = pad_sequences([[1.0, 2.0]], 0.0)
 flat_refs = reshape(refs, [2])
 out = eq(preds, flat_refs)
-"#;
+";
     let err = eval_surf_expect_err(src);
     assert!(
         err.to_lowercase().contains("precision") || err.to_lowercase().contains("mismatch"),
@@ -284,13 +284,13 @@ out = eq(preds, flat_refs)
 /// precision-mismatch error.
 #[test]
 fn issue233_argmin_reduce_eq_non_int64_comparator_rejects() {
-    let src = r#"
+    let src = r"
 make = pad_sequences([[1.0, 4.0, 2.0], [3.0, 0.5, 5.0]], 0.0)
 preds = argmin_reduce(&make, 1)
 refs = pad_sequences([[0.0, 1.0]], 0.0)
 flat_refs = reshape(refs, [2])
 out = eq(preds, flat_refs)
-"#;
+";
     let err = eval_surf_expect_err(src);
     assert!(
         err.to_lowercase().contains("precision") || err.to_lowercase().contains("mismatch"),

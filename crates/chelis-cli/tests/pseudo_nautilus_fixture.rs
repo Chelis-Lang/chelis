@@ -3,7 +3,7 @@
 //! The fixture in `tests/fixtures/pseudo_nautilus/` exists to demonstrate the
 //! Phase 3t "hard rule" pattern end-to-end: all tests that verify internal
 //! correctness are written in Chelis and run via `chelis test`; Python is
-//! reserved for external-oracle parity (scipy, pandas, sympy, QuantLib) and
+//! reserved for external-oracle parity (scipy, pandas, sympy, `QuantLib`) and
 //! lives in a sibling `parity/` directory that the test runner never touches.
 //!
 //! Coverage here:
@@ -201,7 +201,7 @@ fn pseudo_nautilus_parity_script_imports_cleanly() {
     let probe = StdCommand::new("python3")
         .arg("-c")
         .arg(format!(
-            r#"
+            r"
 import ast, pathlib, sys
 tree = ast.parse(pathlib.Path(r'{}').read_text())
 found = False
@@ -217,7 +217,7 @@ for node in ast.walk(tree):
 if not found:
     sys.stderr.write('parity script does not actually import scipy\n')
     sys.exit(2)
-"#,
+",
             script.display()
         ))
         .output();
@@ -241,8 +241,8 @@ if not found:
 /// dev machine and the script can take several seconds when it shells out to
 /// `chelis eval` for every sample point. Run manually with:
 ///
-///   cargo test -p chelis-cli --test pseudo_nautilus_fixture \
-///     -- --ignored pseudo_nautilus_parity_script_runs_with_scipy
+///   cargo test -p chelis-cli --test `pseudo_nautilus_fixture` \
+///     -- --ignored `pseudo_nautilus_parity_script_runs_with_scipy`
 ///
 /// Expected: exit 0, printed parity table with max |diff| below 1e-5.
 #[test]
@@ -265,11 +265,10 @@ fn pseudo_nautilus_parity_script_runs_with_scipy() {
         .current_dir(&pkg)
         .output()
         .expect("spawn python3");
-    if !output.status.success() {
-        panic!(
-            "parity script exited nonzero:\nstdout={}\nstderr={}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    assert!(
+        output.status.success(),
+        "parity script exited nonzero:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

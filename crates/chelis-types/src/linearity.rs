@@ -16,6 +16,7 @@ pub struct LinearityInfo {
 }
 
 impl LinearityInfo {
+    #[must_use]
     pub fn reusable_input_for_span(&self, span: Span) -> Option<usize> {
         self.reusable_inputs_by_offset.get(&span.offset).copied()
     }
@@ -32,6 +33,7 @@ impl LinearityInfo {
     /// new-code half. `self` (the library half) wins on an offset clash;
     /// in practice the two halves carry disjoint span offsets because
     /// they come from separately-parsed source regions.
+    #[must_use]
     pub fn merged_with(&self, other: &LinearityInfo) -> LinearityInfo {
         let mut reusable_inputs_by_offset = self.reusable_inputs_by_offset.clone();
         for (offset, input_index) in &other.reusable_inputs_by_offset {
@@ -63,7 +65,7 @@ enum BindingState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConsumeKind {
     /// `let alias = x` and similar var-RHS bindings.  At the IR
-    /// level `lower_let` maps `alias` to the same NodeId as `x`,
+    /// level `lower_let` maps `alias` to the same `NodeId` as `x`,
     /// so the value is structurally shared rather than destroyed.
     /// Later borrow-reads of `x` must succeed.  See
     /// `spec/design/implicit_linearity.md` "Copy Insertion" and
@@ -237,7 +239,7 @@ struct Checker {
     /// `expr_is_owned_or_borrow_linear` so `&adt_value` is accepted as
     /// a borrow whenever the ADT's definition contains a tensor, not
     /// only when the ADT's type *arguments* contain one. Resolves the
-    /// downstream blocker for `School` P1.5 (BatchNorm) and P2.5
+    /// downstream blocker for `School` P1.5 (`BatchNorm`) and P2.5
     /// (optimizer `_step_tree`) where `&BatchNormParams` /
     /// `&AdamState[tensor[..]]` (with the tensor in a record field,
     /// not the ADT-arg position) was rejected with `InvalidBorrow`.
@@ -574,7 +576,7 @@ impl Checker {
                 Some("copy") => self.check_copy(list, scope),
                 Some("realize") => self.check_realize(expr, list, scope),
                 Some("borrow") => {
-                    self.invalid_borrow(expr, "borrow is only valid as a direct call argument")
+                    self.invalid_borrow(expr, "borrow is only valid as a direct call argument");
                 }
                 Some("app") => self.check_app(expr, list, scope),
                 Some("pipe") => self.check_pipe(list, scope),
@@ -1394,7 +1396,7 @@ fn callee_is_observational_higher_order(expr: &Expr) -> bool {
     let Expr::List(list, _) = expr else {
         return false;
     };
-    matches!(get_tag(list), Some("grad") | Some("vmap"))
+    matches!(get_tag(list), Some("grad" | "vmap"))
 }
 
 fn param_names(expr: &Expr) -> Vec<String> {
@@ -1666,16 +1668,15 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
                 | "to_list"
                 | "tensor_to_scalar"
                 | "len"
-                | "index",
+                | "index"
+                | "split"
+                | "cumsum"
+                | "sort"
+                | "diagonal"
+                | "trace",
             0
-        ) | ("conv2d", 0 | 1)
+        ) | ("conv2d" | "gather", 0 | 1)
             | ("einsum", 1 | 2)
-            | ("split", 0)
-            | ("gather", 0 | 1)
-            | ("cumsum", 0)
-            | ("sort", 0)
-            | ("diagonal", 0)
-            | ("trace", 0)
     )
 }
 
@@ -2075,8 +2076,7 @@ fn app_site(expr: &Expr, list: &List) -> ConsumeSite {
     let name = children(list)
         .first()
         .and_then(var_name)
-        .map(|name| format!("call to `{name}`"))
-        .unwrap_or_else(|| "call".to_string());
+        .map_or_else(|| "call".to_string(), |name| format!("call to `{name}`"));
     ConsumeSite {
         description: format!("{name} {}", diag_site(expr)),
         kind: ConsumeKind::Structural,

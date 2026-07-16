@@ -98,7 +98,7 @@ fn assert_check_clean(path: &Path) {
         serde_json::to_string_pretty(&json).unwrap_or_default(),
     );
     assert_eq!(
-        json["errors"].as_array().map(|a| a.len()).unwrap_or(0),
+        json["errors"].as_array().map_or(0, std::vec::Vec::len),
         0,
         "{} produced check errors",
         path.display(),
@@ -106,8 +106,7 @@ fn assert_check_clean(path: &Path) {
     assert_eq!(
         json["unresolved_names"]
             .as_array()
-            .map(|a| a.len())
-            .unwrap_or(0),
+            .map_or(0, std::vec::Vec::len),
         0,
         "{} produced unresolved names",
         path.display(),
@@ -150,8 +149,7 @@ fn run_build_c(path: &Path, out_dir: &Path) {
 
 fn generated_source_needs_blas(out_dir: &Path, source: &str) -> bool {
     fs::read_to_string(out_dir.join(source))
-        .map(|text| text.contains("cblas_sgemm(") || text.contains("\"chelis_blas.h\""))
-        .unwrap_or(false)
+        .is_ok_and(|text| text.contains("cblas_sgemm(") || text.contains("\"chelis_blas.h\""))
 }
 
 fn cpu_toolchain(out_dir: &Path, source: &str) -> chelis_backend_c::toolchain::NativeToolchain {
@@ -314,13 +312,13 @@ fn parse_tensor_line(line: &str) -> Option<(Vec<u64>, Vec<f64>)> {
 
     let shape: Vec<u64> = shape_str
         .split(',')
-        .map(|s| s.trim())
+        .map(str::trim)
         .filter(|s| !s.is_empty())
         .filter_map(|s| s.parse::<u64>().ok())
         .collect();
     let data: Vec<f64> = data_str
         .split(',')
-        .map(|s| s.trim())
+        .map(str::trim)
         .filter(|s| !s.is_empty())
         .filter_map(|s| s.parse::<f64>().ok())
         .collect();

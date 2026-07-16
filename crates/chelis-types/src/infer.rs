@@ -11,10 +11,10 @@ use crate::adt::{AdtRegistry, CallShape};
 use crate::builtins;
 use crate::context::{TypeEnv, TypeEnvInner};
 use crate::env::Env;
-use crate::errors::*;
+use crate::errors::{CheckError, CheckErrorKind};
 use crate::linearity::LinearityInfo;
-use crate::types::*;
-use crate::unify::*;
+use crate::types::{Dim, DimVar, Prim, RankVar, Scheme, TensorPrec, Type, TypeVar, VarGen};
+use crate::unify::{Subst, TypeError, TypeErrorKind, unify, unify_dim, unify_tensor_prec};
 
 use std::cell::{Cell, RefCell};
 
@@ -45,7 +45,7 @@ use std::cell::{Cell, RefCell};
 /// chain overflows is build- and stack-profile dependent -- the same
 /// `var`-only chain overflows around depth ~27 (debug / 2 MiB) through
 /// ~6090 (release / 32 MiB), a >200x spread (measured; see
-/// docs/investigations/wi1_infer_recursion_depth.md). A static depth
+/// `docs/investigations/wi1_infer_recursion_depth.md`). A static depth
 /// constant is a tuning treadmill: it drifts with per-frame size and
 /// assumes a fixed thread stack. `stacker::remaining_stack()` measures the
 /// actual resource, so the guard stays correct under any build profile and
@@ -82,7 +82,7 @@ const FALLBACK_MAX_DEPTH: usize = 20;
 /// thousands -- a finite source property: the reef linker concatenates each
 /// module's decls under mangled internal names and references every export
 /// once rather than re-inlining bodies, so linking adds breadth, not unbounded
-/// depth; see docs/investigations/wi1_infer_recursion_depth.md). The
+/// depth; see `docs/investigations/wi1_infer_recursion_depth.md`). The
 /// investigation measured a 512 MiB thread completing the real pricer, and
 /// every recursive pass over the tree (inference, the validate / annotate
 /// passes, plus the `deep::Expr` clones and the final drop) runs inside this
@@ -465,6 +465,7 @@ pub struct CheckedProgram {
 }
 
 impl CheckedProgram {
+    #[must_use]
     pub fn from_parts(
         annotated_exprs: Vec<deep::Expr>,
         type_env: HashMap<String, deep::Expr>,
@@ -478,6 +479,7 @@ impl CheckedProgram {
         }
     }
 
+    #[must_use]
     pub fn from_parts_with_signature_context(
         annotated_exprs: Vec<deep::Expr>,
         type_env: HashMap<String, deep::Expr>,
@@ -493,26 +495,32 @@ impl CheckedProgram {
         }
     }
 
+    #[must_use]
     pub fn exprs(&self) -> &[deep::Expr] {
         &self.annotated_exprs
     }
 
+    #[must_use]
     pub fn annotated_exprs(&self) -> &[deep::Expr] {
         &self.annotated_exprs
     }
 
+    #[must_use]
     pub fn type_env(&self) -> &HashMap<String, deep::Expr> {
         &self.type_env
     }
 
+    #[must_use]
     pub fn linearity(&self) -> &LinearityInfo {
         &self.linearity
     }
 
+    #[must_use]
     pub fn signature_inference(&self) -> &SignatureInferenceMetadata {
         &self.signature_inference
     }
 
+    #[must_use]
     pub fn with_linearity(mut self, linearity: LinearityInfo) -> Self {
         self.linearity = linearity;
         self
@@ -547,6 +555,7 @@ impl CheckedProgram {
     /// The monolithic-vs-layered acceptance oracle is what proves this
     /// composition is byte-identical to the monolithic path; a
     /// divergence is a compiler-correctness bug, not a tuning knob.
+    #[must_use]
     pub fn compose(library: &CheckedProgram, new_code: &CheckedProgram) -> Self {
         let mut annotated_exprs =
             Vec::with_capacity(library.annotated_exprs.len() + new_code.annotated_exprs.len());
@@ -582,6 +591,7 @@ pub struct SignatureInferenceMetadata {
 }
 
 impl SignatureInferenceMetadata {
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.functions.is_empty()
     }
@@ -607,6 +617,7 @@ pub struct ParamSignatureInference {
 }
 
 /// Run type inference on a list of top-level Deep expressions.
+#[must_use]
 pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
     // WI-1 follow-up: run the whole pipeline on a grown stack so a deeply
     // nested but finite program checks end-to-end instead of tripping a
@@ -733,9 +744,8 @@ fn build_type_env_from_library_inner(library_exprs: &[deep::Expr]) -> Result<Typ
     // Reset the stack-exhaustion flag for this check unit; drained below
     // before the empty-errors gate (covered-or-rejected on deep input).
     let stack_scope = StackExhaustionScope::enter();
-    let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
-        .map(|v| v == "1")
-        .unwrap_or(false);
+    let detail_profile =
+        std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL").is_some_and(|v| v == "1");
     let mut sub_t = std::time::Instant::now();
     let log_sub = |label: &str, t: &mut std::time::Instant| {
         if detail_profile {
@@ -1181,9 +1191,8 @@ fn check_ir_with_signature_context_inner(
     // error vector below before the empty-errors gate so a deep-input stack
     // bail always fails the check (never a silent green / partial result).
     let stack_scope = StackExhaustionScope::enter();
-    let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
-        .map(|v| v == "1")
-        .unwrap_or(false);
+    let detail_profile =
+        std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL").is_some_and(|v| v == "1");
     let mut sub_t = std::time::Instant::now();
     let log_sub = |label: &str, t: &mut std::time::Instant| {
         if detail_profile {
@@ -1298,6 +1307,7 @@ fn check_typed_program_inner(exprs: &[deep::Expr]) -> Result<CheckedProgram, Inf
     }
 }
 
+#[must_use]
 pub fn infer_ir_program(exprs: &[deep::Expr]) -> InferResult {
     // WI-1 follow-up: grow the stack for the whole pipeline.
     with_grown_stack(|| infer_ir_program_inner(exprs))
@@ -1460,9 +1470,8 @@ fn infer_ir_program_with_state(
     // Per-decl profile: when CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL=1, emit
     // one stderr line per top-level decl with its name and inference time.
     // Aggregated by name in caller scripts to attribute cost per module.
-    let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
-        .map(|v| v == "1")
-        .unwrap_or(false);
+    let detail_profile =
+        std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL").is_some_and(|v| v == "1");
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     for (module, expr) in &items {
         let t0 = if detail_profile {
@@ -1735,8 +1744,7 @@ fn collect_terminal_callees(
             Some("let") => {
                 let kids = children(list);
                 kids.get(1)
-                    .map(|body| collect_terminal_callees(body, shadowed, out))
-                    .unwrap_or(false)
+                    .is_some_and(|body| collect_terminal_callees(body, shadowed, out))
             }
             Some("if") => {
                 let kids = children(list);
@@ -1758,8 +1766,7 @@ fn collect_terminal_callees(
                     {
                         children(arm_list)
                             .get(2)
-                            .map(|body| collect_terminal_callees(body, shadowed, out))
-                            .unwrap_or(false)
+                            .is_some_and(|body| collect_terminal_callees(body, shadowed, out))
                     } else {
                         false
                     }
@@ -1823,8 +1830,7 @@ fn every_terminal_is_self_call(expr: &deep::Expr, def_name: &str) -> bool {
             Some("let") => {
                 let kids = children(list);
                 kids.get(1)
-                    .map(|body| every_terminal_is_self_call(body, def_name))
-                    .unwrap_or(false)
+                    .is_some_and(|body| every_terminal_is_self_call(body, def_name))
             }
             Some("if") => {
                 let kids = children(list);
@@ -1845,8 +1851,7 @@ fn every_terminal_is_self_call(expr: &deep::Expr, def_name: &str) -> bool {
                     {
                         children(arm_list)
                             .get(2)
-                            .map(|body| every_terminal_is_self_call(body, def_name))
-                            .unwrap_or(false)
+                            .is_some_and(|body| every_terminal_is_self_call(body, def_name))
                     } else {
                         false
                     }
@@ -1875,7 +1880,7 @@ fn body_is_literal_self_ref(body: &deep::Expr, name: &str) -> bool {
                 // in Deep: `(x : T)` keeps `x` as the first child. When
                 // the underlying is a var with the self name, treat it as
                 // the Nautilus pattern.
-                Some("ascribe") | Some(":") => match children(list).first() {
+                Some("ascribe" | ":") => match children(list).first() {
                     Some(inner) => current = inner,
                     None => return false,
                 },
@@ -2396,7 +2401,7 @@ fn collect_top_level_calls(
             }
         }
         deep::Expr::MetaExpr(meta, _) => {
-            collect_top_level_calls(&meta.expr, def_names, bound, calls)
+            collect_top_level_calls(&meta.expr, def_names, bound, calls);
         }
         deep::Expr::List(list, _) => match get_tag(list) {
             Some("app") => {
@@ -2501,10 +2506,10 @@ fn param_has_consuming_use_inner(
         }
         deep::Expr::List(list, _) => match get_tag(list) {
             Some("var") => var_name_list(list) == Some(param) && !is_bound_name(param, bound),
-            Some("borrow") | Some("copy") => children(list).first().is_some_and(|child| {
+            Some("borrow" | "copy") => children(list).first().is_some_and(|child| {
                 param_nested_consuming_use(child, param, bound, available_signatures, type_env)
             }),
-            Some("drop") | Some("realize") => children(list)
+            Some("drop" | "realize") => children(list)
                 .first()
                 .is_some_and(|child| expr_mentions_unshadowed_name(child, param, bound)),
             Some("app") => app_consumes_param(list, param, bound, available_signatures, type_env),
@@ -3180,8 +3185,7 @@ fn detect_top_level_binding_cycles(exprs: &[deep::Expr], errors: &mut Vec<CheckE
             let empty_applied: HashSet<String> = HashSet::new();
             fn_body_refs
                 .get(name)
-                .map(|(r, a)| (r.clone(), a.clone()))
-                .unwrap_or((empty_refs, empty_applied))
+                .map_or((empty_refs, empty_applied), |(r, a)| (r.clone(), a.clone()))
         } else {
             (
                 direct_refs.get(name).cloned().unwrap_or_default(),
@@ -3320,10 +3324,9 @@ fn detect_top_level_binding_cycles(exprs: &[deep::Expr], errors: &mut Vec<CheckE
     }
 
     let is_value = |name: &str| -> bool {
-        def_bodies
-            .get(name)
-            .map(|body| !matches!(body, deep::Expr::List(list, _) if get_tag(list) == Some("fn")))
-            .unwrap_or(false)
+        def_bodies.get(name).is_some_and(
+            |body| !matches!(body, deep::Expr::List(list, _) if get_tag(list) == Some("fn")),
+        )
     };
     let mut color: HashMap<String, Color> = def_names
         .iter()
@@ -3494,7 +3497,7 @@ fn validate_tensor_precisions_in_program(exprs: &[deep::Expr], errors: &mut Vec<
             deep::Expr::List(list, _)
                 if matches!(
                     get_tag(list),
-                    Some("def") | Some("defsig") | Some("deftype") | Some("typealias")
+                    Some("def" | "defsig" | "deftype" | "typealias")
                 ) =>
             {
                 children(list)
@@ -3988,14 +3991,10 @@ fn lookup_sig_in_type_env<'a>(type_env: &'a IrTypeEnv, name: &str) -> Option<&'a
     type_env.get(name).or_else(|| {
         // Fall back to terminal-name match (mirrors `lookup_declared_type_expr`).
         let mut matches = type_env.iter().filter_map(|(key, value)| {
-            let key_terminal = key
-                .rsplit_once("__")
-                .map(|(_, t)| t)
-                .unwrap_or(key.as_str());
+            let key_terminal = key.rsplit_once("__").map_or(key.as_str(), |(_, t)| t);
             let key_terminal = key_terminal
                 .rsplit_once('.')
-                .map(|(_, t)| t)
-                .unwrap_or(key_terminal);
+                .map_or(key_terminal, |(_, t)| t);
             (key_terminal == name).then_some(value)
         });
         let first = matches.next()?;
@@ -4034,7 +4033,7 @@ fn type_expr_has_tensor_prec_var(expr: &deep::Expr) -> bool {
     };
     match get_tag(list) {
         Some("t-tensor") => precision_var_name_in_type_expr(stripped).is_some(),
-        Some("t-fn") | Some("t-tuple") | Some("t-adt") => {
+        Some("t-fn" | "t-tuple" | "t-adt") => {
             children(list).iter().any(type_expr_has_tensor_prec_var)
         }
         _ => false,
@@ -4550,12 +4549,9 @@ fn validate_ir_expr(
             }
             if get_tag(list) == Some("cast") {
                 let kids = children(list);
-                return kids
-                    .first()
-                    .map(|inner| {
-                        validate_ir_expr(inner, type_env, static_env, failed_let_names, errors)
-                    })
-                    .unwrap_or(StaticValue::Unknown);
+                return kids.first().map_or(StaticValue::Unknown, |inner| {
+                    validate_ir_expr(inner, type_env, static_env, failed_let_names, errors)
+                });
             }
             if get_tag(list) == Some("app") {
                 let kids = children(list);
@@ -4651,8 +4647,7 @@ fn literal_static_value(expr: &deep::Expr) -> StaticValue {
         deep::Expr::Atom(deep::Atom::Str(value), _) => StaticValue::String(value.clone()),
         deep::Expr::List(list, _) if get_tag(list) == Some("lit") => children(list)
             .first()
-            .map(literal_static_value)
-            .unwrap_or(StaticValue::Unknown),
+            .map_or(StaticValue::Unknown, literal_static_value),
         _ => StaticValue::Unknown,
     }
 }
@@ -5121,9 +5116,10 @@ fn resolve_axis_pair_member(
     // through to host-runtime defense-in-depth.
     match axis_expr.and_then(extract_int_for_dim) {
         Some(raw) => match tensor_ty {
-            Type::Tensor(dims, _) => match normalize_static_axis(dims.len(), raw) {
-                Some(axis) => Ok(axis),
-                None => {
+            Type::Tensor(dims, _) => {
+                if let Some(axis) = normalize_static_axis(dims.len(), raw) {
+                    Ok(axis)
+                } else {
                     errors.push(CheckError::new(
                         CheckErrorKind::TypeMismatch,
                         with_macro_provenance(
@@ -5134,7 +5130,7 @@ fn resolve_axis_pair_member(
                     ));
                     Err(())
                 }
-            },
+            }
             // Non-tensor operand: keep a non-negative literal verbatim
             // and let the downstream shape checker surface the real
             // mismatch.
@@ -5166,9 +5162,10 @@ fn resolve_builtin_axis(
     // Issue #216: cast-aware extractor; see `resolve_axis_pair_member`.
     let raw_axis = axis_expr.and_then(extract_int_for_dim);
     match (tensor_ty, raw_axis) {
-        (Type::Tensor(dims, _), Some(raw)) => match normalize_static_axis(dims.len(), raw) {
-            Some(axis) => Some(axis),
-            None => {
+        (Type::Tensor(dims, _), Some(raw)) => {
+            if let Some(axis) = normalize_static_axis(dims.len(), raw) {
+                Some(axis)
+            } else {
                 errors.push(CheckError::new(
                     CheckErrorKind::TypeMismatch,
                     with_macro_provenance(
@@ -5179,12 +5176,11 @@ fn resolve_builtin_axis(
                 ));
                 None
             }
-        },
+        }
         _ => Some(
             raw_axis
                 .filter(|raw| *raw >= 0)
-                .map(|raw| raw as usize)
-                .unwrap_or(0),
+                .map_or(0, |raw| raw as usize),
         ),
     }
 }
@@ -5269,9 +5265,8 @@ fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
         &mut declaration_errors,
     );
 
-    let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
-        .map(|v| v == "1")
-        .unwrap_or(false);
+    let detail_profile =
+        std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL").is_some_and(|v| v == "1");
     let mut annotated = Vec::with_capacity(exprs.len());
     for expr in exprs {
         let t0 = if detail_profile {
@@ -5308,8 +5303,7 @@ fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
         if let Some(t0) = t0 {
             let elapsed = t0.elapsed();
             let label = top_level_decl_name(expr)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "<anon>".to_string());
+                .map_or_else(|| "<anon>".to_string(), std::string::ToString::to_string);
             eprintln!(
                 "annotate_ir_decl: {:>8.4}s {}",
                 elapsed.as_secs_f64(),
@@ -5355,9 +5349,8 @@ fn annotate_ir_program_with_context(context: &TypeEnv, exprs: &[deep::Expr]) -> 
         &mut declaration_errors,
     );
 
-    let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
-        .map(|v| v == "1")
-        .unwrap_or(false);
+    let detail_profile =
+        std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL").is_some_and(|v| v == "1");
     let mut annotated = Vec::with_capacity(exprs.len());
     for expr in exprs {
         let t0 = if detail_profile {
@@ -5397,7 +5390,7 @@ fn annotate_ir_program_with_context(context: &TypeEnv, exprs: &[deep::Expr]) -> 
             let elapsed = t0.elapsed();
             // exprs here is at the module-wrapper level; pull a label.
             let label = top_level_decl_name(expr)
-                .map(|s| s.to_string())
+                .map(std::string::ToString::to_string)
                 .or_else(|| module_name(expr).map(|m| format!("module:{m}")))
                 .unwrap_or_else(|| "<anon>".to_string());
             eprintln!(
@@ -5967,7 +5960,7 @@ fn stamp_pattern_binding_types(
         deep::Expr::List(list, span) => {
             let tag = get_tag(list);
             let kids = children(list);
-            let needs_type_stamp = matches!(tag, Some("pat-var") | Some("pat-as"));
+            let needs_type_stamp = matches!(tag, Some("pat-var" | "pat-as"));
 
             // The binding's name lives at the first child for both
             // `pat-var` and `pat-as`. Other pattern tags carry no
@@ -6212,10 +6205,7 @@ fn span_of_expr(expr: &deep::Expr) -> Span {
 }
 
 fn span_of_list(list: &deep::List) -> Span {
-    list.elements
-        .first()
-        .map(span_of_expr)
-        .unwrap_or_else(zero_span)
+    list.elements.first().map_or_else(zero_span, span_of_expr)
 }
 
 fn ir_builtin_name(list: &deep::List) -> Option<&str> {
@@ -6420,9 +6410,7 @@ fn extend_ir_env_with_fn_params(fn_list: &deep::List, type_env: &IrTypeEnv) -> I
 fn expr_tensor_type_is_concrete(expr: &deep::Expr, type_env: &IrTypeEnv) -> bool {
     // Peel `(borrow {} ...)` so the idiomatic Surf borrow form does
     // not silently bypass the dim-concreteness check.
-    arg_tensor_type_expr(expr, type_env)
-        .map(|ty| type_expr_is_ir_concrete(&ty))
-        .unwrap_or(false)
+    arg_tensor_type_expr(expr, type_env).is_some_and(|ty| type_expr_is_ir_concrete(&ty))
 }
 
 /// Check whether a conv2d input tensor argument is concrete in every
@@ -6529,7 +6517,7 @@ fn conv2d_input_is_failed_let_name(list: &deep::List, failed_let_names: &HashSet
 ///
 /// All shape-sensitive validator errors flow through this helper so
 /// they uniformly get DimensionMismatch-grade severity and span
-/// suffixes, matching the inference-layer DimensionMismatch surface
+/// suffixes, matching the inference-layer `DimensionMismatch` surface
 /// that JSON tooling already understands (RT-205 F6).
 fn validator_error(
     kind: CheckErrorKind,
@@ -6578,10 +6566,7 @@ fn list_span_id(list: &deep::List) -> Option<&str> {
 /// and bare `"<start>..<end>"` ranges.
 fn parse_span_offset(span_id: &str) -> Option<usize> {
     // Format: "surf:10..25" or "10..25" or "octant:line:7" (opaque)
-    let numeric_part = span_id
-        .rfind(':')
-        .map(|i| &span_id[i + 1..])
-        .unwrap_or(span_id);
+    let numeric_part = span_id.rfind(':').map_or(span_id, |i| &span_id[i + 1..]);
     // Try to parse "start..end"
     numeric_part
         .split_once("..")
@@ -7122,19 +7107,18 @@ fn extract_typed_scalar_literal(
     // positive-stride / non-negative-padding diagnostic instead of the
     // misleading "requires a literal integer stride" message that
     // pre-fix appeared whenever the literal was wrapped.
-    match extract_int_for_dim(arg) {
-        Some(v) => Some(v),
-        None => {
-            errors.push(validator_error(
-                CheckErrorKind::DimensionMismatch,
-                list,
-                format!("IR builtin `conv2d` requires a literal integer {label}"),
-                vec![format!(
-                    "Pass `{label}` as a constant int literal, not a variable or expression"
-                )],
-            ));
-            None
-        }
+    if let Some(v) = extract_int_for_dim(arg) {
+        Some(v)
+    } else {
+        errors.push(validator_error(
+            CheckErrorKind::DimensionMismatch,
+            list,
+            format!("IR builtin `conv2d` requires a literal integer {label}"),
+            vec![format!(
+                "Pass `{label}` as a constant int literal, not a variable or expression"
+            )],
+        ));
+        None
     }
 }
 
@@ -7230,8 +7214,7 @@ fn type_expr_is_ir_concrete(expr: &deep::Expr) -> bool {
     match expr {
         deep::Expr::List(list, _) if get_tag(list) == Some("t-prim") => true,
         _ => tensor_dims_from_type_expr(expr)
-            .map(|dims| dims.iter().all(|d| matches!(d, DeepDimKind::Lit(_))))
-            .unwrap_or(false),
+            .is_some_and(|dims| dims.iter().all(|d| matches!(d, DeepDimKind::Lit(_)))),
     }
 }
 
@@ -7337,7 +7320,7 @@ fn terminal_segment(name: &str) -> &str {
 /// its terminal segment starts with an uppercase ASCII letter (§3.1, the
 /// same rule the surf parser uses to classify a bare uppercase identifier
 /// as `Expr::Constructor` / `Pattern::Constructor`). Type names are also
-/// PascalCase, but they never reach value-position `var`/`pat-ctor`
+/// `PascalCase`, but they never reach value-position `var`/`pat-ctor`
 /// resolution, so an uppercase terminal in those positions is a
 /// constructor.
 fn is_constructor_name(name: &str) -> bool {
@@ -7353,7 +7336,7 @@ fn is_constructor_name(name: &str) -> bool {
 /// constructor (chelis#157/#316 rewrite the reference to its mangled name
 /// when the importing module declares it locally or imports it by name).
 ///
-/// Returns `true` when `name` looks like a constructor (PascalCase terminal)
+/// Returns `true` when `name` looks like a constructor (`PascalCase` terminal)
 /// but is *not* bound exactly and is *only* reachable through the registry's
 /// fuzzy terminal-segment fallback (`lookup_terminal_unique`). That fallback
 /// is exactly the silent cross-module mis-resolution chelis#317 reports: a
@@ -7375,7 +7358,7 @@ fn constructor_out_of_scope(name: &str, env: &Env) -> bool {
 /// fallbacks (`env.lookup_terminal_unique` / `lookup_variant_terminal_unique`)
 /// are diagnostic-only fuzzy matches, never an in-scope binding.
 ///
-/// Returns `true` when `name` is a PascalCase constructor that resolves through
+/// Returns `true` when `name` is a `PascalCase` constructor that resolves through
 /// *neither* exact path. This rejects two out-of-scope cases the bare
 /// [`constructor_out_of_scope`] env check misses for patterns (chelis#317):
 ///
@@ -7608,8 +7591,7 @@ fn tensor_concat_result_type(
                 Some(Dim::Lit(k)) if dims.len() == rank => total.checked_add(*k),
                 _ => None,
             })
-            .map(Dim::Lit)
-            .unwrap_or(Dim::Wildcard),
+            .map_or(Dim::Wildcard, Dim::Lit),
         ConcatListInfo::BindingLen(Some(n)) if n >= 1 => match &out_dims[axis] {
             Dim::Lit(k) => match k.checked_mul(n as i64) {
                 Some(total) => Dim::Lit(total),
@@ -7918,7 +7900,7 @@ fn build_opacity_meta(
         let deep::Expr::List(list, _) = item else {
             continue;
         };
-        if !matches!(get_tag(list), Some("def") | Some("defsig")) {
+        if !matches!(get_tag(list), Some("def" | "defsig")) {
             continue;
         }
         let kids = children(list);
@@ -8313,7 +8295,7 @@ fn collect_user_def_names(items: &[&deep::Expr]) -> HashSet<String> {
 /// builtins (`permute`/`reshape`/`matmul`/…), and any user/non-builtin/computed
 /// callee not proven rank-safe — against a spread `..r` there are no named axes
 /// left to catch an untracked transposition/reshape, so admitting one would
-/// silently break §4.2 transposition safety (spec/design/rank_polymorphism.md
+/// silently break §4.2 transposition safety (`spec/design/rank_polymorphism.md`
 /// §Soundness Boundary).
 fn check_rank_body_discipline(
     def_name: &str,
@@ -8688,9 +8670,8 @@ fn infer_top_level(
                 errors.push(CheckError::new(
                     CheckErrorKind::TypeMismatch,
                     format!(
-                        "def '{}' body doesn't match declared signature: \
-                         body has type `{}`, declared type is `{}`{}",
-                        name, resolved_body, resolved_decl, extra
+                        "def '{name}' body doesn't match declared signature: \
+                         body has type `{resolved_body}`, declared type is `{resolved_decl}`{extra}"
                     ),
                     vec![],
                 ));
@@ -8933,7 +8914,7 @@ fn infer_expr(
                     // Already handled in first pass
                     Type::Unit
                 }
-                Some("deftype") | Some("typealias") => {
+                Some("deftype" | "typealias") => {
                     // Already handled in first pass
                     Type::Unit
                 }
@@ -9264,9 +9245,9 @@ fn infer_lit(
         // produces a Float atom; an Int atom in a float context is
         // either an error caught elsewhere or a Cons-mismatch).
         let range_check = match prim_name {
-            "int8" => Some(("int8", i8::MIN as i64, i8::MAX as i64)),
-            "int16" => Some(("int16", i16::MIN as i64, i16::MAX as i64)),
-            "int32" => Some(("int32", i32::MIN as i64, i32::MAX as i64)),
+            "int8" => Some(("int8", i64::from(i8::MIN), i64::from(i8::MAX))),
+            "int16" => Some(("int16", i64::from(i16::MIN), i64::from(i16::MAX))),
+            "int32" => Some(("int32", i64::from(i32::MIN), i64::from(i32::MAX))),
             // int64 cannot overflow an i64 atom; bool/string don't
             // accept Int atoms.
             _ => None,
@@ -9409,7 +9390,7 @@ fn infer_app(
             children(flist)
                 .first()
                 .and_then(|e| symbol_name(e))
-                .map(|s| s.to_string())
+                .map(std::string::ToString::to_string)
         } else {
             None
         }
@@ -9827,10 +9808,7 @@ fn infer_app(
                     // name/name): the deliberate #218 ragged-axis
                     // widening. Neither side is a dim variable, so there
                     // is no rigid-dim promise to preserve here.
-                    (Dim::Lit(_), Dim::Lit(_))
-                    | (Dim::Name(_), Dim::Name(_))
-                    | (Dim::Lit(_), Dim::Name(_))
-                    | (Dim::Name(_), Dim::Lit(_)) => Dim::Wildcard,
+                    (Dim::Lit(_) | Dim::Name(_), Dim::Lit(_) | Dim::Name(_)) => Dim::Wildcard,
                     // At least one side is a dim variable (or a
                     // wildcard). Unify so rigid dim parameters keep their
                     // identity and `check_declared_dvars_rigid` can fire.
@@ -10167,7 +10145,7 @@ fn infer_app(
                                 CheckErrorKind::TypeMismatch,
                                 with_macro_provenance(
                                     &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("{} expects tensor input, got {}", fname, resolved),
+                                    format!("{fname} expects tensor input, got {resolved}"),
                                 ),
                                 vec![],
                             ));
@@ -10214,7 +10192,7 @@ fn infer_app(
                                 CheckErrorKind::TypeMismatch,
                                 with_macro_provenance(
                                     &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("{} expects int32 axis, got {}", fname, resolved),
+                                    format!("{fname} expects int32 axis, got {resolved}"),
                                 ),
                                 vec![],
                             ));
@@ -10264,8 +10242,7 @@ fn infer_app(
                                 with_macro_provenance(
                                     &deep::Expr::List(list.clone(), zero_span()),
                                     format!(
-                                        "uniform_like expects a float tensor template, got {}",
-                                        resolved
+                                        "uniform_like expects a float tensor template, got {resolved}"
                                     ),
                                 ),
                                 vec![],
@@ -10279,8 +10256,7 @@ fn infer_app(
                                 with_macro_provenance(
                                     &deep::Expr::List(list.clone(), zero_span()),
                                     format!(
-                                        "uniform_like expects tensor template input, got {}",
-                                        resolved
+                                        "uniform_like expects tensor template input, got {resolved}"
                                     ),
                                 ),
                                 vec![],
@@ -10300,8 +10276,7 @@ fn infer_app(
                                 with_macro_provenance(
                                     &deep::Expr::List(list.clone(), zero_span()),
                                     format!(
-                                        "uniform_like expects f32 bounds for args 2-3, got {}",
-                                        resolved
+                                        "uniform_like expects f32 bounds for args 2-3, got {resolved}"
                                     ),
                                 ),
                                 vec![],
@@ -10339,7 +10314,7 @@ fn infer_app(
                                 CheckErrorKind::TypeMismatch,
                                 with_macro_provenance(
                                     &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("dropout expects tensor input, got {}", resolved),
+                                    format!("dropout expects tensor input, got {resolved}"),
                                 ),
                                 vec![],
                             ));
@@ -10357,7 +10332,7 @@ fn infer_app(
                                 CheckErrorKind::TypeMismatch,
                                 with_macro_provenance(
                                     &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("dropout expects f32 rate, got {}", resolved),
+                                    format!("dropout expects f32 rate, got {resolved}"),
                                 ),
                                 vec![],
                             ));
@@ -10381,8 +10356,7 @@ fn infer_app(
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
                                         format!(
-                                            "conv2d expects tensor inputs for args 1-2, got {}",
-                                            resolved
+                                            "conv2d expects tensor inputs for args 1-2, got {resolved}"
                                         ),
                                     ),
                                     vec![],
@@ -10399,8 +10373,7 @@ fn infer_app(
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
                                         format!(
-                                            "conv2d expects int32 stride/padding, got {}",
-                                            resolved
+                                            "conv2d expects int32 stride/padding, got {resolved}"
                                         ),
                                     ),
                                     vec![],
@@ -10415,14 +10388,8 @@ fn infer_app(
             if let Some(ref fname) = func_name
                 && INT_BINOPS.contains(&fname.as_str())
             {
-                let lhs = arg_tys
-                    .first()
-                    .map(|ty| subst.apply(ty))
-                    .unwrap_or(Type::Error);
-                let rhs = arg_tys
-                    .get(1)
-                    .map(|ty| subst.apply(ty))
-                    .unwrap_or(Type::Error);
+                let lhs = arg_tys.first().map_or(Type::Error, |ty| subst.apply(ty));
+                let rhs = arg_tys.get(1).map_or(Type::Error, |ty| subst.apply(ty));
                 match (&lhs, &rhs) {
                     (Type::Prim(lhs_prec), Type::Prim(rhs_prec))
                         if lhs_prec.is_integer()
@@ -10446,8 +10413,7 @@ fn infer_app(
                             with_macro_provenance(
                                 &deep::Expr::List(list.clone(), zero_span()),
                                 format!(
-                                    "{} requires matching integer arguments, got {} and {}",
-                                    fname, lhs, rhs
+                                    "{fname} requires matching integer arguments, got {lhs} and {rhs}"
                                 ),
                             ),
                             vec![],
@@ -10460,14 +10426,8 @@ fn infer_app(
             if let Some(ref fname) = func_name
                 && INT_SHIFT_OPS.contains(&fname.as_str())
             {
-                let lhs = arg_tys
-                    .first()
-                    .map(|ty| subst.apply(ty))
-                    .unwrap_or(Type::Error);
-                let rhs = arg_tys
-                    .get(1)
-                    .map(|ty| subst.apply(ty))
-                    .unwrap_or(Type::Error);
+                let lhs = arg_tys.first().map_or(Type::Error, |ty| subst.apply(ty));
+                let rhs = arg_tys.get(1).map_or(Type::Error, |ty| subst.apply(ty));
                 let lhs_ok = matches!(&lhs, Type::Prim(prec) if prec.is_integer())
                     || matches!(&lhs, Type::Var(_) | Type::Error);
                 let rhs_ok = matches!(&rhs, Type::Prim(prec) if prec.is_integer())
@@ -10480,8 +10440,7 @@ fn infer_app(
                     with_macro_provenance(
                         &deep::Expr::List(list.clone(), zero_span()),
                         format!(
-                            "{} requires integer lhs and shift amount, got {} and {}",
-                            fname, lhs, rhs
+                            "{fname} requires integer lhs and shift amount, got {lhs} and {rhs}"
                         ),
                     ),
                     vec![],
@@ -10522,8 +10481,7 @@ fn infer_app(
                         // rejection (a check-clean program must build).
                         let size_class = kids
                             .get(3)
-                            .map(|arg| classify_expand_size(arg, env))
-                            .unwrap_or(SizeClass::Unknown);
+                            .map_or(SizeClass::Unknown, |arg| classify_expand_size(arg, env));
                         result_ty = check_expand_signature(
                             &kids[1..],
                             &arg_tys,
@@ -10584,7 +10542,7 @@ fn infer_app(
                                 CheckErrorKind::TypeMismatch,
                                 with_macro_provenance(
                                     &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("{} requires bool arguments, got {}", fname, other),
+                                    format!("{fname} requires bool arguments, got {other}"),
                                 ),
                                 vec!["Logical ops only work on bool values".to_string()],
                             ));
@@ -10743,8 +10701,7 @@ fn infer_app(
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
                                             format!(
-                                                "{} expects string arguments, got {other}",
-                                                fname
+                                                "{fname} expects string arguments, got {other}"
                                             ),
                                         ),
                                         vec![],
@@ -11092,12 +11049,9 @@ fn infer_app(
                                 }
                                 return Type::Tensor(then_dims.clone(), then_prec.clone());
                             }
-                            (Type::Var(_), _, _)
-                            | (_, Type::Var(_), _)
-                            | (_, _, Type::Var(_))
-                            | (Type::Error, _, _)
-                            | (_, Type::Error, _)
-                            | (_, _, Type::Error) => return result_ty,
+                            (Type::Var(_) | Type::Error, _, _)
+                            | (_, Type::Var(_) | Type::Error, _)
+                            | (_, _, Type::Var(_) | Type::Error) => return result_ty,
                             _ => {
                                 errors.push(CheckError::new(
                                     CheckErrorKind::TypeMismatch,
@@ -11263,12 +11217,9 @@ fn infer_app(
                                 ));
                                 return Type::Error;
                             }
-                            (Type::Var(_), _, _)
-                            | (_, Type::Var(_), _)
-                            | (_, _, Type::Var(_))
-                            | (Type::Error, _, _)
-                            | (_, Type::Error, _)
-                            | (_, _, Type::Error) => return result_ty,
+                            (Type::Var(_) | Type::Error, _, _)
+                            | (_, Type::Var(_) | Type::Error, _)
+                            | (_, _, Type::Var(_) | Type::Error) => return result_ty,
                             _ => {
                                 errors.push(CheckError::new(
                                     CheckErrorKind::TypeMismatch,
@@ -11328,19 +11279,17 @@ fn infer_app(
                             return Type::Error;
                         };
                         let mode = kids.get(5).and_then(extract_string_literal);
-                        match mode.as_deref() {
-                            Some("replace") | Some("add") => {}
-                            _ => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        "scatter mode must be \"replace\" or \"add\"".to_string(),
-                                    ),
-                                    vec![],
-                                ));
-                                return Type::Error;
-                            }
+                        if let Some("replace" | "add") = mode.as_deref() {
+                        } else {
+                            errors.push(CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    "scatter mode must be \"replace\" or \"add\"".to_string(),
+                                ),
+                                vec![],
+                            ));
+                            return Type::Error;
                         }
                         match infer_gather_result_type(&base_ty, &indices_ty, axis) {
                             Ok(expected_updates) => {
@@ -11597,10 +11546,7 @@ fn infer_app(
                                     vec![subst.apply(&lhs_args[0])],
                                 );
                             }
-                            (Type::Var(_), _)
-                            | (_, Type::Var(_))
-                            | (Type::Error, _)
-                            | (_, Type::Error) => {
+                            (Type::Var(_) | Type::Error, _) | (_, Type::Var(_) | Type::Error) => {
                                 return result_ty;
                             }
                             (lhs, rhs) => {
@@ -11661,23 +11607,24 @@ fn infer_app(
                                 // surfaces the bounds diagnostic at infer.
                                 let raw_axis = kids.get(2).and_then(extract_int_for_dim);
                                 let axis = match raw_axis {
-                                    Some(raw) => match normalize_static_axis(dims.len(), raw) {
-                                        Some(axis) => axis,
-                                        None => {
+                                    Some(raw) => {
+                                        if let Some(axis) = normalize_static_axis(dims.len(), raw) {
+                                            axis
+                                        } else {
                                             errors.push(CheckError::new(
-                                                CheckErrorKind::TypeMismatch,
-                                                with_macro_provenance(
-                                                    &deep::Expr::List(list.clone(), zero_span()),
-                                                    format!(
-                                                        "split axis {raw} out of bounds for rank {}",
-                                                        dims.len()
-                                                    ),
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "split axis {raw} out of bounds for rank {}",
+                                                    dims.len()
                                                 ),
-                                                vec![],
-                                            ));
+                                            ),
+                                            vec![],
+                                        ));
                                             return Type::Error;
                                         }
-                                    },
+                                    }
                                     None => 0,
                                 };
                                 let mut piece_dims = dims.clone();
@@ -11687,10 +11634,7 @@ fn infer_app(
                                     vec![Type::Tensor(piece_dims, precision)],
                                 );
                             }
-                            (Type::Var(_), _)
-                            | (_, Type::Var(_))
-                            | (Type::Error, _)
-                            | (_, Type::Error) => {
+                            (Type::Var(_) | Type::Error, _) | (_, Type::Var(_) | Type::Error) => {
                                 return result_ty;
                             }
                             (tensor_ty, sizes_ty) => {
@@ -12161,10 +12105,7 @@ fn infer_app(
                                     ])],
                                 );
                             }
-                            (Type::Var(_), _)
-                            | (_, Type::Var(_))
-                            | (Type::Error, _)
-                            | (_, Type::Error) => {
+                            (Type::Var(_) | Type::Error, _) | (_, Type::Var(_) | Type::Error) => {
                                 return result_ty;
                             }
                             (lhs, rhs) => {
@@ -12214,8 +12155,7 @@ fn infer_app(
                                     match &args[0] {
                                         Type::Tuple(items) if items.len() == 2 => {
                                             match &items[0] {
-                                                Type::Prim(Prim::Int64)
-                                                | Type::Prim(Prim::String) => {}
+                                                Type::Prim(Prim::Int64 | Prim::String) => {}
                                                 Type::Var(_) | Type::Error => return result_ty,
                                                 other => {
                                                     errors.push(CheckError::new(
@@ -12284,10 +12224,7 @@ fn infer_app(
                                     vec![subst.apply(&args[1])],
                                 );
                             }
-                            (Type::Var(_), _)
-                            | (_, Type::Var(_))
-                            | (Type::Error, _)
-                            | (_, Type::Error) => {
+                            (Type::Var(_) | Type::Error, _) | (_, Type::Var(_) | Type::Error) => {
                                 return result_ty;
                             }
                             (dict_ty, key_ty) => {
@@ -12317,10 +12254,7 @@ fn infer_app(
                                 }
                                 return Type::Prim(Prim::Bool);
                             }
-                            (Type::Var(_), _)
-                            | (_, Type::Var(_))
-                            | (Type::Error, _)
-                            | (_, Type::Error) => {
+                            (Type::Var(_) | Type::Error, _) | (_, Type::Var(_) | Type::Error) => {
                                 return result_ty;
                             }
                             (dict_ty, key_ty) => {
@@ -12355,10 +12289,7 @@ fn infer_app(
                                     vec![subst.apply(&args[0]), subst.apply(&args[1])],
                                 );
                             }
-                            (Type::Var(_), _)
-                            | (_, Type::Var(_))
-                            | (Type::Error, _)
-                            | (_, Type::Error) => {
+                            (Type::Var(_) | Type::Error, _) | (_, Type::Var(_) | Type::Error) => {
                                 return result_ty;
                             }
                             (dict_ty, key_ty) => {
@@ -12401,12 +12332,9 @@ fn infer_app(
                                     vec![subst.apply(&args[0]), subst.apply(&args[1])],
                                 );
                             }
-                            (Type::Var(_), _, _)
-                            | (_, Type::Var(_), _)
-                            | (_, _, Type::Var(_))
-                            | (Type::Error, _, _)
-                            | (_, Type::Error, _)
-                            | (_, _, Type::Error) => {
+                            (Type::Var(_) | Type::Error, _, _)
+                            | (_, Type::Var(_) | Type::Error, _)
+                            | (_, _, Type::Var(_) | Type::Error) => {
                                 return result_ty;
                             }
                             (dict_ty, key_ty, value_ty) => {
@@ -12448,10 +12376,7 @@ fn infer_app(
                                     vec![subst.apply(&lhs_args[0]), subst.apply(&lhs_args[1])],
                                 );
                             }
-                            (Type::Var(_), _)
-                            | (_, Type::Var(_))
-                            | (Type::Error, _)
-                            | (_, Type::Error) => {
+                            (Type::Var(_) | Type::Error, _) | (_, Type::Var(_) | Type::Error) => {
                                 return result_ty;
                             }
                             (lhs_ty, rhs_ty) => {
@@ -12924,7 +12849,7 @@ fn auto_borrow_call_arg_types(func_ty: &Type, arg_tys: Vec<Type>, subst: &Subst)
 /// `Ref(R)` while the declared return is owned `R`, return a relaxed
 /// declared type `Fn(params, Ref(R))` so the def-body unify can succeed.
 /// Returns `None` for any other body shape; the caller surfaces the
-/// existing TypeMismatch in that case.
+/// existing `TypeMismatch` in that case.
 ///
 /// The PR #91 (W4-A) version of this helper accepted only a bare
 /// `(fn (params...) (var x))` body.  0.7.9 broadens the gate to walk
@@ -13325,8 +13250,7 @@ fn infer_expand_app(
     // and arithmetic spellings.
     let size_class = kids
         .get(3)
-        .map(|arg| classify_expand_size(arg, env))
-        .unwrap_or(SizeClass::Unknown);
+        .map_or(SizeClass::Unknown, |arg| classify_expand_size(arg, env));
     let result_ty = Type::Var(vg.fresh_tvar());
     check_expand_signature(
         &kids[1..],
@@ -13529,7 +13453,7 @@ fn infer_reshape_app(
         typed_nodes,
         total_nodes,
     );
-    let input_var_name = symbolic_dim_ref_name(&kids[1]).map(|s| s.to_string());
+    let input_var_name = symbolic_dim_ref_name(&kids[1]).map(std::string::ToString::to_string);
     match type_for_readonly_check(&input_ty, subst) {
         Type::Prim(precision) => {
             if let Some(shape_expr) = kids.get(2) {
@@ -14621,8 +14545,7 @@ fn cons_chain_two_ints(expr: &deep::Expr, _axis: usize) -> InnerPairShape {
             let is_nil = children(list)
                 .first()
                 .and_then(symbol_name)
-                .map(|name| name == "Nil")
-                .unwrap_or(false);
+                .is_some_and(|name| name == "Nil");
             if is_nil {
                 return InnerPairShape::Malformed {
                     reason: "expects a pair [start, end] of two int literals, got 0-element list"
@@ -14654,8 +14577,7 @@ fn cons_chain_two_ints(expr: &deep::Expr, _axis: usize) -> InnerPairShape {
                 if elements_seen != 2 {
                     return InnerPairShape::Malformed {
                         reason: format!(
-                            "expects a pair [start, end] of two int literals, got {}-element list",
-                            elements_seen
+                            "expects a pair [start, end] of two int literals, got {elements_seen}-element list"
                         ),
                     };
                 }
@@ -14747,12 +14669,11 @@ fn reshape_output_dims(
     input_dims: &[Dim],
     subst: &Subst,
 ) -> Vec<Dim> {
-    let elements = match collect_shape_list_elements(shape_expr) {
-        Some(elems) => elems,
-        None => {
-            let rank = list_literal_len(shape_expr).unwrap_or(1);
-            return vec![Dim::Wildcard; rank];
-        }
+    let elements = if let Some(elems) = collect_shape_list_elements(shape_expr) {
+        elems
+    } else {
+        let rank = list_literal_len(shape_expr).unwrap_or(1);
+        return vec![Dim::Wildcard; rank];
     };
     elements
         .into_iter()
@@ -14861,7 +14782,7 @@ fn extract_shape_axis_of(expr: &deep::Expr, input_var_name: Option<&str>) -> Opt
 }
 
 /// Strip one layer of `cast` (tag-form or `app`-form) and return
-/// (inner_expr, target_type_expr).
+/// (`inner_expr`, `target_type_expr`).
 fn peel_cast(expr: &deep::Expr) -> Option<(&deep::Expr, &deep::Expr)> {
     let deep::Expr::List(list, _) = expr else {
         return None;
@@ -14915,8 +14836,7 @@ fn inner_to_list(expr: &deep::Expr) -> Option<&deep::List> {
 fn is_shape_app(app_list: &deep::List) -> bool {
     children(app_list)
         .first()
-        .map(|f| is_builtin_var(f, "shape"))
-        .unwrap_or(false)
+        .is_some_and(|f| is_builtin_var(f, "shape"))
 }
 
 /// Extract an int literal from a Deep expr, looking through `cast(N, int64)`
@@ -15503,19 +15423,18 @@ fn check_reduction_signature(
         && !has_spread
         && let Some(raw) = extract_int_for_dim(&axis_exprs[0])
     {
-        match normalize_static_axis(dims.len(), raw) {
-            Some(axis) => remove.push(axis),
-            None => {
-                errors.push(CheckError::new(
-                    CheckErrorKind::DimensionMismatch,
-                    format!(
-                        "{name} axis {raw} is out of bounds for rank {} tensor",
-                        dims.len()
-                    ),
-                    vec![],
-                ));
-                return Type::Error;
-            }
+        if let Some(axis) = normalize_static_axis(dims.len(), raw) {
+            remove.push(axis);
+        } else {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "{name} axis {raw} is out of bounds for rank {} tensor",
+                    dims.len()
+                ),
+                vec![],
+            ));
+            return Type::Error;
         }
     } else {
         for ax in axis_exprs {
@@ -16219,7 +16138,7 @@ fn is_builtin_var(expr: &deep::Expr, expected: &str) -> bool {
 /// This is the issue Chelis-Lang/chelis#218 R2 HIGH-A source fix:
 /// by emitting concrete dims here, every downstream consumer
 /// (reductions, elementwise activations, anything that reads the
-/// to_tensor app's `type:` metadata) sees a sound shape instead of
+/// `to_tensor` app's `type:` metadata) sees a sound shape instead of
 /// a `Dim::Wildcard`.
 fn static_to_tensor_shape(arg: &deep::Expr, expected_rank: usize) -> Option<Vec<Dim>> {
     let dims = walk_static_cons_chain_shape(arg)?;
@@ -16308,7 +16227,7 @@ fn collect_cons_chain_for_shape(expr: &deep::Expr) -> Option<Vec<&deep::Expr>> {
 /// the same, `cast` of one, or `neg` of one). Mirrors the shape of
 /// `extract_numeric_leaf` in `crates/chelis-ir/src/lower.rs` so the
 /// type-check and IR-lowering passes agree on what counts as a
-/// "static to_tensor leaf." We don't need the actual value here,
+/// "static `to_tensor` leaf." We don't need the actual value here,
 /// only the static-recognition predicate.
 fn extract_numeric_leaf_for_shape(expr: &deep::Expr) -> Option<()> {
     stack_guard!("extract_numeric_leaf_for_shape", expr, None);
@@ -16318,9 +16237,10 @@ fn extract_numeric_leaf_for_shape(expr: &deep::Expr) -> Option<()> {
         deep::Expr::Atom(deep::Atom::Bool(_), _) => Some(()),
         deep::Expr::List(list, _) => match get_tag(list)? {
             "lit" => match list.elements.get(2)? {
-                deep::Expr::Atom(deep::Atom::Int(_), _)
-                | deep::Expr::Atom(deep::Atom::Float(_), _)
-                | deep::Expr::Atom(deep::Atom::Bool(_), _) => Some(()),
+                deep::Expr::Atom(
+                    deep::Atom::Int(_) | deep::Atom::Float(_) | deep::Atom::Bool(_),
+                    _,
+                ) => Some(()),
                 _ => None,
             },
             "cast" => extract_numeric_leaf_for_shape(list.elements.get(2)?),
@@ -16390,10 +16310,10 @@ enum SizeClass {
 /// `size_expr` is the size sub-expression (used only to name a symbolic
 /// dimension when the size is a bare `var`).
 fn sourceless_expand_size_error(size_expr: Option<&deep::Expr>) -> CheckError {
-    let described = size_expr
-        .and_then(symbolic_dim_ref_name)
-        .map(|name| format!("the symbolic dimension `{name}`"))
-        .unwrap_or_else(|| "a runtime scalar".to_string());
+    let described = size_expr.and_then(symbolic_dim_ref_name).map_or_else(
+        || "a runtime scalar".to_string(),
+        |name| format!("the symbolic dimension `{name}`"),
+    );
     CheckError::new(
         CheckErrorKind::DimensionMismatch,
         format!(
@@ -17107,7 +17027,7 @@ fn extract_params(
             elems
                 .iter()
                 .filter_map(|e| match e {
-                    deep::Expr::Atom(deep::Atom::Symbol(s), _) => Some((s.to_string(), None)),
+                    deep::Expr::Atom(deep::Atom::Symbol(s), _) => Some((s.clone(), None)),
                     deep::Expr::MetaExpr(meta, _) => {
                         let deep::Expr::Atom(deep::Atom::Symbol(name), _) = meta.expr.as_ref()
                         else {
@@ -17118,7 +17038,7 @@ fn extract_params(
                                 deep_type_to_resolved_type(val, vg, adt_reg, &mut HashMap::new())
                             })
                         });
-                        Some((name.to_string(), ty_ann))
+                        Some((name.clone(), ty_ann))
                     }
                     deep::Expr::List(plist, _) => {
                         // Typed param: (name {type: T}) — elements[0] is the name symbol,
@@ -17139,7 +17059,7 @@ fn extract_params(
                                     }
                                 }
                             }
-                            Some((name.to_string(), ty_ann))
+                            Some((name.clone(), ty_ann))
                         } else {
                             None
                         }
@@ -17265,7 +17185,7 @@ fn infer_let(
                             .mark_size_provenance(name, crate::env::SizeProvenance::ShapeSourced);
                     }
                     SizeClass::Sourceless | SizeClass::Unknown => {
-                        let_env.clear_size_provenance(name)
+                        let_env.clear_size_provenance(name);
                     }
                 }
                 // chelis#631: same discipline for list-literal lengths.
@@ -17465,7 +17385,7 @@ fn infer_match(
                     CheckErrorKind::NonExhaustiveMatch,
                     with_macro_provenance(
                         &deep::Expr::List(list.clone(), zero_span()),
-                        format!("non-exhaustive match: missing variants {:?}", names),
+                        format!("non-exhaustive match: missing variants {names:?}"),
                     ),
                     vec![],
                 ));
@@ -17484,7 +17404,7 @@ fn top_level_arm_is_irrefutable(pat: &deep::Expr) -> bool {
         return false;
     };
     match get_tag(list) {
-        Some("pat-var") | Some("pat-wild") => true,
+        Some("pat-var" | "pat-wild") => true,
         Some("pat-as") => children(list)
             .get(1)
             .is_some_and(top_level_arm_is_irrefutable),
@@ -17566,8 +17486,10 @@ fn pattern_bindings(
                     let covered_name = adt_reg
                         .lookup_variant(ctor_name)
                         .or_else(|| adt_reg.lookup_variant_terminal_unique(ctor_name))
-                        .map(|(_, variant)| variant.name.clone())
-                        .unwrap_or_else(|| ctor_name.to_string());
+                        .map_or_else(
+                            || ctor_name.to_string(),
+                            |(_, variant)| variant.name.clone(),
+                        );
                     covered_variants.push(covered_name);
 
                     // RFC D-CHECK: constructor pattern match on an
@@ -17692,8 +17614,7 @@ fn pattern_bindings(
                     // exhaustiveness, mirroring `pat-ctor`. See that arm for
                     // why the bare pattern name is not used (chelis#157).
                     let covered_name = variant_info
-                        .map(|(_, vi)| vi.name.clone())
-                        .unwrap_or_else(|| ctor_name.to_string());
+                        .map_or_else(|| ctor_name.to_string(), |(_, vi)| vi.name.clone());
                     covered_variants.push(covered_name);
                     let declared_field_names: Vec<Option<String>> = variant_info
                         .map(|(_, vi)| vi.fields.iter().map(|(n, _)| n.clone()).collect())
@@ -17762,68 +17683,66 @@ fn pattern_bindings(
                                             let pos = declared_field_names
                                                 .iter()
                                                 .position(|nm| nm.as_deref() == Some(n));
-                                            match pos.and_then(|i| instantiated_arg_types.get(i)) {
-                                                Some(ty) => subst.apply(ty),
-                                                None => {
-                                                    // Fallback: un-instantiated declared field
-                                                    // type when the constructor scheme isn't
-                                                    // in `env`. This branch SHOULD be
-                                                    // unreachable in practice: every `deftype`
-                                                    // registered in `adt_reg` via
-                                                    // `collect_declarations` also binds its
-                                                    // constructor scheme in `env` in the same
-                                                    // call. If that invariant drifts (e.g., a
-                                                    // future code path populates `adt_reg`
-                                                    // without binding into `env`), the
-                                                    // fallback would silently produce
-                                                    // `Var(T_a)` from the un-instantiated
-                                                    // VariantInfo — exactly the bug #181 fixed.
-                                                    // The debug_assert below flags the drift
-                                                    // in tests; the runtime fallback to
-                                                    // `vi.fields[i]` preserves pre-fix
-                                                    // behavior in release builds.
-                                                    debug_assert!(
-                                                        false,
-                                                        "env/adt_reg sync invariant violated: \
-                                                         field `{n}` of constructor `{ctor_name}` \
-                                                         is known to `adt_reg` (variant_info found) \
-                                                         but the constructor scheme is missing from \
-                                                         `env`. See infer.rs pat-record fallback note."
-                                                    );
-                                                    variant_info
-                                                        .and_then(|(_, vi)| {
-                                                            vi.fields.iter().find_map(
-                                                                |(name, ty)| {
-                                                                    (name.as_deref() == Some(n))
-                                                                        .then(|| ty.clone())
-                                                                },
-                                                            )
+                                            if let Some(ty) =
+                                                pos.and_then(|i| instantiated_arg_types.get(i))
+                                            {
+                                                subst.apply(ty)
+                                            } else {
+                                                // Fallback: un-instantiated declared field
+                                                // type when the constructor scheme isn't
+                                                // in `env`. This branch SHOULD be
+                                                // unreachable in practice: every `deftype`
+                                                // registered in `adt_reg` via
+                                                // `collect_declarations` also binds its
+                                                // constructor scheme in `env` in the same
+                                                // call. If that invariant drifts (e.g., a
+                                                // future code path populates `adt_reg`
+                                                // without binding into `env`), the
+                                                // fallback would silently produce
+                                                // `Var(T_a)` from the un-instantiated
+                                                // VariantInfo — exactly the bug #181 fixed.
+                                                // The debug_assert below flags the drift
+                                                // in tests; the runtime fallback to
+                                                // `vi.fields[i]` preserves pre-fix
+                                                // behavior in release builds.
+                                                debug_assert!(
+                                                    false,
+                                                    "env/adt_reg sync invariant violated: \
+                                                     field `{n}` of constructor `{ctor_name}` \
+                                                     is known to `adt_reg` (variant_info found) \
+                                                     but the constructor scheme is missing from \
+                                                     `env`. See infer.rs pat-record fallback note."
+                                                );
+                                                variant_info
+                                                    .and_then(|(_, vi)| {
+                                                        vi.fields.iter().find_map(|(name, ty)| {
+                                                            (name.as_deref() == Some(n))
+                                                                .then(|| ty.clone())
                                                         })
-                                                        // Per the loop guard `known_field_set
-                                                        // .contains(n)` and the fact that
-                                                        // `known_field_set` is derived from
-                                                        // `declared_field_names` whose
-                                                        // `Some(_)` entries are exactly the
-                                                        // named fields of `vi.fields`, the
-                                                        // find_map above always returns Some
-                                                        // here. The expect makes that explicit;
-                                                        // if it ever fires, both data sources
-                                                        // are themselves out of sync — a bug
-                                                        // upstream of this site.
-                                                        .expect(
-                                                            "known_field_set is derived from \
-                                                             vi.fields' named entries; mismatch \
-                                                             indicates a corrupted AdtRegistry",
-                                                        )
-                                                }
+                                                    })
+                                                    // Per the loop guard `known_field_set
+                                                    // .contains(n)` and the fact that
+                                                    // `known_field_set` is derived from
+                                                    // `declared_field_names` whose
+                                                    // `Some(_)` entries are exactly the
+                                                    // named fields of `vi.fields`, the
+                                                    // find_map above always returns Some
+                                                    // here. The expect makes that explicit;
+                                                    // if it ever fires, both data sources
+                                                    // are themselves out of sync — a bug
+                                                    // upstream of this site.
+                                                    .expect(
+                                                        "known_field_set is derived from \
+                                                         vi.fields' named entries; mismatch \
+                                                         indicates a corrupted AdtRegistry",
+                                                    )
                                             }
                                         } else if !known_field_set.is_empty() {
                                             // Unknown field name — error
                                             errors.push(CheckError::new(
                                                 CheckErrorKind::TypeMismatch,
                                                 format!(
-                                                    "unknown record field '{}' in pattern for {}",
-                                                    n, ctor_name
+                                                    "unknown record field '{n}' in pattern for {ctor_name}"
                                                 ),
                                                 vec![format!(
                                                     "known fields: {:?}",
@@ -18029,7 +17948,7 @@ fn synthesized_unary_lambda_param(
     // surface as `MetaExpr` or a nested `List`, and the user-written
     // annotation takes precedence over the upstream pipe value's type.
     match &param_kids[0] {
-        deep::Expr::Atom(deep::Atom::Symbol(name), _) => Some(name.to_string()),
+        deep::Expr::Atom(deep::Atom::Symbol(name), _) => Some(name.clone()),
         _ => None,
     }
 }
@@ -18196,7 +18115,7 @@ fn resolve_record_head<'a>(
 
 /// Infer `(record {} Ctor (kv {} field value)...)` — named-field
 /// record construction (RFC D-CHECK prerequisite inference; closes
-/// the latent bogus-field hole: unknown fields are now TypeMismatch
+/// the latent bogus-field hole: unknown fields are now `TypeMismatch`
 /// errors instead of silently untyped).
 #[allow(clippy::too_many_arguments)]
 fn infer_record(
@@ -18902,7 +18821,7 @@ fn infer_grad(
             if !grad_output_supported(&ret) {
                 errors.push(CheckError::new(
                     CheckErrorKind::Other,
-                    format!("grad requires a scalar floating output, got {}", ret),
+                    format!("grad requires a scalar floating output, got {ret}"),
                     vec!["Reduce the function result to a scalar before applying grad".to_string()],
                 ));
                 return Type::Error;
@@ -19270,8 +19189,8 @@ fn infer_def(
 // ── Type conversion from Deep AST ───────────────────────────────
 
 /// Convert a Deep type expression to an internal Type.
-/// `tvar_map` maps type variable names to TypeVars (created on demand).
-/// `dvar_map` maps dimension variable names to DimVars (created on demand).
+/// `tvar_map` maps type variable names to `TypeVars` (created on demand).
+/// `dvar_map` maps dimension variable names to `DimVars` (created on demand).
 fn deep_type_to_type(
     expr: &deep::Expr,
     vg: &mut VarGen,
@@ -19297,9 +19216,7 @@ fn deep_type_to_type_inner(
             match tag {
                 "t-prim" => {
                     if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
-                        Prim::parse_name(name)
-                            .map(Type::Prim)
-                            .unwrap_or(Type::Error)
+                        Prim::parse_name(name).map_or(Type::Error, Type::Prim)
                     } else {
                         Type::Error
                     }
@@ -19792,9 +19709,9 @@ mod tests {
     #[test]
     fn to_int_builtin_rejects_non_string_input() {
         check_err(
-            r#"(def {} parsed
+            r"(def {} parsed
                 (app {} (var {} to_int)
-                    (lit {type: (t-prim {} int32)} 7)))"#,
+                    (lit {type: (t-prim {} int32)} 7)))",
             CheckErrorKind::TypeMismatch,
         );
     }
@@ -19802,10 +19719,10 @@ mod tests {
     #[test]
     fn mod_rejects_float_input() {
         check_err(
-            r#"(def {} bad
+            r"(def {} bad
                 (app {} (var {} mod)
                     (lit {type: (t-prim {} f64)} 7.0)
-                    (lit {type: (t-prim {} f64)} 3.0)))"#,
+                    (lit {type: (t-prim {} f64)} 3.0)))",
             CheckErrorKind::TypeMismatch,
         );
     }
@@ -19813,10 +19730,10 @@ mod tests {
     #[test]
     fn bitand_rejects_mismatched_integer_widths() {
         check_err(
-            r#"(def {} bad
+            r"(def {} bad
                 (app {} (var {} bitand)
                     (lit {type: (t-prim {} int32)} 7)
-                    (lit {type: (t-prim {} int64)} 3)))"#,
+                    (lit {type: (t-prim {} int64)} 3)))",
             CheckErrorKind::TypeMismatch,
         );
     }
@@ -19824,10 +19741,10 @@ mod tests {
     #[test]
     fn shl_rejects_non_integer_shift_amount() {
         check_err(
-            r#"(def {} bad
+            r"(def {} bad
                 (app {} (var {} shl)
                     (lit {type: (t-prim {} int64)} 1)
-                    (lit {type: (t-prim {} f64)} 2.0)))"#,
+                    (lit {type: (t-prim {} f64)} 2.0)))",
             CheckErrorKind::TypeMismatch,
         );
     }
@@ -19835,11 +19752,11 @@ mod tests {
     #[test]
     fn string_slice_rejects_non_string_input() {
         check_err(
-            r#"(def {} bad
+            r"(def {} bad
                 (app {} (var {} string_slice)
                     (lit {type: (t-prim {} int32)} 7)
                     (lit {type: (t-prim {} int64)} 0)
-                    (lit {type: (t-prim {} int64)} 1)))"#,
+                    (lit {type: (t-prim {} int64)} 1)))",
             CheckErrorKind::TypeMismatch,
         );
     }
@@ -19857,24 +19774,24 @@ mod tests {
     #[test]
     fn shape_builtin_accepts_tensor_input() {
         check_ok(
-            r#"(def {} x
+            r"(def {} x
                 (lit {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} 0))
                (def {} dim
                 (app {} (var {} shape)
                     (var {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} x)
-                    (lit {type: (t-prim {} int32)} 1)))"#,
+                    (lit {type: (t-prim {} int32)} 1)))",
         );
     }
 
     #[test]
     fn shape_builtin_rejects_negative_axis_when_rank_is_known() {
         check_err(
-            r#"(def {} x
+            r"(def {} x
                 (lit {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} 0))
                (def {} dim
                 (app {} (var {} shape)
                     (var {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} x)
-                    (lit {type: (t-prim {} int32)} -1)))"#,
+                    (lit {type: (t-prim {} int32)} -1)))",
             CheckErrorKind::DimensionMismatch,
         );
     }
@@ -21710,14 +21627,14 @@ mod tests {
     #[test]
     fn checked_program_annotates_symbolic_expand_apps_from_surf() {
         let checked = checked_surf(
-            r#"
+            r"
 def predict(
   x: tensor[batch, 64, f32],
   w: tensor[64, 1, f32],
   b: tensor[1, f32]
 ) -> tensor[batch, 1, f32] =
   add(matmul(x, w), expand(b, 0, batch))
-"#,
+",
         );
         let missing = checked
             .annotated_exprs()
@@ -21725,18 +21642,17 @@ def predict(
             .find_map(missing_shape_sensitive_app);
         assert!(
             missing.is_none(),
-            "expected all shape-sensitive apps to be annotated, missing: {:?}",
-            missing
+            "expected all shape-sensitive apps to be annotated, missing: {missing:?}"
         );
     }
 
     #[test]
     fn surf_permute_with_axis_arguments_type_checks() {
         let checked = checked_surf(
-            r#"
+            r"
 def transpose(x: tensor[seq, hidden, f32]) -> tensor[hidden, seq, f32] =
   permute(x, 1, 0)
-"#,
+",
         );
         let missing = checked
             .annotated_exprs()
@@ -21744,20 +21660,19 @@ def transpose(x: tensor[seq, hidden, f32]) -> tensor[hidden, seq, f32] =
             .find_map(missing_shape_sensitive_app);
         assert!(
             missing.is_none(),
-            "expected typed shape-sensitive apps after permute, missing: {:?}",
-            missing
+            "expected typed shape-sensitive apps after permute, missing: {missing:?}"
         );
     }
 
     #[test]
     fn surf_list_builtins_type_check() {
         let checked = checked_surf(
-            r#"
+            r"
 xs: List[f32] = [1.0, 2.0]
 ys = append(xs, 3.0)
 total = tensor_to_scalar(sum(to_tensor(ys), 0))
 roundtrip = to_list(to_tensor(ys))
-"#,
+",
         );
         assert!(checked.annotated_exprs().len() >= 4);
     }
@@ -21765,10 +21680,10 @@ roundtrip = to_list(to_tensor(ys))
     #[test]
     fn surf_pad_sequences_type_checks() {
         let checked = checked_surf(
-            r#"
+            r"
 tokens: List[List[int64]] = [[cast(1, int64), cast(2, int64)], [cast(3, int64)]]
 padded = pad_sequences(tokens, cast(0, int64))
-"#,
+",
         );
         assert!(checked.annotated_exprs().len() >= 2);
     }
@@ -21899,7 +21814,7 @@ def projection(
     #[test]
     fn surf_3h_structural_tensor_builtins_type_check() {
         let checked = checked_surf(
-            r#"
+            r"
 def pack_heads(
   q: tensor[batch, seq, 2, f32],
   k: tensor[batch, seq, 2, f32]
@@ -21908,7 +21823,7 @@ def pack_heads(
   pieces = split(packed, 2, [2, 2])
   concat(pieces, 2)
 }
-"#,
+",
         );
         assert!(!checked.annotated_exprs().is_empty());
     }
@@ -21923,11 +21838,11 @@ def pack_heads(
     #[test]
     fn issue631_concat_axis0_literal_list_counts_elements() {
         let result = infer_surf(
-            r#"
+            r"
 module Repro.ConcatCount
 def stack_rows(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[2, 2, f32] =
   concat([a, b], 0)
-"#,
+",
         );
         assert!(
             result.errors.is_empty(),
@@ -21938,17 +21853,17 @@ def stack_rows(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[2, 2, f32] 
 
     /// The chelis#631 reproducer shape: the list is LET-BOUND, so the
     /// concat site sees a variable. The binding carries its literal
-    /// length to the concat (Env::list_literal_len).
+    /// length to the concat (`Env::list_literal_len`).
     #[test]
     fn issue631_concat_axis0_let_bound_list_counts_elements() {
         let result = infer_surf(
-            r#"
+            r"
 module Repro.ConcatCountLet
 def stack_rows(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[2, 2, f32] = {
   rows = [a, b]
   concat(rows, 0)
 }
-"#,
+",
         );
         assert!(
             result.errors.is_empty(),
@@ -21962,11 +21877,11 @@ def stack_rows(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[2, 2, f32] 
     #[test]
     fn issue631_concat_wrong_sum_annotation_rejected() {
         let result = infer_surf(
-            r#"
+            r"
 module Repro.ConcatWrongSum
 def stack_rows(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[3, 2, f32] =
   concat([a, b], 0)
-"#,
+",
         );
         assert!(
             !result.errors.is_empty(),
@@ -21980,11 +21895,11 @@ def stack_rows(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[3, 2, f32] 
     #[test]
     fn issue631_concat_mid_axis_preserves_last_axis() {
         let accepted = infer_surf(
-            r#"
+            r"
 module Repro.ConcatMidAxis
 def stack_mid(a: tensor[2, 1, 5, f32], b: tensor[2, 1, 5, f32]) -> tensor[2, 2, 5, f32] =
   concat([a, b], 1)
-"#,
+",
         );
         assert!(
             accepted.errors.is_empty(),
@@ -21994,11 +21909,11 @@ def stack_mid(a: tensor[2, 1, 5, f32], b: tensor[2, 1, 5, f32]) -> tensor[2, 2, 
         // The last axis is the element's `5`, not a wildcard: a wrong
         // trailing extent no longer slips through.
         let rejected = infer_surf(
-            r#"
+            r"
 module Repro.ConcatMidAxisBad
 def stack_mid(a: tensor[2, 1, 5, f32], b: tensor[2, 1, 5, f32]) -> tensor[2, 2, 6, f32] =
   concat([a, b], 1)
-"#,
+",
         );
         assert!(
             !rejected.errors.is_empty(),
@@ -22012,11 +21927,11 @@ def stack_mid(a: tensor[2, 1, 5, f32], b: tensor[2, 1, 5, f32]) -> tensor[2, 2, 
     #[test]
     fn issue631_concat_param_list_wildcards_concat_axis_only() {
         let accepted = infer_surf(
-            r#"
+            r"
 module Repro.ConcatParamList
 def cat_all(xs: List[tensor[2, 3, f32]]) -> tensor[*, 3, f32] =
   concat(xs, 0)
-"#,
+",
         );
         assert!(
             accepted.errors.is_empty(),
@@ -22024,11 +21939,11 @@ def cat_all(xs: List[tensor[2, 3, f32]]) -> tensor[*, 3, f32] =
             accepted.errors
         );
         let rejected = infer_surf(
-            r#"
+            r"
 module Repro.ConcatParamListBad
 def cat_all(xs: List[tensor[2, 3, f32]]) -> tensor[*, 4, f32] =
   concat(xs, 0)
-"#,
+",
         );
         assert!(
             !rejected.errors.is_empty(),
@@ -22044,11 +21959,11 @@ def cat_all(xs: List[tensor[2, 3, f32]]) -> tensor[*, 4, f32] =
     #[test]
     fn issue631_concat_dynamic_axis_wildcards_all_axes() {
         let result = infer_surf(
-            r#"
+            r"
 module Repro.ConcatDynAxis
 def cat_dyn(a: tensor[2, 3, f32], b: tensor[2, 3, f32], ax: int32) -> tensor[4, 3, f32] =
   concat([a, b], ax)
-"#,
+",
         );
         assert!(
             result.errors.is_empty(),
@@ -22061,11 +21976,11 @@ def cat_dyn(a: tensor[2, 3, f32], b: tensor[2, 3, f32], ax: int32) -> tensor[4, 
     #[test]
     fn issue631_concat_axis_out_of_bounds_rejected() {
         let result = infer_surf(
-            r#"
+            r"
 module Repro.ConcatOob
 def cat_oob(a: tensor[2, f32], b: tensor[2, f32]) -> tensor[*, f32] =
   concat([a, b], 5)
-"#,
+",
         );
         assert!(
             result
@@ -22082,11 +21997,11 @@ def cat_oob(a: tensor[2, f32], b: tensor[2, f32]) -> tensor[*, f32] =
     #[test]
     fn issue631_concat_negative_axis_indexes_from_end() {
         let accepted = infer_surf(
-            r#"
+            r"
 module Repro.ConcatNegAxis
 def cat_neg(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[1, 4, f32] =
   concat([a, b], -1)
-"#,
+",
         );
         assert!(
             accepted.errors.is_empty(),
@@ -22094,11 +22009,11 @@ def cat_neg(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[1, 4, f32] =
             accepted.errors
         );
         let rejected = infer_surf(
-            r#"
+            r"
 module Repro.ConcatNegAxisBad
 def cat_neg(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[1, 5, f32] =
   concat([a, b], -1)
-"#,
+",
         );
         assert!(
             !rejected.errors.is_empty(),
@@ -22118,11 +22033,11 @@ def cat_neg(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[1, 5, f32] =
     fn issue594_mixed_wildcard_element_wildcards_direct_concat_axis() {
         for claim in ["4", "5"] {
             let result = infer_surf(&format!(
-                r#"
+                r"
 module Repro.ConcatHeadBias
 def cat_bias(a: tensor[2, f32], b: tensor[*, f32]) -> tensor[{claim}, f32] =
   concat([a, b], 0)
-"#
+"
             ));
             assert!(
                 result.errors.is_empty(),
@@ -22133,13 +22048,13 @@ def cat_bias(a: tensor[2, f32], b: tensor[*, f32]) -> tensor[{claim}, f32] =
         // Binding path: the join is head-biased to the element `[2]` and
         // the length is 2, so the concat axis is `Lit(4)` — `[5]` rejects.
         let rejected = infer_surf(
-            r#"
+            r"
 module Repro.ConcatHeadBiasBinding
 def cat_bias(a: tensor[2, f32], b: tensor[*, f32]) -> tensor[5, f32] = {
   rows = [a, b]
   concat(rows, 0)
 }
-"#,
+",
         );
         assert!(
             !rejected.errors.is_empty(),
@@ -22156,11 +22071,11 @@ def cat_bias(a: tensor[2, f32], b: tensor[*, f32]) -> tensor[5, f32] = {
     #[test]
     fn issue594_ragged_direct_literal_concat_sums_extents() {
         let accepted = infer_surf(
-            r#"
+            r"
 module Repro.RaggedConcat
 def cat(a: tensor[2, f32], b: tensor[3, f32]) -> tensor[5, f32] =
   concat([a, b], 0)
-"#,
+",
         );
         assert!(
             accepted.errors.is_empty(),
@@ -22168,11 +22083,11 @@ def cat(a: tensor[2, f32], b: tensor[3, f32]) -> tensor[5, f32] =
             accepted.errors
         );
         let rejected = infer_surf(
-            r#"
+            r"
 module Repro.RaggedConcatBad
 def cat(a: tensor[2, f32], b: tensor[3, f32]) -> tensor[6, f32] =
   concat([a, b], 0)
-"#,
+",
         );
         assert!(
             !rejected.errors.is_empty(),
@@ -22186,11 +22101,11 @@ def cat(a: tensor[2, f32], b: tensor[3, f32]) -> tensor[6, f32] =
     #[test]
     fn issue594_ragged_three_element_mid_axis_concat_sums_extents() {
         let accepted = infer_surf(
-            r#"
+            r"
 module Repro.RaggedConcat3
 def cat(a: tensor[4, 1, f32], b: tensor[4, 2, f32], c: tensor[4, 3, f32]) -> tensor[4, 6, f32] =
   concat([a, b, c], 1)
-"#,
+",
         );
         assert!(
             accepted.errors.is_empty(),
@@ -22198,11 +22113,11 @@ def cat(a: tensor[4, 1, f32], b: tensor[4, 2, f32], c: tensor[4, 3, f32]) -> ten
             accepted.errors
         );
         let rejected = infer_surf(
-            r#"
+            r"
 module Repro.RaggedConcat3Bad
 def cat(a: tensor[4, 1, f32], b: tensor[4, 2, f32], c: tensor[4, 3, f32]) -> tensor[4, 7, f32] =
   concat([a, b, c], 1)
-"#,
+",
         );
         assert!(
             !rejected.errors.is_empty(),
@@ -22219,13 +22134,13 @@ def cat(a: tensor[4, 1, f32], b: tensor[4, 2, f32], c: tensor[4, 3, f32]) -> ten
     #[test]
     fn issue594_ragged_let_bound_list_stays_wildcard() {
         let result = infer_surf(
-            r#"
+            r"
 module Repro.RaggedConcatLet
 def cat(a: tensor[2, f32], b: tensor[3, f32]) -> tensor[9, f32] = {
   rows = [a, b]
   concat(rows, 0)
 }
-"#,
+",
         );
         assert!(
             result.errors.is_empty(),
@@ -22242,14 +22157,14 @@ def cat(a: tensor[2, f32], b: tensor[3, f32]) -> tensor[9, f32] = {
     #[test]
     fn issue631_concat_rebound_list_clears_stale_length() {
         let result = infer_surf(
-            r#"
+            r"
 module Repro.ConcatRebind
 def cat_rebind(a: tensor[1, 2, f32], b: tensor[1, 2, f32], xs: List[tensor[1, 2, f32]]) -> tensor[7, 2, f32] = {
   rows = [a, b]
   rows = xs
   concat(rows, 0)
 }
-"#,
+",
         );
         assert!(
             result.errors.is_empty(),
@@ -22264,12 +22179,12 @@ def cat_rebind(a: tensor[1, 2, f32], b: tensor[1, 2, f32], xs: List[tensor[1, 2,
     #[test]
     fn issue631_concat_param_shadow_clears_outer_length() {
         let result = infer_surf(
-            r#"
+            r"
 module Repro.ConcatShadow
 rows = [to_tensor([cast(1.0, f32), cast(2.0, f32)])]
 def cat_shadow(rows: List[tensor[2, f32]]) -> tensor[9, f32] =
   concat(rows, 0)
-"#,
+",
         );
         assert!(
             result.errors.is_empty(),
@@ -22281,7 +22196,7 @@ def cat_shadow(rows: List[tensor[2, f32]]) -> tensor[9, f32] =
     #[test]
     fn surf_3h_sort_and_trace_type_check() {
         let checked = checked_surf(
-            r#"
+            r"
 def summarize(x: tensor[batch, hidden, hidden, f32]) -> (tensor[batch, hidden, f32], tensor[batch, hidden, int64], tensor[batch, f32]) = {
   diag = diagonal(x, 1, 2)
   sorted = sort(diag, 1)
@@ -22290,7 +22205,7 @@ def summarize(x: tensor[batch, hidden, hidden, f32]) -> (tensor[batch, hidden, f
   total = trace(x, 1, 2)
   (values, indices, total)
 }
-"#,
+",
         );
         assert!(!checked.annotated_exprs().is_empty());
     }
@@ -22324,14 +22239,14 @@ def bad(
     fn surf_where_rejects_non_bool_condition_tensor() {
         let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
-                r#"
+                r"
 def bad(
   cond: tensor[batch, hidden, f32],
   x: tensor[batch, hidden, f32],
   y: tensor[batch, hidden, f32]
 ) -> tensor[batch, hidden, f32] =
   where(cond, x, y)
-"#,
+",
             )
             .expect("surf parse"),
         ));
@@ -22422,13 +22337,13 @@ out = scatter(base, idx, updates, 0, "replace")
     #[test]
     fn surf_map_filter_fold_type_check() {
         let checked = checked_surf(
-            r#"
+            r"
 def inc(x: int64) -> int64 = add(x, cast(1, int64))
 xs: List[int64] = [cast(1, int64), cast(2, int64), cast(3, int64)]
 mapped = map(inc, xs)
 filtered = filter(fn (x: int64) -> eq(mod(x, cast(2, int64)), cast(0, int64)), mapped)
 total = fold(fn (acc: int64, x: int64) -> add(acc, x), cast(0, int64), filtered)
-"#,
+",
         );
         assert!(checked.annotated_exprs().len() >= 5);
     }
@@ -22458,10 +22373,10 @@ bad = append(xs, "oops")
     fn surf_filter_rejects_non_bool_callback() {
         let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
-                r#"
+                r"
 xs: List[int64] = [cast(1, int64)]
 bad = filter(fn (x: int64) -> add(x, cast(1, int64)), xs)
-"#,
+",
             )
             .expect("surf parse"),
         ));
@@ -22481,10 +22396,10 @@ bad = filter(fn (x: int64) -> add(x, cast(1, int64)), xs)
     fn surf_dict_entries_rejects_non_dict_input() {
         let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
-                r#"
+                r"
 xs: List[int64] = [cast(1, int64)]
 bad = dict_entries(xs)
-"#,
+",
             )
             .expect("surf parse"),
         ));
@@ -22503,9 +22418,9 @@ bad = dict_entries(xs)
     fn surf_to_list_rejects_rank2_tensor() {
         let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
-                r#"
+                r"
 def bad(x: tensor[2, 2, f32]) -> List[f32] = to_list(x)
-"#,
+",
             )
             .expect("surf parse"),
         ));
@@ -22523,10 +22438,10 @@ def bad(x: tensor[2, 2, f32]) -> List[f32] = to_list(x)
     fn surf_fold_rejects_accumulator_mismatch() {
         let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
-                r#"
+                r"
 xs: List[int64] = [cast(1, int64)]
 bad = fold(fn (acc: string, x: int64) -> string_concat(acc, to_string(x)), cast(0, int64), xs)
-"#,
+",
             )
             .expect("surf parse"),
         ));
@@ -22544,7 +22459,7 @@ bad = fold(fn (acc: string, x: int64) -> string_concat(acc, to_string(x)), cast(
     fn surf_tuple_fold_tensor_slot_program() -> Vec<deep::Expr> {
         chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
-                r#"
+                r"
 def f[n](xs: tensor[n, f32]) -> (tensor[n, f32], int64) = {
   idxs = range(cast(0, int64), numel(copy(xs)))
   state0 = (to_tensor(map(fn (x: f32) -> cast(0.0, f32), to_list(copy(xs)))), cast(0, int64))
@@ -22557,7 +22472,7 @@ def f[n](xs: tensor[n, f32]) -> (tensor[n, f32], int64) = {
 }
 
 out = f(to_tensor([1.0, 2.0, 3.0]))
-"#,
+",
             )
             .expect("surf parse"),
         )
@@ -22682,10 +22597,10 @@ bad = dict_merge(lhs, rhs)
     fn surf_scan_rejects_accumulator_mismatch() {
         let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
-                r#"
+                r"
 xs: List[int64] = [cast(1, int64)]
 bad = scan(fn (acc: string, x: int64) -> string_concat(acc, to_string(x)), cast(0, int64), xs)
-"#,
+",
             )
             .expect("surf parse"),
         ));
@@ -22704,10 +22619,10 @@ bad = scan(fn (acc: string, x: int64) -> string_concat(acc, to_string(x)), cast(
     fn surf_partition_rejects_non_bool_callback() {
         let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
-                r#"
+                r"
 xs: List[int64] = [cast(1, int64)]
 bad = partition(fn (x: int64) -> add(x, cast(1, int64)), xs)
-"#,
+",
             )
             .expect("surf parse"),
         ));
@@ -22727,10 +22642,10 @@ bad = partition(fn (x: int64) -> add(x, cast(1, int64)), xs)
     fn surf_flat_map_rejects_non_list_callback() {
         let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
-                r#"
+                r"
 xs: List[int64] = [cast(1, int64)]
 bad = flat_map(fn (x: int64) -> add(x, cast(1, int64)), xs)
-"#,
+",
             )
             .expect("surf parse"),
         ));
@@ -22748,10 +22663,10 @@ bad = flat_map(fn (x: int64) -> add(x, cast(1, int64)), xs)
     fn surf_flatten_rejects_non_nested_list_input() {
         let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
-                r#"
+                r"
 xs: List[int64] = [cast(1, int64)]
 bad = flatten(xs)
-"#,
+",
             )
             .expect("surf parse"),
         ));
@@ -22904,13 +22819,13 @@ bad = chunk(xs, "two")
     fn issue_293_general_tvar_through_arrow_param_checks_clean() {
         // Positive: the reproducer must check clean — no TypeMismatch.
         let result = infer_surf(
-            r#"
+            r"
 module Repro.GenericCallback
 def apply_resid[n, P](x: tensor[n, f32], inner_p: P, f: tensor[n, f32] -> P -> tensor[n, f32]) -> tensor[n, f32] =
   add(x, f(x, inner_p))
 def use_it(x: tensor[3, f32], w: tensor[3, f32]) -> tensor[3, f32] =
   apply_resid(x, w, fn (t, q) -> mul(t, q))
-"#,
+",
         );
         assert!(
             result.errors.is_empty(),
@@ -22924,11 +22839,11 @@ def use_it(x: tensor[3, f32], w: tensor[3, f32]) -> tensor[3, f32] =
         // Control: the generic def alone already checked clean before the
         // fix; it must keep checking clean.
         let result = infer_surf(
-            r#"
+            r"
 module Repro.GenericCallback
 def apply_resid[n, P](x: tensor[n, f32], inner_p: P, f: tensor[n, f32] -> P -> tensor[n, f32]) -> tensor[n, f32] =
   add(x, f(x, inner_p))
-"#,
+",
         );
         assert!(
             result.errors.is_empty(),
@@ -22943,13 +22858,13 @@ def apply_resid[n, P](x: tensor[n, f32], inner_p: P, f: tensor[n, f32] -> P -> t
         // parameter is a *dim* var `m` rather than a general type var
         // already worked and must keep working.
         let result = infer_surf(
-            r#"
+            r"
 module Repro.DimCallback
 def apply_resid[n, m](x: tensor[n, f32], inner: tensor[m, f32], f: tensor[n, f32] -> tensor[m, f32] -> tensor[n, f32]) -> tensor[n, f32] =
   f(x, inner)
 def use_it(x: tensor[3, f32], w: tensor[3, f32]) -> tensor[3, f32] =
   apply_resid(x, w, fn (t, q) -> add(t, q))
-"#,
+",
         );
         assert!(
             result.errors.is_empty(),
@@ -22963,13 +22878,13 @@ def use_it(x: tensor[3, f32], w: tensor[3, f32]) -> tensor[3, f32] =
         // Control (monomorphic path): a fully concrete callback already
         // worked and must keep working.
         let result = infer_surf(
-            r#"
+            r"
 module Repro.MonoCallback
 def apply_resid[n](x: tensor[n, f32], inner: tensor[n, f32], f: tensor[n, f32] -> tensor[n, f32] -> tensor[n, f32]) -> tensor[n, f32] =
   add(x, f(x, inner))
 def use_it(x: tensor[3, f32], w: tensor[3, f32]) -> tensor[3, f32] =
   apply_resid(x, w, fn (t, q) -> mul(t, q))
-"#,
+",
         );
         assert!(
             result.errors.is_empty(),
@@ -22987,13 +22902,13 @@ def use_it(x: tensor[3, f32], w: tensor[3, f32]) -> tensor[3, f32] =
         // which is bound to the same `P`. `P` cannot be both a tensor and a
         // scalar int32, so this must still produce a clear mismatch.
         let result = infer_surf(
-            r#"
+            r"
 module Repro.BadCallback
 def apply_resid[n, P](x: tensor[n, f32], inner_p: P, f: tensor[n, f32] -> P -> tensor[n, f32]) -> tensor[n, f32] =
   add(x, f(x, inner_p))
 def use_it(x: tensor[3, f32]) -> tensor[3, f32] =
   apply_resid(x, 1, fn (t, q) -> mul(t, q))
-"#,
+",
         );
         assert!(
             result.errors.iter().any(|e| matches!(
@@ -23135,7 +23050,7 @@ def use_it(x: tensor[3, f32]) -> tensor[3, f32] =
     /// DECLARED dim, not the shape-erased `*`. Pre-fix the published scheme
     /// was `tensor[*, 1]`, so a CALLER that forwards the result observed
     /// `*` for its batch axis; that erased the link the C backend needs and
-    /// ICEd the §345 `symbolic_occurrences` guard at the `vmap` lane
+    /// `ICEd` the §345 `symbolic_occurrences` guard at the `vmap` lane
     /// kernel. The fix ties the return dim to the `spots` parameter dim
     /// var, so a caller forwarding `const_col`'s result sees a declared
     /// dim. (`type_env` records each def's body annotation; the call-site
@@ -23144,13 +23059,13 @@ def use_it(x: tensor[3, f32]) -> tensor[3, f32] =
     #[test]
     fn const_col_chain_propagates_declared_dim_to_callers() {
         let checked = checked_surf(
-            r#"
+            r"
 def const_col[n](spots: tensor[n, f32], v: f64) -> tensor[n, 1, f64] = {
   nn = cast(shape(copy(spots), cast(0, int32)), int64)
   reshape(to_tensor(map(fn (i: int64) -> v, range(cast(0, int64), nn))), [nn, cast(1, int64)])
 }
 def caller[n](spots: tensor[n, f32]) -> tensor[n, 1, f64] = const_col(spots, cast(1.0, f64))
-"#,
+",
         );
         let caller_ty = checked
             .type_env()

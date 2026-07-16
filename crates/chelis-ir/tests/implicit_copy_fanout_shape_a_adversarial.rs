@@ -4,7 +4,7 @@
 //! and the broader Shape A scope that v3 explicitly deferred.
 //!
 //! The broader Shape A fixtures originally pinned the deferred-shape
-//! TypeMismatch as `expect_err`; the 0.7.9 cleanup closed
+//! `TypeMismatch` as `expect_err`; the 0.7.9 cleanup closed
 //! `Linearity-ShapeABroadReturn-F1` and they now expect `Ok` clean
 //! lowering.  Each fixture has a single pinned expected outcome that
 //! catches regressions in either direction.
@@ -44,19 +44,18 @@ fn surf_to_dag(source: &str) -> Result<Dag, String> {
 /// in `implicit_copy_shape_a_broader_return.rs` pin the broader coverage.
 #[test]
 fn shape_a_let_tail_return_lowers_cleanly() {
-    let source = r#"
+    let source = r"
 module Repro.ShapeABroader
 
 def identity_via_let[a](x: &tensor[a, f32]) -> tensor[a, f32] = {
   y: &tensor[a, f32] = x
   y
 }
-"#;
+";
     let result = surf_to_dag(source);
     assert!(
         result.is_ok(),
-        "Shape A broader-return fix should lower let-tail returns cleanly; got {:?}",
-        result
+        "Shape A broader-return fix should lower let-tail returns cleanly; got {result:?}"
     );
 }
 
@@ -65,17 +64,16 @@ def identity_via_let[a](x: &tensor[a, f32]) -> tensor[a, f32] = {
 /// triple and accepts when both resolve to the same bare-var name.
 #[test]
 fn shape_a_if_tail_return_lowers_cleanly() {
-    let source = r#"
+    let source = r"
 module Repro.ShapeAIf
 
 def identity_via_if[a](x: &tensor[a, f32], flag: bool) -> tensor[a, f32] =
   if flag then x else x
-"#;
+";
     let result = surf_to_dag(source);
     assert!(
         result.is_ok(),
-        "Shape A broader-return fix should lower if-tail returns cleanly; got {:?}",
-        result
+        "Shape A broader-return fix should lower if-tail returns cleanly; got {result:?}"
     );
 }
 
@@ -88,7 +86,7 @@ def identity_via_if[a](x: &tensor[a, f32], flag: bool) -> tensor[a, f32] =
 /// the `arg_is_borrowed` clause N times against the same arg names.
 #[test]
 fn shape_b_three_grad_fanout_lowers_cleanly() {
-    let source = r#"
+    let source = r"
 module Repro.ImplicitCopyShapeBThreeGrad
 
 def mse_loss(x: tensor[3, f32], y: tensor[3, f32], w: tensor[3, f32], b: tensor[3, f32]) -> tensor[f32] = {
@@ -107,12 +105,11 @@ def sgd_step(x: tensor[3, f32], y: tensor[3, f32], w: tensor[3, f32], b: tensor[
   new_b = sub(b, db)
   add(new_w, new_b)
 }
-"#;
+";
     let result = surf_to_dag(source);
     assert!(
         result.is_ok(),
-        "Shape B three-grad fan-out must lower cleanly; got {:?}",
-        result
+        "Shape B three-grad fan-out must lower cleanly; got {result:?}"
     );
 }
 
@@ -121,7 +118,7 @@ def sgd_step(x: tensor[3, f32], y: tensor[3, f32], w: tensor[3, f32], b: tensor[
 /// covered by `arg_is_borrowed` but the mixed case is not pinned.
 #[test]
 fn shape_b_mixed_grad_vmap_fanout_lowers_cleanly() {
-    let source = r#"
+    let source = r"
 module Repro.ImplicitCopyShapeBMixed
 
 def my_loss(w: tensor[3, f32]) -> tensor[f32] = sum(w, 0)
@@ -132,25 +129,24 @@ def step(w: tensor[3, f32], ws: tensor[2, 3, f32]) -> tensor[3, f32] = {
   trailing = sub(w, dw)
   trailing
 }
-"#;
+";
     let result = surf_to_dag(source);
     assert!(
         result.is_ok(),
-        "Shape B mixed grad + vmap fan-out must lower cleanly; got {:?}",
-        result
+        "Shape B mixed grad + vmap fan-out must lower cleanly; got {result:?}"
     );
 }
 
 /// Sibling: `jit(f)(args)` per the v3 diagnosis is NOT affected (jit
 /// follows f's param types). Pin the negative: an `jit(f)(args); sub(w, ...)`
-/// where `f`'s param is owned should still fail with UseAfterConsume
+/// where `f`'s param is owned should still fail with `UseAfterConsume`
 /// at the linearity layer, NOT silently lower.
 ///
 /// This pins the v3 fix scope; if jit started to be treated as
 /// observational, this test would catch the over-broad fix.
 #[test]
 fn shape_b_jit_call_with_owned_arg_then_borrow_still_rejects() {
-    let source = r#"
+    let source = r"
 module Repro.ImplicitCopyShapeBJit
 
 def my_op(w: tensor[3, f32]) -> tensor[3, f32] = add(w, w)
@@ -160,7 +156,7 @@ def step(w: tensor[3, f32]) -> tensor[3, f32] = {
   trailing = sub(w, out)
   trailing
 }
-"#;
+";
     let result = surf_to_dag(source);
     // jit's call follows the underlying f's param types. If `my_op`
     // takes owned `tensor[3, f32]`, jit-app consumes `w` structurally,
@@ -178,7 +174,7 @@ def step(w: tensor[3, f32]) -> tensor[3, f32] = {
 /// after also works.
 #[test]
 fn shape_b_three_grad_no_trailing_borrow_lowers_cleanly() {
-    let source = r#"
+    let source = r"
 module Repro.ImplicitCopyShapeBNoBorrow
 
 def my_loss(w: tensor[3, f32]) -> tensor[f32] = sum(w, 0)
@@ -189,11 +185,10 @@ def step(w: tensor[3, f32]) -> tensor[3, f32] = {
   d3 = grad(my_loss, wrt=w)(w)
   add(d1, add(d2, d3))
 }
-"#;
+";
     let result = surf_to_dag(source);
     assert!(
         result.is_ok(),
-        "Shape B three-grad without trailing borrow must lower cleanly; got {:?}",
-        result
+        "Shape B three-grad without trailing borrow must lower cleanly; got {result:?}"
     );
 }

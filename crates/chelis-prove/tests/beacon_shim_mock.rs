@@ -39,7 +39,7 @@ static SCENARIO_LOCK: Mutex<()> = Mutex::new(());
 fn with_scenario(scenario: &str) -> MutexGuard<'static, ()> {
     let guard = SCENARIO_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // SAFETY: serialized by SCENARIO_LOCK; only the guard holder mutates this
     // var and only spawns children while holding the guard.
     unsafe {
@@ -201,7 +201,7 @@ fn refuted_oracle_verified_maps_to_disproved_sound_approximate() {
     match discharge.result() {
         TierBResult::Disproved(model) => {
             assert_eq!(
-                model.get("s").and_then(|v| v.as_f64()),
+                model.get("s").and_then(serde_json::Value::as_f64),
                 Some(42.0),
                 "the counterexample model is carried into the Disproved result"
             );
@@ -331,7 +331,7 @@ fn hang_is_hard_killed_at_timeout_and_maps_to_untrusted_error() {
 fn from_env_with_unset_var_yields_no_shim_no_crash() {
     let guard = SCENARIO_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // SAFETY: serialized by SCENARIO_LOCK.
     unsafe {
         std::env::remove_var(BEACON_BIN_ENV);
@@ -348,7 +348,7 @@ fn from_env_with_unset_var_yields_no_shim_no_crash() {
 fn from_env_with_set_var_constructs_a_shim() {
     let guard = SCENARIO_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // SAFETY: serialized by SCENARIO_LOCK.
     unsafe {
         std::env::set_var(BEACON_BIN_ENV, MOCK_BIN);
@@ -507,10 +507,17 @@ fn request_carries_exact_base64_bytes_and_expected_hash() {
         "expected_dag_sha256 must equal the IrHandle dag_hash"
     );
     assert_eq!(
-        request.get("schema_version").and_then(|v| v.as_u64()),
+        request
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64),
         Some(1)
     );
-    assert_eq!(request.get("root_index").and_then(|v| v.as_u64()), Some(0));
+    assert_eq!(
+        request
+            .get("root_index")
+            .and_then(serde_json::Value::as_u64),
+        Some(0)
+    );
 
     let b64 = request
         .get("wire_dag_v1_base64")
@@ -705,7 +712,7 @@ fn large_request_against_non_draining_child_hard_kills_not_deadlocks() {
 
 /// The other half of the HIGH acceptance: a large PROVED verdict is DELIVERED,
 /// not lost. A 256 KiB request that the child actually processes (drains via the
-/// temp file, emits proved) round-trips to a Proved + SoundApproximate discharge.
+/// temp file, emits proved) round-trips to a Proved + `SoundApproximate` discharge.
 #[test]
 fn large_request_proved_verdict_is_delivered_not_lost() {
     let _g = with_scenario("proved");
@@ -792,7 +799,7 @@ fn proved_with_oracle_verified_false_fails_closed_to_untrusted() {
 }
 
 /// Positive twin: a `proved` verdict with the flag ABSENT is the normal verified
-/// case and stays SoundApproximate. The production gate is `oracle_verified ==
+/// case and stays `SoundApproximate`. The production gate is `oracle_verified ==
 /// Some(false)`, so an absent (`None`) flag is accepted — pinned here against a
 /// `proved` report that omits the field entirely.
 #[test]

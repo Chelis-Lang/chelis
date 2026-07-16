@@ -39,6 +39,7 @@ pub struct ContractInvariant {
     pub record: AssumptionRecord,
 }
 
+#[must_use]
 pub fn standard_contracts() -> Vec<StandardContract> {
     vec![
         StandardContract {
@@ -112,6 +113,7 @@ pub fn standard_contracts() -> Vec<StandardContract> {
     ]
 }
 
+#[must_use]
 pub fn standard_contract_registry() -> AssumptionRegistry {
     let mut registry = AssumptionRegistry::new();
     for contract in standard_contracts() {

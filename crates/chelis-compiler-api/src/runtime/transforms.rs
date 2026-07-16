@@ -7,10 +7,12 @@ use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::lower::try_lower_subexpr_program;
 use chelis_types::types::Prim;
 
-use super::named_axis::*;
-use super::*;
+use super::named_axis::{declared_tensor_type_for_shape, pack_dag_roots};
+use super::{
+    EvalContext, RuntimeTensorValue, RuntimeValue, TransformKind, children, symbol_name, tag,
+};
 
-impl<'a> EvalContext<'a> {
+impl EvalContext<'_> {
     /// Bucket 1 entry point: evaluate `(grad f)(args...)` /
     /// `(vmap f)(args...)` in the host runtime. Synthesizes a Deep
     /// `(app {} <transform-expr> (var __chelis_xform_arg_k))` form and
@@ -246,7 +248,7 @@ impl<'a> EvalContext<'a> {
         // from `captured_env` (so `target = fn (...) -> ...; grad(target)(x)`
         // resolves `target` when the inner DAG lowering reaches it).
         let mut program_defs = self.top_level_defs.clone();
-        for (name, value) in captured_env.iter() {
+        for (name, value) in &captured_env {
             if let RuntimeValue::Closure { params, body, .. } = value {
                 program_defs
                     .entry(name.clone())
@@ -535,48 +537,45 @@ fn make_adt_construction_expr(
     field_placeholders: &[(String, TensorType)],
     span: Span,
 ) -> Expr {
-    match field_names {
-        Some(names) => {
-            let mut elements = vec![
-                Expr::Atom(Atom::Symbol("record".to_string()), span),
-                Expr::Map(MetaMap::default(), span),
-                Expr::Atom(Atom::Symbol(ctor.to_string()), span),
-            ];
-            for (name, (placeholder, ty)) in names.iter().zip(field_placeholders.iter()) {
-                elements.push(Expr::List(
-                    List {
-                        elements: vec![
-                            Expr::Atom(Atom::Symbol("kv".to_string()), span),
-                            Expr::Map(MetaMap::default(), span),
-                            Expr::Atom(Atom::Symbol(name.clone()), span),
-                            make_var_with_type(placeholder, ty, span),
-                        ],
-                    },
-                    span,
-                ));
-            }
-            Expr::List(List { elements }, span)
+    if let Some(names) = field_names {
+        let mut elements = vec![
+            Expr::Atom(Atom::Symbol("record".to_string()), span),
+            Expr::Map(MetaMap::default(), span),
+            Expr::Atom(Atom::Symbol(ctor.to_string()), span),
+        ];
+        for (name, (placeholder, ty)) in names.iter().zip(field_placeholders.iter()) {
+            elements.push(Expr::List(
+                List {
+                    elements: vec![
+                        Expr::Atom(Atom::Symbol("kv".to_string()), span),
+                        Expr::Map(MetaMap::default(), span),
+                        Expr::Atom(Atom::Symbol(name.clone()), span),
+                        make_var_with_type(placeholder, ty, span),
+                    ],
+                },
+                span,
+            ));
         }
-        None => {
-            let mut elements = vec![
-                Expr::Atom(Atom::Symbol("app".to_string()), span),
-                Expr::Map(MetaMap::default(), span),
-                Expr::List(
-                    List {
-                        elements: vec![
-                            Expr::Atom(Atom::Symbol("var".to_string()), span),
-                            Expr::Map(MetaMap::default(), span),
-                            Expr::Atom(Atom::Symbol(ctor.to_string()), span),
-                        ],
-                    },
-                    span,
-                ),
-            ];
-            for (placeholder, ty) in field_placeholders {
-                elements.push(make_var_with_type(placeholder, ty, span));
-            }
-            Expr::List(List { elements }, span)
+        Expr::List(List { elements }, span)
+    } else {
+        let mut elements = vec![
+            Expr::Atom(Atom::Symbol("app".to_string()), span),
+            Expr::Map(MetaMap::default(), span),
+            Expr::List(
+                List {
+                    elements: vec![
+                        Expr::Atom(Atom::Symbol("var".to_string()), span),
+                        Expr::Map(MetaMap::default(), span),
+                        Expr::Atom(Atom::Symbol(ctor.to_string()), span),
+                    ],
+                },
+                span,
+            ),
+        ];
+        for (placeholder, ty) in field_placeholders {
+            elements.push(make_var_with_type(placeholder, ty, span));
         }
+        Expr::List(List { elements }, span)
     }
 }
 

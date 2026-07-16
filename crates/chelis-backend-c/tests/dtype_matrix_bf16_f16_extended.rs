@@ -3,7 +3,7 @@
 //! Closes RT-Cleanup coverage gaps for ops the original WS-1 matrix did
 //! not exercise directly:
 //!   * Elementwise: Div, Recip, Sqrt, Sin, Cos, Tan, Atan, Floor, Ceil
-//!   * Reductions: MinReduce, ProdReduce
+//!   * Reductions: `MinReduce`, `ProdReduce`
 //!   * Cross-precision casts: bf16 <-> f32, f16 <-> f32, bf16 <-> f16
 //!     (each asserts both exact bit pattern AND in-tolerance round-trip)
 //!
@@ -58,21 +58,20 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
         .expect("canonical lib path has no parent")
         .join("deps");
     let hashed = find_newest_runtime_archive(&deps_dir)?;
-    let hashed = match hashed {
-        Some(path) => path,
-        None => {
-            Command::new(env!("CARGO"))
-                .args(["build", "-p", "chelis-runtime", "--lib"])
-                .status()
-                .map_err(|e| std::io::Error::other(format!("cargo build chelis-runtime: {e}")))?;
-            find_newest_runtime_archive(&deps_dir)?.ok_or_else(|| {
-                std::io::Error::other(format!(
-                    "no libchelis_runtime-*.a found in {} after explicit \
-                     `cargo build -p chelis-runtime --lib`",
-                    deps_dir.display()
-                ))
-            })?
-        }
+    let hashed = if let Some(path) = hashed {
+        path
+    } else {
+        Command::new(env!("CARGO"))
+            .args(["build", "-p", "chelis-runtime", "--lib"])
+            .status()
+            .map_err(|e| std::io::Error::other(format!("cargo build chelis-runtime: {e}")))?;
+        find_newest_runtime_archive(&deps_dir)?.ok_or_else(|| {
+            std::io::Error::other(format!(
+                "no libchelis_runtime-*.a found in {} after explicit \
+                 `cargo build -p chelis-runtime --lib`",
+                deps_dir.display()
+            ))
+        })?
     };
     let tmp = canonical.with_extension("a.tmp");
     fs::copy(&hashed, &tmp)?;
@@ -118,8 +117,7 @@ fn gcc_available() -> bool {
     Command::new("gcc")
         .arg("--version")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 fn compile_and_run_kernel(test_name: &str, c_source: &str, main_c: &str) -> String {
@@ -428,14 +426,14 @@ fn bf16_div_agrees_with_evaluator() {
             "a".into(),
             chelis_ir::eval::TensorValue::from_vec(
                 vec![n],
-                lhs.iter().map(|&v| v as f64).collect(),
+                lhs.iter().map(|&v| f64::from(v)).collect(),
             ),
         ),
         (
             "b".into(),
             chelis_ir::eval::TensorValue::from_vec(
                 vec![n],
-                rhs.iter().map(|&v| v as f64).collect(),
+                rhs.iter().map(|&v| f64::from(v)).collect(),
             ),
         ),
     ]
@@ -479,14 +477,14 @@ fn f16_div_agrees_with_evaluator() {
             "a".into(),
             chelis_ir::eval::TensorValue::from_vec(
                 vec![n],
-                lhs.iter().map(|&v| v as f64).collect(),
+                lhs.iter().map(|&v| f64::from(v)).collect(),
             ),
         ),
         (
             "b".into(),
             chelis_ir::eval::TensorValue::from_vec(
                 vec![n],
-                rhs.iter().map(|&v| v as f64).collect(),
+                rhs.iter().map(|&v| f64::from(v)).collect(),
             ),
         ),
     ]
@@ -522,7 +520,10 @@ fn unary_eval(op: RiscOp, prec: Prim, vals: &[f32]) -> Vec<f64> {
     dag.add_node(op, vec![load], vec_ty(n, prec), None);
     let inputs: HashMap<String, chelis_ir::eval::TensorValue> = [(
         "x".into(),
-        chelis_ir::eval::TensorValue::from_vec(vec![n], vals.iter().map(|&v| v as f64).collect()),
+        chelis_ir::eval::TensorValue::from_vec(
+            vec![n],
+            vals.iter().map(|&v| f64::from(v)).collect(),
+        ),
     )]
     .into_iter()
     .collect();
@@ -940,7 +941,7 @@ fn run_cast_f32_to_reduced(test_name: &str, dst: Prim, value: f32, tol: f64) {
     let mut dag = Dag::new();
     let src = dag.add_node(
         RiscOp::Const {
-            value: value as f64,
+            value: f64::from(value),
         },
         vec![],
         vec_ty(n, Prim::F32),
@@ -978,8 +979,8 @@ int main(void) {{
     let round_line = lines.next().unwrap();
     let got_bits = u16::from_str_radix(bits_line.trim().trim_start_matches("0x"), 16).unwrap();
     let expected_bits = match dst {
-        Prim::Bf16 => half::bf16::from_f64(value as f64).to_bits(),
-        Prim::F16 => half::f16::from_f64(value as f64).to_bits(),
+        Prim::Bf16 => half::bf16::from_f64(f64::from(value)).to_bits(),
+        Prim::F16 => half::f16::from_f64(f64::from(value)).to_bits(),
         _ => unreachable!(),
     };
     assert_eq!(
@@ -988,7 +989,7 @@ int main(void) {{
     );
     let round: f64 = round_line.parse().unwrap();
     assert!(
-        (round - value as f64).abs() <= tol,
+        (round - f64::from(value)).abs() <= tol,
         "{test_name}: round-trip got {round}, expected {value}, tol {tol}"
     );
 }
@@ -1004,7 +1005,7 @@ fn run_cast_reduced_to_f32(test_name: &str, src: Prim, value: f32, tol: f64) {
     let mut dag = Dag::new();
     let c = dag.add_node(
         RiscOp::Const {
-            value: value as f64,
+            value: f64::from(value),
         },
         vec![],
         vec_ty(n, src),
@@ -1035,8 +1036,8 @@ int main(void) {{
     let stdout = compile_and_run_kernel(test_name, &result.c_source, &main_c);
     let got: f64 = stdout.trim().parse().unwrap();
     let expected = match src {
-        Prim::Bf16 => half::bf16::from_f64(value as f64).to_f64(),
-        Prim::F16 => half::f16::from_f64(value as f64).to_f64(),
+        Prim::Bf16 => half::bf16::from_f64(f64::from(value)).to_f64(),
+        Prim::F16 => half::f16::from_f64(f64::from(value)).to_f64(),
         _ => panic!("src must be reduced"),
     };
     assert!(
@@ -1056,7 +1057,7 @@ fn run_cast_reduced_to_reduced(test_name: &str, src: Prim, dst: Prim, value: f32
     let mut dag = Dag::new();
     let c = dag.add_node(
         RiscOp::Const {
-            value: value as f64,
+            value: f64::from(value),
         },
         vec![],
         vec_ty(n, src),
@@ -1098,8 +1099,8 @@ int main(void) {{
     // chains through f32 so the dst-precision bit pattern is the
     // canonical round-to-nearest-even of the src value.
     let src_value = match src {
-        Prim::Bf16 => half::bf16::from_f64(value as f64).to_f64(),
-        Prim::F16 => half::f16::from_f64(value as f64).to_f64(),
+        Prim::Bf16 => half::bf16::from_f64(f64::from(value)).to_f64(),
+        Prim::F16 => half::f16::from_f64(f64::from(value)).to_f64(),
         _ => panic!("src must be reduced"),
     };
     let expected_bits = match dst {

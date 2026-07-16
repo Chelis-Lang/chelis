@@ -22,7 +22,7 @@
 //!    (the stdlib's `Std.Decimal.normalize` / `Std.Test.fail` rely on
 //!    exactly this).
 //!
-//! Unit-level coverage (full BUILTIN_NAMES sweep, defsig classes, dedupe,
+//! Unit-level coverage (full `BUILTIN_NAMES` sweep, defsig classes, dedupe,
 //! params/locals scope pins) lives in
 //! `crates/chelis-types/tests/issue_353_builtin_shadowing.rs`.
 
@@ -133,7 +133,7 @@ fn issue_353_sig_only_rejected_at_check() {
 
 /// Lane-consistency invariant (the chelis#353 acceptance criterion):
 /// after the fix, `check`, `eval --file`, and `build` give the SAME
-/// answer for the reproducer — the BuiltinShadowing rejection. Pre-fix
+/// answer for the reproducer — the `BuiltinShadowing` rejection. Pre-fix
 /// the three answers were: clean / builtin-arity error / SIGSEGV.
 #[test]
 fn issue_353_lane_consistency_check_eval_build_all_reject() {

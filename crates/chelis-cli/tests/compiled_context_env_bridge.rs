@@ -292,7 +292,7 @@ fn list_tempfile_candidates(tmpdir: &Path) -> Vec<std::path::PathBuf> {
         return Vec::new();
     };
     entries
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .map(|e| e.path())
         .filter(|p| {
             p.file_name()

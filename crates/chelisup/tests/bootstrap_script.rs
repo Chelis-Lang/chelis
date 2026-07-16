@@ -17,8 +17,7 @@ fn tool_available(tool: &str) -> bool {
     Command::new(tool)
         .arg("--version")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 #[test]

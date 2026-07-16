@@ -41,11 +41,11 @@ fn issue185_max_elem_runs_and_matches_ir_eval() {
     // a = [1.0, 4.0, 2.0, 5.0]
     // b = [3.0, 1.0, 6.0, 0.5]
     // max_elem(a, b) -> [3.0, 4.0, 6.0, 5.0]
-    let src = r#"
+    let src = r"
 a = to_tensor([1.0, 4.0, 2.0, 5.0])
 b = to_tensor([3.0, 1.0, 6.0, 0.5])
 out = max_elem(&a, &b)
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![4], "max_elem shape");
@@ -55,11 +55,11 @@ out = max_elem(&a, &b)
 #[test]
 fn issue185_min_elem_runs_and_matches_ir_eval() {
     // min_elem(a, b) -> [1.0, 1.0, 2.0, 0.5]
-    let src = r#"
+    let src = r"
 a = to_tensor([1.0, 4.0, 2.0, 5.0])
 b = to_tensor([3.0, 1.0, 6.0, 0.5])
 out = min_elem(&a, &b)
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![4], "min_elem shape");

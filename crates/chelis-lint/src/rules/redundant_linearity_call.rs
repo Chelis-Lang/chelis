@@ -19,11 +19,11 @@ fn call_re() -> &'static Regex {
 pub struct RedundantLinearityCall;
 
 impl Rule for RedundantLinearityCall {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "redundant-linearity-call"
     }
 
-    fn spec_ref(&self) -> &str {
+    fn spec_ref(&self) -> &'static str {
         "implicit-linearity"
     }
 
@@ -31,7 +31,7 @@ impl Rule for RedundantLinearityCall {
         &[Surface::SurfSource]
     }
 
-    fn summary(&self) -> &str {
+    fn summary(&self) -> &'static str {
         "Source-level `copy()` and `drop()` are valid but redundant under implicit linearity"
     }
 

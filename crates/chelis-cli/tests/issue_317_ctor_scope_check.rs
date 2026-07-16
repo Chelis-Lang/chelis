@@ -66,7 +66,7 @@ fn check_package(root: &Path) -> Value {
         .output()
         .expect("run chelis check");
     serde_json::from_slice(&output.stdout)
-        .unwrap_or_else(|e| panic!("check output must be json: {e}\n{:?}", output))
+        .unwrap_or_else(|e| panic!("check output must be json: {e}\n{output:?}"))
 }
 
 /// Pull the entry for a single source file out of the `{"files":[...]}` map.

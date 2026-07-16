@@ -43,7 +43,7 @@ fn pipe_into_shape_with_explicit_axis_does_not_consume() {
     // pipe must not consume `table`, and the later `gather(table, ...)`
     // must succeed.
     check_surf(
-        r#"
+        r"
 def f[batch, seq, max_seq, hidden](
     table: tensor[max_seq, hidden, f32],
     ids: &tensor[batch, seq, int64]
@@ -51,7 +51,7 @@ def f[batch, seq, max_seq, hidden](
   max_seq_dim = table |> shape(cast(0, int32))
   gather(table, ids, 0)
 }
-"#,
+",
     )
     .expect(
         "issue #226: pipe into a borrow-arg builtin must read, not consume; \
@@ -65,12 +65,12 @@ fn pipe_into_add_with_explicit_other_arg_does_not_consume() {
     // Covers the multi-arg borrow-arg builtin shape that downstream
     // shells use heavily for tensor-scalar compose patterns.
     check_surf(
-        r#"
+        r"
 def f(x: tensor[4, f32], y: tensor[4, f32]) -> tensor[4, f32] = {
   z = x |> add(y)
   add(x, z)
 }
-"#,
+",
     )
     .expect("issue #226: pipe into a multi-arg borrow-arg builtin must read, not consume");
 }
@@ -81,12 +81,12 @@ fn pipe_into_mul_chain_with_explicit_args_does_not_consume() {
     // synthesized lambdas. The piped tensor must survive all stages
     // and remain readable afterward.
     check_surf(
-        r#"
+        r"
 def f(x: tensor[4, f32], k: tensor[4, f32]) -> tensor[4, f32] = {
   y = x |> mul(k) |> mul(k)
   add(x, y)
 }
-"#,
+",
     )
     .expect(
         "issue #226: composed pipe stages into borrow-arg builtins must not \
@@ -101,12 +101,12 @@ fn pipe_into_realize_still_consumes() {
     // peering must not over-permit; `x |> realize` followed by a later
     // read of `x` must still trip `UseAfterConsume`.
     let errors = check_surf(
-        r#"
+        r"
 def bad(x: tensor[4, f32]) -> tensor[4, f32] = {
   y = x |> realize
   add(x, y)
 }
-"#,
+",
     )
     .expect_err(
         "issue #226 fix must preserve consume detection: pipe into `realize` \
@@ -130,13 +130,13 @@ fn pipe_into_user_consuming_function_still_consumes() {
     // (Fixture renamed from `take` for chelis#353: `take` is a builtin
     // name and bare shadowing defs are now rejected at declaration time.)
     let errors = check_surf(
-        r#"
+        r"
 def grab(t: tensor[4, f32]) -> tensor[4, f32] = t
 def bad(x: tensor[4, f32]) -> tensor[4, f32] = {
   y = x |> grab
   add(x, y)
 }
-"#,
+",
     )
     .expect_err(
         "issue #226 fix must preserve consume detection: pipe into a user fn \
@@ -159,13 +159,13 @@ fn pipe_into_user_consuming_function_with_explicit_args_still_consumes() {
     // signature, NOT the synthesized lambda's, and still mark `x` as
     // consumed.
     let errors = check_surf(
-        r#"
+        r"
 def consume_two(t: tensor[4, f32], k: tensor[4, f32]) -> tensor[4, f32] = t
 def bad(x: tensor[4, f32], k: tensor[4, f32]) -> tensor[4, f32] = {
   y = x |> consume_two(k)
   add(x, y)
 }
-"#,
+",
     )
     .expect_err(
         "issue #226 fix must preserve consume detection inside synthesized \

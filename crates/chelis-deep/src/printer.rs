@@ -18,21 +18,25 @@ enum PrintMode {
 ///
 /// Expressions are separated by blank lines and the output ends with a
 /// single newline.
+#[must_use]
 pub fn print_canonical(exprs: &[Expr]) -> String {
     print_program(exprs, PrintMode::Pretty)
 }
 
 /// Print a slice of top-level expressions in flat canonical form.
+#[must_use]
 pub fn print_canonical_flat(exprs: &[Expr]) -> String {
     print_program(exprs, PrintMode::Flat)
 }
 
 /// Print a single expression in canonical pretty form (no trailing newline).
+#[must_use]
 pub fn print_expr(expr: &Expr) -> String {
     Printer::pretty().fmt_expr(expr, 0)
 }
 
 /// Print a single expression in canonical flat form (no trailing newline).
+#[must_use]
 pub fn print_expr_flat(expr: &Expr) -> String {
     Printer::flat().fmt_expr(expr, 0)
 }
@@ -219,7 +223,7 @@ impl Printer {
             let mut value_lines = rendered.lines();
             let first = value_lines.next().unwrap_or("");
             let line = if index == 0 {
-                format!("{{{}: {}", key, first)
+                format!("{{{key}: {first}")
             } else {
                 format!("{}{}: {}", " ".repeat(entry_indent), key, first)
             };

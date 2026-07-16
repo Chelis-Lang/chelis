@@ -2,7 +2,7 @@
 //!
 //! These require a HIP-capable GPU plus `hipcc`/`hiprtc`.
 //! They are `#[ignore]` by default — run with:
-//!     scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1
+//!     `scripts/hip_test.py` -p chelis-backend-hip --test `gpu_correctness` -- --ignored --test-threads=1
 //!
 //! The `scripts/hip_test.py` wrapper sets the full hipBLAS env per
 //! `docs/local_hip_environment.md`. Running the raw `cargo test ...` command
@@ -101,7 +101,7 @@ impl TestInput {
         Self {
             name: name.to_string(),
             shape: shape.to_vec(),
-            data: data.iter().map(|value| *value as f32).collect(),
+            data: data.iter().map(|value| f32::from(*value)).collect(),
             dtype: Prim::Int8,
         }
     }
@@ -112,7 +112,7 @@ impl TestInput {
         Self {
             name: name.to_string(),
             shape: shape.to_vec(),
-            data: data.iter().map(|value| *value as f32).collect(),
+            data: data.iter().map(|value| f32::from(*value)).collect(),
             dtype: Prim::Int16,
         }
     }
@@ -225,8 +225,9 @@ fn cpu_runtime_library_path() -> PathBuf {
             entries.flatten().map(|entry| entry.path()).find(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
+                    .is_some_and(|name| {
+                        name.starts_with("libchelis_runtime") && name.ends_with(".a")
+                    })
             })
         }) {
             return path;
@@ -237,8 +238,9 @@ fn cpu_runtime_library_path() -> PathBuf {
             entries.flatten().map(|entry| entry.path()).find(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
+                    .is_some_and(|name| {
+                        name.starts_with("libchelis_runtime") && name.ends_with(".a")
+                    })
             })
         }) {
             return path;
@@ -310,7 +312,7 @@ fn append_case_lines(
             let (ndim, c_dims) = c_shape(&input.shape);
             let dims = c_dims
                 .iter()
-                .map(|d| d.to_string())
+                .map(std::string::ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
             lines.push(format!(
@@ -1847,7 +1849,7 @@ fn append_case_lines_f64(
             let (ndim, c_dims) = c_shape(&input.shape);
             let dims = c_dims
                 .iter()
-                .map(|d| d.to_string())
+                .map(std::string::ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
             lines.push(format!(
@@ -2557,8 +2559,8 @@ fn ws_a4_i8_add_gpu_matches_two_complement_wrap() {
     assert_eq!(actual, vec![3, -106, -128, 126]);
 }
 
-/// WS-A4: i16 mul on GPU. 1000 * 1000 = 1_000_000 wraps in i16 to
-/// 16960 (1_000_000 mod 65536, with high bit clear).
+/// WS-A4: i16 mul on GPU. 1000 * 1000 = `1_000_000` wraps in i16 to
+/// 16960 (`1_000_000` mod 65536, with high bit clear).
 #[test]
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn ws_a4_i16_mul_gpu_matches_two_complement_wrap() {
@@ -2605,7 +2607,7 @@ fn ws_a4_i16_mul_gpu_matches_two_complement_wrap() {
     assert_eq!(actual, vec![10000, 16960]);
 }
 
-/// WS-A4: i8 reduce_sum on GPU promotes accumulator to i32 per spec
+/// WS-A4: i8 `reduce_sum` on GPU promotes accumulator to i32 per spec
 /// §5.7.1. 200 ones at i8 source produce 200 at i32 output (no wrap).
 #[test]
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
@@ -2644,7 +2646,7 @@ fn ws_a4_i8_reduce_sum_gpu_promotes_to_i32() {
     assert_eq!(actual, vec![200], "200 i8 ones must sum to 200 in i32");
 }
 
-/// WS-A4: i16 reduce_sum on GPU. 200 i16 1000s = 200_000 (overflows
+/// WS-A4: i16 `reduce_sum` on GPU. 200 i16 1000s = `200_000` (overflows
 /// i16 but fits in i32). Mirrors `ws_a4_i8_reduce_sum_gpu_promotes_to_i32`.
 #[test]
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
@@ -2797,7 +2799,7 @@ fn ws_a4_i8_add_emits_dtype_suffixed_kernel_name() {
     );
 }
 
-/// WS-A4 codegen-shape test (no GPU required): i8 reduce_sum emits a
+/// WS-A4 codegen-shape test (no GPU required): i8 `reduce_sum` emits a
 /// (source, accumulator) suffixed kernel name that resolves at
 /// kernel-source-emit time to the integer-promoted template.
 #[test]

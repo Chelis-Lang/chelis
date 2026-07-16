@@ -75,7 +75,7 @@ fn pat_as_wrapping_pat_record_stamps_both_outer_and_inner_types() {
     // }
     //
     // Constructed at Deep level because Surf does not yet expose `pat-as`.
-    let src = r#"
+    let src = r"
 (module {} Issue181PatAs
   (deftype {} FooState (a)
     (variant {} FooState (field {} x (t-var {} a)) (field {} y (t-var {} a))))
@@ -96,7 +96,7 @@ fn pat_as_wrapping_pat_record_stamps_both_outer_and_inner_types() {
               (kv {} y (pat-var {} y))))
           ()
           (lit {type: (t-prim {} int32)} 0))))))
-"#;
+";
     let exprs = deep(src);
     let checked = check_typed_program(&exprs).expect("type check should succeed");
 

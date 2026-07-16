@@ -96,11 +96,11 @@ pub const CLOSED_TAGS: &[&str] = &[
 pub struct DeepUserSymbolCharset;
 
 impl Rule for DeepUserSymbolCharset {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "deep-user-symbol-charset"
     }
 
-    fn spec_ref(&self) -> &str {
+    fn spec_ref(&self) -> &'static str {
         "§11.1"
     }
 
@@ -108,7 +108,7 @@ impl Rule for DeepUserSymbolCharset {
         &[Surface::DeepSource]
     }
 
-    fn summary(&self) -> &str {
+    fn summary(&self) -> &'static str {
         "user-defined Deep symbols must satisfy Surf's identifier charset (no hyphens); only closed-vocabulary tags may contain hyphens"
     }
 
@@ -224,20 +224,20 @@ mod tests {
     #[test]
     fn accepts_canonical_compound_tags() {
         // The closed compound-tag vocabulary is allowed.
-        let src = r#"(def {type: (t-fn {} (t-prim {} f32) (t-prim {} f32))}
+        let src = r"(def {type: (t-fn {} (t-prim {} f32) (t-prim {} f32))}
   square (params {} x)
   (app {} (var {} mul) (var {} x) (var {} x)))
-"#;
+";
         let v = run(src);
         assert!(v.is_empty(), "got: {v:?}");
     }
 
     #[test]
     fn accepts_pattern_tags() {
-        let src = r#"(match {} (var {} m)
+        let src = r"(match {} (var {} m)
   (arm {} (pat-ctor {} Some (pat-var {} x)) () (var {} x))
   (arm {} (pat-ctor {} None) () (var {} default)))
-"#;
+";
         let v = run(src);
         assert!(v.is_empty(), "got: {v:?}");
     }

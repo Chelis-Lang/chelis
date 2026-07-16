@@ -76,7 +76,7 @@ fn parse_one(src: &str) -> Expr {
 #[test]
 fn nested_fn_param_call_lowers_via_substituted_callable() {
     // `doubler(x) = add(x, x)` — concrete, non-recursive.
-    let doubler_src = r#"
+    let doubler_src = r"
         (fn {}
           (params {}
             (x {type: (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)))}))
@@ -84,9 +84,9 @@ fn nested_fn_param_call_lowers_via_substituted_callable() {
             (var {} add)
             (copy {} (var {} x))
             (copy {} (var {} x))))
-    "#;
+    ";
     // `outer(f, x) = f(f(x))` — nested fn-typed parameter application.
-    let outer_src = r#"
+    let outer_src = r"
         (fn {}
           (params {}
             (f {type: (t-fn {}
@@ -98,14 +98,14 @@ fn nested_fn_param_call_lowers_via_substituted_callable() {
             (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
               (var {} f)
               (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))))
-    "#;
+    ";
     // Call site: `outer(doubler, seed)`.
-    let call_src = r#"
+    let call_src = r"
         (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
           (var {} outer)
           (var {} doubler)
           (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} seed))
-    "#;
+    ";
 
     let mut program_defs = HashMap::new();
     program_defs.insert("doubler".to_string(), parse_one(doubler_src));
@@ -151,20 +151,20 @@ fn nested_fn_param_call_lowers_via_substituted_callable() {
 #[test]
 fn true_self_recursion_errors_loudly_at_unroll_cap() {
     // `loop_self(x) = loop_self(x)` — self-referential.
-    let loop_self_src = r#"
+    let loop_self_src = r"
         (fn {}
           (params {}
             (x {type: (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)))}))
           (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
             (var {} loop_self)
             (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)))
-    "#;
+    ";
     // Call site: `loop_self(seed)`.
-    let call_src = r#"
+    let call_src = r"
         (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
           (var {} loop_self)
           (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} seed))
-    "#;
+    ";
 
     let mut program_defs = HashMap::new();
     program_defs.insert("loop_self".to_string(), parse_one(loop_self_src));
@@ -200,7 +200,7 @@ fn true_self_recursion_errors_loudly_at_unroll_cap() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test]
 fn static_base_case_recursion_unrolls_within_cap() {
-    let count_up_src = r#"
+    let count_up_src = r"
         (fn {}
           (params {}
             (x {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))})
@@ -216,13 +216,13 @@ fn static_base_case_recursion_unrolls_within_cap() {
               (app {} (var {} add)
                 (var {type: (t-prim {} int64)} k)
                 (cast {} (lit {} 1) int64)))))
-    "#;
-    let call_src = r#"
+    ";
+    let call_src = r"
         (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
           (var {} count_up)
           (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} seed)
           (cast {} (lit {} 0) int64))
-    "#;
+    ";
 
     let mut program_defs = HashMap::new();
     program_defs.insert("count_up".to_string(), parse_one(count_up_src));

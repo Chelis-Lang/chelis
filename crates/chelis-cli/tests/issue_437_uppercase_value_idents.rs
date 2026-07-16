@@ -5,7 +5,7 @@
 //! uppercase identifier as a `TypeIdent` unconditionally, so a value
 //! binding `S = ...` or an uppercase parameter `def f(S, K) = ...`
 //! failed at parse with "expected end of declaration expression, found
-//! Eq" / "expected identifier, found TypeIdent". The repro in the issue
+//! Eq" / "expected identifier, found `TypeIdent`". The repro in the issue
 //! is `S = f(cast(2.0, f32))`.
 //!
 //! `spec/01-nomenclature.md` §1.1/§3.2/§3.3 now bless single-letter
@@ -14,7 +14,7 @@
 //! §P4a). These tests pin the acceptance surface at the CLI: canonically
 //! formatted source using `S`/`K`/`T`/`N`/`P` passes `chelis check`
 //! cleanly WITHOUT the style-gate bypass, so the formatter and lint also
-//! accept the new value names; multi-letter PascalCase value bindings
+//! accept the new value names; multi-letter `PascalCase` value bindings
 //! stay rejected.
 
 use assert_cmd::Command;

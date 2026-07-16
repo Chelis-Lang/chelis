@@ -78,9 +78,9 @@ fn issue_248_uniform_like_does_not_use_lossy_format() {
     let cases: &[(f64, f64)] = &[
         (1.0e-40, 0.5),
         (0.1, 0.9),
-        (f32::MIN_POSITIVE as f64, 1.0),
+        (f64::from(f32::MIN_POSITIVE), 1.0),
         // smallest positive f32 denormal
-        (f32::from_bits(0x0000_0001) as f64, 1.0),
+        (f64::from(f32::from_bits(0x0000_0001)), 1.0),
     ];
     for &(low, high) in cases {
         let dag = build_uniform_like_dag(low, high, 7);

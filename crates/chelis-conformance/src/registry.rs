@@ -143,6 +143,7 @@ pub fn active_shells() -> impl Iterator<Item = &'static Shell> {
 }
 
 /// Look up a shell by name.
+#[must_use]
 pub fn shell(name: &str) -> Option<&'static Shell> {
     REGISTRY.iter().find(|s| s.name == name)
 }

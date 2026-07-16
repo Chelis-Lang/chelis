@@ -424,11 +424,11 @@ unsafe fn alloc_vec_with_values(dtype: c_int, vals: &[f64]) -> *mut chelis_tenso
 unsafe fn read_at(t: *mut chelis_tensor, i: usize) -> f64 {
     unsafe {
         match (*t).dtype {
-            CHELIS_F32 => *f32::data_ptr_unchecked(t).add(i) as f64,
+            CHELIS_F32 => f64::from(*f32::data_ptr_unchecked(t).add(i)),
             CHELIS_F64 => *f64::data_ptr_unchecked(t).add(i),
             CHELIS_I64 => *i64::data_ptr_unchecked(t).add(i) as f64,
-            CHELIS_I32 => *i32::data_ptr_unchecked(t).add(i) as f64,
-            CHELIS_BOOL => *data_as_f32(t).add(i) as f64,
+            CHELIS_I32 => f64::from(*i32::data_ptr_unchecked(t).add(i)),
+            CHELIS_BOOL => f64::from(*data_as_f32(t).add(i)),
             other => panic!("read_at: unsupported dtype {other}"),
         }
     }
@@ -596,7 +596,7 @@ unsafe fn split_two_halves(
     lhs_size: i64,
 ) -> (*mut chelis_tensor, *mut chelis_tensor) {
     unsafe {
-        let rhs_size = (*t).shape[0] as i64 - lhs_size;
+        let rhs_size = i64::from((*t).shape[0]) - lhs_size;
         let sizes = chelis_list_empty();
         let sizes = chelis_list_append(sizes, chelis_runtime::chelis_value_from_int64(lhs_size));
         let sizes = chelis_list_append(sizes, chelis_runtime::chelis_value_from_int64(rhs_size));

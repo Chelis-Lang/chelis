@@ -46,7 +46,7 @@
 //! can't handle ascription."
 //!
 //! Tracking: chelis#159 (sub-issue (B) of chelis#143)
-//! Diagnosis: docs/investigations/issue_143b_let_ascription_no_propagation_diagnosis.md
+//! Diagnosis: `docs/investigations/issue_143b_let_ascription_no_propagation_diagnosis.md`
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
@@ -92,7 +92,7 @@ fn let_binding_ascription_propagates_to_to_tensor_rhs() {
     // carry `tensor[Wildcard, f32]` (or a free Type::Var that resolves
     // to one), and the sig var `n` stays free.
     let errors = typecheck_surf(
-        r#"
+        r"
 sig pair_id: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
 def pair_id(x, y) = x
 def caller() -> tensor[3, f32] =
@@ -101,7 +101,7 @@ def caller() -> tensor[3, f32] =
     b: tensor[5, f32] = to_tensor([1.0, 2.0, 3.0, 4.0, 5.0])
     pair_id(&a, &b)
   }
-"#,
+",
     );
     assert!(
         has_dimension_mismatch(&errors),
@@ -118,12 +118,12 @@ fn parameter_ascription_path_works_today() {
     // This rules out "the type system can't handle ascription at all"
     // and isolates the bug above to the let-binding path specifically.
     let errors = typecheck_surf(
-        r#"
+        r"
 sig pair_id: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
 def pair_id(x, y) = x
 def caller(a: &tensor[3, f32], b: &tensor[5, f32]) -> tensor[3, f32] =
   pair_id(a, b)
-"#,
+",
     );
     assert!(
         has_dimension_mismatch(&errors),
@@ -139,7 +139,7 @@ fn let_binding_ascription_with_matched_shapes_does_not_spuriously_fail() {
     // DimensionMismatch. Pin this so a future fix doesn't over-correct
     // and introduce false positives for the matched-shape case.
     let errors = typecheck_surf(
-        r#"
+        r"
 sig pair_id: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
 def pair_id(x, y) = x
 def caller() -> tensor[3, f32] =
@@ -148,7 +148,7 @@ def caller() -> tensor[3, f32] =
     b: tensor[3, f32] = to_tensor([1.0, 2.0, 3.0])
     pair_id(&a, &b)
   }
-"#,
+",
     );
     assert!(
         !has_dimension_mismatch(&errors),
@@ -184,13 +184,13 @@ fn let_ascription_dim_mismatch_reports_dimension_mismatch_with_template() {
     // dim 2 (via a parameter ascription). Must report
     // DimensionMismatch with the chelis#159 substring template.
     let errors = typecheck_surf(
-        r#"
+        r"
 def caller(t: &tensor[2, f32]) -> &tensor[2, f32] =
   {
     x: &tensor[3, f32] = t
     x
   }
-"#,
+",
     );
     assert!(
         errors_contain_kind_and_message(
@@ -209,13 +209,13 @@ fn let_ascription_precision_mismatch_reports_precision_mismatch_with_template() 
     // f32-cast scalar. Must report PrecisionMismatch with the
     // chelis#159 substring template.
     let errors = typecheck_surf(
-        r#"
+        r"
 def caller() -> f64 =
   {
     x: f64 = cast(1.0, f32)
     x
   }
-"#,
+",
     );
     assert!(
         errors_contain_kind_and_message(
@@ -236,13 +236,13 @@ fn let_ascription_type_mismatch_reports_type_mismatch_with_template() {
     // failure — Tensor vs Prim — surfaces under TypeMismatch, not
     // DimensionMismatch or PrecisionMismatch).
     let errors = typecheck_surf(
-        r#"
+        r"
 def caller() -> tensor[3, f32] =
   {
     x: tensor[3, f32] = cast(1.0, f32)
     to_tensor([1.0, 2.0, 3.0])
   }
-"#,
+",
     );
     assert!(
         errors_contain_kind_and_message(

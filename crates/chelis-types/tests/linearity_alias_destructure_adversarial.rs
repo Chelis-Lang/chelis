@@ -40,7 +40,7 @@ fn assert_linearity_clean(source: &str) {
 #[test]
 fn alias_chain_three_levels_propagates_consume() {
     let errors = linearity_errors(
-        r#"
+        r"
 def f(x: tensor[4, f32]): tensor[4, f32] =
   {
     y: tensor[4, f32] = x
@@ -48,7 +48,7 @@ def f(x: tensor[4, f32]): tensor[4, f32] =
     r: tensor[4, f32] = realize(z)
     add(x, r)
   }
-"#,
+",
     );
     assert!(
         errors.iter().any(|e| {
@@ -62,7 +62,7 @@ def f(x: tensor[4, f32]): tensor[4, f32] =
 #[test]
 fn alias_chain_four_levels_propagates_consume() {
     let errors = linearity_errors(
-        r#"
+        r"
 def f(x: tensor[4, f32]): tensor[4, f32] =
   {
     a: tensor[4, f32] = x
@@ -72,7 +72,7 @@ def f(x: tensor[4, f32]): tensor[4, f32] =
     r: tensor[4, f32] = realize(d)
     add(x, r)
   }
-"#,
+",
     );
     assert!(
         errors.iter().any(|e| {
@@ -87,7 +87,7 @@ def f(x: tensor[4, f32]): tensor[4, f32] =
 #[test]
 fn alias_chain_four_levels_consume_at_tail_only_passes() {
     assert_linearity_clean(
-        r#"
+        r"
 def f(x: tensor[4, f32]): tensor[4, f32] =
   {
     a: tensor[4, f32] = x
@@ -96,7 +96,7 @@ def f(x: tensor[4, f32]): tensor[4, f32] =
     d: tensor[4, f32] = c
     realize(d)
   }
-"#,
+",
     );
 }
 
@@ -115,14 +115,14 @@ def f(x: tensor[4, f32]): tensor[4, f32] =
 #[test]
 fn alias_then_pipe_stage_consume_propagates() {
     let errors = linearity_errors(
-        r#"
+        r"
 def f(x: tensor[4, f32]): tensor[4, f32] =
   {
     y: tensor[4, f32] = x
     r: tensor[4, f32] = y |> realize
     add(x, r)
   }
-"#,
+",
     );
     assert!(
         errors.iter().any(|e| {
@@ -137,14 +137,14 @@ def f(x: tensor[4, f32]): tensor[4, f32] =
 #[test]
 fn alias_then_app_arg_consume_propagates() {
     let errors = linearity_errors(
-        r#"
+        r"
 def f(x: tensor[4, f32]): tensor[4, f32] =
   {
     y: tensor[4, f32] = x
     r: tensor[4, f32] = realize(y)
     add(x, r)
   }
-"#,
+",
     );
     assert!(
         errors.iter().any(|e| {
@@ -168,7 +168,7 @@ def f(x: tensor[4, f32]): tensor[4, f32] =
 #[test]
 fn nested_tuple_destructure_double_realize_errors() {
     let errors = linearity_errors(
-        r#"
+        r"
 def f(p: ((tensor[4, f32], tensor[4, f32]), tensor[4, f32])): tensor[4, f32] =
   {
     (inner, c) = p
@@ -176,7 +176,7 @@ def f(p: ((tensor[4, f32], tensor[4, f32]), tensor[4, f32])): tensor[4, f32] =
     r1: tensor[4, f32] = realize(a)
     realize(a)
   }
-"#,
+",
     );
     assert!(
         errors.iter().any(|e| {
@@ -192,7 +192,7 @@ def f(p: ((tensor[4, f32], tensor[4, f32]), tensor[4, f32])): tensor[4, f32] =
 #[test]
 fn nested_tuple_destructure_single_consume_each_passes() {
     assert_linearity_clean(
-        r#"
+        r"
 def f(p: ((tensor[4, f32], tensor[4, f32]), tensor[4, f32])): tensor[4, f32] =
   {
     (inner, c) = p
@@ -201,7 +201,7 @@ def f(p: ((tensor[4, f32], tensor[4, f32]), tensor[4, f32])): tensor[4, f32] =
     r2: tensor[4, f32] = realize(b)
     add(r1, r2)
   }
-"#,
+",
     );
 }
 
@@ -210,7 +210,7 @@ def f(p: ((tensor[4, f32], tensor[4, f32]), tensor[4, f32])): tensor[4, f32] =
 #[test]
 fn triple_nested_destructure_double_consume_errors() {
     let errors = linearity_errors(
-        r#"
+        r"
 def f(p: (((tensor[4, f32], tensor[4, f32]), tensor[4, f32]), tensor[4, f32])): tensor[4, f32] =
   {
     (mid, w) = p
@@ -219,7 +219,7 @@ def f(p: (((tensor[4, f32], tensor[4, f32]), tensor[4, f32]), tensor[4, f32])): 
     r1: tensor[4, f32] = realize(a)
     realize(a)
   }
-"#,
+",
     );
     assert!(
         errors.iter().any(|e| {
@@ -239,7 +239,7 @@ def f(p: (((tensor[4, f32], tensor[4, f32]), tensor[4, f32]), tensor[4, f32])): 
 #[test]
 fn nested_destructure_alias_consume_errors() {
     let errors = linearity_errors(
-        r#"
+        r"
 def f(p: ((tensor[4, f32], tensor[4, f32]), tensor[4, f32])): tensor[4, f32] =
   {
     (inner, c) = p
@@ -248,7 +248,7 @@ def f(p: ((tensor[4, f32], tensor[4, f32]), tensor[4, f32])): tensor[4, f32] =
     r: tensor[4, f32] = realize(y)
     add(a, r)
   }
-"#,
+",
     );
     assert!(
         errors.iter().any(|e| {

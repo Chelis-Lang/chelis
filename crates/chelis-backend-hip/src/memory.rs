@@ -50,6 +50,7 @@ struct OwnerRequirement {
 }
 
 impl MemoryPlan {
+    #[must_use]
     pub fn build(dag: &Dag, output_ids: &[NodeId], reduction_inlined: &HashSet<NodeId>) -> Self {
         let mut node_kinds = classify_nodes(dag, reduction_inlined);
         let owner_of = compute_owner_map(dag, &node_kinds);
@@ -58,6 +59,7 @@ impl MemoryPlan {
         Self { node_kinds, slots }
     }
 
+    #[must_use]
     pub fn node_kind(&self, id: NodeId) -> &NodeMemoryKind {
         &self.node_kinds[id.0]
     }
@@ -69,20 +71,24 @@ impl MemoryPlan {
         self.node_kinds.iter()
     }
 
+    #[must_use]
     pub fn slot(&self, id: usize) -> &SlotPlan {
         &self.slots[id]
     }
 
+    #[must_use]
     pub fn slots(&self) -> &[SlotPlan] {
         &self.slots
     }
 
+    #[must_use]
     pub fn peak_device_bytes_estimate(&self) -> Option<usize> {
         self.peak_device_bytes_terms()
             .into_iter()
             .try_fold(0usize, |acc, term| Some(acc + term.as_concrete()?))
     }
 
+    #[must_use]
     pub fn peak_device_bytes_formula(&self) -> String {
         render_dim_expr_sum(&self.peak_device_bytes_terms())
     }
@@ -93,6 +99,7 @@ impl MemoryPlan {
             .try_fold(0usize, |acc, term| Ok(acc + term.evaluate(bindings)?))
     }
 
+    #[must_use]
     pub fn emit_cleanup(&self) -> Vec<String> {
         let mut lines = Vec::new();
         for (idx, kind) in self.node_kinds.iter().enumerate() {
@@ -402,7 +409,7 @@ fn render_dim_expr_sum(terms: &[DimExpr]) -> String {
     } else {
         terms
             .iter()
-            .map(|expr| expr.to_string())
+            .map(std::string::ToString::to_string)
             .collect::<Vec<_>>()
             .join(" + ")
     }

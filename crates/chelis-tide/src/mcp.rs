@@ -30,6 +30,7 @@ pub fn run_stdio_blocking() -> io::Result<()> {
     run_stdio()
 }
 
+#[must_use]
 pub fn handle_message(message: &Value) -> Option<Value> {
     let method = message.get("method")?.as_str()?;
     let id = message.get("id").cloned();
@@ -522,7 +523,7 @@ fn handle_prove_tool(args: &Value) -> Value {
             "proved": prop_proved,
             "failed": prop_failed + ob_failed,
             "unsupported": prop_unsupported + ob_unsupported,
-            "errors": prop_errored + ob_errored + if check_failed || property_run_failed { 1 } else { 0 },
+            "errors": prop_errored + ob_errored + usize::from(check_failed || property_run_failed),
             "obligations": obligations_count,
         }
     })

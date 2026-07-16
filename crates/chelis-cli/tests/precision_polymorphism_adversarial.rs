@@ -4,7 +4,7 @@
 //! type-system refactor, exercising the contextual desugar rule
 //! (spec/02-surf-syntax.md P4b, spec/04-type-system.md 5.8.1) and
 //! the surrounding error-handling surfaces. The WS-A5 RT-3a fixups
-//! (F1: surgical Type::Error masking detector at the def-body vs
+//! (F1: surgical `Type::Error` masking detector at the def-body vs
 //! declared-sig unify site; F2: backend tripwire at the
 //! `Type::Tensor` -> `HostType::Tensor` conversion boundary; F3:
 //! validator fall-through for unbound precision names in value

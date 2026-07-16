@@ -30,6 +30,7 @@ pub enum Tier {
 
 impl Tier {
     /// Stable machine tag for the tier.
+    #[must_use]
     pub fn tag(&self) -> &'static str {
         match self {
             Tier::Must => "must",
@@ -43,6 +44,7 @@ impl Tier {
     /// Whether a `Fail` on this tier gates the audit (everything but `Should`;
     /// conditional tiers gate once their trigger fires, and the row emits `Na`
     /// when it does not, so treating them as gating here is correct).
+    #[must_use]
     pub fn gates(&self) -> bool {
         !matches!(self, Tier::Should)
     }
@@ -225,6 +227,7 @@ pub const MANIFEST: &[ContractRow] = &[
 ];
 
 /// Look up a row by its stable dispatch key.
+#[must_use]
 pub fn row(key: &str) -> Option<&'static ContractRow> {
     MANIFEST.iter().find(|r| r.key == key)
 }

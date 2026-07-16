@@ -20,6 +20,7 @@ use chelis_types::types::Prim;
 /// guard and the CLI gate (`reject_unsupported_metal_ops`) reject `f64`
 /// upstream with the FP64-ALU diagnostic so this arm should be
 /// unreachable from any well-formed build.
+#[must_use]
 pub fn msl_type(prec: Prim) -> &'static str {
     match prec {
         Prim::F32 => "float",
@@ -48,6 +49,7 @@ pub fn msl_type(prec: Prim) -> &'static str {
 /// runtime allocator's `chelis_alloc` element width. Used in
 /// `peak_device_bytes` and any host-side allocation arithmetic so no
 /// caller hardcodes `sizeof(float)` (the RT-4-Fixups F2 lesson).
+#[must_use]
 pub fn metal_elem_size(prec: Prim) -> usize {
     match prec {
         Prim::Int8 | Prim::Bool => 1,
@@ -69,6 +71,7 @@ pub fn metal_elem_size(prec: Prim) -> usize {
 /// Suffix used in generated MSL kernel function names so per-dtype
 /// instances don't collide. `f32` keeps the bare name (legacy) so
 /// existing kernel-name string match tests still resolve.
+#[must_use]
 pub fn kernel_suffix(prec: Prim) -> &'static str {
     match prec {
         Prim::F32 => "",
@@ -104,6 +107,7 @@ pub fn kernel_suffix(prec: Prim) -> &'static str {
 ///
 /// `f64` deliberately panics here as defense in depth; the IR validation
 /// guard, the CLI gate, and the codegen entry all reject `f64` upstream.
+#[must_use]
 pub fn host_sizeof_expr(prec: Prim) -> &'static str {
     match prec {
         Prim::F32 => "sizeof(float)",
@@ -130,6 +134,7 @@ pub fn host_sizeof_expr(prec: Prim) -> &'static str {
 /// Used at the host writeback site to match the runtime's `chelis_alloc`
 /// dispatch. Tag spellings match `crates/chelis-runtime/include/chelis_runtime.h`
 /// (`CHELIS_I8`, `CHELIS_I16`, `CHELIS_I32`, `CHELIS_I64` — not `CHELIS_INT*`).
+#[must_use]
 pub fn runtime_dtype_tag(prec: Prim) -> &'static str {
     match prec {
         Prim::F32 => "CHELIS_F32",
@@ -159,6 +164,7 @@ pub fn runtime_dtype_tag(prec: Prim) -> &'static str {
 /// requested. `max`/`min` reductions never promote, so this helper is
 /// only invoked on the sum path; the caller is responsible for routing
 /// non-sum reductions through the operand precision directly.
+#[must_use]
 pub fn sum_accumulator(prec: Prim) -> Prim {
     match prec {
         Prim::F16 | Prim::Bf16 => Prim::F32,
@@ -171,6 +177,7 @@ pub fn sum_accumulator(prec: Prim) -> Prim {
 /// `#if __METAL_VERSION__ >= 320 ... #endif` guard. Today only `bf16`
 /// needs the guard (Apple7+ / MSL 3.2+ requirement per
 /// `spec/04-type-system.md` §1.1.3).
+#[must_use]
 pub fn requires_msl_320_guard(prec: Prim) -> bool {
     matches!(prec, Prim::Bf16)
 }
@@ -195,6 +202,7 @@ pub fn requires_msl_320_guard(prec: Prim) -> bool {
 /// `reject_unsupported_metal_ops` CLI gate reject `f64` upstream with the
 /// FP64-ALU diagnostic so this arm should be unreachable from any well-formed
 /// build.
+#[must_use]
 pub fn host_const_fill_body(prec: Prim, value: f64, buf: &str, n: usize) -> String {
     match prec {
         Prim::F32 => {
@@ -290,6 +298,7 @@ pub fn host_const_fill_body(prec: Prim, value: f64, buf: &str, n: usize) -> Stri
 /// time and casts both tile operands to f32 at the multiply (the spec
 /// requires the partial product to compute in accumulator precision,
 /// not just the running sum).
+#[must_use]
 pub fn matmul_accumulator(operand_prec: Prim) -> Prim {
     match operand_prec {
         Prim::F16 | Prim::Bf16 => Prim::F32,

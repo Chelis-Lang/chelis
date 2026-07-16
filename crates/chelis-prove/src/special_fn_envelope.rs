@@ -52,6 +52,7 @@ impl Domain {
     /// This is the decline-if-unprovable guard: a range that dips to or below the
     /// domain edge is not covered, so the consumer declines rather than emitting
     /// an unsound bound over a point where the function is undefined.
+    #[must_use]
     pub fn covers(self, lo: f64, hi: f64) -> bool {
         if !lo.is_finite() || !hi.is_finite() || lo > hi {
             return false;
@@ -125,6 +126,7 @@ fn interval_horner(coeffs: &[f64], lo: f64, hi: f64) -> (f64, f64) {
 impl EnvelopeArm {
     /// Evaluate the arm's approximation at `x` (the center, before the `±eps`
     /// band). Horner for the polynomial; the constant for saturation.
+    #[must_use]
     pub fn approx(&self, x: f64) -> f64 {
         match self {
             EnvelopeArm::Saturation { value } => *value,
@@ -144,6 +146,7 @@ impl EnvelopeArm {
     /// sub-intervals), which soundly captures an interior extremum a
     /// non-monotonic arm could have. Endpoint sampling alone is UNSOUND for a
     /// non-monotonic polynomial; this makes no monotonicity assumption.
+    #[must_use]
     pub fn sound_approx_range(&self, a: f64, b: f64) -> (f64, f64) {
         match self {
             EnvelopeArm::Saturation { value } => (*value, *value),
@@ -190,12 +193,14 @@ pub struct SpecialFnEnvelopeBox {
 
 impl SpecialFnEnvelopeBox {
     /// Whether `x` lies in `[lo, hi]` (inclusive).
+    #[must_use]
     pub fn contains(&self, x: f64) -> bool {
         self.lo <= x && x <= self.hi
     }
 
     /// The sound bound `[approx(x) - eps, approx(x) + eps]` on `f(x)` from this
     /// box.
+    #[must_use]
     pub fn bound(&self, x: f64) -> (f64, f64) {
         let a = self.arm.approx(x);
         (a - self.eps, a + self.eps)
@@ -258,6 +263,7 @@ impl SpecialFnEnvelope {
     /// `erf`: all reals, output clamp `[-1, 1]`. The arms and certified `eps`
     /// carry over verbatim, so the generic path evaluates the SAME certified
     /// bound the erf-specific path does.
+    #[must_use]
     pub fn from_erf(env: ErfEnvelope) -> Self {
         let ErfEnvelope { boxes, provenance } = env;
         let boxes = boxes
@@ -292,6 +298,7 @@ impl SpecialFnEnvelope {
     /// committed. `erf` (Gappa+Arb) plus `exp`/`log`/`sqrt` (Arb mean-value
     /// enclosure) have certified data; any other name returns `None` (the honest
     /// floor — the consumer declines).
+    #[must_use]
     pub fn committed(fn_name: &str) -> Option<Self> {
         let json = match fn_name {
             "erf" => return Some(Self::from_erf(ErfEnvelope::committed())),
@@ -310,12 +317,14 @@ impl SpecialFnEnvelope {
 
     /// Find the box containing `x`, if any (inclusive edges; a shared boundary
     /// resolves to the lower box).
+    #[must_use]
     pub fn box_for(&self, x: f64) -> Option<&SpecialFnEnvelopeBox> {
         self.boxes.iter().find(|b| b.contains(x))
     }
 
     /// The sound bound `[lo, hi]` on `f(x)` from the envelope, or `None` if `x`
     /// is outside the covered range.
+    #[must_use]
     pub fn bound(&self, x: f64) -> Option<(f64, f64)> {
         self.box_for(x).map(|b| b.bound(x))
     }
@@ -324,6 +333,7 @@ impl SpecialFnEnvelope {
     /// and contiguous, every `eps >= 0` and finite. This is a STRUCTURAL check,
     /// not a soundness check (soundness is the certified per-box `eps`). Unlike
     /// the erf-specific check it makes NO `±1` saturation assumption.
+    #[must_use]
     pub fn is_well_formed(&self) -> bool {
         if self.boxes.is_empty() {
             return false;
@@ -354,6 +364,7 @@ impl SpecialFnEnvelope {
     /// This is the generalization of `erf_envelope`'s `sound_erf_range_bound`
     /// (was inline in the abstract-subterm consumer): the ONLY difference is the
     /// hardcoded `[-1, 1]` clamp is replaced by the per-function `output_clamp`.
+    #[must_use]
     pub fn sound_range_bound(&self, arg_lo: f64, arg_hi: f64) -> Option<(f64, f64)> {
         if arg_lo > arg_hi || !arg_lo.is_finite() || !arg_hi.is_finite() {
             return None;
@@ -428,12 +439,14 @@ pub struct SpecialFnRegistry;
 
 impl SpecialFnRegistry {
     /// The functions the finder recognizes as abstractable transcendentals.
+    #[must_use]
     pub fn known_functions() -> &'static [&'static str] {
         &["erf", "exp", "log", "sqrt"]
     }
 
     /// The argument domain for `fn_name`, or `None` if `fn_name` is not a known
     /// special function.
+    #[must_use]
     pub fn domain(fn_name: &str) -> Option<Domain> {
         match fn_name {
             "erf" | "exp" => Some(Domain::AllReals),
@@ -445,6 +458,7 @@ impl SpecialFnRegistry {
 
     /// The monotonicity of `fn_name` over its covered range, or `None` if not a
     /// known special function. erf/exp/log/sqrt are all strictly increasing.
+    #[must_use]
     pub fn monotonicity(fn_name: &str) -> Option<Monotonicity> {
         match fn_name {
             "erf" | "exp" | "log" | "sqrt" => Some(Monotonicity::Increasing),
@@ -453,6 +467,7 @@ impl SpecialFnRegistry {
     }
 
     /// The committed, certified envelope for `fn_name`, or `None`.
+    #[must_use]
     pub fn committed(fn_name: &str) -> Option<SpecialFnEnvelope> {
         SpecialFnEnvelope::committed(fn_name)
     }

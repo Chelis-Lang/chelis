@@ -40,6 +40,7 @@ pub enum Verdict {
 }
 
 impl Verdict {
+    #[must_use]
     pub fn tag(&self) -> &'static str {
         match self {
             Verdict::Pass => "pass",
@@ -80,6 +81,7 @@ pub struct AuditReport {
 impl AuditReport {
     /// Count of hard failures: `Fail` verdicts on applicable MUST-tier rows.
     /// SHOULD misses and MANUAL/NA never count.
+    #[must_use]
     pub fn must_failures(&self) -> usize {
         self.rows
             .iter()
@@ -91,11 +93,13 @@ impl AuditReport {
     /// evaluated something. An all-`Na`/`Manual` report (e.g. a pin below the
     /// contract baseline that would otherwise gate every row out) evaluated
     /// nothing and must not read as conformant.
+    #[must_use]
     pub fn ok(&self) -> bool {
         self.must_failures() == 0 && self.evaluated_any()
     }
 
     /// Whether at least one row reached a mechanical `Pass`/`Fail` verdict.
+    #[must_use]
     pub fn evaluated_any(&self) -> bool {
         self.rows
             .iter()
@@ -114,6 +118,7 @@ fn tier_is_must(tier: Tier) -> bool {
 // ---------------------------------------------------------------- entry point
 
 /// Audit the shell rooted at `root`.
+#[must_use]
 pub fn audit(root: &Path) -> AuditReport {
     let ctx = Ctx::load(root);
     let rows = MANIFEST.iter().map(|row| check_row(row, &ctx)).collect();
@@ -513,7 +518,7 @@ fn check_narrowing_coverage(ctx: &Ctx) -> Check {
 /// `token` and why each failed, with a near-miss hint when the issue number
 /// appears in a non-canonical (non-`chelis#NNN`) form — the exact trap in
 /// chelis#654, where a space-form `chelis #316` (now matched, chelis#652) or a
-/// bare `#316` left the fix message ("add an UPSTREAM_BUGS entry") misleading.
+/// bare `#316` left the fix message ("add an `UPSTREAM_BUGS` entry") misleading.
 fn coverage_evidence(token: &str, blocked: &str, upstream: &str, readme: &str) -> String {
     let num = token.trim_start_matches("chelis#");
     let bare = format!("#{num}");
@@ -652,7 +657,7 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
     if let Ok(entries) = std::fs::read_dir(&skills_dir) {
         for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
-            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
             if is_dir {
                 if skills::SHARED_SKILLS.contains(&name.as_str()) {
                     if let Ok(inner) = std::fs::read_dir(e.path()) {
@@ -915,15 +920,13 @@ fn read_opt(path: &Path) -> Option<String> {
 /// Whether `path` is a symlink whose target's final component is
 /// `agent-skills` (i.e. it resolves to the shell's `agent-skills/` dir).
 fn symlink_targets_agent_skills(path: &Path) -> bool {
-    let is_symlink = std::fs::symlink_metadata(path)
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false);
+    let is_symlink = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
     if !is_symlink {
         return false;
     }
     std::fs::read_link(path)
         .ok()
-        .and_then(|t| t.file_name().map(|s| s.to_os_string()))
+        .and_then(|t| t.file_name().map(std::ffi::OsStr::to_os_string))
         .is_some_and(|name| name == "agent-skills")
 }
 
@@ -959,6 +962,7 @@ fn claude_is_symlink_to_agents(root: &Path) -> bool {
 /// is never *looser*: a value the shim would reject (unsafe path component,
 /// non-`X.Y.Z`, pre-release) must never audit green, or conform would bless a
 /// toolchain the shim cannot resolve.
+#[must_use]
 pub fn parse_compiler_pin(toml: &str) -> Option<String> {
     let raw = toml_string_field(toml, "compiler")?;
     // Require the exact-pin leading `=` (conform is stricter than the shim
@@ -1012,6 +1016,7 @@ fn toml_string_field<'a>(toml: &'a str, key: &str) -> Option<&'a str> {
 /// Delegates to the shared [`chelis_version::is_strict_semver`] — the single
 /// source of truth also used by `chelisup::version::validate_install_version`,
 /// so conform can never bless a pin the shim would reject.
+#[must_use]
 pub fn is_installable_version(v: &str) -> bool {
     chelis_version::is_strict_semver(v)
 }
@@ -1231,10 +1236,7 @@ fn parse_semver(v: &str) -> Option<(u64, u64, u64, u8)> {
     let major = it.next()?.parse().ok()?;
     let minor = it.next()?.parse().ok()?;
     let patch_raw = it.next().unwrap_or("0");
-    let digits: String = patch_raw
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
+    let digits: String = patch_raw.chars().take_while(char::is_ascii_digit).collect();
     let patch = digits.parse().unwrap_or(0);
     let is_release = digits.len() == patch_raw.len();
     Some((major, minor, patch, u8::from(is_release)))

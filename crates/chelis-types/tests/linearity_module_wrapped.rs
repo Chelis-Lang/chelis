@@ -35,11 +35,11 @@ fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
 #[test]
 fn bare_top_level_realize_then_borrow_errors_today() {
     let errors = linearity_errors(
-        r#"
+        r"
 x = to_tensor([1.0, 2.0, 3.0])
 y = realize(x)
 b = add(x, y)
-"#,
+",
     );
     assert!(
         errors.iter().any(|e| {
@@ -54,13 +54,13 @@ b = add(x, y)
 #[test]
 fn bare_top_level_consuming_call_then_borrow_errors_today() {
     let errors = linearity_errors(
-        r#"
+        r"
 def consume_it(t: tensor[3, f32]) -> tensor[3, f32] = realize(t)
 
 x = to_tensor([1.0, 2.0, 3.0])
 y = consume_it(x)
 b = mul(x, y)
-"#,
+",
     );
     assert!(
         errors.iter().any(|e| {
@@ -75,13 +75,13 @@ b = mul(x, y)
 #[test]
 fn bare_top_level_multi_realize_then_borrow_errors_today() {
     let errors = linearity_errors(
-        r#"
+        r"
 x = to_tensor([1.0, 2.0, 3.0])
 y = realize(x)
 b = realize(x)
 c = realize(x)
 d = add(x, y)
-"#,
+",
     );
     assert!(
         errors.iter().any(|e| {
@@ -100,13 +100,13 @@ fn module_wrapped_realize_then_borrow_errors() {
     // module-recursive walk must surface the violation as a hard error
     // — the warning-mode plumbing from PR 1 is gone.
     let errors = linearity_errors(
-        r#"
+        r"
 module Test
 
 x = to_tensor([1.0, 2.0, 3.0])
 y = realize(x)
 b = add(x, y)
-"#,
+",
     );
     assert!(
         errors.iter().any(|e| {
@@ -124,7 +124,7 @@ fn module_wrapped_consuming_call_then_borrow_errors() {
     // but inside a module. The consume site is the call to
     // `consume_it`, so the error message must call that out.
     let errors = linearity_errors(
-        r#"
+        r"
 module Test
 
 def consume_it(t: tensor[3, f32]) -> tensor[3, f32] = realize(t)
@@ -132,7 +132,7 @@ def consume_it(t: tensor[3, f32]) -> tensor[3, f32] = realize(t)
 x = to_tensor([1.0, 2.0, 3.0])
 y = consume_it(x)
 b = mul(x, y)
-"#,
+",
     );
     assert!(
         errors.iter().any(|e| {
@@ -151,7 +151,7 @@ fn module_wrapped_multi_realize_then_borrow_errors() {
     // the same chain wrapped in `module Test` must surface the use-
     // after-consume as a hard error, not a warning.
     let errors = linearity_errors(
-        r#"
+        r"
 module Test
 
 x = to_tensor([1.0, 2.0, 3.0])
@@ -159,7 +159,7 @@ y = realize(x)
 b = realize(x)
 c = realize(x)
 d = add(x, y)
-"#,
+",
     );
     assert!(
         errors.iter().any(|e| {

@@ -133,6 +133,7 @@ impl CarcaraAudit {
     /// leaves). Both are an independent confirmation that the proof structure
     /// re-checks; they differ only in whether the rewrite leaves were verified
     /// or trusted.
+    #[must_use]
     pub fn is_confirmed(&self) -> bool {
         matches!(
             self,
@@ -142,6 +143,7 @@ impl CarcaraAudit {
 
     /// Whether the auditor DISAGREED with cvc5 (a surfaced failure). This is the
     /// signal a consumer must never ignore.
+    #[must_use]
     pub fn is_failed(&self) -> bool {
         matches!(self, CarcaraAudit::Failed(_))
     }

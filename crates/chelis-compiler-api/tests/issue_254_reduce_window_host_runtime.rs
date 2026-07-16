@@ -48,7 +48,7 @@ fn root_tensor<'a>(
 /// We use a 1x1x4x4 stand-in so the expected values are tractable.
 #[test]
 fn issue254_reduce_window_max_strided_overlap_matches_pool2d() {
-    let src = r#"
+    let src = r"
 def make_x() -> tensor[1, 1, 4, 4, f32] = to_tensor([[[
     [cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)],
     [cast(5.0, f32), cast(6.0, f32), cast(7.0, f32), cast(8.0, f32)],
@@ -58,7 +58,7 @@ def make_x() -> tensor[1, 1, 4, 4, f32] = to_tensor([[[
 def run(x: tensor[1, 1, 4, 4, f32]) -> tensor[1, 1, 3, 3, f32] =
     reduce_window_max(&x, [2, 2], [1, 1])
 out = run(make_x())
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![1, 1, 3, 3], "Valid pooling output shape");
@@ -70,7 +70,7 @@ out = run(make_x())
 
 #[test]
 fn issue254_reduce_window_min_runs_and_matches_ir_eval() {
-    let src = r#"
+    let src = r"
 def make_x() -> tensor[1, 1, 3, 3, f32] = to_tensor([[[
     [cast(1.0, f32), cast(5.0, f32), cast(3.0, f32)],
     [cast(4.0, f32), cast(2.0, f32), cast(6.0, f32)],
@@ -79,7 +79,7 @@ def make_x() -> tensor[1, 1, 3, 3, f32] = to_tensor([[[
 def run(x: tensor[1, 1, 3, 3, f32]) -> tensor[1, 1, 2, 2, f32] =
     reduce_window_min(&x, [2, 2], [1, 1])
 out = run(make_x())
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![1, 1, 2, 2]);
@@ -90,7 +90,7 @@ out = run(make_x())
 
 #[test]
 fn issue254_reduce_window_sum_runs_and_matches_ir_eval() {
-    let src = r#"
+    let src = r"
 def make_x() -> tensor[1, 1, 3, 3, f32] = to_tensor([[[
     [cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)],
     [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)],
@@ -99,7 +99,7 @@ def make_x() -> tensor[1, 1, 3, 3, f32] = to_tensor([[[
 def run(x: tensor[1, 1, 3, 3, f32]) -> tensor[1, 1, 2, 2, f32] =
     reduce_window_sum(&x, [2, 2], [1, 1])
 out = run(make_x())
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![1, 1, 2, 2]);
@@ -108,7 +108,7 @@ out = run(make_x())
 
 #[test]
 fn issue254_reduce_window_mean_runs_and_matches_ir_eval() {
-    let src = r#"
+    let src = r"
 def make_x() -> tensor[1, 1, 3, 3, f32] = to_tensor([[[
     [cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)],
     [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)],
@@ -117,7 +117,7 @@ def make_x() -> tensor[1, 1, 3, 3, f32] = to_tensor([[[
 def run(x: tensor[1, 1, 3, 3, f32]) -> tensor[1, 1, 2, 2, f32] =
     reduce_window_mean(&x, [2, 2], [1, 1])
 out = run(make_x())
-"#;
+";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![1, 1, 2, 2]);
@@ -128,7 +128,7 @@ out = run(make_x())
 
 #[test]
 fn issue254_reduce_window_rejects_window_larger_than_input_dim() {
-    let src = r#"
+    let src = r"
 def make_x() -> tensor[1, 1, 2, 2, f32] = to_tensor([[[
     [cast(1.0, f32), cast(2.0, f32)],
     [cast(3.0, f32), cast(4.0, f32)]
@@ -136,7 +136,7 @@ def make_x() -> tensor[1, 1, 2, 2, f32] = to_tensor([[[
 def run(x: tensor[1, 1, 2, 2, f32]) -> tensor[1, 1, 1, 1, f32] =
     reduce_window_max(&x, [3, 3], [1, 1])
 out = run(make_x())
-"#;
+";
     let outcome = eval(EvalRequest {
         source_kind: SourceKind::Surf,
         source: src.to_string(),
@@ -150,7 +150,7 @@ out = run(make_x())
 
 #[test]
 fn issue254_reduce_window_rejects_zero_stride() {
-    let src = r#"
+    let src = r"
 def make_x() -> tensor[1, 1, 3, 3, f32] = to_tensor([[[
     [cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)],
     [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)],
@@ -159,7 +159,7 @@ def make_x() -> tensor[1, 1, 3, 3, f32] = to_tensor([[[
 def run(x: tensor[1, 1, 3, 3, f32]) -> tensor[1, 1, 2, 2, f32] =
     reduce_window_max(&x, [2, 2], [1, 0])
 out = run(make_x())
-"#;
+";
     let outcome = eval(EvalRequest {
         source_kind: SourceKind::Surf,
         source: src.to_string(),

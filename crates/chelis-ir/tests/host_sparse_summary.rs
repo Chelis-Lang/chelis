@@ -7,12 +7,12 @@
 //! has no Surf surface path — it is produced exclusively by the AD
 //! adjoint of `gather` (see `crates/chelis-ir/src/grad.rs`'s
 //! `gather` adjoint). This file fills the surface-coverage gap by
-//! driving the recognizer directly on a synthetic ScatterAdd helper
+//! driving the recognizer directly on a synthetic `ScatterAdd` helper
 //! DAG, so the W3-B contract for all three sparse ops is locked.
 //!
-//! Both positive and negative ScatterAdd recognition cases are
+//! Both positive and negative `ScatterAdd` recognition cases are
 //! pinned here:
-//!   * a single ScatterAdd whose operands are direct Loads recognizes
+//!   * a single `ScatterAdd` whose operands are direct Loads recognizes
 //!   * a helper with a post-processing Add on the result rejects
 //!   * a helper with mismatched indices precision rejects
 //!   * a helper with mismatched payload precision rejects

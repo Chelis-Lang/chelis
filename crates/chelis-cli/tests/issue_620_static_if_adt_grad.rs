@@ -119,7 +119,7 @@ fn issue_620_static_cond_if_adt_branch_prunes_under_grad() {
 }
 
 /// The else side of the same shape: a literal condition folding FALSE
-/// selects the ModeB arm, whose gradient is the shaped zero.
+/// selects the `ModeB` arm, whose gradient is the shaped zero.
 #[test]
 fn issue_620_static_cond_if_false_selects_else_ctor() {
     let source = format!(
@@ -468,7 +468,7 @@ fn issue_620_owned_adt_double_read_stays_a_linearity_error() {
 
 /// A grad over a struct argument named `params` -- the conventional
 /// pytree name, which collides with the reserved Deep `params` tag and
-/// therefore desugars through chelis-surf's MetaExpr param wrapper --
+/// therefore desugars through chelis-surf's `MetaExpr` param wrapper --
 /// binds and differentiates like any other name. Regression pin: the
 /// wrapper form was silently dropped from the lowering's param-name walk,
 /// so `params` never bound, its body references lowered to bogus Loads,

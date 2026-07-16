@@ -9,8 +9,8 @@
 //! like `-1` became `usize::MAX`. `tier2::lower_softmax` /
 //! `lower_*reduce` then indexed past the operand rank and `require_dim`
 //! panicked. The fix normalizes `-1` to `rank - 1` (the last axis),
-//! uniformly across softmax / mean / sum / max_reduce / min_reduce /
-//! prod_reduce / argmax_reduce / argmin_reduce / gather / scatter, and
+//! uniformly across softmax / mean / sum / `max_reduce` / `min_reduce` /
+//! `prod_reduce` / `argmax_reduce` / `argmin_reduce` / gather / scatter, and
 //! turns a still-out-of-range axis into a clean lowering diagnostic
 //! rather than a panic. The type checker normalizes the same way so
 //! checker and lowering agree.
@@ -89,10 +89,10 @@ fn check_surf(src: &str) -> Result<(), Vec<String>> {
 /// IR passes verify (no `require_dim` panic, no malformed node).
 #[test]
 fn softmax_negative_last_axis_lowers_and_verifies() {
-    let src = r#"
+    let src = r"
 sig run: tensor[2, 3, f32] -> tensor[2, 3, f32]
 def run(x) = softmax(x, -1)
-"#;
+";
     let dag = lower_surf(src).expect("softmax(x, -1) must lower");
     assert!(
         verify::verify(&dag).is_empty(),
@@ -104,10 +104,10 @@ def run(x) = softmax(x, -1)
 /// the explicit form of `-1` and must lower identically clean.
 #[test]
 fn softmax_positive_axis_control_lowers_and_verifies() {
-    let src = r#"
+    let src = r"
 sig run: tensor[2, 3, f32] -> tensor[2, 3, f32]
 def run(x) = softmax(x, 1)
-"#;
+";
     let dag = lower_surf(src).expect("softmax(x, 1) must lower");
     assert!(
         verify::verify(&dag).is_empty(),
@@ -136,10 +136,10 @@ fn reductions_negative_last_axis_lower_and_verify() {
         ("argmin_reduce", "int64"),
     ] {
         let src = format!(
-            r#"
+            r"
 sig run: tensor[2, 3, f32] -> tensor[2, {out_dtype}]
 def run(x) = {op}(x, -1)
-"#
+"
         );
         let dag = lower_surf(&src).unwrap_or_else(|e| panic!("{op}(x, -1) must lower: {e}"));
         assert!(
@@ -163,10 +163,10 @@ fn reductions_positive_axis_control_lower_and_verify() {
         ("argmin_reduce", "int64"),
     ] {
         let src = format!(
-            r#"
+            r"
 sig run: tensor[2, 3, f32] -> tensor[2, {out_dtype}]
 def run(x) = {op}(x, 1)
-"#
+"
         );
         let dag = lower_surf(&src).unwrap_or_else(|e| panic!("{op}(x, 1) must lower: {e}"));
         assert!(
@@ -182,10 +182,10 @@ def run(x) = {op}(x, 1)
 /// instead of mapping `-1` to `usize::MAX`.
 #[test]
 fn gather_negative_axis_lowers_and_verifies() {
-    let src = r#"
+    let src = r"
 sig run: tensor[2, 3, f32] -> tensor[2, int64] -> tensor[2, 2, f32]
 def run(values, idx) = gather(values, idx, -1)
-"#;
+";
     let dag = lower_surf(src).expect("gather(values, idx, -1) must lower");
     assert!(
         verify::verify(&dag).is_empty(),
@@ -203,10 +203,10 @@ def run(values, idx) = gather(values, idx, -1)
 /// still out of `0..2`) is rejected by the type checker, not panicked.
 #[test]
 fn softmax_axis_too_negative_is_a_checker_error() {
-    let src = r#"
+    let src = r"
 sig run: tensor[2, 3, f32] -> tensor[2, 3, f32]
 def run(x) = softmax(x, -3)
-"#;
+";
     let errors = check_surf(src).expect_err("softmax(x, -3) must be a type error");
     assert!(
         errors
@@ -219,10 +219,10 @@ def run(x) = softmax(x, -3)
 /// A too-large positive axis is likewise a clean checker error.
 #[test]
 fn reduction_axis_too_large_is_a_checker_error() {
-    let src = r#"
+    let src = r"
 sig run: tensor[2, 3, f32] -> tensor[2, f32]
 def run(x) = sum(x, 5)
-"#;
+";
     let errors = check_surf(src).expect_err("sum(x, 5) must be a type error");
     assert!(
         errors
@@ -245,12 +245,12 @@ fn lowering_rejects_out_of_range_axis_without_panicking() {
     // lowers a bare expr with `scoped_tensor_types` and no checker in
     // the loop, so this exercises `normalize_axis` at the lowering
     // boundary directly.
-    let deep_src = r#"
+    let deep_src = r"
 (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}
   (var {} softmax)
   (var {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} x)
   (lit {type: (t-prim {} int32)} 9))
-"#;
+";
     let expr = chelis_deep::parser::parse_str(deep_src)
         .expect("parse failed")
         .into_iter()
@@ -289,10 +289,10 @@ fn lowering_rejects_out_of_range_axis_without_panicking() {
 /// bound to a rank-0 `default_type()` and `dims.get(1)` was `None`.
 #[test]
 fn standalone_def_with_separate_sig_lowers_shape_sensitive_param() {
-    let src = r#"
+    let src = r"
 sig run: &tensor[a, b, f32] -> tensor[a, b, f32]
 def run(logits) = softmax(logits, 1)
-"#;
+";
     let dag =
         lower_surf(src).expect("softmax on a separate-sig symbolic-dim param must lower (Bug A)");
     assert!(
@@ -305,10 +305,10 @@ def run(logits) = softmax(logits, 1)
 /// param with a negative axis must also lower clean (Bug A x Bug B).
 #[test]
 fn standalone_def_with_separate_sig_lowers_negative_axis_param() {
-    let src = r#"
+    let src = r"
 sig run: &tensor[a, b, f32] -> tensor[a, b, f32]
 def run(logits) = softmax(logits, -1)
-"#;
+";
     let dag =
         lower_surf(src).expect("softmax(_, -1) on a separate-sig symbolic-dim param must lower");
     assert!(
@@ -324,10 +324,10 @@ def run(logits) = softmax(logits, -1)
 /// linearity checker would see the second read as use-after-consume.
 #[test]
 fn standalone_def_borrowed_param_stays_borrowed_under_fanout() {
-    let src = r#"
+    let src = r"
 sig run: &tensor[2, 3, f32] -> tensor[2, 3, f32]
 def run(x) = add(softmax(x, -1), softmax(x, 0))
-"#;
+";
     let dag = lower_surf(src)
         .expect("two reads of a borrowed separate-sig param must lower (borrow preserved)");
     assert!(

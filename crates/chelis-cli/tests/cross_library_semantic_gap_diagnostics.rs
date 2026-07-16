@@ -79,7 +79,7 @@ fn rejections_for_source(source: &str) -> Vec<SummaryRejection> {
     host_program_summary_rejections(&host).to_vec()
 }
 
-/// Find the (single) rejection in `rejections` whose helper_path's
+/// Find the (single) rejection in `rejections` whose `helper_path`'s
 /// `def_name` ends with `def_name_suffix` (Reef bindings come out with
 /// module-prefix mangling, so an `endswith` check is the canonical
 /// stable surface). Panics if there is no such rejection or if there

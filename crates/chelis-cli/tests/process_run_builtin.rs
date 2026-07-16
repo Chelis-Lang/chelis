@@ -228,8 +228,7 @@ fn check_accepts_process_run_program() {
     assert!(
         json["errors"]
             .as_array()
-            .map(|e| e.is_empty())
-            .unwrap_or(false),
+            .is_some_and(std::vec::Vec::is_empty),
         "process_run program should have no check errors, got {json}"
     );
 }

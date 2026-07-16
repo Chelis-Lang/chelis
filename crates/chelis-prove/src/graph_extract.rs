@@ -18,7 +18,7 @@
 //! artifact by its content hash (lowercase hex sha256) plus a root index,
 //! and [`ExtractedGoal`] also carries the serialized bytes so nothing
 //! downstream is lost. Content addressing IS the back-reference: if
-//! [`chelis_compiler_api::compiler::lower`] is deterministic, the WireDag
+//! [`chelis_compiler_api::compiler::lower`] is deterministic, the `WireDag`
 //! this producer hashes is byte-identical to the build's, so the verified
 //! thing is the lowered thing. (Cross-invocation hash-match with the build
 //! is a property to be aware of; the shape tests here verify within-run.)
@@ -174,7 +174,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             WireRiscOp::Pad { fill, .. } => reject_if_non_finite(id, "fill", *fill)?,
             WireRiscOp::Const { value } => reject_if_non_finite(id, "value", *value)?,
             WireRiscOp::ConstTensor { data } => {
-                for v in data.iter() {
+                for v in data {
                     if !v.is_finite() {
                         return Err(GraphExtractError::NonFiniteValue {
                             node: id,
@@ -273,6 +273,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// `(name, lo, hi)` dimensions. Beacon's Load seeding and split tie-break
 /// are name-addressed; sorting by name keeps the emitted form stable across
 /// runs regardless of caller insertion order.
+#[must_use]
 pub fn name_sorted_input_box(mut dims: Vec<(String, f64, f64)>) -> IntervalBox {
     dims.sort_by(|a, b| a.0.cmp(&b.0));
     IntervalBox { dims }
@@ -313,16 +314,15 @@ pub fn box_range_goal_from_wire_dag(
     // Resolve the goal's single output to a root index by NAME (Beacon's
     // Load seeding is name-addressed; a positional index would force a
     // binding-integrity remap downstream).
-    let root_index = match named_roots.get(&output_range.output) {
-        Some(&idx) => idx as u64,
-        None => {
-            let mut available: Vec<String> = named_roots.keys().cloned().collect();
-            available.sort();
-            return Err(GraphExtractError::UnknownOutput {
-                output: output_range.output.clone(),
-                available,
-            });
-        }
+    let root_index = if let Some(&idx) = named_roots.get(&output_range.output) {
+        idx as u64
+    } else {
+        let mut available: Vec<String> = named_roots.keys().cloned().collect();
+        available.sort();
+        return Err(GraphExtractError::UnknownOutput {
+            output: output_range.output.clone(),
+            available,
+        });
     };
 
     let wire_dag_bytes = serialize_wire_dag(wire_dag);

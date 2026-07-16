@@ -89,13 +89,12 @@ fn bare_int_literal_rejected_against_int64_context() {
     // integer literal to int64 outside a tensor literal context. So
     // either: (a) the checker rejects mismatch, or (b) it silently
     // widens. We pin (a) and let a failure flag (b) as a finding.
-    if res.is_ok() {
-        panic!(
-            "spec §5.3: bare integer literal `42` defaults to int32 and must NOT \
-             silently widen to int64 in a non-tensor scalar context. The program \
-             `def main -> int64 = 42` should be rejected, not accepted."
-        );
-    }
+    assert!(
+        res.is_err(),
+        "spec §5.3: bare integer literal `42` defaults to int32 and must NOT \
+         silently widen to int64 in a non-tensor scalar context. The program \
+         `def main -> int64 = 42` should be rejected, not accepted."
+    );
 }
 
 /// §5.3 + §5.6 boundary: bare float literal defaults to f32 even inside an
@@ -215,13 +214,12 @@ fn literal_suffix_f8e4m3_is_lex_error_per_spec_5_5() {
         )
         .expect("macro expand")
         .into_exprs();
-        if check_ir_program(&exprs).is_ok() {
-            panic!(
-                "spec §5.5: `1.0f8e4m3` literal suffix is lex-time-rejected \
-                 per the deferred-suffix paragraph; the surf compiler accepts \
-                 it without diagnosing the deferred dtype."
-            );
-        }
+        assert!(
+            check_ir_program(&exprs).is_err(),
+            "spec §5.5: `1.0f8e4m3` literal suffix is lex-time-rejected \
+             per the deferred-suffix paragraph; the surf compiler accepts \
+             it without diagnosing the deferred dtype."
+        );
     }
 }
 
@@ -236,12 +234,11 @@ fn literal_suffix_u8_is_lex_error_per_spec_5_5() {
         )
         .expect("macro expand")
         .into_exprs();
-        if check_ir_program(&exprs).is_ok() {
-            panic!(
-                "spec §5.5: `42u8` unsigned suffix is lex-time-rejected per the \
-                 out-of-scope-suffix paragraph (§1.1.2)."
-            );
-        }
+        assert!(
+            check_ir_program(&exprs).is_err(),
+            "spec §5.5: `42u8` unsigned suffix is lex-time-rejected per the \
+             out-of-scope-suffix paragraph (§1.1.2)."
+        );
     }
 }
 
@@ -292,7 +289,7 @@ fn i64_literal_suffix_infers_int64() {
 }
 
 /// §5.5: a typed literal does NOT widen. `1.0f32` against an `f64`
-/// return position is a TypeMismatch, not a silent promotion. The
+/// return position is a `TypeMismatch`, not a silent promotion. The
 /// concrete diagnostic shape is implementation-defined (the checker
 /// today reports a signature mismatch); the load-bearing assertion is
 /// that the program is rejected.

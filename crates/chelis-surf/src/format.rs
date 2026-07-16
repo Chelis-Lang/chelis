@@ -1,4 +1,7 @@
-use crate::ast::*;
+use crate::ast::{
+    BinOp, Decl, EffectExpr, Expr, ImportKind, LetBinding, LetPattern, Literal, MatchArm, Param,
+    Pattern, PropertyOption, TypeExpr, UnaryOp, Variant, VariantFields,
+};
 use crate::lexer::{self, Comment, LexError};
 use crate::parser::{self, ParseError};
 
@@ -35,6 +38,7 @@ impl From<ParseError> for FormatError {
     }
 }
 
+#[must_use]
 pub fn format_program(decls: &[Decl]) -> String {
     let mut out = Vec::new();
     for decl in decls {
@@ -85,6 +89,7 @@ pub fn format_source(source: &str) -> Result<String, FormatError> {
 /// `goal` field uses it to emit the discharged proposition (a property body)
 /// in the record, so a consumer displays exactly what was discharged rather
 /// than re-parsing it out of source.
+#[must_use]
 pub fn format_expression(expr: &Expr) -> String {
     format_expr(expr)
 }
@@ -134,48 +139,46 @@ fn emit_decls_with_comments(
             lines.push(comments[*next].text.clone());
             *next += 1;
         }
-        match decl {
-            Decl::Module {
-                name, decls: inner, ..
-            } => {
-                let mut header = format!("module {name}");
-                let decl_end = decl.span().end();
-                if inner.is_empty() {
-                    // Comments inside an otherwise-empty module body.
-                    let mut body: Vec<String> = Vec::new();
-                    while *next < comments.len() && comments[*next].span.offset < decl_end {
-                        body.push(comments[*next].text.clone());
-                        *next += 1;
-                    }
-                    if !body.is_empty() {
-                        header.push('\n');
-                        header.push_str(&body.join("\n"));
-                    }
-                    lines.push(header);
-                } else {
-                    let mut body: Vec<String> = Vec::new();
-                    emit_decls_with_comments(inner, comments, next, &mut body);
-                    // Trailing comments still inside the module span.
-                    while *next < comments.len() && comments[*next].span.offset < decl_end {
-                        body.push(comments[*next].text.clone());
-                        *next += 1;
-                    }
-                    header.push('\n');
-                    header.push_str(&body.join("\n"));
-                    lines.push(header);
-                }
-            }
-            _ => {
-                // A comment whose offset falls within this declaration's
-                // own span (e.g. inside a function body) is emitted just
-                // before the declaration so it is never lost.
-                let decl_end = decl.span().end();
+        if let Decl::Module {
+            name, decls: inner, ..
+        } = decl
+        {
+            let mut header = format!("module {name}");
+            let decl_end = decl.span().end();
+            if inner.is_empty() {
+                // Comments inside an otherwise-empty module body.
+                let mut body: Vec<String> = Vec::new();
                 while *next < comments.len() && comments[*next].span.offset < decl_end {
-                    lines.push(comments[*next].text.clone());
+                    body.push(comments[*next].text.clone());
                     *next += 1;
                 }
-                lines.push(format_decl(decl));
+                if !body.is_empty() {
+                    header.push('\n');
+                    header.push_str(&body.join("\n"));
+                }
+                lines.push(header);
+            } else {
+                let mut body: Vec<String> = Vec::new();
+                emit_decls_with_comments(inner, comments, next, &mut body);
+                // Trailing comments still inside the module span.
+                while *next < comments.len() && comments[*next].span.offset < decl_end {
+                    body.push(comments[*next].text.clone());
+                    *next += 1;
+                }
+                header.push('\n');
+                header.push_str(&body.join("\n"));
+                lines.push(header);
             }
+        } else {
+            // A comment whose offset falls within this declaration's
+            // own span (e.g. inside a function body) is emitted just
+            // before the declaration so it is never lost.
+            let decl_end = decl.span().end();
+            while *next < comments.len() && comments[*next].span.offset < decl_end {
+                lines.push(comments[*next].text.clone());
+                *next += 1;
+            }
+            lines.push(format_decl(decl));
         }
     }
 }
@@ -802,24 +805,21 @@ fn format_pipe_layout(binding_head: Option<&str>, seed: String, stages: Vec<Stri
         return flat;
     }
 
-    match binding_head {
-        Some(head) => {
-            let first_line = format!("{head} = {seed}");
-            if first_line.chars().count() <= WIDTH && total_stages <= 2 {
-                let mut lines = vec![first_line];
-                lines.extend(stages.iter().map(|stage| format!("  |> {stage}")));
-                lines.join("\n")
-            } else {
-                let mut lines = vec![format!("{head} ="), format!("  {seed}")];
-                lines.extend(stages.iter().map(|stage| format!("  |> {stage}")));
-                lines.join("\n")
-            }
-        }
-        None => {
-            let mut lines = vec![seed];
-            lines.extend(stages.iter().map(|stage| format!("|> {stage}")));
+    if let Some(head) = binding_head {
+        let first_line = format!("{head} = {seed}");
+        if first_line.chars().count() <= WIDTH && total_stages <= 2 {
+            let mut lines = vec![first_line];
+            lines.extend(stages.iter().map(|stage| format!("  |> {stage}")));
+            lines.join("\n")
+        } else {
+            let mut lines = vec![format!("{head} ="), format!("  {seed}")];
+            lines.extend(stages.iter().map(|stage| format!("  |> {stage}")));
             lines.join("\n")
         }
+    } else {
+        let mut lines = vec![seed];
+        lines.extend(stages.iter().map(|stage| format!("|> {stage}")));
+        lines.join("\n")
     }
 }
 

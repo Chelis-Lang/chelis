@@ -20,11 +20,11 @@ const FMT_FLAT_MAX_STAGES: usize = 3;
 pub struct PreferPipeOperator;
 
 impl Rule for PreferPipeOperator {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "prefer-pipe-operator"
     }
 
-    fn spec_ref(&self) -> &str {
+    fn spec_ref(&self) -> &'static str {
         "§3.6"
     }
 
@@ -32,7 +32,7 @@ impl Rule for PreferPipeOperator {
         &[Surface::SurfSource]
     }
 
-    fn summary(&self) -> &str {
+    fn summary(&self) -> &'static str {
         "Prefer `|>` for valid first-argument call chains"
     }
 

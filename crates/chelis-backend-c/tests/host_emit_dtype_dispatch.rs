@@ -8,8 +8,8 @@
 //! `t->data[i]` form. The legacy form is a 4-byte float load
 //! regardless of dtype against the public `float *data` declaration
 //! in `crates/chelis-runtime/include/chelis_runtime.h`, mirroring
-//! the bug class closed by PR #64 (CastMemcpy), PR #67
-//! (ReshapeMemcpy), and PR #72 (PrintTensorF64).
+//! the bug class closed by PR #64 (`CastMemcpy`), PR #67
+//! (`ReshapeMemcpy`), and PR #72 (`PrintTensorF64`).
 //!
 //! Migrated sites (line numbers in `crates/chelis-backend-c/src/host_emit.rs`):
 //!   * L1587 elementwise binary operator (`add`, `sub`, `mul`, `div`).

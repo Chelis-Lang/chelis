@@ -8,7 +8,7 @@ use chelis_types::check_ir_program;
 use chelis_types::errors::{CheckError, CheckErrorKind};
 
 /// Parse → desugar → macro-expand → type-check, returning the full
-/// CheckError structs for inspection.
+/// `CheckError` structs for inspection.
 fn check_errors(source: &str) -> Vec<CheckError> {
     let decls = parse_str(source).expect("surf parse");
     let exprs = expand_program(&desugar_program(&decls), &ExpansionOptions::default())
@@ -26,10 +26,10 @@ fn check_errors(source: &str) -> Vec<CheckError> {
 fn precision_mismatch_has_span_offset() {
     // add(f32, int32) is a precision mismatch; the span_offset should be
     // present and non-zero because the call site is not at byte 0.
-    let source = r#"
+    let source = r"
 def bad() -> f32 =
     add(1.0, 1)
-"#;
+";
     let errors = check_errors(source);
     let prec_errors: Vec<_> = errors
         .iter()
@@ -66,10 +66,10 @@ def bad() -> f32 =
 #[test]
 fn arity_mismatch_has_span_offset() {
     // Calling a unary function with two arguments.
-    let source = r#"
+    let source = r"
 def f(x: f32) -> f32 = x
 def bad() -> f32 = f(1.0, 2.0)
-"#;
+";
     let errors = check_errors(source);
     let arity_errors: Vec<_> = errors
         .iter()
@@ -99,10 +99,10 @@ def bad() -> f32 = f(1.0, 2.0)
 
 #[test]
 fn if_branch_mismatch_has_span_offset() {
-    let source = r#"
+    let source = r"
 def bad(c: bool) -> f32 =
     if c then 1.0 else 1
-"#;
+";
     let errors = check_errors(source);
     let type_errors: Vec<_> = errors
         .iter()
@@ -167,10 +167,10 @@ fn builders_chain() {
 
 #[test]
 fn clean_program_has_no_span_fields() {
-    let source = r#"
+    let source = r"
 def good(x: tensor[3, f32]) -> tensor[3, f32] =
     add(x, x)
-"#;
+";
     let errors = check_errors(source);
     assert!(
         errors.is_empty(),
@@ -183,13 +183,13 @@ def good(x: tensor[3, f32]) -> tensor[3, f32] =
 #[test]
 fn multi_error_program_all_get_span_offset() {
     // Two distinct type errors in separate function bodies.
-    let source = r#"
+    let source = r"
 def bad1() -> f32 =
     add(1.0, 1)
 
 def bad2() -> f32 =
     add(1.0, 1)
-"#;
+";
     let errors = check_errors(source);
     assert!(
         errors.len() >= 2,
@@ -214,10 +214,10 @@ def bad2() -> f32 =
 #[test]
 fn dimension_mismatch_has_span_offset() {
     // Adding tensors of different shapes is a dimension mismatch.
-    let source = r#"
+    let source = r"
 def bad(x: tensor[3, f32], y: tensor[5, f32]) -> tensor[3, f32] =
     add(x, y)
-"#;
+";
     let errors = check_errors(source);
     let dim_errors: Vec<_> = errors
         .iter()
@@ -244,14 +244,14 @@ def bad(x: tensor[3, f32], y: tensor[5, f32]) -> tensor[3, f32] =
 #[test]
 fn deeply_nested_error_has_nonzero_span() {
     // The error is inside a block with multiple bindings.
-    let source = r#"
+    let source = r"
 def outer() -> f32 = {
     a = 1.0
     b = 2.0
     c = add(1.0, 1)
     c
 }
-"#;
+";
     let errors = check_errors(source);
     assert!(!errors.is_empty(), "expected at least one error; got none");
     let e = &errors[0];
@@ -286,9 +286,9 @@ fn validation_warning_carries_offset() {
     // this is tested by the `at_offset_builder_sets_field` test above.
     // We verify the validation warning path indirectly: for a Surf program
     // that produces no validation warnings, the error list is empty.
-    let source = r#"
+    let source = r"
 def good(x: tensor[3, f32]) -> tensor[3, f32] = x
-"#;
+";
     let errors = check_errors(source);
     assert!(errors.is_empty(), "expected no errors from a good program");
 }
@@ -297,10 +297,10 @@ def good(x: tensor[3, f32]) -> tensor[3, f32] = x
 
 #[test]
 fn different_error_sites_have_distinct_offsets() {
-    let source = r#"
+    let source = r"
 def first() -> f32 = add(1.0, 1)
 def second() -> f32 = add(1.0, 1)
-"#;
+";
     let errors = check_errors(source);
     assert!(
         errors.len() >= 2,
@@ -315,8 +315,7 @@ def second() -> f32 = add(1.0, 1)
     // The two errors are at different source positions, so offsets should differ.
     assert_ne!(
         offsets[0], offsets[1],
-        "two errors at different source locations should have different span_offsets: {:?}",
-        offsets
+        "two errors at different source locations should have different span_offsets: {offsets:?}"
     );
 }
 
@@ -324,9 +323,9 @@ def second() -> f32 = add(1.0, 1)
 
 #[test]
 fn unbound_variable_has_span_offset() {
-    let source = r#"
+    let source = r"
 def bad() -> f32 = nonexistent_var
-"#;
+";
     let errors = check_errors(source);
     let unbound_errors: Vec<_> = errors
         .iter()

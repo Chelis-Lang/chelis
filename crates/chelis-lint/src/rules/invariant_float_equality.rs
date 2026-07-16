@@ -15,11 +15,11 @@ use chelis_surf::ast::{BinOp, Decl, Expr};
 pub struct InvariantFloatEquality;
 
 impl Rule for InvariantFloatEquality {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "invariant-float-equality"
     }
 
-    fn spec_ref(&self) -> &str {
+    fn spec_ref(&self) -> &'static str {
         "§12.1"
     }
 
@@ -27,7 +27,7 @@ impl Rule for InvariantFloatEquality {
         &[Surface::SurfSource]
     }
 
-    fn summary(&self) -> &str {
+    fn summary(&self) -> &'static str {
         "Exact `==` over a representation field in an invariant starves generation; use a tolerance band"
     }
 

@@ -72,6 +72,7 @@ pub const CHELIS_STD_SHELL: &[u8] = include_bytes!(concat!(
 /// SHA256 of [`CHELIS_STD_ARCHIVE`], computed at runtime on first
 /// access. Used by the reef loader to fill `LockedDependency.archive_sha256`
 /// for synthesized `Bundled` lockfile entries.
+#[must_use]
 pub fn archive_sha256() -> String {
     let mut hasher = Sha256::new();
     hasher.update(CHELIS_STD_ARCHIVE);
@@ -81,6 +82,7 @@ pub fn archive_sha256() -> String {
 /// SHA256 of [`CHELIS_STD_SHELL`], computed at runtime on first
 /// access. Used by the reef loader to fill `LockedDependency.shell_sha256`
 /// for synthesized `Bundled` lockfile entries.
+#[must_use]
 pub fn shell_sha256() -> String {
     let mut hasher = Sha256::new();
     hasher.update(CHELIS_STD_SHELL);
@@ -188,7 +190,7 @@ mod tests {
         assert!(src.is_dir(), "src/ missing after extract");
         let any_ch = std::fs::read_dir(&src)
             .expect("read src/")
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .any(|e| e.path().extension().and_then(|s| s.to_str()) == Some("ch"));
         assert!(any_ch, "src/ must contain at least one .ch file");
     }

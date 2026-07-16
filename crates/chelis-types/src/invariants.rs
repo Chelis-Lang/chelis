@@ -49,6 +49,7 @@ use crate::types::Prim;
 /// verifiable invariant -- the divergence the two had let a representation
 /// pass `chelis check` while `chelis prove` silently collected zero
 /// obligations for it.
+#[must_use]
 pub fn invariant_value_class_prim(name: &str) -> bool {
     matches!(name, "f32" | "f64" | "bool") || Prim::parse_name(name).is_some_and(|p| p.is_integer())
 }
@@ -238,10 +239,9 @@ fn is_value_class_type(
             if !visiting.insert(name.to_string()) {
                 return false; // cycle: recursive ADT, not value-class
             }
-            let admitted = deftypes
-                .get(name)
-                .map(|referenced| is_single_record_of_value_class(referenced, deftypes, visiting))
-                .unwrap_or(false);
+            let admitted = deftypes.get(name).is_some_and(|referenced| {
+                is_single_record_of_value_class(referenced, deftypes, visiting)
+            });
             visiting.remove(name);
             admitted
         }
@@ -271,8 +271,7 @@ fn is_single_record_of_value_class(
     fields.iter().all(|field| {
         children(field)
             .get(1)
-            .map(|ty| is_value_class_type(ty, deftypes, visiting))
-            .unwrap_or(false)
+            .is_some_and(|ty| is_value_class_type(ty, deftypes, visiting))
     })
 }
 

@@ -139,6 +139,7 @@ fn symbol_text(expr: &Expr) -> Option<&str> {
 /// reef link, so exports survive as lexical `export` decls). A program
 /// with no `export` decl exports nothing (zero producers; the sixth
 /// rejection makes the type fully sealed — D-PRODUCER).
+#[must_use]
 pub fn collect_exports(exprs: &[Expr]) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     collect_exports_in(exprs, &mut out);
@@ -184,6 +185,7 @@ fn collect_def_bodies(exprs: &[Expr], with_body: &mut BTreeSet<String>) {
 /// declared annotation is part of the exported contract (RFC D-PRODUCER:
 /// inferred types ensure unannotated defs cannot escape; declared types
 /// remain authoritative where present).
+#[must_use]
 pub fn collect_declared_returns(exprs: &[Expr]) -> std::collections::BTreeMap<String, Type> {
     let aliases = collect_type_aliases(exprs);
     let mut out = std::collections::BTreeMap::new();
@@ -297,6 +299,7 @@ fn type_from_deep_depth(ty: &Expr, aliases: &BTreeMap<String, Expr>, depth: usiz
 /// <target>)` nodes: alias name -> target Deep type node. Alias chains are
 /// resolved lazily by `type_from_deep` (which re-enters this map), so we
 /// store the raw target node here.
+#[must_use]
 pub fn collect_type_aliases(exprs: &[Expr]) -> BTreeMap<String, Expr> {
     let mut out = BTreeMap::new();
     collect_type_aliases_in(exprs, &mut out);
@@ -391,6 +394,7 @@ pub fn decompose_return(
 /// Whether a type structurally mentions the named opaque type anywhere,
 /// chasing named record fields through `records` (so `Wrapper { inner: T }`
 /// mentions `T`). Recursion is depth-bounded against cyclic record types.
+#[must_use]
 pub fn type_contains(ty: &Type, type_name: &str, records: &BTreeMap<String, Vec<Type>>) -> bool {
     type_contains_depth(ty, type_name, records, 0)
 }
@@ -433,6 +437,7 @@ fn type_contains_depth(
 /// non-opaque record ADT name maps to the field types of its single
 /// variant. The opaque types themselves are intentionally NOT entries
 /// here (their fields are the representation, walled off by opacity).
+#[must_use]
 pub fn collect_record_fields(exprs: &[Expr]) -> BTreeMap<String, Vec<Type>> {
     let aliases = collect_type_aliases(exprs);
     let mut out = BTreeMap::new();
@@ -540,6 +545,7 @@ fn caller_receives_in_param(
 /// `sigs` maps def-name -> the checker-inferred function/value type
 /// (`FunctionSignatureInference::checked_signature`). The caller obtains
 /// it from `chelis_types::check_typed_program(exprs)`.
+#[must_use]
 pub fn collect_obligations(
     exprs: &[Expr],
     invariants: &[OpaqueInvariant],

@@ -2,7 +2,7 @@ use chelis_deep::authoring::{
     call_graph, change_signature, outline, rename_function, replace_function,
 };
 
-const MODULE: &str = r#"(module {}
+const MODULE: &str = r"(module {}
   demo.auth
   (export {} caller target)
   (defsig {}
@@ -21,7 +21,7 @@ const MODULE: &str = r#"(module {}
     (fn {}
       (params {} (y {type: (t-prim {} f32)}))
       (app {} (var {} target) (var {} y)))))
-"#;
+";
 
 fn parse(source: &str) -> Vec<chelis_deep::Expr> {
     chelis_deep::parser::parse_str_strict(source).expect("deep parses")
@@ -46,7 +46,7 @@ fn outline_lists_functions_with_canonical_node_hash_preimage_text() {
 
 #[test]
 fn call_graph_uses_structural_calls_and_ignores_shadowed_names() {
-    let source = r#"(module {}
+    let source = r"(module {}
   demo.shadow
   (defsig {} target (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32)))
   (def {} target (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))
@@ -56,7 +56,7 @@ fn call_graph_uses_structural_calls_and_ignores_shadowed_names() {
     (fn {}
       (params {} (target {type: (t-prim {} f32)}))
       (var {} target))))
-"#;
+";
     let graph = call_graph(&parse(source)).expect("call graph");
     assert!(
         graph.edges.is_empty(),
@@ -89,7 +89,7 @@ fn rename_updates_defsig_def_exports_and_unshadowed_calls() {
 
 #[test]
 fn replace_function_preserves_declaration_position() {
-    let new_decls = r#"(defsig {}
+    let new_decls = r"(defsig {}
   target
   (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32)))
 (def {}
@@ -97,7 +97,7 @@ fn replace_function_preserves_declaration_position() {
   (fn {}
     (params {} (x {type: (t-prim {} f32)}))
     (var {} x)))
-"#;
+";
     let report = replace_function(&parse(MODULE), "target", &parse(new_decls)).expect("replace");
     let decls: Vec<String> = chelis_deep::authoring::outline(&report.module)
         .expect("outline")
@@ -111,7 +111,7 @@ fn replace_function_preserves_declaration_position() {
 
 #[test]
 fn change_signature_reorders_direct_calls_and_checks_completeness() {
-    let source = r#"(module {}
+    let source = r"(module {}
   demo.sig
   (defsig {}
     pair
@@ -129,11 +129,11 @@ fn change_signature_reorders_direct_calls_and_checks_completeness() {
     (fn {}
       (params {} (a {type: (t-prim {} f32)}) (b {type: (t-prim {} f32)}))
       (app {} (var {} pair) (var {} a) (var {} b)))))
-"#;
-    let new_defsig = r#"(defsig {}
+";
+    let new_defsig = r"(defsig {}
   pair
-  (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32)))"#;
-    let new_params = r#"(params {} (y {type: (t-prim {} f32)}) (x {type: (t-prim {} f32)}))"#;
+  (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32)))";
+    let new_params = r"(params {} (y {type: (t-prim {} f32)}) (x {type: (t-prim {} f32)}))";
 
     let report = change_signature(
         &parse(source),
@@ -156,7 +156,7 @@ fn change_signature_reorders_direct_calls_and_checks_completeness() {
 
 #[test]
 fn change_signature_rejects_duplicate_argument_order_before_rewrite() {
-    let source = r#"(module {}
+    let source = r"(module {}
   demo.sig
   (defsig {}
     pair
@@ -174,11 +174,11 @@ fn change_signature_rejects_duplicate_argument_order_before_rewrite() {
     (fn {}
       (params {} (a {type: (t-prim {} f32)}) (b {type: (t-prim {} f32)}))
       (app {} (var {} pair) (var {} a) (var {} b)))))
-"#;
-    let new_defsig = r#"(defsig {}
+";
+    let new_defsig = r"(defsig {}
   pair
-  (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32)))"#;
-    let new_params = r#"(params {} (x {type: (t-prim {} f32)}) (y {type: (t-prim {} f32)}))"#;
+  (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32)))";
+    let new_params = r"(params {} (x {type: (t-prim {} f32)}) (y {type: (t-prim {} f32)}))";
 
     let error = change_signature(
         &parse(source),

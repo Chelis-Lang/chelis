@@ -440,7 +440,7 @@ int main(void) {
 }
 
 /// POSITIVE (no over-rejection): a symbolic LAST-axis concat grad must still
-/// build + run correctly — the working #551 path (reuses SYM_BATCH_LINEAR,
+/// build + run correctly — the working #551 path (reuses `SYM_BATCH_LINEAR`,
 /// concat axis 1 over `tensor[batch, 2]`), guarding that the #593 floor does
 /// not reject the last-axis case. d/dx sum(concat([2x,3x],axis=1)) = 5.
 #[test]

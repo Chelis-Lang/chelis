@@ -27,14 +27,14 @@ fn phase3j_pre_batch2_linspace_matches_reference_values() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-linspace");
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 import Std.Tensor.Construct (linspace)
 
 ls_5 = linspace(cast(0.0, f32), cast(1.0, f32), cast(5, int32))
 ls_3 = linspace(cast(-1.0, f32), cast(1.0, f32), cast(3, int32))
 ls_1 = linspace(cast(4.0, f32), cast(9.0, f32), cast(1, int32))
-"#,
+",
     );
 
     Command::cargo_bin("chelis")
@@ -68,12 +68,12 @@ fn phase3j_pre_batch2_linspace_rejects_non_scalar_start() {
     // Passing a tensor where a scalar f32 is required should fail check.
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 import Std.Tensor.Construct (linspace)
 
 bad = linspace(to_tensor([cast(0.0, f32)]), cast(1.0, f32), cast(5, int32))
-"#,
+",
     );
 
     Command::cargo_bin("chelis")
@@ -94,13 +94,13 @@ fn phase3j_pre_batch2_arange_matches_reference_values() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-arange");
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 import Std.Tensor.Construct (arange)
 
 ar_0_4 = arange(cast(0, int32), cast(4, int32))
 ar_2_6 = arange(cast(2, int32), cast(6, int32))
-"#,
+",
     );
 
     // KNOWN RESIDUAL: empty arange (stop == start) panics the IR evaluator
@@ -142,12 +142,12 @@ fn phase3j_pre_batch2_arange_rejects_float_bounds() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-arange-bad");
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 import Std.Tensor.Construct (arange)
 
 bad = arange(cast(0.0, f32), cast(4.0, f32))
-"#,
+",
     );
 
     Command::cargo_bin("chelis")
@@ -197,14 +197,14 @@ fn phase3j_pre_batch2_stack_squeeze_unsqueeze_publish_successfully() {
     // evaluate them end-to-end due to the residuals documented above.
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 import Std.Tensor.Construct (stack, squeeze, unsqueeze)
 
 touch = stack
 touch2 = squeeze
 touch3 = unsqueeze
-"#,
+",
     );
 
     Command::cargo_bin("chelis")

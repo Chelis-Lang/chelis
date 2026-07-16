@@ -1,6 +1,6 @@
 //! Perf-F2(c): C in-place fused-elementwise aliasing must admit scoped
 //! same-property `forall` / binder-equivalent aliases, not just literal
-//! `DimInfo`-PartialEq matches.
+//! `DimInfo`-`PartialEq` matches.
 //!
 //! Wire format expectations are pinned with exact `contains` strings (not
 //! pattern fragments) so a regression that drops the in-place alias or
@@ -9,7 +9,7 @@
 //! Boundary: this file exercises only the in-place fusion gate in
 //! `chelis-backend-c::emit::fused_in_place_spec`. The slot planner in
 //! `chelis-backend-c::memory` is the M2a peer and intentionally out of
-//! scope; the fan-in shapes used here construct a deduplicated FusedElem
+//! scope; the fan-in shapes used here construct a deduplicated `FusedElem`
 //! whose `reusable_input` is set by the test, mirroring what fusion does
 //! after the linearity analyzer attaches the reuse hint.
 
@@ -46,10 +46,10 @@ fn vec_lit_f64(n: usize) -> TensorType {
     }
 }
 
-/// Build a 3-input fan-in FusedElem chain: `((a + b) * c)` where `a` is
+/// Build a 3-input fan-in `FusedElem` chain: `((a + b) * c)` where `a` is
 /// marked as the reusable input via `set_reusable_input`. Each external
 /// input is intermediate (a `Realize` node so memory planning treats it
-/// as SlotBacked, mirroring the copy-elision-probe fan-in shape).
+/// as `SlotBacked`, mirroring the copy-elision-probe fan-in shape).
 ///
 /// `a_ty`, `b_ty`, `c_ty`, `out_ty` are independent so callers can probe
 /// binder-equivalent vs literal-equal vs non-equivalent shapes without
@@ -106,7 +106,7 @@ fn fan_in_dag(
 }
 
 /// Pinning regression: fan-in with literal-equal shapes still aliases the
-/// FusedElem's output to the reusable input's data. This is the existing
+/// `FusedElem`'s output to the reusable input's data. This is the existing
 /// in-place wire format the gate already produces; it must not change.
 #[test]
 fn fan_in_literal_equal_shapes_aliases_reusable_input() {
@@ -146,9 +146,9 @@ fn fan_in_literal_equal_shapes_aliases_reusable_input() {
     );
 }
 
-/// Positive — binder-equivalent: FusedElem output uses
+/// Positive — binder-equivalent: `FusedElem` output uses
 /// `Named("seq", Some(4))` while reusable input uses `Lit(4)` and the
-/// other inputs use the matching `Named("seq", Some(4))`. PartialEq says
+/// other inputs use the matching `Named("seq", Some(4))`. `PartialEq` says
 /// these `TensorType`s are NOT equal because `DimInfo::Lit != DimInfo::Named`.
 /// The binder-equivalent extension must still admit the in-place alias.
 ///
@@ -191,7 +191,7 @@ fn fan_in_binder_equivalent_lit_to_named_aliases_reusable_input() {
     );
 }
 
-/// Positive — binder-equivalent the other direction: FusedElem output
+/// Positive — binder-equivalent the other direction: `FusedElem` output
 /// uses `Lit(4)` while reusable input is `Named("seq", Some(4))`. The
 /// alias must still fire — the binder-equivalent predicate is symmetric.
 #[test]
@@ -409,7 +409,7 @@ fn fan_in_multi_consumer_reusable_input_does_not_alias() {
 }
 
 /// Negative — different rank: a rank-1 reusable input and a rank-2
-/// FusedElem output are never binder-equivalent, regardless of total
+/// `FusedElem` output are never binder-equivalent, regardless of total
 /// element count.
 #[test]
 fn fan_in_different_rank_does_not_alias() {

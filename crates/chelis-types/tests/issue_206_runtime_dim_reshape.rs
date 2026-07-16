@@ -63,11 +63,10 @@ fn errors_summary(errors: &[CheckError]) -> String {
 }
 
 fn type_env_string(checked: &CheckedProgram, name: &str) -> String {
-    checked
-        .type_env()
-        .get(name)
-        .map(|e| format!("{e:?}"))
-        .unwrap_or_else(|| format!("(no type_env entry for {name})"))
+    checked.type_env().get(name).map_or_else(
+        || format!("(no type_env entry for {name})"),
+        |e| format!("{e:?}"),
+    )
 }
 
 /// The issue's exact reproducer (`flatten_batch`) MUST type-check. Before
@@ -75,13 +74,13 @@ fn type_env_string(checked: &CheckedProgram, name: &str) -> String {
 #[test]
 fn issue_206_flatten_batch_typechecks() {
     let errors = typecheck_surf(
-        r#"
+        r"
 module Probe.Runtime
 export (flatten_batch)
 
 sig flatten_batch: &tensor[n, 4, f32] -> tensor[n, 4, f32]
 def flatten_batch(x) = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4, int64)])
-"#,
+",
     );
     assert!(
         errors.is_empty(),
@@ -95,13 +94,13 @@ def flatten_batch(x) = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4
 #[test]
 fn issue_206_bias_broadcast_typechecks() {
     let errors = typecheck_surf(
-        r#"
+        r"
 module Probe.Runtime
 export (bias_broadcast)
 
 sig bias_broadcast: &tensor[n, 4, f32] -> &tensor[4, f32] -> tensor[n, 4, f32]
 def bias_broadcast(x, b) = expand(b, 0, shape(x, cast(0, int32)))
-"#,
+",
     );
     assert!(
         errors.is_empty(),
@@ -115,7 +114,7 @@ def bias_broadcast(x, b) = expand(b, 0, shape(x, cast(0, int32)))
 #[test]
 fn issue_206_full_module_typechecks() {
     let errors = typecheck_surf(
-        r#"
+        r"
 module Probe.Runtime
 export (bias_broadcast, flatten_batch)
 
@@ -124,7 +123,7 @@ def bias_broadcast(x, b) = expand(b, 0, shape(x, cast(0, int32)))
 
 sig flatten_batch: &tensor[n, 4, f32] -> tensor[n, 4, f32]
 def flatten_batch(x) = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4, int64)])
-"#,
+",
     );
     assert!(
         errors.is_empty(),
@@ -138,10 +137,10 @@ def flatten_batch(x) = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4
 #[test]
 fn issue_206_two_symbolic_dims_propagate() {
     let errors = typecheck_surf(
-        r#"
+        r"
 sig flatten_two: &tensor[n, m, f32] -> tensor[n, m, f32]
 def flatten_two(x) = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(shape(x, cast(1, int32)), int64)])
-"#,
+",
     );
     assert!(
         errors.is_empty(),
@@ -156,10 +155,10 @@ def flatten_two(x) = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(sha
 #[test]
 fn issue_206_mixed_symbolic_and_literal_dim() {
     let errors = typecheck_surf(
-        r#"
+        r"
 sig with_literal: &tensor[n, 4, f32] -> tensor[n, 4, f32]
 def with_literal(x) = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4, int64)])
-"#,
+",
     );
     assert!(
         errors.is_empty(),
@@ -174,10 +173,10 @@ def with_literal(x) = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4,
 #[test]
 fn issue_206_all_literal_dims_still_work() {
     let errors = typecheck_surf(
-        r#"
+        r"
 sig fixed: &tensor[n, 4, f32] -> tensor[4, 4, f32]
 def fixed(x) = reshape(x, [cast(4, int64), cast(4, int64)])
-"#,
+",
     );
     assert!(
         errors.is_empty(),
@@ -204,10 +203,10 @@ def fixed(x) = reshape(x, [cast(4, int64), cast(4, int64)])
 #[test]
 fn issue_206_shape_of_other_tensor_does_not_propagate() {
     let errors = typecheck_surf(
-        r#"
+        r"
 sig cross_dim: &tensor[n, 4, f32] -> &tensor[m, 4, f32] -> tensor[n, 4, f32]
 def cross_dim(x, y) = reshape(x, [cast(shape(y, cast(0, int32)), int64), cast(4, int64)])
-"#,
+",
     );
     let has_dim_mismatch = errors.iter().any(|e| {
         matches!(
@@ -239,10 +238,10 @@ def cross_dim(x, y) = reshape(x, [cast(shape(y, cast(0, int32)), int64), cast(4,
 #[test]
 fn issue_206_unrecognized_dim_expression_falls_back_to_wildcard() {
     let errors = typecheck_surf(
-        r#"
+        r"
 sig add_one_dim: &tensor[n, 4, f32] -> tensor[n, 4, f32]
 def add_one_dim(x) = reshape(x, [cast(add(shape(x, cast(0, int32)), 1), int64), cast(4, int64)])
-"#,
+",
     );
     // The arithmetic-wrapped shape source is NOT a recognized symbolic
     // dim. Recognizer must fall back to Wildcard, which means no
@@ -270,10 +269,10 @@ def add_one_dim(x) = reshape(x, [cast(add(shape(x, cast(0, int32)), 1), int64), 
 #[test]
 fn issue_206_non_var_reshape_input_falls_back_safely() {
     let errors = typecheck_surf(
-        r#"
+        r"
 sig roundtrip: &tensor[n, 4, f32] -> tensor[n, 4, f32]
 def roundtrip(x) = reshape(reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4, int64)]), [cast(shape(x, cast(0, int32)), int64), cast(4, int64)])
-"#,
+",
     );
     // Inner reshape's input is a `var x` -- recognizer fires, body type
     // `tensor[n, 4, f32]`. Outer reshape's input is the inner reshape's
@@ -300,10 +299,10 @@ def roundtrip(x) = reshape(reshape(x, [cast(shape(x, cast(0, int32)), int64), ca
 #[test]
 fn issue_206_var_name_match_is_load_path_for_propagation() {
     let errors = typecheck_surf(
-        r#"
+        r"
 sig same_var: &tensor[batch, 4, f32] -> tensor[batch, 4, f32]
 def same_var(x) = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4, int64)])
-"#,
+",
     );
     assert!(
         errors.is_empty(),
@@ -314,16 +313,16 @@ def same_var(x) = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4, int
 }
 
 /// Cross-program inspection: when the recognizer fires correctly, the
-/// CheckedProgram should record a sensible type_env entry for the def
+/// `CheckedProgram` should record a sensible `type_env` entry for the def
 /// (this also locks that fix-time changes don't silently drop the def
-/// from the type_env -- the API surface downstream passes rely on).
+/// from the `type_env` -- the API surface downstream passes rely on).
 #[test]
 fn issue_206_propagated_def_appears_in_type_env() {
     let checked = typecheck_surf_program(
-        r#"
+        r"
 sig flatten_batch: &tensor[n, 4, f32] -> tensor[n, 4, f32]
 def flatten_batch(x) = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4, int64)])
-"#,
+",
     )
     .expect("flatten_batch must type-check");
     let env = checked.type_env();

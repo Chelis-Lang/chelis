@@ -64,6 +64,7 @@ enum SelfCommand {
 }
 
 /// Parse argv and run the installer CLI. Returns the process exit code.
+#[must_use]
 pub fn run_cli() -> i32 {
     let cli = Cli::parse();
     let store = match Store::from_env() {
@@ -178,15 +179,14 @@ fn cmd_list_installed(store: &Store) -> i32 {
 }
 
 fn cmd_which(store: &Store) -> i32 {
-    let resolution = match resolve_for_cwd(store) {
-        Some(r) => r,
-        None => {
-            eprintln!(
-                "chelisup: no toolchain resolved here and no default recorded.\n  \
-                 set one with: chelisup default <ver>"
-            );
-            return 1;
-        }
+    let resolution = if let Some(r) = resolve_for_cwd(store) {
+        r
+    } else {
+        eprintln!(
+            "chelisup: no toolchain resolved here and no default recorded.\n  \
+             set one with: chelisup default <ver>"
+        );
+        return 1;
     };
     if !is_safe_path_component(&resolution.version) {
         eprintln!(

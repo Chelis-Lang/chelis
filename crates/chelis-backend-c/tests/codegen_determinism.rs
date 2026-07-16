@@ -2,10 +2,10 @@
 //!
 //! Per `spec/upstream-bugs/host-emit-hashmap-iteration-nondeterminism.md`,
 //! `chelis_backend_c::emit::CEmitter::emit_input_shape_preamble` previously
-//! iterated a `HashMap<String, TensorType>` of input parameters; HashMap
+//! iterated a `HashMap<String, TensorType>` of input parameters; `HashMap`
 //! iteration order is non-deterministic across process runs (and across
 //! compilations within a single run, since each emitter call constructs a
-//! fresh HashMap with its own random seed under stdlib's RandomState).
+//! fresh `HashMap` with its own random seed under stdlib's `RandomState`).
 //!
 //! The user-visible symptom was that the input-validation block (NULL
 //! checks, ndim checks, fixed-axis-size checks, and symbolic-dim binding

@@ -51,13 +51,13 @@ fn surf_to_deep(source: &str) -> Vec<Expr> {
 /// guard did not mark `y2`.
 #[test]
 fn rt205_r4_cascade_propagation_multi_level_pins_bug() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], k3: tensor[32, 16, 3, 3, f32]) -> tensor[1, 32, 2, 2, f32] = {
   y1 = conv2d(&x, &k1, 1, 0)
   y2 = conv2d(&y1, &k2, 1, 0)
   conv2d(&y2, &k3, 1, 0)
 }
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for non-concrete input dim");
@@ -90,13 +90,13 @@ fn rt205_r4_cascade_propagation_bug_plain_conv2d() {
     // a tail `conv2d(&y2, ...)`. Before the fix the validator's
     // suppression covered the `y2` RHS but missed the tail. After
     // the fix the tail is suppressed too.
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], k3: tensor[32, 16, 3, 3, f32]) -> tensor[1, 32, 2, 2, f32] = {
   y1 = conv2d(&x, &k1, 1, 0)
   y2 = conv2d(&y1, &k2, 1, 0)
   conv2d(&y2, &k3, 1, 0)
 }
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure");
@@ -126,13 +126,13 @@ def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8
 #[test]
 fn rt205_r4_cascade_propagation_bug_via_nonconcrete_dim() {
     // Non-concrete spatial axis (h).
-    let src_h = r#"
+    let src_h = r"
 def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], k3: tensor[32, 16, 3, 3, f32]) -> tensor[1, 32, 2, 2, f32] = {
   y1 = conv2d(&x, &k1, 1, 0)
   y2 = conv2d(&y1, &k2, 1, 0)
   conv2d(&y2, &k3, 1, 0)
 }
-"#;
+";
     let deep = surf_to_deep(src_h);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for non-concrete h");
@@ -158,13 +158,13 @@ def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8
     // root failure. Per RT-205 round-3 F-C the spatial/channel axes
     // are required concrete (only `batch` may be symbolic), so this
     // also routes through the cascade-dedup path on `y1`.
-    let src_in_c = r#"
+    let src_in_c = r"
 def f(x: tensor[1, in_c, 8, 16, f32], k1: tensor[8, in_c, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], k3: tensor[32, 16, 3, 3, f32]) -> tensor[1, 32, 2, 2, f32] = {
   y1 = conv2d(&x, &k1, 1, 0)
   y2 = conv2d(&y1, &k2, 1, 0)
   conv2d(&y2, &k3, 1, 0)
 }
-"#;
+";
     let deep = surf_to_deep(src_in_c);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for non-concrete in_c");
@@ -195,14 +195,14 @@ def f(x: tensor[1, in_c, 8, 16, f32], k1: tensor[8, in_c, 3, 3, f32], k2: tensor
 /// extra level.
 #[test]
 fn rt205_r4_cascade_propagation_four_level_chain() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], k3: tensor[32, 16, 3, 3, f32], k4: tensor[64, 32, 3, 3, f32]) -> tensor[1, 64, 1, 1, f32] = {
   y1 = conv2d(&x, &k1, 1, 0)
   y2 = conv2d(&y1, &k2, 1, 0)
   y3 = conv2d(&y2, &k3, 1, 0)
   conv2d(&y3, &k4, 1, 0)
 }
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for 4-level chain");
@@ -234,14 +234,14 @@ def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8
 /// from 2 calls to 3.
 #[test]
 fn rt205_r4_three_independent_failures_not_suppressed() {
-    let src = r#"
+    let src = r"
 def f(x1: tensor[1, 3, h, 16, f32], x2: tensor[1, 3, h, 16, f32], x3: tensor[1, 3, h, 16, f32], k: tensor[8, 3, 3, 3, f32]) -> (tensor[1, 8, 6, 6, f32], tensor[1, 8, 6, 6, f32], tensor[1, 8, 6, 6, f32]) = {
   y1 = conv2d(&x1, &k, 1, 0)
   y2 = conv2d(&x2, &k, 1, 0)
   y3 = conv2d(&x3, &k, 1, 0)
   (y1, y2, y3)
 }
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for non-concrete input dims");
@@ -274,13 +274,13 @@ def f(x1: tensor[1, 3, h, 16, f32], x2: tensor[1, 3, h, 16, f32], x3: tensor[1, 
 /// must too.
 #[test]
 fn rt205_r4_cascade_propagation_through_relu_wrapper_multi_level() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], k3: tensor[32, 16, 3, 3, f32]) -> tensor[1, 32, 2, 2, f32] = {
   y1 = relu(conv2d(&x, &k1, 1, 0))
   y2 = relu(conv2d(&y1, &k2, 1, 0))
   conv2d(&y2, &k3, 1, 0)
 }
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for non-concrete input dim through relu");
@@ -310,13 +310,13 @@ def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8
 /// chain.
 #[test]
 fn rt205_r4_cascade_propagation_alternating_wrapped_and_bare() {
-    let src = r#"
+    let src = r"
 def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], k3: tensor[32, 16, 3, 3, f32]) -> tensor[1, 32, 2, 2, f32] = {
   y1 = conv2d(&x, &k1, 1, 0)
   y2 = relu(conv2d(&y1, &k2, 1, 0))
   conv2d(&y2, &k3, 1, 0)
 }
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for alternating chain");
@@ -365,7 +365,7 @@ fn rt205_r4_cascade_does_not_suppress_user_fn_chain() {
     // returns its input; downstream conv2d uses helper's result.
     // The validator must NOT mark y2 as failed via the cascade path,
     // so the downstream conv2d still emits its own diagnostic.
-    let src = r#"
+    let src = r"
 def helper(t: tensor[1, 8, w1, w2, f32]) -> tensor[1, 8, w1, w2, f32] = t
 
 def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
@@ -373,7 +373,7 @@ def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8
   y2 = helper(y1)
   conv2d(&y2, &k2, 1, 0)
 }
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure");

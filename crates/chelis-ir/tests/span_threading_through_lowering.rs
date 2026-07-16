@@ -15,7 +15,7 @@
 //!  * unspanned input ⇒ all IR nodes carry `span_id = None`
 //!  * empty program ⇒ doesn't panic, produces empty DAG
 //!  * single-source-region invariance: a Deep program where every node
-//!    bears the SAME span ⇒ every IR node carries that span_id
+//!    bears the SAME span ⇒ every IR node carries that `span_id`
 
 use std::collections::BTreeSet;
 
@@ -24,7 +24,7 @@ use chelis_ir::dag::Dag;
 use chelis_ir::lower_program;
 use chelis_types::{check_ir_program, check_linearity};
 
-/// Build a CheckedProgram from Deep source. Mirrors the pipeline the
+/// Build a `CheckedProgram` from Deep source. Mirrors the pipeline the
 /// real driver runs (IR check check → effects → linearity), so the
 /// resulting `CheckedProgram` is exactly what `lower_program` expects.
 fn check(source: &str) -> chelis_types::CheckedProgram {
@@ -156,7 +156,7 @@ fn lowering_without_spans_produces_none_span_ids() {
     // Same shape as the positive test, but no `span:` keys anywhere.
     // Every IR node must have `span_id = None` — lowering must not
     // fabricate spans for unspanned input.
-    let source = r#"
+    let source = r"
         (def {} y
           (app {type: (t-tensor {} (t-prim {} f32))}
                (var {} add)
@@ -165,7 +165,7 @@ fn lowering_without_spans_produces_none_span_ids() {
                     (lit {type: (t-tensor {} (t-prim {} f32))} 3.0)
                     (lit {type: (t-tensor {} (t-prim {} f32))} 4.0))
                (lit {type: (t-tensor {} (t-prim {} f32))} 5.0)))
-    "#;
+    ";
 
     let exprs = chelis_deep::parser::parse_str(source).expect("deep parse");
     assert!(

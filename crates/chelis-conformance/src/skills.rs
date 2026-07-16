@@ -65,6 +65,7 @@ pub const EMBEDDED_SKILLS: &[(&str, &str)] = &[
 ];
 
 /// The embedded `SKILL.md` for `name`, or `None` if `name` is not a shared skill.
+#[must_use]
 pub fn skill_body(name: &str) -> Option<&'static str> {
     EMBEDDED_SKILLS
         .iter()

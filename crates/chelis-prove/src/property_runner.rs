@@ -56,6 +56,7 @@ pub enum PropertyTier {
 }
 
 impl PropertyTier {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             PropertyTier::Smt => "smt",
@@ -199,11 +200,12 @@ impl PropertyOutcome {
     }
 
     /// The full disclosed qualifier set of this outcome's composed verdict, as
-    /// sorted snake_case strings for the `qualifiers:[...]` JSON array
+    /// sorted `snake_case` strings for the `qualifiers:[...]` JSON array
     /// (chelis#422, D2). A green outcome discloses its composed union; a
     /// reals-hedged disproof discloses `real_arithmetic` (symmetric to the proof
     /// side, so the machine-arithmetic caveat is visible on the failure too);
     /// every other non-green outcome discloses none.
+    #[must_use]
     pub fn disclosed_qualifiers(&self) -> Vec<&'static str> {
         if self.composite_verdict == CompositeVerdict::DisprovedModuloRealArithmetic {
             return crate::composition::disclosed_qualifier_strings_for_base(
@@ -241,6 +243,7 @@ impl PropertyOutcome {
     /// `proof_tier == Smt`). A `Passed` with zero fuzz samples is NOT a
     /// genuine pass -- it is the vacuous/timeout sentinel and the fold must
     /// treat it as not-ok (U4).
+    #[must_use]
     pub fn is_pass(&self) -> bool {
         if matches!(
             self.composite_verdict,
@@ -261,6 +264,7 @@ impl PropertyOutcome {
     /// CLI's NDJSON render and the tide MCP JSON render use this single
     /// method, so a property's reported status can never diverge between the
     /// two surfaces.
+    #[must_use]
     pub fn display_status(&self) -> &'static str {
         if self.status == PropertyStatus::Error {
             return "error";
@@ -1169,10 +1173,10 @@ fn prove_surf_property_fuzz(
     options: &PropertyRunOptions,
     seed: u64,
 ) -> PropertyOutcome {
-    let samples_needed = if options.samples != 100 {
-        options.samples
-    } else {
+    let samples_needed = if options.samples == 100 {
         property.samples.unwrap_or(options.samples)
+    } else {
+        options.samples
     };
     let max_attempts = options
         .max_attempts
@@ -2172,10 +2176,10 @@ fn prove_deep_property(
         }
     }
 
-    let samples_needed = if options.samples != 100 {
-        options.samples
-    } else {
+    let samples_needed = if options.samples == 100 {
         property.samples.unwrap_or(options.samples)
+    } else {
+        options.samples
     };
     let max_attempts = options
         .max_attempts

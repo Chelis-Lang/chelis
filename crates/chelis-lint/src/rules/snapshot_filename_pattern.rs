@@ -1,5 +1,5 @@
 //! Rule `snapshot-filename-pattern` — Insta-style snapshot tests follow
-//! `{context}__{section}__{test_name}.snap` with snake_case components
+//! `{context}__{section}__{test_name}.snap` with `snake_case` components
 //! (§10.3). Octant's existing convention is the project standard.
 
 use crate::{Context, Rule, Surface, Violation};
@@ -19,11 +19,11 @@ fn snap_re() -> &'static Regex {
 pub struct SnapshotFilenamePattern;
 
 impl Rule for SnapshotFilenamePattern {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "snapshot-filename-pattern"
     }
 
-    fn spec_ref(&self) -> &str {
+    fn spec_ref(&self) -> &'static str {
         "§10.3"
     }
 
@@ -31,7 +31,7 @@ impl Rule for SnapshotFilenamePattern {
         &[Surface::SnapshotFile]
     }
 
-    fn summary(&self) -> &str {
+    fn summary(&self) -> &'static str {
         "snapshot filenames follow {context}__{section}__{test_name}.snap with snake_case components"
     }
 

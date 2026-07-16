@@ -186,11 +186,11 @@ fn s6_backward_compat_span_free_dp_emits_no_span_comments_on_host_path() {
     // the same host_emit code path the wrapped fixture exercises.
     fs::write(
         &dp_path,
-        r#"(def {} double_it
+        r"(def {} double_it
   (fn {}
     (params {} (x {type: (t-prim {} f32)}))
     (app {} (var {} mul) (var {} x) (lit {type: (t-prim {} f32)} 2.0))))
-"#,
+",
     )
     .expect("write dp");
     let out = dir.path().join("nospan_scalar.c");

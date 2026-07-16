@@ -193,8 +193,7 @@ chelis-std = {{ version = "0.4.0" }}
 /// BLAS link flags.
 pub fn generated_source_needs_blas(out_dir: &Path, source: &str) -> bool {
     fs::read_to_string(out_dir.join(source))
-        .map(|text| text.contains("cblas_sgemm(") || text.contains("\"chelis_blas.h\""))
-        .unwrap_or(false)
+        .is_ok_and(|text| text.contains("cblas_sgemm(") || text.contains("\"chelis_blas.h\""))
 }
 
 /// Link the chelis-generated C against the platform host toolchain, resolving
@@ -246,8 +245,7 @@ pub fn gcc_available() -> bool {
     StdCommand::new(chelis_backend_c::toolchain::c_compiler())
         .arg("--version")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 /// Build `source` to C, link it, run it, and return its stdout. Panics with a

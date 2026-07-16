@@ -3,11 +3,11 @@
 //! Perf-F2(b) — the HIP port of the C backend's
 //! `binder_equivalent_tensor_type` predicate and `fused_in_place_spec`
 //! gate (`crates/chelis-backend-c/src/emit.rs`). When the upstream
-//! linearity analyzer marks a FusedElem's reusable input AND the
+//! linearity analyzer marks a `FusedElem`'s reusable input AND the
 //! reusable input is single-consumer AND its tensor type is
-//! binder-equivalent to the FusedElem output, the HIP backend admits
+//! binder-equivalent to the `FusedElem` output, the HIP backend admits
 //! the in-place alias: at runtime, if the reusable input's storage is
-//! contiguous, the FusedElem's output view is aliased onto the input's
+//! contiguous, the `FusedElem`'s output view is aliased onto the input's
 //! device buffer instead of allocated from the slot.
 //!
 //! This duplicates the C-side predicate intentionally (the W2-B brief
@@ -18,11 +18,11 @@
 
 use chelis_ir::dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, TensorType};
 
-/// Pinned alias-proof spec for an in-place FusedElem.
+/// Pinned alias-proof spec for an in-place `FusedElem`.
 ///
-/// `reusable_input` is the external input NodeId whose device buffer
-/// the FusedElem's output is allowed to alias when contiguity holds at
-/// runtime. `slot_has_later_owner` is true iff the FusedElem's slot
+/// `reusable_input` is the external input `NodeId` whose device buffer
+/// the `FusedElem`'s output is allowed to alias when contiguity holds at
+/// runtime. `slot_has_later_owner` is true iff the `FusedElem`'s slot
 /// has a downstream owner that will consume the slot independently of
 /// the runtime-contiguous path; when false, the fall-back slot
 /// allocation can be deferred to inside the non-contiguous branch.
@@ -32,16 +32,16 @@ pub(crate) struct FusedInPlaceSpec {
     pub slot_has_later_owner: bool,
 }
 
-/// Decide whether a FusedElem node admits in-place aliasing onto its
+/// Decide whether a `FusedElem` node admits in-place aliasing onto its
 /// `reusable_input`. Returns `Some(reusable_input)` iff:
 ///   * the node has a `reusable_input` hint from upstream linearity,
 ///   * the node's op is `FusedElem`,
 ///   * the reusable input appears exactly once in the node's inputs
 ///     (no fan-in to the same buffer through multiple slots),
-///   * the reusable input's output_type is binder-equivalent to the
-///     FusedElem's output_type (see `binder_equivalent_tensor_type`),
+///   * the reusable input's `output_type` is binder-equivalent to the
+///     `FusedElem`'s `output_type` (see `binder_equivalent_tensor_type`),
 ///   * the reusable input has exactly one consumer in the DAG (the
-///     FusedElem itself); multi-consumer inputs cannot be safely
+///     `FusedElem` itself); multi-consumer inputs cannot be safely
 ///     aliased because mutating the buffer would corrupt the second
 ///     consumer's read.
 pub(crate) fn fused_in_place_spec(node: &DagNode, dag: &Dag) -> Option<NodeId> {

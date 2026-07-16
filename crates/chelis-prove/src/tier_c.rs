@@ -30,11 +30,12 @@ pub enum TierCResult {
 /// c-earchin output), this evaluates once. For parameterized properties,
 /// the existing `chelis prove` fuzz logic handles sample generation — this
 /// tier delegates to it.
+#[must_use]
 pub fn fuzz(property_source: &str, property_name: &str, samples: usize, _seed: u64) -> TierCResult {
     // For the dispatcher integration, we call eval_selected on a probe root
     // that wraps the property. This mirrors what chelis prove does internally.
     let probe_name = format!("__chelis_prove_probe_{property_name}");
-    let source_with_probe = format!("{property_source}\n{probe_name} = {property_name}()\n",);
+    let source_with_probe = format!("{property_source}\n{probe_name} = {property_name}()\n");
 
     let result = compiler::eval_selected(
         EvalRequest {
@@ -79,8 +80,9 @@ use crate::concrete_eval::eval_bool;
 use crate::tier_b::SmtProperty;
 use std::collections::HashMap;
 
-/// Fuzz an SmtProperty directly via concrete f64 evaluation.
+/// Fuzz an `SmtProperty` directly via concrete f64 evaluation.
 /// Quantified properties (Forall/Exists in postcondition) → Error (unsupported).
+#[must_use]
 pub fn fuzz_smt_property(property: &SmtProperty, samples: usize, seed: u64) -> TierCResult {
     // Check fuzzability: quantifiers in postcondition → unsupported
     if let crate::inlineability::Fuzzability::NotFuzzable(reason) =

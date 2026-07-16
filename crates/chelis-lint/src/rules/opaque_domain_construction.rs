@@ -73,11 +73,11 @@ impl Catalog {
 pub struct OpaqueDomainConstruction;
 
 impl Rule for OpaqueDomainConstruction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "opaque-domain-construction"
     }
 
-    fn spec_ref(&self) -> &str {
+    fn spec_ref(&self) -> &'static str {
         "§12.1"
     }
 
@@ -85,7 +85,7 @@ impl Rule for OpaqueDomainConstruction {
         &[Surface::SurfSource, Surface::DeepSource]
     }
 
-    fn summary(&self) -> &str {
+    fn summary(&self) -> &'static str {
         "types marked opaque may not be directly constructed, record-updated, or cast into outside their defining module"
     }
 
@@ -379,7 +379,7 @@ fn deep_module_less_leaves(exprs: &[deep::Expr]) -> HashSet<String> {
         let Some(list) = as_list(expr) else {
             continue;
         };
-        if matches!(tag(list), Some("deftype") | Some("typealias"))
+        if matches!(tag(list), Some("deftype" | "typealias"))
             && let Some(name) = children(list).first().and_then(sym_str)
         {
             out.insert(type_leaf(name).to_string());
@@ -731,26 +731,26 @@ mod tests {
 
     #[test]
     fn allows_constructor_inside_defining_module() {
-        let src = r#"
+        let src = r"
 module Whale.Types
 @opaque
 type Probability = | Probability { value: f32 }
 def probability(x: f32) -> Probability = Probability { value: x }
-"#;
+";
         assert!(run_surf(src).is_empty());
     }
 
     #[test]
     fn rejects_constructor_outside_defining_module() {
-        let whale = r#"
+        let whale = r"
 module Whale.Types
 @opaque
 type Probability = | Probability { value: f32 }
-"#;
-        let agent = r#"
+";
+        let agent = r"
 module Agent.Strategy
 def bad(x: f32) -> Probability = Probability { value: x }
-"#;
+";
         let violations = run_surf_in_package(agent, whale);
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].rule_id, "opaque-domain-construction");
@@ -759,12 +759,12 @@ def bad(x: f32) -> Probability = Probability { value: x }
 
     #[test]
     fn rejects_deep_record_update_when_type_metadata_names_opaque_type() {
-        let src = r#"
+        let src = r"
 (module {} whale.types
   (deftype {opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))
 (module {} agent.strategy
   (record-update {type: (t-adt {} Probability)} (var {} p) (kv {} value (lit {type: (t-prim {} f32)} 2.0))))
-"#;
+";
         let violations = run_deep(src);
         assert_eq!(violations.len(), 1);
         assert!(violations[0].message.contains("record-update"));
@@ -772,12 +772,12 @@ def bad(x: f32) -> Probability = Probability { value: x }
 
     #[test]
     fn rejects_untyped_deep_record_update_outside_opaque_defining_module() {
-        let src = r#"
+        let src = r"
 (module {} whale.types
   (deftype {opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))
 (module {} agent.strategy
   (record-update {} (var {} p) (kv {} value (lit {type: (t-prim {} f32)} 2.0))))
-"#;
+";
         let violations = run_deep(src);
         assert_eq!(violations.len(), 1);
         assert!(
@@ -789,12 +789,12 @@ def bad(x: f32) -> Probability = Probability { value: x }
 
     #[test]
     fn rejects_deep_cast_into_opaque_type() {
-        let src = r#"
+        let src = r"
 (module {} whale.types
   (deftype {opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))
 (module {} agent.strategy
   (cast {} (var {} x) (t-adt {} Probability)))
-"#;
+";
         let violations = run_deep(src);
         assert_eq!(violations.len(), 1);
         assert!(
@@ -812,16 +812,16 @@ def bad(x: f32) -> Probability = Probability { value: x }
         // `Probability`; `Other.Domain` defines an UNRELATED non-opaque
         // `Probability` and constructs its OWN type. The lint must NOT
         // flag the unrelated type just because it shares the leaf name.
-        let whale = r#"
+        let whale = r"
 module Whale.Types
 @opaque
 type Probability = | Probability { value: f32 }
-"#;
-        let other = r#"
+";
+        let other = r"
 module Other.Domain
 type Probability = | Probability { value: f32 }
 def make(x: f32) -> Probability = Probability { value: x }
-"#;
+";
         let violations = run_surf_in_package(other, whale);
         assert!(
             violations.is_empty(),
@@ -834,13 +834,13 @@ def make(x: f32) -> Probability = Probability { value: x }
         // CR-9 false positive, Deep surface: same leaf, one opaque
         // (whale.types) and one non-opaque (other.domain) that
         // constructs its own. Only the genuine forge should ever flag.
-        let src = r#"
+        let src = r"
 (module {} whale.types
   (deftype {opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))
 (module {} other.domain
   (deftype {} Probability () (variant {} Probability (field {} value (t-prim {} f32))))
   (record {} Probability (kv {} value (lit {type: (t-prim {} f32)} 2.0))))
-"#;
+";
         let violations = run_deep(src);
         assert!(
             violations.is_empty(),
@@ -853,15 +853,15 @@ def make(x: f32) -> Probability = Probability { value: x }
         // CR-9 negative parity: the genuine forge -- a module that does
         // NOT declare a local same-leaf type but constructs the opaque
         // type from another module -- must still be flagged.
-        let whale = r#"
+        let whale = r"
 module Whale.Types
 @opaque
 type Probability = | Probability { value: f32 }
-"#;
-        let agent = r#"
+";
+        let agent = r"
 module Agent.Strategy
 def bad(x: f32) -> Probability = Probability { value: x }
-"#;
+";
         let violations = run_surf_in_package(agent, whale);
         assert_eq!(
             violations.len(),
@@ -876,12 +876,12 @@ def bad(x: f32) -> Probability = Probability { value: x }
         // CR-9 negative parity: the opaque type's OWN defining module
         // constructing it stays allowed even with the (type, module)
         // keying.
-        let src = r#"
+        let src = r"
 module Whale.Types
 @opaque
 type Probability = | Probability { value: f32 }
 def probability(x: f32) -> Probability = Probability { value: x }
-"#;
+";
         assert!(run_surf(src).is_empty());
     }
 
@@ -916,18 +916,18 @@ def probability(x: f32) -> Probability = Probability { value: x }
         // same bucket as file B, so before the fix it falsely
         // suppressed file B's forge. File B has no local `Secret`, so
         // its forge must be flagged.
-        let victim = r#"
+        let victim = r"
 module Victim.Types
 @opaque
 type Secret = | Secret { value: f32 }
-"#;
-        let filea = r#"
+";
+        let filea = r"
 type Secret = | Secret { value: f32 }
 def make_local(x: f32) -> Secret = Secret { value: x }
-"#;
-        let fileb = r#"
+";
+        let fileb = r"
 def forge(x: f32) -> Secret = Secret { value: x }
-"#;
+";
         let violations = run_corpus(
             &[
                 ("victim.ch", victim),
@@ -951,15 +951,15 @@ def forge(x: f32) -> Secret = Secret { value: x }
         // shadows its OWN constructions (file A here is the checked
         // file). It must stay unflagged even though a named module
         // defines an opaque same-leaf type.
-        let victim = r#"
+        let victim = r"
 module Victim.Types
 @opaque
 type Secret = | Secret { value: f32 }
-"#;
-        let filea = r#"
+";
+        let filea = r"
 type Secret = | Secret { value: f32 }
 def make_local(x: f32) -> Secret = Secret { value: x }
-"#;
+";
         let violations = run_corpus(&[("victim.ch", victim), ("filea.ch", filea)], "filea.ch");
         assert!(
             violations.is_empty(),
@@ -983,14 +983,14 @@ def make_local(x: f32) -> Secret = Secret { value: x }
         // constructs a same-leaf type. Before the fix the lint cataloged
         // the module-less opaque under `None` and flagged fileb -- a
         // false positive against an invalid opaque declaration.
-        let filea = r#"
+        let filea = r"
 @opaque
 type Secret = | Secret { value: f32 }
-"#;
-        let fileb = r#"
+";
+        let fileb = r"
 module Other.Domain
 def f(x: f32) -> Secret = Secret { value: x }
-"#;
+";
         let violations = run_corpus(&[("filea.ch", filea), ("fileb.ch", fileb)], "fileb.ch");
         assert!(
             violations.is_empty(),
@@ -1004,11 +1004,11 @@ def f(x: f32) -> Secret = Secret { value: x }
         // Deep surface: a top-level `opaque: true` deftype (module-less)
         // must not be cataloged, so a same-leaf construction inside a
         // named module is not flagged against it.
-        let src = r#"
+        let src = r"
 (deftype {opaque: true} Secret () (variant {} Secret (field {} value (t-prim {} f32))))
 (module {} other.domain
   (record {} Secret (kv {} value (lit {type: (t-prim {} f32)} 2.0))))
-"#;
+";
         let violations = run_deep(src);
         assert!(
             violations.is_empty(),
@@ -1020,15 +1020,15 @@ def f(x: f32) -> Secret = Secret { value: x }
     fn named_module_opaque_still_flags_out_of_module_forge_cr3_parity() {
         // CR3 negative parity: a properly NAMED-module @opaque still
         // catalogs and still flags the genuine out-of-module forge.
-        let whale = r#"
+        let whale = r"
 module Whale.Types
 @opaque
 type Secret = | Secret { value: f32 }
-"#;
-        let agent = r#"
+";
+        let agent = r"
 module Agent.Strategy
 def bad(x: f32) -> Secret = Secret { value: x }
-"#;
+";
         let violations = run_surf_in_package(agent, whale);
         assert_eq!(
             violations.len(),

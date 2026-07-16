@@ -1,6 +1,6 @@
-//! End-to-end integration test: chelis → BeaconShim → real chelis-beacon binary.
+//! End-to-end integration test: chelis → `BeaconShim` → real chelis-beacon binary.
 //!
-//! Requires CHELIS_BEACON_BIN to point at the real beacon binary.
+//! Requires `CHELIS_BEACON_BIN` to point at the real beacon binary.
 //! Run with:
 //!
 //! ```text
@@ -107,7 +107,7 @@ fn bs_atm_singleton_input_box() -> IntervalBox {
     ])
 }
 
-/// Build a simple forward DAG from Chelis source, then extract a BoxRange goal.
+/// Build a simple forward DAG from Chelis source, then extract a `BoxRange` goal.
 /// The resulting `wire_dag_bytes` are produced by Chelis WI-3, not by Beacon.
 fn simple_square_goal(output_lo: f64, output_hi: f64) -> chelis_prove::ExtractedGoal {
     let source = "x = (x : tensor[f32])\nout = (mul(x, x) : tensor[f32])\n";
@@ -160,8 +160,7 @@ fn beacon_e2e_live_shim_to_real_binary_sound_green() {
     assert_eq!(
         discharge.soundness(),
         Soundness::SoundApproximate,
-        "Beacon proved goal must be SoundApproximate, got {:?}",
-        discharge
+        "Beacon proved goal must be SoundApproximate, got {discharge:?}"
     );
     assert!(
         discharge
@@ -190,8 +189,7 @@ fn beacon_e2e_forward_goal_wrong_range_not_green() {
             discharge.result(),
             chelis_prove::tier_b::TierBResult::Proved
         ),
-        "a wrong-range goal must NOT be Proved by Beacon, got {:?}",
-        discharge
+        "a wrong-range goal must NOT be Proved by Beacon, got {discharge:?}"
     );
 }
 
@@ -339,8 +337,7 @@ fn beacon_e2e_gradient_goal_verified_greek() {
     assert_eq!(
         discharge.soundness(),
         Soundness::SoundApproximate,
-        "gradient goal must be SoundApproximate (verified Greek), got {:?}",
-        discharge
+        "gradient goal must be SoundApproximate (verified Greek), got {discharge:?}"
     );
     assert!(
         discharge

@@ -10,13 +10,13 @@
 //! the compiler recognises the high-level operation and dispatches to the
 //! pre-tuned hardware-aware kernel:
 //!
-//!   * **matmul → cuBLAS / cblas_sgemm** — uses Tensor Cores, SRAM tiling,
+//!   * **matmul → cuBLAS / `cblas_sgemm`** — uses Tensor Cores, SRAM tiling,
 //!     and a hand-written cache schedule. ~100× faster than naive math.
 //!   * **softmax → cuDNN softmax** — single fused kernel that reads each
 //!     element exactly twice, with online-softmax for numerical stability.
 //!     Streaming over the reduction axis avoids materialising the
 //!     intermediate exp/max/sum tensors.
-//!   * **layer_norm → cuDNN layernorm** — fused kernel computing mean,
+//!   * **`layer_norm` → cuDNN layernorm** — fused kernel computing mean,
 //!     variance, normalised output in a single pass over the reduction
 //!     axis.
 //!   * **scatter/gather → cuDF / Thrust scatter** — parallel radix sort
@@ -26,11 +26,11 @@
 //! Every one of these specialised kernels exists because the *generic*
 //! decomposition into RISC primitives runs into a different performance
 //! pathology: memory bandwidth wall (matmul), redundant memory traffic
-//! (softmax/layer_norm), or warp divergence (scatter/gather).
+//! (`softmax/layer_norm`), or warp divergence (scatter/gather).
 //!
 //! This test compiles all five operations to C and tabulates which one
 //! hits a specialised library call vs which falls through to generic
-//! parallel-for loops. The C-backend's BLAS path (cblas_sgemm) is the
+//! parallel-for loops. The C-backend's BLAS path (`cblas_sgemm`) is the
 //! exact analogue of what cuBLAS dispatch would provide on GPU. If
 //! Chelis cannot dispatch a specialised kernel for an operation in the
 //! C backend, it almost certainly cannot dispatch a specialised kernel
@@ -46,13 +46,13 @@
 //! |-------------|---------------------------------------|--------------|
 //! | matmul      | `cblas_sgemm()` direct call           | **YES**      |
 //! | softmax     | §4.2 lowering: 4 allocs + 3+ scalar parallel-for loops | no |
-//! | layer_norm  | §4.4 lowering: 10+ allocs + many loops              | no |
+//! | `layer_norm`  | §4.4 lowering: 10+ allocs + many loops              | no |
 //! | scatter     | Generic `chelis_tensor_scatter()` runtime call      | no |
 //! | gather      | First-class sparse C loop                           | partial |
 //!
 //! **Translation to the user's framing:**
 //!   * matmul gets the equivalent of "Tensor Cores + cuBLAS dispatch."
-//!   * softmax / layer_norm get the equivalent of "naive CUDA cores
+//!   * softmax / `layer_norm` get the equivalent of "naive CUDA cores
 //!     reading from main memory" — no fused reduction, no online-softmax,
 //!     no SRAM tiling.
 //!   * scatter still gets a generic runtime call. Tensor-lane gather now
@@ -65,7 +65,7 @@
 //! to the same RISC primitive set" is correct **for the AD side**. But
 //! "AD flows through" does not imply "those library operations get
 //! specialised codegen." For the dataframe case (Coral, the pandas
-//! analogue at https://github.com/Chelis-Lang/coral), the gap is even
+//! analogue at <https://github.com/Chelis-Lang/coral>), the gap is even
 //! sharper than this test directly probes: Coral's `agg_sum` /
 //! `agg_mean` / `agg_count` etc. (`coral/src/groupby.ch`) are
 //! implemented as host-lane operations over `List[List[int64]]`:
@@ -97,11 +97,11 @@
 //!     host-side `List[List[int64]]` plus `map`/`fold` higher-order
 //!     functions.
 //!
-//! What this test directly probes (matmul / softmax / layer_norm /
+//! What this test directly probes (matmul / softmax / `layer_norm` /
 //! scatter / gather) is the *closest tensor-lane* analogue to the Coral
 //! and Nautilus operations. The "10000 basic math ops" graph the
 //! third-party review describes is exactly what the softmax and
-//! layer_norm tabulations below show: dozens of allocations, many small
+//! `layer_norm` tabulations below show: dozens of allocations, many small
 //! kernels, no recognition of the high-level operation, no dispatch to
 //! a specialised library call. For Coral specifically the situation is
 //! one step further upstream — the operation isn't even in the tensor

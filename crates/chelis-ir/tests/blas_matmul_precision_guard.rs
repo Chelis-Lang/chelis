@@ -1,6 +1,6 @@
 //! WS-A0 RT-1 fixup acceptance tests.
 //!
-//! Pins the per-fix done-condition for the F1 BlasMatmul tactical
+//! Pins the per-fix done-condition for the F1 `BlasMatmul` tactical
 //! precision guard. The other fixups (A1/C1/D1/E1/E2) have their
 //! acceptance tests living in the crates that own the fixed surface.
 //!
@@ -82,7 +82,7 @@ fn blas_matmul_f64_validates_cleanly_after_ws_a1_lift() {
     );
 }
 
-/// WS-A3 admits `bf16` BlasMatmul: the HIP backend now binds the
+/// WS-A3 admits `bf16` `BlasMatmul`: the HIP backend now binds the
 /// `accumulator` field explicitly (no more destructure-`..` footgun)
 /// and routes bf16 + f32-default-accumulator through `hipblasGemmEx`
 /// per spec/04-type-system.md §5.7.1. The C backend still rejects
@@ -121,8 +121,8 @@ fn blas_matmul_bf16_admitted_after_ws_a3_lift() {
     );
 }
 
-/// WS-A3 admits `f16` BlasMatmul on the same lift as bf16 (also
-/// dispatches through `hipblasGemmEx` with HIPBLAS_COMPUTE_32F per
+/// WS-A3 admits `f16` `BlasMatmul` on the same lift as bf16 (also
+/// dispatches through `hipblasGemmEx` with `HIPBLAS_COMPUTE_32F` per
 /// spec §5.7.1).
 #[test]
 fn blas_matmul_f16_admitted_after_ws_a3_lift() {
@@ -157,7 +157,7 @@ fn blas_matmul_f16_admitted_after_ws_a3_lift() {
     );
 }
 
-/// Negative-parity twin: f32 BlasMatmul still validates cleanly. The
+/// Negative-parity twin: f32 `BlasMatmul` still validates cleanly. The
 /// F1 guard is operand-precision specific and must not regress f32.
 #[test]
 fn blas_matmul_f32_validates_cleanly_under_f1_guard() {

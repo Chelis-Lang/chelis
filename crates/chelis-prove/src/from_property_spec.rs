@@ -1,13 +1,13 @@
-//! Bridge from c-earchin's PropertySpec to chelis-prove's SmtProperty.
+//! Bridge from c-earchin's `PropertySpec` to chelis-prove's `SmtProperty`.
 //!
 //! Converts the structured property specification (serialized via JSON from
-//! c-earchin) into the solver-agnostic SmtExpr representation.
+//! c-earchin) into the solver-agnostic `SmtExpr` representation.
 
 use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr, SmtSort};
 use crate::tier_b::SmtProperty;
 use serde::Deserialize;
 
-/// Mirrors c-earchin's PropertySpec via serde (no crate dependency).
+/// Mirrors c-earchin's `PropertySpec` via serde (no crate dependency).
 #[derive(Debug, Clone, Deserialize)]
 pub struct PropertySpecInput {
     pub id: String,
@@ -82,7 +82,7 @@ pub enum SmtAmenabilityInput {
     Opaque,
 }
 
-/// Convert a PropertySpecInput into an SmtProperty for Tier B.
+/// Convert a `PropertySpecInput` into an `SmtProperty` for Tier B.
 pub fn to_smt_property(spec: &PropertySpecInput) -> SmtProperty {
     SmtProperty {
         variables: spec
@@ -96,6 +96,7 @@ pub fn to_smt_property(spec: &PropertySpecInput) -> SmtProperty {
 }
 
 /// Convert amenability classification for dispatch routing.
+#[must_use]
 pub fn to_dispatch_amenability(a: SmtAmenabilityInput) -> crate::dispatch::SmtAmenability {
     match a {
         SmtAmenabilityInput::Linear => crate::dispatch::SmtAmenability::Linear,

@@ -375,7 +375,7 @@ result = step(w, b)
 }
 
 /// F8: Shape B four-arg mse-shape with copies on every arg. Mirrors the
-/// hello-chelis linreg.ch sgd_step pattern at vector arity 3.
+/// hello-chelis linreg.ch `sgd_step` pattern at vector arity 3.
 #[test]
 fn f8_shape_b_grad_fanout_four_arg_mse() {
     let source = "\

@@ -14,7 +14,7 @@
 //!   1. `BlasMultipleRoots` — synthetic two-root matmul-near DAG.
 //!   2. `BlasOutputPrecisionMismatch` — F64 matmul helper output.
 //!   3. `BlasNotMatmulPattern` — root is Sum (matmul-near) but the
-//!      recognizer cannot fold to BlasMatmul, OR root is BlasMatmul
+//!      recognizer cannot fold to `BlasMatmul`, OR root is `BlasMatmul`
 //!      with malformed input count / precision.
 //!   4. `BlasNonLoadOperand` — matmul operand is not a direct Load.
 //!   5. `BlasInputPrecisionMismatch` — helper input precision != F32.
@@ -30,7 +30,7 @@
 //! `contains()` on the rendered `Display` string is explicitly
 //! rejected.
 //!
-//! ## NotEligible parity
+//! ## `NotEligible` parity
 //!
 //! Two negative tests assert that helpers with no matmul-shape body
 //! (e.g. pure-elementwise Add helpers, non-F32 elementwise helpers)

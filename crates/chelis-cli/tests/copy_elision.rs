@@ -71,7 +71,8 @@ fn build_copy_elision_c_source() -> String {
 /// call in the C source. After M2a this approximates the slot-planned helper
 /// working set because slot backing allocations still use `chelis_alloc`.
 ///
-/// Returns (total_bytes, allocation_count, per_alloc_bytes).
+/// Returns (`total_bytes`, `allocation_count`, `per_alloc_bytes`).
+#[must_use]
 pub fn measure_alloc_footprint(c_source: &str) -> (usize, usize, Vec<usize>) {
     let mut per_alloc = Vec::new();
     let mut idx = 0;

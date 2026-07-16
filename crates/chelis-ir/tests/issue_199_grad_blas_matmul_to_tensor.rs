@@ -35,7 +35,7 @@ use chelis_ir::grad::{AdError, grad_dag, grad_dag_checked};
 use chelis_types::types::Prim;
 use std::collections::HashMap;
 
-/// Build a forward DAG `Y = A @ B` (BlasMatmul) followed by a scalar
+/// Build a forward DAG `Y = A @ B` (`BlasMatmul`) followed by a scalar
 /// reduction `sum(sum(Y, 1), 0)`. Returns the DAG plus handles for the
 /// load nodes (a, b) and the scalar output.
 fn build_blas_matmul_scalar_loss(m: usize, k: usize, n: usize) -> (Dag, NodeId, NodeId, NodeId) {
@@ -187,7 +187,7 @@ fn issue_199_blas_matmul_grad_wrt_rhs_is_finite_and_correct() {
 }
 
 /// Finite-difference check: per the agent contract
-/// (feedback_evaluator_byte_identical_gate), the analytical gradient
+/// (`feedback_evaluator_byte_identical_gate`), the analytical gradient
 /// must agree with a centered finite-difference approximation within
 /// standard float tolerance.
 #[test]
@@ -239,7 +239,7 @@ fn issue_199_blas_matmul_grad_matches_finite_difference() {
 /// constant (no Loads on the gradient path) must still produce a clean
 /// result, not a panic or "non-differentiable" error. The adjoint of
 /// every const is the empty input-gradient list, so a `grad(c, wrt=x)`
-/// where `x` is unrelated should produce no grad_node entry for `x`,
+/// where `x` is unrelated should produce no `grad_node` entry for `x`,
 /// not crash.
 #[test]
 fn issue_199_grad_with_unrelated_wrt_returns_no_grad_entry() {
@@ -274,7 +274,7 @@ fn issue_199_grad_with_unrelated_wrt_returns_no_grad_entry() {
 /// Negative parity: `BlasMatmul` is no longer non-differentiable, so
 /// `grad_dag_checked` must NOT emit the legacy "unsupported op or
 /// verification failure" Other error for it. This pins the regression
-/// surface: if a future refactor accidentally removes the BlasMatmul
+/// surface: if a future refactor accidentally removes the `BlasMatmul`
 /// adjoint arm and falls back through to the verifier-rejection path,
 /// this test surfaces the regression with the legacy Other-error
 /// shape.

@@ -93,14 +93,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                     // C2: dimension matching for binary ops.
                     let l_dims = &lhs.output_type.dims;
                     let r_dims = &rhs.output_type.dims;
-                    if l_dims.len() != r_dims.len() {
-                        errors.push(format!(
-                            "binary op at node {} has mismatched dimension count: {} vs {}",
-                            node.id.0,
-                            l_dims.len(),
-                            r_dims.len()
-                        ));
-                    } else {
+                    if l_dims.len() == r_dims.len() {
                         for (i, (ld, rd)) in l_dims.iter().zip(r_dims.iter()).enumerate() {
                             if !dims_compatible(ld, rd) {
                                 errors.push(format!(
@@ -109,6 +102,13 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                                 ));
                             }
                         }
+                    } else {
+                        errors.push(format!(
+                            "binary op at node {} has mismatched dimension count: {} vs {}",
+                            node.id.0,
+                            l_dims.len(),
+                            r_dims.len()
+                        ));
                     }
                 }
             }
@@ -885,14 +885,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                             ));
                         }
                     }
-                    if node.output_type.dims.len() != input_rank {
-                        errors.push(format!(
-                            "pad at node {}: output rank {} != input rank {}",
-                            node.id.0,
-                            node.output_type.dims.len(),
-                            input_rank
-                        ));
-                    } else {
+                    if node.output_type.dims.len() == input_rank {
                         for (axis, ((before, after), in_dim)) in padding
                             .iter()
                             .zip(input.output_type.dims.iter())
@@ -913,6 +906,13 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                                 }
                             }
                         }
+                    } else {
+                        errors.push(format!(
+                            "pad at node {}: output rank {} != input rank {}",
+                            node.id.0,
+                            node.output_type.dims.len(),
+                            input_rank
+                        ));
                     }
                 }
             }
@@ -966,14 +966,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                             ));
                         }
                     }
-                    if node.output_type.dims.len() != input_rank {
-                        errors.push(format!(
-                            "shrink at node {}: output rank {} != input rank {}",
-                            node.id.0,
-                            node.output_type.dims.len(),
-                            input_rank
-                        ));
-                    } else {
+                    if node.output_type.dims.len() == input_rank {
                         for (axis, ((start, end), in_dim)) in
                             bounds.iter().zip(input.output_type.dims.iter()).enumerate()
                         {
@@ -1008,6 +1001,13 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                                 ));
                             }
                         }
+                    } else {
+                        errors.push(format!(
+                            "shrink at node {}: output rank {} != input rank {}",
+                            node.id.0,
+                            node.output_type.dims.len(),
+                            input_rank
+                        ));
                     }
                 }
             }
@@ -1054,14 +1054,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                             ));
                         }
                     }
-                    if node.output_type.dims.len() != input_rank {
-                        errors.push(format!(
-                            "stride at node {}: output rank {} != input rank {}",
-                            node.id.0,
-                            node.output_type.dims.len(),
-                            input_rank
-                        ));
-                    } else {
+                    if node.output_type.dims.len() == input_rank {
                         for (axis, (step, in_dim)) in strides
                             .iter()
                             .zip(input.output_type.dims.iter())
@@ -1089,6 +1082,13 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                                 }
                             }
                         }
+                    } else {
+                        errors.push(format!(
+                            "stride at node {}: output rank {} != input rank {}",
+                            node.id.0,
+                            node.output_type.dims.len(),
+                            input_rank
+                        ));
                     }
                 }
             }

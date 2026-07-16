@@ -112,7 +112,7 @@ mod tests {
         walk(root)
             .unwrap()
             .into_iter()
-            .filter_map(|r| r.ok())
+            .filter_map(std::result::Result::ok)
             .filter_map(|e| {
                 e.path
                     .strip_prefix(root)

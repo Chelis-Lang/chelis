@@ -8,7 +8,7 @@
 //!  - B. matmul rejection for bf16 with operand-narrower-than-default
 //!    accumulator (`accumulator=bf16` when default is f32).
 //!  - F. The accumulator field destructure-with-`..` pattern in the
-//!    backend BlasMatmul detectors.
+//!    backend `BlasMatmul` detectors.
 //!  - F8e4m3 must be rejected by the IR-level default helpers too.
 
 use chelis_ir::dag::{DimExpr, RiscOp};
@@ -19,7 +19,7 @@ use chelis_types::types::Prim;
 // ---------------------------------------------------------------
 
 /// §5.7.1 result-precision rule: result precision = accumulator precision
-/// for reduce_sum (across all rows).
+/// for `reduce_sum` (across all rows).
 #[test]
 fn reduce_sum_int64_default_is_int64_self_matching() {
     let acc = RiscOp::default_reduce_sum_accumulator(Prim::Int64)
@@ -31,7 +31,7 @@ fn reduce_sum_int64_default_is_int64_self_matching() {
     );
 }
 
-/// §5.7.1: bool is rejected for reduce_sum entirely.
+/// §5.7.1: bool is rejected for `reduce_sum` entirely.
 #[test]
 fn reduce_sum_default_bool_rejected_with_workaround_hint() {
     let err = RiscOp::default_reduce_sum_accumulator(Prim::Bool)
@@ -69,7 +69,7 @@ fn matmul_default_f8e4m3_rejected_with_spec_diagnostic() {
 // ---------------------------------------------------------------
 
 /// §5.7.1: f16 with explicit f16 accumulator (default is f32) must error.
-/// NEGATIVE PARITY: existing accumulator_defaults.rs only covers bf16
+/// NEGATIVE PARITY: existing `accumulator_defaults.rs` only covers bf16
 /// and int8/int16. f16 is a separate row in the §5.7.1 table.
 #[test]
 fn reduce_sum_f16_with_explicit_f16_accumulator_is_rejected() {
@@ -81,7 +81,7 @@ fn reduce_sum_f16_with_explicit_f16_accumulator_is_rejected() {
 
 /// §5.7.1: matmul on bf16 with explicit accumulator=bf16 must be rejected
 /// (default is f32; bf16 is narrower-than-default).
-/// NEGATIVE PARITY: existing accumulator_defaults.rs has no matmul-narrow
+/// NEGATIVE PARITY: existing `accumulator_defaults.rs` has no matmul-narrow
 /// test at all.
 #[test]
 fn matmul_bf16_with_explicit_bf16_accumulator_is_rejected() {
@@ -135,7 +135,7 @@ fn reduce_sum_int32_operand_with_f64_accumulator_rejected_cross_lane() {
     assert!(err.contains("§5.7.1"));
 }
 
-/// §5.7.1 wider-than-default acceptance: reduce_sum on f32 with f64
+/// §5.7.1 wider-than-default acceptance: `reduce_sum` on f32 with f64
 /// accumulator must be permitted (f64 is wider than the default f32).
 /// NEGATIVE PARITY: existing test only covers bf16+f64; pin the f32 row.
 #[test]
@@ -148,7 +148,7 @@ fn reduce_sum_f32_operand_with_f64_accumulator_accepted() {
     }
 }
 
-/// §5.7.1: reduce_sum on int8 with int64 accumulator (wider than int32
+/// §5.7.1: `reduce_sum` on int8 with int64 accumulator (wider than int32
 /// default) must be accepted.
 #[test]
 fn reduce_sum_int8_operand_with_int64_accumulator_accepted() {

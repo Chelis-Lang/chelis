@@ -39,6 +39,7 @@ pub struct TransformationPipeline {
 }
 
 impl TransformationPipeline {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -49,6 +50,7 @@ impl TransformationPipeline {
 
     /// Apply all steps in sequence. Each step's output goals become the next
     /// step's inputs. Returns the final goal set and the provenance chain.
+    #[must_use]
     pub fn apply_all(&self, goal: &Goal) -> (Vec<Goal>, Vec<TransformationRecord>) {
         let mut goals = vec![goal.clone()];
         let mut records = Vec::new();
@@ -80,7 +82,7 @@ mod tests {
     /// Identity transformation: returns the goal unchanged.
     struct Identity;
     impl Transformation for Identity {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "identity"
         }
         fn apply(&self, goal: &Goal) -> Vec<Goal> {
@@ -91,7 +93,7 @@ mod tests {
     /// Bogus transformation: returns empty vec (vacuously discharges anything).
     struct VacuousEmpty;
     impl Transformation for VacuousEmpty {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "vacuous_empty"
         }
         fn apply(&self, _goal: &Goal) -> Vec<Goal> {
@@ -162,8 +164,7 @@ mod tests {
             results
                 .iter()
                 .all(|(_, r)| matches!(r, HarnessResult::Pass)),
-            "identity must pass: {:?}",
-            results
+            "identity must pass: {results:?}"
         );
     }
 

@@ -55,28 +55,28 @@ fn post_sprint_def_ast_structure() {
             // element 0: tag "def"
             match &list.elements[0] {
                 Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "def"),
-                other => panic!("expected Symbol(def), got {:?}", other),
+                other => panic!("expected Symbol(def), got {other:?}"),
             }
             // element 1: metadata map {}
             match &list.elements[1] {
                 Expr::Map(m, _) => assert!(m.entries.is_empty()),
-                other => panic!("expected empty Map, got {:?}", other),
+                other => panic!("expected empty Map, got {other:?}"),
             }
             // element 2: name "square"
             match &list.elements[2] {
                 Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "square"),
-                other => panic!("expected Symbol(square), got {:?}", other),
+                other => panic!("expected Symbol(square), got {other:?}"),
             }
             // element 3: fn node
             match &list.elements[3] {
                 Expr::List(func, _) => match &func.elements[0] {
                     Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "fn"),
-                    other => panic!("expected Symbol(fn), got {:?}", other),
+                    other => panic!("expected Symbol(fn), got {other:?}"),
                 },
-                other => panic!("expected fn list, got {:?}", other),
+                other => panic!("expected fn list, got {other:?}"),
             }
         }
-        other => panic!("expected top-level List, got {:?}", other),
+        other => panic!("expected top-level List, got {other:?}"),
     }
     roundtrip(src);
 }
@@ -89,16 +89,16 @@ fn multiple_top_level_exprs() {
     match &exprs[0] {
         Expr::List(list, _) => match &list.elements[0] {
             Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "deftype"),
-            other => panic!("expected Symbol(deftype), got {:?}", other),
+            other => panic!("expected Symbol(deftype), got {other:?}"),
         },
-        other => panic!("expected List(deftype), got {:?}", other),
+        other => panic!("expected List(deftype), got {other:?}"),
     }
     match &exprs[1] {
         Expr::List(list, _) => match &list.elements[0] {
             Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "def"),
-            other => panic!("expected Symbol(def), got {:?}", other),
+            other => panic!("expected Symbol(def), got {other:?}"),
         },
-        other => panic!("expected List(def), got {:?}", other),
+        other => panic!("expected List(def), got {other:?}"),
     }
 }
 
@@ -144,7 +144,7 @@ fn parse_empty_map() {
     assert_eq!(exprs.len(), 1);
     match &exprs[0] {
         Expr::Map(m, _) => assert!(m.entries.is_empty()),
-        other => panic!("expected empty Map, got {:?}", other),
+        other => panic!("expected empty Map, got {other:?}"),
     }
 }
 
@@ -157,7 +157,7 @@ fn parse_map_with_entries() {
             assert_eq!(m.entries.len(), 1);
             assert_eq!(m.entries[0].0, "type");
         }
-        other => panic!("expected Map with entries, got {:?}", other),
+        other => panic!("expected Map with entries, got {other:?}"),
     }
 }
 
@@ -189,10 +189,10 @@ fn spec_colon_as_list_head_parser_leniency() {
             assert_eq!(list.elements.len(), 3);
             match &list.elements[0] {
                 Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, ":"),
-                other => panic!("expected Symbol(:), got {:?}", other),
+                other => panic!("expected Symbol(:), got {other:?}"),
             }
         }
-        other => panic!("expected List, got {:?}", other),
+        other => panic!("expected List, got {other:?}"),
     }
     // Bare list — no Map at [1], so validator skips it (not a tagged node)
     let warnings = validate(&exprs);
@@ -214,10 +214,10 @@ fn spec_nested_lists_post_sprint() {
             // tag = deftype, meta = {}, name = Option, then type-var and variants
             match &list.elements[0] {
                 Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "deftype"),
-                other => panic!("expected Symbol(deftype), got {:?}", other),
+                other => panic!("expected Symbol(deftype), got {other:?}"),
             }
         }
-        other => panic!("expected List, got {:?}", other),
+        other => panic!("expected List, got {other:?}"),
     }
     let warnings = validate(&exprs);
     assert!(
@@ -243,13 +243,13 @@ fn spec_metadata_on_list_items() {
                             assert_eq!(meta.entries.len(), 1);
                             assert_eq!(meta.entries[0].0, "type");
                         }
-                        other => panic!("expected MetaExpr, got {:?}", other),
+                        other => panic!("expected MetaExpr, got {other:?}"),
                     }
                 }
-                other => panic!("expected params list, got {:?}", other),
+                other => panic!("expected params list, got {other:?}"),
             }
         }
-        other => panic!("expected List, got {:?}", other),
+        other => panic!("expected List, got {other:?}"),
     }
     roundtrip("(fn (^{:type f32} x) body)");
 }
@@ -261,7 +261,7 @@ fn spec_float_exponent_only() {
     assert_eq!(exprs.len(), 1);
     match &exprs[0] {
         Expr::Atom(Atom::Float(f), _) => assert!((f - (-1e-5)).abs() < 1e-15),
-        other => panic!("expected Float(-1e-5), got {:?}", other),
+        other => panic!("expected Float(-1e-5), got {other:?}"),
     }
 
     // 1e10 as Float
@@ -269,7 +269,7 @@ fn spec_float_exponent_only() {
     assert_eq!(exprs.len(), 1);
     match &exprs[0] {
         Expr::Atom(Atom::Float(f), _) => assert!((f - 1e10).abs() < 1.0),
-        other => panic!("expected Float(1e10), got {:?}", other),
+        other => panic!("expected Float(1e10), got {other:?}"),
     }
 
     // 5E3 as Float
@@ -277,7 +277,7 @@ fn spec_float_exponent_only() {
     assert_eq!(exprs.len(), 1);
     match &exprs[0] {
         Expr::Atom(Atom::Float(f), _) => assert!((f - 5e3).abs() < 1e-10),
-        other => panic!("expected Float(5E3), got {:?}", other),
+        other => panic!("expected Float(5E3), got {other:?}"),
     }
 }
 

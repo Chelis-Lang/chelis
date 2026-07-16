@@ -1,4 +1,4 @@
-//! RT-2 adversarial coverage for IR lowering of reduce_sum across the
+//! RT-2 adversarial coverage for IR lowering of `reduce_sum` across the
 //! integer-precision rows (int8/int16) where spec §5.7.1 requires
 //! result-precision = accumulator-precision = wider type.
 //!
@@ -48,10 +48,10 @@ fn lower_surf(src: &str) -> Result<chelis_ir::dag::Dag, String> {
 fn end_to_end_sum_int8_lowering_produces_verify_failure() {
     // The user-visible source is innocuous: sum a tensor of int8
     // suffixed literals.
-    let src = r#"
+    let src = r"
         xs: tensor[3, int8] = [1i8, 2i8, 3i8]
         out: tensor[int8] = sum(&xs, 0)
-    "#;
+    ";
     let result = lower_surf(src);
     match result {
         Ok(dag) => {
@@ -92,10 +92,10 @@ fn end_to_end_sum_int8_lowering_produces_verify_failure() {
 /// hint, not an internal-IR diagnostic.
 #[test]
 fn end_to_end_sum_int16_lowering_produces_verify_failure() {
-    let src = r#"
+    let src = r"
         xs: tensor[3, int16] = [1i16, 2i16, 3i16]
         out: tensor[int16] = sum(&xs, 0)
-    "#;
+    ";
     let result = lower_surf(src);
     match result {
         Ok(dag) => {

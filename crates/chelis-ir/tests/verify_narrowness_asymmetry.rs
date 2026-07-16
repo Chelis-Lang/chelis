@@ -1,5 +1,5 @@
 //! RT-2 finding: spec §5.7.1 narrowness rule is enforced for
-//! BlasMatmul but NOT for Sum at the IR-verify layer.
+//! `BlasMatmul` but NOT for Sum at the IR-verify layer.
 //!
 //! verify.rs lines 392-403: `Sum` is checked only for
 //! `output_type.precision == accumulator` — not for the narrowness
@@ -10,7 +10,7 @@
 //!
 //! Symptom: a hand-built (or lowering-produced) Sum with int8
 //! accumulator on int8 operand passes verify, then the C backend's
-//! emit_reduce_sum dispatches the int8 path with int8 accumulator,
+//! `emit_reduce_sum` dispatches the int8 path with int8 accumulator,
 //! silently overflowing on values whose sum exceeds 127.
 //!
 //! Spec §5.7.1: "The accumulator parameter is permitted only when it

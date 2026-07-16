@@ -12,11 +12,11 @@ use chelis_surf::ast::Decl;
 pub struct OpaqueWithoutInvariant;
 
 impl Rule for OpaqueWithoutInvariant {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "opaque-without-invariant"
     }
 
-    fn spec_ref(&self) -> &str {
+    fn spec_ref(&self) -> &'static str {
         "§12.1"
     }
 
@@ -24,7 +24,7 @@ impl Rule for OpaqueWithoutInvariant {
         &[Surface::SurfSource]
     }
 
-    fn summary(&self) -> &str {
+    fn summary(&self) -> &'static str {
         "An opaque type without a declared @invariant carries only the construction guarantee"
     }
 

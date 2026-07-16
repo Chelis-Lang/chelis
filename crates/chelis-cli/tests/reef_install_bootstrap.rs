@@ -92,10 +92,9 @@ fn build_test_archive(
         r#"[package]
 name = "{name}"
 version = "{version}"
-compiler = "{compiler}"
+compiler = "{CURRENT_COMPILER_PIN}"
 module_prefix = "Test"
 {deps_toml}"#,
-        compiler = CURRENT_COMPILER_PIN,
     );
     let main_text = "module Test.Main\n\nexport (placeholder)\ndef placeholder -> int32 = 0\n";
 
@@ -365,7 +364,7 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn file_lock() -> std::sync::MutexGuard<'static, ()> {
     ENV_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Invoke `chelis_reef::install_bootstrap` with the API base URL and
@@ -383,12 +382,11 @@ fn lib_install_bootstrap(
     let prior_path = std::env::var_os("PATH");
     unsafe {
         std::env::set_var("CHELIS_REEF_GITHUB_BASE_API", api_base_url);
-        match token {
-            Some(t) => std::env::set_var("GITHUB_TOKEN", t),
-            None => {
-                std::env::remove_var("GITHUB_TOKEN");
-                std::env::set_var("PATH", "");
-            }
+        if let Some(t) = token {
+            std::env::set_var("GITHUB_TOKEN", t);
+        } else {
+            std::env::remove_var("GITHUB_TOKEN");
+            std::env::set_var("PATH", "");
         }
     }
     let parsed: Vec<chelis_reef::GitHubReleaseSpec> = spec_strings
@@ -442,8 +440,11 @@ fn oracle_linear_chain_topo_order() {
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
     // Submit in input order [A, B, C] — the topo sort must reorder.
-    let input_strings: Vec<String> = shells.iter().map(|s| s.spec_string()).collect();
-    let inputs: Vec<&str> = input_strings.iter().map(|s| s.as_str()).collect();
+    let input_strings: Vec<String> = shells.iter().map(SyntheticShell::spec_string).collect();
+    let inputs: Vec<&str> = input_strings
+        .iter()
+        .map(std::string::String::as_str)
+        .collect();
     let installed =
         lib_install_bootstrap(&inputs, &harness.uri(), Some("unit-test-token"), &registry)
             .expect("linear-chain bootstrap");
@@ -501,8 +502,11 @@ fn oracle_diamond_topo_order() {
     let harness = fixture_for_shells(&shells);
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
-    let input_strings: Vec<String> = shells.iter().map(|s| s.spec_string()).collect();
-    let inputs: Vec<&str> = input_strings.iter().map(|s| s.as_str()).collect();
+    let input_strings: Vec<String> = shells.iter().map(SyntheticShell::spec_string).collect();
+    let inputs: Vec<&str> = input_strings
+        .iter()
+        .map(std::string::String::as_str)
+        .collect();
     lib_install_bootstrap(&inputs, &harness.uri(), Some("unit-test-token"), &registry)
         .expect("diamond bootstrap");
     let order = harness.install_order();
@@ -530,7 +534,7 @@ fn oracle_diamond_topo_order() {
     );
 }
 
-/// Two-shell cycle: A -> B -> A. Must surface BootstrapError::Cycle.
+/// Two-shell cycle: A -> B -> A. Must surface `BootstrapError::Cycle`.
 fn oracle_cycle_named() {
     let shells = vec![
         SyntheticShell::new(
@@ -551,8 +555,11 @@ fn oracle_cycle_named() {
     let harness = fixture_for_shells(&shells);
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
-    let input_strings: Vec<String> = shells.iter().map(|s| s.spec_string()).collect();
-    let inputs: Vec<&str> = input_strings.iter().map(|s| s.as_str()).collect();
+    let input_strings: Vec<String> = shells.iter().map(SyntheticShell::spec_string).collect();
+    let inputs: Vec<&str> = input_strings
+        .iter()
+        .map(std::string::String::as_str)
+        .collect();
     let err = lib_install_bootstrap(&inputs, &harness.uri(), Some("unit-test-token"), &registry)
         .expect_err("cycle must fail");
     let msg = err.to_string();
@@ -585,8 +592,11 @@ fn oracle_missing_dep_named() {
     let harness = fixture_for_shells(&shells);
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
-    let input_strings: Vec<String> = shells.iter().map(|s| s.spec_string()).collect();
-    let inputs: Vec<&str> = input_strings.iter().map(|s| s.as_str()).collect();
+    let input_strings: Vec<String> = shells.iter().map(SyntheticShell::spec_string).collect();
+    let inputs: Vec<&str> = input_strings
+        .iter()
+        .map(std::string::String::as_str)
+        .collect();
     let err = lib_install_bootstrap(&inputs, &harness.uri(), Some("unit-test-token"), &registry)
         .expect_err("missing dep must fail");
     let msg = err.to_string();
@@ -739,7 +749,7 @@ fn oracle_per_shell_atomicity_preserved() {
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
     let inputs = [pa.spec_string(), pb.spec_string(), pc.spec_string()];
-    let inputs_ref: Vec<&str> = inputs.iter().map(|s| s.as_str()).collect();
+    let inputs_ref: Vec<&str> = inputs.iter().map(std::string::String::as_str).collect();
     let err = lib_install_bootstrap(
         &inputs_ref,
         &harness.uri(),
@@ -903,8 +913,11 @@ fn phaseA_item7_three_shell_cycle_named() {
     let harness = fixture_for_shells(&shells);
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
-    let input_strings: Vec<String> = shells.iter().map(|s| s.spec_string()).collect();
-    let inputs: Vec<&str> = input_strings.iter().map(|s| s.as_str()).collect();
+    let input_strings: Vec<String> = shells.iter().map(SyntheticShell::spec_string).collect();
+    let inputs: Vec<&str> = input_strings
+        .iter()
+        .map(std::string::String::as_str)
+        .collect();
     let err = lib_install_bootstrap(&inputs, &harness.uri(), Some("unit-test-token"), &registry)
         .expect_err("3-cycle must fail");
     let msg = err.to_string();
@@ -937,8 +950,11 @@ fn phaseA_item7_self_loop_is_one_cycle() {
     let harness = fixture_for_shells(&shells);
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
-    let input_strings: Vec<String> = shells.iter().map(|s| s.spec_string()).collect();
-    let inputs: Vec<&str> = input_strings.iter().map(|s| s.as_str()).collect();
+    let input_strings: Vec<String> = shells.iter().map(SyntheticShell::spec_string).collect();
+    let inputs: Vec<&str> = input_strings
+        .iter()
+        .map(std::string::String::as_str)
+        .collect();
     let err = lib_install_bootstrap(&inputs, &harness.uri(), Some("unit-test-token"), &registry)
         .expect_err("self-loop must fail");
     match err {
@@ -1087,8 +1103,11 @@ fn phaseA_item7_auth_failure_aborts_before_first_install() {
     let harness = fixture_for_shells(&shells);
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
-    let input_strings: Vec<String> = shells.iter().map(|s| s.spec_string()).collect();
-    let inputs: Vec<&str> = input_strings.iter().map(|s| s.as_str()).collect();
+    let input_strings: Vec<String> = shells.iter().map(SyntheticShell::spec_string).collect();
+    let inputs: Vec<&str> = input_strings
+        .iter()
+        .map(std::string::String::as_str)
+        .collect();
     let err = lib_install_bootstrap(&inputs, &harness.uri(), None, &registry)
         .expect_err("no token must fail");
     match err {

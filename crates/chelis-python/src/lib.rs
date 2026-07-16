@@ -268,7 +268,7 @@ impl NativeTensor {
     }
 
     #[getter]
-    fn dtype(&self) -> &str {
+    fn dtype(&self) -> &'static str {
         "float32"
     }
 
@@ -374,7 +374,7 @@ impl NativeCompiledModel {
             .collect::<PyResult<Vec<_>>>()?;
         let input_ptrs = inputs
             .iter_mut()
-            .map(|input| &mut input.tensor as *mut ChelisTensor)
+            .map(|input| &raw mut input.tensor)
             .collect::<Vec<_>>();
         let output_ptrs = vec![std::ptr::null_mut(); self.loaded.manifest.outputs.len()];
 
@@ -434,7 +434,7 @@ impl NativeCompiledModel {
 
         let input_ptrs = inputs
             .iter_mut()
-            .map(|input| &mut input.tensor as *mut ChelisGpuTensor)
+            .map(|input| &raw mut input.tensor)
             .collect::<Vec<_>>();
         let output_ptrs = vec![std::ptr::null_mut(); self.loaded.manifest.outputs.len()];
 
@@ -635,8 +635,9 @@ fn compiler_error(err: CompilerError) -> PyErr {
     let detail = err
         .errors
         .first()
-        .map(|diagnostic| diagnostic.message.as_str())
-        .unwrap_or("unknown compiler error");
+        .map_or("unknown compiler error", |diagnostic| {
+            diagnostic.message.as_str()
+        });
     ChelisError::new_err(format!("{}: {detail}", err.stage))
 }
 
@@ -818,7 +819,7 @@ fn find_runtime_library_inner() -> Result<PathBuf, String> {
         exe_dir.parent().map(|p| p.join("deps")).unwrap_or_default(),
         exe_dir
             .parent()
-            .map(|p| p.to_path_buf())
+            .map(std::path::Path::to_path_buf)
             .unwrap_or_default(),
         exe_dir.parent().map(|p| p.join("lib")).unwrap_or_default(),
         manifest_dir.join("../../target/debug/deps"),
@@ -943,7 +944,7 @@ fn resolve_call_inputs(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Vec<Py<PyAny>>> {
-    let kwargs_len = kwargs.map_or(0, |kwargs| kwargs.len());
+    let kwargs_len = kwargs.map_or(0, pyo3::types::PyDictMethods::len);
     if !args.is_empty() && kwargs_len > 0 {
         return Err(PyValueError::new_err(
             "use either positional arguments or keyword arguments, not both",
@@ -1194,10 +1195,7 @@ fn dims_array(dims: &[usize]) -> PyResult<[i32; CHELIS_MAX_DIM]> {
 }
 
 fn element_count(shape: &[usize]) -> PyResult<usize> {
-    Ok(shape
-        .iter()
-        .copied()
-        .fold(1usize, |acc, dim| acc.saturating_mul(dim)))
+    Ok(shape.iter().copied().fold(1usize, usize::saturating_mul))
 }
 
 fn numpy_element_strides(array: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
@@ -1377,7 +1375,7 @@ unsafe extern "C" fn dlpack_capsule_destructor(capsule: *mut ffi::PyObject) {
     }
     let managed =
         unsafe { ffi::PyCapsule_GetPointer(capsule, DLTENSOR_CAPSULE.as_ptr().cast::<c_char>()) }
-            as *mut DLManagedTensor;
+            .cast::<DLManagedTensor>();
     if managed.is_null() {
         return;
     }
@@ -1462,9 +1460,9 @@ mod tests {
     use tempfile::tempdir;
 
     const HELLO_TENSOR: &str = include_str!("../../../examples/hello_tensor.ch");
-    const LOSS_PROGRAM: &str = r#"x = (x : tensor[4, f32])
+    const LOSS_PROGRAM: &str = r"x = (x : tensor[4, f32])
 loss = (mean(x, 0) : tensor[f32])
-"#;
+";
 
     #[test]
     fn native_module_check_json_returns_structured_result() {

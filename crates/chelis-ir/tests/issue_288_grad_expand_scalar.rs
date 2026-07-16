@@ -76,11 +76,11 @@ fn scalar_f32() -> TensorType {
 ///     downstream `Mul` failed verification with `Lit(2) vs Lit(1)`).
 ///
 /// Forward:
-///   c   = Cast(Const c_val)        : f32 source_shape  [= scalar_to_tensor(cast(c_val, f32))]
+///   c   = Cast(Const `c_val`)        : f32 `source_shape`  [= `scalar_to_tensor(cast(c_val`, f32))]
 ///   k   = Expand{axis:0, size:n}(c): tensor[n]         [= expand(c, 0, n)]
 ///   x   = Load("x")                : tensor[n]
 ///   m   = Mul(x, k)                : tensor[n]         [= mul(x, k)]
-///   out = Sum{axis:0}(m)           : f32 (rank 0)      [= tensor_to_scalar(sum(m, 0))]
+///   out = Sum{axis:0}(m)           : f32 (rank 0)      [= `tensor_to_scalar(sum(m`, 0))]
 ///
 /// Returns `(dag, x, out)`. `f(x) = sum(x * c_val) = c_val * sum(x)`,
 /// so `df/dx = [c_val; n]` regardless of how the constant source is
@@ -149,7 +149,7 @@ fn assert_close(label: &str, got: &[f64], want: &[f64]) {
         want.len()
     );
     for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
-        assert!((g - w).abs() < 1e-5, "{label}: elem {i}: got {g}, want {w}",);
+        assert!((g - w).abs() < 1e-5, "{label}: elem {i}: got {g}, want {w}");
     }
 }
 

@@ -111,11 +111,11 @@ enum Extent {
 
 /// Build the issue #318 forward DAG.
 ///
-///   c   = Cast(Const c_val)        : f32  source_shape  [scalar_to_tensor(cast(c_val, f32))]
+///   c   = Cast(Const `c_val`)        : f32  `source_shape`  [`scalar_to_tensor(cast(c_val`, f32))]
 ///   x   = Load("x")                : tensor[n] (literal) or tensor[<sym>] (shape-derived)
 ///   k   = Expand{axis:0, size}(c)  : same vector type as x  [expand(c, 0, size)]
 ///   m   = Mul(x, k)                : same vector type  [mul(x, k)]
-///   out = Sum{axis:0}(m)           : f32 (rank 0)      [tensor_to_scalar(sum(m, 0))]
+///   out = Sum{axis:0}(m)           : f32 (rank 0)      [`tensor_to_scalar(sum(m`, 0))]
 ///
 /// For `Literal`, `x` and the expand output are `tensor[2]` and the
 /// expand size is `DimExpr::Concrete(2)`. For `ShapeDerived`, `x` and
@@ -184,7 +184,7 @@ fn assert_close(label: &str, got: &[f64], want: &[f64]) {
         want.len()
     );
     for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
-        assert!((g - w).abs() < 1e-5, "{label}: elem {i}: got {g}, want {w}",);
+        assert!((g - w).abs() < 1e-5, "{label}: elem {i}: got {g}, want {w}");
     }
 }
 

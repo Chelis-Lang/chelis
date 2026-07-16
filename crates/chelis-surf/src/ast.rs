@@ -79,6 +79,7 @@ pub enum Decl {
 
 impl Decl {
     /// Byte span of this declaration in the original Surf source.
+    #[must_use]
     pub fn span(&self) -> Span {
         match self {
             Decl::Module { span, .. }
@@ -119,6 +120,7 @@ pub enum PropertyOption {
 }
 
 impl PropertyOption {
+    #[must_use]
     pub fn span(&self) -> Span {
         match self {
             Self::Tolerance(_, span)
@@ -292,6 +294,7 @@ pub enum EffectExpr {
 }
 
 impl EffectExpr {
+    #[must_use]
     pub fn span(&self) -> Span {
         match self {
             Self::Diff(span)

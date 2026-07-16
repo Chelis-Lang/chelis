@@ -79,10 +79,10 @@ fn check_clean_reef_program_yields_score_one_and_empty_errors() {
 
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 def answer -> int32 = cast(7, int32)
-"#,
+",
     );
 
     let output = Command::cargo_bin("chelis")
@@ -122,10 +122,10 @@ fn check_type_error_reef_program_yields_lower_score_and_kept_shape() {
     // a type-mismatch at the type-checker stage.
     write_file(
         &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
+        r"module Demo.Main
 
 def broken -> int32 = add(1, true)
-"#,
+",
     );
 
     // Issue #207: `chelis check` now exits with code 2 when the JSON
@@ -214,8 +214,7 @@ def broken(c: bool) -> unit ! {} = assert_true(c, "expect ok")
     let any_effect_mentioned = errors.iter().any(|e| {
         e.get("message")
             .and_then(Value::as_str)
-            .map(|m| m.contains("effect") || m.contains("Test"))
-            .unwrap_or(false)
+            .is_some_and(|m| m.contains("effect") || m.contains("Test"))
     });
     assert!(
         any_effect_mentioned,
@@ -234,8 +233,8 @@ fn check_non_reef_file_uses_legacy_path_and_returns_score_one() {
     let raw = dir.path().join("raw_program.ch");
     std::fs::write(
         &raw,
-        r#"def answer -> int32 = cast(7, int32)
-"#,
+        r"def answer -> int32 = cast(7, int32)
+",
     )
     .expect("write raw");
 

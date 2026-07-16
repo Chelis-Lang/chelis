@@ -1,6 +1,6 @@
-//! Tests for chelis_simd.h SIMD reduction functions.
+//! Tests for `chelis_simd.h` SIMD reduction functions.
 //!
-//! Each test generates a standalone C program that includes chelis_simd.h
+//! Each test generates a standalone C program that includes `chelis_simd.h`
 //! directly (without the rest of the runtime), compiles it with gcc -mavx2,
 //! runs it, and verifies the result matches naive scalar computation.
 //!
@@ -32,11 +32,10 @@ fn gcc_available() -> bool {
     Command::new("gcc")
         .arg("--version")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
-/// Compile and run a standalone C program that includes chelis_simd.h.
+/// Compile and run a standalone C program that includes `chelis_simd.h`.
 /// Returns stdout on success, or panics on compile/run failure.
 fn compile_and_run(test_name: &str, c_src: &str) -> String {
     let dir = std::env::temp_dir().join(format!("chelis_simd_{test_name}"));
@@ -89,7 +88,7 @@ fn compile_and_run(test_name: &str, c_src: &str) -> String {
 
 fn naive_sum(data: &[f32]) -> f32 {
     // Use f64 accumulator to avoid large-array precision issues.
-    data.iter().map(|&x| x as f64).sum::<f64>() as f32
+    data.iter().map(|&x| f64::from(x)).sum::<f64>() as f32
 }
 
 /// Reference stride-4 ILP cascade in pure Rust f32 — mirrors the shape
@@ -483,7 +482,7 @@ fn parse_c_hex_literal(s: &str) -> f32 {
     };
     let mut mantissa = u64::from_str_radix(int_part, 16).expect("int digit") as f64;
     for (i, c) in frac_part.chars().enumerate() {
-        let digit = c.to_digit(16).expect("hex frac digit") as f64;
+        let digit = f64::from(c.to_digit(16).expect("hex frac digit"));
         mantissa += digit * 16f64.powi(-(i as i32 + 1));
     }
     (sign * mantissa * 2f64.powi(exp)) as f32

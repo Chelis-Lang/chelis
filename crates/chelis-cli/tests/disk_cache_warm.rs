@@ -115,7 +115,7 @@ fn list_cache_files(reef_home: &Path) -> Vec<PathBuf> {
         return Vec::new();
     };
     let mut out: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|x| x == "ctx"))
         .collect();
@@ -157,8 +157,7 @@ fn cmd_eval_warm_cache_hit_byte_identical_to_cold() {
     assert_eq!(
         cache_after_cold.len(),
         1,
-        "cold run must create exactly one cache file; got {:?}",
-        cache_after_cold
+        "cold run must create exactly one cache file; got {cache_after_cold:?}"
     );
 
     // Warm: second run must hit the cache and produce identical stdout.
@@ -187,8 +186,7 @@ fn cmd_eval_warm_cache_hit_byte_identical_to_cold() {
     assert_eq!(
         cache_after_warm.len(),
         1,
-        "warm hit must NOT create a new cache file; got {:?}",
-        cache_after_warm
+        "warm hit must NOT create a new cache file; got {cache_after_warm:?}"
     );
     assert_eq!(
         cache_after_cold[0], cache_after_warm[0],
@@ -247,15 +245,12 @@ fn cmd_eval_source_edit_invalidates_cache_and_re_saves() {
     assert_eq!(
         files_after_cold2.len(),
         2,
-        "post-edit run must save a NEW cache file, leaving 2 total; got {:?}",
-        files_after_cold2
+        "post-edit run must save a NEW cache file, leaving 2 total; got {files_after_cold2:?}"
     );
     // The pre-edit file should still be present (Phase K does not GC).
     assert!(
         files_after_cold2.contains(&files_after_cold1[0]),
-        "pre-edit cache file should still exist; before={:?} after={:?}",
-        files_after_cold1,
-        files_after_cold2
+        "pre-edit cache file should still exist; before={files_after_cold1:?} after={files_after_cold2:?}"
     );
 }
 
@@ -303,8 +298,7 @@ fn cmd_test_warm_cache_creates_and_reuses_compiled_context() {
     assert_eq!(
         cache_after_cold.len(),
         1,
-        "cold chelis test must write exactly one cache file; got {:?}",
-        cache_after_cold
+        "cold chelis test must write exactly one cache file; got {cache_after_cold:?}"
     );
 
     // Warm: cache hit must NOT create a new cache file.
@@ -326,8 +320,7 @@ fn cmd_test_warm_cache_creates_and_reuses_compiled_context() {
     assert_eq!(
         cache_after_warm.len(),
         1,
-        "warm hit must NOT create a new cache file; got {:?}",
-        cache_after_warm
+        "warm hit must NOT create a new cache file; got {cache_after_warm:?}"
     );
     assert_eq!(
         cache_after_cold[0], cache_after_warm[0],

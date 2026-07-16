@@ -459,6 +459,7 @@ pub fn lower_not(dag: &mut Dag, a: NodeId, ty: &TensorType, parent_span: Option<
 // ---------------------------------------------------------------------------
 
 /// Produce a type with the given axis removed (for reductions).
+#[must_use]
 pub fn reduced_type(ty: &TensorType, axis: usize) -> TensorType {
     let mut dims = ty.dims.clone();
     if axis < dims.len() {
@@ -471,6 +472,7 @@ pub fn reduced_type(ty: &TensorType, axis: usize) -> TensorType {
 }
 
 /// Extract a concrete dimension size from a tensor type at the given axis.
+#[must_use]
 pub fn dim_size(ty: &TensorType, axis: usize) -> Option<usize> {
     ty.dims.get(axis).and_then(|d| match d {
         DimInfo::Lit(n) => Some(*n),
@@ -485,6 +487,7 @@ pub fn dim_expr(ty: &TensorType, axis: usize) -> Option<DimExpr> {
 }
 
 /// A scalar type with no dimensions and the given precision.
+#[must_use]
 pub fn scalar_type(precision: Prim) -> TensorType {
     TensorType {
         dims: vec![],
@@ -767,7 +770,7 @@ fn checked_dim_compatible(current: &DimInfo, target: &DimInfo) -> bool {
     }
 }
 
-/// softmax(x, axis) = exp(x - max_reduce(x, axis)) / sum(exp(x - max_reduce(x, axis)), axis)
+/// softmax(x, axis) = exp(x - `max_reduce(x`, axis)) / sum(exp(x - `max_reduce(x`, axis)), axis)
 ///
 /// Lowering (spec §4.2): numerically stable softmax via max subtraction.
 pub fn lower_softmax(
@@ -830,7 +833,7 @@ pub fn lower_softmax(
     lower_div(dag, exp_shifted, sum_expanded, ty, parent_span)
 }
 
-/// mean(x, axis) = sum(x, axis) / dim_size
+/// mean(x, axis) = sum(x, axis) / `dim_size`
 ///
 /// Lowering (spec §3.4): sum then divide by the axis size.
 pub fn lower_mean(
@@ -864,52 +867,49 @@ pub fn lower_mean(
     // input tensor's runtime shape — the `Const`-of-ones then gets its
     // concrete shape from the bound `output_type`. This carries the
     // operand's extent instead of demanding a concrete one in IR lowering.
-    let divisor = match dim_size(ty, axis) {
-        Some(dim_size_val) => {
-            let count = add_synth(
-                dag,
-                RiscOp::Const {
-                    value: dim_size_val as f64,
-                },
-                vec![],
-                red_ty.clone(),
-                parent_span,
-            );
-            // chelis#616: the count Const is shaped like the reduced sum but
-            // has no input edge carrying that relation; record it as a
-            // shape-dep so the C backend's anon-dim renaming ties the two
-            // (instead of fragmenting the Const's wildcard dim into a fresh
-            // sourceless `_anon_dim_*`).
-            dag.add_shape_dep(count, sum_node);
-            count
-        }
-        None => {
-            // ones shaped exactly like the operand `x` (same symbolic dims).
-            let ones = add_synth(
-                dag,
-                RiscOp::Const { value: 1.0 },
-                vec![],
-                ty.clone(),
-                parent_span,
-            );
-            dag.add_shape_dep(ones, x);
-            // sum the ones over `axis` -> the runtime extent, reduced shape.
-            add_synth(
-                dag,
-                RiscOp::sum_default(axis, ty.precision)
-                    .expect("mean count precision should accept reduce_sum"),
-                vec![ones],
-                red_ty.clone(),
-                parent_span,
-            )
-        }
+    let divisor = if let Some(dim_size_val) = dim_size(ty, axis) {
+        let count = add_synth(
+            dag,
+            RiscOp::Const {
+                value: dim_size_val as f64,
+            },
+            vec![],
+            red_ty.clone(),
+            parent_span,
+        );
+        // chelis#616: the count Const is shaped like the reduced sum but
+        // has no input edge carrying that relation; record it as a
+        // shape-dep so the C backend's anon-dim renaming ties the two
+        // (instead of fragmenting the Const's wildcard dim into a fresh
+        // sourceless `_anon_dim_*`).
+        dag.add_shape_dep(count, sum_node);
+        count
+    } else {
+        // ones shaped exactly like the operand `x` (same symbolic dims).
+        let ones = add_synth(
+            dag,
+            RiscOp::Const { value: 1.0 },
+            vec![],
+            ty.clone(),
+            parent_span,
+        );
+        dag.add_shape_dep(ones, x);
+        // sum the ones over `axis` -> the runtime extent, reduced shape.
+        add_synth(
+            dag,
+            RiscOp::sum_default(axis, ty.precision)
+                .expect("mean count precision should accept reduce_sum"),
+            vec![ones],
+            red_ty.clone(),
+            parent_span,
+        )
     };
 
     // sum / extent
     lower_div(dag, sum_node, divisor, &red_ty, parent_span)
 }
 
-/// layer_norm(x, gamma, beta) over the last axis.
+/// `layer_norm(x`, gamma, beta) over the last axis.
 #[allow(clippy::too_many_arguments)]
 pub fn lower_layer_norm(
     dag: &mut Dag,
@@ -1022,11 +1022,10 @@ pub fn lower_conv2d(
     let stride = stride.max(1);
     let padded_h = h_in_size + (2 * padding);
     let padded_w = w_in_size + (2 * padding);
-    if padded_h < kh_size || padded_w < kw_size {
-        panic!(
-            "IR conv2d kernel dims ({kh_size}, {kw_size}) exceed padded input dims ({padded_h}, {padded_w})"
-        );
-    }
+    assert!(
+        !(padded_h < kh_size || padded_w < kw_size),
+        "IR conv2d kernel dims ({kh_size}, {kw_size}) exceed padded input dims ({padded_h}, {padded_w})"
+    );
     let strided_h = ((padded_h - kh_size) / stride) + 1;
     let strided_w = ((padded_w - kw_size) / stride) + 1;
 
@@ -1053,11 +1052,10 @@ pub fn lower_conv2d(
     };
     let h_out = DimInfo::Lit(h_out_size);
     let w_out = DimInfo::Lit(w_out_size);
-    if h_out_size != strided_h || w_out_size != strided_w {
-        panic!(
-            "IR conv2d output shape mismatch: expected spatial dims ({strided_h}, {strided_w}), got ({h_out_size}, {w_out_size})"
-        );
-    }
+    assert!(
+        !(h_out_size != strided_h || w_out_size != strided_w),
+        "IR conv2d output shape mismatch: expected spatial dims ({strided_h}, {strided_w}), got ({h_out_size}, {w_out_size})"
+    );
 
     let padded_ty = TensorType {
         dims: vec![

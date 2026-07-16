@@ -7,12 +7,35 @@ use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::tier2;
 use chelis_types::types::Prim;
 
-use super::host_ops::*;
-use super::named_axis::*;
-use super::transforms::*;
-use super::*;
+use super::host_ops::{
+    ReduceOp, ReduceWindowOp, activation_gelu_f32, activation_relu_f32, activation_sigmoid_f32,
+    activation_silu_f32, activation_tanh_f32, bool_binop, bool_unop, builtin_name,
+    cast_tensor_value, compare_eq, conv2d_host, dict_lookup, ensure_dict_key_supported,
+    eval_composed_triop, eval_composed_unary, eval_div, eval_floor_div, eval_mod, eval_trunc_div,
+    expect_bool_arg, expect_dict_arg, expect_float_arg, expect_int_arg, expect_int_list,
+    expect_list_arg, expect_string_arg, expect_tensor_arg, extract_bounds_pair_list,
+    float_unop_with_tensor, int_binop, int_shift_binop, nested_list_to_tensor_data, normalize_axis,
+    numeric_binop, numeric_unop, ordered_compare, pad_sequences_to_value, pad_sequences_value,
+    pattern_matches, render_value, runtime_value_eq, tensor_bool_binop, tensor_bool_unop,
+    tensor_clamp_value, tensor_compare_value, tensor_concat_value, tensor_cumsum_value,
+    tensor_diagonal_value, tensor_einsum_value, tensor_expand_host, tensor_float_unop_f32,
+    tensor_gather_value, tensor_matmul_host, tensor_pad_host, tensor_permute_host,
+    tensor_reduce_host, tensor_reduce_window_host, tensor_reshape_value,
+    tensor_scatter_elements_value, tensor_scatter_value, tensor_shrink_host, tensor_softmax_host,
+    tensor_sort_value, tensor_split_value, tensor_stride_host, tensor_to_list_values,
+    tensor_trace_value, tensor_where_value, terminal_name_matches, uniform_like_value,
+    upsert_dict_entry,
+};
+use super::named_axis::REDUCTION_BUILTIN_NAMES;
+use super::transforms::{
+    as_list, param_decl_type_expr, prim_from_name, runtime_param_name, var_name,
+};
+use super::{
+    EvalContext, RuntimeTensorValue, RuntimeValue, TransformKind, children, get_meta, int_value,
+    lit_meta_prim, symbol_name, tag,
+};
 
-impl<'a> EvalContext<'a> {
+impl EvalContext<'_> {
     pub(super) fn resolve_top_level(&mut self, name: &str) -> Result<RuntimeValue, String> {
         if let Some(value) = self.bindings.get(name) {
             return Ok(value.clone());
@@ -355,7 +378,7 @@ impl<'a> EvalContext<'a> {
         if name == "Nil" {
             return Ok(RuntimeValue::List(Vec::new()));
         }
-        if name.chars().next().is_some_and(|ch| ch.is_uppercase()) {
+        if name.chars().next().is_some_and(char::is_uppercase) {
             return Ok(RuntimeValue::Adt {
                 ctor: name.to_string(),
                 fields: Vec::new(),
@@ -442,7 +465,7 @@ impl<'a> EvalContext<'a> {
             .collect::<Result<Vec<_>, _>>()?;
 
         if let Some(name) = var_name(func)
-            && name.chars().next().is_some_and(|ch| ch.is_uppercase())
+            && name.chars().next().is_some_and(char::is_uppercase)
         {
             if name == "Cons" {
                 if args.len() != 2 {
@@ -802,7 +825,7 @@ impl<'a> EvalContext<'a> {
                 RuntimeValue::scalar_like_float(dst_dtype, payload.bits().as_f64())
             }
             (RuntimeValue::Bool(value), dst_dtype) if dst_dtype.is_integer() => {
-                RuntimeValue::scalar_like_int(dst_dtype, if value { 1 } else { 0 })
+                RuntimeValue::scalar_like_int(dst_dtype, i64::from(value))
             }
             (RuntimeValue::Bool(value), dst_dtype) if dst_dtype.is_float() => {
                 RuntimeValue::scalar_like_float(dst_dtype, if value { 1.0 } else { 0.0 })

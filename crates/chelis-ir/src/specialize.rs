@@ -27,6 +27,7 @@ pub const SPECIALIZATION_PIPELINE_ORDER: &[&str] = &[
 ];
 
 /// Run the closed-list no-op cleanup plus backend specialization, then DCE.
+#[must_use]
 pub fn specialize_for_blas(dag: &Dag) -> Dag {
     let cleaned = eliminate_closed_list_noops(dag);
     let gathered = replace_dense_gather_patterns(&cleaned);
@@ -37,6 +38,7 @@ pub fn specialize_for_blas(dag: &Dag) -> Dag {
 
 /// Eliminate only the M1 closed-list no-ops:
 /// identity Cast, identity Reshape, and identity Permute.
+#[must_use]
 pub fn eliminate_closed_list_noops(dag: &Dag) -> Dag {
     let mut out = Dag::new();
     let mut id_map: HashMap<NodeId, NodeId> = HashMap::new();
@@ -101,8 +103,7 @@ fn identity_source(node: &DagNode, dag: &Dag) -> Option<NodeId> {
             if new_shape.len() == input.output_type.dims.len()
                 && new_shape.iter().zip(input.output_type.dims.iter()).all(
                     |(target, dim)| match (target, dim) {
-                        (RtDim::Lit(n), DimInfo::Lit(m))
-                        | (RtDim::Lit(n), DimInfo::Named(_, Some(m))) => n == m,
+                        (RtDim::Lit(n), DimInfo::Lit(m) | DimInfo::Named(_, Some(m))) => n == m,
                         (RtDim::Sym(s), DimInfo::Named(name, None)) => s == name,
                         _ => false,
                     },

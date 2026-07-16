@@ -18,7 +18,7 @@ use serde_json::Value;
 use tempfile::tempdir;
 
 /// Write `contents` to `m.<ext>` in a fresh tempdir and run `chelis prove
-/// --json` on it. Returns (exit_code, ndjson_records).
+/// --json` on it. Returns (`exit_code`, `ndjson_records`).
 fn prove(contents: &str, ext: &str) -> (i32, Vec<Value>) {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join(format!("m.{ext}"));

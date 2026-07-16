@@ -23,7 +23,7 @@
 //!
 //! A gradient over N targets becomes N SEPARATE box/range goals, NOT one goal
 //! packing a vector of sensitivities. Each goal is a single scalar output --
-//! one Greek -- addressed by that target's NAME -> root_index, with its own
+//! one Greek -- addressed by that target's NAME -> `root_index`, with its own
 //! requested output range. This is the Beacon agent's hard requirement: an
 //! interval engine bounds ONE scalar output per goal, so a vector gradient must
 //! be decomposed into per-target scalar goals. The gradient DAG is lowered
@@ -263,6 +263,7 @@ fn fan_out_grad_goals(
 /// out-of-tree [`crate::discharge::DischargeEngine`] (Beacon's interval engine)
 /// routes each goal to it instead. Results are returned in the same order as
 /// `goals`.
+#[must_use]
 pub fn dispatch_grad_goals(
     registry: &DischargeRegistry,
     goals: &[GradGoal],

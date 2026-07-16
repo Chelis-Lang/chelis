@@ -12,9 +12,9 @@ use chelis_types::types::Prim;
 /// Information about a detected matmul pattern.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatmulInfo {
-    /// NodeId of the left matrix operand (rank-2).
+    /// `NodeId` of the left matrix operand (rank-2).
     pub a: NodeId,
-    /// NodeId of the right matrix operand (rank-2).
+    /// `NodeId` of the right matrix operand (rank-2).
     pub b: NodeId,
     /// Rows of the output (M dimension).
     pub m: usize,
@@ -40,6 +40,7 @@ pub struct MatmulInfo {
 /// precision. Integer matmul is rejected at type-check per
 /// spec/04-type-system.md §5.7.2 (Wave-2-Fixups B6) so it should never
 /// reach this detector with matching operand precision.
+#[must_use]
 pub fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
     let sum_node = dag.get(sum_id)?;
     // Read the Sum node's accumulator field per the destructure-`..`
@@ -131,6 +132,7 @@ fn extract_matmul_dims(
 ///
 /// Returns `(sum_node_id, info)` for each detected pattern, ordered by
 /// the Sum node's position in the DAG.
+#[must_use]
 pub fn find_all_matmuls(dag: &Dag) -> Vec<(NodeId, MatmulInfo)> {
     let mut found = Vec::new();
     for node in dag.nodes() {

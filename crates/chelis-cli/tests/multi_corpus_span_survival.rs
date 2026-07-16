@@ -6,7 +6,7 @@
 //! just one. This file probes two additional executable Phase-0 examples:
 //!
 //! * `linreg.ch` — rank-2 matmul + bias + elementwise; smaller MLP shape.
-//! * `hello_tensor.ch` — to_tensor + add — minimal tensor program; tests
+//! * `hello_tensor.ch` — `to_tensor` + add — minimal tensor program; tests
 //!   the span-survival path through the smallest possible non-trivial DAG.
 //!
 //! For each: after `chelis build --target c`, the emitted C source must
@@ -95,7 +95,7 @@ fn linreg_corpus_surf_spans_survive_to_c_codegen() {
     );
 }
 
-/// hello_tensor.ch — minimal viable Surf program. Even at this size, the
+/// `hello_tensor.ch` — minimal viable Surf program. Even at this size, the
 /// span-survival invariant must hold; if it doesn't, M2b is fragile to
 /// shape rather than universally enforced.
 #[test]

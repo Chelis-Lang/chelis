@@ -4,15 +4,15 @@
 //!   - Spec-vs-code matrix: bf16/f16 must error at C codegen with a
 //!     clear diagnostic citing bf16/f16 specifically (not a generic
 //!     "unsupported precision" or a deep panic).
-//!   - i32/i64 reduce_sum (i32 acc / i64 acc) must lower without a
+//!   - i32/i64 `reduce_sum` (i32 acc / i64 acc) must lower without a
 //!     silent f32 downgrade.
-//!   - C-backend BlasMatmul accumulator destructure: hand-build an IR
+//!   - C-backend `BlasMatmul` accumulator destructure: hand-build an IR
 //!     where the accumulator field disagrees with the operand precision
 //!     (i.e., f64 matmul — operand f64, accumulator f64 per spec
 //!     default) and verify the dispatch picks `cblas_dgemm`, not
 //!     `cblas_sgemm`. The pre-WS-A1 footgun was silently calling
 //!     `cblas_sgemm` for non-f32.
-//!   - i8 reduce_sum end-to-end: source is i8, accumulator is i32,
+//!   - i8 `reduce_sum` end-to-end: source is i8, accumulator is i32,
 //!     output dtype is i32; the emitted C must use `int32_t` for the
 //!     accumulator.
 

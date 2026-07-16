@@ -336,13 +336,13 @@ mod tests {
     use super::*;
     use crate::schema::TensorValue;
 
-    const PROBABILITY_SRC: &str = r#"
+    const PROBABILITY_SRC: &str = r"
 module Stats.Prob
 
 @opaque
 @invariant(p) p.value >= 0.0 && p.value <= 1.0
 type Probability = | Probability { value: f32 }
-"#;
+";
 
     fn program_exprs(source: &str) -> Vec<Expr> {
         let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
@@ -364,7 +364,7 @@ type Probability = | Probability { value: f32 }
         assert_eq!(ctor, "Probability");
         // f32 round-trip: 0.3 stored at f32 reads back as f32-of-0.3.
         assert_eq!(fields.len(), 1);
-        assert_eq!(fields[0].as_f64(), Some(0.3_f32 as f64));
+        assert_eq!(fields[0].as_f64(), Some(f64::from(0.3_f32)));
     }
 
     #[test]
@@ -456,11 +456,11 @@ type Probability = | Probability { value: f32 }
     fn tensor_field_decodes() {
         // A tensor representation field decodes a wire tensor at the
         // declared element precision.
-        let src = r#"
+        let src = r"
 module M
 
 type Holder = | Holder { weights: tensor[3, f32] }
-"#;
+";
         let exprs = program_exprs(src);
         let payload = ExecutionValue::Adt {
             ctor: "Holder".to_string(),

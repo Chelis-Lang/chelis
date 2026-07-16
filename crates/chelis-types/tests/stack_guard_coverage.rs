@@ -1,7 +1,7 @@
 //! WS-5 Part B (walker-guard coverage): every self-recursive `deep::Expr` /
 //! `deep::Pat` walker in `infer.rs` must carry the `stack_guard!` macro so the
 //! recursive type checker bails before exhausting the native stack on a
-//! deeply-nested program (WI-1, spec/design/verification_stack_master_plan.md
+//! deeply-nested program (WI-1, `spec/design/verification_stack_master_plan.md`
 //! \u{00A7}4.1). This is a SOURCE-SCANNING invariant: it parses `infer.rs` with
 //! `syn`, enumerates the functions that take a `&deep::Expr` / `&deep::Pat`
 //! argument and call themselves, and asserts each body invokes `stack_guard!`.
@@ -59,7 +59,7 @@ struct BodyScan<'a> {
     invokes_stack_guard: bool,
 }
 
-impl<'a, 'ast> Visit<'ast> for BodyScan<'a> {
+impl<'ast> Visit<'ast> for BodyScan<'_> {
     fn visit_macro(&mut self, mac: &'ast Macro) {
         if macro_is_stack_guard(mac) {
             self.invokes_stack_guard = true;
@@ -288,13 +288,13 @@ fn scan_detects_an_unguarded_recursive_deep_walker() {
     // lacks `stack_guard!`. Feed it a synthetic walker and assert the analysis
     // classifies it as must-be-guarded with no guard, which is exactly the
     // failure condition the coverage test above keys on.
-    let src = r#"
+    let src = r"
         fn unguarded_walker(expr: &deep::Expr) -> bool {
             match expr {
                 _ => unguarded_walker(expr),
             }
         }
-    "#;
+    ";
     let file: File = syn::parse_file(src).expect("synthetic source parses");
     let mut collector = FnCollector {
         walkers: Vec::new(),
@@ -319,11 +319,11 @@ fn scan_ignores_a_non_recursive_deep_consumer() {
     // A function that takes a `&deep::Expr` but does NOT call itself is not a
     // walker that needs a guard; the scan must not demand one (otherwise the
     // coverage test would be a constant false-positive on every leaf helper).
-    let src = r#"
+    let src = r"
         fn leaf_consumer(expr: &deep::Expr) -> usize {
             expr.children.len()
         }
-    "#;
+    ";
     let file: File = syn::parse_file(src).expect("synthetic source parses");
     let mut collector = FnCollector {
         walkers: Vec::new(),

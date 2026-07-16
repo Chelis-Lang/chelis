@@ -25,14 +25,17 @@ pub struct NativeToolchain {
 }
 
 /// Legacy helper kept for older tests that only need the compiler name.
+#[must_use]
 pub fn c_compiler() -> String {
     test_toolchain(CodegenRequirements::default()).compiler
 }
 
+#[must_use]
 pub fn runtime_toolchain(requirements: CodegenRequirements) -> NativeToolchain {
     resolve_toolchain(requirements, &["CHELIS_CC"])
 }
 
+#[must_use]
 pub fn test_toolchain(requirements: CodegenRequirements) -> NativeToolchain {
     resolve_toolchain(requirements, &["CHELIS_TEST_CC", "CHELIS_CC"])
 }
@@ -108,6 +111,7 @@ fn resolve_compiler(override_vars: &[&str]) -> String {
     "gcc".to_string()
 }
 
+#[must_use]
 pub fn is_real_gcc(bin: &str) -> bool {
     let Ok(output) = Command::new(bin).arg("--version").output() else {
         return false;
@@ -119,6 +123,7 @@ pub fn is_real_gcc(bin: &str) -> bool {
     !text.contains("Apple clang") && !text.contains("clang version")
 }
 
+#[must_use]
 pub fn is_apple_clang(bin: &str) -> bool {
     let Ok(output) = Command::new(bin).arg("--version").output() else {
         return false;

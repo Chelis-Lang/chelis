@@ -49,11 +49,11 @@ fn vec_lit_i32(n: usize) -> TensorType {
     }
 }
 
-/// Build a 3-input fan-in FusedElem chain: `((a + b) * c)` where `a`
+/// Build a 3-input fan-in `FusedElem` chain: `((a + b) * c)` where `a`
 /// is the reusable input. Each external input is a `Realize` so memory
 /// planning treats it as `SlotBacked` (intermediate), mirroring how
 /// `copy(x)` fan-in shapes materialize after the linearity analyzer
-/// attaches the reuse hint. This mirrors the C-side fan_in_dag helper
+/// attaches the reuse hint. This mirrors the C-side `fan_in_dag` helper
 /// exactly (same node creation order, same Realize wrappers) so the
 /// emitted node ids are predictable: `a = NodeId(1)`, `b = NodeId(3)`,
 /// `c = NodeId(5)`, `fused = NodeId(6)`.
@@ -106,9 +106,9 @@ fn fan_in_dag(
 
 /// Build the exact-string host-side branch that admits the in-place
 /// alias view on HIP. The wrapper opens with the bare-declaration of
-/// the FusedElem's GPU tensor, then a runtime contiguity guard. The
-/// contiguous branch aliases the FusedElem's view onto the reusable
-/// input's device data + storage_size.
+/// the `FusedElem`'s GPU tensor, then a runtime contiguity guard. The
+/// contiguous branch aliases the `FusedElem`'s view onto the reusable
+/// input's device data + `storage_size`.
 fn expected_in_place_view_alias(fused_id: usize, reusable_id: usize, shape: &str) -> String {
     format!(
         "d_t{fused_id} = chelis_gpu_alloc_view(1, (int[]){{ {shape} }}, CHELIS_F32, d_t{reusable_id}->data, d_t{reusable_id}->storage_size);"
@@ -128,7 +128,7 @@ fn expected_bare_declaration(fused_id: usize) -> String {
 // ---------------------------------------------------------------------
 
 /// Pinning regression: fan-in with literal-equal shapes aliases the
-/// FusedElem's output view onto the reusable input's device buffer.
+/// `FusedElem`'s output view onto the reusable input's device buffer.
 /// This is the W2-B shipped behavior on HIP. The wrapper must emit
 /// the bare `chelis_gpu_tensor *d_t{fused};` declaration (not a slot
 /// allocation), the runtime contiguity guard, and the
@@ -181,7 +181,7 @@ fn fan_in_literal_equal_shapes_aliases_reusable_input() {
     );
 }
 
-/// Positive — binder-equivalent: FusedElem output uses
+/// Positive — binder-equivalent: `FusedElem` output uses
 /// `Named("seq", Some(4))` while reusable input uses `Lit(4)`. The
 /// binder-equivalent predicate must admit the in-place alias even
 /// though structural `DimInfo` equality fails.
@@ -213,7 +213,7 @@ fn fan_in_binder_equivalent_lit_to_named_aliases_reusable_input() {
     );
 }
 
-/// Positive — binder-equivalent the other direction: FusedElem output
+/// Positive — binder-equivalent the other direction: `FusedElem` output
 /// uses `Lit(4)` while reusable input is `Named("seq", Some(4))`. The
 /// alias must still fire — the predicate is symmetric.
 #[test]
@@ -446,7 +446,7 @@ fn fan_in_multi_consumer_reusable_input_does_not_alias() {
 }
 
 /// Negative — different rank: a rank-1 reusable input and a rank-2
-/// FusedElem output are never binder-equivalent, regardless of total
+/// `FusedElem` output are never binder-equivalent, regardless of total
 /// element count.
 #[test]
 fn fan_in_different_rank_does_not_alias() {

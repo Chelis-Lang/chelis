@@ -33,7 +33,7 @@ fn vec_f32(n: usize) -> TensorType {
     }
 }
 
-/// Collect every span on a DAG (canonical span_id ∪ merged_spans).
+/// Collect every span on a DAG (canonical `span_id` ∪ `merged_spans`).
 fn dag_spans(dag: &Dag) -> BTreeSet<String> {
     let mut acc = BTreeSet::new();
     for node in dag.nodes() {
@@ -103,8 +103,8 @@ fn vmap_preserves_span_id_and_merged_spans() {
 // S3.2 — DCE / remap: pure copy of span_id + merged_spans
 // ─────────────────────────────────────────────────────────────────────
 
-/// DCE preserves span_id and merged_spans on every surviving node. Per
-/// spec/design/chelis_span_survival.md §2.3 DCE/remap row: "Pure copy;
+/// DCE preserves `span_id` and `merged_spans` on every surviving node. Per
+/// `spec/design/chelis_span_survival.md` §2.3 DCE/remap row: "Pure copy;
 /// clone `span_id` and `merged_spans` to the remapped node." The S2
 /// cleanup already implemented this (optimize.rs:120-144); this test
 /// locks that the invariant holds and that the pre-pass grep wasn't
@@ -196,8 +196,8 @@ fn dce_does_not_fabricate_spans() {
 // ─────────────────────────────────────────────────────────────────────
 
 /// `verify::verify` takes `&Dag` (immutable borrow). Calling it on a
-/// span-bearing DAG must leave every span_id and merged_spans value
-/// byte-identical. Per spec/design/chelis_span_survival.md §2.3
+/// span-bearing DAG must leave every `span_id` and `merged_spans` value
+/// byte-identical. Per `spec/design/chelis_span_survival.md` §2.3
 /// Verify/Eval row: "Read-only; no propagation."
 #[test]
 fn verify_does_not_mutate_spans() {
@@ -378,7 +378,7 @@ fn constant_fold_dedups_operand_span_matching_op_span() {
 }
 
 /// Unary fold variant: neg of a span-bearing const. The operand's span
-/// flows into merged_spans even when the op carries its own.
+/// flows into `merged_spans` even when the op carries its own.
 #[test]
 fn constant_fold_unary_merges_operand_span() {
     let mut dag = Dag::new();
@@ -399,9 +399,9 @@ fn constant_fold_unary_merges_operand_span() {
     assert_eq!(folded.merged_spans, vec!["u.lit".to_string()]);
 }
 
-/// Operand's pre-existing merged_spans must also flow onto the folded
+/// Operand's pre-existing `merged_spans` must also flow onto the folded
 /// node (transitive — important when fold runs after another pass that
-/// already populated merged_spans).
+/// already populated `merged_spans`).
 #[test]
 fn constant_fold_propagates_operand_merged_spans() {
     let mut dag = Dag::new();
@@ -561,7 +561,7 @@ fn cse_propagates_duplicate_merged_spans() {
     );
 }
 
-/// Survivor's pre-existing merged_spans are preserved through CSE
+/// Survivor's pre-existing `merged_spans` are preserved through CSE
 /// (i.e. CSE doesn't drop the survivor's own merged provenance when
 /// merging in a duplicate).
 #[test]
@@ -617,7 +617,7 @@ fn cse_does_not_fabricate_spans() {
 
 /// When a Tier 2 helper decomposes into sub-nodes, each sub-node
 /// inherits the decomposed parent's `span_id`. Per
-/// spec/design/chelis_span_survival.md §2.3 Tier 2 row.
+/// `spec/design/chelis_span_survival.md` §2.3 Tier 2 row.
 ///
 /// In the current lowering, `lower_div` is a degenerate decomposition (one
 /// synthesized `RiscOp::Div` node — the cascade was collapsed), so
@@ -726,7 +726,7 @@ fn tier2_lower_sub_inherits_parent_span() {
     for node in dag.nodes() {
         match (&node.op, node.span_id.as_deref()) {
             (RiscOp::Const { .. }, None) => {} // operand consts
-            (RiscOp::Neg, Some("sub.expr")) | (RiscOp::Add, Some("sub.expr")) => {}
+            (RiscOp::Neg | RiscOp::Add, Some("sub.expr")) => {}
             (op, span) => panic!(
                 "unexpected (op={op:?}, span={span:?}) on node {:?}",
                 node.id
@@ -839,9 +839,9 @@ fn ad_backward_nodes_carry_grad_marker_and_forward_span() {
     }
 }
 
-/// Forward nodes carry their original span_id and merged_spans through
-/// AD unchanged. Per §2.3 AD row: "Forward nodes: clone span_id and
-/// merged_spans."
+/// Forward nodes carry their original `span_id` and `merged_spans` through
+/// AD unchanged. Per §2.3 AD row: "Forward nodes: clone `span_id` and
+/// `merged_spans`."
 #[test]
 fn ad_forward_nodes_preserve_their_spans() {
     let mut dag = Dag::new();
@@ -873,8 +873,8 @@ fn ad_forward_nodes_preserve_their_spans() {
 }
 
 /// Negative parity: AD on a span-less forward DAG produces backward
-/// nodes carrying ONLY GRAD_SYNTH_MARKER (no forward span to merge), so
-/// the merged_spans on grad-marker nodes is empty. Note this
+/// nodes carrying ONLY `GRAD_SYNTH_MARKER` (no forward span to merge), so
+/// the `merged_spans` on grad-marker nodes is empty. Note this
 /// specifically violates the audit-invariant for synthesized markers
 /// that the spec requires — but that invariant only applies when the
 /// FORWARD DAG carries spans. With no forward spans, there's nothing
@@ -937,7 +937,7 @@ fn ad_on_unspanned_forward_dag_does_not_fabricate_spans() {
 ///     (synthesized markers are NEVER the only provenance — they always
 ///     carry forward-node spans alongside).
 ///
-/// AD is exercised separately in `s3_oracle_with_ad` because grad_dag
+/// AD is exercised separately in `s3_oracle_with_ad` because `grad_dag`
 /// requires a scalar-float root; a single span-rich program covering
 /// every pass at once would be brittle, so we split into two
 /// representative oracles.
@@ -1032,7 +1032,7 @@ fn s3_oracle_lowering_then_optimization_passes() {
 
 /// AD half of the S3 oracle: span-bearing forward program → AD → walk.
 /// Same two assertions: (a) audit invariant, (b) every synthesized
-/// marker has non-empty merged_spans.
+/// marker has non-empty `merged_spans`.
 #[test]
 fn s3_oracle_with_ad() {
     let mut dag = Dag::new();
@@ -1086,8 +1086,8 @@ fn s3_oracle_with_ad() {
 // ─────────────────────────────────────────────────────────────────────
 
 /// Build a chain of 3 fusible elementwise ops with distinct spans, run
-/// fusion, assert FusedElem `span_id == first.span_id` and
-/// `merged_spans` lex-sorted = sort_dedup(rest contributors' spans).
+/// fusion, assert `FusedElem` `span_id == first.span_id` and
+/// `merged_spans` lex-sorted = `sort_dedup(rest` contributors' spans).
 /// Per spec §2.3 Fusion row.
 #[test]
 fn fusion_aggregates_contributors_spans() {
@@ -1135,9 +1135,9 @@ fn fusion_aggregates_contributors_spans() {
     );
 }
 
-/// Each contributor's pre-existing merged_spans must also flow into the
-/// FusedElem (transitive). Locks the rule's "∪ each contributor's
-/// pre-existing merged_spans" half.
+/// Each contributor's pre-existing `merged_spans` must also flow into the
+/// `FusedElem` (transitive). Locks the rule's "∪ each contributor's
+/// pre-existing `merged_spans`" half.
 #[test]
 fn fusion_propagates_contributor_merged_spans() {
     let mut dag = Dag::new();
@@ -1186,7 +1186,7 @@ fn fusion_propagates_contributor_merged_spans() {
 }
 
 /// Non-chain nodes (consumers and inputs to a fused chain) are pure
-/// copies — span_id + merged_spans verbatim. Locks the second add_node
+/// copies — `span_id` + `merged_spans` verbatim. Locks the second `add_node`
 /// path in `rebuild_with_fusion`.
 #[test]
 fn fusion_preserves_unfused_node_spans() {

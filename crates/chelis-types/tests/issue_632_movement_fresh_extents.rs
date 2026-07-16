@@ -100,9 +100,9 @@ fn stamped_app_type(exprs: &[Expr], builtin: &str) -> Option<String> {
 #[test]
 fn issue632_stride_nonidentity_step_mints_fresh_extent() {
     let annotated = expect_clean(
-        r#"
+        r"
 def f(x: tensor[batch, 4, f32]) -> tensor[*, 2, f32] = stride(&x, 2, 2)
-"#,
+",
         "non-identity stride on a symbolic axis",
     );
     let ty = stamped_app_type(&annotated, "stride").expect("stride app has a stamped type");
@@ -121,9 +121,9 @@ def f(x: tensor[batch, 4, f32]) -> tensor[*, 2, f32] = stride(&x, 2, 2)
 #[test]
 fn issue632_pad_nonzero_padding_mints_fresh_extent() {
     let annotated = expect_clean(
-        r#"
+        r"
 def p(x: tensor[batch, f32]) -> tensor[*, f32] = pad(&x, [[1, 0]], 0.0)
-"#,
+",
         "non-zero pad on a symbolic axis",
     );
     let ty = stamped_app_type(&annotated, "pad").expect("pad app has a stamped type");
@@ -145,11 +145,11 @@ def p(x: tensor[batch, f32]) -> tensor[*, f32] = pad(&x, [[1, 0]], 0.0)
 #[test]
 fn issue632_sig_symbol_stride_no_false_rigidity_rejection() {
     expect_clean(
-        r#"
+        r"
 module Repro.SigStride
 sig f: tensor[n, f32] -> tensor[u, f32]
 def f(x) = stride(x, cast(2, int32))
-"#,
+",
         "sig-symbol direct-return stride",
     );
 }
@@ -165,9 +165,9 @@ def f(x) = stride(x, cast(2, int32))
 #[test]
 fn issue632_stride_identity_step_keeps_symbolic_dim() {
     let annotated = expect_clean(
-        r#"
+        r"
 def f(x: tensor[batch, 4, f32]) -> tensor[batch, 2, f32] = stride(&x, 1, 2)
-"#,
+",
         "identity stride on a symbolic axis",
     );
     let ty = stamped_app_type(&annotated, "stride").expect("stride app has a stamped type");
@@ -181,9 +181,9 @@ def f(x: tensor[batch, 4, f32]) -> tensor[batch, 2, f32] = stride(&x, 1, 2)
 #[test]
 fn issue632_pad_zero_padding_keeps_symbolic_dim() {
     let annotated = expect_clean(
-        r#"
+        r"
 def p(x: tensor[batch, f32]) -> tensor[batch, f32] = pad(&x, [[0, 0]], 0.0)
-"#,
+",
         "zero pad on a symbolic axis",
     );
     let ty = stamped_app_type(&annotated, "pad").expect("pad app has a stamped type");
@@ -203,10 +203,10 @@ def p(x: tensor[batch, f32]) -> tensor[batch, f32] = pad(&x, [[0, 0]], 0.0)
 #[test]
 fn issue632_literal_axes_keep_exact_arithmetic() {
     expect_clean(
-        r#"
+        r"
 def f(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = stride(&x, 1, 2)
 def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[0, 1], [0, 1]], 0.0)
-"#,
+",
         "literal stride/pad arithmetic",
     );
 }

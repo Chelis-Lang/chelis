@@ -73,7 +73,7 @@ pub(crate) struct TypeEnvInner {
     /// to its (generalized) scheme. Includes builtins and prelude ADT
     /// constructors.
     pub(crate) env: Env,
-    /// VarGen at the library's high-water mark — new fresh tvars/dvars
+    /// `VarGen` at the library's high-water mark — new fresh tvars/dvars
     /// for new-code checking start above the library's last allocation.
     pub(crate) var_gen: VarGen,
     /// Substitution carrying any library-derived constraints.
@@ -103,6 +103,7 @@ impl TypeEnv {
     /// `check_ir_with_context(&TypeEnv::empty(), exprs)` is
     /// behaviorally equivalent to [`crate::check_ir_program(exprs)`]
     /// on the same `exprs`.
+    #[must_use]
     pub fn empty() -> Self {
         let (env, var_gen) = builtins::builtin_env();
         let mut adt_reg = AdtRegistry::new();
@@ -135,12 +136,14 @@ impl TypeEnv {
     }
 
     /// Number of library defs in scope. Diagnostic helper.
+    #[must_use]
     pub fn library_def_count(&self) -> usize {
         self.inner.library_def_names.len()
     }
 
     /// Whether a name was declared by the library this context was built
     /// from. Diagnostic helper — does NOT walk builtins or prelude.
+    #[must_use]
     pub fn has_library_def(&self, name: &str) -> bool {
         self.inner.library_def_names.contains(name)
     }

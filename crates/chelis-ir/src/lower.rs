@@ -36,7 +36,7 @@ pub fn with_suppress_unrepresentable_panic<R>(f: impl FnOnce() -> R) -> R {
 }
 
 fn unrepresentable_panic_suppressed() -> bool {
-    SUPPRESS_UNREPRESENTABLE_PANIC.with(|cell| cell.get())
+    SUPPRESS_UNREPRESENTABLE_PANIC.with(std::cell::Cell::get)
 }
 
 /// Marker payload for a suppressed un-representable-DAG unwind.
@@ -517,10 +517,10 @@ pub fn install_chelis_panic_hook() {
     CHELIS_PANIC_HOOK_INSTALLED.get_or_init(|| {
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            if SUPPRESS_UNREPRESENTABLE_PANIC.with(|cell| cell.get()) {
+            if SUPPRESS_UNREPRESENTABLE_PANIC.with(std::cell::Cell::get) {
                 return;
             }
-            if SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.get()) {
+            if SUPPRESS_LOWERING_PANIC_OUTPUT.with(std::cell::Cell::get) {
                 return;
             }
             prev(info);
@@ -538,6 +538,7 @@ use crate::tier2;
 use crate::vmap;
 
 /// Lower a checked Deep program into a RISC DAG.
+#[must_use]
 pub fn lower_program(program: &CheckedProgram) -> Dag {
     try_lower_program(program).unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
 }
@@ -562,7 +563,7 @@ pub struct LoweredLibrary {
     /// library IDs that new-code lowering will reference (after a clone).
     pub dag: Dag,
     /// Map from a library top-level def's name (e.g. `lib_const`,
-    /// `lib_double.0`) to the NodeId in `dag` that holds its value. New
+    /// `lib_double.0`) to the `NodeId` in `dag` that holds its value. New
     /// code that references the name resolves through this table rather
     /// than emitting a fresh `Load`.
     pub symbol_table: HashMap<String, NodeId>,
@@ -590,6 +591,7 @@ pub struct LoweredLibrary {
 /// `dag` field of the result is identical to `lower_program(program)` —
 /// the only difference is that `symbol_table`, `program_defs`,
 /// `program_types`, and `linearity` are also exposed.
+#[must_use]
 pub fn lower_program_to_library(program: &CheckedProgram) -> LoweredLibrary {
     try_lower_program_to_library(program).unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
 }
@@ -601,9 +603,8 @@ pub fn try_lower_program_to_library(
 }
 
 fn lower_program_to_library_inner(program: &CheckedProgram) -> LoweredLibrary {
-    let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
-        .map(|v| v == "1")
-        .unwrap_or(false);
+    let detail_profile =
+        std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL").is_some_and(|v| v == "1");
     let mut sub_t = std::time::Instant::now();
     let log_sub = |label: &str, t: &mut std::time::Instant| {
         if detail_profile {
@@ -685,7 +686,7 @@ fn lower_program_to_library_inner(program: &CheckedProgram) -> LoweredLibrary {
     // elsewhere; that lets new code reference both `foo` (as a tuple
     // identity) and `foo.N` (as the specific element).
     let mut pre_dce_table: HashMap<String, NodeId> = HashMap::new();
-    for (name, value) in ctx.bindings.iter() {
+    for (name, value) in &ctx.bindings {
         flatten_binding_into(name, value, &mut pre_dce_table);
     }
     log_sub("flatten_bindings", &mut sub_t);
@@ -749,8 +750,7 @@ fn insert_copy_nodes_for_consuming_fanout(dag: &Dag) -> (Dag, HashMap<NodeId, No
                 if *seen < total {
                     let input_ty = out
                         .get(mapped)
-                        .map(|n| n.output_type.clone())
-                        .unwrap_or_else(LowerCtx::default_type);
+                        .map_or_else(LowerCtx::default_type, |n| n.output_type.clone());
                     let copy =
                         out.add_node(RiscOp::Copy, vec![mapped], input_ty, node.span_id.clone());
                     inputs.push(copy);
@@ -890,10 +890,11 @@ fn strip_drop_nodes(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId>) {
 /// library carrier is safe to reuse across many `new_program` snippets.
 ///
 /// New code's `(var libname)` references resolve directly to the library
-/// DAG's existing NodeId (no duplicate node), and new code's calls to
+/// DAG's existing `NodeId` (no duplicate node), and new code's calls to
 /// library functions inline using the library's `program_defs` —
 /// matching the monolithic `lower_program(library + new)` behaviour
 /// byte-for-byte (modulo any irrelevant extra defs that DCE pruned).
+#[must_use]
 pub fn lower_program_with_context(library: &LoweredLibrary, new_program: &CheckedProgram) -> Dag {
     try_lower_program_with_context(library, new_program)
         .unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
@@ -996,10 +997,12 @@ fn flatten_binding_into(prefix: &str, value: &LoweredValue, out: &mut HashMap<St
     }
 }
 
+#[must_use]
 pub fn tensor_type_from_deep(expr: &Expr) -> TensorType {
     LowerCtx::type_from_type_expr(expr)
 }
 
+#[must_use]
 pub fn lower_subexpr_program(
     expr: &Expr,
     scoped_tensor_types: HashMap<String, TensorType>,
@@ -1081,8 +1084,7 @@ fn lower_subexpr_program_inner(
             let output_type = ctx
                 .dag
                 .get(id)
-                .map(|node| node.output_type.clone())
-                .unwrap_or_else(LowerCtx::default_type);
+                .map_or_else(LowerCtx::default_type, |node| node.output_type.clone());
             ctx.dag.add_node(
                 RiscOp::Copy,
                 vec![id],
@@ -1097,6 +1099,7 @@ fn lower_subexpr_program_inner(
     insert_drop_nodes_for_unconsumed_values(copy_dag)
 }
 
+#[must_use]
 pub fn remap_tensor_dim_symbols(
     dag: &Dag,
     formal_params: &[TensorType],
@@ -1134,8 +1137,7 @@ pub(crate) fn apply_dim_substitutions(dag: &Dag, substitutions: &HashMap<String,
             DimExpr::Concrete(value) => DimExpr::Concrete(*value),
             DimExpr::Sym(name) => substitutions
                 .get(name)
-                .map(DimExpr::from)
-                .unwrap_or_else(|| DimExpr::Sym(name.clone())),
+                .map_or_else(|| DimExpr::Sym(name.clone()), DimExpr::from),
             DimExpr::Mul(lhs, rhs) => DimExpr::Mul(
                 Box::new(rewrite_dim_expr(lhs, substitutions)),
                 Box::new(rewrite_dim_expr(rhs, substitutions)),
@@ -1174,8 +1176,7 @@ pub(crate) fn apply_dim_substitutions(dag: &Dag, substitutions: &HashMap<String,
                     .map(|dim| match dim {
                         RtDim::Sym(name) => substitutions
                             .get(name)
-                            .map(RtDim::from_dim_info)
-                            .unwrap_or_else(|| dim.clone()),
+                            .map_or_else(|| dim.clone(), RtDim::from_dim_info),
                         _ => dim.clone(),
                     })
                     .collect(),
@@ -1805,7 +1806,7 @@ fn collect_body_precision_var_names(expr: &Expr, out: &mut HashSet<String>) {
     }
 }
 
-/// Tier-2 rank polymorphism (spec/design/rank_polymorphism.md): build a
+/// Tier-2 rank polymorphism (`spec/design/rank_polymorphism.md)`: build a
 /// rank-var substitution map from formal vs actual tensor types at a
 /// rank-polymorphic-def call site. The structural twin of
 /// [`tensor_prec_substitutions`]. The formal types come from the def's
@@ -1927,108 +1928,101 @@ fn extract_rank_var_bindings(
         if gi > n {
             return out;
         }
-        match &slots[ri] {
-            DimSlot::Spread(name) => {
-                let rest = &slots[ri + 1..];
-                match rest.iter().position(|s| !matches!(s, DimSlot::Spread(_))) {
-                    Some(0) => {
-                        let (DimSlot::Named(anchor) | DimSlot::DimVar(anchor)) = &rest[0] else {
-                            // Anchor is a `d-lit`/`Other` — unlocatable by name.
-                            // The checker requires a named anchor after a spread,
-                            // so this is unreachable for a checked program; fail
-                            // loud in debug, bail in release.
-                            debug_assert!(
-                                false,
-                                "rank-spread anchor is not a named dim at lowering"
-                            );
-                            return out;
-                        };
-                        // Primary: locate the anchor by name in the (possibly
-                        // still-symbolic) actual dims, exactly as the forward
-                        // lane does when each nested call re-stamps the callee's
-                        // declared named dims onto its placeholder.
-                        let by_name = actual_dims[gi..]
-                            .iter()
-                            .position(|d| matches!(d, DimInfo::Named(g, _) if g == anchor))
-                            .map(|p| gi + p);
-                        // chelis#373 fallback: the actual was monomorphized to
-                        // concrete `Lit` dims and the name is gone. Recover the
-                        // split index by locating the anchor's recorded extent in
-                        // the actual (chelis#549): take the axis when the extent is
-                        // unique (relocating through any intervening `permute`).
-                        // An anchor whose extent is absent falls through to the
-                        // loud path; an extent that collides with another axis
-                        // (the square/equal-extent case) fails loud rather than
-                        // splitting at a possibly-wrong axis.
-                        let split = match by_name {
-                            Some(s) => s,
-                            None => match recover_anchor_axis(
-                                actual_dims,
-                                gi,
-                                n,
-                                anchor,
-                                dim_axis_positions,
-                            ) {
-                                AnchorRecovery::Axis(s) => s,
-                                // FATAL (chelis#549): a soundness rejection that
-                                // must not be absorbed by the C host-fallback
-                                // path into a generic grad-unsupported message.
-                                AnchorRecovery::AmbiguousAfterReorder => {
-                                    raise_fatal_lowering_error(
-                                        format!(
-                                            "rank-spread anchor `{anchor}` cannot be located: \
-                                             call-site monomorphization erased the name and an \
-                                             intervening axis-reorder (e.g. `permute`) left its \
-                                             recorded position stale; its recorded extent appears \
-                                             at multiple axes of the monomorphized actual. \
-                                             Refusing to split at a possibly-wrong axis (chelis#549)"
-                                        ),
-                                        None,
-                                        None,
-                                    )
-                                }
-                                // Anchor absent by name AND not soundly
-                                // recoverable by position — the checker located it
-                                // (Name↔Lit etc. were rejected), so unreachable
-                                // for a checked program. Fail loud (fail-closed)
-                                // rather than the former release-silent
-                                // `return out` partial binding.
-                                AnchorRecovery::Unrecorded => raise_lowering_error(
-                                    format!(
-                                        "rank-spread anchor `{anchor}` absent from monomorphized \
-                                         actual: internal rank-monomorphization error"
-                                    ),
-                                    None,
-                                    None,
-                                ),
-                            },
-                        };
-                        out.push((name.clone(), actual_dims[gi..split].to_vec()));
-                        gi = split;
-                        ri += 1;
-                    }
-                    None if rest.is_empty() => {
-                        out.push((name.clone(), actual_dims[gi..n].to_vec()));
-                        gi = n;
-                        ri += 1;
-                    }
-                    // Two adjacent spreads — the undetermined split is rejected at
-                    // unification, so this never reaches a checked backend.
-                    _ => {
-                        debug_assert!(false, "two adjacent rank spreads at lowering");
+        if let DimSlot::Spread(name) = &slots[ri] {
+            let rest = &slots[ri + 1..];
+            match rest.iter().position(|s| !matches!(s, DimSlot::Spread(_))) {
+                Some(0) => {
+                    let (DimSlot::Named(anchor) | DimSlot::DimVar(anchor)) = &rest[0] else {
+                        // Anchor is a `d-lit`/`Other` — unlocatable by name.
+                        // The checker requires a named anchor after a spread,
+                        // so this is unreachable for a checked program; fail
+                        // loud in debug, bail in release.
+                        debug_assert!(false, "rank-spread anchor is not a named dim at lowering");
                         return out;
-                    }
+                    };
+                    // Primary: locate the anchor by name in the (possibly
+                    // still-symbolic) actual dims, exactly as the forward
+                    // lane does when each nested call re-stamps the callee's
+                    // declared named dims onto its placeholder.
+                    let by_name = actual_dims[gi..]
+                        .iter()
+                        .position(|d| matches!(d, DimInfo::Named(g, _) if g == anchor))
+                        .map(|p| gi + p);
+                    // chelis#373 fallback: the actual was monomorphized to
+                    // concrete `Lit` dims and the name is gone. Recover the
+                    // split index by locating the anchor's recorded extent in
+                    // the actual (chelis#549): take the axis when the extent is
+                    // unique (relocating through any intervening `permute`).
+                    // An anchor whose extent is absent falls through to the
+                    // loud path; an extent that collides with another axis
+                    // (the square/equal-extent case) fails loud rather than
+                    // splitting at a possibly-wrong axis.
+                    let split = match by_name {
+                        Some(s) => s,
+                        None => match recover_anchor_axis(
+                            actual_dims,
+                            gi,
+                            n,
+                            anchor,
+                            dim_axis_positions,
+                        ) {
+                            AnchorRecovery::Axis(s) => s,
+                            // FATAL (chelis#549): a soundness rejection that
+                            // must not be absorbed by the C host-fallback
+                            // path into a generic grad-unsupported message.
+                            AnchorRecovery::AmbiguousAfterReorder => raise_fatal_lowering_error(
+                                format!(
+                                    "rank-spread anchor `{anchor}` cannot be located: \
+                                         call-site monomorphization erased the name and an \
+                                         intervening axis-reorder (e.g. `permute`) left its \
+                                         recorded position stale; its recorded extent appears \
+                                         at multiple axes of the monomorphized actual. \
+                                         Refusing to split at a possibly-wrong axis (chelis#549)"
+                                ),
+                                None,
+                                None,
+                            ),
+                            // Anchor absent by name AND not soundly
+                            // recoverable by position — the checker located it
+                            // (Name↔Lit etc. were rejected), so unreachable
+                            // for a checked program. Fail loud (fail-closed)
+                            // rather than the former release-silent
+                            // `return out` partial binding.
+                            AnchorRecovery::Unrecorded => raise_lowering_error(
+                                format!(
+                                    "rank-spread anchor `{anchor}` absent from monomorphized \
+                                     actual: internal rank-monomorphization error"
+                                ),
+                                None,
+                                None,
+                            ),
+                        },
+                    };
+                    out.push((name.clone(), actual_dims[gi..split].to_vec()));
+                    gi = split;
+                    ri += 1;
+                }
+                None if rest.is_empty() => {
+                    out.push((name.clone(), actual_dims[gi..n].to_vec()));
+                    gi = n;
+                    ri += 1;
+                }
+                // Two adjacent spreads — the undetermined split is rejected at
+                // unification, so this never reaches a checked backend.
+                _ => {
+                    debug_assert!(false, "two adjacent rank spreads at lowering");
+                    return out;
                 }
             }
-            _ => {
-                gi += 1;
-                ri += 1;
-            }
+        } else {
+            gi += 1;
+            ri += 1;
         }
     }
     out
 }
 
+#[must_use]
 pub fn top_level_expr_is_lowered(
     expr: &Expr,
     program_exprs: &[Expr],
@@ -2038,6 +2032,7 @@ pub fn top_level_expr_is_lowered(
     top_level_expr_is_lowered_with_names(expr, type_env, &lowered_names)
 }
 
+#[must_use]
 pub fn top_level_lowering_map(
     exprs: &[Expr],
     type_env: &HashMap<String, Expr>,
@@ -2068,6 +2063,7 @@ pub fn top_level_lowering_map(
 ///
 /// The returned map covers BOTH library + new-code names so callers can
 /// look up either; downstream filters slice to new-code-only as needed.
+#[must_use]
 pub fn top_level_lowering_map_with_context(
     library: &LoweredLibrary,
     new_exprs: &[Expr],
@@ -2162,6 +2158,7 @@ fn ty_expr_to_deep(ty: &TensorType) -> Expr {
     }
 }
 
+#[must_use]
 pub fn expr_is_dag_lowerable(expr: &Expr, program: &CheckedProgram) -> bool {
     if expr_requires_host_runtime(expr) {
         return false;
@@ -2236,7 +2233,7 @@ fn type_is_never_lowerable(expr: &Expr) -> bool {
                 || list.elements.last().is_some_and(type_is_never_lowerable)
         }
         Some("t-tuple") => children(list).iter().any(type_is_never_lowerable),
-        Some("t-adt") | Some("t-unit") => true,
+        Some("t-adt" | "t-unit") => true,
         Some("t-prim") => false,
         _ => false,
     }
@@ -2254,7 +2251,7 @@ pub fn type_expr_has_rank_var(expr: &Expr) -> bool {
         Some("t-tensor") => children(list)
             .iter()
             .any(|c| matches!(c, Expr::List(d, _) if get_tag(d) == Some("d-rank"))),
-        Some("t-ref") | Some("t-fn") | Some("t-tuple") | Some("t-adt") => {
+        Some("t-ref" | "t-fn" | "t-tuple" | "t-adt") => {
             children(list).iter().any(type_expr_has_rank_var)
         }
         _ => false,
@@ -2272,7 +2269,7 @@ pub fn type_expr_has_precision_var(expr: &Expr) -> bool {
     };
     match get_tag(list) {
         Some("t-tensor") => extract_precision_var_name(expr).is_some(),
-        Some("t-ref") | Some("t-fn") | Some("t-tuple") | Some("t-adt") => {
+        Some("t-ref" | "t-fn" | "t-tuple" | "t-adt") => {
             children(list).iter().any(type_expr_has_precision_var)
         }
         _ => false,
@@ -2296,7 +2293,7 @@ fn callable_ref_name(expr: &Expr) -> Option<String> {
     children(list)
         .first()
         .and_then(symbol_name)
-        .map(|name| name.to_string())
+        .map(std::string::ToString::to_string)
 }
 
 fn symbol_name(expr: &Expr) -> Option<&str> {
@@ -2363,7 +2360,7 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
             }
             if get_tag(list) == Some("var")
                 && let Some(name) = children(list).first().and_then(symbol_name)
-                && name.chars().next().is_some_and(|ch| ch.is_uppercase())
+                && name.chars().next().is_some_and(char::is_uppercase)
             {
                 return true;
             }
@@ -2371,7 +2368,7 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                 && let Some(Expr::List(callee, _)) = children(list).first()
                 && get_tag(callee) == Some("var")
                 && let Some(name) = children(callee).first().and_then(symbol_name)
-                && name.chars().next().is_some_and(|ch| ch.is_uppercase())
+                && name.chars().next().is_some_and(char::is_uppercase)
             {
                 return true;
             }
@@ -2551,7 +2548,7 @@ fn def_body_requires_host_runtime(body: &Expr) -> bool {
 /// a `tuple`, `match`, `record`, or similar multi-root / host-shaped
 /// construct. This is the scoping rule for the issue
 /// Chelis-Lang/chelis#218 exemption: only differentiable
-/// tensor-returning function bodies benefit from the to_tensor-
+/// tensor-returning function bodies benefit from the `to_tensor`-
 /// literal lowering, because the IR DAG's single-tensor-root model
 /// fits them. Tuple-returning fns (like
 /// `def eig_pair() -> (tensor[2], tensor[2]) = (to_tensor([1, 2]),
@@ -3520,7 +3517,7 @@ fn symbolic_dim_var_name(expr: &Expr) -> Option<String> {
     children(list)
         .first()
         .and_then(symbol_name)
-        .map(|name| name.to_string())
+        .map(std::string::ToString::to_string)
 }
 
 /// Result of attempting to recognize a `to_tensor` argument as a
@@ -3557,7 +3554,7 @@ struct LiteralToTensor {
 /// tensor shape + flat row-major data. Otherwise return `None`.
 ///
 /// Returning `None` is the conservative default: the existing
-/// host-routing classification stays in force for any to_tensor that
+/// host-routing classification stays in force for any `to_tensor` that
 /// doesn't fit the literal-Cons-chain shape (e.g. a `to_tensor(items)`
 /// where `items` is a host-side List variable).
 fn static_to_tensor_literal(expr: &Expr) -> Option<LiteralToTensor> {
@@ -3814,7 +3811,7 @@ enum LoweredValue {
     /// constructor tag is discrete, so the taken arm is known at lowering
     /// time), `lower_access` (field projection), and the grad lowering
     /// (field-wise ADT gradients, the pytree contract of
-    /// spec/design/differentiable_language.md Decision 6).
+    /// `spec/design/differentiable_language.md` Decision 6).
     Adt {
         ctor: String,
         /// Declared field names for record-syntax constructors, in the
@@ -4059,7 +4056,7 @@ struct LowerCtx {
     /// monomorphization every reachable tensor type carries
     /// `TensorPrec::Concrete(_)` per spec/04-type-system.md §5.8.1.
     prec_substitutions: HashMap<String, Prim>,
-    /// Tier-2 rank polymorphism (spec/design/rank_polymorphism.md): rank-var
+    /// Tier-2 rank polymorphism (`spec/design/rank_polymorphism.md)`: rank-var
     /// substitutions, keyed by the `..r` rank-var name as it appears in a sole
     /// `(d-rank {} r)` dim slot of a rank-polymorphic def's signature. The
     /// structural twin of [`Self::prec_substitutions`]: where precision
@@ -4102,7 +4099,7 @@ struct LowerCtx {
     /// combinator rewrites are an AD bridge, not the general C/backend
     /// lowering for ordinary list programs.
     allow_host_list_ad_rewrites: bool,
-    /// The span_id of the Deep `Expr` currently being lowered. Threaded
+    /// The `span_id` of the Deep `Expr` currently being lowered. Threaded
     /// through `lower_expr` (set on entry, restored on exit) so every
     /// helper that calls `self.dag.add_node(...)` can pass the
     /// region-corresponding span without plumbing it through every
@@ -4214,12 +4211,10 @@ impl LowerCtx {
             }
         };
         let precision = precision_override.unwrap_or_else(|| {
-            if *ty != Self::default_type() {
-                ty.precision
+            if *ty == Self::default_type() {
+                input_ty.map_or(ty.precision, |in_ty| in_ty.precision)
             } else {
-                input_ty
-                    .map(|in_ty| in_ty.precision)
-                    .unwrap_or(ty.precision)
+                ty.precision
             }
         });
         TensorType { dims, precision }
@@ -4311,8 +4306,7 @@ impl LowerCtx {
             let ty = self
                 .dag
                 .get(*node_id)
-                .map(|node| node.output_type.clone())
-                .unwrap_or_else(Self::default_type);
+                .map_or_else(Self::default_type, |node| node.output_type.clone());
             let load = subctx.dag.add_node(
                 RiscOp::Load {
                     name: name.as_str().into(),
@@ -4778,8 +4772,7 @@ impl LowerCtx {
                 let output_type = self
                     .dag
                     .get(*id)
-                    .map(|node| node.output_type.clone())
-                    .unwrap_or_else(Self::default_type);
+                    .map_or_else(Self::default_type, |node| node.output_type.clone());
                 let stored = self.dag.add_node(
                     RiscOp::Store {
                         name: prefix.into(),
@@ -5147,7 +5140,7 @@ impl LowerCtx {
             // tensor input; the static Adt value instead lets
             // `lower_match` select the taken arm at lowering time.
             if !self.program_defs.contains_key(name)
-                && name.chars().next().is_some_and(|ch| ch.is_uppercase())
+                && name.chars().next().is_some_and(char::is_uppercase)
             {
                 return LoweredValue::Adt {
                     ctor: name.clone(),
@@ -5216,7 +5209,7 @@ impl LowerCtx {
             // as `lower_var`'s nullary-constructor branch; a constructor
             // is never a builtin, def, or local callable post-checker.
             if !BUILTIN_NAMES.contains(&func_name.as_str())
-                && func_name.chars().next().is_some_and(|ch| ch.is_uppercase())
+                && func_name.chars().next().is_some_and(char::is_uppercase)
             {
                 let fields = elems[3..]
                     .iter()
@@ -5487,7 +5480,7 @@ impl LowerCtx {
     /// classic tensor/scalar lane; an `Adt` argument (chelis#520 D2) is a
     /// statically-constructed record whose float-tensor fields are
     /// differentiated field-wise, producing an `Adt`-shaped gradient (the
-    /// pytree contract of spec/design/differentiable_language.md Decision 6).
+    /// pytree contract of `spec/design/differentiable_language.md` Decision 6).
     fn lower_grad_callable_with_values(
         &mut self,
         fn_expr: &Expr,
@@ -5575,8 +5568,7 @@ impl LowerCtx {
         let node_type = |ctx: &Self, id: NodeId| {
             ctx.dag
                 .get(id)
-                .map(|node| node.output_type.clone())
-                .unwrap_or_else(Self::default_type)
+                .map_or_else(Self::default_type, |node| node.output_type.clone())
         };
         // Formal/actual pairs for the precision/rank substitution seeding
         // below. ADT-typed params are excluded: their formal annotation is
@@ -5895,9 +5887,8 @@ impl LowerCtx {
                         // zero, the same way the ADT field zero-fill below
                         // does (chelis#520 D2 / chelis#614).
                         None if multi_target => {
-                            let field_ty = actual
-                                .map(|id| node_type(self, id))
-                                .unwrap_or_else(Self::default_type);
+                            let field_ty =
+                                actual.map_or_else(Self::default_type, |id| node_type(self, id));
                             let zero = self.zero_tensor_node(&field_ty);
                             packed.push(LoweredValue::Node(zero));
                         }
@@ -5922,9 +5913,8 @@ impl LowerCtx {
                             // its gradient is exactly zero. Materialize
                             // the zero so the gradient struct keeps the
                             // input's field structure (pytree contract).
-                            let field_ty = actual
-                                .map(|id| node_type(self, id))
-                                .unwrap_or_else(Self::default_type);
+                            let field_ty =
+                                actual.map_or_else(Self::default_type, |id| node_type(self, id));
                             self.zero_tensor_node(&field_ty)
                         });
                         fields.push(LoweredValue::Node(node));
@@ -6290,15 +6280,13 @@ impl LowerCtx {
             .iter()
             .enumerate()
             .map(|(index, _)| {
-                extract_param_type(fn_expr, index)
-                    .map(|expr| {
-                        Self::type_from_type_expr_with_subst(
-                            expr,
-                            &prec_subst_for_params,
-                            &rank_subst_for_params,
-                        )
-                    })
-                    .unwrap_or_else(Self::default_type)
+                extract_param_type(fn_expr, index).map_or_else(Self::default_type, |expr| {
+                    Self::type_from_type_expr_with_subst(
+                        expr,
+                        &prec_subst_for_params,
+                        &rank_subst_for_params,
+                    )
+                })
             })
             .collect();
         let actual_types: Vec<TensorType> = actual_args
@@ -6306,8 +6294,7 @@ impl LowerCtx {
             .map(|id| {
                 self.dag
                     .get(*id)
-                    .map(|node| node.output_type.clone())
-                    .unwrap_or_else(Self::default_type)
+                    .map_or_else(Self::default_type, |node| node.output_type.clone())
             })
             .collect();
 
@@ -6438,8 +6425,7 @@ impl LowerCtx {
                 let result_ty = self
                     .dag
                     .get(*result)
-                    .map(|node| node.output_type.clone())
-                    .unwrap_or_else(Self::default_type);
+                    .map_or_else(Self::default_type, |node| node.output_type.clone());
                 if axis < result_ty.dims.len() {
                     let perm = front_to_axis_perm(result_ty.dims.len(), axis);
                     let perm_ty = permuted_tensor_type(&result_ty, &perm);
@@ -6497,15 +6483,13 @@ impl LowerCtx {
             .iter()
             .enumerate()
             .map(|(index, _)| {
-                extract_param_type(fn_expr, index)
-                    .map(|expr| {
-                        Self::type_from_type_expr_with_subst(
-                            expr,
-                            &prec_subst_for_params,
-                            &rank_subst_for_params,
-                        )
-                    })
-                    .unwrap_or_else(Self::default_type)
+                extract_param_type(fn_expr, index).map_or_else(Self::default_type, |expr| {
+                    Self::type_from_type_expr_with_subst(
+                        expr,
+                        &prec_subst_for_params,
+                        &rank_subst_for_params,
+                    )
+                })
             })
             .collect();
         let actual_types: Vec<TensorType> = actual_args
@@ -6513,8 +6497,7 @@ impl LowerCtx {
             .map(|id| {
                 self.dag
                     .get(*id)
-                    .map(|node| node.output_type.clone())
-                    .unwrap_or_else(Self::default_type)
+                    .map_or_else(Self::default_type, |node| node.output_type.clone())
             })
             .collect();
 
@@ -6639,8 +6622,7 @@ impl LowerCtx {
                 let result_ty = self
                     .dag
                     .get(*result)
-                    .map(|node| node.output_type.clone())
-                    .unwrap_or_else(Self::default_type);
+                    .map_or_else(Self::default_type, |node| node.output_type.clone());
                 if axis < result_ty.dims.len() {
                     let perm = front_to_axis_perm(result_ty.dims.len(), axis);
                     let perm_ty = permuted_tensor_type(&result_ty, &perm);
@@ -6670,8 +6652,7 @@ impl LowerCtx {
         let actual_ty = self
             .dag
             .get(arg_id)
-            .map(|node| node.output_type.clone())
-            .unwrap_or_else(Self::default_type);
+            .map_or_else(Self::default_type, |node| node.output_type.clone());
         if actual_ty.dims.len() > original_ty.dims.len() {
             return arg_id;
         }
@@ -6845,8 +6826,7 @@ impl LowerCtx {
                     let output_type = self
                         .dag
                         .get(leaf)
-                        .map(|node| node.output_type.clone())
-                        .unwrap_or_else(Self::default_type);
+                        .map_or_else(Self::default_type, |node| node.output_type.clone());
                     last = Some(self.dag.add_node(
                         RiscOp::Drop,
                         vec![leaf],
@@ -6962,8 +6942,7 @@ impl LowerCtx {
                 let inferred_ty = self
                     .dag
                     .get(template)
-                    .map(|node| node.output_type.clone())
-                    .unwrap_or_else(|| ty.clone());
+                    .map_or_else(|| ty.clone(), |node| node.output_type.clone());
                 let resolved_ty = if ty == &Self::default_type() && !inferred_ty.dims.is_empty() {
                     inferred_ty
                 } else {
@@ -6984,8 +6963,7 @@ impl LowerCtx {
                 let inferred_ty = self
                     .dag
                     .get(x)
-                    .map(|node| node.output_type.clone())
-                    .unwrap_or_else(|| ty.clone());
+                    .map_or_else(|| ty.clone(), |node| node.output_type.clone());
                 let resolved_ty = if ty == &Self::default_type() && !inferred_ty.dims.is_empty() {
                     inferred_ty
                 } else {
@@ -7109,13 +7087,11 @@ impl LowerCtx {
                 let a_ty = self
                     .dag
                     .get(a)
-                    .map(|n| n.output_type.clone())
-                    .unwrap_or_else(|| ty.clone());
+                    .map_or_else(|| ty.clone(), |n| n.output_type.clone());
                 let b_ty = self
                     .dag
                     .get(b)
-                    .map(|n| n.output_type.clone())
-                    .unwrap_or_else(|| ty.clone());
+                    .map_or_else(|| ty.clone(), |n| n.output_type.clone());
                 let parent_span = self.current_span_id.clone();
                 tier2::lower_matmul(&mut self.dag, a, b, &a_ty, &b_ty, parent_span.as_deref())
             }
@@ -7155,18 +7131,13 @@ impl LowerCtx {
                 let base = self.lower_expr_node(&args[0], "scatter_replace base");
                 let indices = self.lower_expr_node(&args[1], "scatter_replace indices");
                 let updates = self.lower_expr_node(&args[2], "scatter_replace updates");
-                let base_rank = self
-                    .dag
-                    .get(base)
-                    .map(|n| n.output_type.dims.len())
-                    .unwrap_or(0);
+                let base_rank = self.dag.get(base).map_or(0, |n| n.output_type.dims.len());
                 let axis_raw = self.extract_axis_raw(&args[3], "scatter_replace");
                 let axis = self.normalize_axis(axis_raw, base_rank, "scatter_replace", &args[3]);
                 let out_ty = self
                     .dag
                     .get(base)
-                    .map(|n| n.output_type.clone())
-                    .unwrap_or_else(|| ty.clone());
+                    .map_or_else(|| ty.clone(), |n| n.output_type.clone());
                 self.dag.add_node(
                     RiscOp::Scatter { axis },
                     vec![base, indices, updates],
@@ -7182,18 +7153,13 @@ impl LowerCtx {
                 let data = self.lower_expr_node(&args[0], "scatter_elements data");
                 let indices = self.lower_expr_node(&args[1], "scatter_elements indices");
                 let updates = self.lower_expr_node(&args[2], "scatter_elements updates");
-                let data_rank = self
-                    .dag
-                    .get(data)
-                    .map(|n| n.output_type.dims.len())
-                    .unwrap_or(0);
+                let data_rank = self.dag.get(data).map_or(0, |n| n.output_type.dims.len());
                 let axis_raw = self.extract_axis_raw(&args[3], "scatter_elements");
                 let axis = self.normalize_axis(axis_raw, data_rank, "scatter_elements", &args[3]);
                 let out_ty = self
                     .dag
                     .get(data)
-                    .map(|n| n.output_type.clone())
-                    .unwrap_or_else(|| ty.clone());
+                    .map_or_else(|| ty.clone(), |n| n.output_type.clone());
                 self.dag.add_node(
                     RiscOp::ScatterElements { axis },
                     vec![data, indices, updates],
@@ -7206,8 +7172,7 @@ impl LowerCtx {
                 let x_ty = self
                     .dag
                     .get(x)
-                    .map(|n| n.output_type.clone())
-                    .unwrap_or_else(|| ty.clone());
+                    .map_or_else(|| ty.clone(), |n| n.output_type.clone());
                 let axis_raw = self.extract_axis_raw(&args[1], "softmax");
                 let rank = self.axis_rank(x, ty);
                 let axis = self.normalize_axis(axis_raw, rank, "softmax", &args[1]);
@@ -7221,8 +7186,7 @@ impl LowerCtx {
                 let x_ty = self
                     .dag
                     .get(x)
-                    .map(|n| n.output_type.clone())
-                    .unwrap_or_else(|| ty.clone());
+                    .map_or_else(|| ty.clone(), |n| n.output_type.clone());
                 let rank = self.axis_rank(x, ty);
                 let axis = self.resolve_reduce_axis(&args[1], x, rank, "mean");
                 let parent_span = self.current_span_id.clone();
@@ -7236,18 +7200,15 @@ impl LowerCtx {
                 let x_ty = self
                     .dag
                     .get(x)
-                    .map(|n| n.output_type.clone())
-                    .unwrap_or_else(|| ty.clone());
+                    .map_or_else(|| ty.clone(), |n| n.output_type.clone());
                 let gamma_ty = self
                     .dag
                     .get(gamma)
-                    .map(|n| n.output_type.clone())
-                    .unwrap_or_else(|| ty.clone());
+                    .map_or_else(|| ty.clone(), |n| n.output_type.clone());
                 let beta_ty = self
                     .dag
                     .get(beta)
-                    .map(|n| n.output_type.clone())
-                    .unwrap_or_else(|| ty.clone());
+                    .map_or_else(|| ty.clone(), |n| n.output_type.clone());
                 let parent_span = self.current_span_id.clone();
                 let node = tier2::lower_layer_norm(
                     &mut self.dag,
@@ -7276,13 +7237,11 @@ impl LowerCtx {
                 let input_ty = self
                     .dag
                     .get(input)
-                    .map(|n| n.output_type.clone())
-                    .unwrap_or_else(|| ty.clone());
+                    .map_or_else(|| ty.clone(), |n| n.output_type.clone());
                 let kernel_ty = self
                     .dag
                     .get(kernel)
-                    .map(|n| n.output_type.clone())
-                    .unwrap_or_else(|| ty.clone());
+                    .map_or_else(|| ty.clone(), |n| n.output_type.clone());
                 let parent_span = self.current_span_id.clone();
                 tier2::lower_conv2d(
                     &mut self.dag,
@@ -7387,14 +7346,12 @@ impl LowerCtx {
                 let x_ty = self
                     .dag
                     .get(x)
-                    .map(|node| node.output_type.clone())
-                    .unwrap_or_else(|| ty.clone());
+                    .map_or_else(|| ty.clone(), |node| node.output_type.clone());
                 let axis = self.resolve_reduce_axis(&args[1], x, x_ty.dims.len(), "sum");
                 let operand_prec = self
                     .dag
                     .get(x)
-                    .map(|node| node.output_type.precision)
-                    .unwrap_or(ty.precision);
+                    .map_or(ty.precision, |node| node.output_type.precision);
                 // Issue Chelis-Lang/chelis#218 R1 HIGH-2 defense-in-
                 // depth: prefer input-derived dims when meta `ty`
                 // carries a wildcard placeholder. See
@@ -7473,8 +7430,7 @@ impl LowerCtx {
                     let x_prec = self
                         .dag
                         .get(x)
-                        .map(|node| node.output_type.precision)
-                        .unwrap_or(ty.precision);
+                        .map_or(ty.precision, |node| node.output_type.precision);
                     if *ty == Self::default_type() {
                         x_prec
                     } else {
@@ -7485,8 +7441,7 @@ impl LowerCtx {
                 let x_ty = self
                     .dag
                     .get(x)
-                    .map(|node| node.output_type.clone())
-                    .unwrap_or_else(|| ty.clone());
+                    .map_or_else(|| ty.clone(), |node| node.output_type.clone());
                 let dims = Self::reduction_out_dims(&x_ty.dims, ty, axis);
                 let out_precision = if any_wildcard_dim(&ty.dims) || *ty == Self::default_type() {
                     x_ty.precision
@@ -7517,8 +7472,7 @@ impl LowerCtx {
                 let x_ty = self
                     .dag
                     .get(x)
-                    .map(|node| node.output_type.clone())
-                    .unwrap_or_else(|| ty.clone());
+                    .map_or_else(|| ty.clone(), |node| node.output_type.clone());
                 let window_shape = collect_cons_chain(&args[1])
                     .and_then(|elems| {
                         elems
@@ -7571,8 +7525,7 @@ impl LowerCtx {
                 let x_ty = self
                     .dag
                     .get(x)
-                    .map(|node| node.output_type.clone())
-                    .unwrap_or_else(|| ty.clone());
+                    .map_or_else(|| ty.clone(), |node| node.output_type.clone());
                 let axis = self.resolve_reduce_axis(&args[1], x, x_ty.dims.len(), name);
                 let dims = Self::reduction_out_dims(&x_ty.dims, ty, axis);
                 let precision = if any_wildcard_dim(&ty.dims) || *ty == Self::default_type() {
@@ -7666,8 +7619,10 @@ impl LowerCtx {
                     .get(x)
                     .map(|node| node.output_type.clone())
                     .filter(|input_ty| axes.len() == input_ty.dims.len())
-                    .map(|input_ty| permuted_tensor_type(&input_ty, &axes))
-                    .unwrap_or_else(|| ty.clone());
+                    .map_or_else(
+                        || ty.clone(),
+                        |input_ty| permuted_tensor_type(&input_ty, &axes),
+                    );
                 self.dag.add_node(
                     RiscOp::Permute { axes },
                     vec![x],
@@ -7731,8 +7686,7 @@ impl LowerCtx {
                         None => self
                             .dag
                             .get(x)
-                            .map(|node| node.output_type.dims.len())
-                            .unwrap_or(0),
+                            .map_or(0, |node| node.output_type.dims.len()),
                     },
                     None => self.extract_usize_value(&args[1]).unwrap_or(0),
                 };
@@ -7844,15 +7798,15 @@ impl LowerCtx {
                     }
                     _ => None,
                 };
-                let out_ty = self
-                    .fallback_expand_type(x, axis, &size)
-                    .map(|mut t| {
+                let out_ty = self.fallback_expand_type(x, axis, &size).map_or_else(
+                    || ty.clone(),
+                    |mut t| {
                         if let Some(dim) = named_dim {
                             t.dims[axis] = dim;
                         }
                         t
-                    })
-                    .unwrap_or_else(|| ty.clone());
+                    },
+                );
                 let expand_id = self.dag.add_node(
                     RiscOp::Expand { axis, size },
                     vec![x],
@@ -8418,7 +8372,7 @@ impl LowerCtx {
         }
         matches!(
             app_var_name_and_args(expr),
-            Some(("to_list", [_])) | Some(("map", [_, _])) | Some(("filter", [_, _]))
+            Some(("to_list", [_]) | ("map" | "filter", [_, _]))
         )
     }
 
@@ -8620,7 +8574,7 @@ impl LowerCtx {
     }
 
     /// Extract a raw axis value from an expression (for
-    /// sum/max_reduce/softmax/mean/gather/scatter and the reduction
+    /// `sum/max_reduce/softmax/mean/gather/scatter` and the reduction
     /// family). The value is returned verbatim and may be negative:
     /// negative axes index from the end of the operand rank and are
     /// normalized by [`Self::normalize_axis`] once the operand rank is
@@ -8671,8 +8625,7 @@ impl LowerCtx {
         let operand_rank = self
             .dag
             .get(operand)
-            .map(|n| n.output_type.dims.len())
-            .unwrap_or(0);
+            .map_or(0, |n| n.output_type.dims.len());
         if operand_rank > 0 {
             return operand_rank;
         }
@@ -8696,8 +8649,7 @@ impl LowerCtx {
         let operand_rank = self
             .dag
             .get(operand)
-            .map(|n| n.output_type.dims.len())
-            .unwrap_or(0);
+            .map_or(0, |n| n.output_type.dims.len());
         if operand_rank > 0 {
             return operand_rank;
         }
@@ -8718,11 +8670,7 @@ impl LowerCtx {
         indices: NodeId,
         ascribed_result_ty: &TensorType,
     ) -> usize {
-        let values_rank = self
-            .dag
-            .get(values)
-            .map(|n| n.output_type.dims.len())
-            .unwrap_or(0);
+        let values_rank = self.dag.get(values).map_or(0, |n| n.output_type.dims.len());
         if values_rank > 0 {
             return values_rank;
         }
@@ -8732,8 +8680,7 @@ impl LowerCtx {
         let indices_rank = self
             .dag
             .get(indices)
-            .map(|n| n.output_type.dims.len())
-            .unwrap_or(0);
+            .map_or(0, |n| n.output_type.dims.len());
         ascribed_result_ty
             .dims
             .len()
@@ -8758,16 +8705,14 @@ impl LowerCtx {
         let collapsed = self
             .dag
             .get(values)
-            .map(|n| n.output_type.dims.is_empty())
-            .unwrap_or(false);
+            .is_some_and(|n| n.output_type.dims.is_empty());
         if !collapsed || *ascribed_result_ty == Self::default_type() {
             return;
         }
         let indices_rank = self
             .dag
             .get(indices)
-            .map(|n| n.output_type.dims.len())
-            .unwrap_or(0);
+            .map_or(0, |n| n.output_type.dims.len());
         let result_dims = &ascribed_result_ty.dims;
         if axis + indices_rank > result_dims.len() {
             return;
@@ -8801,8 +8746,7 @@ impl LowerCtx {
         let collapsed = self
             .dag
             .get(operand)
-            .map(|n| n.output_type.dims.is_empty())
-            .unwrap_or(false);
+            .is_some_and(|n| n.output_type.dims.is_empty());
         if !collapsed || axis > non_reduced_dims.len() {
             return;
         }
@@ -9183,7 +9127,7 @@ impl LowerCtx {
     /// `let`-bound alias) of a STATICALLY-sized operand axis. This covers the
     /// im2col-style `reshape(p, [mul(b_d, a_d), 1])` target over a
     /// concrete-shaped input, which [`Self::fold_static_size`] deliberately
-    /// rejects (its expand-size contract routes shape() reads to the
+    /// rejects (its expand-size contract routes `shape()` reads to the
     /// shape-source arm) and [`Self::extract_reshape_dim_list`]'s per-element
     /// vocabulary could not express: the unresolvable element aborted the
     /// walk and the reshape fell back to the checker's `Named("*")` wildcard
@@ -9370,8 +9314,7 @@ impl LowerCtx {
     fn resolve_dim_expr_symbol(&self, name: &str) -> DimExpr {
         self.dim_substitutions
             .get(name)
-            .map(DimExpr::from)
-            .unwrap_or_else(|| DimExpr::Sym(name.to_string()))
+            .map_or_else(|| DimExpr::Sym(name.to_string()), DimExpr::from)
     }
 
     /// Recover a broadcast extent from a `shape(operand, axis)` size
@@ -9648,8 +9591,7 @@ impl LowerCtx {
                 let node_ty = self
                     .dag
                     .get(node)
-                    .map(|n| n.output_type.clone())
-                    .unwrap_or_else(Self::default_type);
+                    .map_or_else(Self::default_type, |n| n.output_type.clone());
                 if !node_ty.dims.is_empty() || !node_ty.precision.is_integer() {
                     raise_lowering_error(
                         format!(
@@ -9829,8 +9771,7 @@ impl LowerCtx {
         let input_prec = self
             .dag
             .get(x)
-            .map(|n| n.output_type.precision)
-            .unwrap_or(Prim::F32);
+            .map_or(Prim::F32, |n| n.output_type.precision);
         if input_prec.is_float() {
             self.dag
                 .add_node(op, vec![x], out_ty, self.current_span_id.clone())
@@ -9926,15 +9867,13 @@ impl LowerCtx {
             return LoweredValue::Tuple(items);
         }
 
-        let ty = ty_expr
-            .map(|expr| {
-                Self::type_from_type_expr_with_subst(
-                    expr,
-                    &self.prec_substitutions,
-                    &self.rank_substitutions,
-                )
-            })
-            .unwrap_or_else(Self::default_type);
+        let ty = ty_expr.map_or_else(Self::default_type, |expr| {
+            Self::type_from_type_expr_with_subst(
+                expr,
+                &self.prec_substitutions,
+                &self.rank_substitutions,
+            )
+        });
         LoweredValue::Node(self.dag.add_node(
             RiscOp::Load { name: name.into() },
             vec![],
@@ -10008,8 +9947,7 @@ impl LowerCtx {
                 let ty = self
                     .dag
                     .get(current_node)
-                    .map(|node| node.output_type.clone())
-                    .unwrap_or_else(Self::default_type);
+                    .map_or_else(Self::default_type, |node| node.output_type.clone());
                 current = match fname.as_str() {
                     "neg" => LoweredValue::Node(self.dag.add_node(
                         RiscOp::Neg,
@@ -10225,8 +10163,7 @@ impl LowerCtx {
         let input_ty = self
             .dag
             .get(x)
-            .map(|n| n.output_type.clone())
-            .unwrap_or_else(Self::default_type);
+            .map_or_else(Self::default_type, |n| n.output_type.clone());
         let new_precision = if let Some(prim) = Self::try_extract_prim(&elems[3]) {
             // Handle (t-prim {} name) form.
             prim
@@ -10342,8 +10279,7 @@ impl LowerCtx {
         } else {
             self.dag
                 .get(then_node)
-                .map(|node| node.output_type.clone())
-                .unwrap_or_else(Self::default_type)
+                .map_or_else(Self::default_type, |node| node.output_type.clone())
         };
         if !out_ty.precision.is_float() {
             return self.lower_unrepresentable("if", elems);
@@ -10461,8 +10397,7 @@ impl LowerCtx {
                             let output_type = self
                                 .dag
                                 .get(id)
-                                .map(|node| node.output_type.clone())
-                                .unwrap_or_else(Self::default_type);
+                                .map_or_else(Self::default_type, |node| node.output_type.clone());
                             LoweredValue::Node(self.dag.add_node(
                                 RiscOp::Realize,
                                 vec![id],
@@ -10477,8 +10412,7 @@ impl LowerCtx {
             let output_type = self
                 .dag
                 .get(input)
-                .map(|node| node.output_type.clone())
-                .unwrap_or_else(Self::default_type);
+                .map_or_else(Self::default_type, |node| node.output_type.clone());
             LoweredValue::Node(self.dag.add_node(
                 RiscOp::Realize,
                 vec![input],
@@ -10521,8 +10455,7 @@ impl LowerCtx {
                 let output_type = self
                     .dag
                     .get(*id)
-                    .map(|node| node.output_type.clone())
-                    .unwrap_or_else(Self::default_type);
+                    .map_or_else(Self::default_type, |node| node.output_type.clone());
                 LoweredValue::Node(self.dag.add_node(
                     RiscOp::Copy,
                     vec![*id],
@@ -10656,7 +10589,7 @@ impl LowerCtx {
     /// chelis#520 D1 slice: when the scrutinee lowers to a statically-known
     /// constructor value (`LoweredValue::Adt`), the taken arm is resolved at
     /// lowering time and only that arm's body is lowered. This is the exact
-    /// gradient semantics for AD (spec/design/differentiable_language.md
+    /// gradient semantics for AD (`spec/design/differentiable_language.md`
     /// Phase 1: "the pattern match itself is non-differentiable; gradient
     /// flow goes through the matched values"): the constructor tag is
     /// discrete, so perturbing tensor inputs can never change the taken arm.
@@ -10885,8 +10818,7 @@ impl LowerCtx {
         let cond_ty = self
             .dag
             .get(cond)
-            .map(|node| node.output_type.clone())
-            .unwrap_or_else(Self::default_type);
+            .map_or_else(Self::default_type, |node| node.output_type.clone());
         if cond_ty.precision != out_ty.precision {
             mask = self.dag.add_node(
                 RiscOp::Cast {
@@ -11073,7 +11005,7 @@ mod tests {
     /// expand — never the collapsed `tensor[1]`.
     #[test]
     fn issue_318_expand_shape_arg_recovers_rank0_source_extent() {
-        let expr = r#"
+        let expr = r"
             (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
                  (var {} expand)
                  (app {type: (t-prim {} f32)}
@@ -11086,7 +11018,7 @@ mod tests {
                             (borrow {} (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} x))
                             (cast {} (lit {} 0) (t-prim {} int32)))
                        (t-prim {} int32)))
-        "#;
+        ";
         let dag = lower_with_bound_x(2, expr);
         let (size, dims) = only_expand(&dag);
         assert_eq!(
@@ -11111,7 +11043,7 @@ mod tests {
     /// (the line-review concern), so assert the count explicitly.
     #[test]
     fn issue_318_expand_shape_arg_no_dead_node() {
-        let expr = r#"
+        let expr = r"
             (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
                  (var {} expand)
                  (app {type: (t-prim {} f32)}
@@ -11124,7 +11056,7 @@ mod tests {
                             (borrow {} (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} x))
                             (cast {} (lit {} 0) (t-prim {} int32)))
                        (t-prim {} int32)))
-        "#;
+        ";
         let dag = lower_with_bound_x(2, expr);
         let x_loads = dag
             .nodes()
@@ -11155,7 +11087,7 @@ mod tests {
     #[test]
     fn issue_318_expand_shape_arg_recovers_extent_without_changing_rank_rule() {
         // Source: a rank-1 size-1 constant `tensor[1]`.
-        let expr = r#"
+        let expr = r"
             (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 1) (t-prim {} f32))}
                  (var {} expand)
                  (cast {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
@@ -11168,7 +11100,7 @@ mod tests {
                             (borrow {} (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} x))
                             (cast {} (lit {} 0) (t-prim {} int32)))
                        (t-prim {} int32)))
-        "#;
+        ";
         let dag = lower_with_bound_x(2, expr);
         let (size, dims) = only_expand(&dag);
         assert_eq!(
@@ -11189,7 +11121,7 @@ mod tests {
     /// `tensor[3]`, so `shape(&x, 0)` must recover `3`.
     #[test]
     fn issue_318_expand_shape_arg_tracks_named_tensor_size() {
-        let expr = r#"
+        let expr = r"
             (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
                  (var {} expand)
                  (app {type: (t-prim {} f32)}
@@ -11202,7 +11134,7 @@ mod tests {
                             (borrow {} (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))
                             (cast {} (lit {} 0) (t-prim {} int32)))
                        (t-prim {} int32)))
-        "#;
+        ";
         let dag = lower_with_bound_x(3, expr);
         let (size, dims) = only_expand(&dag);
         assert_eq!(
@@ -11222,7 +11154,7 @@ mod tests {
     /// so the shape-derived recovery did not regress the literal path.
     #[test]
     fn issue_318_expand_literal_size_still_recovers_extent() {
-        let expr = r#"
+        let expr = r"
             (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
                  (var {} expand)
                  (app {type: (t-prim {} f32)}
@@ -11230,7 +11162,7 @@ mod tests {
                       (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
                  (cast {} (lit {} 0) (t-prim {} int32))
                  (cast {} (lit {} 2) (t-prim {} int32)))
-        "#;
+        ";
         let dag = lower_with_bound_x(2, expr);
         let (size, dims) = only_expand(&dag);
         assert_eq!(
@@ -11280,7 +11212,7 @@ mod tests {
     fn issue_369_expand_let_bound_shape_recovers_extent() {
         // (let {} (bind {} len (shape x 0))
         //   (expand (scalar_to_tensor 3.0) 0 (cast len int32)))
-        let body = r#"
+        let body = r"
             (let {}
                  (bind {}
                        len
@@ -11295,7 +11227,7 @@ mod tests {
                            (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
                       (cast {} (lit {} 0) (t-prim {} int32))
                       (cast {} (var {} len) (t-prim {} int32))))
-        "#;
+        ";
         let dag = lower_body_with_bound_x(3, body);
         let (size, dims) = only_expand(&dag);
         assert_eq!(
@@ -11326,7 +11258,7 @@ mod tests {
         // Identical structure to the extent-3 test, but `x: tensor[5]` and
         // the expand output is annotated `tensor[5]`. A recovery that
         // reads x's dim yields Concrete(5); a hardcoded Concrete(3) fails.
-        let body = r#"
+        let body = r"
             (let {}
                  (bind {}
                        len
@@ -11341,7 +11273,7 @@ mod tests {
                            (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
                       (cast {} (lit {} 0) (t-prim {} int32))
                       (cast {} (var {} len) (t-prim {} int32))))
-        "#;
+        ";
         let dag = lower_body_with_bound_x(5, body);
         let (size, dims) = only_expand(&dag);
         assert_eq!(
@@ -11371,7 +11303,7 @@ mod tests {
     #[test]
     fn issue_369_expand_let_bound_non_shape_does_not_recover() {
         // len is bound to a static int (`cast(7, int32)`), not a shape read.
-        let body = r#"
+        let body = r"
             (let {}
                  (bind {} len (cast {} (lit {} 7) (t-prim {} int32)))
                  (app {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
@@ -11381,7 +11313,7 @@ mod tests {
                            (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
                       (cast {} (lit {} 0) (t-prim {} int32))
                       (cast {} (var {} len) (t-prim {} int32))))
-        "#;
+        ";
         let dag = lower_body_with_bound_x(3, body);
         let (size, _dims) = only_expand(&dag);
         // Folds to the `let`-bound static value 7 (NOT `x`'s shape extent 3,
@@ -11406,7 +11338,7 @@ mod tests {
         // len = shape(x, 0)          -- shape binding
         // len = cast(5, int32)       -- re-bound to a static value
         // expand(s, 0, cast(len, int32))  -- must recover 5, NOT the stale 3
-        let body = r#"
+        let body = r"
             (let {}
                  (bind {}
                        len
@@ -11423,7 +11355,7 @@ mod tests {
                            (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
                       (cast {} (lit {} 0) (t-prim {} int32))
                       (cast {} (var {} len) (t-prim {} int32))))
-        "#;
+        ";
         let dag = lower_body_with_bound_x(3, body);
         let (size, _dims) = only_expand(&dag);
         assert_eq!(
@@ -11436,13 +11368,13 @@ mod tests {
 
     #[test]
     fn lowering_marks_reusable_input_from_linearity_hint() {
-        let src = r#"
+        let src = r"
             (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}
                    (var {} relu)
                    (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x)))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         let node = dag
             .roots()
@@ -11454,7 +11386,7 @@ mod tests {
 
     #[test]
     fn lower_gather_uses_sparse_ir_node() {
-        let src = r#"
+        let src = r"
             (def {} values
               (var {type: (t-tensor {} (d-lit {} 4) (d-lit {} 2) (t-prim {} f32))} values))
             (def {} indices
@@ -11465,7 +11397,7 @@ mod tests {
                    (var {type: (t-tensor {} (d-lit {} 4) (d-lit {} 2) (t-prim {} f32))} values)
                    (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} int32))} indices)
                    (lit {type: (t-prim {} int32)} 0)))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         let gather = dag
             .nodes()
@@ -11491,7 +11423,7 @@ mod tests {
         // scatter_replace MUST reach the sparse evaluator/codegen
         // path, NOT the host-runtime fallback (which the existing
         // `scatter(..., mode)` builtin uses).
-        let src = r#"
+        let src = r"
             (def {} base
               (var {type: (t-tensor {} (d-lit {} 4) (d-lit {} 2) (t-prim {} f32))} base))
             (def {} indices
@@ -11505,7 +11437,7 @@ mod tests {
                    (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} int32))} indices)
                    (var {type: (t-tensor {} (d-lit {} 3) (d-lit {} 2) (t-prim {} f32))} updates)
                    (lit {type: (t-prim {} int32)} 0)))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         let scatter = dag
             .nodes()
@@ -11536,11 +11468,11 @@ mod tests {
 
     #[test]
     fn lower_add_two_consts() {
-        let src = r#"
+        let src = r"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 1.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 2.0))
             (def {} c (app {} (var {} add) (var {} a) (var {} b)))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         assert_eq!(non_drop_len(&dag), 3);
         let add_node = dag.get(NodeId(2)).unwrap();
@@ -11551,10 +11483,10 @@ mod tests {
 
     #[test]
     fn lower_neg() {
-        let src = r#"
+        let src = r"
             (def {} x (lit {type: (t-tensor {} (t-prim {} f32))} 5.0))
             (def {} y (app {} (var {} neg) (var {} x)))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         assert_eq!(dag.len(), 2);
         let neg_node = dag.get(NodeId(1)).unwrap();
@@ -11565,11 +11497,11 @@ mod tests {
 
     #[test]
     fn lower_sub_decomposes() {
-        let src = r#"
+        let src = r"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 1.0))
             (def {} c (app {} (var {} sub) (var {} a) (var {} b)))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         // a=Const(3), b=Const(1), Neg(b), Add(a, Neg(b))
         assert_eq!(non_drop_len(&dag), 4);
@@ -11579,10 +11511,10 @@ mod tests {
 
     #[test]
     fn lower_relu_decomposes() {
-        let src = r#"
+        let src = r"
             (def {} x (lit {type: (t-tensor {} (t-prim {} f32))} -2.0))
             (def {} y (app {} (var {} relu) (var {} x)))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         // x=Const(-2), Const(0), MaxElem(x, 0)
         assert_eq!(non_drop_len(&dag), 3);
@@ -11592,14 +11524,14 @@ mod tests {
 
     #[test]
     fn lower_let_binding() {
-        let src = r#"
+        let src = r"
             (let {} (bind {} x (lit {type: (t-tensor {} (t-prim {} f32))} 10.0))
                 (let {}
                   (bind {} out (app {} (var {} neg) (var {} x)))
                   (let {}
                     (bind {} __drop_x (app {} (var {} drop) (var {} x)))
                     (var {} out))))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         // x=Const(10), Neg(x)
         assert_eq!(non_drop_len(&dag), 2);
@@ -11608,12 +11540,12 @@ mod tests {
 
     #[test]
     fn unconsumed_let_binding_gets_terminal_drop() {
-        let src = r#"
+        let src = r"
             (let {} (bind {} x (lit {type: (t-tensor {} (t-prim {} f32))} 10.0))
                 (let {}
                   (bind {} out (app {} (var {} neg) (var {} x)))
                   (var {} out)))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         assert_eq!(non_drop_len(&dag), 2);
         let drops = dag
@@ -11628,7 +11560,7 @@ mod tests {
 
     #[test]
     fn repeated_consuming_user_call_gets_copy() {
-        let src = r#"
+        let src = r"
             (def {} consume
               (fn {type: (t-fn {}
                             (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
@@ -11651,7 +11583,7 @@ mod tests {
                   (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}
                     (var {} consume)
                     (var {} x)))))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         let copy_count = dag
             .nodes()
@@ -11665,7 +11597,7 @@ mod tests {
     #[test]
     fn context_lowering_inserts_copy_for_library_boundary_fanout() {
         let library_exprs = chelis_deep::parser::parse_str(
-            r#"
+            r"
                 (def {} consume
                   (fn {type: (t-fn {}
                                 (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
@@ -11674,7 +11606,7 @@ mod tests {
                       (x {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}))
                     (realize {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}
                       (var {} x))))
-            "#,
+            ",
         )
         .expect("parse library");
         let (type_env, library_checked) =
@@ -11686,7 +11618,7 @@ mod tests {
         let library = lower_program_to_library(&library_checked);
 
         let new_exprs = chelis_deep::parser::parse_str(
-            r#"
+            r"
                 (def {} double_it
                   (fn {type: (t-fn {}
                                 (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
@@ -11701,7 +11633,7 @@ mod tests {
                       (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}
                         (var {} consume)
                         (var {} x)))))
-            "#,
+            ",
         )
         .expect("parse new code");
         let new_checked =
@@ -11740,7 +11672,7 @@ mod tests {
     #[test]
     fn lm_style_local_grad_wrapper_defs_are_marked_lowerable() {
         let checked = parse_and_check(
-            r#"
+            r"
                 (defsig {}
                   jac_row
                   (t-fn {}
@@ -11828,7 +11760,7 @@ mod tests {
                         (app {} (var {} Cons) (lit {type: (t-prim {} f32)} 2.0) (var {} Nil))))
                     (cast {} (lit {type: (t-prim {} f32)} 1.0) (t-prim {} f32))
                     (cast {} (lit {type: (t-prim {} f32)} 3.0) (t-prim {} f32))))
-            "#,
+            ",
         );
         let lowered = top_level_lowering_map(checked.exprs(), checked.type_env());
         assert_eq!(
@@ -11851,7 +11783,7 @@ mod tests {
     #[test]
     fn lm_style_local_grad_wrapper_subexpr_does_not_load_callable_arg_as_data() {
         let checked = parse_and_check(
-            r#"
+            r"
                 (defsig {}
                   jac_row
                   (t-fn {}
@@ -11939,7 +11871,7 @@ mod tests {
                         (app {} (var {} Cons) (lit {type: (t-prim {} f32)} 2.0) (var {} Nil))))
                     (cast {} (lit {type: (t-prim {} f32)} 1.0) (t-prim {} f32))
                     (cast {} (lit {type: (t-prim {} f32)} 3.0) (t-prim {} f32))))
-            "#,
+            ",
         );
         let out_expr = checked
             .exprs()
@@ -11995,7 +11927,7 @@ mod tests {
     #[test]
     fn nested_callable_param_app_in_grad_body_resolves_named_function_arg() {
         let checked = parse_and_check(
-            r#"
+            r"
                 (defsig {}
                   jac_row
                   (t-fn {}
@@ -12047,7 +11979,7 @@ mod tests {
                       (x {type: (t-prim {} f32)})
                       (y {type: (t-prim {} f32)}))
                     (app {} (var {} sub) (var {} y) (var {} x))))
-            "#,
+            ",
         );
         let program_defs = collect_top_level_defs(checked.exprs());
         let jac_fn = match program_defs.get("jac_row") {
@@ -12146,12 +12078,12 @@ mod tests {
 
     #[test]
     fn tuple_return_lowers_to_named_store_roots() {
-        let src = r#"
+        let src = r"
             (def {} grads
               (tuple {}
                 (lit {type: (t-prim {} f32)} 1.0)
                 (lit {type: (t-prim {} f32)} 2.0)))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         let roots = dag.roots();
         assert_eq!(roots.len(), 2);
@@ -12176,10 +12108,10 @@ mod tests {
     /// `chelis-compiler-api::compiler::compile_source`.
     #[test]
     fn issue232_export_directive_does_not_emit_dag_root() {
-        let src = r#"
+        let src = r"
             (def {} forward (lit {type: (t-prim {} f32)} 1.0))
             (export {} forward)
-        "#;
+        ";
         let dag = parse_and_lower(src);
         // Only `forward`'s lowered value-node is a root. The
         // `(export {} forward)` directive must contribute zero roots
@@ -12205,10 +12137,10 @@ mod tests {
     /// emit a `Const` node and add it as a root.
     #[test]
     fn issue232_import_directive_does_not_emit_dag_root() {
-        let src = r#"
+        let src = r"
             (def {} forward (lit {type: (t-prim {} f32)} 1.0))
             (import {} Math (params {}))
-        "#;
+        ";
         // Use `parse_and_lower_unchecked` because the standalone
         // `(import {} ...)` form isn't run through the regular
         // type-checker path; we want a direct lowering observation.
@@ -12236,10 +12168,10 @@ mod tests {
     /// — same lower-time hazard as `export` and `import`.
     #[test]
     fn issue232_import_all_directive_does_not_emit_dag_root() {
-        let src = r#"
+        let src = r"
             (def {} forward (lit {type: (t-prim {} f32)} 1.0))
             (import-all {} Math)
-        "#;
+        ";
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
         let mut ctx = LowerCtx::new(
             std::collections::HashMap::new(),
@@ -12259,7 +12191,7 @@ mod tests {
 
     #[test]
     fn tuple_get_resolves_during_lowering_without_tuple_ir_node() {
-        let src = r#"
+        let src = r"
             (def {} grads
               (tuple {}
                 (lit {type: (t-prim {} f32)} 1.0)
@@ -12268,7 +12200,7 @@ mod tests {
               (tuple-get {}
                 (var {} grads)
                 1))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         assert!(
             dag.nodes()
@@ -12282,11 +12214,11 @@ mod tests {
 
     #[test]
     fn lower_gt_decomposes() {
-        let src = r#"
+        let src = r"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 5.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} c (app {} (var {} gt) (var {} a) (var {} b)))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         // a, b, CmpLt(b, a)
         assert_eq!(non_drop_len(&dag), 3);
@@ -12298,11 +12230,11 @@ mod tests {
 
     #[test]
     fn lower_gte_decomposes() {
-        let src = r#"
+        let src = r"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 5.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} c (app {} (var {} gte) (var {} a) (var {} b)))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         // a, b, CmpLt(a,b), Const(1), CmpLt(lt, 1)
         assert_eq!(non_drop_len(&dag), 5);
@@ -12311,22 +12243,22 @@ mod tests {
 
     #[test]
     fn lower_lte_decomposes() {
-        let src = r#"
+        let src = r"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 5.0))
             (def {} c (app {} (var {} lte) (var {} a) (var {} b)))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         assert_eq!(non_drop_len(&dag), 5);
     }
 
     #[test]
     fn lower_eq_decomposes() {
-        let src = r#"
+        let src = r"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} c (app {} (var {} eq) (var {} a) (var {} b)))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         // a, b, CmpLt(a,b), CmpLt(b,a), MaxElem, Const(1), CmpLt(or, 1)
         assert_eq!(non_drop_len(&dag), 7);
@@ -12334,11 +12266,11 @@ mod tests {
 
     #[test]
     fn lower_min_elem_decomposes() {
-        let src = r#"
+        let src = r"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 5.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} c (app {} (var {} min_elem) (var {} a) (var {} b)))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         // a, b, neg(a), neg(b), max(neg_a, neg_b), neg(max)
         assert_eq!(non_drop_len(&dag), 6);
@@ -12350,11 +12282,11 @@ mod tests {
 
     #[test]
     fn lower_and_decomposes() {
-        let src = r#"
+        let src = r"
             (def {} a (lit {type: (t-tensor {} (t-prim {} bool))} true))
             (def {} b (lit {type: (t-tensor {} (t-prim {} bool))} false))
             (def {} c (app {} (var {} and) (var {} a) (var {} b)))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         // a, b, Mul(a, b)
         assert_eq!(non_drop_len(&dag), 3);
@@ -12364,11 +12296,11 @@ mod tests {
 
     #[test]
     fn lower_or_decomposes() {
-        let src = r#"
+        let src = r"
             (def {} a (lit {type: (t-tensor {} (t-prim {} bool))} false))
             (def {} b (lit {type: (t-tensor {} (t-prim {} bool))} true))
             (def {} c (app {} (var {} or) (var {} a) (var {} b)))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         // a, b, MaxElem(a, b)
         assert_eq!(dag.len(), 3);
@@ -12378,10 +12310,10 @@ mod tests {
 
     #[test]
     fn lower_not_decomposes() {
-        let src = r#"
+        let src = r"
             (def {} a (lit {type: (t-tensor {} (t-prim {} bool))} true))
             (def {} b (app {} (var {} not) (var {} a)))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         // a, Const(1), CmpLt(a, 1)
         assert_eq!(non_drop_len(&dag), 3);
@@ -12392,10 +12324,10 @@ mod tests {
 
     #[test]
     fn lower_reshape_recognized() {
-        let src = r#"
+        let src = r"
             (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
             (def {} y (app {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} (var {} reshape) (var {} x)))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         let last = dag.get(NodeId(dag.len() - 1)).unwrap();
         assert!(matches!(last.op, RiscOp::Reshape { .. }));
@@ -12404,7 +12336,7 @@ mod tests {
 
     #[test]
     fn lower_pad_recognized() {
-        let src = r#"
+        let src = r"
             (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 6) (t-prim {} f32))}
@@ -12412,7 +12344,7 @@ mod tests {
                    (var {} x)
                    ((1 1))
                    0.0))
-        "#;
+        ";
         let dag = parse_and_lower_unchecked(src);
         let last = dag.get(NodeId(dag.len() - 1)).unwrap();
         assert!(matches!(last.op, RiscOp::Pad { .. }));
@@ -12421,14 +12353,14 @@ mod tests {
 
     #[test]
     fn lower_shrink_recognized() {
-        let src = r#"
+        let src = r"
             (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
                    (var {} shrink)
                    (var {} x)
                    ((1 1))))
-        "#;
+        ";
         let dag = parse_and_lower_unchecked(src);
         let last = dag.get(NodeId(dag.len() - 1)).unwrap();
         assert!(matches!(last.op, RiscOp::Shrink { .. }));
@@ -12436,14 +12368,14 @@ mod tests {
 
     #[test]
     fn lower_stride_recognized() {
-        let src = r#"
+        let src = r"
             (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
                    (var {} stride)
                    (var {} x)
                    2))
-        "#;
+        ";
         let dag = parse_and_lower_unchecked(src);
         let last = dag.get(NodeId(dag.len() - 1)).unwrap();
         assert!(matches!(last.op, RiscOp::Stride { .. }));
@@ -12465,7 +12397,7 @@ mod tests {
         // `shrink(x, [[cast(0, int32), cast(2, int32)]])`: an outer
         // `Cons(pair, Nil)`, where `pair` is `Cons(cast(0), Cons(cast(2),
         // Nil))` and each `cast` wraps an int32 `lit`.
-        let src = r#"
+        let src = r"
             (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
@@ -12478,7 +12410,7 @@ mod tests {
                                   (cast {} (lit {type: (t-prim {} int32)} 2) (t-prim {} int32))
                                   (var {} Nil)))
                         (var {} Nil))))
-        "#;
+        ";
         let dag = parse_and_lower_unchecked(src);
         let bounds = dag
             .nodes()
@@ -12501,7 +12433,7 @@ mod tests {
     /// `extract_int_for_dim` did not regress the literal path.
     #[test]
     fn lower_shrink_plain_cons_bounds_still_extract_issue_291() {
-        let src = r#"
+        let src = r"
             (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
@@ -12514,7 +12446,7 @@ mod tests {
                                   (lit {type: (t-prim {} int32)} 2)
                                   (var {} Nil)))
                         (var {} Nil))))
-        "#;
+        ";
         let dag = parse_and_lower_unchecked(src);
         let bounds = dag
             .nodes()
@@ -12535,10 +12467,10 @@ mod tests {
 
     #[test]
     fn lower_sum_reduction() {
-        let src = r#"
+        let src = r"
             (def {} x (lit {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} 1.0))
             (def {} y (app {type: (t-tensor {} (t-prim {} f32))} (var {} sum) (var {} x) (lit {} 0)))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         // x=Const(1), axis_const=Const(0) is lowered inline, Sum{axis:0}
         let found_sum = dag
@@ -12550,10 +12482,10 @@ mod tests {
 
     #[test]
     fn lower_max_reduce_reduction() {
-        let src = r#"
+        let src = r"
             (def {} x (lit {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} 1.0))
             (def {} y (app {type: (t-tensor {} (t-prim {} f32))} (var {} max_reduce) (var {} x) (lit {} 0)))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         let found = dag
             .nodes()
@@ -12574,12 +12506,12 @@ mod tests {
         // `w` (the stacked operand) carries NO type -> rank-0 node. The
         // max_reduce app is typed `[m]` (rank 1). Before the fix this
         // panicked with the rank-0 diagnostic.
-        let src = r#"
+        let src = r"
             (def {} w (var {} w))
             (def {} y
               (app {type: (t-tensor {} (d-name {} m) (t-prim {} f32))}
                    (var {} max_reduce) (var {} w) (lit {} 0)))
-        "#;
+        ";
         let dag = parse_and_lower_unchecked(src);
         let mr = dag
             .nodes()
@@ -12598,9 +12530,9 @@ mod tests {
         );
     }
 
-    /// Issue #320 end-to-end (max_reduce): a windowed operand that lowers to
+    /// Issue #320 end-to-end (`max_reduce)`: a windowed operand that lowers to
     /// the rank-0 placeholder must grad+eval correctly once the front-end
-    /// recovers its rank. `w = reshape(x, [2,2])` is lowered UNtyped (rank-0
+    /// recovers its rank. `w = reshape(x, [2,2])` is lowered `UNtyped` (rank-0
     /// node) but its runtime value is `[2,2]`; `max_reduce(w, 0)` reduces
     /// axis 0 (rows), giving the per-column max. The subgradient routes 1 to
     /// each column's argmax row. With `x = [1,2,4,3]` reshaped row-major to
@@ -12614,7 +12546,7 @@ mod tests {
         // `w = reshape(x, [2,2])` with NO type on the reshape app -> rank-0
         // operand node, but a real producer (Reshape over the `x` Load).
         // `max_reduce(w, 0)` is typed `[2]`; `sum(..., 0)` -> scalar loss.
-        let src = r#"
+        let src = r"
             (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
             (def {} w (app {} (var {} reshape) (var {} x)
                           (app {} (var {} Cons) (lit {} 2)
@@ -12623,7 +12555,7 @@ mod tests {
                            (var {} max_reduce) (var {} w) (lit {} 0)))
             (def {} loss (app {type: (t-tensor {} (t-prim {} f32))}
                               (var {} sum) (var {} m) (lit {} 0)))
-        "#;
+        ";
         let dag = parse_and_lower_unchecked(src);
         // The loss is the scalar `Sum` consuming the `MaxReduce`.
         let mr_id = dag
@@ -12678,7 +12610,7 @@ mod tests {
         //    len  = shape(x, 0)
         //    twos = expand(scalar_to_tensor(2.0), 0, cast(len, int32))
         //    sum(mul(x, twos), 0) }`  -- the exact `tensor_full_like` shape.
-        let body = r#"
+        let body = r"
             (let {}
                  (bind {}
                        len
@@ -12703,7 +12635,7 @@ mod tests {
                                 (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
                                 (var {} twos))
                            (cast {} (lit {} 0) (t-prim {} int32)))))
-        "#;
+        ";
         let dag = lower_body_with_bound_x(3, body);
         // The loss is the scalar `Sum` over `mul(x, twos)`.
         let loss = dag
@@ -12782,7 +12714,7 @@ mod tests {
 
     /// Issue #320 end-to-end (gather): a windowed `values` operand that
     /// lowers to the rank-0 placeholder must grad+eval correctly once the
-    /// front-end recovers its rank. `w = reshape(x, [4])` is lowered UNtyped
+    /// front-end recovers its rank. `w = reshape(x, [4])` is lowered `UNtyped`
     /// (rank-0 node) but its runtime value is `[4]`; `gather(w, idx, 0)` with
     /// `idx = [0, 2]` selects `w[0]` and `w[2]`. `f(x) = x0 + x2`, so the
     /// scatter-add adjoint gives `df/dx = [1, 0, 1, 0]`.
@@ -12791,7 +12723,7 @@ mod tests {
         use crate::eval::{TensorValue, eval_tensor};
         use crate::grad::grad_dag_checked;
 
-        let src = r#"
+        let src = r"
             (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
             (def {} idx (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} int64))} idx))
             (def {} w (app {} (var {} reshape) (var {} x)
@@ -12800,7 +12732,7 @@ mod tests {
                            (var {} gather) (var {} w) (var {} idx) (lit {} 0)))
             (def {} loss (app {type: (t-tensor {} (t-prim {} f32))}
                               (var {} sum) (var {} g) (lit {} 0)))
-        "#;
+        ";
         let dag = parse_and_lower_unchecked(src);
         let g_id = dag
             .nodes()
@@ -12848,13 +12780,13 @@ mod tests {
     fn issue_320_gather_recovers_values_rank_from_ascription() {
         // `values` carries NO type -> rank-0 node. `indices` is `[3]`. The
         // gather app is typed `[3]` (gather of a rank-1 values over axis 0).
-        let src = r#"
+        let src = r"
             (def {} values (var {} values))
             (def {} indices (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} int32))} indices))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
                    (var {} gather) (var {} values) (var {} indices) (lit {} 0)))
-        "#;
+        ";
         let dag = parse_and_lower_unchecked(src);
         let g = dag
             .nodes()
@@ -12872,11 +12804,11 @@ mod tests {
 
     #[test]
     fn lower_cmplt_produces_bool_output() {
-        let src = r#"
+        let src = r"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 1.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 2.0))
             (def {} c (app {} (var {} cmplt) (var {} a) (var {} b)))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         let cmplt_node = dag
             .nodes()
@@ -13432,7 +13364,7 @@ mod regression_tests {
     // Fix 3: Lexical scoping -- let restores bindings.
     #[test]
     fn fix3_let_multiple_bindings() {
-        let src = r#"
+        let src = r"
             (let {} (bind {} x (lit {type: (t-tensor {} (t-prim {} f32))} 1.0)
                            y (lit {type: (t-tensor {} (t-prim {} f32))} 2.0))
                 (let {}
@@ -13442,7 +13374,7 @@ mod regression_tests {
                     (let {}
                       (bind {} __drop_y (app {} (var {} drop) (var {} y)))
                       (var {} out)))))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         assert_eq!(non_drop_len(&dag), 3);
         let add_node = dag.get(NodeId(2)).unwrap();
@@ -13453,10 +13385,10 @@ mod regression_tests {
 
     #[test]
     fn fix3_let_scope_does_not_leak() {
-        let src = r#"
+        let src = r"
             (let {} (bind {} x (lit {} 1.0)) (var {} x))
             (var {} x)
-        "#;
+        ";
         let dag = parse_and_lower_unchecked(src);
         let last = dag.get(NodeId(dag.len() - 1)).unwrap();
         assert!(
@@ -13467,10 +13399,10 @@ mod regression_tests {
 
     #[test]
     fn fix3_fn_scope_does_not_leak() {
-        let src = r#"
+        let src = r"
             (fn {} (params {} p) (var {} p))
             (var {} p)
-        "#;
+        ";
         let dag = parse_and_lower_unchecked(src);
         let last = dag.get(NodeId(dag.len() - 1)).unwrap();
         assert!(
@@ -13482,7 +13414,7 @@ mod regression_tests {
     #[test]
     fn typed_fn_params_preserve_tensor_shape_for_lowering() {
         let exprs = chelis_deep::parser::parse_str(
-            r#"
+            r"
                 (fn {}
                     (params {}
                         (x {type: (t-tensor {} (d-lit {} 32) (d-lit {} 784) (t-prim {} f32))})
@@ -13491,7 +13423,7 @@ mod regression_tests {
                         (var {} matmul)
                         (var {} x)
                         (var {} w)))
-            "#,
+            ",
         )
         .expect("parse failed");
         let mut ctx = LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
@@ -13521,7 +13453,7 @@ mod regression_tests {
     #[test]
     fn pipe_lambda_stage_preserves_tensor_shape_for_following_matmul() {
         let dag = parse_and_lower(
-            r#"
+            r"
                 (def {} x
                   (var {type: (t-tensor {} (d-lit {} 32) (d-lit {} 784) (t-prim {} f32))} x))
                 (def {} w1
@@ -13548,7 +13480,7 @@ mod regression_tests {
                     (var {} matmul)
                     (var {} h1)
                     (var {} w2)))
-            "#,
+            ",
         );
         let root = dag
             .roots()
@@ -13652,10 +13584,10 @@ mod regression_tests {
     // regression uses int32 as a representative non-f32 scalar target.
     #[test]
     fn fix9_cast_with_tprim_node() {
-        let src = r#"
+        let src = r"
             (def {} x (lit {} 1.0))
             (def {} y (cast {} (var {} x) (t-prim {} int32)))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         let cast_node = dag
             .nodes()
@@ -13673,10 +13605,10 @@ mod regression_tests {
 
     #[test]
     fn fix9_cast_bare_symbol_still_works() {
-        let src = r#"
+        let src = r"
             (def {} x (lit {} 1.0))
             (def {} y (cast {} (var {} x) f16))
-        "#;
+        ";
         let dag = parse_and_lower(src);
         let cast_node = dag
             .nodes()
@@ -13697,10 +13629,10 @@ mod regression_tests {
         // tensor precision for Phase 0f), so this test bypasses the checker
         // to keep exercising the IR lowerer property: a Cast node should
         // inherit the input tensor's dims regardless of target precision.
-        let src = r#"
+        let src = r"
             (def {} x (var {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} x))
             (def {} y (cast {} (var {} x) (t-prim {} bf16)))
-        "#;
+        ";
         let dag = parse_and_lower_unchecked(src);
         let cast_node = dag
             .nodes()
@@ -14117,7 +14049,7 @@ mod regression_tests {
     // audit would wrongly reject it if it walked into the meta map.
     #[test]
     fn deftype_tensor_invariant_metadata_does_not_trip_runtime_audit() {
-        let src = r#"
+        let src = r"
             (deftype {invariant: (fn {}
                                    (params {} p)
                                    (app {}
@@ -14131,7 +14063,7 @@ mod regression_tests {
               (variant {}
                 Simplex
                 (field {} weights (t-tensor {} (d-lit {} 3) (t-prim {} f32)))))
-        "#;
+        ";
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
         // Neither audit may panic on declaration metadata.
         for expr in &exprs {
@@ -14147,7 +14079,7 @@ mod regression_tests {
     // metadata is runtime IR.
     #[test]
     fn deftype_scalar_invariant_metadata_does_not_trip_runtime_audit() {
-        let src = r#"
+        let src = r"
             (deftype {invariant: (fn {}
                                    (params {} p)
                                    (app {}
@@ -14165,7 +14097,7 @@ mod regression_tests {
               (variant {}
                 Probability
                 (field {} value (t-prim {} f32))))
-        "#;
+        ";
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
         for expr in &exprs {
             assert_ir_typed(expr);
@@ -14216,7 +14148,7 @@ mod regression_tests {
     #[test]
     fn grad_applied_to_named_top_level_def_lowers_without_panic() {
         use std::collections::HashMap;
-        let fn_src = r#"
+        let fn_src = r"
             (fn {}
               (params {}
                 (x {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}))
@@ -14227,12 +14159,12 @@ mod regression_tests {
                   (copy {} (var {} x))
                   (copy {} (var {} x)))
                 (lit {type: (t-prim {} int32)} 0)))
-        "#;
-        let app_src = r#"
+        ";
+        let app_src = r"
             (app {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
               (grad {} (var {} loss))
               (var {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} input))
-        "#;
+        ";
         let fn_expr = chelis_deep::parser::parse_str(fn_src)
             .expect("parse fn failed")
             .into_iter()
@@ -14271,7 +14203,7 @@ mod regression_tests {
     #[test]
     fn grad_applied_to_named_top_level_def_gradient_is_correct() {
         use std::collections::HashMap;
-        let fn_src = r#"
+        let fn_src = r"
             (fn {}
               (params {}
                 (x {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}))
@@ -14282,12 +14214,12 @@ mod regression_tests {
                   (copy {} (var {} x))
                   (copy {} (var {} x)))
                 (lit {type: (t-prim {} int32)} 0)))
-        "#;
-        let app_src = r#"
+        ";
+        let app_src = r"
             (app {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
               (grad {} (var {} loss))
               (var {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} input))
-        "#;
+        ";
         let fn_expr = chelis_deep::parser::parse_str(fn_src)
             .expect("parse fn failed")
             .into_iter()
@@ -14335,7 +14267,7 @@ mod regression_tests {
         // "lowers_without_panic" and "resolves" names both pass.
         // (The actual content is the positive numeric test above.)
         use std::collections::HashMap;
-        let fn_src = r#"
+        let fn_src = r"
             (fn {}
               (params {}
                 (x {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}))
@@ -14346,12 +14278,12 @@ mod regression_tests {
                   (copy {} (var {} x))
                   (copy {} (var {} x)))
                 (lit {type: (t-prim {} int32)} 0)))
-        "#;
-        let app_src = r#"
+        ";
+        let app_src = r"
             (app {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
               (grad {} (var {} loss))
               (var {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} input))
-        "#;
+        ";
         let fn_expr = chelis_deep::parser::parse_str(fn_src)
             .expect("parse fn failed")
             .into_iter()

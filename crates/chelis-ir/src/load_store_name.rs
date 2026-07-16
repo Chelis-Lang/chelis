@@ -193,12 +193,14 @@ impl LoadStoreName {
 
     /// Borrow the validated name as `&str`.
     #[inline]
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Consume the newtype, returning the underlying validated `String`.
     #[inline]
+    #[must_use]
     pub fn into_string(self) -> String {
         self.0
     }

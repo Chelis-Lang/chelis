@@ -59,16 +59,15 @@ fn shoals_root() -> Option<PathBuf> {
 
 /// Skip-with-message helper. Tests use this when Shoals is not present.
 fn skip_if_no_shoals() -> Option<PathBuf> {
-    match shoals_root() {
-        Some(p) => Some(p),
-        None => {
-            eprintln!(
-                "phase3l_shoals_oracle: skipped. Shoals checkout not found. \
-                 Set CHELIS_SHOALS_PATH or place shoals/ as a sibling of the \
-                 chelis monorepo root."
-            );
-            None
-        }
+    if let Some(p) = shoals_root() {
+        Some(p)
+    } else {
+        eprintln!(
+            "phase3l_shoals_oracle: skipped. Shoals checkout not found. \
+             Set CHELIS_SHOALS_PATH or place shoals/ as a sibling of the \
+             chelis monorepo root."
+        );
+        None
     }
 }
 
@@ -127,7 +126,7 @@ fn phase3l_shoals_oracle() {
     let driver_path = shoals.join("src/oracledriver.ch");
     std::fs::write(
         &driver_path,
-        r#"module Shoals.Oracledriver
+        r"module Shoals.Oracledriver
 import Shoals.Pricing (bs_call_scalar, mc_call_price)
 bs_atm = bs_call_scalar(cast(100.0, f32), cast(100.0, f32), cast(0.05, f32), cast(0.2, f32), cast(1.0, f32))
 mc_seed42_a = with seed(42) {
@@ -138,7 +137,7 @@ mc_seed42_b = with seed(42) {
   template_b = to_tensor(map(fn (i: int64) -> cast(0.0, f32), range(cast(0, int64), cast(20000, int64))))
   mc_call_price(template_b, cast(100.0, f32), cast(100.0, f32), cast(0.05, f32), cast(0.2, f32), cast(1.0, f32))
 }
-"#,
+",
     )
     .expect("write oracle driver");
     let _guard = DriverGuard(driver_path.clone());
@@ -151,7 +150,7 @@ mc_seed42_b = with seed(42) {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(&shoals)
         .args(["eval", "--file", driver_path.to_str().unwrap()])
-        .timeout(std::time::Duration::from_secs(300))
+        .timeout(std::time::Duration::from_mins(5))
         .assert()
         .success();
 
@@ -203,7 +202,7 @@ fn phase3l_shoals_oracle_grad_greeks_match_analytic() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(&shoals)
         .args(["check", "properties/greeks.ch"])
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_mins(2))
         .assert()
         .success()
         .stdout(predicate::str::contains("\"score\": 1"));

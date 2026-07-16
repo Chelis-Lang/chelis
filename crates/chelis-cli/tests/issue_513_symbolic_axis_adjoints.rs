@@ -4,7 +4,7 @@
 //! `Named(_, None)` symbolic dim even when the symbolic axis does not
 //! participate in the op at all.
 //!
-//! Three sub-slices are enabled, each exact (no shape() VALUE read needed,
+//! Three sub-slices are enabled, each exact (no `shape()` VALUE read needed,
 //! the adjoint carries the symbolic dim through structurally):
 //!
 //!   1. `Stride` adjoint over a symbolic NON-strided axis (`stride` of a
@@ -25,7 +25,7 @@
 //! Every enabled path is locked by (i) a central-difference finite-difference
 //! oracle and (ii) eval-vs-`chelis build --target c` backend agreement,
 //! following `issue_513_reshape_shape_derived_grad.rs`. Paths that would need
-//! a runtime shape() VALUE in an ADJOINT construction (symbolic strided
+//! a runtime `shape()` VALUE in an ADJOINT construction (symbolic strided
 //! axis, symbolic reduced prod axis, runtime shrink bounds on a symbolic
 //! axis) REMAIN fail-closed with loud diagnostics, pinned by the negative
 //! tests at the bottom.
@@ -191,7 +191,7 @@ const STRIDE_BASE: [f64; 8] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
 /// FD oracle, linear: loss = sum(stride(x, 1, 2)), so the gradient is 1 at
 /// the kept columns {0, 2} of every (symbolic-batch) row and 0 elsewhere.
 /// Pre-fix this failed loud: "cannot determine size for symbolic dimension
-/// `batch`" from the stride adjoint's all-axes dim_size sweep.
+/// `batch`" from the stride adjoint's all-axes `dim_size` sweep.
 #[test]
 fn issue_513_stride_symbolic_batch_grad_linear_matches_fd() {
     let (shape, grad) = eval_grad(&grad_source(
@@ -258,7 +258,7 @@ const PROD_BASE: [f64; 6] = [0.5, 1.5, 2.0, 1.0, 2.5, 0.5];
 /// FD oracle: loss = sum over batch of prod over the concrete axis; the
 /// gradient at x[i][j] is the leave-one-out product of row i. Pre-fix this
 /// failed loud: "cannot determine size for symbolic dimension `batch`" from
-/// the prod_reduce adjoint's bystander-axis dim_size in the slice bounds.
+/// the `prod_reduce` adjoint's bystander-axis `dim_size` in the slice bounds.
 #[test]
 fn issue_513_prod_reduce_symbolic_batch_grad_matches_fd() {
     let (shape, grad) = eval_grad(&grad_source(
@@ -302,7 +302,7 @@ fn issue_513_prod_reduce_zero_element_symbolic_batch_grad_matches_fd() {
 // ---------------------------------------------------------------------------
 
 /// Concrete-input verb whose reshape target is `[mul(b_d, a_d), 1]`, an
-/// arithmetic expression over shape() reads. No `sig` line: the def carries
+/// arithmetic expression over `shape()` reads. No `sig` line: the def carries
 /// the concrete annotation directly.
 fn reshape_arith_source(nonlinear: bool, literal: &str, grad: bool) -> String {
     let sq = if nonlinear {
@@ -332,7 +332,7 @@ const RESHAPE_BASE: [f64; 4] = [1.0, 2.0, 3.0, 4.0];
 
 /// FD oracle, linear: loss = sum(reshape(permute(x), [b*a, 1])) = sum(x),
 /// gradient all ones. Pre-fix the unresolvable `mul(...)` target fell back to
-/// the checker's `Named("*")` wildcard dims and the backward Expand ICEd in
+/// the checker's `Named("*")` wildcard dims and the backward Expand `ICEd` in
 /// `symbolic_occurrences` ("symbolic dim `*` ... no Load input declares it").
 #[test]
 fn issue_513_reshape_arith_target_grad_linear_matches_fd() {
@@ -558,7 +558,7 @@ fn parse_lines(stdout: &str) -> Vec<f64> {
 /// `shape()` read, at ANY rank (chelis#613, a pre-existing bare-grad-export
 /// lane limitation unrelated to this issue; the reshape-arith oracle below
 /// bare-exports fine because its body reads `shape()`). The stride and
-/// prod_reduce verbs here have shape()-free bodies, so their C oracles use
+/// `prod_reduce` verbs here have shape()-free bodies, so their C oracles use
 /// the applied form, whose emitted C still reads `batch` from the runtime
 /// input tensor (`inputs[0]->shape[0]`, and the build log reports
 /// "Symbolic dims: batch") and so exercises the symbolic-dim lowering end
@@ -617,7 +617,7 @@ fn parse_printed_tensor(stdout: &str) -> Vec<f64> {
 /// eval-vs-C agreement for the symbolic-batch stride grad. The emitted C
 /// reads `batch` from the runtime input (the DAG stays symbolic; the build
 /// log reports "Symbolic dims: batch"); pre-fix this build failed on the
-/// same stride-adjoint dim_size panic as the eval lane.
+/// same stride-adjoint `dim_size` panic as the eval lane.
 #[test]
 fn issue_513_stride_symbolic_batch_grad_c_backend_agrees() {
     let source = grad_source(
@@ -634,7 +634,7 @@ fn issue_513_stride_symbolic_batch_grad_c_backend_agrees() {
     assert_close("stride grad C vs analytic", &c_grad, &want, 1e-3);
 }
 
-/// eval-vs-C agreement for the symbolic-batch prod_reduce grad.
+/// eval-vs-C agreement for the symbolic-batch `prod_reduce` grad.
 #[test]
 fn issue_513_prod_reduce_symbolic_batch_grad_c_backend_agrees() {
     // Integer-valued base keeps the f32 C lane exact.
@@ -650,7 +650,7 @@ fn issue_513_prod_reduce_symbolic_batch_grad_c_backend_agrees() {
 }
 
 /// eval-vs-C agreement for the gated-domain division/mod reshape-target
-/// grad (the floor_div / mod fold arms).
+/// grad (the `floor_div` / mod fold arms).
 #[test]
 fn issue_513_reshape_div_mod_target_grad_c_backend_agrees() {
     let source = reshape_arith2_source(DIV_MOD_TARGET, "", false)
@@ -753,7 +753,7 @@ out = grad(f)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.
     );
 }
 
-/// prod_reduce over the SYMBOLIC axis needs one slice per element of the
+/// `prod_reduce` over the SYMBOLIC axis needs one slice per element of the
 /// runtime axis; the construction is inherently size-dependent and stays
 /// fail-closed with the existing loud message.
 #[test]

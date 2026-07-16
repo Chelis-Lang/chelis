@@ -96,6 +96,7 @@ pub struct ResolveInput<'a> {
 /// Resolve the active toolchain. Returns `None` only when no level
 /// produced a version (no `+ver`, no env, no `chelis-toolchain`, no
 /// `reef.toml` pin, and no recorded default).
+#[must_use]
 pub fn resolve(input: &ResolveInput) -> Option<Resolution> {
     // 1. Leading `+<ver>` argument.
     if let Some(first) = input.args.first()
@@ -324,7 +325,7 @@ mod tests {
         assert_eq!(r.version, "0.5.0");
         match r.source {
             ToolchainSource::ToolchainFile(p) => {
-                assert!(p.ends_with("chelis-toolchain"))
+                assert!(p.ends_with("chelis-toolchain"));
             }
             other => panic!("expected ToolchainFile, got {other:?}"),
         }

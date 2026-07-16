@@ -97,7 +97,7 @@ pub struct HostTensorHelper {
     pub specialization: Option<HostTensorSpecialization>,
     /// Partial rejection captured at helper-construction time when the
     /// helper body is summary-near-eligible (root op is one of the
-    /// three sparse RiscOps, or contains one in a recognizable place)
+    /// three sparse `RiscOps`, or contains one in a recognizable place)
     /// but the summarizer rejected it.
     ///
     /// Carries everything the helper itself knows: rejection class,
@@ -149,10 +149,10 @@ pub struct HostBlasMatmulSummary {
 /// `ScatterAdd`, or `Scatter`/replace).
 ///
 /// `input_indices` is the ordered list of helper input positions that
-/// supply the sparse op's operands. The order matches the RiscOp's
+/// supply the sparse op's operands. The order matches the `RiscOp`'s
 /// `inputs` order:
 ///   * Gather: `[values, indices]`
-///   * ScatterAdd / Scatter: `[target, indices, updates]`
+///   * `ScatterAdd` / Scatter: `[target, indices, updates]`
 ///
 /// `input_tys` is the full ordered tuple of helper-input types (one
 /// entry per helper input parameter, not just the sparse operands).
@@ -235,7 +235,7 @@ impl fmt::Display for HelperPath {
 }
 
 /// Which payload role a `PayloadDTypeMismatch` is reporting on. The
-/// sparse RiscOps have different operand roles:
+/// sparse `RiscOps` have different operand roles:
 ///   * `Gather`: only `Values` is a payload (the indexed-into tensor);
 ///     the output type's precision must match.
 ///   * `ScatterAdd` / `Scatter`: `Target` (the base), `Updates` (the
@@ -280,7 +280,7 @@ impl fmt::Display for WildcardLocation {
     }
 }
 
-/// Which sparse RiscOp the helper's body root names.
+/// Which sparse `RiscOp` the helper's body root names.
 ///
 /// `Unknown` covers the case where the body root isn't a sparse op at
 /// all (the helper is post-processing a sparse op, or the root is
@@ -375,7 +375,7 @@ pub enum SummaryRejectionClass {
     /// BLAS recognizer as the source.
     BlasMultipleRoots,
     /// BLAS helper's declared output precision is not `f32`. Today
-    /// the recognizer requires `f32` output for the BlasMatmul
+    /// the recognizer requires `f32` output for the `BlasMatmul`
     /// path; non-`f32` outputs (e.g. an `f64` matmul helper) silently
     /// skipped through `Option::None` before W6 — now they are
     /// diagnosed.
@@ -383,7 +383,7 @@ pub enum SummaryRejectionClass {
     /// The helper's specialized DAG root is not `RiscOp::BlasMatmul`,
     /// so the recognizer could not extract `batch_dims`, `m`, `n`,
     /// `k`. Includes both the "root op is unrelated" case and the
-    /// "root op shape doesn't match BlasMatmul's expected operand
+    /// "root op shape doesn't match `BlasMatmul`'s expected operand
     /// count / output precision" rejection.
     BlasNotMatmulPattern,
     /// One of the matmul operands is not a direct `RiscOp::Load` of a
@@ -451,7 +451,7 @@ pub enum SummaryRejectionDetail {
         /// Sparse op the helper's body root names.
         op: SparseOpKind,
         /// Positional index of the operand that wasn't a Load (0 =
-        /// first operand, 1 = second, etc.). Matches the RiscOp's
+        /// first operand, 1 = second, etc.). Matches the `RiscOp`'s
         /// `inputs` ordering.
         operand_index: usize,
     },
@@ -480,8 +480,8 @@ pub enum SummaryRejectionDetail {
     WildcardDim {
         location: WildcardLocation,
     },
-    /// Empty payload for the reserved classes (UnrecognizedShape,
-    /// NonContiguousLayout, RankMismatch). Carries no structured
+    /// Empty payload for the reserved classes (`UnrecognizedShape`,
+    /// `NonContiguousLayout`, `RankMismatch`). Carries no structured
     /// information today.
     Reserved,
     // ---------------------------------------------------------------
@@ -760,16 +760,17 @@ pub struct HostExpr {
     /// Backend host emission (S6 step 5) emits one `// span:` line per
     /// `span_id ∪ merged_spans` so the audit invariant holds: every span
     /// ID present on any input Deep node appears on at least one IR or
-    /// HostExpr node.
+    /// `HostExpr` node.
     pub merged_spans: Vec<String>,
 }
 
 impl HostExpr {
-    /// Construct a HostExpr from a kind with no span metadata. The host-side
+    /// Construct a `HostExpr` from a kind with no span metadata. The host-side
     /// lowering layer (§2.3 host-side table, rule "Lowering") populates
     /// `span_id` from the enclosing Deep expr's `meta["span"]` via the
     /// `with_span` constructor; default constructions (e.g. tests) start
     /// span-free.
+    #[must_use]
     pub fn new(kind: HostExprKind) -> Self {
         Self {
             kind,
@@ -778,9 +779,10 @@ impl HostExpr {
         }
     }
 
-    /// Construct a HostExpr from a kind with an explicit span ID. Empty
+    /// Construct a `HostExpr` from a kind with an explicit span ID. Empty
     /// `merged_spans`. Used by the host-lane lowering pass (`lower_host_expr`)
     /// to attach the current Deep expr's span to every freshly-produced node.
+    #[must_use]
     pub fn with_span(kind: HostExprKind, span_id: Option<String>) -> Self {
         Self {
             kind,
@@ -797,7 +799,7 @@ impl HostExpr {
     ///
     /// Used by the host-side N→1 lowering collapse rule (§2.3 host-side
     /// table, rule "Lowering. Body collapses to existing HostExpr"): when
-    /// a parent Deep expr lowers to an already-constructed inner HostExpr
+    /// a parent Deep expr lowers to an already-constructed inner `HostExpr`
     /// (e.g. `(realize ...)`, `(handle-effect ... body)`, `(lit ...)` whose
     /// child is the canonical node), the parent's `span_id` appends here so
     /// the audit invariant ("every input span appears as `span_id` or in
@@ -916,6 +918,7 @@ pub enum HostExprKind {
     Unit,
 }
 
+#[must_use]
 pub fn lower_compiled_program(program: &CheckedProgram) -> CompiledProgram {
     try_lower_compiled_program(program).unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
 }
@@ -957,6 +960,7 @@ pub fn try_lower_compiled_program(
     })
 }
 
+#[must_use]
 pub fn host_program_requires_host_backend(program: &HostProgram) -> bool {
     if !program.globals.is_empty() {
         return true;
@@ -1013,6 +1017,7 @@ fn host_expr_stays_on_tensor_path(
     }
 }
 
+#[must_use]
 pub fn preferred_tensor_entry_name(program: &HostProgram) -> Option<&str> {
     fn tensor_signature(function: &HostFunction) -> bool {
         matches!(function.ret_ty, HostType::Tensor(_))
@@ -1430,11 +1435,12 @@ fn collect_program_summary_rejections(host: &mut HostProgram) {
 /// struct fields. The order is deterministic: per-function rejections
 /// appear in function-declaration order, followed by per-global
 /// rejections in helper-declaration order.
+#[must_use]
 pub fn host_program_summary_rejections(program: &HostProgram) -> &[SummaryRejection] {
     &program.summary_rejections
 }
 
-/// Walk a HostExpr and report whether any node is the generic-fallback
+/// Walk a `HostExpr` and report whether any node is the generic-fallback
 /// `Builtin { name: "call", ... }` that `lower_app_host_expr` emits when
 /// it doesn't recognize the callee. A wrapper containing this node would
 /// emit broken C (`__result = call(...);`) downstream — preferring the
@@ -1445,6 +1451,7 @@ pub fn host_program_summary_rejections(program: &HostProgram) -> &[SummaryReject
 /// callee is itself an application). Emitting such a wrapper produces
 /// `__result = call(...)` C code that doesn't link. The CLI uses this
 /// to surface a clean error instead of shipping broken C.
+#[must_use]
 pub fn host_program_unresolved_call_sites(program: &HostProgram) -> Vec<String> {
     let mut out = Vec::new();
     for function in &program.functions {
@@ -1465,6 +1472,7 @@ pub fn host_program_unresolved_call_sites(program: &HostProgram) -> Vec<String> 
 /// eval/test-only builtins (e.g. `process_run`, Hull Phase 0a) with a
 /// clean diagnostic rather than the silent `/* unsupported builtin */ 0`
 /// fallthrough in C codegen.
+#[must_use]
 pub fn host_program_uses_builtin(program: &HostProgram, builtin: &str) -> bool {
     program
         .globals
@@ -1658,7 +1666,7 @@ fn collect_function_summary_rejections(function: &mut HostFunction) {
 }
 
 /// Build a map from `helper_index -> callsite_span` by walking a
-/// HostExpr for `TensorCall { helper, .. }` nodes. The first
+/// `HostExpr` for `TensorCall { helper, .. }` nodes. The first
 /// observed callsite span wins; a `None` entry means the helper is
 /// referenced but the call site has no span. Helpers never referenced
 /// are absent from the map.
@@ -1755,12 +1763,12 @@ fn body_callsite_span_per_helper(expr: &HostExpr) -> HashMap<usize, Option<Strin
 }
 
 /// Detect the `MultipleReturnPaths` rejection (W3-B category 2):
-/// function body lowers to a HostExprKind::If with at least two
+/// function body lowers to a `HostExprKind::If` with at least two
 /// distinct return arms, and at least one arm names a sparse op
-/// (directly via a TensorCall on a sparse-summarized helper, or
+/// (directly via a `TensorCall` on a sparse-summarized helper, or
 /// transitively via a Call to a function with a sparse
-/// specialization). The callsite_span is the If's own span; the
-/// helper_body_span is the deepest available arm span.
+/// specialization). The `callsite_span` is the If's own span; the
+/// `helper_body_span` is the deepest available arm span.
 fn detect_multiple_return_paths_rejection(function: &HostFunction) -> Option<SummaryRejection> {
     let HostExprKind::If {
         then_expr,
@@ -1995,6 +2003,7 @@ fn remap_blas_summary_to_params(
 /// with `value: a`). The emitter currently collapses `Unknown` to `int`
 /// in C, which breaks links when callers pass concrete pointer types.
 /// Returns a list of `(def_name, position)` pairs for reporting.
+#[must_use]
 pub fn host_program_unknown_typed_params(program: &HostProgram) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for function in &program.functions {
@@ -2386,8 +2395,7 @@ fn finish_tensor_helper_call(
         .roots()
         .first()
         .and_then(|id| dag.get(*id))
-        .map(|node| node.output_type.clone())
-        .unwrap_or_else(|| expected.clone());
+        .map_or_else(|| expected.clone(), |node| node.output_type.clone());
     // Issue #309: a helper whose body has more than one DAG root (the
     // canonical case is a multi-`wrt` `grad`, which differentiates a
     // scalar w.r.t. several tensor params and so produces one gradient
@@ -2404,9 +2412,10 @@ fn finish_tensor_helper_call(
         .roots()
         .iter()
         .map(|id| {
-            dag.get(*id)
-                .map(|node| HostType::Tensor(node.output_type.clone()))
-                .unwrap_or_else(|| HostType::Tensor(expected.clone()))
+            dag.get(*id).map_or_else(
+                || HostType::Tensor(expected.clone()),
+                |node| HostType::Tensor(node.output_type.clone()),
+            )
         })
         .collect();
     let call_ty = if root_tys.len() > 1 {
@@ -2514,7 +2523,7 @@ pub fn try_summarize_blas_helper_for_test(
 ///   * `BlasOutputPrecisionMismatch` — helper output precision is not `f32`
 ///   * `BlasMultipleRoots` — specialized DAG has more than one root
 ///   * `BlasNotMatmulPattern` — root op is not `BlasMatmul`, or its
-///     operand count / output precision doesn't match the BlasMatmul
+///     operand count / output precision doesn't match the `BlasMatmul`
 ///     shape
 ///   * `BlasNonLoadOperand` — a matmul operand is not a direct `Load`
 ///   * `BlasInputPrecisionMismatch` — a helper input has precision
@@ -2730,6 +2739,7 @@ fn try_summarize_blas_helper(
 /// the integration test that exercises ScatterAdd-helper recognition
 /// constructs a synthetic helper DAG and calls through here.
 #[doc(hidden)]
+#[must_use]
 pub fn summarize_sparse_helper_for_test(
     dag: &crate::Dag,
     inputs: &[HostTensorInput],
@@ -2763,11 +2773,11 @@ pub fn try_summarize_sparse_helper_for_test(
 /// span are known.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SparseSummaryAttempt {
-    /// Helper body contains no sparse RiscOp anywhere. Not a
+    /// Helper body contains no sparse `RiscOp` anywhere. Not a
     /// near-summary case; no diagnostic should be emitted. The outer
     /// pass falls through to the BLAS recognizer.
     NotEligible,
-    /// Helper body has a sparse RiscOp in a position where the
+    /// Helper body has a sparse `RiscOp` in a position where the
     /// summarizer attempts recognition, but the structural check
     /// failed. The carried rejection identifies the failure class.
     Rejected(HelperSummaryRejection),
@@ -3218,7 +3228,7 @@ fn summary_dims_bind_to_inputs(input_tys: &[TensorType], dims: &[DimExpr]) -> bo
         })
         .collect::<HashSet<_>>();
     dims.iter()
-        .flat_map(|dim| dim.symbolic_names())
+        .flat_map(super::dag::DimExpr::symbolic_names)
         .all(|name| available.contains(name.as_str()))
 }
 
@@ -3467,7 +3477,7 @@ fn lower_host_expr_kind(
                 // (the value HostExpr), the bind's span appends to the
                 // value's `merged_spans` per §2.3 host-side rule (b)
                 // (N→1 lowering collapse — bind wraps value).
-                let bind_span = bind_first.span_id().map(|s| s.to_owned());
+                let bind_span = bind_first.span_id().map(std::borrow::ToOwned::to_owned);
                 let bind_children = children(bind_list);
                 let mut index = 0;
                 while index + 1 < bind_children.len() {
@@ -3493,8 +3503,9 @@ fn lower_host_expr_kind(
             }
             let body = kids
                 .get(1)
-                .map(|child| lower_host_expr(child, program, &scoped, tensor_helpers))
-                .unwrap_or(HostExpr::new(HostExprKind::Unit));
+                .map_or(HostExpr::new(HostExprKind::Unit), |child| {
+                    lower_host_expr(child, program, &scoped, tensor_helpers)
+                });
             let explicit_ty = expr_host_type(expr, program, scope);
             HostExpr::new(HostExprKind::Let {
                 bindings,
@@ -3620,8 +3631,9 @@ fn lower_host_expr_kind(
             // `int new_t; new_t = 0;` (Nautilus P2 tensor-if-in-fold).
             let inner = children(list)
                 .first()
-                .map(|child| lower_host_expr(child, program, scope, tensor_helpers))
-                .unwrap_or(HostExpr::new(HostExprKind::Unit));
+                .map_or(HostExpr::new(HostExprKind::Unit), |child| {
+                    lower_host_expr(child, program, scope, tensor_helpers)
+                });
             let inner_ty = host_expr_type(&inner);
             let explicit = expr_host_type(expr, program, scope);
             let ty = if explicit == HostType::Unknown {
@@ -3640,8 +3652,9 @@ fn lower_host_expr_kind(
             // host lane.
             children(list)
                 .first()
-                .map(|child| lower_host_expr(child, program, scope, tensor_helpers))
-                .unwrap_or(HostExpr::new(HostExprKind::Unit))
+                .map_or(HostExpr::new(HostExprKind::Unit), |child| {
+                    lower_host_expr(child, program, scope, tensor_helpers)
+                })
         }
         Expr::List(list, _) if tag(list) == Some("jit") => {
             // `spec/03-deep-syntax.md` §2.7: jit is a compilation trigger
@@ -3655,8 +3668,9 @@ fn lower_host_expr_kind(
             // (Finding 1 of red-team PR #51).
             children(list)
                 .first()
-                .map(|child| lower_host_expr(child, program, scope, tensor_helpers))
-                .unwrap_or(HostExpr::new(HostExprKind::Unit))
+                .map_or(HostExpr::new(HostExprKind::Unit), |child| {
+                    lower_host_expr(child, program, scope, tensor_helpers)
+                })
         }
         Expr::List(list, _) if tag(list) == Some("par") => {
             // `spec/03-deep-syntax.md` §2.3: par v1 is sequential
@@ -3735,7 +3749,7 @@ fn refine_host_function_signatures(functions: &mut [HostFunction]) -> bool {
 
         for function in functions.iter_mut() {
             let inferred_param_fns = infer_callable_param_types(&function.params, &function.body);
-            for param in function.params.iter_mut() {
+            for param in &mut function.params {
                 if param.ty == HostType::Unknown
                     && let Some(inferred) = inferred_param_fns.get(&param.name)
                     && !host_type_has_unknown(inferred)
@@ -4283,10 +4297,10 @@ fn refine_host_expr_types(
             if *ty == HostType::Unknown {
                 let then_ty = host_expr_type(then_expr);
                 let else_ty = host_expr_type(else_expr);
-                let inferred = if then_ty != HostType::Unknown {
-                    then_ty
-                } else {
+                let inferred = if then_ty == HostType::Unknown {
                     else_ty
+                } else {
+                    then_ty
                 };
                 if inferred != HostType::Unknown {
                     *ty = inferred;
@@ -4312,10 +4326,10 @@ fn refine_host_expr_types(
             if *ty == HostType::Unknown {
                 let some_ty = host_expr_type(some_expr);
                 let none_ty = host_expr_type(none_expr);
-                let inferred = if some_ty != HostType::Unknown {
-                    some_ty
-                } else {
+                let inferred = if some_ty == HostType::Unknown {
                     none_ty
+                } else {
+                    some_ty
                 };
                 if inferred != HostType::Unknown {
                     *ty = inferred;
@@ -4882,8 +4896,9 @@ fn lower_record_host_expr(
         };
         let value = kv_kids
             .get(1)
-            .map(|expr| lower_host_expr(expr, program, scope, tensor_helpers))
-            .unwrap_or(HostExpr::new(HostExprKind::Unit));
+            .map_or(HostExpr::new(HostExprKind::Unit), |expr| {
+                lower_host_expr(expr, program, scope, tensor_helpers)
+            });
         supplied.insert(name.to_string(), value);
     }
     let fields = ctor_info
@@ -4914,12 +4929,12 @@ fn lower_record_host_expr(
     HostExpr::new(HostExprKind::AdtConstruct {
         ctor,
         fields,
-        ty: if explicit_ty != HostType::Unknown {
-            explicit_ty
+        ty: if explicit_ty == HostType::Unknown {
+            ctor_info.map_or(HostType::Unknown, |(adt_name, _)| {
+                HostType::Adt(adt_name, Vec::new())
+            })
         } else {
-            ctor_info
-                .map(|(adt_name, _)| HostType::Adt(adt_name, Vec::new()))
-                .unwrap_or(HostType::Unknown)
+            explicit_ty
         },
     })
 }
@@ -4933,8 +4948,9 @@ fn lower_access_host_expr(
     let kids = children(list);
     let base = kids
         .first()
-        .map(|expr| lower_host_expr(expr, program, scope, tensor_helpers))
-        .unwrap_or(HostExpr::new(HostExprKind::Unit));
+        .map_or(HostExpr::new(HostExprKind::Unit), |expr| {
+            lower_host_expr(expr, program, scope, tensor_helpers)
+        });
     let field_name = kids.get(1).and_then(symbol_name).unwrap_or("");
     let (field_index, field_ty) =
         lookup_access_field(program, &base, field_name).unwrap_or((0, HostType::Unknown));
@@ -4946,10 +4962,10 @@ fn lower_access_host_expr(
     HostExpr::new(HostExprKind::AdtFieldAccess {
         base: Box::new(base),
         field_index,
-        ty: if explicit_ty != HostType::Unknown {
-            explicit_ty
-        } else {
+        ty: if explicit_ty == HostType::Unknown {
             field_ty
+        } else {
+            explicit_ty
         },
     })
 }
@@ -5531,7 +5547,7 @@ fn dual_eval_user_call(
     dual_eval(body, &call_env, program, depth + 1)
 }
 
-/// Extract a compile-time float constant from a HostExpr if it is a literal.
+/// Extract a compile-time float constant from a `HostExpr` if it is a literal.
 fn float_const(expr: &HostExpr) -> Option<f64> {
     match &expr.kind {
         HostExprKind::Float(v) => Some(*v),
@@ -5583,18 +5599,14 @@ fn lower_app_host_expr(
     let ctor_info = lookup_adt_ctor(program, &name);
     let inferred_ret_ty = fn_sig
         .as_ref()
-        .map(|(_, ret_ty)| ret_ty.clone())
-        .unwrap_or(HostType::Unknown);
+        .map_or(HostType::Unknown, |(_, ret_ty)| ret_ty.clone());
     if name == "Cons" && kids.len() == 3 {
         let expr = Expr::List(list.clone(), chelis_deep::Span::new(0, 0));
         if let Some(items) = lower_list_literal_items(&expr, program, scope, tensor_helpers) {
             let ty = expr_host_type(&expr, program, scope);
             let ty = if ty == HostType::Unknown {
                 HostType::List(Box::new(
-                    items
-                        .first()
-                        .map(host_expr_type)
-                        .unwrap_or(HostType::Unknown),
+                    items.first().map_or(HostType::Unknown, host_expr_type),
                 ))
             } else {
                 ty
@@ -5607,10 +5619,10 @@ fn lower_app_host_expr(
         return HostExpr::new(HostExprKind::Builtin {
             name,
             args: vec![arg.clone()],
-            ty: if explicit_ty != HostType::Unknown {
-                explicit_ty
-            } else {
+            ty: if explicit_ty == HostType::Unknown {
                 HostType::Option(Box::new(host_expr_type(&arg)))
+            } else {
+                explicit_ty
             },
         });
     }
@@ -5900,10 +5912,10 @@ fn lower_app_host_expr(
             },
         });
     }
-    let ty = if explicit_ty != HostType::Unknown {
-        explicit_ty
-    } else {
+    let ty = if explicit_ty == HostType::Unknown {
         infer_builtin_host_type(&name, &args).unwrap_or(HostType::Unknown)
+    } else {
+        explicit_ty
     };
     HostExpr::new(HostExprKind::Builtin { name, args, ty })
 }
@@ -6050,10 +6062,7 @@ fn substitute_expr(
 /// Looks through a wrapping `MetaExpr` so type-annotated bindings still match.
 fn is_inlinable_callable_binding_value(expr: &Expr) -> bool {
     match expr {
-        Expr::List(inner, _) => matches!(
-            tag(inner),
-            Some("fn") | Some("grad") | Some("vmap") | Some("vmap-grad")
-        ),
+        Expr::List(inner, _) => matches!(tag(inner), Some("fn" | "grad" | "vmap" | "vmap-grad")),
         Expr::MetaExpr(meta, _) => is_inlinable_callable_binding_value(&meta.expr),
         _ => false,
     }
@@ -6086,17 +6095,17 @@ fn inline_local_callable_lets(expr: &Expr) -> Expr {
 
     let bind_kids = children(bind_list);
     let mut rebuilt_pairs = Vec::<(String, Expr)>::new();
-    let mut body = kids
-        .get(1)
-        .map(inline_local_callable_lets)
-        .unwrap_or_else(|| {
+    let mut body = kids.get(1).map_or_else(
+        || {
             Expr::List(
                 List {
                     elements: Vec::new(),
                 },
                 *span,
             )
-        });
+        },
+        inline_local_callable_lets,
+    );
 
     for index in (0..bind_kids.len()).step_by(2).rev() {
         let Some(name) = bind_kids.get(index).and_then(symbol_name) else {
@@ -6200,12 +6209,10 @@ fn top_level_fn_helper_summary_rejects(program: &CheckedProgram, name: &str) -> 
         return false;
     }
     let pushed = push_inlining(name);
-    let rejects = lower_host_function(name, body, None, program)
-        .map(|mut function| {
-            collect_function_summary_rejections(&mut function);
-            !function.summary_rejections.is_empty()
-        })
-        .unwrap_or(false);
+    let rejects = lower_host_function(name, body, None, program).is_some_and(|mut function| {
+        collect_function_summary_rejections(&mut function);
+        !function.summary_rejections.is_empty()
+    });
     if pushed {
         pop_inlining(name);
     }
@@ -6590,25 +6597,24 @@ fn remap_tensor_helper_dim_symbols(
         formal_params.push(root.output_type.clone());
         let actual_output = if tensor_type_has_synthetic_dims(expected_output) {
             match root.op {
-                crate::dag::RiscOp::Permute { ref axes } => root
-                    .inputs
-                    .first()
-                    .and_then(|id| dag.get(*id))
-                    .map(|node| {
-                        let mut output = node.output_type.clone();
-                        output.dims = axes
-                            .iter()
-                            .filter_map(|axis| node.output_type.dims.get(*axis).cloned())
-                            .collect();
-                        output
-                    })
-                    .unwrap_or_else(|| expected_output.clone()),
+                crate::dag::RiscOp::Permute { ref axes } => {
+                    root.inputs.first().and_then(|id| dag.get(*id)).map_or_else(
+                        || expected_output.clone(),
+                        |node| {
+                            let mut output = node.output_type.clone();
+                            output.dims = axes
+                                .iter()
+                                .filter_map(|axis| node.output_type.dims.get(*axis).cloned())
+                                .collect();
+                            output
+                        },
+                    )
+                }
                 crate::dag::RiscOp::UniformLike { .. } | crate::dag::RiscOp::Dropout { .. } => root
                     .inputs
                     .first()
                     .and_then(|id| dag.get(*id))
-                    .map(|node| node.output_type.clone())
-                    .unwrap_or_else(|| expected_output.clone()),
+                    .map_or_else(|| expected_output.clone(), |node| node.output_type.clone()),
                 _ => expected_output.clone(),
             }
         } else {
@@ -6744,8 +6750,10 @@ fn actualize_tensor_helper_types(
                     node.inputs
                         .get(1)
                         .and_then(|rhs| inferred.get(rhs))
-                        .map(|rhs| merge_binary_tensor_types(lhs, rhs, node.output_type.precision))
-                        .unwrap_or_else(|| precision_like(lhs, node.output_type.precision))
+                        .map_or_else(
+                            || precision_like(lhs, node.output_type.precision),
+                            |rhs| merge_binary_tensor_types(lhs, rhs, node.output_type.precision),
+                        )
                 }),
             crate::dag::RiscOp::Neg
             | crate::dag::RiscOp::Exp
@@ -7353,8 +7361,7 @@ fn infer_einsum_tensor_type(equation: &str, tensors: &[TensorType]) -> Option<Te
         .collect::<Option<Vec<_>>>()?;
     let precision = tensors
         .first()
-        .map(|tensor| tensor.precision)
-        .unwrap_or(chelis_types::types::Prim::F32);
+        .map_or(chelis_types::types::Prim::F32, |tensor| tensor.precision);
     Some(TensorType { dims, precision })
 }
 
@@ -7381,8 +7388,8 @@ fn expr_int_literal(expr: &Expr) -> Option<i64> {
     }
 }
 
-/// chelis#631: an integer literal reaching this HostExpr position,
-/// seeing through the canonical `cast(N, int32)` spelling (the HostExpr
+/// chelis#631: an integer literal reaching this `HostExpr` position,
+/// seeing through the canonical `cast(N, int32)` spelling (the `HostExpr`
 /// analog of [`expr_int_literal`]'s cast peel).
 fn host_expr_int_literal(expr: &HostExpr) -> Option<i64> {
     match &expr.kind {
@@ -7571,7 +7578,7 @@ fn parse_host_type_with_subst(expr: &Expr, subst: &HashMap<String, HostType>) ->
     };
     match tag(list) {
         Some("t-prim") => match children(list).first().and_then(symbol_name) {
-            Some("int64") | Some("int32") => HostType::Int64,
+            Some("int64" | "int32") => HostType::Int64,
             // Thread the declared float width through verbatim so a
             // declared `f64` entry parameter lowers to an f64 `Load`
             // instead of being silently downgraded to f32 by the
@@ -7612,11 +7619,9 @@ fn parse_host_type_with_subst(expr: &Expr, subst: &HashMap<String, HostType>) ->
                 HostType::Tensor(crate::lower::tensor_type_from_deep(expr))
             }
         }
-        Some("t-ref") => list
-            .elements
-            .get(2)
-            .map(|inner| parse_host_type_with_subst(inner, subst))
-            .unwrap_or(HostType::Unknown),
+        Some("t-ref") => list.elements.get(2).map_or(HostType::Unknown, |inner| {
+            parse_host_type_with_subst(inner, subst)
+        }),
         Some("t-var") => children(list)
             .first()
             .and_then(symbol_name)
@@ -8393,8 +8398,9 @@ fn lookup_adt_field_on_type(
                 if children(field_list).first().and_then(symbol_name) == Some(field_name) {
                     let ty = children(field_list)
                         .get(1)
-                        .map(|expr| parse_host_type_with_subst(expr, &subst))
-                        .unwrap_or(HostType::Unknown);
+                        .map_or(HostType::Unknown, |expr| {
+                            parse_host_type_with_subst(expr, &subst)
+                        });
                     if let Some(existing) = &found
                         && existing != &(index, ty.clone())
                     {
@@ -8880,7 +8886,7 @@ mod tests {
     #[test]
     fn named_tensor_entry_inserts_copy_for_consuming_fanout() {
         let checked = parse_and_check(
-            r#"
+            r"
                 (def {} consume
                   (fn {type: (t-fn {}
                                 (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
@@ -8903,7 +8909,7 @@ mod tests {
                       (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}
                         (var {} consume)
                         (var {} x)))))
-            "#,
+            ",
         );
         let dag = lower_named_tensor_entry_dag(&checked, "double_it").expect("lower entry");
         let copy_count = dag
@@ -8917,7 +8923,7 @@ mod tests {
     #[test]
     fn named_entry_dag_accepts_scalar_numeric_params() {
         let checked = parse_and_check(
-            r#"
+            r"
                 (def {} add_scalar
                   (fn {type: (t-fn {}
                                 (t-prim {} f32)
@@ -8930,7 +8936,7 @@ mod tests {
                       (var {} add)
                       (var {} x)
                       (var {} y))))
-            "#,
+            ",
         );
 
         let dag = lower_named_tensor_entry_dag(&checked, "add_scalar").expect("lower scalar entry");
@@ -8961,7 +8967,7 @@ mod tests {
     #[test]
     fn named_entry_dag_lowers_f64_scalar_params_to_f64_loads() {
         let checked = parse_and_check(
-            r#"
+            r"
                 (def {} add_scalar
                   (fn {type: (t-fn {}
                                 (t-prim {} f64)
@@ -8974,7 +8980,7 @@ mod tests {
                       (var {} add)
                       (var {} x)
                       (var {} y))))
-            "#,
+            ",
         );
 
         let dag =
@@ -9004,7 +9010,7 @@ mod tests {
         // Negative twin: the historical bug. NO scalar Load produced for
         // a declared-f64 entry param may carry `Prim::F32`.
         let checked = parse_and_check(
-            r#"
+            r"
                 (def {} add_scalar
                   (fn {type: (t-fn {}
                                 (t-prim {} f64)
@@ -9017,7 +9023,7 @@ mod tests {
                       (var {} add)
                       (var {} x)
                       (var {} y))))
-            "#,
+            ",
         );
 
         let dag =
@@ -9128,7 +9134,7 @@ mod tests {
     #[test]
     fn tensor_helper_exp_body_keeps_exp_root() {
         let checked = parse_and_check(
-            r#"
+            r"
                 (def {} softplus
                   (fn {type: (t-fn {}
                                 (t-tensor {} (d-lit {} 4) (t-prim {} f32))
@@ -9138,7 +9144,7 @@ mod tests {
                     (app {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}
                       (var {} exp)
                       (var {} x))))
-            "#,
+            ",
         );
         let defs = collect_program_defs(checked.exprs());
         let body = lookup_program_def(&defs, "softplus").unwrap();
@@ -9164,7 +9170,7 @@ mod tests {
     #[test]
     fn tensor_helper_hoists_host_lane_tensor_args_with_f32_type() {
         let checked = parse_and_check(
-            r#"
+            r"
                 (defsig {}
                   jac_row
                   (t-fn {}
@@ -9252,7 +9258,7 @@ mod tests {
                         (app {} (var {} Cons) (lit {type: (t-prim {} f32)} 2.0) (var {} Nil))))
                     (cast {} (lit {type: (t-prim {} f32)} 1.0) (t-prim {} f32))
                     (cast {} (lit {type: (t-prim {} f32)} 3.0) (t-prim {} f32))))
-            "#,
+            ",
         );
         let lowered = top_level_lowering_map(checked.exprs(), checked.type_env());
         let host = lower_host_program(&checked, &lowered);

@@ -76,6 +76,7 @@ impl ErfEnclosure {
     /// `lo <= hi` is a precondition of a well-formed enclosure; a caller that
     /// constructs one directly (rather than via the oracle) is responsible for
     /// it. [`ErfEnclosure::is_well_formed`] checks it.
+    #[must_use]
     pub fn new(lo: f64, hi: f64) -> Self {
         Self { lo, hi }
     }
@@ -83,12 +84,14 @@ impl ErfEnclosure {
     /// Whether the endpoints form a non-empty, finite-or-saturating interval:
     /// both endpoints non-NaN and `lo <= hi`. A NaN endpoint is incomparable
     /// and makes the enclosure meaningless, so it is not well formed.
+    #[must_use]
     pub fn is_well_formed(&self) -> bool {
         !self.lo.is_nan() && !self.hi.is_nan() && self.lo <= self.hi
     }
 
     /// The width `hi - lo` of the enclosure. A tighter (smaller) width is a
     /// sharper enclosure; the oracle tightens it by raising the precision.
+    #[must_use]
     pub fn width(&self) -> f64 {
         self.hi - self.lo
     }
@@ -99,6 +102,7 @@ impl ErfEnclosure {
     /// is checked sound by confirming it contains the rigorous enclosure, and a
     /// concrete sample is checked inside a claimed bound by this predicate. A
     /// NaN `x` is contained by nothing.
+    #[must_use]
     pub fn contains(&self, x: f64) -> bool {
         // `x.is_nan()` short-circuits: NaN compares false to both bounds, but be
         // explicit so the intent (NaN is contained by nothing) is unmistakable.
@@ -110,6 +114,7 @@ impl ErfEnclosure {
     /// the truth. This is the bound-soundness check the oracle exists for: a
     /// claimed special-function bound is sound iff
     /// `oracle_enclosure.contained_in(claim_lo, claim_hi)`.
+    #[must_use]
     pub fn contained_in(&self, lo: f64, hi: f64) -> bool {
         !lo.is_nan() && !hi.is_nan() && lo <= self.lo && self.hi <= hi
     }

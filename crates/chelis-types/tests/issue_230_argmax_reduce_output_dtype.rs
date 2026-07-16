@@ -19,8 +19,8 @@
 //! Before the fix, `check_reduction_signature` defaulted every
 //! non-`sum` reduction's output precision to the input precision,
 //! producing `tensor[b, f32]` for `argmax_reduce` on an `f32` input.
-//! Downstream consumers like hydronnx (which emits ONNX ArgMax /
-//! ArgMin into chelis) hit a `TypeMismatch` on the declared
+//! Downstream consumers like hydronnx (which emits ONNX `ArgMax` /
+//! `ArgMin` into chelis) hit a `TypeMismatch` on the declared
 //! `tensor[..., int64]` signature.
 //!
 //! See `crates/chelis-ir/src/dag.rs::RiscOp::Argmax` for the
@@ -53,9 +53,9 @@ fn surf_to_deep(source: &str) -> Vec<Expr> {
 /// This is the hydronnx PR #2 reproducer (issue #230).
 #[test]
 fn issue230_argmax_reduce_f32_input_yields_int64() {
-    let src = r#"
+    let src = r"
 def forward(x: tensor[2, 3, f32]) -> tensor[2, int64] = argmax_reduce(x, 1)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -74,9 +74,9 @@ def forward(x: tensor[2, 3, f32]) -> tensor[2, int64] = argmax_reduce(x, 1)
 /// dtype.
 #[test]
 fn issue230_argmax_reduce_int32_input_yields_int64() {
-    let src = r#"
+    let src = r"
 def forward(x: tensor[2, 3, int32]) -> tensor[2, int64] = argmax_reduce(x, 1)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -93,9 +93,9 @@ def forward(x: tensor[2, 3, int32]) -> tensor[2, int64] = argmax_reduce(x, 1)
 /// EXPECT: `argmin_reduce` on an `f32` tensor produces `tensor[..., int64]`.
 #[test]
 fn issue230_argmin_reduce_f32_input_yields_int64() {
-    let src = r#"
+    let src = r"
 def forward(x: tensor[2, 3, f32]) -> tensor[2, int64] = argmin_reduce(x, 1)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -114,9 +114,9 @@ def forward(x: tensor[2, 3, f32]) -> tensor[2, int64] = argmin_reduce(x, 1)
 /// (input dtype happens to match the canonical output dtype).
 #[test]
 fn issue230_argmin_reduce_int64_input_yields_int64() {
-    let src = r#"
+    let src = r"
 def forward(x: tensor[2, 3, int64]) -> tensor[2, int64] = argmin_reduce(x, 1)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -144,9 +144,9 @@ def forward(x: tensor[2, 3, int64]) -> tensor[2, int64] = argmin_reduce(x, 1)
 /// fails.
 #[test]
 fn issue230_argmax_reduce_wrong_output_dtype_f32_rejected() {
-    let src = r#"
+    let src = r"
 def forward(x: tensor[2, 3, f32]) -> tensor[2, f32] = argmax_reduce(x, 1)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for argmax_reduce -> f32");
@@ -170,9 +170,9 @@ def forward(x: tensor[2, 3, f32]) -> tensor[2, f32] = argmax_reduce(x, 1)
 /// integer type, the output is still int64, not the input's int32.
 #[test]
 fn issue230_argmin_reduce_wrong_output_dtype_int32_rejected() {
-    let src = r#"
+    let src = r"
 def forward(x: tensor[2, 3, int32]) -> tensor[2, int32] = argmin_reduce(x, 1)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for argmin_reduce -> int32");
@@ -201,9 +201,9 @@ def forward(x: tensor[2, 3, int32]) -> tensor[2, int32] = argmin_reduce(x, 1)
 /// `tensor[2, f32]` — input dtype preserved.
 #[test]
 fn issue230_sibling_sweep_max_reduce_preserves_input_dtype() {
-    let src = r#"
+    let src = r"
 def forward(x: tensor[2, 3, f32]) -> tensor[2, f32] = max_reduce(x, 1)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -221,9 +221,9 @@ def forward(x: tensor[2, 3, f32]) -> tensor[2, f32] = max_reduce(x, 1)
 /// `tensor[2, f32]` — input dtype preserved.
 #[test]
 fn issue230_sibling_sweep_min_reduce_preserves_input_dtype() {
-    let src = r#"
+    let src = r"
 def forward(x: tensor[2, 3, f32]) -> tensor[2, f32] = min_reduce(x, 1)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -241,9 +241,9 @@ def forward(x: tensor[2, 3, f32]) -> tensor[2, f32] = min_reduce(x, 1)
 /// `tensor[2, f32]` — input dtype preserved.
 #[test]
 fn issue230_sibling_sweep_prod_reduce_preserves_input_dtype() {
-    let src = r#"
+    let src = r"
 def forward(x: tensor[2, 3, f32]) -> tensor[2, f32] = prod_reduce(x, 1)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -261,9 +261,9 @@ def forward(x: tensor[2, 3, f32]) -> tensor[2, f32] = prod_reduce(x, 1)
 /// `tensor[2, f32]` — input dtype preserved.
 #[test]
 fn issue230_sibling_sweep_mean_preserves_input_dtype() {
-    let src = r#"
+    let src = r"
 def forward(x: tensor[2, 3, f32]) -> tensor[2, f32] = mean(x, 1)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -282,9 +282,9 @@ def forward(x: tensor[2, 3, f32]) -> tensor[2, f32] = mean(x, 1)
 /// only applies to narrow integer inputs).
 #[test]
 fn issue230_sibling_sweep_sum_f32_preserves_input_dtype() {
-    let src = r#"
+    let src = r"
 def forward(x: tensor[2, 3, f32]) -> tensor[2, f32] = sum(x, 1)
-"#;
+";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {

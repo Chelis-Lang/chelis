@@ -115,7 +115,7 @@ impl<'a> Parser<'a> {
                 }])
             }
             Some(tok) => Err(ParseError::Expected {
-                expected: format!("{:?}", expected_kind),
+                expected: format!("{expected_kind:?}"),
                 found: format!("{:?}", tok.kind),
                 offset: tok.span.offset,
             }),
@@ -180,7 +180,7 @@ impl<'a> Parser<'a> {
             other => {
                 return Err(ParseError::Expected {
                     expected: "atom".to_string(),
-                    found: format!("{:?}", other),
+                    found: format!("{other:?}"),
                     offset: span.offset,
                 });
             }
@@ -254,7 +254,7 @@ impl<'a> Parser<'a> {
                 other => {
                     return Err(ParseError::Expected {
                         expected: "keyword".to_string(),
-                        found: format!("{:?}", other),
+                        found: format!("{other:?}"),
                         offset: key_tok.span.offset,
                     });
                 }
@@ -335,7 +335,7 @@ impl<'a> Parser<'a> {
                 other => {
                     return Err(ParseError::Expected {
                         expected: "map key (symbol)".to_string(),
-                        found: format!("{:?}", other),
+                        found: format!("{other:?}"),
                         offset: key_tok.span.offset,
                     });
                 }
@@ -352,7 +352,7 @@ impl<'a> Parser<'a> {
                 other => {
                     return Err(ParseError::Expected {
                         expected: ":".to_string(),
-                        found: format!("{:?}", other),
+                        found: format!("{other:?}"),
                         offset: colon_tok.span.offset,
                     });
                 }
@@ -409,7 +409,7 @@ impl<'a> Parser<'a> {
 ///
 /// Performance note: this is called only on `lit`-tagged lists (the
 /// caller pre-filters), so the per-call cost is bounded. Marked
-/// `#[inline(never)]` so the parse_list hot path keeps a small stack
+/// `#[inline(never)]` so the `parse_list` hot path keeps a small stack
 /// frame and the deep-recursion test (1000 nested apps) does not bloat.
 #[inline(never)]
 fn collapse_typed_literal_lit(list: List, span: crate::Span) -> Result<List, ParseError> {
@@ -612,7 +612,7 @@ fn normalize_typed_literals_in_expr(expr: &mut Expr) -> Result<(), ParseError> {
     // ancestor mutation. After an ancestor's collapse runs, no pointers
     // into that ancestor's subtree remain on the stack.
     let mut stack: Vec<(*mut Expr, bool)> = Vec::new();
-    stack.push((expr as *mut Expr, false));
+    stack.push((std::ptr::from_mut::<Expr>(expr), false));
 
     while let Some((ptr, visited)) = stack.pop() {
         // SAFETY: the pointer was derived from a unique `&mut Expr` we
@@ -626,19 +626,19 @@ fn normalize_typed_literals_in_expr(expr: &mut Expr) -> Result<(), ParseError> {
             stack.push((ptr, true));
             match node {
                 Expr::List(list, _) => {
-                    for child in list.elements.iter_mut() {
-                        stack.push((child as *mut Expr, false));
+                    for child in &mut list.elements {
+                        stack.push((std::ptr::from_mut::<Expr>(child), false));
                     }
                 }
                 Expr::Map(map, _) => {
-                    for (_, v) in map.entries.iter_mut() {
-                        stack.push((v as *mut Expr, false));
+                    for (_, v) in &mut map.entries {
+                        stack.push((std::ptr::from_mut::<Expr>(v), false));
                     }
                 }
                 Expr::MetaExpr(me, _) => {
-                    stack.push((&mut *me.expr as *mut Expr, false));
-                    for (_, v) in me.entries.iter_mut() {
-                        stack.push((v as *mut Expr, false));
+                    stack.push((&raw mut *me.expr, false));
+                    for (_, v) in &mut me.entries {
+                        stack.push((std::ptr::from_mut::<Expr>(v), false));
                     }
                 }
                 Expr::Atom(_, _) => {}
@@ -717,7 +717,7 @@ mod tests {
         assert_eq!(exprs.len(), 1);
         match &exprs[0] {
             Expr::Atom(Atom::Int(42), _) => {}
-            other => panic!("expected Int(42), got {:?}", other),
+            other => panic!("expected Int(42), got {other:?}"),
         }
     }
 
@@ -726,7 +726,7 @@ mod tests {
         let exprs = p("3.125");
         match &exprs[0] {
             Expr::Atom(Atom::Float(f), _) => assert!((f - 3.125).abs() < 1e-10),
-            other => panic!("expected Float, got {:?}", other),
+            other => panic!("expected Float, got {other:?}"),
         }
     }
 
@@ -735,7 +735,7 @@ mod tests {
         let exprs = p(r#""hello""#);
         match &exprs[0] {
             Expr::Atom(Atom::Str(s), _) => assert_eq!(s, "hello"),
-            other => panic!("expected Str, got {:?}", other),
+            other => panic!("expected Str, got {other:?}"),
         }
     }
 
@@ -744,7 +744,7 @@ mod tests {
         let exprs = p("foo");
         match &exprs[0] {
             Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "foo"),
-            other => panic!("expected Symbol, got {:?}", other),
+            other => panic!("expected Symbol, got {other:?}"),
         }
     }
 
@@ -753,7 +753,7 @@ mod tests {
         let exprs = p(":axis");
         match &exprs[0] {
             Expr::Atom(Atom::Keyword(k), _) => assert_eq!(k, "axis"),
-            other => panic!("expected Keyword, got {:?}", other),
+            other => panic!("expected Keyword, got {other:?}"),
         }
     }
 
@@ -763,11 +763,11 @@ mod tests {
         assert_eq!(exprs.len(), 2);
         match &exprs[0] {
             Expr::Atom(Atom::Bool(true), _) => {}
-            other => panic!("expected Bool(true), got {:?}", other),
+            other => panic!("expected Bool(true), got {other:?}"),
         }
         match &exprs[1] {
             Expr::Atom(Atom::Bool(false), _) => {}
-            other => panic!("expected Bool(false), got {:?}", other),
+            other => panic!("expected Bool(false), got {other:?}"),
         }
     }
 
@@ -782,18 +782,18 @@ mod tests {
                 assert_eq!(list.elements.len(), 3);
                 match &list.elements[0] {
                     Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "add"),
-                    other => panic!("expected Symbol(add), got {:?}", other),
+                    other => panic!("expected Symbol(add), got {other:?}"),
                 }
                 match &list.elements[1] {
                     Expr::Atom(Atom::Int(1), _) => {}
-                    other => panic!("expected Int(1), got {:?}", other),
+                    other => panic!("expected Int(1), got {other:?}"),
                 }
                 match &list.elements[2] {
                     Expr::Atom(Atom::Int(2), _) => {}
-                    other => panic!("expected Int(2), got {:?}", other),
+                    other => panic!("expected Int(2), got {other:?}"),
                 }
             }
-            other => panic!("expected List, got {:?}", other),
+            other => panic!("expected List, got {other:?}"),
         }
     }
 
@@ -806,10 +806,10 @@ mod tests {
                 assert_eq!(list.elements.len(), 1);
                 match &list.elements[0] {
                     Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "nop"),
-                    other => panic!("expected Symbol(nop), got {:?}", other),
+                    other => panic!("expected Symbol(nop), got {other:?}"),
                 }
             }
-            other => panic!("expected List, got {:?}", other),
+            other => panic!("expected List, got {other:?}"),
         }
     }
 
@@ -823,25 +823,25 @@ mod tests {
                 assert_eq!(list.elements.len(), 4); // def, {}, f, (fn ...)
                 match &list.elements[0] {
                     Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "def"),
-                    other => panic!("expected Symbol(def), got {:?}", other),
+                    other => panic!("expected Symbol(def), got {other:?}"),
                 }
                 match &list.elements[1] {
                     Expr::Map(m, _) => assert!(m.entries.is_empty()),
-                    other => panic!("expected empty Map, got {:?}", other),
+                    other => panic!("expected empty Map, got {other:?}"),
                 }
                 match &list.elements[2] {
                     Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "f"),
-                    other => panic!("expected Symbol(f), got {:?}", other),
+                    other => panic!("expected Symbol(f), got {other:?}"),
                 }
                 match &list.elements[3] {
                     Expr::List(func, _) => match &func.elements[0] {
                         Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "fn"),
-                        other => panic!("expected Symbol(fn), got {:?}", other),
+                        other => panic!("expected Symbol(fn), got {other:?}"),
                     },
-                    other => panic!("expected fn list, got {:?}", other),
+                    other => panic!("expected fn list, got {other:?}"),
                 }
             }
-            other => panic!("expected List, got {:?}", other),
+            other => panic!("expected List, got {other:?}"),
         }
     }
 
@@ -857,14 +857,14 @@ mod tests {
                 assert_eq!(meta.entries[0].0, "type");
                 match &meta.entries[0].1 {
                     Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "f32"),
-                    other => panic!("expected Symbol(f32), got {:?}", other),
+                    other => panic!("expected Symbol(f32), got {other:?}"),
                 }
                 match meta.expr.as_ref() {
                     Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "x"),
-                    other => panic!("expected Symbol(x), got {:?}", other),
+                    other => panic!("expected Symbol(x), got {other:?}"),
                 }
             }
-            other => panic!("expected MetaExpr, got {:?}", other),
+            other => panic!("expected MetaExpr, got {other:?}"),
         }
     }
 
@@ -880,12 +880,12 @@ mod tests {
                 match meta.expr.as_ref() {
                     Expr::List(list, _) => match &list.elements[0] {
                         Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "add"),
-                        other => panic!("expected Symbol(add), got {:?}", other),
+                        other => panic!("expected Symbol(add), got {other:?}"),
                     },
-                    other => panic!("expected List, got {:?}", other),
+                    other => panic!("expected List, got {other:?}"),
                 }
             }
-            other => panic!("expected MetaExpr, got {:?}", other),
+            other => panic!("expected MetaExpr, got {other:?}"),
         }
     }
 
@@ -897,18 +897,18 @@ mod tests {
         assert_eq!(exprs.len(), 3);
         match &exprs[0] {
             Expr::Atom(Atom::Int(42), _) => {}
-            other => panic!("expected Int(42), got {:?}", other),
+            other => panic!("expected Int(42), got {other:?}"),
         }
         match &exprs[1] {
             Expr::List(list, _) => match &list.elements[0] {
                 Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "add"),
-                other => panic!("expected Symbol(add), got {:?}", other),
+                other => panic!("expected Symbol(add), got {other:?}"),
             },
-            other => panic!("expected List, got {:?}", other),
+            other => panic!("expected List, got {other:?}"),
         }
         match &exprs[2] {
             Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "foo"),
-            other => panic!("expected Symbol(foo), got {:?}", other),
+            other => panic!("expected Symbol(foo), got {other:?}"),
         }
     }
 
@@ -921,8 +921,7 @@ mod tests {
         let err = result.unwrap_err();
         assert!(
             err.to_string().contains("unexpected end of input"),
-            "expected EOF error, got: {}",
-            err
+            "expected EOF error, got: {err}"
         );
     }
 
@@ -933,8 +932,7 @@ mod tests {
         let err = result.unwrap_err();
         assert!(
             err.to_string().contains("found )"),
-            "expected unexpected ')' error, got: {}",
-            err
+            "expected unexpected ')' error, got: {err}"
         );
     }
 
@@ -945,7 +943,7 @@ mod tests {
         assert_eq!(exprs.len(), 1);
         match &exprs[0] {
             Expr::List(list, _) => assert!(list.elements.is_empty()),
-            other => panic!("expected empty list, got: {:?}", other),
+            other => panic!("expected empty list, got: {other:?}"),
         }
     }
 
@@ -959,10 +957,10 @@ mod tests {
                 assert_eq!(list.elements.len(), 3);
                 match &list.elements[0] {
                     Expr::Atom(Atom::Int(42), _) => {}
-                    other => panic!("expected Int(42), got {:?}", other),
+                    other => panic!("expected Int(42), got {other:?}"),
                 }
             }
-            other => panic!("expected List, got {:?}", other),
+            other => panic!("expected List, got {other:?}"),
         }
     }
 
@@ -973,8 +971,7 @@ mod tests {
         let err = result.unwrap_err();
         assert!(
             err.to_string().contains("found }"),
-            "expected unexpected '}}' error, got: {}",
-            err
+            "expected unexpected '}}' error, got: {err}"
         );
     }
 

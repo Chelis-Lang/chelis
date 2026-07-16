@@ -14,7 +14,7 @@
 //!      plus the `--features smt` companion test.
 //!
 //!   2. CHECK-LANE COVERAGE: asserts every check-lane target token
-//!      (CheckErrorKind / WF-message marker / clean-positive) is hit by >= 1
+//!      (`CheckErrorKind` / WF-message marker / clean-positive) is hit by >= 1
 //!      generated program. The prove-lane coverage is the `--features smt`
 //!      companion (the obligation surface only compiles under `smt`).
 //!

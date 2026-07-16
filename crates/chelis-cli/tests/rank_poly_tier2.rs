@@ -397,8 +397,7 @@ fn build_compile_run(source: &str, name: &str) -> String {
 
     let c_source = format!("{name}.c");
     let needs_blas = fs::read_to_string(out_dir.join(&c_source))
-        .map(|t| t.contains("cblas_sgemm(") || t.contains("\"chelis_blas.h\""))
-        .unwrap_or(false);
+        .is_ok_and(|t| t.contains("cblas_sgemm(") || t.contains("\"chelis_blas.h\""));
     let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
         chelis_backend_c::toolchain::CodegenRequirements {
             wants_openmp: true,

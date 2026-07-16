@@ -49,6 +49,7 @@ pub struct AbstractSubterm {
 }
 
 impl AbstractSubterm {
+    #[must_use]
     pub fn new() -> Self {
         let mut envelopes = HashMap::new();
         for &f in SpecialFnRegistry::known_functions() {
@@ -94,6 +95,7 @@ impl AbstractSubterm {
     /// Retained as the erf-specific entry point (the generic engine is
     /// [`SpecialFnEnvelope::sound_range_bound`]); returns `None` if erf has no
     /// loaded envelope or the range is outside its covered domain.
+    #[must_use]
     pub fn sound_erf_range_bound(&self, arg_lo: f64, arg_hi: f64) -> Option<(f64, f64)> {
         self.envelope_for("erf")?.sound_range_bound(arg_lo, arg_hi)
     }
@@ -106,7 +108,7 @@ impl Default for AbstractSubterm {
 }
 
 impl Transformation for AbstractSubterm {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "abstract-subterm"
     }
 
@@ -190,7 +192,7 @@ impl Transformation for AbstractSubterm {
     }
 }
 
-/// A located special-function application in an SmtExpr tree.
+/// A located special-function application in an `SmtExpr` tree.
 struct SpecialFnSite {
     /// The function name (`"erf"`, `"exp"`, ...).
     fn_name: String,
@@ -536,10 +538,8 @@ fn bare_var_range(var_name: &str, preconditions: &[SmtExpr]) -> Option<(f64, f64
 
     for pre in preconditions {
         match pre {
-            SmtExpr::Cmp(CmpOp::Le, left, right)
-            | SmtExpr::Cmp(CmpOp::Ge, right, left)
-            | SmtExpr::Cmp(CmpOp::Lt, left, right)
-            | SmtExpr::Cmp(CmpOp::Gt, right, left) => {
+            SmtExpr::Cmp(CmpOp::Le | CmpOp::Lt, left, right)
+            | SmtExpr::Cmp(CmpOp::Ge | CmpOp::Gt, right, left) => {
                 if matches!(right.as_ref(), SmtExpr::Var(n) if n == var_name)
                     && let SmtExpr::RealLit(v) = left.as_ref()
                 {
@@ -775,7 +775,7 @@ mod tests {
         // look dischargeable (the unsound direction the harness must catch).
         struct TooTightFake;
         impl Transformation for TooTightFake {
-            fn name(&self) -> &str {
+            fn name(&self) -> &'static str {
                 "too_tight_fake"
             }
             fn apply(&self, _goal: &Goal) -> Vec<Goal> {

@@ -40,7 +40,7 @@ pub struct FitnessComponents {
     pub structure: f64,
     /// Fraction of variable references that resolve.
     pub names: f64,
-    /// Fraction of sub-expressions that unify successfully (typed_nodes / total_nodes).
+    /// Fraction of sub-expressions that unify successfully (`typed_nodes` / `total_nodes`).
     pub types: f64,
 }
 
@@ -50,11 +50,13 @@ impl FitnessReport {
     /// `parse` is 1.0 (we only reach the checker if parsing succeeded).
     /// `structure` is 1.0 by default; use `with_structure` to override
     /// if the Deep tag validator was run upstream.
+    #[must_use]
     pub fn from_infer_result(result: &InferResult) -> FitnessReport {
         Self::from_infer_result_with_structure(result, 1.0)
     }
 
     /// Compute fitness with an explicit structure score (from tag validator).
+    #[must_use]
     pub fn from_infer_result_with_structure(result: &InferResult, structure: f64) -> FitnessReport {
         let parse = 1.0;
         // structure comes from parameter (tag validator score)
@@ -89,7 +91,7 @@ impl FitnessReport {
             .filter_map(|e| {
                 e.message
                     .strip_prefix("unbound variable: ")
-                    .map(|s| s.to_string())
+                    .map(std::string::ToString::to_string)
             })
             .collect();
 
@@ -112,6 +114,7 @@ impl FitnessReport {
 
 /// Type-check a Deep program and produce a fitness report.
 /// Runs tag validation to compute the structure component.
+#[must_use]
 pub fn check_program(exprs: &[chelis_deep::Expr]) -> FitnessReport {
     let structure = structure_score(exprs);
     let result = crate::infer::infer_program(exprs);
@@ -120,6 +123,7 @@ pub fn check_program(exprs: &[chelis_deep::Expr]) -> FitnessReport {
 
 /// IR/0h-aware fitness report that treats typed self-loads as valid
 /// program inputs, matching the executable compiler pipeline.
+#[must_use]
 pub fn check_ir_program(exprs: &[chelis_deep::Expr]) -> FitnessReport {
     let structure = structure_score(exprs);
     let result = infer_ir_program(exprs);
@@ -197,6 +201,7 @@ pub struct StructuralStats {
 
 /// Compute [`StructuralStats`] for `exprs`. See the type docs for why
 /// the result is suitable for partition-and-recombine.
+#[must_use]
 pub fn structural_stats(exprs: &[chelis_deep::Expr]) -> StructuralStats {
     let warnings = chelis_deep::validate::validate(exprs);
     let invalid_nodes = warnings

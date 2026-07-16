@@ -213,7 +213,7 @@ fn bf16_matmul_default_accumulator_emits_bf16_gemm_wrapper() {
     );
 }
 
-/// Mirror smoke test for f16: verifies the f16 GemmEx wrapper is
+/// Mirror smoke test for f16: verifies the f16 `GemmEx` wrapper is
 /// emitted when the operand precision is f16.
 #[test]
 fn f16_matmul_default_accumulator_emits_f16_gemm_wrapper() {
@@ -337,8 +337,9 @@ fn cpu_runtime_library_path() -> PathBuf {
             entries.flatten().map(|entry| entry.path()).find(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
+                    .is_some_and(|name| {
+                        name.starts_with("libchelis_runtime") && name.ends_with(".a")
+                    })
             })
         }) {
             return path;
@@ -349,8 +350,9 @@ fn cpu_runtime_library_path() -> PathBuf {
             entries.flatten().map(|entry| entry.path()).find(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
+                    .is_some_and(|name| {
+                        name.starts_with("libchelis_runtime") && name.ends_with(".a")
+                    })
             })
         }) {
             return path;
@@ -414,7 +416,7 @@ fn dtype_macro(p: Prim) -> &'static str {
     }
 }
 
-/// Emit C source that builds a chelis_tensor in `prefix_input_storage[slot]`
+/// Emit C source that builds a `chelis_tensor` in `prefix_input_storage[slot]`
 /// of shape `shape`, dtype `dtype`, populated with `data` (interpreted as f32
 /// values). For bf16 / f16 the f32 values are converted into the right
 /// bit pattern before being written into the 2-byte storage slots.
@@ -433,7 +435,7 @@ fn emit_input_setup(
     };
     let dim_str = dims
         .iter()
-        .map(|d| d.to_string())
+        .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join(", ");
     let mut lines = vec![
@@ -699,7 +701,7 @@ fn assert_within_relative_tolerance(actual: &[f32], expected: &[f32], rel_tol: f
 /// `HIPBLAS_STATUS_NOT_SUPPORTED` (status=7) for bf16/f16 matmul on
 /// this device, even though the codegen path itself is correct (the
 /// generated source compiles, links against `-lhipblas`, and calls
-/// `hipblasGemmEx` with the spec-compliant enum values). A ROCm stack
+/// `hipblasGemmEx` with the spec-compliant enum values). A `ROCm` stack
 /// that ships bf16 kernel tunings for the gfx1151 lane will pass this
 /// test as written. Documented as a WS-A3 escalation in the PR
 /// description; codegen-side acceptance is exercised by the

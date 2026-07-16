@@ -33,7 +33,7 @@
 //!   the empty list literal infers as rank-1, not as a scalar.
 //! * `eval_numel_three_element_tensor`: positive control, expect `3`.
 //! * `eval_numel_single_element_tensor`: positive control, expect `1`. A
-//!   too-aggressive fix that returned shape.iter().product() without
+//!   too-aggressive fix that returned `shape.iter().product()` without
 //!   special-casing the scalar would break this fixture if shape `[1]` got
 //!   confused with shape `[]`.
 

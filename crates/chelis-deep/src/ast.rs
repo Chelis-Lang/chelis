@@ -16,6 +16,7 @@ pub enum Expr {
 }
 
 impl Expr {
+    #[must_use]
     pub fn span(&self) -> Span {
         match self {
             Expr::Atom(_, s) | Expr::List(_, s) | Expr::Map(_, s) | Expr::MetaExpr(_, s) => *s,
@@ -45,6 +46,7 @@ impl Expr {
     /// without a metadata map at index 1, lists whose metadata map has no
     /// `span` key, or `span` values that are not string literals (those are
     /// shape errors callers handle separately, not a missing span).
+    #[must_use]
     pub fn span_id(&self) -> Option<&str> {
         let list = match self {
             Expr::List(list, _) => list,
@@ -112,6 +114,7 @@ pub struct MetaExpr {
 /// a consumer sees the discharged invariant predicate, not the lowering's
 /// internal span annotations. The 3-tuple shape is preserved (the metadata map
 /// stays present at index 1, just empty), so the result re-parses.
+#[must_use]
 pub fn strip_metadata(expr: &Expr) -> Expr {
     match expr {
         Expr::Atom(..) => expr.clone(),

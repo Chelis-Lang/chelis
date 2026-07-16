@@ -17,7 +17,10 @@ use super::transforms::{as_list, extract_prim_from_type_expr, prim_from_name, va
 // `RuntimeTensorValue`) and the private Deep-shape helpers (`tag`, `children`,
 // `get_meta`, `symbol_name`, `top_level_items`) into scope, mirroring the
 // `use super::*` idiom the other `runtime` submodules use.
-use super::*;
+use super::{
+    EvalContext, RuntimeTensorValue, RuntimeValue, children, get_meta, symbol_name, tag,
+    top_level_items,
+};
 
 /// A declared opaque-type invariant, recovered from `deftype` metadata.
 ///

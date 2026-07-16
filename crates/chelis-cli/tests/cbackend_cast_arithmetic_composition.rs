@@ -9,11 +9,11 @@
 //! output diverges from `chelis eval`.
 //!
 //! W2 PR 3's agent reported observing this corruption before applying
-//! their host_emit migration; verification on the current `main`
+//! their `host_emit` migration; verification on the current `main`
 //! (post-PR #87 merge) confirms the chain produces byte-exact f64
 //! output through the DAG-emitted kernel path.  These fixtures lock
 //! the property so any future regression in either the runtime or
-//! the host_emit code paths surfaces here.
+//! the `host_emit` code paths surfaces here.
 //!
 //! Each fixture:
 //!   1. Writes a small `.ch` program that combines `cast` with a

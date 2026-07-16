@@ -85,7 +85,7 @@ fn issue232_prove_with_module_export_does_not_phantom_root() {
 }
 
 /// Same shape but with `import` instead of `export` — both fall
-/// through the same lower_top_level catch-all, both must be skipped.
+/// through the same `lower_top_level` catch-all, both must be skipped.
 /// The `import Math` directive desugars to an `(import {} Math (...))`
 /// Deep node whose lower-time emission of a `Const` root would
 /// otherwise add a phantom root.

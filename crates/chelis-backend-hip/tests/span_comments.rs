@@ -7,7 +7,7 @@
 //! Design choice (documented in commit message): generic shared kernels
 //! (`kernel_neg`, `kernel_add`, …) are launched from multiple DAG nodes,
 //! so embedding per-node spans inside their source string would be
-//! ambiguous. Per-node kernels (`kernel_fused_*` for FusedElem and
+//! ambiguous. Per-node kernels (`kernel_fused_*` for `FusedElem` and
 //! `kernel_fused_sum_*`/`kernel_fused_maxred_*` for fused reductions) get
 //! the originating node's spans prepended inside the source string.
 //! Host-side launch sites get span comments for every node, making the
@@ -43,8 +43,7 @@ fn hipcc_available() -> bool {
     Command::new("hipcc")
         .arg("--version")
         .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|out| out.status.success())
 }
 
 fn hip_runtime_src_dir() -> PathBuf {
@@ -67,8 +66,9 @@ fn cpu_runtime_library_path() -> PathBuf {
             entries.flatten().map(|entry| entry.path()).find(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
+                    .is_some_and(|name| {
+                        name.starts_with("libchelis_runtime") && name.ends_with(".a")
+                    })
             })
         }) {
             return path;
@@ -79,8 +79,9 @@ fn cpu_runtime_library_path() -> PathBuf {
             entries.flatten().map(|entry| entry.path()).find(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
+                    .is_some_and(|name| {
+                        name.starts_with("libchelis_runtime") && name.ends_with(".a")
+                    })
             })
         }) {
             return path;

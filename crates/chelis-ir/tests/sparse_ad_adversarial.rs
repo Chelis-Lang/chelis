@@ -1,4 +1,4 @@
-//! Wave 5 red-team — Gap 3 / M4-residual AD edges through Gather, ScatterAdd,
+//! Wave 5 red-team — Gap 3 / M4-residual AD edges through Gather, `ScatterAdd`,
 //! and Scatter (replace).
 //!
 //! Existing locked tests in `grad_gather_contract.rs` and `scatter_replace_contract.rs`
@@ -21,7 +21,7 @@
 //! 4. **Out-of-range gather indices at FORWARD eval time** must panic with
 //!    an "out of bounds" message, NOT silently wrap or zero. This locks the
 //!    fail-closed evaluator contract from `eval.rs::gather`.
-//! 5. **Out-of-range scatter_add indices at FORWARD eval time** must panic
+//! 5. **Out-of-range `scatter_add` indices at FORWARD eval time** must panic
 //!    with "out of bounds". Locks the eval contract.
 //! 6. **Out-of-range scatter (replace) indices at FORWARD eval time** must
 //!    panic with "out of bounds". Locks the eval contract.
@@ -601,9 +601,9 @@ fn scatter_ad_error_display_contains_canonical_language() {
     }
 }
 
-/// Defensive: ScatterAdd's AD path remains None (the adjoint flows
-/// through Gather elsewhere — see `grad.rs::backward_op`'s ScatterAdd
-/// arm returns `None`). Locks the contract that ScatterAdd's own
+/// Defensive: `ScatterAdd`'s AD path remains None (the adjoint flows
+/// through Gather elsewhere — see `grad.rs::backward_op`'s `ScatterAdd`
+/// arm returns `None`). Locks the contract that `ScatterAdd`'s own
 /// backward is not auto-synthesized at this layer.
 #[test]
 fn scatter_add_backward_op_returns_no_individual_adjoint() {

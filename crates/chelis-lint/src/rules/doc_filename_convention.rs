@@ -194,11 +194,11 @@ fn numbered_spec_prefix(name: &str) -> bool {
 }
 
 impl Rule for DocFilenameConvention {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "doc-filename-convention"
     }
 
-    fn spec_ref(&self) -> &str {
+    fn spec_ref(&self) -> &'static str {
         "§8"
     }
 
@@ -206,7 +206,7 @@ impl Rule for DocFilenameConvention {
         &[Surface::DocFile]
     }
 
-    fn summary(&self) -> &str {
+    fn summary(&self) -> &'static str {
         "documentation filename conventions per §8 (numeric+kebab spec/, snake spec/design/, snake docs/ with SCREAMING_SNAKE for status reports, kebab mdBook book chapters)"
     }
 

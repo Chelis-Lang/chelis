@@ -23,8 +23,9 @@ use crate::grad::{AdError, GradResult, grad_dag, grad_dag_checked};
 ///
 /// Prefer [`grad_then_fuse_checked`] in new code: it surfaces the
 /// structured `AdError::NotSupported` rejection for non-differentiable
-/// ops (argmax/argmin/floor/ceil/scatter_replace) instead of silently
+/// ops (`argmax/argmin/floor/ceil/scatter_replace`) instead of silently
 /// returning `None`.
+#[must_use]
 pub fn grad_then_fuse(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<GradResult> {
     let grad_result = grad_dag(forward, output, wrt)?;
     Some(fuse_grad_result(grad_result))

@@ -1,8 +1,8 @@
-//! Rule `surf-value-snake-case` — Surf top-level `def` names are snake_case.
+//! Rule `surf-value-snake-case` — Surf top-level `def` names are `snake_case`.
 //!
 //! Spec authority: `spec/01-nomenclature.md` §3.2 (Functions and values).
 //!
-//! snake_case here means: starts with a lowercase ASCII letter, followed
+//! `snake_case` here means: starts with a lowercase ASCII letter, followed
 //! by lowercase ASCII letters, ASCII digits, or `_`. No uppercase letters
 //! anywhere; no leading underscore. Single-letter math-style function
 //! names (`f`, `g`) satisfy this trivially.
@@ -33,11 +33,11 @@ fn def_re() -> &'static Regex {
 pub struct SurfValueSnakeCase;
 
 impl Rule for SurfValueSnakeCase {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "surf-value-snake-case"
     }
 
-    fn spec_ref(&self) -> &str {
+    fn spec_ref(&self) -> &'static str {
         "§3.2"
     }
 
@@ -45,7 +45,7 @@ impl Rule for SurfValueSnakeCase {
         &[Surface::SurfSource]
     }
 
-    fn summary(&self) -> &str {
+    fn summary(&self) -> &'static str {
         "Surf `def` names are snake_case: lowercase ASCII, optional digits and underscores, no leading underscore"
     }
 

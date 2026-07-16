@@ -4,15 +4,15 @@
 //! but for the host lane. Per `spec/design/chelis_span_survival.md` §2.3
 //! host-side rule table, every span ID present on the input Deep AST
 //! whose program lowers through the host-lane path must appear as either
-//! `span_id` or in `merged_spans` on at least one HostExpr node after
+//! `span_id` or in `merged_spans` on at least one `HostExpr` node after
 //! `lower_compiled_program()`.
 //!
 //! This file is the named acceptance oracle for S6 steps 1-4. The S6
 //! step 5+ phase will extend the audit invariant to backend `// span:`
-//! emission; for steps 1-4 the oracle is the in-memory HostExpr tree.
+//! emission; for steps 1-4 the oracle is the in-memory `HostExpr` tree.
 //!
 //! Negative-parity tests (CLAUDE.md):
-//!  * unspanned input ⇒ all HostExpr nodes carry `span_id = None` and
+//!  * unspanned input ⇒ all `HostExpr` nodes carry `span_id = None` and
 //!    empty `merged_spans`
 //!  * empty program ⇒ does not panic, produces an empty `HostProgram`
 //!  * synthesized-marker invariant: any `HostExpr` whose `span_id`
@@ -38,7 +38,7 @@ use chelis_types::{check_ir_program, check_linearity};
 ///
 /// Per `spec/design/chelis_span_survival.md` §2.3 host-side table, the
 /// schema is locked architecturally for orchestrator-tooling uniformity
-/// (a single audit consumer reads both DagNode and HostExpr) and for
+/// (a single audit consumer reads both `DagNode` and `HostExpr`) and for
 /// future host-side optimizations that WILL produce merge candidates.
 #[test]
 fn host_expr_schema_carries_span_id_and_merged_spans() {
@@ -330,7 +330,7 @@ fn walk_host_program(program: &HostProgram, visit: &mut dyn FnMut(&HostExpr)) {
 /// S6 oracle (named in `spec/design/chelis_span_survival.md` §3 S6 step
 /// 4): a span-attributed Deep program that lowers through the host lane
 /// produces a `HostProgram` where every input span ID appears as
-/// `span_id` or in `merged_spans` on at least one HostExpr node.
+/// `span_id` or in `merged_spans` on at least one `HostExpr` node.
 ///
 /// The fixture uses a `(let ...)` over a string-typed binding so the
 /// program routes through the host lane (rather than the pure-tensor DAG
@@ -465,11 +465,11 @@ fn host_lowering_an_empty_program_does_not_panic() {
 
 /// Per §2.3 host-side table, rule (b) "N→1 lowering collapse": when a
 /// parent Deep expr lowers to a body that already corresponds to an
-/// existing HostExpr, the parent's `span_id` appends to the existing
+/// existing `HostExpr`, the parent's `span_id` appends to the existing
 /// node's `merged_spans` (lex-sorted, deduped).
 ///
 /// `(realize {span: "outer"} body)` is the host-side analogue: realize
-/// is a host-side identity and returns the body's HostExpr verbatim. The
+/// is a host-side identity and returns the body's `HostExpr` verbatim. The
 /// outer realize's span MUST land in the body's `merged_spans` so the
 /// audit chain doesn't drop the outer source region.
 #[test]
@@ -523,7 +523,7 @@ fn realize_wrapper_collapses_into_body_via_merged_spans() {
 }
 
 /// Top-level def → body N→1 collapse: `(def {span: a} name body)`
-/// produces a `HostBinding` whose `value` is the body's HostExpr. The
+/// produces a `HostBinding` whose `value` is the body's `HostExpr`. The
 /// def's `span_id` MUST append to the value's `merged_spans` (per the
 /// §2.3 host-side rule for top-level def collapse).
 #[test]
@@ -660,7 +660,7 @@ fn synthesized_marker_with_empty_merged_spans_is_invalid() {
     assert!(!node_violates_synthesized_marker_invariant(&real_node));
 }
 
-/// Scan a HostProgram and assert no node violates the synthesized-marker
+/// Scan a `HostProgram` and assert no node violates the synthesized-marker
 /// invariant. This check runs against today's lowered programs and
 /// would fail if any host-side pass started minting synthesized markers
 /// without forward spans.
@@ -697,7 +697,7 @@ fn node_violates_synthesized_marker_invariant(node: &HostExpr) -> bool {
 // ── Region-corresponding inheritance through let/if/match ─────────────
 
 /// Region-corresponding rule (rule a from §2.3 host-side table): every
-/// freshly-produced HostExpr inherits the enclosing Deep expr's span.
+/// freshly-produced `HostExpr` inherits the enclosing Deep expr's span.
 /// Test: a span-bearing `(let ...)` lowers to a `HostExprKind::Let`
 /// whose canonical `span_id` is the let's own span.
 #[test]
