@@ -7,7 +7,10 @@ and the audit record in `docs/investigations/numeric_audit_next_sweeps.md` /
 `docs/investigations/numeric_audit_structural_prevention.md`.
 **Class fixed:** chelis#727 (no dtype's semantics are enforced at any single
 point), subsuming chelis#695 (the integer instance). Sibling classes #703,
-#709 have their own independent fixes; #728's fix is Phase 3 of this plan.
+#709 have their own plans (`spec/design/loud_unsupported.md` chelis#730,
+`spec/design/checker_totality.md` chelis#731); #728's plan is
+`spec/design/faithful_observation.md` (chelis#732), which this plan's
+Phase 3 inherits or delivers depending on landing order (its §I1).
 
 ## Summary
 
@@ -223,6 +226,13 @@ contract is "element-preserving ops only"; every use site cites it. That
 hatch is the ONE deliberate hole, kept greppable.
 
 ## C4. The observation contract (formatting; fixes #728)
+
+**Ownership note:** the authoritative elaboration and the delivery plan
+for this contract is `spec/design/faithful_observation.md` (chelis#732),
+which is independently landable BEFORE this plan; its §I1 pins both
+landing orders. The rules below are identical to its §C1 by construction -
+an edit to either updates both in the same change set. This section
+remains as the interface this plan's phases rely on.
 
 One function, one output, every exit, both lanes:
 

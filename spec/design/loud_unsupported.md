@@ -73,8 +73,8 @@ only signature, and after Phase 2 the silent arm is a lint/build failure.
 ## Non-goals
 
 - **Not #709.** The checker's `Type::Error`-without-diagnostic hole is the
-  same disease in a different organ with a different fix (DeepTag enum +
-  loud unknown-tag diagnostic; prevention doc item 5). One shared piece
+  same disease in a different organ with a different fix - now its own
+  plan (`spec/design/checker_totality.md`, chelis#731). One shared piece
   lands here: the `EffectKind` enum (§C4.4), because its catch-all is a
   lowering-side substitution proven live via `.dp`.
 - **Not #727/#729.** This plan never decides what an op computes or which
@@ -82,7 +82,8 @@ only signature, and after Phase 2 the silent arm is a lint/build failure.
   semantically-wrong-when-fixed (f16 scalars, #714), this plan delivers
   the loud rejection and #729 delivers the support (§I1).
 - **Not #728.** The print helper's `default:` arm is censused here (it is
-  a substitution) but its fix ships with #729 Phase 3's generated
+  a substitution) but its fix ships with the faithful-observation plan
+  (`spec/design/faithful_observation.md`, chelis#732) Phase 2's generated
   formatter; this plan only requires that until then the arm aborts with
   the dtype id rather than misreading (§C1 rule 4 applies to it).
 - **Not a diagnostics-UX project.** §C2 fixes the *shape* of unsupported

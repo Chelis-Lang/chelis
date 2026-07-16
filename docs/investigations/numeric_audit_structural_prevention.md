@@ -227,7 +227,12 @@ design proposal with a phase plan and per-phase oracles:
 [`spec/design/dtype_semantics.md`](../../spec/design/dtype_semantics.md),
 tracked as chelis#729. Items 3 and 8 (the #703 fixes and the tripwires) are now ALSO a formal
 proposal: [`spec/design/loud_unsupported.md`](../../spec/design/loud_unsupported.md),
-tracked as chelis#730. Item 5 (#709's DeepTag enum) remains independent.
+tracked as chelis#730. Item 5 is now
+[`spec/design/checker_totality.md`](../../spec/design/checker_totality.md)
+(chelis#731), and item 6 is
+[`spec/design/faithful_observation.md`](../../spec/design/faithful_observation.md)
+(chelis#732). All four classes now have formal plans with phase-handoff
+contracts.
 
 ## Sequencing against the open fix plan
 
