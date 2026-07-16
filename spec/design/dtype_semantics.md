@@ -7,7 +7,7 @@ and the audit record in `docs/investigations/numeric_audit_next_sweeps.md` /
 `docs/investigations/numeric_audit_structural_prevention.md`.
 **Class fixed:** chelis#727 (no dtype's semantics are enforced at any single
 point), subsuming chelis#695 (the integer instance). Sibling classes #703,
-#709, #728 have their own fixes; #728's falls out of Phase 3 here.
+#709 have their own independent fixes; #728's fix is Phase 3 of this plan.
 
 ## Summary
 
@@ -25,11 +25,12 @@ found four correct helpers sitting uncalled next to their bug sites - but
 representation types whose constructors are private, so that producing a
 numeric value without passing through the semantics is a compile error.
 
-The refactor is phased so each phase lands green against an oracle that
-already exists: the ~70 `#[ignore]`d red tests on PR #696 that assert
-correct behavior per cell, plus the exact-string cross-lane harness (#687)
-and a domain-validity invariant. This is spec-first development applied to a
-refactor: the failing acceptance surface was written before this design.
+The work is split into five phases. **Each phase is specified below as a
+contract**: what it inherits from the previous phase, what it must deliver,
+what is *frozen* at its exit (the parts the next phase is allowed to build
+on without re-checking), what is explicitly not its job, and the one oracle
+that decides whether it is done. Someone picking up Phase N should be able
+to work from §"Phase N" plus the normative contracts in §C1-§C5 alone.
 
 ## Why a refactor and not another patch
 
@@ -59,214 +60,510 @@ Recorded so the next reader does not have to re-derive it:
 - **Not** the fix for #703 (unsupported cases must fail loudly - dispatch
   and fallback discipline, `numeric_audit_structural_prevention.md` item 3)
   or #709 (checker holes - item 5). Those are cheaper, independent, and
-  should not wait for this.
+  must not wait for this.
 - **Not** a numerics-accuracy project. Transcendental ulp bounds (#719's
   vvsqrtf, SLEEF vs libm differences) get a documented per-op tolerance
-  table as part of the formatting/oracle contract, not new kernels.
-- **Not** a change to surface syntax or the type checker's user-facing
-  rules, except where the capability table (Phase 4) surfaces cells that
-  were never authored (integer `mean` #724, bool `add` #726) - each of
-  those becomes an explicit spec decision rather than a lane accident.
+  table as part of the formatting/oracle contract (§C4), not new kernels.
+- **Not** a change to surface syntax or user-facing checker rules, except
+  where the capability table (Phase 4) surfaces cells that were never
+  authored (integer `mean` #724, bool `add` #726) - each becomes an
+  explicit spec decision rather than a lane accident.
 
-## Design
+## Vocabulary
 
-### D1. The semantics module
+Used precisely throughout:
 
-A new module (working name `chelis_types::dtype_semantics`; may graduate to
-a `chelis-dtype` crate if the dependency graph wants it) defining, for every
-`Prim`, in one place:
+- **Lane** - an execution path from source to a value: the evaluator
+  (`chelis eval`), the compiled C binary, HIP, Metal, prove's interpreter.
+- **Surface** - scalar vs tensor within a lane (the audit showed these
+  diverge *within* lanes: #718).
+- **Cell** - one (op, dtype, lane, surface) combination. The unit of both
+  bugs and tests.
+- **Control** - a test locking a cell that is correct today. Controls are
+  load-invariant across all phases: no phase may change a control's
+  expected value (§B2).
+- **Finalize** - apply a dtype's rounding/width/domain rule to a wide
+  intermediate, or trap. The central verb of this design.
+
+---
+
+# Part I - the normative contracts (§C1-§C5)
+
+These sections are the *interfaces between phases*. Phase 1 implements
+§C1-§C4; later phases consume them and may not reinterpret them. Any change
+to a frozen contract after its freeze point (§B1) requires editing THIS
+document and the tracking issue in the same change set - never a silent
+drift in code.
+
+## C1. Per-dtype value semantics (normative)
+
+The single table both the spec section and the module implement. "Wide
+intermediate" means the f64 (float family) or i64 (integer family) value an
+op kernel produced before finalize.
+
+| dtype | value set | finalize(wide) | overflow / out of range | special values |
+|---|---|---|---|---|
+| `f64` | IEEE binary64 | identity | n/a (IEEE handles it) | NaN/±inf/-0.0 preserved |
+| `f32` | IEEE binary32 | round-to-nearest-even to 24-bit mantissa | rounds to ±inf per IEEE | NaN preserved (quiet), ±inf, -0.0 preserved |
+| `f16` | IEEE binary16 | RNE to 11-bit mantissa, incl. subnormals | overflow -> ±inf (locked: `mul(65504f16, 2f16) = inf`) | as f32 |
+| `bf16` | bfloat16 | RNE to 8-bit mantissa | overflow -> ±inf | as f32 |
+| `int64` | integers in [-2^63, 2^63-1] | must be integral and in range, else **trap** | **trap** (`NumericTrap::Overflow`) | none |
+| `int32/16/8` | integers at width | same rule at width | **trap** | none |
+| `bool` | {0, 1} | must be exactly 0 or 1, else **trap** (`NumericTrap::Domain`) | trap | none |
+| `f8e4m3` | rejected by the checker (spec §1.1.1) | unreachable: `finalize` for it is a compile-time-visible `Rejected` row in the capability table, not a runtime arm | - | - |
+
+Normative notes, each pinned by an existing test:
+
+1. **Single rounding from f64 is correctly rounded** for f32/f16/bf16
+   (f64 carries >= 2p+2 bits for p <= 24). Kernels therefore compute float
+   ops in f64 and finalize ONCE. Chained ops finalize per-op: the eval
+   scalar lane's `add(add(2048f16,1f16),1f16) = 2048` lock
+   (`narrow_dtype_matrix.rs::eval_scalar_f16_rounds_per_op`) is the
+   sequential-rounding contract.
+2. **The f64 collision stays.** `f64 add(2^53, 1) == 2^53` is CORRECT
+   IEEE behavior and must not change
+   (`precision_matrix.rs::f64_add_at_mantissa_boundary_is_correctly_lossy`).
+   The identical numbers at int64 trap or stay exact - never silently
+   collapse.
+3. **Integer overflow traps at every width in every lane** (#680's decided
+   contract). Today int8/16/32 wrap in eval and int64 saturates, and the
+   compiled lane does neither (#718) - all four behaviors are replaced by
+   the trap. In-range arithmetic is exact and must not trap
+   (negative-parity locks exist: `int8_add_just_below_overflow_does_not_trap`).
+4. **Comparisons compare finalized values.** `lt(cast(2048.0,f16),
+   cast(2049.0,f16))` is `false` because both casts finalize to 2048
+   before comparing. This kills the wrong-branch family (#680's 2^53 case,
+   #714's 2049 case, #720's fold) in one rule.
+5. **Integer division stays authored as-is**: `div` on integers rejected
+   by the checker; `floor_div`/`trunc_div`/`mod` exact via the checked
+   path (#387, verified in both lanes by `scalar_stub_matrix.rs`).
+
+## C2. The trap contract
+
+One error type, one message shape, identical in every lane:
 
 ```rust
-pub struct DtypeSemantics {
-    /// Is this f64 value a member of the dtype's value set?
-    /// (f16: exactly representable in binary16; int8: integral in
-    /// [-128, 127]; bool: 0.0 or 1.0.)
-    pub fn contains(prim: Prim, value: f64) -> bool;
-
-    /// Round/narrow a wide intermediate into the dtype, or trap.
-    /// f16/bf16/f32: round-to-nearest-even at the dtype's mantissa
-    /// (single rounding from f64 is correctly rounded for all three,
-    /// the 2p+2 rule the eval scalar lane already relies on).
-    /// f64: identity. Integers: must be integral and in range, else
-    /// NumericTrap::Overflow (the #680 contract: errors, not wraps,
-    /// at every width, in every lane). Bool: must be 0 or 1.
-    pub fn finalize(prim: Prim, raw: RawResult) -> Result<Bits, NumericTrap>;
-
-    /// Exact integer operations at width (checked; trap on overflow)
-    /// and float operations with one terminal rounding. The kernel
-    /// SIGNATURES are the enforcement: an integer cannot reach an
-    /// f64 kernel (see D3).
-    pub fn int_binop(op: IntOp, a: i64, b: i64, prim: Prim) -> Result<i64, NumericTrap>;
-    pub fn float_binop(op: FloatOp, a: f64, b: f64, prim: Prim) -> Result<Bits, NumericTrap>;
-
-    /// THE printed form, used by every lane and every exit
-    /// (print, to_list, wire schema, diagnostics). Integers print as
-    /// integers; narrow floats print their exact narrowed value; the
-    /// per-op transcendental tolerance table lives with this contract.
-    pub fn format(prim: Prim, bits: Bits) -> String;
+pub enum NumericTrap {
+    /// Integer result outside the dtype's range.
+    Overflow { op: &'static str, prim: Prim },
+    /// Value not a member of the dtype's set (fractional -> int,
+    /// non-0/1 -> bool).
+    Domain   { op: &'static str, prim: Prim },
+    /// Division/remainder by zero (existing behavior, absorbed here).
+    DivZero  { op: &'static str },
 }
 ```
 
-Two rules govern the module itself:
+- **Message format (frozen at Phase 2 exit):**
+  `numeric trap: <kind> in <op> at <prim>` following the branding precedent
+  of `chelis_int_div_guard` / `integer division or remainder by zero`
+  (`chelis-runtime/include/chelis_runtime.h:165-171`). The EXACT strings are
+  recorded in the module as `pub const` and every lane emits them verbatim -
+  the C lane via generated guard snippets (Phase 3), eval via the module
+  directly. #687's oracle compares them byte-for-byte.
+- Traps are *values* (`Result::Err`) inside the lanes and become process
+  aborts only at the lane boundary (eval: `error:` + nonzero exit;
+  compiled C: stderr + nonzero exit). No lane may `panic!` for a user-input
+  trap (#692's rule).
+- **Deciding fold behavior:** compile-time folds (`fold_static_cond`,
+  const propagation) that would trap **decline to fold** - the condition
+  falls to runtime, mirroring `fold_static_size`'s refusal (#711's rule).
+  A fold must never bake a trap away NOR bake one in.
 
-- **Exhaustive matches only.** Every `match` over `Prim` in this module and
-  its consumers has no `_` arm (`numeric_audit_structural_prevention.md`
-  item 3a, enforced by a chelis-lint rule). Adding a `Prim` variant makes
-  the compiler enumerate every place that must decide what it means.
-- **The spec moves with it.** `spec/04-type-system.md` gains the overflow
-  and rounding section it currently lacks - the absence is why int8-wraps
-  and int64-saturates coexisted unnoticed (#680). The module is the
-  executable form of that section; divergence between them is a spec bug.
+## C3. Representation and construction (the privacy contract)
 
-### D2. Private constructors: the semantics is unavoidable
+**Scalars.** The existing tagged scalar (`ScalarBits`-family: exact i64
+storage for ints, f64 for floats) keeps its shape. What changes is
+visibility: raw variant construction becomes `pub(in dtype_semantics)`.
+The public constructors are:
 
-`ScalarBits` (already a tagged union, already exact - the audit confirmed
-the scalar front end is clean) keeps its shape but makes raw construction
-private to the semantics module. `TensorValue` is the larger change: its
-element buffer becomes private, constructed only via
-`TensorValue::finalize(prim, raw_elems)` (bulk form of D1's finalize, so
-hot loops finalize per-buffer, not per-element - see Performance).
+```rust
+/// Op results. THE chokepoint: applies C1, or traps.
+pub fn finalize_scalar(prim: Prim, raw: RawScalar) -> Result<ScalarValue, NumericTrap>;
+/// Literals and host-boundary ingress (already-exact values;
+/// still domain-checked, cannot trap for in-range input by construction).
+pub fn scalar_from_i64(prim: Prim, v: i64) -> Result<ScalarValue, NumericTrap>;
+pub fn scalar_from_f64(prim: Prim, v: f64) -> Result<ScalarValue, NumericTrap>;
 
-After D2, "forgot to call the narrowing helper" - the literal mechanism of
-#680, #717, and #720 - is code that does not compile. The compiler emits
-the complete site work-list that three rounds of manual fixing never
-assembled.
+pub enum RawScalar { Int(i64), Float(f64) }   // what kernels produce
+```
 
-**The storage decision.** `TensorValue { data: Vec<f64> }` is currently
-declared independently at three layers (`chelis-ir/src/eval.rs`,
-`chelis-compiler-api/src/schema.rs`, `bindings/python/chelis/__init__.py`)
-plus prove's `HashMap<String, f64>` env. Phase 1 makes ONE decision -
-per-dtype buffers (the C runtime's `TensorElement` shape, extended to the
-deferred `CHELIS_I32`/`CHELIS_BOOL` per PR #79's outstanding deferral) vs
-f64 storage with finalize-on-write - and expresses it at all four layers in
-the same change set, per #695's sequencing note ("one storage decision
-expressed at three layers"). The proposal's default is **per-dtype
-buffers**: finalize-on-write over f64 storage cannot represent exact int64
-above 2^53 (#684) no matter how disciplined the writes are, so f64 storage
-fails requirement one. The wire schema and Python boundary change with it
-(#686, #685).
+**Tensors.** The element buffer becomes private and per-dtype:
 
-### D3. The kernel type split
+```rust
+pub enum TensorStorage {          // constructors pub(in dtype_semantics)
+    F64(Vec<f64>), F32(Vec<f32>), F16(Vec<u16>), Bf16(Vec<u16>),
+    I64(Vec<i64>), I32(Vec<i32>), I16(Vec<i16>), I8(Vec<i8>),
+    Bool(Vec<u8>),                // 0/1, one byte - ends PR #79's deferral
+}
+/// Bulk finalize: one monomorphized loop per dtype, never per-element
+/// dynamic dispatch (performance contract §C5).
+pub fn finalize_tensor(prim: Prim, raw: RawTensor) -> Result<TensorValue, NumericTrap>;
+```
 
-Unchanged from #695's decided contract, restated because D1/D2 do not
-subsume it: the shared evaluator helpers stop being typed
-`impl Fn(f64, f64) -> f64`. Integer ops route through
-`int_binop(i64, i64) -> Result<i64, _>`; float ops through the float
-kernel plus terminal `finalize`. An integer operand reaching a float
-kernel becomes `E0308` at compile time. This is also what makes the trap
-contract implementable - an i64 overflow cannot be detected inside an
-`Fn(f64, f64)` kernel that already lost the values.
+This is the **storage decision** (#684/#686/#685): per-dtype buffers, not
+finalize-on-write over `Vec<f64>` - f64 storage cannot represent exact
+int64 above 2^53 regardless of write discipline, so it fails #684 by
+construction. The decision is expressed at all four declaration layers in
+ONE change set (Phase 1): `chelis-ir/src/eval.rs` (`TensorValue`),
+`chelis-compiler-api/src/schema.rs` (wire schema - `data` becomes a tagged
+per-dtype payload; this is a wire-format break, versioned as such),
+`bindings/python/chelis/__init__.py` (per-dtype tuples / numpy dtypes,
+ending the `np.float64` cast of #685), and prove's env (§C5-consumer
+table). Partial adoption of the storage decision is forbidden: it is the
+one all-layers-or-nothing element of this plan, because a mixed state
+re-creates the very boundary bugs (#684/#686) it exists to end.
 
-### D4. Consumers
+**Access for consumers.** Reads are free-form (`as_f64_lossy()` explicitly
+named lossy, `as_i64_exact() -> Option<i64>`, typed slices per dtype).
+Only *construction* is gated. Movement ops (reshape/permute/shrink) that
+provably preserve elements may clone/re-slice storage without
+re-finalizing via a `pub(crate) fn reuse_storage` escape hatch whose doc
+contract is "element-preserving ops only"; every use site cites it. That
+hatch is the ONE deliberate hole, kept greppable.
 
-Every lane consumes D1 through D2/D3; none re-implements semantics:
+## C4. The observation contract (formatting; fixes #728)
 
-| consumer | change |
-|---|---|
-| eval scalar (`host_ops.rs`) | kernels split (D3); results finalized (D2). The one already-correct surface (scalar f16/bf16 rounding) becomes shared instead of local. |
-| eval tensor (`host_ops.rs`, `eval.rs`) | `tensor_float_unop_f32` and the un-narrowed binop paths (#717) replaced by bulk finalize; storage per D2. |
-| `fold_static_cond` / `convert_cast_data` (`lower.rs`, `eval.rs`) | cast folding calls `finalize` (kills #720); integer condition folding uses `int_binop` and declines on trap (kills #711, mirroring `fold_static_size`). |
-| prove (`concrete_eval.rs`, `obligation_engine.rs`, `opaque.rs`) | env becomes exact-value typed; the `as f64` flatteners (#688) fail to compile after D3. |
-| C backend host lane (`host.rs`, `host_emit.rs`) | `parse_host_type` gains the narrow arms (#714) as a forced consequence of exhaustive `Prim` matches; scalar C storage per dtype with trap guards (#718, mirroring `chelis_int_div_guard`). |
-| backend emitted code (print helper, dtype switches) | GENERATED from D1's exhaustive `format`/dispatch functions (`prevention` item 3b) - kills #716/#723 and gives both lanes byte-identical printed output, which is #728's fix and #687's precondition. |
-| Metal / HIP | already the best-behaved consumers (typed kernels / clean rejection); they adopt the capability table (D5) but need no semantic change. |
+One function, one output, every exit, both lanes:
 
-### D5. The capability table (parallelizable)
+```rust
+/// THE printed form of one element. Used by eval's printer directly and
+/// used to GENERATE the C print helper (Phase 3). No other formatting
+/// path may exist for tensor/scalar payloads.
+pub fn format_element(prim: Prim, value: ElementRef<'_>) -> String;
+```
 
-One `const` table, op x dtype -> `Supported | Rejected(reason)`, from which
-the checker's acceptance rules derive, backend dispatch skeletons are
-macro-generated (a table row without a kernel is a compile error in that
-backend), and a conformance test executes every Supported cell in every
-lane asserting exact agreement, and every Rejected cell asserting the same
-diagnostic. This retires lane skew as a class (#712, #715's int rows,
-#724, #726, #692's panic-vs-silent split) and converts "add a builtin"
-from silently-becomes-a-stub into the-build-breaks-until-every-lane-
-decides. It can begin as a generated test over the CURRENT dispatch before
-any migration, which makes it a Phase 0 detector as well as the Phase 4
-end state.
+Frozen rules (Phase 1 freezes the Rust side; Phase 3 makes C emit the
+identical bytes):
 
-## Performance
+1. **Integers print as integers.** `data=[750]`, never `750.0` (#723's
+   `.0` lie ends). int64 prints all 19 digits exactly (never via double).
+2. **Floats print shortest-round-trip for their OWN width**: an f32
+   element prints the shortest string that parses back to that f32 (Rust
+   `Display` semantics); f16/bf16 print the shortest string round-tripping
+   through their exact value. This replaces the C helper's `%.1f`/`%.16g`
+   split and eval's f64-width formatting - it is what makes byte-equal
+   lane comparison possible (the audit's `1.4142135381698608` vs
+   `1.414213538169861` divergence was two formatters, one value).
+3. **bool prints `true`/`false`** in tensors, matching `to_list` (ends the
+   `1.0`-vs-`true` split, #726's observation half).
+4. **`print`, `to_list`, diagnostics, and the wire schema agree** with the
+   stored bits and each other. Acceptance is literal: for every dtype,
+   dump the same tensor through all exits in both lanes and diff bytes.
+5. **The transcendental tolerance table.** Where lanes legitimately differ
+   in VALUE (libm vs SLEEF vs vForce, > 0.5 ulp ops), the per-op bound is
+   recorded in `spec/05-risc-primitives.md` next to the op, and the #687
+   oracle consults it; `sqrt` is required correctly rounded (#719) and has
+   no tolerance row. Formatting itself never has tolerance.
 
-Two obligations, addressed by construction rather than hope:
+## C5. Kernels and the consumer map
 
-- **Bulk finalize.** Tensor ops finalize per-buffer with a monomorphized
-  per-dtype loop (or, with per-dtype storage, compute directly in the
-  element type) - never a per-element dynamic dispatch. The C backend
-  already works this way; eval adopting per-dtype buffers makes the
-  reference lane's cost model match the compiled one.
-- **The inner-loop budget stands.** `cargo test --workspace` stays under
-  the ~60s contract; the conformance matrix (D5) is table-generated and
-  cheap per cell, and the heavyweight cells (compile+run per dtype) stay
-  in the per-crate integration tier that PR #696's harness already uses.
+**Kernel split (D3 of the original sketch, #695's decided fix):**
 
-## Phases, each with its oracle
+```rust
+// The ONLY arithmetic entry points. An integer operand reaching a float
+// kernel is a type error at the call site, not a wrong answer later.
+pub fn int_binop(op: IntOp, prim: Prim, a: i64, b: i64) -> Result<i64, NumericTrap>;
+pub fn int_unop (op: IntUnop, prim: Prim, a: i64)       -> Result<i64, NumericTrap>;
+pub fn float_binop(op: FloatOp, prim: Prim, a: f64, b: f64) -> Result<ScalarValue, NumericTrap>;
+pub fn float_unop (op: FloatUnop, prim: Prim, a: f64)       -> Result<ScalarValue, NumericTrap>;
+```
 
-Per the repo contract: one authoritative oracle per phase, red tests first
-(they exist), no phase claimed done on narrative progress.
+`IntOp`/`FloatOp` are closed enums (no strings). Dispatch from builtin
+NAMES to these enums stays in the consumers and is #703's territory (its
+fallback must be `Err`, not a value) - this plan only guarantees that once
+dispatched, the semantics are right.
 
-**Phase 0 - detectors (afternoon-scale, before any refactor).**
-Domain-validity invariant wired into the PR #696 lane drivers (every
-element of every printed/returned tensor is a member of its declared
-dtype's value set - mechanically catches 2049.0-in-f16, 187.5-in-int64,
-2-in-bool, 200-in-int8), plus the #687 exact-integer oracle lanes.
-*Oracle:* the invariant harness runs in CI and is red on today's known
-cells (ignored), green on the clean ones.
+**Consumer map** - who calls what, and which audit issue each row retires:
 
-**Phase 1 - the semantics module + eval adoption.**
-D1 lands with exhaustive matches and the spec/04 section; eval scalar and
-tensor adopt it (D2, including the storage decision at all four layers).
-*Oracle:* the eval-side ignored tests flip green as a class -
-`eval_tensor_narrowing_matrix.rs` (all cells), `narrow_dtype_matrix.rs`
-eval rows, `precision_matrix.rs` eval rows, `int_width_lane_matrix.rs`
-eval cells - with zero regressions in the locked controls (the ByDesign
-float rows and the correct-scalar-rounding locks must NOT change).
+| consumer | adopts | retires |
+|---|---|---|
+| eval scalar (`chelis-compiler-api/src/runtime/host_ops.rs`) | kernel split + `finalize_scalar` | #680, #718 eval-scalar cells |
+| eval tensor (same file + `chelis-ir/src/eval.rs`) | `finalize_tensor` bulk paths; `tensor_float_unop_f32` and raw `binary_map` deleted | #717, #684, #724 eval half, #726 eval half |
+| `convert_cast_data` (`chelis-ir/src/eval.rs`) | thin wrapper over `finalize_scalar` | #717 cast rows, #720 (via next row) |
+| `fold_static_cond` / const folds (`chelis-ir/src/lower.rs`) | `int_binop` + finalize in the Cast arm; decline-on-trap | #711, #720 |
+| prove (`concrete_eval.rs`, `obligation_engine.rs:1857`, `opaque.rs:1536`) | env `HashMap<String, ScalarValue>`; flatteners deleted (will not compile post-split) | #688 |
+| C host lane (`chelis-ir/src/host.rs`, `chelis-backend-c/src/host_emit.rs`) | `parse_host_type` narrow arms (forced by exhaustive `Prim`), per-dtype scalar storage + generated trap guards | #714, #718 C cells, #715's dtype rows |
+| C emitted helpers (print, dtype switches) | GENERATED from `format_element` / exhaustive matches | #716, #723, #728 |
+| Metal / HIP | capability table only (already honestly typed / cleanly rejecting) | - |
 
-**Phase 2 - the kernel split + prove.**
-D3 in `host_ops.rs`; prove's interpreter and flatteners move to exact
-values. *Oracle:* `issue_680_int_exactness.rs` and
-`prove_int64_exactness.rs` ignored rows green; the overflow-trap rows trap
-with the branded diagnostic in eval.
+**Performance contract:** finalize is per-buffer monomorphized loops (or
+direct element-type compute once storage is per-dtype), never per-element
+dyn dispatch; `cargo test --workspace` stays inside the ~60s inner-loop
+budget; the conformance matrix's compile+run cells live in the per-crate
+integration tier, not the workspace loop.
 
-**Phase 3 - backends consume, observation channel generated.**
-`parse_host_type` narrow arms, C scalar width+trap parity, generated print
-helper and dtype switches (D4 backend rows). *Oracle:*
-`scalar_stub_matrix.rs` dtype rows, `narrow_dtype_matrix.rs` C rows,
-`reduction_and_bitwise_matrix.rs` #723 row, `fold_static_cond_matrix.rs`,
-and cross-lane byte-identical printed output on the #687 corpus (the #728
-acceptance: print, to_list, and the wire schema agree with the stored
-bits, both lanes, every dtype).
+---
 
-**Phase 4 - the capability table as the permanent guard.**
-D5 generation replaces hand-mirrored dispatch; the conformance matrix
-becomes the standing per-PR guard. *Oracle:* the generated matrix is the
-named suite; deleting any lane's arm for a Supported cell fails the build,
-not the numbers.
+# Part II - process rules that hold at every phase boundary
 
-Phases 1-3 each unblock issue clusters independently; none requires a
-big-bang merge. The #703/#709 fixes (loud fallbacks, DeepTag enum) are
-orthogonal and can land any time.
+## B1. Freeze points
+
+| contract | frozen at end of | may change after only by |
+|---|---|---|
+| §C1 semantics table + spec/04 section | Phase 1 | spec change + this doc + re-run of the full matrix |
+| §C3 public API + storage layout + wire schema | Phase 1 | versioned schema bump, all four layers together |
+| §C2 trap kinds + exact message strings | Phase 2 | this doc + #687 corpus update in the same PR |
+| §C4 formatting rules 1-4 | Phase 1 (Rust) / Phase 3 (C parity) | this doc + #687 corpus update |
+| §C5 kernel signatures | Phase 2 | this doc |
+| capability table schema | Phase 4 entry | this doc |
+
+"Frozen" means: later phases may ADD consumers but not reinterpret
+behavior. If your phase needs a frozen contract to change, stop, update
+this document and chelis#729 first, and say so in the PR - that is the
+protocol, not a failure.
+
+## B2. Invariants that hold across every boundary
+
+1. **Controls never move.** Every green control in the audit test files
+   (correct cells, `ByDesign` float rows, the documented lucky-greens)
+   keeps its exact expected string through all five phases. A phase PR
+   that edits a control's expectation is wrong until proven otherwise -
+   the burden is on the PR to show the control itself was wrong.
+2. **Red-to-green only by un-ignoring.** The `#[ignore]`d tests assert
+   correct behavior and fail today. A phase completes cells by making the
+   test pass and REMOVING the ignore attribute in the same PR - never by
+   editing the assertion to match behavior (the audit's "never invert an
+   assertion" rule).
+3. **No new dispatch wildcards.** Any `match` a phase touches in the
+   numeric crates loses its `_` arm over closed enums (`Prim`, `RiscOp`,
+   dtype ids) rather than gaining one, ratcheting toward
+   `numeric_audit_structural_prevention.md` item 3a.
+4. **Discoveries fork, they do not scope-creep.** Mid-phase findings
+   (there will be some; every audit pass found more) are filed as issues
+   and linked to #729 - a phase's exit oracle does not grow after entry.
+5. **Both lanes or neither.** Any behavior change lands with its eval and
+   compiled-lane expectations updated in the same PR, per the
+   Public-Surface Change Rule in the repo contract.
+
+## B3. How to pick up a phase
+
+1. Read this doc's Part I, your phase's section, and the previous phase's
+   "frozen at exit" list. You may rely on frozen items without re-review.
+2. Run your phase's oracle suite first; record the red set in the PR
+   description (it is your work-list and your done-list).
+3. `docs/investigations/probes/` has the raw probe drivers if you need to
+   re-derive any cell's current behavior from scratch; do not trust
+   comments, including this document's - the oracle tests are the truth.
+4. Land against the gate (`scripts/gate.py --local`), open the PR early,
+   let CI's macOS Smoke run the workspace suite.
+
+---
+
+# Part III - the phases
+
+## Phase 0 - detectors (before any refactor; afternoon-scale)
+
+**You inherit:** the PR #696 test surface as-is; no code changes exist yet.
+
+**You deliver:**
+
+1. **The domain-validity checker**: a test-support function
+   `assert_elements_in_domain(prim, printed_or_stored: &Values)` that
+   implements §C1's *value set* column only (no finalize, no traps - pure
+   membership), plus its wiring into the existing lane drivers
+   (`eval_lane_str` / `c_lane_str` / `build_and_run_c` families) so every
+   matrix test gets domain-checking for free.
+2. **The #687 exact-integer oracle lanes**: `eval_agreement.rs` gains an
+   exact-string lane (or is superseded by the PR #696 drivers - decision
+   recorded in the PR); `parity.rs` loses the silent float-parsing
+   fallback (a mismatch REPORTS, and only ops with a §C4.5 tolerance row
+   may compare tolerantly).
+3. New `#[ignore]`d rows where the domain checker exposes cells the audit
+   did not enumerate (expected: few; the audit was thorough, but the
+   checker is mechanical).
+
+**Frozen at your exit:** the domain-checker's API and the drivers'
+verbatim-string discipline. Later phases treat "domain checker green" as
+load-bearing evidence.
+
+**Explicitly not yours:** fixing anything the detectors reveal; touching
+production code at all.
+
+**Oracle:** the invariant harness runs in CI, red (ignored) on exactly the
+audit's known bad cells, green on all controls. `parity.rs` still passes
+on the existing corpus with the fallback removed.
+
+## Phase 1 - the semantics module, the storage decision, eval adoption
+
+**You inherit:** Phase 0's detectors (your acceptance instruments) and
+Part I as the spec of what to build.
+
+**You deliver:**
+
+1. The `dtype_semantics` module implementing §C1-§C4's Rust side:
+   `finalize_scalar` / `finalize_tensor` / `scalar_from_*` /
+   `format_element` / `NumericTrap`, with exhaustive `Prim` matches and
+   unit tests per cell of the §C1 table (positive AND negative per the
+   repo's negative-test-parity rule: every rounding case, every trap
+   case, every special value).
+2. **The spec/04 section**: overflow, rounding, domain, and trap text
+   matching §C1/§C2 verbatim in substance. Spec and module land in the
+   same PR so they cannot diverge at birth.
+3. **The storage decision at all four layers** (§C3): `TensorStorage`
+   per-dtype buffers in eval, the versioned wire-schema change, the
+   Python boundary, prove's env type swap can be deferred to Phase 2 ONLY
+   if prove keeps compiling untouched (record which).
+4. **Eval adoption**: eval scalar and tensor paths construct exclusively
+   through the module (raw constructors are now private - the compiler
+   gives you the site list; the PR description records the count).
+   `tensor_float_unop_f32` and the raw f64 `binary_map`/`unary_map` paths
+   are deleted, not deprecated.
+5. Crate-placement decision (open question 4) recorded in this doc.
+
+**Frozen at your exit:** §C1 table + spec section; §C3 API + storage +
+wire schema; §C4 rules 1-4 as implemented in Rust. **Eval is now the
+reference lane**: Phases 2-3 validate other lanes against eval's output
+strings.
+
+**Explicitly not yours:** the compiled lanes (C still wrong in all its
+audited ways at your exit - expected); trap wiring in `host_ops`' scalar
+kernels beyond what finalize forces (Phase 2); any generated-C work.
+
+**Oracle:** `eval_tensor_narrowing_matrix.rs` fully green and un-ignored;
+the eval rows of `narrow_dtype_matrix.rs`, `precision_matrix.rs`,
+`int_width_lane_matrix.rs`, `reduction_and_bitwise_matrix.rs` (#724's
+eval half traps or is table-rejected - see open question 2, decided in
+this phase) green and un-ignored; every control untouched; the Phase 0
+domain checker green on ALL eval outputs, not just audited cells.
+
+## Phase 2 - the kernel split and prove
+
+**You inherit:** the module (frozen §C1/§C3/§C4-Rust), eval as reference
+lane, and the not-yet-split `host_ops` helpers now visibly awkward (they
+finalize but still accept `Fn(f64,f64)`).
+
+**You deliver:**
+
+1. §C5's kernel signatures as the ONLY arithmetic entry points in
+   `host_ops.rs`; the `Fn(f64, f64) -> f64`-shaped helpers
+   (`numeric_binop`, `numeric_unop`, `tensor_numeric_binop`,
+   `dispatch_scalar_binop`) are deleted. The compiler enumerates every
+   call site; the PR records the count against #695's "~17".
+2. The trap contract end-to-end in eval: overflow/domain/divzero traps
+   surface with §C2's exact strings; the strings become `pub const` and
+   are FROZEN in this PR.
+3. Prove: `concrete_eval`'s env becomes exact-typed; the two `as f64`
+   flatteners (`obligation_engine.rs:1857`, `opaque.rs:1536`) will no
+   longer compile - replace with exact reads; `fuzz` samples integers as
+   integers.
+4. `fold_static_cond` moves to `int_binop` + finalize-in-Cast-arm with
+   decline-on-trap (this is here, not Phase 1, because it needs the
+   frozen trap semantics to define "decline").
+
+**Frozen at your exit:** §C2 message strings; §C5 signatures. Phase 3 may
+generate C guard code emitting those exact strings without asking.
+
+**Explicitly not yours:** C backend behavior (still unwrapped/untrapped at
+your exit); formatting anywhere.
+
+**Oracle:** `issue_680_int_exactness.rs` and `precision_matrix.rs`
+overflow rows green and un-ignored (eval side); `prove_int64_exactness.rs`
+green and un-ignored; `fold_static_cond_matrix.rs` eval expectations and
+the #711 row green; the #722 grad rows green in EVAL (grad's lowering now
+folds/computes exactly; the C half of #722 waits for Phase 3 plus #699's
+own fix, which is #703-track).
+
+## Phase 3 - backends adopt; the observation channel is generated
+
+**You inherit:** frozen everything (§C1-§C5); eval as the reference lane
+whose printed strings are the expected values for yours.
+
+**You deliver:**
+
+1. `parse_host_type` (`chelis-ir/src/host.rs:7572`) and
+   `infer_builtin_host_type_from_arg_tys` (`:7861`) lose their defaults;
+   narrow scalar types get real `HostType` representations backed by
+   per-dtype C storage. The `HostType::Unknown -> int64_t/void*` path for
+   numeric types becomes unreachable (#714).
+2. Scalar C arithmetic at width with generated trap guards emitting §C2's
+   frozen strings (the `chelis_int_div_guard` pattern, generalized), and
+   f16/bf16 scalar C storage/rounding matching §C1 (likely via uint16
+   payload + the same conversion helpers the WS-1 kernels already use).
+3. **The generated print helper**: the emitted C tensor/scalar printers
+   are produced from `format_element`'s per-dtype logic (a Rust function
+   emitting the C switch, exhaustive over `Prim`, `default:` aborts with
+   the dtype id). `to_list`, print, and the wire schema now agree in the
+   compiled lane (§C4.4).
+4. The #687 cross-lane oracle turned fully on: byte-identical expected
+   strings for every cell in the matrix files, tolerance only where
+   §C4.5's table says so.
+
+**Frozen at your exit:** §C4 C-side parity - both lanes print identical
+bytes. This is #728's acceptance and the precondition Phase 4's generated
+conformance matrix asserts against.
+
+**Explicitly not yours:** which cells EXIST (capability decisions like
+#724/#726 arrive in Phase 4; until then those cells stay ignored with
+their issue numbers); HIP/Metal kernel work (none needed).
+
+**Oracle:** the C rows of `narrow_dtype_matrix.rs` and
+`int_width_lane_matrix.rs`, `scalar_stub_matrix.rs`'s dtype rows, the
+#723 row in `reduction_and_bitwise_matrix.rs`, and
+`fold_static_cond_matrix.rs`'s C rows - green and un-ignored; plus the
+cross-lane byte-diff pass over the whole corpus (print/to_list/wire vs
+stored bits, both lanes, every dtype).
+
+## Phase 4 - the capability table becomes the permanent guard
+
+**You inherit:** two agreeing lanes and a hand-curated matrix of tests.
+
+**You deliver:**
+
+1. The `const` op x dtype table (`Supported | Rejected(&'static str)`),
+   with the never-authored cells decided on the record: integer `mean`
+   (#724 - reject, widen, or authored floor-mean), bool arithmetic
+   (#726 - proposal default: reject, diagnostics pointing at explicit
+   casts), scalar floor/ceil/round on ints (#715's three-lane row - the
+   checker's existing stance says integer-valid; make eval and C honor
+   it or change the stance, once, here).
+2. Checker acceptance derived from the table (delete the hand-mirrored
+   lists, e.g. `TRANSCENDENTAL_FLOAT_ONLY_OPS` becomes a table view).
+3. Backend dispatch skeletons macro-generated from the table: a
+   `Supported` cell with no kernel is a compile error in that backend; a
+   kernel with no cell is dead code the build flags.
+4. The generated conformance suite: every `Supported` cell executed in
+   every lane asserting exact agreement (or §C4.5 tolerance), every
+   `Rejected` cell asserting the same diagnostic from every lane. This
+   suite REPLACES the hand-written matrix files as the standing guard;
+   the audit files remain as regression archaeology.
+
+**Frozen at your exit:** the table schema and the rule that lanes derive
+from it. After this phase, "add a builtin" without deciding every lane is
+a build failure, which is the class-level end state.
+
+**Explicitly not yours:** relitigating §C1 semantics (frozen since
+Phase 1).
+
+**Oracle:** the generated matrix is the named suite (this phase's single
+authoritative oracle per the repo contract); mutation check: deleting any
+lane's arm for a Supported cell must fail the BUILD, not just the tests.
+
+---
+
+# Part IV - bookkeeping
 
 ## Issue map
 
 | phase | goes green / becomes unwritable |
 |---|---|
 | 0 | detection for everything below; #687 partially |
-| 1 | #684, #717, #720, #724 (eval half), #726 (eval half), the #711 fold via int_binop |
-| 2 | #680, #688, #718 (eval cells), #722 (via #699's raise + exact grad lane) |
-| 3 | #714, #715 (dtype rows), #716, #718 (C cells), #723, #728, #687 unblocked |
-| 4 | #692, #712, #715 (lane skew), #724/#726 (authored cells), future lane skew as a class |
+| 1 | #684, #717, #720 (with Phase 2's fold work), #724 eval half, #726 eval half |
+| 2 | #680, #688, #711, #718 eval cells, #722 eval half |
+| 3 | #714, #715 dtype rows, #716, #718 C cells, #723, #728; #687 fully unblocked |
+| 4 | #692, #712, #715 lane skew, #724/#726 authored, future lane skew as a class |
 
-## Open questions (decide in Phase 1, on the record)
+Orthogonal, do not wait: #703's loud-fallback discipline and #709's
+DeepTag/EffectKind enums (`numeric_audit_structural_prevention.md` items
+3 and 5), the tripwires (item 8), and #699/#725's raise-instead-of-
+substitute fixes (needed for #722's C half regardless of this plan).
 
-1. Per-dtype buffers vs finalize-on-write f64 storage (proposal default:
-   per-dtype; f64 storage cannot meet #684's exactness requirement).
-2. Where `mean` on integer tensors lands in the capability table (#724's
-   three options - reject, widen-to-float, or authored integer mean) and
-   whether bool arithmetic exists at all (#726; proposal default: reject
-   both, pointing at explicit casts).
-3. Whether `NumericTrap` surfaces as the existing branded diagnostic
-   string (`chelis_int_div_guard` precedent) or a structured error kind -
-   both lanes must emit the same text either way (#687).
-4. Crate placement (`chelis-types` module vs new `chelis-dtype` crate) -
-   decided by whether chelis-runtime can depend on it for the generated
-   C helper templates without a cycle.
+## Open questions and where they get decided
+
+| # | question | decided in | recorded where |
+|---|---|---|---|
+| 1 | per-dtype buffers vs finalize-on-write f64 (proposal default: per-dtype; f64 storage cannot meet #684) | Phase 1, before any code | §C3 of this doc + the PR |
+| 2 | integer `mean` / bool arithmetic / int floor-ceil-round capability rows | provisionally Phase 1 (eval must do SOMETHING); ratified Phase 4 | capability table + spec/05 |
+| 3 | trap surface form and exact strings | Phase 2 | §C2 + `pub const` in the module |
+| 4 | crate placement (`chelis-types` module vs `chelis-dtype` crate; constraint: chelis-runtime's generated-helper templates must reach it without a cycle) | Phase 1 | §C5 + this doc |
+| 5 | wire-schema versioning mechanics for the storage change | Phase 1 | schema.rs + `spec/design/chelis_manifest_spec.md` if it bites the manifest |
