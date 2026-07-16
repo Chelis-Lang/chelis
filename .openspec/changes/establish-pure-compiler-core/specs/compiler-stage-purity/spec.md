@@ -46,7 +46,7 @@ Mutable working state used by checking, lowering, optimization, or code generati
 - **THEN** each result matches an isolated execution of that program and context
 
 ### Requirement: Compiler-core execution has no host side effects
-Designated post-preparation compiler-core modules SHALL NOT directly or indirectly obtain capabilities to read or write the filesystem, inspect process environment, execute subprocesses, access a wall clock, emit terminal output, install panic hooks, access a network, obtain entropy, make semantic decisions from thread scheduling, use unsafe FFI, or mutate static or thread-local semantic state. Surf/Deep parsing and desugaring are not newly certified by this change and MUST NOT be counted as acceptance evidence for this boundary.
+Designated post-preparation compiler-core modules SHALL NOT directly or indirectly obtain capabilities to read or write the filesystem, inspect process environment, execute subprocesses, access a wall clock, emit terminal output, install panic hooks, access a network, obtain entropy, make semantic decisions from thread scheduling, use unsafe FFI, or mutate static or thread-local semantic state. Surf/Deep parsing and desugaring are not newly certified by this change and MUST NOT be counted as acceptance evidence for this boundary. Cargo dependency allowlists and exact mixed-module manifests SHALL be primary enforcement. The shared pinned Dylint layer SHALL consume manifest-derived boundaries and forbidden classes, compile every declared package/target/feature/configuration lane, reject resolved forbidden or adapter references and capability-bearing public interfaces, and fail on unresolved configured entries or zero matched production-core items. Its report SHALL state active-cfg, procedural-macro/build-script, arbitrary-dynamic-dispatch, and precompiled-dependency blind spots. Every domain use SHALL reference an accepted `establish-dylint-tooling` diagnostic/class and satisfy the positive/negative detector contract in `FCIS-EVIDENCE-011`. It SHALL be `NoFix` unless a separately accepted tooling change supports the fix ID; any supported fix evidence SHALL run on disposable copies and include compiler semantic parity plus checkout immutability.
 
 #### Scenario: Core compilation leaves the host unchanged
 - **WHEN** a prepared in-memory program is compiled by a core stage
@@ -54,7 +54,7 @@ Designated post-preparation compiler-core modules SHALL NOT directly or indirect
 
 #### Scenario: Architecture gate rejects a hidden effect
 - **WHEN** a negative fixture adds a direct, aliased, re-exported, qualified, callback/macro/trait-hidden forbidden host capability to a designated core module
-- **THEN** the architecture gate fails and identifies the forbidden dependency class
+- **THEN** the architecture gate fails with the registered Dylint diagnostic and identifies the forbidden capability or adapter-reference class
 
 #### Scenario: Test-only code is classified intentionally
 - **WHEN** a designated source file contains a `cfg(test)` fixture using host I/O

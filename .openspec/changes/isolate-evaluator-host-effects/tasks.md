@@ -65,7 +65,7 @@
 ## 6. Close The Vocabulary And Architecture
 
 - [ ] 6.1 Add the exhaustive consistency gate spanning builtin registration, current/planned host-capable effect declarations, evaluator policy, protocol mapping, captured events, and target policy
-- [ ] 6.2 Enforce the `chelis-eval-core` dependency allowlist, check in the compatibility-adapter manifest and threat model, and add specifically claimed direct, alias, re-export, qualified, callback/macro/trait, and `cfg(test)` fixtures without claiming arbitrary macro/dynamic-dispatch completeness
+- [ ] 6.2 Enforce the `chelis-eval-core` dependency allowlist, check in the compatibility-adapter manifest, and run manifest-configured accepted-prerequisite Dylint plans for every declared library/test/feature lane with allowed-positive and violating-negative direct, alias, re-export, qualified, function-item, callback, declarative-macro-expanded, trait, adapter-reference, production-in-test-build, and classified `cfg(test)` detector fixtures; register each domain use as `NoFix`, rejecting unknown diagnostics/classes or prerequisite-unsupported fix IDs; fail on unresolved entries, zero matched production items, omitted lanes, missing detector polarity, or unsafe fixes and record active-cfg/proc-macro/build-script/dynamic-dispatch/transitive-dependency blind spots
 - [ ] 6.3 Make every missing mapping, duplicate mapping, continuation replay, and adapter-bypass fixture fail for the specified reason
 
 ## 7. Documentation And Acceptance

@@ -12,7 +12,7 @@ Every value capable of changing proof engine selection, observation mapping, sou
 - **THEN** the changed semantic identity and any selection difference are attributable to that explicit input
 
 ### Requirement: Engine execution uses requests and observations
-Pure proof dispatch SHALL NOT invoke solver, FFI, worker, filesystem, network, clock, terminal, entropy, thread-scheduling, mutable-global, or subprocess APIs. It SHALL select a typed `EngineRequest` with a deterministic invocation-local sequence identity and resume a non-cloneable, consumed-by-value suspension with a correlated typed `EngineObservation` returned by an imperative adapter. The FCIS contract manifest SHALL pin exact v1 request, observation, evidence, transcript, engine-count, and lane-specific transport bounds before protocol implementation. Observation validation SHALL occur before continuation state changes.
+Pure proof dispatch SHALL NOT invoke solver, FFI, worker, filesystem, network, clock, terminal, entropy, thread-scheduling, mutable-global, or subprocess APIs. It SHALL select a typed `EngineRequest` with a deterministic invocation-local sequence identity and resume a non-cloneable, consumed-by-value suspension with a correlated typed `EngineObservation` returned by an imperative adapter. The FCIS contract manifest SHALL pin exact v1 request, observation, evidence, transcript, engine-count, and lane-specific transport bounds before protocol implementation. Observation validation SHALL occur before continuation state changes. Cargo dependency allowlists SHALL be the primary architecture boundary. The shared pinned Dylint layer SHALL consume manifest-derived core/adapter/capability policy, compile every declared default/optional package/target/feature/configuration lane, reject resolved forbidden references, adapter references, ambient state, and capability-bearing public interfaces, and fail on unresolved configured entries or zero matched production-core items. Its report SHALL record active-cfg, procedural-macro/build-script, arbitrary-dynamic-dispatch, and precompiled-dependency blind spots. Every domain use SHALL reference an accepted `establish-dylint-tooling` diagnostic/class and satisfy the positive/negative detector contract in `FCIS-EVIDENCE-011`. It SHALL be `NoFix` unless a separately accepted tooling change supports the fix ID; any supported fix evidence SHALL run on disposable copies and include proof trust/failure parity plus checkout immutability.
 
 #### Scenario: Supported goal yields a request
 - **WHEN** policy selects a configured engine for a supported goal
@@ -29,6 +29,10 @@ Pure proof dispatch SHALL NOT invoke solver, FFI, worker, filesystem, network, c
 #### Scenario: Oversized observation fails before mapping
 - **WHEN** an observation exceeds the explicit payload bound
 - **THEN** dispatch returns a structured protocol failure without changing continuation state
+
+#### Scenario: Resolved engine capability cannot enter proof core
+- **WHEN** a declared Dylint lane introduces a direct, aliased, re-exported, function-item, callback, declarative-macro-expanded, trait-hidden, or adapter-module solver/host capability into a proof-core item
+- **THEN** the architecture gate emits the registered forbidden-capability or adapter-reference diagnostic and remains non-green
 
 ### Requirement: Engine specifications are stable semantic data
 Each configured engine SHALL have a serializable and comparable specification containing stable identity, implementation version or digest, supported goal shapes, configuration fingerprint, and transport class. Ordered engine specifications SHALL be authoritative semantic inputs to selection and decision-record equality. An engine specification MUST NOT contain self-asserted maximum soundness or qualifier authorization.

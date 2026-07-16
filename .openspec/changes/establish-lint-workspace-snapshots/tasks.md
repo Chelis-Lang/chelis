@@ -16,7 +16,7 @@
 - [ ] 1.5 Add lint parity fixtures for codes, severities, paths, ordering, exceptions, clean examples, and negative cross-file cases
 - [ ] 1.6 Add CLI tests pinning blocking collection-diagnostic exit and machine-output behavior
 - [ ] 1.7 Add legacy-rule positive compatibility and negative not-counted-as-pure evidence tests
-- [ ] 1.8 Add architecture fixtures for direct, aliased, re-exported, qualified, callback/macro/trait-hidden, entropy, scheduling, unsafe-FFI, mutable-global, and `cfg(test)` host capabilities
+- [ ] 1.8 Before lint-core migration, add domain allowed-positive and violating-negative fixtures/live probes for each claimed prerequisite-supported direct, aliased, re-exported, qualified, function-item, callback, declarative-macro-expanded, trait-hidden, collector/legacy-adapter-reference, entropy, scheduling, unsafe-FFI, mutable-global, production-in-test-build, and classified `cfg(test)` form plus allowed invocation-local mutation; register every domain use as `NoFix` and reject unknown diagnostics/classes or unsupported fix IDs
 - [ ] 1.9 Commit all stubs and verify intended hidden-I/O, missing-input, escape, unreadable, invalid, and legacy-boundary cases fail before implementation
 - [ ] 1.10 Add the `--slice contracts` runner around the failing contract fixtures before snapshot implementation
 
@@ -47,8 +47,8 @@
 ## 5. Lock The Architecture
 
 - [ ] 5.1 Enforce the `chelis-lint-core` dependency allowlist and check in the temporary compatibility-facade collector/legacy module manifest
-- [ ] 5.2 Reject the specifically documented direct, alias, re-export, qualified, callback, macro, and forbidden-trait fixtures for filesystem, traversal, environment, process, network, clock, terminal, entropy, scheduling, unsafe-FFI, and mutable-global capabilities; document that fixtures do not prove arbitrary macro/dynamic-dispatch completeness
-- [ ] 5.3 Verify test-only I/O is classified by `cfg(test)` body without exempting production code
+- [ ] 5.2 Run the manifest-configured accepted-prerequisite Dylint layer for the declared `chelis-lint-core` library/test lanes and require both detector polarities before rejecting the specifically documented direct, alias, re-export, qualified, function-item, callback, declarative-macro-expanded, forbidden-trait, and collector/legacy-adapter references for filesystem, traversal, environment, process, network, clock, terminal, entropy, scheduling, unsafe-FFI, and mutable-global capabilities
+- [ ] 5.3 Fail on unresolved configured entries, zero matched production-core items, a missing declared lane, missing detector polarity, or unknown/prerequisite-unsupported/unsafe/non-idempotent fix evidence; verify test-only I/O is classified by `cfg(test)` owner without exempting production code, exercise any prerequisite-supported fix only in disposable copies with compile/lint/parity/idempotence and checkout-immutability checks, and document active-cfg, proc-macro/build-script, arbitrary-dynamic-dispatch, and transitive-dependency blind spots
 
 ## 6. Documentation And Acceptance
 

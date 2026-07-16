@@ -16,7 +16,7 @@
 - [ ] 1.5 Add invalid-observation tests for inconsistent raw status, failed evidence validation, attempted self-authorization, and authorization-policy tampering
 - [ ] 1.6 Add replay positive tests and tampered identity/fingerprint/payload negative tests
 - [ ] 1.7 Add fresh-machine audit replay, tampered-observation denial, duration-normalization, explicit no-persistent-cache surface, and prior-artifact-schema compatibility tests
-- [ ] 1.8 Add `chelis-prove-core` dependency-boundary tests and specifically claimed alias, re-export, callback, macro, trait, entropy, scheduling, unsafe-FFI, mutable-global, and `cfg(test)` fixtures with documented completeness limits
+- [ ] 1.8 Before proof-core migration, add `chelis-prove-core` dependency-boundary tests and domain allowed-positive/violating-negative fixtures/live probes for each claimed prerequisite-supported direct, alias, re-export, qualified, function-item, callback, declarative-macro expansion, trait, adapter reference, entropy, scheduling, unsafe-FFI, mutable-global, production-in-test-build, and classified `cfg(test)` form; register every domain use as `NoFix` and reject unknown diagnostics/classes or unsupported fix IDs
 - [ ] 1.9 Commit all stubs and verify intended hostile, malformed, unauthorized, and tampered cases fail before refactoring
 - [ ] 1.10 Require recorded green evidence from `.venv/bin/python scripts/fcis_gate.py proof-forced-result-removal` in the independent `remove-ambient-proof-result-override` change
 - [ ] 1.11 Retain its hostile-environment and production-source absence cases as regression inputs without reimplementing or re-claiming that security correction
@@ -37,7 +37,7 @@
 - [ ] 3.2 Validate deterministic request identity, engine fingerprint, observation kind, stale/replay state, integrity, and payload bounds before mapping or state transition
 - [ ] 3.3 Centralize mapping from raw observations to status, soundness, evidence, assumptions, qualifiers, degradation, and composite verdict
 - [ ] 3.4 Enforce the separately trusted authorization policy and make unknown/self-authorized descriptors non-green
-- [ ] 3.5 Enforce the `chelis-prove-core` Cargo dependency allowlist and architecture threat model; ensure semantic dispatch imports no solver, FFI, worker, process, environment, filesystem, network, clock, terminal, entropy, scheduling, mutable-global, or adapter capability
+- [ ] 3.5 Enforce the `chelis-prove-core` Cargo dependency allowlist and run manifest-configured accepted-prerequisite Dylint plans for every declared default/optional package/library/test/feature lane; require both detector polarities before enforcing that semantic dispatch imports or references no solver, FFI, worker, process, environment, filesystem, network, clock, terminal, entropy, scheduling, mutable-global, or adapter capability; fail on unresolved entries, zero matched production items, omitted lanes, missing detector polarity, or unknown/prerequisite-unsupported/unsafe fixes, and exercise any prerequisite-supported fix only in disposable copies with compile/lint/proof-trust parity/idempotence and checkout-immutability checks while recording active-cfg/proc-macro/build-script/dynamic-dispatch/transitive-dependency blind spots
 - [ ] 3.6 Implement observation replay by starting a fresh dispatcher through the same selection and mapping path
 - [ ] 3.7 Implement/extend and run `.venv/bin/python scripts/fcis_gate.py proof-execution --slice dispatch`
 

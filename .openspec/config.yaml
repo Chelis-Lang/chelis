@@ -19,10 +19,13 @@ context: |
   domain freshness checks.
   All FCIS changes follow .openspec/FCIS_ARCHITECTURE.md for boundary,
   decision-algebra, protocol, identity, trust, ordering, parity, and evidence
-  laws. The `establish-fcis-contract-mechanics` change owns the typed manifest,
-  traceability, architecture-evidence, and oracle registry required before a
-  domain migration begins implementation; planned or missing evidence is
-  blocked, never skipped or green.
+  laws. The independent `establish-dylint-tooling` change first owns the
+  isolated pinned resolved-lint implementation, adversarial fixtures, and
+  standalone oracle. The downstream `establish-fcis-contract-mechanics`
+  change consumes that current-revision prerequisite and owns the typed FCIS
+  manifest, traceability, domain architecture-evidence projection, and oracle
+  registry required before a domain migration begins implementation; planned
+  or missing evidence is blocked, never skipped or green.
 
   Development is spec-first. Every active requirement needs positive and
   negative coverage before implementation. Passing crate-local tests is not a
@@ -43,15 +46,20 @@ rules:
     - Resolve security-sensitive defaults, exact v1 payload/path/argument/entry/transcript/total-memory bounds, and the authority that grants trust or capabilities before implementation rather than leaving them as open questions.
     - For request workflows, define deterministic request identity, single-use continuation semantics, exact payload bounds, transient-sensitive-payload handling, and persistent secret exclusion; define replay normalization only when replay is in scope.
     - When persistence or identity is in scope, define golden-tested versioned domain-separated canonical encoding, require identities to be core-computed or validated against their value, and distinguish cache candidate lookup from evidence validation, freshness, and reuse authorization; otherwise state explicitly that no persistent semantic identity is introduced.
-    - State the architecture gate threat model, resolved-API or dependency enforcement used, and known blind spots; do not present lexical source scanning as a transitive purity proof.
+    - State the architecture gate threat model, dependency enforcement, shared pinned Dylint resolved-lint mechanism, declared package/target/feature/configuration lanes, and known blind spots; do not present lexical source scanning, Dylint, or bounded fixtures as a transitive purity proof.
+    - For `establish-dylint-tooling`, keep the root workspace and normal gate on stable Rust; place generic fixture-configured tooling in the isolated `tools/dylint` workspace; group same-owner diagnostics into category libraries rather than per-lint crates; and pin exact cargo-dylint/dylint-link/dylint_linting/dylint_testing/nightly/rustc-dev/llvm-tools-preview/dependency versions. For every downstream change, derive domain Dylint boundary/capability policy from the validated FCIS manifest and fail on unresolved configured APIs, missing declared lanes, or zero matched production-core items.
+    - Give every Dylint diagnostic a typed detector contract with allowed-positive and violating-negative fixtures for each claimed syntax class; missing, stale, or one-polarity evidence is non-green and never supports a completeness claim beyond those forms.
+    - Permit a machine-applicable `cargo dylint --fix` suggestion only through a typed registered fix policy whose detector tests pass first and whose disposable positive/negative fix fixtures prove exact rewrite, formatting/compilation, post-fix lint cleanliness, domain parity, and idempotence; fixes may not suppress the lint, widen policy, mutate manifests/configuration, escape the boundary, or delete evidence.
     - Name one typed owner for every capability matrix, builtin/rule/engine/action registry, lock rank, report state, identity domain, or other machine-facing closed vocabulary, with generated projections or explicit tripwires.
   specs:
     - Give every requirement a stable ID plus explicitly identified positive and negative scenarios; scenario polarity must not be inferred only from prose titles.
+    - For Dylint evidence, specify detector polarity fixtures separately from fix fixtures, declare `NoFix` or a stable machine-applicable fix ID, and require the acceptance runner to test fixes only in disposable copies while proving the tracked checkout is unchanged.
     - Map every scenario through a fixture and focused slice to the owning final oracle once the FCIS contract manifest is registered.
     - Express cross-surface parity through an explicit semantic projection and capability matrix rather than assuming every surface supports every target.
     - State success invariants such as an empty error list and no claimed complete artifact set after failure.
   tasks:
     - Put failing test stubs and the fail-closed focused runner before implementation tasks.
+    - Put allowed-positive and violating-negative Dylint detector tests before lint implementation; put positive rewrite and negative no-machine-fix fixtures before any machine-applicable suggestion implementation.
     - Include positive and negative coverage, architecture fixtures, public-surface parity, docs, examples, typed-registry/tripwire work, and the owning acceptance oracle.
-    - Register the change, requirement/scenario IDs, fixtures, slices, prerequisite edges, architecture evidence, and final oracle in the FCIS contract manifest before domain implementation.
+    - Register the change, requirement/scenario IDs, fixtures, slices, prerequisite edges, architecture evidence, and final oracle in the FCIS contract manifest before domain implementation. The sole bootstrap exception is `establish-dylint-tooling`: it must pass its independent standalone oracle first, and contract mechanics must then register and execute that oracle as a current-revision prerequisite before any domain work.
     - Put independent security or product corrections in separately completable OpenSpec changes. A tightly coupled migration may use bounded slices under one umbrella oracle only when the design names the cross-slice invariant requiring end-to-end completion; every slice still needs a focused gate, compatibility/rollback boundary, and no premature completion claim.

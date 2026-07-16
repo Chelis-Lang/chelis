@@ -27,14 +27,67 @@ channel.
 
 Architecture enforcement prefers a dependency-minimal crate boundary whenever the domain
 can support one without a compatibility break. Where a temporary module boundary is
-necessary, an exact production-module manifest supplements dependency allowlists,
-resolved-API checks where available, and negative fixtures for specifically claimed bypass
-forms. Lexical source scans alone are not a transitive purity proof, and fixture coverage
-must not be described as complete detection of arbitrary macro expansion, dynamic dispatch,
-or future Rust syntax. Public core interfaces must not accept unsealed callbacks or traits
-capable of smuggling forbidden host capabilities. Every architecture gate names its actual
-enforcement mechanism, threat model, proven fixture classes, and known blind spots before
-implementation begins.
+necessary, an exact production-module manifest supplements dependency allowlists, the
+shared pinned Dylint resolved-HIR/MIR lint layer, and negative fixtures for specifically
+claimed bypass forms. The Dylint layer checks compiled Rust core items for resolved
+forbidden API/type/macro references, function-item escape, references into declared adapter
+modules, ambient mutable state, and capability-bearing public interfaces. It is evidence
+infrastructure, not a production dependency and not the primary capability boundary.
+
+The independent `establish-dylint-tooling` prerequisite owns the Dylint library,
+`cargo-dylint`, `dylint-link`, `dylint_linting`, `dylint_testing`, dated nightly,
+`rustc-dev` and `llvm-tools-preview` components, remaining dependency pins, generic
+configuration schema, diagnostic registry, adversarial fixture corpus, and standalone
+`dylint-tooling` oracle. It lands before FCIS contract mechanics and has no dependency on
+the later FCIS runner. The repository root remains on stable Rust. The isolated nested
+workspace is `tools/dylint`; its initial `fcis-boundaries` category library
+(`chelis-fcis-boundaries`) contains the FCIS capability, adapter, ambient-state, and
+public-interface passes. Same-owner diagnostics stay in that library rather than becoming
+per-lint crates; a later sibling category requires a distinct policy owner or
+compilation/evidence lifecycle.
+
+After that prerequisite passes, `establish-fcis-contract-mechanics` records and verifies the
+exact accepted pins/schema/diagnostic registry, executes the standalone oracle against the
+same revision, and projects validated domain FCIS manifests into Dylint configuration. The
+tooling prerequisite checks only fixture policy; neither it nor root metadata may become a
+second handwritten domain capability list. Dylint recompiles only declared evidence packages
+with the pinned nightly and does not replace the normal stable compiler gate. Every domain
+Dylint command declares its package, target, feature, and configuration lanes, fails when a
+configured API cannot be resolved or a configured core matches no production items, and
+emits machine-readable diagnostics that the FCIS runner normalizes.
+
+Every registered Dylint diagnostic has a typed detector contract naming its claimed syntax
+classes, at least one allowed positive fixture, at least one violating negative fixture, and
+the exact diagnostic class expected from each negative fixture. Claimed alias, re-export,
+function-item, callback, trait, macro, adapter-reference, and test-classification coverage is
+accepted only after its own positive and negative fixtures pass. Missing, stale, or
+one-polarity detector evidence blocks the lint from acceptance use. This is scope-bounded
+evidence for the registered forms, not a proof that the detector is complete for arbitrary
+Rust programs.
+
+A typed fix policy is either `NoFix` or `MachineApplicable` with a stable fix ID, exact
+positive and negative fix fixtures, and a domain parity command. `cargo dylint --fix` is
+permitted only after the detector contract passes and only for a lint whose registered
+machine-applicable fix proves exact rewritten output, successful formatting and compilation,
+a clean rerun of the same lint, domain-required behavior/parity, and second-application
+idempotence. Negative fix fixtures prove that unsafe or ambiguous cases emit no
+machine-applicable suggestion. A fix may not add lint suppression, widen a boundary or
+manifest exception, mutate FCIS policy/configuration, move code outside the checked boundary,
+or delete tests or evidence. Acceptance oracles exercise fixes only in disposable fixture
+copies and verify the tracked checkout is unchanged; an explicit developer `--fix` command
+may mutate the developer's working tree.
+
+Resolved lints can prove the specifically fixture-locked direct, alias, re-export, qualified,
+function-pointer, callback, trait, macro-expansion, adapter-reference, and `cfg(test)` forms
+that the selected compilation lanes expose. They cannot prove host behavior hidden behind
+arbitrary dynamic dispatch or precompiled dependencies, side effects performed by build
+scripts or procedural-macro implementations, or code removed by an unexecuted `cfg`, target,
+or feature lane. Lexical source scans alone are not a transitive purity proof, and neither
+Dylint nor bounded fixture coverage may be described as complete detection of future Rust
+syntax or arbitrary transitive side effects. Public core interfaces must not accept
+unsealed callbacks or traits capable of smuggling forbidden host capabilities. Every
+architecture gate names its actual enforcement mechanism, compilation matrix, threat model,
+proven fixture classes, and known blind spots before implementation begins.
 
 ## Decision and workflow algebra
 
@@ -164,10 +217,12 @@ independent authorities.
 
 ## Mechanical evidence contract
 
-The `establish-fcis-contract-mechanics` change owns evidence infrastructure shared by these
-migrations. It does not define production effect or workflow types. Before a domain
-implementation begins, its active requirements and planned evidence are registered in a
-versioned machine manifest:
+The `establish-dylint-tooling` change first owns and independently accepts the isolated
+resolved-lint implementation and fixture harness. The downstream
+`establish-fcis-contract-mechanics` change owns the remaining evidence infrastructure shared
+by these migrations and consumes that Dylint prerequisite without reimplementing it. It does
+not define production effect or workflow types. Before a domain implementation begins, its
+active requirements and planned evidence are registered in a versioned machine manifest:
 
 - stable change, capability, requirement, scenario, fixture, slice, and oracle identities;
 - explicit positive/negative scenario polarity and complete
@@ -175,39 +230,53 @@ versioned machine manifest:
 - an acyclic prerequisite graph whose child gates run current-revision prerequisite
   regressions rather than trusting stale completion records;
 - exact core/adapter boundaries, forbidden capability classes, architecture enforcement
-  layers, proven fixture forms, threat model, and known blind spots;
+  layers, Dylint diagnostic registrations with claimed detector classes and positive/negative
+  fixtures, `NoFix` or machine-applicable fix policies with disposable fix/parity fixtures,
+  proven fixture forms, threat model, and known blind spots;
 - one typed owner for every builtin/rule/engine/action registry, surface matrix, lock rank,
   report state, identity domain, or other acceptance-bearing closed vocabulary; and
 - exact v1 resource and protocol bounds plus explicit persistent-identity scope.
 
 The canonical runner is `.venv/bin/python scripts/fcis_gate.py <oracle> [--slice <slice>]`.
-Its validated command plans contain argv arrays, workspace-relative directories, and declared
-environment policy, never shell strings. Registered but missing evidence is blocked or failed,
+Its validated command plans contain argv arrays, workspace-relative directories, declared
+environment policy, and `ReadOnlyCheckout` or `DisposableFixtureCopy` mutation policy, never
+shell strings. A plan containing `cargo dylint --fix` is valid only for a registered fix in a
+declared disposable fixture copy with tracked-checkout pre/post verification. Registered but
+missing evidence is blocked or failed,
 not skipped. Focused slices may support incremental review but cannot produce a final
 completion claim. A successful final report has an empty error list by construction; failed
 or blocked reports have nonempty structured errors. Semantic report order excludes absolute
 checkout roots, elapsed duration, terminal mode, process identity, and localized OS text.
 
 Architecture evidence is layered: resolved dependency allowlists and crate boundaries first,
-exact mixed-module manifests where temporarily necessary, resolved forbidden-API/macro checks
-where available, compile-fail fixtures for claimed bypass forms, public-interface capability
-checks, and behavioral determinism/denial/replay/parity suites. The shared checker rejects a
-lexical or bounded-fixture mechanism described as a complete transitive purity proof.
+exact mixed-module manifests where temporarily necessary, the manifest-configured pinned
+Dylint forbidden-API/type/macro, adapter-reference, ambient-state, and public-interface
+checks, compile-fail/UI detector and disposable fix fixtures for claimed bypass forms, and
+behavioral determinism/denial/replay/parity suites. Architecture reports include the
+Dylint/toolchain pins, declared compilation lanes, resolved configured entries, matched
+production-core item counts, detector-contract state, fix policy, and fix-fixture/parity
+state so a stale, one-polarity, unsafe-fix, or vacuous invocation cannot pass. The shared checker rejects a
+lexical, resolved-lint, or bounded-fixture mechanism described as a complete transitive
+purity proof.
 
 ## Delivery and evidence
 
 The migration proceeds in risk-reducing order:
 
-1. establish the FCIS manifest/checker, fail-closed oracle registry, and failing evidence
-   registration needed by each domain before its implementation begins;
-2. land proof forced-result removal, Tide deny-external hardening, and removal of Reef's
+1. establish and independently accept the isolated pinned Dylint workspace, generic FCIS
+   boundary diagnostics, adversarial detector/fix fixtures, and standalone `dylint-tooling`
+   oracle;
+2. consume that current-revision prerequisite while establishing the FCIS manifest/checker,
+   fail-closed oracle registry, Dylint policy projection, and failing evidence registration
+   needed by each domain before its implementation begins;
+3. land proof forced-result removal, Tide deny-external hardening, and removal of Reef's
    implicit `gh auth token` fallback as independently completable security changes;
-3. use lint snapshots as the one-shot FCIS and architecture-gate proving ground;
-4. make compiler stage state explicit before beginning the canonical facade and
+4. use lint snapshots as the one-shot FCIS and architecture-gate proving ground;
+5. make compiler stage state explicit before beginning the canonical facade and
    target/build-planning slice;
-5. migrate proof and evaluator request/observation protocols through bounded
+6. migrate proof and evaluator request/observation protocols through bounded
    builtin/engine-family slices; and
-6. migrate Reef read-only analysis, local transactions, conformance/source repair, and
+7. migrate Reef read-only analysis, local transactions, conformance/source repair, and
    remote publication through separately gated slices in that order.
 
 Security corrections and unrelated product-surface changes land as independent OpenSpec
@@ -216,7 +285,8 @@ design states the cross-slice invariant that requires end-to-end completion; eac
 still be independently reviewable, have a focused gate, preserve a rollback boundary, and
 avoid claiming umbrella completion. Focused commands never satisfy the final completion claim
 unless the focused command is itself the named oracle of a separately scoped change. A shared
-test harness may own manifest parsing, resolved forbidden-API checks, canonical identity
-helpers for domains that ship identities, and negative-fixture execution, but production
+test harness may own manifest parsing, Dylint configuration projection and resolved
+forbidden-API checks, canonical identity helpers for domains that ship identities, and
+negative-fixture execution, but production
 domains do not share a generic effect or workflow framework without a separate concrete
 proposal.

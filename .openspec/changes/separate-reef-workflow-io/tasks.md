@@ -22,7 +22,7 @@
 - [ ] 1.10 Add structured-notice/report fixtures for terminal and machine callers, including partial local recovery and indeterminate remote state
 - [ ] 1.11 Add conformance snapshot host-change and hidden-I/O fixtures for every policy-bearing audit class
 - [ ] 1.12 Add path fixtures for normalized UTF-8 `/` destinations and rejected non-UTF-8, `.`, `..`, absolute, and escaping components
-- [ ] 1.13 Add architecture fixtures for aliases, re-exports, qualified paths, callbacks, trait-hidden capabilities, unsafe FFI, entropy/scheduling, and `cfg(test)` handling
+- [ ] 1.13 Before Reef-core migration, add domain allowed-positive and violating-negative fixtures/live probes for each claimed prerequisite-supported direct, alias, re-export, qualified-path, function-item, callback, declarative-macro-expanded, trait-hidden, Reef/conformance-adapter-reference, unsafe-FFI, entropy/scheduling, mutable-global, production-in-test-build, and classified `cfg(test)` form; register every domain use as `NoFix` and reject unknown diagnostics/classes or unsupported fix IDs
 - [ ] 1.14 Commit all stubs and verify intended hidden-I/O, denial, drift, corruption, replay, adapter-self-verification, blob substitution, lock-order, remote-indeterminate, and partial-state cases fail before implementation
 
 ## 2. Create The Reef Functional Core And Protocol
@@ -100,8 +100,8 @@
 
 ## 10. Lock Architecture And Public Parity
 
-- [ ] 10.1 Enforce the `chelis-reef-core` dependency allowlist and check in the Reef-adapter/conformance decision/adapter manifest plus the architecture-gate threat model, specifically proven fixture classes, and known blind spots
-- [ ] 10.2 Reject the documented direct, alias, re-export, qualified, callback, trait, macro, and `cfg(test)` host-capability fixtures and adapter imports without claiming arbitrary macro/dynamic-dispatch completeness
+- [ ] 10.1 Enforce the `chelis-reef-core` dependency allowlist, check in the Reef-adapter/conformance decision/adapter manifest, and run manifest-configured accepted-prerequisite Dylint plans for every declared Reef-core/conformance package/library/test/feature lane; report exact pins, resolved entries, matched production counts, specifically proven fixture classes, and active-cfg/proc-macro/build-script/dynamic-dispatch/transitive-dependency blind spots
+- [ ] 10.2 Reject the documented direct, alias, re-export, qualified, function-item, callback, trait, declarative-macro-expanded, adapter-reference, production-in-test-build, and classified `cfg(test)` host-capability fixtures only after both detector polarities pass; fail on unresolved configured entries, zero matched production/decision-module items, omitted lanes, missing detector polarity, or unknown/prerequisite-unsupported/unsafe fixes, and exercise any prerequisite-supported fix only in disposable copies with compile/lint/Reef-conformance plan-and-failure parity/idempotence and checkout-immutability checks without claiming arbitrary macro/dynamic-dispatch completeness
 - [ ] 10.3 Compare exit status, machine output shape, notices, on-disk formats, dependency/origin/pin decisions, declared atomicity/recovery behavior, remote state, and conformance outcomes with established fixtures
 - [ ] 10.4 Verify every secret is absent from persistent requests/observations, plans, identities, notices, diagnostics, logs, and replay records
 

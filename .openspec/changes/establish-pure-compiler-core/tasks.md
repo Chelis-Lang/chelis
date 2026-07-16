@@ -16,7 +16,7 @@
 - [ ] 1.5 Add equal-input tests across different thread stack sizes plus trusted-local and untrusted-service limit boundary fixtures
 - [ ] 1.6 Add near-limit time and peak-working-memory regression fixtures so the 16,384-depth and 100,000,000-step local ceilings are measured rather than treated as free capacity
 - [ ] 1.7 Add profiling, compiler-capability, resource-bundle, implementation-independent canonical query-key/outcome-digest golden vectors, cached/uncached, and ambient-runtime-file tests
-- [ ] 1.8 Add architecture fixtures for allowed local mutation and forbidden direct, aliased, re-exported, qualified, callback-hidden, trait-hidden, unsafe-FFI, entropy, scheduling, and intentionally classified `cfg(test)` host dependencies
+- [ ] 1.8 Before compiler-core migration, add domain allowed-positive and violating-negative fixtures/live probes for allowed invocation-local mutation and each claimed prerequisite-supported forbidden direct, aliased, re-exported, qualified, function-item, callback-hidden, trait-hidden, declarative-macro-expanded, adapter-reference, unsafe-FFI, entropy, scheduling, production-in-test-build, and intentionally classified `cfg(test)` form; register every domain use as `NoFix` and reject unknown diagnostics/classes or unsupported fix IDs
 - [ ] 1.9 Add a dependency fixture that fails on any backend-to-`chelis-compiler-core` edge
 - [ ] 1.10 Commit all test stubs and verify intended negative cases fail before implementation
 
@@ -78,8 +78,8 @@
 
 ## 7. Lock The Architecture
 
-- [ ] 7.1 Implement crate-dependency checks as the primary boundary plus the exact mixed-backend module manifest, resolved forbidden-API checks where available, and documented lexical/dynamic-dispatch/macro blind spots
-- [ ] 7.2 Reject the specifically claimed alias, re-export, qualified-path, callback/function-pointer, forbidden-trait, unsafe-FFI, entropy/scheduling, adapter-import, macro, and `cfg(test)` fixtures without claiming arbitrary procedural-macro or dynamic-dispatch completeness
+- [ ] 7.1 Implement crate-dependency checks as the primary boundary plus the exact mixed-backend module manifest and manifest-configured accepted-prerequisite Dylint plans for every declared package/library/test/feature lane; record exact pins, resolved entries, matched production counts, and active-cfg/proc-macro/build-script/dynamic-dispatch/transitive-dependency blind spots
+- [ ] 7.2 Reject the specifically claimed alias, re-export, qualified-path, function-item, callback/function-pointer, forbidden-trait, unsafe-FFI, entropy/scheduling, adapter-import, declarative-macro expansion, production-in-test-build, and classified `cfg(test)` fixtures only after both detector polarities pass; fail on unresolved configured entries, zero matched production items, omitted lanes, missing detector polarity, or unknown/prerequisite-unsupported/unsafe/non-idempotent fixes, and exercise any prerequisite-supported fix only in disposable copies with compile/lint/compiler-parity and checkout-immutability checks without claiming arbitrary procedural-macro or dynamic-dispatch completeness
 - [ ] 7.3 Verify backend policy/emission modules have no dependency on `chelis-compiler-core`
 - [ ] 7.4 Verify measured/unmeasured and cached/uncached paths preserve normalized semantic outputs
 
