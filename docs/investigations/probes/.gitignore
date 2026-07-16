@@ -1,0 +1,4 @@
+# Battery runs regenerate probe programs and build outputs here; never commit them.
+probes/
+*.ch
+*.dp
