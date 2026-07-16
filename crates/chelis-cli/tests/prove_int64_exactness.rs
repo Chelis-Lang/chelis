@@ -78,11 +78,11 @@ fn prove_does_not_refute_a_true_int64_theorem() {
 fn prove_accepts_the_small_offset_control() {
     let (stdout, _) = prove(
         "module Audit.ProveIntCtl\n\
-         export (bump_a, bump_b)\n\
-         def bump_a(x: int64) -> int64 = add(x, 1i64)\n\
-         def bump_b(x: int64) -> int64 = add(x, 2i64)\n\
+         export (increment_by_one, advance_by_two)\n\
+         def increment_by_one(x: int64) -> int64 = add(x, 1i64)\n\
+         def advance_by_two(x: int64) -> int64 = add(x, 2i64)\n\
          @property small_offsets_stay_distinct forall(x: int64):\n\
-           (bump_a(x) != bump_b(x))\n",
+           (increment_by_one(x) != advance_by_two(x))\n",
     );
     assert!(
         stdout.contains("1 passed, 0 failed"),

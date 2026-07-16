@@ -1,0 +1,15 @@
+(defsig {} f (t-fn {} (t-prim {} f32)))
+
+(def {}
+  f
+  (fn {}
+    (params {})
+    (handle-effect {effect: teleport, span: "surf:17..38"}
+      (lit {span: "surf:27..29", type: (t-prim {} int32)} 42)
+      (lit {span: "surf:31..38", type: (t-prim {} f32)} 2.5))))
+
+(def {}
+  out
+  (app {span: "surf:45..55"}
+    (var {span: "surf:45..50"} print)
+    (app {span: "surf:51..54"} (var {span: "surf:51..52"} f))))

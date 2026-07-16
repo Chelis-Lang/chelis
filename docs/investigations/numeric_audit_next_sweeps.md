@@ -448,6 +448,18 @@ opaque produced-value chokepoint itself still needs the smt build.
    not a value bug, but the #687 exact-string oracle needs a per-op
    formatting contract before it can compare transcendental outputs.
 
+### Class bookkeeping and prevention (filed after the outcomes above)
+
+Two further metas were filed once the findings were classified: **[#727]**
+(no dtype's semantics are enforced at any single point - the generalization
+of #695 that the narrow-float sweep forced) and **[#728]** (the observation
+channel is not dtype-faithful - the #716/#723 class, and the missing
+prerequisite for #687). The mechanism-by-mechanism plan for making all four
+classes structurally unwritable is
+[`numeric_audit_structural_prevention.md`](numeric_audit_structural_prevention.md),
+and the raw probe corpus behind every finding AND every negative result is
+archived under [`probes/`](probes/README.md).
+
 [#714]: https://github.com/Chelis-Lang/chelis/issues/714
 [#715]: https://github.com/Chelis-Lang/chelis/issues/715
 [#716]: https://github.com/Chelis-Lang/chelis/issues/716
@@ -461,3 +473,5 @@ opaque produced-value chokepoint itself still needs the smt build.
 [#724]: https://github.com/Chelis-Lang/chelis/issues/724
 [#725]: https://github.com/Chelis-Lang/chelis/issues/725
 [#726]: https://github.com/Chelis-Lang/chelis/issues/726
+[#727]: https://github.com/Chelis-Lang/chelis/issues/727
+[#728]: https://github.com/Chelis-Lang/chelis/issues/728
