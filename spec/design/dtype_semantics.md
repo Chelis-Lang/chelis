@@ -553,7 +553,9 @@ lane's arm for a Supported cell must fail the BUILD, not just the tests.
 | 3 | #714, #715 dtype rows, #716, #718 C cells, #723, #728; #687 fully unblocked |
 | 4 | #692, #712, #715 lane skew, #724/#726 authored, future lane skew as a class |
 
-Orthogonal, do not wait: #703's loud-fallback discipline and #709's
+Orthogonal, do not wait: #703's loud-fallback discipline (now its own
+plan: `spec/design/loud_unsupported.md`, tracking chelis#730, whose §I1
+pins the interlock with this document) and #709's
 DeepTag/EffectKind enums (`numeric_audit_structural_prevention.md` items
 3 and 5), the tripwires (item 8), and #699/#725's raise-instead-of-
 substitute fixes (needed for #722's C half regardless of this plan).

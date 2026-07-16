@@ -225,8 +225,9 @@ hand-inlining); add:
 Items 1, 2, 4, 6 and 7 of this document have been consolidated into a
 design proposal with a phase plan and per-phase oracles:
 [`spec/design/dtype_semantics.md`](../../spec/design/dtype_semantics.md),
-tracked as chelis#729. Items 3, 5 and 8 (the #703/#709 fixes and the
-tripwires) remain independent and should not wait for it.
+tracked as chelis#729. Items 3 and 8 (the #703 fixes and the tripwires) are now ALSO a formal
+proposal: [`spec/design/loud_unsupported.md`](../../spec/design/loud_unsupported.md),
+tracked as chelis#730. Item 5 (#709's DeepTag enum) remains independent.
 
 ## Sequencing against the open fix plan
 
