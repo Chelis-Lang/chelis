@@ -2189,3 +2189,97 @@ Scope:
   break programs the backend lane compiles and runs correctly today.
 - Builtin-adjacent reserved keywords (`cast`, `grad`, `vmap`, ...) are not
   part of `BUILTIN_NAMES`; a `def cast` is already a parse error.
+
+---
+
+## 9. Numeric Value Semantics (Decided 2026-07; Implementation Tracked As chelis#729)
+
+**Status banner - read before citing.** The atoms below are DECIDED
+normative semantics, authored 2026-07-16 out of the numeric audit
+(chelis#680-#734; metas #695/#727). They are NOT yet implemented: today's
+behavior diverges per the issue references in each atom's note, and the
+divergences are locked as issue-linked `#[ignore]`d tests (the
+"specified, not yet honored" state of `spec/design/spec_provenance.md`
+§C4.2). The delivery plan and the full elaboration (finalize semantics,
+kernel signatures, storage) is `spec/design/dtype_semantics.md`. Atom IDs
+are stable; rev hashes arrive with the provenance lint (chelis#733
+Phase 1) - the atom grammar is provisional until that plan's Phase 1
+ratifies it.
+
+> **[04-NUM-1]** Every numeric op result SHALL be finalized into its
+> declared dtype - rounding for floats, width and domain checks for
+> integers and bool - before it becomes observable to any subsequent op,
+> comparison, fold, or output, in every lane and on every surface
+> (scalar and tensor alike).
+
+*(Not honored today: chelis#717, #714, #718, #720, #726.)*
+
+> **[04-NUM-2]** Float finalization SHALL be IEEE-754 round-to-nearest,
+> ties-to-even, at the dtype's own width (f64 identity; f32 24-bit,
+> f16 11-bit including subnormals, bf16 8-bit mantissa), with overflow
+> to the correctly signed infinity, and NaN, signed zero, and infinities
+> preserved. Computing a single op in f64 and rounding once is a
+> conforming implementation for f32/f16/bf16.
+
+*(Honored today only by the eval scalar lane; see chelis#717.)*
+
+> **[04-NUM-3]** Integer op results that are not exactly representable
+> in the declared width SHALL trap with the branded overflow diagnostic;
+> no lane and no surface SHALL wrap, saturate, or silently widen.
+> In-range integer arithmetic SHALL be exact at every width.
+
+*(Not honored today: int8/16/32 wrap in eval scalars, int64 saturates,
+the compiled scalar lane widens, the compiled tensor lane wraps -
+chelis#680/#718.)*
+
+> **[04-NUM-4]** A `bool` value SHALL be exactly 0 or 1; arithmetic
+> that would produce any other value in a bool-typed position SHALL be
+> rejected by the checker or trap.
+
+*(Not honored today: chelis#726.)*
+
+> **[04-NUM-5]** Comparisons SHALL compare finalized values: a cast's
+> rounding applies before any comparison reads it, including in
+> compile-time condition folds, which SHALL either fold with exact
+> per-dtype semantics or decline to fold. A fold SHALL never remove a
+> branch that exact semantics would take, and SHALL never fold away or
+> introduce a trap.
+
+*(Not honored today: chelis#711, #720.)*
+
+> **[04-NUM-6]** `f64 add(2^53, 1) == 2^53` and every other correctly
+> rounded float result at the dtype's own mantissa boundary is CORRECT
+> and SHALL NOT be "fixed"; identical printed numbers at an integer
+> dtype are a defect. Same inputs, opposite verdicts, by design.
+
+*(Honored and locked: `precision_matrix.rs` ByDesign rows.)*
+
+---
+
+## 10. Checker Totality (Decided 2026-07; Implementation Tracked As chelis#731)
+
+**Status banner:** same provisional-atom and honesty rules as §9. The
+delivery plan is `spec/design/checker_totality.md`.
+
+> **[04-TOT-1]** Every Deep tag in the closed vocabulary
+> (spec/03-deep-syntax.md) SHALL have an explicit checker disposition: a
+> real inference case, or a rejection with a pushed diagnostic. A
+> construct the checker does not recognize SHALL produce a diagnostic,
+> never a silent exemption of its subtree.
+
+*(Not honored today: `handle-effect` - chelis#709.)*
+
+> **[04-TOT-2]** If a check completes with an empty error vector, the
+> typed result SHALL contain no error-typed expression: `Type::Error`
+> without a corresponding reported diagnostic SHALL be unconstructible.
+
+*(Not honored today: chelis#709/#710; the witness-token mechanism is
+chelis#731 Phase 2.)*
+
+> **[04-TOT-3]** A structurally malformed Deep form that reaches the
+> checker SHALL be rejected with a diagnostic naming the tag and the
+> expected shape; deferring the failure to a later stage is not a
+> disposition.
+
+*(Partially honored today: 4 of 6 audited guards reject; two are silent -
+chelis#710.)*
