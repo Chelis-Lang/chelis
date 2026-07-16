@@ -1,0 +1,43 @@
+schema: spec-driven
+
+context: |
+  Chelis is a Rust workspace governed by AGENTS.md and the active specification
+  hierarchy: spec/design/chelis_canonical_reference.md, then spec/00-12*.md,
+  then spec/design/chelis_project_plan.md. Public behavior changes must update
+  code, tests, active specs, current-state docs, examples, and CLI/machine
+  surfaces together.
+
+  FCIS means Functional Core / Imperative Shell. A core may use
+  invocation-owned local mutation, but every value capable of changing its
+  observable result must be explicit. One-shot cores map immutable inputs to
+  returned data. Workflows whose next decision depends on a host result use a
+  typed request/observation state machine. Imperative adapters acquire inputs,
+  execute requests, measure, mutate, and render; they do not duplicate policy.
+  All FCIS changes follow .openspec/FCIS_ARCHITECTURE.md for boundary,
+  decision-algebra, protocol, identity, trust, ordering, and parity laws.
+
+  Development is spec-first. Every active requirement needs positive and
+  negative coverage before implementation. Passing crate-local tests is not a
+  completion claim. Each change must name one executable acceptance oracle.
+
+rules:
+  proposal:
+    - State explicit goals and non-goals.
+    - Identify the functional-core boundary, imperative adapters, affected public surfaces, and compatibility expectations.
+    - Keep unrelated correctness or product-surface changes out of an FCIS refactor unless separately specified.
+  design:
+    - Distinguish one-shot deterministic computation from resumable request/observation workflows.
+    - Define authoritative inputs, returned outputs, query keys, decision or evidence digests, report metadata, deterministic ordering, and trust or capability boundaries.
+    - Use sum types that distinguish accepted decisions, semantic rejection, and host execution failure without contradictory success/error/artifact states.
+    - Name the exact designated core modules or crate boundary and adapter modules before implementation, and explain how architecture tests avoid aliases, re-exports, cfg(test), and indirect capability bypasses.
+    - Include one exact acceptance command and its expected green condition.
+    - Resolve security-sensitive defaults and the authority that grants trust or capabilities before implementation rather than leaving them as open questions.
+    - For request workflows, define deterministic request identity, single-use continuation semantics, replay normalization, payload bounds, and secret exclusion.
+  specs:
+    - Give every requirement positive and negative scenarios.
+    - Express cross-surface parity through an explicit semantic projection and capability matrix rather than assuming every surface supports every target.
+    - State success invariants such as an empty error list and no claimed complete artifact set after failure.
+  tasks:
+    - Put failing test stubs before implementation tasks.
+    - Include positive and negative coverage, architecture fixtures, public-surface parity, docs, examples, and the owning acceptance oracle.
+    - Split broad migrations into independently reviewable slices with compatibility adapters and rollback points.
