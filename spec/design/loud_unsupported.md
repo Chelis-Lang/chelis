@@ -513,7 +513,7 @@ boundary, pinned:
 
 | # | question | decided in | recorded where |
 |---|---|---|---|
-| 1 | `Unsupported` as one shared type across chelis-ir/backends vs per-crate mirrors with a conversion (constraint: no dependency cycles; lowering's existing error type may absorb it) | Phase 1, in the plumbing PR | §C2/§C3 of this doc |
+| 1 | `Unsupported`: one shared type vs per-crate mirrors | DECIDED 2026-07-17: ONE shared type, defined in `chelis-types` beside the dtype_semantics module and the future capability table (whose `Rejected` cells both the checker and the backends render into it). No cycles: chelis-types sits at the workspace bottom and every producer (chelis-ir, all backends, compiler-api) already depends on it (verified against the Cargo graph). Lowering's existing error type absorbs it via `From<Unsupported>`, not replacement. Per-crate mirrors would be the scatter pattern in miniature | §C2/§C3 of this doc |
 | 2 | whether `check` should pre-report target-independent unsupported constructs | **RESOLVED** by `capability_table.md`: yes for semantic-table (A) rejections - they are target-independent type facts; target-level (B) rejections surface at build | `capability_table.md` §Derivations |
 | 3 | lint allowlist mechanics (inline justification comment vs allowlist file) - follow whatever §8.6's rule already does for exceptions | Phase 2 | lint rule spec |
 | 4 | which gates survive Phase 3 as early-UX vs die | Phase 3 | §C5 rows 17-18 + gate contract |

@@ -141,8 +141,12 @@ Normative, for every node the checker visits:
    disposition.
 5. **`handle-effect` gets a real case** (the instance fix): check the
    handler expression against its effect kind's signature (`random`: an
-   integer seed; `resource`: a string device - the kinds come from
-   `EffectKind`, §I1), check the body in the enclosing context, and
+   integer-LITERAL seed, contextually bound at int64 per spec/02 §P10
+   exception 2; `resource`: a string-LITERAL device, literal-ness
+   checked, name vocabulary not validated - the kinds come from
+   `EffectKind`, §I1; non-literal arguments are rejected citing §P5's
+   shipped constraint and [#735] - Phase 1 checks FORM, [#735] authors
+   meaning), check the body in the enclosing context, and
    return the BODY's type so the enclosing `def` signature is enforced.
    The three executed escalations become impossible: an int64 body in an
    `-> f32` def is a type error; the tensor variant is a type error; both
@@ -437,10 +441,10 @@ the scratch variant deleted); the canary and full matrix stay green.
 
 | # | question | decided in | recorded where |
 |---|---|---|---|
-| 1 | `handle-effect`'s checked signature details (seed int width; is a non-literal seed expression allowed; device string validation) | Phase 1 | §C1.5 + spec/04 effect section |
+| 1 | `handle-effect`'s checked signature details | DECIDED 2026-07-17: Phase 1 checks FORM, [#735] authors meaning. Seed = an integer literal, contextually bound at int64 via spec/02 §P10 exception 2 (the P10b known-type-position mechanism - binding, not promotion; the §P10 extension to the seed position lands with P1's spec sync); non-literal seed expressions are rejected, diagnostic citing §P5's shipped constraint and [#735]. Device = a string literal; the checker validates literal-ness only, never the device-name vocabulary (target knowledge, [#735]'s territory) | §C1.5 + spec/04 effect section + spec/02 §P10 |
 | 2 | typecheck-cache deserialization as a witness mint (accepted, or cache entries re-validated?) | Phase 2 | §C3 note + the cache module doc |
 | 3 | whether printers/desugar also migrate to `DeepTag` (nice-to-have; they are not chokepoints) | Phase 3, may defer | this doc |
-| 4 | score semantics for `UnknownForm`/`MalformedForm` (severity weights) | Phase 1, follow existing kind precedents | scoring code + this doc |
+| 4 | score semantics for `UnknownForm`/`MalformedForm` | DECIDED 2026-07-17: severity parity with `TypeMismatch` (the existing 0.5-class precedent), no new weight class. The invariant that matters - any pushed error forces score < 1.0 - is locked by §C4.4's corpus independently of the weights, so calibration can move later without touching it | scoring code + this doc |
 
 ## The one-sentence summary for a reviewer
 
@@ -456,6 +460,7 @@ tree) standing guard over both claims.
 [#709]: https://github.com/Chelis-Lang/chelis/issues/709
 [#710]: https://github.com/Chelis-Lang/chelis/issues/710
 [#721]: https://github.com/Chelis-Lang/chelis/issues/721
+[#735]: https://github.com/Chelis-Lang/chelis/issues/735
 [#729]: https://github.com/Chelis-Lang/chelis/issues/729
 [#730]: https://github.com/Chelis-Lang/chelis/issues/730
 [#731]: https://github.com/Chelis-Lang/chelis/issues/731

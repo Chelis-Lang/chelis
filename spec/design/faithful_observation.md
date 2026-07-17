@@ -126,8 +126,10 @@ Per-dtype rules:
 5. **Containers**: tensor rendering stays `tensor(shape=[..],
    data=[..])`; `to_list` stays `[..]`; both use `format_element` for
    every element, so the exits can no longer disagree ([#726]'s split).
-   The existing 32-element print truncation (`, ...`) is kept and
-   documented.
+   Truncation (decided 2026-07-17): every exit in both lanes truncates
+   tensor element rendering at 32 with the marker `, ...` - one rule,
+   no exceptions (open question 4 has the rationale and the migration
+   note). Full-element fidelity is `to_list`'s and the wire's job.
 6. **Diagnostics that embed values** (traps, mismatch messages) use
    `format_element` for the embedded value - a diagnostic must not
    launder what it reports.
@@ -425,10 +427,10 @@ never as tolerance.
 
 | # | question | decided in | recorded where |
 |---|---|---|---|
-| 1 | exact number grammar edge set (exponent threshold where `{:?}` switches to e-notation; f16/bf16 shortest-digit definition) | Phase 1 | §C1.3 + the formatter's unit tests |
+| 1 | exact number grammar edge set | DECIDED 2026-07-17 (mechanics; exact constants pinned by P1's tests): `{:?}`'s e-notation thresholds are captured empirically and recorded as NORMATIVE CONSTANTS in §C1.3, so a rustc formatting change breaks our tests loudly instead of silently shifting the grammar the generated C must match. f16/bf16 shortest-digit = the shortest string whose parse-back (strtod to f64, then round to the half width - safe by the same excess-precision argument as [04-NUM-1]'s single-rounding rule) yields the stored bits, verified EXHAUSTIVELY over all 65536 bit patterns per format (a required P1 deliverable - the narrow widths are fully enumerable, so no boundary-case debate survives) | §C1.3 + the formatter's unit tests |
 | 2 | precision-escalation loop vs vendored Ryū for the C routine | Phase 2 (loop is the default; revisit only on measured cost) | §C3.3 |
 | 3 | whether the wire schema renders numbers as JSON numbers or strings for int64 once [#729]'s storage lands | with [#729] Phase 1 | schema.rs + both docs' §I1 |
-| 4 | truncation marker (`, ...`) threshold configurability | Phase 1, default keep-as-is | §C1.5 |
+| 4 | truncation story | DECIDED 2026-07-17: ONE rule at every exit in both lanes - truncate tensor element rendering at 32 with the marker `, ...` (C's existing form). P0's census proved "keep as-is" was incoherent (three stories: eval transcript unlimited, eval root `+ ...`@32, C `, ...`@32). Eval-transcript's unlimited printing is REMOVED in the migration (the one place §B2.1's carve-out changes how MUCH is printed, flagged with §B2.2 bit-level companions); print-based cross-lane comparison beyond 32 never worked (the C lane already capped), and full-element fidelity is `to_list`'s and the wire's job, never print's. The threshold is one documented constant; configurability deferred until a real need | §C1.5 |
 
 ## The one-sentence summary for a reviewer
 
