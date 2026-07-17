@@ -91,7 +91,7 @@ text Waves 1-2 author. The graph is acyclic; node colors are the waves
 above.
 
 ```mermaid
-%%{init: {"themeVariables": {"fontSize": "18px"}, "flowchart": {"nodeSpacing": 55, "rankSpacing": 65}}}%%
+%%{init: {"themeVariables": {"fontSize": "18px"}, "flowchart": {"defaultRenderer": "elk", "nodeSpacing": 55, "rankSpacing": 65}}}%%
 flowchart TB
   classDef w0 fill:#ececec,stroke:#808080,color:#1a1a1a
   classDef w1 fill:#d9ead3,stroke:#5a8a4a,color:#1a1a1a
@@ -160,7 +160,6 @@ flowchart TB
   n719 ==>|"HARD: precedes the<br/>sqrt = 0 tolerance row"| n732p3
   n683 -.->|"natural moment"| n729p2
   n713 -.->|"natural moment"| n729p3
-  n732p2 ~~~ n719
 
   style S733 fill:#FFFFFF,stroke:#C3CCD3
   style S730 fill:#FFFFFF,stroke:#C3CCD3
