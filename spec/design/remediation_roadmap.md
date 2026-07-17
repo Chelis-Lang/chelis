@@ -89,8 +89,10 @@ it (string-match + loud else if it lands first); [#731] Phase 3's
 addition. The thick red edge is the single hard cross-plan dependency in
 the set: [#719]'s fix precedes [#732] Phase 3's `sqrt = 0` tolerance
 row. Not drawn (for legibility): [#733] Phase 1 atomizes whatever spec
-text Waves 1-2 author. The graph is acyclic; node colors are the waves
-above.
+text Waves 1-2 author. The graph is acyclic. Node colors are the waves
+above: grey = Wave 0, green = Wave 1, blue = Wave 2, orange = Wave 3,
+purple = Wave 4 (so [#733] P1, blue, rides Wave 2); white boxes with
+dashed borders are standalone fixes outside the wave structure.
 
 ```mermaid
 %%{init: {"themeVariables": {"fontSize": "18px"}, "flowchart": {"nodeSpacing": 45, "rankSpacing": 42}}}%%
