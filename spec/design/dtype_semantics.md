@@ -591,10 +591,10 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 
 | # | question | decided in | recorded where |
 |---|---|---|---|
-| 1 | per-dtype buffers vs finalize-on-write f64 (proposal default: per-dtype; f64 storage cannot meet [#684]) | Phase 1, before any code | §C3 of this doc + the PR |
-| 2 | integer `mean` / bool arithmetic / int floor-ceil-round capability rows | provisionally Phase 1 (eval must do SOMETHING); ratified Phase 4 | capability table + spec/05 |
+| 1 | per-dtype buffers vs finalize-on-write f64 | DECIDED 2026-07-17: per-dtype buffers. The proposal default is ratified: f64 storage cannot meet [#684] by construction, and the 2026-07 review endorsed per-dtype `TensorStorage` as the structural core | §C3 of this doc + the PR |
+| 2 | integer `mean` / bool arithmetic / int floor-ceil-round capability rows | cells DECIDED 2026-07 on the issues ([#724] reject; [#726] reject + first-class `count`; [#712]/[#715] support - see capability_table.md's seed rows); Phase 4 ratifies each as an atom | capability table + spec/05 |
 | 3 | trap surface form and exact strings | Phase 2 | §C2 + `pub const` in the module |
-| 4 | crate placement (`chelis-types` module vs `chelis-dtype` crate; constraint: chelis-runtime's generated-helper templates must reach it without a cycle) | Phase 1 | §C5 + this doc |
+| 4 | crate placement | DECIDED 2026-07-17: a `chelis-types` MODULE. `Prim` already lives there (`types.rs`); the checker already consumes value-domain semantics (literal range diagnostics today, table-A acceptance at Phase 4); every §C5 consumer already depends on the crate; and §C3's privacy contract is module-scoped (`pub(in dtype_semantics)`), so the firewall is identical to a crate boundary. Constraint check passed: chelis-runtime stays dependency-light (libc+memmap2 only) - the generated helpers are emitted by chelis-backend-c, and C-side parity is enforced by tests, not a link edge. Discipline: the module stays import-clean (only `Prim` + std from the surrounding crate) so a later lift to a leaf crate remains mechanical. This also fixes [#732] Phase 1's `format_element` placement as FINAL (its §C3.1 pre-[#729] fallback is the answer - no Wave 2 -> Wave 3 migration) | §C5 + this doc + faithful_observation.md §C3.1 |
 | 5 | wire-schema versioning mechanics for the storage change | Phase 1 | schema.rs + `spec/design/chelis_manifest_spec.md` if it bites the manifest |
 
 [#387]: https://github.com/Chelis-Lang/chelis/issues/387

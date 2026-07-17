@@ -151,8 +151,9 @@ For every dtype and every storable value:
 ## C3. The single-source architecture
 
 1. **One Rust implementation.** `format_element` lives beside the dtype
-   definitions (final crate placement follows [#729] open question 4;
-   pre-[#729] it can live in `chelis-types`). Exhaustive over `Prim` - no
+   definitions ([#729] open question 4 is DECIDED 2026-07-17: a
+   `chelis-types` module - the pre-[#729] fallback is the final answer,
+   so this placement is permanent, not provisional). Exhaustive over `Prim` - no
    `_` arm (`loud_unsupported.md` §C4's lint patrols it and its
    generator).
 2. **The C side is generated, not written.** A Rust function emits the
