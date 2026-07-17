@@ -196,10 +196,14 @@ fn c_lane_str(expr: &str, ret_ty: &str, name: &str) -> Result<String, String> {
 fn check_row(row: &Row, ret_ty: &str) {
     let eval_got =
         eval_lane_str(row.expr).unwrap_or_else(|e| panic!("{}: eval lane failed: {e}", row.name));
+    // chelis#729 Phase 0: every printed element must be a member of the
+    // declared dtype's value set, in every lane, before any value compare.
+    common::assert_elements_in_domain(ret_ty, &eval_got, row.name);
 
     if row.lanes == Lanes::Both && c_toolchain_available() {
         match c_lane_str(row.expr, ret_ty, row.name) {
             Ok(c_got) => {
+                common::assert_elements_in_domain(ret_ty, &c_got, row.name);
                 assert_eq!(
                     eval_got, c_got,
                     "{}: LANE DIVERGENCE. eval={eval_got}, compiled C={c_got}, \
@@ -790,8 +794,10 @@ fn int8_add_just_below_overflow_does_not_trap() {
 fn int64_tensor_round_trip_is_exact_in_every_lane() {
     let expr = "to_list(to_tensor([cast(9007199254740993, int64)]))";
     let eval_got = eval_lane_str(expr).expect("eval lane");
+    common::assert_elements_in_domain("int64", &eval_got, "tensor_rt eval");
     if c_toolchain_available() {
         let c_got = c_lane_str(expr, "List[int64]", "tensor_rt").expect("c lane");
+        common::assert_elements_in_domain("int64", &c_got, "tensor_rt C");
         assert_eq!(
             eval_got, c_got,
             "LANE DIVERGENCE on a pure to_tensor/to_list round-trip with no \
@@ -815,6 +821,7 @@ fn int64_tensor_round_trip_is_exact_in_every_lane() {
 fn i64_max_tensor_round_trip_passes_by_luck_not_by_correctness() {
     let expr = &format!("to_list(to_tensor([cast({I64_MAX}, int64)]))");
     let got = eval_lane_str(expr).expect("eval lane");
+    common::assert_elements_in_domain("int64", &got, "i64_max_rt");
     assert_eq!(
         got, "[9223372036854775807]",
         "i64::MAX round-trips through Vec<f64> storage only because f64 rounds \
@@ -866,6 +873,7 @@ fn bare_expression_keeps_int64_exact() {
     let got =
         eval_program_first_line("module M.Main\nout = print(cast(9007199254740993, int64))\n")
             .expect("eval");
+    common::assert_elements_in_domain("int64", &got, "bare_expr");
     assert_eq!(
         got, "9007199254740993",
         "a bare int64 expression must be exact (control for the binding cases)"
@@ -918,6 +926,7 @@ fn def_body_keeps_int64_exact() {
         "module M.Main\ndef f() -> int64 = cast(9007199254740993, int64)\nout = print(f())\n",
     )
     .expect("eval");
+    common::assert_elements_in_domain("int64", &got, "def_body");
     assert_eq!(
         got, "9007199254740993",
         "a def body stays on the exact scalar lane; this is why the same value \
@@ -1056,6 +1065,7 @@ fn int64_max_elem_tensor_agrees_across_lanes_at_f32_boundary() {
         .unwrap_or("")
         .trim()
         .to_string();
+    common::assert_elements_in_domain("int64", &eval_got, "mx eval");
     assert_eq!(
         eval_got, "[16777217, 1, 2, 3]",
         "eval lane must be exact for int64 max_elem"
@@ -1130,6 +1140,7 @@ fn int64_max_elem_tensor_agrees_across_lanes_at_f32_boundary() {
 fn int32_tensor_round_trip_is_exact_above_the_f32_boundary() {
     let expr = "to_list(to_tensor([cast(16777217, int32)]))";
     let eval_got = eval_lane_str(expr).expect("eval lane");
+    common::assert_elements_in_domain("int32", &eval_got, "i32_rt eval");
     assert_eq!(
         eval_got, "[16777217]",
         "int32 tensor round-trip must be exact at 2^24+1. If this fails, the \
@@ -1138,6 +1149,7 @@ fn int32_tensor_round_trip_is_exact_above_the_f32_boundary() {
     );
     if c_toolchain_available() {
         let c_got = c_lane_str(expr, "List[int32]", "i32_rt").expect("c lane");
+        common::assert_elements_in_domain("int32", &c_got, "i32_rt C");
         assert_eq!(
             c_got, eval_got,
             "int32 tensor round-trip must agree across lanes"
@@ -1172,6 +1184,7 @@ fn int64_literal_above_mantissa_boundary_is_exact_in_the_compiled_lane() {
         return;
     }
     let c_got = c_lane_str(expr, "int64", "lit_c").expect("c lane");
+    common::assert_elements_in_domain("int64", &c_got, "lit_c");
     assert_eq!(
         c_got, "9007199254740993",
         "the compiled lane must carry an int64 literal above 2^53 exactly. \
@@ -1194,6 +1207,7 @@ fn int64_scalar_abs_is_exact_in_the_compiled_host_lane() {
     }
     let c_got =
         c_lane_str("abs(cast(-9007199254740993, int64))", "int64", "abs_host").expect("c lane");
+    common::assert_elements_in_domain("int64", &c_got, "abs_host");
     assert_eq!(
         c_got, "9007199254740993",
         "compiled int64 scalar abs goes through the host lane and is exact"
@@ -1359,6 +1373,7 @@ fn assert_int_tensor_unop_parity(op: &str, expected: &str, name: &str) {
         .unwrap_or("")
         .trim()
         .to_string();
+    common::assert_elements_in_domain("int64", &eval_got, name);
     assert_eq!(
         eval_got, expected,
         "{name}: eval lane must be correct for `{op}` on an int64 tensor"
@@ -1641,6 +1656,7 @@ fn pad_sequences_preserves_int64_ids_above_i32_max() {
     let eval_expr = "pad_sequences([[cast(3000000000, int64), cast(1, int64)], \
                      [cast(2, int64)]], cast(0, int64))";
     let eval_got = eval_lane_str(eval_expr).expect("eval lane");
+    common::assert_elements_in_domain("int64", &eval_got, "pads eval");
     assert!(
         eval_got.contains("3000000000"),
         "eval must preserve a token id above i32::MAX; got {eval_got}"

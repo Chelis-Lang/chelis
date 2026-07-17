@@ -110,7 +110,11 @@ Both cross-lane oracles are structurally blind ([#687]):
   `assert_close(9007199254740992.0, 9007199254740993.0, tol)` **passes**.
 - `crates/chelis-cli/tests/parity.rs` compares byte-exactly but **falls back** to
   `parse_tensor_line` (`Vec<f64>`) + a 1e-6 tolerance on mismatch - i.e. exactly
-  when a real bug is present.
+  when a real bug is present. *(Status update: the fallback was deleted by
+  [#729] Phase 0 - `assert_parity` is now byte-exact with no tolerant path,
+  and `eval_agreement.rs` is recorded as superseded for integer exactness
+  by the PR [#696] drivers. The finding above is preserved as the record of
+  why.)*
 
 Both were green through **three** rounds of this bug class. Downstream is worse:
 an audit of `Chelis-Lang/school` found its numerical validation is host-eval-only
@@ -476,3 +480,5 @@ archived under [`probes/`](probes/README.md).
 [#726]: https://github.com/Chelis-Lang/chelis/issues/726
 [#727]: https://github.com/Chelis-Lang/chelis/issues/727
 [#728]: https://github.com/Chelis-Lang/chelis/issues/728
+[#729]: https://github.com/Chelis-Lang/chelis/issues/729
+[#696]: https://github.com/Chelis-Lang/chelis/pull/696

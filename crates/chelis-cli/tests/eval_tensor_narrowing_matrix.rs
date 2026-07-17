@@ -127,6 +127,7 @@ fn c_f64_tensor_unary_ops_are_f64_precise() {
     }
     let line = c_first_line(&f64_unop_program("tan", "1.5", "3.0"), "c_f64_tan")
         .expect("C lane should run");
+    common::assert_elements_in_domain("f64", &line, "c_f64_tan");
     // Property-based, not an exact string: double tan is not required to
     // be correctly rounded and may differ by a few ulp between platform
     // libms (see the eval tan control above). f64 PRECISION is the claim:
@@ -155,12 +156,14 @@ fn f64_tensor_div_is_exact_in_both_lanes() {
          out = print(f(to_tensor([cast(1.0, f64), cast(2.0, f64)]), \
          to_tensor([cast(3.0, f64), cast(3.0, f64)])))\n";
     let eval_line = eval_first_line(program).expect("eval should run");
+    common::assert_elements_in_domain("f64", &eval_line, "f64_div eval");
     assert!(
         eval_line.contains("0.3333333333333333"),
         "eval f64 div must be exact f64; got: {eval_line}"
     );
     if c_toolchain_available() {
         let c_line = c_first_line(program, "f64_div_both").expect("C lane should run");
+        common::assert_elements_in_domain("f64", &c_line, "f64_div C");
         assert!(
             c_line.contains("0.3333333333333333"),
             "C f64 div must be exact f64; got: {c_line}"
@@ -183,6 +186,10 @@ fn c_f32_tensor_add_rounds_to_f32() {
         "c_f32_add",
     )
     .expect("C lane should run");
+    // chelis#729 Phase 0: this control also pins the domain checker's
+    // print-truncation slack: the C lane's %.16g rendering of the exact
+    // f32 sum ("0.300000011920929") must be accepted as an f32 member.
+    common::assert_elements_in_domain("f32", &line, "c_f32_add");
     assert!(
         line.contains("0.300000011920929"),
         "C f32 add(0.1, 0.2) must be the f32 sum; got: {line}"
@@ -224,6 +231,10 @@ fn eval_f32_tensor_tan_and_sqrt_do_narrow_to_f32() {
          out = print(f(to_tensor([1.5, 3.0])))\n",
     )
     .expect("eval should run");
+    // chelis#729 Phase 0: the domain checker states the same
+    // f32-representability property mechanically; the hand-rolled loop
+    // below stays as the original control (controls never move).
+    common::assert_elements_in_domain("f32", &line, "eval_f32_tan");
     let values = parse_data(&line);
     for (v, truth) in values
         .iter()
@@ -245,6 +256,7 @@ fn eval_f32_tensor_tan_and_sqrt_do_narrow_to_f32() {
          out = print(f(to_tensor([1.5, 3.0])))\n",
     )
     .expect("eval should run");
+    common::assert_elements_in_domain("f32", &line, "eval_f32_sqrt");
     assert!(
         line.contains("data=[1.2247449159622192, 1.7320507764816284]"),
         "eval f32 tensor sqrt narrows through f32 today (and is correctly \
@@ -318,6 +330,9 @@ fn eval_f32_tensor_add_rounds_to_f32() {
          out = print(f(to_tensor([0.1, 1.0]), to_tensor([0.2, 2.0])))\n",
     )
     .expect("eval should run");
+    // chelis#729 Phase 0: 0.30000000447034836 is not an f32 value; the
+    // domain checker is the mechanical form of this cell's claim.
+    common::assert_elements_in_domain("f32", &line, "eval_f32_tensor_add");
     assert!(
         line.contains("0.30000001192092896"),
         "f32 tensor add must round its result to f32; got: {line}"
@@ -336,6 +351,7 @@ fn eval_f32_tensor_div_rounds_to_f32() {
          out = print(f(to_tensor([1.0, 2.0]), to_tensor([3.0, 3.0])))\n",
     )
     .expect("eval should run");
+    common::assert_elements_in_domain("f32", &line, "eval_f32_tensor_div");
     assert!(
         line.contains("0.3333333432674408"),
         "f32 tensor div must round its result to f32; got: {line}"
@@ -355,6 +371,7 @@ fn eval_f32_tensor_recip_rounds_to_f32() {
          out = print(f(to_tensor([1.5, 3.0])))\n",
     )
     .expect("eval should run");
+    common::assert_elements_in_domain("f32", &line, "eval_f32_tensor_recip");
     assert!(
         line.contains("0.6666666865348816"),
         "f32 tensor recip must round its result to f32; got: {line}"
