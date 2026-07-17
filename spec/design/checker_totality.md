@@ -60,7 +60,15 @@ The three-sighting pattern, checker edition:
 |---|---|---|
 | `infer_expr` unknown-tag wildcard | returns `Type::Error` | **no** ([#709]) |
 | `.dp` arity guards (`(def {} orphan)`, `(cast {} ...)`) | return `Type::Error` | **no** ([#710]) |
-| the same guards for `let`/`fn`/`app`/`if` | reject | yes - proof the correct pattern coexists |
+| the `let`/`fn`/`app`/`if` malformed forms | rejected BEFORE the checker (Deep parser arity validation) | n/a - CORRECTED 2026-07 (PR #757): parser-screened, not checker templates; the checker guards at those sites are equally silent |
+
+Correction (Phase 0 execution, PR #757): the original table held the
+`let`/`fn`/`app`/`if` guards up as the correct in-checker pattern; they
+are actually screened by the Deep PARSER's arity validation, and the
+checker-side guards there are silent like the rest. Phase 1's
+`MalformedForm` sweep therefore has no in-checker template at those
+sites - the template is the push-then-return idiom of the reporting
+arms ([#710]'s extension comment carries the full 15-form list).
 
 Exactly the [#703] shape: the correct response exists in the same file and
 the neighboring arm does not use it. A fix that adds the `handle-effect`
@@ -218,6 +226,21 @@ recorded as the one non-constructor entry point (open question 2).
    default suite, and is the behavioral proof the structural claims cash
    out. New wrapper constructs added to the language get a row in it as
    part of landing (a one-line reviewer checklist item, recorded here).
+   Known fixture caveat (PR #757): six of the eleven wrapper strings are
+   parse-rejected Surf as written, so those rows score below 1 via the
+   parser, not the checker; re-probed with corrected syntax, the
+   ill-typed variants ARE checker-caught, so the coverage claim
+   survives. Fixtures corrected at Phase 1 (B2.1: rows may be fixed to
+   test what they claim, never removed or weakened).
+4. **The fitness-honesty corpus** (2026-07 review integration): a CI
+   suite of known-ill-typed programs - the wrapper battery plus every
+   census-verified silent-hole repro ([#709]/[#710]/[#755]/[#756] and
+   future finds) - asserting every member scores strictly below 1.0;
+   any member scoring 1.0 fails the build. This is the continuous,
+   corpus-level enforcement of §C1.3, standing even after §C3 makes
+   violations unconstructible. Margin thresholds (e.g. < 0.9) are
+   calibration, decided with open question 4's severity weights.
+   Delivered at Phase 1; permanent thereafter.
 
 ---
 
@@ -304,8 +327,14 @@ probe or test.
    Phase 2 has landed, else matching the two known kind strings with a
    loud else (and a note to migrate; §I1).
 3. **The [#710] guard sweep**: the silent arity guards push
-   `MalformedForm`; the correctly-rejecting siblings are the template.
+   `MalformedForm`; the template is the push-then-return reporting idiom
+   (the formerly-cited `let`/`fn`/`app`/`if` "siblings" are
+   parser-screened, not templates - see the corrected table above).
 4. Diagnostic-shape conformance per §C2.
+5. **The fitness-honesty corpus** (§C4.4), seeded from the wrapper
+   battery (fixtures corrected per §C4.3's caveat), the four holes, and
+   the census-verified silent sites ([#755]/[#756] and the [#710]
+   extension).
 
 **Frozen at your exit:** §C2 kinds and shapes.
 
@@ -430,3 +459,5 @@ tree) standing guard over both claims.
 [#729]: https://github.com/Chelis-Lang/chelis/issues/729
 [#730]: https://github.com/Chelis-Lang/chelis/issues/730
 [#731]: https://github.com/Chelis-Lang/chelis/issues/731
+[#755]: https://github.com/Chelis-Lang/chelis/issues/755
+[#756]: https://github.com/Chelis-Lang/chelis/issues/756

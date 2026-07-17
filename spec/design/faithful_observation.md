@@ -186,17 +186,28 @@ For every dtype and every storable value:
 1. **The round-trip invariant** (§C2.1) lands as a property harness over
    the probe corpus and the matrix tests' outputs - red today on [#723] and
    [#716]'s cells, green after Phase 2, and permanent thereafter.
-2. **The per-op value-tolerance table** goes into
-   `spec/05-risc-primitives.md`: for each transcendental, the documented
-   cross-lane bound (default: 1 ulp at the computed width; `sqrt`: 0 -
-   correctly rounded per IEEE and [#719]; add/sub/mul/div/comparisons: 0).
-   The [#687] oracle consults ONLY this table when values differ;
-   formatting differences are never tolerated (they are bugs here).
+2. **The per-op value-tolerance table** is a MACHINE artifact first
+   (2026-07 review integration): its authoritative form is `const` Rust
+   beside the capability table (the same no-second-parser resolution as
+   that doc's open question 1), consumed directly by the [#687] oracle
+   and by [#754]'s shell-facing gate; the `spec/05-risc-primitives.md`
+   §8 rendering is generated from or tripwire-checked against it, so
+   prose and data cannot drift. Content: for each transcendental, the
+   documented cross-lane bound (default: 1 ulp at the computed width;
+   `sqrt`: 0 - correctly rounded per IEEE, its row landing only after
+   [#719]'s fix; add/sub/mul/div/comparisons: 0). The [#687] oracle
+   consults ONLY this table when values differ; formatting differences
+   are never tolerated (they are bugs here).
 3. **The oracle handshake**: with §C1-§C3 landed, [#687]'s exact-string
    comparison becomes implementable as: byte-equal or (value-parse +
    table-bounded for the listed ops). `parity.rs`'s silent float
    fallback and `eval_agreement.rs`'s f64 tolerance are replaced by
-   exactly that rule - delivered in Phase 3 jointly with [#687].
+   exactly that rule - delivered in Phase 3 jointly with [#687]. ONE
+   COMPARATOR, TWO SURFACES: [#754]'s shell-invokable cross-lane gate
+   is the external consumer of this same rule and MUST wrap the
+   identical Rust comparison implementation the internal oracle suite
+   uses - a second hand-rolled comparison would recreate the
+   per-consumer scatter this plan set exists to kill.
 
 ---
 
@@ -445,3 +456,4 @@ guaranteed to be a real value bug wearing its own name.
 [#729]: https://github.com/Chelis-Lang/chelis/issues/729
 [#730]: https://github.com/Chelis-Lang/chelis/issues/730
 [#732]: https://github.com/Chelis-Lang/chelis/issues/732
+[#754]: https://github.com/Chelis-Lang/chelis/issues/754

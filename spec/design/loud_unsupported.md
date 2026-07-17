@@ -179,12 +179,24 @@ conformant when migrated:
 - Metal: `` `chelis build --target metal` rejects f64 ... `` ;
 - runtime: `to_tensor: unsupported destination dtype ...`.
 
-**Surfacing per surface:** `chelis check` -> JSON error entry, score < 1;
+**Surfacing per surface:** `chelis check` -> JSON error entry, score < 1,
+carrying the machine-readable kind (`unsupported`) and the `what` payload
+as structured fields - the branded string is the RENDERING of the
+contract, not the contract; agents match the structured kind, never
+regex over prose (2026-07 review integration);
 `chelis build`/`eval` -> `error:` line + nonzero exit; compiled binary
 (dynamic-only cases) -> stderr + nonzero exit. The [#687] oracle corpus
 gains a rejected-cells section asserting these strings byte-for-byte per
 lane (a rejection emitted differently per lane is lane skew, [#712]'s
 shape).
+
+**Authored vs accidental (2026-07 review):** a deliberately-unsupported
+case cites the spec atom that decides it (the [#733] linkage); a
+not-yet-implemented case cites its issue. The capability table makes
+the distinction structural - `Rejected(atom)` vs `Unimplemented
+{ issue }` - and this contract's `hint` carries the same citation at
+the diagnostic surface, so "unsupported by decision" and "unsupported
+because nobody built it yet" are never conflated again.
 
 ## C3. The failure channel
 
@@ -440,7 +452,10 @@ no longer load-carrying for correctness) and the census rows 17-18.
    context".
 2. **The gate contract**, recorded in this doc: a gate may only ever make
    a diagnostic EARLIER or MORE SPECIFIC; it may never be the sole
-   defense, and a gate/emitter disagreement is a bug in the gate.
+   defense, and a gate/emitter disagreement is a bug in the gate. The
+   enforcement ladder (2026-07 review): compile-error > lint > tripwire
+   > gate > prose - a gate that is load-bearing for correctness is on
+   the wrong rung.
 3. Deletion of gates that now only duplicate emitter rejections, with the
    cross-lane rejected-cells corpus proving the diagnostic surface
    unchanged or improved (earlier stage, same `unsupported:` content).
@@ -541,4 +556,5 @@ standing between an unsupported case and a plausible wrong number.
 [#730]: https://github.com/Chelis-Lang/chelis/issues/730
 [#731]: https://github.com/Chelis-Lang/chelis/issues/731
 [#732]: https://github.com/Chelis-Lang/chelis/issues/732
+[#733]: https://github.com/Chelis-Lang/chelis/issues/733
 [#734]: https://github.com/Chelis-Lang/chelis/issues/734

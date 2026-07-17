@@ -59,6 +59,10 @@ formatter + generated C side: fixes [#716]/[#723] outright and gives the
 refactor its byte-exact instrument) in parallel with [#731] Phases 2-3 (the
 witness token + DeepTag) and [#730] Phase 2 (the lint ratchets). [#733]
 Phase 1 rides alongside, atomizing whatever spec text Waves 1-2 author.
+[#732] Phase 2 additionally gates the ECOSYSTEM's compiled-lane
+validation: no shell runs a compiled binary today, and [#754]'s
+cross-lane agreement gate (the mechanism [#738]'s conform row points
+at) is hard-gated on byte-identical rendering.
 
 **Wave 3 - the semantics refactor.** [#729] Phases 1-3 in order (the
 module + storage decision; the kernel split + prove; backend adoption),
@@ -86,10 +90,11 @@ arrowless links are shared-component coordination with no inherent
 order: [#730] Phase 2 delivers `EffectKind` and [#731] Phase 1 consumes
 it (string-match + loud else if it lands first); [#731] Phase 3's
 `DeepTag` joins [#730]'s lint enum list, whose freeze anticipates the
-addition. The thick red edge is the single hard cross-plan dependency in
-the set: [#719]'s fix precedes [#732] Phase 3's `sqrt = 0` tolerance
-row. Not drawn (for legibility): [#733] Phase 1 atomizes whatever spec
-text Waves 1-2 author. The graph is acyclic. Node colors are the waves
+addition. The thick red edges are the hard dependencies: inside the
+plan set, [#719]'s fix precedes [#732] Phase 3's `sqrt = 0` tolerance
+row; downstream of the set, [#754]'s ecosystem gate is hard-gated on
+[#732] Phase 2's byte-identical rendering. Not drawn (for legibility):
+[#733] Phase 1 atomizes whatever spec text Waves 1-2 author. The graph is acyclic. Node colors are the waves
 above: grey = Wave 0, green = Wave 1, blue = Wave 2, orange = Wave 3,
 purple = Wave 4 (so [#733] P1, blue, rides Wave 2); white boxes with
 dashed borders are standalone fixes outside the wave structure.
@@ -152,6 +157,7 @@ flowchart TB
   n719["#719 sqrt fix (standalone)"]:::ext
   n683["#683 i64::MIN literal (standalone)"]:::ext
   n713["#713 pad_sequences dtype (standalone)"]:::ext
+  n754["#754 cross-lane gate (ecosystem)"]:::ext
 
   n730p0 -.->|"tripwire hosts the<br/>%.16g / %.1f pattern"| n732p0
   n730p2 -.-|"EffectKind (either first)"| n731p1
@@ -164,6 +170,7 @@ flowchart TB
   n719 ==>|"HARD: precedes the<br/>sqrt = 0 tolerance row"| n732p3
   n683 -.->|"natural moment"| n729p2
   n713 -.->|"natural moment"| n729p3
+  n732p2 ==>|"HARD: byte-identical rendering<br/>is the gate's prerequisite"| n754
 
   style S733 fill:#FFFFFF,stroke:#C3CCD3
   style S730 fill:#FFFFFF,stroke:#C3CCD3
@@ -172,7 +179,7 @@ flowchart TB
   style S729 fill:#FFFFFF,stroke:#C3CCD3
   linkStyle default stroke-width:2.5px
   linkStyle 16,17 stroke:#9AA7B0,color:#7A8894,stroke-width:2.5px
-  linkStyle 23 stroke:#B3362B,stroke-width:5px,color:#B3362B
+  linkStyle 23,26 stroke:#B3362B,stroke-width:5px,color:#B3362B
 ```
 
 ## The unclaimed-issue ledger
@@ -193,6 +200,10 @@ the capability table's seed decisions, or by being closed.
 | [#719] | vvsqrtf not correctly rounded; layout-dependent results | THE FIX (sqrtf or intrinsic on the contiguous path, one implementation per op) is standalone and must land BEFORE [#732] Phase 3 writes `sqrt = 0` into the tolerance table |
 | [#721] | eval cannot ingest the canonical Deep of a nullary fn | standalone eval-ingestion fix; explicitly non-goaled by [#731]; no plan dependency |
 | [#734] | `to_string` on tensors/lists compiles to the literal `<value>` | [#730] census row 3 (now live); dies at [#730] Phase 1, unwritable after Phase 2; rendering via [#732]'s formatter |
+| [#747] | cli.rs `runtime_library_path()` hard-codes `../../target/debug/deps` (breaks isolated CARGO_TARGET_DIR runs) | standalone test-harness fix; no plan dependency; the per-worktree target symlink is the interim workaround |
+| [#750] | compiled lane silently drops def-call-valued top-level roots | silent-omission cousin of [#703]'s class (the skip_for_lowered mechanism, root-output face); standalone fix; [#754]'s output diff catches regressions |
+| [#751] | generated C emits uncompilable / sign-losing float constants (f64::MAX as integer literal; -0.0 as `-0`) | ingress, [#729] family; natural moment [#729] Phase 3 (constant emission); [#732]'s harness C_LANE_EXCLUDED cells return when it lands |
+| [#754] | shell-invokable cross-lane agreement gate (owner: brittonr) | downstream consumer, not plan-set work: hard-gated on [#732] Phase 2; consumes Phase 3's tolerance artifact and [#729] Phase 4's capability table (cell skipping); GPU lanes join after [#736]/[#737]; [#738] is its consumer; the one-comparator rule is pinned in [#732]'s §C4.3 |
 
 Also tracked to closure but already claimed (listed for completeness):
 [#680]/[#684]/[#685]/[#686]/[#688] -> [#729]; [#682]/[#692]/[#697]/[#698]/[#699]/[#704]/[#705]/[#725] ->
@@ -200,6 +211,11 @@ Also tracked to closure but already claimed (listed for completeness):
 the gate half at Phase 3's dedupe); [#709]/[#710] -> [#731]; [#716]/[#723] -> [#732]; [#694] -> [#733]; [#711]/[#720] ->
 [#729] Phase 2 / [#720]'s own note; [#712]/[#715]/[#724]/[#726] -> capability table
 seed decisions; [#722] -> [#730] Phase 1 (loud) then [#729]/table (computed).
+Wave 0's own discoveries, claimed at filing: [#744]/[#745] -> [#730]
+(census rows 13/19, Phase 1 raises); [#748]/[#749] -> [#732] Phase 2
+(the generated formatter kills both); [#753] -> [#729] (spec/04
+[04-NUM-7] + the capability seed row); [#755]/[#756] -> [#731] (census
+extensions; die at the Phase 1-2 sweep and witness migration).
 
 ## The deferred-evidence ledger
 
@@ -281,3 +297,14 @@ output is atoms plus a sweep, not code.
 [#737]: https://github.com/Chelis-Lang/chelis/issues/737
 [#738]: https://github.com/Chelis-Lang/chelis/issues/738
 [#740]: https://github.com/Chelis-Lang/chelis/issues/740
+[#744]: https://github.com/Chelis-Lang/chelis/issues/744
+[#745]: https://github.com/Chelis-Lang/chelis/issues/745
+[#747]: https://github.com/Chelis-Lang/chelis/issues/747
+[#748]: https://github.com/Chelis-Lang/chelis/issues/748
+[#749]: https://github.com/Chelis-Lang/chelis/issues/749
+[#750]: https://github.com/Chelis-Lang/chelis/issues/750
+[#751]: https://github.com/Chelis-Lang/chelis/issues/751
+[#753]: https://github.com/Chelis-Lang/chelis/issues/753
+[#754]: https://github.com/Chelis-Lang/chelis/issues/754
+[#755]: https://github.com/Chelis-Lang/chelis/issues/755
+[#756]: https://github.com/Chelis-Lang/chelis/issues/756
