@@ -62,6 +62,15 @@
 //! (`spec/05-risc-primitives.md`). It must trap identically at every integer
 //! width; today int8/int16/int32 silently wrap while int64 saturates, because
 //! Rust's int->int `as` truncates while float->int `as` saturates.
+//!
+//! ## chelis#729 Phase 0 note
+//!
+//! The lane drivers here (`eval_int`, `parse_out_binding`) parse printed
+//! values as exact `i64`, so they enforce the int64 value set (the §C1
+//! domain column) by construction: a fractional, out-of-range, or
+//! float-formatted rendering fails the parse loudly. The shared checker
+//! for the string-shaped drivers in the sibling matrix files is
+//! `common::assert_elements_in_domain`.
 
 #![allow(clippy::uninlined_format_args)]
 

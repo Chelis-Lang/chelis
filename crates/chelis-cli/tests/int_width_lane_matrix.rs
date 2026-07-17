@@ -127,6 +127,12 @@ fn c_scalar_int8_add_overflow_traps() {
         panic!("needs a host C toolchain");
     }
     let (line, stderr, ok) = c_lane(SCALAR_I8_OVERFLOW, "c_i8_scalar_ovf").expect("C lane");
+    if ok {
+        // chelis#729 Phase 0: if the lane produced a value instead of
+        // trapping, that value must at least be a member of int8 (today
+        // it prints 200, which is the mechanical detection of #718).
+        common::assert_elements_in_domain("int8", &line, "c_i8_scalar_ovf");
+    }
     assert!(
         !ok && stderr.contains("overflow"),
         "int8 100 + 100 must trap with a branded overflow diagnostic; \
@@ -150,6 +156,9 @@ fn c_scalar_int8_neg_min_traps() {
         "c_i8_neg_min",
     )
     .expect("C lane");
+    if ok {
+        common::assert_elements_in_domain("int8", &line, "c_i8_neg_min");
+    }
     assert!(
         !ok && stderr.contains("overflow"),
         "neg(i8::MIN) must trap; got exit ok={ok}, stdout `{line}`, stderr `{stderr}`"
@@ -218,6 +227,9 @@ fn c_scalar_overflow_traps_at_every_width() {
         let program =
             format!("module M.Main\ndef run() -> {ret_ty} = {expr}\nout = print(run())\n");
         let (line, stderr, ok) = c_lane(&program, &format!("c_ovf_{i}")).expect("C lane");
+        if ok {
+            common::assert_elements_in_domain(ret_ty, &line, expr);
+        }
         assert!(
             !ok && stderr.contains("overflow"),
             "`{expr}` must trap with a branded overflow diagnostic; \
@@ -238,10 +250,13 @@ fn in_range_int8_scalar_add_agrees_across_lanes() {
     let program = "module M.Main\n\
          def run() -> int8 = add(cast(126, int8), cast(1, int8))\n\
          out = print(run())\n";
-    assert_eq!(eval_first_line(program).expect("eval"), "127");
+    let eval_line = eval_first_line(program).expect("eval");
+    common::assert_elements_in_domain("int8", &eval_line, "i8_in_range eval");
+    assert_eq!(eval_line, "127");
     if c_toolchain_available() {
         let (line, _, ok) = c_lane(program, "c_i8_in_range").expect("C lane");
         assert!(ok);
+        common::assert_elements_in_domain("int8", &line, "i8_in_range C");
         assert_eq!(line, "127");
     }
 }
@@ -256,6 +271,7 @@ fn in_range_int16_tensor_add_agrees_across_lanes() {
          out = print(f(to_tensor([cast(60, int16), cast(1, int16)]), \
          to_tensor([cast(40, int16), cast(2, int16)])))\n";
     let eval_line = eval_first_line(program).expect("eval");
+    common::assert_elements_in_domain("int16", &eval_line, "i16_in_range eval");
     assert!(
         eval_line.contains("data=[100.0, 3.0]"),
         "eval int16 tensor add of in-range values; got: {eval_line}"
@@ -263,6 +279,7 @@ fn in_range_int16_tensor_add_agrees_across_lanes() {
     if c_toolchain_available() {
         let (line, _, ok) = c_lane(program, "c_i16_in_range").expect("C lane");
         assert!(ok);
+        common::assert_elements_in_domain("int16", &line, "i16_in_range C");
         assert!(
             line.contains("data=[100.0, 3.0]") || line.contains("data=[100, 3]"),
             "C int16 tensor add of in-range values; got: {line}"

@@ -252,18 +252,19 @@ fn f16_bf16_scalar_op_surface_agrees_across_lanes() {
     for (i, (expr, ret_ty, expected)) in rows.iter().enumerate() {
         let program =
             format!("module M.Main\ndef run() -> {ret_ty} = {expr}\nout = print(run())\n");
+        let eval_got = eval_first_line(&program).expect("eval");
+        // chelis#729 Phase 0: both lanes' printed values must be members
+        // of the declared dtype's value set before any comparison.
+        common::assert_elements_in_domain(ret_ty, &eval_got, expr);
         assert_eq!(
-            eval_first_line(&program).expect("eval"),
-            *expected,
+            eval_got, *expected,
             "eval drifted for `{expr}`; update the row"
         );
         let (_, stdout) = build_and_run_c(&program, &format!("f16_surface_{i}"))
             .expect("C lane should build and run");
-        assert_eq!(
-            stdout.lines().next().unwrap_or("").trim(),
-            *expected,
-            "LANE DIVERGENCE for `{expr}`"
-        );
+        let c_got = stdout.lines().next().unwrap_or("").trim().to_string();
+        common::assert_elements_in_domain(ret_ty, &c_got, expr);
+        assert_eq!(c_got, *expected, "LANE DIVERGENCE for `{expr}`");
     }
 }
 
@@ -359,6 +360,12 @@ fn f8e4m3_is_rejected_in_both_lanes() {
 /// Compares BIT PATTERNS, not decimal text (a grep for a decimal is how the
 /// chelis#711 probe went wrong). When #716 is fixed this test fails loudly at
 /// the misread assertion and should be replaced by the direct-print row below.
+///
+/// Deliberately NOT wired to the chelis#729 Phase 0 domain checker: the
+/// printed payload here is the documented #716 misprint (an f16 buffer
+/// read as f32) and is out of the f16 value set BY DESIGN of this lock.
+/// The domain-checked assertion of the same cell is
+/// `c_print_of_f16_tensor_prints_f16_values`.
 #[test]
 fn c_dag_kernels_compute_correct_f16_bits_despite_print() {
     if !c_toolchain_available() {
@@ -447,6 +454,13 @@ fn f16_scalar_add_boundary_agrees_across_lanes() {
         "f16_boundary",
     )
     .expect("build and run");
+    // chelis#729 Phase 0: 2049 is not an f16 value; the domain checker
+    // catches this mechanically before the exact compare does.
+    common::assert_elements_in_domain(
+        "f16",
+        stdout.lines().next().unwrap_or("").trim(),
+        "f16_boundary",
+    );
     assert!(
         stdout.lines().next().unwrap_or("").trim() == "2048",
         "f16 2048 + 1 must round ties-to-even to 2048; got: {stdout}"
@@ -519,6 +533,11 @@ fn c_print_of_f16_tensor_prints_f16_values() {
         "f16_print",
     )
     .expect("build and run");
+    common::assert_elements_in_domain(
+        "f16",
+        stdout.lines().next().unwrap_or("").trim(),
+        "f16_print",
+    );
     assert!(
         stdout.contains("data=[2048.0, 0.75]"),
         "the print helper must decode f16 elements; got: {stdout}"
@@ -541,6 +560,11 @@ fn c_to_list_of_f16_tensor_works() {
         "f16_to_list",
     )
     .expect("chelis#716: to_list of an f16 tensor must not abort");
+    common::assert_elements_in_domain(
+        "f16",
+        stdout.lines().next().unwrap_or("").trim(),
+        "f16_to_list",
+    );
     assert!(
         stdout.contains("2048") && stdout.contains("0.75"),
         "to_list must yield the f16 values; got: {stdout}"
@@ -565,6 +589,11 @@ fn c_f16_tensor_literal_constructs() {
         "f16_literal",
     )
     .expect("chelis#716: an f16 tensor literal must be constructible at runtime");
+    common::assert_elements_in_domain(
+        "f16",
+        stdout.lines().next().unwrap_or("").trim(),
+        "f16_literal",
+    );
     assert!(
         stdout.contains("data=[2048.0, 0.75]"),
         "the constructed f16 literal must round and print; got: {stdout}"
@@ -591,6 +620,9 @@ fn eval_tensor_f16_add_rounds_to_f16() {
          to_tensor([cast(1.0, f16), cast(0.25, f16)])))\n",
     )
     .expect("eval should run");
+    // chelis#729 Phase 0: 2049.0 in an f16 buffer is the mechanical
+    // detection of this cell, independent of the exact-string assert.
+    common::assert_elements_in_domain("f16", &line, "eval_f16_tensor_add");
     assert!(
         line.contains("data=[2048.0, 0.75]"),
         "f16 tensor add must round per-op like the scalar lane; got: {line}"
@@ -611,6 +643,7 @@ fn eval_tensor_bf16_add_rounds_to_bf16() {
          to_tensor([cast(1.0, bf16), cast(0.25, bf16)])))\n",
     )
     .expect("eval should run");
+    common::assert_elements_in_domain("bf16", &line, "eval_bf16_tensor_add");
     assert!(
         line.contains("data=[256.0, 0.75]"),
         "bf16 tensor add must round per-op like the scalar lane; got: {line}"
@@ -631,6 +664,7 @@ fn eval_tensor_cast_to_f16_rounds() {
          out = print(f(to_tensor([2049.0, 0.75])))\n",
     )
     .expect("eval should run");
+    common::assert_elements_in_domain("f16", &line, "eval_f16_tensor_cast");
     assert!(
         line.contains("data=[2048.0, 0.75]"),
         "a cast to f16 must apply f16 rounding; got: {line}"

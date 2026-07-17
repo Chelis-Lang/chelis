@@ -5,6 +5,22 @@
 //! `hip-local-gpu` feature flag (`cargo test -p chelis-e2e --features
 //! hip-local-gpu`); the default-feature Linux CI runner skips them
 //! because hipcc / libhipblas are not present.
+//!
+//! ## Integer exactness: superseded oracle (chelis#687, chelis#729 Phase 0)
+//!
+//! This harness is f64-typed end to end (`eval_last -> f64`,
+//! `parse_c_output -> f64`, `assert_close`) and covers float cells only
+//! (f32/bf16/f16), where a tolerance is legitimate until chelis#732
+//! delivers byte-identical rendering. It deliberately gains NO
+//! exact-string integer lane: at this DAG level `RiscOp::Const { value:
+//! f64 }` cannot even express an exact int64 above 2^53 (chelis#684), so
+//! an integer lane here would test the wrong layer. The exact-integer
+//! cross-lane oracle is the PR #696 driver family instead:
+//! `crates/chelis-cli/tests/precision_matrix.rs` (`eval_lane_str` /
+//! `c_lane_str`, verbatim strings) and
+//! `crates/chelis-cli/tests/issue_680_int_exactness.rs` (`eval_int` /
+//! `parse_out_binding`, exact `i64` parses). Do not add integer rows to
+//! THIS file; add them there.
 
 use std::collections::HashMap;
 use std::io::Write;

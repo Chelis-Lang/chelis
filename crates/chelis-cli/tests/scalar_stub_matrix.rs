@@ -112,6 +112,9 @@ fn assert_scalar_parity(op_expr: &str, ret_ty: &str, expected: &str, name: &str)
     let program = scalar_program(op_expr, ret_ty);
     let eval_got = eval_first_line(&program)
         .unwrap_or_else(|e| panic!("{name}: eval failed for `{op_expr}`: {e}"));
+    // chelis#729 Phase 0: printed values must be members of the declared
+    // dtype's value set in both lanes before any parity compare.
+    common::assert_elements_in_domain(ret_ty, &eval_got, name);
     assert_eq!(
         eval_got, expected,
         "{name}: eval value drifted; update the row"
@@ -124,6 +127,7 @@ fn assert_scalar_parity(op_expr: &str, ret_ty: &str, expected: &str, name: &str)
         !emitted.contains(STUB_MARKER),
         "{name}: the C emitter substituted a stub for `{op_expr}`"
     );
+    common::assert_elements_in_domain(ret_ty, &c_got, name);
     assert_eq!(
         c_got, expected,
         "{name}: LANE DIVERGENCE for `{op_expr}`: eval={eval_got}, C={c_got}"

@@ -12,11 +12,22 @@
 //!       4. `gcc <name>.c -L. -lchelis_runtime -o <name>` -> binary
 //!       5. `<name>`                           -> stdout (C backend lane)
 //!
-//!     Then assert the eval lane and the C lane agree:
-//!       - byte-equal for non-tensor lines,
-//!       - `1e-6` relative tolerance (with `1e-6` absolute floor for tiny
-//!         magnitudes) for the data array of every
-//!         `tensor(shape=..., data=[...])` line.
+//!     Then assert the eval lane and the C lane agree: every line
+//!     byte-equal, tensor lines included.
+//!
+//! There is deliberately NO tolerant fallback for tensor lines. The old
+//! mismatch path (re-parse both lines as `Vec<f64>`, compare under 1e-6)
+//! was removed by chelis#729 Phase 0: it silently converted integer
+//! divergences into passing float comparisons - exactly the path a real
+//! bug takes (chelis#687). Ops with a legitimate cross-lane value
+//! tolerance get it from the per-op tolerance table
+//! (`spec/design/dtype_semantics.md` §C4.5, to be authored into spec/05
+//! [05-OBS-3]) once it exists, never from a blanket re-parse. The corpus
+//! passes byte-exact
+//! today (123/123 lines) because it prints dyadic floats exclusively; a
+//! new example printing a computed non-dyadic float will fail here for
+//! formatting reasons until chelis#732 Phase 2 lands byte-identical
+//! rendering - that is the release valve.
 //!
 //! Examples that compile to an object only (no `main`) — i.e. files that
 //! define functions but never invoke them at top level — produce empty eval
@@ -230,16 +241,19 @@ fn run_binary(binary: &Path) -> Vec<u8> {
 }
 
 // -----------------------------------------------------------------------------
-// Tolerant comparison
+// Byte-exact comparison
 // -----------------------------------------------------------------------------
 
-const REL_TOL: f64 = 1e-6;
-const ABS_TOL: f64 = 1e-6;
-
-/// Compare two stdout byte-streams under the parity invariant:
-///   - non-tensor lines must be byte-equal,
-///   - tensor lines (`tensor(shape=..., data=[...])`) must agree element-wise
-///     to `1e-6` relative tolerance with `1e-6` absolute floor.
+/// Compare two stdout byte-streams under the parity invariant: same line
+/// count, every line byte-equal.
+///
+/// The former mismatch fallback (re-parse both lines via a
+/// `parse_tensor_line -> Vec<f64>` and compare under 1e-6 tolerance) is
+/// deliberately gone (chelis#729 Phase 0, chelis#687): it engaged exactly
+/// when a real divergence was present and re-read integer payloads as
+/// floats, so an int64 corruption above 2^53 could never fail this
+/// harness. A mismatch now REPORTS. chelis#732 Phase 2 is the release
+/// valve for legitimate float-formatting differences.
 ///
 /// Returns `Ok(())` if parity holds, or `Err(reason)` on first divergence.
 fn assert_parity(eval_out: &[u8], c_out: &[u8], label: &str) -> Result<(), String> {
@@ -260,74 +274,14 @@ fn assert_parity(eval_out: &[u8], c_out: &[u8], label: &str) -> Result<(), Strin
     }
 
     for (i, (e, c)) in eval_lines.iter().zip(c_lines.iter()).enumerate() {
-        if e == c {
-            continue;
-        }
-        // Try tolerant tensor compare on this line.
-        match (parse_tensor_line(e), parse_tensor_line(c)) {
-            (Some((es, ed)), Some((cs, cd))) => {
-                if es != cs {
-                    return Err(format!(
-                        "[{label}] line {i}: tensor shape mismatch: eval={es:?} c={cs:?}\n  eval: {e}\n  c:    {c}",
-                    ));
-                }
-                if ed.len() != cd.len() {
-                    return Err(format!(
-                        "[{label}] line {i}: tensor data length mismatch: eval={} c={}\n  eval: {e}\n  c:    {c}",
-                        ed.len(),
-                        cd.len(),
-                    ));
-                }
-                for (j, (ev, cv)) in ed.iter().zip(cd.iter()).enumerate() {
-                    let diff = (ev - cv).abs();
-                    let scale = ev.abs().max(cv.abs()).max(1.0);
-                    if diff > ABS_TOL && diff / scale > REL_TOL {
-                        return Err(format!(
-                            "[{label}] line {i}, element {j}: |eval-c|={diff:e} exceeds tol (rel={REL_TOL:e}, abs={ABS_TOL:e})\n  eval[{j}]={ev}\n  c[{j}]={cv}\n  eval: {e}\n  c:    {c}",
-                        ));
-                    }
-                }
-            }
-            _ => {
-                return Err(format!(
-                    "[{label}] line {i} differs (and is not a parseable tensor line):\n  eval: {e}\n  c:    {c}",
-                ));
-            }
+        if e != c {
+            return Err(format!(
+                "[{label}] line {i} differs between lanes (byte-exact contract; \
+                 no tolerant fallback exists - see the module docs):\n  eval: {e}\n  c:    {c}",
+            ));
         }
     }
     Ok(())
-}
-
-/// Parse a string of the form `... tensor(shape=[a, b], data=[1.0, 2.0, ...])`
-/// (possibly with a `name = ` prefix) and return `(shape, data)`. Returns
-/// `None` if no tensor literal is found.
-fn parse_tensor_line(line: &str) -> Option<(Vec<u64>, Vec<f64>)> {
-    let start = line.find("tensor(shape=[")?;
-    let rest = &line[start + "tensor(shape=[".len()..];
-    let shape_end = rest.find(']')?;
-    let shape_str = &rest[..shape_end];
-    let after_shape = &rest[shape_end + 1..];
-    let data_anchor = after_shape.find("data=[")?;
-    let after_data = &after_shape[data_anchor + "data=[".len()..];
-    let data_end = after_data.find(']')?;
-    let data_str = &after_data[..data_end];
-
-    let shape: Vec<u64> = shape_str
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .filter_map(|s| s.parse::<u64>().ok())
-        .collect();
-    let data: Vec<f64> = data_str
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .filter_map(|s| s.parse::<f64>().ok())
-        .collect();
-    if data.is_empty() {
-        return None;
-    }
-    Some((shape, data))
 }
 
 // -----------------------------------------------------------------------------
@@ -530,20 +484,28 @@ fn parity_corpus_is_complete() {
 }
 
 // -----------------------------------------------------------------------------
-// Self-test for the tolerance comparator
+// Self-test for the byte-exact comparator
 // -----------------------------------------------------------------------------
 
 #[test]
-fn parity_comparator_accepts_within_tolerance() {
+fn parity_comparator_accepts_byte_identical_tensor_lines() {
     let a = b"contracted = tensor(shape=[2, 2], data=[19.0, 22.0, 43.0, 50.0])\n";
-    let b = b"contracted = tensor(shape=[2, 2], data=[19.0000001, 22.0, 43.0, 50.0])\n";
+    let b = b"contracted = tensor(shape=[2, 2], data=[19.0, 22.0, 43.0, 50.0])\n";
     assert!(assert_parity(a, b, "self-test-ok").is_ok());
 }
 
+/// Under the removed 1e-6 fallback this pair PASSED - the chelis#687
+/// blind spot in miniature. A sub-tolerance drift must now report.
 #[test]
-fn parity_comparator_rejects_outside_tolerance() {
+fn parity_comparator_reports_sub_tolerance_float_drift() {
     let a = b"contracted = tensor(shape=[2, 2], data=[19.0, 22.0, 43.0, 50.0])\n";
-    // 0.5 absolute, 2.6% relative — well outside 1e-6.
+    let b = b"contracted = tensor(shape=[2, 2], data=[19.0000001, 22.0, 43.0, 50.0])\n";
+    assert!(assert_parity(a, b, "self-test-drift").is_err());
+}
+
+#[test]
+fn parity_comparator_rejects_value_divergence() {
+    let a = b"contracted = tensor(shape=[2, 2], data=[19.0, 22.0, 43.0, 50.0])\n";
     let b = b"contracted = tensor(shape=[2, 2], data=[19.5, 22.0, 43.0, 50.0])\n";
     assert!(assert_parity(a, b, "self-test-fail").is_err());
 }

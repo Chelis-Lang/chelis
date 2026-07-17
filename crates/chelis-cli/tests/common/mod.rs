@@ -319,3 +319,248 @@ pub fn stub_toolchain(home: &Path, ver: &str) {
     fs::create_dir_all(&bin).unwrap();
     fs::write(bin.join("chelis"), b"#!/bin/true\n").unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Domain-validity checker (chelis#729 Phase 0)
+//
+// Implements ONLY the "value set" column of the §C1 table in
+// `spec/design/dtype_semantics.md`: pure membership of printed values in
+// their declared dtype's value set. No finalize logic, no traps, no
+// formatting rules (formatting faithfulness is chelis#732's contract, not
+// this checker's; a value-preserving formatting lie like `750.0` for an
+// int64 is IN domain here).
+//
+// FROZEN AT chelis#729 PHASE 0 EXIT: the API below
+// (`assert_elements_in_domain(prim, printed, context)` plus the pure
+// decision fn `element_domain_violation(prim, token)`) and the lane
+// drivers' verbatim-string discipline (drivers return printed strings;
+// nothing re-parses through f64 to compare values). Later phases treat
+// "domain checker green" as acceptance evidence; changing the membership
+// rules requires editing dtype_semantics.md and chelis#729 in the same
+// change set (its §B1 protocol).
+//
+// Reading membership off PRINTED text has two documented consequences:
+//
+// 1. PRINT-TRUNCATION SLACK - TEMPORARY BY CONSTRUCTION, RATCHETS TO 0.
+//    The compiled lane renders float payloads via `%.16g`, which
+//    truncates the widened value's decimal expansion at 16 significant
+//    digits (relative error < 1e-15). Membership for f32/f16/bf16
+//    therefore accepts a token whose f64 reading is within 1e-13
+//    RELATIVE of the widened nearest-at-width value. The classes stay
+//    cleanly separated: the smallest real violation this checker exists
+//    to catch is a skipped f32 rounding, whose relative distance to the
+//    nearest f32 is on the order of an f32 ulp (~6e-8), five orders of
+//    magnitude above the slack; f16/bf16 ulps are larger still.
+//    This slack is NOT a value tolerance and is NOT permanent: it exists
+//    only because today's C printer truncates. When chelis#732 Phase 2
+//    lands shortest-round-trip formatting in the compiled lane, every
+//    printed token parses back exactly and
+//    `DOMAIN_PRINT_TRUNCATION_SLACK` ratchets to 0 - flipping the
+//    constant is an item on #732 Phase 2's adoption checklist, not a
+//    judgment call left to a future reader.
+// 2. TEXT AMBIGUITY IS RESOLVED TOWARD NO-FALSE-POSITIVES. A token that
+//    is the shortest-round-trip rendering of an f32 at f32 width (for
+//    example `0.1`) is accepted, even though the same text could have
+//    been printed from an out-of-domain f64. Controls must never fail;
+//    a missed violation surfaces later through the exact-string rows.
+// ---------------------------------------------------------------------------
+
+/// Relative slack for `%.16g`-style print truncation (module note 1).
+/// TEMPORARY: ratchets to 0 when chelis#732 Phase 2 makes the compiled
+/// lane print shortest-round-trip tokens; do not treat as a tolerance.
+pub const DOMAIN_PRINT_TRUNCATION_SLACK: f64 = 1e-13;
+
+/// Strip `List[...]` wrappers (the drivers pass return types like
+/// `List[int64]` for `to_list` rows) down to the element prim name.
+fn normalize_prim(prim: &str) -> &str {
+    let mut p = prim.trim();
+    while let Some(inner) = p.strip_prefix("List[").and_then(|s| s.strip_suffix(']')) {
+        p = inner.trim();
+    }
+    p
+}
+
+/// Extract the printed value tokens from one lane's output line: the
+/// `data=[...]` payload of a `tensor(...)` form, the elements of a
+/// (possibly nested) `[...]` list, or the bare scalar payload. A leading
+/// `name = ` binding echo is stripped.
+pub fn printed_value_tokens(printed: &str) -> Vec<String> {
+    let s = printed.trim();
+    if let Some(dstart) = s.find("data=[") {
+        let rest = &s[dstart + "data=[".len()..];
+        if let Some(dend) = rest.find(']') {
+            return split_value_tokens(&rest[..dend]);
+        }
+    }
+    let s = match s.split_once(" = ") {
+        Some((_, rhs)) if !s.starts_with('[') => rhs.trim(),
+        _ => s,
+    };
+    if s.starts_with('[') && s.ends_with(']') {
+        let inner: String = s.chars().filter(|c| *c != '[' && *c != ']').collect();
+        return split_value_tokens(&inner);
+    }
+    vec![s.to_string()]
+}
+
+fn split_value_tokens(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// Pure membership decision for ONE printed element token against the
+/// §C1 value-set column. `None` means member; `Some(reason)` names the
+/// violation. Panics on an unknown prim name so a typo cannot silently
+/// skip checking.
+pub fn element_domain_violation(prim: &str, token: &str) -> Option<String> {
+    let t = token.trim();
+    match normalize_prim(prim) {
+        "bool" => match t {
+            "true" | "false" | "0" | "1" | "0.0" | "1.0" => None,
+            _ => Some(format!("`{t}` is not a bool value (value set is {{0, 1}})")),
+        },
+        "f64" => match t.parse::<f64>() {
+            Ok(_) => None,
+            Err(_) => Some(format!("`{t}` is not parseable as a number")),
+        },
+        "f32" => narrow_float_violation(
+            t,
+            "f32",
+            |d| (d as f32) as f64,
+            |t| t.parse::<f32>().is_ok_and(|v| format!("{v:?}") == t),
+        ),
+        "f16" => narrow_float_violation(
+            t,
+            "f16",
+            |d| half::f16::from_f64(d).to_f64(),
+            |t| {
+                t.parse::<f32>().is_ok_and(|v| {
+                    let w = half::f16::from_f32(v).to_f32();
+                    format!("{w:?}") == t
+                })
+            },
+        ),
+        "bf16" => narrow_float_violation(
+            t,
+            "bf16",
+            |d| half::bf16::from_f64(d).to_f64(),
+            |t| {
+                t.parse::<f32>().is_ok_and(|v| {
+                    let w = half::bf16::from_f32(v).to_f32();
+                    format!("{w:?}") == t
+                })
+            },
+        ),
+        "int64" => int_violation(t, "int64", i64::MIN as i128, i64::MAX as i128),
+        "int32" => int_violation(t, "int32", i32::MIN as i128, i32::MAX as i128),
+        "int16" => int_violation(t, "int16", i16::MIN as i128, i16::MAX as i128),
+        "int8" => int_violation(t, "int8", i8::MIN as i128, i8::MAX as i128),
+        "f8e4m3" => Some(format!(
+            "`{t}` claims dtype f8e4m3, which the checker rejects (spec/04 §1.1.1); \
+             no runtime value may carry it"
+        )),
+        other => panic!("domain checker: unknown prim `{other}` (from `{prim}`)"),
+    }
+}
+
+/// Shared narrow-float membership: exact widened rendering, own-width
+/// shortest rendering, or within print-truncation slack of the widened
+/// nearest-at-width value. See the module notes for why each branch exists.
+fn narrow_float_violation(
+    t: &str,
+    prim: &str,
+    round_trip: impl Fn(f64) -> f64,
+    is_own_width_shortest: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let d: f64 = match t.parse() {
+        Ok(d) => d,
+        Err(_) => return Some(format!("`{t}` is not parseable as a number")),
+    };
+    if d.is_nan() || d.is_infinite() {
+        return None;
+    }
+    let h = round_trip(d);
+    if h.is_infinite() {
+        return Some(format!(
+            "`{t}` is finite but exceeds the {prim} finite range (nearest {prim} is {h})"
+        ));
+    }
+    if d == h {
+        return None;
+    }
+    if is_own_width_shortest(t) {
+        return None;
+    }
+    let rel = (d - h).abs() / d.abs().max(h.abs()).max(f64::MIN_POSITIVE);
+    if rel <= DOMAIN_PRINT_TRUNCATION_SLACK {
+        return None;
+    }
+    Some(format!(
+        "`{t}` is not representable in {prim}: nearest {prim} value is {h:?}, \
+         relative deviation {rel:e} exceeds the print-truncation slack \
+         {DOMAIN_PRINT_TRUNCATION_SLACK:e}"
+    ))
+}
+
+/// Integer membership: integral value inside the width's range. Accepts
+/// both integer-formatted and float-formatted renderings (the eval tensor
+/// lane prints `100.0` for int tensors today; a value-preserving
+/// formatting lie is chelis#732's problem, not a domain violation).
+fn int_violation(t: &str, prim: &str, min: i128, max: i128) -> Option<String> {
+    let looks_integral = {
+        let body = t.strip_prefix('-').unwrap_or(t);
+        !body.is_empty() && body.bytes().all(|b| b.is_ascii_digit())
+    };
+    if looks_integral {
+        return match t.parse::<i128>() {
+            Ok(v) if (min..=max).contains(&v) => None,
+            Ok(v) => Some(format!("`{v}` is outside the {prim} range [{min}, {max}]")),
+            Err(_) => Some(format!("`{t}` does not fit any integer width")),
+        };
+    }
+    let d: f64 = match t.parse() {
+        Ok(d) => d,
+        Err(_) => return Some(format!("`{t}` is not parseable as a number")),
+    };
+    if !d.is_finite() {
+        return Some(format!(
+            "`{t}` is not a finite value; {prim} has no specials"
+        ));
+    }
+    if d.fract() != 0.0 {
+        return Some(format!("`{t}` is fractional; {prim} holds integers only"));
+    }
+    // Width bounds compared in f64. For widths below 64 bits both bounds
+    // are exactly representable. For int64 the exclusive upper bound 2^63
+    // is exact in f64 while i64::MAX is not; every integral f64 strictly
+    // below 2^63 is <= i64::MAX (the f64 grid near 2^63 steps by 1024),
+    // so `d < 2^63` is the correct membership test.
+    let (lo, hi_exclusive) = if max == i64::MAX as i128 {
+        (-(2f64.powi(63)), 2f64.powi(63))
+    } else {
+        (min as f64, max as f64 + 1.0)
+    };
+    if !(lo..hi_exclusive).contains(&d) {
+        return Some(format!("`{t}` is outside the {prim} range [{min}, {max}]"));
+    }
+    None
+}
+
+/// THE chelis#729 Phase 0 detector entry point: assert every printed
+/// element of `printed` is a member of `prim`'s value set (§C1's value
+/// set column). Wire this wherever a lane driver's output and its declared
+/// dtype meet. Panics with the offending token and reason.
+pub fn assert_elements_in_domain(prim: &str, printed: &str, context: &str) {
+    for token in printed_value_tokens(printed) {
+        if let Some(reason) = element_domain_violation(prim, &token) {
+            panic!(
+                "domain violation [{context}]: {reason}. Full printed payload: \
+                 `{printed}`. Value-set contract: spec/design/dtype_semantics.md \
+                 §C1 (chelis#729 Phase 0 detector)."
+            );
+        }
+    }
+}

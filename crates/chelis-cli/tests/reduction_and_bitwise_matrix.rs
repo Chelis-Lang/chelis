@@ -134,6 +134,12 @@ fn bitwise_ops_agree_across_lanes_at_every_width() {
             let program = scalar_program(&expr, ty);
             assert_eq!(eval_first_line(&program).expect("eval"), expected);
             let c_got = c_first_line(&program, &format!("bw_{ty}_{}", &expr[..4]));
+            // Only the C lane is domain-wired here by design: it is the
+            // #718 width-escape suspect, and a domain diagnostic before
+            // the generic LANE DIVERGENCE assert names the failure class.
+            // The eval side's exact-string assert_eq above subsumes its
+            // own domain check (in-domain expected value).
+            common::assert_elements_in_domain(ty, &c_got, &expr);
             assert_eq!(
                 c_got, expected,
                 "LANE DIVERGENCE for `{expr}`: C printed {c_got}"
@@ -264,6 +270,7 @@ fn c_int64_tensor_print_is_exact_above_2p53() {
          def f(x: tensor[1, 2, int64]) -> tensor[1, int64] = sum(x, 1)\n\
          out = print(f(to_tensor([[cast(9007199254740992, int64), cast(1, int64)]])))\n";
     let line = c_first_line(program, "i64_sum_print");
+    common::assert_elements_in_domain("int64", &line, "i64_sum_print");
     assert!(
         line.contains("9007199254740993"),
         "the printed tensor must carry the exact int64 the runtime holds; got: {line}"
@@ -291,6 +298,12 @@ fn int64_tensor_mean_lanes_agree() {
          cast(200, int64), cast(50, int64)])))\n";
     let eval_got = eval_first_line(program).expect("eval");
     let c_got = c_first_line(program, "i64_mean");
+    // chelis#729 Phase 0: agreement alone is not enough for this row.
+    // 187.5 in an int64 tensor is a domain violation even if both lanes
+    // were to agree on it; the checker keeps this red until the #724
+    // semantics are authored, not merely until the lanes coincide.
+    common::assert_elements_in_domain("int64", &eval_got, "i64_mean eval");
+    common::assert_elements_in_domain("int64", &c_got, "i64_mean C");
     assert_eq!(
         eval_got, c_got,
         "mean of an integer tensor must mean ONE thing"
@@ -323,12 +336,12 @@ fn f32_reductions_agree_across_lanes() {
              def f(x: tensor[4, f32]) -> tensor[{ret}] = {op}(x, 0)\n\
              out = print(f(to_tensor([1.5, 4.5, 2.5, 0.5])))\n"
         );
-        assert_eq!(eval_first_line(&program).expect("eval"), expected, "{op}");
-        assert_eq!(
-            c_first_line(&program, &format!("red_{op}")),
-            expected,
-            "{op}"
-        );
+        let eval_got = eval_first_line(&program).expect("eval");
+        common::assert_elements_in_domain(ret, &eval_got, op);
+        assert_eq!(eval_got, expected, "{op}");
+        let c_got = c_first_line(&program, &format!("red_{op}"));
+        common::assert_elements_in_domain(ret, &c_got, op);
+        assert_eq!(c_got, expected, "{op}");
     }
 }
 
