@@ -55,14 +55,11 @@ chelis-shell.workspace = true
 # runs fully offline through the real chelisup binary.
 flate2 = "1"
 # `observation_roundtrip_harness.rs` (chelis#732 Phase 0) verifies f16/bf16
-# exit text at the dtype's own width, which needs the same half-float
-# conversions the backends already use.
+# exit text at the dtype's own width, and the chelis#729 Phase 0 domain
+# checker (tests/common/mod.rs) needs the same f16/bf16 nearest-value
+# rounding - one dev-dep serves both; same crate the backends already use.
 half.workspace = true
 chelis-std-bundle.workspace = true
-# The chelis#729 Phase 0 domain-validity checker (tests/common/mod.rs)
-# needs f16/bf16 nearest-value rounding to decide narrow-float membership;
-# same crate the backends already use for their Const emit paths.
-half.workspace = true
 predicates = "3"
 sha2 = "0.10"
 tar = "0.4"
