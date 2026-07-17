@@ -2626,13 +2626,24 @@ impl CEmitter {
         self.line("}");
     }
 
-    /// Map a scalar C math function name to its vForce batch equivalent.
+    /// Map a scalar C math function name to its vForce batch equivalent, or
+    /// `None` to keep the correctly-rounded scalar loop.
+    ///
+    /// `sqrtf` is deliberately absent (chelis#719). IEEE-754 sec 5.4.1 requires
+    /// `squareRoot` to be correctly rounded; Accelerate's `vvsqrtf` is not. It
+    /// returns 0x3F9CC470 for sqrt(1.5), one ulp below the correctly-rounded
+    /// 0x3F9CC471. Routing sqrt through vForce also made the result
+    /// layout-dependent, since the strided path already used scalar `sqrtf`. The
+    /// scalar loop is correctly rounded on every platform (arm64 `fsqrt`, x86
+    /// `sqrtss`, or libm) and the compiler auto-vectorizes it, so the contiguous
+    /// and strided paths now agree bit for bit. exp/log/sin carry no IEEE
+    /// correctness requirement and stay on vForce (their per-op tolerances live
+    /// in spec/05 sec 8, chelis#732).
     fn vforce_func(scalar_func: &str) -> Option<&'static str> {
         match scalar_func {
             "expf" => Some("vvexpf"),
             "logf" => Some("vvlogf"),
             "sinf" => Some("vvsinf"),
-            "sqrtf" => Some("vvsqrtf"),
             _ => None,
         }
     }

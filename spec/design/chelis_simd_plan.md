@@ -234,11 +234,11 @@ The Sleef path emits explicit SIMD loops (the emitter controls the loop structur
 | log | logf | Sleef_logf8_u10 | Sleef_logf4_u10 | vvlogf |
 | sin | sinf | Sleef_sinf8_u10 | Sleef_sinf4_u10 | vvsinf |
 | cos | cosf | Sleef_cosf8_u10 | Sleef_cosf4_u10 | vvcosf |
-| sqrt | sqrtf | _mm256_sqrt_ps (hw) | vsqrtq_f32 (hw) | vvsqrtf |
+| sqrt | sqrtf | _mm256_sqrt_ps (hw) | vsqrtq_f32 (hw) | scalar sqrtf (#719) |
 | pow | powf | Sleef_powf8_u10 | Sleef_powf4_u10 | vvpowf |
 | erf | — (Horner) | Sleef_erff8_u10 | Sleef_erff4_u10 | — |
 
-Note: sqrt has hardware SIMD instructions on both x86 and ARM. The auto-vectorizer usually handles this correctly. Sleef is needed for the transcendental functions (exp, log, sin, etc.) that don't have hardware equivalents.
+Note: sqrt has hardware SIMD instructions on both x86 and ARM. The auto-vectorizer usually handles this correctly. Sleef is needed for the transcendental functions (exp, log, sin, etc.) that don't have hardware equivalents. sqrt is deliberately NOT routed to Accelerate vForce: `vvsqrtf` is not correctly rounded, and IEEE-754 requires `squareRoot` to be (chelis#719). The contiguous path keeps the scalar `sqrtf` loop, which the compiler auto-vectorizes and which agrees bit-for-bit with the strided `sqrtf` path.
 
 ### Build system changes
 
