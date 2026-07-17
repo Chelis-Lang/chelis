@@ -243,6 +243,20 @@ re-finalizing via a `pub(crate) fn reuse_storage` escape hatch whose doc
 contract is "element-preserving ops only"; every use site cites it. That
 hatch is the ONE deliberate hole, kept greppable.
 
+**The cast ladder (2026-07 review; [#759]).** The explicit `cast`
+surface mirrors the read-side split above: the CHECKED cast is the
+default - `convert_cast_data` is a thin wrapper over `finalize_scalar`
+(consumer map), so a cast whose value does not survive the target dtype
+traps per §C1/§C2 - and a NAMED lossy/truncating form ([#759]) is the
+explicit escape hatch, the same species as [#753]'s `wrap_*`: never the
+default, greppable, per-direction semantics AUTHORED as an atom rather
+than inherited from a lane (proposal defaults: float->float is RNE at
+the target width; float->int truncates toward zero with the
+out-of-range rule authored, not accidental; int->narrower-int gets ONE
+authored rule), with capability-table rows and cross-lane oracle
+coverage like any other cell. Spelling and atom land with Phase 2's
+kernel work; cells ratified at Phase 4.
+
 ## C4. The observation contract (formatting; fixes [#728])
 
 **Ownership note:** the authoritative elaboration and the delivery plan
@@ -623,6 +637,8 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#687]: https://github.com/Chelis-Lang/chelis/issues/687
 [#736]: https://github.com/Chelis-Lang/chelis/issues/736
 [#737]: https://github.com/Chelis-Lang/chelis/issues/737
+[#753]: https://github.com/Chelis-Lang/chelis/issues/753
+[#759]: https://github.com/Chelis-Lang/chelis/issues/759
 [#688]: https://github.com/Chelis-Lang/chelis/issues/688
 [#692]: https://github.com/Chelis-Lang/chelis/issues/692
 [#695]: https://github.com/Chelis-Lang/chelis/issues/695

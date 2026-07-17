@@ -107,6 +107,7 @@ authored:
 | `bitand`/`bitor`/`bitxor`/`shl`/`shr` x Scalar x int widths ([#682]) | `Supported`; C B-cells `Unimplemented { issue: #682 }` until emitted |
 | `to_string` x Tensor/List ([#734]) | `Supported` (eval already stringifies); C B-cell `Unimplemented { issue: #734 }` until the emitter renders via [#732]'s formatter |
 | `wrap_add`/`wrap_sub`/`wrap_mul` x (both surfaces) x int widths (spec/04 [04-NUM-7], [#753]) | A `Supported` on int8/16/32/64, `Rejected` on bool/float ("no modular arithmetic on non-integer dtypes; see [04-NUM-7]"); B-cells `Unimplemented { issue: #753 }` until kernels land ([#729] Phase 2's natural moment; SMT lowers to `bvadd`/`bvsub`/`bvmul` exactly, no tolerance row) |
+| named lossy cast x directions x dtypes ([#759]) | the explicit truncating/narrowing rung over the checked-cast default (same discipline as [#753]): per-direction rules authored as atoms - proposals: float->float RNE at target width; float->int truncate-toward-zero with an authored out-of-range rule; int->narrower-int ONE authored rule; never the default; bool out of scope per [04-NUM-4]; B-cells land with [#729] Phase 2's kernel work |
 
 ## Open questions (decided at [#729] Phase 4 entry, recorded here)
 
@@ -143,4 +144,5 @@ authored:
 [#733]: https://github.com/Chelis-Lang/chelis/issues/733
 [#734]: https://github.com/Chelis-Lang/chelis/issues/734
 [#753]: https://github.com/Chelis-Lang/chelis/issues/753
+[#759]: https://github.com/Chelis-Lang/chelis/issues/759
 [#717]: https://github.com/Chelis-Lang/chelis/issues/717
