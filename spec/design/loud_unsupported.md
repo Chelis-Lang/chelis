@@ -411,7 +411,12 @@ tripwire proving it.
 1. **`rust-no-wildcard-dispatch`** in chelis-lint (§C4.2): blocking, with
    the enum list (`Prim`, `RiscOp`, `ElemKind`, dtype-id constants), the
    crate list (chelis-ir, chelis-backend-c, chelis-backend-hip,
-   chelis-compiler-api numeric modules, chelis-runtime), the
+   chelis-compiler-api numeric modules, chelis-runtime; candidate
+   addition per Jeff's reflexive finding on [#738]/[#739]:
+   chelis-conformance, whose `check_row` `other =>` arm returns a silent
+   `Verdict::Manual` for un-dispatched MANIFEST rows - the class inside
+   the soundness auditor itself; coordinate with the conform
+   workstream), the
    justification-string allowlist mechanism, and registration in the lint
    rule spec per repo convention. Plus its own positive/negative rule
    tests (the lint crate's standard).
@@ -558,3 +563,5 @@ standing between an unsupported case and a plausible wrong number.
 [#732]: https://github.com/Chelis-Lang/chelis/issues/732
 [#733]: https://github.com/Chelis-Lang/chelis/issues/733
 [#734]: https://github.com/Chelis-Lang/chelis/issues/734
+[#738]: https://github.com/Chelis-Lang/chelis/issues/738
+[#739]: https://github.com/Chelis-Lang/chelis/issues/739

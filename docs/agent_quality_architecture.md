@@ -26,6 +26,15 @@ ladder as it can go, and treat "it's documented" as the floor, not the
 fix.** A compile error is the only context-delivery mechanism that
 reaches an agent 100% of the time, in-context, at the moment it matters.
 
+**Ratified as a REVIEW discipline** (Jeff, 2026-07, on the tracking
+issue): every mechanism proposal in this program names which rung it
+targets, and where it picks a lower rung than the top, justifies why the
+higher rungs do not apply. That single question - "why isn't this a
+compile error?" - would have caught most of what the audit found. Apply
+it reflexively too: the soundness tooling itself is in scope (the
+conform auditor's own silent `Verdict::Manual` wildcard arm is the same
+class one meta-level up - see chelis#738/#739).
+
 Corollary, from the audit's evidence about agents specifically: they
 trust comments (comments hid the only unpredicted bug), they stop at the
 reported symptom, they invent plausible fallbacks when a function cannot

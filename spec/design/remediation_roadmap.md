@@ -235,17 +235,31 @@ standard ("execute everything"). Each has a tracked task.
 (Filed: [#735] effects, [#736] HIP runtime, [#737] Metal harness, [#738] shell
 lanes.)
 
-## Effects: the one semantic area with no owner
+## Effects: split into decided-needs-authoring and genuinely open
 
 Called out beyond the ledger because it is a spec-silence case (the
-exact [#733] shape) and not merely missing evidence: nothing anywhere
-states what `with seed(n)` guarantees (determinism? cross-lane
-reproducibility? scope of the seed?), what `with device` selects, or
-what either means under `grad`/`vmap`. [#731] will make their BODIES
-type-checked and [#730] will make unknown KINDS loud, but the meaning
-stays unauthored - the same undecided-cell condition that produced
-[#724]/[#726], one construct over. Owned by [#735]; its
-output is atoms plus a sweep, not code.
+exact [#733] shape) and not merely missing evidence. Re-scoped per
+Jeff's 2026-07 pass on [#735], which grounded it against the LaCaDiLE
+formal development (the canonical calculus; our spec text lags it):
+
+- **The effect DISCIPLINE is decided** - handler scoping is syntactic
+  (the effect discharges for the body's scope only), nesting shadows
+  innermost-first, `with seed`/`with device` compose via distinct
+  labels, and grad rejects an unhandled `Random` effect - all backed by
+  LaCaDiLE Theorem 3 (mechanized handler calculus). That half is
+  spec-atom TRANSCRIPTION behind [#733], not design. Coordination note
+  for [#733]: these atoms cite theorems in ANOTHER repo's formal
+  development, and the atom grammar's rev-hashing is spec-text-based -
+  a cross-repo citation form needs defining before these atoms land.
+- **Genuinely open, still owed**: what a seed guarantees NUMERICALLY
+  (same-seed same-stream within a lane; cross-lane stream identity is
+  exactly the never-swept gap), what `with device` selects
+  operationally, and vmap interaction (not in LaCaDiLE at all). Jeff
+  owns the RNG-reproducibility call; the rest stays [#735] authoring.
+
+[#731] makes the BODIES type-checked (with the T-Handle shape as the
+formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
+[#735]'s output remains atoms plus a sweep, not code.
 
 [#680]: https://github.com/Chelis-Lang/chelis/issues/680
 [#681]: https://github.com/Chelis-Lang/chelis/issues/681

@@ -150,6 +150,13 @@ Normative, for every node the checker visits:
    and [#735] - Phase 1 checks FORM, [#735] authors meaning), check the
    body in the enclosing context, and
    return the BODY's type so the enclosing `def` signature is enforced.
+   The case's typing SHAPE has a formal target (Jeff's 2026-07 note on
+   [#709]): mirror LaCaDiLE's T-Handle rule (mechanized; the basis of
+   its Theorem 3) - type the body under the handled effect, discharge
+   the handled label from the residual effect row, enforce the declared
+   type, never a silent `Type::Error`. T-Handle governs the typing
+   shape; the literal-form rules above are ours (LaCaDiLE does not model
+   seed values).
    The three executed escalations become impossible: an int64 body in an
    `-> f32` def is a type error; the tensor variant is a type error; both
    are caught before any backend sees them.
