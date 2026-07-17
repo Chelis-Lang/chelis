@@ -31,6 +31,58 @@ fn prove_capabilities_emits_valid_json() {
     assert!(caps["engine_registry"].is_array());
 }
 
+// --- Issue #673: --capabilities must not claim beacon is dispatchable ---
+
+#[test]
+fn prove_capabilities_does_not_claim_beacon_when_binary_present_but_unwired() {
+    // A discoverable binary is NOT dispatchability. `with_beacon` has no caller
+    // on the production dispatch path, so CHELIS_BEACON_BIN pointing at a real
+    // executable must still not make the machine-readable surface say prove can
+    // route to beacon -- in any of the three places that claim it.
+    let dir = tempdir().unwrap();
+    let fake_beacon = dir.path().join("chelis-beacon");
+    std::fs::write(&fake_beacon, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake_beacon, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let output = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["prove", "--capabilities"])
+        .env("CHELIS_BEACON_BIN", &fake_beacon)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "exit 0");
+    let caps: Value = serde_json::from_slice(&output.stdout).expect("valid JSON");
+
+    // Nothing may claim beacon is usable...
+    assert_eq!(caps["beacon_available"], Value::Bool(false));
+    assert_eq!(caps["beacon_wired"], Value::Bool(false));
+    let registry = caps["engine_registry"].as_array().unwrap();
+    assert!(
+        !registry.contains(&Value::String("beacon_shim".into())),
+        "engine_registry must not list beacon_shim while nothing registers it: {registry:?}"
+    );
+    // ...and the env var IS observed, so none of the above passed vacuously.
+    assert_eq!(caps["beacon_binary_present"], Value::Bool(true));
+}
+
+#[test]
+fn prove_capabilities_reports_beacon_binary_absent_without_env() {
+    let output = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["prove", "--capabilities"])
+        .env_remove("CHELIS_BEACON_BIN")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "exit 0");
+    let caps: Value = serde_json::from_slice(&output.stdout).expect("valid JSON");
+    assert_eq!(caps["beacon_binary_present"], Value::Bool(false));
+    assert_eq!(caps["beacon_available"], Value::Bool(false));
+}
+
 #[test]
 fn prove_capabilities_does_not_require_input_files() {
     // --capabilities should exit 0 even without any .ch/.dp files present
