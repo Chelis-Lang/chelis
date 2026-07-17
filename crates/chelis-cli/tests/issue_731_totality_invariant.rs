@@ -21,6 +21,17 @@
 //! `(t-var {} _)` entry is precisely a silent `Type::Error` verdict.
 //! Signature metadata carries `Type` values directly and is scanned as-is.
 //!
+//! DETECTION SURFACE (limitation, on the record - PR #757 review): this
+//! harness sees a silent `Type::Error` only where it surfaces as (a) a
+//! stamp on a stamp-eligible EXPRESSION node or (b) a `Type` value in
+//! the signature-inference table. A silent Error confined to an ADT
+//! field-type DECLARATION (the chelis#756 `deftype` family, produced in
+//! `deep_type_to_type_with_params` and stored in the AdtRegistry)
+//! surfaces in neither and is invisible here. The red set below is
+//! exactly the four expression-level holes; GLOBAL restoration of
+//! [04-TOT-2] over all census sites is Phase 2's `ErrorWitness`
+//! migration, not this harness.
+//!
 //! Two funnels are driven, both returning `Result<CheckedProgram, _>`
 //! with the same empty-errors gate: `chelis_types::check_ir_program`
 //! (the `check_ir_with_signature_context_inner` route named by §C4.1,
@@ -51,7 +62,11 @@ const MASKED_ERROR: &str = "add(cast(1.0, f32), cast(2, int64))";
 /// this set gets a `type:` stamp during annotation unless its type
 /// inferred to `Type::Error`. If that list changes, this mirror must
 /// change in the same PR (the control corpus goes red otherwise, which
-/// is the tripwire working as intended).
+/// is the tripwire working as intended). KEEP CHAR-IDENTICAL to that
+/// function's list in BOTH directions - do not add tags it lacks (e.g.
+/// `d-rank`, which `dim_to_deep_expr` emits but the checker's list
+/// omits); divergence either way breaks the missing-stamp <=> Error
+/// equivalence this file relies on.
 const NON_TYPE_STAMPED_TAGS: &[&str] = &[
     "module",
     "import",
