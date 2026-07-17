@@ -12,8 +12,8 @@
 //!
 //! Beacon consumes the SERIALIZED `WireDag` JSON bytes out of process:
 //! it parses the slice, validates `schema_version <= WIRE_DAG_SCHEMA_VERSION`
-//! (currently `2`; a lower version is forward-compatible via additive
-//! defaults, a higher one fails closed), sha256s the bytes,
+//! (a lower version is forward-compatible via additive defaults, a higher
+//! one fails closed), sha256s the bytes,
 //! and selects the output by root index. So this producer addresses that
 //! artifact by its content hash (lowercase hex sha256) plus a root index,
 //! and [`ExtractedGoal`] also carries the serialized bytes so nothing

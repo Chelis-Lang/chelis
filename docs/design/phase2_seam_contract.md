@@ -59,6 +59,15 @@ slice, asserts `schema_version == 1`, computes a sha256 over those bytes, and
 selects the output by `root_index`. So `IrHandle` addresses that artifact by its
 content hash (lowercase hex) plus a root index, NOT by a node id.
 
+**① SUPERSEDED IN PART (schema version only).** The `schema_version == 1`
+equality above is sign-off-era history: it recorded the contract when
+`WIRE_DAG_SCHEMA_VERSION` was `1`. The wire schema is now `3` (`Reshape` carries
+`WireRtDim` extents, chelis#616), and Beacon does not assert equality with any
+single version: it accepts the supported set `[1, 2, 3]`, forward-compatible
+downward via additive defaults and fail-closed above the constant (beacon#54).
+The fail-closed posture ① froze is unchanged and `IrHandle`'s shape is
+untouched; only the accepted set widened.
+
 `IrHandle` still holds only a hash + index: it does NOT carry a `chelis_ir::Dag`
 or a `WireDag` value, so populating it pulls no live IR dependency into
 `chelis-prove`'s public API. The WI-3 producer (which DOES have the IR in scope)
@@ -218,10 +227,11 @@ out of tree. An out-of-tree interval engine registered on top of
 any other `BoxRange` goal.
 
 **Boundary checks.** The gradient `WireDag` flows through the same WI-3
-fail-closed boundary as a forward DAG: a non-v1 schema, a non-finite node-op
-float, or an inverted/NaN output range is rejected before hashing. An unknown
-gradient target (a `target` not among `wrt_names`) fails the WHOLE fan-out with
-`AdRailError::UnknownGradTarget` — no partial goal set, no wrong-root goal.
+fail-closed boundary as a forward DAG: a schema above `WIRE_DAG_SCHEMA_VERSION`,
+a non-finite node-op float, or an inverted/NaN output range is rejected before
+hashing. An unknown gradient target (a `target` not among `wrt_names`) fails the
+WHOLE fan-out with `AdRailError::UnknownGradTarget` — no partial goal set, no
+wrong-root goal.
 
 ## Sign-off
 

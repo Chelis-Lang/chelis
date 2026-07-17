@@ -10,7 +10,7 @@
 
 use std::process::Command;
 
-use chelis_compiler_api::schema::SourceKind;
+use chelis_compiler_api::schema::{SourceKind, WIRE_DAG_SCHEMA_VERSION};
 use chelis_prove::discharge::{IntervalBox, OutputRange, Qualifier, Soundness};
 use chelis_prove::engine_registry::DischargeRegistry;
 use chelis_prove::graph_extract::{box_range_goal_from_source, box_range_goal_from_source_entry};
@@ -271,7 +271,10 @@ fn beacon_e2e_bs_call_vec_live_shim_round_trip_uses_chelis_wi3_bytes() {
         extracted.goal.ir.root_index()
     );
     assert_eq!(beacon_evidence["output_name"].as_str(), Some("bs_call_vec"));
-    assert_eq!(beacon_evidence["schema_version"].as_u64(), Some(2));
+    assert_eq!(
+        beacon_evidence["schema_version"].as_u64(),
+        Some(u64::from(WIRE_DAG_SCHEMA_VERSION))
+    );
 }
 
 #[test]
