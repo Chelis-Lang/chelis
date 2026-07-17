@@ -76,12 +76,9 @@ not law.
 
 ## The dependency DAG
 
-The sequencing above as a graph. NOTE: GitHub's mermaid renderer (dagre)
-stacks the five plan columns into one tall cascade because every
-cross-plan edge is treated as a rank constraint - a degraded but still
-correct view. For the intended side-by-side column layout, open this
-block in a mermaid viewer with a newer layout engine (paste into
-mermaid.live, or use an IDE mermaid preview).
+The sequencing above as a graph. NOTE: GitHub renders this as one tall
+cascade - a degraded but still correct view. For the intended
+side-by-side column layout, open it in VS Code's markdown preview.
 Solid arrows are the within-plan phase chains - the only hard sequencing.
 Dashed arrows are soft interlocks with a recommended direction; the
 alternative order is pinned in the owning docs' §I1 sections. Dotted
