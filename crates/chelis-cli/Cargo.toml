@@ -54,6 +54,10 @@ chelis-shell.workspace = true
 # (`chelis-vX.Y.Z-<slug>.tar.gz`, gzip) so the auto-install-via-chelisup path
 # runs fully offline through the real chelisup binary.
 flate2 = "1"
+# `observation_roundtrip_harness.rs` (chelis#732 Phase 0) verifies f16/bf16
+# exit text at the dtype's own width, which needs the same half-float
+# conversions the backends already use.
+half.workspace = true
 chelis-std-bundle.workspace = true
 predicates = "3"
 sha2 = "0.10"

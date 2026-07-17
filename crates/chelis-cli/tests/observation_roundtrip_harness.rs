@@ -1,0 +1,1550 @@
+//! The chelis#732 Phase 0 round-trip harness: the mechanical detector for
+//! `spec/design/faithful_observation.md` §C2.1.
+//!
+//! ## The invariant under test
+//!
+//! For every dtype and every storable value, the text a lane emits at any
+//! exit (`print`, `to_list`, diagnostics, wire rendering) must parse back
+//! to exactly the stored bits AT THE DTYPE'S OWN WIDTH. Phase 0 asserts the
+//! invariant at the VALUE level only; the number grammar (`750` vs `750.0`,
+//! e-notation form, truncation markers) freezes later, at Phase 1 (§C1.3),
+//! so these tests stay valid across the §B2.1 expectations migration.
+//!
+//! Two assertion tiers, chosen so that VALUE bugs (chelis#684, #714, #717 -
+//! all [#729] territory per §I1) never redden a cell here:
+//!
+//! * **tier 1 - intra-lane exit agreement** (§C2.2): every exit of one lane
+//!   decodes to the same bits. Used alone where the lanes' STORED value is
+//!   known to diverge from the constructed one (eval's f64-backed int64
+//!   tensors above 2^53, chelis#684).
+//! * **tier 2 - absolute faithfulness**: the decoded bits equal the
+//!   constructed value's bits. Used where construction is
+//!   storage-strategy-independent (integers within 2^53; float values
+//!   exactly representable at the dtype, so chelis#717's missing rounding
+//!   has nothing to round; inf/NaN, which survive every width).
+//!
+//! ## The value tables (FROZEN, append-only from Phase 0's exit)
+//!
+//! Per `faithful_observation.md` Phase 0, the per-dtype tables below are
+//! frozen at this file's landing: rows may be APPENDED (with a PR that says
+//! why) but never edited or removed. Labels are stable row ids.
+//!
+//! ## Known-red cells (`#[ignore]`, §B2.3: red-to-green only by un-ignoring)
+//!
+//! | cell | issue |
+//! |---|---|
+//! | C print of f16/bf16 tensors (reads 2-byte buffers as f32) | chelis#716 |
+//! | C `to_list` of f16/bf16 tensors (runtime abort) | chelis#716 |
+//! | C print of int64 tensors above 2^53 (renders through double) | chelis#723 |
+//! | bool tensor `print` (1.0/0.0) vs `to_list` (true/false), both lanes | chelis#726 observation half |
+//! | C print format selection (`%.1f` collapses tiny values, `%.16g` starves 17-digit f64) | chelis#748 (§B2.5 discovery) |
+//! | C nested-in-list tensor renderer (int64 via f64, 10-element silent truncation) | chelis#749 (§B2.5 discovery) |
+//!
+//! Everything else is green by contract; a new red here is a new
+//! faithful-observation bug (file it, per §B2.5).
+//!
+//! Excluded by ownership (§I1): f16/bf16 SCALARS in the compiled lane never
+//! reach the print helper honestly (chelis#714 stores them in int64_t - an
+//! ingress/value bug), so their C cells are absent rather than red. The
+//! wire's capacity limits (JSON cannot carry NaN/inf as numbers; int64
+//! above 2^53 in `Vec<f64>` tensor data) are [#729]/[#686] storage decisions
+//! recorded at the schema (§C2.4), so the wire rows here cover the
+//! in-capacity set only.
+//!
+//! Run: `cargo nextest run -p chelis-cli --test observation_roundtrip_harness`
+//! Red cells: append `-- --ignored`.
+
+#![allow(clippy::uninlined_format_args)]
+
+use assert_cmd::Command;
+use tempfile::tempdir;
+
+#[path = "common/mod.rs"]
+mod common;
+
+use common::write_file;
+
+// ---------------------------------------------------------------------------
+// Lane drivers (self-contained on purpose: the sibling matrix files' drivers
+// return only the first stdout line, and [#729] Phase 0 edits those shared
+// shapes on its own branch; these capture the FULL stdout because the harness
+// reads several exits from one run)
+// ---------------------------------------------------------------------------
+
+fn c_toolchain_available() -> bool {
+    std::process::Command::new("cc")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// `chelis eval` a full program; full stdout or stderr.
+fn eval_stdout(program: &str) -> Result<String, String> {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("p.ch");
+    write_file(&path, program);
+    let out = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("chelis eval should run");
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Build `program` to C, link, run; full stdout or stage error.
+fn c_stdout(program: &str, name: &str) -> Result<String, String> {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join(format!("{name}.ch"));
+    let out_dir = dir.path().join(format!("{name}-out"));
+    write_file(&path, program);
+    let built = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("chelis build should run");
+    if !built.status.success() {
+        return Err(String::from_utf8_lossy(&built.stderr).into_owned());
+    }
+    let status = common::link_generated(&out_dir, &format!("{name}.c"), name);
+    if !status.success() {
+        return Err(format!("link failed: {status}"));
+    }
+    let run = std::process::Command::new(out_dir.join(name))
+        .output()
+        .expect("compiled binary should run");
+    if !run.status.success() {
+        return Err(format!(
+            "binary exited {}: {}",
+            run.status,
+            String::from_utf8_lossy(&run.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&run.stdout).into_owned())
+}
+
+/// The exit program. `print` returns unit in BOTH lanes (verified by
+/// execution: print roots render as `name = ()`), so the labeled-root
+/// renderer is exercised by DIRECT value roots (`troot`/`lroot`) while the
+/// print calls exercise the transcript renderer. `troot` inlines the body
+/// because the compiled lane silently DROPS def-call-valued roots that eval
+/// renders (chelis#750; see the count-tolerance note on the assert
+/// helpers).
+fn exits_program(ret: &str, body: &str) -> String {
+    format!(
+        "module M.Main\n\
+         def mk() -> {ret} = {body}\n\
+         shown = print(mk())\n\
+         listed = print(to_list(mk()))\n\
+         troot = {body}\n\
+         lroot = to_list(mk())\n"
+    )
+}
+
+/// Lines rendering the tensor itself: the `print` transcript line plus the
+/// `troot = ...` labeled root. Exactly two per lane.
+fn tensor_lines(stdout: &str) -> Vec<&str> {
+    stdout
+        .lines()
+        .filter(|l| l.contains("tensor(shape="))
+        .collect()
+}
+
+/// Lines rendering the to_list value: the transcript `[...]` line plus the
+/// `lroot = [...]` labeled root. Exactly two per lane.
+fn list_lines(stdout: &str) -> Vec<&str> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with('[') || l.starts_with("lroot = ["))
+        .collect()
+}
+
+/// Element texts of a `data=[...]` payload.
+fn tensor_elems(line: &str) -> Vec<String> {
+    let start = line.find("data=[").expect("data marker") + "data=[".len();
+    let end = start + line[start..].find(']').expect("closing bracket");
+    bracket_elems(&line[start..end])
+}
+
+/// Element texts of a `[...]` list payload (with or without `name = `).
+fn list_payload_elems(line: &str) -> Vec<String> {
+    let start = line.find('[').expect("open bracket") + 1;
+    let end = line.rfind(']').expect("closing bracket");
+    bracket_elems(&line[start..end])
+}
+
+fn bracket_elems(payload: &str) -> Vec<String> {
+    payload
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Bit decoding at the dtype's own width
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Width {
+    F64,
+    F32,
+    F16,
+    Bf16,
+}
+
+/// Bits of `v` at `w`, widened into u64. NaN normalizes to one canonical
+/// pattern per width: exit text spells NaN without a payload, so the
+/// round-trip contract for NaN is class-level, not payload-level.
+fn value_bits_at(v: f64, w: Width) -> u64 {
+    if v.is_nan() {
+        return match w {
+            Width::F64 => f64::NAN.to_bits(),
+            Width::F32 => u64::from(f32::NAN.to_bits()),
+            Width::F16 => u64::from(half::f16::NAN.to_bits()),
+            Width::Bf16 => u64::from(half::bf16::NAN.to_bits()),
+        };
+    }
+    match w {
+        Width::F64 => v.to_bits(),
+        // Narrowing here re-rounds from the f64 image. Every table value is
+        // exactly representable at its width (or is inf/NaN), so no
+        // double-rounding case exists for these rows; a future appended row
+        // must keep that property or extend this decoder.
+        Width::F32 => u64::from((v as f32).to_bits()),
+        Width::F16 => u64::from(half::f16::from_f64(v).to_bits()),
+        Width::Bf16 => u64::from(half::bf16::from_f64(v).to_bits()),
+    }
+}
+
+/// Parse exit text into bits at `w`. Accepts the grammars live today
+/// (Rust Debug/Display shapes, C printf `inf`/`nan` spellings); Rust's f64
+/// parser covers all of them.
+fn text_bits_at(text: &str, w: Width) -> Result<u64, String> {
+    let v: f64 = text
+        .parse()
+        .map_err(|e| format!("`{text}` is not a float: {e}"))?;
+    Ok(value_bits_at(v, w))
+}
+
+/// Lenient integer decode: today's exits render integer elements either as
+/// integers (`750`, exact) or float-shaped (`750.0`, the pre-migration
+/// tensor form). The float shape is accepted and decoded through f64, which
+/// is precisely what makes chelis#723's above-2^53 lie DETECTABLE: the
+/// float-shaped text decodes to a different i64 than the exact to_list text.
+fn text_int_lenient(text: &str) -> Result<i64, String> {
+    if let Ok(v) = text.parse::<i64>() {
+        return Ok(v);
+    }
+    let f: f64 = text
+        .parse()
+        .map_err(|e| format!("`{text}` is neither i64 nor float: {e}"))?;
+    if f.fract() != 0.0 || !f.is_finite() {
+        return Err(format!("`{text}` is not an integral value"));
+    }
+    Ok(f as i64)
+}
+
+// ---------------------------------------------------------------------------
+// The frozen value tables. `elem` is the Chelis element expression; `value`
+// is the constructed value's exact f64 image. `c_print_safe` marks rows the
+// emitted C print helper's CURRENT `%.1f`/`%.16g` selection can round-trip;
+// unsafe rows are asserted (red) in the Phase B-filed discovery test below
+// and stay out of the green C print assertions until Phase 2 fixes them.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct FRow {
+    label: &'static str,
+    elem: &'static str,
+    value: f64,
+    c_print_safe: bool,
+}
+
+/// f64 boundary rows (§C2.1's set: max/min, first-gap neighbors, subnormal,
+/// -0.0, plus the audit's 17-digit and e-notation values).
+const F64_ROWS: &[FRow] = &[
+    FRow {
+        label: "f64-max",
+        elem: "cast(1.7976931348623157e308, f64)",
+        value: f64::MAX,
+        // %.16g emits 16 significant digits; the parse-back lands past the
+        // overflow midpoint and reads as inf (discovery row).
+        c_print_safe: false,
+    },
+    FRow {
+        label: "f64-min-subnormal",
+        elem: "cast(5e-324, f64)",
+        value: 5e-324,
+        c_print_safe: false, // |x| < 1e-9 hits the %.1f arm and prints 0.0
+    },
+    FRow {
+        label: "f64-min-normal",
+        elem: "cast(2.2250738585072014e-308, f64)",
+        value: 2.2250738585072014e-308,
+        c_print_safe: false, // same %.1f collapse
+    },
+    FRow {
+        label: "f64-neg-zero",
+        elem: "cast(-0.0, f64)",
+        value: -0.0,
+        c_print_safe: true,
+    },
+    FRow {
+        label: "f64-tenth",
+        elem: "cast(0.1, f64)",
+        value: 0.1,
+        c_print_safe: true,
+    },
+    FRow {
+        label: "f64-17-digit",
+        elem: "cast(0.30000000000000004, f64)",
+        value: 0.30000000000000004,
+        c_print_safe: false, // %.16g starves the 17th digit; reads back 0.3
+    },
+    FRow {
+        label: "f64-2p53",
+        elem: "cast(9007199254740992.0, f64)",
+        value: 9007199254740992.0,
+        c_print_safe: true,
+    },
+    FRow {
+        label: "f64-2p53-plus-2",
+        elem: "cast(9007199254740994.0, f64)",
+        value: 9007199254740994.0,
+        c_print_safe: true,
+    },
+    FRow {
+        label: "f64-audit-e19",
+        elem: "cast(9.999999980506448e19, f64)",
+        value: 9.999999980506448e19,
+        c_print_safe: true,
+    },
+    FRow {
+        label: "f64-neg",
+        elem: "cast(-1.5, f64)",
+        value: -1.5,
+        c_print_safe: true,
+    },
+];
+
+/// f32 rows. Literals are the default float width, so they bind directly.
+const F32_ROWS: &[FRow] = &[
+    FRow {
+        label: "f32-max",
+        elem: "3.4028234663852886e38",
+        value: 3.4028234663852886e38,
+        c_print_safe: true, // the f64 image needs only 16 digits
+    },
+    FRow {
+        label: "f32-min-subnormal",
+        elem: "1e-45",
+        value: 1.401298464324817e-45,
+        c_print_safe: false, // %.1f collapse
+    },
+    FRow {
+        label: "f32-min-normal",
+        elem: "1.1754943508222875e-38",
+        value: 1.1754943508222875e-38,
+        c_print_safe: false, // %.1f collapse
+    },
+    FRow {
+        label: "f32-neg-zero",
+        elem: "-0.0",
+        value: -0.0,
+        c_print_safe: true,
+    },
+    FRow {
+        label: "f32-tenth",
+        elem: "0.1",
+        value: 0.10000000149011612,
+        c_print_safe: true,
+    },
+    FRow {
+        label: "f32-2p24",
+        elem: "16777216.0",
+        value: 16777216.0,
+        c_print_safe: true,
+    },
+    FRow {
+        label: "f32-2p24-plus-2",
+        elem: "16777218.0",
+        value: 16777218.0,
+        c_print_safe: true,
+    },
+    FRow {
+        label: "f32-2049",
+        elem: "2049.0",
+        value: 2049.0,
+        c_print_safe: true,
+    },
+    FRow {
+        label: "f32-neg",
+        elem: "-1.5",
+        value: -1.5,
+        c_print_safe: true,
+    },
+];
+
+/// f16 rows: every value is EXACTLY representable in f16 (and in the f32
+/// literals used to construct it), so eval's missing tensor-lane rounding
+/// (chelis#717, a [#729] value bug) has nothing to round and cannot redden
+/// these cells. C-lane print/to_list for this table live in the chelis#716
+/// ignored tests only.
+const F16_ROWS: &[FRow] = &[
+    FRow {
+        label: "f16-max",
+        elem: "65504.0",
+        value: 65504.0,
+        c_print_safe: true,
+    },
+    FRow {
+        label: "f16-min-normal",
+        elem: "0.00006103515625",
+        value: 0.00006103515625,
+        c_print_safe: true,
+    },
+    FRow {
+        label: "f16-min-subnormal",
+        elem: "0.000000059604644775390625",
+        value: 5.960464477539063e-8,
+        c_print_safe: true,
+    },
+    FRow {
+        label: "f16-neg-zero",
+        elem: "-0.0",
+        value: -0.0,
+        c_print_safe: true,
+    },
+    FRow {
+        label: "f16-frac",
+        elem: "0.75",
+        value: 0.75,
+        c_print_safe: true,
+    },
+    FRow {
+        label: "f16-2048",
+        elem: "2048.0",
+        value: 2048.0,
+        c_print_safe: true,
+    },
+    FRow {
+        label: "f16-2050",
+        elem: "2050.0",
+        value: 2050.0,
+        c_print_safe: true,
+    },
+    FRow {
+        label: "f16-neg",
+        elem: "-1.5",
+        value: -1.5,
+        c_print_safe: true,
+    },
+];
+
+/// bf16 rows, same exact-representability rule as f16.
+const BF16_ROWS: &[FRow] = &[
+    FRow {
+        label: "bf16-max",
+        elem: "3.3895313892515355e38",
+        value: 3.3895313892515355e38,
+        c_print_safe: true,
+    },
+    FRow {
+        label: "bf16-min-normal",
+        elem: "1.1754943508222875e-38",
+        value: 1.1754943508222875e-38,
+        c_print_safe: true,
+    },
+    FRow {
+        label: "bf16-min-subnormal",
+        elem: "9.183549615799121e-41",
+        value: 9.183549615799121e-41,
+        c_print_safe: true,
+    },
+    FRow {
+        label: "bf16-neg-zero",
+        elem: "-0.0",
+        value: -0.0,
+        c_print_safe: true,
+    },
+    FRow {
+        label: "bf16-frac",
+        elem: "0.75",
+        value: 0.75,
+        c_print_safe: true,
+    },
+    FRow {
+        label: "bf16-256",
+        elem: "256.0",
+        value: 256.0,
+        c_print_safe: true,
+    },
+    FRow {
+        label: "bf16-258",
+        elem: "258.0",
+        value: 258.0,
+        c_print_safe: true,
+    },
+    FRow {
+        label: "bf16-neg",
+        elem: "-1.5",
+        value: -1.5,
+        c_print_safe: true,
+    },
+];
+
+/// The specials program per float dtype: [inf, NaN, -inf] from IEEE division
+/// (no trapping float path in either lane; inf and NaN survive every
+/// narrowing width, so chelis#717 cannot distort them either).
+fn float_specials_body(dt: &str) -> (String, String) {
+    let ret = format!("tensor[3, {dt}]");
+    let body = match dt {
+        "f32" => "div(to_tensor([1.0, 0.0, -1.0]), to_tensor([0.0, 0.0, 0.0]))".to_string(),
+        "f64" => "div(to_tensor([cast(1.0, f64), cast(0.0, f64), cast(-1.0, f64)]), \
+                  to_tensor([cast(0.0, f64), cast(0.0, f64), cast(0.0, f64)]))"
+            .to_string(),
+        narrow => {
+            format!("cast(div(to_tensor([1.0, 0.0, -1.0]), to_tensor([0.0, 0.0, 0.0])), {narrow})")
+        }
+    };
+    (ret, body)
+}
+
+const SPECIALS: &[(&str, f64)] = &[
+    ("inf", f64::INFINITY),
+    ("nan", f64::NAN),
+    ("-inf", f64::NEG_INFINITY),
+];
+
+/// The specials table as `FRow`s (the `elem` column is unused: the values
+/// come from `float_specials_body`'s division, not per-element literals).
+fn special_rows() -> Vec<FRow> {
+    SPECIALS
+        .iter()
+        .map(|&(label, value)| FRow {
+            label,
+            elem: "",
+            value,
+            c_print_safe: true,
+        })
+        .collect()
+}
+
+struct IRow {
+    label: &'static str,
+    elem: &'static str,
+    value: i64,
+}
+
+/// Integer rows within +/- 2^53: exact in BOTH storage strategies (i64 and
+/// eval's f64-backed tensors), so tier 2 holds in both lanes. MIN endpoints
+/// are written as -(MAX) because the grammar's negative literal is neg
+/// applied to a positive literal, and i8/-128-style magnitudes are an
+/// ingress question ([#729]) this harness does not take a position on.
+const INT_ROWS: &[(&str, &[IRow])] = &[
+    (
+        "int8",
+        &[
+            IRow {
+                label: "i8-max",
+                elem: "cast(127, int8)",
+                value: 127,
+            },
+            IRow {
+                label: "i8-neg-max",
+                elem: "cast(-127, int8)",
+                value: -127,
+            },
+            IRow {
+                label: "i8-zero",
+                elem: "cast(0, int8)",
+                value: 0,
+            },
+        ],
+    ),
+    (
+        "int16",
+        &[
+            IRow {
+                label: "i16-max",
+                elem: "cast(32767, int16)",
+                value: 32767,
+            },
+            IRow {
+                label: "i16-neg-max",
+                elem: "cast(-32767, int16)",
+                value: -32767,
+            },
+        ],
+    ),
+    (
+        "int32",
+        &[
+            IRow {
+                label: "i32-max",
+                elem: "cast(2147483647, int32)",
+                value: 2147483647,
+            },
+            IRow {
+                label: "i32-neg-max",
+                elem: "cast(-2147483647, int32)",
+                value: -2147483647,
+            },
+        ],
+    ),
+    (
+        "int64",
+        &[
+            IRow {
+                label: "i64-2p53",
+                elem: "cast(9007199254740992, int64)",
+                value: 9007199254740992,
+            },
+            IRow {
+                label: "i64-neg-2p53",
+                elem: "cast(-9007199254740992, int64)",
+                value: -9007199254740992,
+            },
+            IRow {
+                label: "i64-small",
+                elem: "cast(750, int64)",
+                value: 750,
+            },
+        ],
+    ),
+];
+
+// ---------------------------------------------------------------------------
+// Shared assertions
+// ---------------------------------------------------------------------------
+
+/// Tier 2 over a float dtype: all four exit renders decode to the table's
+/// bits at `w`. `print_filter` limits which rows the two print lines are
+/// held to and `list_filter` the two to_list lines (eval passes `all_rows`
+/// for both; the C tests carve out the C-lane exclusions and the
+/// print-format discovery cells).
+fn assert_float_exits(
+    stdout: &str,
+    w: Width,
+    rows: &[FRow],
+    print_filter: fn(&FRow) -> bool,
+    list_filter: fn(&FRow) -> bool,
+    ctx: &str,
+) {
+    assert_float_print_exits(stdout, w, rows, print_filter, ctx);
+    let llines = list_lines(stdout);
+    assert!(
+        (1..=2).contains(&llines.len()),
+        "[{ctx}] expected the transcript (and possibly root) to_list renders, got:\n{stdout}"
+    );
+    for line in llines {
+        let elems = list_payload_elems(line);
+        assert_eq!(elems.len(), rows.len(), "[{ctx}] element count: {line}");
+        for (row, text) in rows.iter().zip(&elems) {
+            if !list_filter(row) {
+                continue;
+            }
+            let got = text_bits_at(text, w)
+                .unwrap_or_else(|e| panic!("[{ctx}/{}] to_list exit: {e}", row.label));
+            assert_eq!(
+                got,
+                value_bits_at(row.value, w),
+                "[{ctx}/{}] to_list exit text `{text}` does not round-trip to the stored bits",
+                row.label
+            );
+        }
+    }
+}
+
+/// The print half alone, for programs whose to_list exit cannot run yet
+/// (the chelis#716 f16/bf16 print cells: to_list of the same tensor aborts,
+/// and each red cell must fail on ITS OWN exit).
+fn assert_float_print_exits(
+    stdout: &str,
+    w: Width,
+    rows: &[FRow],
+    print_filter: fn(&FRow) -> bool,
+    ctx: &str,
+) {
+    let tlines = tensor_lines(stdout);
+    // 1 or 2: the print transcript is always present; the `troot` render is
+    // absent where the compiled lane drops the root (chelis#750) or where
+    // the program has no value root. Every line that IS rendered must be
+    // faithful.
+    assert!(
+        (1..=2).contains(&tlines.len()),
+        "[{ctx}] expected the transcript (and possibly root) tensor renders, got:\n{stdout}"
+    );
+    for line in tlines {
+        let elems = tensor_elems(line);
+        assert_eq!(elems.len(), rows.len(), "[{ctx}] element count: {line}");
+        for (row, text) in rows.iter().zip(&elems) {
+            if !print_filter(row) {
+                continue;
+            }
+            let got = text_bits_at(text, w)
+                .unwrap_or_else(|e| panic!("[{ctx}/{}] print exit: {e}", row.label));
+            assert_eq!(
+                got,
+                value_bits_at(row.value, w),
+                "[{ctx}/{}] print exit text `{text}` does not round-trip to the stored bits",
+                row.label
+            );
+        }
+    }
+}
+
+/// Tier 2 over an integer dtype (both exits, both renders).
+fn assert_int_exits(stdout: &str, rows: &[IRow], ctx: &str) {
+    assert!(
+        (1..=2).contains(&tensor_lines(stdout).len()),
+        "[{ctx}] expected the transcript (and possibly root) tensor renders, got:\n{stdout}"
+    );
+    assert!(
+        (1..=2).contains(&list_lines(stdout).len()),
+        "[{ctx}] expected the transcript (and possibly root) to_list renders, got:\n{stdout}"
+    );
+    for line in tensor_lines(stdout) {
+        let elems = tensor_elems(line);
+        assert_eq!(elems.len(), rows.len(), "[{ctx}] element count: {line}");
+        for (row, text) in rows.iter().zip(&elems) {
+            let got = text_int_lenient(text)
+                .unwrap_or_else(|e| panic!("[{ctx}/{}] print exit: {e}", row.label));
+            assert_eq!(
+                got, row.value,
+                "[{ctx}/{}] print exit text `{text}`",
+                row.label
+            );
+        }
+    }
+    for line in list_lines(stdout) {
+        let elems = list_payload_elems(line);
+        assert_eq!(elems.len(), rows.len(), "[{ctx}] element count: {line}");
+        for (row, text) in rows.iter().zip(&elems) {
+            let got = text_int_lenient(text)
+                .unwrap_or_else(|e| panic!("[{ctx}/{}] to_list exit: {e}", row.label));
+            assert_eq!(
+                got, row.value,
+                "[{ctx}/{}] to_list exit text `{text}`",
+                row.label
+            );
+        }
+    }
+}
+
+fn all_rows(_r: &FRow) -> bool {
+    true
+}
+
+/// Rows excluded from the compiled-lane PROGRAMS (not just assertions), by
+/// table label - all for one ingress defect, verified by execution:
+/// `host_emit.rs`'s Float arm renders constants into the C source with Rust
+/// `{}` Display, which has no e-notation, so any integral-valued float
+/// constant >= 2^64 becomes a raw C integer literal clang REJECTS
+/// ("integer literal is too large"): f64::MAX, 9.999999980506448e19, and
+/// f32::MAX produce programs that do not compile. The same Display path
+/// spells -0.0 as `-0`, an integer literal whose double conversion drops
+/// the sign; probed 2026-07-17: the C scalar and cast-element (f64 tensor)
+/// routes LOSE the sign, while the direct f32 literal tensor route
+/// preserves it, so only the f64 row stays excluded. All faces are one
+/// INGRESS value defect, chelis#751 ([#729] territory per §I1, probe
+/// outcomes recorded on [#729]), so the affected cells are unconstructible
+/// in the C lane today rather than red rendering cells; labels leave this
+/// list when chelis#751 lands.
+const C_LANE_EXCLUDED: &[&str] = &["f64-neg-zero", "f64-max", "f64-audit-e19", "f32-max"];
+
+fn c_lane_rows(r: &FRow) -> bool {
+    !C_LANE_EXCLUDED.contains(&r.label)
+}
+
+/// Rows excluded from the EVAL to_list assertions: the eval tensor lane
+/// pins its runtime precision tag at F32 even for checker-typed f64
+/// tensors (chelis#717's per-op-chaos family, verified here by execution:
+/// print shows the stored f64 while to_list narrows every element through
+/// the F32 tag - f64::MAX reads back as `inf`, 0.1 as its f32 image). A
+/// VALUE/metadata bug, [#729]'s per §I1, so these are exclusions with a
+/// probe comment on [#729], not red rendering cells. Only f32-exact f64
+/// values survive the tag; the print exit is asserted on EVERY row.
+const EVAL_F64_LIST_EXCLUDED: &[&str] = &[
+    "f64-max",
+    "f64-min-subnormal",
+    "f64-min-normal",
+    "f64-tenth",
+    "f64-17-digit",
+    "f64-2p53-plus-2",
+    "f64-audit-e19",
+];
+
+fn eval_f64_list_rows(r: &FRow) -> bool {
+    !EVAL_F64_LIST_EXCLUDED.contains(&r.label)
+}
+
+/// The compiled-lane subset of a table: the rows whose constants the C
+/// backend can render into compilable source (see `C_LANE_EXCLUDED`).
+fn c_rows(rows: &[FRow]) -> Vec<FRow> {
+    rows.iter().filter(|r| c_lane_rows(r)).cloned().collect()
+}
+
+fn c_print_safe_rows(r: &FRow) -> bool {
+    c_lane_rows(r) && r.c_print_safe
+}
+
+fn c_print_red_rows(r: &FRow) -> bool {
+    c_lane_rows(r) && !r.c_print_safe
+}
+
+fn float_table_program(dt: &str, rows: &[FRow], via_cast: bool) -> String {
+    let elems: Vec<&str> = rows.iter().map(|r| r.elem).collect();
+    let n = rows.len();
+    let body = if via_cast {
+        format!("cast(to_tensor([{}]), {dt})", elems.join(", "))
+    } else {
+        format!("to_tensor([{}])", elems.join(", "))
+    };
+    exits_program(&format!("tensor[{n}, {dt}]"), &body)
+}
+
+fn int_table_program(dt: &str, rows: &[IRow]) -> String {
+    let elems: Vec<&str> = rows.iter().map(|r| r.elem).collect();
+    let n = rows.len();
+    exits_program(
+        &format!("tensor[{n}, {dt}]"),
+        &format!("to_tensor([{}])", elems.join(", ")),
+    )
+}
+
+// ===========================================================================
+// GREEN - eval lane, tensor + to_list exits (transcript and root renders)
+// ===========================================================================
+
+#[test]
+fn eval_f64_tensor_exits_round_trip() {
+    let out = eval_stdout(&float_table_program("f64", F64_ROWS, false)).expect("eval");
+    assert_float_exits(
+        &out,
+        Width::F64,
+        F64_ROWS,
+        all_rows,
+        eval_f64_list_rows,
+        "eval/f64",
+    );
+
+    let (ret, body) = float_specials_body("f64");
+    let out = eval_stdout(&exits_program(&ret, &body)).expect("eval specials");
+    assert_float_exits(
+        &out,
+        Width::F64,
+        &special_rows(),
+        all_rows,
+        all_rows,
+        "eval/f64-specials",
+    );
+}
+
+#[test]
+fn eval_f32_tensor_exits_round_trip() {
+    let out = eval_stdout(&float_table_program("f32", F32_ROWS, false)).expect("eval");
+    assert_float_exits(&out, Width::F32, F32_ROWS, all_rows, all_rows, "eval/f32");
+
+    let (ret, body) = float_specials_body("f32");
+    let out = eval_stdout(&exits_program(&ret, &body)).expect("eval specials");
+    assert_float_exits(
+        &out,
+        Width::F32,
+        &special_rows(),
+        all_rows,
+        all_rows,
+        "eval/f32-specials",
+    );
+}
+
+#[test]
+fn eval_f16_bf16_tensor_exits_round_trip() {
+    for (dt, w, rows) in [
+        ("f16", Width::F16, F16_ROWS),
+        ("bf16", Width::Bf16, BF16_ROWS),
+    ] {
+        let out = eval_stdout(&float_table_program(dt, rows, true)).expect("eval");
+        assert_float_exits(&out, w, rows, all_rows, all_rows, &format!("eval/{dt}"));
+
+        let (ret, body) = float_specials_body(dt);
+        let out = eval_stdout(&exits_program(&ret, &body)).expect("eval specials");
+        assert_float_exits(
+            &out,
+            w,
+            &special_rows(),
+            all_rows,
+            all_rows,
+            &format!("eval/{dt}-specials"),
+        );
+    }
+}
+
+#[test]
+fn eval_int_tensor_exits_round_trip() {
+    for (dt, rows) in INT_ROWS {
+        let out = eval_stdout(&int_table_program(dt, rows)).expect("eval");
+        assert_int_exits(&out, rows, &format!("eval/{dt}"));
+    }
+}
+
+/// int64 ABOVE 2^53: tier 1 only. Eval's tensor storage is f64-backed
+/// (chelis#684, a [#729] value bug), so the constructed 2^53+1 is already
+/// collapsed BEFORE any exit renders it; faithful observation here means
+/// both exits agree on the stored (wrong) value. The C lane's tier-2
+/// version of this row is the chelis#723 ignored test below.
+#[test]
+fn eval_int64_above_2p53_exits_agree_within_lane() {
+    let program = exits_program(
+        "tensor[1, int64]",
+        "to_tensor([cast(9007199254740993, int64)])",
+    );
+    let out = eval_stdout(&program).expect("eval");
+    let mut decoded: Vec<i64> = Vec::new();
+    for line in tensor_lines(&out) {
+        decoded.push(text_int_lenient(&tensor_elems(line)[0]).expect("print exit"));
+    }
+    for line in list_lines(&out) {
+        decoded.push(text_int_lenient(&list_payload_elems(line)[0]).expect("to_list exit"));
+    }
+    assert_eq!(decoded.len(), 4, "four exit renders expected:\n{out}");
+    assert!(
+        decoded.windows(2).all(|w| w[0] == w[1]),
+        "eval exits disagree on one stored int64 tensor: {decoded:?}\n{out}"
+    );
+}
+
+// ===========================================================================
+// GREEN - eval lane, scalar exits (transcript and root renders)
+// ===========================================================================
+
+/// Scalar exit rows: (expression, dtype width or None for integer, exact
+/// f64 image / i64 value). Scalars take a different path from tensors in
+/// BOTH lanes (render_value scalar arms in eval; emit_print_value in C),
+/// so they get their own rows.
+#[test]
+fn eval_scalar_exits_round_trip() {
+    let float_rows: &[(&str, Width, f64)] = &[
+        (
+            "cast(0.30000000000000004, f64)",
+            Width::F64,
+            0.30000000000000004,
+        ),
+        ("cast(1.7976931348623157e308, f64)", Width::F64, f64::MAX),
+        ("cast(5e-324, f64)", Width::F64, 5e-324),
+        ("cast(-0.0, f64)", Width::F64, -0.0),
+        ("cast(0.1, f64)", Width::F64, 0.1),
+        ("0.1", Width::F32, 0.10000000149011612),
+        ("3.4028234663852886e38", Width::F32, 3.4028234663852886e38),
+        ("-0.0", Width::F32, -0.0),
+        ("cast(0.75, f16)", Width::F16, 0.75),
+        ("cast(2048.0, f16)", Width::F16, 2048.0),
+        ("cast(0.75, bf16)", Width::Bf16, 0.75),
+        (
+            "div(cast(1.0, f64), cast(0.0, f64))",
+            Width::F64,
+            f64::INFINITY,
+        ),
+        ("div(cast(0.0, f64), cast(0.0, f64))", Width::F64, f64::NAN),
+    ];
+    for (expr, w, value) in float_rows {
+        let out = eval_stdout(&format!("module M.Main\nshown = print({expr})\n")).expect("eval");
+        for line in scalar_render_lines(&out) {
+            let got = text_bits_at(&line, *w)
+                .unwrap_or_else(|e| panic!("[eval scalar {expr}] {e}\n{out}"));
+            assert_eq!(
+                got,
+                value_bits_at(*value, *w),
+                "[eval scalar {expr}] text `{line}` does not round-trip"
+            );
+        }
+    }
+    let int_rows: &[(&str, i64)] = &[
+        ("cast(9223372036854775807, int64)", i64::MAX),
+        ("cast(-9223372036854775807, int64)", -i64::MAX),
+        ("cast(9007199254740993, int64)", 9007199254740993),
+        ("cast(2147483647, int32)", 2147483647),
+    ];
+    for (expr, value) in int_rows {
+        let out = eval_stdout(&format!("module M.Main\nshown = print({expr})\n")).expect("eval");
+        for line in scalar_render_lines(&out) {
+            let got =
+                text_int_lenient(&line).unwrap_or_else(|e| panic!("[eval scalar {expr}] {e}"));
+            assert_eq!(got, *value, "[eval scalar {expr}] text `{line}`");
+        }
+    }
+    let out = eval_stdout("module M.Main\nshown = print(true)\n").expect("eval");
+    for line in scalar_render_lines(&out) {
+        assert_eq!(line, "true", "bool scalar exit");
+    }
+}
+
+/// The scalar print-transcript render of a single `shown = print(expr)`
+/// program. The print root itself renders as `()` (print returns unit) and
+/// is dropped. Scalar VALUE roots are deliberately not driven here: eval
+/// realizes them to rank-0 f64 tensors before rendering (the [#684]/[#687]
+/// noted behavior) and the compiled lane drops def-call roots entirely
+/// (chelis#750), so neither lane offers a bare scalar root
+/// render to hold to §C2.1 - the census records both.
+fn scalar_render_lines(stdout: &str) -> Vec<String> {
+    let lines: Vec<String> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.ends_with("()"))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "expected exactly the scalar print transcript, got:\n{stdout}"
+    );
+    lines
+}
+
+// ===========================================================================
+// GREEN - compiled C lane
+// ===========================================================================
+
+#[test]
+fn c_f64_tensor_exits_round_trip() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    // to_list is asserted on EVERY row (the runtime's f64 list render is
+    // Display, which is shortest-round-trip); print only on the rows the
+    // current %.1f/%.16g selection can carry - the rest are the discovery
+    // test's red cells.
+    let rows = c_rows(F64_ROWS);
+    let out = c_stdout(&float_table_program("f64", &rows, false), "obs_f64").expect("C lane");
+    assert_float_exits(
+        &out,
+        Width::F64,
+        &rows,
+        c_print_safe_rows,
+        all_rows,
+        "c/f64",
+    );
+
+    let (ret, body) = float_specials_body("f64");
+    let out = c_stdout(&exits_program(&ret, &body), "obs_f64_sp").expect("C specials");
+    assert_float_exits(
+        &out,
+        Width::F64,
+        &special_rows(),
+        all_rows,
+        all_rows,
+        "c/f64-specials",
+    );
+}
+
+#[test]
+fn c_f32_tensor_exits_round_trip() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    let rows = c_rows(F32_ROWS);
+    let out = c_stdout(&float_table_program("f32", &rows, false), "obs_f32").expect("C lane");
+    assert_float_exits(
+        &out,
+        Width::F32,
+        &rows,
+        c_print_safe_rows,
+        all_rows,
+        "c/f32",
+    );
+
+    let (ret, body) = float_specials_body("f32");
+    let out = c_stdout(&exits_program(&ret, &body), "obs_f32_sp").expect("C specials");
+    assert_float_exits(
+        &out,
+        Width::F32,
+        &special_rows(),
+        all_rows,
+        all_rows,
+        "c/f32-specials",
+    );
+}
+
+#[test]
+fn c_int_tensor_exits_round_trip() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    for (dt, rows) in INT_ROWS {
+        let out = c_stdout(&int_table_program(dt, rows), &format!("obs_{dt}")).expect("C lane");
+        assert_int_exits(&out, rows, &format!("c/{dt}"));
+    }
+}
+
+/// The C lane's int64 to_list exit is EXACT above 2^53 (the audit's proof
+/// instrument for chelis#723; mirrors the sum-based lock in
+/// reduction_and_bitwise_matrix.rs without moving it). Print of the same
+/// tensor is the chelis#723 ignored test below.
+#[test]
+fn c_int64_to_list_is_exact_above_2p53() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    let program = "module M.Main\n\
+         def mk() -> tensor[2, int64] = to_tensor([cast(9007199254740993, int64), \
+         cast(9223372036854775807, int64)])\n\
+         shown = print(to_list(mk()))\n\
+         lroot = to_list(mk())\n";
+    let out = c_stdout(program, "obs_i64_list").expect("C lane");
+    for line in list_lines(&out) {
+        let elems = list_payload_elems(line);
+        assert_eq!(
+            text_int_lenient(&elems[0]).expect("elem 0"),
+            9007199254740993,
+            "to_list must carry 2^53+1 exactly: {line}"
+        );
+        assert_eq!(
+            text_int_lenient(&elems[1]).expect("elem 1"),
+            i64::MAX,
+            "to_list must carry i64::MAX exactly: {line}"
+        );
+    }
+}
+
+#[test]
+fn c_scalar_exits_round_trip() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    // f16/bf16 scalar rows are deliberately ABSENT: the compiled lane stores
+    // them in int64_t (chelis#714, ingress/value - [#729]'s side of §I1), so
+    // there is no faithfully-stored value for this harness to read yet.
+    let float_rows: &[(&str, &str, Width, f64)] = &[
+        ("f64", "cast(0.1, f64)", Width::F64, 0.1),
+        (
+            "f64",
+            "cast(9007199254740992.0, f64)",
+            Width::F64,
+            9007199254740992.0,
+        ),
+        ("f64", "cast(5e-324, f64)", Width::F64, 5e-324),
+        (
+            "f64",
+            "div(cast(1.0, f64), cast(0.0, f64))",
+            Width::F64,
+            f64::INFINITY,
+        ),
+        (
+            "f64",
+            "div(cast(0.0, f64), cast(0.0, f64))",
+            Width::F64,
+            f64::NAN,
+        ),
+        ("f32", "0.1", Width::F32, 0.10000000149011612),
+        // f32::MAX is absent: the emitted constant is an integer literal
+        // clang rejects (the C_LANE_EXCLUDED ingress defect, [#729]).
+        ("f32", "1e-45", Width::F32, 1.401298464324817e-45),
+    ];
+    for (i, (ret, expr, w, value)) in float_rows.iter().enumerate() {
+        let program = format!("module M.Main\ndef run() -> {ret} = {expr}\nshown = print(run())\n");
+        let out = c_stdout(&program, &format!("obs_sc_f{i}")).expect("C lane");
+        for line in scalar_render_lines(&out) {
+            let got = text_bits_at(&line, *w).unwrap_or_else(|e| panic!("[c scalar {expr}] {e}"));
+            assert_eq!(
+                got,
+                value_bits_at(*value, *w),
+                "[c scalar {expr}] text `{line}` does not round-trip"
+            );
+        }
+    }
+    let int_rows: &[(&str, i64)] = &[
+        ("cast(9223372036854775807, int64)", i64::MAX),
+        ("cast(9007199254740993, int64)", 9007199254740993),
+    ];
+    for (i, (expr, value)) in int_rows.iter().enumerate() {
+        let program = format!("module M.Main\ndef run() -> int64 = {expr}\nshown = print(run())\n");
+        let out = c_stdout(&program, &format!("obs_sc_i{i}")).expect("C lane");
+        for line in scalar_render_lines(&out) {
+            assert_eq!(
+                text_int_lenient(&line).expect("int scalar"),
+                *value,
+                "[c scalar {expr}] text `{line}`"
+            );
+        }
+    }
+    let out = c_stdout(
+        "module M.Main\ndef run() -> bool = and(true, true)\nshown = print(run())\n",
+        "obs_sc_b",
+    )
+    .expect("C lane");
+    for line in scalar_render_lines(&out) {
+        assert_eq!(line, "true", "bool scalar exit");
+    }
+}
+
+// ===========================================================================
+// GREEN - wire rendering (§C2.4, in-capacity set)
+// ===========================================================================
+
+/// The wire exit: `ExecutionValue`/`TensorValue` serialize numeric payloads
+/// through serde_json. Finite f64 and full-range i64 must round-trip
+/// bit-exactly. Out-of-capacity cells (NaN/inf have no JSON number form;
+/// int64 above 2^53 cannot ride `TensorValue`'s `Vec<f64>`) are [#729]/[#686]
+/// storage decisions recorded at the schema (§C2.4) - deliberately no
+/// assertion pins them here.
+#[test]
+fn wire_execution_value_rendering_round_trips() {
+    use chelis_compiler_api::schema::{ExecutionValue, TensorValue};
+
+    let finite: Vec<f64> = F64_ROWS.iter().map(|r| r.value).collect();
+    for &v in &finite {
+        let json = serde_json::to_string(&ExecutionValue::Float64 { value: v }).expect("serialize");
+        let back: ExecutionValue = serde_json::from_str(&json).expect("parse");
+        match back {
+            ExecutionValue::Float64 { value } => assert_eq!(
+                value.to_bits(),
+                v.to_bits(),
+                "wire f64 {v:?} did not round-trip through `{json}`"
+            ),
+            other => panic!("wire round-trip changed the variant: {other:?}"),
+        }
+    }
+
+    let tensor = ExecutionValue::Tensor {
+        value: TensorValue {
+            shape: vec![finite.len()],
+            data: finite.clone(),
+        },
+    };
+    let json = serde_json::to_string(&tensor).expect("serialize");
+    let back: ExecutionValue = serde_json::from_str(&json).expect("parse");
+    match back {
+        ExecutionValue::Tensor { value } => {
+            for (a, b) in value.data.iter().zip(&finite) {
+                assert_eq!(a.to_bits(), b.to_bits(), "wire tensor element drifted");
+            }
+        }
+        other => panic!("wire round-trip changed the variant: {other:?}"),
+    }
+
+    for v in [i64::MAX, -i64::MAX, 9007199254740993_i64, 0] {
+        let json = serde_json::to_string(&ExecutionValue::Int64 { value: v }).expect("serialize");
+        let back: ExecutionValue = serde_json::from_str(&json).expect("parse");
+        match back {
+            ExecutionValue::Int64 { value } => {
+                assert_eq!(value, v, "wire i64 {v} did not round-trip through `{json}`")
+            }
+            other => panic!("wire round-trip changed the variant: {other:?}"),
+        }
+    }
+}
+
+// ===========================================================================
+// GREEN - diagnostics embedding values (§C1.6's exit, eval lane)
+// ===========================================================================
+
+/// The one eval diagnostic that embeds a numeric ELEMENT payload today: the
+/// decode chokepoint's invariant-violation message renders the offending
+/// value through render_value (invariant.rs:570). The embedded digits must
+/// round-trip to the stored bits at the field's width. Violating values are
+/// f32-exact so ingress narrowing questions ([#729]) cannot blur the row.
+#[test]
+fn diagnostics_invariant_violation_embeds_faithful_value() {
+    use chelis_compiler_api::schema::ExecutionValue;
+    use chelis_compiler_api::{DecodeError, try_decode_adt_value};
+
+    const SRC: &str = r#"
+module Obs.Prob
+
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type Probability = | Probability { value: f32 }
+
+def make(x: f32) -> Probability = Probability { value: x }
+"#;
+    let decls = chelis_surf::parser::parse_str(SRC).expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls);
+
+    for violating in [2.5_f64, -0.5_f64] {
+        let payload = ExecutionValue::Adt {
+            ctor: "Probability".to_string(),
+            fields: vec![ExecutionValue::Float64 { value: violating }],
+        };
+        let err = try_decode_adt_value(&exprs, &payload)
+            .expect_err("out-of-band probability must be rejected");
+        let msg = match &err {
+            DecodeError::Invariant(msg) => msg.clone(),
+            other => panic!("expected an invariant violation, got {other:?}"),
+        };
+        let start = msg
+            .find("Probability(")
+            .unwrap_or_else(|| panic!("diagnostic must embed the value: {msg}"))
+            + "Probability(".len();
+        let end = start
+            + msg[start..]
+                .find(')')
+                .unwrap_or_else(|| panic!("unclosed value in: {msg}"));
+        let text = &msg[start..end];
+        let got = text_bits_at(text, Width::F32)
+            .unwrap_or_else(|e| panic!("diagnostic payload `{text}`: {e}"));
+        assert_eq!(
+            got,
+            value_bits_at(violating, Width::F32),
+            "the diagnostic's embedded value `{text}` does not round-trip \
+             to the rejected bits (§C1.6): {msg}"
+        );
+    }
+}
+
+// ===========================================================================
+// RED - the known-unfaithful cells (§B2.3: go green only by un-ignoring)
+// ===========================================================================
+
+/// §C1.4/§C1.5: one bool tensor must read identically from print and
+/// to_list. Observed today in BOTH lanes: print renders `data=[1.0, 0.0]`
+/// while to_list renders `[true, false]` (chelis#726's observation half;
+/// eval side lands with [#732] Phase 1, C side Phase 2).
+#[test]
+#[ignore = "chelis#726 (observation half; fixed by chelis#732 Phases 1-2): bool tensor print \
+            says 1.0/0.0 while to_list says true/false in both lanes. Run with \
+            `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
+fn bool_tensor_print_matches_to_list_exit() {
+    let program = exits_program("tensor[2, bool]", "to_tensor([true, false])");
+    let expected = ["true", "false"];
+
+    let out = eval_stdout(&program).expect("eval");
+    for line in tensor_lines(&out) {
+        assert_eq!(
+            tensor_elems(line),
+            expected,
+            "eval bool tensor print must render true/false: {line}"
+        );
+    }
+    for line in list_lines(&out) {
+        assert_eq!(list_payload_elems(line), expected, "eval to_list: {line}");
+    }
+
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    let out = c_stdout(&program, "obs_bool_split").expect("C lane");
+    for line in tensor_lines(&out) {
+        assert_eq!(
+            tensor_elems(line),
+            expected,
+            "C bool tensor print must render true/false: {line}"
+        );
+    }
+    for line in list_lines(&out) {
+        assert_eq!(list_payload_elems(line), expected, "C to_list: {line}");
+    }
+}
+
+/// chelis#716: the emitted print helper's `default:` arm reads f16/bf16
+/// buffers as f32. Value-level assertion (not exact strings) so this test
+/// survives the §B2.1 grammar migration and goes green at Phase 2 untouched.
+#[test]
+#[ignore = "chelis#716: the emitted C print helper reads f16/bf16 tensor buffers as f32 and \
+            prints garbage over CORRECT kernel results. Run with \
+            `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
+fn c_f16_bf16_tensor_print_is_dtype_faithful() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    for (dt, w, rows) in [
+        ("f16", Width::F16, F16_ROWS),
+        ("bf16", Width::Bf16, BF16_ROWS),
+    ] {
+        // Print-only program: the sibling to_list exit aborts today
+        // (chelis#716's other half, its own test below), and each red cell
+        // must fail on ITS OWN exit.
+        let elems: Vec<&str> = rows.iter().map(|r| r.elem).collect();
+        let program = format!(
+            "module M.Main\n\
+             def mk() -> tensor[{n}, {dt}] = cast(to_tensor([{e}]), {dt})\n\
+             shown = print(mk())\n",
+            n = rows.len(),
+            e = elems.join(", ")
+        );
+        let out = c_stdout(&program, &format!("obs_{dt}_print"))
+            .unwrap_or_else(|e| panic!("chelis#716: the {dt} program must run: {e}"));
+        assert_float_print_exits(&out, w, rows, all_rows, &format!("c/{dt}"));
+    }
+}
+
+/// chelis#716: to_list of an f16/bf16 tensor aborts at runtime in the
+/// compiled lane (`to_list expects numeric or bool tensor input`).
+#[test]
+#[ignore = "chelis#716: to_list of f16/bf16 tensors aborts at runtime in the compiled lane. \
+            Run with \
+            `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
+fn c_f16_bf16_to_list_completes_per_dtype() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    for (dt, w, rows) in [
+        ("f16", Width::F16, F16_ROWS),
+        ("bf16", Width::Bf16, BF16_ROWS),
+    ] {
+        let elems: Vec<&str> = rows.iter().map(|r| r.elem).collect();
+        let program = format!(
+            "module M.Main\n\
+             def mk() -> tensor[{n}, {dt}] = cast(to_tensor([{e}]), {dt})\n\
+             out = print(to_list(mk()))\n",
+            n = rows.len(),
+            e = elems.join(", ")
+        );
+        let out = c_stdout(&program, &format!("obs_{dt}_list"))
+            .unwrap_or_else(|e| panic!("chelis#716: {dt} to_list must not abort: {e}"));
+        for line in list_lines(&out) {
+            let elems = list_payload_elems(line);
+            assert_eq!(elems.len(), rows.len(), "[c/{dt}] element count: {line}");
+            for (row, text) in rows.iter().zip(&elems) {
+                let got =
+                    text_bits_at(text, w).unwrap_or_else(|e| panic!("[c/{dt}/{}] {e}", row.label));
+                assert_eq!(got, value_bits_at(row.value, w), "[c/{dt}/{}]", row.label);
+            }
+        }
+    }
+}
+
+/// chelis#723: the emitted print helper renders int64 through double, so
+/// print of a stored 2^53+1 reads back as 2^53 while to_list (green control
+/// above) carries it exactly.
+#[test]
+#[ignore = "chelis#723: the emitted C print helper renders int64 tensor elements through \
+            double; 9007199254740993 prints as a value that decodes to 9007199254740992. \
+            Run with \
+            `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
+fn c_int64_tensor_print_round_trips_above_2p53() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    let program = exits_program(
+        "tensor[2, int64]",
+        "to_tensor([cast(9007199254740993, int64), cast(9223372036854775807, int64)])",
+    );
+    let out = c_stdout(&program, "obs_i64_print").expect("C lane");
+    let expected = [9007199254740993_i64, i64::MAX];
+    for line in tensor_lines(&out) {
+        let elems = tensor_elems(line);
+        for (want, text) in expected.iter().zip(&elems) {
+            let got = text_int_lenient(text).unwrap_or_else(|e| panic!("print exit: {e}"));
+            assert_eq!(
+                got, *want,
+                "the printed int64 tensor must carry the exact stored value; got `{text}`"
+            );
+        }
+    }
+}
+
+/// DISCOVERY chelis#748 (§B2.5, found while building this harness): the
+/// emitted print paths' format SELECTION loses whole value classes
+/// independently of the dtype-funnel bugs:
+///
+/// * the near-integer branch `fabs(v - round(v)) < 1e-9 -> %.1f` collapses
+///   EVERY |x| < 1e-9 to `0.0` - f32/f64 subnormals, min-normals, tiny
+///   gradients (host_emit.rs:516; runtime lib.rs:3772 has the same test);
+/// * `%.16g` emits 16 significant digits, one short of f64's worst case -
+///   0.30000000000000004 reads back as 0.3, and f64::MAX reads back as INF
+///   (host_emit.rs:518 tensor path, :4275/:4366 scalar paths).
+///
+/// Both are Phase 2 casualties (chelis_format_shortest replaces the split).
+#[test]
+#[ignore = "chelis#748 (B2.5 discovery): \
+            the emitted %.1f arm collapses |x|<1e-9 to 0.0 and %.16g starves 17-digit f64 \
+            values. Run with \
+            `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
+fn c_print_format_selection_preserves_small_and_17_digit_values() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    // The compilable f64/f32 table rows excluded from the green print
+    // assertions (the C_LANE_EXCLUDED cells never reach a renderer at all).
+    let rows = c_rows(F64_ROWS);
+    let out = c_stdout(&float_table_program("f64", &rows, false), "obs_f64_red").expect("C lane");
+    assert_float_exits(
+        &out,
+        Width::F64,
+        &rows,
+        c_print_red_rows,
+        all_rows,
+        "c/f64-red",
+    );
+
+    let rows = c_rows(F32_ROWS);
+    let out = c_stdout(&float_table_program("f32", &rows, false), "obs_f32_red").expect("C lane");
+    assert_float_exits(
+        &out,
+        Width::F32,
+        &rows,
+        c_print_red_rows,
+        all_rows,
+        "c/f32-red",
+    );
+
+    // The scalar %.16g path starves the same 17-digit f64 values. (f64::MAX
+    // would starve too - %.16g parses back as inf - but its C cell is
+    // unconstructible today: the emitted constant is an integer literal
+    // clang rejects, the C_LANE_EXCLUDED ingress defect.)
+    for (i, (expr, value)) in [("cast(0.30000000000000004, f64)", 0.30000000000000004)]
+        .iter()
+        .enumerate()
+    {
+        let program = format!("module M.Main\ndef run() -> f64 = {expr}\nshown = print(run())\n");
+        let out = c_stdout(&program, &format!("obs_sc_red{i}")).expect("C lane");
+        for line in scalar_render_lines(&out) {
+            let got =
+                text_bits_at(&line, Width::F64).unwrap_or_else(|e| panic!("[c scalar {expr}] {e}"));
+            assert_eq!(
+                got,
+                value_bits_at(*value, Width::F64),
+                "[c scalar {expr}] text `{line}` does not round-trip"
+            );
+        }
+    }
+}
+
+/// DISCOVERY chelis#749 (§B2.5): tensors rendered INSIDE a
+/// list go through the runtime's `tensor_to_string` (chelis-runtime
+/// lib.rs:3730), a SECOND hand-written dtype funnel: int64 read `as f64`
+/// (chelis#723's shape at a different site), f16/bf16 through the `_ =>`
+/// f32 fallback (chelis#716's shape), and a 10-element truncation with NO
+/// marker. This row pins the int64 case at the value level.
+#[test]
+#[ignore = "chelis#749 (B2.5 discovery): \
+            the runtime nested-value tensor renderer reads int64 elements as f64 and \
+            silently truncates at 10 elements. Run with \
+            `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
+fn c_nested_tensor_in_list_renders_int64_faithfully() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    let program = "module M.Main\n\
+         def mk() -> tensor[1, int64] = to_tensor([cast(9007199254740993, int64)])\n\
+         out = print([mk()])\n";
+    let out = c_stdout(program, "obs_i64_nested").expect("C lane");
+    let line = out
+        .lines()
+        .find(|l| l.contains("tensor(shape="))
+        .unwrap_or_else(|| panic!("no nested tensor render in:\n{out}"));
+    let got = text_int_lenient(&tensor_elems(line)[0]).expect("nested elem");
+    assert_eq!(
+        got, 9007199254740993,
+        "the nested tensor render must carry the exact stored int64: {line}"
+    );
+}

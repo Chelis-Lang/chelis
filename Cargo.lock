@@ -517,6 +517,7 @@ dependencies = [
  "chelisup",
  "clap",
  "flate2",
+ "half",
  "libc",
  "predicates",
  "serde",
