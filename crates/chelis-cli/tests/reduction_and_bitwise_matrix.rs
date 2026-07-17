@@ -134,6 +134,11 @@ fn bitwise_ops_agree_across_lanes_at_every_width() {
             let program = scalar_program(&expr, ty);
             assert_eq!(eval_first_line(&program).expect("eval"), expected);
             let c_got = c_first_line(&program, &format!("bw_{ty}_{}", &expr[..4]));
+            // Only the C lane is domain-wired here by design: it is the
+            // #718 width-escape suspect, and a domain diagnostic before
+            // the generic LANE DIVERGENCE assert names the failure class.
+            // The eval side's exact-string assert_eq above subsumes its
+            // own domain check (in-domain expected value).
             common::assert_elements_in_domain(ty, &c_got, &expr);
             assert_eq!(
                 c_got, expected,
