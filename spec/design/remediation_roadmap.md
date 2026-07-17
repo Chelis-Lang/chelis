@@ -92,8 +92,10 @@ it (string-match + loud else if it lands first); [#731] Phase 3's
 `DeepTag` joins [#730]'s lint enum list, whose freeze anticipates the
 addition. The thick red edges are the hard dependencies: inside the
 plan set, [#719]'s fix precedes [#732] Phase 3's `sqrt = 0` tolerance
-row; downstream of the set, [#754]'s ecosystem gate is hard-gated on
-[#732] Phase 2's byte-identical rendering. Not drawn (for legibility):
+row (SATISFIED 2026-07-17: PR #760 merged, [#719] closed - the row may
+be authored when Phase 3 arrives); downstream of the set, [#754]'s
+ecosystem gate is hard-gated on [#732] Phase 2's byte-identical
+rendering. Not drawn (for legibility):
 [#733] Phase 1 atomizes whatever spec text Waves 1-2 author. The graph is acyclic. Node colors are the waves
 above: grey = Wave 0, green = Wave 1, blue = Wave 2, orange = Wave 3,
 purple = Wave 4 (so [#733] P1, blue, rides Wave 2); white boxes with
@@ -154,7 +156,7 @@ flowchart TB
     n729p0 --> n729p1 --> n729p2 --> n729p3 --> n729p4
   end
 
-  n719["#719 sqrt fix (standalone)"]:::ext
+  n719["#719 sqrt fix (FIXED: PR #760)"]:::ext
   n683["#683 i64::MIN literal (standalone)"]:::ext
   n713["#713 pad_sequences dtype (standalone)"]:::ext
   n754["#754 cross-lane gate (ecosystem)"]:::ext
@@ -197,7 +199,6 @@ the capability table's seed decisions, or by being closed.
 | [#691] | C DAG lane emits fmaxf/fabsf for int64 | owned by capability-table seed decision: B-cells `Unimplemented { issue: #691 }` - the substitution becomes a rejection at [#730] Phase 1 / table landing, correct kernels later |
 | [#693] | Metal int64 `abs` zero emission | root cause is [#699] (confirmed by emission); Metal B-cell `Unimplemented { issue: #693 }` until the MSL integer path is wired post-[#699]-fix |
 | [#713] | `pad_sequences` allocates int32 output for int64 input | standalone lowering fix; natural moment is [#729] Phase 3 (C host dtype parity), tracked here until claimed there |
-| [#719] | vvsqrtf not correctly rounded; layout-dependent results | THE FIX (sqrtf or intrinsic on the contiguous path, one implementation per op) is standalone and must land BEFORE [#732] Phase 3 writes `sqrt = 0` into the tolerance table |
 | [#721] | eval cannot ingest the canonical Deep of a nullary fn | standalone eval-ingestion fix; explicitly non-goaled by [#731]; no plan dependency |
 | [#734] | `to_string` on tensors/lists compiles to the literal `<value>` | [#730] census row 3 (now live); dies at [#730] Phase 1, unwritable after Phase 2; rendering via [#732]'s formatter |
 | [#747] | cli.rs `runtime_library_path()` hard-codes `../../target/debug/deps` (breaks isolated CARGO_TARGET_DIR runs) | standalone test-harness fix; no plan dependency; the per-worktree target symlink is the interim workaround |

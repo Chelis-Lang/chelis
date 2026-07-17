@@ -197,8 +197,9 @@ For every dtype and every storable value:
    §8 rendering is generated from or tripwire-checked against it, so
    prose and data cannot drift. Content: for each transcendental, the
    documented cross-lane bound (default: 1 ulp at the computed width;
-   `sqrt`: 0 - correctly rounded per IEEE, its row landing only after
-   [#719]'s fix; add/sub/mul/div/comparisons: 0). The [#687] oracle
+   `sqrt`: 0 - correctly rounded per IEEE; [#719] is FIXED (PR #760,
+   merged 2026-07-17), so the row may be authored when Phase 3 arrives;
+   add/sub/mul/div/comparisons: 0). The [#687] oracle
    consults ONLY this table when values differ; formatting differences
    are never tolerated (they are bugs here).
 3. **The oracle handshake**: with §C1-§C3 landed, [#687]'s exact-string
@@ -364,9 +365,11 @@ visible as exactly themselves.
 
 1. The per-op tolerance table in `spec/05-risc-primitives.md` (§C4.2),
    authored from the audit's measurements (the vvsqrtf/SLEEF rows). The
-   `sqrt = 0` row lands only AFTER [#719]'s fix is merged: the fix
-   precedes the row ([#719]'s owner line and the roadmap ledger agree);
-   the table is never authored with a known-false row.
+   fix-precedes-the-row gate on `sqrt = 0` is SATISFIED: [#719] was
+   fixed by PR #760 (merged 2026-07-17; contiguous f32 sqrt now takes
+   the correctly-rounded scalar path, layout-independent, and the
+   scalar loop measured ~1.6x FASTER than vvsqrtf). The row may be
+   authored; the table is never authored with a known-false row.
 2. Jointly with [#687]: `parity.rs` and `eval_agreement.rs` replaced by /
    rebuilt on the byte-equal-or-table-bounded rule (§C4.3). (The silent
    float-parse fallback itself is deleted earlier, by [#729] Phase 0 -
