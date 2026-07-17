@@ -172,6 +172,24 @@ pub enum NumericTrap {
   const propagation) that would trap **decline to fold** - the condition
   falls to runtime, mirroring `fold_static_size`'s refusal ([#711]'s rule).
   A fold must never bake a trap away NOR bake one in.
+- **GPU lanes (evidence-backed riders, 2026-07-17; provisional pending
+  the HIP half, [#736]):** a GPU kernel cannot raise mid-flight, so the
+  GPU trap shape is a device-side error-flag buffer (atomic flag +
+  first-failing index) checked on the host after dispatch completion,
+  which then raises with the same branded message. This is C2-conforming
+  by construction: the completion wait IS the lane boundary, and traps
+  remain values until it. The Metal spike ([#737] report) measured the
+  detection as ~free for the memory-bound elementwise shape the backend
+  emits (worst +0.7% median, int64 mul included) and verified MSL int64
+  bit-exact. Implementation rider from the same spike: the clang
+  overflow builtins are BANNED in emitted MSL (reproducible backend
+  compiler crashes on `__builtin_mul_overflow(long)`; at-scale
+  vectorization miscompiles false-positive the add/sub forms) - the
+  hand-written checks (widening for int32, sign-bit XOR for add/sub,
+  `mulhi` for int64 mul; never the division-based form, which also
+  crashes the backend) are the implementation. Ratifying trap-everywhere
+  for the GPU lanes stays with the [04-NUM-3] freeze decision once
+  [#736] runs.
 
 ## C3. Representation and construction (the privacy contract)
 
@@ -603,6 +621,8 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#685]: https://github.com/Chelis-Lang/chelis/issues/685
 [#686]: https://github.com/Chelis-Lang/chelis/issues/686
 [#687]: https://github.com/Chelis-Lang/chelis/issues/687
+[#736]: https://github.com/Chelis-Lang/chelis/issues/736
+[#737]: https://github.com/Chelis-Lang/chelis/issues/737
 [#688]: https://github.com/Chelis-Lang/chelis/issues/688
 [#692]: https://github.com/Chelis-Lang/chelis/issues/692
 [#695]: https://github.com/Chelis-Lang/chelis/issues/695
