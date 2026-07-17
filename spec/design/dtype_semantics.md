@@ -250,8 +250,9 @@ identical bytes):
    `.0` lie ends). int64 prints all 19 digits exactly (never via double).
 2. **Floats print shortest-round-trip for their OWN width**: an f32
    element prints the shortest string that parses back to that f32 (Rust
-   `Display` semantics); f16/bf16 print the shortest string round-tripping
-   through their exact value. This replaces the C helper's `%.1f`/`%.16g`
+   `{:?}` shortest-round-trip semantics - see [#732]'s §C1.3 for why this
+   is `{:?}` and not `Display`); f16/bf16 print the shortest string
+   round-tripping through their exact value. This replaces the C helper's `%.1f`/`%.16g`
    split and eval's f64-width formatting - it is what makes byte-equal
    lane comparison possible (the audit's `1.4142135381698608` vs
    `1.414213538169861` divergence was two formatters, one value).
@@ -378,7 +379,15 @@ protocol, not a failure.
    exact-string lane (or is superseded by the PR [#696] drivers - decision
    recorded in the PR); `parity.rs` loses the silent float-parsing
    fallback (a mismatch REPORTS, and only ops with a §C4.5 tolerance row
-   may compare tolerantly).
+   may compare tolerantly). Constraint, verified by execution 2026-07-17:
+   the current run-mode parity corpus is byte-identical across lanes
+   (123/123 lines) only because it prints dyadic floats exclusively, so
+   this lands green - but until [#732] Phase 2 delivers byte-identical
+   rendering, it freezes that float diet. A new example printing any
+   computed float (a `sqrt`, a non-dyadic product) goes red for
+   formatting reasons, not value reasons; [#732] Phase 2 is the release
+   valve. [#732] Phase 3's "fallback deleted" item is satisfied by this
+   deliverable (recorded in both docs).
 3. New `#[ignore]`d rows where the domain checker exposes cells the audit
    did not enumerate (expected: few; the audit was thorough, but the
    checker is mechanical).

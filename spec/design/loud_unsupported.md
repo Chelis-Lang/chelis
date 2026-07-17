@@ -328,8 +328,10 @@ surface.
 
 1. **Executed re-verification of every §C5 row** using the probe corpus:
    each row's status column becomes `live (test <name>)` or
-   `dead (canary <name>)`. Row 3 (`<value>` string fallback) gets its
-   first probe. Discrepancies edit the census (B2.5 protocol).
+   `dead (canary <name>)`. Row 3 (`<value>` string fallback) is already
+   settled: probed 2026-07-16, live, filed as [#734]
+   (`issue_734_tostring_placeholder.rs`); P0 carries that status into the
+   verified census. Discrepancies edit the census (B2.5 protocol).
 2. **The token tripwire test** (§C4.3) with the verified census as its
    allowlist, wired into the default workspace run (it is a fast grep).
 3. **The [#687] rejected-cells corpus stub**: the existing loud-failure
@@ -357,7 +359,9 @@ guard), and lowering's existing `raise_lowering_error`.
    unchanged (existing fallbacks temporarily map to their current strings
    behind the new signatures). Zero test movement; purely mechanical.
 2. **The live-site sweep**, one reviewable PR per row or tight group:
-   census rows 1, 2, 5, 6, 7, 8, 9 convert to §C2 diagnostics; rows 11,
+   census rows 1, 2, 3, 5, 6, 7, 8, 9 convert to §C2 diagnostics (row 3's
+   `to_string` placeholder becomes a diagnostic here, [#734]; real
+   tensor/list rendering arrives with [#732]'s formatter); rows 11,
    12 (panics) convert to diagnostics through the same channel; row 4's
    `<value>` prints become diagnostics at emit time (an unclassifiable
    value is a compiler bug surfaced, not a placeholder printed). Row 10
@@ -486,7 +490,7 @@ boundary, pinned:
 | phase | goes green / becomes unwritable |
 |---|---|
 | 0 | census verified; tripwire live; regressions detectable |
-| 1 | [#699] (+[#722]'s eval half via the raise), [#682], [#704], [#705], [#715] (stub half), [#689], [#692], [#725], the [#709]-adjacent effect catch-all; [#714]/[#718] downgraded from silent-wrong to cleanly-rejected |
+| 1 | [#699] (+[#722]'s eval half via the raise), [#682], [#704], [#705], [#715] (stub half), [#689], [#692], [#725], [#734], the [#709]-adjacent effect catch-all; [#714]/[#718] downgraded from silent-wrong to cleanly-rejected |
 | 2 | the entire FUTURE supply of the class (lint + newtype + enums) |
 | 3 | [#697], [#698], [#705]'s gate half; gate rot as a class |
 

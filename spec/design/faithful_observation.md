@@ -112,11 +112,15 @@ Per-dtype rules:
    value. This single rule replaces C's `%.1f`/`%.16g` split and eval's
    f64-width formatting, and is what makes byte-equal lane comparison
    possible.
-3. **The number grammar is Rust `Display`'s, normatively**: shortest
-   round-trip digits, `inf`/`-inf`/`NaN` spellings, lowercase `e` with
-   unpadded exponent (`1e-7`, not `1e-07`), `-0.0` preserved and printed
-   with its sign. The generated C normalizes to this grammar (§C3.2) -
-   platform printf variance (`nan`, two-digit exponents) must not leak.
+3. **The number grammar is Rust `{:?}` (`Debug`) float formatting,
+   normatively**: shortest round-trip digits, `inf`/`-inf`/`NaN`
+   spellings, lowercase `e` with unpadded exponent (`1e-7`, not `1e-07`),
+   `-0.0` preserved and printed with its sign. (`Display` is NOT this
+   grammar: it never emits e-notation - `1e20` prints as
+   `100000000000000000000` under `Display`; eval's current output is
+   already `{:?}`-shaped, e.g. `9.999999980506448e19`.) The generated C
+   normalizes to this grammar (§C3.2) - platform printf variance (`nan`,
+   two-digit exponents) must not leak.
 4. **bool prints `true`/`false`** at every exit, including inside tensor
    `data=[...]`.
 5. **Containers**: tensor rendering stays `tensor(shape=[..],
@@ -345,11 +349,15 @@ visible as exactly themselves.
 **You deliver:**
 
 1. The per-op tolerance table in `spec/05-risc-primitives.md` (§C4.2),
-   authored from the audit's measurements (the vvsqrtf/SLEEF rows),
-   with `sqrt` at 0 pending [#719]'s fix.
+   authored from the audit's measurements (the vvsqrtf/SLEEF rows). The
+   `sqrt = 0` row lands only AFTER [#719]'s fix is merged: the fix
+   precedes the row ([#719]'s owner line and the roadmap ledger agree);
+   the table is never authored with a known-false row.
 2. Jointly with [#687]: `parity.rs` and `eval_agreement.rs` replaced by /
-   rebuilt on the byte-equal-or-table-bounded rule (§C4.3); the silent
-   float-parse fallback deleted.
+   rebuilt on the byte-equal-or-table-bounded rule (§C4.3). (The silent
+   float-parse fallback itself is deleted earlier, by [#729] Phase 0 -
+   this phase replaces the comparison rule it left behind; see the
+   corpus-diet note in that deliverable.)
 3. The rejected-cells corpus (from `loud_unsupported.md` Phase 0) and
    the value corpus unified under the same comparison rule so
    diagnostics and values are oracle-checked identically.
@@ -405,7 +413,7 @@ never as tolerance.
 
 | # | question | decided in | recorded where |
 |---|---|---|---|
-| 1 | exact number grammar edge set (exponent threshold where Display switches to e-notation; f16/bf16 shortest-digit definition) | Phase 1 | §C1.3 + the formatter's unit tests |
+| 1 | exact number grammar edge set (exponent threshold where `{:?}` switches to e-notation; f16/bf16 shortest-digit definition) | Phase 1 | §C1.3 + the formatter's unit tests |
 | 2 | precision-escalation loop vs vendored Ryū for the C routine | Phase 2 (loop is the default; revisit only on measured cost) | §C3.3 |
 | 3 | whether the wire schema renders numbers as JSON numbers or strings for int64 once [#729]'s storage lands | with [#729] Phase 1 | schema.rs + both docs' §I1 |
 | 4 | truncation marker (`, ...`) threshold configurability | Phase 1, default keep-as-is | §C1.5 |

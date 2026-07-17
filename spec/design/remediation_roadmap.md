@@ -42,7 +42,11 @@ domain-validity invariant + [#687] oracle lanes ([#729] P0), the substitution
 census verification + token tripwire ([#730] P0 - note census row 3 is
 already settled: live, [#734]), the `Type::Error` census + red
 totality invariant ([#731] P0), the round-trip harness + exit census
-([#732] P0), the PR spec gate + `spec/**` signoff ([#733] P0).
+([#732] P0), the PR spec gate + `spec/**` signoff ([#733] P0). Two
+handshakes qualify "any order": [#732] P0's `%.16g`/`%.1f` grep pattern
+lands in [#730] P0's tripwire (land [#730] P0 first or pair the PRs), and
+[#729] P0's domain-checker wiring edits the same lane drivers [#732] P0's
+harness drives through (sequence or coordinate those two).
 
 **Wave 1 - the small loud fixes.** [#731] Phase 1 (the checker holes -
 days) and [#730] Phase 1 (the failure channel + live-site sweep). These
@@ -70,6 +74,104 @@ Standing exception: any Wave may be entered early for a cell that becomes
 urgent - the interlock sections make that safe; this ordering is advice,
 not law.
 
+## The dependency DAG
+
+The sequencing above as a graph (GitHub renders the mermaid inline).
+Solid arrows are the within-plan phase chains - the only hard sequencing.
+Dashed arrows are soft interlocks with a recommended direction; the
+alternative order is pinned in the owning docs' §I1 sections. Dotted
+arrowless links are shared-component coordination with no inherent
+order: [#730] Phase 2 delivers `EffectKind` and [#731] Phase 1 consumes
+it (string-match + loud else if it lands first); [#731] Phase 3's
+`DeepTag` joins [#730]'s lint enum list, whose freeze anticipates the
+addition. The thick red edge is the single hard cross-plan dependency in
+the set: [#719]'s fix precedes [#732] Phase 3's `sqrt = 0` tolerance
+row. Not drawn (for legibility): [#733] Phase 1 atomizes whatever spec
+text Waves 1-2 author. The graph is acyclic; node colors are the waves
+above.
+
+```mermaid
+%%{init: {"themeVariables": {"fontSize": "18px"}, "flowchart": {"nodeSpacing": 55, "rankSpacing": 65}}}%%
+flowchart TB
+  classDef w0 fill:#ececec,stroke:#808080,color:#1a1a1a
+  classDef w1 fill:#d9ead3,stroke:#5a8a4a,color:#1a1a1a
+  classDef w2 fill:#d0e0f2,stroke:#4a78a8,color:#1a1a1a
+  classDef w3 fill:#fce5cd,stroke:#c07f2f,color:#1a1a1a
+  classDef w4 fill:#e2d5ea,stroke:#8e5ea8,color:#1a1a1a
+  classDef ext fill:#ffffff,stroke:#999999,stroke-dasharray:4 3,color:#1a1a1a
+
+  subgraph S733["#733 spec provenance"]
+    direction TB
+    n733p0["P0 · PR spec gate + spec/** signoff"]:::w0
+    n733p1["P1 · atomize Wave 1-2 spec text"]:::w2
+    n733p23["P2 coverage ratchet · P3 citations"]:::w4
+    n733p0 --> n733p1 --> n733p23
+  end
+
+  subgraph S730["#730 loud unsupported"]
+    direction TB
+    n730p0["P0 · census re-verify + token tripwire<br/>+ rejected-cells corpus stub"]:::w0
+    n730p1["P1 · Result channel + live-site sweep"]:::w1
+    n730p2["P2 · lint ratchet + EmittedExpr<br/>+ EffectKind enum"]:::w2
+    n730p3["P3 · gates become UX"]:::w4
+    n730p0 --> n730p1 --> n730p2 --> n730p3
+  end
+
+  subgraph S731["#731 checker totality"]
+    direction TB
+    n731p0["P0 · Type::Error census<br/>+ red totality invariant"]:::w0
+    n731p1["P1 · loud wildcard + handle-effect case<br/>+ #710 guard sweep"]:::w1
+    n731p2["P2 · ErrorWitness token,<br/>invariant always-on"]:::w2
+    n731p3["P3 · DeepTag exhaustive dispatch"]:::w2
+    n731p0 --> n731p1 --> n731p2 --> n731p3
+  end
+
+  subgraph S732["#732 faithful observation"]
+    direction TB
+    n732p0["P0 · round-trip harness + exit census"]:::w0
+    n732p1["P1 · format_element + eval adoption<br/>+ eval-side migration"]:::w2
+    n732p2["P2 · generated C helper + to_list arms<br/>+ C-side migration"]:::w2
+    n732p3["P3 · tolerance table + #687 handshake"]:::w4
+    n732p0 --> n732p1 --> n732p2 --> n732p3
+  end
+
+  subgraph S729["#729 dtype semantics"]
+    direction TB
+    n729p0["P0 · domain checker + #687 oracle lanes"]:::w0
+    n729p1["P1 · semantics module + storage decision<br/>+ eval adoption"]:::w3
+    n729p2["P2 · kernel split + traps + prove"]:::w3
+    n729p3["P3 · C backend adoption<br/>+ generated observation"]:::w3
+    n729p4["P4 · capability table"]:::w4
+    n729p0 --> n729p1 --> n729p2 --> n729p3 --> n729p4
+  end
+
+  n719["#719 sqrt fix (standalone)"]:::ext
+  n683["#683 i64::MIN literal (standalone)"]:::ext
+  n713["#713 pad_sequences dtype (standalone)"]:::ext
+
+  n730p0 -.->|"tripwire hosts the<br/>%.16g / %.1f pattern"| n732p0
+  n730p2 -.-|"EffectKind (either first)"| n731p1
+  n731p3 -.-|"DeepTag (either order)"| n730p2
+  n730p1 -.->|"census rows 6-7 raise first<br/>(else 729.P3 absorbs them)"| n729p3
+  n732p1 -.->|"format_element Rust side<br/>(I1: either order pinned)"| n729p1
+  n732p2 -.->|"generated print helper<br/>(I1: either order pinned)"| n729p3
+  n729p3 -.->|"value divergences shrink<br/>before the oracle turns on"| n732p3
+  n729p4 -.->|"Rejected(reason) cells<br/>feed gate derivation"| n730p3
+  n719 ==>|"HARD: precedes the<br/>sqrt = 0 tolerance row"| n732p3
+  n683 -.->|"natural moment"| n729p2
+  n713 -.->|"natural moment"| n729p3
+  n732p2 ~~~ n719
+
+  style S733 fill:#FFFFFF,stroke:#C3CCD3
+  style S730 fill:#FFFFFF,stroke:#C3CCD3
+  style S731 fill:#FFFFFF,stroke:#C3CCD3
+  style S732 fill:#FFFFFF,stroke:#C3CCD3
+  style S729 fill:#FFFFFF,stroke:#C3CCD3
+  linkStyle default stroke-width:2.5px
+  linkStyle 16,17 stroke:#9AA7B0,color:#7A8894,stroke-width:2.5px
+  linkStyle 23 stroke:#B3362B,stroke-width:5px,color:#B3362B
+```
+
 ## The unclaimed-issue ledger
 
 Filed issues no plan's kill table claimed, each now with an owner. Rule:
@@ -84,15 +186,15 @@ the capability table's seed decisions, or by being closed.
 | [#690] | HIP has no integer div-by-zero guard | rides the same HIP B-cell work as [#689]; the guard is part of `Implemented` for HIP int division cells |
 | [#691] | C DAG lane emits fmaxf/fabsf for int64 | owned by capability-table seed decision: B-cells `Unimplemented { issue: #691 }` - the substitution becomes a rejection at [#730] Phase 1 / table landing, correct kernels later |
 | [#693] | Metal int64 `abs` zero emission | root cause is [#699] (confirmed by emission); Metal B-cell `Unimplemented { issue: #693 }` until the MSL integer path is wired post-[#699]-fix |
-| [#705] | `reject_host_only_builtins` has no CLI twin | [#730] Phase 3 (gate dedupe) - was in its map; listed here because only the gate half was claimed. The builtin-coverage half dies with [#730] Phase 1's typed emitter |
 | [#713] | `pad_sequences` allocates int32 output for int64 input | standalone lowering fix; natural moment is [#729] Phase 3 (C host dtype parity), tracked here until claimed there |
 | [#719] | vvsqrtf not correctly rounded; layout-dependent results | THE FIX (sqrtf or intrinsic on the contiguous path, one implementation per op) is standalone and must land BEFORE [#732] Phase 3 writes `sqrt = 0` into the tolerance table |
 | [#721] | eval cannot ingest the canonical Deep of a nullary fn | standalone eval-ingestion fix; explicitly non-goaled by [#731]; no plan dependency |
 | [#734] | `to_string` on tensors/lists compiles to the literal `<value>` | [#730] census row 3 (now live); dies at [#730] Phase 1, unwritable after Phase 2; rendering via [#732]'s formatter |
 
 Also tracked to closure but already claimed (listed for completeness):
-[#680]/[#684]/[#685]/[#686]/[#688] -> [#729]; [#682]/[#692]/[#697]/[#698]/[#699]/[#704]/[#725] ->
-[#730]; [#709]/[#710] -> [#731]; [#716]/[#723] -> [#732]; [#694] -> [#733]; [#711]/[#720] ->
+[#680]/[#684]/[#685]/[#686]/[#688] -> [#729]; [#682]/[#692]/[#697]/[#698]/[#699]/[#704]/[#705]/[#725] ->
+[#730] (both halves: the builtin-coverage half at Phase 1's typed emitter,
+the gate half at Phase 3's dedupe); [#709]/[#710] -> [#731]; [#716]/[#723] -> [#732]; [#694] -> [#733]; [#711]/[#720] ->
 [#729] Phase 2 / [#720]'s own note; [#712]/[#715]/[#724]/[#726] -> capability table
 seed decisions; [#722] -> [#730] Phase 1 (loud) then [#729]/table (computed).
 
