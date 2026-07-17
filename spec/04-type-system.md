@@ -2225,7 +2225,8 @@ ratifies it.
 
 > **[04-NUM-3]** Integer op results that are not exactly representable
 > in the declared width SHALL trap with the branded overflow diagnostic;
-> no lane and no surface SHALL wrap, saturate, or silently widen.
+> no lane and no surface SHALL wrap (except via the named modular
+> operations of [04-NUM-7]), saturate, or silently widen.
 > In-range integer arithmetic SHALL be exact at every width.
 
 *(Not honored today: int8/16/32 wrap in eval scalars, int64 saturates,
@@ -2253,6 +2254,25 @@ chelis#680/#718.)*
 > dtype are a defect. Same inputs, opposite verdicts, by design.
 
 *(Honored and locked: `precision_matrix.rs` ByDesign rows.)*
+
+> **[04-NUM-7]** A named modular-arithmetic operation (initially
+> `wrap_add`, `wrap_sub`, `wrap_mul`; the roster is owned by the
+> capability table) on an integer dtype SHALL produce the unique value
+> in that dtype's range congruent to the exact mathematical result
+> modulo 2^width, and SHALL NOT trap. These operations are the
+> explicit, user-visible escape hatch for modular arithmetic (hashing,
+> RNGs, checksums); the wrap prohibited by [04-NUM-3] is the *implicit*
+> overflow behavior of the ordinary arithmetic ops, not these named
+> ops, whose result is in-range by construction. Named modular
+> operations are defined ONLY on the integer dtypes (`int8`, `int16`,
+> `int32`, `int64`); they SHALL NOT be defined on `bool` or any float
+> dtype (floats overflow to infinity per [04-NUM-2] and have no modular
+> escape hatch by construction), and requesting one on a non-integer
+> dtype is a checker-level type error.
+
+*(Not expressible today: no `wrap_*` builtins exist; the eval RNG's
+splitmix hash (`dropout_sample`, `chelis-ir/src/eval.rs`) is the
+in-tree witness of the need. Tracked by chelis#753.)*
 
 ---
 

@@ -90,19 +90,23 @@ reference lane needs conformance rows too):
 
 The audited cells that were never authored, listed so Phase 4 cannot ship
 around them (proposal defaults from the plans; final call is the atom
-author's):
+author's). Rows marked DECIDED were settled in the 2026-07 design review
+on the named issues; Phase 4 still ratifies them as atoms per the [#733]
+signoff - the decision is recorded, the normative sentence still gets
+authored:
 
 | cell | proposal default |
 |---|---|
-| `mean` x Tensor x int widths ([#724]) | `Rejected` ("integer mean requires an explicit cast or floor_div; see atom") |
-| `add`/`sub`/`mul` x (any) x bool ([#726]) | `Rejected` (point at `and`/`or`/`cast`) |
-| scalar `relu`/`sigmoid`/`silu`/`gelu`/`tanh` ([#712], [#704]) | author once: `Supported` everywhere or `Rejected` everywhere - the three-lane disagreement dies either way |
-| scalar `floor`/`ceil`/`round` x int widths ([#715]'s rows) | `Supported` as identity (the checker's existing stance, made real) |
-| `max_elem`/`min_elem` x Scalar x all dtypes ([#715]) | `Supported` (eval already correct; C implements via [#730] Phase 1 + kernel work) |
+| `mean` x Tensor x int widths ([#724]) | DECIDED (2026-07, on the issue): `Rejected` - integer mean requires an explicit cast (`mean(cast(x, f32))`) or `floor_div(sum(x), n)`; `mean`'s sig is float-only. Scope: only fractional-producing reductions reject; `sum`/`max`/`min`/`prod` over integers stay valid |
+| `add`/`sub`/`mul` x (any) x bool ([#726]) | DECIDED (2026-07, on the issue): `Rejected` per [04-NUM-4], diagnostic points at `and`/`or`/`cast`; the mask-counting idiom is preserved via a first-class `count` builtin (chosen over bool-accepting reductions; tracked on [#726]) |
+| scalar `relu`/`sigmoid`/`silu`/`gelu`/`tanh` ([#712], [#704]) | DECIDED (2026-07, on the issue): `Supported` on float dtypes at BOTH surfaces (a scalar is a rank-0 tensor; kills the three-lane disagreement in the direction the tensor forms already behave); non-float is a clean domain `Rejected`, never a silent 0 |
+| scalar `floor`/`ceil`/`round` x int widths ([#715]'s rows) | DECIDED (2026-07, via [#712]'s comment): `Supported` as identity (the checker's existing stance, made real) |
+| `max_elem`/`min_elem` x Scalar x all dtypes ([#715]) | DECIDED (2026-07, via [#712]'s comment): `Supported` at their valid dtypes (eval already correct; C implements via [#730] Phase 1 + kernel work) |
 | C-DAG x int64 x `max_elem`/`abs` etc. ([#691]) | B-cells `Unimplemented { issue: #691 }` until integer kernels land - the fmaxf/fabsf substitution becomes a rejection |
 | Metal x int64 x `abs` ([#693]/[#699]) | A is `Supported`; Metal B-cell `Implemented` once [#699]'s raise lands and the MSL integer path is wired; until then `Unimplemented { issue: #693 }` |
 | `bitand`/`bitor`/`bitxor`/`shl`/`shr` x Scalar x int widths ([#682]) | `Supported`; C B-cells `Unimplemented { issue: #682 }` until emitted |
 | `to_string` x Tensor/List ([#734]) | `Supported` (eval already stringifies); C B-cell `Unimplemented { issue: #734 }` until the emitter renders via [#732]'s formatter |
+| `wrap_add`/`wrap_sub`/`wrap_mul` x (both surfaces) x int widths (spec/04 [04-NUM-7], [#753]) | A `Supported` on int8/16/32/64, `Rejected` on bool/float ("no modular arithmetic on non-integer dtypes; see [04-NUM-7]"); B-cells `Unimplemented { issue: #753 }` until kernels land ([#729] Phase 2's natural moment; SMT lowers to `bvadd`/`bvsub`/`bvmul` exactly, no tolerance row) |
 
 ## Open questions (decided at [#729] Phase 4 entry, recorded here)
 
@@ -138,4 +142,5 @@ author's):
 [#732]: https://github.com/Chelis-Lang/chelis/issues/732
 [#733]: https://github.com/Chelis-Lang/chelis/issues/733
 [#734]: https://github.com/Chelis-Lang/chelis/issues/734
+[#753]: https://github.com/Chelis-Lang/chelis/issues/753
 [#717]: https://github.com/Chelis-Lang/chelis/issues/717
