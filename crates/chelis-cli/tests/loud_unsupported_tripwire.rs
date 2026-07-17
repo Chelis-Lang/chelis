@@ -21,7 +21,26 @@
 //!   work: file an issue, append a section C5 census row, and extend
 //!   `BASELINE` in the same change set - never silently;
 //! - a count DECREASE accompanies the site's fix: shrink `BASELINE` in the
-//!   fixing PR (removals only with the site's fix).
+//!   fixing PR (removals only with the site's fix). For BASELINE entries
+//!   with no census row (the annotated benign carriers, e.g. host.rs's
+//!   `unwrap_or_default()`s), a decrease just means shrink the baseline
+//!   in the same PR - there is no censused "fix" to ride with.
+//!
+//! Known limits of this bridge (PR #746 review; the section C4.2 lint
+//! replaces this test at Phase 2):
+//! - FALSE-RED surface: `CFormatNarrowing` scans ALL crates/*/src for the
+//!   very common `%.1f`/`%.16g` tokens. A NEW legitimate use anywhere
+//!   (a timing print, a benchmark) trips the increase branch; if it is
+//!   genuinely not a numeric-observation exit, extend `BASELINE` with an
+//!   annotation in the same PR - the faithful_observation.md B2.4
+//!   pointer in the message applies only to formatter sites.
+//! - FALSE-GREEN evasions (grep is textual): `*/ 0.0"` / `*/0"` /
+//!   unquoted stubs evade `StubZero`; a multi-line `_ =>` arm evades
+//!   `ElemKindWildcardArm` (same-line match only), as do NAMED catch-alls
+//!   (`other =>`) - though a named catch-all emitting a stub is caught by
+//!   `StubZero`, per census row 19; non-quote-adjacent `<value>`
+//!   spellings evade `ValuePlaceholder`. The lint rule closes these
+//!   structurally; do not treat this bridge as airtight.
 
 #![allow(clippy::uninlined_format_args)]
 

@@ -271,8 +271,8 @@ The remediation work-list, from the audit record as of 2026-07-16.
 | 11 | `emit.rs:4238/4406/4777` reduce panics | (row-two: panic, not substitution) | [#692] | live (test `int64_max_reduce_does_not_panic_the_compiler`) |
 | 12 | `emit.rs:4509` window-length assert | (row-two) | [#725] half | live (test `c_nonliteral_window_does_not_panic_the_compiler`) |
 | 13 | `lower.rs:9833`, `:10235` `unwrap_or(Prim::F32)` | F32 dtype | [#710]-adjacent, [#744] | **live via `.dp` build lane** for `:10235` (test `dp_bogus_cast_target_must_not_build_silently`; P0 re-execution refuted the dead-by-probe claim - the guard is eval-only, [#744]); eval guard locked green (canary `canary_dp_cast_bogus_dtype_is_guarded`); `:9833` needs an internal desync; §C1.4 applies |
-| 14 | `named_axis.rs:430` `unwrap_or(Prim::F32)` | F32 dtype | audit item 7 | dead (canary `canary_vmap_int64_roots_keep_integer_precision`); §C1.4 applies |
-| 15 | `host_emit.rs` `assign_partition` non-tuple arm | emits a C comment, no assignment | audit item 7 | dead (canary `partition_agrees_across_lanes`) |
+| 14 | `named_axis.rs:430` `unwrap_or(Prim::F32)` | F32 dtype | audit item 7 | dead (reachable-surface clearance: `canary_vmap_int64_roots_keep_integer_precision`; the arm is internal-desync-only, undrivable from input); §C1.4 applies |
+| 15 | `host_emit.rs` `assign_partition` non-tuple arm | emits a C comment, no assignment | audit item 7 | dead (reachable-surface clearance: `partition_agrees_across_lanes`; the arm is internal-desync-only, undrivable from input); §C1.4 applies |
 | 16 | ~25 guarded `Const { 0.0 }` sites in `lower.rs` | zero values | backlog §pattern | dead (canaries `canary_unknown_deep_tag_is_rejected`, `canary_bare_keyword_atom_fails_cleanly`, `canary_dynamic_fail_aborts_loudly`); §C1.4 applies |
 | 17 | `HOST_ONLY_BUILTINS` one-entry allowlist | (gate, not site - lets sites 1-2 fire) | [#682] [#705] | live (test `tensor_scan_does_not_silently_compile_to_a_stub`) |
 | 18 | duplicated/drifted gates | (gate skew) | [#697] [#698] | live (tests `hip_int64_neg_emits_the_f32_fallback_kernel_today` for the [#698] half, `int64_max_reduce_does_not_panic_the_compiler` for the [#697] half) |
@@ -282,8 +282,13 @@ The remediation work-list, from the audit record as of 2026-07-16.
 a `test <name>` backing a live row is either a green evidence lock that
 asserts today's substituting behavior directly, or an `#[ignore]`d
 red-by-design test whose failure under `--ignored` is the liveness proof
-(each was re-executed at P0). A `canary <name>` is a green test that
-drives the guard keeping a dead row dead. New named executables live in
+(each was re-executed at P0, except row 3, whose 2026-07-16 probe is
+carried per the contract). A `canary <name>` is a green test that drives
+the guard keeping a dead row dead - except rows 14 and 15, whose guarded
+arms are internal-desync-only and cannot be driven from any input
+surface: their canaries are reachable-surface clearance (the reachable
+path behaves correctly), not deadness proofs, and §C1.4's raise-or-prove
+converts both arms at Phase 1 regardless. New named executables live in
 `crates/chelis-cli/tests/loud_unsupported_census_canaries.rs`; the token
 baseline is frozen in
 `crates/chelis-cli/tests/loud_unsupported_tripwire.rs` (which also hosts

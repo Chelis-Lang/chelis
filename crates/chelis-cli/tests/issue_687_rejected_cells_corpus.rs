@@ -221,9 +221,9 @@ fn runtime_rejected_cells_abort_with_their_pinned_diagnostics() {
             stderr.contains(expect),
             "{name}: the abort must carry {expect:?} on stderr; got: {stderr}"
         );
-        assert!(
-            !stdout.contains("out ="),
-            "{name}: no result line may be printed after an abort; stdout: {stdout}"
-        );
+        // The nonzero exit + branded stderr above carry this test. (A
+        // previous `!stdout.contains("out =")` guard was vacuous:
+        // compiled binaries print bare values, never an `out =` prefix -
+        // PR #746 review.)
     }
 }
