@@ -258,24 +258,43 @@ The remediation work-list, from the audit record as of 2026-07-16.
 
 | # | site | substitutes | issue | status |
 |---|---|---|---|---|
-| 1 | `lower.rs` `lower_transcendental` non-float arm | `Const 0.0`, operand dropped | [#699] (+[#722] via grad) | live |
-| 2 | `host_emit.rs:2300` builtin fallback | literal `0` | [#682] [#704] [#705] [#715] | live |
-| 3 | `host_emit.rs:2236` string fallback | `chelis_string_from_cstr("<value>")` | [#734] | **live** (probed 2026-07-16: `to_string` on tensors/lists prints the literal `<value>` in C; scalar arms correct - `issue_734_tostring_placeholder.rs`) |
-| 4 | `host_emit.rs:4305/4390` print of unclassifiable value | literal `<value>` text | [#714] symptom | live |
-| 5 | HIP `emit.rs` `elem_kind` `_` arm | `ElemKind::F32` | [#689] | live (emission-proven) |
-| 6 | `host.rs:7572-7583` `parse_host_type` `_` arm | `HostType::Unknown` -> downstream `int64_t`/`void*` | [#714] | live |
-| 7 | `host.rs:7861-7882` arithmetic type default | `HostType::Int64` | [#714] [#718] | live |
-| 8 | `lower.rs:7522-7537` reduce_window extraction | `vec![]` windows -> silent no-op | [#725] | live |
-| 9 | `lower.rs:9518-9519` handle-effect catch-all | drops handler, lowers body | [#709]-adjacent | live via `.dp` |
-| 10 | emitted print helper `default:` arm | reads buffer as f32 | [#716] ([#728] owns fix) | live |
-| 11 | `emit.rs:4238/4406/4777` reduce panics | (row-two: panic, not substitution) | [#692] | live |
-| 12 | `emit.rs:4509` window-length assert | (row-two) | [#725] half | live |
-| 13 | `lower.rs:9833`, `:10235` `unwrap_or(Prim::F32)` | F32 dtype | [#710]-adjacent | dead-by-probe (runtime guard); §C1.4 applies |
-| 14 | `named_axis.rs:430` `unwrap_or(Prim::F32)` | F32 dtype | audit item 7 | dead-by-inspection only; §C1.4 applies |
-| 15 | `host_emit.rs` `assign_partition` non-tuple arm | emits a C comment, no assignment | audit item 7 | dead-by-probe (basic partition clean) |
-| 16 | ~25 guarded `Const { 0.0 }` sites in `lower.rs` | zero values | backlog §pattern | dead-by-probe (4/5 refuted); §C1.4 applies |
-| 17 | `HOST_ONLY_BUILTINS` one-entry allowlist | (gate, not site - lets sites 1-2 fire) | [#682] [#705] | live |
-| 18 | duplicated/drifted gates | (gate skew) | [#697] [#698] | live |
+| 1 | `lower.rs` `lower_transcendental` non-float arm | `Const 0.0`, operand dropped | [#699] (+[#722] via grad) | live (test `cos_on_integer_tensor_is_not_silently_zeroed`) |
+| 2 | `host_emit.rs:2300` builtin fallback | literal `0` | [#682] [#704] [#705] [#715] | live (test `no_build_ever_emits_a_silent_unsupported_builtin_stub`) |
+| 3 | `host_emit.rs:2236` string fallback | `chelis_string_from_cstr("<value>")` | [#734] | **live** (test `to_string_of_a_tensor_stringifies_in_the_compiled_lane`; probed 2026-07-16, status carried by P0 - scalar-arm controls green in `issue_734_tostring_placeholder.rs`) |
+| 4 | `host_emit.rs:4305/4390` print of unclassifiable value | literal `<value>` text | [#714] symptom | live (test `c_f16_floor_prints_the_value_placeholder_today`) |
+| 5 | HIP `emit.rs` `elem_kind` `_` arm | `ElemKind::F32` | [#689] | live (test `hip_int64_neg_emits_the_f32_fallback_kernel_today`; emission-proven) |
+| 6 | `host.rs:7572-7583` `parse_host_type` `_` arm | `HostType::Unknown` -> downstream `int64_t`/`void*` | [#714] | live (tests `f16_scalar_abs_compiles_and_runs`, `f16_scalar_fraction_survives_compilation`) |
+| 7 | `host.rs:7861-7882` arithmetic type default | `HostType::Int64` | [#714] [#718] | live (tests `f16_scalar_fraction_survives_compilation`, `c_scalar_overflow_traps_at_every_width`) |
+| 8 | `lower.rs:7522-7537` reduce_window extraction | `vec![]` windows -> silent no-op | [#725] | live (test `c_nonliteral_window_and_strides_pool_or_reject`) |
+| 9 | `lower.rs:9518-9519` handle-effect catch-all | drops handler, lowers body | [#709]-adjacent | live via `.dp` (test `unknown_effect_kind_is_rejected`) |
+| 10 | emitted print helper `default:` arm | reads buffer as f32 | [#716] ([#728] owns fix) | live (test `c_print_of_f16_tensor_prints_f16_values`) |
+| 11 | `emit.rs:4238/4406/4777` reduce panics | (row-two: panic, not substitution) | [#692] | live (test `int64_max_reduce_does_not_panic_the_compiler`) |
+| 12 | `emit.rs:4509` window-length assert | (row-two) | [#725] half | live (test `c_nonliteral_window_does_not_panic_the_compiler`) |
+| 13 | `lower.rs:9833`, `:10235` `unwrap_or(Prim::F32)` | F32 dtype | [#710]-adjacent, [#744] | **live via `.dp` build lane** for `:10235` (test `dp_bogus_cast_target_must_not_build_silently`; P0 re-execution refuted the dead-by-probe claim - the guard is eval-only, [#744]); eval guard locked green (canary `canary_dp_cast_bogus_dtype_is_guarded`); `:9833` needs an internal desync; §C1.4 applies |
+| 14 | `named_axis.rs:430` `unwrap_or(Prim::F32)` | F32 dtype | audit item 7 | dead (reachable-surface clearance: `canary_vmap_int64_roots_keep_integer_precision`; the arm is internal-desync-only, undrivable from input); §C1.4 applies |
+| 15 | `host_emit.rs` `assign_partition` non-tuple arm | emits a C comment, no assignment | audit item 7 | dead (reachable-surface clearance: `partition_agrees_across_lanes`; the arm is internal-desync-only, undrivable from input); §C1.4 applies |
+| 16 | ~25 guarded `Const { 0.0 }` sites in `lower.rs` | zero values | backlog §pattern | dead (canaries `canary_unknown_deep_tag_is_rejected`, `canary_bare_keyword_atom_fails_cleanly`, `canary_dynamic_fail_aborts_loudly`); §C1.4 applies |
+| 17 | `HOST_ONLY_BUILTINS` one-entry allowlist | (gate, not site - lets sites 1-2 fire) | [#682] [#705] | live (test `tensor_scan_does_not_silently_compile_to_a_stub`) |
+| 18 | duplicated/drifted gates | (gate skew) | [#697] [#698] | live (tests `hip_int64_neg_emits_the_f32_fallback_kernel_today` for the [#698] half, `int64_max_reduce_does_not_panic_the_compiler` for the [#697] half) |
+| 19 | Metal `emit.rs:1419` `host_scalar_literal` pad-fill catch-all | `/* unsupported pad fill dtype */ 0` | [#745] (P0 token-sweep discovery, B2.5) | dead (canaries `metal_rejects_f64_with_a_specific_diagnostic`, `f8e4m3_is_rejected_in_both_lanes` - the gate/checker are the only defense); §C1.4 applies |
+
+**Status backing convention** (Phase 0 verification, executed 2026-07-17):
+a `test <name>` backing a live row is either a green evidence lock that
+asserts today's substituting behavior directly, or an `#[ignore]`d
+red-by-design test whose failure under `--ignored` is the liveness proof
+(each was re-executed at P0, except row 3, whose 2026-07-16 probe is
+carried per the contract). A `canary <name>` is a green test that drives
+the guard keeping a dead row dead - except rows 14 and 15, whose guarded
+arms are internal-desync-only and cannot be driven from any input
+surface: their canaries are reachable-surface clearance (the reachable
+path behaves correctly), not deadness proofs, and §C1.4's raise-or-prove
+converts both arms at Phase 1 regardless. New named executables live in
+`crates/chelis-cli/tests/loud_unsupported_census_canaries.rs`; the token
+baseline is frozen in
+`crates/chelis-cli/tests/loud_unsupported_tripwire.rs` (which also hosts
+the [#732] plan's `%.16g`/`%.1f`/`{value:.1}` format-token row per its
+Phase 0 item 3 and the roadmap's Wave 0 handshake; that row's new-site
+message points at `faithful_observation.md` §B2.4).
 
 Phase 0 freezes this table into the tripwire; additions after that are
 either new work (filed + censused) or regressions (red gate).
@@ -565,3 +584,5 @@ standing between an unsupported case and a plausible wrong number.
 [#734]: https://github.com/Chelis-Lang/chelis/issues/734
 [#738]: https://github.com/Chelis-Lang/chelis/issues/738
 [#739]: https://github.com/Chelis-Lang/chelis/issues/739
+[#744]: https://github.com/Chelis-Lang/chelis/issues/744
+[#745]: https://github.com/Chelis-Lang/chelis/issues/745
