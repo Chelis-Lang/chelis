@@ -9,10 +9,12 @@
 //! `0`. Same substitution site as #682/#704/#705; this file extends the
 //! confirmed blast radius to ordinary scalar math.
 //!
-//! Also carried here: chelis#719 - the C backend's contiguous f32 tensor
-//! `sqrt` path uses Accelerate's `vvsqrtf`, which is not correctly rounded
-//! (IEEE-754 requires sqrt to be), and differs from the strided path's
-//! `sqrtf` on the same values.
+//! Also carried here: the chelis#719 regression locks. The C backend's
+//! contiguous f32 tensor `sqrt` path used Accelerate's `vvsqrtf`, which is not
+//! correctly rounded (IEEE-754 requires sqrt to be) and differed from the
+//! strided path's `sqrtf` on the same values. The fix drops `vvsqrtf` for the
+//! scalar `sqrtf` loop; these tests lock correct rounding and layout
+//! independence in the compiled lane.
 //!
 //! The passing controls bound the stub list exactly: the working scalar ops
 //! stay locked in both lanes, the tensor forms of the broken ops stay
@@ -308,10 +310,6 @@ fn working_f64_scalar_ops_agree_across_lanes() {
 /// `sqrtf` (the strided path of the SAME kernel) and eval produce.
 /// Bit-pattern comparison, not decimal text.
 #[test]
-#[ignore = "chelis#719: the contiguous f32 sqrt path (vvsqrtf) is not correctly rounded; \
-            sqrt(1.5) prints 1.22474479675293 (bits 0x3F9CC470) instead of \
-            1.2247449159622192 (0x3F9CC471). macOS/Accelerate only. Run with \
-            `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn c_f32_tensor_sqrt_is_correctly_rounded() {
     if !cfg!(target_os = "macos") {
         eprintln!("skipping: the vvsqrtf path is emitted only where Accelerate exists");
@@ -336,6 +334,105 @@ fn c_f32_tensor_sqrt_is_correctly_rounded() {
         "sqrt(1.5) must be correctly rounded (sqrtf/eval agree on 0x3F9CC471); \
          the vvsqrtf path returned bits {:#010X} ({value})",
         (value as f32).to_bits()
+    );
+}
+
+/// Bits of the first element printed in a `data=[...]` line.
+fn first_data_elem_bits(line: &str) -> u32 {
+    let start = line.find("data=[").expect("data marker") + "data=[".len();
+    let rest = &line[start..];
+    let end = rest.find([',', ']']).expect("element terminator");
+    let value: f64 = rest[..end].trim().parse().expect("numeric element");
+    (value as f32).to_bits()
+}
+
+/// chelis#719 layout-independence lock. sqrt(1.5) must print byte-identical
+/// bits whether its input is contiguous or a strided (permuted) view. Before
+/// the fix the contiguous kernel takes Accelerate `vvsqrtf` (0x3F9CC470) while
+/// a permuted view takes the strided `sqrtf` (0x3F9CC471), so the SAME value
+/// gives two answers depending on memory layout. After the fix both paths use
+/// the correctly-rounded `sqrtf` and agree.
+#[test]
+fn c_f32_tensor_sqrt_is_layout_independent() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    // Contiguous input: sqrt(1.5) is the first printed element.
+    let (_, contig) = c_lane(
+        "module M.Main\n\
+         def f(x: tensor[2, f32]) -> tensor[2, f32] = sqrt(x)\n\
+         out = print(f(to_tensor([1.5, 3.0])))\n",
+        "c_sqrt_contig",
+    )
+    .expect("contiguous C lane should run");
+    // Strided input: permute transposes a 2x2 into a non-contiguous view, so
+    // sqrt sees strided data; the transposed [0][0] element is still 1.5.
+    let (_, strided) = c_lane(
+        "module M.Main\n\
+         def f(x: tensor[2, 2, f32]) -> tensor[2, 2, f32] = sqrt(permute(x, 1, 0))\n\
+         out = print(f(to_tensor([[1.5, 3.0], [9.0, 4.0]])))\n",
+        "c_sqrt_strided",
+    )
+    .expect("strided C lane should run");
+    let contig_bits = first_data_elem_bits(&contig);
+    let strided_bits = first_data_elem_bits(&strided);
+    assert_eq!(
+        contig_bits, strided_bits,
+        "sqrt(1.5) must not depend on memory layout: contiguous returned \
+         {contig_bits:#010X}, strided (permuted view) returned {strided_bits:#010X}"
+    );
+    assert_eq!(
+        contig_bits, 0x3F9C_C471,
+        "the layout-independent value must be the correctly-rounded one \
+         (0x3F9CC471), not both paths agreeing on the wrong bits; got {contig_bits:#010X}"
+    );
+}
+
+/// f32 bits of every element in a `data=[...]` line. Comparing bits (not the
+/// decimal text) keeps a lane-specific float-to-string rendering of the SAME
+/// f32 value - e.g. eval `1.4142135381698608` vs C `1.414213538169861`, both
+/// 0x3FB504F3 - from reading as a false divergence.
+fn data_elem_bits(line: &str) -> Vec<u32> {
+    let start = line.find("data=[").expect("data marker") + "data=[".len();
+    let close = line[start..].find(']').expect("close bracket") + start;
+    line[start..close]
+        .split(',')
+        .map(|tok| {
+            let v: f64 = tok.trim().parse().expect("numeric element");
+            (v as f32).to_bits()
+        })
+        .collect()
+}
+
+/// chelis#719 negative parity. Ordinary sqrt inputs - a perfect square
+/// (4.0 -> 2.0 exact) and inexact roots (2.0, 0.5, 1.5) - must be bit-identical
+/// in the eval and compiled-C lanes. This is the regression control: the fix
+/// removes the vvsqrtf divergence at 1.5 while leaving every other value exactly
+/// where eval computes it. Bit comparison, so lane-specific decimal formatting
+/// of the same f32 is not mistaken for a numeric difference.
+#[test]
+fn c_f32_tensor_sqrt_ordinary_values_agree_across_lanes() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    let program = "module M.Main\n\
+         def f(x: tensor[4, f32]) -> tensor[4, f32] = sqrt(x)\n\
+         out = print(f(to_tensor([4.0, 2.0, 0.5, 1.5])))\n";
+    let eval_line = eval_first_line(program).expect("eval should run");
+    let (_, c_line) = c_lane(program, "c_sqrt_ordinary").expect("C lane should build and run");
+    assert_eq!(
+        data_elem_bits(&eval_line),
+        data_elem_bits(&c_line),
+        "sqrt lane divergence on ordinary values: eval={eval_line}, C={c_line}"
+    );
+    // Anchor the perfect-square element so the parity check cannot pass on two
+    // lanes that are wrong in the same way: sqrt(4.0) is exactly 2.0.
+    assert_eq!(
+        first_data_elem_bits(&c_line),
+        2.0f32.to_bits(),
+        "sqrt(4.0) must be exactly 2.0; C lane printed {c_line}"
     );
 }
 
