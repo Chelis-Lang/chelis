@@ -18104,6 +18104,40 @@ fn infer_tuple(
     Type::Tuple(elems)
 }
 
+/// Extract a non-negative tuple-projection index from a Deep index
+/// node. Accepts a bare `Int` atom (hand-written Deep) and a `lit`
+/// node wrapping an `Int` atom (the Surf `.N` desugar, chelis#707).
+/// Returns `None` for any other shape or a negative literal, which the
+/// sole caller maps to `Type::Error`.
+fn tuple_get_index(expr: &deep::Expr) -> Option<usize> {
+    match expr {
+        deep::Expr::Atom(deep::Atom::Int(n), _) => usize::try_from(*n).ok(),
+        deep::Expr::List(list, _) if get_tag(list) == Some("lit") => match children(list).first() {
+            Some(deep::Expr::Atom(deep::Atom::Int(n), _)) => usize::try_from(*n).ok(),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Human description of a malformed tuple-projection index, for the
+/// diagnostic the sole caller pushes when `tuple_get_index` returns
+/// `None`. Peeks through a `lit` wrapper to the payload atom.
+fn describe_tuple_index(expr: &deep::Expr) -> String {
+    let atom = match expr {
+        deep::Expr::List(list, _) if get_tag(list) == Some("lit") => children(list).first(),
+        other => Some(other),
+    };
+    match atom {
+        Some(deep::Expr::Atom(deep::Atom::Int(n), _)) => format!("integer literal {n}"),
+        Some(deep::Expr::Atom(deep::Atom::Float(f), _)) => format!("float literal {f}"),
+        Some(deep::Expr::Atom(deep::Atom::Bool(b), _)) => format!("bool literal {b}"),
+        Some(deep::Expr::Atom(deep::Atom::Str(_), _)) => "a string literal".to_string(),
+        Some(deep::Expr::Atom(deep::Atom::Symbol(s), _)) => format!("symbol `{s}`"),
+        _ => "a non-literal expression".to_string(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn infer_tuple_get(
     list: &deep::List,
@@ -18132,9 +18166,34 @@ fn infer_tuple_get(
     );
     let resolved = subst.apply(&tuple_ty);
 
-    let index = match &kids[1] {
-        deep::Expr::Atom(deep::Atom::Int(n), _) => *n as usize,
-        _ => {
+    // The Surf `.N` desugar emits the projection index as a `lit` node
+    // `(lit {type: int32} <Int>)` (`desugar.rs`, `Expr::TupleGet`),
+    // while hand-written Deep may carry it as a bare `Int` atom. Read
+    // the index from either shape. Matching only the bare atom made
+    // every Surf-level `.N` projection fall through to `Type::Error`,
+    // silently erasing the element type — `Type::Error` then unifies
+    // with anything, so a value derived from a tuple projection lost
+    // its nominal type at every downstream boundary (chelis#707).
+    let index = match tuple_get_index(&kids[1]) {
+        Some(index) => index,
+        None => {
+            // A malformed index (negative, float, symbol, or any
+            // non-literal) is not a valid projection. Diagnose it
+            // rather than returning a silent `Type::Error`: a bare
+            // negative `Int` used to blow up as `-1 as usize` into a
+            // loud out-of-bounds error, and every other shape was
+            // silently swallowed — both are undiagnosed `Type::Error`
+            // under an empty error vector, the §04-TOT-2 hole this fix
+            // otherwise closes (chelis#707, rt-707).
+            errors.push(CheckError::new(
+                CheckErrorKind::TupleIndexOutOfBounds,
+                format!(
+                    "invalid tuple index: expected a non-negative integer \
+                     literal, found {}",
+                    describe_tuple_index(&kids[1]),
+                ),
+                vec![],
+            ));
             return Type::Error;
         }
     };
@@ -18157,6 +18216,18 @@ fn infer_tuple_get(
             }
         }
         Type::Error => Type::Error,
+        // The target is not yet known to be a tuple — e.g. an
+        // unannotated closure parameter (a `fold` accumulator)
+        // constrained only structurally by its own projections. This
+        // type system has no open/row-polymorphic tuple, so we cannot
+        // pin the arity from one projection; defer by handing back a
+        // fresh element type instead of committing to "not a tuple".
+        // Before chelis#707 this path was unreachable (the index never
+        // parsed, so every projection returned `Type::Error`), so this
+        // preserves the prior permissiveness for genuinely-unresolved
+        // targets while the `Tuple` arm now carries the real element
+        // type for concrete tuples.
+        Type::Var(_) => vg.fresh_type(),
         _ => {
             errors.push(CheckError::new(
                 CheckErrorKind::TypeMismatch,
@@ -20059,6 +20130,53 @@ mod tests {
              (def {} x (tuple-get {} (var {} t) 5))",
             CheckErrorKind::TupleIndexOutOfBounds,
         );
+    }
+
+    #[test]
+    fn tuple_get_lit_node_index_valid() {
+        // chelis#707: the Surf `.N` desugar emits the index as a `lit`
+        // node `(lit {int32} N)`, not a bare `Int` atom. The bare-atom
+        // form above always worked; this is the untested seam that made
+        // every Surf-level projection type as `Type::Error`.
+        check_ok(
+            "(def {} t (tuple {} (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} f32)} 2.0)))
+             (def {} x (tuple-get {} (var {} t) (lit {type: (t-prim {} int32)} 0)))",
+        );
+    }
+
+    #[test]
+    fn tuple_get_lit_node_index_out_of_bounds() {
+        // Negative parity for the seam: a `lit`-node index must reach the
+        // bounds check. Before chelis#707 the index never parsed, so this
+        // returned `Type::Error` with NO diagnostic (a swallowed reject);
+        // now it fires `TupleIndexOutOfBounds`.
+        check_err(
+            "(def {} t (tuple {} (lit {type: (t-prim {} int32)} 1)))
+             (def {} x (tuple-get {} (var {} t) (lit {type: (t-prim {} int32)} 5)))",
+            CheckErrorKind::TupleIndexOutOfBounds,
+        );
+    }
+
+    #[test]
+    fn tuple_get_index_reads_bare_atom_and_lit_node() {
+        // Bare `Int` atom (hand-written Deep).
+        let bare = deep::Expr::Atom(deep::Atom::Int(2), zero_span());
+        assert_eq!(tuple_get_index(&bare), Some(2));
+        // `lit` node wrapping an `Int` atom (the Surf `.N` desugar).
+        let lit = node_expr(
+            "lit",
+            vec![deep::Expr::Atom(deep::Atom::Int(2), zero_span())],
+        );
+        assert_eq!(tuple_get_index(&lit), Some(2));
+        // A negative literal is not a valid index.
+        let negative = deep::Expr::Atom(deep::Atom::Int(-1), zero_span());
+        assert_eq!(tuple_get_index(&negative), None);
+        // A non-`Int` payload (symbol) is not an index.
+        let symbolic = node_expr("lit", vec![symbol_expr("nope")]);
+        assert_eq!(tuple_get_index(&symbolic), None);
+        // A non-`lit` list tag is not an index.
+        let other = node_expr("var", vec![symbol_expr("t")]);
+        assert_eq!(tuple_get_index(&other), None);
     }
 
     // ── Cast tests ───────────────────────────────────────────────
