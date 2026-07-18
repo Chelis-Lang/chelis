@@ -21,10 +21,40 @@ fn repo_root() -> PathBuf {
         .expect("repo root should exist")
 }
 
+/// Resolve the workspace `target/` directory from the running test binary
+/// rather than a `CARGO_MANIFEST_DIR`-relative path, so an external
+/// `CARGO_TARGET_DIR` (e.g. a concurrent agent building into
+/// `target/agents/<name>`) is honored. The binary lives at
+/// `<target>/<profile>/deps/<test-bin>`; strip a trailing `deps` component if
+/// present, then drop the profile component to reach `<target>`. See
+/// chelis#747.
+fn target_dir_from_current_exe() -> PathBuf {
+    let exe = std::env::current_exe().expect("could not determine current test executable");
+    let mut profile_dir = exe
+        .parent()
+        .expect("test executable should have a parent directory");
+    if profile_dir.file_name().and_then(|name| name.to_str()) == Some("deps") {
+        profile_dir = profile_dir
+            .parent()
+            .expect("`deps` directory should have a parent");
+    }
+    profile_dir
+        .parent()
+        .map(PathBuf::from)
+        .expect("profile directory should have a parent target directory")
+}
+
 fn chelis_bin() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
-        let debug_bin = repo_root().join("target/debug/chelis");
+        // The compiler bin lives at `<target>/debug/chelis`. Resolve `<target>`
+        // from the running test binary so an external `CARGO_TARGET_DIR` is
+        // honored (chelis#747), and pin the self-heal build to that same dir via
+        // `CARGO_TARGET_DIR` so the build target and the lookup cannot diverge
+        // (an ambient relative `CARGO_TARGET_DIR` would otherwise resolve
+        // against the build cwd, not `<target>`).
+        let target_dir = target_dir_from_current_exe();
+        let debug_bin = target_dir.join("debug/chelis");
         if debug_bin.exists() {
             return debug_bin;
         }
@@ -32,10 +62,11 @@ fn chelis_bin() -> &'static Path {
         let status = StdCommand::new("cargo")
             .args(["build", "-p", "chelis-cli"])
             .current_dir(repo_root())
+            .env("CARGO_TARGET_DIR", &target_dir)
             .status()
             .expect("build chelis-cli");
         assert!(status.success(), "cargo build -p chelis-cli failed");
-        repo_root().join("target/debug/chelis")
+        debug_bin
     })
     .as_path()
 }

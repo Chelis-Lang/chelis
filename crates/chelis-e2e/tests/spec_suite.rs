@@ -374,19 +374,42 @@ fn runtime_src_dir() -> std::path::PathBuf {
         .expect("runtime dir not found")
 }
 
+/// Resolve the workspace `target/` directory from the running test binary
+/// rather than a `CARGO_MANIFEST_DIR`-relative path, so an external
+/// `CARGO_TARGET_DIR` (e.g. a concurrent agent building into
+/// `target/agents/<name>`) is honored. The binary lives at
+/// `<target>/<profile>/deps/<test-bin>`; strip a trailing `deps` component if
+/// present, then drop the profile component to reach `<target>`. See
+/// chelis#747.
+fn target_dir_from_current_exe() -> std::path::PathBuf {
+    let exe = std::env::current_exe().expect("could not determine current test executable");
+    let mut profile_dir = exe
+        .parent()
+        .expect("test executable should have a parent directory");
+    if profile_dir.file_name().and_then(|name| name.to_str()) == Some("deps") {
+        profile_dir = profile_dir
+            .parent()
+            .expect("`deps` directory should have a parent");
+    }
+    profile_dir
+        .parent()
+        .map(std::path::PathBuf::from)
+        .expect("profile directory should have a parent target directory")
+}
+
 fn runtime_library_path() -> std::path::PathBuf {
-    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let target_dir = target_dir_from_current_exe();
     for path in [
-        manifest_dir.join("../../target/debug/libchelis_runtime.a"),
-        manifest_dir.join("../../target/release/libchelis_runtime.a"),
+        target_dir.join("debug/libchelis_runtime.a"),
+        target_dir.join("release/libchelis_runtime.a"),
     ] {
         if path.exists() {
             return path;
         }
     }
     for dir in [
-        manifest_dir.join("../../target/debug/deps"),
-        manifest_dir.join("../../target/release/deps"),
+        target_dir.join("debug/deps"),
+        target_dir.join("release/deps"),
     ] {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {

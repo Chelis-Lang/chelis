@@ -821,14 +821,46 @@ fn find_runtime_library_inner() -> Result<PathBuf, String> {
             .map(|p| p.to_path_buf())
             .unwrap_or_default(),
         exe_dir.parent().map(|p| p.join("lib")).unwrap_or_default(),
+    ] {
+        if !candidate_dir.as_os_str().is_empty()
+            && let Some(found) = find_in_dir(&candidate_dir)
+        {
+            return Ok(found);
+        }
+    }
+
+    // Honor an external `CARGO_TARGET_DIR` (e.g. a concurrent agent building
+    // into `target/agents/<name>`) before the `CARGO_MANIFEST_DIR`-relative
+    // fallbacks below, which assume the default `target/` beside the workspace.
+    // `current_exe()` cannot resolve this for the Python extension — its exe is
+    // the interpreter, not a chelis build artifact. A relative value resolves
+    // against the workspace root. See chelis#747.
+    if let Some(raw) = std::env::var_os("CARGO_TARGET_DIR") {
+        let raw = PathBuf::from(raw);
+        let target_dir = if raw.is_absolute() {
+            raw
+        } else {
+            manifest_dir.join("../..").join(raw)
+        };
+        for candidate_dir in [
+            target_dir.join("debug/deps"),
+            target_dir.join("release/deps"),
+            target_dir.join("debug"),
+            target_dir.join("release"),
+        ] {
+            if let Some(found) = find_in_dir(&candidate_dir) {
+                return Ok(found);
+            }
+        }
+    }
+
+    for candidate_dir in [
         manifest_dir.join("../../target/debug/deps"),
         manifest_dir.join("../../target/release/deps"),
         manifest_dir.join("../../target/debug"),
         manifest_dir.join("../../target/release"),
     ] {
-        if !candidate_dir.as_os_str().is_empty()
-            && let Some(found) = find_in_dir(&candidate_dir)
-        {
+        if let Some(found) = find_in_dir(&candidate_dir) {
             return Ok(found);
         }
     }
@@ -1583,5 +1615,43 @@ loss = (mean(x, 0) : tensor[f32])
         let library = unsafe { Library::new(&output.lib_path) }
             .expect("shared library should load without unresolved runtime symbols");
         drop(library);
+    }
+
+    // chelis#747 red-team: `CHELIS_RUNTIME_DIR` is the first-priority override in
+    // `find_runtime_library_inner`. When the staticlib is absent there it MUST
+    // fail loud (naming the env var), never silently fall through to the
+    // `CARGO_TARGET_DIR` branch or the manifest-relative fallbacks. A valid
+    // `CARGO_TARGET_DIR` set simultaneously must NOT rescue it: the documented
+    // precedence is CHELIS_RUNTIME_DIR-wins-or-errors, then exe-relative, then
+    // CARGO_TARGET_DIR, then manifest. Env is process-global; save/restore and
+    // rely on nextest's process-per-test isolation (matches the repo pattern in
+    // reef_install_from_github.rs).
+    #[test]
+    fn find_runtime_library_bogus_chelis_runtime_dir_is_loud_error_even_with_valid_target_dir() {
+        let empty_runtime_dir = tempdir().expect("tempdir");
+        let valid_target_dir = tempdir().expect("tempdir");
+        let prior_runtime = std::env::var_os("CHELIS_RUNTIME_DIR");
+        let prior_target = std::env::var_os("CARGO_TARGET_DIR");
+        unsafe {
+            std::env::set_var("CHELIS_RUNTIME_DIR", empty_runtime_dir.path());
+            std::env::set_var("CARGO_TARGET_DIR", valid_target_dir.path());
+        }
+        let result = find_runtime_library_inner();
+        unsafe {
+            match prior_runtime {
+                Some(v) => std::env::set_var("CHELIS_RUNTIME_DIR", v),
+                None => std::env::remove_var("CHELIS_RUNTIME_DIR"),
+            }
+            match prior_target {
+                Some(v) => std::env::set_var("CARGO_TARGET_DIR", v),
+                None => std::env::remove_var("CARGO_TARGET_DIR"),
+            }
+        }
+        let err =
+            result.expect_err("bogus CHELIS_RUNTIME_DIR must be a loud error, not a fall-through");
+        assert!(
+            err.contains("CHELIS_RUNTIME_DIR"),
+            "error must name CHELIS_RUNTIME_DIR, got: {err}"
+        );
     }
 }
