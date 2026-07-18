@@ -67,8 +67,9 @@ Standalone single-file HIP spike measuring per-element integer-overflow
 percentages compare. Atomic flag + first-failing-index detection; GPU-event
 timing; median-of-15 after 3 warmup, checked/unchecked interleaved. Memory-bound
 cells at 2²⁴ elements, compute-bound at 2²² × 64 chained ops with a runtime mask
-so the backend cannot delete the checks. Self-checking: planted overflows,
-`memcmp`, and a host oracle gate every cell (prints `correctness: all cells passed`).
+so the backend cannot delete the checks. Self-checking: memcmp + in-range-clear
+gate all 10 cells; the 6 memory-bound cells add planted-overflow-index and
+host-oracle checks (prints `correctness: all cells passed`).
 
 ```sh
 eval $(scripts/hip_test.py --print-env)
@@ -76,7 +77,7 @@ hipcc -O2 docs/investigations/probes/hip_runtime/hip_overflow_trap_spike.cpp \
     -o /tmp/hip_trap_spike && /tmp/hip_trap_spike
 ```
 
-Result (this box): memory-bound detection is **free** (≤0.6% median — bandwidth
-saturated); compute-bound ceilings run +100…+320%, applying only to hypothetical
+Result (this box): memory-bound detection is **free** (within ±2% timing noise —
+bandwidth saturated); compute-bound ceilings run +100…+320%, applying only to hypothetical
 fused kernels the HIP backend does not emit. Verdict: trap-everywhere is
 feasible on HIP, matching the Metal conclusion. Full numbers on #736.
