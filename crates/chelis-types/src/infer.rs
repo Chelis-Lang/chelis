@@ -18120,6 +18120,24 @@ fn tuple_get_index(expr: &deep::Expr) -> Option<usize> {
     }
 }
 
+/// Human description of a malformed tuple-projection index, for the
+/// diagnostic the sole caller pushes when `tuple_get_index` returns
+/// `None`. Peeks through a `lit` wrapper to the payload atom.
+fn describe_tuple_index(expr: &deep::Expr) -> String {
+    let atom = match expr {
+        deep::Expr::List(list, _) if get_tag(list) == Some("lit") => children(list).first(),
+        other => Some(other),
+    };
+    match atom {
+        Some(deep::Expr::Atom(deep::Atom::Int(n), _)) => format!("integer literal {n}"),
+        Some(deep::Expr::Atom(deep::Atom::Float(f), _)) => format!("float literal {f}"),
+        Some(deep::Expr::Atom(deep::Atom::Bool(b), _)) => format!("bool literal {b}"),
+        Some(deep::Expr::Atom(deep::Atom::Str(_), _)) => "a string literal".to_string(),
+        Some(deep::Expr::Atom(deep::Atom::Symbol(s), _)) => format!("symbol `{s}`"),
+        _ => "a non-literal expression".to_string(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn infer_tuple_get(
     list: &deep::List,
@@ -18158,7 +18176,26 @@ fn infer_tuple_get(
     // its nominal type at every downstream boundary (chelis#707).
     let index = match tuple_get_index(&kids[1]) {
         Some(index) => index,
-        None => return Type::Error,
+        None => {
+            // A malformed index (negative, float, symbol, or any
+            // non-literal) is not a valid projection. Diagnose it
+            // rather than returning a silent `Type::Error`: a bare
+            // negative `Int` used to blow up as `-1 as usize` into a
+            // loud out-of-bounds error, and every other shape was
+            // silently swallowed — both are undiagnosed `Type::Error`
+            // under an empty error vector, the §04-TOT-2 hole this fix
+            // otherwise closes (chelis#707, rt-707).
+            errors.push(CheckError::new(
+                CheckErrorKind::TupleIndexOutOfBounds,
+                format!(
+                    "invalid tuple index: expected a non-negative integer \
+                     literal, found {}",
+                    describe_tuple_index(&kids[1]),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
     };
 
     match resolved {
