@@ -282,6 +282,37 @@ fn subheading_entry_cited_passes() {
         &doc("(none yet)", tracking, "(none yet)", "(none yet)"),
     );
     assert_eq!(verdict_of(&report, "upstream-bugs"), Verdict::Pass);
+    // A clean Pass carries no diagnostic (locks the cited-pass path).
+    assert!(row_of(&report, "upstream-bugs").diagnostic.is_empty());
+}
+
+// A DUPLICATED section heading orphans the second occurrence's body: with only
+// the first `## Tracking` body checked, an uncited entry under a second
+// `## Tracking` used to audit a silent Pass. A duplicated required section is a
+// malformed doc and now fails closed (chelis#739 RT delta residual).
+#[test]
+fn duplicated_section_heading_fails_closed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "dup");
+    let body = "# Upstream Bugs\n\nintro\n\n\
+        ## Actively blocking\n\n(none yet)\n\n\
+        ## Tracking\n\n- cited entry (chelis#1)\n\n\
+        ## Tracking\n\n- generic-callback-unification limit blocks training (prose, uncited)\n\n\
+        ## Parked\n\n(none yet)\n\n\
+        ## Archived\n\n(none yet)\n";
+    let report = audit_with_bugs(&root, body);
+    let r = row_of(&report, "upstream-bugs");
+    assert_eq!(
+        r.verdict,
+        Verdict::Fail,
+        "an uncited entry under a duplicated `## Tracking` must not silently pass"
+    );
+    assert!(
+        r.diagnostic.contains("duplicated") && r.diagnostic.contains("Tracking"),
+        "diag should name the duplicated section: {}",
+        r.diagnostic
+    );
+    assert!(!report.ok());
 }
 
 // §Archived uncited entries are exempt (closed history) -> Pass.

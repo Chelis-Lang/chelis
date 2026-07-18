@@ -485,21 +485,30 @@ fn check_upstream_bugs(ctx: &Ctx) -> Check {
             "add docs/UPSTREAM_BUGS.md with the four required sections",
         );
     };
-    // Structural gate: the four sections must be present as *well-formed ATX
-    // headings*. This uses the same strict `section_body` locator the citation
-    // loop below uses, so the gate and the loop can never disagree. A lenient
-    // `has_heading` (bare `starts_with('#')`) used to accept a malformed
-    // `##Actively blocking` (no space) that `section_body` then could not locate,
-    // and the loop silently skipped that section's entries — a machine
-    // false-green of the exact class this row exists to kill (chelis#739 red
-    // team). A malformed heading now fails closed here.
+    // Structural gate: each required section must appear *exactly once* as a
+    // well-formed, section-level ATX heading. Both directions fail closed, and
+    // both close a confirmed false-green (chelis#739 red team):
+    //   - MISSING/malformed: a lenient `has_heading` (bare `starts_with('#')`)
+    //     used to accept a malformed `##Actively blocking` (no space) that the
+    //     strict `section_body` locator could not resolve, and the loop silently
+    //     skipped that section's entries. The gate now uses the same
+    //     `is_section_heading` predicate as the locator, so they cannot disagree.
+    //   - DUPLICATED: `section_body` reads only the *first* matching heading's
+    //     body (up to the next same-level heading — the duplicate), so entries
+    //     under a second `## Tracking` were never citation-checked and audited
+    //     green while rendering as a normal section to a human. A duplicated
+    //     required section is a malformed doc; fail it here.
     let lines: Vec<&str> = bugs.lines().collect();
     let required = ["Actively blocking", "Tracking", "Parked", "Archived"];
-    let missing: Vec<&str> = required
-        .iter()
-        .copied()
-        .filter(|s| section_body(&lines, s).is_none())
-        .collect();
+    let mut missing: Vec<&str> = Vec::new();
+    let mut duplicated: Vec<&str> = Vec::new();
+    for s in required {
+        match section_heading_indices(&lines, s).len() {
+            0 => missing.push(s),
+            1 => {}
+            _ => duplicated.push(s),
+        }
+    }
     if !missing.is_empty() {
         return fail(
             format!(
@@ -507,6 +516,15 @@ fn check_upstream_bugs(ctx: &Ctx) -> Check {
                 missing.join(", ")
             ),
             "add each as a well-formed ATX heading (e.g. `## Actively blocking`, with a space after the `#`)",
+        );
+    }
+    if !duplicated.is_empty() {
+        return fail(
+            format!(
+                "docs/UPSTREAM_BUGS.md duplicated section heading(s): {}",
+                duplicated.join(", ")
+            ),
+            "each required section must appear exactly once; a duplicated heading orphans the second body from the citation check, so merge them",
         );
     }
 
@@ -596,15 +614,42 @@ impl BugEntry {
     }
 }
 
-/// The body of the markdown section whose heading contains `needle`, from just
-/// after that heading to just before the next heading of equal-or-shallower
-/// level (or EOF) — so a `###`+ sub-heading stays *inside* a `##` section rather
-/// than closing it. Each body line is paired with its 1-based file line number.
-/// `None` if no ATX heading containing `needle` is found.
-fn section_body<'a>(lines: &[&'a str], needle: &str) -> Option<Vec<(usize, &'a str)>> {
-    let start = lines
+/// Required-section headings are document-level: the scaffold and every shell
+/// (School included) write them as `##` (level 2). A *section-level* heading is
+/// thus any ATX heading at level ≤ 2; deeper (`###`+) headings are entry
+/// sub-headings, never section headings. Restricting section matching to this
+/// ceiling keeps a `### Tracking …` entry sub-heading from being mistaken for
+/// the §Tracking section (in body location or duplicate detection).
+const SECTION_HEADING_MAX_LEVEL: usize = 2;
+
+/// Whether `line` is a section-level heading (level ≤ 2) naming `needle`. Uses a
+/// substring match, not equality, because real section headings carry trailing
+/// context (School: `## Tracking (filed upstream, not blocking)`).
+fn is_section_heading(line: &str, needle: &str) -> bool {
+    heading_level(line).is_some_and(|lvl| lvl <= SECTION_HEADING_MAX_LEVEL) && line.contains(needle)
+}
+
+/// Indices of every section-level heading naming `needle`. A length > 1 means
+/// the section is duplicated (a malformed doc that would orphan a body from the
+/// citation check).
+fn section_heading_indices(lines: &[&str], needle: &str) -> Vec<usize> {
+    lines
         .iter()
-        .position(|l| heading_level(l).is_some() && l.contains(needle))?;
+        .enumerate()
+        .filter(|(_, l)| is_section_heading(l, needle))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The body of the markdown section whose section-level heading names `needle`,
+/// from just after that heading to just before the next heading of
+/// equal-or-shallower level (or EOF) — so a `###`+ sub-heading stays *inside* a
+/// `##` section rather than closing it. Uses the *first* section-level match;
+/// the structural gate rejects a duplicated section before this is reached. Each
+/// body line is paired with its 1-based file line number. `None` if no
+/// section-level heading names `needle`.
+fn section_body<'a>(lines: &[&'a str], needle: &str) -> Option<Vec<(usize, &'a str)>> {
+    let start = lines.iter().position(|l| is_section_heading(l, needle))?;
     let level = heading_level(lines[start]).unwrap_or(usize::MAX);
     let mut body = Vec::new();
     for (i, l) in lines.iter().enumerate().skip(start + 1) {
