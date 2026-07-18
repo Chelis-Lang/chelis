@@ -384,3 +384,60 @@ fn local_binding_shadows_nullary_def_in_eval() {
         eval_with_ext(&dp, ".dp").expect("local binding must shadow the top-level nullary def");
     assert_eq!(first_line(&stdout), "101", "full stdout: {stdout}");
 }
+
+// ---------------------------------------------------------------------------
+// RT #721 adversarials (fresh-context red team). Coverage the PR's tests do
+// not carry: the chained-nullary and host-body variants of the resolve path,
+// and the two negative guards the fix must NOT weaken — a non-fn top-level
+// binding must stay non-callable, and arity errors must stay clean.
+// ---------------------------------------------------------------------------
+
+/// A nullary def that CALLS another nullary def. The inner `a()` folds to a
+/// tensor-root (`a = tensor(...)`) while the outer `b` is a host closure;
+/// both must resolve through the fixed application path. Was part of the
+/// original shadow class.
+#[test]
+fn rt721_nullary_calls_nullary_through_eval() {
+    let dp = deep_of("def a() -> f32 = 2.0\ndef b() -> f32 = add(a(), 1.0)\nout = print(b())\n");
+    let stdout = eval_with_ext(&dp, ".dp").expect("chained nullary defs must evaluate");
+    assert_eq!(first_line(&stdout), "3", "full stdout: {stdout}");
+}
+
+/// A nullary def whose body is host-gated to a Closure (a scalar `add` of two
+/// literals) and therefore NEVER lands in `tensor_bindings`. It exercises the
+/// new path's `else`-free fn branch on a def that was never shadowed, proving
+/// the fix does not disturb the always-working host-body nullary.
+#[test]
+fn rt721_host_bodied_nullary_still_roundtrips() {
+    let dp = deep_of("def f() -> f32 = add(1.0, 1.5)\nout = print(f())\n");
+    let stdout = eval_with_ext(&dp, ".dp").expect("host-body nullary must evaluate");
+    assert_eq!(first_line(&stdout), "2.5", "full stdout: {stdout}");
+}
+
+/// Negative guard: a top-level NON-fn value binding (`g = to_tensor(...)`)
+/// applied as `g()` must be REJECTED, never resolved into a call. The fix's
+/// `matches!(.. tag == "fn")` guard is the reason a folded tensor root cannot
+/// be turned into a callable. If it regressed, `g()` would print the tensor
+/// or resolve it; here it must fail with a type mismatch and produce no value.
+#[test]
+fn rt721_toplevel_value_binding_is_not_callable() {
+    let dp = deep_of("g = to_tensor([1.0])\nout = print(g())\n");
+    let err = eval_with_ext(&dp, ".dp")
+        .expect_err("applying a non-fn top-level value binding must be rejected");
+    assert!(
+        err.contains("type mismatch") && err.contains("tensor"),
+        "expected a type-mismatch rejection naming the tensor, got: {err}"
+    );
+}
+
+/// Negative guard: a nullary def applied with an argument is a clean arity
+/// error through the fixed path, not shadow-path weirdness.
+#[test]
+fn rt721_nullary_applied_with_arg_is_arity_error() {
+    let dp = deep_of("def f() -> f32 = 2.5\nout = print(f(3.0))\n");
+    let err = eval_with_ext(&dp, ".dp").expect_err("nullary def with an arg must be rejected");
+    assert!(
+        err.contains("arity mismatch") && err.contains("expected 0 args, got 1"),
+        "expected a clean 0-vs-1 arity error, got: {err}"
+    );
+}
