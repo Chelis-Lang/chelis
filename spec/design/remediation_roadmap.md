@@ -205,6 +205,7 @@ the capability table's seed decisions, or by being closed.
 | [#750] | compiled lane silently drops def-call-valued top-level roots | silent-omission cousin of [#703]'s class (the skip_for_lowered mechanism, root-output face); standalone fix; [#754]'s output diff catches regressions |
 | [#751] | generated C emits uncompilable / sign-losing float constants (f64::MAX as integer literal; -0.0 as `-0`) | ingress, [#729] family; natural moment [#729] Phase 3 (constant emission); [#732]'s harness C_LANE_EXCLUDED cells return when it lands |
 | [#754] | shell-invokable cross-lane agreement gate (owner: brittonr) | downstream consumer, not plan-set work: hard-gated on [#732] Phase 2; consumes Phase 3's tolerance artifact and [#729] Phase 4's capability table (cell skipping); GPU lanes join after [#736]/[#737]; [#738] is its consumer; the one-comparator rule is pinned in [#732]'s §C4.3. Scope boundary (2026-07): a verdict proves lane agreement for its RECORDED (target triple, C toolchain + flags incl. -ffp-contract, libm identity) only - never cross-platform determinism by itself; the platform axis compares verdicts across CI matrix entries under the same tolerance table |
+| [#763] | `chelis lane-check` - the exact-only, Nix-hermetic first slice of [#754] (owner: brittonr) | child of the [#754] row: same one-comparator rule and proof-scope boundary; for its exact-safe corpus, byte-identity holds TODAY (the parity corpus diet, verified 2026-07-17), so [#732] Phase 2 is the corpus-EXPANSION unlock rather than a ship blocker; the initial corpus curates around [#751] (uncompilable float constants) and [#761] (subnormal ingress flush) |
 | [#761] | C lane flushes f32 subnormal literals to zero at ingress (the to_tensor route; found by [#719]'s fix session) | ingress, [#729] family ([04-NUM-2] requires subnormal-preserving narrowing); distinct from [#748] (rendering), whose print collapse masks this value-loss class in print-based checks; natural moment [#729] Phase 3 (C host dtype parity) or standalone earlier; blocks the subnormal locks in [#719]'s and [#732]'s suites until fixed |
 
 Also tracked to closure but already claimed (listed for completeness):
@@ -325,3 +326,4 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#755]: https://github.com/Chelis-Lang/chelis/issues/755
 [#756]: https://github.com/Chelis-Lang/chelis/issues/756
 [#761]: https://github.com/Chelis-Lang/chelis/issues/761
+[#763]: https://github.com/Chelis-Lang/chelis/issues/763
