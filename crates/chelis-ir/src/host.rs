@@ -1143,6 +1143,34 @@ fn lower_host_program(
             collect_deep_var_names(body, &mut names_captured_by_fn_defs);
         }
     }
+    // Issue #750: does this program emit a host `main()`? A non-`fn`
+    // top-level binding reaches `host.globals` today iff `skip_for_lowered`
+    // does NOT drop it, i.e. it is non-lowered (needs host runtime, e.g. a
+    // `print`-effecting `shown = print(x)`) or it is a #378 captured value
+    // binding. `emit_main` runs exactly when `host.globals` is non-empty
+    // (`host_emit.rs`), so the presence of any such binding is the precise,
+    // rescue-independent predicate for "this program emits a host `main`".
+    // The #750 rescue below is gated on this so it only ever RE-ATTACHES a
+    // labeled root to a `main` that already exists — it never flips a
+    // pure-DAG program (which emits a callable kernel with `outputs[]`, no
+    // `main`) onto the host lane.
+    let program_emits_host_main = top_level_items(program.exprs()).iter().any(|expr| {
+        let Expr::List(list, _) = expr else {
+            return false;
+        };
+        if tag(list) != Some("def") {
+            return false;
+        }
+        let kids = children(list);
+        let Some(binding_name) = kids.first().and_then(symbol_name) else {
+            return false;
+        };
+        let is_fn_body =
+            matches!(kids.get(1), Some(Expr::List(body_list, _)) if tag(body_list) == Some("fn"));
+        !is_fn_body
+            && (!lowered_names.get(binding_name).copied().unwrap_or(false)
+                || names_captured_by_fn_defs.contains(binding_name))
+    });
     for expr in top_level_items(program.exprs()) {
         let Expr::List(list, _) = expr else {
             continue;
@@ -1285,9 +1313,22 @@ fn lower_host_program(
         // also claims it (the DAG lane inlines its own copy for tensor
         // roots; the global is emitted only when a function references it).
         let captured_value_binding = !is_fn_body && names_captured_by_fn_defs.contains(name);
+        // Issue #750: a DAG-lowered non-`fn` value binding (e.g.
+        // `troot = mk()`, a def-call-valued root) that a program's host
+        // `main` should print is otherwise dropped by `skip_for_lowered`,
+        // because labeled roots are emitted ONLY from `host.globals` and
+        // there is no DAG-root -> labeled-print bridge. Rescue it into
+        // `host.globals` exactly like the #378 captured-value carve-out so
+        // the CLI display-name pass stamps it and `emit_main` renders it,
+        // byte-identical to a direct-construction root of the same value.
+        // Gated on `program_emits_host_main` so the rescue only re-attaches
+        // a root to a `main` the program ALREADY emits — a pure-DAG program
+        // keeps emitting a kernel with `outputs[]` and no `main`.
+        let display_root_binding = !is_fn_body && program_emits_host_main;
         let skip_for_lowered = lowered_names.get(name).copied().unwrap_or(false)
             && !needs_host_wrapper
-            && !captured_value_binding;
+            && !captured_value_binding
+            && !display_root_binding;
         if skip_for_lowered {
             continue;
         }
