@@ -91,13 +91,36 @@ pub enum ValidationError {
 }
 
 pub fn validate_surf(source: &str) -> Result<(), ValidationError> {
-    match surf::Grammar::parse(surf::Rule::program, source) {
-        Ok(_) => Ok(()),
-        Err(pest_err) => chelis_surf::parser::parse_str(source)
-            .map(|_| ())
-            .map_err(|parse_err| {
-                ValidationError::Failed(format!("{pest_err}\ncompiler parse failed: {parse_err}"))
-            }),
+    // Phase 1f (spec/design/phase1f_executable_grammar.md): the pest
+    // grammar is an independent second implementation and is explicitly
+    // "not a replacement for the parser" — the hand-written compiler
+    // parser is the acceptance authority, and validator/compiler
+    // *agreement* is the oracle. The exit verdict therefore follows the
+    // parser in BOTH directions, not just when the grammar happens to
+    // reject:
+    //   * grammar accepts + parser accepts -> accept (agreement)
+    //   * grammar rejects + parser accepts -> accept; the grammar is
+    //     merely incomplete relative to the shipped surface (the
+    //     executable examples rely on this rescue path)
+    //   * grammar accepts + parser rejects -> REJECT with the compiler's
+    //     reason (chelis#706: the grammar admits bare-statement
+    //     juxtaposition the parser rejects). Reporting success here would
+    //     disagree with the compile path — `check`/`fmt`/`build`/`eval`/
+    //     `validate --desugar` all reject the same input.
+    //   * grammar rejects + parser rejects -> reject, surfacing both views
+    // Whenever the two disagree the diagnostic names the split — the
+    // conformance tool's "valuable finding" is preserved, not papered over.
+    let grammar = surf::Grammar::parse(surf::Rule::program, source);
+    match (chelis_surf::parser::parse_str(source), grammar) {
+        (Ok(_), _) => Ok(()),
+        (Err(parse_err), Ok(_)) => Err(ValidationError::Failed(format!(
+            "the Surf PEG grammar accepts this program but the compiler parser rejects it \
+             (the grammar is too lenient, a chelis-validate conformance gap); \
+             compiler parse failed: {parse_err}"
+        ))),
+        (Err(parse_err), Err(pest_err)) => Err(ValidationError::Failed(format!(
+            "{pest_err}\ncompiler parse failed: {parse_err}"
+        ))),
     }
 }
 
@@ -608,6 +631,49 @@ mod tests {
     fn surf_accepts_short_block_bindings() {
         let source = "def f(x) = {\n  y = relu(x)\n  y\n}\n";
         validate_surf(source).expect("validator should accept short block bindings");
+    }
+
+    // chelis#706: `validate --surf` must agree with the compiler parser.
+    // The pest grammar admits bare-statement juxtaposition inside a block,
+    // but the hand-written parser rejects it (BareStatementInBlock), so the
+    // validator — whose exit verdict follows the parser — must reject too,
+    // and name the grammar/parser split.
+    #[test]
+    fn surf_rejects_bare_statement_the_parser_rejects() {
+        let source = "def f(a: f32, b: f32, c: f32, d: f32) -> f32 = {\n  g(a, b)\n  h(c, d)\n}\n";
+        use pest::Parser as _;
+        // Premise: the compiler parser rejects it and the pest grammar accepts it,
+        // i.e. this is exactly the grammar-too-lenient case.
+        assert!(
+            chelis_surf::parser::parse_str(source).is_err(),
+            "precondition: the compiler parser rejects the bare-statement block"
+        );
+        assert!(
+            super::surf::Grammar::parse(super::surf::Rule::program, source).is_ok(),
+            "precondition: the pest grammar admits the bare-statement block"
+        );
+        let err = validate_surf(source)
+            .expect_err("validator must reject what the compiler parser rejects");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("compiler parser rejects it") && msg.contains("too lenient"),
+            "diagnostic should name the grammar/parser split; got: {msg}"
+        );
+        assert!(
+            msg.contains("expression statement must be bound"),
+            "diagnostic should carry the parser's #706 reason; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn surf_par_bare_items_are_rejected_like_the_parser() {
+        // The par{} companion: newline-separated items the parser rejects.
+        let source = "def f(x, y) -> Unit = par {\n  g(x)\n  h(y)\n}\n";
+        assert!(
+            chelis_surf::parser::parse_str(source).is_err(),
+            "precondition: the compiler parser rejects bare par items"
+        );
+        validate_surf(source).expect_err("validator must reject bare par items too");
     }
 
     #[test]
