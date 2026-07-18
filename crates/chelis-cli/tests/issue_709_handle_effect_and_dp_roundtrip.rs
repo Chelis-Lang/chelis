@@ -20,13 +20,18 @@
 //!   working binary - the unknown kind and its handler silently dropped
 //!   (the #703 shape).
 //!
-//! ## chelis#721 (found while probing the controls)
+//! ## chelis#721 (found while probing the controls; fixed, locked below)
 //!
-//! `chelis eval` cannot ingest the canonical Deep of a NULLARY fn:
-//! `(fn {} (params {}) body)` evaluates to its body value, so
-//! `surf -> deep -> eval` fails with `value is not callable` on the
-//! simplest constant-returning def, while check scores 1 and the compiled
-//! lane runs the same file. Unary defs round-trip fine (locked).
+//! `chelis eval` could not ingest the canonical Deep of a NULLARY fn. The
+//! real chain (verified against origin/main): a nullary def whose body is
+//! DAG-lowerable folds to a constant that lands in `tensor_bindings`, whose
+//! precedence in `eval_var` returns that Tensor BEFORE `resolve_top_level`,
+//! so `(app (var f))` applied the folded scalar and died `value is not
+//! callable`, while check scored 1 and the compiled lane ran the same file.
+//! Fixed in `eval_app`: an application whose callee names a `(fn …)`-bodied
+//! top-level def (and is not a local binding) resolves the def directly to
+//! its Closure, bypassing only the tensor_bindings shadow. Unary defs always
+//! round-tripped (locked as the control).
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -310,19 +315,129 @@ fn unknown_effect_kind_is_rejected() {
 }
 
 // ===========================================================================
-// chelis#721 - nullary defs cannot round-trip surf -> deep -> eval
+// chelis#721 - a nullary def's canonical Deep round-trips through eval
+//
+// Before the fix these `.dp` evals died `value is not callable: Tensor(...)`:
+// the def's DAG-folded constant shadowed its Closure in `tensor_bindings`.
+// The print result is asserted on stdout's FIRST line exactly; eval also
+// emits trailing labeled roots (`f = tensor(...)`) that the C lane does not
+// (the known labeled-root parity residual recorded on the issue) - the tests
+// deliberately pin only the print result so they neither depend on nor bless
+// that residual.
 // ===========================================================================
 
-/// Observed today: `error: value is not callable: Tensor(... 2.5 ...)` -
-/// eval binds the nullary fn to its body VALUE, then `(app (var f))` calls
-/// the scalar. check scores the same file 1 and the compiled lane runs it.
+/// The exact print output is stdout's first line; assert on that rather than
+/// `contains`, so a value that only appears in a trailing labeled root cannot
+/// mask a broken print.
+fn first_line(stdout: &str) -> &str {
+    stdout.lines().next().unwrap_or_default()
+}
+
+/// The locked repro: the canonical Deep of the simplest constant-returning
+/// nullary def now evaluates and prints its value. Was `#[ignore]`d as the
+/// live #721 bug.
 #[test]
-#[ignore = "chelis#721: eval cannot ingest the canonical Deep of a nullary fn (`value is \
-            not callable`); the same .dp checks at 1 and runs compiled. Run with \
-            `cargo test -p chelis-cli --test issue_709_handle_effect_and_dp_roundtrip -- --ignored`."]
 fn nullary_fn_deep_roundtrips_through_eval() {
     let dp = deep_of("def f() -> f32 = 2.5\nout = print(f())\n");
     let stdout = eval_with_ext(&dp, ".dp")
         .expect("chelis#721: the canonical Deep of a nullary fn must evaluate");
-    assert!(stdout.contains("2.5"), "got: {stdout}");
+    assert_eq!(first_line(&stdout), "2.5", "full stdout: {stdout}");
+}
+
+/// A nullary def applied more than once inside a larger expression: proves
+/// the resolved Closure is reusable, not a one-shot, and composes.
+#[test]
+fn nullary_fn_applied_twice_through_eval() {
+    let dp = deep_of("def f() -> f32 = 2.5\nout = print(add(f(), f()))\n");
+    let stdout = eval_with_ext(&dp, ".dp").expect("nullary applied twice must evaluate");
+    assert_eq!(first_line(&stdout), "5", "full stdout: {stdout}");
+}
+
+/// A nullary def whose body is NOT a bare literal but still DAG-folds into
+/// `tensor_bindings` (`cast(5, int64)` -> a shaped scalar root, verified via
+/// the `f = tensor(...)` labeled root). It exercises the SAME tensor-root
+/// shadow as the bare-lit lock through a compound body. (A scalar `add` of
+/// two literals is host-gated to a Closure instead and never took this path,
+/// so it is not the interesting case here.)
+#[test]
+fn nullary_nonliteral_fn_deep_roundtrips_through_eval() {
+    let dp = deep_of("def f() -> int64 = cast(5, int64)\nout = print(f())\n");
+    let stdout =
+        eval_with_ext(&dp, ".dp").expect("nullary cast-bodied def must evaluate through eval");
+    assert_eq!(first_line(&stdout), "5", "full stdout: {stdout}");
+}
+
+/// Negative parity for the fix's precedence guard: a LOCAL binding named `f`
+/// (here the function-typed parameter of `call_f`) must still win over the
+/// top-level nullary `f`. Only the `tensor_bindings` shadow is bypassed, never
+/// the local-bindings lookup. If the guard regressed, `f(1.0)` would resolve
+/// the nullary top-level `f` and fail `closure expected 0 args, got 1` (or
+/// print `2.5`); the local lambda yields `1.0 + 100.0`.
+#[test]
+fn local_binding_shadows_nullary_def_in_eval() {
+    let dp = deep_of(
+        "def f() -> f32 = 2.5\n\
+         def call_f(f: (f32) -> f32) -> f32 = f(1.0)\n\
+         out = print(call_f(fn (x: f32) -> add(x, 100.0)))\n",
+    );
+    let stdout =
+        eval_with_ext(&dp, ".dp").expect("local binding must shadow the top-level nullary def");
+    assert_eq!(first_line(&stdout), "101", "full stdout: {stdout}");
+}
+
+// ---------------------------------------------------------------------------
+// RT #721 adversarials (fresh-context red team). Coverage the PR's tests do
+// not carry: the chained-nullary and host-body variants of the resolve path,
+// and the two negative guards the fix must NOT weaken — a non-fn top-level
+// binding must stay non-callable, and arity errors must stay clean.
+// ---------------------------------------------------------------------------
+
+/// A nullary def that CALLS another nullary def. The inner `a()` folds to a
+/// tensor-root (`a = tensor(...)`) while the outer `b` is a host closure;
+/// both must resolve through the fixed application path. Was part of the
+/// original shadow class.
+#[test]
+fn rt721_nullary_calls_nullary_through_eval() {
+    let dp = deep_of("def a() -> f32 = 2.0\ndef b() -> f32 = add(a(), 1.0)\nout = print(b())\n");
+    let stdout = eval_with_ext(&dp, ".dp").expect("chained nullary defs must evaluate");
+    assert_eq!(first_line(&stdout), "3", "full stdout: {stdout}");
+}
+
+/// A nullary def whose body is host-gated to a Closure (a scalar `add` of two
+/// literals) and therefore NEVER lands in `tensor_bindings`. It exercises the
+/// new path's `else`-free fn branch on a def that was never shadowed, proving
+/// the fix does not disturb the always-working host-body nullary.
+#[test]
+fn rt721_host_bodied_nullary_still_roundtrips() {
+    let dp = deep_of("def f() -> f32 = add(1.0, 1.5)\nout = print(f())\n");
+    let stdout = eval_with_ext(&dp, ".dp").expect("host-body nullary must evaluate");
+    assert_eq!(first_line(&stdout), "2.5", "full stdout: {stdout}");
+}
+
+/// Negative guard: a top-level NON-fn value binding (`g = to_tensor(...)`)
+/// applied as `g()` must be REJECTED, never resolved into a call. The fix's
+/// `matches!(.. tag == "fn")` guard is the reason a folded tensor root cannot
+/// be turned into a callable. If it regressed, `g()` would print the tensor
+/// or resolve it; here it must fail with a type mismatch and produce no value.
+#[test]
+fn rt721_toplevel_value_binding_is_not_callable() {
+    let dp = deep_of("g = to_tensor([1.0])\nout = print(g())\n");
+    let err = eval_with_ext(&dp, ".dp")
+        .expect_err("applying a non-fn top-level value binding must be rejected");
+    assert!(
+        err.contains("type mismatch") && err.contains("tensor"),
+        "expected a type-mismatch rejection naming the tensor, got: {err}"
+    );
+}
+
+/// Negative guard: a nullary def applied with an argument is a clean arity
+/// error through the fixed path, not shadow-path weirdness.
+#[test]
+fn rt721_nullary_applied_with_arg_is_arity_error() {
+    let dp = deep_of("def f() -> f32 = 2.5\nout = print(f(3.0))\n");
+    let err = eval_with_ext(&dp, ".dp").expect_err("nullary def with an arg must be rejected");
+    assert!(
+        err.contains("arity mismatch") && err.contains("expected 0 args, got 1"),
+        "expected a clean 0-vs-1 arity error, got: {err}"
+    );
 }

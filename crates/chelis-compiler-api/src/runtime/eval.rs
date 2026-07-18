@@ -491,7 +491,24 @@ impl<'a> EvalContext<'a> {
             .iter()
             .map(|arg| self.static_type_expr_of(arg))
             .collect::<Vec<_>>();
-        let callable = self.eval_expr(func)?;
+        // chelis#721: when the callee names a `(fn …)`-bodied top-level def and
+        // is NOT a local binding, resolve it directly to its Closure. A nullary
+        // (or otherwise DAG-lowerable) def folds to a constant that lands in
+        // `tensor_bindings`; `eval_var`'s precedence returns that Tensor BEFORE
+        // `resolve_top_level` (eval.rs eval_var), so `eval_expr(func)` here would
+        // hand back the folded Tensor and `apply_*` would reject it as "value is
+        // not callable". Going through `resolve_top_level` bypasses only the
+        // tensor_bindings shadow — a local binding (checked here) still wins, and
+        // a bare non-applied `(var f)` keeps today's eval_var behavior.
+        let callable = if let Some(callee) = var_name(func)
+            && !self.bindings.contains_key(callee)
+            && let Some((resolved, def_expr)) = self.lookup_top_level_def(callee)
+            && matches!(&def_expr, Expr::List(def_list, _) if tag(def_list) == Some("fn"))
+        {
+            self.resolve_top_level(&resolved)?
+        } else {
+            self.eval_expr(func)?
+        };
         self.apply_resolved_callable_with_arg_types(callable, args, &arg_type_exprs)
     }
 
