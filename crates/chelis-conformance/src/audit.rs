@@ -178,6 +178,13 @@ impl Ctx {
     }
 }
 
+/// Sentinel diagnostic prefix emitted by the `check_row` catch-all for a
+/// MANIFEST key with no dispatch arm. `tests/audit_negative_parity.rs` audits a
+/// scaffolded shell and asserts no row ever carries it, so a MANIFEST row added
+/// without a real check fails the build instead of silently reporting an
+/// unimplemented `Manual` that reads as "reviewed, nothing to flag" (chelis#739).
+pub const NO_CHECK_IMPLEMENTED_PREFIX: &str = "no check implemented for row key";
+
 fn check_row(row: &ContractRow, ctx: &Ctx) -> RowResult {
     // since_version gating: a stale shell is spared rows added *after* its pin
     // (canary-safe), but never the baseline rows. The pin is floored at the
@@ -225,7 +232,7 @@ fn check_row(row: &ContractRow, ctx: &Ctx) -> RowResult {
         "chelis-src" => check_chelis_src(ctx),
         other => (
             Verdict::Manual,
-            format!("no check implemented for row key {other:?}"),
+            format!("{NO_CHECK_IMPLEMENTED_PREFIX} {other:?}"),
             String::new(),
             Vec::new(),
         ),
@@ -266,6 +273,15 @@ fn fail(diag: impl Into<String>, fix: impl Into<String>) -> Check {
 /// `conform audit --explain` (chelis#654).
 fn fail_ex(diag: impl Into<String>, fix: impl Into<String>, evidence: Vec<String>) -> Check {
     (Verdict::Fail, diag.into(), fix.into(), evidence)
+}
+
+/// A `Manual` verdict with a non-empty diagnostic (and optional `--explain`
+/// evidence): the honest "cannot be decided mechanically, a human must look"
+/// outcome. The diagnostic MUST be non-empty — `print_audit_report` renders a
+/// row's detail only when its diagnostic is non-empty, so an empty-diagnostic
+/// `Manual` prints nothing and reads as a silent pass (chelis#739).
+fn manual_ex(diag: impl Into<String>, fix: impl Into<String>, evidence: Vec<String>) -> Check {
+    (Verdict::Manual, diag.into(), fix.into(), evidence)
 }
 
 /// Whether `text` has a markdown heading line (any level) containing `needle`.
@@ -440,6 +456,28 @@ fn check_chelis_surface(ctx: &Ctx) -> Check {
     )
 }
 
+/// Row 8 (§4): `docs/UPSTREAM_BUGS.md` exists, carries the four required
+/// sections, and — the cite-by-number machine check added for chelis#739 —
+/// every confidently parsed entry under §Actively blocking / §Tracking /
+/// §Parked cites its bug as `chelis#NNN` or a `docs/issue_drafts/<name>` draft
+/// path, never a prose name. §4 makes this a MUST ("cite by number … never by a
+/// prose name"): a prose-name citation is invisible to every mechanical audit,
+/// which is the exact failure the contract's own §4 rationale cites (School
+/// carried a "generic-callback-unification limit" through three docs and a
+/// shipped PR while chelis#293 was already fixed in the pin it was built on).
+///
+/// **Entry granularity** is a documented heuristic: within a section, an *entry*
+/// is a top-level markdown list item (`-`/`*`/`+`, or `N.`/`N)`, indented ≤3
+/// spaces) or a sub-heading (any heading deeper than the section heading, i.e.
+/// `###`+ under a `##` section). Nested/indented lines and prose paragraphs
+/// belong to the entry above them; the `(none yet)` placeholder and blank lines
+/// are not entries. §Archived is exempt entirely — its entries are closed
+/// history, not live narrowings.
+///
+/// A section that holds non-placeholder content but no parseable entry at all is
+/// reported `Manual` (its shape is not machine-decidable), never a mechanical
+/// `Pass` — a mechanical `Pass` there would launder unreviewed prose as
+/// conformant.
 fn check_upstream_bugs(ctx: &Ctx) -> Check {
     let Some(bugs) = ctx.read("docs/UPSTREAM_BUGS.md") else {
         return fail(
@@ -447,22 +485,228 @@ fn check_upstream_bugs(ctx: &Ctx) -> Check {
             "add docs/UPSTREAM_BUGS.md with the four required sections",
         );
     };
+    // Structural gate first: the four sections must be present as headings.
     let required = ["Actively blocking", "Tracking", "Parked", "Archived"];
     let missing: Vec<&str> = required
         .iter()
         .copied()
         .filter(|s| !has_heading(&bugs, s))
         .collect();
-    if missing.is_empty() {
-        pass()
-    } else {
-        fail(
+    if !missing.is_empty() {
+        return fail(
             format!(
                 "docs/UPSTREAM_BUGS.md missing section(s): {}",
                 missing.join(", ")
             ),
             "add the §Actively blocking / §Tracking / §Parked / §Archived sections",
-        )
+        );
+    }
+
+    // §4 cite-by-number check over the three *live* sections (§Archived exempt).
+    let lines: Vec<&str> = bugs.lines().collect();
+    let mut uncited: Vec<String> = Vec::new();
+    let mut manual_sections: Vec<&str> = Vec::new();
+    let mut manual_evidence: Vec<String> = Vec::new();
+    for section in ["Actively blocking", "Tracking", "Parked"] {
+        // A section whose heading is present per `has_heading` but not locatable
+        // as a real ATX heading (a malformed `#Tracking` with no space) yields no
+        // body; there is nothing well-formed to entry-check, so skip it.
+        let Some(body) = section_body(&lines, section) else {
+            continue;
+        };
+        let entries = parse_bug_entries(&body);
+        if entries.is_empty() {
+            if let Some((line, first)) = first_content_line(&body) {
+                manual_sections.push(section);
+                manual_evidence.push(format!(
+                    "docs/UPSTREAM_BUGS.md:{line}: §{section} content {:?} is not a top-level list item or sub-heading; cannot machine-check its citation",
+                    snippet(first),
+                ));
+            }
+            continue;
+        }
+        for entry in &entries {
+            if scan_citations(&entry.text).is_empty() && !cites_issue_draft(&entry.text) {
+                uncited.push(format!(
+                    "docs/UPSTREAM_BUGS.md:{}: §{section} entry {:?} cites no chelis#NNN or docs/issue_drafts/ path",
+                    entry.line,
+                    snippet(entry.head()),
+                ));
+            }
+        }
+    }
+
+    // A Fail (a confidently-parsed uncited entry) dominates a Manual: it is the
+    // actionable §4 violation. Surface the un-machine-checkable sections in the
+    // same evidence so `--explain` still names them.
+    if !uncited.is_empty() {
+        let mut evidence = uncited;
+        evidence.extend(manual_evidence);
+        let n = evidence
+            .iter()
+            .filter(|e| e.contains("cites no chelis#NNN"))
+            .count();
+        return fail_ex(
+            format!(
+                "docs/UPSTREAM_BUGS.md: {n} entr{} with a prose-name citation, not chelis#NNN / a docs/issue_drafts/ path (§4)",
+                if n == 1 { "y" } else { "ies" },
+            ),
+            "cite every entry by `chelis#NNN` or a `docs/issue_drafts/<name>` draft path at the entry, never a prose name (contract §4)",
+            evidence,
+        );
+    }
+    if !manual_sections.is_empty() {
+        return manual_ex(
+            format!(
+                "docs/UPSTREAM_BUGS.md §{} ha{} content but no parseable entry (top-level list item or sub-heading); §4 cite-by-number cannot be machine-checked there",
+                manual_sections.join(", §"),
+                if manual_sections.len() == 1 {
+                    "s"
+                } else {
+                    "ve"
+                },
+            ),
+            "structure each bug as a top-level list item or sub-heading citing chelis#NNN / a draft path so the §4 cite-by-number rule is machine-checkable",
+            manual_evidence,
+        );
+    }
+    pass()
+}
+
+/// One parsed `docs/UPSTREAM_BUGS.md` entry: its 1-based start line (for
+/// evidence) and its full text (start line plus its continuation lines, joined),
+/// which is what the citation scan runs over so a `chelis#NNN` on a nested line
+/// still covers its entry.
+struct BugEntry {
+    line: usize,
+    text: String,
+}
+
+impl BugEntry {
+    /// The entry's first line (the list-item or sub-heading line itself).
+    fn head(&self) -> &str {
+        self.text.lines().next().unwrap_or("")
+    }
+}
+
+/// The body of the markdown section whose heading contains `needle`, from just
+/// after that heading to just before the next heading of equal-or-shallower
+/// level (or EOF) — so a `###`+ sub-heading stays *inside* a `##` section rather
+/// than closing it. Each body line is paired with its 1-based file line number.
+/// `None` if no ATX heading containing `needle` is found.
+fn section_body<'a>(lines: &[&'a str], needle: &str) -> Option<Vec<(usize, &'a str)>> {
+    let start = lines
+        .iter()
+        .position(|l| heading_level(l).is_some() && l.contains(needle))?;
+    let level = heading_level(lines[start]).unwrap_or(usize::MAX);
+    let mut body = Vec::new();
+    for (i, l) in lines.iter().enumerate().skip(start + 1) {
+        if heading_level(l).is_some_and(|lvl| lvl <= level) {
+            break;
+        }
+        body.push((i + 1, *l));
+    }
+    Some(body)
+}
+
+/// Partition a section body into entries. An entry starts at each entry-start
+/// line and runs until the next entry-start line (or the body end), so its
+/// continuation/nested lines travel with it.
+fn parse_bug_entries(body: &[(usize, &str)]) -> Vec<BugEntry> {
+    let starts: Vec<usize> = body
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, l))| is_bug_entry_start(l))
+        .map(|(pos, _)| pos)
+        .collect();
+    let mut entries = Vec::new();
+    for (k, &s) in starts.iter().enumerate() {
+        let end = starts.get(k + 1).copied().unwrap_or(body.len());
+        let text = body[s..end]
+            .iter()
+            .map(|(_, l)| *l)
+            .collect::<Vec<_>>()
+            .join("\n");
+        entries.push(BugEntry {
+            line: body[s].0,
+            text,
+        });
+    }
+    entries
+}
+
+/// Whether `line` begins a bug entry: a sub-heading (any ATX heading — the body
+/// already excludes headings at or above the section level, so every heading it
+/// contains is a sub-heading) or a top-level list item.
+fn is_bug_entry_start(line: &str) -> bool {
+    heading_level(line).is_some() || is_top_list_item(line)
+}
+
+/// The first non-blank, non-`(none yet)` line of a section body and its 1-based
+/// line number, or `None` when the section is empty/placeholder-only.
+fn first_content_line<'a>(body: &[(usize, &'a str)]) -> Option<(usize, &'a str)> {
+    body.iter().copied().find(|(_, l)| {
+        let t = l.trim();
+        !t.is_empty() && t != "(none yet)"
+    })
+}
+
+/// The ATX heading level of `line` (count of leading `#`), or `None` if it is
+/// not a heading. A real ATX heading has a space/tab (or nothing) after the run
+/// of `#`, so a bare `#316` is text, not a level-1 heading.
+fn heading_level(line: &str) -> Option<usize> {
+    let t = line.trim_start();
+    let hashes = t.chars().take_while(|&c| c == '#').count();
+    if hashes == 0 {
+        return None;
+    }
+    let after = &t[hashes..];
+    (after.is_empty() || after.starts_with(' ') || after.starts_with('\t')).then_some(hashes)
+}
+
+/// Whether `line` starts a top-level markdown list item — unordered
+/// (`-`/`*`/`+`) or ordered (`N.`/`N)`) — indented no more than 3 spaces. A
+/// more-indented item is a nested continuation of the entry above it, so it is
+/// not itself an entry.
+fn is_top_list_item(line: &str) -> bool {
+    let indent = line.len() - line.trim_start().len();
+    if indent > 3 {
+        return false;
+    }
+    let t = line.trim_start();
+    if let Some(rest) = t.strip_prefix(['-', '*', '+']) {
+        return rest.starts_with(' ') || rest.starts_with('\t') || rest.is_empty();
+    }
+    let digits = t.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digits > 0 {
+        let after = &t[digits..];
+        return after.starts_with('.') || after.starts_with(')');
+    }
+    false
+}
+
+/// Whether `text` cites a parked issue draft by path — a reference to a file
+/// under `docs/issue_drafts/`, the §4-sanctioned alternative to a `chelis#NNN`
+/// number for a not-yet-filed bug. The directory prefix must be followed by a
+/// filename character, so a bare mention of the directory itself does not count.
+fn cites_issue_draft(text: &str) -> bool {
+    const PREFIX: &str = "docs/issue_drafts/";
+    text.match_indices(PREFIX).any(|(i, _)| {
+        text[i + PREFIX.len()..]
+            .chars()
+            .next()
+            .is_some_and(|c| !c.is_whitespace() && !matches!(c, ')' | ']' | '/'))
+    })
+}
+
+/// A one-line, length-capped snippet of `line` for an evidence message.
+fn snippet(line: &str) -> String {
+    let t = line.trim();
+    let capped: String = t.chars().take(60).collect();
+    if t.chars().count() > 60 {
+        format!("{capped}…")
+    } else {
+        capped
     }
 }
 
@@ -1262,6 +1506,79 @@ mod tests {
         assert_eq!(cites("blocked on chelis #316"), vec!["chelis#316"]);
         assert_eq!(cites("see chelis # 42 here"), vec!["chelis#42"]);
         assert!(cites("chelis\n#316").is_empty());
+    }
+
+    #[test]
+    fn heading_level_is_atx_strict() {
+        assert_eq!(heading_level("# Title"), Some(1));
+        assert_eq!(heading_level("## Tracking"), Some(2));
+        assert_eq!(heading_level("### chelis#316 foo"), Some(3));
+        assert_eq!(heading_level("   ## indented heading"), Some(2));
+        // A bare `#316` (no space after the hashes) is text, not a heading.
+        assert_eq!(heading_level("#316 is the bug"), None);
+        assert_eq!(heading_level("no heading here"), None);
+        assert_eq!(heading_level("- a list item"), None);
+    }
+
+    #[test]
+    fn top_list_item_detection() {
+        assert!(is_top_list_item("- bug"));
+        assert!(is_top_list_item("* bug"));
+        assert!(is_top_list_item("+ bug"));
+        assert!(is_top_list_item("  - indented ≤3"));
+        assert!(is_top_list_item("1. ordered"));
+        assert!(is_top_list_item("12) ordered paren"));
+        // Nested items (>3 spaces) belong to their parent entry, not new entries.
+        assert!(!is_top_list_item("    - deeply nested"));
+        // A horizontal rule / plain dash is not a list item.
+        assert!(!is_top_list_item("---"));
+        assert!(!is_top_list_item("prose line"));
+        assert!(!is_top_list_item("(none yet)"));
+    }
+
+    #[test]
+    fn issue_draft_path_is_cited() {
+        assert!(cites_issue_draft(
+            "parked as docs/issue_drafts/foo.md until filed"
+        ));
+        assert!(cites_issue_draft(
+            "see (docs/issue_drafts/callback-unif.md)"
+        ));
+        // A bare directory mention (no filename after the slash) is not a cite.
+        assert!(!cites_issue_draft(
+            "filed under docs/issue_drafts/ somewhere"
+        ));
+        assert!(!cites_issue_draft("no draft reference at all"));
+    }
+
+    #[test]
+    fn section_body_stops_at_next_same_level_heading() {
+        let doc = "# T\n\n## Tracking\n\n- a\n### sub of a\ntext\n\n## Parked\n\n(none yet)\n";
+        let lines: Vec<&str> = doc.lines().collect();
+        let body = section_body(&lines, "Tracking").unwrap();
+        // The `### sub of a` is *inside* Tracking (deeper than `##`); the body
+        // ends at `## Parked`.
+        let joined = body.iter().map(|(_, l)| *l).collect::<Vec<_>>().join("|");
+        assert_eq!(joined, "|- a|### sub of a|text|");
+    }
+
+    #[test]
+    fn bug_entries_partition_by_start_line() {
+        let doc =
+            "## Tracking\n\n- first entry\n  continuation\n- second (chelis#5)\n### third\nbody\n";
+        let lines: Vec<&str> = doc.lines().collect();
+        let body = section_body(&lines, "Tracking").unwrap();
+        let entries = parse_bug_entries(&body);
+        assert_eq!(entries.len(), 3);
+        // A nested continuation line travels with its entry.
+        assert!(entries[0].text.contains("continuation"));
+        // The citation on the second entry is found by the whole-entry scan.
+        let toks: Vec<String> = scan_citations(&entries[1].text)
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect();
+        assert_eq!(toks, vec!["chelis#5".to_string()]);
+        assert_eq!(entries[2].head().trim(), "### third");
     }
 
     #[test]
