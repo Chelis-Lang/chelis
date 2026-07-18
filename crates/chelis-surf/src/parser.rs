@@ -19,6 +19,11 @@ pub enum ParseError {
     },
     #[error("non-associative operator chained at byte {offset}")]
     NonAssocChain { offset: usize },
+    #[error(
+        "expression statement must be bound: a block is bindings followed by one tail expression; \
+         bind the value with `_ = <expr>` or move it to tail position (byte {offset})"
+    )]
+    BareStatementInBlock { offset: usize },
 }
 
 struct Parser {
@@ -2039,7 +2044,11 @@ impl Parser {
             let end = self.expect(&TokenKind::RBrace)?;
             return Ok(Expr::Par(exprs, start.merge(end.span)));
         }
-        exprs.push(self.parse_expr(0)?);
+        // chelis#706 family: par items are Sep-bounded, so a bare
+        // `par { f(x)\n g(y) }` no longer cross-newline-juxtaposes into a
+        // single task; the newline-only case falls through to the loop's
+        // `expected separator (`;`)` error below.
+        exprs.push(self.parse_expr_until_block_separator()?);
         loop {
             while matches!(self.raw_peek(), TokenKind::Newline) {
                 self.advance_raw();
@@ -2061,7 +2070,7 @@ impl Parser {
             if *self.peek() == TokenKind::RBrace {
                 break;
             }
-            exprs.push(self.parse_expr(0)?);
+            exprs.push(self.parse_expr_until_block_separator()?);
         }
         let end = self.expect(&TokenKind::RBrace)?;
         Ok(Expr::Par(exprs, start.merge(end.span)))
@@ -2082,8 +2091,31 @@ impl Parser {
                 });
             }
         }
-        let expr = self.parse_expr(0)?;
+        // The tail is Sep-bounded exactly like a binding value
+        // (`BlockBody <- (BlockBinding Sep)* Expr`, spec/02 §BlockBody):
+        // a top-level newline/`;` ends it unless the next line begins `|>`
+        // or the break is inside ()/[]/{}. An empty tail keeps today's
+        // "expected expression" shape — routing `{ x = 1 }` (RBrace here)
+        // through the nested parser would report Eof and disturb the
+        // pinned message, so guard it explicitly first.
+        if *self.peek() == TokenKind::RBrace {
+            return Err(ParseError::Expected {
+                expected: "expression".into(),
+                found: format!("{:?}", self.peek()),
+                offset: self.current_offset(),
+            });
+        }
+        let expr = self.parse_expr_until_block_separator()?;
         self.consume_block_separators();
+        if *self.peek() != TokenKind::RBrace {
+            // A second top-level expression after the tail: bare non-tail
+            // statements silently juxtaposed into an application before
+            // chelis#706. `current_offset` skips newlines, so this lands
+            // on the stray statement's first token.
+            return Err(ParseError::BareStatementInBlock {
+                offset: self.current_offset(),
+            });
+        }
         let end = self.expect(&TokenKind::RBrace)?;
         Ok(Expr::Block(bindings, Box::new(expr), start.merge(end.span)))
     }
@@ -3350,6 +3382,272 @@ mod tests {
                 assert_eq!(exprs.len(), 2);
             }
             _ => panic!("expected Par, got {e:?}"),
+        }
+    }
+
+    // ===== chelis#706: bounded block tail + bare-statement diagnostic =====
+    //
+    // The tail expression, like a binding value, is Sep-bounded: a
+    // top-level newline/`;` ends it unless the next line begins `|>` or
+    // the break is inside ()/[]/{}. A second top-level expression after
+    // the tail is rejected (previously it silently cross-newline
+    // juxtaposed into an application).
+
+    #[test]
+    fn block_tail_multiline_leading_pipe_pipeline_parses() {
+        // Positive #1: tail-only multi-line pipeline stays one Pipe tail.
+        let e = body(
+            "def f(x) = {
+                x
+                |> g
+                |> h
+            }",
+        );
+        match e {
+            Expr::Block(bindings, body, _) => {
+                assert!(bindings.is_empty());
+                assert!(
+                    matches!(*body, Expr::Pipe(_, _, _)),
+                    "tail should be a pipeline: {body:?}"
+                );
+            }
+            _ => panic!("expected Block, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn block_bindings_then_multiline_pipe_tail_parses() {
+        // Positive #2: bindings followed by a multi-line pipe tail (mlp.ch shape).
+        let e = body(
+            "def f(logits, labels) = {
+                h = relu(logits)
+                softmax(h, 0)
+                |> log
+                |> mul(labels)
+            }",
+        );
+        match e {
+            Expr::Block(bindings, body, _) => {
+                assert_eq!(bindings.len(), 1);
+                assert!(
+                    matches!(*body, Expr::Pipe(_, _, _)),
+                    "tail should be a pipeline: {body:?}"
+                );
+            }
+            _ => panic!("expected Block, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn block_tail_multiline_match_arms_parses() {
+        // Positive #3: tail is a match whose arms span multiple lines;
+        // the arm-separating newlines are brace-guarded.
+        let e = body(
+            "def f(x) = {
+                match x with {
+                    | Some y => y
+                    | None => 0
+                }
+            }",
+        );
+        match e {
+            Expr::Block(bindings, body, _) => {
+                assert!(bindings.is_empty());
+                match *body {
+                    Expr::Match(_, ref arms, _) => assert_eq!(arms.len(), 2),
+                    ref other => panic!("expected Match tail, got {other:?}"),
+                }
+            }
+            _ => panic!("expected Block, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn block_tail_newlines_inside_parens_and_list_parse() {
+        // Positive #4: newlines inside ()/[] in the tail are interior,
+        // not separators.
+        let e = body(
+            "def f(a, b, c) = {
+                g(
+                    a,
+                    [
+                        b,
+                        c
+                    ]
+                )
+            }",
+        );
+        match e {
+            Expr::Block(bindings, body, _) => {
+                assert!(bindings.is_empty());
+                assert!(
+                    matches!(*body, Expr::Apply(_, _, _)),
+                    "tail should be a call: {body:?}"
+                );
+            }
+            _ => panic!("expected Block, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn block_tail_nested_block_parses() {
+        // Positive #5a: tail is itself a nested block.
+        let e = body(
+            "def f(x) = {
+                y = 1
+                {
+                    z = 2
+                    z
+                }
+            }",
+        );
+        match e {
+            Expr::Block(bindings, body, _) => {
+                assert_eq!(bindings.len(), 1);
+                assert!(
+                    matches!(*body, Expr::Block(_, _, _)),
+                    "tail should be a nested block: {body:?}"
+                );
+            }
+            _ => panic!("expected Block, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn with_seed_block_binding_then_tail_parses() {
+        // Positive #5b: parse_with_handler routes through parse_block, so
+        // the bounded tail applies to `with seed(..) { .. }` too.
+        let e = body(
+            "def f(x) = with seed(42) {
+                y = 1
+                f(y)
+            }",
+        );
+        match e {
+            Expr::WithSeed(_, body, _) => match *body {
+                Expr::Block(ref bindings, ref tail, _) => {
+                    assert_eq!(bindings.len(), 1);
+                    assert!(matches!(**tail, Expr::Apply(_, _, _)));
+                }
+                ref other => panic!("expected Block body, got {other:?}"),
+            },
+            _ => panic!("expected WithSeed, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn block_tail_trailing_separator_parses() {
+        // Positive #6: a trailing separator after the tail is fine.
+        let e = body("def f(x) = { g(x); }");
+        match e {
+            Expr::Block(bindings, body, _) => {
+                assert!(bindings.is_empty());
+                assert!(matches!(*body, Expr::Apply(_, _, _)));
+            }
+            _ => panic!("expected Block, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn block_bare_second_statement_is_rejected_at_second_call() {
+        // Negative #8: the #706 reproducer. Two newline-separated calls;
+        // the second is a bare non-tail statement.
+        let src = "def f(a, b, c, d) = {
+                g(a, b)
+                h(c, d)
+            }";
+        let err = p_err(src);
+        let offset = match err {
+            ParseError::BareStatementInBlock { offset } => offset,
+            other => panic!("expected BareStatementInBlock, got {other:?}"),
+        };
+        // Offset lands on the second statement's first token.
+        assert_eq!(offset, src.find("h(c, d)").unwrap());
+        assert!(
+            err.to_string().contains("_ ="),
+            "message should suggest `_ =`: {err}"
+        );
+    }
+
+    #[test]
+    fn block_bare_second_statement_semicolon_is_rejected() {
+        // Negative #9: the explicit-`;` variant upgrades to the same
+        // targeted diagnostic (was a generic "expected RBrace").
+        let src = "def f(x, y) = { g(x); h(y) }";
+        let err = p_err(src);
+        let offset = match err {
+            ParseError::BareStatementInBlock { offset } => offset,
+            other => panic!("expected BareStatementInBlock, got {other:?}"),
+        };
+        assert_eq!(offset, src.find("h(y)").unwrap());
+    }
+
+    #[test]
+    fn block_three_statements_error_at_second() {
+        // Negative #10: three statements -> error at the second, not the third.
+        let src = "def f(a, b, c) = {
+                g(a)
+                h(b)
+                k(c)
+            }";
+        let err = p_err(src);
+        let offset = match err {
+            ParseError::BareStatementInBlock { offset } => offset,
+            other => panic!("expected BareStatementInBlock, got {other:?}"),
+        };
+        assert_eq!(offset, src.find("h(b)").unwrap());
+    }
+
+    #[test]
+    fn block_tail_then_paren_group_is_rejected() {
+        // Negative #11: parens-absorption vector. `g(x)\n(a, b)` must not
+        // juxtapose the tuple onto the call.
+        let src = "def f(x, a, b) = {
+                g(x)
+                (a, b)
+            }";
+        let err = p_err(src);
+        assert!(
+            matches!(err, ParseError::BareStatementInBlock { .. }),
+            "expected BareStatementInBlock, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn par_bare_newline_separated_items_rejected() {
+        // Negative #12: par items are Sep-bounded too; a newline between
+        // items (no `;`) yields the clean separator error, not a silent
+        // one-task collapse.
+        let src = "def f(x, y) -> Unit = par {
+                g(x)
+                h(y)
+            }";
+        let err = p_err(src);
+        match err {
+            ParseError::Expected { ref expected, .. } => {
+                assert!(
+                    expected.contains("separator"),
+                    "expected separator error, got {err:?}"
+                );
+            }
+            other => panic!("expected separator error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn block_no_tail_still_reports_expected_expression() {
+        // Negative #13: a block with only a binding and no tail keeps the
+        // pinned "expected expression" shape (not BareStatementInBlock).
+        let src = "def f() = { x = 1 }";
+        let err = p_err(src);
+        match err {
+            ParseError::Expected { ref expected, .. } => {
+                assert!(
+                    expected.contains("expression"),
+                    "expected expression error, got {err:?}"
+                );
+            }
+            other => panic!("expected `expression` error, got {other:?}"),
         }
     }
 

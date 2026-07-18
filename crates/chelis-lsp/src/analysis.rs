@@ -1294,7 +1294,8 @@ fn parse_error_offset(text: &str, err: &chelis_surf::parser::ParseError) -> usiz
         chelis_surf::parser::ParseError::Lex(_) => 0,
         chelis_surf::parser::ParseError::UnexpectedEof => text.len(),
         chelis_surf::parser::ParseError::Expected { offset, .. }
-        | chelis_surf::parser::ParseError::NonAssocChain { offset } => *offset,
+        | chelis_surf::parser::ParseError::NonAssocChain { offset }
+        | chelis_surf::parser::ParseError::BareStatementInBlock { offset } => *offset,
     }
 }
 

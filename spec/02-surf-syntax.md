@@ -432,7 +432,7 @@ Planned remaining Phase 3 language-completeness additions:
 
 ### P5: Blocks and Sequencing
 
-Braces define blocks. Inside blocks, bindings are sequential. Newlines and semicolons are both valid separators. The final expression is the block's value.
+Braces define blocks. Inside blocks, bindings are sequential. Newlines and semicolons are both valid separators. The final expression is the block's value. That tail expression, like a binding value, is separator-bounded: a top-level newline or `;` ends it unless the next line begins `|>` or the break is inside `()`/`[]`/`{}`. A block is therefore bindings followed by exactly one tail expression; a bare non-tail expression statement is rejected — bind it with `_ = <expr>` or move it to tail position (chelis#706).
 
 ```
 {
@@ -764,13 +764,15 @@ Double-quoted: `"hello world"`. Escapes: `\"`, `\\`, `\n`, `\t`, `\r`, `\0`. No 
 
 ### P12: Whitespace and Line Continuation
 
-Newlines are NOT significant. They are whitespace. Any expression can break across lines freely:
+Within a single expression, newlines are NOT significant — they are whitespace, and an expression can break across lines freely:
 
 ```
 x
   |> transform_a
   |> transform_b
 ```
+
+The one qualification is at separator boundaries in a sequencing context (block bindings, block tail, declaration bodies): there, a top-level newline acts as a `Sep` and ends the current expression unless the next line begins `|>` or the break is inside `()`/`[]`/`{}`. This is the same boundary rule that binding values and declaration bodies already follow (see P5 and `BlockBody`); it is what makes a bare non-tail statement a rejected juxtaposition rather than a silent application (chelis#706). The leading-`|>` continuation above is exactly the escape hatch that keeps a multi-line pipeline as one expression.
 
 Trailing commas allowed everywhere commas appear: parameter lists, argument lists, record fields, import lists, tuples. Parser ignores trailing comma before closing delimiter.
 
@@ -1023,6 +1025,11 @@ BlockExpr     <- '{' S BlockBody S '}'
 BlockBody     <- (BlockBinding Sep)* Expr
 BlockBinding  <- LetPattern S '=' S Expr
 Sep           <- (S ';' S) / (S Newline S)
+# The tail Expr, like a BlockBinding value, is Sep-bounded: a top-level
+# newline or ';' ends it unless the next line begins '|>' or the break is
+# inside ()/[]/{}. There is exactly one tail (no `Expr (Sep Expr)*`), so a
+# second top-level expression is a bare non-tail statement and is rejected
+# — bind it with `_ = <expr>` or move it to tail position (chelis#706).
 
 TransformExpr <- TransformKw S '(' S Expr
                   (S ',' S TransformArg)? (S ',')? S ')'
