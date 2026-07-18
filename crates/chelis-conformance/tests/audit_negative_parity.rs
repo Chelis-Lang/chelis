@@ -237,6 +237,41 @@ fn sync_prunes_extra_skill_content() {
     assert!(audit::audit(&root).ok(), "audit green after prune");
 }
 
+// Row 8 (§4) cite-by-number has its own adversarial matrix in
+// `tests/row8_citation_matrix.rs` (prose-name Fail, chelis#NNN / draft-path
+// Pass, per-entry partition, sub-heading + ordered-list entries, nested-item
+// handling, the honest-Manual fallback, §Archived exemption, and the
+// malformed-heading fail-closed case). Kept there rather than duplicated here.
+
+/// Tripwire: a MANIFEST row added without a `check_row` dispatch arm falls
+/// through to the catch-all `Manual`, silently reporting "no check implemented"
+/// instead of a real verdict. Auditing a scaffolded shell exercises every row
+/// (the audit iterates all of MANIFEST); assert none carries the catch-all
+/// sentinel, so adding a row without a check fails the build (chelis#739).
+///
+/// Boundary (chelis#739 red team, LOW): this is pin-scoped. `check_row` applies
+/// `since_version` gating *before* the dispatch match, so a future row whose
+/// `since_version` is above the scaffold's pin returns `Na` and never reaches
+/// its arm — the tripwire would not exercise it. Today every row's
+/// `since_version` is the contract baseline, so all 18 are exercised; a
+/// future-dated row would need its own coverage.
+#[test]
+fn every_manifest_key_hits_a_real_arm() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "arms");
+    let report = audit::audit(&root);
+    let orphans: Vec<String> = report
+        .rows
+        .iter()
+        .filter(|r| r.diagnostic.starts_with(audit::NO_CHECK_IMPLEMENTED_PREFIX))
+        .map(|r| format!("row {} ({})", r.row, r.key))
+        .collect();
+    assert!(
+        orphans.is_empty(),
+        "MANIFEST rows with no check_row arm (fell through to the catch-all): {orphans:?}"
+    );
+}
+
 /// M3: row 18 applicability is driven by the registry's authoritative
 /// `links_chelis_crates` flag, not a Cargo.toml guess.
 #[test]

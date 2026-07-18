@@ -184,8 +184,19 @@ pub const MANIFEST: &[ContractRow] = &[
     },
     ContractRow {
         row: 14,
+        // Narrowed to what the audit actually enforces (chelis#739): §8 also
+        // requires *mirrored* `.claude/commands` + `.codex/commands` wrappers with
+        // the `red-team` alias wired to `redteam-exec`, but neither `conform init`
+        // nor `sync` materializes command dirs today, so a fresh scaffold has none
+        // and there is nothing to byte-check. Making commands a checked artifact
+        // requires embedding a canonical command set (parallel to the skills
+        // machinery) so `init`/`sync` create them and the audit can enforce the
+        // mirror — deferred as a follow-up. The §8 / §11 contract text keeps the
+        // full requirement; this string reflects current enforcement. The
+        // `manifest_matches_contract_doc` tripwire compares only row/tier/section,
+        // so this description narrowing does not drift the machine form.
         key: "vendored-skills",
-        artifact: "Vendored shared skills + symlinked skill dirs + mirrored commands",
+        artifact: "Vendored shared skills + symlinked skill dirs",
         tier: Tier::Must,
         section: "§8",
         since_version: CONTRACT_BASELINE_VERSION,
