@@ -237,131 +237,24 @@ fn sync_prunes_extra_skill_content() {
     assert!(audit::audit(&root).ok(), "audit green after prune");
 }
 
-// ---------------------------------------------------------------- row 8 (§4)
-
-/// Overwrite `docs/UPSTREAM_BUGS.md` keeping the four required section headings,
-/// with the §Tracking and §Archived bodies supplied by the caller. The other two
-/// live sections stay at the `(none yet)` placeholder.
-fn write_upstream_bugs(root: &Path, tracking: &str, archived: &str) {
-    let doc = format!(
-        "# Upstream Bugs\n\nCite by `chelis#NNN`.\n\n\
-         ## Actively blocking\n\n(none yet)\n\n\
-         ## Tracking\n\n{tracking}\n\n\
-         ## Parked\n\n(none yet)\n\n\
-         ## Archived\n\n{archived}\n"
-    );
-    std::fs::write(root.join("docs/UPSTREAM_BUGS.md"), doc).unwrap();
-}
-
-/// §4: a bug entry named only in prose (no `chelis#NNN`, no draft path) is
-/// invisible to a mechanical audit — the exact failure row 8 now catches.
-#[test]
-fn prose_name_upstream_bug_fails_row_8() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = stamp(tmp.path(), "u8prose");
-    write_upstream_bugs(
-        &root,
-        "- generic-callback-unification limit blocks the training loop",
-        "(none yet)",
-    );
-
-    let report = audit::audit(&root);
-    assert!(!report.ok(), "a prose-name entry must fail the audit");
-    assert_eq!(verdict_of(&report, "upstream-bugs"), Verdict::Fail);
-    let diag = diagnostic_of(&report, "upstream-bugs");
-    assert!(diag.contains("prose-name"), "diag was: {diag}");
-}
-
-/// A `chelis#NNN` citation on the entry satisfies §4.
-#[test]
-fn chelis_number_citation_passes_row_8() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = stamp(tmp.path(), "u8num");
-    write_upstream_bugs(
-        &root,
-        "- generic-callback-unification limit (chelis#293); frozen param",
-        "(none yet)",
-    );
-
-    let report = audit::audit(&root);
-    assert_eq!(verdict_of(&report, "upstream-bugs"), Verdict::Pass);
-    assert!(diagnostic_of(&report, "upstream-bugs").is_empty());
-    assert!(report.ok());
-}
-
-/// A parked `docs/issue_drafts/<name>` draft path is the §4-sanctioned
-/// alternative to a filed number and also satisfies the check.
-#[test]
-fn issue_draft_path_citation_passes_row_8() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = stamp(tmp.path(), "u8draft");
-    write_upstream_bugs(
-        &root,
-        "- frobnicator gap; parked as docs/issue_drafts/frobnicator.md until filed",
-        "(none yet)",
-    );
-
-    let report = audit::audit(&root);
-    assert_eq!(verdict_of(&report, "upstream-bugs"), Verdict::Pass);
-    assert!(report.ok());
-}
-
-/// A section holding prose but no parseable entry is honest `Manual` (a human
-/// must confirm the citations) with a non-empty diagnostic — never a mechanical
-/// `Pass` that would launder unreviewed prose, and never a gating `Fail`.
-#[test]
-fn unparseable_section_is_manual_row_8() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = stamp(tmp.path(), "u8manual");
-    write_upstream_bugs(
-        &root,
-        "We are tracking a few suspected issues but have not filed them yet.",
-        "(none yet)",
-    );
-
-    let report = audit::audit(&root);
-    assert_eq!(verdict_of(&report, "upstream-bugs"), Verdict::Manual);
-    let diag = diagnostic_of(&report, "upstream-bugs");
-    assert!(
-        !diag.is_empty(),
-        "a Manual must carry a non-empty diagnostic"
-    );
-    assert!(diag.contains("Tracking"), "diag was: {diag}");
-    // Manual on a MUST row does not gate: the rest of the shell is conformant.
-    assert!(report.ok(), "an honest Manual must not fail the audit");
-}
-
-/// §Archived is closed history, exempt from the cite-by-number check: a
-/// prose-named archived entry does not fail row 8.
-#[test]
-fn archived_section_is_exempt_row_8() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = stamp(tmp.path(), "u8arch");
-    write_upstream_bugs(
-        &root,
-        "(none yet)",
-        "- old generic-callback limit, closed long ago (prose name, no number)",
-    );
-
-    let report = audit::audit(&root);
-    assert_eq!(verdict_of(&report, "upstream-bugs"), Verdict::Pass);
-    assert!(report.ok());
-}
-
-/// The freshly scaffolded `(none yet)` placeholder body passes row 8 cleanly.
-#[test]
-fn scaffolded_upstream_bugs_passes_row_8() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = stamp(tmp.path(), "u8fresh");
-    let report = audit::audit(&root);
-    assert_eq!(verdict_of(&report, "upstream-bugs"), Verdict::Pass);
-}
+// Row 8 (§4) cite-by-number has its own adversarial matrix in
+// `tests/row8_citation_matrix.rs` (prose-name Fail, chelis#NNN / draft-path
+// Pass, per-entry partition, sub-heading + ordered-list entries, nested-item
+// handling, the honest-Manual fallback, §Archived exemption, and the
+// malformed-heading fail-closed case). Kept there rather than duplicated here.
 
 /// Tripwire: a MANIFEST row added without a `check_row` dispatch arm falls
 /// through to the catch-all `Manual`, silently reporting "no check implemented"
 /// instead of a real verdict. Auditing a scaffolded shell exercises every row
 /// (the audit iterates all of MANIFEST); assert none carries the catch-all
 /// sentinel, so adding a row without a check fails the build (chelis#739).
+///
+/// Boundary (chelis#739 red team, LOW): this is pin-scoped. `check_row` applies
+/// `since_version` gating *before* the dispatch match, so a future row whose
+/// `since_version` is above the scaffold's pin returns `Na` and never reaches
+/// its arm — the tripwire would not exercise it. Today every row's
+/// `since_version` is the contract baseline, so all 18 are exercised; a
+/// future-dated row would need its own coverage.
 #[test]
 fn every_manifest_key_hits_a_real_arm() {
     let tmp = tempfile::tempdir().unwrap();

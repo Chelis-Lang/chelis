@@ -485,32 +485,39 @@ fn check_upstream_bugs(ctx: &Ctx) -> Check {
             "add docs/UPSTREAM_BUGS.md with the four required sections",
         );
     };
-    // Structural gate first: the four sections must be present as headings.
+    // Structural gate: the four sections must be present as *well-formed ATX
+    // headings*. This uses the same strict `section_body` locator the citation
+    // loop below uses, so the gate and the loop can never disagree. A lenient
+    // `has_heading` (bare `starts_with('#')`) used to accept a malformed
+    // `##Actively blocking` (no space) that `section_body` then could not locate,
+    // and the loop silently skipped that section's entries — a machine
+    // false-green of the exact class this row exists to kill (chelis#739 red
+    // team). A malformed heading now fails closed here.
+    let lines: Vec<&str> = bugs.lines().collect();
     let required = ["Actively blocking", "Tracking", "Parked", "Archived"];
     let missing: Vec<&str> = required
         .iter()
         .copied()
-        .filter(|s| !has_heading(&bugs, s))
+        .filter(|s| section_body(&lines, s).is_none())
         .collect();
     if !missing.is_empty() {
         return fail(
             format!(
-                "docs/UPSTREAM_BUGS.md missing section(s): {}",
+                "docs/UPSTREAM_BUGS.md missing or malformed section heading(s): {}",
                 missing.join(", ")
             ),
-            "add the §Actively blocking / §Tracking / §Parked / §Archived sections",
+            "add each as a well-formed ATX heading (e.g. `## Actively blocking`, with a space after the `#`)",
         );
     }
 
     // §4 cite-by-number check over the three *live* sections (§Archived exempt).
-    let lines: Vec<&str> = bugs.lines().collect();
     let mut uncited: Vec<String> = Vec::new();
     let mut manual_sections: Vec<&str> = Vec::new();
     let mut manual_evidence: Vec<String> = Vec::new();
     for section in ["Actively blocking", "Tracking", "Parked"] {
-        // A section whose heading is present per `has_heading` but not locatable
-        // as a real ATX heading (a malformed `#Tracking` with no space) yields no
-        // body; there is nothing well-formed to entry-check, so skip it.
+        // Unreachable in practice — each live section passed the strict gate
+        // above, so `section_body` resolves it here too. Kept as a fail-closed
+        // guard: an unlocatable section is skipped, never silently passed.
         let Some(body) = section_body(&lines, section) else {
             continue;
         };
