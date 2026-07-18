@@ -1353,6 +1353,48 @@ fn fn_typed_top_level_binding_emits_no_root_issue_750() {
     }
 }
 
+/// chelis#750 (predicate rescue): a def-call root ALONGSIDE a
+/// direct-construction root, with NO `print`. The direct-construction root
+/// (`rb = to_tensor([...])`) forces a host `main` on its own (it is never
+/// DAG-lowered), so `program_emits_host_main` is true and the def-call root
+/// (`ra = mk()`) must be rescued too. Before chelis#750 the compiled lane
+/// emitted ONLY the direct root and silently dropped the def-call root; both
+/// must now render, byte-identical to eval, with full line-count parity.
+/// This is the mixed-root face of the fix (the pure def-call-only,
+/// no-`print` program stays on the kernel lane and is out of scope).
+#[test]
+fn c_defcall_root_rescued_beside_direct_root_issue_750() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    let program = "module M.Main\n\
+         def mk() -> tensor[3, f32] = to_tensor([1.0, 2.0, 3.0])\n\
+         ra = mk()\n\
+         rb = to_tensor([9.0, 8.0])\n";
+    let eval_out = eval_stdout(program).expect("eval");
+    let c_out = c_stdout(program, "issue750_mixed").expect("C lane");
+
+    for root in [
+        "ra = tensor(shape=[3], data=[1.0, 2.0, 3.0])",
+        "rb = tensor(shape=[2], data=[9.0, 8.0])",
+    ] {
+        assert!(
+            c_out.lines().any(|l| l == root),
+            "chelis#750: the compiled lane must emit `{root}`, got:\n{c_out}"
+        );
+        assert!(
+            eval_out.lines().any(|l| l == root),
+            "chelis#750: eval must emit `{root}`, got:\n{eval_out}"
+        );
+    }
+    assert_eq!(
+        eval_out.lines().count(),
+        c_out.lines().count(),
+        "chelis#750: line-count parity broken:\n--- eval ---\n{eval_out}\n--- c ---\n{c_out}"
+    );
+}
+
 // ===========================================================================
 // GREEN - wire rendering (§C2.4, in-capacity set)
 // ===========================================================================
