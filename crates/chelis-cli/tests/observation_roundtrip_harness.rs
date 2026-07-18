@@ -137,18 +137,22 @@ fn c_stdout(program: &str, name: &str) -> Result<String, String> {
 
 /// The exit program. `print` returns unit in BOTH lanes (verified by
 /// execution: print roots render as `name = ()`), so the labeled-root
-/// renderer is exercised by DIRECT value roots (`troot`/`lroot`) while the
-/// print calls exercise the transcript renderer. `troot` inlines the body
-/// because the compiled lane silently DROPS def-call-valued roots that eval
-/// renders (chelis#750; see the count-tolerance note on the assert
-/// helpers).
+/// renderer is exercised by value roots (`troot`/`lroot`) while the print
+/// calls exercise the transcript renderer. `troot = mk()` is a DEF-CALL
+/// value root: the compiled lane used to silently DROP it while eval
+/// rendered it (chelis#750), so this harness inlined the body as a
+/// workaround. chelis#750 is fixed (the host lane now re-attaches a
+/// def-call-valued display root to `emit_main`), so `troot` calls `mk()`
+/// directly and the render-count assertions below pin BOTH lanes to
+/// exactly two tensor / two list renders — this harness is the regression
+/// lock for chelis#750.
 fn exits_program(ret: &str, body: &str) -> String {
     format!(
         "module M.Main\n\
          def mk() -> {ret} = {body}\n\
          shown = print(mk())\n\
          listed = print(to_list(mk()))\n\
-         troot = {body}\n\
+         troot = mk()\n\
          lroot = to_list(mk())\n"
     )
 }
@@ -645,11 +649,18 @@ fn assert_float_exits(
     list_filter: fn(&FRow) -> bool,
     ctx: &str,
 ) {
-    assert_float_print_exits(stdout, w, rows, print_filter, ctx);
+    // Full four-exit programs (`exits_program`) render the print transcript
+    // AND the `troot` value root: exactly two tensor renders.
+    assert_float_print_exits(stdout, w, rows, print_filter, 2, ctx);
     let llines = list_lines(stdout);
-    assert!(
-        (1..=2).contains(&llines.len()),
-        "[{ctx}] expected the transcript (and possibly root) to_list renders, got:\n{stdout}"
+    // chelis#750: exactly two — the `print(to_list(mk()))` transcript line
+    // and the `lroot = [...]` labeled root. Both lanes render both now that
+    // the def-call root drop is fixed; a count other than two is a
+    // regression (a dropped or duplicated root render).
+    assert_eq!(
+        llines.len(),
+        2,
+        "[{ctx}] expected the transcript and root to_list renders, got:\n{stdout}"
     );
     for line in llines {
         let elems = list_payload_elems(line);
@@ -673,21 +684,26 @@ fn assert_float_exits(
 /// The print half alone, for programs whose to_list exit cannot run yet
 /// (the chelis#716 f16/bf16 print cells: to_list of the same tensor aborts,
 /// and each red cell must fail on ITS OWN exit).
+///
+/// `expected_tensor_renders` pins the exact tensor-render count: a full
+/// `exits_program` passes 2 (the `print(mk())` transcript plus the
+/// `troot = tensor(...)` value root — chelis#750 now emits both in both
+/// lanes), while a print-only program (no value root, e.g. the chelis#716
+/// f16/bf16 cells) passes 1. An off-by-one here is a dropped or duplicated
+/// root render.
 fn assert_float_print_exits(
     stdout: &str,
     w: Width,
     rows: &[FRow],
     print_filter: fn(&FRow) -> bool,
+    expected_tensor_renders: usize,
     ctx: &str,
 ) {
     let tlines = tensor_lines(stdout);
-    // 1 or 2: the print transcript is always present; the `troot` render is
-    // absent where the compiled lane drops the root (chelis#750) or where
-    // the program has no value root. Every line that IS rendered must be
-    // faithful.
-    assert!(
-        (1..=2).contains(&tlines.len()),
-        "[{ctx}] expected the transcript (and possibly root) tensor renders, got:\n{stdout}"
+    assert_eq!(
+        tlines.len(),
+        expected_tensor_renders,
+        "[{ctx}] expected {expected_tensor_renders} tensor render(s), got:\n{stdout}"
     );
     for line in tlines {
         let elems = tensor_elems(line);
@@ -710,13 +726,19 @@ fn assert_float_print_exits(
 
 /// Tier 2 over an integer dtype (both exits, both renders).
 fn assert_int_exits(stdout: &str, rows: &[IRow], ctx: &str) {
-    assert!(
-        (1..=2).contains(&tensor_lines(stdout).len()),
-        "[{ctx}] expected the transcript (and possibly root) tensor renders, got:\n{stdout}"
+    // chelis#750: exactly two per exit — the `print(...)` transcript line
+    // and the labeled root (`troot`/`lroot`). The def-call root drop is
+    // fixed, so both lanes render both; a count other than two is a
+    // regression (a dropped or duplicated root render).
+    assert_eq!(
+        tensor_lines(stdout).len(),
+        2,
+        "[{ctx}] expected the transcript and root tensor renders, got:\n{stdout}"
     );
-    assert!(
-        (1..=2).contains(&list_lines(stdout).len()),
-        "[{ctx}] expected the transcript (and possibly root) to_list renders, got:\n{stdout}"
+    assert_eq!(
+        list_lines(stdout).len(),
+        2,
+        "[{ctx}] expected the transcript and root to_list renders, got:\n{stdout}"
     );
     for line in tensor_lines(stdout) {
         let elems = tensor_elems(line);
@@ -996,10 +1018,14 @@ fn eval_scalar_exits_round_trip() {
 /// The scalar print-transcript render of a single `shown = print(expr)`
 /// program. The print root itself renders as `()` (print returns unit) and
 /// is dropped. Scalar VALUE roots are deliberately not driven here: eval
-/// realizes them to rank-0 f64 tensors before rendering (the [#684]/[#687]
-/// noted behavior) and the compiled lane drops def-call roots entirely
-/// (chelis#750), so neither lane offers a bare scalar root
-/// render to hold to §C2.1 - the census records both.
+/// realizes them to rank-0 f64 tensors before rendering (`root = tensor(
+/// shape=[], data=[0.1])`, the [#684]/[#687] noted behavior) while the
+/// compiled lane — now that chelis#750 emits the root rather than dropping
+/// it — renders the same binding as a bare scalar (`root = 0.1`). The two
+/// lanes therefore still disagree on a scalar value root's SHAPE, so there
+/// is no shared bare-scalar root render to hold to §C2.1; the rank-0
+/// realization gap is [#684]/[#687] territory, tracked separately from the
+/// chelis#750 emission fix. The census records both.
 fn scalar_render_lines(stdout: &str) -> Vec<String> {
     let lines: Vec<String> = stdout
         .lines()
@@ -1197,6 +1223,137 @@ fn c_scalar_exits_round_trip() {
 }
 
 // ===========================================================================
+// GREEN - chelis#750: def-call-valued top-level display roots
+//
+// The host lane emits labeled roots ONLY from `host.globals`, and a
+// DAG-lowered non-`fn` value binding (`troot = mk()`) used to be dropped
+// from `host.globals` while eval still rendered it. These pin the fix: the
+// compiled lane now re-attaches such a root to `emit_main`, byte-identical
+// to a direct-construction root of the same value.
+// ===========================================================================
+
+/// chelis#750 (tensor): the issue's exact int8 repro. The def-call value
+/// root `troot = mk()` was silently dropped by the compiled lane; it is now
+/// emitted with the exact stored values (127 / -127 / 0), and its labeled
+/// line is byte-identical to eval's.
+#[test]
+fn c_def_call_tensor_root_matches_eval_issue_750() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    let program = "module M.Main\n\
+         def mk() -> tensor[3, int8] = \
+         to_tensor([cast(127, int8), cast(-127, int8), cast(0, int8)])\n\
+         shown = print(mk())\n\
+         troot = mk()\n";
+    let eval_out = eval_stdout(program).expect("eval");
+    let c_out = c_stdout(program, "issue750_tensor").expect("C lane");
+
+    let expected = "troot = tensor(shape=[3], data=[127.0, -127.0, 0.0])";
+    assert!(
+        c_out.lines().any(|l| l == expected),
+        "chelis#750: the compiled lane must emit the def-call tensor root \
+         `{expected}`, got:\n{c_out}"
+    );
+    // The `troot` render is byte-identical across lanes and both lanes emit
+    // the same number of lines (no silent drop).
+    let eval_troot = eval_out
+        .lines()
+        .find(|l| l.starts_with("troot = "))
+        .expect("eval troot line");
+    let c_troot = c_out
+        .lines()
+        .find(|l| l.starts_with("troot = "))
+        .expect("c troot line");
+    assert_eq!(
+        eval_troot, c_troot,
+        "chelis#750: the troot render diverges between lanes:\n eval: {eval_troot}\n c:    {c_troot}"
+    );
+    assert_eq!(
+        eval_out.lines().count(),
+        c_out.lines().count(),
+        "chelis#750: line-count parity broken:\n--- eval ---\n{eval_out}\n--- c ---\n{c_out}"
+    );
+}
+
+/// chelis#750 (scalar): the issue's exact f64 repro. The def-call value
+/// root `root = run()` was silently dropped by the compiled lane; it is now
+/// emitted as `root = 0.1`, byte-identical to a direct-construction scalar
+/// root of the same value (the acceptance target). Eval realizes the same
+/// binding to a rank-0 f64 tensor (`root = tensor(shape=[], data=[0.1])`),
+/// the [#684]/[#687] rank-0 realization gap tracked separately from this
+/// emission fix — so the lanes agree on VALUE and line COUNT but not on the
+/// scalar root's SHAPE.
+#[test]
+fn c_def_call_scalar_root_emitted_issue_750() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    let program = "module M.Main\n\
+         def run() -> f64 = cast(0.1, f64)\n\
+         shown = print(run())\n\
+         root = run()\n";
+    let eval_out = eval_stdout(program).expect("eval");
+    let c_out = c_stdout(program, "issue750_scalar").expect("C lane");
+
+    // No longer dropped: the compiled lane emits the scalar root, matching a
+    // direct-construction scalar root of the same value.
+    assert!(
+        c_out.lines().any(|l| l == "root = 0.1"),
+        "chelis#750: the compiled lane must emit the def-call scalar root \
+         `root = 0.1`, got:\n{c_out}"
+    );
+    // Eval realizes the scalar root as a rank-0 tensor ([#684]/[#687]).
+    assert!(
+        eval_out
+            .lines()
+            .any(|l| l == "root = tensor(shape=[], data=[0.1])"),
+        "chelis#750: eval realizes the scalar root as a rank-0 tensor, got:\n{eval_out}"
+    );
+    // The lanes still agree on line count (no silent drop).
+    assert_eq!(
+        eval_out.lines().count(),
+        c_out.lines().count(),
+        "chelis#750: line-count parity broken:\n--- eval ---\n{eval_out}\n--- c ---\n{c_out}"
+    );
+}
+
+/// chelis#750 (negative): a `fn`-typed top-level binding is NOT a display
+/// root — the CLI display-name pass maps `HostType::Fn` to `None`, so
+/// neither lane emits a labeled root for it, even though the #750 rescue now
+/// keeps non-`fn` value roots. The value roots beside it are still emitted,
+/// pinning the rescue to VALUE roots only (a spurious `myfn = <ptr>` root
+/// would be the regression).
+#[test]
+fn fn_typed_top_level_binding_emits_no_root_issue_750() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    let program = "module M.Main\n\
+         def add1(x: f64) -> f64 = add(x, cast(1.0, f64))\n\
+         shown = print(add1(cast(2.0, f64)))\n\
+         troot = to_tensor([cast(1, int8), cast(2, int8)])\n\
+         myfn = add1\n";
+    let eval_out = eval_stdout(program).expect("eval");
+    let c_out = c_stdout(program, "issue750_fnroot").expect("C lane");
+
+    for (lane, out) in [("eval", &eval_out), ("c", &c_out)] {
+        assert!(
+            !out.lines().any(|l| l.starts_with("myfn =")),
+            "[{lane}] chelis#750: a fn-typed binding must not emit a labeled root, got:\n{out}"
+        );
+        assert!(
+            out.lines().any(|l| l.starts_with("troot = tensor(")),
+            "[{lane}] chelis#750: the value root beside the fn binding must still \
+             be emitted, got:\n{out}"
+        );
+    }
+}
+
+// ===========================================================================
 // GREEN - wire rendering (§C2.4, in-capacity set)
 // ===========================================================================
 
@@ -1382,7 +1539,10 @@ fn c_f16_bf16_tensor_print_is_dtype_faithful() {
         );
         let out = c_stdout(&program, &format!("obs_{dt}_print"))
             .unwrap_or_else(|e| panic!("chelis#716: the {dt} program must run: {e}"));
-        assert_float_print_exits(&out, w, rows, all_rows, &format!("c/{dt}"));
+        // Print-only program (no value root): exactly one tensor render, the
+        // `print(mk())` transcript. This cell fails on the VALUE assertion
+        // below (chelis#716 reads f16/bf16 as f32), not on the render count.
+        assert_float_print_exits(&out, w, rows, all_rows, 1, &format!("c/{dt}"));
     }
 }
 
