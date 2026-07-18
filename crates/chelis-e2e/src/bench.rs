@@ -1031,11 +1031,35 @@ fn cpu_runtime_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
 }
 
+/// Resolve the workspace `target/` directory from the running binary rather
+/// than a `CARGO_MANIFEST_DIR`-relative path, so an external
+/// `CARGO_TARGET_DIR` (e.g. a concurrent agent building into
+/// `target/agents/<name>`) is honored. `cpu_runtime_library` is only reached
+/// from the `bench_phase1e` binary, which lives at `<target>/<profile>/<bin>`
+/// (a test binary would instead be at `<target>/<profile>/deps/<bin>`); strip
+/// a trailing `deps` component if present, then drop the profile component to
+/// reach `<target>`. See chelis#747.
+fn target_dir_from_current_exe() -> PathBuf {
+    let exe = std::env::current_exe().expect("could not determine current executable");
+    let mut profile_dir = exe
+        .parent()
+        .expect("executable should have a parent directory");
+    if profile_dir.file_name().and_then(|name| name.to_str()) == Some("deps") {
+        profile_dir = profile_dir
+            .parent()
+            .expect("`deps` directory should have a parent");
+    }
+    profile_dir
+        .parent()
+        .map(PathBuf::from)
+        .expect("profile directory should have a parent target directory")
+}
+
 fn cpu_runtime_library() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let target_dir = target_dir_from_current_exe();
     for dir in [
-        manifest_dir.join("../../target/debug/deps"),
-        manifest_dir.join("../../target/release/deps"),
+        target_dir.join("debug/deps"),
+        target_dir.join("release/deps"),
     ] {
         if let Ok(entries) = fs::read_dir(&dir) {
             for entry in entries.flatten() {

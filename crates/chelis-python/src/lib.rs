@@ -821,14 +821,46 @@ fn find_runtime_library_inner() -> Result<PathBuf, String> {
             .map(|p| p.to_path_buf())
             .unwrap_or_default(),
         exe_dir.parent().map(|p| p.join("lib")).unwrap_or_default(),
+    ] {
+        if !candidate_dir.as_os_str().is_empty()
+            && let Some(found) = find_in_dir(&candidate_dir)
+        {
+            return Ok(found);
+        }
+    }
+
+    // Honor an external `CARGO_TARGET_DIR` (e.g. a concurrent agent building
+    // into `target/agents/<name>`) before the `CARGO_MANIFEST_DIR`-relative
+    // fallbacks below, which assume the default `target/` beside the workspace.
+    // `current_exe()` cannot resolve this for the Python extension — its exe is
+    // the interpreter, not a chelis build artifact. A relative value resolves
+    // against the workspace root. See chelis#747.
+    if let Some(raw) = std::env::var_os("CARGO_TARGET_DIR") {
+        let raw = PathBuf::from(raw);
+        let target_dir = if raw.is_absolute() {
+            raw
+        } else {
+            manifest_dir.join("../..").join(raw)
+        };
+        for candidate_dir in [
+            target_dir.join("debug/deps"),
+            target_dir.join("release/deps"),
+            target_dir.join("debug"),
+            target_dir.join("release"),
+        ] {
+            if let Some(found) = find_in_dir(&candidate_dir) {
+                return Ok(found);
+            }
+        }
+    }
+
+    for candidate_dir in [
         manifest_dir.join("../../target/debug/deps"),
         manifest_dir.join("../../target/release/deps"),
         manifest_dir.join("../../target/debug"),
         manifest_dir.join("../../target/release"),
     ] {
-        if !candidate_dir.as_os_str().is_empty()
-            && let Some(found) = find_in_dir(&candidate_dir)
-        {
+        if let Some(found) = find_in_dir(&candidate_dir) {
             return Ok(found);
         }
     }
