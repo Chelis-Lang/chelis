@@ -6947,8 +6947,11 @@ impl LowerCtx {
             }
             "uniform_like" if args.len() == 3 => {
                 let template = self.lower_expr_node(&args[0], "uniform_like template");
-                let low = self.extract_f64_value(&args[1]).unwrap_or(0.0);
-                let high = self.extract_f64_value(&args[2]).unwrap_or(1.0);
+                // chelis#776: statically resolve each bound (through neg /
+                // float-cast wrappers) or fail loudly — never the silent [0,1)
+                // default that dropped a wrapped or computed range in codegen.
+                let low = self.resolve_static_f64_arg(&args[1], "uniform_like", "low bound");
+                let high = self.resolve_static_f64_arg(&args[2], "uniform_like", "high bound");
                 let seed = self.random_seed.unwrap_or(0);
                 // When no `type` metadata is attached to the `app` form
                 // (as is common when the host lane drives sub-expression
@@ -6979,7 +6982,10 @@ impl LowerCtx {
             }
             "dropout" if args.len() == 2 => {
                 let x = self.lower_expr_node(&args[0], "dropout input");
-                let rate = self.extract_f64_value(&args[1]).unwrap_or(0.0);
+                // chelis#776 (same silent-substitution shape as uniform_like's
+                // bounds): a wrapped/computed rate must resolve statically or
+                // fail loudly, never silently become 0.0 (no-op dropout).
+                let rate = self.resolve_static_f64_arg(&args[1], "dropout", "rate");
                 let seed = self.random_seed.unwrap_or(0);
                 let inferred_ty = self
                     .dag
@@ -7910,7 +7916,11 @@ impl LowerCtx {
                     vec![]
                 };
                 let fill = if args.len() >= 3 {
-                    self.extract_f64_value(&args[2]).unwrap_or(0.0)
+                    // chelis#776: an explicit fill argument must resolve
+                    // statically (through neg / float-cast wrappers) or fail
+                    // loudly. The `else` arm below is a true structural default
+                    // — no fill was given, so pad with zeros.
+                    self.resolve_static_f64_arg(&args[2], "pad", "fill value")
                 } else {
                     0.0
                 };
@@ -9530,22 +9540,96 @@ impl LowerCtx {
         self.extract_usize_value(expr).map(|value| value as u64)
     }
 
-    /// Extract an f64 value from an expression.
+    /// Extract a compile-time-constant f64 from an expression, seeing through
+    /// the statically-resolvable, value-carrying wrappers a numeric literal
+    /// can arrive in: a `(lit ...)` node, a `neg(...)` of an extractable value,
+    /// and a `cast(..., <float prim>)` of an extractable value. A float-target
+    /// cast preserves the numeric value (the f32/f64 sampler narrows the same
+    /// bits in every lane), so it is folded through; an integer-target cast
+    /// *changes* the value by truncation, so it is NOT folded — it returns
+    /// `None` and the caller fails loudly rather than baking a guessed
+    /// truncation into codegen. Any other form (a runtime variable, arithmetic,
+    /// a `shape()` read) also returns `None`.
+    ///
+    /// chelis#776: this used to see through neither `cast` nor `neg`, so a
+    /// wrapped bound fell to a caller `unwrap_or(default)` and silently
+    /// replaced the user's value with the [0,1) default in the compiled lane
+    /// (the #703 silent-substitution class). Callers that bake this into
+    /// codegen now go through [`Self::resolve_static_f64_arg`], which turns an
+    /// unresolvable value into a loud lowering error.
     fn extract_f64_value(&self, expr: &Expr) -> Option<f64> {
         match expr {
             Expr::Atom(Atom::Float(f), _) => Some(*f),
             Expr::Atom(Atom::Int(n), _) => Some(*n as f64),
-            Expr::List(list, _) => {
-                if let Some(Expr::Atom(Atom::Float(f), _)) = list.elements.get(2) {
-                    Some(*f)
-                } else if let Some(Expr::Atom(Atom::Int(n), _)) = list.elements.get(2) {
-                    Some(*n as f64)
-                } else {
-                    None
+            Expr::List(list, _) => match get_tag(list) {
+                // cast(<inner>, <target>): value-preserving only for a float
+                // target; an integer target truncates and is left unresolved
+                // (chelis#776 — go loud, do not guess the cast semantics).
+                Some("cast") => {
+                    let inner = list.elements.get(2)?;
+                    let target = list.elements.get(3)?;
+                    match Self::try_extract_prim(target) {
+                        Some(prim) if prim.is_float() => self.extract_f64_value(inner),
+                        _ => None,
+                    }
                 }
-            }
+                // neg(<inner>): unary minus desugars to
+                // `(app {} (var {} neg) <inner>)`.
+                Some("app")
+                    if children(list)
+                        .first()
+                        .is_some_and(|callee| expr_is_var_named(callee, "neg")) =>
+                {
+                    let inner = children(list).get(1)?;
+                    self.extract_f64_value(inner).map(|v| -v)
+                }
+                // `(lit {} <atom>)` and any other list carrying a bare numeric
+                // atom in the value slot (pre-chelis#776 behavior, preserved).
+                _ => match list.elements.get(2) {
+                    Some(Expr::Atom(Atom::Float(f), _)) => Some(*f),
+                    Some(Expr::Atom(Atom::Int(n), _)) => Some(*n as f64),
+                    _ => None,
+                },
+            },
             _ => None,
         }
+    }
+
+    /// Resolve a builtin argument that is baked into the emitted kernel as a
+    /// compile-time constant (a `uniform_like` bound, a `dropout` rate, a `pad`
+    /// fill), or raise a loud lowering error. A silent `unwrap_or(default)` at
+    /// these sites substitutes a wrong value into a program that compiles and
+    /// runs — the #703 class; here it silently collapsed a wrapped or computed
+    /// `uniform_like` range to the [0,1) default (chelis#776). An unresolvable
+    /// argument is therefore a build failure, never a default.
+    ///
+    /// The error is *fatal* on purpose: a non-fatal lowering error at these
+    /// sites is caught by the host-emit backend's speculative sub-lowering and
+    /// laundered into a silent `/* unsupported builtin */ 0` stub (a null
+    /// tensor), which is just a different silent miscompile. A fatal error
+    /// surfaces as a user-facing build error instead — the same pathway the
+    /// `grad`-of-non-differentiable rejection uses (issue #197). `chelis eval`
+    /// stays correct: it interprets the `with seed { ... }` program through its
+    /// own evaluator and does not require this DAG lowering to succeed, so a
+    /// runtime bound that fails the build still evaluates to the right range.
+    fn resolve_static_f64_arg(&self, expr: &Expr, builtin: &str, arg_desc: &str) -> f64 {
+        self.extract_f64_value(expr).unwrap_or_else(|| {
+            let found = match expr {
+                Expr::List(list, _) => get_tag(list).unwrap_or("expression"),
+                _ => "expression",
+            };
+            raise_fatal_lowering_error(
+                format!(
+                    "`{builtin}` requires a statically-resolvable {arg_desc}, but the \
+                     compiled-backend lowering cannot fold `{found}` to a compile-time \
+                     constant. Use a numeric literal (optionally negated or cast to a \
+                     float type); a runtime-computed value is not supported here \
+                     (Chelis-Lang/chelis#776)"
+                ),
+                Some(expr.span()),
+                expr.span_id().map(ToOwned::to_owned),
+            )
+        })
     }
 
     /// Extract a list of usize values from a slice of expressions.
@@ -13582,6 +13666,189 @@ mod regression_tests {
         assert!(
             captured_lower_message(err).contains("`vmap` is not supported by IR evaluation yet")
         );
+    }
+
+    // chelis#776: the compiled-backend lowering must see through the
+    // statically-resolvable value-carrying wrappers a numeric argument can
+    // arrive in — a float-cast and a unary minus — instead of silently
+    // defaulting a dropped `uniform_like` range to [0,1) (dropout rate to 0,
+    // pad fill to 0); and it must fail loudly, never substitute a default,
+    // for anything it cannot fold. Negative-parity is asserted alongside the
+    // positive cases for each fixed site.
+
+    /// A rank-1 f32 template literal for the wrapped-bound uniform_like /
+    /// dropout / pad lowering probes below.
+    const WRAPPED_ARG_TEMPLATE: &str =
+        "(lit {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} 0.0)";
+
+    fn uniform_like_low_high(dag: &Dag) -> (f64, f64) {
+        dag.nodes()
+            .iter()
+            .find_map(|node| match node.op {
+                RiscOp::UniformLike { low, high, .. } => Some((low, high)),
+                _ => None,
+            })
+            .expect("expected a UniformLike node in the lowered DAG")
+    }
+
+    #[test]
+    fn uniform_like_cast_wrapped_bounds_resolve_statically() {
+        let src = format!(
+            "(app {{}} (var {{}} uniform_like) {WRAPPED_ARG_TEMPLATE} \
+             (cast {{}} (lit {{}} 2.0) (t-prim {{}} f32)) \
+             (cast {{}} (lit {{}} 5.0) (t-prim {{}} f32)))"
+        );
+        assert_eq!(
+            uniform_like_low_high(&parse_and_lower_unchecked(&src)),
+            (2.0, 5.0)
+        );
+    }
+
+    #[test]
+    fn uniform_like_negative_literal_bounds_resolve_statically() {
+        // `-3.0` / `-1.0` desugar to `(app {} (var {} neg) (lit ...))`.
+        let src = format!(
+            "(app {{}} (var {{}} uniform_like) {WRAPPED_ARG_TEMPLATE} \
+             (app {{}} (var {{}} neg) (lit {{}} 3.0)) \
+             (app {{}} (var {{}} neg) (lit {{}} 1.0)))"
+        );
+        assert_eq!(
+            uniform_like_low_high(&parse_and_lower_unchecked(&src)),
+            (-3.0, -1.0)
+        );
+    }
+
+    #[test]
+    fn uniform_like_mixed_neg_and_cast_bounds_resolve_statically() {
+        // low = cast(neg(3.0), f32); high = cast(5.0, f32).
+        let src = format!(
+            "(app {{}} (var {{}} uniform_like) {WRAPPED_ARG_TEMPLATE} \
+             (cast {{}} (app {{}} (var {{}} neg) (lit {{}} 3.0)) (t-prim {{}} f32)) \
+             (cast {{}} (lit {{}} 5.0) (t-prim {{}} f32)))"
+        );
+        assert_eq!(
+            uniform_like_low_high(&parse_and_lower_unchecked(&src)),
+            (-3.0, 5.0)
+        );
+    }
+
+    #[test]
+    fn uniform_like_runtime_bound_fails_loudly_not_silent_default() {
+        // A runtime add is not statically foldable: the lowering must raise,
+        // never silently substitute the [0,1) default (the #703 class).
+        let src = format!(
+            "(app {{}} (var {{}} uniform_like) {WRAPPED_ARG_TEMPLATE} \
+             (app {{}} (var {{}} add) (lit {{}} 2.0) (lit {{}} 1.0)) \
+             (lit {{}} 5.0))"
+        );
+        let err = std::panic::catch_unwind(|| {
+            let _ = parse_and_lower_unchecked(&src);
+        })
+        .expect_err("a runtime uniform_like bound must fail lowering");
+        let msg = captured_lower_message(err);
+        assert!(
+            msg.contains("uniform_like")
+                && msg.contains("statically-resolvable")
+                && msg.contains("chelis#776"),
+            "unexpected diagnostic: {msg}"
+        );
+    }
+
+    #[test]
+    fn uniform_like_integer_cast_bound_fails_loudly() {
+        // A value-changing cast (float literal -> int32 truncation) is NOT
+        // folded — the lowering refuses to guess the cast semantics and fails
+        // loudly rather than bake a truncated bound into codegen (chelis#776).
+        let src = format!(
+            "(app {{}} (var {{}} uniform_like) {WRAPPED_ARG_TEMPLATE} \
+             (cast {{}} (lit {{}} 2.0) (t-prim {{}} int32)) \
+             (lit {{}} 5.0))"
+        );
+        let err = std::panic::catch_unwind(|| {
+            let _ = parse_and_lower_unchecked(&src);
+        })
+        .expect_err("an integer-cast uniform_like bound must fail lowering");
+        assert!(captured_lower_message(err).contains("statically-resolvable"));
+    }
+
+    fn dropout_rate(dag: &Dag) -> f64 {
+        dag.nodes()
+            .iter()
+            .find_map(|node| match node.op {
+                RiscOp::Dropout { rate, .. } => Some(rate),
+                _ => None,
+            })
+            .expect("expected a Dropout node in the lowered DAG")
+    }
+
+    #[test]
+    fn dropout_cast_wrapped_rate_resolves_statically() {
+        let src = format!(
+            "(app {{}} (var {{}} dropout) {WRAPPED_ARG_TEMPLATE} \
+             (cast {{}} (lit {{}} 0.25) (t-prim {{}} f32)))"
+        );
+        assert_eq!(dropout_rate(&parse_and_lower_unchecked(&src)), 0.25);
+    }
+
+    #[test]
+    fn dropout_runtime_rate_fails_loudly() {
+        let src = format!("(app {{}} (var {{}} dropout) {WRAPPED_ARG_TEMPLATE} (var {{}} r))");
+        let err = std::panic::catch_unwind(|| {
+            let _ = parse_and_lower_unchecked(&src);
+        })
+        .expect_err("a runtime dropout rate must fail lowering");
+        let msg = captured_lower_message(err);
+        assert!(
+            msg.contains("dropout") && msg.contains("statically-resolvable"),
+            "unexpected diagnostic: {msg}"
+        );
+    }
+
+    fn pad_fill(dag: &Dag) -> f64 {
+        dag.nodes()
+            .iter()
+            .find_map(|node| match &node.op {
+                RiscOp::Pad { fill, .. } => Some(*fill),
+                _ => None,
+            })
+            .expect("expected a Pad node in the lowered DAG")
+    }
+
+    const PAD_PADDING: &str = "(app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int32)} 1) \
+         (lit {type: (t-prim {} int32)} 1)) (var {} Nil))";
+
+    #[test]
+    fn pad_cast_wrapped_fill_resolves_statically() {
+        let src = format!(
+            "(app {{}} (var {{}} pad) {WRAPPED_ARG_TEMPLATE} {PAD_PADDING} \
+             (cast {{}} (lit {{}} 7.0) (t-prim {{}} f32)))"
+        );
+        assert_eq!(pad_fill(&parse_and_lower_unchecked(&src)), 7.0);
+    }
+
+    #[test]
+    fn pad_runtime_fill_fails_loudly() {
+        let src =
+            format!("(app {{}} (var {{}} pad) {WRAPPED_ARG_TEMPLATE} {PAD_PADDING} (var {{}} f))");
+        let err = std::panic::catch_unwind(|| {
+            let _ = parse_and_lower_unchecked(&src);
+        })
+        .expect_err("a runtime pad fill must fail lowering");
+        let msg = captured_lower_message(err);
+        assert!(
+            msg.contains("pad") && msg.contains("statically-resolvable"),
+            "unexpected diagnostic: {msg}"
+        );
+    }
+
+    #[test]
+    fn pad_no_fill_arg_keeps_structural_zero_default() {
+        // No explicit fill argument: the `else` arm is a true structural
+        // default (pad with zeros), NOT a user-value substitution — it must
+        // still resolve to 0.0, not go loud (chelis#776 fix is scoped to the
+        // present-but-unresolvable case).
+        let src = format!("(app {{}} (var {{}} pad) {WRAPPED_ARG_TEMPLATE} {PAD_PADDING})");
+        assert_eq!(pad_fill(&parse_and_lower_unchecked(&src)), 0.0);
     }
 
     #[test]
