@@ -129,14 +129,44 @@ fn baseline_wsc_blocker_reproducer_errors_without_unbound_wrapping() {
 // surgical detector at `infer.rs`'s def-body call site that
 // re-surfaces the masked declared-shape constraint when the body
 // collapses to `Type::Error` and the body's inference also produced
-// an `UnboundVariable` diagnostic. Below the post-fix behavior is
-// pinned: the unbound-name error fires AND the precision-mismatch
-// surfaces against the declared return type.
+// an `UnboundVariable` diagnostic.
+//
+// chelis#773 interaction (measured, intentional). #773 removed
+// `infer_app`'s arg-Error short-circuit: an Error-typed ARGUMENT no
+// longer collapses the whole call. This sharpens F1's real contract
+// ("an unbound function must not mask a REAL downstream precision
+// mismatch") into two honest cases, distinguished by whether the
+// downstream op's return precision is free or concrete:
+//
+//   * unbound wrapper feeding a PRECISION-POLYMORPHIC downstream op
+//     (`poly_id(nonexistent_function(x))`): the erased arg leaves
+//     `poly_id`'s output precision genuinely FREE, so the body
+//     resolves to the declared return with no conflict. The old F1
+//     re-surface fired only because the arg-Error short-circuit
+//     collapsed the body to `Type::Error`; that report was
+//     speculative (it assumed the unknown wrapper is
+//     precision-preserving). Post-#773 the body no longer collapses,
+//     so ONLY the (sound, actionable) unbound-var error is reported.
+//   * unbound wrapper feeding a CONCRETE-precision downstream op
+//     (`force_f64(nonexistent_function(x))`): the body resolves to a
+//     concrete `f64` that genuinely conflicts with the declared
+//     `f32`, so the real mismatch surfaces alongside the unbound-var
+//     error WITHOUT any Error-collapse hack. This is F1's
+//     masking-prevention contract, preserved by honest resolution.
+//
+// The directly-unbound-CALLEE case (Section B2 below,
+// `def f(x) = nonexistent_function(x)`) is unchanged: #773 kept the
+// callee-Error early-out, so a body whose callee is unbound still
+// collapses to `Type::Error` and F1 still re-surfaces the declared
+// return.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn unbound_function_no_longer_masks_downstream_precision_mismatch() {
+fn unbound_wrapper_into_polymorphic_downstream_reports_only_unbound() {
     // BASELINE (no unbound wrapper): precision mismatch IS reported.
+    // `poly_id(x)` with `x: tensor[3, int32]` resolves to
+    // `tensor[3, int32]`, which conflicts with the declared
+    // `tensor[3, f32]` return. This must stay caught.
     let dir = tempdir().expect("tempdir");
     let baseline_path = dir.path().join("baseline.ch");
     write_file(
@@ -159,9 +189,18 @@ fn unbound_function_no_longer_masks_downstream_precision_mismatch() {
          got {baseline_errors:?}"
     );
 
-    // ATTACK: wrap the arg in an unbound function call. Post-F1 the
-    // precision mismatch on the declared return type must still
-    // surface alongside the unbound-name error.
+    // ATTACK: wrap the arg in an unbound function call, feeding a
+    // PRECISION-POLYMORPHIC downstream op (`poly_id`). chelis#773: the
+    // erased arg (`nonexistent_function(x)` is `Type::Error`) leaves
+    // `poly_id`'s output precision genuinely FREE, so the body resolves
+    // to the declared `tensor[3, f32]` with no conflict. The pre-#773 F1
+    // path re-surfaced an int32/f32 "declared-shape" error ONLY because
+    // the arg-Error short-circuit collapsed the body to `Type::Error`;
+    // that report was speculative (it assumed the unknown wrapper is
+    // precision-preserving). Post-#773 the sound result is exactly the
+    // unbound-var error — the program still rejects, and no fabricated
+    // precision mismatch is emitted. The concrete-downstream companion
+    // below pins that a REAL mismatch still surfaces.
     let attack_path = dir.path().join("attack.ch");
     write_file(
         &attack_path,
@@ -184,21 +223,74 @@ fn unbound_function_no_longer_masks_downstream_precision_mismatch() {
         "attack: unbound variable must still be reported; got {attack_errors:?}"
     );
 
-    // F1 fix: a non-UnboundVariable error must also fire, naming both
-    // the inferred input precision (`int32`, from the declared param
-    // type) and the declared return precision (`f32`). Both names
-    // appear in the rendered Fn type so the user sees the masked
-    // shape constraint.
-    let attack_has_declared_shape_error = attack_errors.iter().any(|e| {
-        let msg = e.get("message").and_then(|m| m.as_str()).unwrap_or("");
+    // chelis#773: no speculative precision-mismatch error. Because the
+    // polymorphic body is genuinely free, the ONLY diagnostic is the
+    // unbound var — assert exactly that (both the count and that no
+    // non-UnboundVariable precision error was fabricated).
+    assert_eq!(
+        attack_errors.len(),
+        1,
+        "attack: the polymorphic body resolves freely, so exactly one \
+         diagnostic (the unbound var) is sound; got {attack_errors:?}"
+    );
+    let fabricated_precision_error = attack_errors.iter().any(|e| {
         let kind = e.get("kind").and_then(|k| k.as_str()).unwrap_or("");
-        kind != "UnboundVariable" && msg.contains("int32") && msg.contains("f32")
+        let msg = e.get("message").and_then(|m| m.as_str()).unwrap_or("");
+        kind != "UnboundVariable" && msg.contains("f32")
     });
     assert!(
-        attack_has_declared_shape_error,
-        "F1 fix: the declared-shape constraint must surface alongside \
-         the unbound error so the user sees the masked precision \
-         mismatch. Got {attack_errors:?}"
+        !fabricated_precision_error,
+        "attack: a precision-polymorphic downstream op must NOT fabricate \
+         a speculative f32 mismatch off an erased (Error) argument; \
+         got {attack_errors:?}"
+    );
+}
+
+#[test]
+fn unbound_wrapper_into_concrete_downstream_still_surfaces_real_mismatch() {
+    // F1's masking-prevention contract, PRESERVED by honest resolution
+    // (chelis#773). When the unbound wrapper feeds a CONCRETE-precision
+    // downstream op, the body resolves to that concrete precision, which
+    // genuinely conflicts with the declared return — so the real
+    // mismatch surfaces ALONGSIDE the unbound-var error, with no
+    // `Type::Error`-collapse hack. `force_f64` returns `tensor[3, f64]`
+    // regardless of its (erased) argument; the declared `use_mix` return
+    // is `tensor[3, f32]`.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("concrete_attack.ch");
+    write_file(
+        &path,
+        "sig poly_id: tensor[d, p] -> tensor[d, p]\n\
+         def poly_id(x) = x\n\
+         def force_f64(y: tensor[3, f64]) -> tensor[3, f64] = y\n\
+         def use_mix(x: tensor[3, int32]) -> tensor[3, f32] = \
+         force_f64(nonexistent_function(x))\n",
+    );
+    let errors = run_json_check(&path)["errors"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    let has_unbound = errors
+        .iter()
+        .any(|e| e.get("kind").and_then(|k| k.as_str()) == Some("UnboundVariable"));
+    assert!(
+        has_unbound,
+        "concrete attack: unbound variable must still be reported; got {errors:?}"
+    );
+
+    // The real f64-vs-f32 mismatch surfaces without any Error collapse:
+    // the body honestly resolves to concrete `tensor[3, f64]`.
+    let has_real_mismatch = errors.iter().any(|e| {
+        let kind = e.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+        let msg = e.get("message").and_then(|m| m.as_str()).unwrap_or("");
+        kind == "TypeMismatch" && msg.contains("f64") && msg.contains("f32")
+    });
+    assert!(
+        has_real_mismatch,
+        "F1 preserved: a concrete-precision downstream op must surface the \
+         real f64-vs-f32 mismatch alongside the unbound error (honest \
+         resolution, no Type::Error collapse); got {errors:?}"
     );
 }
 

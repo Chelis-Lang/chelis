@@ -5703,30 +5703,39 @@ fn annotate_fn_children(
     // matmul typing rule depends on. `param_vg` (the cloned `VarGen`)
     // feeds fresh-var allocation so it does not perturb the caller's.
     //
-    // Why clone rather than thread the caller's `vg` and advance its
-    // counter (which would be collision-free and shrink the argument
-    // below to a sentence): this is a post-inference ANNOTATION pass and
-    // `vg: &VarGen` is borrowed SHARED here — advancing the caller's
-    // counter is not even available without widening the whole annotation
-    // call-chain to `&mut VarGen`, a far larger change for a pass whose
-    // vars never escape. The throwaway clone is the correct local choice;
-    // the confinement argument below is why the resulting ID overlap is
-    // harmless.
+    // We cannot advance the CALLER's `vg` past these param-type vars:
+    // `vg: &VarGen` is borrowed SHARED in this post-inference annotation
+    // pass, and threading `&mut VarGen` through the whole annotation
+    // call-chain is a far larger change for a pass whose vars never escape.
+    // Instead we feed the already-advanced `param_vg` clone to the body
+    // annotation below (see the body call) — the "advance the counter" fix
+    // scoped to exactly where it matters.
     //
-    // Var-ID overlap is harmless. These freshly-minted `TypeVar`s are
-    // used ONLY to seed `fn_env` for the body-ANNOTATION pass below; the
-    // annotation re-infers each body node's `type:` via
-    // `infer_expr_in_scope`, which runs in its OWN throwaway `Subst`
-    // (`infer_expr_in_scope` creates `Subst::new()`). Nothing from
-    // `param_vg` flows back into the caller's `vg`/`subst` or the
-    // program's global type state, so a `TypeVar(N)` minted here that
-    // happens to collide numerically with a `TypeVar(N)` elsewhere never
-    // unifies the two: the collision is confined to this one node's
-    // annotation scope. (Re-using the already-resolved declared `Fn` type
-    // — as the WS-A7 `infer_def_body_with_sig` inference path does — would
-    // also work, but is not reachable from this post-inference annotation
-    // pass, which has no access to that resolved type or the error
-    // vector.)
+    // chelis#773 — why the body pass MUST mint from `param_vg`, not `vg`:
+    // `infer_expr_in_scope` (the per-node re-inference the annotation runs)
+    // CLONES the `VarGen` it is given and instantiates each builtin scheme
+    // (`matmul`, `mul`, …) from that clone. If it cloned the un-advanced
+    // `vg`, a scheme's fresh parameter/return var would numerically COLLIDE
+    // with a param-type var — e.g. the `tensor[s, d, p]` precision
+    // `TypeVar(N)` and `matmul`'s instantiated first-param `TypeVar(N)`.
+    // `unify` then attempts `Tensor([.., .., Var(N)]) ~ Var(N)`, the
+    // occurs-check rejects it, and the body op collapses to `Type::Error`,
+    // cascading down the let-chain. Before #773 that Error was swallowed by
+    // `infer_app`'s arg-Error short-circuit (every downstream op collapsed
+    // to a clean `Error`, so the negative-parity test saw no bare `t-var`);
+    // removing that short-circuit exposed the collision as a bare-`t-var`
+    // result on the shape-computed `matmul` override
+    // (`check_matmul_signature` returns `subst.apply(ret_tv)` — an unbound
+    // `Var` — when an operand is `Error`). Because `param_vg` has already
+    // consumed every param-type var, feeding it to the body pass makes
+    // every scheme-instantiated var strictly greater, so no collision can
+    // occur. Nothing from `param_vg` flows back into the caller's
+    // `vg`/`subst` or the program's global type state; the annotation runs
+    // in its own throwaway `Subst`. (Re-using the already-resolved declared
+    // `Fn` type — as the WS-A7 `infer_def_body_with_sig` inference path
+    // does — would also work, but is not reachable from this post-inference
+    // annotation pass, which has no access to that resolved type or the
+    // error vector.)
     let declared_param_types: Vec<Option<Type>> = match declared_param_type_exprs {
         Some(declared) => {
             let mut tvar_map: HashMap<String, TypeVar> = HashMap::new();
@@ -5790,7 +5799,19 @@ fn annotate_fn_children(
         adt_reg,
     )];
     if let Some(body) = kids.get(1) {
-        result.push(annotate_expr_with_scope(body, &fn_env, vg, subst, adt_reg));
+        // chelis#773: mint body-annotation vars from the advanced
+        // `param_vg` (past every param-type var) when the params were
+        // seeded from a declared sig, so builtin-scheme instantiation
+        // cannot collide with a param-type var (see the note above). Bare
+        // `fn` literals (no declared sig) keep the caller's `vg`.
+        let body_vg: &VarGen = if declared_param_type_exprs.is_some() {
+            &param_vg
+        } else {
+            vg
+        };
+        result.push(annotate_expr_with_scope(
+            body, &fn_env, body_vg, subst, adt_reg,
+        ));
     }
     (result, resolved_fn_ty)
 }
@@ -9698,28 +9719,29 @@ fn infer_app(
         return Type::Unit;
     }
 
-    // If func or any arg is Error, propagate.
+    // If the *callee* is Error, propagate. With no resolved callee scheme
+    // there is no return type to produce: `subst.apply(&ret_tv)` (see below)
+    // would leak a bare `Var`, because the `unify` against `expected_fn` is
+    // Error-permissive and never binds `ret_tv`. A callee-`Error` already
+    // carries its own diagnostic from the failed `var` lookup, so this
+    // early-out suppresses no checking.
     //
-    // chelis#530: the `expand` SIZE slot (kids[3], index 2 in `kids[1..]`)
-    // is exempt. An inline size that is a tuple projection (`t.0`), an
-    // inline `match`/`if`, or a `cast`/integer-arithmetic expression
-    // *containing* one infers to `Type::Error`; letting that short-circuit
-    // here returned `Type::Error` WITHOUT a diagnostic and WITHOUT ever
-    // reaching the per-builtin expand Form-3 gate (positional arm) or the
-    // named-axis literal check — silently accepting a sourceless size that
-    // the C backend then hardcodes to extent 1 (eval `[3, 2]` vs C `[1, 2]`).
-    // Both expand size gates read the size from the raw AST, not from
-    // `arg_tys[2]`, and `unify` treats `Type::Error` as permissive
-    // (`unify.rs`: `(Error, _) | (_, Error) => Ok(())`), so deferring to
-    // them is sound and yields the correct per-form located diagnostic. A
-    // genuinely sourced size never infers to `Error`, so this exemption only
-    // ever reaches the rejection paths.
-    let is_expand_call = matches!(func_name.as_deref(), Some("expand"));
-    let non_size_arg_is_error = arg_tys
-        .iter()
-        .enumerate()
-        .any(|(index, t)| !(is_expand_call && index == 2) && matches!(t, Type::Error));
-    if matches!(func_ty, Type::Error) || non_size_arg_is_error {
+    // chelis#773: we do NOT short-circuit on an Error-typed *argument*. The
+    // previous arm collapsed the whole call to `Type::Error` the moment any
+    // (non-`expand`-size) argument inferred to `Error`, which disabled type
+    // checking of every sibling argument in the same call — one reported
+    // error in one slot masked genuine mismatches in the others. Error-typed
+    // arguments now flow into the per-slot `unify` below, which treats
+    // `Type::Error` as permissive (`unify.rs`: `(Error, _) | (_, Error) =>
+    // Ok(())`): siblings still check against their scheme slots, and the
+    // call returns the callee's resolved return type instead of `Error`.
+    //
+    // The chelis#530 `expand` SIZE-slot concern is subsumed, not lost: both
+    // expand size gates read the size from the raw AST (not from
+    // `arg_tys[2]`), and now that no argument short-circuits here, an
+    // Error-typed size slot always reaches the per-form located diagnostic.
+    // A genuinely sourced size never infers to `Error`.
+    if matches!(func_ty, Type::Error) {
         return Type::Error;
     }
 
