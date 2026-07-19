@@ -1968,7 +1968,10 @@ Current shipped inference/checking behavior:
   §2.6)
 - `with seed(seed) { ... }` handles `Random` across direct operations and calls made
   inside the handled region; the C host backend preserves this with generated
-  handler-scoped RNG state for nested stdlib/user functions
+  handler-scoped RNG state for nested stdlib/user functions. Per-lane determinism
+  of a seeded region is `spec/05-risc-primitives.md` [05-RNG-1]; cross-lane stream
+  identity (eval and the compiled-C host lane producing the same draw sequence) is
+  tracked at chelis#735, pending chelis#731 Phase 1's seed-literal diagnostic
 - `with device(device) { ... }` marks a resource region that is validated against the
   chosen build target
 - declared `Resource("...")` annotations are accepted on `t-fn` type expressions, but
