@@ -68,6 +68,72 @@ uniform_like(
     }
 }
 
+/// chelis#771: `literal_seed_i64` reads a `with seed(...)` literal at full
+/// i64 width, peeling the `(lit {type: (t-prim {} int32)} n)` wrapper the
+/// desugarer attaches (desugar.rs:1564-1569) and ignoring the int32 default
+/// meta — so the evaluator's effective u64 seed matches the C lane's
+/// `(uint64_t)n` instead of `eval_lit`'s int32-narrowed value.
+#[test]
+fn literal_seed_read_at_full_i64_width() {
+    use chelis_deep::Span;
+    let sp = Span::new(0, 0);
+    let node = |tag: &str, children: Vec<Expr>| {
+        let mut elements = vec![
+            Expr::Atom(Atom::Symbol(tag.to_string()), sp),
+            Expr::Map(MetaMap::default(), sp),
+        ];
+        elements.extend(children);
+        Expr::List(List { elements }, sp)
+    };
+    // (lit {type: (t-prim {} int32)} 4294967295) — the exact shape desugar
+    // emits for `seed(4294967295)`.
+    let int32_seed_lit = |n: i64| {
+        let t_int32 = node(
+            "t-prim",
+            vec![Expr::Atom(Atom::Symbol("int32".to_string()), sp)],
+        );
+        Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Symbol("lit".to_string()), sp),
+                    Expr::Map(
+                        MetaMap {
+                            entries: vec![("type".to_string(), t_int32)],
+                        },
+                        sp,
+                    ),
+                    Expr::Atom(Atom::Int(n), sp),
+                ],
+            },
+            sp,
+        )
+    };
+
+    // The peel reads the raw i64 atom regardless of the int32 meta.
+    let lit = int32_seed_lit(4_294_967_295);
+    assert_eq!(literal_seed_i64(&lit), Some(4_294_967_295));
+    assert_eq!(literal_seed_i64(&lit).unwrap() as u64, 4_294_967_295_u64);
+    // Guard against the pre-#771 bug: `eval_lit` would narrow
+    // `4294967295 as i32` = -1, sign-extend, and seed 0xFFFF_FFFF_FFFF_FFFF.
+    assert_ne!(
+        literal_seed_i64(&lit).unwrap() as u64,
+        0xFFFF_FFFF_FFFF_FFFF_u64,
+    );
+    // The exact 2^31 boundary and a bare (unwrapped) int atom both read full.
+    assert_eq!(
+        literal_seed_i64(&int32_seed_lit(2_147_483_648)),
+        Some(2_147_483_648),
+    );
+    assert_eq!(
+        literal_seed_i64(&Expr::Atom(Atom::Int(2_147_483_648), sp)),
+        Some(2_147_483_648),
+    );
+    // Non-literal seed expressions return None, so the caller keeps the
+    // dtype-narrowing `eval_expr` fallback for computed seeds.
+    let var_seed = node("var", vec![Expr::Atom(Atom::Symbol("s".to_string()), sp)]);
+    assert_eq!(literal_seed_i64(&var_seed), None);
+}
+
 #[test]
 fn ownership_drop_is_unit_and_does_not_shadow_list_drop_runtime() {
     let checked = checked_surf(

@@ -177,14 +177,34 @@ impl<'a> EvalContext<'a> {
                     })
                     .unwrap_or_default();
                 if effect == "random" {
-                    let seed = self.eval_expr(
-                        kids.first()
-                            .ok_or_else(|| "handle-effect missing seed".to_string())?,
-                    )?;
-                    let seed = match seed.as_i64() {
+                    let seed_expr = kids
+                        .first()
+                        .ok_or_else(|| "handle-effect missing seed".to_string())?;
+                    // chelis#771: read a *literal* seed at full i64 width so
+                    // the evaluator derives the same u64 seed as the compiled
+                    // C lane. `literal_seed_i64` peels `(lit …)` to the raw
+                    // `Atom::Int`, mirroring host lowering (host.rs reads the
+                    // raw atom and ignores the int32 default meta). Routing the
+                    // literal through `eval_expr` -> `eval_lit` instead narrows
+                    // it to int32 (spec/04-type-system.md §5.3 default),
+                    // truncating then sign-extending any seed >= 2^31 into an
+                    // unrelated stream. The seed is designed int64
+                    // (spec/design/checker_totality.md §C1.5 item 5). Non-literal
+                    // (computed) seed expressions keep the eval path and still
+                    // narrow at their scalar dtype until #731 Phase 1's
+                    // int64-suffixed FORM gate lands.
+                    let seed = match literal_seed_i64(seed_expr) {
                         Some(value) => value as u64,
                         None => {
-                            return Err(format!("with seed expects int seed, got {seed:?}"));
+                            let seed = self.eval_expr(seed_expr)?;
+                            match seed.as_i64() {
+                                Some(value) => value as u64,
+                                None => {
+                                    return Err(format!(
+                                        "with seed expects int seed, got {seed:?}"
+                                    ));
+                                }
+                            }
                         }
                     };
                     let saved_seed = self.random_seed;
