@@ -3150,17 +3150,101 @@ pub(super) fn uniform_like_value(
     high: f64,
     seed: u64,
 ) -> RuntimeTensorValue {
-    let span = high - low;
+    // chelis#770: evaluate the affine `low + (high - low) * unit` in f32,
+    // conforming to the C f32 sampler `chelis_uniform_sample_f32`
+    // (chelis-backend-c/src/emit.rs and host_emit.rs:
+    // `return low + (high - low) * (float)unit;` with f32 `low`/`high`).
+    // Under the default toolchain (`-march=native`, `-ffp-contract=fast`) the
+    // C compiler contracts that `low + span * unit` into a single-rounding
+    // fused multiply-add, so `span_f.mul_add(unit_f, low_f)` (also one
+    // rounding) matches it bit-for-bit; a plain `low_f + span_f * unit_f`
+    // (two roundings) drifts 1 ULP on some elements. `dropout_sample` stays
+    // f64 (no C oracle; drives dropout thresholds); the f32 casts are local.
+    let low_f = low as f32;
+    let high_f = high as f32;
+    let span_f = high_f - low_f;
     let data = template
         .value
         .data
         .iter()
         .enumerate()
-        .map(|(index, _)| low + span * dropout_sample(seed, index as u64))
+        .map(|(index, _)| span_f.mul_add(dropout_sample(seed, index as u64) as f32, low_f) as f64)
         .collect::<Vec<_>>();
     RuntimeTensorValue {
         value: IrTensorValue::from_vec(template.value.shape.clone(), data),
         precision: template.precision,
+    }
+}
+
+#[cfg(test)]
+mod uniform_like_affine_tests {
+    //! chelis#770: `uniform_like_value` evaluates the affine in f32,
+    //! op-for-op with the C `chelis_uniform_sample_f32` sampler, so the host
+    //! evaluator and the compiled C lane agree at f32. These pin the exact
+    //! widened-f32 output at seed=42 / shape=[8] and the 1-ULP gap the old
+    //! f64 affine left at elem[4] of [2,5), plus a negative range (unit-level
+    //! only: the C cross-lane path can't be driven with a bare negative
+    //! literal, a separate lowering gap).
+    use super::*;
+
+    fn template_f32(n: usize) -> RuntimeTensorValue {
+        RuntimeTensorValue {
+            value: IrTensorValue::from_vec(vec![n], vec![0.0; n]),
+            precision: Prim::F32,
+        }
+    }
+
+    #[test]
+    fn affine_mirrors_c_f32_sampler_positive_range() {
+        let out = uniform_like_value(&template_f32(8), 2.0, 5.0, 42);
+        // Single correctly-rounded FMA, conforming to the compiled C sampler.
+        // elem[4]: where the pre-#770 f64 affine rounded to the adjacent f32
+        // (0x404215a9) instead of the sampler's 0x404215aa.
+        assert_eq!(
+            out.value.data[4].to_bits(),
+            (f32::from_bits(0x404215aa) as f64).to_bits(),
+            "elem[4] must be the C f32 sampler value (0x404215aa), got {} (f32 bits {:#010x})",
+            out.value.data[4],
+            (out.value.data[4] as f32).to_bits(),
+        );
+        let old_f64_affine = 2.0 + (5.0 - 2.0) * dropout_sample(42, 4);
+        assert_eq!((old_f64_affine as f32).to_bits(), 0x404215a9);
+        assert_ne!(
+            (out.value.data[4] as f32).to_bits(),
+            (old_f64_affine as f32).to_bits(),
+            "the fix must not reproduce the old f64-affine rounding",
+        );
+        // elem[6]/[7]: where a single-rounding FMA and a plain two-rounding
+        // affine disagree by 1 ULP — the exact bit the compiled C lane flips
+        // between `-ffp-contract=fast` (FMA, 0x408f5273) and `=off` (two
+        // roundings, 0x408f5274). Pin the FMA values; show two-rounding differs.
+        assert_eq!(
+            out.value.data[6].to_bits(),
+            (f32::from_bits(0x408f5273) as f64).to_bits(),
+            "elem[6] must be the single-rounding FMA value (0x408f5273)",
+        );
+        assert_eq!(
+            out.value.data[7].to_bits(),
+            (f32::from_bits(0x403ec1e7) as f64).to_bits(),
+            "elem[7] must be the single-rounding FMA value (0x403ec1e7)",
+        );
+        let unit6 = dropout_sample(42, 6) as f32;
+        let two_rounding_6 = 2.0f32 + (5.0f32 - 2.0f32) * unit6;
+        assert_eq!(two_rounding_6.to_bits(), 0x408f5274);
+        assert_ne!(
+            (out.value.data[6] as f32).to_bits(),
+            two_rounding_6.to_bits(),
+        );
+    }
+
+    #[test]
+    fn affine_is_f32_for_negative_range() {
+        let out = uniform_like_value(&template_f32(8), -3.0, -1.0, 42);
+        assert_eq!(
+            out.value.data[3].to_bits(),
+            (f32::from_bits(0xc010167a) as f64).to_bits(),
+            "elem[3] must be the C f32 sampler value for [-3,-1) (0xc010167a)",
+        );
     }
 }
 

@@ -436,9 +436,18 @@ fn dropout_sample(seed: u64, index: u64) -> f64 {
 }
 
 fn uniform_like(shape: &[usize], low: f64, high: f64, seed: u64) -> TensorValue {
-    let span = high - low;
+    // chelis#770: conform to the C f32 sampler affine
+    // (chelis-backend-c/src/emit.rs: `low + (high - low) * (float)unit` with
+    // f32 `low`/`high`). The default toolchain contracts C's `low + span *
+    // unit` into a single-rounding fused multiply-add, so
+    // `span_f.mul_add(unit_f, low_f)` (also one rounding) matches it
+    // bit-for-bit; a two-rounding `low_f + span_f * unit_f` drifts 1 ULP on
+    // some elements. `dropout_sample` stays f64; the f32 casts are local.
+    let low_f = low as f32;
+    let high_f = high as f32;
+    let span_f = high_f - low_f;
     let data = (0..numel(shape))
-        .map(|index| low + span * dropout_sample(seed, index as u64))
+        .map(|index| span_f.mul_add(dropout_sample(seed, index as u64) as f32, low_f) as f64)
         .collect();
     TensorValue {
         data,
@@ -2841,6 +2850,59 @@ mod tests {
             .remove(&NodeId(dag_b.len() - 1))
             .unwrap();
         assert_ne!(out_a, out_b);
+    }
+
+    #[test]
+    fn uniform_like_affine_mirrors_c_f32_sampler() {
+        // chelis#770: the affine is a single correctly-rounded FMA
+        // (`span_f.mul_add(unit_f, low_f)`), conforming to the compiled C
+        // sampler `chelis_uniform_sample_f32` (which the default toolchain
+        // contracts to the same FMA). seed=42, shape=[8], [2,5).
+        let out = uniform_like(&[8], 2.0, 5.0, 42);
+        // elem[4]: where the OLD f64 affine diverged from the C f32 sampler by
+        // 1 ULP (the #735 sweep: eval 0x404215a9 vs C 0x404215aa).
+        assert_eq!(
+            out.data[4].to_bits(),
+            (f32::from_bits(0x404215aa) as f64).to_bits(),
+            "elem[4] must be the C f32 sampler value (0x404215aa)",
+        );
+        let old_f64_affine = 2.0 + (5.0 - 2.0) * dropout_sample(42, 4);
+        assert_eq!((old_f64_affine as f32).to_bits(), 0x404215a9);
+        assert_ne!(
+            (out.data[4] as f32).to_bits(),
+            (old_f64_affine as f32).to_bits()
+        );
+        // elem[6]/[7]: where a single-rounding FMA and a plain two-rounding
+        // `low_f + span_f * unit_f` disagree by 1 ULP. Pin the FMA values and
+        // show the two-rounding form does NOT reproduce elem[6] — this is the
+        // exact bit the compiled C lane flips between `-ffp-contract=fast`
+        // (FMA, 0x408f5273) and `-ffp-contract=off` (two roundings, 0x408f5274).
+        assert_eq!(
+            out.data[6].to_bits(),
+            (f32::from_bits(0x408f5273) as f64).to_bits(),
+            "elem[6] must be the single-rounding FMA value (0x408f5273)",
+        );
+        assert_eq!(
+            out.data[7].to_bits(),
+            (f32::from_bits(0x403ec1e7) as f64).to_bits(),
+            "elem[7] must be the single-rounding FMA value (0x403ec1e7)",
+        );
+        let unit6 = dropout_sample(42, 6) as f32;
+        let two_rounding_6 = 2.0f32 + (5.0f32 - 2.0f32) * unit6;
+        assert_eq!(two_rounding_6.to_bits(), 0x408f5274);
+        assert_ne!((out.data[6] as f32).to_bits(), two_rounding_6.to_bits());
+    }
+
+    #[test]
+    fn uniform_like_affine_negative_range_is_f32() {
+        // chelis#770: negative range at unit level (the C cross-lane path
+        // can't be driven with a bare negative literal — a separate lowering
+        // gap). seed=42, index=3, low=-3.0, high=-1.0 → 0xc010167a.
+        let out = uniform_like(&[8], -3.0, -1.0, 42);
+        assert_eq!(
+            out.data[3].to_bits(),
+            (f32::from_bits(0xc010167a) as f64).to_bits(),
+        );
     }
 
     // ---- Phase 3j-pre: new reduction ops ----

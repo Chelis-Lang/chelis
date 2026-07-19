@@ -52,7 +52,7 @@ __device__ float chelis_uniform_sample_f32(unsigned long long seed, unsigned lon
     x *= 0x94D049BB133111EBULL;
     x ^= x >> 31;
     double unit = (double)(x >> 11) / (double)(1ULL << 53);
-    return low + (high - low) * (float)unit;
+    return fmaf(high - low, (float)unit, low);
 }
 ";
 
