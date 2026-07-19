@@ -635,6 +635,138 @@ fn g1_add_consts_gpu() {
 }
 
 // ===========================================================================
+// chelis#770: the uniform_like sampler affine is a single correctly-rounded
+// FMA (`fmaf(high - low, (float)unit, low)`), bit-identical across the host
+// evaluator, the C lane, and this HIP device kernel. gpu_correctness carries
+// no other uniform_like value case, so this locks the on-GPU sampler.
+//
+// Manual gate runner (this whole file is #[ignore] per the module header):
+//   scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness -- \
+//       --ignored --test-threads=1
+// Expected success: green — the 8 f32 outputs equal the bit patterns below.
+// elem[6]/[7] are the tell: the single-rounding FMA gives 0x408f5273 /
+// 0x403ec1e7 where a two-rounding `low + span*unit` gives 0x408f5274 /
+// 0x403ec1e8, so a %.6f-precision check could not catch a regression — this
+// asserts raw f32 bits.
+// ===========================================================================
+
+/// Compile a single-output, no-input DAG and return each f32 output element's
+/// raw bit pattern. Mirrors `compile_and_run_single_output` but prints exact
+/// bits (`%.6f` cannot distinguish the 1-ULP FMA difference this locks).
+fn compile_and_run_output_f32_bits(dag: &Dag, func_name: &str) -> Vec<u32> {
+    require_hipcc();
+    let result = codegen_hip(dag, func_name);
+    assert_eq!(
+        result.output_labels.len(),
+        1,
+        "bit harness expects a single output"
+    );
+    assert!(
+        result.input_labels.is_empty(),
+        "bit harness expects a no-input DAG"
+    );
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let hip_rt = hip_runtime_src_dir();
+    write_temp_file(
+        tmp.path(),
+        "chelis_hip_runtime.h",
+        &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
+    );
+    copy_runtime_artifacts(tmp.path());
+    write_temp_file(tmp.path(), "model.cpp", &result.c_source);
+    let main_cpp = format!(
+        r#"#include "chelis_runtime.h"
+#include <cstdio>
+#include <cstdint>
+#include <cstring>
+extern "C" void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
+int main(void) {{
+    chelis_tensor *outputs[1] = {{0}};
+    {func_name}(nullptr, 0, outputs, 1);
+    for (int i = 0; i < outputs[0]->size; i++) {{
+        if (i > 0) printf(" ");
+        float v = outputs[0]->data[i];
+        uint32_t bits;
+        memcpy(&bits, &v, sizeof(bits));
+        printf("0x%08x", bits);
+    }}
+    printf("\n");
+    chelis_free(outputs[0]);
+    return 0;
+}}
+"#
+    );
+    write_temp_file(tmp.path(), "main.cpp", &main_cpp);
+
+    let bin_path = tmp.path().join("gpu_correctness_bits_bin");
+    let mut compile_cmd = Command::new("hipcc");
+    compile_cmd.arg("-O2");
+    compile_cmd.args(&result.compile_flags);
+    compile_cmd.arg(tmp.path().join("main.cpp"));
+    compile_cmd.arg(tmp.path().join("model.cpp"));
+    compile_cmd.arg(format!("-L{}", tmp.path().display()));
+    compile_cmd.arg("-lchelis_runtime");
+    compile_cmd.arg("-lpthread");
+    compile_cmd.arg("-ldl");
+    compile_cmd.args(&result.link_flags);
+    compile_cmd.arg("-o");
+    compile_cmd.arg(&bin_path);
+    let compile = compile_cmd.output().expect("run hipcc");
+    assert!(
+        compile.status.success(),
+        "hipcc failed:\nstderr: {}\nsource:\n{}",
+        String::from_utf8_lossy(&compile.stderr),
+        result.c_source
+    );
+
+    let run = Command::new(&bin_path).output().expect("run gpu binary");
+    assert_gpu_binary_success(&run, &result.link_flags);
+    let stdout = String::from_utf8(run.stdout).expect("utf8 stdout");
+    stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .split_whitespace()
+        .map(|tok| {
+            let hex = tok.strip_prefix("0x").unwrap_or(tok);
+            u32::from_str_radix(hex, 16).expect("parse hex bit pattern")
+        })
+        .collect()
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn uniform_like_fma_gpu_bit_exact_matches_eval_and_c() {
+    let mut dag = Dag::new();
+    let template = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], vec_f32(8), None);
+    let out = dag.add_node(
+        RiscOp::UniformLike {
+            low: 2.0,
+            high: 5.0,
+            seed: 42,
+        },
+        vec![template],
+        vec_f32(8),
+        None,
+    );
+    dag.add_root(out);
+
+    let actual = compile_and_run_output_f32_bits(&dag, "uniform_like_fma");
+    // seed 42, [2,5), shape [8]. Bit-identical to the host evaluator and the C
+    // lane (measured; elem[4] is the #735-sweep divergence, elem[6]/[7] are the
+    // FMA-vs-two-rounding tell).
+    let expected: Vec<u32> = vec![
+        0x407d8370, 0x408730b3, 0x4091855a, 0x4047de4a, 0x404215aa, 0x402ba9ac, 0x408f5273,
+        0x403ec1e7,
+    ];
+    assert_eq!(
+        actual, expected,
+        "HIP uniform_like FMA output must be bit-exact with eval/C"
+    );
+}
+
+// ===========================================================================
 // G2: All unary ops GPU == evaluator within tolerance
 // ===========================================================================
 

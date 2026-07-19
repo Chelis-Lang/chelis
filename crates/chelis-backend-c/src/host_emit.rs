@@ -410,7 +410,10 @@ fn append_uniform_sample_helper(out: &mut Vec<String>) {
     out.push("    x *= 0x94D049BB133111EBULL;".to_string());
     out.push("    x ^= x >> 31;".to_string());
     out.push("    double unit = (double)(x >> 11) / (double)(1ULL << 53);".to_string());
-    out.push("    return low + (high - low) * (float)unit;".to_string());
+    // chelis#770: one explicit correctly-rounded FMA, flag-independent and
+    // bit-identical to the host evaluator's `f32::mul_add`. Byte-identical to
+    // the `emit.rs` copy (see the rationale there).
+    out.push("    return fmaf(high - low, (float)unit, low);".to_string());
     out.push("}".to_string());
     out.push(
         "typedef struct { uint64_t seed; uint64_t counter; int active; } chelis_rng_state;"

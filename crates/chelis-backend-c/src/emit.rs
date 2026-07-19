@@ -161,7 +161,16 @@ impl CEmitter {
         e.line("    x *= 0x94D049BB133111EBULL;");
         e.line("    x ^= x >> 31;");
         e.line("    double unit = (double)(x >> 11) / (double)(1ULL << 53);");
-        e.line("    return low + (high - low) * (float)unit;");
+        // chelis#770: emit the affine as one explicit correctly-rounded FMA
+        // rather than `low + (high - low) * (float)unit`. The latter is
+        // contracted into an FMA under `-ffp-contract=fast` (the default with
+        // `-march=native`) but left as two roundings under `-ffp-contract=off`,
+        // so its output was compile-flag-dependent (1 ULP on some elements) —
+        // a real RNG-determinism hole. `fmaf` is IEEE correctly-rounded on all
+        // targets (hardware or software), making the sampler flag-independent
+        // and bit-identical to the host evaluator's `f32::mul_add`. Keep this
+        // line byte-identical to `host_emit.rs`'s copy.
+        e.line("    return fmaf(high - low, (float)unit, low);");
         e.line("}");
         e.line("#ifndef CHELIS_EFFECTIVE_UNIFORM_SEED");
         e.line("#define CHELIS_EFFECTIVE_UNIFORM_SEED(seed) (seed)");
