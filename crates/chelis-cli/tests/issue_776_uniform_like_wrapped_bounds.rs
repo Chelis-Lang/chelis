@@ -338,3 +338,86 @@ fn def_form_non_literal_bound_rejected_by_checker() {
         "def-form non-literal bound must be rejected by the checker:\n{combined}"
     );
 }
+
+// -- RT-782 keeper: pad-fill sibling fix locked at the emitted-C level --------
+//
+// The suite above proves the uniform_like emitted-bits fix but asserts pad's
+// fix only through the in-crate `pad_fill()` DAG helper in lower.rs. RT-782
+// confirmed by execution that on the parent (b469ace6) a cast-wrapped pad fill
+// silently baked `chelis_f32_from_bits(0x00000000u)` (0.0f) into the generated
+// C — a real shipped-binary miscompile of the same #703 class as the
+// uniform_like bug — while the branch bakes the declared `0x40e00000u` (7.0f).
+
+#[test]
+fn pad_cast_wrapped_fill_emits_declared_bits_not_silent_zero() {
+    // `cast(7.0, f32)` fill -> 7.0f == 0x40e00000. Pre-fix the generated C baked
+    // the pad-with-zeros default 0x00000000 verbatim, dropping the user's fill.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("pad_fill.ch");
+    let out_dir = dir.path().join("pad_fill-out");
+    write_file(
+        &path,
+        "def f(x: tensor[4, f32]) -> tensor[6, f32] = pad(&x, [[1, 1]], cast(7.0, f32))\n\
+         out = f(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)]))\n",
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let src = std::fs::read_to_string(out_dir.join("pad_fill.c")).expect("generated C source");
+    assert!(
+        src.contains("0x40e00000u"),
+        "emitted C must carry the declared 7.0f pad fill (0x40e00000):\n{src}"
+    );
+    assert!(
+        !src.contains("fill_f32_bits(t1, 0x00000000u)"),
+        "emitted C must NOT silently pad with the 0.0f default when a fill was given:\n{src}"
+    );
+}
+
+#[test]
+fn pad_runtime_fill_build_fails_loudly() {
+    // A runtime pad fill is not statically foldable: the build must fail loudly
+    // naming pad + chelis#776, never silently bake a 0.0f fill.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("pad_rt.ch");
+    let out_dir = dir.path().join("pad_rt-out");
+    write_file(
+        &path,
+        "def f(x: tensor[4, f32], r: f32) -> tensor[6, f32] = pad(&x, [[1, 1]], r)\n\
+         out = f(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)]), cast(9.0, f32))\n",
+    );
+    let out = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("chelis build should run");
+    assert!(
+        !out.status.success(),
+        "build must fail loudly on a runtime pad fill, not silently compile"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("pad")
+            && stderr.contains("statically-resolvable")
+            && stderr.contains("chelis#776"),
+        "build diagnostic must name pad, the static requirement, and chelis#776:\n{stderr}"
+    );
+}
