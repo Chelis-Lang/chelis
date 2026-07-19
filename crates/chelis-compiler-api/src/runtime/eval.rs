@@ -189,10 +189,18 @@ impl<'a> EvalContext<'a> {
                     // it to int32 (spec/04-type-system.md §5.3 default),
                     // truncating then sign-extending any seed >= 2^31 into an
                     // unrelated stream. The seed is designed int64
-                    // (spec/design/checker_totality.md §C1.5 item 5). Non-literal
-                    // (computed) seed expressions keep the eval path and still
-                    // narrow at their scalar dtype until #731 Phase 1's
-                    // int64-suffixed FORM gate lands.
+                    // (spec/design/checker_totality.md §C1.5 item 5).
+                    //
+                    // The `eval_expr` fallback below is defensive/forward-looking,
+                    // not a live narrowing path: computed (non-literal) seeds are
+                    // currently gate-REJECTED in both lanes by chelis-effects'
+                    // `validate_handler_expr` (a `random` handler whose seed is
+                    // not an int literal errors "with seed(...) currently requires
+                    // an int literal seed" in check, eval, AND build). That gate's
+                    // accept set is exactly this peel's accept set, so every seed
+                    // that reaches here is a literal read at full width and the
+                    // fallback never runs on a checked path. It would only narrow
+                    // if #731 Phase 1 relaxes the gate to admit computed seeds.
                     let seed = match literal_seed_i64(seed_expr) {
                         Some(value) => value as u64,
                         None => {
