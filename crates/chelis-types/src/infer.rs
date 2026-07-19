@@ -10511,7 +10511,44 @@ fn infer_app(
                 return Type::Error;
             }
 
-            if let Some(ref fname) = func_name {
+            // chelis#778 follow-up: a shape-computed builtin override derives
+            // its result shape from operand shapes and returns
+            // `subst.apply(ret_tv)`. When an operand type is `Error`, the
+            // Error-permissive per-slot unify above (`(Error, _) => Ok(())`)
+            // never bound `ret_tv`, so the override would leak an unbound
+            // `Var` as the call's result type. In the post-inference
+            // type-annotation/writeback pass — which re-infers a node in a
+            // scope where its operands can be unbound and thus `Error` — that
+            // bare `Var` is then degraded to a rank-0 default `TensorType`
+            // that CLOBBERS the node's concrete type annotation, ICEing the IR
+            // lowering (`conv2d output height axis requires a statically known
+            // axis`; #778's short-circuit removal exposed this). Returning
+            // `Type::Error` instead restores the pre-#778 downstream shape
+            // WITHOUT re-adding the arg-`Error` short-circuit: the per-slot
+            // unify above already ran, so sibling-argument checking (#773's
+            // de-mask win) is preserved. Keep this list in sync with the
+            // shape-computed override arms in the match below.
+            let shape_override_operand_error = func_name.as_deref().is_some_and(|fname| {
+                matches!(
+                    fname,
+                    "matmul"
+                        | "sum"
+                        | "max_reduce"
+                        | "min_reduce"
+                        | "prod_reduce"
+                        | "argmax_reduce"
+                        | "argmin_reduce"
+                        | "mean"
+                        | "expand"
+                        | "layer_norm"
+                        | "conv2d"
+                ) && arg_tys
+                    .iter()
+                    .any(|ty| matches!(subst.apply(ty), Type::Error))
+            });
+            if shape_override_operand_error {
+                result_ty = Type::Error;
+            } else if let Some(ref fname) = func_name {
                 match fname.as_str() {
                     "matmul" => {
                         result_ty = check_matmul_signature(&arg_tys, &result_ty, subst, errors);
