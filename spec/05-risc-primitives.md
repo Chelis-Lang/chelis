@@ -598,6 +598,29 @@ interpreter to reach the subprocess-exec path; the rejection is a build error,
 not a silent zero. Full backend support (host-side `host_emit` lowering plus a
 sandboxed runtime exec helper) is tracked in Chelis-Lang/chelis#267.
 
+#### Seed determinism atom
+
+Provisional-atom grammar per `spec/design/spec_provenance.md` §C1, matching
+the §7/§8 atoms of this file; rev hashes arrive with chelis#733 Phase 1, so no
+rev is embedded here (as for every sibling atom).
+
+> **[05-RNG-1]** For a fixed compiler version and target, evaluating a
+> `with seed(N)` program twice SHALL yield byte-identical output, and two
+> distinct accepted seeds SHALL yield distinct streams, in every lane. The
+> RNG is not cryptographic: streams are decorrelated only up to the
+> SplitMix64 mixing - in particular the per-call counter and per-element
+> index enter the hash symmetrically.
+
+*(Measured true with no exceptions in the eval and compiled-C host lanes -
+byte-identical run-to-run and across separate programs, distinct seeds
+diverge - by the chelis#735 cross-lane seed sweep and its re-sweep. This atom
+is the unconditional per-lane determinism-at-rest guarantee only. Cross-lane
+stream identity - eval and the compiled-C host lane producing the same draw
+sequence - is a separate, still-parked atom, held behind chelis#731 Phase 1's
+out-of-range/unsuffixed seed-literal diagnostic; the GPU/kernel lanes are the
+chelis#736 follow-on. See chelis#735 for the sweep evidence and the decided
+contract.)*
+
 ---
 
 ## 3. Derived Built-Ins (Tier 2)
