@@ -899,3 +899,28 @@ fn int_value(expr: &Expr) -> Option<i64> {
         _ => None,
     }
 }
+
+/// Read a *literal* seed at full i64 width, peeling `(lit {meta} …)`
+/// wrappers down to the raw `Atom::Int`. Mirrors the compiled C host lane,
+/// which reads the raw atom and ignores the int32 default meta (`host.rs`
+/// `lower_host_expr`: the `lit` peel forwards to the `Atom::Int(i64)` arm).
+///
+/// chelis#771: routing a literal seed through `eval_lit` narrows it to the
+/// spec/04-type-system.md §5.3 int32 default (int32-truncate then
+/// sign-extend), so any seed `>= 2^31` becomes an unrelated `u64` in the
+/// evaluator while the compiled lane keeps the full value — the two lanes
+/// then sample completely different streams from the "same" seed. The seed
+/// is designed int64 (spec/design/checker_totality.md §C1.5 item 5, the
+/// int64-suffixed literal contract; #731 Phase 1's FORM gate is unshipped).
+///
+/// Returns `None` for non-literal (computed) seed expressions; those keep
+/// the existing dtype-narrowing `eval_expr` path unchanged.
+fn literal_seed_i64(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Atom(Atom::Int(value), _) => Some(*value),
+        Expr::List(list, _) if tag(list) == Some("lit") => {
+            children(list).first().and_then(literal_seed_i64)
+        }
+        _ => None,
+    }
+}
