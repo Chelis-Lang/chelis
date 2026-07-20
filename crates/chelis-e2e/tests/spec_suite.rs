@@ -430,7 +430,7 @@ fn runtime_library_path() -> std::path::PathBuf {
 
 fn compile_and_run_dag(dag: &Dag, func_name: &str) -> String {
     assert!(gcc_available(), "gcc not available -- skipping");
-    let result = chelis_backend_c::codegen(dag, func_name);
+    let result = chelis_backend_c::codegen(dag, func_name).unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let rt_dir = runtime_src_dir();
     let write = |name: &str, content: &str| {
@@ -516,7 +516,7 @@ fn spec_generated_c_compiles() {
     let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
     dag.add_root(c);
 
-    let result = chelis_backend_c::codegen(&dag, "spec_test");
+    let result = chelis_backend_c::codegen(&dag, "spec_test").unwrap();
     assert!(
         !result.c_source.is_empty(),
         "codegen should produce non-empty C source"

@@ -44,7 +44,7 @@ fn build_dag(reducer: ReduceWindowKind) -> Dag {
 #[test]
 fn issue254_emit_reduce_window_max_uses_fmaxf_and_neg_infinity() {
     let dag = build_dag(ReduceWindowKind::Max);
-    let src = codegen(&dag, "kernel").c_source;
+    let src = codegen(&dag, "kernel").unwrap().c_source;
     assert!(
         src.contains("acc = fmaxf("),
         "Max emit must combine with fmaxf, got:\n{src}"
@@ -68,7 +68,7 @@ fn issue254_emit_reduce_window_max_uses_fmaxf_and_neg_infinity() {
 #[test]
 fn issue254_emit_reduce_window_min_uses_fminf_and_positive_infinity() {
     let dag = build_dag(ReduceWindowKind::Min);
-    let src = codegen(&dag, "kernel").c_source;
+    let src = codegen(&dag, "kernel").unwrap().c_source;
     assert!(
         src.contains("acc = fminf("),
         "Min emit must combine with fminf, got:\n{src}"
@@ -83,7 +83,7 @@ fn issue254_emit_reduce_window_min_uses_fminf_and_positive_infinity() {
 #[test]
 fn issue254_emit_reduce_window_sum_uses_plus_equals() {
     let dag = build_dag(ReduceWindowKind::Sum);
-    let src = codegen(&dag, "kernel").c_source;
+    let src = codegen(&dag, "kernel").unwrap().c_source;
     assert!(
         src.contains("acc += t"),
         "Sum emit must use `acc += ...`, got:\n{src}"
@@ -103,7 +103,7 @@ fn issue254_emit_reduce_window_sum_uses_plus_equals() {
 #[test]
 fn issue254_emit_reduce_window_mean_divides_by_window_volume() {
     let dag = build_dag(ReduceWindowKind::Mean);
-    let src = codegen(&dag, "kernel").c_source;
+    let src = codegen(&dag, "kernel").unwrap().c_source;
     assert!(
         src.contains("acc += t"),
         "Mean emit must combine with sum, got:\n{src}"
@@ -136,7 +136,7 @@ fn issue254_emit_reduce_window_max_uses_stride_in_index_arithmetic() {
         tensor_4d([1, 1, 2, 2]),
         None,
     );
-    let src = codegen(&dag, "kernel").c_source;
+    let src = codegen(&dag, "kernel").unwrap().c_source;
     assert!(
         src.contains("* 2 + __w0"),
         "stride>1 emit must multiply the output index by the stride along axis 0, got:\n{src}"

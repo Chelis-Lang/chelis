@@ -45,7 +45,7 @@ fn s6_host_canonical_span_id_emitted_as_comment() {
         Some("op.var".to_string()),
     );
     let program = make_program(body);
-    let src = emit_host_program(&program, "host_canonical");
+    let src = emit_host_program(&program, "host_canonical").unwrap();
 
     assert!(
         src.contains("// span: op.var"),
@@ -64,7 +64,7 @@ fn s6_host_merged_spans_emitted_lex_sorted_after_canonical() {
     body.merged_spans = vec!["op.b".into(), "op.a".into(), "op.c".into()];
 
     let program = make_program(body);
-    let src = emit_host_program(&program, "host_merged");
+    let src = emit_host_program(&program, "host_merged").unwrap();
 
     let span_lines: Vec<&str> = src
         .lines()
@@ -96,7 +96,7 @@ fn s6_host_merged_spans_dedup_against_canonical() {
     body.merged_spans = vec!["op.dup".into(), "op.other".into()];
 
     let program = make_program(body);
-    let src = emit_host_program(&program, "host_dedup");
+    let src = emit_host_program(&program, "host_dedup").unwrap();
 
     let canonical_count = src.matches("// span: op.dup").count();
     assert_eq!(
@@ -116,7 +116,7 @@ fn s6_host_no_spans_emits_no_comment_block() {
     // `// span:` lines on the host path.
     let body = HostExpr::new(HostExprKind::Var("x".to_string(), HostType::Float64));
     let program = make_program(body);
-    let src = emit_host_program(&program, "host_nospan");
+    let src = emit_host_program(&program, "host_nospan").unwrap();
 
     assert!(
         !src.contains("// span:"),
@@ -135,7 +135,7 @@ fn s6_host_forbidden_newline_in_span_is_escaped_at_emit() {
         Some("op\nint INJECTED_HOST = 42;".to_string()),
     );
     let program = make_program(body);
-    let src = emit_host_program(&program, "host_forbidden_newline");
+    let src = emit_host_program(&program, "host_forbidden_newline").unwrap();
 
     assert!(
         src.contains("// span: op\\nint INJECTED_HOST = 42;"),
@@ -157,7 +157,7 @@ fn s6_host_forbidden_newline_in_merged_spans_is_escaped_at_emit() {
     body.merged_spans = vec!["op\nint INJECTED_VIA_HOST_MERGED = 1;".into()];
 
     let program = make_program(body);
-    let src = emit_host_program(&program, "host_forbidden_merged");
+    let src = emit_host_program(&program, "host_forbidden_merged").unwrap();
 
     assert!(
         src.contains("// span: op\\nint INJECTED_VIA_HOST_MERGED = 1;"),
@@ -179,7 +179,7 @@ fn s6_host_clean_span_emitted_verbatim_audit_invariant() {
         Some("eq1.σ_body".to_string()),
     );
     let program = make_program(body);
-    let src = emit_host_program(&program, "host_clean_audit");
+    let src = emit_host_program(&program, "host_clean_audit").unwrap();
 
     assert!(
         src.contains("// span: eq1.σ_body"),

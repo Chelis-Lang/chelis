@@ -52,7 +52,7 @@ fn issue_248_uniform_like_low_arg_emits_exact_bit_pattern() {
     let low: f64 = 1.0e-40;
     let high: f64 = 0.5;
     let dag = build_uniform_like_dag(low, high, 42);
-    let src = CEmitter::emit_dag(&dag, "test_fn");
+    let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
 
     let low_bits = (low as f32).to_bits();
     let high_bits = (high as f32).to_bits();
@@ -84,7 +84,7 @@ fn issue_248_uniform_like_does_not_use_lossy_format() {
     ];
     for &(low, high) in cases {
         let dag = build_uniform_like_dag(low, high, 7);
-        let src = CEmitter::emit_dag(&dag, "test_fn");
+        let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
         let low_bits = (low as f32).to_bits();
         let high_bits = (high as f32).to_bits();
         assert!(
@@ -287,7 +287,7 @@ fn issue_248_uniform_like_byte_identical_low_under_gcc() {
     let low: f64 = 1.0e-40;
     let high: f64 = 1.0e-40;
     let dag = build_uniform_like_dag(low, high, 0);
-    let result = codegen(&dag, "test_uniform_like");
+    let result = codegen(&dag, "test_uniform_like").unwrap();
     let src = &result.c_source;
     let want_bits = (low as f32).to_bits();
     let harness = r#"

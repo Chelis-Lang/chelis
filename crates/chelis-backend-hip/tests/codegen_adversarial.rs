@@ -69,7 +69,7 @@ fn rt1_load_permute_add_sum_chain() {
         None,
     );
     dag.add_root(s);
-    let result = codegen_hip(&dag, "test_chain");
+    let result = codegen_hip(&dag, "test_chain").unwrap();
     let src = &result.c_source;
 
     // Verify the full chain is emitted
@@ -110,7 +110,7 @@ fn rt2_two_loads_store() {
         None,
     );
     dag.add_root(store);
-    let result = codegen_hip(&dag, "test_store");
+    let result = codegen_hip(&dag, "test_store").unwrap();
     let src = &result.c_source;
 
     // Store should alias its input through a metadata wrapper, not by allocating fresh storage.
@@ -143,7 +143,7 @@ fn rt3_scalar_only_dag() {
     let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
     let c = dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32(), None);
     dag.add_root(c);
-    let result = codegen_hip(&dag, "test_scalar");
+    let result = codegen_hip(&dag, "test_scalar").unwrap();
     let src = &result.c_source;
 
     // Scalar should be treated as ndim=1, size=1
@@ -169,7 +169,7 @@ fn rt4_fanout_same_input_two_ops() {
     let a = dag.add_node(RiscOp::Add, vec![x, x], vec_f32(4), None);
     let b = dag.add_node(RiscOp::Mul, vec![x, a], vec_f32(4), None);
     dag.add_root(b);
-    let result = codegen_hip(&dag, "test_fanout");
+    let result = codegen_hip(&dag, "test_fanout").unwrap();
     let src = &result.c_source;
 
     // x and the add intermediate should have their wrappers freed; backing slots free at end.
@@ -215,7 +215,7 @@ fn rt5_stride_op_multiplies_strides() {
         vec_f32(3),
         None,
     );
-    let result = codegen_hip(&dag, "test_stride");
+    let result = codegen_hip(&dag, "test_stride").unwrap();
     let src = &result.c_source;
 
     // The stride op MUST multiply strides by the stride factors.
@@ -255,7 +255,7 @@ fn rt6_multiple_stores() {
     );
     dag.add_root(store_a);
     dag.add_root(store_b);
-    let result = codegen_hip(&dag, "test_multi_store");
+    let result = codegen_hip(&dag, "test_multi_store").unwrap();
 
     assert_eq!(result.output_labels, vec!["out_a", "out_b"]);
     let src = &result.c_source;
@@ -295,7 +295,7 @@ fn rt7_different_reductions_different_kernels() {
     );
     dag.add_root(sum_ax0);
     dag.add_root(sum_ax1);
-    let result = codegen_hip(&dag, "test_diff_reductions");
+    let result = codegen_hip(&dag, "test_diff_reductions").unwrap();
     let src = &result.c_source;
 
     // These must be DIFFERENT kernels (different reduction axis).
@@ -333,7 +333,7 @@ fn rt8_load_as_output_with_store() {
     );
     dag.add_root(store);
     dag.add_root(x); // Load is also a root
-    let result = codegen_hip(&dag, "test_load_output");
+    let result = codegen_hip(&dag, "test_load_output").unwrap();
     let src = &result.c_source;
 
     // output_specs: [Store("computed") at slot 0, Load("x") at slot 1]
@@ -373,7 +373,7 @@ fn rt9_expand_sets_stride_zero() {
         None,
     );
     dag.add_root(e);
-    let result = codegen_hip(&dag, "test_expand_stride");
+    let result = codegen_hip(&dag, "test_expand_stride").unwrap();
     let src = &result.c_source;
 
     // The expand must set stride[0] = 0
@@ -400,7 +400,7 @@ fn rt10_reshape_view_correct() {
         None,
     );
     dag.add_root(r);
-    let result = codegen_hip(&dag, "test_reshape");
+    let result = codegen_hip(&dag, "test_reshape").unwrap();
     let src = &result.c_source;
 
     // Reshape creates a view with the new shape
@@ -429,7 +429,7 @@ fn rt11_store_no_double_free() {
         None,
     );
     dag.add_root(store);
-    let result = codegen_hip(&dag, "test_store_free");
+    let result = codegen_hip(&dag, "test_store_free").unwrap();
     let src = &result.c_source;
 
     // The store aliases the add result through a metadata wrapper, so the output copy must
@@ -461,7 +461,7 @@ fn rt12_cast_emits_kernel() {
         None,
     );
     dag.add_root(c);
-    let result = codegen_hip(&dag, "test_cast");
+    let result = codegen_hip(&dag, "test_cast").unwrap();
     assert!(
         result.c_source.contains("kernel_cast"),
         "Cast must emit a kernel"
@@ -498,7 +498,7 @@ fn rt14_staged_scalar_reduction_allocates_inline_scratch() {
         None,
     );
     dag.add_root(sum);
-    let result = codegen_hip(&dag, "test_stage_scratch");
+    let result = codegen_hip(&dag, "test_stage_scratch").unwrap();
     let src = &result.c_source;
 
     assert!(src.contains("kernel_sum_ax0"));

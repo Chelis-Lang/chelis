@@ -83,21 +83,24 @@ pub struct CodegenOptions {
 /// Repeated `Load(name)` nodes share one input slot, surfaced via `input_labels`.
 /// `Store(name)` nodes are exported as named outputs in `output_labels`; any
 /// remaining DAG roots are appended afterward as `root{index}`.
-pub fn codegen(dag: &chelis_ir::dag::Dag, func_name: &str) -> CodegenResult {
+pub fn codegen(
+    dag: &chelis_ir::dag::Dag,
+    func_name: &str,
+) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
     codegen_with_options(dag, func_name, CodegenOptions::default())
 }
 
 pub fn codegen_host_program(
     program: &chelis_ir::host::HostProgram,
     func_name: &str,
-) -> CodegenResult {
-    let c_source = host_emit::emit_host_program(program, func_name);
+) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
+    let c_source = host_emit::emit_host_program(program, func_name)?;
     let h_header = host_emit::emit_host_header(program, func_name);
     let needs_blas = c_source.contains("#include \"chelis_blas.h\"")
         || c_source.contains("cblas_sgemm(")
         || c_source.contains("cblas_dgemm(")
         || c_source.contains("chelis_blas_matmul");
-    CodegenResult {
+    Ok(CodegenResult {
         c_source,
         h_header,
         requirements: toolchain::CodegenRequirements {
@@ -107,7 +110,7 @@ pub fn codegen_host_program(
         input_labels: Vec::new(),
         output_labels: Vec::new(),
         symbolic_dims: Vec::new(),
-    }
+    })
 }
 
 /// Generate C source code from a RISC DAG with explicit backend options.
@@ -115,7 +118,7 @@ pub fn codegen_with_options(
     dag: &chelis_ir::dag::Dag,
     func_name: &str,
     options: CodegenOptions,
-) -> CodegenResult {
+) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
     let specialized;
     let dag = if options.use_blas {
         specialized = chelis_ir::specialize::specialize_for_blas(dag);
@@ -123,7 +126,7 @@ pub fn codegen_with_options(
     } else {
         dag
     };
-    let c_source = emit::CEmitter::emit_dag_with_options(dag, func_name, options);
+    let c_source = emit::CEmitter::emit_dag_with_options(dag, func_name, options)?;
     let h_header = format!(
         "void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
     );
@@ -135,7 +138,7 @@ pub fn codegen_with_options(
     let input_labels = emit::CEmitter::input_labels(dag);
     let output_labels = emit::CEmitter::output_labels(dag);
     let symbolic_dims = chelis_ir::dag::symbolic_params(dag);
-    CodegenResult {
+    Ok(CodegenResult {
         c_source,
         h_header,
         requirements: toolchain::CodegenRequirements {
@@ -145,7 +148,7 @@ pub fn codegen_with_options(
         input_labels,
         output_labels,
         symbolic_dims,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -273,7 +276,7 @@ mod tests {
     fn codegen_returns_source_and_header() {
         let mut dag = Dag::new();
         dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-        let result = codegen(&dag, "my_func");
+        let result = codegen(&dag, "my_func").unwrap();
         assert!(result.c_source.contains("void my_func("));
         assert!(result.h_header.contains("void my_func("));
         assert_eq!(
@@ -291,7 +294,7 @@ mod tests {
     fn codegen_header_is_declaration() {
         let mut dag = Dag::new();
         dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-        let result = codegen(&dag, "test_fn");
+        let result = codegen(&dag, "test_fn").unwrap();
         assert!(result.h_header.ends_with(';'));
         assert!(!result.h_header.contains('{'));
     }
@@ -323,7 +326,7 @@ mod tests {
             sym,
             None,
         );
-        let _ = codegen(&dag, "mis_sized");
+        let _ = codegen(&dag, "mis_sized").unwrap();
     }
 
     /// Positive parity: a CORRECTLY sized leading-axis Pad over a symbolic
@@ -353,7 +356,7 @@ mod tests {
             out_ty,
             None,
         );
-        let result = codegen(&dag, "well_sized");
+        let result = codegen(&dag, "well_sized").unwrap();
         assert!(result.c_source.contains("void well_sized("));
     }
 
@@ -371,7 +374,7 @@ mod tests {
         // `static` would prevent external callers from linking against the symbol.
         let mut dag = Dag::new();
         dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-        let result = codegen(&dag, "my_entry");
+        let result = codegen(&dag, "my_entry").unwrap();
         // The definition line must start with `void`, not `static void`.
         assert!(
             result.c_source.contains("\nvoid my_entry("),
@@ -397,7 +400,8 @@ mod tests {
                 static_entry: true,
                 ..CodegenOptions::default()
             },
-        );
+        )
+        .unwrap();
         assert!(
             result.contains("static void internal_helper("),
             "internal helper must be static; got source starting:\n{}",
@@ -450,7 +454,7 @@ mod tests {
             summary_rejections: Vec::new(),
         };
 
-        let result = codegen_host_program(&program, "my_prog");
+        let result = codegen_host_program(&program, "my_prog").unwrap();
         let src = &result.c_source;
 
         // The tensor helper must be static (internal to the TU).
@@ -549,7 +553,7 @@ mod tests {
             summary_rejections: Vec::new(),
         };
 
-        let result = codegen_host_program(&program, "my_prog");
+        let result = codegen_host_program(&program, "my_prog").unwrap();
         assert!(result.c_source.contains("#include \"chelis_blas.h\""));
         assert!(result.c_source.contains("cblas_sgemm("));
         assert!(
@@ -568,7 +572,7 @@ mod tests {
             scalar_f32(),
             None,
         );
-        let result = codegen(&dag, "test_fn");
+        let result = codegen(&dag, "test_fn").unwrap();
         assert_eq!(result.output_labels, vec!["out"]);
     }
 
@@ -595,7 +599,7 @@ mod tests {
         );
         let sum = dag.add_node(RiscOp::Add, vec![x0, x1], scalar_f32(), None);
         dag.add_node(RiscOp::Add, vec![sum, y], scalar_f32(), None);
-        let result = codegen(&dag, "test_fn");
+        let result = codegen(&dag, "test_fn").unwrap();
         assert_eq!(result.input_labels, vec!["x", "y"]);
         assert_eq!(result.output_labels, vec!["root0"]);
     }
@@ -647,7 +651,7 @@ mod tests {
             mat_f32(2, 4),
             None,
         );
-        let result = codegen(&dag, "test_fn");
+        let result = codegen(&dag, "test_fn").unwrap();
         assert!(!result.requirements.needs_blas);
         assert!(!result.c_source.contains("cblas_sgemm("));
     }
@@ -706,7 +710,7 @@ mod tests {
                 use_blas: true,
                 ..CodegenOptions::default()
             },
-        );
+        ).unwrap();
         assert!(result.requirements.needs_blas);
         assert!(result.c_source.contains("#include \"chelis_blas.h\""));
         assert!(result.c_source.contains("cblas_sgemm("));
@@ -928,7 +932,7 @@ int main(void) {
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
         let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
         dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
-        let result = codegen(&dag, "test_add");
+        let result = codegen(&dag, "test_add").unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
         copy_runtime_artifacts(tmp.path());
@@ -984,7 +988,7 @@ int main() {
         if !gcc_available() {
             panic!("gcc not available");
         }
-        let result = codegen_with_options(dag, func_name, options);
+        let result = codegen_with_options(dag, func_name, options).unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
         copy_runtime_artifacts(tmp.path());
@@ -1123,7 +1127,7 @@ int main() {{
         if !gcc_available() {
             panic!("gcc not available");
         }
-        let result = codegen_with_options(dag, func_name, options);
+        let result = codegen_with_options(dag, func_name, options).unwrap();
         let n_out = result.output_labels.len();
 
         let mut case_blocks = Vec::new();
@@ -1733,7 +1737,7 @@ int main(void) {{
         dag.add_root(gathered);
         dag.add_root(scattered);
 
-        let result = codegen(&dag, "test_sparse");
+        let result = codegen(&dag, "test_sparse").unwrap();
         let tmp = tempfile::tempdir().unwrap();
         copy_runtime_artifacts(tmp.path());
         write_temp_file(tmp.path(), "model.c", &result.c_source);
@@ -1992,7 +1996,7 @@ int main(void) {{
         );
         dag.add_node(RiscOp::Add, vec![x, y], batch_vec, None);
 
-        let result = codegen(&dag, "test_symbolic_batch");
+        let result = codegen(&dag, "test_symbolic_batch").unwrap();
         assert_eq!(result.symbolic_dims, vec!["batch"]);
         assert!(result.c_source.contains("int batch = inputs[0]->shape[0];"));
         assert!(result.c_source.contains("inputs[1]->shape[0] != batch"));
@@ -2047,7 +2051,7 @@ int main(void) {{
         let out = tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty, None);
         dag.add_root(out);
 
-        let result = codegen(&dag, "test_symbolic_matmul");
+        let result = codegen(&dag, "test_symbolic_matmul").unwrap();
         assert_eq!(result.symbolic_dims, vec!["batch"]);
         assert!(result.c_source.contains("int batch = inputs[0]->shape[0];"));
 
@@ -2118,7 +2122,7 @@ int main(void) {{
                 use_blas: true,
                 ..CodegenOptions::default()
             },
-        );
+        ).unwrap();
         assert!(result.requirements.needs_blas);
         assert!(result.c_source.contains("int seq = inputs[0]->shape[2];"));
         assert!(result.c_source.contains("cblas_sgemm"));
@@ -2193,7 +2197,7 @@ int main(void) {{
                 use_blas: true,
                 ..CodegenOptions::default()
             },
-        );
+        ).unwrap();
         assert!(
             !result.c_source.contains("cblas_sgemm("),
             "non-contiguous matrix slices must not bypass IR specialization \
@@ -2234,7 +2238,7 @@ int main(void) {{
         let xyz = dag.add_node(RiscOp::Add, vec![xy, z], symbolic, None);
         dag.add_root(xyz);
 
-        let result = codegen(&dag, "test_symbolic_occurrences");
+        let result = codegen(&dag, "test_symbolic_occurrences").unwrap();
         assert!(result.c_source.contains("int batch = inputs[0]->shape[0];"));
         assert!(result.c_source.contains("inputs[1]->shape[0] != batch"));
         assert!(result.c_source.contains("inputs[2]->shape[0] != batch"));
@@ -2250,7 +2254,7 @@ int main(void) {{
         let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
         dag.add_root(a);
         dag.add_root(b);
-        let result = codegen(&dag, "test_multi");
+        let result = codegen(&dag, "test_multi").unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
         copy_runtime_artifacts(tmp.path());
@@ -2294,7 +2298,7 @@ int main(void) {
         }
         let mut dag = Dag::new();
         dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(2), None);
-        let result = codegen(&dag, "test_load_copy");
+        let result = codegen(&dag, "test_load_copy").unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
         copy_runtime_artifacts(tmp.path());
@@ -2412,7 +2416,7 @@ int main(void) {
                 use_blas: true,
                 ..CodegenOptions::default()
             },
-        );
+        ).unwrap();
         assert!(result.c_source.contains("cblas_sgemm("));
 
         let tmp = tempfile::tempdir().unwrap();
@@ -2595,7 +2599,7 @@ int main(void) {
                 math_lib_override: Some(MathLib::Sleef),
                 ..CodegenOptions::default()
             },
-        );
+        ).unwrap();
         // The Sleef guard must be present.
         assert!(
             result.c_source.contains("#ifdef CHELIS_HAS_SLEEF"),
@@ -2651,7 +2655,7 @@ int main(void) {
                 math_lib_override: Some(MathLib::None),
                 ..CodegenOptions::default()
             },
-        );
+        ).unwrap();
         assert!(
             !result.c_source.contains("#include \"chelis_math.h\""),
             "MathLib::None must not emit chelis_math.h include:\n{}",
@@ -2692,7 +2696,7 @@ int main(void) {
                 math_lib_override: Some(MathLib::Sleef),
                 ..CodegenOptions::default()
             },
-        );
+        ).unwrap();
         // Sleef guard must NOT appear — add-only kernel takes the Level-1 path.
         assert!(
             !result.c_source.contains("#ifdef CHELIS_HAS_SLEEF"),
@@ -2726,7 +2730,7 @@ int main(void) {
                     math_lib_override: Some(MathLib::Sleef),
                     ..CodegenOptions::default()
                 },
-            );
+            ).unwrap();
 
             let tmp = tempfile::tempdir().unwrap();
             copy_runtime_artifacts(tmp.path());
@@ -2820,7 +2824,7 @@ int main(void) {{
                 math_lib_override: Some(MathLib::Sleef),
                 ..CodegenOptions::default()
             },
-        );
+        ).unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
         copy_runtime_artifacts(tmp.path());
@@ -2934,7 +2938,7 @@ int main(void) {{
                 math_lib_override: Some(MathLib::Sleef),
                 ..CodegenOptions::default()
             },
-        );
+        ).unwrap();
         let src = &result.c_source;
         assert!(
             src.contains("#ifdef CHELIS_HAS_SLEEF"),
@@ -2972,7 +2976,7 @@ int main(void) {{
                 math_lib_override: Some(MathLib::Sleef),
                 ..CodegenOptions::default()
             },
-        );
+        ).unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
         copy_runtime_artifacts(tmp.path());
@@ -3107,7 +3111,7 @@ int main(void) {{
             summary_rejections: Vec::new(),
         };
 
-        let result = codegen_host_program(&program, "prog");
+        let result = codegen_host_program(&program, "prog").unwrap();
         let src = &result.c_source;
 
         // Tensor helper must be `static void` (never static inline — it uses the DAG kernel sig)
@@ -3173,7 +3177,7 @@ int main(void) {{
             summary_rejections: Vec::new(),
         };
 
-        let result = codegen_host_program(&program, "lib");
+        let result = codegen_host_program(&program, "lib").unwrap();
         let src = &result.c_source;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -3211,7 +3215,7 @@ int main(void) {{
             None,
         );
         dag.add_node(RiscOp::Tan, vec![x], scalar_f32(), None);
-        let result = codegen(&dag, "test_tan");
+        let result = codegen(&dag, "test_tan").unwrap();
         let src = &result.c_source;
         assert!(src.contains("tanf("), "tan must emit `tanf(`; got:\n{src}");
         assert!(
@@ -3231,7 +3235,7 @@ int main(void) {{
             None,
         );
         dag.add_node(RiscOp::Abs, vec![x], scalar_f32(), None);
-        let result = codegen(&dag, "test_abs");
+        let result = codegen(&dag, "test_abs").unwrap();
         let src = &result.c_source;
         // `fabsf` must appear; plain `absf` (which doesn't exist in C) must not.
         assert!(
@@ -3380,7 +3384,7 @@ int main(void) {{
         if !gcc_available() {
             panic!("gcc not available");
         }
-        let result = codegen(dag, func_name);
+        let result = codegen(dag, func_name).unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
         copy_runtime_artifacts(tmp.path());

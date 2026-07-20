@@ -85,7 +85,7 @@ fn c_backend_blas_matmul_bf16_routes_through_convert_then_sgemm_post_ws_1() {
         None,
     );
     dag.add_root(mm);
-    let src = CEmitter::emit_dag(&dag, "test_fn");
+    let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
     assert!(
         src.contains("chelis_bf16_buffer_to_f32"),
         "WS-1: bf16 matmul must convert operands to f32 before BLAS dispatch; got:\n{src}"
@@ -128,7 +128,7 @@ fn c_backend_blas_matmul_f16_routes_through_convert_then_sgemm_post_ws_1() {
         None,
     );
     dag.add_root(mm);
-    let src = CEmitter::emit_dag(&dag, "test_fn");
+    let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
     assert!(
         src.contains("chelis_f16_buffer_to_f32"),
         "WS-1: f16 matmul must convert operands to f32 before BLAS dispatch; got:\n{src}"
@@ -181,7 +181,7 @@ fn c_backend_f64_matmul_emits_cblas_dgemm_not_sgemm() {
         use_blas: true,
         ..CodegenOptions::default()
     };
-    let result = codegen_with_options(&dag, "f64_mm", opts);
+    let result = codegen_with_options(&dag, "f64_mm", opts).unwrap();
     let src = &result.c_source;
     assert!(
         src.contains("cblas_dgemm"),
@@ -223,7 +223,7 @@ fn c_backend_int8_reduce_sum_uses_int32_accumulator_no_silent_overflow() {
         None,
     );
     dag.add_root(s);
-    let result = codegen_with_options(&dag, "int8_sum", CodegenOptions::default());
+    let result = codegen_with_options(&dag, "int8_sum", CodegenOptions::default()).unwrap();
     let src = &result.c_source;
     assert!(
         src.contains("int32_t"),
@@ -254,7 +254,7 @@ fn c_backend_int16_reduce_sum_uses_int32_accumulator() {
         None,
     );
     dag.add_root(s);
-    let result = codegen_with_options(&dag, "int16_sum", CodegenOptions::default());
+    let result = codegen_with_options(&dag, "int16_sum", CodegenOptions::default()).unwrap();
     let src = &result.c_source;
     assert!(
         src.contains("int32_t"),
@@ -291,7 +291,7 @@ fn c_backend_f32_operand_f64_accumulator_reduce_sum_uses_double_acc() {
         None,
     );
     dag.add_root(s);
-    let result = codegen_with_options(&dag, "f32_sum_f64_acc", CodegenOptions::default());
+    let result = codegen_with_options(&dag, "f32_sum_f64_acc", CodegenOptions::default()).unwrap();
     let src = &result.c_source;
     assert!(
         src.contains("double"),
@@ -323,7 +323,7 @@ fn c_backend_int32_reduce_sum_emits_int32_no_silent_float_downgrade() {
         None,
     );
     dag.add_root(s);
-    let result = codegen_with_options(&dag, "int32_sum", CodegenOptions::default());
+    let result = codegen_with_options(&dag, "int32_sum", CodegenOptions::default()).unwrap();
     let src = &result.c_source;
     assert!(
         src.contains("int32_t"),
@@ -362,7 +362,7 @@ fn c_backend_int64_reduce_sum_emits_int64() {
         None,
     );
     dag.add_root(s);
-    let result = codegen_with_options(&dag, "int64_sum", CodegenOptions::default());
+    let result = codegen_with_options(&dag, "int64_sum", CodegenOptions::default()).unwrap();
     let src = &result.c_source;
     assert!(
         src.contains("int64_t"),

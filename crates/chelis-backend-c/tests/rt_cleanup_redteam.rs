@@ -285,7 +285,7 @@ fn run_bf16_abs_with_bits(bits: u16) -> u16 {
         None,
     );
     dag.add_node(RiscOp::Abs, vec![load], vec_ty(n, Prim::Bf16), None);
-    let result = codegen(&dag, "bf16_abs_edge");
+    let result = codegen(&dag, "bf16_abs_edge").unwrap();
     let main_c = format!(
         r#"{HARNESS}
 extern void bf16_abs_edge(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
@@ -326,7 +326,7 @@ fn run_f16_abs_with_bits(bits: u16) -> u16 {
         None,
     );
     dag.add_node(RiscOp::Abs, vec![load], vec_ty(n, Prim::F16), None);
-    let result = codegen(&dag, "f16_abs_edge");
+    let result = codegen(&dag, "f16_abs_edge").unwrap();
     let main_c = format!(
         r#"{HARNESS}
 extern void f16_abs_edge(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
@@ -545,7 +545,7 @@ fn bf16_reduce_sum_4096_x_0_001_uses_f32_accumulator_per_spec_5_7_1() {
         },
         None,
     );
-    let result = codegen(&dag, "bf16_sum_4096");
+    let result = codegen(&dag, "bf16_sum_4096").unwrap();
     let main_c = format!(
         r#"{HARNESS}
 extern void bf16_sum_4096(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
@@ -633,7 +633,7 @@ fn bf16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
         accumulator: Prim::F32,
     };
     dag.add_node(mm, vec![a, b], mat_ty(2, 4, Prim::F32), None);
-    let result = codegen(&dag, "bf16_mm_f32_out");
+    let result = codegen(&dag, "bf16_mm_f32_out").unwrap();
     assert!(
         result.c_source.contains("chelis_bf16_buffer_to_f32"),
         "bf16-operand matmul with f32 output must convert operands through \
@@ -678,7 +678,7 @@ fn f16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
         accumulator: Prim::F32,
     };
     dag.add_node(mm, vec![a, b], mat_ty(2, 4, Prim::F32), None);
-    let result = codegen(&dag, "f16_mm_f32_out");
+    let result = codegen(&dag, "f16_mm_f32_out").unwrap();
     assert!(
         result.c_source.contains("chelis_f16_buffer_to_f32"),
         "f16-operand matmul with f32 output must convert operands:\n{}",
@@ -720,7 +720,7 @@ fn bf16_matmul_wrapper_balances_scratch_alloc_and_free_when_output_is_bf16() {
         accumulator: Prim::F32,
     };
     dag.add_node(mm, vec![a, b], mat_ty(2, 4, Prim::Bf16), None);
-    let result = codegen(&dag, "bf16_mm_alloc_free");
+    let result = codegen(&dag, "bf16_mm_alloc_free").unwrap();
     let src = &result.c_source;
     let mallocs = src.matches("malloc((size_t)").count();
     let frees_in_wrapper = src.matches("free(t").filter(|_| true).count();
@@ -771,7 +771,7 @@ fn bf16_matmul_wrapper_balances_scratch_alloc_and_free_when_output_is_f32() {
         accumulator: Prim::F32,
     };
     dag.add_node(mm, vec![a, b], mat_ty(2, 4, Prim::F32), None);
-    let result = codegen(&dag, "bf16_mm_alloc_free_f32_out");
+    let result = codegen(&dag, "bf16_mm_alloc_free_f32_out").unwrap();
     let src = &result.c_source;
     let mallocs = src.matches("malloc((size_t)").count();
     // When output is f32, only af and bf are scratch; cf is the result tensor itself.
@@ -811,7 +811,7 @@ fn bf16_const_fill_pinned_bit_patterns_for_0_1_0_01_pi() {
         let n = 4;
         let mut dag = Dag::new();
         dag.add_node(RiscOp::Const { value }, vec![], vec_ty(n, Prim::Bf16), None);
-        let result = codegen(&dag, "bf16_const_extra");
+        let result = codegen(&dag, "bf16_const_extra").unwrap();
         let main_c = format!(
             r#"{HARNESS}
 extern void bf16_const_extra(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
@@ -856,7 +856,7 @@ fn f16_const_fill_pinned_bit_patterns_for_0_1_0_01_pi() {
         let n = 4;
         let mut dag = Dag::new();
         dag.add_node(RiscOp::Const { value }, vec![], vec_ty(n, Prim::F16), None);
-        let result = codegen(&dag, "f16_const_extra");
+        let result = codegen(&dag, "f16_const_extra").unwrap();
         let main_c = format!(
             r#"{HARNESS}
 extern void f16_const_extra(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
@@ -920,7 +920,7 @@ fn cast_f32_to_bf16_preserves_value_per_ieee_754() {
         vec_ty(n, Prim::Bf16),
         None,
     );
-    let result = codegen(&dag, "cast_f32_bf16");
+    let result = codegen(&dag, "cast_f32_bf16").unwrap();
     let main_c = format!(
         r#"{HARNESS}
 extern void cast_f32_bf16(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
@@ -969,7 +969,7 @@ fn cast_bf16_to_f32_preserves_value_per_ieee_754() {
         vec_ty(n, Prim::F32),
         None,
     );
-    let result = codegen(&dag, "cast_bf16_f32");
+    let result = codegen(&dag, "cast_bf16_f32").unwrap();
     let main_c = format!(
         r#"{HARNESS}
 extern void cast_bf16_f32(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
@@ -1017,7 +1017,7 @@ fn cast_f32_to_f16_preserves_value_per_ieee_754() {
         vec_ty(n, Prim::F16),
         None,
     );
-    let result = codegen(&dag, "cast_f32_f16");
+    let result = codegen(&dag, "cast_f32_f16").unwrap();
     let main_c = format!(
         r#"{HARNESS}
 extern void cast_f32_f16(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
@@ -1097,7 +1097,7 @@ fn cross_backend_bf16_add_mul_chain_agrees_with_evaluator() {
     let eval_out = evals[&last_id].data.clone();
 
     // C backend
-    let result = codegen(&dag, "bf16_chain");
+    let result = codegen(&dag, "bf16_chain").unwrap();
     let main_c = format!(
         r#"{HARNESS}
 extern void bf16_chain(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);

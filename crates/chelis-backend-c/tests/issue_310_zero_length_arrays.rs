@@ -61,7 +61,7 @@ fn issue_310_nullary_adt_variant_emits_no_zero_length_array() {
         ty: HostType::Adt("Maybe".to_string(), Vec::new()),
     });
     let program = program_with_body(HostType::Adt("Maybe".to_string(), Vec::new()), body);
-    let src = emit_host_program(&program, "nullary_adt");
+    let src = emit_host_program(&program, "nullary_adt").unwrap();
 
     assert!(
         !has_zero_length_array(&src),
@@ -91,7 +91,7 @@ fn issue_310_adt_variant_with_fields_still_emits_array() {
         HostType::Adt("Maybe".to_string(), vec![HostType::Int64]),
         body,
     );
-    let src = emit_host_program(&program, "adt_with_field");
+    let src = emit_host_program(&program, "adt_with_field").unwrap();
 
     assert!(
         src.contains("[1];"),
@@ -114,7 +114,7 @@ fn issue_310_adt_variant_with_fields_still_emits_array() {
 fn issue_310_empty_tuple_emits_no_zero_length_array() {
     let body = HostExpr::new(HostExprKind::Tuple(Vec::new(), HostType::Tuple(Vec::new())));
     let program = program_with_body(HostType::Tuple(Vec::new()), body);
-    let src = emit_host_program(&program, "empty_tuple");
+    let src = emit_host_program(&program, "empty_tuple").unwrap();
 
     assert!(
         !has_zero_length_array(&src),
@@ -144,7 +144,7 @@ fn issue_310_nonempty_tuple_still_emits_array() {
         HostType::Tuple(vec![HostType::Int64, HostType::Int64]),
         body,
     );
-    let src = emit_host_program(&program, "pair_tuple");
+    let src = emit_host_program(&program, "pair_tuple").unwrap();
 
     assert!(
         src.contains("[2];"),
@@ -228,7 +228,7 @@ fn issue_310_nullary_adt_compiles_under_pedantic_iso_c() {
         ty: HostType::Adt("Maybe".to_string(), Vec::new()),
     });
     let program = program_with_body(HostType::Adt("Maybe".to_string(), Vec::new()), body);
-    let src = emit_host_program(&program, "nullary_adt_pedantic");
+    let src = emit_host_program(&program, "nullary_adt_pedantic").unwrap();
 
     if let Some(stderr) = pedantic_compile_error("nullary_adt", &src) {
         panic!(
@@ -245,7 +245,7 @@ fn issue_310_empty_tuple_compiles_under_pedantic_iso_c() {
     }
     let body = HostExpr::new(HostExprKind::Tuple(Vec::new(), HostType::Tuple(Vec::new())));
     let program = program_with_body(HostType::Tuple(Vec::new()), body);
-    let src = emit_host_program(&program, "empty_tuple_pedantic");
+    let src = emit_host_program(&program, "empty_tuple_pedantic").unwrap();
 
     if let Some(stderr) = pedantic_compile_error("empty_tuple", &src) {
         panic!(

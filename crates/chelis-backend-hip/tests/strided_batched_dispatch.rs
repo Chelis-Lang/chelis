@@ -111,7 +111,7 @@ fn rank4_uniform_batched_matmul_dispatches_strided_batched_with_product_batch_co
     );
     dag.add_root(out);
 
-    let result = codegen_hip(&dag, "red_team_rank4_uniform");
+    let result = codegen_hip(&dag, "red_team_rank4_uniform").unwrap();
 
     let expected = format!(
         "chelis_hipblas_sgemm_strided_batched_row_major(d_t{a}, d_t{b}, d_t{out}, 4, 6, 5, (2 * 3), 20LL, 30LL, 24LL);",
@@ -159,7 +159,7 @@ fn rank3_f64_uniform_batched_does_not_dispatch_strided_batched() {
     );
     dag.add_root(out);
 
-    let result = codegen_hip(&dag, "red_team_rank3_f64");
+    let result = codegen_hip(&dag, "red_team_rank3_f64").unwrap();
     assert_no_substring(
         &result.c_source,
         "chelis_hipblas_sgemm_strided_batched_row_major(",
@@ -215,7 +215,7 @@ fn symbolic_batch_concrete_mnk_dispatches_strided_batched_with_symbolic_batch_co
     );
     dag.add_root(out);
 
-    let result = codegen_hip(&dag, "red_team_symbolic_batch");
+    let result = codegen_hip(&dag, "red_team_symbolic_batch").unwrap();
     // The batch_count is the symbol's runtime expression. The HIP emitter
     // renders `DimExpr::Sym("batch")` as the bare local variable `batch`
     // (bound from `inputs[0]->shape[0]` earlier in the emitted entry).
@@ -275,7 +275,7 @@ fn symbolic_mnk_falls_back_to_helper_loop_not_strided_batched() {
     );
     dag.add_root(out);
 
-    let result = codegen_hip(&dag, "red_team_symbolic_mnk");
+    let result = codegen_hip(&dag, "red_team_symbolic_mnk").unwrap();
     assert_no_substring(
         &result.c_source,
         "chelis_hipblas_sgemm_strided_batched_row_major(",
@@ -321,7 +321,7 @@ fn rank2_matmul_takes_plain_sgemm_not_batched_nor_strided() {
     );
     dag.add_root(out);
 
-    let result = codegen_hip(&dag, "red_team_rank2");
+    let result = codegen_hip(&dag, "red_team_rank2").unwrap();
     assert_no_substring(
         &result.c_source,
         "chelis_hipblas_sgemm_strided_batched_row_major(",
@@ -378,7 +378,7 @@ fn broadcasted_rhs_leading_axis_falls_back_to_helper_loop() {
     );
     dag.add_root(out);
 
-    let result = codegen_hip(&dag, "red_team_rhs_broadcast");
+    let result = codegen_hip(&dag, "red_team_rhs_broadcast").unwrap();
     assert_no_substring(
         &result.c_source,
         "chelis_hipblas_sgemm_strided_batched_row_major(",
@@ -445,7 +445,7 @@ fn both_sides_broadcasted_leading_axis_falls_back_to_helper_loop() {
     );
     dag.add_root(out);
 
-    let result = codegen_hip(&dag, "red_team_both_broadcast");
+    let result = codegen_hip(&dag, "red_team_both_broadcast").unwrap();
     assert_no_substring(
         &result.c_source,
         "chelis_hipblas_sgemm_strided_batched_row_major(",
@@ -509,7 +509,7 @@ fn perf_f1_uniform_rank3_batched_matmul_dispatches_strided_batched() {
     );
     dag.add_root(out);
 
-    let result = codegen_hip(&dag, "perf_f1_uniform_strided_batched");
+    let result = codegen_hip(&dag, "perf_f1_uniform_strided_batched").unwrap();
 
     // The exact emitted line is deterministic from `emit_blas_matmul`:
     //   chelis_hipblas_sgemm_strided_batched_row_major(d_t<a>, d_t<b>,
@@ -586,7 +586,7 @@ fn perf_f1_broadcasted_leading_axis_uses_helper_loop_fallback() {
     );
     dag.add_root(out);
 
-    let result = codegen_hip(&dag, "perf_f1_broadcasted_helper_loop");
+    let result = codegen_hip(&dag, "perf_f1_broadcasted_helper_loop").unwrap();
 
     // The exact emitted fallback line is deterministic from
     // `emit_blas_matmul`:

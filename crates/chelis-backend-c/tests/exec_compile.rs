@@ -260,7 +260,7 @@ fn exec_math_none_exp_kernel_correct_output() {
             math_lib_override: Some(MathLib::None),
             ..Default::default()
         },
-    );
+    ).unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -341,7 +341,7 @@ fn exec_sleef_kernel_scalar_fallback_correct() {
             math_lib_override: Some(MathLib::Sleef),
             ..Default::default()
         },
-    );
+    ).unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -421,7 +421,7 @@ fn exec_reduce_sum_correct_output() {
     );
     let dag = fuse(&dag);
 
-    let result = chelis_backend_c::codegen(&dag, "test_reduce_sum");
+    let result = chelis_backend_c::codegen(&dag, "test_reduce_sum").unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -496,7 +496,7 @@ fn reduce_window_3x3_dag(reducer: ReduceWindowKind, kernel: &str) -> String {
         out_ty,
         None,
     );
-    chelis_backend_c::codegen(&dag, kernel).c_source
+    chelis_backend_c::codegen(&dag, kernel).unwrap().c_source
 }
 
 // Build a contiguous 1x1x3x3 input view holding [[1..9]] row-major.
@@ -623,7 +623,7 @@ fn reduce_window_grad_dag(reducer: ReduceWindowKind, kernel: &str) -> String {
         x_ty,
         None,
     );
-    chelis_backend_c::codegen(&dag, kernel).c_source
+    chelis_backend_c::codegen(&dag, kernel).unwrap().c_source
 }
 
 const RW_GRAD_HARNESS_HEADER: &str = r#"
@@ -745,7 +745,7 @@ fn exec_div_ieee_corner_cases() {
             math_lib_override: Some(MathLib::None),
             ..Default::default()
         },
-    );
+    ).unwrap();
     let src = &result.c_source;
 
     let harness = format!(
@@ -797,7 +797,7 @@ fn exec_recip_ieee_corner_cases() {
             math_lib_override: Some(MathLib::None),
             ..Default::default()
         },
-    );
+    ).unwrap();
     let src = &result.c_source;
 
     let harness = format!(
@@ -891,7 +891,7 @@ fn run_int_div_op_exec(
             math_lib_override: Some(MathLib::None),
             ..Default::default()
         },
-    );
+    ).unwrap();
     let src = &result.c_source;
 
     let [e0, e1, e2, e3] = expected;
@@ -1142,7 +1142,7 @@ fn exec_floor_div_int_zero_divisor_traps() {
             math_lib_override: Some(MathLib::None),
             ..Default::default()
         },
-    );
+    ).unwrap();
     let src = &result.c_source;
     // Emit-shape: floor_div must wrap the integer divisor in the portable guard.
     assert!(
@@ -1232,7 +1232,7 @@ fn exec_reduce_sum_issue_163_repro_is_bit_exact_with_evaluator() {
         None,
     );
     let dag = fuse(&dag);
-    let result = chelis_backend_c::codegen(&dag, "test_issue_163_sum");
+    let result = chelis_backend_c::codegen(&dag, "test_issue_163_sum").unwrap();
 
     let harness = format!(
         r#"{HARNESS_HEADER}
@@ -1305,7 +1305,7 @@ fn exec_zero_size_tensor_does_not_crash() {
             math_lib_override: Some(MathLib::Sleef),
             ..Default::default()
         },
-    );
+    ).unwrap();
     let src = &result.c_source;
 
     let harness = format!(
@@ -1681,7 +1681,7 @@ fn ws_a1_exec_f64_reduce_sum_matches_reference() {
     );
     let dag = fuse(&dag);
 
-    let result = chelis_backend_c::codegen(&dag, "test_reduce_sum_f64");
+    let result = chelis_backend_c::codegen(&dag, "test_reduce_sum_f64").unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -1780,7 +1780,7 @@ fn ws_a1_exec_i32_reduce_sum_produces_integer_result_no_float_cast() {
     );
     let dag = fuse(&dag);
 
-    let result = chelis_backend_c::codegen(&dag, "test_reduce_sum_i32");
+    let result = chelis_backend_c::codegen(&dag, "test_reduce_sum_i32").unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -1892,7 +1892,7 @@ fn ws_a1_exec_f64_matmul_dispatches_dgemm_and_matches_reference() {
             use_blas: true,
             ..CodegenOptions::default()
         },
-    );
+    ).unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -2080,7 +2080,7 @@ fn ws_a1_exec_mixed_f64_tensors_and_i32_indices_compile_and_run() {
         None,
     );
 
-    let result = chelis_backend_c::codegen(&dag, "test_mixed");
+    let result = chelis_backend_c::codegen(&dag, "test_mixed").unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -2316,7 +2316,7 @@ fn exec_i8_add_correct_output() {
     dag.add_node(RiscOp::Add, vec![a, b], vec_i8(8), None);
     let dag = fuse(&dag);
 
-    let result = chelis_backend_c::codegen(&dag, "test_i8_add");
+    let result = chelis_backend_c::codegen(&dag, "test_i8_add").unwrap();
     let src = &result.c_source;
 
     // The kernel must emit `int8_t*` access against `t->data` (not float*).
@@ -2382,7 +2382,7 @@ fn exec_i8_add_overflow_wraps_two_complement() {
     dag.add_node(RiscOp::Add, vec![a, b], vec_i8(2), None);
     let dag = fuse(&dag);
 
-    let result = chelis_backend_c::codegen(&dag, "test_i8_add_wrap");
+    let result = chelis_backend_c::codegen(&dag, "test_i8_add_wrap").unwrap();
     let src = &result.c_source;
 
     let harness = format!(
@@ -2433,7 +2433,7 @@ fn exec_i8_mul_correct_output_with_wrap() {
     dag.add_node(RiscOp::Mul, vec![a, b], vec_i8(2), None);
     let dag = fuse(&dag);
 
-    let result = chelis_backend_c::codegen(&dag, "test_i8_mul");
+    let result = chelis_backend_c::codegen(&dag, "test_i8_mul").unwrap();
     let src = &result.c_source;
 
     let harness = format!(
@@ -2481,7 +2481,7 @@ fn exec_i16_add_correct_output() {
     dag.add_node(RiscOp::Add, vec![a, b], vec_i16(4), None);
     let dag = fuse(&dag);
 
-    let result = chelis_backend_c::codegen(&dag, "test_i16_add");
+    let result = chelis_backend_c::codegen(&dag, "test_i16_add").unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -2545,7 +2545,7 @@ fn exec_i8_reduce_sum_promotes_to_i32() {
     dag.add_node(sum_op, vec![a], scalar_i32(), None);
     let dag = fuse(&dag);
 
-    let result = chelis_backend_c::codegen(&dag, "test_i8_reduce_sum");
+    let result = chelis_backend_c::codegen(&dag, "test_i8_reduce_sum").unwrap();
     let src = &result.c_source;
 
     // The accumulator type in the emitted C must be int32_t — pinning
@@ -2607,7 +2607,7 @@ fn exec_i16_reduce_sum_promotes_to_i32() {
     dag.add_node(sum_op, vec![a], scalar_i32(), None);
     let dag = fuse(&dag);
 
-    let result = chelis_backend_c::codegen(&dag, "test_i16_reduce_sum");
+    let result = chelis_backend_c::codegen(&dag, "test_i16_reduce_sum").unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -2734,7 +2734,7 @@ fn run_cmplt_parity(
     assert_eq!(expected.len(), n);
 
     let dag = fuse(&dag);
-    let result = codegen_with_options(&dag, &format!("cmplt_{tag}"), CodegenOptions::default());
+    let result = codegen_with_options(&dag, &format!("cmplt_{tag}"), CodegenOptions::default()).unwrap();
     let src = &result.c_source;
 
     // Format the operand initializers and the expected bool vector.

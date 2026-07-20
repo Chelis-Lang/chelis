@@ -252,7 +252,7 @@ fn run_unary_reduced(
         None,
     );
     dag.add_node(op, vec![load], vec_ty(n, prec), None);
-    let result = codegen(&dag, test_name);
+    let result = codegen(&dag, test_name).unwrap();
     let load_helper = match prec {
         Prim::Bf16 => "bf16_tensor_from_f32",
         Prim::F16 => "f16_tensor_from_f32",
@@ -344,7 +344,7 @@ fn run_binary_reduced(
         None,
     );
     dag.add_node(op, vec![a, b], vec_ty(n, prec), None);
-    let result = codegen(&dag, test_name);
+    let result = codegen(&dag, test_name).unwrap();
     let load_helper = match prec {
         Prim::Bf16 => "bf16_tensor_from_f32",
         Prim::F16 => "f16_tensor_from_f32",
@@ -794,7 +794,7 @@ fn run_scalar_reduce_reduced(
         None,
     );
     dag.add_node(op, vec![load], scalar_ty(prec), None);
-    let result = codegen(&dag, test_name);
+    let result = codegen(&dag, test_name).unwrap();
     let load_helper = match prec {
         Prim::Bf16 => "bf16_tensor_from_f32",
         Prim::F16 => "f16_tensor_from_f32",
@@ -864,7 +864,7 @@ fn bf16_min_reduce_is_structurally_unsupported_today() {
         scalar_ty(Prim::Bf16),
         None,
     );
-    let _ = codegen(&dag, "bf16_min_reduce_panic_probe");
+    let _ = codegen(&dag, "bf16_min_reduce_panic_probe").unwrap();
 }
 
 #[test]
@@ -883,7 +883,7 @@ fn f16_min_reduce_is_structurally_unsupported_today() {
         scalar_ty(Prim::F16),
         None,
     );
-    let _ = codegen(&dag, "f16_min_reduce_panic_probe");
+    let _ = codegen(&dag, "f16_min_reduce_panic_probe").unwrap();
 }
 
 #[test]
@@ -902,7 +902,7 @@ fn bf16_prod_reduce_is_structurally_unsupported_today() {
         scalar_ty(Prim::Bf16),
         None,
     );
-    let _ = codegen(&dag, "bf16_prod_reduce_panic_probe");
+    let _ = codegen(&dag, "bf16_prod_reduce_panic_probe").unwrap();
 }
 
 #[test]
@@ -921,7 +921,7 @@ fn f16_prod_reduce_is_structurally_unsupported_today() {
         scalar_ty(Prim::F16),
         None,
     );
-    let _ = codegen(&dag, "f16_prod_reduce_panic_probe");
+    let _ = codegen(&dag, "f16_prod_reduce_panic_probe").unwrap();
 }
 
 // ---------------------------------------------------------------------
@@ -952,7 +952,7 @@ fn run_cast_f32_to_reduced(test_name: &str, dst: Prim, value: f32, tol: f64) {
         vec_ty(n, dst),
         None,
     );
-    let result = codegen(&dag, test_name);
+    let result = codegen(&dag, test_name).unwrap();
     let to_f32 = match dst {
         Prim::Bf16 => "chelis_bf16_to_f32",
         Prim::F16 => "chelis_f16_to_f32",
@@ -1018,7 +1018,7 @@ fn run_cast_reduced_to_f32(test_name: &str, src: Prim, value: f32, tol: f64) {
         vec_ty(n, Prim::F32),
         None,
     );
-    let result = codegen(&dag, test_name);
+    let result = codegen(&dag, test_name).unwrap();
     let main_c = format!(
         r#"{HARNESS}
 extern void {test_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
@@ -1068,7 +1068,7 @@ fn run_cast_reduced_to_reduced(test_name: &str, src: Prim, dst: Prim, value: f32
         vec_ty(n, dst),
         None,
     );
-    let result = codegen(&dag, test_name);
+    let result = codegen(&dag, test_name).unwrap();
     let to_f32 = match dst {
         Prim::Bf16 => "chelis_bf16_to_f32",
         Prim::F16 => "chelis_f16_to_f32",

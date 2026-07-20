@@ -151,7 +151,7 @@ fn s4_c_canonical_span_id_emitted_as_comment() {
     );
     dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), Some("op.neg".into()));
 
-    let result = codegen(&dag, "s4_canonical");
+    let result = codegen(&dag, "s4_canonical").unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -178,7 +178,7 @@ fn s4_c_merged_spans_emitted_lex_sorted_after_canonical() {
         node.merged_spans = vec!["op.b".into(), "op.a".into(), "op.c".into()];
     }
 
-    let result = codegen(&dag, "s4_merged");
+    let result = codegen(&dag, "s4_merged").unwrap();
     let src = &result.c_source;
 
     // Find the order of `// span:` lines emitted for the Neg node.
@@ -216,7 +216,7 @@ fn s4_c_merged_spans_dedup_against_canonical() {
         node.merged_spans = vec!["op.dup".into(), "op.other".into()];
     }
 
-    let result = codegen(&dag, "s4_dedup");
+    let result = codegen(&dag, "s4_dedup").unwrap();
     let src = &result.c_source;
 
     let canonical_count = src.matches("// span: op.dup").count();
@@ -240,7 +240,7 @@ fn s4_c_no_spans_emits_no_comment_block() {
     let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
     dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
 
-    let result = codegen(&dag, "s4_nospan");
+    let result = codegen(&dag, "s4_nospan").unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -297,7 +297,7 @@ fn s4_c_oracle_richer_combinations_compile_and_grep() {
         Some("n5.canonical".into()),
     );
 
-    let result = codegen(&dag, "s4_oracle_c");
+    let result = codegen(&dag, "s4_oracle_c").unwrap();
     let src = &result.c_source;
 
     // Expected counts:
@@ -361,7 +361,7 @@ fn s4_c_forbidden_newline_in_span_is_escaped_at_emit() {
     );
     dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
 
-    let result = codegen(&dag, "s4_c_forbidden_newline");
+    let result = codegen(&dag, "s4_c_forbidden_newline").unwrap();
     let src = &result.c_source;
 
     // Escaped form present.
@@ -391,7 +391,7 @@ fn s4_c_forbidden_newline_in_merged_spans_is_escaped_at_emit() {
         node.merged_spans = vec!["op\nint INJECTED_VIA_MERGED = 1;".into()];
     }
 
-    let result = codegen(&dag, "s4_c_forbidden_merged");
+    let result = codegen(&dag, "s4_c_forbidden_merged").unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -426,7 +426,7 @@ fn s4_c_clean_span_emitted_verbatim_audit_invariant() {
         Some("__synthesized_grad__".into()),
     );
 
-    let result = codegen(&dag, "s4_c_clean");
+    let result = codegen(&dag, "s4_c_clean").unwrap();
     let src = &result.c_source;
 
     // Both verbatim — no escapes inserted.

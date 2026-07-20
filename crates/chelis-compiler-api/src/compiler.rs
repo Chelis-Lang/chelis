@@ -786,7 +786,8 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
                 && (chelis_ir::host::host_program_requires_host_backend(host_program)
                     || compiled.dag.roots().is_empty())
             {
-                let result = chelis_backend_c::codegen_host_program(host_program, &func_name);
+                let result = chelis_backend_c::codegen_host_program(host_program, &func_name)
+                    .map_err(unsupported_stage_error)?;
                 return Ok(compiled_execution_artifact(
                     request.target,
                     &func_name,
@@ -807,7 +808,8 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
                     use_blas: true,
                     ..chelis_backend_c::CodegenOptions::default()
                 },
-            );
+            )
+            .map_err(unsupported_stage_error)?;
             Ok(compiled_execution_artifact(
                 request.target,
                 &func_name,
@@ -836,7 +838,8 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
                 && host_requires_host_backend
                 && let Some(host_program) = host_compiled.host.as_ref()
             {
-                let result = chelis_backend_c::codegen_host_program(host_program, &func_name);
+                let result = chelis_backend_c::codegen_host_program(host_program, &func_name)
+                    .map_err(unsupported_stage_error)?;
                 return Ok(compiled_execution_artifact(
                     request.target,
                     &func_name,
@@ -859,7 +862,8 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
             let specialized = chelis_ir::specialize::specialize_for_blas(&hip_dag);
             reject_unsupported_hip_ops(&specialized)?;
             let fused = chelis_ir::fuse::fuse(&specialized);
-            let result = chelis_backend_hip::codegen_hip(&fused, &func_name);
+            let result = chelis_backend_hip::codegen_hip(&fused, &func_name)
+                .map_err(unsupported_stage_error)?;
             Ok(compiled_execution_artifact(
                 request.target,
                 &func_name,
@@ -2693,6 +2697,15 @@ fn unknown_name_error(stage: &str, field: &str, name: &str) -> CompilerError {
         format!("unknown name `{name}` in `{field}`"),
         "unknown_name",
     )
+}
+
+/// Map a backend [`chelis_types::unsupported::Unsupported`] rejection into
+/// the compile-stage error envelope (chelis#730 section C2 surfacing: the
+/// branded rendering is the message; the kind is `unsupported_feature`).
+pub(crate) fn unsupported_stage_error(
+    err: chelis_types::unsupported::Unsupported,
+) -> CompilerError {
+    stage_error("compile", err.to_string(), "unsupported_feature")
 }
 
 pub(crate) fn stage_error(stage: &str, message: impl Into<String>, kind: &str) -> CompilerError {

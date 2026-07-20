@@ -17,6 +17,7 @@ enum SparseSummaryKind {
 use crate::emit::CEmitter;
 use chelis_ir::dag::{DimExpr, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
+use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use std::collections::{HashMap, HashSet};
 
 /// The set of parameter indices a user function's result may alias
@@ -250,7 +251,10 @@ fn result_alias_set(
     }
 }
 
-pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
+pub fn emit_host_program(
+    program: &HostProgram,
+    program_name: &str,
+) -> Result<String, Unsupported> {
     // Emit helpers and functions into a body buffer first so we can detect which
     // runtime headers they transitively require (e.g. `chelis_math.h` on macOS
     // when a helper uses the vForce vvexpf/vvlogf path).  The preamble is then
@@ -313,7 +317,7 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
             &mut body,
             helper,
             &format!("{program_name}__global__tensor_{index}"),
-        ));
+        )?);
     }
     for function in &program.functions {
         for (index, helper) in function.tensor_helpers.iter().enumerate() {
@@ -324,7 +328,7 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
                 &mut body,
                 helper,
                 &format!("{function_name}__tensor_{index}"),
-            ));
+            )?);
         }
     }
 
@@ -339,13 +343,13 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
             &function_specializations,
             &returns_arg,
             internal_linkage,
-        );
+        )?;
         body.push(String::new());
     }
 
     if !program.globals.is_empty() {
         let hoisted: HashSet<&str> = captured_globals.iter().map(String::as_str).collect();
-        emit_main(&mut body, program_name, program, &returns_arg, &hoisted);
+        emit_main(&mut body, program_name, program, &returns_arg, &hoisted)?;
     }
 
     let mut out: Vec<String> = vec![
@@ -361,7 +365,7 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
     }
     out.push(String::new());
     out.extend(body);
-    out.join("\n")
+    Ok(out.join("\n"))
 }
 
 fn emitted_function_name(program_name: &str, function_name: &str) -> String {
@@ -639,7 +643,7 @@ fn append_helper(
     out: &mut Vec<String>,
     helper: &HostTensorHelper,
     helper_name: &str,
-) -> HelperRequirements {
+) -> Result<HelperRequirements, Unsupported> {
     if let Some((_input_name, _input_ty)) = identity_helper_input(helper) {
         out.push(format!(
             "static void {}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out) {{",
@@ -650,7 +654,7 @@ fn append_helper(
         out.push("    outputs[0] = inputs[0];".to_string());
         out.push("}".to_string());
         out.push(String::new());
-        return HelperRequirements::default();
+        return Ok(HelperRequirements::default());
     }
 
     // Tensor helpers are TU-internal: they are only called from within this
@@ -670,7 +674,7 @@ fn append_helper(
             static_entry: true,
             ..crate::CodegenOptions::default()
         },
-    );
+    )?;
     // The CEmitter prepends a `static inline float chelis_uniform_sample_f32`
     // prelude to every DAG it emits so that a standalone-emitted kernel
     // stays self-contained. When multiple helpers get concatenated into a
@@ -705,7 +709,7 @@ fn append_helper(
         out.push(line.to_string());
     }
     out.push(String::new());
-    requirements
+    Ok(requirements)
 }
 
 fn identity_helper_input(
@@ -734,7 +738,7 @@ fn emit_function(
     function_specializations: &HashMap<String, HostFunctionSpecialization>,
     returns_arg: &HashMap<String, ReturnsArg>,
     internal_linkage: bool,
-) {
+) -> Result<(), Unsupported> {
     let params = function
         .params
         .iter()
@@ -760,10 +764,11 @@ fn emit_function(
         returns_arg.clone(),
         &function.tensor_helpers,
     );
-    emitter.emit_expr_to_var(&function.body, "__result", &function.ret_ty);
+    emitter.emit_expr_to_var(&function.body, "__result", &function.ret_ty)?;
     out.extend(emitter.lines);
     out.push("    return __result;".to_string());
     out.push("}".to_string());
+    Ok(())
 }
 
 /// The base C indent inside the generated `main` body. Top-level `main`
@@ -778,7 +783,7 @@ fn emit_main(
     program: &HostProgram,
     returns_arg: &HashMap<String, ReturnsArg>,
     hoisted: &HashSet<&str>,
-) {
+) -> Result<(), Unsupported> {
     out.push("int main(void) {".to_string());
     let mut emitter = HostEmitter::new(
         BASE_MAIN_INDENT.to_string(),
@@ -798,7 +803,7 @@ fn emit_main(
     emitter.scope_releases = Some(Vec::new());
     for (index, binding) in program.globals.iter().enumerate() {
         let binding_var = format!("__binding_{index}_value");
-        emitter.emit_expr_to_var(&binding.value, &binding_var, &binding.ty);
+        emitter.emit_expr_to_var(&binding.value, &binding_var, &binding.ty)?;
         // The binding-value local owns its allocation regardless of how
         // it was produced (tensor kernel output, list/dict builtin,
         // literal). Track it here; the alias name (`theta`) is never
@@ -825,7 +830,7 @@ fn emit_main(
             // #379: the display label stays raw (it is a printed string);
             // the C value identifier routes through `c_ident` so it matches
             // the (possibly mangled) declaration above.
-            emitter.emit_labeled_root(display_name, &c_ident(&binding.name), &binding.ty);
+            emitter.emit_labeled_root(display_name, &c_ident(&binding.name), &binding.ty)?;
         }
     }
     // issue #406: free everything `main` owns before returning. Emitted
@@ -835,6 +840,7 @@ fn emit_main(
     out.extend(emitter.lines);
     out.push("    return 0;".to_string());
     out.push("}".to_string());
+    Ok(())
 }
 
 /// Top-level bindings referenced by name inside at least one compiled host
@@ -1137,10 +1143,11 @@ impl<'a> HostEmitter<'a> {
         }
     }
 
-    fn emit_expr_to_var(&mut self, expr: &HostExpr, target: &str, ty: &HostType) {
+    fn emit_expr_to_var(&mut self, expr: &HostExpr, target: &str, ty: &HostType) -> Result<(), Unsupported> {
         self.lines
             .push(format!("{}{};", self.indent, c_decl(ty, target)));
-        self.assign_expr(target, expr, ty);
+        self.assign_expr(target, expr, ty)?;
+        Ok(())
     }
 
     /// Emit `// span:` comment lines for a `HostExpr`'s `span_id ∪ merged_spans`,
@@ -1181,7 +1188,7 @@ impl<'a> HostEmitter<'a> {
         }
     }
 
-    fn assign_expr(&mut self, target: &str, expr: &HostExpr, ty: &HostType) {
+    fn assign_expr(&mut self, target: &str, expr: &HostExpr, ty: &HostType) -> Result<(), Unsupported> {
         self.emit_span_comments(expr);
         match &expr.kind {
             HostExprKind::Int(value) => self
@@ -1205,7 +1212,7 @@ impl<'a> HostEmitter<'a> {
                 } else {
                     expr_ty
                 };
-                self.assign_list_literal(target, items, effective_ty);
+                self.assign_list_literal(target, items, effective_ty)?;
             }
             HostExprKind::Tuple(items, expr_ty) => {
                 let effective_ty = if !matches!(ty, HostType::Unknown) {
@@ -1213,7 +1220,7 @@ impl<'a> HostEmitter<'a> {
                 } else {
                     expr_ty
                 };
-                self.assign_tuple_literal(target, items, effective_ty);
+                self.assign_tuple_literal(target, items, effective_ty)?;
             }
             HostExprKind::Var(name, var_ty) => {
                 if name == "Nil" {
@@ -1246,7 +1253,7 @@ impl<'a> HostEmitter<'a> {
                 arg_tys,
                 ty: call_ty,
             } => {
-                self.assign_call(target, function, args, arg_tys, call_ty);
+                self.assign_call(target, function, args, arg_tys, call_ty)?;
             }
             HostExprKind::Builtin {
                 name,
@@ -1258,7 +1265,7 @@ impl<'a> HostEmitter<'a> {
                 } else {
                     expr_ty
                 };
-                self.assign_builtin(target, name, args, effective_ty);
+                self.assign_builtin(target, name, args, effective_ty)?;
             }
             HostExprKind::AdtConstruct {
                 ctor,
@@ -1270,7 +1277,7 @@ impl<'a> HostEmitter<'a> {
                 } else {
                     expr_ty
                 };
-                self.assign_adt_construct(target, ctor, fields, effective_ty);
+                self.assign_adt_construct(target, ctor, fields, effective_ty)?;
             }
             HostExprKind::AdtFieldAccess {
                 base,
@@ -1282,7 +1289,7 @@ impl<'a> HostEmitter<'a> {
                 } else {
                     expr_ty
                 };
-                self.assign_adt_field_access(target, base, *field_index, effective_ty);
+                self.assign_adt_field_access(target, base, *field_index, effective_ty)?;
             }
             HostExprKind::If {
                 cond,
@@ -1296,17 +1303,17 @@ impl<'a> HostEmitter<'a> {
                     expr_ty
                 };
                 let cond_var = self.next_temp("cond");
-                self.emit_expr_to_var(cond, &cond_var, &HostType::Bool);
+                self.emit_expr_to_var(cond, &cond_var, &HostType::Bool)?;
                 self.lines
                     .push(format!("{}if ({cond_var}) {{", self.indent));
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
-                self.assign_expr(target, then_expr, effective_ty);
+                self.assign_expr(target, then_expr, effective_ty)?;
                 self.indent = previous.clone();
                 self.lines.push(format!("{}}} else {{", self.indent));
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
-                self.assign_expr(target, else_expr, effective_ty);
+                self.assign_expr(target, else_expr, effective_ty)?;
                 self.indent = previous;
                 self.lines.push(format!("{}}}", self.indent));
             }
@@ -1324,7 +1331,7 @@ impl<'a> HostEmitter<'a> {
                 };
                 let option_var = self.next_temp("option");
                 let option_ty = host_type(scrutinee);
-                self.emit_expr_to_var(scrutinee, &option_var, &option_ty);
+                self.emit_expr_to_var(scrutinee, &option_var, &option_ty)?;
                 self.lines
                     .push(format!("{}if ({}.is_some) {{", self.indent, option_var));
                 let nested_indent = format!("{}    ", self.indent);
@@ -1356,12 +1363,12 @@ impl<'a> HostEmitter<'a> {
                         ));
                     }
                 }
-                self.assign_expr(target, some_expr, effective_ty);
+                self.assign_expr(target, some_expr, effective_ty)?;
                 self.indent = previous.clone();
                 self.lines.push(format!("{}}} else {{", self.indent));
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
-                self.assign_expr(target, none_expr, effective_ty);
+                self.assign_expr(target, none_expr, effective_ty)?;
                 self.indent = previous;
                 self.lines.push(format!("{}}}", self.indent));
             }
@@ -1382,7 +1389,7 @@ impl<'a> HostEmitter<'a> {
                     arms,
                     default_expr.as_deref(),
                     effective_ty,
-                );
+                )?;
             }
             HostExprKind::Let {
                 bindings,
@@ -1430,7 +1437,7 @@ impl<'a> HostEmitter<'a> {
                     {
                         scope.owned_destinations.insert(temp.clone());
                     }
-                    self.emit_expr_to_var(&binding.value, &temp, &binding.ty);
+                    self.emit_expr_to_var(&binding.value, &temp, &binding.ty)?;
                     self.lines.push(format!(
                         "{}{};",
                         self.indent,
@@ -1457,7 +1464,7 @@ impl<'a> HostEmitter<'a> {
                         }
                     }
                 }
-                self.assign_expr(target, body, effective_ty);
+                self.assign_expr(target, body, effective_ty)?;
                 // Release the block's heap bindings in reverse declaration
                 // order, before closing the C block while they are still in
                 // scope. Last-declared shadows of a reused name win the C
@@ -1472,10 +1479,10 @@ impl<'a> HostEmitter<'a> {
                 self.lines.push(format!("{}}}", self.indent));
             }
             HostExprKind::Map { callback, list, ty } => {
-                self.assign_map(target, callback, list, ty);
+                self.assign_map(target, callback, list, ty)?;
             }
             HostExprKind::Filter { callback, list, ty } => {
-                self.assign_filter(target, callback, list, ty);
+                self.assign_filter(target, callback, list, ty)?;
             }
             HostExprKind::Fold {
                 callback,
@@ -1483,7 +1490,7 @@ impl<'a> HostEmitter<'a> {
                 list,
                 ty,
             } => {
-                self.assign_fold(target, callback, init, list, ty);
+                self.assign_fold(target, callback, init, list, ty)?;
             }
             HostExprKind::Scan {
                 callback,
@@ -1491,17 +1498,17 @@ impl<'a> HostEmitter<'a> {
                 list,
                 ty,
             } => {
-                self.assign_scan(target, callback, init, list, ty);
+                self.assign_scan(target, callback, init, list, ty)?;
             }
             HostExprKind::Partition { callback, list, ty } => {
-                self.assign_partition(target, callback, list, ty);
+                self.assign_partition(target, callback, list, ty)?;
             }
             HostExprKind::FlatMap { callback, list, ty } => {
-                self.assign_flat_map(target, callback, list, ty);
+                self.assign_flat_map(target, callback, list, ty)?;
             }
             HostExprKind::WithSeed { seed, body, ty } => {
                 let seed_var = self.next_temp("seed");
-                self.emit_expr_to_var(seed, &seed_var, &HostType::Int64);
+                self.emit_expr_to_var(seed, &seed_var, &HostType::Int64)?;
                 let saved_var = self.next_temp("rng_saved");
                 self.lines.push(format!(
                     "{}chelis_rng_state {saved_var} = chelis_rng_current;",
@@ -1515,37 +1522,34 @@ impl<'a> HostEmitter<'a> {
                     .push(format!("{}chelis_rng_current.counter = 0ULL;", self.indent));
                 self.lines
                     .push(format!("{}chelis_rng_current.active = 1;", self.indent));
-                self.assign_expr(target, body, ty);
+                self.assign_expr(target, body, ty)?;
                 self.lines
                     .push(format!("{}chelis_rng_current = {saved_var};", self.indent));
             }
             HostExprKind::TensorCall { helper, args, ty } => {
-                self.assign_tensor_call(target, *helper, args, ty);
+                self.assign_tensor_call(target, *helper, args, ty)?;
             }
             HostExprKind::Unit => {
                 self.lines.push(format!("{}{target} = 0;", self.indent));
             }
         }
+        Ok(())
     }
 
-    fn assign_builtin(&mut self, target: &str, name: &str, args: &[HostExpr], ty: &HostType) {
-        let arg_vars = args
-            .iter()
-            .enumerate()
-            .map(|(index, arg)| {
-                let arg_name = self.next_temp(&format!("arg{index}"));
-                let inferred_ty = host_type(arg);
-                let expected_ty = expected_builtin_arg_ty(name, ty, index);
-                let arg_ty =
-                    if has_unknown(&inferred_ty) && !matches!(expected_ty, HostType::Unknown) {
-                        expected_ty
-                    } else {
-                        inferred_ty
-                    };
-                self.emit_expr_to_var(arg, &arg_name, &arg_ty);
-                (arg_name, arg_ty)
-            })
-            .collect::<Vec<_>>();
+    fn assign_builtin(&mut self, target: &str, name: &str, args: &[HostExpr], ty: &HostType) -> Result<(), Unsupported> {
+        let mut arg_vars: Vec<(String, HostType)> = Vec::with_capacity(args.len());
+        for (index, arg) in args.iter().enumerate() {
+            let arg_name = self.next_temp(&format!("arg{index}"));
+            let inferred_ty = host_type(arg);
+            let expected_ty = expected_builtin_arg_ty(name, ty, index);
+            let arg_ty = if has_unknown(&inferred_ty) && !matches!(expected_ty, HostType::Unknown) {
+                expected_ty
+            } else {
+                inferred_ty
+            };
+            self.emit_expr_to_var(arg, &arg_name, &arg_ty)?;
+            arg_vars.push((arg_name, arg_ty));
+        }
 
         if let HostType::Tensor(_) = ty {
             match name {
@@ -1561,7 +1565,7 @@ impl<'a> HostEmitter<'a> {
                         &arg_vars[1].0,
                         "+",
                     );
-                    return;
+                    return Ok(());
                 }
                 "sub"
                     if matches!(
@@ -1575,7 +1579,7 @@ impl<'a> HostEmitter<'a> {
                         &arg_vars[1].0,
                         "-",
                     );
-                    return;
+                    return Ok(());
                 }
                 "mul"
                     if matches!(
@@ -1589,7 +1593,7 @@ impl<'a> HostEmitter<'a> {
                         &arg_vars[1].0,
                         "*",
                     );
-                    return;
+                    return Ok(());
                 }
                 "div"
                     if matches!(
@@ -1603,7 +1607,7 @@ impl<'a> HostEmitter<'a> {
                         &arg_vars[1].0,
                         "/",
                     );
-                    return;
+                    return Ok(());
                 }
                 "max_elem"
                     if matches!(
@@ -1617,7 +1621,7 @@ impl<'a> HostEmitter<'a> {
                         &arg_vars[1].0,
                         "fmaxf",
                     );
-                    return;
+                    return Ok(());
                 }
                 "min_elem"
                     if matches!(
@@ -1631,31 +1635,31 @@ impl<'a> HostEmitter<'a> {
                         &arg_vars[1].0,
                         "fminf",
                     );
-                    return;
+                    return Ok(());
                 }
                 "neg" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
                     self.assign_tensor_unary_elementwise(target, &arg_vars[0].0, "-");
-                    return;
+                    return Ok(());
                 }
                 "not" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
                     self.assign_tensor_unary_elementwise(target, &arg_vars[0].0, "!");
-                    return;
+                    return Ok(());
                 }
                 "exp" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
                     self.assign_tensor_unary_func_elementwise(target, &arg_vars[0].0, "expf");
-                    return;
+                    return Ok(());
                 }
                 "log" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
                     self.assign_tensor_unary_func_elementwise(target, &arg_vars[0].0, "logf");
-                    return;
+                    return Ok(());
                 }
                 "sin" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
                     self.assign_tensor_unary_func_elementwise(target, &arg_vars[0].0, "sinf");
-                    return;
+                    return Ok(());
                 }
                 "sqrt" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
                     self.assign_tensor_unary_func_elementwise(target, &arg_vars[0].0, "sqrtf");
-                    return;
+                    return Ok(());
                 }
                 "relu" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
                     self.assign_tensor_unary_func_elementwise(
@@ -1663,7 +1667,7 @@ impl<'a> HostEmitter<'a> {
                         &arg_vars[0].0,
                         "chelis_host_relu_f32",
                     );
-                    return;
+                    return Ok(());
                 }
                 "sigmoid" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
                     self.assign_tensor_unary_func_elementwise(
@@ -1671,7 +1675,7 @@ impl<'a> HostEmitter<'a> {
                         &arg_vars[0].0,
                         "chelis_host_sigmoid_f32",
                     );
-                    return;
+                    return Ok(());
                 }
                 "tanh" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
                     self.assign_tensor_unary_func_elementwise(
@@ -1679,7 +1683,7 @@ impl<'a> HostEmitter<'a> {
                         &arg_vars[0].0,
                         "chelis_host_tanh_f32",
                     );
-                    return;
+                    return Ok(());
                 }
                 "silu" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
                     self.assign_tensor_unary_func_elementwise(
@@ -1687,7 +1691,7 @@ impl<'a> HostEmitter<'a> {
                         &arg_vars[0].0,
                         "chelis_host_silu_f32",
                     );
-                    return;
+                    return Ok(());
                 }
                 "gelu" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
                     self.assign_tensor_unary_func_elementwise(
@@ -1695,7 +1699,7 @@ impl<'a> HostEmitter<'a> {
                         &arg_vars[0].0,
                         "chelis_host_gelu_f32",
                     );
-                    return;
+                    return Ok(());
                 }
                 _ => {}
             }
@@ -1704,11 +1708,11 @@ impl<'a> HostEmitter<'a> {
         match name {
             "Some" => {
                 self.assign_option_some(target, ty, &arg_vars[0].0, &arg_vars[0].1);
-                return;
+                return Ok(());
             }
             "None" => {
                 self.assign_option_none(target, ty);
-                return;
+                return Ok(());
             }
             "cast" => {
                 let expr = match (&arg_vars[0].1, ty) {
@@ -1741,12 +1745,12 @@ impl<'a> HostEmitter<'a> {
                 };
                 self.lines
                     .push(format!("{}{target} = {};", self.indent, expr));
-                return;
+                return Ok(());
             }
             "copy" => {
                 self.lines
                     .push(format!("{}{target} = {};", self.indent, arg_vars[0].0));
-                return;
+                return Ok(());
             }
             "tuple-get" => {
                 let value_var = self.next_temp("tuple_value");
@@ -1755,7 +1759,7 @@ impl<'a> HostEmitter<'a> {
                     self.indent, value_var, arg_vars[0].0, arg_vars[1].0
                 ));
                 self.assign_unboxed_value(target, ty, &value_var);
-                return;
+                return Ok(());
             }
             "index" => {
                 let value_var = self.next_temp("list_value");
@@ -1764,7 +1768,7 @@ impl<'a> HostEmitter<'a> {
                     self.indent, value_var, arg_vars[0].0, arg_vars[1].0
                 ));
                 self.assign_unboxed_value(target, ty, &value_var);
-                return;
+                return Ok(());
             }
             "append" => {
                 self.lines.push(format!(
@@ -1773,7 +1777,7 @@ impl<'a> HostEmitter<'a> {
                     arg_vars[0].0,
                     self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)
                 ));
-                return;
+                return Ok(());
             }
             "concat" => {
                 if matches!(ty, HostType::Tensor(_)) {
@@ -1787,21 +1791,21 @@ impl<'a> HostEmitter<'a> {
                         self.indent, arg_vars[0].0, arg_vars[1].0
                     ));
                 }
-                return;
+                return Ok(());
             }
             "split" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_tensor_split({}, {}, {});",
                     self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0
                 ));
-                return;
+                return Ok(());
             }
             "gather" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_tensor_gather({}, {}, {});",
                     self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0
                 ));
-                return;
+                return Ok(());
             }
             "scatter" => {
                 self.lines.push(format!(
@@ -1813,63 +1817,63 @@ impl<'a> HostEmitter<'a> {
                     arg_vars[3].0,
                     arg_vars[4].0
                 ));
-                return;
+                return Ok(());
             }
             "where" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_tensor_where({}, {}, {});",
                     self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0
                 ));
-                return;
+                return Ok(());
             }
             "cumsum" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_tensor_cumsum({}, {});",
                     self.indent, arg_vars[0].0, arg_vars[1].0
                 ));
-                return;
+                return Ok(());
             }
             "sort" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_tensor_sort({}, {});",
                     self.indent, arg_vars[0].0, arg_vars[1].0
                 ));
-                return;
+                return Ok(());
             }
             "diagonal" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_tensor_diagonal({}, {}, {});",
                     self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0
                 ));
-                return;
+                return Ok(());
             }
             "trace" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_tensor_trace({}, {}, {});",
                     self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0
                 ));
-                return;
+                return Ok(());
             }
             "clamp" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_tensor_clamp({}, {}, {});",
                     self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0
                 ));
-                return;
+                return Ok(());
             }
             "einsum" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_tensor_einsum({}, {}, {});",
                     self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0
                 ));
-                return;
+                return Ok(());
             }
             "take" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_list_take({}, {});",
                     self.indent, arg_vars[0].0, arg_vars[1].0
                 ));
-                return;
+                return Ok(());
             }
             "drop" => {
                 if arg_vars.len() == 1 {
@@ -1880,42 +1884,42 @@ impl<'a> HostEmitter<'a> {
                         self.indent, arg_vars[0].0, arg_vars[1].0
                     ));
                 }
-                return;
+                return Ok(());
             }
             "chunk" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_list_chunk({}, {});",
                     self.indent, arg_vars[0].0, arg_vars[1].0
                 ));
-                return;
+                return Ok(());
             }
             "flatten" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_list_flatten({});",
                     self.indent, arg_vars[0].0
                 ));
-                return;
+                return Ok(());
             }
             "zip" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_list_zip({}, {});",
                     self.indent, arg_vars[0].0, arg_vars[1].0
                 ));
-                return;
+                return Ok(());
             }
             "enumerate" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_list_enumerate({});",
                     self.indent, arg_vars[0].0
                 ));
-                return;
+                return Ok(());
             }
             "dict_of" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_dict_from_pairs({});",
                     self.indent, arg_vars[0].0
                 ));
-                return;
+                return Ok(());
             }
             "dict_get" => {
                 let getter = match ty {
@@ -1934,7 +1938,7 @@ impl<'a> HostEmitter<'a> {
                     arg_vars[0].0,
                     self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)
                 ));
-                return;
+                return Ok(());
             }
             "dict_contains" => {
                 self.lines.push(format!(
@@ -1943,7 +1947,7 @@ impl<'a> HostEmitter<'a> {
                     arg_vars[0].0,
                     self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)
                 ));
-                return;
+                return Ok(());
             }
             "dict_remove" => {
                 self.lines.push(format!(
@@ -1952,7 +1956,7 @@ impl<'a> HostEmitter<'a> {
                     arg_vars[0].0,
                     self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)
                 ));
-                return;
+                return Ok(());
             }
             "dict_insert" => {
                 self.lines.push(format!(
@@ -1962,35 +1966,35 @@ impl<'a> HostEmitter<'a> {
                     self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1),
                     self.box_value_expr(&arg_vars[2].0, &arg_vars[2].1)
                 ));
-                return;
+                return Ok(());
             }
             "dict_merge" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_dict_merge({}, {});",
                     self.indent, arg_vars[0].0, arg_vars[1].0
                 ));
-                return;
+                return Ok(());
             }
             "dict_keys" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_dict_keys({});",
                     self.indent, arg_vars[0].0
                 ));
-                return;
+                return Ok(());
             }
             "dict_values" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_dict_values({});",
                     self.indent, arg_vars[0].0
                 ));
-                return;
+                return Ok(());
             }
             "dict_entries" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_dict_entries({});",
                     self.indent, arg_vars[0].0
                 ));
-                return;
+                return Ok(());
             }
             "to_tensor" => {
                 // RT-4 F1: when the destination tensor's precision is
@@ -2032,21 +2036,21 @@ impl<'a> HostEmitter<'a> {
                             "{}{target} = chelis_tensor_from_value_list_typed({}, {dtype_macro});",
                             self.indent, arg_vars[0].0
                         ));
-                        return;
+                        return Ok(());
                     }
                 }
                 self.lines.push(format!(
                     "{}{target} = chelis_tensor_from_value_list({});",
                     self.indent, arg_vars[0].0
                 ));
-                return;
+                return Ok(());
             }
             "to_list" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_list_from_tensor({});",
                     self.indent, arg_vars[0].0
                 ));
-                return;
+                return Ok(());
             }
             "pad_sequences" => {
                 self.lines.push(format!(
@@ -2055,7 +2059,7 @@ impl<'a> HostEmitter<'a> {
                     arg_vars[0].0,
                     self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)
                 ));
-                return;
+                return Ok(());
             }
             "pad_sequences_to" => {
                 self.lines.push(format!(
@@ -2065,14 +2069,14 @@ impl<'a> HostEmitter<'a> {
                     arg_vars[1].0,
                     self.box_value_expr(&arg_vars[2].0, &arg_vars[2].1)
                 ));
-                return;
+                return Ok(());
             }
             "read_file" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_read_file({});",
                     self.indent, arg_vars[0].0
                 ));
-                return;
+                return Ok(());
             }
             "write_file" => {
                 self.lines.push(format!(
@@ -2080,56 +2084,56 @@ impl<'a> HostEmitter<'a> {
                     self.indent, arg_vars[0].0, arg_vars[1].0
                 ));
                 self.lines.push(format!("{}{target} = 0;", self.indent));
-                return;
+                return Ok(());
             }
             "read_lines" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_read_lines({});",
                     self.indent, arg_vars[0].0
                 ));
-                return;
+                return Ok(());
             }
             "read_bytes" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_read_bytes({});",
                     self.indent, arg_vars[0].0
                 ));
-                return;
+                return Ok(());
             }
             "file_exists" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_file_exists({});",
                     self.indent, arg_vars[0].0
                 ));
-                return;
+                return Ok(());
             }
             "list_dir" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_list_dir({});",
                     self.indent, arg_vars[0].0
                 ));
-                return;
+                return Ok(());
             }
             "mmap_file" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_mmap_file({});",
                     self.indent, arg_vars[0].0
                 ));
-                return;
+                return Ok(());
             }
             "mmap_read" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_mmap_read({}, {}, {});",
                     self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0
                 ));
-                return;
+                return Ok(());
             }
             "mmap_len" => {
                 self.lines.push(format!(
                     "{}{target} = chelis_mmap_len({});",
                     self.indent, arg_vars[0].0
                 ));
-                return;
+                return Ok(());
             }
             _ => {}
         }
@@ -2241,16 +2245,16 @@ impl<'a> HostEmitter<'a> {
             "to_int" => format!("chelis_parse_int64({})", arg_vars[0].0),
             "to_float" => format!("chelis_parse_f64({})", arg_vars[0].0),
             "print" => {
-                self.emit_print_value(&arg_vars[0].0, &arg_vars[0].1);
+                self.emit_print_value(&arg_vars[0].0, &arg_vars[0].1)?;
                 "0".to_string()
             }
             "fail" => {
                 self.lines
                     .push(format!("{}chelis_fail({});", self.indent, arg_vars[0].0));
-                return;
+                return Ok(());
             }
             "debug" => {
-                self.emit_print_value(&arg_vars[0].0, &arg_vars[0].1);
+                self.emit_print_value(&arg_vars[0].0, &arg_vars[0].1)?;
                 arg_vars[0].0.clone()
             }
             "tensor_to_scalar" => format!("chelis_tensor_to_f64({})", arg_vars[0].0),
@@ -2307,6 +2311,7 @@ impl<'a> HostEmitter<'a> {
         if matches!(ty, HostType::Unit) {
             self.lines.push(format!("{}{target} = 0;", self.indent));
         }
+        Ok(())
     }
 
     // W2 PR 3 of the 0.7.8 compiler cleanup workstream
@@ -2617,12 +2622,12 @@ impl<'a> HostEmitter<'a> {
         helper: usize,
         args: &[HostExpr],
         ty: &HostType,
-    ) {
+    ) -> Result<(), Unsupported> {
         if let Some(host_helper) = self.tensor_helpers.get(helper) {
             match host_helper.specialization.as_ref() {
                 Some(HostTensorSpecialization::BlasMatmul(summary)) => {
-                    self.assign_blas_matmul_summary(target, summary, args, ty);
-                    return;
+                    self.assign_blas_matmul_summary(target, summary, args, ty)?;
+                    return Ok(());
                 }
                 Some(HostTensorSpecialization::SparseGather(summary)) => {
                     self.assign_sparse_summary(
@@ -2631,8 +2636,8 @@ impl<'a> HostEmitter<'a> {
                         summary,
                         args,
                         ty,
-                    );
-                    return;
+                    )?;
+                    return Ok(());
                 }
                 Some(HostTensorSpecialization::SparseScatterAdd(summary)) => {
                     self.assign_sparse_summary(
@@ -2641,8 +2646,8 @@ impl<'a> HostEmitter<'a> {
                         summary,
                         args,
                         ty,
-                    );
-                    return;
+                    )?;
+                    return Ok(());
                 }
                 Some(HostTensorSpecialization::SparseScatterReplace(summary)) => {
                     self.assign_sparse_summary(
@@ -2651,26 +2656,24 @@ impl<'a> HostEmitter<'a> {
                         summary,
                         args,
                         ty,
-                    );
-                    return;
+                    )?;
+                    return Ok(());
                 }
                 None => {}
             }
         }
 
         let helper_name = format!("{}__tensor_{helper}", self.helper_prefix);
-        let tensor_args = args
-            .iter()
-            .enumerate()
-            .map(|(index, arg)| {
-                let inferred_ty = host_type(arg);
-                if matches!(inferred_ty, HostType::Tensor(_)) {
+        let mut tensor_args: Vec<(String, Option<String>)> = Vec::with_capacity(args.len());
+        for (index, arg) in args.iter().enumerate() {
+            let inferred_ty = host_type(arg);
+            let entry = if matches!(inferred_ty, HostType::Tensor(_)) {
                     let arg_name = self.next_temp(&format!("tensor_arg{index}"));
-                    self.emit_expr_to_var(arg, &arg_name, &inferred_ty);
+                    self.emit_expr_to_var(arg, &arg_name, &inferred_ty)?;
                     (arg_name, None)
                 } else {
                     let value_name = self.next_temp(&format!("tensor_scalar{index}"));
-                    self.emit_expr_to_var(arg, &value_name, &inferred_ty);
+                    self.emit_expr_to_var(arg, &value_name, &inferred_ty)?;
                     let tensor_name = self.next_temp(&format!("tensor_arg{index}"));
                     self.lines
                         .push(format!("{}chelis_tensor* {};", self.indent, tensor_name));
@@ -2722,9 +2725,9 @@ impl<'a> HostEmitter<'a> {
                     ));
                     self.lines.push(format!("{}{store}", self.indent));
                     (tensor_name.clone(), Some(tensor_name))
-                }
-            })
-            .collect::<Vec<_>>();
+                };
+            tensor_args.push(entry);
+        }
         let outputs_name = self.next_temp("outputs");
         // A constant-only tensor helper (e.g. `expand(scalar_to_tensor(c),
         // 0, n)`) has zero inputs. ISO C forbids a zero-length array
@@ -2820,6 +2823,7 @@ impl<'a> HostEmitter<'a> {
                     .push(format!("{}chelis_free({boxed});", self.indent));
             }
         }
+        Ok(())
     }
 
     fn assign_blas_matmul_summary(
@@ -2828,28 +2832,25 @@ impl<'a> HostEmitter<'a> {
         summary: &HostBlasMatmulSummary,
         args: &[HostExpr],
         _ty: &HostType,
-    ) {
+    ) -> Result<(), Unsupported> {
         assert_eq!(
             args.len(),
             summary.input_tys.len(),
             "BLAS summary argument count must match callsite argument count"
         );
-        let tensor_args = args
-            .iter()
-            .enumerate()
-            .map(|(index, arg)| {
-                let arg_name = self.next_temp(&format!("blas_arg{index}"));
-                let expected_ty = HostType::Tensor(
-                    summary
-                        .input_tys
-                        .get(index)
-                        .expect("summary input type")
-                        .clone(),
-                );
-                self.emit_expr_to_var(arg, &arg_name, &expected_ty);
-                arg_name
-            })
-            .collect::<Vec<_>>();
+        let mut tensor_args: Vec<String> = Vec::with_capacity(args.len());
+        for (index, arg) in args.iter().enumerate() {
+            let arg_name = self.next_temp(&format!("blas_arg{index}"));
+            let expected_ty = HostType::Tensor(
+                summary
+                    .input_tys
+                    .get(index)
+                    .expect("summary input type")
+                    .clone(),
+            );
+            self.emit_expr_to_var(arg, &arg_name, &expected_ty)?;
+            tensor_args.push(arg_name);
+        }
         self.emit_blas_summary_contract(summary, &tensor_args);
 
         let lhs = tensor_args
@@ -2975,6 +2976,7 @@ impl<'a> HostEmitter<'a> {
             "{}if ({rhs_contig} != {rhs}) chelis_free({rhs_contig});",
             self.indent
         ));
+        Ok(())
     }
 
     fn emit_blas_summary_contract(
@@ -3107,28 +3109,25 @@ impl<'a> HostEmitter<'a> {
         summary: &HostSparseOpSummary,
         args: &[HostExpr],
         _ty: &HostType,
-    ) {
+    ) -> Result<(), Unsupported> {
         assert_eq!(
             args.len(),
             summary.input_tys.len(),
             "sparse summary argument count must match callsite argument count"
         );
-        let tensor_args = args
-            .iter()
-            .enumerate()
-            .map(|(index, arg)| {
-                let arg_name = self.next_temp(&format!("sparse_arg{index}"));
-                let expected_ty = HostType::Tensor(
-                    summary
-                        .input_tys
-                        .get(index)
-                        .expect("sparse summary input type")
-                        .clone(),
-                );
-                self.emit_expr_to_var(arg, &arg_name, &expected_ty);
-                arg_name
-            })
-            .collect::<Vec<_>>();
+        let mut tensor_args: Vec<String> = Vec::with_capacity(args.len());
+        for (index, arg) in args.iter().enumerate() {
+            let arg_name = self.next_temp(&format!("sparse_arg{index}"));
+            let expected_ty = HostType::Tensor(
+                summary
+                    .input_tys
+                    .get(index)
+                    .expect("sparse summary input type")
+                    .clone(),
+            );
+            self.emit_expr_to_var(arg, &arg_name, &expected_ty)?;
+            tensor_args.push(arg_name);
+        }
         self.emit_sparse_summary_contract(summary, &tensor_args);
 
         let target_dtype = sparse_dtype_macro(summary.output.precision);
@@ -3182,6 +3181,7 @@ impl<'a> HostEmitter<'a> {
                 );
             }
         }
+        Ok(())
     }
 
     /// Emit input-contract assertions for a sparse summary: nonnull,
@@ -3494,12 +3494,12 @@ impl<'a> HostEmitter<'a> {
         args: &[HostExpr],
         arg_tys: &[HostType],
         ty: &HostType,
-    ) {
+    ) -> Result<(), Unsupported> {
         if let Some(spec) = self.function_specializations.get(function).cloned() {
             match spec {
                 HostFunctionSpecialization::BlasMatmul(summary) => {
-                    self.assign_blas_matmul_summary(target, &summary, args, ty);
-                    return;
+                    self.assign_blas_matmul_summary(target, &summary, args, ty)?;
+                    return Ok(());
                 }
                 HostFunctionSpecialization::SparseGather(summary) => {
                     self.assign_sparse_summary(
@@ -3508,8 +3508,8 @@ impl<'a> HostEmitter<'a> {
                         &summary,
                         args,
                         ty,
-                    );
-                    return;
+                    )?;
+                    return Ok(());
                 }
                 HostFunctionSpecialization::SparseScatterAdd(summary) => {
                     self.assign_sparse_summary(
@@ -3518,8 +3518,8 @@ impl<'a> HostEmitter<'a> {
                         &summary,
                         args,
                         ty,
-                    );
-                    return;
+                    )?;
+                    return Ok(());
                 }
                 HostFunctionSpecialization::SparseScatterReplace(summary) => {
                     self.assign_sparse_summary(
@@ -3528,30 +3528,27 @@ impl<'a> HostEmitter<'a> {
                         &summary,
                         args,
                         ty,
-                    );
-                    return;
+                    )?;
+                    return Ok(());
                 }
             }
         }
 
-        let arg_vars = args
-            .iter()
-            .enumerate()
-            .map(|(index, arg)| {
-                let arg_name = self.next_temp(&format!("call_arg{index}"));
-                let inferred_ty = host_type(arg);
-                let expected_ty = arg_tys.get(index).cloned().unwrap_or(HostType::Unknown);
-                let arg_ty = if !matches!(expected_ty, HostType::Unknown)
-                    && (has_unknown(&inferred_ty) || inferred_ty != expected_ty)
-                {
-                    expected_ty
-                } else {
-                    inferred_ty
-                };
-                self.emit_expr_to_var(arg, &arg_name, &arg_ty);
-                arg_name
-            })
-            .collect::<Vec<_>>();
+        let mut arg_vars: Vec<String> = Vec::with_capacity(args.len());
+        for (index, arg) in args.iter().enumerate() {
+            let arg_name = self.next_temp(&format!("call_arg{index}"));
+            let inferred_ty = host_type(arg);
+            let expected_ty = arg_tys.get(index).cloned().unwrap_or(HostType::Unknown);
+            let arg_ty = if !matches!(expected_ty, HostType::Unknown)
+                && (has_unknown(&inferred_ty) || inferred_ty != expected_ty)
+            {
+                expected_ty
+            } else {
+                inferred_ty
+            };
+            self.emit_expr_to_var(arg, &arg_name, &arg_ty)?;
+            arg_vars.push(arg_name);
+        }
         self.lines.push(format!(
             "{}{target} = {}({});",
             self.indent,
@@ -3562,6 +3559,7 @@ impl<'a> HostEmitter<'a> {
             arg_vars.join(", ")
         ));
         self.retain_call_escaped_args(target, function, args, ty);
+        Ok(())
     }
 
     /// Issue #406 (call-escape): when a block result is produced by a call
@@ -3639,7 +3637,7 @@ impl<'a> HostEmitter<'a> {
         ctor: &str,
         fields: &[HostExpr],
         _ty: &HostType,
-    ) {
+    ) -> Result<(), Unsupported> {
         // A nullary variant (e.g. `Nothing`, `True`) has no payload fields.
         // ISO C forbids a zero-length array (`chelis_value adt_fields[0];`),
         // so pass a NULL fields pointer with count 0 instead; the runtime
@@ -3657,7 +3655,7 @@ impl<'a> HostEmitter<'a> {
             for (index, field) in fields.iter().enumerate() {
                 let field_var = self.next_temp(&format!("adt_field{index}"));
                 let field_ty = host_type(field);
-                self.emit_expr_to_var(field, &field_var, &field_ty);
+                self.emit_expr_to_var(field, &field_var, &field_ty)?;
                 self.lines.push(format!(
                     "{}{}[{index}] = {};",
                     self.indent,
@@ -3674,6 +3672,7 @@ impl<'a> HostEmitter<'a> {
             fields_arg,
             fields.len()
         ));
+        Ok(())
     }
 
     fn assign_adt_field_access(
@@ -3682,15 +3681,16 @@ impl<'a> HostEmitter<'a> {
         base: &HostExpr,
         field_index: usize,
         ty: &HostType,
-    ) {
+    ) -> Result<(), Unsupported> {
         let base_var = self.next_temp("adt_base");
-        self.emit_expr_to_var(base, &base_var, &host_type(base));
+        self.emit_expr_to_var(base, &base_var, &host_type(base))?;
         let value_var = self.next_temp("adt_field");
         self.lines.push(format!(
             "{}chelis_value {} = chelis_adt_get_field({}, {});",
             self.indent, value_var, base_var, field_index
         ));
         self.assign_unboxed_value(target, ty, &value_var);
+        Ok(())
     }
 
     fn assign_match_adt(
@@ -3700,9 +3700,9 @@ impl<'a> HostEmitter<'a> {
         arms: &[HostMatchArm],
         default_expr: Option<&HostExpr>,
         expr_ty: &HostType,
-    ) {
+    ) -> Result<(), Unsupported> {
         let scrutinee_var = self.next_temp("adt");
-        self.emit_expr_to_var(scrutinee, &scrutinee_var, &host_type(scrutinee));
+        self.emit_expr_to_var(scrutinee, &scrutinee_var, &host_type(scrutinee))?;
         let tag_var = self.next_temp("adt_tag");
         self.lines.push(format!(
             "{}chelis_string {} = chelis_adt_get_tag({});",
@@ -3730,7 +3730,7 @@ impl<'a> HostEmitter<'a> {
                 ));
                 self.assign_unboxed_value(&binding.name, &binding.ty, &field_var);
             }
-            self.assign_expr(target, &arm.expr, expr_ty);
+            self.assign_expr(target, &arm.expr, expr_ty)?;
             self.indent = previous;
             self.lines.push(format!("{}}}", self.indent));
         }
@@ -3738,7 +3738,7 @@ impl<'a> HostEmitter<'a> {
         let nested_indent = format!("{}    ", self.indent);
         let previous = std::mem::replace(&mut self.indent, nested_indent);
         if let Some(default_expr) = default_expr {
-            self.assign_expr(target, default_expr, expr_ty);
+            self.assign_expr(target, default_expr, expr_ty)?;
         } else {
             self.lines.push(format!(
                 "{}fprintf(stderr, \"non-exhaustive ADT match\\n\");",
@@ -3748,13 +3748,14 @@ impl<'a> HostEmitter<'a> {
         }
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
+        Ok(())
     }
 
-    fn assign_list_literal(&mut self, target: &str, items: &[HostExpr], ty: &HostType) {
+    fn assign_list_literal(&mut self, target: &str, items: &[HostExpr], ty: &HostType) -> Result<(), Unsupported> {
         if items.is_empty() {
             self.lines
                 .push(format!("{}{target} = chelis_list_empty();", self.indent));
-            return;
+            return Ok(());
         }
         let values_name = self.next_temp("list_values");
         self.lines.push(format!(
@@ -3774,7 +3775,7 @@ impl<'a> HostEmitter<'a> {
             } else {
                 inferred_ty
             };
-            self.emit_expr_to_var(item, &item_var, &item_ty);
+            self.emit_expr_to_var(item, &item_var, &item_ty)?;
             self.lines.push(format!(
                 "{}{}[{index}] = {};",
                 self.indent,
@@ -3795,9 +3796,10 @@ impl<'a> HostEmitter<'a> {
             _ => HostType::List(Box::new(HostType::Unknown)),
         };
         self.track_owned_alloc(target, &list_ty);
+        Ok(())
     }
 
-    fn assign_tuple_literal(&mut self, target: &str, items: &[HostExpr], ty: &HostType) {
+    fn assign_tuple_literal(&mut self, target: &str, items: &[HostExpr], ty: &HostType) -> Result<(), Unsupported> {
         // An empty tuple has no elements. ISO C forbids a zero-length array
         // (`chelis_value tuple_values[0];`), so pass a NULL items pointer with
         // count 0 instead; the runtime helper's `len <= 0` guard never
@@ -3825,7 +3827,7 @@ impl<'a> HostEmitter<'a> {
                 } else {
                     inferred_ty
                 };
-                self.emit_expr_to_var(item, &item_var, &item_ty);
+                self.emit_expr_to_var(item, &item_var, &item_ty)?;
                 self.lines.push(format!(
                     "{}{}[{index}] = {};",
                     self.indent,
@@ -3848,6 +3850,7 @@ impl<'a> HostEmitter<'a> {
             _ => HostType::Tuple(Vec::new()),
         };
         self.track_owned_alloc(target, &tuple_ty);
+        Ok(())
     }
 
     fn assign_map(
@@ -3856,9 +3859,9 @@ impl<'a> HostEmitter<'a> {
         callback: &HostCallback,
         list: &HostExpr,
         _ty: &HostType,
-    ) {
+    ) -> Result<(), Unsupported> {
         let list_var = self.next_temp("map_list");
-        self.emit_expr_to_var(list, &list_var, &host_type(list));
+        self.emit_expr_to_var(list, &list_var, &host_type(list))?;
         let len_var = self.next_temp("map_len");
         self.lines.push(format!(
             "{}int64_t {} = chelis_list_len({});",
@@ -3889,7 +3892,7 @@ impl<'a> HostEmitter<'a> {
         self.lines
             .push(format!("{}{} {};", self.indent, c_type(&param.ty), arg_var));
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value);
-        self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var);
+        self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var)?;
         self.lines.push(format!(
             "{}{target} = chelis_list_append({target}, {});",
             self.indent,
@@ -3897,6 +3900,7 @@ impl<'a> HostEmitter<'a> {
         ));
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
+        Ok(())
     }
 
     fn assign_filter(
@@ -3905,9 +3909,9 @@ impl<'a> HostEmitter<'a> {
         callback: &HostCallback,
         list: &HostExpr,
         _ty: &HostType,
-    ) {
+    ) -> Result<(), Unsupported> {
         let list_var = self.next_temp("filter_list");
-        self.emit_expr_to_var(list, &list_var, &host_type(list));
+        self.emit_expr_to_var(list, &list_var, &host_type(list))?;
         let len_var = self.next_temp("filter_len");
         self.lines.push(format!(
             "{}int64_t {} = chelis_list_len({});",
@@ -3934,7 +3938,7 @@ impl<'a> HostEmitter<'a> {
         self.lines
             .push(format!("{}{} {};", self.indent, c_type(&param.ty), arg_var));
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value);
-        self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &keep_var);
+        self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &keep_var)?;
         self.lines
             .push(format!("{}if ({}) {{", self.indent, keep_var));
         let nested_indent = format!("{}    ", self.indent);
@@ -3947,6 +3951,7 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!("{}}}", self.indent));
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
+        Ok(())
     }
 
     fn assign_fold(
@@ -3956,10 +3961,10 @@ impl<'a> HostEmitter<'a> {
         init: &HostExpr,
         list: &HostExpr,
         ty: &HostType,
-    ) {
-        self.assign_expr(target, init, ty);
+    ) -> Result<(), Unsupported> {
+        self.assign_expr(target, init, ty)?;
         let list_var = self.next_temp("fold_list");
-        self.emit_expr_to_var(list, &list_var, &host_type(list));
+        self.emit_expr_to_var(list, &list_var, &host_type(list))?;
         let len_var = self.next_temp("fold_len");
         self.lines.push(format!(
             "{}int64_t {} = chelis_list_len({});",
@@ -3992,9 +3997,10 @@ impl<'a> HostEmitter<'a> {
             item_arg
         ));
         self.assign_unboxed_value(&item_arg, &params[1].ty, &item_value);
-        self.emit_callback_assign(callback, &[acc_arg, item_arg], target);
+        self.emit_callback_assign(callback, &[acc_arg, item_arg], target)?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
+        Ok(())
     }
 
     fn assign_scan(
@@ -4004,19 +4010,19 @@ impl<'a> HostEmitter<'a> {
         init: &HostExpr,
         list: &HostExpr,
         ty: &HostType,
-    ) {
+    ) -> Result<(), Unsupported> {
         let HostType::List(inner_ty) = ty else {
             self.lines
                 .push(format!("{}{target} = chelis_list_empty();", self.indent));
-            return;
+            return Ok(());
         };
         let acc_ty = inner_ty.as_ref().clone();
         let acc_var = self.next_temp("scan_acc");
-        self.emit_expr_to_var(init, &acc_var, &acc_ty);
+        self.emit_expr_to_var(init, &acc_var, &acc_ty)?;
         self.lines
             .push(format!("{}{target} = chelis_list_empty();", self.indent));
         let list_var = self.next_temp("scan_list");
-        self.emit_expr_to_var(list, &list_var, &host_type(list));
+        self.emit_expr_to_var(list, &list_var, &host_type(list))?;
         let len_var = self.next_temp("scan_len");
         self.lines.push(format!(
             "{}int64_t {} = chelis_list_len({});",
@@ -4050,7 +4056,7 @@ impl<'a> HostEmitter<'a> {
             item_arg
         ));
         self.assign_unboxed_value(&item_arg, &params[1].ty, &item_value);
-        self.emit_callback_assign(callback, &[acc_arg, item_arg], &acc_var);
+        self.emit_callback_assign(callback, &[acc_arg, item_arg], &acc_var)?;
         self.lines.push(format!(
             "{}{target} = chelis_list_append({target}, {});",
             self.indent,
@@ -4058,6 +4064,7 @@ impl<'a> HostEmitter<'a> {
         ));
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
+        Ok(())
     }
 
     fn assign_partition(
@@ -4066,11 +4073,11 @@ impl<'a> HostEmitter<'a> {
         callback: &HostCallback,
         list: &HostExpr,
         ty: &HostType,
-    ) {
+    ) -> Result<(), Unsupported> {
         let HostType::Tuple(parts) = ty else {
             self.lines
                 .push(format!("{}/* unsupported partition type */", self.indent));
-            return;
+            return Ok(());
         };
         let pass_ty = parts.first().cloned().unwrap_or(HostType::Unknown);
         let fail_ty = parts.get(1).cloned().unwrap_or(HostType::Unknown);
@@ -4089,7 +4096,7 @@ impl<'a> HostEmitter<'a> {
             fail_var
         ));
         let list_var = self.next_temp("partition_list");
-        self.emit_expr_to_var(list, &list_var, &host_type(list));
+        self.emit_expr_to_var(list, &list_var, &host_type(list))?;
         let len_var = self.next_temp("partition_len");
         self.lines.push(format!(
             "{}int64_t {} = chelis_list_len({});",
@@ -4114,7 +4121,7 @@ impl<'a> HostEmitter<'a> {
         self.lines
             .push(format!("{}{} {};", self.indent, c_type(&param.ty), arg_var));
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value);
-        self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &keep_var);
+        self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &keep_var)?;
         self.lines
             .push(format!("{}if ({}) {{", self.indent, keep_var));
         let then_indent = format!("{}    ", self.indent);
@@ -4150,6 +4157,7 @@ impl<'a> HostEmitter<'a> {
             "{}{target} = chelis_tuple_from_values({}, 2);",
             self.indent, tuple_values
         ));
+        Ok(())
     }
 
     fn assign_flat_map(
@@ -4158,9 +4166,9 @@ impl<'a> HostEmitter<'a> {
         callback: &HostCallback,
         list: &HostExpr,
         _ty: &HostType,
-    ) {
+    ) -> Result<(), Unsupported> {
         let list_var = self.next_temp("flat_map_list");
-        self.emit_expr_to_var(list, &list_var, &host_type(list));
+        self.emit_expr_to_var(list, &list_var, &host_type(list))?;
         let len_var = self.next_temp("flat_map_len");
         self.lines.push(format!(
             "{}int64_t {} = chelis_list_len({});",
@@ -4191,16 +4199,17 @@ impl<'a> HostEmitter<'a> {
         self.lines
             .push(format!("{}{} {};", self.indent, c_type(&param.ty), arg_var));
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value);
-        self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var);
+        self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var)?;
         self.lines.push(format!(
             "{}{target} = chelis_list_concat({target}, {});",
             self.indent, result_var
         ));
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
+        Ok(())
     }
 
-    fn emit_callback_assign(&mut self, callback: &HostCallback, arg_vars: &[String], target: &str) {
+    fn emit_callback_assign(&mut self, callback: &HostCallback, arg_vars: &[String], target: &str) -> Result<(), Unsupported> {
         match &callback.kind {
             HostCallbackKind::Named { function, .. } => {
                 self.lines.push(format!(
@@ -4220,9 +4229,10 @@ impl<'a> HostEmitter<'a> {
                         arg_var
                     ));
                 }
-                self.assign_expr(target, body, &callback.ret_ty);
+                self.assign_expr(target, body, &callback.ret_ty)?;
             }
         }
+        Ok(())
     }
 
     fn box_value_expr(&self, value: &str, ty: &HostType) -> String {
@@ -4263,7 +4273,7 @@ impl<'a> HostEmitter<'a> {
             .push(format!("{}{target} = {expr};", self.indent));
     }
 
-    fn emit_print_value(&mut self, value: &str, ty: &HostType) {
+    fn emit_print_value(&mut self, value: &str, ty: &HostType) -> Result<(), Unsupported> {
         match ty {
             HostType::String => self.lines.push(format!(
                 "{}printf(\"%s\\n\", chelis_string_data({}));",
@@ -4307,9 +4317,10 @@ impl<'a> HostEmitter<'a> {
                 .lines
                 .push(format!("{}printf(\"<value>\\n\");", self.indent)),
         }
+        Ok(())
     }
 
-    fn emit_labeled_root(&mut self, name: &str, value: &str, ty: &HostType) {
+    fn emit_labeled_root(&mut self, name: &str, value: &str, ty: &HostType) -> Result<(), Unsupported> {
         // Mirror eval's tuple-root expansion: a `Tuple([T0, T1, ...])`
         // top-level binding renders as `<name>.0 = ...`, `<name>.1 = ...`
         // (one labeled line per field). Eval produces this via
@@ -4329,7 +4340,7 @@ impl<'a> HostEmitter<'a> {
                     c_decl(field_ty, &field_value)
                 ));
                 self.assign_unboxed_value(&field_value, field_ty, &field_var);
-                self.emit_labeled_root(&field_name, &field_value, field_ty);
+                self.emit_labeled_root(&field_name, &field_value, field_ty)?;
                 // issue #406: `chelis_tuple_get` retains the boxed element
                 // it returns (a no-op for scalar fields). The labeled-root
                 // printer only reads it, so release the retained handle once
@@ -4339,7 +4350,7 @@ impl<'a> HostEmitter<'a> {
                 self.lines
                     .push(format!("{}chelis_value_release({field_var});", self.indent));
             }
-            return;
+            return Ok(());
         }
         // `name` is producer-supplied (HostProgram binding display_name).
         // It lands inside a `"..."` C string literal as a `printf %s`
@@ -4393,6 +4404,7 @@ impl<'a> HostEmitter<'a> {
                 .push(format!("{}printf(\"<value>\");", self.indent)),
         }
         self.lines.push(format!("{}printf(\"\\n\");", self.indent));
+        Ok(())
     }
 
     fn next_temp(&mut self, prefix: &str) -> String {

@@ -38,7 +38,7 @@ fn hip_fprintf_format_string_escapes_percent_in_func_name() {
     let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
-    let result = codegen_hip(&dag, "f%spct");
+    let result = codegen_hip(&dag, "f%spct").unwrap();
     let src = &result.c_source;
 
     // Host entrypoint format string carries `%%`.
@@ -66,7 +66,7 @@ fn hip_fprintf_format_string_escapes_percent_in_load_name() {
     let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
-    let result = codegen_hip(&dag, "test_load_pct");
+    let result = codegen_hip(&dag, "test_load_pct").unwrap();
     let src = &result.c_source;
 
     // Both host and device input-shape preambles emit "input `<label>`".
@@ -87,7 +87,7 @@ fn hip_fprintf_format_string_escapes_newline_in_func_name() {
     let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
-    let result = codegen_hip(&dag, "f\nINJECT");
+    let result = codegen_hip(&dag, "f\nINJECT").unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -107,7 +107,7 @@ fn hip_clean_func_name_emitted_verbatim() {
     let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
-    let result = codegen_hip(&dag, "my_func");
+    let result = codegen_hip(&dag, "my_func").unwrap();
     let src = &result.c_source;
 
     assert!(

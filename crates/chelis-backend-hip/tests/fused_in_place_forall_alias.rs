@@ -141,7 +141,7 @@ fn fan_in_literal_equal_shapes_aliases_reusable_input() {
         vec_lit_f32(4),
         vec_lit_f32(4),
     );
-    let result = codegen_hip(&dag, "test_fan_in_literal");
+    let result = codegen_hip(&dag, "test_fan_in_literal").unwrap();
     let hip = &result.c_source;
     let fused_id = fused.0;
     let a_id = a.0;
@@ -193,7 +193,7 @@ fn fan_in_binder_equivalent_lit_to_named_aliases_reusable_input() {
         vec_named_f32("seq", 4),
         vec_named_f32("seq", 4),
     );
-    let result = codegen_hip(&dag, "test_fan_in_binder_lit_to_named");
+    let result = codegen_hip(&dag, "test_fan_in_binder_lit_to_named").unwrap();
     let hip = &result.c_source;
     let fused_id = fused.0;
     let a_id = a.0;
@@ -224,7 +224,7 @@ fn fan_in_binder_equivalent_named_to_lit_aliases_reusable_input() {
         vec_lit_f32(4),
         vec_lit_f32(4),
     );
-    let result = codegen_hip(&dag, "test_fan_in_binder_named_to_lit");
+    let result = codegen_hip(&dag, "test_fan_in_binder_named_to_lit").unwrap();
     let hip = &result.c_source;
     let fused_id = fused.0;
     let a_id = a.0;
@@ -247,7 +247,7 @@ fn fan_in_same_named_binder_aliases_reusable_input() {
         vec_named_f32("seq", 4),
         vec_named_f32("seq", 4),
     );
-    let result = codegen_hip(&dag, "test_fan_in_same_named_binder");
+    let result = codegen_hip(&dag, "test_fan_in_same_named_binder").unwrap();
     let hip = &result.c_source;
     let fused_id = fused.0;
     let a_id = a.0;
@@ -270,7 +270,7 @@ fn fan_in_named_binder_with_unknown_size_aliases() {
         vec_named_f32("seq", 4),
         vec_named_f32("seq", 4),
     );
-    let result = codegen_hip(&dag, "test_fan_in_named_unsized");
+    let result = codegen_hip(&dag, "test_fan_in_named_unsized").unwrap();
     let hip = &result.c_source;
     let fused_id = fused.0;
     let a_id = a.0;
@@ -298,7 +298,7 @@ fn fan_in_different_named_binders_does_not_alias() {
         vec_named_f32("seq", 4),
         vec_named_f32("seq", 4),
     );
-    let result = codegen_hip(&dag, "test_fan_in_different_binders");
+    let result = codegen_hip(&dag, "test_fan_in_different_binders").unwrap();
     let hip = &result.c_source;
     let fused_id = fused.0;
     let a_id = a.0;
@@ -336,7 +336,7 @@ fn fan_in_same_binder_different_known_size_does_not_alias() {
         vec_named_f32("seq", 8),
         vec_named_f32("seq", 8),
     );
-    let result = codegen_hip(&dag, "test_fan_in_size_mismatch");
+    let result = codegen_hip(&dag, "test_fan_in_size_mismatch").unwrap();
     let hip = &result.c_source;
     let fused_id = fused.0;
     let a_id = a.0;
@@ -368,7 +368,7 @@ fn fan_in_different_precision_does_not_alias() {
         vec_lit_f32(4),
         vec_lit_f32(4),
     );
-    let result = codegen_hip(&dag, "test_fan_in_different_precision");
+    let result = codegen_hip(&dag, "test_fan_in_different_precision").unwrap();
     let hip = &result.c_source;
     let fused_id = fused.0;
     let a_id = a.0;
@@ -428,7 +428,7 @@ fn fan_in_multi_consumer_reusable_input_does_not_alias() {
     dag.add_root(fused);
     dag.add_root(other);
 
-    let result = codegen_hip(&dag, "test_fan_in_multi_consumer");
+    let result = codegen_hip(&dag, "test_fan_in_multi_consumer").unwrap();
     let hip = &result.c_source;
     let fused_id = fused.0;
     let a_id = a.0;
@@ -459,7 +459,7 @@ fn fan_in_different_rank_does_not_alias() {
         precision: Prim::F32,
     };
     let (dag, fused, a) = fan_in_dag(ty_r1.clone(), ty_r2.clone(), ty_r2.clone(), ty_r2);
-    let result = codegen_hip(&dag, "test_fan_in_different_rank");
+    let result = codegen_hip(&dag, "test_fan_in_different_rank").unwrap();
     let hip = &result.c_source;
     let fused_id = fused.0;
     let a_id = a.0;
@@ -510,7 +510,7 @@ fn fan_in_no_reusable_input_keeps_slot_backed_path() {
     // No set_reusable_input.
     dag.add_root(fused);
 
-    let result = codegen_hip(&dag, "test_fan_in_no_reusable");
+    let result = codegen_hip(&dag, "test_fan_in_no_reusable").unwrap();
     let hip = &result.c_source;
     let fused_id = fused.0;
     let a_id = a.0;

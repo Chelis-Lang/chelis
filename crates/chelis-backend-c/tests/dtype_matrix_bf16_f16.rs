@@ -322,7 +322,7 @@ fn bf16_const_fill_produces_exact_bit_pattern() {
             vec_ty(n, Prim::Bf16),
             None,
         );
-        let result = codegen(&dag, "bf16_const_bits");
+        let result = codegen(&dag, "bf16_const_bits").unwrap();
         let main_c = format!(
             r#"{HARNESS}
 extern void bf16_const_bits(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
@@ -375,7 +375,7 @@ fn f16_const_fill_produces_exact_bit_pattern() {
             vec_ty(n, Prim::F16),
             None,
         );
-        let result = codegen(&dag, "f16_const_bits");
+        let result = codegen(&dag, "f16_const_bits").unwrap();
         let main_c = format!(
             r#"{HARNESS}
 extern void f16_const_bits(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
@@ -439,7 +439,7 @@ fn bf16_add_agrees_with_evaluator() {
         None,
     );
     dag.add_node(RiscOp::Add, vec![a, b], scalar_ty(Prim::Bf16), None);
-    let result = codegen(&dag, "bf16_add");
+    let result = codegen(&dag, "bf16_add").unwrap();
     let main_c = format!(
         r#"{HARNESS}
 extern void bf16_add(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
@@ -483,7 +483,7 @@ fn f16_add_agrees_with_evaluator() {
         None,
     );
     dag.add_node(RiscOp::Add, vec![a, b], scalar_ty(Prim::F16), None);
-    let result = codegen(&dag, "f16_add");
+    let result = codegen(&dag, "f16_add").unwrap();
     let main_c = format!(
         r#"{HARNESS}
 extern void f16_add(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
@@ -527,7 +527,7 @@ fn bf16_mul_agrees_with_evaluator() {
         None,
     );
     dag.add_node(RiscOp::Mul, vec![a, b], scalar_ty(Prim::Bf16), None);
-    let result = codegen(&dag, "bf16_mul");
+    let result = codegen(&dag, "bf16_mul").unwrap();
     let main_c = format!(
         r#"{HARNESS}
 extern void bf16_mul(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
@@ -570,7 +570,7 @@ fn f16_mul_agrees_with_evaluator() {
         None,
     );
     dag.add_node(RiscOp::Mul, vec![a, b], scalar_ty(Prim::F16), None);
-    let result = codegen(&dag, "f16_mul");
+    let result = codegen(&dag, "f16_mul").unwrap();
     let main_c = format!(
         r#"{HARNESS}
 extern void f16_mul(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
@@ -618,7 +618,7 @@ fn bf16_reduce_sum_uses_f32_accumulator_per_spec_5_7_1() {
     );
     let sum_op = RiscOp::sum_default(0, Prim::Bf16).expect("sum constructs");
     dag.add_node(sum_op, vec![load], scalar_ty(Prim::F32), None);
-    let result = codegen(&dag, "bf16_sum_1024");
+    let result = codegen(&dag, "bf16_sum_1024").unwrap();
     let main_c = format!(
         r#"{HARNESS}
 extern void bf16_sum_1024(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
@@ -679,7 +679,7 @@ fn f16_reduce_sum_uses_f32_accumulator_per_spec_5_7_1() {
     );
     let sum_op = RiscOp::sum_default(0, Prim::F16).expect("sum constructs");
     dag.add_node(sum_op, vec![load], scalar_ty(Prim::F32), None);
-    let result = codegen(&dag, "f16_sum_1024");
+    let result = codegen(&dag, "f16_sum_1024").unwrap();
     let main_c = format!(
         r#"{HARNESS}
 extern void f16_sum_1024(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
@@ -743,7 +743,7 @@ fn bf16_reduce_max_agrees_with_evaluator() {
         scalar_ty(Prim::Bf16),
         None,
     );
-    let result = codegen(&dag, "bf16_max");
+    let result = codegen(&dag, "bf16_max").unwrap();
     let main_c = format!(
         r#"{HARNESS}
 extern void bf16_max(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
@@ -790,7 +790,7 @@ fn f16_reduce_max_agrees_with_evaluator() {
         scalar_ty(Prim::F16),
         None,
     );
-    let result = codegen(&dag, "f16_max");
+    let result = codegen(&dag, "f16_max").unwrap();
     let main_c = format!(
         r#"{HARNESS}
 extern void f16_max(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
@@ -882,7 +882,7 @@ fn build_f16_matmul_dag() -> Dag {
 fn bf16_matmul_routes_through_convert_then_sgemm() {
     let dag = build_bf16_matmul_dag();
     let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
-    let result = codegen(&specialized, "bf16_matmul_routing");
+    let result = codegen(&specialized, "bf16_matmul_routing").unwrap();
     assert!(
         result.c_source.contains("chelis_bf16_buffer_to_f32"),
         "emitted C must convert bf16 operands to f32: {}",
@@ -904,7 +904,7 @@ fn bf16_matmul_routes_through_convert_then_sgemm() {
 fn f16_matmul_routes_through_convert_then_sgemm() {
     let dag = build_f16_matmul_dag();
     let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
-    let result = codegen(&specialized, "f16_matmul_routing");
+    let result = codegen(&specialized, "f16_matmul_routing").unwrap();
     assert!(
         result.c_source.contains("chelis_f16_buffer_to_f32"),
         "emitted C must convert f16 operands to f32: {}",
@@ -934,7 +934,7 @@ fn bf16_matmul_agrees_with_evaluator() {
     }
     let dag = build_bf16_matmul_dag();
     let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
-    let result = codegen(&specialized, "bf16_matmul_exec");
+    let result = codegen(&specialized, "bf16_matmul_exec").unwrap();
     let main_c = format!(
         r#"{HARNESS}
 extern void bf16_matmul_exec(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
@@ -1002,7 +1002,7 @@ fn f16_matmul_agrees_with_evaluator() {
     }
     let dag = build_f16_matmul_dag();
     let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
-    let result = codegen(&specialized, "f16_matmul_exec");
+    let result = codegen(&specialized, "f16_matmul_exec").unwrap();
     let main_c = format!(
         r#"{HARNESS}
 extern void f16_matmul_exec(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);

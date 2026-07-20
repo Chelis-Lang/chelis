@@ -139,7 +139,7 @@ fn c_test_extra_flags() -> Vec<String> {
 
 /// Build a DAG, generate C, compile with gcc, run, return stdout as string.
 fn compile_and_run(dag: &Dag, func_name: &str) -> String {
-    let result = chelis_backend_c::codegen(dag, func_name);
+    let result = chelis_backend_c::codegen(dag, func_name).unwrap();
 
     let tmp = tempfile::tempdir().unwrap();
     let rt_dir = runtime_src_dir();
@@ -336,7 +336,7 @@ fn agreement_exp() {
 /// conversion helper. Returns the trailing element as `f64` so the
 /// caller can compare against the evaluator.
 fn compile_and_run_reduced(dag: &Dag, func_name: &str, is_bf16: bool) -> f64 {
-    let result = chelis_backend_c::codegen(dag, func_name);
+    let result = chelis_backend_c::codegen(dag, func_name).unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let rt_dir = runtime_src_dir();
     for header in &[
@@ -482,7 +482,7 @@ fn agreement_bf16_reduce_sum_matches_eval_within_tol() {
     );
     let sum = RiscOp::sum_default(0, Prim::Bf16).expect("sum constructs");
     dag.add_node(sum, vec![c], scalar_ty(Prim::F32), None);
-    let result = chelis_backend_c::codegen(&dag, "test_bf16_sum_const");
+    let result = chelis_backend_c::codegen(&dag, "test_bf16_sum_const").unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let rt_dir = runtime_src_dir();
     for header in &[

@@ -899,8 +899,10 @@ fn build_training_programs_from_compiled(
     }
     let train_dag = dag_without_roots(&train_dag);
 
-    let train_c = chelis_backend_c::codegen(&train_dag, "chelis_train");
-    let train_hip = chelis_backend_hip::codegen_hip(&train_dag, "chelis_train");
+    let train_c =
+        chelis_backend_c::codegen(&train_dag, "chelis_train").map_err(|e| e.to_string())?;
+    let train_hip =
+        chelis_backend_hip::codegen_hip(&train_dag, "chelis_train").map_err(|e| e.to_string())?;
 
     let train_labels = output_index_map(&train_c.output_labels);
     if !train_labels.contains_key("eval_output") {
@@ -922,8 +924,8 @@ fn build_transformer_programs() -> Result<ForwardPrograms, String> {
     add_named_store(&mut dag, "out", out);
     let fused = fuse::fuse(&dag);
     let fused = dag_without_roots(&fused);
-    let cpu = chelis_backend_c::codegen(&fused, "chelis_forward");
-    let hip = chelis_backend_hip::codegen_hip(&fused, "chelis_forward");
+    let cpu = chelis_backend_c::codegen(&fused, "chelis_forward").map_err(|e| e.to_string())?;
+    let hip = chelis_backend_hip::codegen_hip(&fused, "chelis_forward").map_err(|e| e.to_string())?;
     let output_index = *output_index_map(&cpu.output_labels)
         .get("out")
         .ok_or("missing `out` output label".to_string())?;

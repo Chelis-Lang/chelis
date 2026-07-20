@@ -44,7 +44,7 @@ fn issue_189_f32_const_emits_exact_bit_pattern() {
         scalar(Prim::F32),
         None,
     );
-    let src = CEmitter::emit_dag(&dag, "test_fn");
+    let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
     let want_bits = (0.000000123456789_f64 as f32).to_bits();
     let needle = format!("0x{want_bits:08x}");
     assert!(
@@ -70,7 +70,7 @@ fn issue_189_f64_const_emits_exact_bit_pattern() {
     let mut dag = Dag::new();
     let v: f64 = 1.0e-300;
     dag.add_node(RiscOp::Const { value: v }, vec![], scalar(Prim::F64), None);
-    let src = CEmitter::emit_dag(&dag, "test_fn");
+    let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
     let want_bits = v.to_bits();
     let needle = format!("0x{want_bits:016x}");
     assert!(
@@ -100,7 +100,7 @@ fn issue_189_f32_const_does_not_use_lossy_format() {
     for &v in values {
         let mut dag = Dag::new();
         dag.add_node(RiscOp::Const { value: v }, vec![], scalar(Prim::F32), None);
-        let src = CEmitter::emit_dag(&dag, "test_fn");
+        let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
         let v32 = v as f32;
         let want_bits = v32.to_bits();
         // The bit pattern must be present.
@@ -126,7 +126,7 @@ fn issue_189_f32_const_smallest_denormal_round_trips() {
         scalar(Prim::F32),
         None,
     );
-    let src = CEmitter::emit_dag(&dag, "test_fn");
+    let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
     assert!(
         src.contains("0x00000001"),
         "f32 denormal must round-trip via bit pattern `0x00000001`; emitted source:\n{src}"
@@ -144,7 +144,7 @@ fn issue_189_f64_const_one_ulp_pair_round_trips() {
     for v in [v1, v2] {
         let mut dag = Dag::new();
         dag.add_node(RiscOp::Const { value: v }, vec![], scalar(Prim::F64), None);
-        let src = CEmitter::emit_dag(&dag, "test_fn");
+        let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
         let bits = v.to_bits();
         assert!(
             src.contains(&format!("0x{bits:016x}")),
@@ -321,7 +321,7 @@ fn issue_189_f32_const_byte_identical_to_eval_under_gcc() {
         },
         None,
     );
-    let result = codegen(&dag, "test_const_f32");
+    let result = codegen(&dag, "test_const_f32").unwrap();
     let src = &result.c_source;
     let want_bits = (v as f32).to_bits();
     let harness = r#"
@@ -372,7 +372,7 @@ fn issue_189_f64_const_byte_identical_to_eval_under_gcc() {
         },
         None,
     );
-    let result = codegen(&dag, "test_const_f64");
+    let result = codegen(&dag, "test_const_f64").unwrap();
     let src = &result.c_source;
     let want_bits = v.to_bits();
     let harness = r#"

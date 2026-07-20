@@ -445,7 +445,7 @@ int main(void) {{
 
 fn compile_and_run_single_output(dag: &Dag, func_name: &str, inputs: &[TestInput]) -> Vec<f32> {
     require_hipcc();
-    let result = codegen_hip(dag, func_name);
+    let result = codegen_hip(dag, func_name).unwrap();
     assert_eq!(
         result.output_labels.len(),
         1,
@@ -511,7 +511,7 @@ fn compile_and_run_output_cases(
     input_cases: &[Vec<TestInput>],
 ) -> Vec<Vec<f32>> {
     require_hipcc();
-    let result = codegen_hip(dag, func_name);
+    let result = codegen_hip(dag, func_name).unwrap();
     assert_eq!(
         result.output_labels.len(),
         1,
@@ -655,7 +655,7 @@ fn g1_add_consts_gpu() {
 /// bits (`%.6f` cannot distinguish the 1-ULP FMA difference this locks).
 fn compile_and_run_output_f32_bits(dag: &Dag, func_name: &str) -> Vec<u32> {
     require_hipcc();
-    let result = codegen_hip(dag, func_name);
+    let result = codegen_hip(dag, func_name).unwrap();
     assert_eq!(
         result.output_labels.len(),
         1,
@@ -2061,7 +2061,7 @@ fn compile_and_run_single_output_f64(
     inputs: &[TestInputF64],
 ) -> Vec<f64> {
     require_hipcc();
-    let result = codegen_hip(dag, func_name);
+    let result = codegen_hip(dag, func_name).unwrap();
     assert_eq!(
         result.output_labels.len(),
         1,
@@ -2538,7 +2538,7 @@ fn compile_and_run_single_output_typed_i64(
     out_printf_spec: &str,
 ) -> Vec<i64> {
     require_hipcc();
-    let result = codegen_hip(dag, func_name);
+    let result = codegen_hip(dag, func_name).unwrap();
     assert_eq!(
         result.output_labels.len(),
         1,
@@ -2916,7 +2916,7 @@ fn ws_a4_i8_add_emits_dtype_suffixed_kernel_name() {
     );
     dag.add_root(out);
 
-    let result = codegen_hip(&dag, "ws_a4_i8_add_codegen");
+    let result = codegen_hip(&dag, "ws_a4_i8_add_codegen").unwrap();
     assert!(
         result.c_source.contains("kernel_add_i8"),
         "i8 add must emit `kernel_add_i8`; got source:\n{}",
@@ -2957,7 +2957,7 @@ fn ws_a4_i8_reduce_sum_emits_promoted_kernel_name() {
     );
     dag.add_root(out);
 
-    let result = codegen_hip(&dag, "ws_a4_i8_reduce_sum_codegen");
+    let result = codegen_hip(&dag, "ws_a4_i8_reduce_sum_codegen").unwrap();
     // Kernel name encodes both source dtype (`_i8`) and accumulator
     // dtype (`_i32`). The unsuffixed `kernel_sum_ax0` would be the f32
     // → f32 path, so its absence is the regression-shield.

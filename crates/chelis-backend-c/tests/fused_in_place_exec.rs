@@ -192,7 +192,7 @@ fn fused_in_place_compile_run_matches_contiguous_and_strided_inputs() {
     dag.set_reusable_input(fused, x);
     dag.add_root(fused);
 
-    let result = chelis_backend_c::codegen(&dag, "fused_in_place_probe");
+    let result = chelis_backend_c::codegen(&dag, "fused_in_place_probe").unwrap();
     let stdout = compile_and_run(
         "fused_in_place_probe",
         &result.c_source,

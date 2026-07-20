@@ -63,10 +63,13 @@ pub fn runtime_dir() -> &'static str {
 ///
 /// Inputs arrive as host tensors, are transferred to GPU, processed via
 /// HIP kernels, and results are transferred back to host tensors in outputs.
-pub fn codegen_hip(dag: &chelis_ir::dag::Dag, func_name: &str) -> HipCodegenResult {
+pub fn codegen_hip(
+    dag: &chelis_ir::dag::Dag,
+    func_name: &str,
+) -> Result<HipCodegenResult, chelis_types::unsupported::Unsupported> {
     let specialized = chelis_ir::specialize::specialize_for_blas(dag);
     let dag = &specialized;
-    let (c_source, peak_device_bytes) = emit::HipEmitter::emit_dag(dag, func_name);
+    let (c_source, peak_device_bytes) = emit::HipEmitter::emit_dag(dag, func_name)?;
     let h_header = format!(
         "extern \"C\" void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
     );
@@ -88,7 +91,7 @@ pub fn codegen_hip(dag: &chelis_ir::dag::Dag, func_name: &str) -> HipCodegenResu
     {
         link_flags.push("-lhipblas".to_string());
     }
-    HipCodegenResult {
+    Ok(HipCodegenResult {
         c_source,
         h_header,
         compile_flags: vec![],
@@ -100,5 +103,5 @@ pub fn codegen_hip(dag: &chelis_ir::dag::Dag, func_name: &str) -> HipCodegenResu
         peak_device_bytes_estimate: peak_device_bytes.estimate,
         peak_device_bytes_terms: peak_device_bytes.terms,
         peak_device_bytes_static_extra: peak_device_bytes.extra_bytes,
-    }
+    })
 }

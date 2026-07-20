@@ -2606,7 +2606,7 @@ fn cmd_build(
                 reject_unsupported_c_precisions_host(host_program)?;
                 reject_symbolic_windowed_reduce_host(host_program, "c")?;
                 reject_unsupported_reduce_window_precision_host(host_program, "c")?;
-                let result = chelis_backend_c::codegen_host_program(host_program, func_name);
+                let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
                 cmd_build_c_result(result, func_name, output, &symbolic_dims)
             } else {
                 reject_unsupported_effect_ops(&dag, "c")?;
@@ -2642,7 +2642,7 @@ fn cmd_build(
                 && host_requires_host_backend
                 && let Some(host_program) = compiled_program.host.as_ref()
             {
-                let result = chelis_backend_c::codegen_host_program(host_program, func_name);
+                let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
                 cmd_build_hip_host(result, func_name, output)
             } else {
                 let mut hip_dag = if let Some(entry_dag) = preferred_entry_dag {
@@ -2686,7 +2686,7 @@ fn cmd_build(
                 // Host-only programs fall through to the C backend, exactly
                 // like the HIP path. The metal path doesn't have a separate
                 // host wrapper today; reuse cmd_build_hip_host for parity.
-                let result = chelis_backend_c::codegen_host_program(host_program, func_name);
+                let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
                 cmd_build_hip_host(result, func_name, output)
             } else {
                 let mut metal_dag = if let Some(entry_dag) = preferred_entry_dag {
@@ -2851,7 +2851,7 @@ fn cmd_build_deep(
                 reject_unsupported_c_precisions_host(host_program)?;
                 reject_symbolic_windowed_reduce_host(host_program, "c")?;
                 reject_unsupported_reduce_window_precision_host(host_program, "c")?;
-                let result = chelis_backend_c::codegen_host_program(host_program, func_name);
+                let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
                 cmd_build_c_result(result, func_name, output, &symbolic_dims)
             } else {
                 reject_unsupported_effect_ops(&dag, "c")?;
@@ -2882,7 +2882,7 @@ fn cmd_build_deep(
                 && host_requires_host_backend
                 && let Some(host_program) = compiled_program.host.as_ref()
             {
-                let result = chelis_backend_c::codegen_host_program(host_program, func_name);
+                let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
                 cmd_build_hip_host(result, func_name, output)
             } else {
                 let mut hip_dag = if let Some(entry_dag) = preferred_entry_dag {
@@ -2919,7 +2919,7 @@ fn cmd_build_deep(
                 && host_requires_host_backend
                 && let Some(host_program) = compiled_program.host.as_ref()
             {
-                let result = chelis_backend_c::codegen_host_program(host_program, func_name);
+                let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
                 cmd_build_hip_host(result, func_name, output)
             } else {
                 let mut metal_dag = if let Some(entry_dag) = preferred_entry_dag {
@@ -7400,7 +7400,7 @@ fn cmd_build_c(
             use_blas: true,
             ..chelis_backend_c::CodegenOptions::default()
         },
-    );
+    )?;
     let symbolic_dims = fallback_symbolic_dims(dag, &result.symbolic_dims, symbolic_dims_hint);
     cmd_build_c_result(result, func_name, output, &symbolic_dims)
 }
@@ -7543,7 +7543,7 @@ fn cmd_build_hip(
     output: Option<&std::path::Path>,
     symbolic_dims_hint: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let result = chelis_backend_hip::codegen_hip(dag, func_name);
+    let result = chelis_backend_hip::codegen_hip(dag, func_name)?;
 
     let out_dir = output
         .map(|p| p.to_path_buf())

@@ -41,7 +41,7 @@ fn redteam_five_op_sleef_contains_all_macros() {
             math_lib_override: Some(MathLib::Sleef),
             ..CodegenOptions::default()
         },
-    );
+    ).unwrap();
     let src = &result.c_source;
 
     // All five Sleef macros (exp appears twice — first and last step).
@@ -107,7 +107,7 @@ fn redteam_zero_size_tensor_loop_does_not_execute() {
             math_lib_override: Some(MathLib::Sleef),
             ..CodegenOptions::default()
         },
-    );
+    ).unwrap();
     let src = &result.c_source;
 
     // The AVX2 loop must use the standard guard form.
@@ -139,7 +139,7 @@ fn redteam_math_lib_none_uses_scalar_expf() {
             math_lib_override: Some(MathLib::None),
             ..CodegenOptions::default()
         },
-    );
+    ).unwrap();
     let src = &result.c_source;
 
     // Must NOT contain math header.
@@ -185,7 +185,7 @@ fn redteam_pure_arithmetic_with_sleef_forced_uses_level1_path() {
             math_lib_override: Some(MathLib::Sleef),
             ..CodegenOptions::default()
         },
-    );
+    ).unwrap();
     let src = &result.c_source;
 
     // Must NOT contain Sleef guard.
@@ -218,7 +218,7 @@ fn redteam_vforce_single_exp_kernel() {
             math_lib_override: Some(MathLib::VForce),
             ..CodegenOptions::default()
         },
-    );
+    ).unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -249,7 +249,7 @@ fn redteam_vforce_two_op_kernel_falls_through_to_level1() {
             math_lib_override: Some(MathLib::VForce),
             ..CodegenOptions::default()
         },
-    );
+    ).unwrap();
     let src = &result.c_source;
 
     assert!(
