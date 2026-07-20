@@ -27,16 +27,18 @@
 //!   exactly), so a stdout digit-count difference between the lanes cannot
 //!   masquerade as a value divergence and a silently skipped element cannot
 //!   mask one (`parse_tensor_data` fails loudly on a missing/unparseable line).
-//! * **Loud fallback**: a genuinely non-static bound (a runtime add) fails the
-//!   `chelis build` loudly, naming chelis#776 — it never silently compiles to
-//!   the [0,1) default and never laundered into a `/* unsupported builtin */`
-//!   host stub. `chelis eval`, which interprets the range, stays correct.
+//! * **Loud rejection**: a genuinely non-static bound (a runtime add) fails
+//!   loudly in BOTH lanes — it never silently compiles to the [0,1) default and
+//!   never laundered into a `/* unsupported builtin */` host stub.
 //!
-//! Note on the type checker: the `def f(...) = uniform_like(t, lo, hi)` form is
-//! rejected at check time ("uniform_like currently requires literal low/high
-//! bounds"), but that gate is bypassed for the top-level
-//! `with seed { uniform_like(...) }` form used here — the only form that
-//! supplies a seed — so the lowering guard is the actual enforcement, not mere
+//! Note on the type checker (updated for chelis#731 Phase 1): the uniform_like
+//! literal-bounds checker gate now fires inside `with seed { uniform_like(...) }`
+//! bodies too — those bodies were unchecked before (chelis#709), which is why
+//! the lowering guard used to be the actual enforcement for this form. The gate
+//! is aligned with the lowering's static-fold set (`extract_f64_value`), so
+//! bare/lit/neg/float-cast bounds pass the checker and reach the lowering (the
+//! emitted-bits and cross-lane suites below), while a genuinely-runtime bound is
+//! now a checker rejection in both lanes and PR #782's fatal lowering error is
 //! defense-in-depth. The def-form rejection is pinned separately below.
 
 #![allow(clippy::uninlined_format_args)]
@@ -55,7 +57,7 @@ fn program(low: &str, high: &str, seed: u64) -> String {
     format!(
         "template = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), \
          cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])\n\
-         sampled = with seed({seed}) {{ uniform_like(copy(template), {low}, {high}) }}\n"
+         sampled = with seed({seed}i64) {{ uniform_like(copy(template), {low}, {high}) }}\n"
     )
 }
 
@@ -245,13 +247,25 @@ fn mixed_neg_and_cast_bounds_cross_lane() {
     assert_f32_bit_parity(&eval, &c, "mixed [-3,5)");
 }
 
-// -- loud fallback on a genuinely non-static bound ---------------------------
+// -- loud rejection on a genuinely non-static bound --------------------------
+//
+// chelis#731 Phase 1 (checker totality): the uniform_like literal-bounds
+// checker gate now fires INSIDE `with seed { ... }` bodies too. Before, those
+// bodies were unchecked (chelis#709), so a genuinely-runtime bound like
+// `cast(2.0, f32) + cast(1.0, f32)` (an `add`, which is NOT a statically-
+// resolvable bound) reached the lowering, where PR #782's fatal error caught it
+// at build and the eval lane interpreted the range at runtime. Now the CHECKER
+// rejects it first, in BOTH lanes (build and eval run the front-end). PR #782's
+// fatal lowering error is therefore defense-in-depth (unreachable via the
+// checked CLI path). Statically-resolvable bounds -- bare/lit/neg/float-cast --
+// still pass the gate and reach the lowering (the cast/neg suites above), so
+// this only tightens the genuinely-runtime case.
 
 #[test]
-fn runtime_computed_bound_build_fails_loudly() {
-    // `cast(2.0, f32) + cast(1.0, f32)` is a runtime add the lowering cannot
-    // fold to a compile-time constant. The build must fail LOUDLY, never emit
-    // a [0,1) sampler and never a `/* unsupported builtin */` stub.
+fn runtime_computed_bound_build_rejected_by_checker() {
+    // `cast(2.0, f32) + cast(1.0, f32)` is a runtime add: not a statically-
+    // resolvable bound. The build must fail LOUDLY at the checker gate, never
+    // emit a [0,1) sampler and never a `/* unsupported builtin */` stub.
     let src = program("cast(2.0, f32) + cast(1.0, f32)", "cast(5.0, f32)", 42);
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("runtime.ch");
@@ -276,10 +290,9 @@ fn runtime_computed_bound_build_fails_loudly() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("uniform_like")
-            && stderr.contains("statically-resolvable")
-            && stderr.contains("chelis#776"),
-        "build diagnostic must name uniform_like, the static requirement, and chelis#776:\n{stderr}"
+        stderr.contains("uniform_like currently requires literal low/high bounds"),
+        "build diagnostic must be the checker's uniform_like bounds gate (chelis#731 \
+         makes it fire inside `with seed`):\n{stderr}"
     );
     // The failed build must not have written a C artifact that silently
     // samples the [0,1) default.
@@ -292,29 +305,42 @@ fn runtime_computed_bound_build_fails_loudly() {
     }
 }
 
+/// Negative parity for the build rejection above: the eval lane runs the same
+/// front-end, so a runtime bound is now rejected there too (chelis#731 Phase 1).
+/// Before, eval interpreted the range; the checker gate firing inside `with
+/// seed` closes that lane-asymmetry so a program either checks or is rejected in
+/// both lanes.
 #[test]
-fn runtime_computed_bound_eval_still_correct() {
-    // The eval lane interprets the range, so the loud build error must not
-    // regress it: `[2.0+1.0, 5.0)` = `[3, 5)`.
+fn runtime_computed_bound_eval_rejected_by_checker() {
     let src = program("cast(2.0, f32) + cast(1.0, f32)", "cast(5.0, f32)", 42);
-    let sampled = eval_sampled(&src);
-    assert_eq!(sampled.len(), 8, "expected 8 samples");
-    for (i, v) in sampled.iter().enumerate() {
-        assert!(
-            (3.0..5.0).contains(v),
-            "eval elem[{i}] = {v} must lie in [3,5)"
-        );
-    }
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("runtime_eval.ch");
+    write_file(&path, &src);
+    let out = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("chelis eval should run");
+    assert!(
+        !out.status.success(),
+        "eval must reject a runtime uniform_like bound, not interpret it"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("uniform_like currently requires literal low/high bounds"),
+        "eval rejection must be the checker's uniform_like bounds gate:\n{stderr}"
+    );
 }
 
 // -- def-form checker rejection (a separate, earlier loud guard) -------------
 
 #[test]
 fn def_form_non_literal_bound_rejected_by_checker() {
-    // In a `def` body the checker rejects a non-literal bound before lowering
-    // ("uniform_like currently requires literal low/high bounds"). This pins
-    // that this earlier guard stays loud; the lowering guard above covers the
-    // `with seed { ... }` form the checker does not gate.
+    // In a `def` body the checker rejects a runtime (variable) bound before
+    // lowering ("uniform_like currently requires literal low/high bounds").
+    // This pins that guard; chelis#731 Phase 1 makes the same gate fire inside
+    // `with seed { ... }` bodies too (see the runtime-bound tests above).
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("def.ch");
     write_file(
@@ -419,5 +445,51 @@ fn pad_runtime_fill_build_fails_loudly() {
             && stderr.contains("statically-resolvable")
             && stderr.contains("chelis#776"),
         "build diagnostic must name pad, the static requirement, and chelis#776:\n{stderr}"
+    );
+}
+
+// -- chelis#731 obligation: the checker gate fires inside `with seed` bodies ---
+//
+// Before chelis#731 Phase 1 the uniform_like literal-bounds checker gate never
+// fired inside a `with seed { ... }` body (the body was unchecked, chelis#709),
+// so only the lowering enforced it. These two `chelis check`-level tests pin the
+// obligation directly: a statically-resolvable bound inside a handler body
+// checks clean, and a genuinely-runtime bound is caught by the checker there.
+
+/// `chelis check` score for a `.ch` program.
+fn check_score(program: &str) -> f64 {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("gate.ch");
+    write_file(&path, program);
+    let out = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["check", path.to_str().unwrap()])
+        .output()
+        .expect("chelis check should run");
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("check must emit JSON");
+    parsed["score"].as_f64().expect("numeric score")
+}
+
+#[test]
+fn gate_fires_in_with_seed_body_on_runtime_bound() {
+    // A runtime add bound inside `with seed` is now a checker error (score < 1).
+    let score = check_score(&program("add(cast(2.0, f32), cast(1.0, f32))", "5.0", 42));
+    assert!(
+        score < 1.0,
+        "chelis#731: the uniform_like bounds gate must fire inside a `with seed` \
+         body on a runtime bound, got score {score}"
+    );
+}
+
+#[test]
+fn gate_accepts_static_bound_in_with_seed_body() {
+    // Positive parity: a statically-resolvable bound (a negated literal) inside
+    // `with seed` passes the gate and checks clean.
+    let score = check_score(&program("-3.0", "-1.0", 42));
+    assert!(
+        (score - 1.0).abs() < 1e-9,
+        "a statically-resolvable bound inside `with seed` must check clean, got {score}"
     );
 }

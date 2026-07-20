@@ -1968,10 +1968,16 @@ Current shipped inference/checking behavior:
   §2.6)
 - `with seed(seed) { ... }` handles `Random` across direct operations and calls made
   inside the handled region; the C host backend preserves this with generated
-  handler-scoped RNG state for nested stdlib/user functions. Per-lane determinism
-  of a seeded region is `spec/05-risc-primitives.md` [05-RNG-1]; cross-lane stream
-  identity (eval and the compiled-C host lane producing the same draw sequence) is
-  tracked at chelis#735, pending chelis#731 Phase 1's seed-literal diagnostic
+  handler-scoped RNG state for nested stdlib/user functions. The seed is
+  semantically int64, and a seed written as an integer literal SHALL carry the
+  `i64` suffix (`with seed(42i64) { ... }`, spec/02-surf-syntax.md §P10a); an
+  unsuffixed literal is a type error naming the required suffix (chelis#731 Phase 1
+  / §C1.5, the reject-diagnostic half chelis#771 left to this phase). The body is
+  checked in the enclosing context and its type is returned, so the enclosing
+  signature is enforced. Per-lane determinism of a seeded region is
+  `spec/05-risc-primitives.md` [05-RNG-1]; cross-lane stream identity (eval and the
+  compiled-C host lane producing the same draw sequence) is tracked at chelis#735,
+  now unblocked by Phase 1's seed-literal diagnostic
 - `with device(device) { ... }` marks a resource region that is validated against the
   chosen build target
 - declared `Resource("...")` annotations are accepted on `t-fn` type expressions, but
@@ -2279,10 +2285,12 @@ in-tree witness of the need. Tracked by chelis#753.)*
 
 ---
 
-## 10. Checker Totality (Decided 2026-07; Implementation Tracked As chelis#731)
+## 10. Checker Totality (Decided 2026-07; Ratified At chelis#731 Phase 1)
 
 **Status banner:** same provisional-atom and honesty rules as §9. The
-delivery plan is `spec/design/checker_totality.md`.
+delivery plan is `spec/design/checker_totality.md`. chelis#731 Phase 1
+ratifies this section as its contract text; the atom IDs are the citation
+grammar (no rev/hash machinery, per the chelis#733 re-scope 2026-07-20).
 
 > **[04-TOT-1]** Every Deep tag in the closed vocabulary
 > (spec/03-deep-syntax.md) SHALL have an explicit checker disposition: a
@@ -2290,19 +2298,33 @@ delivery plan is `spec/design/checker_totality.md`.
 > construct the checker does not recognize SHALL produce a diagnostic,
 > never a silent exemption of its subtree.
 
-*(Not honored today: `handle-effect` - chelis#709.)*
+*(Honored at the construct level as of chelis#731 Phase 1: the
+`handle-effect` case landed - the seed/device handler is checked per
+effect kind and the body's type is returned so the enclosing signature is
+enforced (chelis#709) - and `infer_expr`'s unknown-tag wildcard now pushes
+`UnknownForm` instead of a silent `Type::Error`. Compile-time
+exhaustiveness over the closed vocabulary - the `DeepTag` enum - is
+chelis#731 Phase 3.)*
 
 > **[04-TOT-2]** If a check completes with an empty error vector, the
 > typed result SHALL contain no error-typed expression: `Type::Error`
 > without a corresponding reported diagnostic SHALL be unconstructible.
 
-*(Not honored today: chelis#709/#710; the witness-token mechanism is
-chelis#731 Phase 2.)*
+*(The four Phase 0 holes and the chelis#710 malformed-form family are
+closed at chelis#731 Phase 1, and the totality-invariant harness
+(`crates/chelis-cli/tests/issue_731_totality_invariant.rs`) plus the
+fitness-honesty corpus (§C4.4) enforce it. Structural
+unconstructibility of a silent `Type::Error` - the `ErrorWitness` token -
+is chelis#731 Phase 2; the Surf-reachable chelis#755 (field access) and
+chelis#756 (deep-type conversion) sites remain silent until that global
+migration.)*
 
 > **[04-TOT-3]** A structurally malformed Deep form that reaches the
 > checker SHALL be rejected with a diagnostic naming the tag and the
 > expected shape; deferring the failure to a later stage is not a
 > disposition.
 
-*(Partially honored today: 4 of 6 audited guards reject; two are silent -
-chelis#710.)*
+*(Honored as of chelis#731 Phase 1: the malformed arity/shape guards push
+`MalformedForm` - the two Phase 0 holes (`(def)` with no body, `(cast)`
+with no target) plus the census-extension family (jit/realize/copy/borrow/
+var/lit/match/pipe/tuple-get/record/access/record-update/grad/vmap).)*

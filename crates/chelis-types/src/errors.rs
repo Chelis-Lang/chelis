@@ -97,6 +97,21 @@ pub enum CheckErrorKind {
     /// (`pkg__...`) before the checker runs, and their call sites are
     /// rewritten with them.
     BuiltinShadowing,
+    /// chelis#731 / spec/04-type-system.md §10 [04-TOT-1]: a Deep tag
+    /// reached `infer_expr`'s dispatch with no checker disposition. The
+    /// parser already screens the 62-tag closed vocabulary
+    /// (spec/03-deep-syntax.md), so this is a version skew or a bug, not
+    /// ordinary user input. The checker rejects it loudly instead of
+    /// returning a silent `Type::Error` that would exempt the whole
+    /// subtree from checking (chelis#709's class defect).
+    UnknownForm,
+    /// chelis#731 / spec/04-type-system.md §10 [04-TOT-3]: a structurally
+    /// malformed Deep form reached the checker (an arity or shape guard
+    /// that used to return a silent `Type::Error`, chelis#710's half).
+    /// The message names the tag and the expected shape; deferring the
+    /// failure to a later stage (the runtime catching it) is not a
+    /// disposition.
+    MalformedForm,
     Other,
 }
 
@@ -123,6 +138,11 @@ impl CheckErrorKind {
             CheckErrorKind::OpaqueTypeViolation => 0.8,
             CheckErrorKind::ReservedLinkerName => 0.9,
             CheckErrorKind::BuiltinShadowing => 0.9,
+            // chelis#731 open question 4 (decided 2026-07-17): severity
+            // parity with `TypeMismatch` (the 0.5 class); no new weight
+            // class. The invariant that governs is that any pushed error
+            // forces score < 1.0, which §C4.4's corpus locks independently.
+            CheckErrorKind::UnknownForm | CheckErrorKind::MalformedForm => 0.5,
             CheckErrorKind::Other => 0.5,
         }
     }

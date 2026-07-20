@@ -47,7 +47,7 @@ fn checked_surf(source: &str) -> CheckedProgram {
 fn with_seed_uniform_like_evaluates_body() {
     let checked = checked_surf(
         r#"
-x = with seed(7) {
+x = with seed(7i64) {
   tensor_to_scalar(
 uniform_like(
   trace(pad_sequences_to([[0.0]], cast(1, int64), cast(0.0, f32)), cast(0, int32), cast(1, int32)),
