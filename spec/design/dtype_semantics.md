@@ -272,8 +272,13 @@ One function, one output, every exit, both lanes:
 /// THE printed form of one element. Used by eval's printer directly and
 /// used to GENERATE the C print helper (Phase 3). No other formatting
 /// path may exist for tensor/scalar payloads.
-pub fn format_element(prim: Prim, value: ElementRef<'_>) -> String;
+pub fn format_element(prim: Prim, value: ElementRef) -> String;
 ```
+
+(Landed at [#732] Phase 1, 2026-07-20, as `chelis-types::observation`:
+`ElementRef` is a `Copy` enum carrying the element at its dtype's own
+width - the sketch's lifetime was dropped; a `prim`/variant mismatch
+panics loudly, mirroring `ScalarPayload`'s dtype/bits invariant.)
 
 Frozen rules (Phase 1 freezes the Rust side; Phase 3 makes C emit the
 identical bytes):
@@ -298,6 +303,14 @@ identical bytes):
    recorded in `spec/05-risc-primitives.md` next to the op, and the [#687]
    oracle consults it; `sqrt` is required correctly rounded ([#719]) and has
    no tolerance row. Formatting itself never has tolerance.
+6. **Containers and scalar roots** (decided with [#732] Phase 1, identical
+   to its §C1.5; ratified as [05-OBS-4]/[05-OBS-5]): a scalar-typed value
+   renders as the BARE scalar at every exit in both lanes, including as a
+   top-level labeled root; a rank-0 tensor renders as its single element,
+   bare (`tensor(shape=[], data=[..])` is not an exit form - the [#775]
+   decision). Tensor element rendering truncates after 32 elements with
+   the `, ...` marker at every exit in both lanes; `to_list` and the wire
+   never truncate.
 
 ## C5. Kernels and the consumer map
 
