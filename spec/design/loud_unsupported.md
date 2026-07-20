@@ -290,7 +290,7 @@ The remediation work-list, from the audit record as of 2026-07-16.
 
 **Phase 1 dispositions (PR [#791], 2026-07-20).** Every live row below
 converted to a section C2 diagnostic; every dead row got its section
-C1.4 raise except four documented structural keeps in `lower.rs` (the
+C1.4 raise except five documented structural keeps in `lower.rs` (the
 defsig/deftype/typealias inert declaration node, the
 unknown-tag-with-children sequence seed, `zero_tensor_node`'s
 deliberate ADT zero adjoint, the empty-`drop` sequencing zero, and the
@@ -458,7 +458,7 @@ guard), and lowering's existing `raise_lowering_error`.
 ([#729] Phase 3, shell repos) may match `unsupported:` diagnostics without
 re-checking.
 
-**Delivered** (PR [#791], 2026-07-20), with two recorded oracle
+**Delivered** (PR [#791], 2026-07-20), with three recorded
 deviations: (1) `issue_703_silent_placeholders.rs`'s [#712]
 lane-agreement rows stay `#[ignore]`d - they assert checker/eval
 agreement on scalar activations, which no emission conversion can move
@@ -466,6 +466,12 @@ agreement on scalar activations, which no emission conversion can move
 un-ignored" overshot). (2) The [#722] eval rows stay `#[ignore]`d as
 value tests; the loud-not-zero contract they were listed for is locked
 by the new green `grad_through_int_abs_fails_loudly_not_zero`.
+(3) Deliverable 3's message migration landed in full for the runtime
+`to_tensor` exemplar (re-rendered to the frozen 4-clause shape); the
+HIP admit-gate and Metal f64-gate exemplars carry the `unsupported:`
+brand with their original message bodies - their full-shape
+conformance rides Phase 3's gate work, per B2.1's
+single-dedicated-change rule for diagnostic-wording migration.
 
 **Explicitly not yours:** making any unsupported thing SUPPORTED (that is
 [#729]'s or an op-owner's work; see §I1 for what your rejections do to
