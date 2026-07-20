@@ -315,21 +315,25 @@ fn int64_tensor_mean_lanes_agree() {
 // ===========================================================================
 
 /// All seven f32 reductions agree across lanes on exactly-representable
-/// values.
+/// values. Per-lane expected strings since chelis#732 Phase 1: eval
+/// renders the rank-0 result bare ([05-OBS-4]) and integers as integers
+/// ([05-OBS-2]) while the compiled lane keeps its pre-contract wrapper
+/// until the Phase 2 migration - the VALUES are asserted equal across
+/// lanes, and byte-identical rendering returns at Phase 2 (§C2.3).
 #[test]
 fn f32_reductions_agree_across_lanes() {
     if !c_toolchain_available() {
         eprintln!("skipping: no host C toolchain");
         return;
     }
-    for (op, ret, expected) in [
-        ("sum", "f32", "tensor(shape=[], data=[9.0])"),
-        ("mean", "f32", "tensor(shape=[], data=[2.25])"),
-        ("max_reduce", "f32", "tensor(shape=[], data=[4.5])"),
-        ("min_reduce", "f32", "tensor(shape=[], data=[0.5])"),
-        ("prod_reduce", "f32", "tensor(shape=[], data=[8.4375])"),
-        ("argmax_reduce", "int64", "tensor(shape=[], data=[1.0])"),
-        ("argmin_reduce", "int64", "tensor(shape=[], data=[3.0])"),
+    for (op, ret, eval_expected, c_expected) in [
+        ("sum", "f32", "9.0", "tensor(shape=[], data=[9.0])"),
+        ("mean", "f32", "2.25", "tensor(shape=[], data=[2.25])"),
+        ("max_reduce", "f32", "4.5", "tensor(shape=[], data=[4.5])"),
+        ("min_reduce", "f32", "0.5", "tensor(shape=[], data=[0.5])"),
+        ("prod_reduce", "f32", "8.4375", "tensor(shape=[], data=[8.4375])"),
+        ("argmax_reduce", "int64", "1", "tensor(shape=[], data=[1.0])"),
+        ("argmin_reduce", "int64", "3", "tensor(shape=[], data=[3.0])"),
     ] {
         let program = format!(
             "module M.Main\n\
@@ -338,10 +342,10 @@ fn f32_reductions_agree_across_lanes() {
         );
         let eval_got = eval_first_line(&program).expect("eval");
         common::assert_elements_in_domain(ret, &eval_got, op);
-        assert_eq!(eval_got, expected, "{op}");
+        assert_eq!(eval_got, eval_expected, "{op} (eval)");
         let c_got = c_first_line(&program, &format!("red_{op}"));
         common::assert_elements_in_domain(ret, &c_got, op);
-        assert_eq!(c_got, expected, "{op}");
+        assert_eq!(c_got, c_expected, "{op} (C)");
     }
 }
 
@@ -357,9 +361,14 @@ fn int64_sum_agrees_across_lanes_in_range() {
          def f(x: tensor[4, int64]) -> tensor[int64] = sum(x, 0)\n\
          out = print(f(to_tensor([cast(100, int64), cast(400, int64), \
          cast(200, int64), cast(50, int64)])))\n";
-    let expected = "tensor(shape=[], data=[750.0])";
-    assert_eq!(eval_first_line(program).expect("eval"), expected);
-    assert_eq!(c_first_line(program, "i64_sum_range"), expected);
+    // chelis#732 P1 migration: eval renders the rank-0 int64 result bare
+    // ([05-OBS-4]) as an exact integer ([05-OBS-2]); the compiled lane
+    // keeps its pre-contract form until Phase 2. Same VALUE, 750, both.
+    assert_eq!(eval_first_line(program).expect("eval"), "750");
+    assert_eq!(
+        c_first_line(program, "i64_sum_range"),
+        "tensor(shape=[], data=[750.0])"
+    );
 }
 
 /// **The Bool dtype is clean end-to-end in both lanes** - probed rather than

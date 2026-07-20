@@ -261,9 +261,10 @@ fn in_range_int8_scalar_add_agrees_across_lanes() {
     }
 }
 
-/// In-range int16 tensor arithmetic agrees across lanes (modulo eval's
-/// float formatting of integer tensors, chelis#684): both lanes hold
-/// value-100 elements.
+/// In-range int16 tensor arithmetic agrees across lanes: both lanes hold
+/// value-100 elements. Since chelis#732 Phase 1, eval prints integer
+/// tensor elements as integers ([05-OBS-2]); the compiled lane keeps its
+/// pre-contract float form until Phase 2.
 #[test]
 fn in_range_int16_tensor_add_agrees_across_lanes() {
     let program = "module M.Main\n\
@@ -273,7 +274,7 @@ fn in_range_int16_tensor_add_agrees_across_lanes() {
     let eval_line = eval_first_line(program).expect("eval");
     common::assert_elements_in_domain("int16", &eval_line, "i16_in_range eval");
     assert!(
-        eval_line.contains("data=[100.0, 3.0]"),
+        eval_line.contains("data=[100, 3]"),
         "eval int16 tensor add of in-range values; got: {eval_line}"
     );
     if c_toolchain_available() {

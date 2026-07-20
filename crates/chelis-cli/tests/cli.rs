@@ -802,12 +802,9 @@ fn eval_prints_labeled_tuple_components() {
         .args(["eval", "--file", path.to_str().unwrap()])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "grads.0 = tensor(shape=[], data=[1.0])",
-        ))
-        .stdout(predicate::str::contains(
-            "grads.1 = tensor(shape=[], data=[2.5])",
-        ));
+        // chelis#732 P1 ([05-OBS-4]): rank-0 realizations render bare.
+        .stdout(predicate::str::contains("grads.0 = 1.0"))
+        .stdout(predicate::str::contains("grads.1 = 2.5"));
 }
 
 #[test]

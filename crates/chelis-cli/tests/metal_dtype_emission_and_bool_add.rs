@@ -209,7 +209,9 @@ fn bool_logic_and_counting_idiom_are_correct() {
          out = print(f(to_tensor([true, false]), to_tensor([true, true])))\n",
     )
     .expect("eval");
-    assert_eq!(line, "tensor(shape=[2], data=[1.0, 0.0])");
+    // chelis#732 P1 migration: bool tensor elements print true/false
+    // ([05-OBS-2]) and rank-0 tensors render bare ([05-OBS-4]).
+    assert_eq!(line, "tensor(shape=[2], data=[true, false])");
 
     let line = eval_first_line(
         "module M.Main\n\
@@ -217,5 +219,5 @@ fn bool_logic_and_counting_idiom_are_correct() {
          out = print(f(to_tensor([true, false, true])))\n",
     )
     .expect("eval");
-    assert_eq!(line, "tensor(shape=[], data=[2.0])");
+    assert_eq!(line, "2");
 }

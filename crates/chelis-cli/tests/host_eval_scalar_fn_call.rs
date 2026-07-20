@@ -6,14 +6,13 @@
 // zero-arg user-def calls. A one-arg control passes, confirming the bug
 // is zero-arg-specific.
 //
-// Output shape: `chelis eval --file` renders a scalar root as
-// `tensor(shape=[], data=[N.N])` (per `format_execution_value` in
-// `crates/chelis-cli/src/main.rs`). bool true renders as 1.0, i64 7
-// renders as 7.0; the cast to a single-channel scalar tensor happens at
-// the result-binding layer, not in the user-def fn body.
+// Output shape (chelis#732 Phase 1, [05-OBS-4]): `chelis eval --file`
+// renders a scalar root BARE - the old `tensor(shape=[], data=[N.N])`
+// wrapper was the interpreter's rank-0 realization leaking into the
+// observation channel and is no longer an exit form. bool prints
+// true/false, integers print as integers ([05-OBS-2]).
 
 use assert_cmd::Command;
-use predicates::prelude::*;
 use std::fs;
 use std::path::Path;
 use tempfile::tempdir;
@@ -34,15 +33,15 @@ fn eval_file(path: &Path) -> assert_cmd::assert::Assert {
 
 #[test]
 fn host_eval_scalar_f32_zero_arg_returns_body_literal() {
-    // Primary reproduction. With the bug, this prints
-    // `tensor(shape=[], data=[0.0])`; expected is the body literal 7.5.
+    // Primary reproduction. With the bug, this prints `0.0`; expected
+    // is the body literal 7.5.
     let dir = tempdir().expect("tempdir");
     let fixture = dir.path().join("scalar_f32_zero_arg.ch");
     write_file(&fixture, "def go() -> f32 = 7.5\nresult = go()\n");
 
     eval_file(&fixture)
         .success()
-        .stdout(predicate::str::contains("tensor(shape=[], data=[7.5])"));
+        .stdout("7.5\n");
 }
 
 #[test]
@@ -58,33 +57,31 @@ fn host_eval_scalar_f64_zero_arg_returns_body_literal() {
 
     eval_file(&fixture)
         .success()
-        .stdout(predicate::str::contains("tensor(shape=[], data=[7.5])"));
+        .stdout("7.5\n");
 }
 
 #[test]
 fn host_eval_scalar_i64_zero_arg_returns_body_literal() {
-    // i64 path. Integer literal renders as `7.0` through the scalar
-    // tensor formatter.
+    // i64 path. Integers print as integers ([05-OBS-2]).
     let dir = tempdir().expect("tempdir");
     let fixture = dir.path().join("scalar_i64_zero_arg.ch");
     write_file(&fixture, "def go() -> i64 = 7\nresult = go()\n");
 
     eval_file(&fixture)
         .success()
-        .stdout(predicate::str::contains("tensor(shape=[], data=[7.0])"));
+        .stdout("7\n");
 }
 
 #[test]
 fn host_eval_scalar_bool_zero_arg_returns_body_literal() {
-    // bool path. `true` renders as `1.0` through the scalar tensor
-    // formatter.
+    // bool path. `true` renders as `true` ([05-OBS-2]).
     let dir = tempdir().expect("tempdir");
     let fixture = dir.path().join("scalar_bool_zero_arg.ch");
     write_file(&fixture, "def go() -> bool = true\nresult = go()\n");
 
     eval_file(&fixture)
         .success()
-        .stdout(predicate::str::contains("tensor(shape=[], data=[1.0])"));
+        .stdout("true\n");
 }
 
 #[test]
@@ -98,5 +95,5 @@ fn host_eval_scalar_one_arg_returns_arg_value() {
 
     eval_file(&fixture)
         .success()
-        .stdout(predicate::str::contains("tensor(shape=[], data=[7.5])"));
+        .stdout("7.5\n");
 }
