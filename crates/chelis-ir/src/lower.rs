@@ -7571,7 +7571,7 @@ impl LowerCtx {
                 // chelis#730 Phase 1 (census row 8, chelis#725): a window or
                 // stride list that does not fold to non-negative integer
                 // literals raises a FATAL lowering error. The former
-                // `unwrap_or_default()` pair silently lowered BOTH lists to
+                // empty-list-defaulting pair silently lowered BOTH lists to
                 // empty, turning the pooling into a no-op that returned the
                 // unpooled input at the wrong shape (and the half-literal
                 // case panicked the emitter's arity assertion). Fatal so the

@@ -351,11 +351,16 @@ fn masked_return_type_violation_does_not_reach_a_binary() {
 /// chelis#731 Phase 1: a `.dp` whose handle-effect carries a BOGUS effect kind
 /// used to check at score 1 and build a working binary; `lower_handle_effect`'s
 /// catch-all lowers the body and silently drops the unknown kind and its
-/// handler (the #703 shape). The handle-effect checker case string-matches the
-/// two known kinds (`random`/`resource`) with a loud `MalformedForm` else, so an
-/// unknown kind is now rejected at check (the §I1 interlock: whichever of
-/// chelis#730's lowering raise or this checker gate lands first rejects it;
-/// this is the checker side). Was `#[ignore]`d red.
+/// handler (the #703 shape). Post chelis#731 P1 + chelis#730 P1 the pinned
+/// section I1 interlock holds from BOTH sides: the checker's handle-effect
+/// case string-matches the two known kinds (`random`/`resource`) with a
+/// loud `MalformedForm` else, so an unknown kind is rejected at CHECK time
+/// first - the earliest competent stage - and chelis#730's IR-lane and
+/// host-lane lowering raises (census rows 9/20, the branded fatal
+/// diagnostics) are defense-in-depth behind it. This test asserts the
+/// surviving surface: the checker-level rejection. The `EffectKind` enum
+/// that closes the future-kinds hole structurally is chelis#730 Phase 2.
+/// Was `#[ignore]`d red.
 #[test]
 fn unknown_effect_kind_is_rejected() {
     if !c_toolchain_available() {

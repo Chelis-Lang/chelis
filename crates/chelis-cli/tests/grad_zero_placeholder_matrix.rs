@@ -118,7 +118,9 @@ fn grad_program(weight_op: &str, print_form: bool) -> String {
 /// Observed today: `[0.0, 0.0, 0.0, 0.0]` from eval. The correct gradient is
 /// `w = abs(weights) = [100, 200, 300, 400]`.
 #[test]
-#[ignore = "chelis#722: grad through abs(int64 tensor) returns zeros in eval (the #699 \
+#[ignore = "chelis#722; since chelis#730 Phase 1 the placeholder is a LOUD lowering error \
+            in both lanes (see grad_through_int_abs_fails_loudly_not_zero) - red for a \
+            better reason until chelis#729 lands integer abs/floor. Original finding: grad through abs(int64 tensor) returns zeros in eval (the #699 \
             placeholder poisons the grad-lowered forward pass); correct gradient is \
             [100, 200, 300, 400]. Run with \
             `cargo test -p chelis-cli --test grad_zero_placeholder_matrix -- --ignored`."]
@@ -133,7 +135,9 @@ fn eval_grad_through_int_abs_is_the_true_gradient() {
 /// Observed today: `[0.0, 0.0, 0.0, 0.0]` from the compiled binary too -
 /// both lanes agree on the wrong answer, invisible to any cross-lane oracle.
 #[test]
-#[ignore = "chelis#722: grad through abs(int64 tensor) returns zeros in the compiled lane \
+#[ignore = "chelis#722; since chelis#730 Phase 1 the placeholder is a LOUD lowering error \
+            in both lanes (see grad_through_int_abs_fails_loudly_not_zero) - red for a \
+            better reason until chelis#729 lands integer abs/floor. Original finding: grad through abs(int64 tensor) returns zeros in the compiled lane \
             as well; correct gradient is [100, 200, 300, 400]. Run with \
             `cargo test -p chelis-cli --test grad_zero_placeholder_matrix -- --ignored`."]
 fn c_grad_through_int_abs_is_the_true_gradient() {
@@ -150,7 +154,9 @@ fn c_grad_through_int_abs_is_the_true_gradient() {
 /// floor on an already-integral int64 tensor is the identity, so the true
 /// gradient is the raw weights. Observed today: zeros in eval.
 #[test]
-#[ignore = "chelis#722: grad through floor(int64 tensor) returns zeros in eval (same \
+#[ignore = "chelis#722; since chelis#730 Phase 1 the placeholder is a LOUD lowering error \
+            in both lanes (see grad_through_int_abs_fails_loudly_not_zero) - red for a \
+            better reason until chelis#729 lands integer abs/floor. Original finding: grad through floor(int64 tensor) returns zeros in eval (same \
             placeholder as abs, per #699's op list); correct gradient is \
             [-100, 200, -300, 400]. Run with \
             `cargo test -p chelis-cli --test grad_zero_placeholder_matrix -- --ignored`."]
@@ -160,6 +166,32 @@ fn eval_grad_through_int_floor_is_the_true_gradient() {
         line.contains("data=[-100.0, 200.0, -300.0, 400.0]"),
         "grad of sum(x*w) wrt x must be w = floor(weights) = weights; got: {line}"
     );
+}
+
+// ===========================================================================
+// chelis#730 Phase 1 (census row 1's grad half): loud, not zero
+// ===========================================================================
+
+/// The conversion's parity row: grad through `abs`/`floor` on an int64
+/// tensor now fails LOUDLY in both lanes with the branded diagnostic -
+/// never plausible zero gradients. Flips to the value tests above when
+/// chelis#729 lands integer abs/floor support.
+#[test]
+fn grad_through_int_abs_fails_loudly_not_zero() {
+    let err = eval_first_line(&grad_program("abs", true))
+        .expect_err("chelis#722: grad through abs(int64) must fail loudly, not zero");
+    assert!(
+        err.contains("unsupported:"),
+        "the eval-lane failure must carry the branded diagnostic; got: {err}"
+    );
+    if c_toolchain_available() {
+        let err = c_first_line(&grad_program("abs", false), "grad_abs_int_loud")
+            .expect_err("the compiled lane must reject the same program");
+        assert!(
+            err.contains("unsupported:"),
+            "the build-lane failure must carry the branded diagnostic; got: {err}"
+        );
+    }
 }
 
 // ===========================================================================

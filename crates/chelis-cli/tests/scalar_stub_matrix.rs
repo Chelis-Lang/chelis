@@ -149,7 +149,8 @@ fn assert_scalar_parity(
 // ===========================================================================
 
 #[test]
-#[ignore = "chelis#715: scalar tan compiles to the 0 stub (C prints 0; eval 1.5574077367782593). \
+#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
+            (value support tracked by chelis#729). Original finding: scalar tan compiles to the 0 stub (C prints 0; eval 1.5574077367782593). \
             Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_tan_agrees_across_lanes() {
     assert_scalar_parity(
@@ -162,7 +163,8 @@ fn f32_scalar_tan_agrees_across_lanes() {
 }
 
 #[test]
-#[ignore = "chelis#715: scalar atan compiles to the 0 stub (C prints 0; eval 0.7853981852531433). \
+#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
+            (value support tracked by chelis#729). Original finding: scalar atan compiles to the 0 stub (C prints 0; eval 0.7853981852531433). \
             Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_atan_agrees_across_lanes() {
     assert_scalar_parity(
@@ -175,35 +177,40 @@ fn f32_scalar_atan_agrees_across_lanes() {
 }
 
 #[test]
-#[ignore = "chelis#715: scalar floor compiles to the 0 stub at plain f32 (C prints 0; eval 1). \
+#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
+            (value support tracked by chelis#729). Original finding: scalar floor compiles to the 0 stub at plain f32 (C prints 0; eval 1). \
             Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_floor_agrees_across_lanes() {
     assert_scalar_parity("floor(cast(1.5, f32))", "f32", "1.0", "1", "f32_floor");
 }
 
 #[test]
-#[ignore = "chelis#715: scalar ceil compiles to the 0 stub (C prints 0; eval 2). \
+#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
+            (value support tracked by chelis#729). Original finding: scalar ceil compiles to the 0 stub (C prints 0; eval 2). \
             Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_ceil_agrees_across_lanes() {
     assert_scalar_parity("ceil(cast(1.5, f32))", "f32", "2.0", "2", "f32_ceil");
 }
 
 #[test]
-#[ignore = "chelis#715: scalar round compiles to the 0 stub (C prints 0; eval 2). \
+#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
+            (value support tracked by chelis#729). Original finding: scalar round compiles to the 0 stub (C prints 0; eval 2). \
             Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_round_agrees_across_lanes() {
     assert_scalar_parity("round(cast(1.5, f32))", "f32", "2.0", "2", "f32_round");
 }
 
 #[test]
-#[ignore = "chelis#715: scalar recip compiles to the 0 stub (C prints 0; eval 0.25). \
+#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
+            (value support tracked by chelis#729). Original finding: scalar recip compiles to the 0 stub (C prints 0; eval 0.25). \
             Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_recip_agrees_across_lanes() {
     assert_scalar_parity("recip(cast(4.0, f32))", "f32", "0.25", "0.25", "f32_recip");
 }
 
 #[test]
-#[ignore = "chelis#715: scalar max_elem compiles to the 0 stub at every dtype (C prints 0; \
+#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
+            (value support tracked by chelis#729). Original finding: scalar max_elem compiles to the 0 stub at every dtype (C prints 0; \
             eval 1.5). Ordinary clamp code silently returns 0 when compiled. Run with \
             `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_max_elem_agrees_across_lanes() {
@@ -217,7 +224,8 @@ fn f32_scalar_max_elem_agrees_across_lanes() {
 }
 
 #[test]
-#[ignore = "chelis#715: scalar min_elem compiles to the 0 stub (C prints 0; eval 0.25). \
+#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
+            (value support tracked by chelis#729). Original finding: scalar min_elem compiles to the 0 stub (C prints 0; eval 0.25). \
             Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_min_elem_agrees_across_lanes() {
     assert_scalar_parity(
@@ -230,14 +238,16 @@ fn f32_scalar_min_elem_agrees_across_lanes() {
 }
 
 #[test]
-#[ignore = "chelis#715: the stub fires at f64 too - scalar floor(1.5f64) compiles to 0. \
+#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
+            (value support tracked by chelis#729). Original finding: the stub fires at f64 too - scalar floor(1.5f64) compiles to 0. \
             Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f64_scalar_floor_agrees_across_lanes() {
     assert_scalar_parity("floor(cast(1.5, f64))", "f64", "1.0", "1", "f64_floor");
 }
 
 #[test]
-#[ignore = "chelis#715: scalar max_elem at int64 compiles to 0 (eval 7). Run with \
+#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
+            (value support tracked by chelis#729). Original finding: scalar max_elem at int64 compiles to 0 (eval 7). Run with \
             `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn i64_scalar_max_elem_agrees_across_lanes() {
     assert_scalar_parity(
@@ -256,7 +266,8 @@ fn i64_scalar_max_elem_agrees_across_lanes() {
 /// absent from TRANSCENDENTAL_FLOAT_ONLY_OPS, per chelis#699), so the
 /// correct behavior is identity.
 #[test]
-#[ignore = "chelis#715: floor(5i64) - checker accepts, eval rejects at runtime, compiled C \
+#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
+            (value support tracked by chelis#729). Original finding: floor(5i64) - checker accepts, eval rejects at runtime, compiled C \
             prints 0. Three lanes, three answers. Correct is 5 everywhere. Run with \
             `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn i64_scalar_floor_is_identity_in_all_lanes() {
@@ -268,7 +279,8 @@ fn i64_scalar_floor_is_identity_in_all_lanes() {
 /// says EVERY dtype, so the f64 half is asserted too, not just f32.
 /// Observed today: C prints 0 for all seven rows; eval is correct.
 #[test]
-#[ignore = "chelis#715: the stub fires at f64 for the whole family - tan/atan/ceil/round/\
+#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
+            (value support tracked by chelis#729). Original finding: the stub fires at f64 for the whole family - tan/atan/ceil/round/\
             recip/max_elem/min_elem all print 0 from the compiled binary (floor has its \
             own row above). Run with \
             `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]

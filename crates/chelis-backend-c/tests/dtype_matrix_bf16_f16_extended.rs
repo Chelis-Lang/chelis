@@ -843,13 +843,12 @@ int main(void) {{
 // `chelis_f32_to_bf16` convert-then-reduce pattern that Sum and
 // MaxReduce already follow); per the WS-Cleanup-Fixups brief
 // ("FIXUP only; no new architectural changes") we pin the structural
-// gap with `#[should_panic]` tests rather than expand emit_reduce_simple
+// gap with rejection tests rather than expand emit_reduce_simple
 // here. Closure path: when emit_reduce_simple gains the
 // convert-then-reduce arm for reduced floats, flip these to active
 // agreement tests against the evaluator.
 
 #[test]
-#[should_panic(expected = "emit_reduce_simple path is f32-hardcoded")]
 fn bf16_min_reduce_is_structurally_unsupported_today() {
     let mut dag = Dag::new();
     let load = dag.add_node(
@@ -864,11 +863,18 @@ fn bf16_min_reduce_is_structurally_unsupported_today() {
         scalar_ty(Prim::Bf16),
         None,
     );
-    let _ = codegen(&dag, "bf16_min_reduce_panic_probe").unwrap();
+    // chelis#730 Phase 1: the former f32-hardcoded panic is a section C2
+    // diagnostic through the Result channel.
+    let err = codegen(&dag, "bf16_min_reduce_reject_probe")
+        .expect_err("a bf16 min_reduce must be rejected, not emitted");
+    let rendered = err.to_string();
+    assert!(
+        rendered.starts_with("unsupported:") && rendered.contains("bf16"),
+        "the rejection must be branded and name the dtype; got: {rendered}"
+    );
 }
 
 #[test]
-#[should_panic(expected = "emit_reduce_simple path is f32-hardcoded")]
 fn f16_min_reduce_is_structurally_unsupported_today() {
     let mut dag = Dag::new();
     let load = dag.add_node(
@@ -883,11 +889,18 @@ fn f16_min_reduce_is_structurally_unsupported_today() {
         scalar_ty(Prim::F16),
         None,
     );
-    let _ = codegen(&dag, "f16_min_reduce_panic_probe").unwrap();
+    // chelis#730 Phase 1: the former f32-hardcoded panic is a section C2
+    // diagnostic through the Result channel.
+    let err = codegen(&dag, "f16_min_reduce_reject_probe")
+        .expect_err("a f16 min_reduce must be rejected, not emitted");
+    let rendered = err.to_string();
+    assert!(
+        rendered.starts_with("unsupported:") && rendered.contains("f16"),
+        "the rejection must be branded and name the dtype; got: {rendered}"
+    );
 }
 
 #[test]
-#[should_panic(expected = "emit_reduce_simple path is f32-hardcoded")]
 fn bf16_prod_reduce_is_structurally_unsupported_today() {
     let mut dag = Dag::new();
     let load = dag.add_node(
@@ -902,11 +915,18 @@ fn bf16_prod_reduce_is_structurally_unsupported_today() {
         scalar_ty(Prim::Bf16),
         None,
     );
-    let _ = codegen(&dag, "bf16_prod_reduce_panic_probe").unwrap();
+    // chelis#730 Phase 1: the former f32-hardcoded panic is a section C2
+    // diagnostic through the Result channel.
+    let err = codegen(&dag, "bf16_prod_reduce_reject_probe")
+        .expect_err("a bf16 prod_reduce must be rejected, not emitted");
+    let rendered = err.to_string();
+    assert!(
+        rendered.starts_with("unsupported:") && rendered.contains("bf16"),
+        "the rejection must be branded and name the dtype; got: {rendered}"
+    );
 }
 
 #[test]
-#[should_panic(expected = "emit_reduce_simple path is f32-hardcoded")]
 fn f16_prod_reduce_is_structurally_unsupported_today() {
     let mut dag = Dag::new();
     let load = dag.add_node(
@@ -921,7 +941,15 @@ fn f16_prod_reduce_is_structurally_unsupported_today() {
         scalar_ty(Prim::F16),
         None,
     );
-    let _ = codegen(&dag, "f16_prod_reduce_panic_probe").unwrap();
+    // chelis#730 Phase 1: the former f32-hardcoded panic is a section C2
+    // diagnostic through the Result channel.
+    let err = codegen(&dag, "f16_prod_reduce_reject_probe")
+        .expect_err("a f16 prod_reduce must be rejected, not emitted");
+    let rendered = err.to_string();
+    assert!(
+        rendered.starts_with("unsupported:") && rendered.contains("f16"),
+        "the rejection must be branded and name the dtype; got: {rendered}"
+    );
 }
 
 // ---------------------------------------------------------------------

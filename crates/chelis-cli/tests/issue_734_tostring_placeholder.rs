@@ -86,8 +86,10 @@ fn c_first_line(program: &str, name: &str) -> String {
 
 /// Observed today: the compiled binary prints the literal `<value>`.
 #[test]
-#[ignore = "chelis#734: to_string(tensor) compiles to the literal string '<value>'; eval \
-            prints tensor(shape=[2], data=[1.5, 2.5]). Run with \
+#[ignore = "chelis#734: to_string(tensor) is now REJECTED loudly at build per the \
+            chelis#730 plan (was the silent '<value>' placeholder); real tensor \
+            rendering arrives with chelis#732's formatter and un-ignores this value \
+            test. Run with \
             `cargo test -p chelis-cli --test issue_734_tostring_placeholder -- --ignored`."]
 fn to_string_of_a_tensor_stringifies_in_the_compiled_lane() {
     if !c_toolchain_available() {
@@ -107,8 +109,9 @@ fn to_string_of_a_tensor_stringifies_in_the_compiled_lane() {
 
 /// Observed today: `<value>` for lists as well.
 #[test]
-#[ignore = "chelis#734: to_string(List[int64]) compiles to the literal string '<value>'; \
-            eval prints [1, 2]. Run with \
+#[ignore = "chelis#734: to_string(List) is now REJECTED loudly at build per the \
+            chelis#730 plan (was the silent '<value>' placeholder); real list rendering \
+            arrives with chelis#732's formatter and un-ignores this value test. Run with \
             `cargo test -p chelis-cli --test issue_734_tostring_placeholder -- --ignored`."]
 fn to_string_of_a_list_stringifies_in_the_compiled_lane() {
     if !c_toolchain_available() {

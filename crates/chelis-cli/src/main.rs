@@ -6878,7 +6878,7 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
                 // error and not a Rust stack trace.
                 if !bf16_or_f16_admissible_ops.contains(&node.id) {
                     return Err(format!(
-                        "`chelis build --target hip` admits `{}` only on tensor \
+                        "unsupported: `chelis build --target hip` admits `{}` only on tensor \
                          load/store nodes and on `BlasMatmul` operands today \
                          (`hipblasGemmEx` with an f32 accumulator, WS-A3). \
                          Node {} carries op {:?} which has no bf16/f16 kernel \
@@ -6893,7 +6893,7 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
             }
             other => {
                 return Err(format!(
-                    "`chelis build --target hip` DAG path does not support tensor \
+                    "unsupported: `chelis build --target hip` DAG path does not support tensor \
                      precision `{}` (node {}). \
                      Supported: f32/f64/bool plus the integer family \
                      (int8/int16/int32/int64), with bf16/f16 admitted on matmul \
@@ -6970,7 +6970,7 @@ fn reject_unsupported_metal_ops(
                 // Diagnostic text is the spec-pinned string; tests
                 // assert exact-string match so this must not drift.
                 return Err(format!(
-                    "`chelis build --target metal` rejects f64 (node {}): \
+                    "unsupported: `chelis build --target metal` rejects f64 (node {}): \
                      Apple Silicon GPUs lack FP64 ALUs; use `--target c` or \
                      `--target hip` for f64 workloads. \
                      See spec/04-type-system.md §1.1.3.",

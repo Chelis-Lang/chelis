@@ -260,13 +260,11 @@ fn assert_scalar_op_not_stubbed(op: &str, name: &str) {
 
 macro_rules! scalar_stub_test {
     ($fn_name:ident, $op:literal) => {
+        // Un-ignored by chelis#730 Phase 1: the stub arm is now a loud
+        // build rejection (the Err(_) arm below), which this test accepts;
+        // computing these scalar ops in the compiled lane is chelis#704's
+        // support work.
         #[test]
-        #[ignore = "chelis#704: this scalar op silently compiles to \
-                    `/* unsupported builtin */ 0` and returns 0. The tensor form \
-                    is CORRECT (see tensor_relu_is_correct_and_emits_no_stub). \
-                    This test asserts the correct behavior and fails until the \
-                    fix lands. Run with `cargo test -p chelis-cli --test \
-                    issue_703_silent_placeholders -- --ignored`."]
         fn $fn_name() {
             assert_scalar_op_not_stubbed($op, stringify!($fn_name));
         }
@@ -320,26 +318,20 @@ fn assert_int_tensor_transcendental_not_zeroed(op: &str, name: &str) {
     }
 }
 
+/// Un-ignored by chelis#730 Phase 1: `lower_transcendental` now raises a
+/// fatal branded lowering error for non-float inputs (census row 1), so
+/// the build fails cleanly - the Err(_) arm this test accepts.
 #[test]
-#[ignore = "chelis#699: cos on an integer tensor builds and returns zeros \
-            (sin/exp are correctly rejected). Run with `cargo test -p chelis-cli \
-            --test issue_703_silent_placeholders -- --ignored`."]
 fn cos_on_integer_tensor_is_not_silently_zeroed() {
     assert_int_tensor_transcendental_not_zeroed("cos", "cos_i32");
 }
 
 #[test]
-#[ignore = "chelis#699: tan on an integer tensor builds and returns zeros. \
-            Run with `cargo test -p chelis-cli --test \
-            issue_703_silent_placeholders -- --ignored`."]
 fn tan_on_integer_tensor_is_not_silently_zeroed() {
     assert_int_tensor_transcendental_not_zeroed("tan", "tan_i32");
 }
 
 #[test]
-#[ignore = "chelis#699: atan on an integer tensor builds and returns zeros. \
-            Run with `cargo test -p chelis-cli --test \
-            issue_703_silent_placeholders -- --ignored`."]
 fn atan_on_integer_tensor_is_not_silently_zeroed() {
     assert_int_tensor_transcendental_not_zeroed("atan", "atan_i32");
 }
@@ -359,13 +351,11 @@ fn atan_on_integer_tensor_is_not_silently_zeroed() {
 /// emitters never see a `tensor_scan` call". Verified false: the emitted C
 /// contains `/* unsupported builtin tensor_scan */ 0` verbatim, which is the
 /// exact string that paragraph says can no longer occur.
+/// Un-ignored by chelis#730 Phase 1: the stub arm is a loud rejection, so
+/// `chelis build` on tensor_scan now fails cleanly (the emitter channel
+/// speaks even though the CLI never calls reject_host_only_builtins; the
+/// gate-dedup half of chelis#705 stays Phase 3, census rows 17/18).
 #[test]
-#[ignore = "chelis#705: tensor_scan compiles to a silent C stub because \
-            reject_host_only_builtins only guards compiler::compile, which \
-            chelis build never calls. This test asserts the correct behavior \
-            (build must fail loudly OR emit real code) and fails until the fix \
-            lands. Run with `cargo test -p chelis-cli --test \
-            issue_703_silent_placeholders -- --ignored`."]
 fn tensor_scan_does_not_silently_compile_to_a_stub() {
     if !c_toolchain_available() {
         eprintln!("skipping: no host C toolchain");
@@ -428,12 +418,10 @@ fn tensor_scan_is_correct_in_the_eval_lane() {
 ///
 /// Checked across every op family known to hit the fallback: bitwise (#682),
 /// scalar activations (#704), and host-only builtins (#705).
+/// Un-ignored by chelis#730 Phase 1: the class-level invariant holds -
+/// the fallback arm is now Err(Unsupported), so an unimplemented builtin
+/// fails the build instead of compiling to a stub.
 #[test]
-#[ignore = "chelis#703: the `other => /* unsupported builtin */ 0` fallback at \
-            crates/chelis-backend-c/src/host_emit.rs:2300 makes any builtin \
-            without a C arm a silent-wrong-answer bug by default. Run with \
-            `cargo test -p chelis-cli --test issue_703_silent_placeholders -- \
-            --ignored`."]
 fn no_build_ever_emits_a_silent_unsupported_builtin_stub() {
     if !c_toolchain_available() {
         eprintln!("skipping: no host C toolchain");

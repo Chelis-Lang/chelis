@@ -1148,21 +1148,28 @@ These C implementations are the ground truth. The GPU backend (Phase 1) must pro
 
 ## 7. The Unsupported-Case Response Contract (Decided 2026-07; Implementation Tracked As chelis#730)
 
-**Status banner - read before citing.** Decided normative semantics from
-the numeric audit (meta chelis#703); NOT yet implemented - today's
-divergences are per-atom noted and locked as issue-linked `#[ignore]`d
-tests. The delivery plan and full elaboration (the failure channel, the
-census, the ratchets) is `spec/design/loud_unsupported.md`. Atom IDs are
-stable; rev hashes arrive with chelis#733 Phase 1, whose grammar these
-provisionally follow.
+**Status banner - read before citing.** RATIFIED and enforced for the
+censused live sites by chelis#730 Phase 1 (the Result-typed failure
+channel, the branded `unsupported:` diagnostic, and the live-site
+sweep; PR chelis#791). Residuals are per-atom noted below; the ratchets
+that make regressions unwritable ([05-UNS-4]'s gate demotion, the lint
+rule) are that plan's Phases 2-3. The delivery plan and full
+elaboration (the failure channel, the census, the ratchets) is
+`spec/design/loud_unsupported.md`. Atom IDs are stable and are the
+citation grammar (chelis#733 re-scope: no rev hashes).
 
 > **[05-UNS-1]** When any stage encounters a case it does not support -
 > an op, builtin, dtype, kernel, construct, or parameter shape - it
 > SHALL respond with a diagnostic through its failure channel. No stage
 > SHALL substitute a value, type, dtype, kernel, or emission.
 
-*(Not honored today: chelis#682, #689, #699, #714, #715, #716, #725,
-#734.)*
+*(Enforced since chelis#730 Phase 1 for the censused sites: the
+formerly substituting encounters of chelis#682/#689/#699/#714/#715/
+#725/#734 now fail loudly. Residual: chelis#716's narrow-float tensor
+boundary cells abort loudly at run time - the print helper's dtype-id
+abort is interim per chelis#728 - and the eval-lane value cells of
+chelis#717 are observation/semantics work owned by chelis#728/#729/
+#732, not substitution.)*
 
 > **[05-UNS-2]** The diagnostic SHALL surface at the earliest competent
 > stage - the checker for type-answerable questions, the build for
@@ -1180,15 +1187,20 @@ dtype abort.)*
 > compiler invariants whose upstream guarantee is named at the panic
 > site.
 
-*(Not honored today: chelis#692, #725's assertion half.)*
+*(Enforced since chelis#730 Phase 1: the chelis#692 reduce-family
+panics and chelis#725's emitter assertions are section C2 diagnostics
+through the Result channel.)*
 
 > **[05-UNS-4]** A pre-codegen gate MAY make an unsupported diagnostic
 > earlier or more specific; it SHALL NOT be the sole defense against an
 > unsupported case reaching emission, and a gate/emitter disagreement is
 > a defect in the gate.
 
-*(Not honored today: the one-entry allowlist and drifted-gate findings,
-chelis#697/#698/#705.)*
+*(Partially honored: since chelis#730 Phase 1 the emitter channel
+speaks even where a gate is missing or permissive, so no gate is the
+sole defense against a SILENT wrong binary any more; the gate
+dedup/demotion itself - chelis#697/#698/#705's gate halves - is that
+plan's Phase 3.)*
 
 ---
 

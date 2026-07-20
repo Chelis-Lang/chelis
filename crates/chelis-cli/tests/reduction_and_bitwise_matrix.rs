@@ -117,9 +117,13 @@ fn scalar_program(expr: &str, ret_ty: &str) -> String {
 // chelis#682 at every width - eval width-correct, C stubs to 0
 // ===========================================================================
 
-/// Observed today: C prints 0 for every row (the host_emit.rs:2300 stub).
+/// Value-parity row: red-for-a-better-reason since chelis#730 Phase 1
+/// (the build rejects instead of stubbing 0); goes green when the ops gain
+/// compiled arms.
 #[test]
-#[ignore = "chelis#682: bitwise ops stub to 0 in compiled C at every integer width; eval is \
+#[ignore = "chelis#682: bitwise ops have no compiled-C arms; since chelis#730 Phase 1 the \
+            build REJECTS them loudly (previously a silent 0 stub) - red for a better \
+            reason. Value support is the op-owner half of chelis#682; eval is \
             correct (bitand 8, shl 16 at int8/int16/int32/int64). Run with \
             `cargo test -p chelis-cli --test reduction_and_bitwise_matrix -- --ignored`."]
 fn bitwise_ops_agree_across_lanes_at_every_width() {
@@ -169,9 +173,11 @@ fn eval_shift_width_semantics_are_locked() {
     );
 }
 
-/// The lucky green, documented: shl(1i8, 9) prints 0 in BOTH lanes for two
-/// unrelated reasons (eval: the bit left the 8-bit window; C: the #682
-/// stub). Never cite this row as cross-lane evidence.
+/// The formerly "lucky green" coincidence row, re-authored by chelis#730
+/// Phase 1: eval still prints 0 (the bit left the 8-bit window); the C
+/// lane no longer stubs `shl` to 0 - the build is rejected with the
+/// branded diagnostic (census row 2), so the coincidence is gone and can
+/// never again be cited as cross-lane evidence.
 #[test]
 fn shl_past_width_agreement_is_a_coincidence_not_evidence() {
     if !c_toolchain_available() {
@@ -180,7 +186,15 @@ fn shl_past_width_agreement_is_a_coincidence_not_evidence() {
     }
     let program = scalar_program("shl(cast(1, int8), cast(9, int8))", "int8");
     assert_eq!(eval_first_line(&program).expect("eval"), "0");
-    assert_eq!(c_first_line(&program, "shl_past_width"), "0");
+    let (ok, stderr, _) = c_build_outcome(&program, "shl_past_width");
+    assert!(
+        !ok,
+        "the compiled lane must reject the stubbed builtin, not print 0"
+    );
+    assert!(
+        stderr.contains("unsupported:"),
+        "the rejection must carry the branded diagnostic; got: {stderr}"
+    );
 }
 
 // ===========================================================================
@@ -190,11 +204,10 @@ fn shl_past_width_agreement_is_a_coincidence_not_evidence() {
 /// Observed today: `chelis build` PANICS (emit.rs:4238) instead of either
 /// compiling correctly or rejecting with a diagnostic. This row asserts the
 /// non-panic contract: any outcome except a Rust backtrace.
+/// Un-ignored by chelis#730 Phase 1 (census row 11): the reduce-family
+/// panics are now section C2 diagnostics through the emitter channel;
+/// the build fails cleanly and this test accepts the rejection arm.
 #[test]
-#[ignore = "chelis#692: max_reduce on an int64 tensor panics the compiler at emit.rs:4238 \
-            (min_reduce at 4406, argmax/argmin at 4777). Must become a clean diagnostic or \
-            a correct build. Run with \
-            `cargo test -p chelis-cli --test reduction_and_bitwise_matrix -- --ignored`."]
 fn int64_max_reduce_does_not_panic_the_compiler() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
