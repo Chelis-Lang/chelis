@@ -38,7 +38,9 @@ use tempfile::tempdir;
 #[path = "common/mod.rs"]
 mod common;
 
-use common::{gcc_available as c_toolchain_available, link_generated, parse_tensor_data, write_file};
+use common::{
+    gcc_available as c_toolchain_available, link_generated, parse_tensor_data, write_file,
+};
 
 const PAR_BOUND_DP: &str = r#"(def {} template (lit {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))} 0.0))
 (def {} sampled
@@ -288,7 +290,8 @@ fn redteam_negative_dp_seed_not_silently_dropped() {
         !c_src.contains("CHELIS_EFFECTIVE_UNIFORM_SEED(0ULL"),
         "checker-accepted seed -1 must not silently bake the seed-0/default \
          stream into C; generated:\n{}",
-        c_src.lines()
+        c_src
+            .lines()
             .filter(|l| l.contains("EFFECTIVE_UNIFORM_SEED"))
             .collect::<Vec<_>>()
             .join("\n")

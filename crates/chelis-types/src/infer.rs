@@ -17811,7 +17811,12 @@ fn infer_match(
     // scrutinee with zero arms used to reach `result_ty.unwrap_or(Type::Error)`
     // as a silent `Type::Error` (census-verified silent-through).
     if kids.len() < 2 {
-        return malformed_form(list, "match", "at least one arm after the scrutinee", errors);
+        return malformed_form(
+            list,
+            "match",
+            "at least one arm after the scrutinee",
+            errors,
+        );
     }
 
     let mut result_ty: Option<Type> = None;
@@ -18939,7 +18944,12 @@ fn infer_access(
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 {
-        return malformed_form(list, "access", "a target expression and a field name", errors);
+        return malformed_form(
+            list,
+            "access",
+            "a target expression and a field name",
+            errors,
+        );
     }
     let target_ty = infer_expr(
         &kids[0],
@@ -18952,7 +18962,12 @@ fn infer_access(
         total_nodes,
     );
     let Some(field_name) = symbol_name(&kids[1]) else {
-        return malformed_form(list, "access", "a symbol field name as its second child", errors);
+        return malformed_form(
+            list,
+            "access",
+            "a symbol field name as its second child",
+            errors,
+        );
     };
     // Peel borrow layers: an `&T` target reads through the borrow.
     let mut resolved = subst.apply(&target_ty);
@@ -19034,7 +19049,12 @@ fn infer_record_update(
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
-        return malformed_form(list, "record-update", "a target expression to update", errors);
+        return malformed_form(
+            list,
+            "record-update",
+            "a target expression to update",
+            errors,
+        );
     }
     let target_ty = infer_expr(
         &kids[0],
