@@ -4257,14 +4257,20 @@ impl CEmitter {
         if !matches!(ty.precision, Prim::F32)
             || !matches!(input_node.output_type.precision, Prim::F32)
         {
-            panic!(
-                "WS-A1 / F1: emit_reduce_max path is f32-hardcoded; node {id} has \
-                 input precision `{}` and output precision `{}`. Widening \
-                 max_reduce to non-f32 dtypes is follow-on work; the safe \
-                 alternative is the dtype-parameterized scalar reduction.",
-                input_node.output_type.precision.name(),
-                ty.precision.name(),
-            );
+            // chelis#730 Phase 1 (census row 11, chelis#692): a clean
+            // diagnostic through the section C3 channel, not a compiler
+            // panic. Reachable from ordinary Surf (`max_reduce` over an
+            // int64 tensor).
+            return Err(Unsupported::new(
+                UnsupportedKind::Op("max_reduce".to_string()),
+                format!(
+                    "`{}` tensors in the C DAG emitter (node {id})",
+                    input_node.output_type.precision.name()
+                ),
+                Stage::Codegen("c"),
+                "the C reduce kernels are f32-hardcoded today (WS-A1/F1); cast to f32 \
+                 before the reduction. Non-f32 widening is follow-on work (chelis#692)",
+            ));
         }
         self.emit_slot_wrapper(id, ty);
         let output_is_scalar = ty.dims.is_empty();
@@ -4426,13 +4432,17 @@ impl CEmitter {
         if !matches!(ty.precision, Prim::F32)
             || !matches!(input_node.output_type.precision, Prim::F32)
         {
-            panic!(
-                "WS-A1 / F1: emit_reduce_simple path is f32-hardcoded; node {id} has \
-                 input precision `{}` and output precision `{}`. Widening \
-                 min_reduce / prod_reduce to non-f32 dtypes is follow-on work.",
-                input_node.output_type.precision.name(),
-                ty.precision.name(),
-            );
+            // chelis#730 Phase 1 (census row 11, chelis#692).
+            return Err(Unsupported::new(
+                UnsupportedKind::Op("min_reduce / prod_reduce".to_string()),
+                format!(
+                    "`{}` tensors in the C DAG emitter (node {id})",
+                    input_node.output_type.precision.name()
+                ),
+                Stage::Codegen("c"),
+                "the C reduce kernels are f32-hardcoded today (WS-A1/F1); cast to f32 \
+                 before the reduction. Non-f32 widening is follow-on work (chelis#692)",
+            ));
         }
         self.emit_slot_wrapper(id, ty);
         let output_is_scalar = ty.dims.is_empty();
@@ -4523,24 +4533,52 @@ impl CEmitter {
         if !matches!(ty.precision, Prim::F32)
             || !matches!(input_node.output_type.precision, Prim::F32)
         {
-            panic!(
-                "emit_reduce_window: f32-only; node {id} has input precision `{}` \
-                 and output precision `{}`. bf16/f16 widening is follow-on work.",
-                input_node.output_type.precision.name(),
-                ty.precision.name(),
-            );
+            // chelis#730 Phase 1 (census row 11 shape): a clean diagnostic,
+            // not a panic; the pre-codegen gate normally rejects earlier.
+            return Err(Unsupported::new(
+                UnsupportedKind::Op("reduce_window_*".to_string()),
+                format!(
+                    "`{}` tensors in the C DAG emitter (node {id})",
+                    input_node.output_type.precision.name()
+                ),
+                Stage::Codegen("c"),
+                "the C windowed-reduction emitter is f32-only today; cast to f32 \
+                 before the windowed reduction (spec/05-risc-primitives.md \
+                 section 2.3.1)",
+            ));
         }
-        assert_eq!(
-            window_shape.len(),
-            strides.len(),
-            "reduce_window: window_shape and strides must have equal length"
-        );
+        // chelis#730 Phase 1 (census row 12, chelis#725's assertion half):
+        // an arity mismatch between window and stride lists is a producing-
+        // pass bug (lowering now raises on non-literal lists, census row
+        // 8), but if one ever reaches emission it is a diagnostic through
+        // the section C3 channel, never a compiler panic.
+        if window_shape.len() != strides.len() {
+            return Err(Unsupported::new(
+                UnsupportedKind::Construct(format!(
+                    "a `reduce_window_*` node with {} window axes but {} strides",
+                    window_shape.len(),
+                    strides.len()
+                )),
+                format!("the C DAG emitter (node {id})"),
+                Stage::Codegen("c"),
+                "internal desync: lowering guarantees equal-length literal window and \
+                 stride lists (chelis#725; chelis#730 census rows 8/12)",
+            ));
+        }
         let n = window_shape.len();
         let in_rank = input_node.output_type.dims.len();
-        assert!(
-            in_rank >= n,
-            "reduce_window: input rank {in_rank} smaller than window arity {n}"
-        );
+        if in_rank < n {
+            return Err(Unsupported::new(
+                UnsupportedKind::Construct(format!(
+                    "a `reduce_window_*` node of input rank {in_rank} with window \
+                     arity {n}"
+                )),
+                format!("the C DAG emitter (node {id})"),
+                Stage::Codegen("c"),
+                "internal desync: the checker guarantees window arity <= input rank \
+                 (chelis#730 census row 12)",
+            ));
+        }
         let leading = in_rank - n;
         // Defensive backstop: a windowed output axis whose extent is not
         // statically known cannot be allocated correctly here — the
@@ -4552,13 +4590,20 @@ impl CEmitter {
         // mis-allocated kernel. See spec/05-risc-primitives.md §2.3.1.
         for (offset, dim) in ty.dims.iter().enumerate().skip(leading) {
             if Self::known_dim_size(dim).is_none() {
-                panic!(
-                    "emit_reduce_window: node {id} windowed axis {offset} has a \
-                     runtime-only symbolic extent ({dim:?}); the windowed output \
-                     extent floor((d - window) / stride) + 1 is not statically \
-                     representable. This must be rejected before C codegen \
-                     (reject_symbolic_windowed_reduce); reaching emit is a bug."
-                );
+                // chelis#730 Phase 1 (census row 12 shape): diagnostic, not
+                // panic; `reject_symbolic_windowed_reduce` still rejects
+                // earlier with span context.
+                return Err(Unsupported::new(
+                    UnsupportedKind::Construct(format!(
+                        "a `reduce_window_*` windowed axis {offset} with a \
+                         runtime-only symbolic extent"
+                    )),
+                    format!("the C DAG emitter (node {id})"),
+                    Stage::Codegen("c"),
+                    "the windowed output extent floor((d - window) / stride) + 1 is \
+                     not statically representable; bind the axis to a concrete size \
+                     (spec/05-risc-primitives.md section 2.3.1)",
+                ));
             }
         }
         let window_volume: usize = window_shape.iter().product();
@@ -4799,13 +4844,19 @@ impl CEmitter {
         // would silently truncate. Reject loudly until follow-on
         // widens the input read.
         if !matches!(input_node.output_type.precision, Prim::F32) {
-            panic!(
-                "WS-A1 / F1: emit_reduce_argcmp path is f32-hardcoded; node {id} \
-                 has input precision `{}`. Widening argmax/argmin to non-f32 \
-                 inputs is follow-on work (the F32-encoded output index is \
-                 deliberate per the doc comment).",
-                input_node.output_type.precision.name(),
-            );
+            // chelis#730 Phase 1 (census row 11, chelis#692).
+            return Err(Unsupported::new(
+                UnsupportedKind::Op(
+                    if is_argmax { "argmax_reduce" } else { "argmin_reduce" }.to_string(),
+                ),
+                format!(
+                    "`{}` tensor inputs in the C DAG emitter (node {id})",
+                    input_node.output_type.precision.name()
+                ),
+                Stage::Codegen("c"),
+                "the C argmax/argmin kernels read f32 inputs only today (WS-A1/F1); \
+                 cast to f32 before the reduction (chelis#692)",
+            ));
         }
         let init = if is_argmax { "-INFINITY" } else { "INFINITY" };
         let cmp = if is_argmax { ">" } else { "<" };

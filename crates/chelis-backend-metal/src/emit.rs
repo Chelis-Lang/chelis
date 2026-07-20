@@ -33,6 +33,7 @@ fn metal_pairs_to_usize(bounds: &[(RtDim, RtDim)]) -> Vec<(usize, usize)> {
         .collect()
 }
 use chelis_types::types::Prim;
+use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 
 use crate::blas;
 use crate::dtype;
@@ -1317,7 +1318,7 @@ impl Emitter {
         self.body.push(format!(
             "{msl_ty} pad_fill_{} = ({msl_ty}){};",
             node.id.0,
-            Self::host_scalar_literal(prec, fill)
+            Self::host_scalar_literal(prec, fill)?
         ));
         self.body.push(format!(
             "{{ __unsafe_unretained id<MTLBuffer> bufs[2] = {{ {}, {out_buf} }}; \
@@ -1409,15 +1410,31 @@ impl Emitter {
     /// model already accepts f32 fast-math drift; the exact-bit-pattern
     /// refinement is HIP-side via `chelis_f32_from_bits`); integers and
     /// bool cast directly.
-    fn host_scalar_literal(prec: Prim, value: f64) -> String {
-        match prec {
+    /// chelis#730 Phase 1 (census row 19, chelis#745): the former
+    /// catch-all emitted `/* unsupported pad fill dtype */ 0` - a silent
+    /// zero substituted into the pad constant. The remaining precisions
+    /// (f64 behind the Metal gate, the deferred f8e4m3, string) are a
+    /// section C2 diagnostic through this emitter's existing String error
+    /// channel; exhaustive per section C4.1 - no wildcard arm.
+    fn host_scalar_literal(prec: Prim, value: f64) -> Result<String, String> {
+        Ok(match prec {
             Prim::F32 => format!("{value:?}f"),
             Prim::F16 | Prim::Bf16 => format!("{value:?}"),
             Prim::Bool => (if value != 0.0 { "true" } else { "false" }).to_string(),
             Prim::Int8 | Prim::Int16 | Prim::Int32 => format!("{}", value as i64),
             Prim::Int64 => format!("{}LL", value as i64),
-            other => format!("/* unsupported pad fill dtype {} */ 0", other.name()),
-        }
+            Prim::F64 | Prim::F8e4m3 | Prim::String => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Dtype(prec.name().to_string()),
+                    "a Metal pad-fill host scalar literal",
+                    Stage::Codegen("metal"),
+                    "the Metal backend rejects f64 (no FP64 ALUs) and the deferred \
+                     dtypes before emission; reaching this arm means the gate was \
+                     bypassed (chelis#745, chelis#730 census row 19)",
+                )
+                .to_string());
+            }
+        })
     }
 
     fn emit_store(

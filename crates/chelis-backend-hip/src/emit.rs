@@ -3626,19 +3626,37 @@ impl HipEmitter {
     /// matmul-only via `hipblasGemmEx` in WS-A3; i8/i16 routes through
     /// the WS-A4 typed templates via [`Self::dtype_c_type`]) and panic
     /// so callers see the limit immediately.
+    /// chelis#730 Phase 1 (census row 5, chelis#689): the former `_ =>
+    /// ElemKind::F32` wildcard silently dispatched f32 kernels over
+    /// non-f32 buffers - runtime-confirmed corrupt on gfx1151 (int64
+    /// `neg` read 8-byte lanes as 4-byte floats and left half the output
+    /// buffer unwritten). Every precision without an f32/f64 kernel
+    /// family is now a section C2 diagnostic; the ops with typed WS-A4
+    /// templates (Add/Mul/Div/FloorDiv/TruncDiv, pad/shrink, i8/i16 sum)
+    /// never call this shorthand. Exhaustive per section C4.1 - no
+    /// wildcard arm.
     fn elem_kind(ty: &TensorType) -> Result<kernels::ElemKind, Unsupported> {
         Ok(match ty.precision {
             Prim::F32 | Prim::Bool => kernels::ElemKind::F32,
             Prim::F64 => kernels::ElemKind::F64,
-            // For non-float precisions reaching this float-only shorthand
-            // (e.g. an i32 Realize node forwarded from an upstream load),
-            // fall back to the F32 stride convention. The narrow-int and
-            // i32 paths route through the WS-A4 typed templates via
-            // [`Self::dtype_c_type`] when the kernel is precision-aware;
-            // this fallback only fires from legacy float-only paths and
-            // the actual storage width is enforced by the runtime's
-            // `tensor_elem_size` and the launch-site `dtype_c_type` cast.
-            _ => kernels::ElemKind::F32,
+            Prim::F16
+            | Prim::Bf16
+            | Prim::F8e4m3
+            | Prim::Int8
+            | Prim::Int16
+            | Prim::Int32
+            | Prim::Int64
+            | Prim::String => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Dtype(ty.precision.name().to_string()),
+                    "a HIP kernel family with f32/f64 variants only",
+                    Stage::Codegen("hip"),
+                    "this op has no typed HIP kernel for the operand dtype; the former \
+                     silent F32 fallback emitted a corrupting kernel (chelis#689). \
+                     Cast to f32/f64, or use the ops with typed templates \
+                     (add/mul/div and the i8/i16 promoted sum)",
+                ));
+            }
         })
     }
 

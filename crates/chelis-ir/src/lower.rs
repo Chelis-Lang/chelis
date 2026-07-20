@@ -423,6 +423,30 @@ fn raise_fatal_lowering_error(
     raise_lowering_diagnostic(LowerDiagnostic::new(message, span, span_id).fatal())
 }
 
+/// chelis#730 Phase 1, section C1.4 raise-or-prove: a malformed or
+/// arity-short Deep form reaching executable lowering raises a lowering
+/// error instead of substituting a silent `Const { value: 0.0 }`
+/// placeholder (census row 16 of `spec/design/loud_unsupported.md`).
+/// These shapes are pre-guarded by `chelis-deep` validation (the closed
+/// tag vocabulary and per-tag arity checks), so this raise is expected
+/// dead; if it ever fires, the input bypassed validation or a producing
+/// pass emitted a malformed node - either way the response is a loud
+/// diagnostic, never a plausible zero. Non-fatal on purpose: the host
+/// fallback lane legitimately owns several of these shapes (strings,
+/// host-only forms) and its own failure paths stay loud now that the
+/// emitter stub arm is an error (section C3).
+fn raise_malformed_deep(what: &str, span: Option<Span>, span_id: Option<String>) -> ! {
+    raise_lowering_error(
+        format!(
+            "{what} cannot be lowered to the executable IR \
+             (spec/design/loud_unsupported.md section C1.4; this form previously \
+             lowered to a silent zero placeholder)"
+        ),
+        span,
+        span_id,
+    )
+}
+
 /// Re-raise an already-constructed fatal lowering diagnostic.
 /// Crate-internal so the host-side sub-lowering paths can resurface
 /// a fatal AD rejection caught by their inner `try_lower_*` call
@@ -530,6 +554,7 @@ pub fn install_chelis_panic_hook() {
 
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_types::{BUILTIN_NAMES, CheckedProgram, LinearityInfo, types::Prim};
 
 use crate::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType};
@@ -4706,15 +4731,11 @@ impl LowerCtx {
         let result = match expr {
             Expr::Atom(atom, _) => self.lower_atom(atom),
             Expr::List(list, span) => self.lower_list(list, *span),
-            Expr::Map(_, _) => LoweredValue::Node({
-                // Bare metadata map -- shouldn't appear as an expression to lower.
-                self.dag.add_node(
-                    RiscOp::Const { value: 0.0 },
-                    vec![],
-                    Self::default_type(),
-                    self.current_span_id.clone(),
-                )
-            }),
+            Expr::Map(_, _) => raise_malformed_deep(
+                "a bare metadata map in expression position",
+                Some(expr.span()),
+                self.current_span_id.clone(),
+            ),
             Expr::MetaExpr(meta_expr, _) => self.lower_expr(&meta_expr.expr),
         };
         self.current_span_id = saved_span_id;
@@ -4858,12 +4879,17 @@ impl LowerCtx {
                 Self::default_type(),
                 self.current_span_id.clone(),
             )),
-            Atom::Str(_) | Atom::Keyword(_) => LoweredValue::Node(self.dag.add_node(
-                RiscOp::Const { value: 0.0 },
-                vec![],
-                Self::default_type(),
+            Atom::Str(_) => raise_malformed_deep(
+                "a string atom in DAG expression position (string values are host-lane \
+                 only)",
+                None,
                 self.current_span_id.clone(),
-            )),
+            ),
+            Atom::Keyword(_) => raise_malformed_deep(
+                "a bare keyword atom in expression position",
+                None,
+                self.current_span_id.clone(),
+            ),
         }
     }
 
@@ -4874,24 +4900,20 @@ impl LowerCtx {
     fn lower_list(&mut self, list: &List, span: Span) -> LoweredValue {
         let elems = &list.elements;
         if elems.is_empty() {
-            return LoweredValue::Node(self.dag.add_node(
-                RiscOp::Const { value: 0.0 },
-                vec![],
-                Self::default_type(),
+            raise_malformed_deep(
+                "an empty Deep list node",
+                Some(span),
                 self.current_span_id.clone(),
-            ));
+            );
         }
 
         let tag = match &elems[0] {
             Expr::Atom(Atom::Symbol(s), _) => s.as_str(),
-            _ => {
-                return LoweredValue::Node(self.dag.add_node(
-                    RiscOp::Const { value: 0.0 },
-                    vec![],
-                    Self::default_type(),
-                    self.current_span_id.clone(),
-                ));
-            }
+            _ => raise_malformed_deep(
+                "a Deep list node whose tag position is not a symbol",
+                Some(span),
+                self.current_span_id.clone(),
+            ),
         };
 
         match tag {
@@ -4917,6 +4939,12 @@ impl LowerCtx {
             "handle-effect" => self.lower_handle_effect(elems),
             "jit" => self.lower_jit(elems),
             "vmap" => self.lower_unsupported(tag, elems),
+            // Declarations lowered as an inert zero node: these forms are
+            // not value expressions (the checker never lets their "value"
+            // flow into a computation), so the node is a structural no-op,
+            // not a value substitution. Census row 16 keep-with-comment
+            // (chelis#730 section C1.4): a raise here would break every
+            // program that declares a signature or type alias.
             "defsig" | "deftype" | "typealias" => LoweredValue::Node(self.dag.add_node(
                 RiscOp::Const { value: 0.0 },
                 vec![],
@@ -4924,6 +4952,20 @@ impl LowerCtx {
                 self.current_span_id.clone(),
             )),
             _ => {
+                // Unknown-tag fallthrough: children are sequence-lowered
+                // and the last value wins (some wrapper tags rely on
+                // this). A CHILDLESS unknown tag has no value to forward
+                // and previously seeded a silent zero - that childless
+                // case now raises (census row 16, section C1.4; the
+                // parser's closed 62-tag vocabulary keeps this dead, see
+                // canary_unknown_deep_tag_is_rejected).
+                if elems.len() <= 2 {
+                    raise_malformed_deep(
+                        &format!("an unknown childless Deep tag `{tag}`"),
+                        Some(span),
+                        self.current_span_id.clone(),
+                    );
+                }
                 let mut last = LoweredValue::Node(self.dag.add_node(
                     RiscOp::Const { value: 0.0 },
                     vec![],
@@ -4941,12 +4983,11 @@ impl LowerCtx {
     /// `(def {meta...} name body)`
     fn lower_def(&mut self, elems: &[Expr]) -> LoweredValue {
         if elems.len() < 4 {
-            return LoweredValue::Node(self.dag.add_node(
-                RiscOp::Const { value: 0.0 },
-                vec![],
-                Self::default_type(),
+            raise_malformed_deep(
+                "a `def` form with fewer than 4 elements",
+                None,
                 self.current_span_id.clone(),
-            ));
+            );
         }
         let name = match &elems[2] {
             Expr::Atom(Atom::Symbol(s), _) => s.clone(),
@@ -4974,12 +5015,11 @@ impl LowerCtx {
     /// `(let {} (bind {} name1 expr1 name2 expr2 ...) body)`
     fn lower_let(&mut self, elems: &[Expr]) -> LoweredValue {
         if elems.len() < 4 {
-            return LoweredValue::Node(self.dag.add_node(
-                RiscOp::Const { value: 0.0 },
-                vec![],
-                Self::default_type(),
+            raise_malformed_deep(
+                "a `let` form with fewer than 4 elements",
+                None,
                 self.current_span_id.clone(),
-            ));
+            );
         }
         let saved = self.bindings.clone();
         let saved_list_bindings = self.list_bindings.clone();
@@ -5169,12 +5209,11 @@ impl LowerCtx {
                 self.current_span_id.clone(),
             ));
         }
-        LoweredValue::Node(self.dag.add_node(
-            RiscOp::Const { value: 0.0 },
-            vec![],
-            Self::default_type(),
+        raise_malformed_deep(
+            "a var form with no usable name",
+            None,
             self.current_span_id.clone(),
-        ))
+        )
     }
 
     /// `(app {meta...} func arg1 arg2 ...)`
@@ -5189,12 +5228,11 @@ impl LowerCtx {
         // (`lower_builtin_app`, `try_lower_callable_app`, and the
         // fallback "lower func and args, return last" path).
         if elems.len() < 3 {
-            return LoweredValue::Node(self.dag.add_node(
-                RiscOp::Const { value: 0.0 },
-                vec![],
-                Self::default_type(),
+            raise_malformed_deep(
+                "an `app` form with no callee",
+                Some(app_span),
                 self.current_span_id.clone(),
-            ));
+            );
         }
 
         let ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
@@ -6854,6 +6892,11 @@ impl LowerCtx {
                         self.current_span_id.clone(),
                     ));
                 }
+                // A `drop` of a value with zero tensor leaves (e.g. an
+                // empty ADT) has nothing to drop; the zero node is an
+                // inert sequencing value that the checker never lets flow
+                // into a computation. Census row 16 keep-with-comment
+                // (chelis#730 section C1.4).
                 last.unwrap_or_else(|| {
                     self.dag.add_node(
                         RiscOp::Const { value: 0.0 },
@@ -7525,22 +7568,48 @@ impl LowerCtx {
                     .get(x)
                     .map(|node| node.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
-                let window_shape = collect_cons_chain(&args[1])
-                    .and_then(|elems| {
-                        elems
-                            .iter()
-                            .map(|e| extract_int_for_dim(e).and_then(|n| usize::try_from(n).ok()))
-                            .collect::<Option<Vec<_>>>()
-                    })
-                    .unwrap_or_default();
-                let strides = collect_cons_chain(&args[2])
-                    .and_then(|elems| {
-                        elems
-                            .iter()
-                            .map(|e| extract_int_for_dim(e).and_then(|n| usize::try_from(n).ok()))
-                            .collect::<Option<Vec<_>>>()
-                    })
-                    .unwrap_or_default();
+                // chelis#730 Phase 1 (census row 8, chelis#725): a window or
+                // stride list that does not fold to non-negative integer
+                // literals raises a FATAL lowering error. The former
+                // `unwrap_or_default()` pair silently lowered BOTH lists to
+                // empty, turning the pooling into a no-op that returned the
+                // unpooled input at the wrong shape (and the half-literal
+                // case panicked the emitter's arity assertion). Fatal so the
+                // host-fallback lane cannot launder the failure into the
+                // unsupported-builtin stub path (the chelis#776/#782
+                // finding). Runtime-parameterized windows are op-owner
+                // support work, not a silent default.
+                let extract_literal_axis_list = |list_arg: &Expr, which: &str| -> Vec<usize> {
+                    collect_cons_chain(list_arg)
+                        .and_then(|elems| {
+                            elems
+                                .iter()
+                                .map(|e| {
+                                    extract_int_for_dim(e).and_then(|n| usize::try_from(n).ok())
+                                })
+                                .collect::<Option<Vec<_>>>()
+                        })
+                        .unwrap_or_else(|| {
+                            let unsupported = Unsupported::new(
+                                UnsupportedKind::Construct(format!(
+                                    "a non-literal {which} list for `{name}`"
+                                )),
+                                "the compiled-backend lowering of `reduce_window_*`",
+                                Stage::Lowering,
+                                "window and stride lists must be integer literals for the \
+                                 compiled lane today; a runtime-parameterized window \
+                                 previously lowered to a silent no-op (chelis#725; \
+                                 chelis#730 census row 8)",
+                            );
+                            raise_fatal_lowering_error(
+                                unsupported.to_string(),
+                                Some(list_arg.span()),
+                                list_arg.span_id().map(ToOwned::to_owned),
+                            )
+                        })
+                };
+                let window_shape = extract_literal_axis_list(&args[1], "window");
+                let strides = extract_literal_axis_list(&args[2], "stride");
                 let reducer = match name {
                     "reduce_window_max" => crate::dag::ReduceWindowKind::Max,
                     "reduce_window_min" => crate::dag::ReduceWindowKind::Min,
@@ -7734,13 +7803,45 @@ impl LowerCtx {
                 let axis = match &named_insert {
                     Some(_) => match args.get(3).and_then(bare_var_name) {
                         Some(anchor) => self.resolve_expand_anchor(&args[3], x, &anchor),
-                        None => self
-                            .dag
-                            .get(x)
-                            .map(|node| node.output_type.dims.len())
-                            .unwrap_or(0),
+                        // The operand node was just lowered above; a missing
+                        // entry is an internal desync, not an input shape -
+                        // raise instead of silently anchoring at the end of
+                        // a rank-0 view (section C1.4).
+                        None => match self.dag.get(x) {
+                            Some(node) => node.output_type.dims.len(),
+                            None => raise_lowering_error(
+                                format!(
+                                    "internal lowering desync: `expand` operand node {} \
+                                     is missing from the DAG (section C1.4)",
+                                    x.0
+                                ),
+                                Some(args[0].span()),
+                                args[0].span_id().map(ToOwned::to_owned),
+                            ),
+                        },
                     },
-                    None => self.extract_usize_value(&args[1]).unwrap_or(0),
+                    // chelis#730 Phase 1 (#782-flagged structural-index site):
+                    // an axis argument that is neither a compile-time usize
+                    // nor a bare dimension name previously defaulted to axis
+                    // 0 silently. Fatal: any program reaching this arm was
+                    // expanding the wrong axis (section C1.4 raise-or-prove).
+                    None => self.extract_usize_value(&args[1]).unwrap_or_else(|| {
+                        let unsupported = Unsupported::new(
+                            UnsupportedKind::Construct(
+                                "a non-literal `expand` axis argument".to_string(),
+                            ),
+                            "the compiled-backend lowering of `expand`",
+                            Stage::Lowering,
+                            "the expand axis must be an integer literal or a named \
+                             dimension; a computed axis previously fell back to axis 0 \
+                             silently (chelis#730 section C1.4, flagged by chelis#782)",
+                        );
+                        raise_fatal_lowering_error(
+                            unsupported.to_string(),
+                            Some(args[1].span()),
+                            args[1].span_id().map(ToOwned::to_owned),
+                        )
+                    }),
                 };
                 // Recover the broadcast extent. Three sources, in order:
                 //
@@ -9517,6 +9618,15 @@ impl LowerCtx {
                 }),
             _ => None,
         };
+        // chelis#730 Phase 1 (census row 9, chelis#709-adjacent): the
+        // former `_ if elems.len() >= 4` catch-all lowered the body and
+        // silently DROPPED the handler for any unrecognized effect kind
+        // (`effect: teleport` built and ran). The known kinds are the two
+        // the desugarer produces - `random` (seed scope) and `resource`
+        // (pure passthrough) - matched by string here; the `EffectKind`
+        // enum that closes the future-kinds hole structurally is Phase 2
+        // (section C4.4). Fatal so the host-fallback lane cannot launder
+        // the drop (its own handle-effect arm carries the same match).
         match effect {
             Some("random") if elems.len() >= 4 => {
                 let saved_seed = self.random_seed;
@@ -9526,13 +9636,21 @@ impl LowerCtx {
                 result
             }
             Some("resource") if elems.len() >= 4 => self.lower_expr(&elems[3]),
-            _ if elems.len() >= 4 => self.lower_expr(&elems[3]),
-            _ => LoweredValue::Node(self.dag.add_node(
-                RiscOp::Const { value: 0.0 },
-                vec![],
-                Self::default_type(),
-                self.current_span_id.clone(),
-            )),
+            other => {
+                let unsupported = Unsupported::new(
+                    UnsupportedKind::EffectKind(other.unwrap_or("<missing>").to_string()),
+                    "a `handle-effect` form in IR lowering",
+                    Stage::Lowering,
+                    "known effect kinds are `random` and `resource` \
+                     (spec/03-deep-syntax.md); an unknown kind previously dropped its \
+                     handler silently (chelis#730 census row 9)",
+                );
+                raise_fatal_lowering_error(
+                    unsupported.to_string(),
+                    None,
+                    self.current_span_id.clone(),
+                )
+            }
         }
     }
 
@@ -9902,28 +10020,60 @@ impl LowerCtx {
         out
     }
 
-    /// C4: Enforce float-only for transcendental ops (exp, log, sin, sqrt).
-    /// If the input is not float, produce a Const(0) error placeholder.
+    /// C4: Enforce float-only for the unary elementwise float family
+    /// (exp, log, sin, sqrt, cos, tan, atan, abs, floor, ceil, round).
+    ///
+    /// chelis#730 Phase 1 (census row 1, chelis#699/#722): a non-float
+    /// input raises a FATAL lowering error instead of substituting a
+    /// `Const 0.0` with the operand dropped. Fatal on purpose: a
+    /// non-fatal error here is caught by the host-emit backend's
+    /// speculative sub-lowering, which would fall back to emitting the
+    /// op as a host call over a tensor pointer - garbage C, not a loud
+    /// failure (the chelis#776/#782 laundering finding). Under the
+    /// chelis#729 interlock (section I1) these cells are CLEANLY
+    /// REJECTED here; computing the well-defined integer cases
+    /// (abs/floor/ceil/round) is chelis#729's work and replaces this
+    /// raise, never a silent default. The raise also fires under `grad`
+    /// lowering, which turns chelis#722's silent zero gradients into
+    /// the same loud error in both lanes.
     fn lower_transcendental(&mut self, op: RiscOp, x: NodeId, ty: &TensorType) -> NodeId {
         // Elementwise: output dims come from the lowered operand, not the
         // annotation (whose dims can be stale symbolics inside a rank-poly
         // inline body; chelis#346 red-team F1: `sum(exp(x), seq)` reduced
         // the wrong axis). Same contract as the Tier-1 binary arms.
         let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
-        let input_prec = self
-            .dag
-            .get(x)
-            .map(|n| n.output_type.precision)
-            .unwrap_or(Prim::F32);
+        let input_prec = match self.dag.get(x) {
+            Some(node) => node.output_type.precision,
+            // Section C1.4: a missing operand node is an internal desync
+            // (the id was just produced by lowering); raising beats
+            // guessing F32 (census row 13's :9833 sibling).
+            None => raise_lowering_error(
+                format!(
+                    "internal lowering desync: operand node {} of a float unary op is \
+                     missing from the DAG (was a silent F32 precision default; \
+                     spec/design/loud_unsupported.md section C1.4)",
+                    x.0
+                ),
+                None,
+                self.current_span_id.clone(),
+            ),
+        };
         if input_prec.is_float() {
             self.dag
                 .add_node(op, vec![x], out_ty, self.current_span_id.clone())
         } else {
-            // Non-float input: produce a zero constant as error placeholder.
-            self.dag.add_node(
-                RiscOp::Const { value: 0.0 },
-                vec![],
-                out_ty,
+            let unsupported = Unsupported::new(
+                UnsupportedKind::Op(format!("{op:?}")),
+                format!("`{}` tensors in IR lowering", input_prec.name()),
+                Stage::Lowering,
+                "this op family is float-only in the executable IR today; cast the \
+                 operand to a float dtype first. Integer support for the well-defined \
+                 cases (abs/floor/ceil/round) is tracked by chelis#729; the silent \
+                 zero this replaced was chelis#699/#722",
+            );
+            raise_fatal_lowering_error(
+                unsupported.to_string(),
+                None,
                 self.current_span_id.clone(),
             )
         }
@@ -9932,12 +10082,11 @@ impl LowerCtx {
     /// `(fn {} (params {} p1 p2 ...) body)`
     fn lower_fn(&mut self, elems: &[Expr]) -> LoweredValue {
         if elems.len() < 4 {
-            return LoweredValue::Node(self.dag.add_node(
-                RiscOp::Const { value: 0.0 },
-                vec![],
-                Self::default_type(),
+            raise_malformed_deep(
+                "an `fn` form with fewer than 4 elements",
+                None,
                 self.current_span_id.clone(),
-            ));
+            );
         }
         let saved = self.bindings.clone();
         let saved_list_bindings = self.list_bindings.clone();
@@ -10030,12 +10179,11 @@ impl LowerCtx {
     /// `(pipe {} x f g ...)` -- chain: lower x, then apply f, then g, etc.
     fn lower_pipe(&mut self, elems: &[Expr]) -> LoweredValue {
         if elems.len() < 3 {
-            return LoweredValue::Node(self.dag.add_node(
-                RiscOp::Const { value: 0.0 },
-                vec![],
-                Self::default_type(),
+            raise_malformed_deep(
+                "a `pipe` form with no seed expression",
+                None,
                 self.current_span_id.clone(),
-            ));
+            );
         }
         let mut current = self.lower_expr(&elems[2]);
         for func_expr in &elems[3..] {
@@ -10296,14 +10444,21 @@ impl LowerCtx {
     }
 
     /// `(cast {} expr (t-prim {} name))` -- precision cast.
+    ///
+    /// chelis#730 Phase 1 (census row 13, chelis#744): a cast target that
+    /// is not a recognized primitive raises a FATAL lowering error. The
+    /// former silent F32-default fallbacks (parse-or-F32) lowered
+    /// a bogus `.dp` cast target to f32 silently in the build lane (the
+    /// eval lane's guard rejects the same file cleanly - chelis#744
+    /// refuted the dead-by-probe claim). Fatal so the host fallback
+    /// cannot re-launder the same node.
     fn lower_cast(&mut self, elems: &[Expr]) -> LoweredValue {
         if elems.len() < 4 {
-            return LoweredValue::Node(self.dag.add_node(
-                RiscOp::Const { value: 0.0 },
-                vec![],
-                Self::default_type(),
+            raise_malformed_deep(
+                "a `cast` form with fewer than 4 elements",
+                None,
                 self.current_span_id.clone(),
-            ));
+            );
         }
         let x = self.lower_expr_node(&elems[2], "cast input");
         let input_ty = self
@@ -10311,14 +10466,42 @@ impl LowerCtx {
             .get(x)
             .map(|n| n.output_type.clone())
             .unwrap_or_else(Self::default_type);
+        let raise_bogus_target = |found: &str| -> ! {
+            let unsupported = Unsupported::new(
+                UnsupportedKind::Dtype(found.to_string()),
+                "a `cast` target in IR lowering",
+                Stage::Lowering,
+                "the cast target must name an active primitive type \
+                 (spec/04-type-system.md section 1.1); a bogus target previously \
+                 lowered as f32 silently in the build lane (chelis#744, chelis#730 \
+                 census row 13)",
+            );
+            raise_fatal_lowering_error(
+                unsupported.to_string(),
+                Some(elems[3].span()),
+                elems[3].span_id().map(ToOwned::to_owned),
+            )
+        };
         let new_precision = if let Some(prim) = Self::try_extract_prim(&elems[3]) {
             // Handle (t-prim {} name) form.
             prim
         } else if let Expr::Atom(Atom::Symbol(pname), _) = &elems[3] {
-            // Fallback: bare symbol for backward compat.
-            Prim::parse_name(pname).unwrap_or(Prim::F32)
+            // Bare-symbol spelling (backward compat): parse or raise.
+            match Prim::parse_name(pname) {
+                Some(prim) => prim,
+                None => raise_bogus_target(pname),
+            }
+        } else if let Expr::List(list, _) = &elems[3]
+            && list.elements.len() >= 3
+            && let Expr::Atom(Atom::Symbol(tag), _) = &list.elements[0]
+            && tag == "t-prim"
+            && let Expr::Atom(Atom::Symbol(pname), _) = &list.elements[2]
+        {
+            // `(t-prim {} <name>)` whose name is not a recognized
+            // primitive (the chelis#744 repro spelling).
+            raise_bogus_target(pname)
         } else {
-            Prim::F32
+            raise_bogus_target("a non-primitive cast target expression")
         };
         let ty = TensorType {
             dims: input_ty.dims,
@@ -10380,28 +10563,25 @@ impl LowerCtx {
 
     fn lower_if(&mut self, elems: &[Expr]) -> LoweredValue {
         let Some(cond_expr) = elems.get(2) else {
-            return LoweredValue::Node(self.dag.add_node(
-                RiscOp::Const { value: 0.0 },
-                vec![],
-                Self::default_type(),
+            raise_malformed_deep(
+                "an `if` form with no condition",
+                None,
                 self.current_span_id.clone(),
-            ));
+            );
         };
         let Some(then_expr) = elems.get(3) else {
-            return LoweredValue::Node(self.dag.add_node(
-                RiscOp::Const { value: 0.0 },
-                vec![],
-                Self::default_type(),
+            raise_malformed_deep(
+                "an `if` form with no then-branch",
+                None,
                 self.current_span_id.clone(),
-            ));
+            );
         };
         let Some(else_expr) = elems.get(4) else {
-            return LoweredValue::Node(self.dag.add_node(
-                RiscOp::Const { value: 0.0 },
-                vec![],
-                Self::default_type(),
+            raise_malformed_deep(
+                "an `if` form with no else-branch",
+                None,
                 self.current_span_id.clone(),
-            ));
+            );
         };
 
         let cond = self.lower_expr_node(cond_expr, "if condition");
@@ -10506,12 +10686,11 @@ impl LowerCtx {
             last = Some(self.lower_expr(expr));
         }
         last.unwrap_or_else(|| {
-            LoweredValue::Node(self.dag.add_node(
-                RiscOp::Const { value: 0.0 },
-                vec![],
-                Self::default_type(),
+            raise_malformed_deep(
+                "an empty `par` block",
+                None,
                 self.current_span_id.clone(),
-            ))
+            )
         })
     }
 
@@ -10523,12 +10702,11 @@ impl LowerCtx {
         if let Some(inner) = elems.get(2) {
             self.lower_expr(inner)
         } else {
-            LoweredValue::Node(self.dag.add_node(
-                RiscOp::Const { value: 0.0 },
-                vec![],
-                Self::default_type(),
+            raise_malformed_deep(
+                "a `jit` form with no inner expression",
+                None,
                 self.current_span_id.clone(),
-            ))
+            )
         }
     }
 
@@ -10570,12 +10748,11 @@ impl LowerCtx {
                 self.current_span_id.clone(),
             ))
         } else {
-            LoweredValue::Node(self.dag.add_node(
-                RiscOp::Const { value: 0.0 },
-                vec![],
-                Self::default_type(),
+            raise_malformed_deep(
+                "a `realize` form with no inner expression",
+                None,
                 self.current_span_id.clone(),
-            ))
+            )
         }
     }
 
@@ -10585,12 +10762,11 @@ impl LowerCtx {
             let input = self.lower_expr(&elems[2]);
             self.copy_lowered_value(&input)
         } else {
-            LoweredValue::Node(self.dag.add_node(
-                RiscOp::Const { value: 0.0 },
-                vec![],
-                Self::default_type(),
+            raise_malformed_deep(
+                "a `copy` form with no inner expression",
+                None,
                 self.current_span_id.clone(),
-            ))
+            )
         }
     }
 
@@ -10640,19 +10816,30 @@ impl LowerCtx {
         if elems.len() >= 3 {
             self.lower_expr(&elems[2])
         } else {
-            LoweredValue::Node(self.dag.add_node(
-                RiscOp::Const { value: 0.0 },
-                vec![],
-                Self::default_type(),
+            raise_malformed_deep(
+                "a `borrow` form with no inner expression",
+                None,
                 self.current_span_id.clone(),
-            ))
+            )
         }
     }
 
     /// `(tuple-get {} tuple_expr index)` -- not representable in the Phase 0 RISC DAG.
     fn lower_tuple_get(&mut self, elems: &[Expr]) -> LoweredValue {
         let tuple = self.lower_expr(&elems[2]);
-        let index = self.extract_usize_value(&elems[3]).unwrap_or(0);
+        // chelis#730 Phase 1 (#782-flagged structural-index site): a
+        // tuple index that does not fold to a compile-time usize raises
+        // instead of silently reading field 0 (section C1.4; the index
+        // is compile-time by construction, so this is expected dead).
+        let index = self.extract_usize_value(&elems[3]).unwrap_or_else(|| {
+            raise_lowering_error(
+                "tuple-get index does not fold to a compile-time integer (was a \
+                 silent index-0 default; spec/design/loud_unsupported.md section \
+                 C1.4, flagged by chelis#782)",
+                Some(elems[3].span()),
+                elems[3].span_id().map(ToOwned::to_owned),
+            )
+        });
         tuple.tuple_get(index).unwrap_or_else(|| {
             raise_lowering_error(
                 format!("tuple-get index {index} out of bounds during lowering"),

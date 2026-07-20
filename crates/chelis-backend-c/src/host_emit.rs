@@ -516,7 +516,21 @@ fn append_tensor_print_helper(out: &mut Vec<String>) {
             .to_string(),
     );
     out.push("            case CHELIS_BOOL: value = (double)t->data[i]; break;".to_string());
-    out.push("            default: value = (double)t->data[i]; break;".to_string());
+    out.push("            case CHELIS_F32: value = (double)t->data[i]; break;".to_string());
+    // chelis#730 Phase 1 (census row 10 interim-hardening): a dtype this
+    // helper cannot decode (f16/bf16 2-byte storage) aborts with the
+    // dtype id instead of misreading the buffer as f32. The faithful
+    // rendering is chelis#728/#732's work (their generated formatter
+    // replaces this helper); until then the abort is the section C1
+    // rule-4 response, mirroring the runtime `to_tensor` abort shape.
+    out.push("            default:".to_string());
+    out.push(
+        "                fprintf(stderr, \"unsupported: tensor print of dtype id %d on \
+         the emitted C print helper (runtime); f16/bf16 tensor rendering is tracked by \
+         chelis#728\\n\", (int)t->dtype);"
+            .to_string(),
+    );
+    out.push("                exit(1);".to_string());
     out.push("        }".to_string());
     out.push("        if (i > 0) { printf(\", \"); }".to_string());
     out.push("        if (fabs(value - round(value)) < 1e-9) {".to_string());
@@ -2138,6 +2152,34 @@ impl<'a> HostEmitter<'a> {
             _ => {}
         }
 
+        // chelis#730 Phase 1 (census rows 6/7, chelis#714/#718): scalar
+        // numeric emission over an operand whose host type never resolved
+        // (f16/bf16/int8/int16 scalars parse to `HostType::Unknown`)
+        // previously baked `int64_t`/`double` arithmetic over garbage via
+        // the Int64 type default. The baking point rejects instead;
+        // `HostType::Unknown` stays legal for the genuinely polymorphic
+        // pointer-boxing surfaces (rank/precision-poly defs, `void*`
+        // calling convention) that never reach these scalar operator arms.
+        const SCALAR_NUMERIC_BUILTINS: &[&str] = &[
+            "add", "sub", "mul", "div", "floor_div", "trunc_div", "mod", "neg", "cmplt", "lt",
+            "gt", "gte", "lte", "sqrt", "exp", "log", "sin", "cos", "tanh", "pow", "abs", "min",
+            "max",
+        ];
+        if SCALAR_NUMERIC_BUILTINS.contains(&name)
+            && arg_vars
+                .iter()
+                .any(|(_, arg_ty)| matches!(arg_ty, HostType::Unknown))
+        {
+            return Err(Unsupported::new(
+                UnsupportedKind::HostType("Unknown".to_string()),
+                format!("scalar `{name}` in `chelis build` host emission"),
+                Stage::Codegen("c"),
+                "a scalar operand's host type never resolved - narrow-float (f16/bf16) \
+                 and sub-int32 scalars have no C host representation yet \
+                 (chelis#714/#718; support is chelis#729's work). Use f32/f64/int64 \
+                 scalars or the tensor forms",
+            ));
+        }
         let expr = match name {
             "add" => format!("{} + {}", arg_vars[0].0, arg_vars[1].0),
             "sub" => format!("{} - {}", arg_vars[0].0, arg_vars[1].0),
@@ -2240,7 +2282,23 @@ impl<'a> HostEmitter<'a> {
                 }
                 HostType::Bool => format!("chelis_string_from_bool({})", arg_vars[0].0),
                 HostType::String => arg_vars[0].0.clone(),
-                _ => "chelis_string_from_cstr(\"<value>\")".to_string(),
+                // chelis#730 Phase 1 (census row 3, chelis#734): to_string
+                // of a tensor/list/other non-scalar has no C rendering yet;
+                // it previously compiled to the literal placeholder string
+                // `<value>`. Real rendering arrives with chelis#732's
+                // generated formatter.
+                other => {
+                    return Err(Unsupported::new(
+                        UnsupportedKind::Construct(format!(
+                            "`to_string` of a `{other:?}`-typed value"
+                        )),
+                        "`chelis build` host emission",
+                        Stage::Codegen("c"),
+                        "the compiled lane stringifies int64/f32/f64/bool/string scalars \
+                         only today; tensor/list rendering is tracked by chelis#732 \
+                         (was the `<value>` placeholder, chelis#734)",
+                    ));
+                }
             },
             "to_int" => format!("chelis_parse_int64({})", arg_vars[0].0),
             "to_float" => format!("chelis_parse_f64({})", arg_vars[0].0),
@@ -2304,7 +2362,22 @@ impl<'a> HostEmitter<'a> {
             },
             "min" => format!("fmin({}, {})", arg_vars[0].0, arg_vars[1].0),
             "max" => format!("fmax({}, {})", arg_vars[0].0, arg_vars[1].0),
-            other => format!("/* unsupported builtin {other} */ 0"),
+            // chelis#730 Phase 1 (census row 2; chelis#682/#704/#705/#715):
+            // a builtin with no C emission arm is a build error, never a
+            // silent literal-0 stub. This arm is also the terminal of the
+            // speculative sub-lowering recovery path (chelis#776/#782): a
+            // non-fatal lowering error that fell back to host emission now
+            // ends HERE, loudly, instead of in a compiled zero.
+            other => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Builtin(other.to_string()),
+                    "`chelis build` host emission",
+                    Stage::Codegen("c"),
+                    "this builtin has no compiled-lane emission arm yet; the eval lane \
+                     may support it (`chelis eval`). Silent-stub class: chelis#703; \
+                     instances chelis#682/#704/#705/#715",
+                ));
+            }
         };
         self.lines
             .push(format!("{}{target} = {expr};", self.indent));
@@ -4075,9 +4148,21 @@ impl<'a> HostEmitter<'a> {
         ty: &HostType,
     ) -> Result<(), Unsupported> {
         let HostType::Tuple(parts) = ty else {
-            self.lines
-                .push(format!("{}/* unsupported partition type */", self.indent));
-            return Ok(());
+            // chelis#730 Phase 1 (census row 15, section C1.4
+            // raise-or-prove): a `partition` whose result type is not a
+            // tuple is an internal desync (the checker types partition as
+            // a two-list tuple; see `partition_agrees_across_lanes` for
+            // the reachable-surface clearance). Previously emitted a bare
+            // C comment and NO assignment - garbage C downstream.
+            return Err(Unsupported::new(
+                UnsupportedKind::Construct(format!(
+                    "a `partition` result typed `{ty:?}` instead of a tuple"
+                )),
+                "`chelis build` host emission",
+                Stage::Codegen("c"),
+                "internal desync: the checker guarantees a two-list tuple type for \
+                 partition results (chelis#730 census row 15)",
+            ));
         };
         let pass_ty = parts.first().cloned().unwrap_or(HostType::Unknown);
         let fail_ty = parts.get(1).cloned().unwrap_or(HostType::Unknown);
@@ -4313,9 +4398,19 @@ impl<'a> HostEmitter<'a> {
             HostType::Unit => self
                 .lines
                 .push(format!("{}printf(\"()\\n\");", self.indent)),
-            _ => self
-                .lines
-                .push(format!("{}printf(\"<value>\\n\");", self.indent)),
+            // chelis#730 Phase 1 (census row 4, chelis#714 symptom): an
+            // unclassifiable value at a print site is a compiler bug
+            // surfaced at emit time, never the literal `<value>` text.
+            other => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::HostType(format!("{other:?}")),
+                    "a `print` site in `chelis build` host emission",
+                    Stage::Codegen("c"),
+                    "the value's host type never resolved to a printable representation \
+                     (chelis#714's Unknown chain); previously this compiled to the \
+                     literal `<value>` placeholder",
+                ));
+            }
         }
         Ok(())
     }
@@ -4399,9 +4494,19 @@ impl<'a> HostEmitter<'a> {
                 .lines
                 .push(format!("{}chelis_print_dict({});", self.indent, value)),
             HostType::Unit => self.lines.push(format!("{}printf(\"()\");", self.indent)),
-            _ => self
-                .lines
-                .push(format!("{}printf(\"<value>\");", self.indent)),
+            // chelis#730 Phase 1 (census row 4): same contract as
+            // `emit_print_value` - an unclassifiable labeled root is a
+            // surfaced compiler bug, not a `<value>` placeholder.
+            other => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::HostType(format!("{other:?}")),
+                    "a labeled-root print in `chelis build` host emission",
+                    Stage::Codegen("c"),
+                    "the value's host type never resolved to a printable representation \
+                     (chelis#714's Unknown chain); previously this compiled to the \
+                     literal `<value>` placeholder",
+                ));
+            }
         }
         self.lines.push(format!("{}printf(\"\\n\");", self.indent));
         Ok(())
