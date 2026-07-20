@@ -1229,7 +1229,15 @@ fn assert_stdout_value_parity(c_out: &[u8], eval_out: &[u8], label: &str) {
         // Every data segment is tokenized and every shape segment joins
         // the comparison (PR #792 red-team F3: a second tensor's
         // divergence, or a shape divergence with equal data, must fail).
-        let shapes = segments(&payload, "shape=[");
+        // EMPTY shape segments (`shape=[]`, the rank-0 wrapper) are
+        // dropped: the compiled lane still prints the wrapper for rank-0
+        // tensors while eval renders them bare ([05-OBS-4]) - the
+        // sanctioned interim render class; the element itself is still
+        // bit-compared below.
+        let shapes: Vec<String> = segments(&payload, "shape=[")
+            .into_iter()
+            .filter(|s| !s.trim().is_empty())
+            .collect();
         let bodies: Vec<String> = if payload.contains("data=[") {
             segments(&payload, "data=[")
         } else {
@@ -1257,9 +1265,7 @@ fn assert_stdout_value_parity(c_out: &[u8], eval_out: &[u8], label: &str) {
                     // collapse to one f64 (PR #792 red-team F3). Fail loud;
                     // such a pair needs a width-exact comparison, not this
                     // interim helper.
-                    if !other.contains('.')
-                        && !other.contains('e')
-                        && v.abs() >= 9007199254740992.0
+                    if !other.contains('.') && !other.contains('e') && v.abs() >= 9007199254740992.0
                     {
                         panic!(
                             "[{label}] exact-int64 token `{other}` at or above 2^53 \
@@ -9189,12 +9195,19 @@ fn rt792_stdout_parity_detects_shape_divergence() {
 }
 
 /// Positive control: equal values across multiple segments in the
-/// migrated int-vs-float render forms are accepted, shapes matching.
+/// migrated int-vs-float render forms are accepted, shapes matching;
+/// the rank-0 wrapper class (eval bare vs the compiled lane's
+/// `shape=[]` wrapper) stays accepted with its element bit-compared.
 #[test]
 fn rt792_stdout_parity_accepts_equal_values_across_segments() {
     assert_stdout_value_parity(
         b"out = [tensor(shape=[1], data=[1.0]), tensor(shape=[1], data=[2.0])]",
         b"out = [tensor(shape=[1], data=[1]), tensor(shape=[1], data=[2])]",
         "rt792-accept",
+    );
+    assert_stdout_value_parity(
+        b"tr = tensor(shape=[], data=[5.0])",
+        b"tr = 5.0",
+        "rt792-accept-rank0",
     );
 }

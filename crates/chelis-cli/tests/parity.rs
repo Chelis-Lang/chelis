@@ -319,8 +319,7 @@ fn migrated_render_equivalent(eval_line: &str, c_line: &str) -> bool {
             "false" => Some(0.0),
             other => {
                 let v: f64 = other.parse().ok()?;
-                if !other.contains('.') && !other.contains('e') && v.abs() >= 9007199254740992.0
-                {
+                if !other.contains('.') && !other.contains('e') && v.abs() >= 9007199254740992.0 {
                     return None;
                 }
                 Some(v)
@@ -367,13 +366,24 @@ fn migrated_render_equivalent(eval_line: &str, c_line: &str) -> bool {
         return false;
     }
     // Tensor SHAPE tokens are part of the value (PR #792 red-team F3): a
-    // shape divergence with equal data must not pass.
+    // shape divergence with equal data must not pass. EMPTY shape
+    // segments (`shape=[]`, the rank-0 wrapper) are dropped first: the
+    // compiled lane still prints the wrapper for rank-0 tensors while
+    // eval renders them bare ([05-OBS-4]) - exactly the sanctioned
+    // interim render class, and its single element is still compared at
+    // the bit level below.
+    let nonempty = |shapes: Vec<String>| -> Vec<String> {
+        shapes
+            .into_iter()
+            .filter(|s| !s.trim().is_empty())
+            .collect()
+    };
     match (
         segments(eval_payload, "shape=["),
         segments(c_payload, "shape=["),
     ) {
         (Some(eval_shapes), Some(c_shapes)) => {
-            if eval_shapes != c_shapes {
+            if nonempty(eval_shapes) != nonempty(c_shapes) {
                 return false;
             }
         }
@@ -685,6 +695,17 @@ fn rt792_migrated_equivalence_detects_shape_divergence() {
     assert!(migrated_render_equivalent(
         "out = tensor(shape=[2, 2], data=[1, 2, 3, 4])",
         "out = tensor(shape=[2, 2], data=[1.0, 2.0, 3.0, 4.0])",
+    ));
+    // Positive control: the rank-0 wrapper class (eval bare vs the
+    // compiled lane's `shape=[]` wrapper) is the sanctioned interim
+    // delta and stays equivalent - with its element still bit-compared.
+    assert!(migrated_render_equivalent(
+        "tr = 5.0",
+        "tr = tensor(shape=[], data=[5.0])",
+    ));
+    assert!(!migrated_render_equivalent(
+        "tr = 5.0",
+        "tr = tensor(shape=[], data=[5.5])",
     ));
 }
 
