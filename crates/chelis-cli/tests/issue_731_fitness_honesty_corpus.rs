@@ -204,6 +204,26 @@ fn malformed_dp_forms_score_below_one() {
             ),
             ".dp",
         ),
+        // chelis#731 red team F2: a negative int64-literal seed (the RNG lanes
+        // fold it to seed 0, breaking [05-RNG-1]).
+        (
+            "dp_negative_int64_seed",
+            wrap(
+                "(handle-effect {effect: random} (lit {type: (t-prim {} int64)} -1) \
+                 (lit {type: (t-prim {} f32)} 2.5))",
+            ),
+            ".dp",
+        ),
+        // chelis#731 red team: a handle-effect with a THIRD child (spec/03 gives
+        // it exactly two); the extra child is an unvisited subtree ([04-TOT-3]).
+        (
+            "dp_handle_effect_extra_child",
+            wrap(
+                "(handle-effect {effect: random} (lit {type: (t-prim {} int64)} 42) \
+                 (lit {type: (t-prim {} f32)} 2.5) (lit {type: (t-prim {} f32)} 9.0))",
+            ),
+            ".dp",
+        ),
     ];
     assert_below_one(&cases);
 }

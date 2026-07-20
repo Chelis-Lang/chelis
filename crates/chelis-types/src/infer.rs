@@ -7279,13 +7279,21 @@ fn children(list: &deep::List) -> &[deep::Expr] {
 /// and return the `Type::Error` sentinel. This replaces the silent
 /// `return Type::Error` arity guards that used to let structurally malformed
 /// `.dp` check clean (score 1 with an empty error list). `expected` names the
-/// well-formed shape so the message points at the fix.
-fn malformed_form(tag: &str, expected: &str, errors: &mut Vec<CheckError>) -> Type {
+/// well-formed shape, and the message also names the FOUND shape (the node's
+/// tagged-children count) per §C2 -- the calibration example is the Deep
+/// parser's own "found unknown tag ..." message.
+fn malformed_form(
+    list: &deep::List,
+    tag: &str,
+    expected: &str,
+    errors: &mut Vec<CheckError>,
+) -> Type {
+    let found = children(list).len();
     errors.push(CheckError::new(
         CheckErrorKind::MalformedForm,
         format!(
-            "malformed `{tag}`: expected {expected} (spec/03-deep-syntax.md; \
-             chelis#731 [04-TOT-3])"
+            "malformed `{tag}`: expected {expected}, found a `{tag}` with {found} \
+             child element(s) (spec/03-deep-syntax.md; chelis#731 [04-TOT-3])"
         ),
         vec![],
     ));
@@ -7330,15 +7338,26 @@ fn is_static_numeric_bound(expr: &deep::Expr) -> bool {
             Some("app") if children(list).first().is_some_and(expr_is_neg_var) => {
                 children(list).get(1).is_some_and(is_static_numeric_bound)
             }
-            // `(lit {} <atom>)` and any other list carrying a bare numeric atom
-            // in the value slot (mirrors the lowering's catch-all).
-            _ => matches!(
+            // Only a `lit`-tagged list carries a numeric atom AS ITS VALUE.
+            // The lowering's `extract_f64_value` catch-all reads element 2 of
+            // ANY list, which blesses a form whose value is NOT at element 2 --
+            // e.g. `(par {} 2.0 3.0)`, whose value is its LAST child (3.0) per
+            // spec/03-deep-syntax.md §2.3, while element 2 is the FIRST child
+            // (2.0). Accepting that would let the checker bless a bound the
+            // lowering folds from the wrong position (the chelis#703 silent-
+            // substitution shape; chelis#731 red team). The checker's arm is
+            // therefore NARROWER than the lowering's on purpose: a `par`-wrapped
+            // (or otherwise non-literal, non-cast, non-neg) bound is rejected
+            // here, so it never reaches the fold. The lowering-side over-broad
+            // catch-all is filed separately.
+            Some("lit") => matches!(
                 list.elements.get(2),
                 Some(deep::Expr::Atom(
                     deep::Atom::Float(_) | deep::Atom::Int(_),
                     _
                 ))
             ),
+            _ => false,
         },
         _ => false,
     }
@@ -9080,7 +9099,7 @@ fn infer_expr(
                             total_nodes,
                         )
                     } else {
-                        malformed_form("jit", "one wrapped expression", errors)
+                        malformed_form(list, "jit", "one wrapped expression", errors)
                     }
                 }
                 Some("realize") => {
@@ -9097,7 +9116,7 @@ fn infer_expr(
                             total_nodes,
                         )
                     } else {
-                        malformed_form("realize", "one wrapped expression", errors)
+                        malformed_form(list, "realize", "one wrapped expression", errors)
                     }
                 }
                 Some("copy") => {
@@ -9129,7 +9148,7 @@ fn infer_expr(
                             }
                         }
                     } else {
-                        malformed_form("copy", "one wrapped expression", errors)
+                        malformed_form(list, "copy", "one wrapped expression", errors)
                     }
                 }
                 Some("borrow") => {
@@ -9194,7 +9213,7 @@ fn infer_expr(
                             }
                         }
                     } else {
-                        malformed_form("borrow", "one wrapped expression", errors)
+                        malformed_form(list, "borrow", "one wrapped expression", errors)
                     }
                 }
                 Some("handle-effect") => infer_handle_effect(
@@ -9287,17 +9306,19 @@ fn infer_handle_effect(
     total_nodes: &mut usize,
 ) -> Type {
     let kids = children(list);
-    // Structural arity: (handle-effect {effect: K} <handler> <body>). Fewer
-    // than two children is malformed Deep; reject loudly ([04-TOT-3]).
-    if kids.len() < 2 {
-        errors.push(CheckError::new(
-            CheckErrorKind::MalformedForm,
-            "malformed `handle-effect`: expected a handler expression and a body \
-             (spec/03-deep-syntax.md; chelis#731 [04-TOT-3])"
-                .to_string(),
-            vec![],
-        ));
-        return Type::Error;
+    // Structural arity: spec/03-deep-syntax.md gives `handle-effect` EXACTLY
+    // two children -- `(handle-effect {effect: K} <handler> <body>)`. Any other
+    // count is malformed Deep; reject loudly ([04-TOT-3]). A THIRD child in
+    // particular carries an ill-typed subtree the checker would never visit
+    // (chelis#731 red team) -- the chelis#710 silent-exemption class -- so
+    // tolerating `>= 2` would be a fitness-honesty hole.
+    if kids.len() != 2 {
+        return malformed_form(
+            list,
+            "handle-effect",
+            "exactly two children (a handler expression and a body)",
+            errors,
+        );
     }
     let handler = &kids[0];
     let body = &kids[1];
@@ -9325,21 +9346,41 @@ fn infer_handle_effect(
         Some("random") => {
             // Open question 1 (decided 2026-07-17): the seed is semantically
             // int64, and a seed written as an integer LITERAL must carry the
-            // `i64` suffix. An unsuffixed literal is a type error naming the
-            // suffix (the reject-diagnostic half chelis#771 left to Phase 1).
-            if seed_literal_int64_status(handler) == Some(false) {
-                errors.push(CheckError::new(
-                    CheckErrorKind::TypeMismatch,
-                    "`with seed(...)` requires an int64-suffixed integer literal seed; \
-                     an unsuffixed literal defaults to int32 (spec/02-surf-syntax.md \
-                     §P10a; spec/design/checker_totality.md §C1.5)"
-                        .to_string(),
-                    vec![
-                        "Add the `i64` suffix to the seed literal, e.g. \
-                         `with seed(42i64) { ... }`"
+            // `i64` suffix (the reject-diagnostic half chelis#771 left to Phase
+            // 1). A negative int64 literal is additionally rejected: the RNG
+            // lanes cannot honor it today (chelis#731 red team F2).
+            match seed_literal_form(handler) {
+                SeedLiteralForm::Unsuffixed => {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        "`with seed(...)` requires an int64-suffixed integer literal seed; \
+                         an unsuffixed literal defaults to int32 (spec/02-surf-syntax.md \
+                         §P10a; spec/design/checker_totality.md §C1.5)"
                             .to_string(),
-                    ],
-                ));
+                        vec![
+                            "Add the `i64` suffix to the seed literal, e.g. \
+                             `with seed(42i64) { ... }`"
+                                .to_string(),
+                        ],
+                    ));
+                }
+                SeedLiteralForm::NegativeInt64 => {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        "`with seed(...)` requires a non-negative seed literal; the RNG \
+                         lanes cannot honor a negative seed today (the DAG lowering folds \
+                         it to seed 0, so distinct-stream determinism ([05-RNG-1]) would \
+                         fail for a negative seed vs 0). Negative-seed semantics are \
+                         chelis#735's territory (spec/design/checker_totality.md §C1.5)"
+                            .to_string(),
+                        vec![
+                            "Use a non-negative int64-suffixed seed, e.g. \
+                             `with seed(42i64) { ... }`"
+                                .to_string(),
+                        ],
+                    ));
+                }
+                SeedLiteralForm::NotIntLiteral | SeedLiteralForm::ValidInt64 => {}
             }
         }
         Some("resource") => {
@@ -9381,26 +9422,45 @@ fn infer_handle_effect(
     )
 }
 
-/// Classify the int64-suffix status of a `random`-effect seed handler when it
-/// is an integer LITERAL. Returns `None` when the handler is not an integer
-/// literal (a bare `Atom::Int` or a `(lit ... Int)` node): those are the
-/// shared effects gate's territory (`chelis-effects` `validate_handler_expr`),
-/// not the checker's suffix rule, so the checker stays silent on them to avoid
-/// a double diagnostic. Returns `Some(true)` for an int64-suffixed literal
-/// (`Ni64` desugars to `(lit {type: (t-prim {} int64)} N)`) and `Some(false)`
-/// for an unsuffixed one (a bare `Atom::Int`, or a `(lit {type: int32} N)`).
-fn seed_literal_int64_status(expr: &deep::Expr) -> Option<bool> {
-    match expr {
+/// Classification of a `random`-effect seed handler for the checker's
+/// seed-form rules (chelis#731 §C1.5; the negative case is the chelis#731 red
+/// team's F2 finding).
+enum SeedLiteralForm {
+    /// Not an integer literal (a computed expression, a string, ...). This is
+    /// the shared effects gate's territory (`chelis-effects`
+    /// `validate_handler_expr`); the checker stays silent to avoid a double
+    /// diagnostic.
+    NotIntLiteral,
+    /// An unsuffixed integer literal (a bare `Atom::Int`, or `(lit {type:
+    /// int32} N)`). The seed is semantically int64, so this is a type error.
+    Unsuffixed,
+    /// An int64-suffixed but NEGATIVE literal (`(lit {type: int64} -N)`). The
+    /// RNG lanes cannot honor a negative seed today (the DAG lane's
+    /// `extract_usize_value` rejects it and silently falls back to seed 0), so
+    /// distinct-stream determinism ([05-RNG-1]) would fail for `-1` vs `0`.
+    /// Rejected until chelis#735 authors negative-seed semantics.
+    NegativeInt64,
+    /// A valid non-negative int64-suffixed literal (`Ni64` desugars to
+    /// `(lit {type: (t-prim {} int64)} N)`, N >= 0). Accepted.
+    ValidInt64,
+}
+
+/// Classify a `random`-effect seed handler. Only integer literals are the
+/// checker's business (the effects gate covers literal-ness); a bare atom is
+/// unsuffixed by construction, a `(lit ...)` carries its width in the `type`
+/// metadata.
+fn seed_literal_form(expr: &deep::Expr) -> SeedLiteralForm {
+    let int_lit = match expr {
         // A bare integer atom has no suffix metadata: unsuffixed by construction.
-        deep::Expr::Atom(deep::Atom::Int(_), _) => Some(false),
+        deep::Expr::Atom(deep::Atom::Int(value), _) => Some((false, *value)),
         deep::Expr::List(list, _) if get_tag(list) == Some("lit") => {
             match list.elements.get(2) {
-                Some(deep::Expr::Atom(deep::Atom::Int(_), _)) => {
+                Some(deep::Expr::Atom(deep::Atom::Int(value), _)) => {
                     let is_int64 = get_meta(list).is_some_and(|meta| {
-                        meta.entries.iter().any(|(key, value)| {
+                        meta.entries.iter().any(|(key, meta_value)| {
                             key == "type"
                                 && matches!(
-                                    value,
+                                    meta_value,
                                     deep::Expr::List(inner, _)
                                         if get_tag(inner) == Some("t-prim")
                                             && children(inner).first().and_then(symbol_name)
@@ -9408,13 +9468,19 @@ fn seed_literal_int64_status(expr: &deep::Expr) -> Option<bool> {
                                 )
                         })
                     });
-                    Some(is_int64)
+                    Some((is_int64, *value))
                 }
                 // A `(lit ...)` wrapping a non-int value is not an int seed.
                 _ => None,
             }
         }
         _ => None,
+    };
+    match int_lit {
+        None => SeedLiteralForm::NotIntLiteral,
+        Some((false, _)) => SeedLiteralForm::Unsuffixed,
+        Some((true, value)) if value < 0 => SeedLiteralForm::NegativeInt64,
+        Some((true, _)) => SeedLiteralForm::ValidInt64,
     }
 }
 
@@ -9516,7 +9582,7 @@ fn infer_var(
             Type::Error
         }
     } else {
-        malformed_form("var", "a symbol name as its first child", errors)
+        malformed_form(list, "var", "a symbol name as its first child", errors)
     }
 }
 
@@ -9683,10 +9749,10 @@ fn infer_lit(
             deep::Expr::Atom(deep::Atom::Float(_), _) => Type::Prim(Prim::F32),
             deep::Expr::Atom(deep::Atom::Bool(_), _) => Type::Prim(Prim::Bool),
             deep::Expr::Atom(deep::Atom::Str(_), _) => Type::Prim(Prim::String),
-            _ => malformed_form("lit", "a scalar atom value", errors),
+            _ => malformed_form(list, "lit", "a scalar atom value", errors),
         }
     } else {
-        malformed_form("lit", "a value atom or a `type:` annotation", errors)
+        malformed_form(list, "lit", "a value atom or a `type:` annotation", errors)
     }
 }
 
@@ -17721,6 +17787,7 @@ fn infer_match(
     let kids = children(list);
     if kids.is_empty() {
         return malformed_form(
+            list,
             "match",
             "a scrutinee expression and at least one arm",
             errors,
@@ -17744,7 +17811,7 @@ fn infer_match(
     // scrutinee with zero arms used to reach `result_ty.unwrap_or(Type::Error)`
     // as a silent `Type::Error` (census-verified silent-through).
     if kids.len() < 2 {
-        return malformed_form("match", "at least one arm after the scrutinee", errors);
+        return malformed_form(list, "match", "at least one arm after the scrutinee", errors);
     }
 
     let mut result_ty: Option<Type> = None;
@@ -18270,7 +18337,7 @@ fn infer_pipe(
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
-        return malformed_form("pipe", "at least one stage", errors);
+        return malformed_form(list, "pipe", "at least one stage", errors);
     }
 
     let mut current_ty = infer_expr(
@@ -18507,7 +18574,7 @@ fn infer_tuple_get(
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 {
-        return malformed_form("tuple-get", "a tuple expression and an index", errors);
+        return malformed_form(list, "tuple-get", "a tuple expression and an index", errors);
     }
 
     let tuple_ty = infer_expr(
@@ -18639,6 +18706,7 @@ fn infer_record(
     let kids = children(list);
     let Some(head) = kids.first().and_then(symbol_name) else {
         return malformed_form(
+            list,
             "record",
             "a symbol constructor head as its first child",
             errors,
@@ -18871,7 +18939,7 @@ fn infer_access(
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 {
-        return malformed_form("access", "a target expression and a field name", errors);
+        return malformed_form(list, "access", "a target expression and a field name", errors);
     }
     let target_ty = infer_expr(
         &kids[0],
@@ -18884,7 +18952,7 @@ fn infer_access(
         total_nodes,
     );
     let Some(field_name) = symbol_name(&kids[1]) else {
-        return malformed_form("access", "a symbol field name as its second child", errors);
+        return malformed_form(list, "access", "a symbol field name as its second child", errors);
     };
     // Peel borrow layers: an `&T` target reads through the borrow.
     let mut resolved = subst.apply(&target_ty);
@@ -18966,7 +19034,7 @@ fn infer_record_update(
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
-        return malformed_form("record-update", "a target expression to update", errors);
+        return malformed_form(list, "record-update", "a target expression to update", errors);
     }
     let target_ty = infer_expr(
         &kids[0],
@@ -19087,7 +19155,7 @@ fn infer_cast(
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 {
-        return malformed_form("cast", "an expression and a target type", errors);
+        return malformed_form(list, "cast", "an expression and a target type", errors);
     }
 
     let expr_ty = infer_expr(
@@ -19312,7 +19380,7 @@ fn infer_grad(
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
-        return malformed_form("grad", "a function argument to differentiate", errors);
+        return malformed_form(list, "grad", "a function argument to differentiate", errors);
     }
 
     let f_ty = infer_expr(
@@ -19527,7 +19595,7 @@ fn infer_vmap(
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
-        return malformed_form("vmap", "a function argument to map", errors);
+        return malformed_form(list, "vmap", "a function argument to map", errors);
     }
 
     // Issue #216: cast-aware so a Deep-direct vmap node with a cast-
@@ -19661,12 +19729,12 @@ fn infer_def(
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 {
-        return malformed_form("def", "a name and a body expression", errors);
+        return malformed_form(list, "def", "a name and a body expression", errors);
     }
 
     let name = match symbol_name(&kids[0]) {
         Some(n) => n.to_string(),
-        None => return malformed_form("def", "a symbol name as its first child", errors),
+        None => return malformed_form(list, "def", "a symbol name as its first child", errors),
     };
 
     let body_ty = infer_expr(

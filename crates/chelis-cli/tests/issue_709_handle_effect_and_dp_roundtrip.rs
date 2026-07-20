@@ -307,6 +307,25 @@ fn unsuffixed_seed_literal_is_rejected() {
     );
 }
 
+/// Negative parity for the §C1.5 negative-seed rule (chelis#731 red team F2): a
+/// negative int64-literal seed is `.dp`-reachable (Surf's `-1i64` desugars to a
+/// non-literal `neg` the effects gate rejects), and the RNG lanes fold a
+/// negative seed to 0, so distinct-stream determinism ([05-RNG-1]) cannot hold.
+/// The checker rejects it. Positive parity is `with_seed_well_typed_body_checks_clean`
+/// (a non-negative `42i64` seed checks clean).
+#[test]
+fn negative_int64_seed_literal_is_rejected() {
+    let score = check_score(
+        "(module {} m.main (def {} out (handle-effect {effect: random} \
+         (lit {type: (t-prim {} int64)} -1) (lit {type: (t-prim {} f32)} 2.5))))\n",
+        ".dp",
+    );
+    assert!(
+        score < 1.0,
+        "a negative int64 seed literal must be rejected, got score {score}"
+    );
+}
+
 /// chelis#731 Phase 1: `with seed(42i64) { cast(5, int64) }` from an `-> f32`
 /// fn used to pass check (score 1), build, and run, printing an int64 `5` from
 /// a function declared `-> f32`. The handle-effect case returns the body's type,

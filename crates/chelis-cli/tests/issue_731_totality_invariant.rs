@@ -472,6 +472,20 @@ fn totality_holds_for_with_seed_body() {
     assert_totality("with_seed_body", &surf_to_deep(&program));
 }
 
+/// chelis#731 red team F3: the cell above uses an UNSUFFIXED seed, so its
+/// suffix diagnostic alone satisfies [04-TOT-2] (verdict Reported) even if the
+/// BODY check regressed - the cell is vacuous w.r.t. the handle-effect body
+/// fix. This sibling uses a SUFFIXED seed (`42i64`), so the seed pushes no
+/// diagnostic and the ONLY thing that can make the funnel report is the body's
+/// masked error. If the body check ever silently exempts again, this cell trips
+/// (the handle-effect node carries a silent Type::Error under an empty error
+/// vector). The original cell stays untouched per B2.1.
+#[test]
+fn totality_holds_for_with_seed_suffixed_body_locks_body_check() {
+    let program = format!("def f() -> f32 = with seed(42i64) {{ {MASKED_ERROR} }}\n");
+    assert_totality("with_seed_suffixed_body", &surf_to_deep(&program));
+}
+
 /// chelis#709 hole 2 (closed by chelis#731 Phase 1): same mechanism through
 /// `with device`; the device body is now checked.
 #[test]
