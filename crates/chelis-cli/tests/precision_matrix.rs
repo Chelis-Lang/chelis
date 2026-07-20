@@ -240,7 +240,9 @@ fn f64_add_at_mantissa_boundary_is_correctly_lossy() {
         &Row {
             name: "f64_add_2p53",
             expr: "add(cast(9007199254740992.0, f64), cast(1.0, f64))",
-            expected: "9007199254740992",
+            // chelis#732 P1 migration: float scalars render in the pinned
+            // grammar (integral floats keep one fractional digit).
+            expected: "9007199254740992.0",
             status: Status::ByDesign,
             lanes: Lanes::EvalOnly,
             note: "f64 has a 53-bit mantissa; 2^53+1 is not representable. \
@@ -262,7 +264,8 @@ fn f32_add_at_mantissa_boundary_is_correctly_lossy() {
         &Row {
             name: "f32_add_2p24",
             expr: "add(cast(16777216.0, f32), cast(1.0, f32))",
-            expected: "16777216",
+            // chelis#732 P1 migration: Debug-grammar float scalar.
+            expected: "16777216.0",
             status: Status::ByDesign,
             lanes: Lanes::EvalOnly,
             note: "f32 has a 24-bit mantissa; 2^24+1 is not representable. \
@@ -281,7 +284,8 @@ fn f32_add_below_mantissa_boundary_is_exact() {
         &Row {
             name: "f32_add_below_2p24",
             expr: "add(cast(16777215.0, f32), cast(1.0, f32))",
-            expected: "16777216",
+            // chelis#732 P1 migration: Debug-grammar float scalar.
+            expected: "16777216.0",
             status: Status::Locked,
             lanes: Lanes::EvalOnly,
             note: "2^24-1 + 1 = 2^24 is exactly representable in f32.",
