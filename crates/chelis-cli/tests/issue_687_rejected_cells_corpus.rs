@@ -173,7 +173,10 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &[&str])] = &[
          out = run(to_tensor([cast(1, int32), cast(2, int32), cast(3, int32), \
          cast(4, int32)]))\n",
         "c",
-        &["unsupported:", "(lowering)"],
+        // The stage depends on routing (the DAG entry raises at lowering;
+        // the host-fallback path refuses at emission) - pin the brand and
+        // the op, not the stage.
+        &["unsupported:", "cos"],
     ),
     (
         "c_nonliteral_window",

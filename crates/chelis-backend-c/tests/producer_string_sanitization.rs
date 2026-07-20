@@ -305,7 +305,8 @@ fn c_codegen_with_options_inherits_sanitization() {
             static_entry: true,
             ..Default::default()
         },
-    ).unwrap();
+    )
+    .unwrap();
     let src = &result.c_source;
 
     assert!(

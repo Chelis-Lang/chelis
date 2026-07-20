@@ -456,7 +456,7 @@ impl HipEmitter {
                 self.emit_load_device(node.id.0, input_idx, &node.output_type);
             } else {
                 self.emit_span_comments(node);
-                self.emit_node(node, dag);
+                self.emit_node(node, dag)?;
             }
         }
 
@@ -841,7 +841,11 @@ impl HipEmitter {
         Ok(vec![(name, source)])
     }
 
-    fn extra_reduction_kernel_sources(&self, node: &DagNode, dag: &Dag) -> Result<Vec<(String, String)>, Unsupported> {
+    fn extra_reduction_kernel_sources(
+        &self,
+        node: &DagNode,
+        dag: &Dag,
+    ) -> Result<Vec<(String, String)>, Unsupported> {
         // Kernel sources for the four reductions previously deferred to
         // the C backend: Min / Prod / Argmax / Argmin. Argmax/Argmin emit
         // an i64 result tensor; Min/Prod emit an in-precision result.
@@ -889,8 +893,9 @@ impl HipEmitter {
         // the kernel specialization. For unary ops and reductions the
         // f32/f64 split is owned by `ElemKind::suffix()`.
         let operand_prec = || dag.get(node.inputs[0]).unwrap().output_type.precision;
-        let kind_for_node =
-            |n: &DagNode| -> Result<kernels::ElemKind, Unsupported> { Self::elem_kind(&n.output_type) };
+        let kind_for_node = |n: &DagNode| -> Result<kernels::ElemKind, Unsupported> {
+            Self::elem_kind(&n.output_type)
+        };
         Ok(match op {
             // WS-A4: Add / Mul use the dtype-suffixed convention so f32
             // stays unsuffixed (`kernel_add`) and non-f32 dtypes pick
@@ -1141,7 +1146,8 @@ impl HipEmitter {
         // i8/i16 for narrow-int Add/Mul), so each of those arms
         // resolves the right template inline rather than touching the
         // float-only `elem_kind` shorthand.
-        let elem_for_unary = || -> Result<kernels::ElemKind, Unsupported> { Self::elem_kind(&node.output_type) };
+        let elem_for_unary =
+            || -> Result<kernels::ElemKind, Unsupported> { Self::elem_kind(&node.output_type) };
         let operand_prec = || dag.get(node.inputs[0]).unwrap().output_type.precision;
         Ok(match op {
             // WS-A4: Add / Mul dispatch on operand precision so each
@@ -1450,9 +1456,10 @@ impl HipEmitter {
         // Resolve the precision-suffixed kernel name once, so the launch
         // shims agree with the kernel-source emitter on the symbol the
         // host references (e.g. `kernel_add_f32` vs `kernel_add_f64`).
-        let resolved_kernel_name = || -> String {
-            self.kernel_name_for_op(&node.op, node, dag)?
-                .unwrap_or_else(|| panic!("op {:?} has no kernel name", node.op))
+        let resolved_kernel_name = || -> Result<String, Unsupported> {
+            Ok(self
+                .kernel_name_for_op(&node.op, node, dag)?
+                .unwrap_or_else(|| panic!("op {:?} has no kernel name", node.op)))
         };
         match &node.op {
             RiscOp::Const { value } => self.emit_const(id, *value, &node.output_type)?,
@@ -1460,19 +1467,19 @@ impl HipEmitter {
             RiscOp::Load { .. } => unreachable!("handled in emit_dag"),
             RiscOp::Add => self.emit_binary_launch(
                 id,
-                &resolved_kernel_name(),
+                &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
             ),
             RiscOp::Mul => self.emit_binary_launch(
                 id,
-                &resolved_kernel_name(),
+                &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
             ),
             RiscOp::Div => self.emit_binary_launch(
                 id,
-                &resolved_kernel_name(),
+                &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
             ),
@@ -1480,70 +1487,112 @@ impl HipEmitter {
             // any other binary elementwise kernel.
             RiscOp::FloorDiv | RiscOp::TruncDiv => self.emit_binary_launch(
                 id,
-                &resolved_kernel_name(),
+                &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
             ),
             RiscOp::MaxElem => self.emit_binary_launch(
                 id,
-                &resolved_kernel_name(),
+                &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
             ),
             RiscOp::CmpLt => self.emit_binary_launch(
                 id,
-                &resolved_kernel_name(),
+                &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
             ),
-            RiscOp::Neg => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Recip => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Exp => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Log => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Sin => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Sqrt => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Cos => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Tan => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Atan => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Abs => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Floor => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Ceil => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Round => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
+            RiscOp::Neg => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Recip => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Exp => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Log => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Sin => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Sqrt => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Cos => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Tan => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Atan => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Abs => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Floor => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Ceil => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Round => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
             RiscOp::UniformLike { low, high, seed } => {
                 self.emit_uniform_like_launch(id, *low, *high, *seed, &node.output_type)?
             }
             RiscOp::Dropout { .. } => {
                 unreachable!("dropout should be rejected before HIP code generation")
             }
-            RiscOp::Copy => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
+            RiscOp::Copy => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
             RiscOp::Drop => {}
             // WS-A4: bind `accumulator` instead of `..` and thread it
             // through to `emit_reduce_launch` so the launch-side kernel
@@ -1642,7 +1691,7 @@ impl HipEmitter {
                     id,
                     &hip_pairs_to_usize(padding),
                     *fill,
-                    &resolved_kernel_name(),
+                    &resolved_kernel_name()?,
                     &node.inputs,
                     &node.output_type,
                     dag,
@@ -1652,7 +1701,7 @@ impl HipEmitter {
                 self.emit_shrink_launch(
                     id,
                     &hip_pairs_to_usize(bounds),
-                    &resolved_kernel_name(),
+                    &resolved_kernel_name()?,
                     &node.inputs,
                     &node.output_type,
                     dag,
@@ -1666,12 +1715,18 @@ impl HipEmitter {
                     &node.output_type,
                 );
             }
-            RiscOp::Realize => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Cast { .. } => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
+            RiscOp::Realize => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Cast { .. } => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
             RiscOp::Store { name } => {
                 self.emit_store(id, name.as_str(), &node.inputs, &node.output_type)
             }
@@ -1874,7 +1929,12 @@ impl HipEmitter {
 
     /// Emit a multi-element constant tensor on HIP. Uploads data
     /// element-by-element via fill calls (same kernel as Const).
-    fn emit_const_tensor(&mut self, id: usize, data: &[f64], ty: &TensorType) -> Result<(), Unsupported> {
+    fn emit_const_tensor(
+        &mut self,
+        id: usize,
+        data: &[f64],
+        ty: &TensorType,
+    ) -> Result<(), Unsupported> {
         self.emit_slot_wrapper(id, ty);
         let elem = Self::elem_kind(ty)?;
         self.line("{");
@@ -3830,7 +3890,7 @@ mod tests {
         );
         dag.add_root(out);
 
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_sparse");
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_sparse").unwrap();
 
         assert!(hip.contains("kernel_scatter_add_i64"));
         assert!(hip.contains("const long long *indices"));
@@ -3845,7 +3905,7 @@ mod tests {
     #[test]
     fn fused_reusable_input_emits_hip_in_place_restrict_shape() {
         let dag = fused_mul_reusable_input_dag();
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn");
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
 
         assert!(hip.contains("extern \\\"C\\\" __global__ void kernel_fused_2("));
         // Aliased external (ext0 ↔ x) must NOT carry __restrict__.
@@ -3874,7 +3934,7 @@ mod tests {
         // No set_reusable_input call — the in-place gate must reject.
         dag.add_root(fused);
 
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn");
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
 
         assert!(hip.contains("extern \\\"C\\\" __global__ void kernel_fused_2("));
         assert!(hip.contains("const float *ext0"));
@@ -3899,7 +3959,7 @@ mod tests {
         let mut dag = Dag::new();
         let c = dag.add_node(RiscOp::Const { value }, vec![], vec_f32(4), None);
         dag.add_root(c);
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn");
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
 
         let want_bits = (value as f32).to_bits();
         assert_ne!(
@@ -3928,7 +3988,7 @@ mod tests {
         let mut dag = Dag::new();
         let c = dag.add_node(RiscOp::Const { value }, vec![], vec_f64(4), None);
         dag.add_root(c);
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn");
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
 
         let want_bits = value.to_bits();
         let needle = format!("chelis_f64_from_bits(0x{want_bits:016x}uLL)");
@@ -3954,7 +4014,7 @@ mod tests {
             None,
         );
         dag.add_root(u);
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn");
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
 
         let low_bits = (low as f32).to_bits();
         let high_bits = (high as f32).to_bits();

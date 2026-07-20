@@ -866,6 +866,7 @@ fn bf16_min_reduce_is_structurally_unsupported_today() {
     // chelis#730 Phase 1: the former f32-hardcoded panic is a section C2
     // diagnostic through the Result channel.
     let err = codegen(&dag, "bf16_min_reduce_reject_probe")
+        .map(|_| ())
         .expect_err("a bf16 min_reduce must be rejected, not emitted");
     let rendered = err.to_string();
     assert!(
@@ -892,6 +893,7 @@ fn f16_min_reduce_is_structurally_unsupported_today() {
     // chelis#730 Phase 1: the former f32-hardcoded panic is a section C2
     // diagnostic through the Result channel.
     let err = codegen(&dag, "f16_min_reduce_reject_probe")
+        .map(|_| ())
         .expect_err("a f16 min_reduce must be rejected, not emitted");
     let rendered = err.to_string();
     assert!(
@@ -918,6 +920,7 @@ fn bf16_prod_reduce_is_structurally_unsupported_today() {
     // chelis#730 Phase 1: the former f32-hardcoded panic is a section C2
     // diagnostic through the Result channel.
     let err = codegen(&dag, "bf16_prod_reduce_reject_probe")
+        .map(|_| ())
         .expect_err("a bf16 prod_reduce must be rejected, not emitted");
     let rendered = err.to_string();
     assert!(
@@ -944,6 +947,7 @@ fn f16_prod_reduce_is_structurally_unsupported_today() {
     // chelis#730 Phase 1: the former f32-hardcoded panic is a section C2
     // diagnostic through the Result channel.
     let err = codegen(&dag, "f16_prod_reduce_reject_probe")
+        .map(|_| ())
         .expect_err("a f16 prod_reduce must be rejected, not emitted");
     let rendered = err.to_string();
     assert!(

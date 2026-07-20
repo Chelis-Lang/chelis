@@ -5,8 +5,8 @@
 //! Two kinds of test live here, per the census verification contract:
 //!
 //! - **Evidence locks** (green today): assert the CURRENT substituting
-//!   behavior of a live row, the `metal_int64_abs_receives_the_pre_planted_
-//!   const_zero` pattern. Each is replaced by the row's conversion PR at
+//!   behavior of a live row, the `metal_int64_abs_is_rejected_not_
+//!   pre_planted_zero` pattern (its Phase 1 rejection form). Each is replaced by the row's conversion PR at
 //!   Phase 1 - the lock failing later IS the signal that the row moved.
 //! - **Canaries** (green today): drive the guard that keeps a dead row
 //!   dead (section C1.4's prove-half). If a canary ever observes the

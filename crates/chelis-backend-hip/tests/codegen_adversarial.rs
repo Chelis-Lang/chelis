@@ -547,7 +547,9 @@ fn rt15_matmul_specialization_respects_contiguity() {
         None,
     );
     contiguous.add_root(sum);
-    let contiguous_src = codegen_hip(&contiguous, "test_matmul_contig").c_source;
+    let contiguous_src = codegen_hip(&contiguous, "test_matmul_contig")
+        .unwrap()
+        .c_source;
     assert!(
         contiguous_src.contains("chelis_hipblas_sgemm_row_major"),
         "contiguous matmul should specialize to hipBLAS"
@@ -591,7 +593,9 @@ fn rt15_matmul_specialization_respects_contiguity() {
         None,
     );
     fallback.add_root(sum);
-    let fallback_src = codegen_hip(&fallback, "test_matmul_fallback").c_source;
+    let fallback_src = codegen_hip(&fallback, "test_matmul_fallback")
+        .unwrap()
+        .c_source;
     assert!(
         !fallback_src.contains("chelis_hipblas_sgemm_row_major"),
         "non-contiguous matmul must stay on the generic reduction path"

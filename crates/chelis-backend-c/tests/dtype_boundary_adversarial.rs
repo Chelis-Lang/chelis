@@ -215,9 +215,12 @@ fn c_backend_blas_matmul_f64_does_not_silently_lower_to_sgemm() {
     let emit_result = std::panic::catch_unwind(|| CEmitter::emit_dag(&dag, "test_fn"));
     match emit_result {
         Err(_panic) => {
-            // Backend rejected — acceptable behavior. Pass.
+            // Backend rejected via panic — acceptable behavior. Pass.
         }
-        Ok(src) => {
+        // chelis#730 Phase 1: the emitter can now also reject through the
+        // Result channel — equally acceptable.
+        Ok(Err(_unsupported)) => {}
+        Ok(Ok(src)) => {
             // Backend emitted something. Check whether it's silent
             // sgemm-on-f64-data. The substring `cblas_sgemm` indicates
             // single-precision GEMM. Source data is `double*`; calling

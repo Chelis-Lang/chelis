@@ -99,8 +99,11 @@ pub struct Unsupported {
     pub context: String,
     /// Which stage refused.
     pub stage: Stage,
-    /// Source span when one exists (lowering/codegen thread it).
-    pub span: Option<SpanRef>,
+    /// Source span when one exists (lowering/codegen thread it). Boxed
+    /// so the Err variant stays small on the hot Result-typed emission
+    /// paths (clippy::result_large_err); the section C2 shape is
+    /// unchanged - the box is a representation detail.
+    pub span: Option<Box<SpanRef>>,
     /// The supported alternative, when one exists. Not optional prose:
     /// sites without an alternative say why (deferred per a cited spec
     /// atom, or the tracking issue for the unbuilt support).
@@ -126,7 +129,7 @@ impl Unsupported {
     /// Attach a span reference.
     #[must_use]
     pub fn with_span(mut self, span: SpanRef) -> Self {
-        self.span = Some(span);
+        self.span = Some(Box::new(span));
         self
     }
 }
@@ -179,13 +182,9 @@ mod tests {
             UnsupportedKind::HostType("f16".into()),
         ];
         for kind in kinds {
-            let rendered = Unsupported::new(
-                kind.clone(),
-                "test context",
-                Stage::Lowering,
-                "hint text",
-            )
-            .to_string();
+            let rendered =
+                Unsupported::new(kind.clone(), "test context", Stage::Lowering, "hint text")
+                    .to_string();
             assert!(
                 rendered.starts_with("unsupported: "),
                 "kind {kind:?} must render with the literal brand; got {rendered}"

@@ -3554,6 +3554,50 @@ fn lower_host_expr_kind(
             lower_access_host_expr(list, program, scope, tensor_helpers)
         }
         Expr::List(list, _) if tag(list) == Some("cast") => {
+            // chelis#730 Phase 1 (census row 13's host-lane half,
+            // chelis#744): a cast target naming an unrecognized primitive
+            // raises the same fatal branded diagnostic as the IR-lane
+            // `lower_cast` - the build lane previously typed it Unknown,
+            // fell back to the inferred operand type, and shipped a
+            // working binary while eval rejected the same file. Only the
+            // `(t-prim {} name)` and bare-symbol spellings are validated;
+            // `t-var` targets (precision-polymorphic casts) stay legal.
+            let bogus_target_name = match children(list).get(1) {
+                Some(Expr::List(tlist, _))
+                    if tag(tlist) == Some("t-prim")
+                        && children(tlist)
+                            .first()
+                            .and_then(symbol_name)
+                            .is_some_and(|name| {
+                                chelis_types::types::Prim::parse_name(name).is_none()
+                            }) =>
+                {
+                    children(tlist).first().and_then(symbol_name)
+                }
+                Some(Expr::Atom(Atom::Symbol(name), _))
+                    if chelis_types::types::Prim::parse_name(name).is_none() =>
+                {
+                    Some(name.as_str())
+                }
+                _ => None,
+            };
+            if let Some(bogus) = bogus_target_name {
+                let unsupported = chelis_types::unsupported::Unsupported::new(
+                    chelis_types::unsupported::UnsupportedKind::Dtype(bogus.to_string()),
+                    "a `cast` target in host lowering",
+                    chelis_types::unsupported::Stage::Lowering,
+                    "the cast target must name an active primitive type \
+                     (spec/04-type-system.md section 1.1); a bogus target previously \
+                     lowered as the operand type silently in the build lane \
+                     (chelis#744, chelis#730 census row 13)",
+                );
+                crate::lower::raise_fatal_lowering_diagnostic(crate::lower::LowerDiagnostic {
+                    message: unsupported.to_string(),
+                    span: None,
+                    span_id: expr.span_id().map(ToOwned::to_owned),
+                    fatal: true,
+                });
+            }
             let value = lower_host_expr(
                 children(list).first().unwrap_or(expr),
                 program,
@@ -3625,13 +3669,11 @@ fn lower_host_expr_kind(
             // diagnostic as the IR-lane arm.
             if effect != "random" && effect != "resource" {
                 let unsupported = chelis_types::unsupported::Unsupported::new(
-                    chelis_types::unsupported::UnsupportedKind::EffectKind(
-                        if effect.is_empty() {
-                            "<missing>".to_string()
-                        } else {
-                            effect.to_string()
-                        },
-                    ),
+                    chelis_types::unsupported::UnsupportedKind::EffectKind(if effect.is_empty() {
+                        "<missing>".to_string()
+                    } else {
+                        effect.to_string()
+                    }),
                     "a `handle-effect` form in host lowering",
                     chelis_types::unsupported::Stage::Lowering,
                     "known effect kinds are `random` and `resource` \

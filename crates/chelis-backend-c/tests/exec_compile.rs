@@ -260,7 +260,8 @@ fn exec_math_none_exp_kernel_correct_output() {
             math_lib_override: Some(MathLib::None),
             ..Default::default()
         },
-    ).unwrap();
+    )
+    .unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -341,7 +342,8 @@ fn exec_sleef_kernel_scalar_fallback_correct() {
             math_lib_override: Some(MathLib::Sleef),
             ..Default::default()
         },
-    ).unwrap();
+    )
+    .unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -745,7 +747,8 @@ fn exec_div_ieee_corner_cases() {
             math_lib_override: Some(MathLib::None),
             ..Default::default()
         },
-    ).unwrap();
+    )
+    .unwrap();
     let src = &result.c_source;
 
     let harness = format!(
@@ -797,7 +800,8 @@ fn exec_recip_ieee_corner_cases() {
             math_lib_override: Some(MathLib::None),
             ..Default::default()
         },
-    ).unwrap();
+    )
+    .unwrap();
     let src = &result.c_source;
 
     let harness = format!(
@@ -891,7 +895,8 @@ fn run_int_div_op_exec(
             math_lib_override: Some(MathLib::None),
             ..Default::default()
         },
-    ).unwrap();
+    )
+    .unwrap();
     let src = &result.c_source;
 
     let [e0, e1, e2, e3] = expected;
@@ -1142,7 +1147,8 @@ fn exec_floor_div_int_zero_divisor_traps() {
             math_lib_override: Some(MathLib::None),
             ..Default::default()
         },
-    ).unwrap();
+    )
+    .unwrap();
     let src = &result.c_source;
     // Emit-shape: floor_div must wrap the integer divisor in the portable guard.
     assert!(
@@ -1305,7 +1311,8 @@ fn exec_zero_size_tensor_does_not_crash() {
             math_lib_override: Some(MathLib::Sleef),
             ..Default::default()
         },
-    ).unwrap();
+    )
+    .unwrap();
     let src = &result.c_source;
 
     let harness = format!(
@@ -1892,7 +1899,8 @@ fn ws_a1_exec_f64_matmul_dispatches_dgemm_and_matches_reference() {
             use_blas: true,
             ..CodegenOptions::default()
         },
-    ).unwrap();
+    )
+    .unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -2734,7 +2742,8 @@ fn run_cmplt_parity(
     assert_eq!(expected.len(), n);
 
     let dag = fuse(&dag);
-    let result = codegen_with_options(&dag, &format!("cmplt_{tag}"), CodegenOptions::default()).unwrap();
+    let result =
+        codegen_with_options(&dag, &format!("cmplt_{tag}"), CodegenOptions::default()).unwrap();
     let src = &result.c_source;
 
     // Format the operand initializers and the expected bool vector.

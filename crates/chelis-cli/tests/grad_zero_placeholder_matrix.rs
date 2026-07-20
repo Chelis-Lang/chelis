@@ -198,21 +198,35 @@ fn grad_through_int_abs_fails_loudly_not_zero() {
 // CONTROLS (pass today; they isolate the trigger)
 // ===========================================================================
 
-/// The forward pass WITHOUT grad is correct in eval: the placeholder fires
-/// only once grad routes the function through lowering.
+/// The forward COMPUTATION without grad is correct in eval - re-authored
+/// by chelis#730 Phase 1 (B2.5 adjudication). The original control used
+/// the def-rooted program, whose eval output ALSO carried a fabricated
+/// `g = tensor([0.0, ...])` trailing labeled root (the eval pipeline
+/// lowers every tensor-signature def as a DAG root; the chelis#699
+/// placeholder zeroed it silently). Two honest halves now:
+/// the inline host-runtime forward computes 300.0, and the def-rooted
+/// program fails LOUDLY with the branded diagnostic instead of printing
+/// a correct first line above a fabricated zero root.
 #[test]
 fn forward_pass_without_grad_is_correct_in_eval() {
-    let program = "def g(x: tensor[4, f32]) -> tensor[f32] = {\n\
+    let inline = "out = print(sum(mul(to_tensor([0.1, 0.2, 0.3, 0.4]), \
+                  cast(abs(cast(to_tensor([-100.0, 200.0, -300.0, 400.0]), int64)), \
+                  f32)), 0))\n";
+    let line = eval_first_line(inline).expect("the host-runtime forward must evaluate");
+    // chelis#732 P1 ([05-OBS-4]): the rank-0 result renders bare.
+    assert_eq!(line, "300.0", "sum(x * abs(w)) must be 300.0; got: {line}");
+
+    let def_rooted = "def g(x: tensor[4, f32]) -> tensor[f32] = {\n\
            w = cast(abs(to_tensor([cast(-100, int64), cast(200, int64), \
          cast(-300, int64), cast(400, int64)])), f32)\n\
            sum(mul(copy(x), w), 0)\n\
          }\n\
          out = print(g(to_tensor([0.1, 0.2, 0.3, 0.4])))\n";
-    let line = eval_first_line(program).expect("eval should run");
-    // chelis#732 P1 ([05-OBS-4]): the rank-0 result renders bare.
-    assert_eq!(
-        line, "300.0",
-        "0.1*100 + 0.2*200 + 0.3*300 + 0.4*400 = 300; got: {line}"
+    let err = eval_first_line(def_rooted)
+        .expect_err("the def-rooted program must fail loudly, never print a fabricated root");
+    assert!(
+        err.contains("unsupported:"),
+        "the failure must carry the branded diagnostic; got: {err}"
     );
 }
 

@@ -175,7 +175,10 @@ pub struct Unsupported {
 ```
 
 Implemented as `chelis_types::unsupported::Unsupported` (per open
-question 1: one shared type at the workspace bottom).
+question 1: one shared type at the workspace bottom; the span field is
+boxed in the implementation so the Err variant stays small on the
+Result-typed emission paths - a representation detail, not a shape
+change).
 
 **Message format (frozen):**
 `unsupported: <what> on <context> (<stage>); <hint>` - branded with the

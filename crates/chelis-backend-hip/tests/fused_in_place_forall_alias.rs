@@ -356,35 +356,34 @@ fn fan_in_same_binder_different_known_size_does_not_alias() {
 }
 
 /// Negative — different precision: Int32 vs F32 is never
-/// binder-equivalent even with matching dim shapes. dtype is part of
-/// the alias proof. (F64 is not exercised because the HIP backend
-/// rejects F64 entirely at codegen entry; Int32 vs F32 lives in the
-/// HIP-supported subset.)
+/// binder-equivalent even with matching dim shapes; dtype is part of
+/// the alias proof.
+///
+/// Re-authored by chelis#730 Phase 1 (census row 5, chelis#689): the
+/// former `elem_kind` F32 wildcard let this mixed-precision fused
+/// fan-in EMIT (reading the int32 operand through the f32 kernel - the
+/// corruption class chelis#689 runtime-confirmed), and the old
+/// assertion only checked the alias line was absent in that corrupt
+/// emission. There is no typed mixed-precision fused kernel, so HIP
+/// codegen now rejects the DAG loudly - which also guarantees no alias
+/// wrapper is emitted. The dtype half of the alias proof is thereby
+/// subsumed by the rejection; the same-precision alias-gate rows above
+/// keep the gate's live coverage.
 #[test]
 fn fan_in_different_precision_does_not_alias() {
-    let (dag, fused, a) = fan_in_dag(
+    let (dag, _fused, _a) = fan_in_dag(
         vec_lit_i32(4),
         vec_lit_f32(4),
         vec_lit_f32(4),
         vec_lit_f32(4),
     );
-    let result = codegen_hip(&dag, "test_fan_in_different_precision").unwrap();
-    let hip = &result.c_source;
-    let fused_id = fused.0;
-    let a_id = a.0;
-
-    // The FusedElem output is F32 (CHELIS_F32). If the gate misfired
-    // the wrapper would emit the F32 alias view onto an Int32 input —
-    // assert that line is absent.
-    let forbidden_alias = expected_in_place_view_alias(fused_id, a_id, "4");
+    let err = codegen_hip(&dag, "test_fan_in_different_precision")
+        .map(|_| ())
+        .expect_err("a mixed int32/f32 fused fan-in has no typed HIP kernel");
+    let rendered = err.to_string();
     assert!(
-        !hip.contains(&forbidden_alias),
-        "different-precision fan-in must NOT alias d_t{fused_id} onto d_t{a_id}->data; got:\n{hip}"
-    );
-    let forbidden_guard = expected_contiguity_guard(a_id);
-    assert!(
-        !hip.contains(&forbidden_guard),
-        "different-precision must NOT emit contiguity guard; got:\n{hip}"
+        rendered.starts_with("unsupported:") && rendered.contains("int32"),
+        "the rejection must be branded and name the dtype; got: {rendered}"
     );
 }
 

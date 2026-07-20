@@ -306,7 +306,7 @@ fn s3_floor_trunc_div_emit_typed_int_kernels() {
     let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i32(4), None);
     let c = dag.add_node(RiscOp::TruncDiv, vec![a, b], vec_i32(4), None);
     dag.add_root(c);
-    let trunc_src = codegen_hip(&dag, "test_trunc_div").c_source;
+    let trunc_src = codegen_hip(&dag, "test_trunc_div").unwrap().c_source;
     assert!(
         trunc_src.contains("kernel_trunc_div_i32"),
         "trunc_div(int32) must emit a dtype-suffixed kernel; got:\n{trunc_src}"
@@ -319,7 +319,7 @@ fn s3_floor_trunc_div_emit_typed_int_kernels() {
     let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i32(4), None);
     let c = dag.add_node(RiscOp::FloorDiv, vec![a, b], vec_i32(4), None);
     dag.add_root(c);
-    let floor_src = codegen_hip(&dag, "test_floor_div").c_source;
+    let floor_src = codegen_hip(&dag, "test_floor_div").unwrap().c_source;
     assert!(
         floor_src.contains("kernel_floor_div_i32") && floor_src.contains("q -= 1"),
         "floor_div(int32) must emit a sign-corrected kernel; got:\n{floor_src}"
@@ -331,7 +331,7 @@ fn s3_floor_trunc_div_emit_typed_int_kernels() {
     let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(4), None);
     let c = dag.add_node(RiscOp::FloorDiv, vec![a, b], vec_f32(4), None);
     dag.add_root(c);
-    let floor_f_src = codegen_hip(&dag, "test_floor_div_f").c_source;
+    let floor_f_src = codegen_hip(&dag, "test_floor_div_f").unwrap().c_source;
     assert!(
         floor_f_src.contains("floorf("),
         "floor_div(f32) must emit floorf(a / b); got:\n{floor_f_src}"

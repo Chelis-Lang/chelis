@@ -251,10 +251,7 @@ fn result_alias_set(
     }
 }
 
-pub fn emit_host_program(
-    program: &HostProgram,
-    program_name: &str,
-) -> Result<String, Unsupported> {
+pub fn emit_host_program(program: &HostProgram, program_name: &str) -> Result<String, Unsupported> {
     // Emit helpers and functions into a body buffer first so we can detect which
     // runtime headers they transitively require (e.g. `chelis_math.h` on macOS
     // when a helper uses the vForce vvexpf/vvlogf path).  The preamble is then
@@ -1157,7 +1154,12 @@ impl<'a> HostEmitter<'a> {
         }
     }
 
-    fn emit_expr_to_var(&mut self, expr: &HostExpr, target: &str, ty: &HostType) -> Result<(), Unsupported> {
+    fn emit_expr_to_var(
+        &mut self,
+        expr: &HostExpr,
+        target: &str,
+        ty: &HostType,
+    ) -> Result<(), Unsupported> {
         self.lines
             .push(format!("{}{};", self.indent, c_decl(ty, target)));
         self.assign_expr(target, expr, ty)?;
@@ -1202,7 +1204,12 @@ impl<'a> HostEmitter<'a> {
         }
     }
 
-    fn assign_expr(&mut self, target: &str, expr: &HostExpr, ty: &HostType) -> Result<(), Unsupported> {
+    fn assign_expr(
+        &mut self,
+        target: &str,
+        expr: &HostExpr,
+        ty: &HostType,
+    ) -> Result<(), Unsupported> {
         self.emit_span_comments(expr);
         match &expr.kind {
             HostExprKind::Int(value) => self
@@ -1550,7 +1557,13 @@ impl<'a> HostEmitter<'a> {
         Ok(())
     }
 
-    fn assign_builtin(&mut self, target: &str, name: &str, args: &[HostExpr], ty: &HostType) -> Result<(), Unsupported> {
+    fn assign_builtin(
+        &mut self,
+        target: &str,
+        name: &str,
+        args: &[HostExpr],
+        ty: &HostType,
+    ) -> Result<(), Unsupported> {
         let mut arg_vars: Vec<(String, HostType)> = Vec::with_capacity(args.len());
         for (index, arg) in args.iter().enumerate() {
             let arg_name = self.next_temp(&format!("arg{index}"));
@@ -2161,8 +2174,28 @@ impl<'a> HostEmitter<'a> {
         // pointer-boxing surfaces (rank/precision-poly defs, `void*`
         // calling convention) that never reach these scalar operator arms.
         const SCALAR_NUMERIC_BUILTINS: &[&str] = &[
-            "add", "sub", "mul", "div", "floor_div", "trunc_div", "mod", "neg", "cmplt", "lt",
-            "gt", "gte", "lte", "sqrt", "exp", "log", "sin", "cos", "tanh", "pow", "abs", "min",
+            "add",
+            "sub",
+            "mul",
+            "div",
+            "floor_div",
+            "trunc_div",
+            "mod",
+            "neg",
+            "cmplt",
+            "lt",
+            "gt",
+            "gte",
+            "lte",
+            "sqrt",
+            "exp",
+            "log",
+            "sin",
+            "cos",
+            "tanh",
+            "pow",
+            "abs",
+            "min",
             "max",
         ];
         if SCALAR_NUMERIC_BUILTINS.contains(&name)
@@ -2180,6 +2213,30 @@ impl<'a> HostEmitter<'a> {
                  scalars or the tensor forms",
             ));
         }
+        // A TENSOR operand reaching these scalar operator arms means the
+        // op has no tensor emission arm (the tensor block above returned
+        // early for every op that has one) - emitting `cos(ptr)` or
+        // `a + b` over `chelis_tensor*` is garbage C that fails (or
+        // corrupts) at the user's compiler. This is the loud terminal the
+        // section C3 laundering rule requires for the recoverable
+        // `lower_transcendental` raise: the speculative-probe fallback
+        // lands here and errs instead of emitting.
+        if SCALAR_NUMERIC_BUILTINS.contains(&name)
+            && arg_vars
+                .iter()
+                .any(|(_, arg_ty)| matches!(arg_ty, HostType::Tensor(_)))
+        {
+            return Err(Unsupported::new(
+                UnsupportedKind::Builtin(name.to_string()),
+                "tensor operands in `chelis build` host emission (no tensor \
+                 emission arm for this op)"
+                    .to_string(),
+                Stage::Codegen("c"),
+                "this op has no compiled tensor arm yet; the eval lane may support \
+                 it (chelis#703 class; the DAG lane owns the supported tensor ops)",
+            ));
+        }
+        
         let expr = match name {
             "add" => format!("{} + {}", arg_vars[0].0, arg_vars[1].0),
             "sub" => format!("{} - {}", arg_vars[0].0, arg_vars[1].0),
@@ -2273,7 +2330,7 @@ impl<'a> HostEmitter<'a> {
                 arg_vars[0].0, arg_vars[1].0
             ),
             "string_len" => format!("chelis_string_len({})", arg_vars[0].0),
-            "to_string" => match arg_vars[0].1 {
+            "to_string" => match &arg_vars[0].1 {
                 HostType::Int64 => format!("chelis_string_from_int64({})", arg_vars[0].0),
                 // f32 promotes to double for formatting (lossless); there is
                 // no separate f32 formatter in the runtime.
@@ -2741,64 +2798,62 @@ impl<'a> HostEmitter<'a> {
         for (index, arg) in args.iter().enumerate() {
             let inferred_ty = host_type(arg);
             let entry = if matches!(inferred_ty, HostType::Tensor(_)) {
-                    let arg_name = self.next_temp(&format!("tensor_arg{index}"));
-                    self.emit_expr_to_var(arg, &arg_name, &inferred_ty)?;
-                    (arg_name, None)
-                } else {
-                    let value_name = self.next_temp(&format!("tensor_scalar{index}"));
-                    self.emit_expr_to_var(arg, &value_name, &inferred_ty)?;
-                    let tensor_name = self.next_temp(&format!("tensor_arg{index}"));
-                    self.lines
-                        .push(format!("{}chelis_tensor* {};", self.indent, tensor_name));
-                    // Scalar inputs to tensor helpers use true rank-0 tensors so
-                    // tensor[f32] keeps shape=[] across generated host/DAG calls.
-                    //
-                    // W2 PR 3 (CRuntime-F32Coupling): every arm casts
-                    // `->data` through a typed pointer before writing
-                    // the scalar.  The legacy bool / f32 arms wrote
-                    // through the public `float *data` declaration in
-                    // the C runtime header; mirror the int64 arm's
-                    // typed-cast pattern for the bool and f32 cases
-                    // so the bug class closes uniformly.  Bool
-                    // storage today is 4-byte f32-encoded (per
-                    // `docs/investigations/c_runtime_dtype_accessors_diagnosis.md`),
-                    // so the bool arm casts to `(float*)` and writes
-                    // the 1.0f / 0.0f bit pattern.
-                    let (dtype, store) = match inferred_ty {
-                        HostType::Int64 => (
-                            "CHELIS_I64",
-                            format!("((int64_t*){tensor_name}->data)[0] = {value_name};"),
-                        ),
-                        HostType::Bool => (
-                            "CHELIS_BOOL",
-                            format!(
-                                "((float*){tensor_name}->data)[0] = {value_name} ? 1.0f : 0.0f;"
-                            ),
-                        ),
-                        // #381: an f64 captured scalar (e.g. `cast(1.1, f64)`)
-                        // fed to a tensor helper via `scalar_to_tensor` must be
-                        // packed into a `CHELIS_F64` rank-0 tensor and written
-                        // through a `double*`. The pre-fix catch-all packed it
-                        // as `CHELIS_F32` and stored only the low 4 bytes; the
-                        // f64 kernel then read 8 bytes (the high 4 garbage),
-                        // collapsing the value to ~0 and silently disagreeing
-                        // with the evaluator. Float32 still uses the f32 arm.
-                        HostType::Float64 => (
-                            "CHELIS_F64",
-                            format!("((double*){tensor_name}->data)[0] = (double)({value_name});"),
-                        ),
-                        _ => (
-                            "CHELIS_F32",
-                            format!("((float*){tensor_name}->data)[0] = (float)({value_name});"),
-                        ),
-                    };
-                    self.lines.push(format!(
-                        "{}{tensor_name} = chelis_alloc(0, NULL, {dtype});",
-                        self.indent
-                    ));
-                    self.lines.push(format!("{}{store}", self.indent));
-                    (tensor_name.clone(), Some(tensor_name))
+                let arg_name = self.next_temp(&format!("tensor_arg{index}"));
+                self.emit_expr_to_var(arg, &arg_name, &inferred_ty)?;
+                (arg_name, None)
+            } else {
+                let value_name = self.next_temp(&format!("tensor_scalar{index}"));
+                self.emit_expr_to_var(arg, &value_name, &inferred_ty)?;
+                let tensor_name = self.next_temp(&format!("tensor_arg{index}"));
+                self.lines
+                    .push(format!("{}chelis_tensor* {};", self.indent, tensor_name));
+                // Scalar inputs to tensor helpers use true rank-0 tensors so
+                // tensor[f32] keeps shape=[] across generated host/DAG calls.
+                //
+                // W2 PR 3 (CRuntime-F32Coupling): every arm casts
+                // `->data` through a typed pointer before writing
+                // the scalar.  The legacy bool / f32 arms wrote
+                // through the public `float *data` declaration in
+                // the C runtime header; mirror the int64 arm's
+                // typed-cast pattern for the bool and f32 cases
+                // so the bug class closes uniformly.  Bool
+                // storage today is 4-byte f32-encoded (per
+                // `docs/investigations/c_runtime_dtype_accessors_diagnosis.md`),
+                // so the bool arm casts to `(float*)` and writes
+                // the 1.0f / 0.0f bit pattern.
+                let (dtype, store) = match inferred_ty {
+                    HostType::Int64 => (
+                        "CHELIS_I64",
+                        format!("((int64_t*){tensor_name}->data)[0] = {value_name};"),
+                    ),
+                    HostType::Bool => (
+                        "CHELIS_BOOL",
+                        format!("((float*){tensor_name}->data)[0] = {value_name} ? 1.0f : 0.0f;"),
+                    ),
+                    // #381: an f64 captured scalar (e.g. `cast(1.1, f64)`)
+                    // fed to a tensor helper via `scalar_to_tensor` must be
+                    // packed into a `CHELIS_F64` rank-0 tensor and written
+                    // through a `double*`. The pre-fix catch-all packed it
+                    // as `CHELIS_F32` and stored only the low 4 bytes; the
+                    // f64 kernel then read 8 bytes (the high 4 garbage),
+                    // collapsing the value to ~0 and silently disagreeing
+                    // with the evaluator. Float32 still uses the f32 arm.
+                    HostType::Float64 => (
+                        "CHELIS_F64",
+                        format!("((double*){tensor_name}->data)[0] = (double)({value_name});"),
+                    ),
+                    _ => (
+                        "CHELIS_F32",
+                        format!("((float*){tensor_name}->data)[0] = (float)({value_name});"),
+                    ),
                 };
+                self.lines.push(format!(
+                    "{}{tensor_name} = chelis_alloc(0, NULL, {dtype});",
+                    self.indent
+                ));
+                self.lines.push(format!("{}{store}", self.indent));
+                (tensor_name.clone(), Some(tensor_name))
+            };
             tensor_args.push(entry);
         }
         let outputs_name = self.next_temp("outputs");
@@ -3824,7 +3879,12 @@ impl<'a> HostEmitter<'a> {
         Ok(())
     }
 
-    fn assign_list_literal(&mut self, target: &str, items: &[HostExpr], ty: &HostType) -> Result<(), Unsupported> {
+    fn assign_list_literal(
+        &mut self,
+        target: &str,
+        items: &[HostExpr],
+        ty: &HostType,
+    ) -> Result<(), Unsupported> {
         if items.is_empty() {
             self.lines
                 .push(format!("{}{target} = chelis_list_empty();", self.indent));
@@ -3872,7 +3932,12 @@ impl<'a> HostEmitter<'a> {
         Ok(())
     }
 
-    fn assign_tuple_literal(&mut self, target: &str, items: &[HostExpr], ty: &HostType) -> Result<(), Unsupported> {
+    fn assign_tuple_literal(
+        &mut self,
+        target: &str,
+        items: &[HostExpr],
+        ty: &HostType,
+    ) -> Result<(), Unsupported> {
         // An empty tuple has no elements. ISO C forbids a zero-length array
         // (`chelis_value tuple_values[0];`), so pass a NULL items pointer with
         // count 0 instead; the runtime helper's `len <= 0` guard never
@@ -4294,7 +4359,12 @@ impl<'a> HostEmitter<'a> {
         Ok(())
     }
 
-    fn emit_callback_assign(&mut self, callback: &HostCallback, arg_vars: &[String], target: &str) -> Result<(), Unsupported> {
+    fn emit_callback_assign(
+        &mut self,
+        callback: &HostCallback,
+        arg_vars: &[String],
+        target: &str,
+    ) -> Result<(), Unsupported> {
         match &callback.kind {
             HostCallbackKind::Named { function, .. } => {
                 self.lines.push(format!(
@@ -4415,7 +4485,12 @@ impl<'a> HostEmitter<'a> {
         Ok(())
     }
 
-    fn emit_labeled_root(&mut self, name: &str, value: &str, ty: &HostType) -> Result<(), Unsupported> {
+    fn emit_labeled_root(
+        &mut self,
+        name: &str,
+        value: &str,
+        ty: &HostType,
+    ) -> Result<(), Unsupported> {
         // Mirror eval's tuple-root expansion: a `Tuple([T0, T1, ...])`
         // top-level binding renders as `<name>.0 = ...`, `<name>.1 = ...`
         // (one labeled line per field). Eval produces this via

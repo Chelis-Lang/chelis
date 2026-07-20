@@ -10071,11 +10071,27 @@ impl LowerCtx {
                  cases (abs/floor/ceil/round) is tracked by chelis#729; the silent \
                  zero this replaced was chelis#699/#722",
             );
-            raise_fatal_lowering_error(
-                unsupported.to_string(),
-                None,
-                self.current_span_id.clone(),
-            )
+            // The suppression-aware raise ladder (the `reject_lowering_slice`
+            // shape): a SPECULATIVE probe unwinds quietly so the host
+            // evaluator/emitter keeps owning the non-DAG paths (eval of a
+            // plain `abs(int64 tensor)` forward pass is CORRECT there); an
+            // AD transform body raises FATAL so the branded message
+            // survives the build lane's recoverable fallback (chelis#722's
+            // zero gradients, the issue #197 pattern); everywhere else the
+            // raise is recoverable and the host-emission channel is the
+            // loud terminal (section C3's laundering rule - the scalar
+            // arms reject tensor operands).
+            if unrepresentable_panic_suppressed() {
+                std::panic::panic_any(UnrepresentableDag);
+            }
+            if self.allow_host_list_ad_rewrites {
+                raise_fatal_lowering_error(
+                    unsupported.to_string(),
+                    None,
+                    self.current_span_id.clone(),
+                )
+            }
+            raise_lowering_error(unsupported.to_string(), None, self.current_span_id.clone())
         }
     }
 
@@ -10686,11 +10702,7 @@ impl LowerCtx {
             last = Some(self.lower_expr(expr));
         }
         last.unwrap_or_else(|| {
-            raise_malformed_deep(
-                "an empty `par` block",
-                None,
-                self.current_span_id.clone(),
-            )
+            raise_malformed_deep("an empty `par` block", None, self.current_span_id.clone())
         })
     }
 

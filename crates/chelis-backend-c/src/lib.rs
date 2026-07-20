@@ -710,7 +710,8 @@ mod tests {
                 use_blas: true,
                 ..CodegenOptions::default()
             },
-        ).unwrap();
+        )
+        .unwrap();
         assert!(result.requirements.needs_blas);
         assert!(result.c_source.contains("#include \"chelis_blas.h\""));
         assert!(result.c_source.contains("cblas_sgemm("));
@@ -2122,7 +2123,8 @@ int main(void) {{
                 use_blas: true,
                 ..CodegenOptions::default()
             },
-        ).unwrap();
+        )
+        .unwrap();
         assert!(result.requirements.needs_blas);
         assert!(result.c_source.contains("int seq = inputs[0]->shape[2];"));
         assert!(result.c_source.contains("cblas_sgemm"));
@@ -2197,7 +2199,8 @@ int main(void) {{
                 use_blas: true,
                 ..CodegenOptions::default()
             },
-        ).unwrap();
+        )
+        .unwrap();
         assert!(
             !result.c_source.contains("cblas_sgemm("),
             "non-contiguous matrix slices must not bypass IR specialization \
@@ -2416,7 +2419,8 @@ int main(void) {
                 use_blas: true,
                 ..CodegenOptions::default()
             },
-        ).unwrap();
+        )
+        .unwrap();
         assert!(result.c_source.contains("cblas_sgemm("));
 
         let tmp = tempfile::tempdir().unwrap();
@@ -2599,7 +2603,8 @@ int main(void) {
                 math_lib_override: Some(MathLib::Sleef),
                 ..CodegenOptions::default()
             },
-        ).unwrap();
+        )
+        .unwrap();
         // The Sleef guard must be present.
         assert!(
             result.c_source.contains("#ifdef CHELIS_HAS_SLEEF"),
@@ -2655,7 +2660,8 @@ int main(void) {
                 math_lib_override: Some(MathLib::None),
                 ..CodegenOptions::default()
             },
-        ).unwrap();
+        )
+        .unwrap();
         assert!(
             !result.c_source.contains("#include \"chelis_math.h\""),
             "MathLib::None must not emit chelis_math.h include:\n{}",
@@ -2696,7 +2702,8 @@ int main(void) {
                 math_lib_override: Some(MathLib::Sleef),
                 ..CodegenOptions::default()
             },
-        ).unwrap();
+        )
+        .unwrap();
         // Sleef guard must NOT appear — add-only kernel takes the Level-1 path.
         assert!(
             !result.c_source.contains("#ifdef CHELIS_HAS_SLEEF"),
@@ -2730,7 +2737,8 @@ int main(void) {
                     math_lib_override: Some(MathLib::Sleef),
                     ..CodegenOptions::default()
                 },
-            ).unwrap();
+            )
+            .unwrap();
 
             let tmp = tempfile::tempdir().unwrap();
             copy_runtime_artifacts(tmp.path());
@@ -2824,7 +2832,8 @@ int main(void) {{
                 math_lib_override: Some(MathLib::Sleef),
                 ..CodegenOptions::default()
             },
-        ).unwrap();
+        )
+        .unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
         copy_runtime_artifacts(tmp.path());
@@ -2938,7 +2947,8 @@ int main(void) {{
                 math_lib_override: Some(MathLib::Sleef),
                 ..CodegenOptions::default()
             },
-        ).unwrap();
+        )
+        .unwrap();
         let src = &result.c_source;
         assert!(
             src.contains("#ifdef CHELIS_HAS_SLEEF"),
@@ -2976,7 +2986,8 @@ int main(void) {{
                 math_lib_override: Some(MathLib::Sleef),
                 ..CodegenOptions::default()
             },
-        ).unwrap();
+        )
+        .unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
         copy_runtime_artifacts(tmp.path());

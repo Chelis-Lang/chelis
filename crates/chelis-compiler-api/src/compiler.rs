@@ -1073,18 +1073,6 @@ fn compile_new_source_in_context(
                 errors: errors.iter().map(check_error_diagnostic).collect(),
             })?;
 
-    // Lower against the cached library DAG.
-    let composed_dag =
-        chelis_ir::lower::try_lower_program_with_context(&context.library_dag, &new_checked)
-            .map_err(|diagnostic| {
-                stage_error_with_span(
-                    "lower",
-                    diagnostic.to_string(),
-                    "lower_error",
-                    deep_span_to_schema(diagnostic.span),
-                )
-            })?;
-
     // Build the same CompiledSource shape `compile_source` produces, but
     // for the new code only — the library state lives in the composed
     // Dag and the type-env is unioned so eval-time name resolution
@@ -1106,6 +1094,32 @@ fn compile_new_source_in_context(
         new_checked.type_env(),
         Some(&combined_lowered_names),
     );
+
+    // Lower against the cached library DAG.
+    //
+    // chelis#730 Phase 1: same auxiliary-DAG rule as `compile_source` -
+    // when the new code has zero tensor roots, a NON-FATAL lowering
+    // rejection (e.g. an unsupported op inside a def the host runtime
+    // evaluates) is absorbed and eval proceeds without new-code DAG
+    // roots; the placeholder that used to keep this call total by
+    // accident is gone. Fatal diagnostics and tensor-rooted programs
+    // still surface the error.
+    let composed_dag =
+        match chelis_ir::lower::try_lower_program_with_context(&context.library_dag, &new_checked)
+        {
+            Ok(dag) => dag,
+            Err(diagnostic) if !diagnostic.fatal && new_tensor_root_names.is_empty() => {
+                context.library_dag.dag.clone()
+            }
+            Err(diagnostic) => {
+                return Err(stage_error_with_span(
+                    "lower",
+                    diagnostic.to_string(),
+                    "lower_error",
+                    deep_span_to_schema(diagnostic.span),
+                ));
+            }
+        };
 
     // The composed Dag's roots are [library_roots ..., new_roots ...].
     // Slice to the new-code tail so `tensor_root_names` aligns 1:1 with
@@ -1650,14 +1664,30 @@ fn compile_source_scoped(
     let tensor_root_names =
         root_names_from_checked_exprs(checked.exprs(), checked.type_env(), true);
 
-    let dag = chelis_ir::lower::try_lower_program(&checked).map_err(|diagnostic| {
-        stage_error_with_span(
-            "lower",
-            diagnostic.to_string(),
-            "lower_error",
-            deep_span_to_schema(diagnostic.span),
-        )
-    })?;
+    // chelis#730 Phase 1: the whole-program DAG here is AUXILIARY for a
+    // program whose roots are all host-evaluated (e.g. `out = print(...)`)
+    // - the host runtime computes those roots and the DAG goes unused.
+    // Before Phase 1 an unsupported construct inside an (unused) def
+    // lowered to a silent zero placeholder, which kept this call total by
+    // accident; now that such sites raise, a NON-FATAL lowering rejection
+    // with zero tensor roots is absorbed (mirroring
+    // `try_lower_compiled_program`'s host fallback) so eval keeps
+    // computing what it computed correctly. A fatal diagnostic, or any
+    // failure when a tensor root actually needs the DAG, still surfaces.
+    let dag = match chelis_ir::lower::try_lower_program(&checked) {
+        Ok(dag) => dag,
+        Err(diagnostic) if !diagnostic.fatal && tensor_root_names.is_empty() => {
+            chelis_ir::dag::Dag::new()
+        }
+        Err(diagnostic) => {
+            return Err(stage_error_with_span(
+                "lower",
+                diagnostic.to_string(),
+                "lower_error",
+                deep_span_to_schema(diagnostic.span),
+            ));
+        }
+    };
 
     if !tensor_root_names.is_empty() && dag.roots().len() != tensor_root_names.len() {
         return Err(stage_error(

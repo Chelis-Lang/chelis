@@ -925,7 +925,8 @@ fn build_transformer_programs() -> Result<ForwardPrograms, String> {
     let fused = fuse::fuse(&dag);
     let fused = dag_without_roots(&fused);
     let cpu = chelis_backend_c::codegen(&fused, "chelis_forward").map_err(|e| e.to_string())?;
-    let hip = chelis_backend_hip::codegen_hip(&fused, "chelis_forward").map_err(|e| e.to_string())?;
+    let hip =
+        chelis_backend_hip::codegen_hip(&fused, "chelis_forward").map_err(|e| e.to_string())?;
     let output_index = *output_index_map(&cpu.output_labels)
         .get("out")
         .ok_or("missing `out` output label".to_string())?;

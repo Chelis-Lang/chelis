@@ -4847,7 +4847,12 @@ impl CEmitter {
             // chelis#730 Phase 1 (census row 11, chelis#692).
             return Err(Unsupported::new(
                 UnsupportedKind::Op(
-                    if is_argmax { "argmax_reduce" } else { "argmin_reduce" }.to_string(),
+                    if is_argmax {
+                        "argmax_reduce"
+                    } else {
+                        "argmin_reduce"
+                    }
+                    .to_string(),
                 ),
                 format!(
                     "`{}` tensor inputs in the C DAG emitter (node {id})",
@@ -6502,7 +6507,8 @@ mod tests {
                 math_lib_override: Some(crate::MathLib::None),
                 ..crate::CodegenOptions::default()
             },
-        ).unwrap();
+        )
+        .unwrap();
         assert!(
             c.contains("exp("),
             "f64 exp must emit exp(, not expf(:\n{c}"
@@ -6586,7 +6592,8 @@ mod tests {
                 use_blas: true,
                 ..crate::CodegenOptions::default()
             },
-        );
+        )
+        .unwrap();
         assert!(result.c_source.contains("cblas_sgemm("));
     }
 

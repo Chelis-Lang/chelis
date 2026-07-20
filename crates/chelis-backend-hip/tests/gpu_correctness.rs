@@ -2425,7 +2425,7 @@ fn ws_a2_hip_f1_admits_f64_matmul_at_codegen() {
         None,
     );
     dag.add_root(mm);
-    let result = chelis_backend_hip::codegen_hip(&dag, "ws_a2_codegen_f64_matmul");
+    let result = chelis_backend_hip::codegen_hip(&dag, "ws_a2_codegen_f64_matmul").unwrap();
     assert!(
         result.c_source.contains("chelis_hipblas_dgemm_row_major("),
         "f64 matmul must dispatch to dgemm"
@@ -2454,7 +2454,7 @@ fn ws_a2_hip_reduce_sum_f64_emits_double_accumulator() {
         None,
     );
     dag.add_root(s);
-    let result = chelis_backend_hip::codegen_hip(&dag, "ws_a2_reduce_sum_f64");
+    let result = chelis_backend_hip::codegen_hip(&dag, "ws_a2_reduce_sum_f64").unwrap();
     assert!(
         result.c_source.contains("kernel_sum_ax0_f64"),
         "f64 reduce_sum must use the f64-suffixed kernel name"
@@ -2476,7 +2476,7 @@ fn ws_a2_hip_min_reduce_f64_kernel_emitted() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f64(4), None);
     let m = dag.add_node(RiscOp::MinReduce { axis: 0 }, vec![x], scalar_f64(), None);
     dag.add_root(m);
-    let result = chelis_backend_hip::codegen_hip(&dag, "ws_a2_min_reduce_f64");
+    let result = chelis_backend_hip::codegen_hip(&dag, "ws_a2_min_reduce_f64").unwrap();
     assert!(
         result.c_source.contains("kernel_min_ax0_f64"),
         "f64 min_reduce must use the f64-suffixed kernel name"
@@ -2501,7 +2501,7 @@ fn ws_a2_hip_argmax_f64_kernel_emitted() {
         None,
     );
     dag.add_root(m);
-    let result = chelis_backend_hip::codegen_hip(&dag, "ws_a2_argmax_f64");
+    let result = chelis_backend_hip::codegen_hip(&dag, "ws_a2_argmax_f64").unwrap();
     assert!(
         result.c_source.contains("kernel_argmax_ax0_f64"),
         "f64 argmax must use the f64-suffixed kernel name"
