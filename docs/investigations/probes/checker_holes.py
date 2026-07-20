@@ -13,7 +13,7 @@ DIR.mkdir(parents=True, exist_ok=True)
 
 CASES = {
     "bare": f"def f() -> f32 = {BAD}\n",
-    "with_seed": f"def f() -> f32 = with seed(42) {{ {BAD} }}\n",
+    "with_seed": f"def f() -> f32 = with seed(42i64) {{ {BAD} }}\n",
     "with_device": f'def f() -> f32 = with device("gpu:0") {{ {BAD} }}\n',
     "let_body": f"def f() -> f32 = let x = {BAD} in x\n",
     "if_then": f"def f(c: bool) -> f32 = if c then {BAD} else 1.0\n",
@@ -25,7 +25,7 @@ CASES = {
     "grad_body": f"def g(x: f32) -> f32 = {BAD}\ndef f(x: f32) -> f32 = grad(g)(x)\n",
     "vmap_lambda": f"def f(t: tensor[4, f32]) -> tensor[4, f32] = vmap(fn (v: f32) -> f32 = {BAD})(t)\n",
     "jit_body": f"def g(x: f32) -> f32 = {BAD}\ndef f(x: f32) -> f32 = jit(g)(x)\n",
-    "nested_with_seed": f"def f() -> f32 = with seed(42) {{ with seed(7) {{ {BAD} }} }}\n",
+    "nested_with_seed": f"def f() -> f32 = with seed(42i64) {{ with seed(7i64) {{ {BAD} }} }}\n",
     "seed_expr_ill_typed": 'def f() -> f32 = with seed("not a seed") { 1.0 }\n',
     "device_expr_ill_typed": "def f() -> f32 = with device(42) { 1.0 }\n",
 }

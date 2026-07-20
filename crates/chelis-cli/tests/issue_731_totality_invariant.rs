@@ -40,14 +40,14 @@
 //!
 //! ## Red set and boundary law
 //!
-//! Red today (`#[ignore]`d) on exactly the four known holes: a `with
-//! seed` body, a `with device` body (chelis#709), and the two chelis#710
-//! forms (`(def {} orphan)`, `(cast {} expr)` with no target). Green on
-//! the control corpus below, which runs in the default suite. Per B2.1/
-//! B2.2 of the design doc these tests flip red-to-green ONLY by deleting
-//! the `#[ignore]` attribute after Phase 1; the assertions never weaken,
-//! and a new hole EXTENDS the census and gets filed - it does not edit
-//! this red set silently.
+//! The four known holes - a `with seed` body, a `with device` body
+//! (chelis#709), and the two chelis#710 forms (`(def {} orphan)`,
+//! `(cast {} expr)` with no target) - were `#[ignore]`d red at Phase 0 and
+//! are flipped to green here by chelis#731 Phase 1 (the handle-effect case
+//! and the `MalformedForm` guard sweep). Per B2.1/B2.2 of the design doc
+//! the flip was ONLY by deleting the `#[ignore]` attribute; the assertions
+//! never weakened. The full corpus runs in the default suite. A new hole
+//! EXTENDS the census and gets filed - it does not edit this set silently.
 
 use chelis_deep::ast as deep;
 use chelis_types::types::Type;
@@ -462,35 +462,42 @@ fn control_reported_errors_keep_the_invariant_vacuous() {
 // The four known holes: red today, flip by un-ignoring after Phase 1.
 // ===========================================================================
 
-/// chelis#709 hole 1: the `with seed` body types as silent Type::Error
-/// (no `handle-effect` case in infer.rs), so the ill-typed body checks
-/// clean and the handle-effect node goes unstamped.
+/// chelis#709 hole 1 (closed by chelis#731 Phase 1): the `with seed` body used
+/// to type as a silent Type::Error (no `handle-effect` case in infer.rs). The
+/// handle-effect case now checks the body, so its error is reported and the
+/// invariant holds (verdict Reported, no silent Error).
 #[test]
-#[ignore = "chelis#709/chelis#731 Phase 0: [04-TOT-2] is violated today - `with seed` \
-            bodies produce a silent Type::Error with an empty error vector. Run with \
-            `cargo test -p chelis-cli --test issue_731_totality_invariant -- --ignored`."]
 fn totality_holds_for_with_seed_body() {
     let program = format!("def f() -> f32 = with seed(42) {{ {MASKED_ERROR} }}\n");
     assert_totality("with_seed_body", &surf_to_deep(&program));
 }
 
-/// chelis#709 hole 2: same mechanism through `with device`.
+/// chelis#731 red team F3: the cell above uses an UNSUFFIXED seed, so its
+/// suffix diagnostic alone satisfies [04-TOT-2] (verdict Reported) even if the
+/// BODY check regressed - the cell is vacuous w.r.t. the handle-effect body
+/// fix. This sibling uses a SUFFIXED seed (`42i64`), so the seed pushes no
+/// diagnostic and the ONLY thing that can make the funnel report is the body's
+/// masked error. If the body check ever silently exempts again, this cell trips
+/// (the handle-effect node carries a silent Type::Error under an empty error
+/// vector). The original cell stays untouched per B2.1.
 #[test]
-#[ignore = "chelis#709/chelis#731 Phase 0: [04-TOT-2] is violated today - `with device` \
-            bodies produce a silent Type::Error with an empty error vector. Run with \
-            `cargo test -p chelis-cli --test issue_731_totality_invariant -- --ignored`."]
+fn totality_holds_for_with_seed_suffixed_body_locks_body_check() {
+    let program = format!("def f() -> f32 = with seed(42i64) {{ {MASKED_ERROR} }}\n");
+    assert_totality("with_seed_suffixed_body", &surf_to_deep(&program));
+}
+
+/// chelis#709 hole 2 (closed by chelis#731 Phase 1): same mechanism through
+/// `with device`; the device body is now checked.
+#[test]
 fn totality_holds_for_with_device_body() {
     let program = format!("def f() -> f32 = with device(\"gpu:0\") {{ {MASKED_ERROR} }}\n");
     assert_totality("with_device_body", &surf_to_deep(&program));
 }
 
-/// chelis#710 hole 1: `(def {} orphan)` - the infer_def arity guard
-/// returns Type::Error without pushing, so the malformed def checks
-/// clean.
+/// chelis#710 hole 1 (closed by chelis#731 Phase 1): `(def {} orphan)` - the
+/// infer_def arity guard now pushes `MalformedForm` instead of a silent
+/// Type::Error, so the malformed def is reported.
 #[test]
-#[ignore = "chelis#710/chelis#731 Phase 0: [04-TOT-2] is violated today - a def with no \
-            body checks clean via a silent Type::Error. Run with \
-            `cargo test -p chelis-cli --test issue_731_totality_invariant -- --ignored`."]
 fn totality_holds_for_dp_def_missing_body() {
     assert_totality(
         "dp_def_missing_body",
@@ -498,12 +505,9 @@ fn totality_holds_for_dp_def_missing_body() {
     );
 }
 
-/// chelis#710 hole 2: `(cast {} expr)` with no target type - the
-/// infer_cast arity guard returns Type::Error without pushing.
+/// chelis#710 hole 2 (closed by chelis#731 Phase 1): `(cast {} expr)` with no
+/// target type - the infer_cast arity guard now pushes `MalformedForm`.
 #[test]
-#[ignore = "chelis#710/chelis#731 Phase 0: [04-TOT-2] is violated today - a cast with no \
-            target type checks clean via a silent Type::Error. Run with \
-            `cargo test -p chelis-cli --test issue_731_totality_invariant -- --ignored`."]
 fn totality_holds_for_dp_cast_missing_target() {
     assert_totality(
         "dp_cast_missing_target",

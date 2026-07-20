@@ -669,7 +669,7 @@ fn validate_handler_expr(expr: &Expr, errors: &mut Vec<EffectError>) {
                             message: "with seed(...) currently requires an int literal seed"
                                 .to_string(),
                             suggestions: vec![
-                                "Use `with seed(42) { ... }` with an explicit integer seed"
+                                "Use `with seed(42i64) { ... }` with an explicit int64-suffixed integer seed"
                                     .to_string(),
                             ],
                         });
@@ -737,7 +737,7 @@ fn validate_unhandled_random_roots(
                         "Function `{name}` has unhandled effect `Random`; `dropout` requires `with seed(...)`"
                     ),
                     suggestions: vec![
-                        "Wrap the stochastic region with `with seed(42) { ... }`".to_string(),
+                        "Wrap the stochastic region with `with seed(42i64) { ... }`".to_string(),
                     ],
                 });
             }
@@ -1389,7 +1389,7 @@ def outer() -> unit = inner()
         let program = surf_checked(
             r#"
 def sealed() -> unit =
-  with seed(7) { test_assert(true, "inside-handler") }
+  with seed(7i64) { test_assert(true, "inside-handler") }
 "#,
         );
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
@@ -1591,7 +1591,7 @@ def entry(x: f32) -> f32 = helper(mul(x, x))
             r#"module Frag.Honest
 export (entry)
 def entry(x: tensor[8, f32]) -> tensor[8, f32] =
-  with seed(7) { dropout(x, 0.5) }
+  with seed(7i64) { dropout(x, 0.5) }
 "#,
         );
         check_program(&checked).expect("handled-Random module-wrapped program must check clean");

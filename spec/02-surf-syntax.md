@@ -465,7 +465,7 @@ No `where` clauses. Use blocks.
 Phase 2a adds two `with` block forms:
 
 ```text
-with seed(42) {
+with seed(42i64) {
   dropout(x, 0.5)
 }
 
@@ -479,8 +479,9 @@ brace-delimited block body.
 
 Current shipped constraints:
 
-- `with seed(...)` currently requires an explicit integer literal seed for the effect
-  checker and lowering path
+- `with seed(...)` requires an explicit integer literal seed carrying the `i64`
+  suffix (`with seed(42i64) { ... }`); the seed is semantically int64 and an
+  unsuffixed literal is a type error naming the suffix (§P10a; chelis#731 Phase 1)
 - `with device(...)` currently requires an explicit string literal device name
 - only `seed` and `device` are valid handler names in the Phase 2a Surf parser
 

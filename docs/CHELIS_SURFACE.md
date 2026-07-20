@@ -159,7 +159,7 @@ point by name; its insert axis must be a compile-time constant.
 | `const` | `(value, shape...) -> tensor[shape,p]` | zero gradient |
 | `load` | `(source, shape...) -> tensor[shape,p]` | zero gradient |
 | `dropout` | `(&tensor[D,f32], rate: f32) -> tensor[D,f32]` | differentiable (mask fixed wrt seed); introduces `Random`. **Eval-only — not codegen'd by C/HIP/Metal build yet.** |
-| `uniform_like` | `(&tensor[D,f32], lo: f32, hi: f32) -> tensor[D,f32]` | zero gradient; introduces `Random`; seeded via `with seed(N) { }` |
+| `uniform_like` | `(&tensor[D,f32], lo: f32, hi: f32) -> tensor[D,f32]` | zero gradient; introduces `Random`; seeded via `with seed(Ni64) { }` |
 
 Internal-only `RiscOp`s not directly callable from Surf: `Store`, `Copy`, `Drop`,
 `Realize`, `Cast`, `FusedElem`, `OneHot`, `BlasMatmul` (the `matmul` specialization
@@ -421,7 +421,7 @@ build also rejects runtime-symbolic windowed axes and bf16/f16 (cast to f32 firs
 
 | Effect | Introduced by | Handled by |
 |---|---|---|
-| `Random` | `dropout`, `uniform_like` | `with seed(N) { ... }` |
+| `Random` | `dropout`, `uniform_like` | `with seed(Ni64) { ... }` |
 | `Io` | file ops, `mmap_*`, `process_run`, `print` | root / runtime |
 | `Test` | `test_assert*` | pinned at root, no handler |
 | `Accum` | accumulation contexts | — |

@@ -66,8 +66,7 @@ fn nested_block_bare_statement_rejected() {
 /// The bounded tail also applies inside a `with seed(..)` handler block.
 #[test]
 fn with_seed_block_bare_statement_rejected() {
-    let src =
-        "def f(x: tensor[batch, f32]) -> tensor[batch, f32] = with seed(42) {\n  a(x)\n  b(x)\n}\n";
+    let src = "def f(x: tensor[batch, f32]) -> tensor[batch, f32] = with seed(42i64) {\n  a(x)\n  b(x)\n}\n";
     let out = run(&[
         "check",
         write_tempfile("rt706-seed-", src).path().to_str().unwrap(),

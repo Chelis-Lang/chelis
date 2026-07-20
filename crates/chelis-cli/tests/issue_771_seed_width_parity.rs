@@ -48,7 +48,7 @@ fn seeded_uniform(seed: u64) -> String {
     let zeros = ["cast(0.0, f32)"; 8].join(", ");
     format!(
         "template = to_tensor([{zeros}])\n\
-         sampled = with seed({seed}) {{ uniform_like(copy(template), 0.0, 1.0) }}\n"
+         sampled = with seed({seed}i64) {{ uniform_like(copy(template), 0.0, 1.0) }}\n"
     )
 }
 

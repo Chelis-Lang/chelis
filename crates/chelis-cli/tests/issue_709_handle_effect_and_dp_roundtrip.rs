@@ -9,16 +9,19 @@
 //! let/if/match/lambda/pipe/tuple/list/grad/vmap/jit, and the seed/device
 //! HANDLER expressions are checked too. #709's blast-radius claim holds.
 //!
-//! ## The escalations
+//! ## The escalations (fixed by chelis#731 Phase 1)
 //!
-//! * The masked error reaches a RUNNABLE binary: `with seed(42) { cast(5,
-//!   int64) }` from an `-> f32` fn passes check (score 1), builds, runs,
-//!   and prints `5` in BOTH lanes. The DAG-gate rejection #709 called
-//!   incidental does not fire for host-lane bodies.
-//! * `lower_handle_effect`'s catch-all is live TODAY via `.dp`: rewriting
-//!   `effect: random` to a bogus kind still checks at score 1 and builds a
+//! * The masked error used to reach a RUNNABLE binary: `with seed(42i64) {
+//!   cast(5, int64) }` from an `-> f32` fn passed check (score 1), built, ran,
+//!   and printed `5` in BOTH lanes. The handle-effect checker case now returns
+//!   the body's type, so the declared return type is enforced and the build
+//!   rejects it with a type diagnostic (`masked_return_type_violation...`).
+//! * `lower_handle_effect`'s catch-all was live via `.dp`: rewriting
+//!   `effect: random` to a bogus kind still checked at score 1 and built a
 //!   working binary - the unknown kind and its handler silently dropped
-//!   (the #703 shape).
+//!   (the #703 shape). The checker case now string-matches the two known kinds
+//!   with a loud `MalformedForm` else, so a bogus kind is rejected at check
+//!   (`unknown_effect_kind_is_rejected`).
 //!
 //! ## chelis#721 (found while probing the controls; fixed, locked below)
 //!
@@ -229,14 +232,14 @@ fn unary_fn_deep_roundtrips_through_eval() {
 // chelis#709 - the holes
 // ===========================================================================
 
-/// Observed today: score 1 with the error inside `with seed`.
+/// chelis#731 Phase 1: the `handle-effect` checker case now checks the `with
+/// seed` body, so the masked error inside it is caught (score < 1). Was
+/// `#[ignore]`d red when the body was unchecked. The seed carries the required
+/// `i64` suffix so the ONLY error is the body's (isolating what this pins).
 #[test]
-#[ignore = "chelis#709: infer.rs has no handle-effect case; the with seed body is not \
-            checked and this program scores 1. Run with \
-            `cargo test -p chelis-cli --test issue_709_handle_effect_and_dp_roundtrip -- --ignored`."]
 fn with_seed_body_is_type_checked() {
     let score = check_score(
-        &format!("def f() -> f32 = with seed(42) {{ {MASKED_ERROR} }}\n"),
+        &format!("def f() -> f32 = with seed(42i64) {{ {MASKED_ERROR} }}\n"),
         ".ch",
     );
     assert!(
@@ -245,10 +248,9 @@ fn with_seed_body_is_type_checked() {
     );
 }
 
-/// Observed today: score 1 with the error inside `with device`.
+/// chelis#731 Phase 1: same, through `with device`. The device body is now
+/// checked, so the masked error is caught.
 #[test]
-#[ignore = "chelis#709: the with device body is not checked; scores 1 today. Run with \
-            `cargo test -p chelis-cli --test issue_709_handle_effect_and_dp_roundtrip -- --ignored`."]
 fn with_device_body_is_type_checked() {
     let score = check_score(
         &format!("def f() -> f32 = with device(\"gpu:0\") {{ {MASKED_ERROR} }}\n"),
@@ -260,19 +262,81 @@ fn with_device_body_is_type_checked() {
     );
 }
 
-/// Observed today: check scores 1, the build succeeds, and the binary runs,
-/// printing an int64 `5` from a function declared `-> f32`. The escalation
-/// row: the mask reaches a runnable binary through the host lane.
+/// Positive parity: a WELL-TYPED `with seed` body (with the required `i64` seed
+/// suffix) checks clean (score 1). The handle-effect case returns the body's
+/// type, so a correct body is accepted, not just rejected.
 #[test]
-#[ignore = "chelis#709: `with seed(42) { cast(5, int64) }` from an -> f32 fn compiles and \
-            runs, printing 5 in both lanes; the build must reject it with a type \
-            diagnostic. Run with \
-            `cargo test -p chelis-cli --test issue_709_handle_effect_and_dp_roundtrip -- --ignored`."]
+fn with_seed_well_typed_body_checks_clean() {
+    let score = check_score(
+        "def f() -> f32 = with seed(42i64) { add(cast(1.0, f32), cast(2.0, f32)) }\n",
+        ".ch",
+    );
+    assert!(
+        (score - 1.0).abs() < 1e-9,
+        "a well-typed with seed body must check clean, got score {score}"
+    );
+}
+
+/// Positive parity for `with device`: a well-typed body checks clean.
+#[test]
+fn with_device_well_typed_body_checks_clean() {
+    let score = check_score(
+        "def f() -> f32 = with device(\"gpu:0\") { add(cast(1.0, f32), cast(2.0, f32)) }\n",
+        ".ch",
+    );
+    assert!(
+        (score - 1.0).abs() < 1e-9,
+        "a well-typed with device body must check clean, got score {score}"
+    );
+}
+
+/// Negative parity for the §C1.5 seed-suffix rule (chelis#731 / chelis#771):
+/// an UNSUFFIXED integer literal seed is a type error, even with a well-typed
+/// body. This is the reject-diagnostic half chelis#771 left to Phase 1; it
+/// unblocks the parked cross-lane RNG atom (chelis#735). The seeded-authoring
+/// half stays with #735.
+#[test]
+fn unsuffixed_seed_literal_is_rejected() {
+    let score = check_score(
+        "def f() -> f32 = with seed(42) { add(cast(1.0, f32), cast(2.0, f32)) }\n",
+        ".ch",
+    );
+    assert!(
+        score < 1.0,
+        "an unsuffixed seed literal must be rejected, got score {score}"
+    );
+}
+
+/// Negative parity for the §C1.5 negative-seed rule (chelis#731 red team F2): a
+/// negative int64-literal seed is `.dp`-reachable (Surf's `-1i64` desugars to a
+/// non-literal `neg` the effects gate rejects), and the RNG lanes fold a
+/// negative seed to 0, so distinct-stream determinism ([05-RNG-1]) cannot hold.
+/// The checker rejects it. Positive parity is `with_seed_well_typed_body_checks_clean`
+/// (a non-negative `42i64` seed checks clean).
+#[test]
+fn negative_int64_seed_literal_is_rejected() {
+    let score = check_score(
+        "(module {} m.main (def {} out (handle-effect {effect: random} \
+         (lit {type: (t-prim {} int64)} -1) (lit {type: (t-prim {} f32)} 2.5))))\n",
+        ".dp",
+    );
+    assert!(
+        score < 1.0,
+        "a negative int64 seed literal must be rejected, got score {score}"
+    );
+}
+
+/// chelis#731 Phase 1: `with seed(42i64) { cast(5, int64) }` from an `-> f32`
+/// fn used to pass check (score 1), build, and run, printing an int64 `5` from
+/// a function declared `-> f32`. The handle-effect case returns the body's type,
+/// so the declared return type is now enforced and the build rejects it with a
+/// type diagnostic before any backend sees it. Was `#[ignore]`d red.
+#[test]
 fn masked_return_type_violation_does_not_reach_a_binary() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
     }
-    let program = "def f() -> f32 = with seed(42) { cast(5, int64) }\nout = print(f())\n";
+    let program = "def f() -> f32 = with seed(42i64) { cast(5, int64) }\nout = print(f())\n";
     match c_lane_outcome(program, ".ch", "seed_masked") {
         CLane::Rejected(stderr) => assert!(
             stderr.contains("Type errors") || stderr.contains("type"),
@@ -284,19 +348,20 @@ fn masked_return_type_violation_does_not_reach_a_binary() {
     }
 }
 
-/// Observed today: a `.dp` whose handle-effect carries a BOGUS effect kind
-/// checks at score 1 and builds a working binary; `lower_handle_effect`'s
+/// chelis#731 Phase 1: a `.dp` whose handle-effect carries a BOGUS effect kind
+/// used to check at score 1 and build a working binary; `lower_handle_effect`'s
 /// catch-all lowers the body and silently drops the unknown kind and its
-/// handler (the #703 shape, live today via the .dp path).
+/// handler (the #703 shape). The handle-effect checker case string-matches the
+/// two known kinds (`random`/`resource`) with a loud `MalformedForm` else, so an
+/// unknown kind is now rejected at check (the §I1 interlock: whichever of
+/// chelis#730's lowering raise or this checker gate lands first rejects it;
+/// this is the checker side). Was `#[ignore]`d red.
 #[test]
-#[ignore = "chelis#709: a handle-effect with effect kind `teleport` builds and runs; an \
-            unknown effect kind must be rejected loudly. Run with \
-            `cargo test -p chelis-cli --test issue_709_handle_effect_and_dp_roundtrip -- --ignored`."]
 fn unknown_effect_kind_is_rejected() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
     }
-    let dp = deep_of("def f() -> f32 = with seed(42) { 2.5 }\nout = print(f())\n")
+    let dp = deep_of("def f() -> f32 = with seed(42i64) { 2.5 }\nout = print(f())\n")
         .replace("effect: random", "effect: teleport");
     assert!(
         dp.contains("effect: teleport"),

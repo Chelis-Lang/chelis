@@ -7897,7 +7897,7 @@ fn eval_vmap_does_not_regress_to_host_runtime_unsupported() {
 fn write_seeded_uniform(path: &Path, low_seed: u64) {
     let contents = format!(
         r#"template = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])
-sampled = with seed({low_seed}) {{ uniform_like(copy(template), cast(0.0, f32), cast(1.0, f32)) }}
+sampled = with seed({low_seed}i64) {{ uniform_like(copy(template), cast(0.0, f32), cast(1.0, f32)) }}
 "#
     );
     write_file(path, &contents);
@@ -7924,22 +7924,22 @@ fn build_c_with_seed_uniform_like_succeeds() {
         .success()
         .stderr(predicate::str::contains("does not yet plumb").not());
 
-    // Generated C must route the source seed into the random op. The
-    // host path may bake `0ULL` into a reusable helper, but the sampler
-    // must receive the active handler seed through the effective-seed
-    // wrapper, not a direct literal zero.
+    // Generated C must route the source seed into the random op through the
+    // effective-seed wrapper, never a silently-defaulted literal zero (the
+    // #703 class). With the int64-suffixed seed (chelis#731 requires the `i64`
+    // suffix; chelis#771 reads it at full width), the direct `uniform_like`
+    // bakes the resolved seed 7 into the wrapper argument
+    // `CHELIS_EFFECTIVE_UNIFORM_SEED(7ULL)`; the handler-scope runtime threading
+    // (`chelis_rng_current.active`) is exercised by the cross-function seed test
+    // instead, where the seed cannot be baked at the random op site.
     let c_src = fs::read_to_string(out_dir.join("seeded.c")).expect("read seeded.c");
     assert!(
-        c_src.contains("CHELIS_EFFECTIVE_UNIFORM_SEED(0ULL"),
-        "expected generated C to route host random ops through the effective seed wrapper; got:\n{c_src}"
-    );
-    assert!(
-        c_src.contains("chelis_rng_current.active = 1"),
-        "expected generated C to activate the with-seed handler scope; got:\n{c_src}"
+        c_src.contains("CHELIS_EFFECTIVE_UNIFORM_SEED(7ULL"),
+        "expected generated C to route the source seed 7 through the effective seed wrapper; got:\n{c_src}"
     );
     assert!(
         !c_src.contains("chelis_uniform_sample_f32(0ULL"),
-        "sampler must not receive literal seed=0 directly when source seed is 7"
+        "sampler must not receive a silently-defaulted literal seed=0 when the source seed is 7"
     );
 }
 
@@ -8083,8 +8083,8 @@ fn cross_function_seed_local_wrapper_uses_handler_seed_in_c_backend() {
         r#"template = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])
 def sample(t: tensor[4, f32]) -> tensor[4, f32] ! { Random } =
   uniform_like(copy(t), 0.0, 1.0)
-seven = with seed(7) { sample(copy(template)) }
-forty_two = with seed(42) { sample(copy(template)) }
+seven = with seed(7i64) { sample(copy(template)) }
+forty_two = with seed(42i64) { sample(copy(template)) }
 "#,
     );
 

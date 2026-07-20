@@ -280,13 +280,14 @@ A function's effects can be annotated with a `! { ... }` suffix on the signature
 host operations such as `print`. Handlers are introduced by `with`:
 
 ```chelis-surf-fragment
-with seed(42) {
+with seed(42i64) {
   dropout(x, 0.5)
 }
 ```
 
-`with seed(...)` takes an integer literal and `with device("...")` takes a string literal.
-See [Effects and Handlers](effects.md) for the full model.
+`with seed(...)` takes an int64-suffixed integer literal (`42i64`; an unsuffixed literal is a
+type error) and `with device("...")` takes a string literal. See
+[Effects and Handlers](effects.md) for the full model.
 
 ## Transforms
 

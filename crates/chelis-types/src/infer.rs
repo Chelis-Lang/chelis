@@ -7274,18 +7274,111 @@ fn children(list: &deep::List) -> &[deep::Expr] {
     }
 }
 
-fn is_numeric_literal_expr(expr: &deep::Expr) -> bool {
+/// chelis#710 / spec/04-type-system.md §10 [04-TOT-3]: push a `MalformedForm`
+/// diagnostic for a Deep node whose arity or shape the checker cannot type,
+/// and return the `Type::Error` sentinel. This replaces the silent
+/// `return Type::Error` arity guards that used to let structurally malformed
+/// `.dp` check clean (score 1 with an empty error list). `expected` names the
+/// well-formed shape, and the message also names the FOUND shape (the node's
+/// tagged-children count) per §C2 -- the calibration example is the Deep
+/// parser's own "found unknown tag ..." message.
+fn malformed_form(
+    list: &deep::List,
+    tag: &str,
+    expected: &str,
+    errors: &mut Vec<CheckError>,
+) -> Type {
+    let found = children(list).len();
+    errors.push(CheckError::new(
+        CheckErrorKind::MalformedForm,
+        format!(
+            "malformed `{tag}`: expected {expected}, found a `{tag}` with {found} \
+             child element(s) (spec/03-deep-syntax.md; chelis#731 [04-TOT-3])"
+        ),
+        vec![],
+    ));
+    Type::Error
+}
+
+/// True when a `uniform_like` low/high bound is a statically-resolvable numeric
+/// value the compiled-backend lowering can fold to a compile-time constant.
+///
+/// This MIRRORS `extract_f64_value` in `chelis-ir/src/lower.rs` (chelis#776) so
+/// the checker's disposition and the backend agree on what a valid bound is: a
+/// bare `Float`/`Int` atom, a `(lit ...)` wrapping one, a float-target `cast` of
+/// a resolvable value, or a `neg` of a resolvable value. A genuinely-runtime
+/// bound (a variable, an `add`, a `shape()` read) is not resolvable and is the
+/// checker's reject case; the lowering's fatal error is then defense-in-depth.
+///
+/// chelis#731 Phase 1 context: before the `handle-effect` case landed, this
+/// gate never fired where `uniform_like` actually lives (inside a `with seed`
+/// body, unchecked per chelis#709), so the older `is_numeric_literal_expr`
+/// form (literal-only) never had to agree with the backend's broader fold set.
+/// Now that the gate fires inside handler bodies, it is aligned with the fold
+/// set so that `uniform_like(t, -3.0, ...)` (a `neg` literal) and
+/// `uniform_like(t, cast(2.0, f32), ...)` -- both of which the backend folds --
+/// are accepted rather than spuriously rejected.
+fn is_static_numeric_bound(expr: &deep::Expr) -> bool {
+    // Recurses on the `cast`/`neg` inner node; guard the native stack against a
+    // pathologically deep wrapper chain, bailing conservatively to `false` (the
+    // bound is then treated as non-resolvable and rejected loudly, never a
+    // silent accept).
+    stack_guard!("is_static_numeric_bound", expr, false);
     match expr {
         deep::Expr::Atom(deep::Atom::Float(_) | deep::Atom::Int(_), _) => true,
-        deep::Expr::List(list, _) if get_tag(list) == Some("lit") => matches!(
-            list.elements.get(2),
-            Some(deep::Expr::Atom(
-                deep::Atom::Float(_) | deep::Atom::Int(_),
-                _
-            ))
-        ),
+        deep::Expr::List(list, _) => match get_tag(list) {
+            // A float-target cast of a resolvable value. An integer target
+            // truncates and is left unresolved, matching the lowering.
+            Some("cast") => {
+                let inner_resolvable = list.elements.get(2).is_some_and(is_static_numeric_bound);
+                let target_is_float = list.elements.get(3).is_some_and(deep_prim_is_float);
+                target_is_float && inner_resolvable
+            }
+            // neg(<inner>): unary minus desugars to `(app {} (var {} neg) <inner>)`.
+            Some("app") if children(list).first().is_some_and(expr_is_neg_var) => {
+                children(list).get(1).is_some_and(is_static_numeric_bound)
+            }
+            // Only a `lit`-tagged list carries a numeric atom AS ITS VALUE.
+            // The lowering's `extract_f64_value` catch-all reads element 2 of
+            // ANY list, which blesses a form whose value is NOT at element 2 --
+            // e.g. `(par {} 2.0 3.0)`, whose value is its LAST child (3.0) per
+            // spec/03-deep-syntax.md §2.3, while element 2 is the FIRST child
+            // (2.0). Accepting that would let the checker bless a bound the
+            // lowering folds from the wrong position (the chelis#703 silent-
+            // substitution shape; chelis#731 red team). The checker's arm is
+            // therefore NARROWER than the lowering's on purpose: a `par`-wrapped
+            // (or otherwise non-literal, non-cast, non-neg) bound is rejected
+            // here, so it never reaches the fold. The lowering-side over-broad
+            // catch-all is filed separately.
+            Some("lit") => matches!(
+                list.elements.get(2),
+                Some(deep::Expr::Atom(
+                    deep::Atom::Float(_) | deep::Atom::Int(_),
+                    _
+                ))
+            ),
+            _ => false,
+        },
         _ => false,
     }
+}
+
+/// True when `target` is a `(t-prim {} <name>)` naming a float precision.
+fn deep_prim_is_float(target: &deep::Expr) -> bool {
+    matches!(target, deep::Expr::List(list, _)
+        if get_tag(list) == Some("t-prim")
+            && children(list)
+                .first()
+                .and_then(symbol_name)
+                .and_then(Prim::parse_name)
+                .is_some_and(|prim| prim.is_float()))
+}
+
+/// True when `expr` is `(var {} neg)`, the callee of a desugared unary minus.
+fn expr_is_neg_var(expr: &deep::Expr) -> bool {
+    matches!(expr, deep::Expr::List(list, _)
+        if get_tag(list) == Some("var")
+            && children(list).first().and_then(symbol_name) == Some("neg"))
 }
 
 /// Get metadata map from element[1] of a list.
@@ -8958,6 +9051,19 @@ fn infer_expr(
                     // Already handled in first pass
                     Type::Unit
                 }
+                // chelis#731 [04-TOT-1]: top-level declaration and module
+                // tags carry no expression type. They reach `infer_expr` when
+                // a program is checked item-by-item; their real processing is
+                // the declaration passes (imports/exports/module framing,
+                // dimension declarations), so their expression-level
+                // disposition is an explicit `Unit` no-op. Before the loud
+                // wildcard they fell through to a silent `Type::Error` that
+                // happened to be harmless because the value is discarded; the
+                // explicit no-op keeps that behavior while satisfying the
+                // every-tag-has-a-disposition contract (never the loud arm,
+                // which would wrongly flag a well-formed `(export ...)`).
+                Some("module") | Some("import") | Some("import-all") | Some("export")
+                | Some("defdim") => Type::Unit,
                 Some("par") => {
                     // par: evaluate all children, return type of last (v1: sequential)
                     let kids = children(list);
@@ -8993,7 +9099,7 @@ fn infer_expr(
                             total_nodes,
                         )
                     } else {
-                        Type::Error
+                        malformed_form(list, "jit", "one wrapped expression", errors)
                     }
                 }
                 Some("realize") => {
@@ -9010,7 +9116,7 @@ fn infer_expr(
                             total_nodes,
                         )
                     } else {
-                        Type::Error
+                        malformed_form(list, "realize", "one wrapped expression", errors)
                     }
                 }
                 Some("copy") => {
@@ -9042,7 +9148,7 @@ fn infer_expr(
                             }
                         }
                     } else {
-                        Type::Error
+                        malformed_form(list, "copy", "one wrapped expression", errors)
                     }
                 }
                 Some("borrow") => {
@@ -9107,11 +9213,37 @@ fn infer_expr(
                             }
                         }
                     } else {
-                        Type::Error
+                        malformed_form(list, "borrow", "one wrapped expression", errors)
                     }
                 }
+                Some("handle-effect") => infer_handle_effect(
+                    list,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    typed_nodes,
+                    total_nodes,
+                ),
                 _ => {
-                    // Unknown tag -- try to infer children
+                    // chelis#731 [04-TOT-1] / §C1.2: a Deep tag reached
+                    // dispatch with no checker case. The parser already
+                    // screens the 62-tag closed vocabulary, so this is a
+                    // version skew or a bug, never ordinary input. Reject it
+                    // loudly rather than returning a silent `Type::Error` that
+                    // would exempt the whole subtree from checking (the
+                    // chelis#709 class defect: the default must be to fail).
+                    let named = tag.unwrap_or("<none>");
+                    errors.push(CheckError::new(
+                        CheckErrorKind::UnknownForm,
+                        format!(
+                            "unknown Deep tag `{named}` has no checker disposition \
+                             (not in the 62-tag closed vocabulary of \
+                             spec/03-deep-syntax.md; chelis#731 [04-TOT-1])"
+                        ),
+                        vec![],
+                    ));
                     Type::Error
                 }
             }
@@ -9134,6 +9266,222 @@ fn infer_expr(
     }
 
     result
+}
+
+/// chelis#709 / spec/design/checker_totality.md §C1.5: the `handle-effect`
+/// checker case. Before this, `handle-effect` fell through `infer_expr`'s
+/// wildcard to a silent `Type::Error`, so `with seed` / `with device` bodies
+/// were not type-checked at all and the enclosing `def`'s declared return
+/// type went unenforced.
+///
+/// The typing SHAPE mirrors LaCaDiLE's T-Handle rule (Jeff's 2026-07 note on
+/// chelis#709): type the body in the enclosing context and return the BODY's
+/// type, so the enclosing signature is enforced against it. The handler is
+/// checked per effect kind. chelis#730's `EffectKind` enum does not exist yet,
+/// so the two known kinds are string-matched with a loud `MalformedForm` else
+/// (the pinned §I1 interlock: migrate to the enum when it lands).
+///
+/// Handler-form rules (open question 1, decided 2026-07-17; explicit over
+/// implicit, since this code is agent-written):
+/// * `random` (`with seed`): the seed is semantically int64. A seed written as
+///   an integer LITERAL must carry the `i64` suffix; an unsuffixed literal is a
+///   `TypeMismatch` naming the suffix (this is the reject-diagnostic half left
+///   to chelis#731 Phase 1 by chelis#771, unblocking the parked cross-lane RNG
+///   atom on chelis#735). Non-literal seed expressions stay the shared
+///   front-end effects gate's responsibility (`chelis-effects`
+///   `validate_handler_expr`: "requires an int literal seed", spec/02 §P5), so
+///   they are not re-reported here.
+/// * `resource` (`with device`): the device is a string literal, checked by the
+///   same effects gate; the device-name vocabulary is not validated here
+///   (target knowledge, chelis#735). Checking the expression bounds the handler.
+#[allow(clippy::too_many_arguments)]
+fn infer_handle_effect(
+    list: &deep::List,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+) -> Type {
+    let kids = children(list);
+    // Structural arity: spec/03-deep-syntax.md gives `handle-effect` EXACTLY
+    // two children -- `(handle-effect {effect: K} <handler> <body>)`. Any other
+    // count is malformed Deep; reject loudly ([04-TOT-3]). A THIRD child in
+    // particular carries an ill-typed subtree the checker would never visit
+    // (chelis#731 red team) -- the chelis#710 silent-exemption class -- so
+    // tolerating `>= 2` would be a fitness-honesty hole.
+    if kids.len() != 2 {
+        return malformed_form(
+            list,
+            "handle-effect",
+            "exactly two children (a handler expression and a body)",
+            errors,
+        );
+    }
+    let handler = &kids[0];
+    let body = &kids[1];
+
+    let effect = get_meta(list).and_then(|meta| {
+        meta.entries.iter().find_map(|(key, value)| {
+            if key == "effect" {
+                symbol_name(value)
+            } else {
+                None
+            }
+        })
+    });
+
+    // The handler's LITERAL-ness (an int literal seed, a string literal device)
+    // is enforced by the shared front-end effects gate (`chelis-effects`
+    // `validate_handler_expr`, spec/02 §P5), which runs in check, build, and
+    // eval. The checker does not type-infer the handler expression here: doing
+    // so would surface handler-internal diagnostics (e.g. an out-of-range inner
+    // literal in `with seed(-2147483649)`) that preempt the effects gate's
+    // "requires an int literal seed" message, and the effects gate already
+    // rejects every non-literal form loudly and identically across lanes. The
+    // checker's only handler-side addition is the int64-suffix rule below.
+    match effect {
+        Some("random") => {
+            // Open question 1 (decided 2026-07-17): the seed is semantically
+            // int64, and a seed written as an integer LITERAL must carry the
+            // `i64` suffix (the reject-diagnostic half chelis#771 left to Phase
+            // 1). A negative int64 literal is additionally rejected: the RNG
+            // lanes cannot honor it today (chelis#731 red team F2).
+            match seed_literal_form(handler) {
+                SeedLiteralForm::Unsuffixed => {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        "`with seed(...)` requires an int64-suffixed integer literal seed; \
+                         an unsuffixed literal defaults to int32 (spec/02-surf-syntax.md \
+                         §P10a; spec/design/checker_totality.md §C1.5)"
+                            .to_string(),
+                        vec![
+                            "Add the `i64` suffix to the seed literal, e.g. \
+                             `with seed(42i64) { ... }`"
+                                .to_string(),
+                        ],
+                    ));
+                }
+                SeedLiteralForm::NegativeInt64 => {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        "`with seed(...)` requires a non-negative seed literal; the RNG \
+                         lanes cannot honor a negative seed today (the DAG lowering folds \
+                         it to seed 0, so distinct-stream determinism ([05-RNG-1]) would \
+                         fail for a negative seed vs 0). Negative-seed semantics are \
+                         chelis#735's territory (spec/design/checker_totality.md §C1.5)"
+                            .to_string(),
+                        vec![
+                            "Use a non-negative int64-suffixed seed, e.g. \
+                             `with seed(42i64) { ... }`"
+                                .to_string(),
+                        ],
+                    ));
+                }
+                SeedLiteralForm::NotIntLiteral | SeedLiteralForm::ValidInt64 => {}
+            }
+        }
+        Some("resource") => {
+            // Device literal-ness is the effects gate's job; the device-name
+            // vocabulary is not validated here (target knowledge, chelis#735).
+        }
+        other => {
+            // §C1.5 / §I1: an unknown effect kind is malformed. chelis#730's
+            // lowering catch-all still lowers the body and silently drops the
+            // handler for an unknown kind (`lower_handle_effect`), so until its
+            // raise lands the checker is the loud gate for the bogus-effect
+            // `.dp`.
+            let named = other.unwrap_or("<missing>");
+            errors.push(CheckError::new(
+                CheckErrorKind::MalformedForm,
+                format!(
+                    "unknown effect kind `{named}` in `handle-effect`: the checker \
+                     recognizes only `random` (with seed) and `resource` \
+                     (with device) (spec/03-deep-syntax.md; chelis#730, chelis#731)"
+                ),
+                vec![],
+            ));
+        }
+    }
+
+    // T-Handle: return the BODY's type in the enclosing context. This is the
+    // chelis#709 fix -- the enclosing `def` signature is now enforced against
+    // the body, so an int64 body in an `-> f32` def, or a tensor body from a
+    // scalar-typed fn, is a type error caught before any backend sees it.
+    infer_expr(
+        body,
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    )
+}
+
+/// Classification of a `random`-effect seed handler for the checker's
+/// seed-form rules (chelis#731 §C1.5; the negative case is the chelis#731 red
+/// team's F2 finding).
+enum SeedLiteralForm {
+    /// Not an integer literal (a computed expression, a string, ...). This is
+    /// the shared effects gate's territory (`chelis-effects`
+    /// `validate_handler_expr`); the checker stays silent to avoid a double
+    /// diagnostic.
+    NotIntLiteral,
+    /// An unsuffixed integer literal (a bare `Atom::Int`, or `(lit {type:
+    /// int32} N)`). The seed is semantically int64, so this is a type error.
+    Unsuffixed,
+    /// An int64-suffixed but NEGATIVE literal (`(lit {type: int64} -N)`). The
+    /// RNG lanes cannot honor a negative seed today (the DAG lane's
+    /// `extract_usize_value` rejects it and silently falls back to seed 0), so
+    /// distinct-stream determinism ([05-RNG-1]) would fail for `-1` vs `0`.
+    /// Rejected until chelis#735 authors negative-seed semantics.
+    NegativeInt64,
+    /// A valid non-negative int64-suffixed literal (`Ni64` desugars to
+    /// `(lit {type: (t-prim {} int64)} N)`, N >= 0). Accepted.
+    ValidInt64,
+}
+
+/// Classify a `random`-effect seed handler. Only integer literals are the
+/// checker's business (the effects gate covers literal-ness); a bare atom is
+/// unsuffixed by construction, a `(lit ...)` carries its width in the `type`
+/// metadata.
+fn seed_literal_form(expr: &deep::Expr) -> SeedLiteralForm {
+    let int_lit = match expr {
+        // A bare integer atom has no suffix metadata: unsuffixed by construction.
+        deep::Expr::Atom(deep::Atom::Int(value), _) => Some((false, *value)),
+        deep::Expr::List(list, _) if get_tag(list) == Some("lit") => {
+            match list.elements.get(2) {
+                Some(deep::Expr::Atom(deep::Atom::Int(value), _)) => {
+                    let is_int64 = get_meta(list).is_some_and(|meta| {
+                        meta.entries.iter().any(|(key, meta_value)| {
+                            key == "type"
+                                && matches!(
+                                    meta_value,
+                                    deep::Expr::List(inner, _)
+                                        if get_tag(inner) == Some("t-prim")
+                                            && children(inner).first().and_then(symbol_name)
+                                                == Some("int64")
+                                )
+                        })
+                    });
+                    Some((is_int64, *value))
+                }
+                // A `(lit ...)` wrapping a non-int value is not an int seed.
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    match int_lit {
+        None => SeedLiteralForm::NotIntLiteral,
+        Some((false, _)) => SeedLiteralForm::Unsuffixed,
+        Some((true, value)) if value < 0 => SeedLiteralForm::NegativeInt64,
+        Some((true, _)) => SeedLiteralForm::ValidInt64,
+    }
 }
 
 fn infer_atom(atom: &deep::Atom) -> Type {
@@ -9234,7 +9582,7 @@ fn infer_var(
             Type::Error
         }
     } else {
-        Type::Error
+        malformed_form(list, "var", "a symbol name as its first child", errors)
     }
 }
 
@@ -9401,10 +9749,10 @@ fn infer_lit(
             deep::Expr::Atom(deep::Atom::Float(_), _) => Type::Prim(Prim::F32),
             deep::Expr::Atom(deep::Atom::Bool(_), _) => Type::Prim(Prim::Bool),
             deep::Expr::Atom(deep::Atom::Str(_), _) => Type::Prim(Prim::String),
-            _ => Type::Error,
+            _ => malformed_form(list, "lit", "a scalar atom value", errors),
         }
     } else {
-        Type::Error
+        malformed_form(list, "lit", "a value atom or a `type:` annotation", errors)
     }
 }
 
@@ -10333,13 +10681,15 @@ fn infer_app(
                     }
 
                     if let Some(expr) = kids.get(index + 1)
-                        && !is_numeric_literal_expr(expr)
+                        && !is_static_numeric_bound(expr)
                     {
                         errors.push(CheckError::new(
                             CheckErrorKind::TypeMismatch,
                             with_macro_provenance(
                                 &deep::Expr::List(list.clone(), zero_span()),
-                                "uniform_like currently requires literal low/high bounds"
+                                "uniform_like currently requires literal low/high bounds \
+                                 (a numeric literal, optionally negated or cast to a float \
+                                 type); a runtime-computed bound is not supported"
                                     .to_string(),
                             ),
                             vec![],
@@ -17436,7 +17786,12 @@ fn infer_match(
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
-        return Type::Error;
+        return malformed_form(
+            list,
+            "match",
+            "a scrutinee expression and at least one arm",
+            errors,
+        );
     }
 
     let scrutinee_ty = infer_expr(
@@ -17449,6 +17804,20 @@ fn infer_match(
         typed_nodes,
         total_nodes,
     );
+
+    // chelis#710 [04-TOT-3]: a match with a scrutinee but no arms is
+    // malformed. Return early so the exhaustiveness check below cannot also
+    // fire (which would double-report on an ADT scrutinee); a bare bool/int
+    // scrutinee with zero arms used to reach `result_ty.unwrap_or(Type::Error)`
+    // as a silent `Type::Error` (census-verified silent-through).
+    if kids.len() < 2 {
+        return malformed_form(
+            list,
+            "match",
+            "at least one arm after the scrutinee",
+            errors,
+        );
+    }
 
     let mut result_ty: Option<Type> = None;
     let mut covered_variants: Vec<String> = Vec::new();
@@ -17973,7 +18342,7 @@ fn infer_pipe(
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
-        return Type::Error;
+        return malformed_form(list, "pipe", "at least one stage", errors);
     }
 
     let mut current_ty = infer_expr(
@@ -18210,7 +18579,7 @@ fn infer_tuple_get(
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 {
-        return Type::Error;
+        return malformed_form(list, "tuple-get", "a tuple expression and an index", errors);
     }
 
     let tuple_ty = infer_expr(
@@ -18341,7 +18710,12 @@ fn infer_record(
 ) -> Type {
     let kids = children(list);
     let Some(head) = kids.first().and_then(symbol_name) else {
-        return Type::Error;
+        return malformed_form(
+            list,
+            "record",
+            "a symbol constructor head as its first child",
+            errors,
+        );
     };
 
     let Some((adt_name, variant, ctor_name)) = resolve_record_head(head, adt_reg) else {
@@ -18570,7 +18944,12 @@ fn infer_access(
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 {
-        return Type::Error;
+        return malformed_form(
+            list,
+            "access",
+            "a target expression and a field name",
+            errors,
+        );
     }
     let target_ty = infer_expr(
         &kids[0],
@@ -18583,7 +18962,12 @@ fn infer_access(
         total_nodes,
     );
     let Some(field_name) = symbol_name(&kids[1]) else {
-        return Type::Error;
+        return malformed_form(
+            list,
+            "access",
+            "a symbol field name as its second child",
+            errors,
+        );
     };
     // Peel borrow layers: an `&T` target reads through the borrow.
     let mut resolved = subst.apply(&target_ty);
@@ -18665,7 +19049,12 @@ fn infer_record_update(
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
-        return Type::Error;
+        return malformed_form(
+            list,
+            "record-update",
+            "a target expression to update",
+            errors,
+        );
     }
     let target_ty = infer_expr(
         &kids[0],
@@ -18786,7 +19175,7 @@ fn infer_cast(
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 {
-        return Type::Error;
+        return malformed_form(list, "cast", "an expression and a target type", errors);
     }
 
     let expr_ty = infer_expr(
@@ -19011,7 +19400,7 @@ fn infer_grad(
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
-        return Type::Error;
+        return malformed_form(list, "grad", "a function argument to differentiate", errors);
     }
 
     let f_ty = infer_expr(
@@ -19226,7 +19615,7 @@ fn infer_vmap(
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
-        return Type::Error;
+        return malformed_form(list, "vmap", "a function argument to map", errors);
     }
 
     // Issue #216: cast-aware so a Deep-direct vmap node with a cast-
@@ -19360,12 +19749,12 @@ fn infer_def(
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 {
-        return Type::Error;
+        return malformed_form(list, "def", "a name and a body expression", errors);
     }
 
     let name = match symbol_name(&kids[0]) {
         Some(n) => n.to_string(),
-        None => return Type::Error,
+        None => return malformed_form(list, "def", "a symbol name as its first child", errors),
     };
 
     let body_ty = infer_expr(
@@ -21433,7 +21822,7 @@ mod tests {
                  (field {} snd (t-prim {} f32))))
              (def {} p
                (record {}
-                 (var {} MkPair)
+                 MkPair
                  (kv {} fst (lit {type: (t-prim {} int32)} 1))
                  (kv {} snd (lit {type: (t-prim {} f32)} 2.0))))",
         );

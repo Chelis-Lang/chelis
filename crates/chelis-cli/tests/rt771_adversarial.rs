@@ -160,13 +160,17 @@ fn rt_2e_add_computed_seed_rejected_both_lanes() {
 
 #[test]
 fn rt_4_literal_boundaries_agree() {
-    // Bare int literals (any i64) pass the gate and must be lane-identical.
+    // int64-suffixed literals across the int32/int64 boundary pass the gate and
+    // must be lane-identical. chelis#731 Phase 1 makes the seed's int64 suffix a
+    // checker requirement (an unsuffixed literal is now a type error), so the
+    // boundary seeds carry the `i64` suffix; the suffix is meta-only and does
+    // not change the seed's raw-atom value the peel reads, so lane parity holds.
     for s in [
-        "2147483646",
-        "2147483647",
-        "2147483648",
-        "2147483649",
-        "4294967296",
+        "2147483646i64",
+        "2147483647i64",
+        "2147483648i64",
+        "2147483649i64",
+        "4294967296i64",
     ] {
         assert_both_agree("4", s);
     }

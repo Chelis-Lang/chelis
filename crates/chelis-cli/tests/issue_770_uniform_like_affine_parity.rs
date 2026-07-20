@@ -68,7 +68,7 @@ fn program(low: &str, high: &str, seed: u64) -> String {
     format!(
         "template = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), \
          cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])\n\
-         sampled = with seed({seed}) {{ uniform_like(copy(template), {low}, {high}) }}\n"
+         sampled = with seed({seed}i64) {{ uniform_like(copy(template), {low}, {high}) }}\n"
     )
 }
 
