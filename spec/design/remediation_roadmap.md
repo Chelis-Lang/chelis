@@ -22,7 +22,7 @@ The plan set: [`dtype_semantics.md`](dtype_semantics.md) ([#729]), [`loud_unsupp
 | [#703] unsupported cases substitute values instead of failing | [`loud_unsupported.md`](loud_unsupported.md) - Result-typed failure channel, the 18-row census sweep, un-writability ratchets (lint, newtype, tripwire), gates demoted to UX | [#730] |
 | [#709] unrecognized constructs silently exempt from checking (+[#710]'s silent half) | [`checker_totality.md`](checker_totality.md) - loud wildcard + handle-effect case, ErrorWitness token (silent Type::Error unconstructible), totality invariant, DeepTag exhaustiveness | [#731] |
 | [#728] the observation channel is not dtype-faithful | [`faithful_observation.md`](faithful_observation.md) - one Rust formatter, generated C print helper, round-trip invariant, tolerance table; landable before [#729]; unblocks [#687] | [#732] |
-| spec silence + stale claims ([#694]; the unauthored cells) | [`spec_provenance.md`](spec_provenance.md) - hash-addressed spec atoms, lint-checked @spec claims, test-carrier coverage, the PR authority gate | [#733] |
+| spec silence + stale claims ([#694]; the unauthored cells) | [`spec_provenance.md`](spec_provenance.md) - re-scoped 2026-07-20 to OpenSpec-first (brittonr driving): the PR authority gate + `spec/**` signoff land as designed, atom IDs stay the citation grammar, and the hash/lint provenance machinery (xxhash revs, not SHA-256) is the growth target entered on a recorded trigger | [#733] |
 
 Supporting: [`capability_table.md`](capability_table.md) (schema; rides [#729] Phase 4),
 [`docs/agent_quality_architecture.md`](../../docs/agent_quality_architecture.md) ([#740]), the seeded atoms
@@ -35,18 +35,18 @@ interlock is pinned in both landing orders (each doc's §I1). The
 *recommended* order optimizes for detectors-before-fixes and for
 small-wins-early:
 
-**Wave 0 - all five Phase 0s, in any order, immediately.** Each is
-afternoon-scale, none touches production code, and together they make
-every class regression-visible before anyone fixes anything: the
-domain-validity invariant + [#687] oracle lanes ([#729] P0), the substitution
-census verification + token tripwire ([#730] P0 - note census row 3 is
-already settled: live, [#734]), the `Type::Error` census + red
-totality invariant ([#731] P0), the round-trip harness + exit census
-([#732] P0), the PR spec gate + `spec/**` signoff ([#733] P0). Two
-handshakes qualify "any order": [#732] P0's `%.16g`/`%.1f` grep pattern
-lands in [#730] P0's tripwire (land [#730] P0 first or pair the PRs), and
-[#729] P0's domain-checker wiring edits the same lane drivers [#732] P0's
-harness drives through (sequence or coordinate those two).
+**Wave 0 - all five Phase 0s, in any order, immediately.** STATUS
+2026-07-20: four of five LANDED 2026-07-17 - the domain-validity
+invariant + [#687] oracle lanes ([#729] P0, PR #758), the substitution
+census verification + token tripwire ([#730] P0, PR #746), the
+`Type::Error` census + red totality invariant ([#731] P0, PR #757 -
+`issue_731_totality_invariant.rs`), the round-trip harness + exit
+census ([#732] P0, PR #752). The one outstanding Wave 0 item is the PR
+spec gate + `spec/**` signoff ([#733] P0), unaffected by [#733]'s
+2026-07-20 OpenSpec-first re-scope. The two ordering handshakes
+(the `%.16g`/`%.1f` grep pattern landing in [#730] P0's tripwire; [#729]
+P0 and [#732] P0 sharing lane drivers) were honored and are now
+historical.
 
 **Wave 1 - the small loud fixes.** [#731] Phase 1 (the checker holes -
 days) and [#730] Phase 1 (the failure channel + live-site sweep). These
@@ -57,8 +57,11 @@ makes the remaining reds honest.
 **Wave 2 - the independently-landable value work.** [#732] Phases 1-2 (the
 formatter + generated C side: fixes [#716]/[#723] outright and gives the
 refactor its byte-exact instrument) in parallel with [#731] Phases 2-3 (the
-witness token + DeepTag) and [#730] Phase 2 (the lint ratchets). [#733]
-Phase 1 rides alongside, atomizing whatever spec text Waves 1-2 author.
+witness token + DeepTag) and [#730] Phase 2 (the lint ratchets). [#733]'s
+OpenSpec track rides alongside (per the 2026-07-20 re-scope): new
+normative text Waves 1-2 author is born with atom IDs and goes through
+the OpenSpec claim flow; the rev/lint machinery (the re-scoped Phase 1)
+stays deferred.
 [#732] Phase 2 additionally gates the ECOSYSTEM's compiled-lane
 validation: no shell runs a compiled binary today, and [#754]'s
 cross-lane agreement gate (the mechanism [#738]'s conform row points
@@ -70,9 +73,11 @@ validated by everything Waves 0-2 built.
 
 **Wave 4 - the permanent guards.** [#729] Phase 4 delivers the capability
 table per [`capability_table.md`](capability_table.md); [#730] Phase 3 (gates become UX) and [#733]
-Phase 3 (citations) ship inside it; [#732] Phase 3 (tolerance table +
-the [#687] handshake) closes the oracle; [#733] Phase 2's coverage ratchet
-turns on for the atomized specs.
+Phase 3 (citation PRESENCE - atom IDs on rows, not deferred by the
+re-scope) ship inside it; [#732] Phase 3 (tolerance table + the [#687]
+handshake) closes the oracle. [#733] Phase 2's coverage ratchet is
+growth-target work: it turns on only if/when the re-scope's trigger
+fires and the rev/lint tier is built.
 
 Standing exception: any Wave may be entered early for a cell that becomes
 urgent - the interlock sections make that safe; this ordering is advice,
@@ -96,10 +101,11 @@ row (SATISFIED 2026-07-17: PR #760 merged, [#719] closed - the row may
 be authored when Phase 3 arrives); downstream of the set, [#754]'s
 ecosystem gate is hard-gated on [#732] Phase 2's byte-identical
 rendering. Not drawn (for legibility):
-[#733] Phase 1 atomizes whatever spec text Waves 1-2 author. The graph is acyclic. Node colors are the waves
+[#733]'s OpenSpec track covers whatever spec text Waves 1-2 author. The graph is acyclic. Node colors are the waves
 above: grey = Wave 0, green = Wave 1, blue = Wave 2, orange = Wave 3,
-purple = Wave 4 (so [#733] P1, blue, rides Wave 2); white boxes with
-dashed borders are standalone fixes outside the wave structure.
+purple = Wave 4 (so [#733]'s OpenSpec track, blue, rides Wave 2); white
+boxes with dashed borders are standalone fixes outside the wave
+structure. LANDED marks the four Phase 0s merged 2026-07-17.
 
 ```mermaid
 %%{init: {"themeVariables": {"fontSize": "18px"}, "flowchart": {"nodeSpacing": 45, "rankSpacing": 42}}}%%
@@ -114,14 +120,14 @@ flowchart TB
   subgraph S733["#733 spec provenance"]
     direction TB
     n733p0["P0 · PR spec gate + spec/** signoff"]:::w0
-    n733p1["P1 · atomize Wave 1-2 spec text"]:::w2
-    n733p23["P2 coverage ratchet · P3 citations"]:::w4
+    n733p1["OpenSpec track · claim discipline<br/>(P1 rev/lint: growth target)"]:::w2
+    n733p23["P3 citation presence<br/>(P2 ratchet: growth target)"]:::w4
     n733p0 --> n733p1 --> n733p23
   end
 
   subgraph S730["#730 loud unsupported"]
     direction TB
-    n730p0["P0 · census re-verify + token tripwire<br/>+ rejected-cells corpus stub"]:::w0
+    n730p0["P0 · census re-verify + token tripwire<br/>+ rejected-cells corpus stub (LANDED)"]:::w0
     n730p1["P1 · Result channel + live-site sweep"]:::w1
     n730p2["P2 · lint ratchet + EmittedExpr<br/>+ EffectKind enum"]:::w2
     n730p3["P3 · gates become UX"]:::w4
@@ -130,7 +136,7 @@ flowchart TB
 
   subgraph S731["#731 checker totality"]
     direction TB
-    n731p0["P0 · Type::Error census<br/>+ red totality invariant"]:::w0
+    n731p0["P0 · Type::Error census<br/>+ red totality invariant (LANDED)"]:::w0
     n731p1["P1 · loud wildcard + handle-effect case<br/>+ #710 guard sweep"]:::w1
     n731p2["P2 · ErrorWitness token,<br/>invariant always-on"]:::w2
     n731p3["P3 · DeepTag exhaustive dispatch"]:::w2
@@ -139,7 +145,7 @@ flowchart TB
 
   subgraph S732["#732 faithful observation"]
     direction TB
-    n732p0["P0 · round-trip harness + exit census"]:::w0
+    n732p0["P0 · round-trip harness + exit census (LANDED)"]:::w0
     n732p1["P1 · format_element + eval adoption<br/>+ eval-side migration"]:::w2
     n732p2["P2 · generated C helper + to_list arms<br/>+ C-side migration"]:::w2
     n732p3["P3 · tolerance table + #687 handshake"]:::w4
@@ -148,7 +154,7 @@ flowchart TB
 
   subgraph S729["#729 dtype semantics"]
     direction TB
-    n729p0["P0 · domain checker + #687 oracle lanes"]:::w0
+    n729p0["P0 · domain checker + #687 oracle lanes (LANDED)"]:::w0
     n729p1["P1 · semantics module + storage decision<br/>+ eval adoption"]:::w3
     n729p2["P2 · kernel split + traps + prove"]:::w3
     n729p3["P3 · C backend adoption<br/>+ generated observation"]:::w3
@@ -199,14 +205,14 @@ the capability table's seed decisions, or by being closed.
 | [#691] | C DAG lane emits fmaxf/fabsf for int64 | owned by capability-table seed decision: B-cells `Unimplemented { issue: #691 }` - the substitution becomes a rejection at [#730] Phase 1 / table landing, correct kernels later |
 | [#693] | Metal int64 `abs` zero emission | root cause is [#699] (confirmed by emission); Metal B-cell `Unimplemented { issue: #693 }` until the MSL integer path is wired post-[#699]-fix |
 | [#713] | `pad_sequences` allocates int32 output for int64 input | standalone lowering fix; natural moment is [#729] Phase 3 (C host dtype parity), tracked here until claimed there |
-| [#721] | eval cannot ingest the canonical Deep of a nullary fn | standalone eval-ingestion fix; explicitly non-goaled by [#731]; no plan dependency |
 | [#734] | `to_string` on tensors/lists compiles to the literal `<value>` | [#730] census row 3 (now live); dies at [#730] Phase 1, unwritable after Phase 2; rendering via [#732]'s formatter |
-| [#747] | cli.rs `runtime_library_path()` hard-codes `../../target/debug/deps` (breaks isolated CARGO_TARGET_DIR runs) | standalone test-harness fix; no plan dependency; the per-worktree target symlink is the interim workaround |
-| [#750] | compiled lane silently drops def-call-valued top-level roots | silent-omission cousin of [#703]'s class (the skip_for_lowered mechanism, root-output face); standalone fix; [#754]'s output diff catches regressions |
 | [#751] | generated C emits uncompilable / sign-losing float constants (f64::MAX as integer literal; -0.0 as `-0`) | ingress, [#729] family; natural moment [#729] Phase 3 (constant emission); [#732]'s harness C_LANE_EXCLUDED cells return when it lands |
-| [#754] | shell-invokable cross-lane agreement gate (owner: brittonr) | downstream consumer, not plan-set work: hard-gated on [#732] Phase 2; consumes Phase 3's tolerance artifact and [#729] Phase 4's capability table (cell skipping); GPU lanes join after [#736]/[#737]; [#738] is its consumer; the one-comparator rule is pinned in [#732]'s §C4.3. Scope boundary (2026-07): a verdict proves lane agreement for its RECORDED (target triple, C toolchain + flags incl. -ffp-contract, libm identity) only - never cross-platform determinism by itself; the platform axis compares verdicts across CI matrix entries under the same tolerance table |
+| [#754] | shell-invokable cross-lane agreement gate (owner: brittonr) | downstream consumer, not plan-set work: hard-gated on [#732] Phase 2; consumes Phase 3's tolerance artifact and [#729] Phase 4's capability table (cell skipping); GPU lanes join after [#736]/[#737]; [#738] is its consumer; the one-comparator rule is pinned in [#732]'s §C4.3. Scope boundary (2026-07): a verdict proves lane agreement for its RECORDED (target triple, C toolchain + flags incl. -ffp-contract, libm identity) only - never cross-platform determinism by itself; the platform axis compares verdicts across CI matrix entries under the same tolerance table. Platform priority (Jeff, 2026-07-20): server-side Linux x86-64 is the primary verdict platform before any wider matrix. The -ffp-contract entry in the provenance flag set now has a measured in-house exemplar: the pre-[#770]-fix `uniform_like` affine was contraction-dependent (PR #779 removed the sensitivity at the source) |
 | [#763] | `chelis lane-check` - the exact-only, Nix-hermetic first slice of [#754] (owner: brittonr) | child of the [#754] row: same one-comparator rule and proof-scope boundary; for its exact-safe corpus, byte-identity holds TODAY (the parity corpus diet, verified 2026-07-17), so [#732] Phase 2 is the corpus-EXPANSION unlock rather than a ship blocker; the initial corpus curates around [#751] (uncompilable float constants) and [#761] (subnormal ingress flush) |
 | [#761] | C lane flushes f32 subnormal literals to zero at ingress (the to_tensor route; found by [#719]'s fix session) | ingress, [#729] family ([04-NUM-2] requires subnormal-preserving narrowing); distinct from [#748] (rendering), whose print collapse masks this value-loss class in print-based checks; natural moment [#729] Phase 3 (C host dtype parity) or standalone earlier; blocks the subnormal locks in [#719]'s and [#732]'s suites until fixed |
+| [#775] | scalar top-level roots render as a rank-0 tensor in eval but a bare scalar in compiled C (value and line count agree; shape diverges; unmasked, not caused, by [#750]'s fix) | [#732]'s concrete acceptance case for its Phase 1 scalar-root rendering decision. Disposition (Jeff, 2026-07-18): deliberately fixed in NEITHER lane now - [05-OBS-1..3] and the container rule do not decide it, and a unilateral pick would preempt the one-formatter-both-lanes contract; the [#732] P0 harness pins the divergence as deliberately-undriven until Phase 1 decides |
+| [#780] | matmul shape checking lost through an unannotated lambda parameter - a Surf-reachable false green (found in [#773]'s red team; pre-existing on both sides of the [#773] fix) | [#731] family: a silent unresolved-var acceptance, the deferral-shaped cousin of silent `Type::Error`; sequenced behind [#731] Phase 1-2 rather than fixed standalone so lambda-param binding/re-check semantics are decided once inside the track |
+| [#783] | annotation writeback degrades an unresolved Var to a rank-0 default and clobbers a concrete annotation (a silent [#703]-class substitution; the enabler of the transient [#773]-fix conv2d ICE, hotfixed same day) | sits between [#731] (the silent-degradation discipline) and [#730] (the substitution shape): the durable invariant is covered-or-rejected on the type-metadata channel - never replace a concrete annotation with a degraded one silently. Not urgent: the known trigger is guarded (all eleven shape-computed overrides), regression-locked by `issue_778_conv2d_annotation_clobber.rs` |
 
 Also tracked to closure but already claimed (listed for completeness):
 [#680]/[#684]/[#685]/[#686]/[#688] -> [#729]; [#682]/[#692]/[#697]/[#698]/[#699]/[#704]/[#705]/[#725] ->
@@ -220,6 +226,13 @@ Wave 0's own discoveries, claimed at filing: [#744]/[#745] -> [#730]
 [04-NUM-7] + the capability seed row); [#755]/[#756] -> [#731] (census
 extensions; die at the Phase 1-2 sweep and witness migration).
 
+Closed by the 2026-07-18/19 fix batch and removed from the ledger
+above: [#747] (PR #767), [#721] (PR #768), [#750] (PR #774). Filed and
+fixed inside the same batch, never ledgered: the [#735] sweep's
+discoveries [#770] (PR #779), [#771] (PR #777, lane-agreement half;
+the reject-diagnostic half stays [#731] Phase 1), and [#776] (PR #782),
+plus the standalone [#706] (PR #769) and [#707] (PR #772).
+
 ## The deferred-evidence ledger
 
 Claims resting on inspection or partial execution, per the audit's own
@@ -230,7 +243,7 @@ standard ("execute everything"). Each has a tracked task.
 | HIP runtime behavior ([#689]/[#690] symptoms at runtime) | **executed on gfx1151** (HIP 7.13, chelis 0.16.1, via `scripts/hip_test.py`): [#689] confirmed - `neg`/`sum` run an `_f32` kernel over the `CHELIS_I64` buffer and return garbage (e.g. `sum([10¹²,2·10¹²,3·10¹²,4·10¹²])` = 3567587328 vs 10¹³; `neg` also drops the upper lanes), while `add`/`mul` (correct `_i64` kernels) and f32 `neg` are exact. [#690] confirmed - HIP `trunc_div` by zero returns silently (exit 0, garbage) where the evaluator aborts branded. Repro archived at `docs/investigations/probes/hip_runtime/`; red-team re-ran the probes (PASS) and the runtime results are posted on [#689](https://github.com/Chelis-Lang/chelis/issues/689#issuecomment-5011825763), [#690](https://github.com/Chelis-Lang/chelis/issues/690#issuecomment-5011825818), and [#736](https://github.com/Chelis-Lang/chelis/issues/736#issuecomment-5011825877) | [#736]: probes executed + posted; both issues off the emission-only caveat |
 | Metal runtime execution (typed kernels actually computing) | emission-locked (`metal_dtype_emission_and_bool_add.rs`); never executed | [#737]: a small driver harness (main.mm + chelis runtime link) on an arm64 Mac; promote the emission locks to run locks |
 | [#688]'s opaque produced-value chokepoint (`flatten_field_value`) | the CLASS is executed (spurious fuzz-tier counterexample); the cited site is not | tracked on [#688] itself: needs `--features smt` + an `@opaque` int64-field type; exact repro sketch is in the issue comments |
-| `with seed` / `with device` semantics (cross-lane seeding reproducibility) | never swept; both [#730] and [#731] explicitly non-goal it | [#735]: spec-gap issue - author the semantics (atoms, per [#733]), then sweep both lanes |
+| `with seed` / `with device` semantics (cross-lane seeding reproducibility) | the `with seed` half is SWEPT (2026-07-18 sweep + 2026-07-19 re-sweep on [#735]: eval vs compiled-C host lane, all probes f32-bit-identical post the [#770]/[#771]/[#776] fixes, independently re-run 253/253); [05-RNG-1] shipped (PR #781) | [#735]: remaining authoring - `with device` selection, vmap x seed, grad-through-seeded-draws numerics; GPU/kernel-lane RNG sweep is the [#736] follow-on; the unconditional cross-lane atom is parked solely behind [#731] Phase 1's seed-literal diagnostic |
 | shell repos' compiled-lane numerics (school validates eval-only) | audit note, unexecuted downstream | [#738]: conform-contract amendment proposal - shells gain a compiled-lane numerical row |
 | census rows 13-16 of [#730] (dead-by-probe placeholder sites) | probed dead or dead-by-inspection | re-verified mechanically at [#730] Phase 0; §C1.4 raise-or-prove applies regardless |
 
@@ -253,15 +266,34 @@ formal development (the canonical calculus; our spec text lags it):
   for [#733]: these atoms cite theorems in ANOTHER repo's formal
   development, and the atom grammar's rev-hashing is spec-text-based -
   a cross-repo citation form needs defining before these atoms land.
-- **Genuinely open, still owed**: what a seed guarantees NUMERICALLY
-  (same-seed same-stream within a lane; cross-lane stream identity is
-  exactly the never-swept gap), what `with device` selects
-  operationally, and vmap interaction (not in LaCaDiLE at all). Jeff
-  owns the RNG-reproducibility call; the rest stays [#735] authoring.
+- **The RNG-reproducibility call is MADE and partly shipped** (Jeff,
+  2026-07-18, the [decision memo on
+  #735](https://github.com/Chelis-Lang/chelis/issues/735#issuecomment-5013424269)):
+  the contract is same-seed same-stream, byte-identical, across all
+  supported lanes, for any range - the measured two-tier behavior
+  (exact for [0,1), 1-ULP elsewhere) was rejected as an ambiguous
+  contract and fixed as an implementation defect instead. Status: the
+  formerly never-swept cross-lane gap has now been swept twice by
+  execution (2026-07-18 sweep, 2026-07-19 re-sweep; all probes
+  f32-bit-identical after the [#770]/[#771]/[#776] fixes, independently
+  re-run). The per-lane determinism-at-rest atom **[05-RNG-1]** shipped
+  (PR #781, spec/05 §2.6) - grounded in the sweep evidence, deliberately
+  NOT in LaCaDiLE, whose `Random` effect is abstract and says nothing
+  about stream values, so the cross-repo citation question does not
+  arise for it. The unconditional CROSS-LANE atom is drafted and parked
+  with exactly one remaining blocker: [#731] Phase 1's
+  out-of-range/unsuffixed seed-literal diagnostic (until the checker
+  rejects those literals, the invariant would be silent about inputs
+  the compiler accepts).
+- **Genuinely open, still owed**: what `with device` selects
+  operationally, vmap x seed (not in LaCaDiLE at all; its own sweep),
+  the numerics of grad THROUGH seeded draws (LaCaDiLE yields only
+  seed-before-grad), and the GPU/kernel RNG lanes (the [#736]
+  follow-on). All stay [#735] authoring.
 
 [#731] makes the BODIES type-checked (with the T-Handle shape as the
 formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
-[#735]'s output remains atoms plus a sweep, not code.
+[#735]'s remaining output is atoms plus the parked sweeps, not code.
 
 [#680]: https://github.com/Chelis-Lang/chelis/issues/680
 [#681]: https://github.com/Chelis-Lang/chelis/issues/681
@@ -286,6 +318,8 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#703]: https://github.com/Chelis-Lang/chelis/issues/703
 [#704]: https://github.com/Chelis-Lang/chelis/issues/704
 [#705]: https://github.com/Chelis-Lang/chelis/issues/705
+[#706]: https://github.com/Chelis-Lang/chelis/issues/706
+[#707]: https://github.com/Chelis-Lang/chelis/issues/707
 [#709]: https://github.com/Chelis-Lang/chelis/issues/709
 [#710]: https://github.com/Chelis-Lang/chelis/issues/710
 [#711]: https://github.com/Chelis-Lang/chelis/issues/711
@@ -327,3 +361,10 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#756]: https://github.com/Chelis-Lang/chelis/issues/756
 [#761]: https://github.com/Chelis-Lang/chelis/issues/761
 [#763]: https://github.com/Chelis-Lang/chelis/issues/763
+[#770]: https://github.com/Chelis-Lang/chelis/issues/770
+[#771]: https://github.com/Chelis-Lang/chelis/issues/771
+[#773]: https://github.com/Chelis-Lang/chelis/issues/773
+[#775]: https://github.com/Chelis-Lang/chelis/issues/775
+[#776]: https://github.com/Chelis-Lang/chelis/issues/776
+[#780]: https://github.com/Chelis-Lang/chelis/issues/780
+[#783]: https://github.com/Chelis-Lang/chelis/issues/783

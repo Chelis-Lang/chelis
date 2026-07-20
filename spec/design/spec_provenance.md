@@ -1,6 +1,10 @@
 # Spec Provenance: atoms, hash-linked claims, and the coverage gate
 
-**Status:** Design proposal, pre-implementation. Tracking issue: [#733].
+**Status:** Design target, re-scoped 2026-07-20 (see "The 2026-07
+re-scope" below): delivery is OpenSpec-first with brittonr driving; the
+atom + provenance machinery specified in this document is the growth
+target, not the next step. Phase 0 (the PR gate) is unaffected.
+Tracking issue: [#733].
 **Owning specs:** every file under `spec/` (this plan changes how normative
 text in them is WRITTEN and REFERENCED, not what any of them says);
 `spec/design/ears_chelis_bridge.md` (the existing EARS anchor, developed in
@@ -49,14 +53,76 @@ enforceable triple is **atom <-> test <-> code**, where the atom-test edge
 is machine-checked (existence, freshness, coverage) and the test-code edge
 is what tests already are.
 
-**Scope verdict:** no new external tooling (the openspec.dev / EARS ideas
-are adopted as *formats and flows*, implemented with the repo's own
-machinery: chelis-lint, the gate, CI, Python scripts with tests per repo
-policy). One new lint rule family, one atom grammar, one CI job, and an
-incremental atomization that starts where the four sibling plans are about
-to write normative text anyway - their spec deliverables are BORN
-atomized, so the system grows with the work instead of demanding a
-big-bang retrofit.
+**Scope verdict (as re-scoped 2026-07):** the near-term mechanism is the
+in-org OpenSpec flow plus the Phase 0 PR gate - process and existing
+tooling, nothing new to build. The in-repo machinery this doc specifies
+(one new lint rule family, one atom grammar, rev hashing, the coverage
+ratchet) is deferred to the growth tier and built only when OpenSpec
+proves inadequate for a concrete need. Incremental atomization of IDs
+continues regardless: the sibling plans' spec deliverables are BORN with
+atom IDs (the seeded [04-NUM-*]/[04-TOT-*]/[05-UNS-*]/[05-OBS-*] sets,
+and [05-RNG-1] after them), so the addressing grows with the work
+whether or not the enforcement tier ever fires.
+
+## The 2026-07 re-scope: OpenSpec-first, atoms as the growth target
+
+Decision record, 2026-07-20. Basis: Jeff's design review on [#733]
+([comment](https://github.com/Chelis-Lang/chelis/issues/733#issuecomment-5006123938))
+backing brittonr's OpenSpec-first call from the design-set PR thread
+(PR [#742]); Robert defers to brittonr on the mechanism. The goal is
+endorsed unchanged - a spec that stays honest, "specified but silently
+not honored" made visible. The re-scope is about mechanism weight:
+hash-addressed atoms, a custom extractor, `@spec ... rev ...` claim
+discipline, and truncated-hash revs are each something to author,
+build, maintain, and teach; under "future-proof without over-building"
+(spec/00-context.md §5, principle 8) we grow into that rather than
+prebuild it.
+
+**Live now (unchanged by the re-scope):**
+
+1. **Phase 0 as written** - the PR spec gate (`Spec-Atoms:` /
+   `Spec-Design:` trailers, the `spec-exempt` label + rolling report),
+   CODEOWNERS on `spec/**`, the PR template. Still afternoon-scale,
+   still land-first, still the only unlanded Phase 0 in the plan set.
+2. **Atom IDs as the citation grammar.** The seeded provisional atoms
+   (spec/04 §9-§10, spec/05 §7-§8) and every atom authored after them
+   ([05-RNG-1], PR #781, is the working example) keep the §C1 ID and
+   blockquote shape and remain the citation targets for PR trailers,
+   capability-table rows, and code comments. IDs are addressable
+   without the hash machinery; what defers is freshness ENFORCEMENT,
+   not addressing.
+3. **The structural tier's citation requirements (§C5)** - rows, tag
+   dispositions, and tolerance entries cite atom IDs as the sibling
+   plans' table phases land. Citation-presence checks ride those
+   plans; rev-freshness checks arrive with the growth tier.
+
+**The near-term mechanism (brittonr driving):** the in-org OpenSpec
+setup (the FCIS/dylint precedent) supplies the spec-delta-before-code
+claim discipline - what changes, against which spec statement, before
+the code lands. Exact flow, artifact locations, and its oracle are
+brittonr's call and land with the adoption PR; this doc deliberately
+does not over-specify them.
+
+**Deferred to the growth tier** (Phases 1-2 below, unchanged in
+content, no longer next): the atom extractor, the `spec-ref-valid` /
+`spec-ref-fresh` / `spec-atom-wellformed` lint family, rev computation
+and the freshness protocol, the tombstone registry, and the blocking
+coverage manifest.
+
+**The entry trigger:** the growth tier is built when OpenSpec proves
+inadequate for a concrete, named need - the expected first trigger is a
+spec edit that SHOULD auto-invalidate dependent claims and has no clean
+OpenSpec expression. Entering is a decision recorded on [#733], never a
+silent drift.
+
+**Hashing, pinned:** when the rev machinery lands it hashes with
+**xxhash**, not SHA-256 (§C1.3 amended below). This is an integrity
+check in a non-adversarial setting - "did this text change" - so a
+fast non-cryptographic hash fits the requirement; a cryptographic hash
+is over-engineered here. Reference revs computed under the original
+SHA-256 rule before this re-scope (e.g. the `27c28528` noted in
+PR #781's description for [05-RNG-1]) are void; no landed spec text
+embeds a rev, so nothing needs migration.
 
 ## What this plan can and cannot enforce (read first)
 
@@ -139,10 +205,14 @@ Rules:
    structural ("the Deep vocabulary SHALL comprise exactly the 62 tags
    listed in ..."). MUST/SHALL only inside atoms; aspirational prose
    stays outside them.
-3. **Hash**: SHA-256 of the whitespace-normalized atom text (collapse
-   runs of whitespace, strip the ID marker itself), truncated to 8 hex
-   chars. Normalization means reflowing or re-wrapping an atom does NOT
-   invalidate claims; changing any word does.
+3. **Hash**: xxhash (xxh3-64) of the whitespace-normalized atom text
+   (collapse runs of whitespace, strip the ID marker itself), rendered
+   as 8 hex chars. Pinned on [#733] in the 2026-07 re-scope,
+   superseding this doc's original SHA-256 choice: this is integrity
+   ("did this text change"), not an adversarial setting, so a fast
+   non-cryptographic hash fits. Normalization means reflowing or
+   re-wrapping an atom does NOT invalidate claims; changing any word
+   does.
 4. **Extent**: the blockquote is the atom. Tables can be atoms (a
    blockquoted table, e.g. the tolerance table's rows); one atom per
    decision, not per paragraph of exposition.
@@ -335,7 +405,12 @@ build-relevant, which is the strongest form of this plan:
 job; a `spec-exempt` PR passes and appears in the report; a docs-only PR
 passes untouched. (The job's own test suite is the named suite.)
 
-## Phase 1 - atoms, the extractor, and the lint (the mechanism tier)
+## Phase 1 - atoms, the extractor, and the lint (GROWTH TARGET)
+
+**Deferred by the 2026-07 re-scope.** Entered only on the re-scope
+section's trigger, as a recorded decision on [#733]. The near-term
+substitute is the OpenSpec track (brittonr). Content below is
+unchanged and remains the specification for when the tier is entered.
 
 **You inherit:** the gate (your delivery vehicle) and the sibling plans'
 imminent spec deliverables (your first atoms).
@@ -368,7 +443,10 @@ planted stale rev (the rules' negative tests); the extractor's unit
 suite; at least one real spec-edit exercised end-to-end (edit an atom,
 watch carriers fail, re-affirm, green).
 
-## Phase 2 - the coverage edge and the first ratchet
+## Phase 2 - the coverage edge and the first ratchet (GROWTH TARGET)
+
+**Deferred by the 2026-07 re-scope**, same terms as Phase 1 (it
+consumes Phase 1's machinery).
 
 **You inherit:** live atoms, live lint, annotated audit tests.
 
@@ -390,6 +468,12 @@ the debt report runs in CI on every PR; the exemption report shows only
 discharged or in-flight entries.
 
 ## Phase 3 - the structural tier (jointly with [#729]/[#731]/[#732])
+
+**Re-scope note:** NOT deferred - citation PRESENCE (every row / tag
+disposition / tolerance entry names its atom ID) ships inside the
+sibling plans' table phases regardless, enforced by their own
+generators. Only the rev-FRESHNESS check on those citations waits for
+the growth tier's lint.
 
 **You inherit:** the mechanism, the coverage gate, and the sibling
 plans' tables as they land.
@@ -487,3 +571,4 @@ being discoverable only by a three-day adversarial audit.
 [#731]: https://github.com/Chelis-Lang/chelis/issues/731
 [#732]: https://github.com/Chelis-Lang/chelis/issues/732
 [#733]: https://github.com/Chelis-Lang/chelis/issues/733
+[#742]: https://github.com/Chelis-Lang/chelis/pull/742
