@@ -25,9 +25,9 @@
 //!   (`1e-7`, `9.999999980506448e19`);
 //! * specials spell `inf` / `-inf` / `NaN`; `-0.0` keeps its sign.
 //!
-//! `Display` is NOT this grammar (it never emits e-notation), and C's
-//! `%.1f`/`%.16g` split is not either; the generated C normalizes to this
-//! grammar at Phase 2.
+//! `Display` is NOT this grammar (it never emits e-notation), and neither
+//! is the C helpers' two-branch printf format split (the chelis#748
+//! shape); the generated C normalizes to this grammar at Phase 2.
 //!
 //! For `f32`/`f64` the implementation IS `format!("{v:?}")`. For
 //! `f16`/`bf16` (no native Rust formatter) the shortest-digit search below
@@ -190,7 +190,12 @@ fn format_half(image: f64, stored_bits: u64, narrow: &dyn Fn(f64) -> u64, width:
         return if image < 0.0 { "-inf" } else { "inf" }.to_string();
     }
     if image == 0.0 {
-        return if image.is_sign_negative() { "-0.0" } else { "0.0" }.to_string();
+        return if image.is_sign_negative() {
+            "-0.0"
+        } else {
+            "0.0"
+        }
+        .to_string();
     }
     let neg = image < 0.0;
     let abs = image.abs();
@@ -212,11 +217,7 @@ fn format_half(image: f64, stored_bits: u64, narrow: &dyn Fn(f64) -> u64, width:
 /// shortest in digits. Among same-length hits the numerically closest to
 /// `abs` wins; an exact tie prefers the even mantissa (deterministic,
 /// spec/05 section 8.1).
-fn shortest_digits(
-    abs: f64,
-    round_trips: &dyn Fn(&str) -> bool,
-    width: &str,
-) -> (String, i32) {
+fn shortest_digits(abs: f64, round_trips: &dyn Fn(&str) -> bool, width: &str) -> (String, i32) {
     for p in 1..=17u32 {
         // Correctly rounded p-digit scientific form "d.ddd...e<exp>".
         let sci = format!("{:.*e}", (p - 1) as usize, abs);
@@ -252,9 +253,7 @@ fn shortest_digits(
             let dist = (value - abs).abs();
             let better = match &best {
                 None => true,
-                Some((bm, _, bd)) => {
-                    dist < *bd || (dist == *bd && cand % 2 == 0 && bm % 2 == 1)
-                }
+                Some((bm, _, bd)) => dist < *bd || (dist == *bd && cand % 2 == 0 && bm % 2 == 1),
             };
             if better {
                 best = Some((cand, cand_exp, dist));
@@ -291,7 +290,7 @@ fn split_sci(sci: &str) -> (String, i32) {
 /// (`abs`, the exact f64 image) against the normative thresholds.
 fn assemble(neg: bool, digits: &str, sci_exp: i32, abs: f64) -> String {
     let sign = if neg { "-" } else { "" };
-    let decimal_form = abs >= DECIMAL_LOWER_BOUND && abs < DECIMAL_UPPER_BOUND;
+    let decimal_form = (DECIMAL_LOWER_BOUND..DECIMAL_UPPER_BOUND).contains(&abs);
     if decimal_form {
         let len = digits.len() as i32;
         let body = if sci_exp >= len - 1 {
@@ -377,7 +376,10 @@ mod tests {
     fn integers_print_as_integers_at_every_width() {
         assert_eq!(format_element(Prim::Int8, ElementRef::I8(127)), "127");
         assert_eq!(format_element(Prim::Int8, ElementRef::I8(-128)), "-128");
-        assert_eq!(format_element(Prim::Int16, ElementRef::I16(-32767)), "-32767");
+        assert_eq!(
+            format_element(Prim::Int16, ElementRef::I16(-32767)),
+            "-32767"
+        );
         assert_eq!(
             format_element(Prim::Int32, ElementRef::I32(2147483647)),
             "2147483647"
@@ -429,7 +431,7 @@ mod tests {
             (-0.0f32, "-0.0"),
             (16777218.0f32, "16777218.0"),
             // The audit's byte-comparability example: sqrt(2) at f32.
-            (1.4142135f32, "1.4142135"),
+            (std::f32::consts::SQRT_2, "1.4142135"),
         ] {
             assert_eq!(format_element(Prim::F32, ElementRef::F32(v)), want);
         }
@@ -439,7 +441,10 @@ mod tests {
     fn f16_formats_shortest_round_trip_at_f16_width() {
         let f16 = half::f16::from_f64;
         // Exact-representable rows from the harness's frozen f16 table.
-        assert_eq!(format_element(Prim::F16, ElementRef::F16(f16(0.75))), "0.75");
+        assert_eq!(
+            format_element(Prim::F16, ElementRef::F16(f16(0.75))),
+            "0.75"
+        );
         assert_eq!(
             format_element(Prim::F16, ElementRef::F16(f16(2048.0))),
             "2048.0"

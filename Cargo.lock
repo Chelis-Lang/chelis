@@ -819,6 +819,7 @@ dependencies = [
  "chelis-macros",
  "chelis-pred",
  "chelis-surf",
+ "half",
  "quote",
  "serde",
  "stacker",

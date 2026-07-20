@@ -3097,7 +3097,7 @@ fn render_tensor_element(precision: Prim, stored: f64) -> String {
         // Exact i64 range at f64 precision: [-2^63, 2^63). A saturating
         // `as` cast outside it would print a near-miss integer for bits
         // that are not that integer.
-        if stored >= 9223372036854775808.0 || stored < -9223372036854775808.0 {
+        if !(-9223372036854775808.0..9223372036854775808.0).contains(&stored) {
             return faithful_f64();
         }
         let as_int = stored as i64;
@@ -3180,7 +3180,10 @@ fn render_tensor(tensor: &RuntimeTensorValue) -> String {
     )
 }
 
-pub(super) fn render_value(value: &RuntimeValue) -> String {
+// pub(crate): compiler.rs pre-renders each evaluated root's display text
+// through this exact function (the [05-OBS-1] single renderer) while the
+// dtype tags still exist; see `EvaluatedRoot::display`.
+pub(crate) fn render_value(value: &RuntimeValue) -> String {
     use chelis_types::{ElementRef, format_element};
     match value {
         RuntimeValue::Tensor(tensor) => render_tensor(tensor),
