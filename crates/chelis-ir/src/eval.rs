@@ -2810,7 +2810,7 @@ mod tests {
             (def {} x (lit {type: (t-tensor {} (d-lit {} 32) (t-prim {} f32))} 1.0))
             (def {} y
               (handle-effect {effect: random}
-                (lit {type: (t-prim {} int32)} 42)
+                (lit {type: (t-prim {} int64)} 42)
                 (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
         "#;
         let dag = lower(src);
@@ -2829,14 +2829,14 @@ mod tests {
             (def {} x (lit {type: (t-tensor {} (d-lit {} 32) (t-prim {} f32))} 1.0))
             (def {} y
               (handle-effect {effect: random}
-                (lit {type: (t-prim {} int32)} 42)
+                (lit {type: (t-prim {} int64)} 42)
                 (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
         "#;
         let src_b = r#"
             (def {} x (lit {type: (t-tensor {} (d-lit {} 32) (t-prim {} f32))} 1.0))
             (def {} y
               (handle-effect {effect: random}
-                (lit {type: (t-prim {} int32)} 43)
+                (lit {type: (t-prim {} int64)} 43)
                 (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
         "#;
         let dag_a = lower(src_a);
