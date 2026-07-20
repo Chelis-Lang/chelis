@@ -1104,22 +1104,23 @@ fn compile_new_source_in_context(
     // roots; the placeholder that used to keep this call total by
     // accident is gone. Fatal diagnostics and tensor-rooted programs
     // still surface the error.
-    let composed_dag =
-        match chelis_ir::lower::try_lower_program_with_context(&context.library_dag, &new_checked)
-        {
-            Ok(dag) => dag,
-            Err(diagnostic) if !diagnostic.fatal && new_tensor_root_names.is_empty() => {
-                context.library_dag.dag.clone()
-            }
-            Err(diagnostic) => {
-                return Err(stage_error_with_span(
-                    "lower",
-                    diagnostic.to_string(),
-                    "lower_error",
-                    deep_span_to_schema(diagnostic.span),
-                ));
-            }
-        };
+    let composed_dag = match chelis_ir::lower::try_lower_program_with_context(
+        &context.library_dag,
+        &new_checked,
+    ) {
+        Ok(dag) => dag,
+        Err(diagnostic) if !diagnostic.fatal && new_tensor_root_names.is_empty() => {
+            context.library_dag.dag.clone()
+        }
+        Err(diagnostic) => {
+            return Err(stage_error_with_span(
+                "lower",
+                diagnostic.to_string(),
+                "lower_error",
+                deep_span_to_schema(diagnostic.span),
+            ));
+        }
+    };
 
     // The composed Dag's roots are [library_roots ..., new_roots ...].
     // Slice to the new-code tail so `tensor_root_names` aligns 1:1 with

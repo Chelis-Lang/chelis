@@ -2236,7 +2236,7 @@ impl<'a> HostEmitter<'a> {
                  it (chelis#703 class; the DAG lane owns the supported tensor ops)",
             ));
         }
-        
+
         let expr = match name {
             "add" => format!("{} + {}", arg_vars[0].0, arg_vars[1].0),
             "sub" => format!("{} - {}", arg_vars[0].0, arg_vars[1].0),

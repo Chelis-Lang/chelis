@@ -285,13 +285,14 @@ const BASELINE: &[Entry] = &[
         Pat::UnwrapOrNumericLiteral,
         "crates/chelis-ir/src/lower.rs",
         13,
-        "proven-structural: recursion-depth counter, with-seed defaults \
-         (the effects checker rejects unhandled Random before lowering), \
-         desync-guarded rank/extent reads, and the uniform-ConstTensor \
-         first-element read (non-empty by the windows(2) guard). FLAGGED \
-         for filing, not proven: conv2d's present-but-non-literal stride \
-         unwrap_or(1) / padding unwrap_or(0) - the chelis#776 shape; see \
-         the census appendix",
+        "structural at the P1 baseline: recursion-depth counter, \
+         desync-guarded rank/extent reads, the uniform-ConstTensor \
+         first-element read (non-empty by the windows(2) guard). FLAGGED, \
+         not proven: conv2d's present-but-non-literal stride unwrap_or(1) \
+         / padding unwrap_or(0) - the chelis#776 shape (census row 23) - \
+         and the with-seed defaults, whose effects-checker cover the \
+         chelis#793 red team pierced (a negative .dp int64 seed extracts \
+         to None and falls to seed 0); both arrive as filed census rows",
     ),
     (
         Pat::UnwrapOrNumericLiteral,
@@ -340,9 +341,9 @@ const BASELINE: &[Entry] = &[
         Pat::UnwrapOrNumericLiteral,
         "crates/chelis-compiler-api/src/runtime/eval.rs",
         2,
-        "with-seed default (effects-checker-guarded, mirrors lower.rs) and \
-         a scalarization first-element read; P1-frozen for the Phase 2 \
-         lint audit",
+        "with-seed default (mirrors lower.rs; same chelis#793 negative-seed \
+         caveat) and a scalarization first-element read; P1-frozen for \
+         the Phase 2 lint audit",
     ),
     (
         Pat::UnwrapOrNumericLiteral,

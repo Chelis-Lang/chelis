@@ -3562,25 +3562,23 @@ fn lower_host_expr_kind(
             // working binary while eval rejected the same file. Only the
             // `(t-prim {} name)` and bare-symbol spellings are validated;
             // `t-var` targets (precision-polymorphic casts) stay legal.
-            let bogus_target_name = match children(list).get(1) {
-                Some(Expr::List(tlist, _))
-                    if tag(tlist) == Some("t-prim")
-                        && children(tlist)
-                            .first()
-                            .and_then(symbol_name)
-                            .is_some_and(|name| {
-                                chelis_types::types::Prim::parse_name(name).is_none()
-                            }) =>
-                {
-                    children(tlist).first().and_then(symbol_name)
-                }
-                Some(Expr::Atom(Atom::Symbol(name), _))
-                    if chelis_types::types::Prim::parse_name(name).is_none() =>
-                {
-                    Some(name.as_str())
-                }
-                _ => None,
-            };
+            let bogus_target_name =
+                match children(list).get(1) {
+                    Some(Expr::List(tlist, _))
+                        if tag(tlist) == Some("t-prim")
+                            && children(tlist).first().and_then(symbol_name).is_some_and(
+                                |name| chelis_types::types::Prim::parse_name(name).is_none(),
+                            ) =>
+                    {
+                        children(tlist).first().and_then(symbol_name)
+                    }
+                    Some(Expr::Atom(Atom::Symbol(name), _))
+                        if chelis_types::types::Prim::parse_name(name).is_none() =>
+                    {
+                        Some(name.as_str())
+                    }
+                    _ => None,
+                };
             if let Some(bogus) = bogus_target_name {
                 let unsupported = chelis_types::unsupported::Unsupported::new(
                     chelis_types::unsupported::UnsupportedKind::Dtype(bogus.to_string()),
