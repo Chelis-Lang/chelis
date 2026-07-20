@@ -141,7 +141,7 @@ fn fan_in_literal_equal_shapes_aliases_reusable_input() {
         vec_lit_f32(4),
         vec_lit_f32(4),
     );
-    let result = codegen_hip(&dag, "test_fan_in_literal");
+    let result = codegen_hip(&dag, "test_fan_in_literal").unwrap();
     let hip = &result.c_source;
     let fused_id = fused.0;
     let a_id = a.0;
@@ -193,7 +193,7 @@ fn fan_in_binder_equivalent_lit_to_named_aliases_reusable_input() {
         vec_named_f32("seq", 4),
         vec_named_f32("seq", 4),
     );
-    let result = codegen_hip(&dag, "test_fan_in_binder_lit_to_named");
+    let result = codegen_hip(&dag, "test_fan_in_binder_lit_to_named").unwrap();
     let hip = &result.c_source;
     let fused_id = fused.0;
     let a_id = a.0;
@@ -224,7 +224,7 @@ fn fan_in_binder_equivalent_named_to_lit_aliases_reusable_input() {
         vec_lit_f32(4),
         vec_lit_f32(4),
     );
-    let result = codegen_hip(&dag, "test_fan_in_binder_named_to_lit");
+    let result = codegen_hip(&dag, "test_fan_in_binder_named_to_lit").unwrap();
     let hip = &result.c_source;
     let fused_id = fused.0;
     let a_id = a.0;
@@ -247,7 +247,7 @@ fn fan_in_same_named_binder_aliases_reusable_input() {
         vec_named_f32("seq", 4),
         vec_named_f32("seq", 4),
     );
-    let result = codegen_hip(&dag, "test_fan_in_same_named_binder");
+    let result = codegen_hip(&dag, "test_fan_in_same_named_binder").unwrap();
     let hip = &result.c_source;
     let fused_id = fused.0;
     let a_id = a.0;
@@ -270,7 +270,7 @@ fn fan_in_named_binder_with_unknown_size_aliases() {
         vec_named_f32("seq", 4),
         vec_named_f32("seq", 4),
     );
-    let result = codegen_hip(&dag, "test_fan_in_named_unsized");
+    let result = codegen_hip(&dag, "test_fan_in_named_unsized").unwrap();
     let hip = &result.c_source;
     let fused_id = fused.0;
     let a_id = a.0;
@@ -298,7 +298,7 @@ fn fan_in_different_named_binders_does_not_alias() {
         vec_named_f32("seq", 4),
         vec_named_f32("seq", 4),
     );
-    let result = codegen_hip(&dag, "test_fan_in_different_binders");
+    let result = codegen_hip(&dag, "test_fan_in_different_binders").unwrap();
     let hip = &result.c_source;
     let fused_id = fused.0;
     let a_id = a.0;
@@ -336,7 +336,7 @@ fn fan_in_same_binder_different_known_size_does_not_alias() {
         vec_named_f32("seq", 8),
         vec_named_f32("seq", 8),
     );
-    let result = codegen_hip(&dag, "test_fan_in_size_mismatch");
+    let result = codegen_hip(&dag, "test_fan_in_size_mismatch").unwrap();
     let hip = &result.c_source;
     let fused_id = fused.0;
     let a_id = a.0;
@@ -356,35 +356,34 @@ fn fan_in_same_binder_different_known_size_does_not_alias() {
 }
 
 /// Negative — different precision: Int32 vs F32 is never
-/// binder-equivalent even with matching dim shapes. dtype is part of
-/// the alias proof. (F64 is not exercised because the HIP backend
-/// rejects F64 entirely at codegen entry; Int32 vs F32 lives in the
-/// HIP-supported subset.)
+/// binder-equivalent even with matching dim shapes; dtype is part of
+/// the alias proof.
+///
+/// Re-authored by chelis#730 Phase 1 (census row 5, chelis#689): the
+/// former `elem_kind` F32 wildcard let this mixed-precision fused
+/// fan-in EMIT (reading the int32 operand through the f32 kernel - the
+/// corruption class chelis#689 runtime-confirmed), and the old
+/// assertion only checked the alias line was absent in that corrupt
+/// emission. There is no typed mixed-precision fused kernel, so HIP
+/// codegen now rejects the DAG loudly - which also guarantees no alias
+/// wrapper is emitted. The dtype half of the alias proof is thereby
+/// subsumed by the rejection; the same-precision alias-gate rows above
+/// keep the gate's live coverage.
 #[test]
 fn fan_in_different_precision_does_not_alias() {
-    let (dag, fused, a) = fan_in_dag(
+    let (dag, _fused, _a) = fan_in_dag(
         vec_lit_i32(4),
         vec_lit_f32(4),
         vec_lit_f32(4),
         vec_lit_f32(4),
     );
-    let result = codegen_hip(&dag, "test_fan_in_different_precision");
-    let hip = &result.c_source;
-    let fused_id = fused.0;
-    let a_id = a.0;
-
-    // The FusedElem output is F32 (CHELIS_F32). If the gate misfired
-    // the wrapper would emit the F32 alias view onto an Int32 input —
-    // assert that line is absent.
-    let forbidden_alias = expected_in_place_view_alias(fused_id, a_id, "4");
+    let err = codegen_hip(&dag, "test_fan_in_different_precision")
+        .map(|_| ())
+        .expect_err("a mixed int32/f32 fused fan-in has no typed HIP kernel");
+    let rendered = err.to_string();
     assert!(
-        !hip.contains(&forbidden_alias),
-        "different-precision fan-in must NOT alias d_t{fused_id} onto d_t{a_id}->data; got:\n{hip}"
-    );
-    let forbidden_guard = expected_contiguity_guard(a_id);
-    assert!(
-        !hip.contains(&forbidden_guard),
-        "different-precision must NOT emit contiguity guard; got:\n{hip}"
+        rendered.starts_with("unsupported:") && rendered.contains("int32"),
+        "the rejection must be branded and name the dtype; got: {rendered}"
     );
 }
 
@@ -428,7 +427,7 @@ fn fan_in_multi_consumer_reusable_input_does_not_alias() {
     dag.add_root(fused);
     dag.add_root(other);
 
-    let result = codegen_hip(&dag, "test_fan_in_multi_consumer");
+    let result = codegen_hip(&dag, "test_fan_in_multi_consumer").unwrap();
     let hip = &result.c_source;
     let fused_id = fused.0;
     let a_id = a.0;
@@ -459,7 +458,7 @@ fn fan_in_different_rank_does_not_alias() {
         precision: Prim::F32,
     };
     let (dag, fused, a) = fan_in_dag(ty_r1.clone(), ty_r2.clone(), ty_r2.clone(), ty_r2);
-    let result = codegen_hip(&dag, "test_fan_in_different_rank");
+    let result = codegen_hip(&dag, "test_fan_in_different_rank").unwrap();
     let hip = &result.c_source;
     let fused_id = fused.0;
     let a_id = a.0;
@@ -510,7 +509,7 @@ fn fan_in_no_reusable_input_keeps_slot_backed_path() {
     // No set_reusable_input.
     dag.add_root(fused);
 
-    let result = codegen_hip(&dag, "test_fan_in_no_reusable");
+    let result = codegen_hip(&dag, "test_fan_in_no_reusable").unwrap();
     let hip = &result.c_source;
     let fused_id = fused.0;
     let a_id = a.0;

@@ -194,7 +194,7 @@ fn s4_hip_canonical_span_id_emitted_host_side() {
     dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), Some("op.neg".into()));
     dag.add_root(chelis_ir::dag::NodeId(1));
 
-    let result = codegen_hip(&dag, "s4_hip_canonical");
+    let result = codegen_hip(&dag, "s4_hip_canonical").unwrap();
     let src = &result.c_source;
 
     // Host-side span comments must appear (we can find them anywhere in
@@ -236,7 +236,7 @@ fn s4_hip_merged_spans_emitted_lex_sorted_after_canonical() {
     }
     dag.add_root(neg_id);
 
-    let result = codegen_hip(&dag, "s4_hip_merged");
+    let result = codegen_hip(&dag, "s4_hip_merged").unwrap();
     let src = &result.c_source;
 
     // Look at host-side ordering only (kernel_neg shared kernel does not
@@ -278,7 +278,7 @@ fn s4_hip_no_spans_emits_no_comment_block() {
     let neg = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(neg);
 
-    let result = codegen_hip(&dag, "s4_hip_nospan");
+    let result = codegen_hip(&dag, "s4_hip_nospan").unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -307,7 +307,7 @@ fn s4_hip_per_node_kernel_string_carries_spans_inside() {
     dag.add_root(n);
     let fused = fuse(&dag);
 
-    let result = codegen_hip(&fused, "s4_hip_fused");
+    let result = codegen_hip(&fused, "s4_hip_fused").unwrap();
     let src = &result.c_source;
 
     // Confirm host-side launch comments appear for every node.
@@ -388,7 +388,7 @@ fn s4_hip_oracle_richer_combinations_compile_and_grep() {
     );
     dag.add_root(n5);
 
-    let result = codegen_hip(&dag, "s4_hip_oracle");
+    let result = codegen_hip(&dag, "s4_hip_oracle").unwrap();
     let src = &result.c_source;
 
     // Host-side counts (same as C oracle):
@@ -442,7 +442,7 @@ fn s4_hip_forbidden_newline_in_span_is_escaped_at_emit() {
     let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
-    let result = codegen_hip(&dag, "s4_hip_forbidden_newline");
+    let result = codegen_hip(&dag, "s4_hip_forbidden_newline").unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -481,7 +481,7 @@ fn s4_hip_forbidden_newline_in_per_node_kernel_string_is_escaped() {
     dag.add_root(n);
     let fused = fuse(&dag);
 
-    let result = codegen_hip(&fused, "s4_hip_forbidden_kernel");
+    let result = codegen_hip(&fused, "s4_hip_forbidden_kernel").unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -543,7 +543,7 @@ fn s4_hip_clean_span_emitted_verbatim_audit_invariant() {
     );
     dag.add_root(n);
 
-    let result = codegen_hip(&dag, "s4_hip_clean");
+    let result = codegen_hip(&dag, "s4_hip_clean").unwrap();
     let src = &result.c_source;
 
     assert!(

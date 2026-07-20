@@ -122,19 +122,75 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &[&str])] = &[
         "hip_f16_compute",
         "def f(a: tensor[4, f16], b: tensor[4, f16]) -> tensor[4, f16] = add(a, b)\n",
         "hip",
-        &["admits", "only on tensor load/store"],
+        &["unsupported:", "admits", "only on tensor load/store"],
     ),
     (
         "hip_bf16_compute",
         "def f(a: tensor[4, bf16], b: tensor[4, bf16]) -> tensor[4, bf16] = add(a, b)\n",
         "hip",
-        &["admits", "only on tensor load/store"],
+        &["unsupported:", "admits", "only on tensor load/store"],
     ),
     (
         "metal_f64",
         "def f(a: tensor[4, f64], b: tensor[4, f64]) -> tensor[4, f64] = add(a, b)\n",
         "metal",
-        &["`chelis build --target metal` rejects f64"],
+        &["unsupported:", "`chelis build --target metal` rejects f64"],
+    ),
+    // -- chelis#730 Phase 1 rows: the converted census sites, each pinned
+    // to the branded section C2 rendering. --------------------------------
+    (
+        "c_stub_tensor_scan",
+        "def gen() -> tensor[5, f32] = \
+         tensor_scan(0.0, fn (prev: f32, i: int64) -> add(prev, 1.0), cast(5, int64))\n\
+         out = gen()\n",
+        "c",
+        &["unsupported:", "tensor_scan", "(codegen:c)"],
+    ),
+    (
+        "c_stub_scalar_floor",
+        "def f(x: f32) -> f32 = floor(x)\nout = f(3.5)\n",
+        "c",
+        &["unsupported:", "floor", "(codegen:c)"],
+    ),
+    (
+        "c_to_string_tensor",
+        "def f(x: tensor[2, f32]) -> string = to_string(x)\n\
+         out = f(to_tensor([1.5, 2.5]))\n",
+        "c",
+        &["unsupported:", "to_string", "(codegen:c)"],
+    ),
+    (
+        "c_int64_max_reduce",
+        "def f(x: tensor[4, int64]) -> tensor[int64] = max_reduce(x, 0)\n\
+         out = f(to_tensor([cast(1, int64), cast(4, int64), cast(2, int64), \
+         cast(3, int64)]))\n",
+        "c",
+        &["unsupported:", "max_reduce", "(codegen:c)"],
+    ),
+    (
+        "c_int_tensor_cos",
+        "def run(x: tensor[4, int32]) -> tensor[4, int32] = cos(x)\n\
+         out = run(to_tensor([cast(1, int32), cast(2, int32), cast(3, int32), \
+         cast(4, int32)]))\n",
+        "c",
+        // The stage depends on routing (the DAG entry raises at lowering;
+        // the host-fallback path refuses at emission) - pin the brand and
+        // the op, not the stage.
+        &["unsupported:", "cos"],
+    ),
+    (
+        "c_nonliteral_window",
+        "def f(x: tensor[6, f32], w: int32, s: int32) -> tensor[5, f32] = \
+         reduce_window_max(x, [w], [s])\n\
+         out = f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2, 1)\n",
+        "c",
+        &["unsupported:", "window", "(lowering)"],
+    ),
+    (
+        "hip_int64_neg",
+        "def f(x: tensor[4, int64]) -> tensor[4, int64] = neg(x)\n",
+        "hip",
+        &["unsupported:", "int64", "(codegen:hip)"],
     ),
 ];
 
@@ -191,7 +247,9 @@ const RUNTIME_ABORT_ROWS: &[(&str, &str, &str)] = &[
         "to_tensor_narrow_dtype",
         "def f() -> tensor[2, f16] = to_tensor([cast(2049.0, f16), cast(0.75, f16)])\n\
          out = print(f())\n",
-        "to_tensor: unsupported destination dtype",
+        "unsupported: destination dtype",
+        // (chelis#730 Phase 1 migrated the runtime exemplar to the frozen
+        // branded shape; the dtype payload and the on-clause follow.)
     ),
     (
         // chelis#387 family: the portable integer div-by-zero guard, with a

@@ -2178,9 +2178,12 @@ unsafe fn chelis_flatten_nested_list_typed(
                     };
                     *(out_bytes as *mut f32).add(i) = value;
                 }
+                // chelis#730 Phase 1 message migration: the section C2
+                // calibration exemplar, rendered in the frozen branded shape.
                 _ => runtime_fail!(
-                    "to_tensor: unsupported destination dtype `{}` for host-lane literal storage; \
-                     bf16/f16/f8e4m3 are not implemented on the host runtime",
+                    "unsupported: destination dtype `{}` on to_tensor host-lane literal \
+                     storage (runtime); bf16/f16/f8e4m3 are not implemented on the host \
+                     runtime",
                     dst_dtype
                 ),
             }

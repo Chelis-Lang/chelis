@@ -252,7 +252,7 @@ fn run_unary_reduced(
         None,
     );
     dag.add_node(op, vec![load], vec_ty(n, prec), None);
-    let result = codegen(&dag, test_name);
+    let result = codegen(&dag, test_name).unwrap();
     let load_helper = match prec {
         Prim::Bf16 => "bf16_tensor_from_f32",
         Prim::F16 => "f16_tensor_from_f32",
@@ -344,7 +344,7 @@ fn run_binary_reduced(
         None,
     );
     dag.add_node(op, vec![a, b], vec_ty(n, prec), None);
-    let result = codegen(&dag, test_name);
+    let result = codegen(&dag, test_name).unwrap();
     let load_helper = match prec {
         Prim::Bf16 => "bf16_tensor_from_f32",
         Prim::F16 => "f16_tensor_from_f32",
@@ -794,7 +794,7 @@ fn run_scalar_reduce_reduced(
         None,
     );
     dag.add_node(op, vec![load], scalar_ty(prec), None);
-    let result = codegen(&dag, test_name);
+    let result = codegen(&dag, test_name).unwrap();
     let load_helper = match prec {
         Prim::Bf16 => "bf16_tensor_from_f32",
         Prim::F16 => "f16_tensor_from_f32",
@@ -843,13 +843,12 @@ int main(void) {{
 // `chelis_f32_to_bf16` convert-then-reduce pattern that Sum and
 // MaxReduce already follow); per the WS-Cleanup-Fixups brief
 // ("FIXUP only; no new architectural changes") we pin the structural
-// gap with `#[should_panic]` tests rather than expand emit_reduce_simple
+// gap with rejection tests rather than expand emit_reduce_simple
 // here. Closure path: when emit_reduce_simple gains the
 // convert-then-reduce arm for reduced floats, flip these to active
 // agreement tests against the evaluator.
 
 #[test]
-#[should_panic(expected = "emit_reduce_simple path is f32-hardcoded")]
 fn bf16_min_reduce_is_structurally_unsupported_today() {
     let mut dag = Dag::new();
     let load = dag.add_node(
@@ -864,11 +863,19 @@ fn bf16_min_reduce_is_structurally_unsupported_today() {
         scalar_ty(Prim::Bf16),
         None,
     );
-    let _ = codegen(&dag, "bf16_min_reduce_panic_probe");
+    // chelis#730 Phase 1: the former f32-hardcoded panic is a section C2
+    // diagnostic through the Result channel.
+    let err = codegen(&dag, "bf16_min_reduce_reject_probe")
+        .map(|_| ())
+        .expect_err("a bf16 min_reduce must be rejected, not emitted");
+    let rendered = err.to_string();
+    assert!(
+        rendered.starts_with("unsupported:") && rendered.contains("bf16"),
+        "the rejection must be branded and name the dtype; got: {rendered}"
+    );
 }
 
 #[test]
-#[should_panic(expected = "emit_reduce_simple path is f32-hardcoded")]
 fn f16_min_reduce_is_structurally_unsupported_today() {
     let mut dag = Dag::new();
     let load = dag.add_node(
@@ -883,11 +890,19 @@ fn f16_min_reduce_is_structurally_unsupported_today() {
         scalar_ty(Prim::F16),
         None,
     );
-    let _ = codegen(&dag, "f16_min_reduce_panic_probe");
+    // chelis#730 Phase 1: the former f32-hardcoded panic is a section C2
+    // diagnostic through the Result channel.
+    let err = codegen(&dag, "f16_min_reduce_reject_probe")
+        .map(|_| ())
+        .expect_err("a f16 min_reduce must be rejected, not emitted");
+    let rendered = err.to_string();
+    assert!(
+        rendered.starts_with("unsupported:") && rendered.contains("f16"),
+        "the rejection must be branded and name the dtype; got: {rendered}"
+    );
 }
 
 #[test]
-#[should_panic(expected = "emit_reduce_simple path is f32-hardcoded")]
 fn bf16_prod_reduce_is_structurally_unsupported_today() {
     let mut dag = Dag::new();
     let load = dag.add_node(
@@ -902,11 +917,19 @@ fn bf16_prod_reduce_is_structurally_unsupported_today() {
         scalar_ty(Prim::Bf16),
         None,
     );
-    let _ = codegen(&dag, "bf16_prod_reduce_panic_probe");
+    // chelis#730 Phase 1: the former f32-hardcoded panic is a section C2
+    // diagnostic through the Result channel.
+    let err = codegen(&dag, "bf16_prod_reduce_reject_probe")
+        .map(|_| ())
+        .expect_err("a bf16 prod_reduce must be rejected, not emitted");
+    let rendered = err.to_string();
+    assert!(
+        rendered.starts_with("unsupported:") && rendered.contains("bf16"),
+        "the rejection must be branded and name the dtype; got: {rendered}"
+    );
 }
 
 #[test]
-#[should_panic(expected = "emit_reduce_simple path is f32-hardcoded")]
 fn f16_prod_reduce_is_structurally_unsupported_today() {
     let mut dag = Dag::new();
     let load = dag.add_node(
@@ -921,7 +944,16 @@ fn f16_prod_reduce_is_structurally_unsupported_today() {
         scalar_ty(Prim::F16),
         None,
     );
-    let _ = codegen(&dag, "f16_prod_reduce_panic_probe");
+    // chelis#730 Phase 1: the former f32-hardcoded panic is a section C2
+    // diagnostic through the Result channel.
+    let err = codegen(&dag, "f16_prod_reduce_reject_probe")
+        .map(|_| ())
+        .expect_err("a f16 prod_reduce must be rejected, not emitted");
+    let rendered = err.to_string();
+    assert!(
+        rendered.starts_with("unsupported:") && rendered.contains("f16"),
+        "the rejection must be branded and name the dtype; got: {rendered}"
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -952,7 +984,7 @@ fn run_cast_f32_to_reduced(test_name: &str, dst: Prim, value: f32, tol: f64) {
         vec_ty(n, dst),
         None,
     );
-    let result = codegen(&dag, test_name);
+    let result = codegen(&dag, test_name).unwrap();
     let to_f32 = match dst {
         Prim::Bf16 => "chelis_bf16_to_f32",
         Prim::F16 => "chelis_f16_to_f32",
@@ -1018,7 +1050,7 @@ fn run_cast_reduced_to_f32(test_name: &str, src: Prim, value: f32, tol: f64) {
         vec_ty(n, Prim::F32),
         None,
     );
-    let result = codegen(&dag, test_name);
+    let result = codegen(&dag, test_name).unwrap();
     let main_c = format!(
         r#"{HARNESS}
 extern void {test_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
@@ -1068,7 +1100,7 @@ fn run_cast_reduced_to_reduced(test_name: &str, src: Prim, dst: Prim, value: f32
         vec_ty(n, dst),
         None,
     );
-    let result = codegen(&dag, test_name);
+    let result = codegen(&dag, test_name).unwrap();
     let to_f32 = match dst {
         Prim::Bf16 => "chelis_bf16_to_f32",
         Prim::F16 => "chelis_f16_to_f32",

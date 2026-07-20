@@ -67,6 +67,13 @@ enum Pat {
     /// A wildcard match arm producing an `ElemKind` (census row 5: HIP's
     /// `_ => kernels::ElemKind::F32` dtype substitution).
     ElemKindWildcardArm,
+    /// `.unwrap_or(<numeric literal>)` on a NON-COMMENT line in
+    /// lowering/emission/runtime-packing paths - the value-default shape
+    /// chelis#776 exposed (a user value silently replaced by a baked
+    /// default). Added at Phase 1 per the census-maintenance obligation;
+    /// the baseline annotates each surviving site as proven-structural
+    /// or P1-frozen for the Phase 2 lint audit.
+    UnwrapOrNumericLiteral,
     /// `%.16g` / `%.1f` / `{value:.1}` anywhere in crate sources - the
     /// f64-shaped observation-channel exits (chelis#716/#723/#728; owned by
     /// the chelis#732 plan, hosted in this tripwire per its Phase 0 item 3
@@ -81,6 +88,7 @@ const ALL_PATS: &[Pat] = &[
     Pat::UnwrapOrDefault,
     Pat::UnwrapOrPrim,
     Pat::ElemKindWildcardArm,
+    Pat::UnwrapOrNumericLiteral,
     Pat::CFormatNarrowing,
 ];
 
@@ -92,6 +100,7 @@ impl Pat {
             Pat::UnwrapOrDefault => "unwrap-or-default",
             Pat::UnwrapOrPrim => "unwrap-or-prim",
             Pat::ElemKindWildcardArm => "elemkind-wildcard-arm",
+            Pat::UnwrapOrNumericLiteral => "unwrap-or-numeric-literal",
             Pat::CFormatNarrowing => "c-format-narrowing",
         }
     }
@@ -122,7 +131,9 @@ impl Pat {
         match self {
             Pat::StubZero | Pat::ValuePlaceholder | Pat::CFormatNarrowing => ALL_CRATE_SRC,
             Pat::UnwrapOrDefault => LOWERING_AND_EMISSION,
-            Pat::UnwrapOrPrim => LOWERING_EMISSION_AND_RUNTIME_PACKING,
+            Pat::UnwrapOrPrim | Pat::UnwrapOrNumericLiteral => {
+                LOWERING_EMISSION_AND_RUNTIME_PACKING
+            }
             Pat::ElemKindWildcardArm => BACKENDS,
         }
     }
@@ -153,6 +164,27 @@ impl Pat {
                     t.starts_with("_ =>") && t.contains("ElemKind::")
                 })
                 .count(),
+            // Comment lines are skipped so a doc reference to the banned
+            // token (e.g. a conversion comment quoting the pre-fix code)
+            // does not count as a live site; the section C4.2 lint closes
+            // string/comment evasions structurally at Phase 2.
+            Pat::UnwrapOrNumericLiteral => content
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .map(|line| {
+                    let mut hits = 0;
+                    let mut rest = line;
+                    while let Some(pos) = rest.find(".unwrap_or(") {
+                        let after = &rest[pos + ".unwrap_or(".len()..];
+                        let after = after.strip_prefix('-').unwrap_or(after);
+                        if after.starts_with(|c: char| c.is_ascii_digit()) {
+                            hits += 1;
+                        }
+                        rest = &rest[pos + ".unwrap_or(".len()..];
+                    }
+                    hits
+                })
+                .sum(),
             Pat::CFormatNarrowing => {
                 occurrences(content, "%.16g")
                     + occurrences(content, "%.1f")
@@ -169,35 +201,20 @@ impl Pat {
 type Entry = (Pat, &'static str, usize, &'static str);
 
 const BASELINE: &[Entry] = &[
-    // -- silent-stub-zero ---------------------------------------------------
-    (
-        Pat::StubZero,
-        "crates/chelis-backend-c/src/host_emit.rs",
-        1,
-        "census row 2 (chelis#682/#704/#705/#715): the builtin literal-0 stub",
-    ),
-    (
-        Pat::StubZero,
-        "crates/chelis-backend-metal/src/emit.rs",
-        1,
-        "census row 19 (chelis#745): Metal host_scalar_literal catch-all, \
-         found by this tripwire's Phase 0 sweep; dead behind the f64 gate",
-    ),
-    // -- value-placeholder --------------------------------------------------
-    (
-        Pat::ValuePlaceholder,
-        "crates/chelis-backend-c/src/host_emit.rs",
-        3,
-        "census rows 3 (chelis#734, to_string catch-all) and 4 (chelis#714 \
-         symptom, the two unclassifiable-print sites)",
-    ),
+    // -- silent-stub-zero: ZERO entries left - census rows 2 and 19
+    // converted at Phase 1 (the stub arm is Err(Unsupported); Metal's
+    // host_scalar_literal rejects through its String channel) -----------
+    // -- value-placeholder: ZERO entries left - census rows 3 and 4
+    // converted at Phase 1 (both print arms and the to_string catch-all
+    // are Err(Unsupported)) ---------------------------------------------
     // -- unwrap-or-default --------------------------------------------------
     (
         Pat::UnwrapOrDefault,
         "crates/chelis-ir/src/lower.rs",
-        7,
-        "census row 8 (chelis#725, reduce_window extraction, 2 of these) + 5 \
-         pre-existing non-censused uses frozen at the P0 baseline",
+        5,
+        "census row 8's two reduce_window extraction uses converted at \
+         Phase 1 (chelis#725); the remaining 5 pre-existing non-censused \
+         uses stay frozen at the P0 baseline for the Phase 2 lint audit",
     ),
     (
         Pat::UnwrapOrDefault,
@@ -248,22 +265,8 @@ const BASELINE: &[Entry] = &[
         1,
         "pre-existing at the P0 baseline; not censused as substituting",
     ),
-    // -- unwrap-or-prim -----------------------------------------------------
-    (
-        Pat::UnwrapOrPrim,
-        "crates/chelis-ir/src/lower.rs",
-        2,
-        "census row 13 (lower_transcendental precision default at :9833; \
-         lower_cast fallback at :10235, LIVE via the .dp build lane, \
-         chelis#744); section C1.4 applies at Phase 1",
-    ),
-    (
-        Pat::UnwrapOrPrim,
-        "crates/chelis-compiler-api/src/runtime/named_axis.rs",
-        1,
-        "census row 14 (pack_dag_roots root-precision default); dead by \
-         canary, section C1.4 applies at Phase 1",
-    ),
+    // -- unwrap-or-prim: census rows 13 and 14 converted at Phase 1
+    // (lower_cast and lower_transcendental raise; named_axis errors) ----
     (
         Pat::UnwrapOrPrim,
         "crates/chelis-compiler-api/src/runtime/host_ops.rs",
@@ -271,13 +274,85 @@ const BASELINE: &[Entry] = &[
         "to_tensor literal-precision defaults: float literals default to F32 \
          per spec (int/bool elements override); audited, not a substitution",
     ),
-    // -- elemkind-wildcard-arm ----------------------------------------------
+    // -- elemkind-wildcard-arm: ZERO entries left - census row 5's
+    // wildcard deleted at Phase 1 (section C4.1); elem_kind is an
+    // exhaustive Result-returning match ---------------------------------
+    // -- unwrap-or-numeric-literal (added at Phase 1 per the chelis#776
+    // census-maintenance obligation; every entry is annotated
+    // proven-structural or P1-frozen; the expand-axis and tuple-get
+    // index sites chelis#782 flagged were CONVERTED, not baselined) -----
     (
-        Pat::ElemKindWildcardArm,
-        "crates/chelis-backend-hip/src/emit.rs",
+        Pat::UnwrapOrNumericLiteral,
+        "crates/chelis-ir/src/lower.rs",
+        13,
+        "structural at the P1 baseline: recursion-depth counter, \
+         desync-guarded rank/extent reads, the uniform-ConstTensor \
+         first-element read (non-empty by the windows(2) guard). FLAGGED, \
+         not proven: conv2d's present-but-non-literal stride unwrap_or(1) \
+         / padding unwrap_or(0) - the chelis#776 shape (census row 23) - \
+         and the with-seed defaults, whose effects-checker cover the \
+         chelis#793 red team pierced (a negative .dp int64 seed extracts \
+         to None and falls to seed 0) - that .dp repro is now rejected at \
+         CHECK time by chelis#793's negative-seed checker case, so the \
+         sites are checker-guarded pending their census rows",
+    ),
+    (
+        Pat::UnwrapOrNumericLiteral,
+        "crates/chelis-ir/src/dag.rs",
         1,
-        "census row 5 (chelis#689): elem_kind's F32 fallback; deleted at \
-         Phase 1 (section C4.1)",
+        "proven-structural at the P1 baseline (symbolic-dim bookkeeping)",
+    ),
+    (
+        Pat::UnwrapOrNumericLiteral,
+        "crates/chelis-ir/src/eval.rs",
+        2,
+        "P1-frozen (shrink extent reads); Phase 2 lint audits them",
+    ),
+    (
+        Pat::UnwrapOrNumericLiteral,
+        "crates/chelis-backend-c/src/host_emit.rs",
+        1,
+        "proven-structural: tensor-helper root count floor (max(1))",
+    ),
+    (
+        Pat::UnwrapOrNumericLiteral,
+        "crates/chelis-backend-hip/src/emit.rs",
+        2,
+        "proven-structural: fused-input count over an empty set; MAX_DIM \
+         zero-padding of pinned pad/shrink offset vectors",
+    ),
+    (
+        Pat::UnwrapOrNumericLiteral,
+        "crates/chelis-backend-metal/src/emit.rs",
+        1,
+        "proven-structural: MAX_DIM zero-padding of movement dim vectors",
+    ),
+    (
+        Pat::UnwrapOrNumericLiteral,
+        "crates/chelis-compiler-api/src/context.rs",
+        1,
+        "P1-frozen; Phase 2 lint audits it",
+    ),
+    (
+        Pat::UnwrapOrNumericLiteral,
+        "crates/chelis-compiler-api/src/cache_envelope.rs",
+        1,
+        "P1-frozen (cache bookkeeping); Phase 2 lint audits it",
+    ),
+    (
+        Pat::UnwrapOrNumericLiteral,
+        "crates/chelis-compiler-api/src/runtime/eval.rs",
+        2,
+        "with-seed default (mirrors lower.rs; the chelis#793 negative-seed \
+         repro is now checker-rejected) and a scalarization first-element \
+         read; P1-frozen for the Phase 2 lint audit",
+    ),
+    (
+        Pat::UnwrapOrNumericLiteral,
+        "crates/chelis-compiler-api/src/runtime/host_ops.rs",
+        1,
+        "proven-structural: absent symbolic-dim label defaults to extent 1 \
+         per the summary contract",
     ),
     // -- c-format-narrowing (hosted for the chelis#732 plan's Phase 0; its
     // production allowlist only ever shrinks - deleted by #732 Phase 2) ----
@@ -461,13 +536,30 @@ fn tripwire_goes_red_on_every_planted_token_class() {
         violations(dir.path(), &[]).is_empty(),
         "a clean tree must scan clean"
     );
+    // A COMMENT mentioning the numeric-unwrap token must not count as a
+    // live site (conversion comments quote the pre-fix code).
+    let commented = dir.path().join("crates/chelis-ir/src");
+    fs::create_dir_all(&commented).expect("mkdir");
+    fs::write(
+        commented.join("commented.rs"),
+        "// the pre-fix code read bound.unwrap_or(0.0) here\npub fn ok() {}\n",
+    )
+    .expect("write");
+    assert!(
+        violations(dir.path(), &[])
+            .iter()
+            .all(|v| !v.contains("unwrap-or-numeric-literal")),
+        "a comment-only token mention must not trip the numeric-unwrap class"
+    );
+    fs::remove_file(commented.join("commented.rs")).expect("cleanup");
 
     let ir = dir.path().join("crates/chelis-ir/src");
     fs::create_dir_all(&ir).expect("mkdir");
     fs::write(
         ir.join("lower.rs"),
         "fn f() {\n    let w = windows.unwrap_or_default();\n    \
-         let p = prec.unwrap_or(Prim::F32);\n}\n",
+         let p = prec.unwrap_or(Prim::F32);\n    \
+         let low = bound.unwrap_or(0.0);\n}\n",
     )
     .expect("write");
     let hip = dir.path().join("crates/chelis-backend-hip/src");
@@ -503,6 +595,7 @@ fn tripwire_goes_red_on_every_planted_token_class() {
         "unwrap-or-default",
         "unwrap-or-prim",
         "elemkind-wildcard-arm",
+        "unwrap-or-numeric-literal",
         "c-format-narrowing",
     ] {
         assert!(

@@ -1,6 +1,8 @@
 # Loud Unsupported: the failure-channel contract
 
-**Status:** Design proposal, pre-implementation. Tracking issue: [#730].
+**Status:** Phases 0-1 implemented (Phase 0: PR [#746]; Phase 1: PR
+[#791] - the failure channel, the live-site sweep, and the section C2/C3
+freeze). Phases 2-3 pending. Tracking issue: [#730].
 **Owning specs:** `spec/05-risc-primitives.md` (op support statements;
 its §7 carries this plan's decided contract as provisional atoms
 [05-UNS-1..4], seeded ahead of Phase 1, which ratifies them),
@@ -155,6 +157,11 @@ pub struct Unsupported {
     /// What was encountered: an op, builtin name, dtype, tag, effect
     /// kind, or construct. Closed enum + payload, not a bare string.
     pub what: UnsupportedKind,
+    /// The context of the encounter (the op family, target lane, or
+    /// call position) - the `on <context>` clause of the rendering.
+    /// (Added at Phase 1 ratification: the frozen message format always
+    /// carried a context clause; the struct now carries it explicitly.)
+    pub context: String,
     /// Which stage refused (checker | lowering | codegen(target) | runtime).
     pub stage: Stage,
     /// Source span when one exists (lowering/codegen must thread it;
@@ -167,6 +174,12 @@ pub struct Unsupported {
 }
 ```
 
+Implemented as `chelis_types::unsupported::Unsupported` (per open
+question 1: one shared type at the workspace bottom; the span field is
+boxed in the implementation so the Err variant stays small on the
+Result-typed emission paths - a representation detail, not a shape
+change).
+
 **Message format (frozen):**
 `unsupported: <what> on <context> (<stage>); <hint>` - branded with the
 literal prefix `unsupported:` so tests and shells can match it. The three
@@ -177,7 +190,10 @@ conformant when migrated:
   load/store nodes ... See spec/04-type-system.md §5.7.1`` (names the
   construct, the boundary, and the spec);
 - Metal: `` `chelis build --target metal` rejects f64 ... `` ;
-- runtime: `to_tensor: unsupported destination dtype ...`.
+- runtime: `unsupported: destination dtype ... on to_tensor host-lane
+  literal storage (runtime); ...` (migrated to the branded shape at
+  Phase 1; the pre-migration spelling was
+  `to_tensor: unsupported destination dtype ...`).
 
 **Surfacing per surface:** `chelis check` -> JSON error entry, score < 1,
 carrying the machine-readable kind (`unsupported`) and the `what` payload
@@ -210,6 +226,22 @@ Per stage, what exists and what this plan builds:
 | DAG C emitter (`chelis-backend-c/src/emit.rs`) | panics ([#692]) | same Result channel; the reduce-family panic arms become diagnostics |
 | HIP emitter | gate rejects much; `elem_kind` substitutes F32 ([#689]) | `elem_kind` returns `Result`; its `_` arm deleted (§C4.1) |
 | runtime (`chelis-runtime`) | `runtime_fail!` aborts exist and are the right shape | unchanged; used only for dynamic-only cases per §C1.2 |
+
+**The speculative-sub-lowering laundering rule (Phase 1 addition; the
+[#776]/[#782] finding):** the host-emit backend speculatively sub-lowers
+def bodies through the tensor-DAG path and, on a NON-FATAL lowering
+error, recovers by falling back to host emission. Before Phase 1 that
+recovery path could terminate in the silent
+`/* unsupported builtin */ 0` stub - laundering a raised error back
+into a compiled zero, which is why [#782] had to mark its lowering
+errors fatal. The Result channel closes this structurally: the
+recovery terminal is now `Err(Unsupported)`, so a swallowed non-fatal
+error either host-emits CORRECTLY or fails the build loudly - it can
+no longer end silent. Rule for new lowering-side rejections: use the
+FATAL raise when the host fallback would mis-emit the same construct
+(a garbage host call over a tensor pointer); a non-fatal raise is
+acceptable only where the host fallback legitimately owns the form,
+because its own unsupported terminal is now loud.
 
 **The `EmittedExpr` rule:** the C expression type is a newtype over
 `String` whose constructors are the typed builders. There is deliberately
@@ -255,6 +287,24 @@ substitute; these remove the *ability*:
 
 The remediation work-list, from the audit record as of 2026-07-16.
 **Live** = confirmed by execution.
+
+**Phase 1 dispositions (PR [#791], 2026-07-20).** Every live row below
+converted to a section C2 diagnostic; every dead row got its section
+C1.4 raise except five documented structural keeps in `lower.rs` (the
+defsig/deftype/typealias inert declaration node, the
+unknown-tag-with-children sequence seed, `zero_tensor_node`'s
+deliberate ADT zero adjoint, the empty-`drop` sequencing zero, and the
+`fail`-in-if mask placeholder - each annotated at the site). Row status
+notes below are left as the P0 record; the per-row conversion evidence
+is the un-ignored acceptance tests named in PR [#791] plus
+`loud_unsupported_phase1.rs`. Appended rows:
+
+| # | site | substitutes | issue | status |
+|---|---|---|---|---|
+| 20 | `host.rs` handle-effect arm (host-lane sibling of row 9) | drops handler, lowers body for non-`random` kinds | [#709]-adjacent (P1 discovery, B2.5) | CONVERTED with row 9 in the same change set (test `unknown_effect_kind_is_rejected`) |
+| 21 | `lower.rs` `expand` positional-axis `unwrap_or(0)` | axis 0 | flagged by [#782] | CONVERTED: fatal raise (section C1.4; a computed axis previously expanded axis 0 silently) |
+| 22 | `lower.rs` `tuple-get` index `unwrap_or(0)` | field 0 | flagged by [#782] | CONVERTED: raise (section C1.4; compile-time index by construction) |
+| 23 | `lower.rs` conv2d present-but-non-literal stride/padding `unwrap_or(1)`/`unwrap_or(0)` | stride 1 / padding 0 | P1 discovery (the [#776] shape); TO FILE | flagged and left per B2.5 (absent-arg defaults are the documented optional-arg semantics; the present-but-non-literal case needs its own probe + issue); baselined in the tripwire's numeric-unwrap class |
 
 | # | site | substitutes | issue | status |
 |---|---|---|---|---|
@@ -407,6 +457,21 @@ guard), and lowering's existing `raise_lowering_error`.
 **Frozen at your exit:** §C2 shape + strings; §C3 signatures. Downstream
 ([#729] Phase 3, shell repos) may match `unsupported:` diagnostics without
 re-checking.
+
+**Delivered** (PR [#791], 2026-07-20), with three recorded
+deviations: (1) `issue_703_silent_placeholders.rs`'s [#712]
+lane-agreement rows stay `#[ignore]`d - they assert checker/eval
+agreement on scalar activations, which no emission conversion can move
+(that contract is [#712]/[#731] territory; the oracle's "fully
+un-ignored" overshot). (2) The [#722] eval rows stay `#[ignore]`d as
+value tests; the loud-not-zero contract they were listed for is locked
+by the new green `grad_through_int_abs_fails_loudly_not_zero`.
+(3) Deliverable 3's message migration landed in full for the runtime
+`to_tensor` exemplar (re-rendered to the frozen 4-clause shape); the
+HIP admit-gate and Metal f64-gate exemplars carry the `unsupported:`
+brand with their original message bodies - their full-shape
+conformance rides Phase 3's gate work, per B2.1's
+single-dedicated-change rule for diagnostic-wording migration.
 
 **Explicitly not yours:** making any unsupported thing SUPPORTED (that is
 [#729]'s or an op-owner's work; see §I1 for what your rejections do to
@@ -586,3 +651,7 @@ standing between an unsupported case and a plausible wrong number.
 [#739]: https://github.com/Chelis-Lang/chelis/issues/739
 [#744]: https://github.com/Chelis-Lang/chelis/issues/744
 [#745]: https://github.com/Chelis-Lang/chelis/issues/745
+[#746]: https://github.com/Chelis-Lang/chelis/pull/746
+[#776]: https://github.com/Chelis-Lang/chelis/issues/776
+[#782]: https://github.com/Chelis-Lang/chelis/pull/782
+[#791]: https://github.com/Chelis-Lang/chelis/pull/791

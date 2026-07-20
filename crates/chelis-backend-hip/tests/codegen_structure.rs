@@ -202,7 +202,7 @@ fn dag_with_load() -> Dag {
 #[test]
 fn s1_includes_hip_runtime_header() {
     let dag = dag_add_consts();
-    let result = codegen_hip(&dag, "test_s1");
+    let result = codegen_hip(&dag, "test_s1").unwrap();
     assert!(
         result
             .c_source
@@ -214,7 +214,7 @@ fn s1_includes_hip_runtime_header() {
 #[test]
 fn s1_neg_no_cpu_runtime_include() {
     let dag = dag_add_consts();
-    let result = codegen_hip(&dag, "test_s1_neg");
+    let result = codegen_hip(&dag, "test_s1_neg").unwrap();
     // Should NOT directly include the CPU-only runtime (it's included via hip runtime)
     assert!(
         !result
@@ -231,7 +231,7 @@ fn s1_neg_no_cpu_runtime_include() {
 #[test]
 fn s2_kernel_strings_are_const_char() {
     let dag = dag_add_consts();
-    let result = codegen_hip(&dag, "test_s2");
+    let result = codegen_hip(&dag, "test_s2").unwrap();
     assert!(
         result.c_source.contains("const char *"),
         "Kernel source strings should be const char* literals"
@@ -241,7 +241,7 @@ fn s2_kernel_strings_are_const_char() {
 #[test]
 fn s2_kernel_strings_escape_embedded_quotes() {
     let dag = dag_add_consts();
-    let result = codegen_hip(&dag, "test_quote_escape");
+    let result = codegen_hip(&dag, "test_quote_escape").unwrap();
     assert!(
         result
             .c_source
@@ -255,7 +255,7 @@ fn s2_neg_const_only_dag_only_fill_kernel() {
     let mut dag = Dag::new();
     let c = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32(), None);
     dag.add_root(c);
-    let result = codegen_hip(&dag, "test_s2_neg");
+    let result = codegen_hip(&dag, "test_s2_neg").unwrap();
     // A const-only DAG should only have the fill kernel, no compute kernels
     assert!(
         result.c_source.contains("kernel_fill"),
@@ -285,7 +285,7 @@ fn s3_all_elementwise_ops_emit_kernels() {
         let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
         let c = dag.add_node(op.clone(), vec![a, b], scalar_f32(), None);
         dag.add_root(c);
-        let result = codegen_hip(&dag, &format!("test_{name}"));
+        let result = codegen_hip(&dag, &format!("test_{name}")).unwrap();
         assert!(
             result.c_source.contains("chelis_launch_kernel"),
             "Binary op '{name}' must emit a kernel launch"
@@ -306,7 +306,7 @@ fn s3_floor_trunc_div_emit_typed_int_kernels() {
     let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i32(4), None);
     let c = dag.add_node(RiscOp::TruncDiv, vec![a, b], vec_i32(4), None);
     dag.add_root(c);
-    let trunc_src = codegen_hip(&dag, "test_trunc_div").c_source;
+    let trunc_src = codegen_hip(&dag, "test_trunc_div").unwrap().c_source;
     assert!(
         trunc_src.contains("kernel_trunc_div_i32"),
         "trunc_div(int32) must emit a dtype-suffixed kernel; got:\n{trunc_src}"
@@ -319,7 +319,7 @@ fn s3_floor_trunc_div_emit_typed_int_kernels() {
     let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i32(4), None);
     let c = dag.add_node(RiscOp::FloorDiv, vec![a, b], vec_i32(4), None);
     dag.add_root(c);
-    let floor_src = codegen_hip(&dag, "test_floor_div").c_source;
+    let floor_src = codegen_hip(&dag, "test_floor_div").unwrap().c_source;
     assert!(
         floor_src.contains("kernel_floor_div_i32") && floor_src.contains("q -= 1"),
         "floor_div(int32) must emit a sign-corrected kernel; got:\n{floor_src}"
@@ -331,7 +331,7 @@ fn s3_floor_trunc_div_emit_typed_int_kernels() {
     let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(4), None);
     let c = dag.add_node(RiscOp::FloorDiv, vec![a, b], vec_f32(4), None);
     dag.add_root(c);
-    let floor_f_src = codegen_hip(&dag, "test_floor_div_f").c_source;
+    let floor_f_src = codegen_hip(&dag, "test_floor_div_f").unwrap().c_source;
     assert!(
         floor_f_src.contains("floorf("),
         "floor_div(f32) must emit floorf(a / b); got:\n{floor_f_src}"
@@ -352,7 +352,7 @@ fn s3_all_unary_ops_emit_kernels() {
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
         let c = dag.add_node(op.clone(), vec![a], scalar_f32(), None);
         dag.add_root(c);
-        let result = codegen_hip(&dag, &format!("test_{name}"));
+        let result = codegen_hip(&dag, &format!("test_{name}")).unwrap();
         assert!(
             result.c_source.contains("chelis_launch_kernel"),
             "Unary op '{name}' must emit a kernel launch"
@@ -378,7 +378,7 @@ fn s4_sum_reduction_emits_kernel() {
         None,
     );
     dag.add_root(s);
-    let result = codegen_hip(&dag, "test_sum");
+    let result = codegen_hip(&dag, "test_sum").unwrap();
     assert!(
         result.c_source.contains("chelis_launch_kernel"),
         "Sum reduction must emit a kernel launch"
@@ -391,7 +391,7 @@ fn s4_max_reduce_emits_kernel() {
     let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
     let m = dag.add_node(RiscOp::MaxReduce { axis: 0 }, vec![x], vec_f32(4), None);
     dag.add_root(m);
-    let result = codegen_hip(&dag, "test_max_reduce");
+    let result = codegen_hip(&dag, "test_max_reduce").unwrap();
     assert!(
         result.c_source.contains("chelis_launch_kernel"),
         "MaxReduce must emit a kernel launch"
@@ -415,7 +415,7 @@ fn s5_reshape_no_kernel_launch() {
         None,
     );
     dag.add_root(r);
-    let result = codegen_hip(&dag, "test_reshape");
+    let result = codegen_hip(&dag, "test_reshape").unwrap();
     // Reshape itself must not add a kernel launch
     assert!(
         result.c_source.contains("chelis_gpu_alloc_view"),
@@ -434,7 +434,7 @@ fn s5_permute_no_kernel_launch() {
         None,
     );
     dag.add_root(p);
-    let result = codegen_hip(&dag, "test_permute");
+    let result = codegen_hip(&dag, "test_permute").unwrap();
     assert!(
         result.c_source.contains("chelis_gpu_alloc_view"),
         "Permute must use alloc_view (metadata-only)"
@@ -455,7 +455,7 @@ fn s5_expand_no_kernel_launch() {
         None,
     );
     dag.add_root(e);
-    let result = codegen_hip(&dag, "test_expand");
+    let result = codegen_hip(&dag, "test_expand").unwrap();
     assert!(
         result.c_source.contains("chelis_gpu_alloc_view"),
         "Expand must use alloc_view (metadata-only)"
@@ -477,7 +477,7 @@ fn s5_realize_materializes_with_kernel_not_view() {
     let r = dag.add_node(RiscOp::Realize, vec![s], vec_f32(3), None);
     dag.add_root(r);
 
-    let result = codegen_hip(&dag, "test_realize");
+    let result = codegen_hip(&dag, "test_realize").unwrap();
     assert!(
         result.c_source.contains("kernel_cast"),
         "Realize must materialize through a copy-style kernel launch"
@@ -498,7 +498,7 @@ fn s5_copy_materializes_and_drop_emits_no_kernel_or_wrapper() {
     dag.add_node(RiscOp::Drop, vec![x], vec_f32(6), None);
     dag.add_root(copy);
 
-    let result = codegen_hip(&dag, "test_copy_drop");
+    let result = codegen_hip(&dag, "test_copy_drop").unwrap();
     let host = host_entry_source(&result.c_source, "test_copy_drop");
 
     assert!(
@@ -523,7 +523,7 @@ fn s5_copy_materializes_and_drop_emits_no_kernel_or_wrapper() {
 #[test]
 fn s6_grid_block_in_launch() {
     let dag = dag_add_consts();
-    let result = codegen_hip(&dag, "test_s6");
+    let result = codegen_hip(&dag, "test_s6").unwrap();
     // Generated code should reference block size 256
     assert!(
         result.c_source.contains("256"),
@@ -544,7 +544,7 @@ fn s7_topo_order_preserved() {
     let d = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
     let e = dag.add_node(RiscOp::Mul, vec![c, d], scalar_f32(), None);
     dag.add_root(e);
-    let result = codegen_hip(&dag, "test_topo");
+    let result = codegen_hip(&dag, "test_topo").unwrap();
     let src = &result.c_source;
     // t0 (const), t1 (const), t2 (add), t3 (const), t4 (mul)
     // Each must appear in order
@@ -560,14 +560,14 @@ fn s7_topo_order_preserved() {
 #[test]
 fn s8_input_labels_match() {
     let dag = dag_with_load();
-    let result = codegen_hip(&dag, "test_labels");
+    let result = codegen_hip(&dag, "test_labels").unwrap();
     assert_eq!(result.input_labels, vec!["x"]);
 }
 
 #[test]
 fn s8_output_labels_root() {
     let dag = dag_add_consts();
-    let result = codegen_hip(&dag, "test_labels");
+    let result = codegen_hip(&dag, "test_labels").unwrap();
     assert_eq!(result.output_labels, vec!["root0"]);
 }
 
@@ -578,7 +578,7 @@ fn s8_duplicate_load_single_slot() {
     let x2 = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
     let out = dag.add_node(RiscOp::Add, vec![x1, x2], vec_f32(4), None);
     dag.add_root(out);
-    let result = codegen_hip(&dag, "test_dup_load");
+    let result = codegen_hip(&dag, "test_dup_load").unwrap();
     assert_eq!(
         result.input_labels,
         vec!["x"],
@@ -605,7 +605,7 @@ fn s9_cmplt_float_result() {
         None,
     );
     dag.add_root(c);
-    let result = codegen_hip(&dag, "test_cmplt");
+    let result = codegen_hip(&dag, "test_cmplt").unwrap();
     assert!(
         result.c_source.contains("1.0f") && result.c_source.contains("0.0f"),
         "cmplt kernel must produce float 1.0f/0.0f, not integer bool"
@@ -619,7 +619,7 @@ fn s9_cmplt_float_result() {
 #[test]
 fn s10_device_helpers_present() {
     let dag = dag_add_consts();
-    let result = codegen_hip(&dag, "test_helpers");
+    let result = codegen_hip(&dag, "test_helpers").unwrap();
     assert!(
         result.c_source.contains("chelis_flat_to_indices"),
         "Device helper chelis_flat_to_indices must be in kernel source"
@@ -645,7 +645,7 @@ fn s10_device_helpers_present() {
 #[test]
 fn s11_static_module_caching() {
     let dag = dag_add_consts();
-    let result = codegen_hip(&dag, "test_cache");
+    let result = codegen_hip(&dag, "test_cache").unwrap();
     assert!(
         result.c_source.contains("static hipModule_t"),
         "Kernel modules must be cached with 'static hipModule_t'"
@@ -655,7 +655,7 @@ fn s11_static_module_caching() {
 #[test]
 fn s11_launches_reset_and_check_failure_flag() {
     let dag = dag_add_consts();
-    let result = codegen_hip(&dag, "test_failure_checks");
+    let result = codegen_hip(&dag, "test_failure_checks").unwrap();
     let src = &result.c_source;
     let launch_count = src.matches("chelis_launch_kernel").count();
     assert_eq!(
@@ -693,7 +693,7 @@ fn s11_launches_reset_and_check_failure_flag() {
 #[test]
 fn s12_transfers_present() {
     let dag = dag_with_load();
-    let result = codegen_hip(&dag, "test_transfer");
+    let result = codegen_hip(&dag, "test_transfer").unwrap();
     assert!(
         result.c_source.contains("chelis_host_to_device"),
         "Input transfer (host→device) must be present"
@@ -707,7 +707,7 @@ fn s12_transfers_present() {
 #[test]
 fn s12_transfer_order() {
     let dag = dag_with_load();
-    let result = codegen_hip(&dag, "test_transfer_order");
+    let result = codegen_hip(&dag, "test_transfer_order").unwrap();
     let src = &result.c_source;
     let h2d_pos = src.find("chelis_host_to_device").expect("h2d present");
     let d2h_pos = src.find("chelis_device_to_host").expect("d2h present");
@@ -725,7 +725,7 @@ fn s12_duplicate_load_transfers_once() {
     let out = dag.add_node(RiscOp::Add, vec![x0, x1], vec_f32(4), None);
     dag.add_root(out);
 
-    let result = codegen_hip(&dag, "test_dup_transfer_once");
+    let result = codegen_hip(&dag, "test_dup_transfer_once").unwrap();
     assert_eq!(
         result.c_source.matches("chelis_host_to_device").count(),
         1,
@@ -736,7 +736,7 @@ fn s12_duplicate_load_transfers_once() {
 #[test]
 fn s12_peak_estimate_reported() {
     let dag = dag_with_load();
-    let result = codegen_hip(&dag, "test_peak_estimate");
+    let result = codegen_hip(&dag, "test_peak_estimate").unwrap();
     assert!(
         result
             .peak_device_bytes_estimate
@@ -762,7 +762,7 @@ fn s12_symbolic_peak_memory_reports_formula_without_fake_estimate() {
     );
     dag.add_root(x);
 
-    let result = codegen_hip(&dag, "test_symbolic_peak");
+    let result = codegen_hip(&dag, "test_symbolic_peak").unwrap();
     assert_eq!(result.peak_device_bytes_estimate, None);
     assert_eq!(result.peak_device_bytes_formula, "(batch * 4)");
     assert_eq!(
@@ -805,7 +805,7 @@ fn s12_symbolic_repeated_occurrences_check_every_non_canonical_input() {
     let xyz = dag.add_node(RiscOp::Add, vec![xy, z], symbolic, None);
     dag.add_root(xyz);
 
-    let result = codegen_hip(&dag, "test_symbolic_repeats");
+    let result = codegen_hip(&dag, "test_symbolic_repeats").unwrap();
     assert!(result.c_source.contains("int batch = inputs[0]->shape[0];"));
     assert!(
         result.c_source.contains("inputs[1]->shape[0] != batch"),
@@ -827,7 +827,7 @@ fn s12_slot_backed_kernels_iterate_over_logical_size_after_dce() {
     let out = dag.add_node(RiscOp::Neg, vec![small], vec_f32(4), None);
     dag.add_root(out);
 
-    let result = codegen_hip(&dag, "test_logical_size");
+    let result = codegen_hip(&dag, "test_logical_size").unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -858,7 +858,7 @@ fn s13_cleanup_frees_intermediates() {
     let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
     let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
     dag.add_root(c);
-    let result = codegen_hip(&dag, "test_cleanup");
+    let result = codegen_hip(&dag, "test_cleanup").unwrap();
     // a (t0) and b (t1) are intermediates, so both their wrappers and slot owners are freed.
     assert!(
         result.c_source.contains("chelis_gpu_free_view(d_t0)"),
@@ -881,7 +881,7 @@ fn s13_cleanup_frees_intermediates() {
 #[test]
 fn s13_outputs_not_freed() {
     let dag = dag_add_consts();
-    let result = codegen_hip(&dag, "test_no_free_output");
+    let result = codegen_hip(&dag, "test_no_free_output").unwrap();
     // The output wrapper is freed after the host copy, and the backing slot is freed once at the end.
     assert!(
         result.c_source.contains("chelis_gpu_free_view(d_t2)"),
@@ -898,7 +898,7 @@ fn s13_outputs_not_freed() {
 #[test]
 fn s13_input_copies_are_freed() {
     let dag = dag_with_load();
-    let result = codegen_hip(&dag, "test_free_input_copy");
+    let result = codegen_hip(&dag, "test_free_input_copy").unwrap();
     assert!(
         result.c_source.contains("chelis_gpu_free_view(d_t0)"),
         "The per-node load wrapper must be freed"
@@ -922,7 +922,7 @@ fn s13_views_use_view_free() {
     let c = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], mat_f32(3, 2), None);
     let out = dag.add_node(RiscOp::Add, vec![p, c], mat_f32(3, 2), None);
     dag.add_root(out);
-    let result = codegen_hip(&dag, "test_view_free");
+    let result = codegen_hip(&dag, "test_view_free").unwrap();
     // Permute (t1) is a view — must use chelis_gpu_free_view, NOT chelis_gpu_free
     assert!(
         result.c_source.contains("chelis_gpu_free_view(d_t1)"),
@@ -942,7 +942,7 @@ fn s14_generated_hip_source_compiles_when_hipcc_available() {
     }
 
     let dag = dag_add_consts();
-    let result = codegen_hip(&dag, "test_compile");
+    let result = codegen_hip(&dag, "test_compile").unwrap();
     let tmp = tempfile::tempdir().expect("tempdir");
 
     let hip_rt = hip_runtime_src_dir();
@@ -1005,7 +1005,7 @@ fn s15_segmented_reduction_strategy_names_track_axis_size() {
         None,
     );
     tiny.add_root(sum_tiny);
-    let tiny_result = codegen_hip(&tiny, "test_tiny_reduce");
+    let tiny_result = codegen_hip(&tiny, "test_tiny_reduce").unwrap();
     assert!(
         tiny_result.c_source.contains("kernel_sum_ax1"),
         "generic symbolic-capable reductions should emit the axis-specific kernel"
@@ -1023,7 +1023,7 @@ fn s15_segmented_reduction_strategy_names_track_axis_size() {
         None,
     );
     small.add_root(sum_small);
-    let small_result = codegen_hip(&small, "test_small_reduce");
+    let small_result = codegen_hip(&small, "test_small_reduce").unwrap();
     assert!(
         small_result.c_source.contains("kernel_sum_ax1"),
         "axis_size=16 should use the same runtime-sized reduction kernel"
@@ -1041,7 +1041,7 @@ fn s15_segmented_reduction_strategy_names_track_axis_size() {
         None,
     );
     large.add_root(sum_large);
-    let large_result = codegen_hip(&large, "test_large_reduce");
+    let large_result = codegen_hip(&large, "test_large_reduce").unwrap();
     assert!(
         large_result.c_source.contains("kernel_sum_ax1"),
         "axis_size=128 should use the same runtime-sized reduction kernel"
@@ -1068,7 +1068,7 @@ fn s15_scalar_reduction_uses_staged_kernels_and_estimate() {
         None,
     );
     dag.add_root(sum);
-    let result = codegen_hip(&dag, "test_scalar_stage");
+    let result = codegen_hip(&dag, "test_scalar_stage").unwrap();
 
     assert!(
         result.c_source.contains("kernel_sum_ax0"),
@@ -1115,7 +1115,7 @@ fn s15_matmul_emits_hipblas_and_link_flag() {
         None,
     );
     dag.add_root(sum);
-    let result = codegen_hip(&dag, "test_hipblas_matmul");
+    let result = codegen_hip(&dag, "test_hipblas_matmul").unwrap();
 
     assert!(
         result.c_source.contains("chelis_hipblas_sgemm_row_major"),
@@ -1154,7 +1154,7 @@ fn sparse_gather_i64_emits_typed_hip_kernel_and_runtime_allocation() {
     );
     dag.add_root(out);
 
-    let result = codegen_hip(&dag, "test_sparse_gather_i64");
+    let result = codegen_hip(&dag, "test_sparse_gather_i64").unwrap();
     assert!(result.c_source.contains("kernel_gather_i64"));
     assert!(result.c_source.contains("const long long *indices"));
     assert!(result.c_source.contains("CHELIS_I64"));
@@ -1206,7 +1206,7 @@ fn sparse_scatter_add_i32_emits_atomic_add_kernel() {
     );
     dag.add_root(out);
 
-    let result = codegen_hip(&dag, "test_sparse_scatter_i32");
+    let result = codegen_hip(&dag, "test_sparse_scatter_i32").unwrap();
     assert!(result.c_source.contains("kernel_scatter_add_i32"));
     assert!(result.c_source.contains("const int *indices"));
     assert!(
@@ -1226,7 +1226,7 @@ fn s15_batched_matmul_emits_hipblas_strided_batched_helper_and_link_flag() {
     let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], b_ty.clone(), None);
     let out = chelis_ir::tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty, None);
     dag.add_root(out);
-    let result = codegen_hip(&dag, "test_hipblas_batched_matmul");
+    let result = codegen_hip(&dag, "test_hipblas_batched_matmul").unwrap();
 
     assert!(
         result
@@ -1296,7 +1296,7 @@ fn s15_batched_matmul_symbolic_batch_emits_strided_batched_helper() {
         None,
     );
     dag.add_root(out);
-    let result = codegen_hip(&dag, "test_hipblas_symbolic_batch_strided_matmul");
+    let result = codegen_hip(&dag, "test_hipblas_symbolic_batch_strided_matmul").unwrap();
 
     assert!(
         result
@@ -1352,7 +1352,7 @@ fn s15_batched_matmul_symbolic_matrix_dim_uses_helper_loop_fallback() {
         None,
     );
     dag.add_root(out);
-    let result = codegen_hip(&dag, "test_hipblas_batched_loop_fallback");
+    let result = codegen_hip(&dag, "test_hipblas_batched_loop_fallback").unwrap();
 
     assert!(
         result
@@ -1404,7 +1404,7 @@ fn s15_batched_matmul_noncontiguous_batch_layout_uses_helper_loop_fallback() {
         None,
     );
     dag.add_root(out);
-    let result = codegen_hip(&dag, "test_hipblas_noncontiguous_batch_loop_fallback");
+    let result = codegen_hip(&dag, "test_hipblas_noncontiguous_batch_loop_fallback").unwrap();
 
     assert!(
         result
@@ -1460,7 +1460,7 @@ fn s15_noncontiguous_matmul_falls_back_to_generic_reduction() {
         None,
     );
     dag.add_root(sum);
-    let result = codegen_hip(&dag, "test_generic_matmul");
+    let result = codegen_hip(&dag, "test_generic_matmul").unwrap();
 
     assert!(
         !result.c_source.contains("chelis_hipblas_sgemm_row_major"),
@@ -1475,7 +1475,7 @@ fn s15_noncontiguous_matmul_falls_back_to_generic_reduction() {
 #[test]
 fn s15_device_entrypoint_is_emitted_for_direct_gpu_execution() {
     let dag = dag_with_load();
-    let result = codegen_hip(&dag, "test_device_entry");
+    let result = codegen_hip(&dag, "test_device_entry").unwrap();
 
     assert!(
         result
@@ -1508,7 +1508,7 @@ fn sf1_fused_elem_single_kernel_launch() {
     dag.add_root(d);
 
     let fused = fuse(&dag);
-    let result = codegen_hip(&fused, "test_sf1");
+    let result = codegen_hip(&fused, "test_sf1").unwrap();
     let host_src = host_entry_source(&result.c_source, "test_sf1");
 
     // Count kernel launches: should be 2 fills + 1 fused = 3 total
@@ -1536,7 +1536,7 @@ fn sf2_fused_kernel_chained_computation() {
     dag.add_root(d);
 
     let fused = fuse(&dag);
-    let result = codegen_hip(&fused, "test_sf2");
+    let result = codegen_hip(&fused, "test_sf2").unwrap();
     let src = &result.c_source;
 
     // The embedded kernel source (escaped in a C string literal) should contain
@@ -1567,7 +1567,7 @@ fn sf3_no_intermediate_alloc_in_fused_chain() {
     dag.add_root(d);
 
     let fused = fuse(&dag);
-    let result = codegen_hip(&fused, "test_sf3");
+    let result = codegen_hip(&fused, "test_sf3").unwrap();
     let host_src = host_entry_source(&result.c_source, "test_sf3");
 
     // Without fusion: 2 const allocs + add alloc + neg alloc = 4 allocs.
@@ -1609,7 +1609,7 @@ fn sfr1_fused_elem_into_reduction_no_intermediate_alloc() {
     dag.add_root(summed);
 
     let fused = fuse(&dag);
-    let result = codegen_hip(&fused, "test_sfr1");
+    let result = codegen_hip(&fused, "test_sfr1").unwrap();
     let src = host_entry_source(&result.c_source, "test_sfr1");
 
     // With elem→elem fusion: add→neg becomes FusedElem.
@@ -1660,7 +1660,7 @@ fn sfr2_fused_elem_into_max_reduce() {
     dag.add_root(maxed);
 
     let fused = fuse(&dag);
-    let result = codegen_hip(&fused, "test_sfr2");
+    let result = codegen_hip(&fused, "test_sfr2").unwrap();
     let src = host_entry_source(&result.c_source, "test_sfr2");
 
     assert!(
@@ -1706,7 +1706,7 @@ fn sfr3_multi_consumer_fused_elem_not_inlined() {
     dag.add_root(summed);
 
     let fused = fuse(&dag);
-    let result = codegen_hip(&fused, "test_sfr3");
+    let result = codegen_hip(&fused, "test_sfr3").unwrap();
     let src = &result.c_source;
 
     // Since the FusedElem output is both a root and consumed by the sum,
@@ -1732,7 +1732,7 @@ fn sfr4_realize_blocks_fused_kernel_emission() {
     dag.add_root(negated);
 
     let fused = fuse(&dag);
-    let result = codegen_hip(&fused, "test_realize_barrier");
+    let result = codegen_hip(&fused, "test_realize_barrier").unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -1767,7 +1767,7 @@ fn s8a_pad_emits_kernel_and_launch_not_view() {
     );
     dag.add_root(p);
 
-    let result = codegen_hip(&dag, "test_pad");
+    let result = codegen_hip(&dag, "test_pad").unwrap();
     let src = &result.c_source;
     assert!(
         src.contains("__global__ void kernel_pad"),
@@ -1799,7 +1799,7 @@ fn s8a_shrink_emits_kernel_and_launch_not_view() {
     );
     dag.add_root(s);
 
-    let result = codegen_hip(&dag, "test_shrink");
+    let result = codegen_hip(&dag, "test_shrink").unwrap();
     let src = &result.c_source;
     assert!(
         src.contains("__global__ void kernel_shrink"),
@@ -1837,7 +1837,7 @@ fn s8a_pad_f64_uses_dtype_suffix() {
     );
     dag.add_root(p);
 
-    let result = codegen_hip(&dag, "test_pad_f64");
+    let result = codegen_hip(&dag, "test_pad_f64").unwrap();
     let src = &result.c_source;
     assert!(
         src.contains("kernel_pad_f64"),
@@ -1863,7 +1863,7 @@ fn s8a_shrink_i32_uses_dtype_suffix() {
     );
     dag.add_root(s);
 
-    let result = codegen_hip(&dag, "test_shrink_i32");
+    let result = codegen_hip(&dag, "test_shrink_i32").unwrap();
     let src = &result.c_source;
     assert!(
         src.contains("kernel_shrink_i32"),

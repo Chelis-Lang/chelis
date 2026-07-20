@@ -118,7 +118,9 @@ fn grad_program(weight_op: &str, print_form: bool) -> String {
 /// Observed today: `[0.0, 0.0, 0.0, 0.0]` from eval. The correct gradient is
 /// `w = abs(weights) = [100, 200, 300, 400]`.
 #[test]
-#[ignore = "chelis#722: grad through abs(int64 tensor) returns zeros in eval (the #699 \
+#[ignore = "chelis#722; since chelis#730 Phase 1 the placeholder is a LOUD lowering error \
+            in both lanes (see grad_through_int_abs_fails_loudly_not_zero) - red for a \
+            better reason until chelis#729 lands integer abs/floor. Original finding: grad through abs(int64 tensor) returns zeros in eval (the #699 \
             placeholder poisons the grad-lowered forward pass); correct gradient is \
             [100, 200, 300, 400]. Run with \
             `cargo test -p chelis-cli --test grad_zero_placeholder_matrix -- --ignored`."]
@@ -133,7 +135,9 @@ fn eval_grad_through_int_abs_is_the_true_gradient() {
 /// Observed today: `[0.0, 0.0, 0.0, 0.0]` from the compiled binary too -
 /// both lanes agree on the wrong answer, invisible to any cross-lane oracle.
 #[test]
-#[ignore = "chelis#722: grad through abs(int64 tensor) returns zeros in the compiled lane \
+#[ignore = "chelis#722; since chelis#730 Phase 1 the placeholder is a LOUD lowering error \
+            in both lanes (see grad_through_int_abs_fails_loudly_not_zero) - red for a \
+            better reason until chelis#729 lands integer abs/floor. Original finding: grad through abs(int64 tensor) returns zeros in the compiled lane \
             as well; correct gradient is [100, 200, 300, 400]. Run with \
             `cargo test -p chelis-cli --test grad_zero_placeholder_matrix -- --ignored`."]
 fn c_grad_through_int_abs_is_the_true_gradient() {
@@ -150,7 +154,9 @@ fn c_grad_through_int_abs_is_the_true_gradient() {
 /// floor on an already-integral int64 tensor is the identity, so the true
 /// gradient is the raw weights. Observed today: zeros in eval.
 #[test]
-#[ignore = "chelis#722: grad through floor(int64 tensor) returns zeros in eval (same \
+#[ignore = "chelis#722; since chelis#730 Phase 1 the placeholder is a LOUD lowering error \
+            in both lanes (see grad_through_int_abs_fails_loudly_not_zero) - red for a \
+            better reason until chelis#729 lands integer abs/floor. Original finding: grad through floor(int64 tensor) returns zeros in eval (same \
             placeholder as abs, per #699's op list); correct gradient is \
             [-100, 200, -300, 400]. Run with \
             `cargo test -p chelis-cli --test grad_zero_placeholder_matrix -- --ignored`."]
@@ -163,24 +169,64 @@ fn eval_grad_through_int_floor_is_the_true_gradient() {
 }
 
 // ===========================================================================
+// chelis#730 Phase 1 (census row 1's grad half): loud, not zero
+// ===========================================================================
+
+/// The conversion's parity row: grad through `abs`/`floor` on an int64
+/// tensor now fails LOUDLY in both lanes with the branded diagnostic -
+/// never plausible zero gradients. Flips to the value tests above when
+/// chelis#729 lands integer abs/floor support.
+#[test]
+fn grad_through_int_abs_fails_loudly_not_zero() {
+    let err = eval_first_line(&grad_program("abs", true))
+        .expect_err("chelis#722: grad through abs(int64) must fail loudly, not zero");
+    assert!(
+        err.contains("unsupported:"),
+        "the eval-lane failure must carry the branded diagnostic; got: {err}"
+    );
+    if c_toolchain_available() {
+        let err = c_first_line(&grad_program("abs", false), "grad_abs_int_loud")
+            .expect_err("the compiled lane must reject the same program");
+        assert!(
+            err.contains("unsupported:"),
+            "the build-lane failure must carry the branded diagnostic; got: {err}"
+        );
+    }
+}
+
+// ===========================================================================
 // CONTROLS (pass today; they isolate the trigger)
 // ===========================================================================
 
-/// The forward pass WITHOUT grad is correct in eval: the placeholder fires
-/// only once grad routes the function through lowering.
+/// The forward COMPUTATION without grad is correct in eval - re-authored
+/// by chelis#730 Phase 1 (B2.5 adjudication). The original control used
+/// the def-rooted program, whose eval output ALSO carried a fabricated
+/// `g = tensor([0.0, ...])` trailing labeled root (the eval pipeline
+/// lowers every tensor-signature def as a DAG root; the chelis#699
+/// placeholder zeroed it silently). Two honest halves now:
+/// the inline host-runtime forward computes 300.0, and the def-rooted
+/// program fails LOUDLY with the branded diagnostic instead of printing
+/// a correct first line above a fabricated zero root.
 #[test]
 fn forward_pass_without_grad_is_correct_in_eval() {
-    let program = "def g(x: tensor[4, f32]) -> tensor[f32] = {\n\
+    let inline = "out = print(sum(mul(to_tensor([0.1, 0.2, 0.3, 0.4]), \
+                  cast(abs(cast(to_tensor([-100.0, 200.0, -300.0, 400.0]), int64)), \
+                  f32)), 0))\n";
+    let line = eval_first_line(inline).expect("the host-runtime forward must evaluate");
+    // chelis#732 P1 ([05-OBS-4]): the rank-0 result renders bare.
+    assert_eq!(line, "300.0", "sum(x * abs(w)) must be 300.0; got: {line}");
+
+    let def_rooted = "def g(x: tensor[4, f32]) -> tensor[f32] = {\n\
            w = cast(abs(to_tensor([cast(-100, int64), cast(200, int64), \
          cast(-300, int64), cast(400, int64)])), f32)\n\
            sum(mul(copy(x), w), 0)\n\
          }\n\
          out = print(g(to_tensor([0.1, 0.2, 0.3, 0.4])))\n";
-    let line = eval_first_line(program).expect("eval should run");
-    // chelis#732 P1 ([05-OBS-4]): the rank-0 result renders bare.
-    assert_eq!(
-        line, "300.0",
-        "0.1*100 + 0.2*200 + 0.3*300 + 0.4*400 = 300; got: {line}"
+    let err = eval_first_line(def_rooted)
+        .expect_err("the def-rooted program must fail loudly, never print a fabricated root");
+    assert!(
+        err.contains("unsupported:"),
+        "the failure must carry the branded diagnostic; got: {err}"
     );
 }
 

@@ -149,23 +149,30 @@ fn metal_rank2_fallback_is_a_named_abort_stub() {
     );
 }
 
-/// The #699 Metal symptom, root-caused: the int64 `abs` output buffer is
-/// filled with a literal zero from a pre-planted `Const 0` node, and the
-/// input tensor is absent from the emission. The zero comes from
-/// `lower_transcendental`, not from Metal. When #699 lands this lock must
-/// be REPLACED by a correctness row (abs actually computed).
+/// The #699 Metal symptom, REPLACED at chelis#730 Phase 1: the int64
+/// `abs` def used to arrive with a pre-planted `Const 0` node from
+/// `lower_transcendental` and Metal emitted a zero-filled buffer. The
+/// placeholder now raises, so the build is REJECTED loudly (the DAG lane
+/// refuses; the host-emission fallback's scalar arm refuses the tensor
+/// operand) and no zero-filled emission exists to lock. Replace with a
+/// correctness row when chelis#729 lands integer abs.
 #[test]
-fn metal_int64_abs_receives_the_pre_planted_const_zero() {
+fn metal_int64_abs_is_rejected_not_pre_planted_zero() {
     let (ok, stderr, emitted) = build_metal(
         "def f(a: tensor[4, int64]) -> tensor[4, int64] = abs(a)\n",
         "metal_i64_abs",
     );
-    assert!(ok, "{stderr}");
     assert!(
-        emitted.contains("node 0 = Const 0") && emitted.contains("(int64_t)0LL"),
-        "the zero placeholder arrives from lowering; if this fails, either \
-         chelis#699 was fixed (replace this lock with a correctness row) or \
-         the emission changed shape"
+        !ok,
+        "an int64 abs def must be rejected, never emitted as a zero buffer"
+    );
+    assert!(
+        stderr.contains("unsupported:"),
+        "the rejection must carry the branded diagnostic; got: {stderr}"
+    );
+    assert!(
+        !emitted.contains("node 0 = Const 0"),
+        "no pre-planted zero emission may be left behind"
     );
 }
 

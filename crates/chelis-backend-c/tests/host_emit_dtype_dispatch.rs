@@ -117,7 +117,7 @@ fn make_unary_program(op_name: &str, prim: Prim) -> HostProgram {
 #[test]
 fn binary_elementwise_emits_dtype_switch_at_f32() {
     let program = make_binary_program("add", Prim::F32);
-    let src = emit_host_program(&program, "binop_f32");
+    let src = emit_host_program(&program, "binop_f32").unwrap();
     assert!(
         src.contains("switch (") && src.contains("->dtype)"),
         "binary elementwise must emit an outer switch on dtype; got:\n{src}"
@@ -149,7 +149,7 @@ fn binary_elementwise_emits_dtype_switch_at_f32() {
 #[test]
 fn binary_elementwise_emits_dtype_switch_at_f64() {
     let program = make_binary_program("add", Prim::F64);
-    let src = emit_host_program(&program, "binop_f64");
+    let src = emit_host_program(&program, "binop_f64").unwrap();
     assert!(
         src.contains("(double*)") && src.contains("->data"),
         "binary elementwise at f64 must cast `->data` through `(double*)`; got:\n{src}"
@@ -159,7 +159,7 @@ fn binary_elementwise_emits_dtype_switch_at_f64() {
 #[test]
 fn binary_elementwise_emits_dtype_switch_at_i64() {
     let program = make_binary_program("add", Prim::Int64);
-    let src = emit_host_program(&program, "binop_i64");
+    let src = emit_host_program(&program, "binop_i64").unwrap();
     assert!(
         src.contains("(int64_t*)") && src.contains("->data"),
         "binary elementwise at i64 must cast `->data` through `(int64_t*)`; got:\n{src}"
@@ -171,7 +171,7 @@ fn binary_elementwise_emits_dtype_switch_at_i64() {
 #[test]
 fn binary_func_elementwise_emits_typed_pointer_access() {
     let program = make_binary_program("max_elem", Prim::F32);
-    let src = emit_host_program(&program, "binfunc_f32");
+    let src = emit_host_program(&program, "binfunc_f32").unwrap();
     // `max_elem` -> `fmaxf` requires an f32-typed access pattern.  The
     // migrated emission must cast `->data` to a typed pointer before
     // indexing rather than reading through the public `float *data`
@@ -194,7 +194,7 @@ fn binary_func_elementwise_emits_typed_pointer_access() {
 #[test]
 fn unary_elementwise_emits_dtype_switch_at_f32() {
     let program = make_unary_program("neg", Prim::F32);
-    let src = emit_host_program(&program, "unop_f32");
+    let src = emit_host_program(&program, "unop_f32").unwrap();
     assert!(
         src.contains("switch (") && src.contains("->dtype)"),
         "unary elementwise must emit an outer switch on dtype; got:\n{src}"
@@ -208,7 +208,7 @@ fn unary_elementwise_emits_dtype_switch_at_f32() {
 #[test]
 fn unary_elementwise_emits_dtype_switch_at_f64() {
     let program = make_unary_program("neg", Prim::F64);
-    let src = emit_host_program(&program, "unop_f64");
+    let src = emit_host_program(&program, "unop_f64").unwrap();
     assert!(
         src.contains("(double*)"),
         "unary elementwise at f64 must cast `->data` through `(double*)`; got:\n{src}"
@@ -218,7 +218,7 @@ fn unary_elementwise_emits_dtype_switch_at_f64() {
 #[test]
 fn unary_elementwise_emits_dtype_switch_at_i64() {
     let program = make_unary_program("neg", Prim::Int64);
-    let src = emit_host_program(&program, "unop_i64");
+    let src = emit_host_program(&program, "unop_i64").unwrap();
     assert!(
         src.contains("(int64_t*)"),
         "unary elementwise at i64 must cast `->data` through `(int64_t*)`; got:\n{src}"
@@ -230,7 +230,7 @@ fn unary_elementwise_emits_dtype_switch_at_i64() {
 #[test]
 fn unary_func_elementwise_emits_typed_pointer_access() {
     let program = make_unary_program("exp", Prim::F32);
-    let src = emit_host_program(&program, "unfunc_f32");
+    let src = emit_host_program(&program, "unfunc_f32").unwrap();
     assert!(
         src.contains("(float*)") || src.contains("(const float*)"),
         "unary func elementwise must cast `->data` to typed pointer; got:\n{src}"
@@ -284,7 +284,7 @@ fn make_tensor_call_with_scalar_arg(scalar_ty: HostType, scalar_val: HostExpr) -
 fn scalar_to_tensor_coercion_bool_uses_typed_pointer() {
     let program =
         make_tensor_call_with_scalar_arg(HostType::Bool, HostExpr::new(HostExprKind::Bool(true)));
-    let src = emit_host_program(&program, "scalar_bool");
+    let src = emit_host_program(&program, "scalar_bool").unwrap();
     // The legacy bool arm writes `tensor_name->data[0] = value ? 1.0f
     // : 0.0f;` against `float *data`.  The migrated code must cast
     // `->data` through a typed pointer first.
@@ -312,7 +312,7 @@ fn scalar_to_tensor_coercion_f64_uses_f64_typed_pointer() {
         HostType::Float64,
         HostExpr::new(HostExprKind::Float(7.5)),
     );
-    let src = emit_host_program(&program, "scalar_f64");
+    let src = emit_host_program(&program, "scalar_f64").unwrap();
     assert!(
         src.contains("chelis_alloc(0, NULL, CHELIS_F64)"),
         "f64 scalar-to-tensor coercion must allocate a CHELIS_F64 rank-0 tensor (#381); got:\n{src}"
@@ -342,7 +342,7 @@ fn scalar_to_tensor_coercion_int64_keeps_typed_pointer() {
     // survives the host_emit migration.
     let program =
         make_tensor_call_with_scalar_arg(HostType::Int64, HostExpr::new(HostExprKind::Int(42)));
-    let src = emit_host_program(&program, "scalar_i64");
+    let src = emit_host_program(&program, "scalar_i64").unwrap();
     assert!(
         src.contains("(int64_t*)") && src.contains("->data"),
         "int64 scalar-to-tensor coercion must use `(int64_t*)` cast; got:\n{src}"

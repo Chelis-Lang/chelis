@@ -424,10 +424,21 @@ pub(super) fn pack_dag_roots(
                 root.0
             )
         })?;
+        // chelis#730 Phase 1 (census row 14, section C1.4 raise-or-prove):
+        // a root id missing from the DAG it was just packed from is an
+        // internal desync with no user-facing driver; erroring beats the
+        // former silent F32 precision default.
         let precision = dag
             .get(*root)
             .map(|node| node.output_type.precision)
-            .unwrap_or(Prim::F32);
+            .ok_or_else(|| {
+                format!(
+                    "host runtime: root {} missing from the {context_label} DAG while \
+                     packing result precision (internal desync; was a silent F32 \
+                     default - spec/design/loud_unsupported.md section C1.4)",
+                    root.0
+                )
+            })?;
         packed.push(RuntimeValue::Tensor(RuntimeTensorValue {
             value: tensor,
             precision,

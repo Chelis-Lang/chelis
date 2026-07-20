@@ -5,8 +5,8 @@
 //! Two kinds of test live here, per the census verification contract:
 //!
 //! - **Evidence locks** (green today): assert the CURRENT substituting
-//!   behavior of a live row, the `metal_int64_abs_receives_the_pre_planted_
-//!   const_zero` pattern. Each is replaced by the row's conversion PR at
+//!   behavior of a live row, the `metal_int64_abs_is_rejected_not_
+//!   pre_planted_zero` pattern (its Phase 1 rejection form). Each is replaced by the row's conversion PR at
 //!   Phase 1 - the lock failing later IS the signal that the row moved.
 //! - **Canaries** (green today): drive the guard that keeps a dead row
 //!   dead (section C1.4's prove-half). If a canary ever observes the
@@ -203,19 +203,16 @@ fn check_score_and_output(program: &str, ext: &str) -> (f64, String) {
 // Census row 5 (chelis#689) + row 18's chelis#698 half - LIVE evidence lock.
 // ===========================================================================
 
-/// **Evidence lock (replace at Phase 1):** `chelis build --target hip` on an
-/// int64 `neg` emits the F32 fallback kernel today - `elem_kind`'s `_ =>
-/// ElemKind::F32` arm firing on a dtype it does not support, exactly as the
-/// audit's emission probe recorded (chelis#689). The build SUCCEEDING past
-/// the CLI gate is simultaneously row 18's chelis#698 evidence (the
-/// permissive CLI copy of `reject_unsupported_hip_ops` admits int64
-/// unconditionally). Emission-only; no hipcc needed.
-///
-/// When chelis#689's rejection lands (plan Phase 1), this lock fails at the
-/// build-succeeded assertion and must be REPLACED by a rejection row in the
-/// chelis#687 corpus.
+/// **Rejection lock (replaced the Phase 0 evidence lock at Phase 1):**
+/// `chelis build --target hip` on an int64 `neg` is REJECTED with the
+/// branded section C2 diagnostic - `elem_kind`'s former `_ =>
+/// ElemKind::F32` wildcard is deleted (census row 5, chelis#689;
+/// runtime-confirmed corrupt on gfx1151). The permissive CLI gate still
+/// admits int64 (row 18's chelis#698 half, Phase 3 territory); the
+/// EMITTER channel is what refuses now - the enforcement-ladder rung the
+/// plan demands. Emission-only; no hipcc needed.
 #[test]
-fn hip_int64_neg_emits_the_f32_fallback_kernel_today() {
+fn hip_int64_neg_is_rejected_with_the_branded_diagnostic() {
     let (ok, stderr, emitted) = build_target(
         "def f(x: tensor[4, int64]) -> tensor[4, int64] = neg(x)\n",
         ".ch",
@@ -223,15 +220,18 @@ fn hip_int64_neg_emits_the_f32_fallback_kernel_today() {
         "hip",
     );
     assert!(
-        ok,
-        "census row 18 (chelis#698): the CLI HIP gate admits int64 today; a \
-         rejection here means the row moved - update the census. stderr: {stderr}"
+        !ok,
+        "census row 5 (chelis#689): the HIP emitter must reject an int64 \
+         elementwise kernel, never emit the F32 fallback"
     );
     assert!(
-        emitted.contains("kernel_neg_f32"),
-        "census row 5 (chelis#689): elem_kind's F32 fallback emitted the f32 \
-         kernel for int64 at audit time. If this no longer holds, the row \
-         moved - update the census, do not delete this lock. Emitted:\n{emitted}"
+        stderr.contains("unsupported:") && stderr.contains("int64"),
+        "the rejection must be the branded section C2 diagnostic naming the \
+         dtype; got: {stderr}"
+    );
+    assert!(
+        !emitted.contains("kernel_neg_f32"),
+        "no F32 fallback kernel may be left behind on a rejected build"
     );
 }
 
@@ -239,28 +239,22 @@ fn hip_int64_neg_emits_the_f32_fallback_kernel_today() {
 // Census row 4 (chelis#714 symptom) - LIVE evidence lock.
 // ===========================================================================
 
-/// **Evidence lock (replace at Phase 1):** a compiled f16 scalar `floor`
-/// prints the literal `<value>` placeholder - host_emit.rs's unclassifiable-
-/// value print arm (the row 4 sites), reached via the HostType::Unknown
-/// chain chelis#714 documents (floor stays Unknown, emits the chelis#715
-/// stub into a `void*`, and main prints `<value>`).
+/// **Rejection lock (replaced the Phase 0 evidence lock at Phase 1):**
+/// the compiled f16 scalar `floor` program is REJECTED at build with the
+/// branded diagnostic - the row 4 `<value>` print arms and the row 2
+/// builtin stub are both errors now, so the chelis#714 Unknown chain
+/// terminates loudly instead of printing a placeholder.
 #[test]
-fn c_f16_floor_prints_the_value_placeholder_today() {
-    if !c_toolchain_available() {
-        eprintln!("skipping: no host C toolchain");
-        return;
-    }
-    let (_, stdout, _) = c_run_outcome(
+fn c_f16_floor_is_rejected_not_value_placeholder() {
+    let err = c_run_outcome(
         "def run() -> f16 = floor(cast(1.5, f16))\nout = run()\n",
         ".ch",
         "f16_floor_value",
     )
-    .expect("chelis#714: the f16 floor program builds and links today");
+    .expect_err("census row 4: the f16 floor program must fail the build loudly");
     assert!(
-        stdout.contains("<value>"),
-        "census row 4: the unclassifiable-print arm emitted `<value>` at \
-         audit time. If this no longer holds, the row moved - update the \
-         census, do not delete this lock. stdout: {stdout}"
+        err.contains("unsupported:"),
+        "the rejection must carry the branded section C2 diagnostic; got: {err}"
     );
 }
 
@@ -303,15 +297,11 @@ fn canary_dp_cast_bogus_dtype_is_guarded() {
     }
 }
 
-/// Observed today (chelis#744): both bogus-cast spellings BUILD to a
-/// working binary that prints 1.5 - lower_cast's `unwrap_or(Prim::F32)` /
-/// `else => Prim::F32` substituting silently in the lane that ships. The
-/// eval guard has no lowering twin.
+/// Un-ignored by chelis#730 Phase 1 (census row 13, chelis#744):
+/// `lower_cast` now raises a fatal branded error on a bogus target dtype
+/// in both spellings, so the build lane rejects exactly like the eval
+/// guard.
 #[test]
-#[ignore = "chelis#744: a .dp cast with a bogus target dtype compiles to a working f32 \
-            binary (eval rejects the same file cleanly; check scores 1). The build lane \
-            must reject loudly per the chelis#730 plan section C1. Run with \
-            `cargo test -p chelis-cli --test loud_unsupported_census_canaries -- --ignored`."]
 fn dp_bogus_cast_target_must_not_build_silently() {
     for (i, dp) in [BOGUS_CAST_TPRIM, BOGUS_CAST_BARE].iter().enumerate() {
         let (ok, stderr, _emitted) = build_target(dp, ".dp", &format!("bogus_cast_{i}"), "c");

@@ -445,7 +445,7 @@ int main(void) {{
 
 fn compile_and_run_single_output(dag: &Dag, func_name: &str, inputs: &[TestInput]) -> Vec<f32> {
     require_hipcc();
-    let result = codegen_hip(dag, func_name);
+    let result = codegen_hip(dag, func_name).unwrap();
     assert_eq!(
         result.output_labels.len(),
         1,
@@ -511,7 +511,7 @@ fn compile_and_run_output_cases(
     input_cases: &[Vec<TestInput>],
 ) -> Vec<Vec<f32>> {
     require_hipcc();
-    let result = codegen_hip(dag, func_name);
+    let result = codegen_hip(dag, func_name).unwrap();
     assert_eq!(
         result.output_labels.len(),
         1,
@@ -655,7 +655,7 @@ fn g1_add_consts_gpu() {
 /// bits (`%.6f` cannot distinguish the 1-ULP FMA difference this locks).
 fn compile_and_run_output_f32_bits(dag: &Dag, func_name: &str) -> Vec<u32> {
     require_hipcc();
-    let result = codegen_hip(dag, func_name);
+    let result = codegen_hip(dag, func_name).unwrap();
     assert_eq!(
         result.output_labels.len(),
         1,
@@ -2061,7 +2061,7 @@ fn compile_and_run_single_output_f64(
     inputs: &[TestInputF64],
 ) -> Vec<f64> {
     require_hipcc();
-    let result = codegen_hip(dag, func_name);
+    let result = codegen_hip(dag, func_name).unwrap();
     assert_eq!(
         result.output_labels.len(),
         1,
@@ -2425,7 +2425,7 @@ fn ws_a2_hip_f1_admits_f64_matmul_at_codegen() {
         None,
     );
     dag.add_root(mm);
-    let result = chelis_backend_hip::codegen_hip(&dag, "ws_a2_codegen_f64_matmul");
+    let result = chelis_backend_hip::codegen_hip(&dag, "ws_a2_codegen_f64_matmul").unwrap();
     assert!(
         result.c_source.contains("chelis_hipblas_dgemm_row_major("),
         "f64 matmul must dispatch to dgemm"
@@ -2454,7 +2454,7 @@ fn ws_a2_hip_reduce_sum_f64_emits_double_accumulator() {
         None,
     );
     dag.add_root(s);
-    let result = chelis_backend_hip::codegen_hip(&dag, "ws_a2_reduce_sum_f64");
+    let result = chelis_backend_hip::codegen_hip(&dag, "ws_a2_reduce_sum_f64").unwrap();
     assert!(
         result.c_source.contains("kernel_sum_ax0_f64"),
         "f64 reduce_sum must use the f64-suffixed kernel name"
@@ -2476,7 +2476,7 @@ fn ws_a2_hip_min_reduce_f64_kernel_emitted() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f64(4), None);
     let m = dag.add_node(RiscOp::MinReduce { axis: 0 }, vec![x], scalar_f64(), None);
     dag.add_root(m);
-    let result = chelis_backend_hip::codegen_hip(&dag, "ws_a2_min_reduce_f64");
+    let result = chelis_backend_hip::codegen_hip(&dag, "ws_a2_min_reduce_f64").unwrap();
     assert!(
         result.c_source.contains("kernel_min_ax0_f64"),
         "f64 min_reduce must use the f64-suffixed kernel name"
@@ -2501,7 +2501,7 @@ fn ws_a2_hip_argmax_f64_kernel_emitted() {
         None,
     );
     dag.add_root(m);
-    let result = chelis_backend_hip::codegen_hip(&dag, "ws_a2_argmax_f64");
+    let result = chelis_backend_hip::codegen_hip(&dag, "ws_a2_argmax_f64").unwrap();
     assert!(
         result.c_source.contains("kernel_argmax_ax0_f64"),
         "f64 argmax must use the f64-suffixed kernel name"
@@ -2538,7 +2538,7 @@ fn compile_and_run_single_output_typed_i64(
     out_printf_spec: &str,
 ) -> Vec<i64> {
     require_hipcc();
-    let result = codegen_hip(dag, func_name);
+    let result = codegen_hip(dag, func_name).unwrap();
     assert_eq!(
         result.output_labels.len(),
         1,
@@ -2916,7 +2916,7 @@ fn ws_a4_i8_add_emits_dtype_suffixed_kernel_name() {
     );
     dag.add_root(out);
 
-    let result = codegen_hip(&dag, "ws_a4_i8_add_codegen");
+    let result = codegen_hip(&dag, "ws_a4_i8_add_codegen").unwrap();
     assert!(
         result.c_source.contains("kernel_add_i8"),
         "i8 add must emit `kernel_add_i8`; got source:\n{}",
@@ -2957,7 +2957,7 @@ fn ws_a4_i8_reduce_sum_emits_promoted_kernel_name() {
     );
     dag.add_root(out);
 
-    let result = codegen_hip(&dag, "ws_a4_i8_reduce_sum_codegen");
+    let result = codegen_hip(&dag, "ws_a4_i8_reduce_sum_codegen").unwrap();
     // Kernel name encodes both source dtype (`_i8`) and accumulator
     // dtype (`_i32`). The unsuffixed `kernel_sum_ax0` would be the f32
     // → f32 path, so its absence is the regression-shield.

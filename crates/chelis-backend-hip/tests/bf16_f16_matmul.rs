@@ -164,7 +164,7 @@ fn bf16_matmul_with_explicit_f64_accumulator_panics_at_codegen() {
 
     // Should panic inside emit_blas_matmul with the WS-A2-routing
     // diagnostic. The codegen panic is the test oracle.
-    let _ = codegen_hip(&dag, "ws_a3_bf16_f64_acc");
+    let _ = codegen_hip(&dag, "ws_a3_bf16_f64_acc").unwrap();
 }
 
 /// Codegen smoke: bf16 matmul with the spec-default f32 accumulator
@@ -197,7 +197,7 @@ fn bf16_matmul_default_accumulator_emits_bf16_gemm_wrapper() {
     let out = dag.add_node(matmul, vec![a, b], matrix(2, 4, Prim::Bf16), None);
     dag.add_root(out);
 
-    let result = codegen_hip(&dag, "ws_a3_bf16_default");
+    let result = codegen_hip(&dag, "ws_a3_bf16_default").unwrap();
     assert!(
         result
             .c_source
@@ -241,7 +241,7 @@ fn f16_matmul_default_accumulator_emits_f16_gemm_wrapper() {
     let out = dag.add_node(matmul, vec![a, b], matrix(2, 4, Prim::F16), None);
     dag.add_root(out);
 
-    let result = codegen_hip(&dag, "ws_a3_f16_default");
+    let result = codegen_hip(&dag, "ws_a3_f16_default").unwrap();
     assert!(
         result
             .c_source
@@ -287,7 +287,7 @@ fn f32_matmul_does_not_emit_bf16_or_f16_gemm_wrapper() {
     let out = dag.add_node(matmul, vec![a, b], matrix(2, 4, Prim::F32), None);
     dag.add_root(out);
 
-    let result = codegen_hip(&dag, "ws_a3_f32_baseline");
+    let result = codegen_hip(&dag, "ws_a3_f32_baseline").unwrap();
     assert!(
         !result
             .c_source
@@ -584,7 +584,7 @@ int main(void) {{
 
 fn compile_and_run(dag: &Dag, func_name: &str, case: &ExecCase) -> Vec<f32> {
     require_hipcc();
-    let result = codegen_hip(dag, func_name);
+    let result = codegen_hip(dag, func_name).unwrap();
     assert_eq!(
         result.output_labels.len(),
         1,

@@ -2606,7 +2606,7 @@ fn cmd_build(
                 reject_unsupported_c_precisions_host(host_program)?;
                 reject_symbolic_windowed_reduce_host(host_program, "c")?;
                 reject_unsupported_reduce_window_precision_host(host_program, "c")?;
-                let result = chelis_backend_c::codegen_host_program(host_program, func_name);
+                let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
                 cmd_build_c_result(result, func_name, output, &symbolic_dims)
             } else {
                 reject_unsupported_effect_ops(&dag, "c")?;
@@ -2642,7 +2642,7 @@ fn cmd_build(
                 && host_requires_host_backend
                 && let Some(host_program) = compiled_program.host.as_ref()
             {
-                let result = chelis_backend_c::codegen_host_program(host_program, func_name);
+                let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
                 cmd_build_hip_host(result, func_name, output)
             } else {
                 let mut hip_dag = if let Some(entry_dag) = preferred_entry_dag {
@@ -2686,7 +2686,7 @@ fn cmd_build(
                 // Host-only programs fall through to the C backend, exactly
                 // like the HIP path. The metal path doesn't have a separate
                 // host wrapper today; reuse cmd_build_hip_host for parity.
-                let result = chelis_backend_c::codegen_host_program(host_program, func_name);
+                let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
                 cmd_build_hip_host(result, func_name, output)
             } else {
                 let mut metal_dag = if let Some(entry_dag) = preferred_entry_dag {
@@ -2851,7 +2851,7 @@ fn cmd_build_deep(
                 reject_unsupported_c_precisions_host(host_program)?;
                 reject_symbolic_windowed_reduce_host(host_program, "c")?;
                 reject_unsupported_reduce_window_precision_host(host_program, "c")?;
-                let result = chelis_backend_c::codegen_host_program(host_program, func_name);
+                let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
                 cmd_build_c_result(result, func_name, output, &symbolic_dims)
             } else {
                 reject_unsupported_effect_ops(&dag, "c")?;
@@ -2882,7 +2882,7 @@ fn cmd_build_deep(
                 && host_requires_host_backend
                 && let Some(host_program) = compiled_program.host.as_ref()
             {
-                let result = chelis_backend_c::codegen_host_program(host_program, func_name);
+                let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
                 cmd_build_hip_host(result, func_name, output)
             } else {
                 let mut hip_dag = if let Some(entry_dag) = preferred_entry_dag {
@@ -2919,7 +2919,7 @@ fn cmd_build_deep(
                 && host_requires_host_backend
                 && let Some(host_program) = compiled_program.host.as_ref()
             {
-                let result = chelis_backend_c::codegen_host_program(host_program, func_name);
+                let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
                 cmd_build_hip_host(result, func_name, output)
             } else {
                 let mut metal_dag = if let Some(entry_dag) = preferred_entry_dag {
@@ -6878,7 +6878,7 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
                 // error and not a Rust stack trace.
                 if !bf16_or_f16_admissible_ops.contains(&node.id) {
                     return Err(format!(
-                        "`chelis build --target hip` admits `{}` only on tensor \
+                        "unsupported: `chelis build --target hip` admits `{}` only on tensor \
                          load/store nodes and on `BlasMatmul` operands today \
                          (`hipblasGemmEx` with an f32 accumulator, WS-A3). \
                          Node {} carries op {:?} which has no bf16/f16 kernel \
@@ -6893,7 +6893,7 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
             }
             other => {
                 return Err(format!(
-                    "`chelis build --target hip` DAG path does not support tensor \
+                    "unsupported: `chelis build --target hip` DAG path does not support tensor \
                      precision `{}` (node {}). \
                      Supported: f32/f64/bool plus the integer family \
                      (int8/int16/int32/int64), with bf16/f16 admitted on matmul \
@@ -6970,7 +6970,7 @@ fn reject_unsupported_metal_ops(
                 // Diagnostic text is the spec-pinned string; tests
                 // assert exact-string match so this must not drift.
                 return Err(format!(
-                    "`chelis build --target metal` rejects f64 (node {}): \
+                    "unsupported: `chelis build --target metal` rejects f64 (node {}): \
                      Apple Silicon GPUs lack FP64 ALUs; use `--target c` or \
                      `--target hip` for f64 workloads. \
                      See spec/04-type-system.md §1.1.3.",
@@ -7400,7 +7400,7 @@ fn cmd_build_c(
             use_blas: true,
             ..chelis_backend_c::CodegenOptions::default()
         },
-    );
+    )?;
     let symbolic_dims = fallback_symbolic_dims(dag, &result.symbolic_dims, symbolic_dims_hint);
     cmd_build_c_result(result, func_name, output, &symbolic_dims)
 }
@@ -7543,7 +7543,7 @@ fn cmd_build_hip(
     output: Option<&std::path::Path>,
     symbolic_dims_hint: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let result = chelis_backend_hip::codegen_hip(dag, func_name);
+    let result = chelis_backend_hip::codegen_hip(dag, func_name)?;
 
     let out_dir = output
         .map(|p| p.to_path_buf())

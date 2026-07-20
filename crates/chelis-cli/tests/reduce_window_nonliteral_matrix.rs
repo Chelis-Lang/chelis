@@ -147,11 +147,11 @@ fn eval_pools_correctly_with_nonliteral_window_and_strides() {
 /// `tensor(shape=[6], data=[1.0, 5.0, 2.0, 8.0, 3.0, 9.0])` - the input,
 /// unpooled, with shape 6 out of a `-> tensor[5, f32]` function. Both
 /// lists defaulted to empty and the ReduceWindow became a no-op.
+/// Un-ignored by chelis#730 Phase 1 (census row 8): lowering now raises a
+/// fatal branded error on non-literal window/stride lists, which this
+/// test accepts as the reject arm. Pooling with runtime windows is
+/// op-owner support work.
 #[test]
-#[ignore = "chelis#725: non-literal window AND strides silently lower to empty lists; the \
-            compiled max-pool is a no-op returning the unpooled input with the wrong \
-            shape. Either pool correctly or reject at build. Run with \
-            `cargo test -p chelis-cli --test reduce_window_nonliteral_matrix -- --ignored`."]
 fn c_nonliteral_window_and_strides_pool_or_reject() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
@@ -183,11 +183,10 @@ fn c_nonliteral_window_and_strides_pool_or_reject() {
 /// emit.rs:4509 ... window_shape and strides must have equal length, left: 0`;
 /// the half-non-literal case trips the internal assertion instead of a
 /// diagnostic.
+/// Un-ignored by chelis#730 Phase 1 (census rows 8/12): the half-literal
+/// case is rejected at lowering before the emitter arity check (itself
+/// now a diagnostic, not an assert).
 #[test]
-#[ignore = "chelis#725: a non-literal window with a literal stride panics the compiler at \
-            emit.rs:4509 (window defaulted to empty, stride did not). Must become a clean \
-            diagnostic or a correct build. Run with \
-            `cargo test -p chelis-cli --test reduce_window_nonliteral_matrix -- --ignored`."]
 fn c_nonliteral_window_does_not_panic_the_compiler() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");

@@ -96,6 +96,46 @@ fn build_and_run_c(program: &str, name: &str) -> Result<(String, String), String
     Ok((emitted, String::from_utf8_lossy(&run.stdout).into_owned()))
 }
 
+/// Build + link + run, keeping the run OUTCOME: `Ok((run_ok, stdout,
+/// stderr))`, or `Err(build/link stderr)`. For rows whose contract is a
+/// runtime ABORT (census row 10 interim-hardening), where
+/// `build_and_run_c`'s nonzero-exit-is-Err folding would hide the
+/// distinction between a build failure and the asserted abort.
+fn c_run_outcome_full(program: &str, name: &str) -> Result<(bool, String, String), String> {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join(format!("{name}.ch"));
+    let out_dir = dir.path().join(format!("{name}-out"));
+    write_file(&path, program);
+    let built = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("chelis build should run");
+    if !built.status.success() {
+        return Err(String::from_utf8_lossy(&built.stderr).into_owned());
+    }
+    let status = common::link_generated(&out_dir, &format!("{name}.c"), name);
+    if !status.success() {
+        return Err(format!("link failed: {status}"));
+    }
+    let run = std::process::Command::new(out_dir.join(name))
+        .output()
+        .expect("compiled binary should run");
+    Ok((
+        run.status.success(),
+        String::from_utf8_lossy(&run.stdout).into_owned(),
+        String::from_utf8_lossy(&run.stderr).into_owned(),
+    ))
+}
+
 /// `chelis eval` a full program; first printed line or stderr.
 fn eval_first_line(program: &str) -> Result<String, String> {
     let dir = tempdir().expect("tempdir");
@@ -221,7 +261,8 @@ fn eval_scalar_bf16_rounds_per_op() {
 /// values for every row (1.25 -> 1, 0.333.. -> 0, -1.5 -> -1,
 /// sqrt -> 1, exp -> 2, inf -> 131008, cast(2049) -> 2049).
 #[test]
-#[ignore = "chelis#714: the full f16/bf16 scalar op surface diverges in the compiled lane \
+#[ignore = "chelis#714, now rejected loudly at build per the chelis#730 plan section I1 \
+            (value support tracked by chelis#729). Original finding: the full f16/bf16 scalar op surface diverges in the compiled lane \
             (int64_t storage, no narrow-float rounding). Each row's expected value is the \
             locked eval answer. Run with \
             `cargo test -p chelis-cli --test narrow_dtype_matrix -- --ignored`."]
@@ -362,41 +403,35 @@ fn f8e4m3_is_rejected_in_both_lanes() {
 /// (= 2048.0, the correctly rounded f16 sum of 2048 + 1) and 0x3A00 (= 0.75)
 /// concatenated little-endian.
 ///
-/// Compares BIT PATTERNS, not decimal text (a grep for a decimal is how the
-/// chelis#711 probe went wrong). When #716 is fixed this test fails loudly at
-/// the misread assertion and should be replaced by the direct-print row below.
-///
-/// Deliberately NOT wired to the chelis#729 Phase 0 domain checker: the
-/// printed payload here is the documented #716 misprint (an f16 buffer
-/// read as f32) and is out of the f16 value set BY DESIGN of this lock.
-/// The domain-checked assertion of the same cell is
-/// `c_print_of_f16_tensor_prints_f16_values`.
+/// Re-authored by chelis#730 Phase 1 (census row 10 interim-hardening):
+/// the emitted print helper no longer misreads an f16 buffer as f32 - it
+/// ABORTS with the branded dtype-id message. The f16 kernel-bits VALUE
+/// evidence this lock used to decode from the misprint has no observation
+/// route until chelis#728/#716 land the faithful print (the value
+/// assertion lives in the ignored `c_print_of_f16_tensor_prints_f16_values`).
+/// This lock now pins the interim contract: the program still BUILDS (f16
+/// tensor kernels are supported storage), and the binary aborts loudly at
+/// the print instead of rendering garbage.
 #[test]
-fn c_dag_kernels_compute_correct_f16_bits_despite_print() {
+fn c_f16_tensor_print_aborts_with_dtype_id_instead_of_misreading() {
     if !c_toolchain_available() {
         eprintln!("skipping: no host C toolchain");
         return;
     }
-    let (_, stdout) = build_and_run_c(
+    let (ran_ok, _stdout, stderr) = c_run_outcome_full(
         "def f(x: tensor[2, f32], y: tensor[2, f32]) -> tensor[2, f16] = add(cast(x, f16), cast(y, f16))\n\
          out = print(f(to_tensor([2048.0, 0.5]), to_tensor([1.0, 0.25])))\n",
         "f16_kernel_bits",
     )
-    .expect("build and run");
-    let line = stdout
-        .lines()
-        .find(|l| l.trim_start().starts_with("tensor(shape="))
-        .unwrap_or_else(|| panic!("no tensor line in:\n{stdout}"));
-    let start = line.find("data=[").expect("data marker") + "data=[".len();
-    let end = start + line[start..].find([',', ']']).expect("delimiter");
-    let misread: f64 = line[start..end].trim().parse().expect("numeric payload");
-    let bits = (misread as f32).to_bits();
-    assert_eq!(
-        bits, 0x3A00_6800,
-        "the misprinted f32 must carry the two CORRECT f16 results \
-         (0x6800 = 2048.0 correctly rounded, 0x3A00 = 0.75); if this fails \
-         either the kernels regressed or chelis#716 was fixed - if the \
-         latter, replace this lock with c_print_of_f16_tensor_prints_f16_values"
+    .expect("the f16 tensor program must still BUILD (storage is supported)");
+    assert!(
+        !ran_ok,
+        "the compiled binary must abort at the f16 print, not render garbage"
+    );
+    assert!(
+        stderr.contains("unsupported: tensor print of dtype id"),
+        "the abort must carry the branded dtype-id message (census row 10 \
+         interim contract, chelis#728 owns the faithful rendering); got: {stderr}"
     );
 }
 
@@ -406,7 +441,8 @@ fn c_dag_kernels_compute_correct_f16_bits_despite_print() {
 
 /// Observed today: C prints `0` (the value went through `int64_t`).
 #[test]
-#[ignore = "chelis#714: add(0.5f16, 0.25f16) compiles to a binary that prints 0 (int64_t \
+#[ignore = "chelis#714, now rejected loudly at build per the chelis#730 plan section I1 \
+            (value support tracked by chelis#729). Original finding: add(0.5f16, 0.25f16) compiles to a binary that prints 0 (int64_t \
             storage truncates the fraction); eval correctly prints 0.75. Run with \
             `cargo test -p chelis-cli --test narrow_dtype_matrix -- --ignored`."]
 fn f16_scalar_fraction_survives_compilation() {
@@ -426,7 +462,8 @@ fn f16_scalar_fraction_survives_compilation() {
 
 /// Observed today: C prints `0` for bf16 as well.
 #[test]
-#[ignore = "chelis#714: add(0.5bf16, 0.25bf16) compiles to a binary that prints 0; eval \
+#[ignore = "chelis#714, now rejected loudly at build per the chelis#730 plan section I1 \
+            (value support tracked by chelis#729). Original finding: add(0.5bf16, 0.25bf16) compiles to a binary that prints 0; eval \
             correctly prints 0.75. Run with \
             `cargo test -p chelis-cli --test narrow_dtype_matrix -- --ignored`."]
 fn bf16_scalar_fraction_survives_compilation() {
@@ -447,7 +484,8 @@ fn bf16_scalar_fraction_survives_compilation() {
 /// Observed today: C prints `2049` (no f16 rounding anywhere in the host
 /// lane); eval correctly prints 2048.
 #[test]
-#[ignore = "chelis#714: add(2048f16, 1f16) compiles to 2049 (not an f16 value); eval \
+#[ignore = "chelis#714, now rejected loudly at build per the chelis#730 plan section I1 \
+            (value support tracked by chelis#729). Original finding: add(2048f16, 1f16) compiles to 2049 (not an f16 value); eval \
             correctly prints 2048. Run with \
             `cargo test -p chelis-cli --test narrow_dtype_matrix -- --ignored`."]
 fn f16_scalar_add_boundary_agrees_across_lanes() {
@@ -476,7 +514,8 @@ fn f16_scalar_add_boundary_agrees_across_lanes() {
 /// comparison must be false - the compiled lane picks the wrong branch at a
 /// threshold of 2049 instead of #680's 2^53.
 #[test]
-#[ignore = "chelis#714: lt(2048f16, 2049f16) compiles to true (the casts never round, so \
+#[ignore = "chelis#714, now rejected loudly at build per the chelis#730 plan section I1 \
+            (value support tracked by chelis#729). Original finding: lt(2048f16, 2049f16) compiles to true (the casts never round, so \
             2048 < 2049); correct IEEE answer is false, and eval agrees. Run with \
             `cargo test -p chelis-cli --test narrow_dtype_matrix -- --ignored`."]
 fn f16_scalar_comparison_rounds_in_compiled_lane() {
@@ -499,7 +538,8 @@ fn f16_scalar_comparison_rounds_in_compiled_lane() {
 /// 'double'). The one #714 symptom that is loud, though as a toolchain error
 /// rather than a diagnostic.
 #[test]
-#[ignore = "chelis#714: abs(cast(-1.5, f16)) emits C that fails to compile (void* __result \
+#[ignore = "chelis#714, now rejected loudly at build per the chelis#730 plan section I1 \
+            (value support tracked by chelis#729). Original finding: abs(cast(-1.5, f16)) emits C that fails to compile (void* __result \
             = fabs(...)). This test asserts it builds, runs, and prints 1.5. Run with \
             `cargo test -p chelis-cli --test narrow_dtype_matrix -- --ignored`."]
 fn f16_scalar_abs_compiles_and_runs() {
@@ -576,7 +616,7 @@ fn c_to_list_of_f16_tensor_works() {
     );
 }
 
-/// Observed today: runtime abort `to_tensor: unsupported destination dtype`
+/// Observed today: the branded runtime abort `unsupported: destination dtype`
 /// (chelis-runtime lib.rs:2182). The build gate admits the program
 /// (cli_admits_bf16_f16_target_c.rs locks that), then the runtime cannot
 /// construct the value the program starts from.

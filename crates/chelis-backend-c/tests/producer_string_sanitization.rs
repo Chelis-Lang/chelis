@@ -65,7 +65,7 @@ fn c_fprintf_format_string_escapes_percent_in_func_name() {
     // consume an argument that isn't there. The CLI never produces this
     // shape, but downstream tooling could; the sanitizer is the seat
     // belt.
-    let result = codegen(&dag, "f%spct");
+    let result = codegen(&dag, "f%spct").unwrap();
     let src = &result.c_source;
 
     // The format string itself must contain the escaped form `%%s`.
@@ -93,7 +93,7 @@ fn c_fprintf_format_string_escapes_percent_in_load_name() {
     let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
-    let result = codegen(&dag, "test_load_pct");
+    let result = codegen(&dag, "test_load_pct").unwrap();
     let src = &result.c_source;
 
     // The fprintf reporting "input `inp%s` at slot N is NULL" needs the
@@ -118,7 +118,7 @@ fn c_fprintf_format_string_escapes_newline_in_func_name() {
     let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
-    let result = codegen(&dag, "f\nINJECT");
+    let result = codegen(&dag, "f\nINJECT").unwrap();
     let src = &result.c_source;
 
     // Escape: `\n` inside the C string literal becomes the two-character
@@ -146,7 +146,7 @@ fn c_fprintf_format_string_escapes_double_quote_in_func_name() {
     let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
-    let result = codegen(&dag, "fn\"injected");
+    let result = codegen(&dag, "fn\"injected").unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -165,7 +165,7 @@ fn c_clean_func_name_emitted_verbatim() {
     let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
-    let result = codegen(&dag, "my_func");
+    let result = codegen(&dag, "my_func").unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -210,7 +210,7 @@ fn c_fprintf_format_string_escapes_percent_in_symbolic_dim_name() {
     let s = dag.add_node(RiscOp::Add, vec![a, b], vec_f32_named("batch"), None);
     dag.add_root(s);
 
-    let result = codegen(&dag, "sym");
+    let result = codegen(&dag, "sym").unwrap();
     let src = &result.c_source;
 
     // No `%` injection here (clean identifier `batch`); confirm the
@@ -243,7 +243,7 @@ fn c_sanitized_format_strings_still_compile_cleanly() {
     // Clean func_name so the declarator (`void {func_name}(...)`) is
     // valid C. This isolates the test to the format-string-context
     // sanitizer.
-    let result = codegen(&dag, "test_sanitize");
+    let result = codegen(&dag, "test_sanitize").unwrap();
 
     let dir = std::env::temp_dir().join("chelis_producer_sanitize_c_compile");
     std::fs::create_dir_all(&dir).unwrap();
@@ -305,7 +305,8 @@ fn c_codegen_with_options_inherits_sanitization() {
             static_entry: true,
             ..Default::default()
         },
-    );
+    )
+    .unwrap();
     let src = &result.c_source;
 
     assert!(

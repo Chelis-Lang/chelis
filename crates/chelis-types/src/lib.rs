@@ -13,6 +13,7 @@ pub(crate) mod opacity;
 pub(crate) mod pipe_stage;
 pub mod types;
 pub mod unify;
+pub mod unsupported;
 
 mod builtins;
 pub use builtins::{BUILTIN_NAMES, ShapeClass, builtin_env, shape_class};

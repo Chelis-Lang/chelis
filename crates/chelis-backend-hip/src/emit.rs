@@ -7,6 +7,7 @@ use chelis_ir::dag::{
     Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType, symbolic_bindings,
 };
 use chelis_types::types::Prim;
+use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 
 /// chelis#616: the HIP device-kernel lane does not support runtime (node-valued)
 /// movement bounds; `reject_unsupported_hip_ops` (compiler-api + CLI) rejects
@@ -165,7 +166,10 @@ impl MatmulWrapper {
 
 impl HipEmitter {
     /// Emit complete C/HIP source for a DAG as a function.
-    pub(crate) fn emit_dag(dag: &Dag, func_name: &str) -> (String, PeakDeviceBytesBreakdown) {
+    pub(crate) fn emit_dag(
+        dag: &Dag,
+        func_name: &str,
+    ) -> Result<(String, PeakDeviceBytesBreakdown), Unsupported> {
         // F1 (WS-A0 RT-1 fixup, tactical) — lifted by WS-A2 (HIP f32/f64)
         // and WS-A3 (HIP bf16/f16).
         //
@@ -226,7 +230,7 @@ impl HipEmitter {
         };
 
         // First pass: collect all needed kernel sources by walking the DAG.
-        e.collect_kernels(dag);
+        e.collect_kernels(dag)?;
 
         // Emit includes
         e.line("#include \"chelis_hip_runtime.h\"");
@@ -309,7 +313,7 @@ impl HipEmitter {
                 e.emit_load(node.id.0, input_idx, &node.output_type);
             } else {
                 e.emit_span_comments(node);
-                e.emit_node(node, dag);
+                e.emit_node(node, dag)?;
             }
         }
 
@@ -360,7 +364,7 @@ impl HipEmitter {
         e.indent = 0;
         e.line("}");
         e.line("");
-        e.emit_device_entrypoint(dag, func_name, &output_specs, &input_slots, &kernel_names);
+        e.emit_device_entrypoint(dag, func_name, &output_specs, &input_slots, &kernel_names)?;
         let mut formula = e.plan.peak_device_bytes_formula();
         if e.extra_peak_device_bytes_estimate > 0 {
             formula = if formula == "0" {
@@ -379,7 +383,7 @@ impl HipEmitter {
             terms: e.plan.peak_device_bytes_terms(),
             extra_bytes: e.extra_peak_device_bytes_estimate,
         };
-        (e.lines.join("\n"), breakdown)
+        Ok((e.lines.join("\n"), breakdown))
     }
 
     fn emit_device_entrypoint(
@@ -389,7 +393,7 @@ impl HipEmitter {
         output_specs: &[OutputSpec],
         input_slots: &std::collections::HashMap<String, usize>,
         kernel_names: &[String],
-    ) {
+    ) -> Result<(), Unsupported> {
         let expected_inputs = input_slots.len();
         let expected_outputs = output_specs.len();
 
@@ -452,7 +456,7 @@ impl HipEmitter {
                 self.emit_load_device(node.id.0, input_idx, &node.output_type);
             } else {
                 self.emit_span_comments(node);
-                self.emit_node(node, dag);
+                self.emit_node(node, dag)?;
             }
         }
 
@@ -479,13 +483,14 @@ impl HipEmitter {
         self.device_entrypoint_mode = false;
         self.indent = 0;
         self.line("}");
+        Ok(())
     }
 
     // ------------------------------------------------------------------
     // Kernel collection (first pass)
     // ------------------------------------------------------------------
 
-    fn collect_kernels(&mut self, dag: &Dag) {
+    fn collect_kernels(&mut self, dag: &Dag) -> Result<(), Unsupported> {
         let mut seen = std::collections::HashSet::new();
         for node in dag.nodes() {
             // Skip reduction-inlined FusedElem nodes (they become part of the
@@ -501,7 +506,7 @@ impl HipEmitter {
                 // the dispatch happens inside the called helper which
                 // explicitly re-matches and binds the field.
                 RiscOp::Sum { axis, .. } | RiscOp::MaxReduce { axis } => {
-                    let sources = self.reduction_kernel_sources(node, dag, *axis);
+                    let sources = self.reduction_kernel_sources(node, dag, *axis)?;
                     for (name, source) in sources {
                         if seen.insert(name.clone()) {
                             // Reduction kernels named `kernel_fused_<sum|maxred>_<id>`
@@ -529,7 +534,7 @@ impl HipEmitter {
                     // here, then the standard `emit_node` dispatch in
                     // `emit_dag` launches them via the same machinery as
                     // the existing Sum/MaxReduce kernels.
-                    let sources = self.extra_reduction_kernel_sources(node, dag);
+                    let sources = self.extra_reduction_kernel_sources(node, dag)?;
                     for (name, source) in sources {
                         if seen.insert(name.clone()) {
                             self.kernel_sources.push((name, source));
@@ -539,11 +544,11 @@ impl HipEmitter {
                 }
                 _ => {}
             }
-            let name = self.kernel_name_for_op(&node.op, node, dag);
+            let name = self.kernel_name_for_op(&node.op, node, dag)?;
             if let Some(name) = name
                 && seen.insert(name.clone())
             {
-                let source = self.kernel_source_for_op(&name, &node.op, node, dag);
+                let source = self.kernel_source_for_op(&name, &node.op, node, dag)?;
                 // Per-node kernels (FusedElem `kernel_fused_<id>`, fused
                 // reductions) get this node's spans embedded inside their
                 // source string so the audit chain survives into the
@@ -559,6 +564,7 @@ impl HipEmitter {
                 self.kernel_sources.push((name, source));
             }
         }
+        Ok(())
     }
 
     /// True when a kernel name is unique to a single DagNode (i.e. its
@@ -762,7 +768,7 @@ impl HipEmitter {
         node: &DagNode,
         dag: &Dag,
         axis: usize,
-    ) -> Vec<(String, String)> {
+    ) -> Result<Vec<(String, String)>, Unsupported> {
         // WS-A4: bind `accumulator` instead of `..`. The kernel-name and
         // kernel-source paths agree on the (source, accumulator) tuple
         // so the i8/i16 → i32 promoted path produces a uniquely-named
@@ -775,18 +781,18 @@ impl HipEmitter {
         let input_id = node.inputs[0];
         if self.reduction_inlined.contains(&input_id.0) {
             let fused_node = dag.get(input_id).unwrap();
-            let elem = Self::elem_kind(&fused_node.output_type);
+            let elem = Self::elem_kind(&fused_node.output_type)?;
             let (steps, n_ext) = Self::extract_fused_steps(&fused_node.op);
             let name = Self::fused_reduction_kernel_name(node.id.0, kind);
             let source = kernels::reduce_fused(&name, axis, steps, n_ext, kind, elem);
-            return vec![(name, source)];
+            return Ok(vec![(name, source)]);
         }
 
         if matches!(kind, kernels::ReduceKind::Sum)
             && let Some(matmul) = blas::detect_matmul_pattern(dag, node.id)
             && Self::supports_static_hipblas_matmul(dag, &matmul, &node.output_type)
         {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         // For Sum, the result precision IS the accumulator (spec §5.7.1)
@@ -818,24 +824,28 @@ impl HipEmitter {
                     // dispatch. Panics in `elem_kind` if a non-float
                     // dtype slips through here, which is the loud
                     // failure mode we want for unwired precisions.
-                    let operand_kind = Self::elem_kind(operand_ty);
-                    let acc_kind = Self::elem_kind(&node.output_type);
+                    let operand_kind = Self::elem_kind(operand_ty)?;
+                    let acc_kind = Self::elem_kind(&node.output_type)?;
                     let name = Self::reduction_kernel_name(kind, axis, acc_kind);
                     let source = kernels::reduce_sum(&name, axis, operand_kind, acc_kind);
                     (name, source)
                 }
             }
             kernels::ReduceKind::Max => {
-                let acc_kind = Self::elem_kind(&node.output_type);
+                let acc_kind = Self::elem_kind(&node.output_type)?;
                 let name = Self::reduction_kernel_name(kind, axis, acc_kind);
                 let source = kernels::reduce_max(&name, axis, acc_kind);
                 (name, source)
             }
         };
-        vec![(name, source)]
+        Ok(vec![(name, source)])
     }
 
-    fn extra_reduction_kernel_sources(&self, node: &DagNode, dag: &Dag) -> Vec<(String, String)> {
+    fn extra_reduction_kernel_sources(
+        &self,
+        node: &DagNode,
+        dag: &Dag,
+    ) -> Result<Vec<(String, String)>, Unsupported> {
         // Kernel sources for the four reductions previously deferred to
         // the C backend: Min / Prod / Argmax / Argmin. Argmax/Argmin emit
         // an i64 result tensor; Min/Prod emit an in-precision result.
@@ -844,8 +854,8 @@ impl HipEmitter {
         // output_type is `int64` and would otherwise tip elem_kind into
         // its panic arm).
         let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
-        let elem = Self::elem_kind(input_ty);
-        match &node.op {
+        let elem = Self::elem_kind(input_ty)?;
+        Ok(match &node.op {
             RiscOp::MinReduce { axis } => {
                 let name = Self::extra_reduction_kernel_name("min", *axis, elem);
                 let src = kernels::reduce_min(&name, *axis, elem);
@@ -867,10 +877,15 @@ impl HipEmitter {
                 vec![(name, src)]
             }
             _ => unreachable!("extra_reduction_kernel_sources expected Min/Prod/Argmax/Argmin"),
-        }
+        })
     }
 
-    fn kernel_name_for_op(&self, op: &RiscOp, node: &DagNode, dag: &Dag) -> Option<String> {
+    fn kernel_name_for_op(
+        &self,
+        op: &RiscOp,
+        node: &DagNode,
+        dag: &Dag,
+    ) -> Result<Option<String>, Unsupported> {
         // WS-A2 + WS-A4: kernel-name dispatch must agree with the
         // kernel-source emission in `kernel_source_for_op`. For binary
         // elementwise ops the operand precision is unambiguous
@@ -878,8 +893,10 @@ impl HipEmitter {
         // the kernel specialization. For unary ops and reductions the
         // f32/f64 split is owned by `ElemKind::suffix()`.
         let operand_prec = || dag.get(node.inputs[0]).unwrap().output_type.precision;
-        let kind_for_node = |n: &DagNode| -> kernels::ElemKind { Self::elem_kind(&n.output_type) };
-        match op {
+        let kind_for_node = |n: &DagNode| -> Result<kernels::ElemKind, Unsupported> {
+            Self::elem_kind(&n.output_type)
+        };
+        Ok(match op {
             // WS-A4: Add / Mul use the dtype-suffixed convention so f32
             // stays unsuffixed (`kernel_add`) and non-f32 dtypes pick
             // up an explicit suffix (`kernel_add_f64`, `kernel_add_i8`).
@@ -907,34 +924,34 @@ impl HipEmitter {
                 Self::dtype_kernel_suffix(operand_prec())
             )),
             // WS-A2: float-only kernel templates remain `_<f32|f64>`-suffixed.
-            RiscOp::MaxElem => Some(format!("kernel_max_elem_{}", kind_for_node(node).suffix())),
+            RiscOp::MaxElem => Some(format!("kernel_max_elem_{}", kind_for_node(node)?.suffix())),
             RiscOp::CmpLt => {
                 // CmpLt has bool output but operand-precision storage;
                 // dispatch on the operand precision so the kernel name
                 // matches the kernel source emitted in
                 // `kernel_source_for_op`.
-                let operand_kind = Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type);
+                let operand_kind = Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?;
                 Some(format!("kernel_cmplt_{}", operand_kind.suffix()))
             }
-            RiscOp::Neg => Some(format!("kernel_neg_{}", kind_for_node(node).suffix())),
-            RiscOp::Recip => Some(format!("kernel_recip_{}", kind_for_node(node).suffix())),
-            RiscOp::Exp => Some(format!("kernel_exp_{}", kind_for_node(node).suffix())),
-            RiscOp::Log => Some(format!("kernel_log_{}", kind_for_node(node).suffix())),
-            RiscOp::Sin => Some(format!("kernel_sin_{}", kind_for_node(node).suffix())),
-            RiscOp::Sqrt => Some(format!("kernel_sqrt_{}", kind_for_node(node).suffix())),
-            RiscOp::Cos => Some(format!("kernel_cos_{}", kind_for_node(node).suffix())),
-            RiscOp::Tan => Some(format!("kernel_tan_{}", kind_for_node(node).suffix())),
-            RiscOp::Atan => Some(format!("kernel_atan_{}", kind_for_node(node).suffix())),
-            RiscOp::Abs => Some(format!("kernel_abs_{}", kind_for_node(node).suffix())),
-            RiscOp::Floor => Some(format!("kernel_floor_{}", kind_for_node(node).suffix())),
-            RiscOp::Ceil => Some(format!("kernel_ceil_{}", kind_for_node(node).suffix())),
-            RiscOp::Round => Some(format!("kernel_round_{}", kind_for_node(node).suffix())),
+            RiscOp::Neg => Some(format!("kernel_neg_{}", kind_for_node(node)?.suffix())),
+            RiscOp::Recip => Some(format!("kernel_recip_{}", kind_for_node(node)?.suffix())),
+            RiscOp::Exp => Some(format!("kernel_exp_{}", kind_for_node(node)?.suffix())),
+            RiscOp::Log => Some(format!("kernel_log_{}", kind_for_node(node)?.suffix())),
+            RiscOp::Sin => Some(format!("kernel_sin_{}", kind_for_node(node)?.suffix())),
+            RiscOp::Sqrt => Some(format!("kernel_sqrt_{}", kind_for_node(node)?.suffix())),
+            RiscOp::Cos => Some(format!("kernel_cos_{}", kind_for_node(node)?.suffix())),
+            RiscOp::Tan => Some(format!("kernel_tan_{}", kind_for_node(node)?.suffix())),
+            RiscOp::Atan => Some(format!("kernel_atan_{}", kind_for_node(node)?.suffix())),
+            RiscOp::Abs => Some(format!("kernel_abs_{}", kind_for_node(node)?.suffix())),
+            RiscOp::Floor => Some(format!("kernel_floor_{}", kind_for_node(node)?.suffix())),
+            RiscOp::Ceil => Some(format!("kernel_ceil_{}", kind_for_node(node)?.suffix())),
+            RiscOp::Round => Some(format!("kernel_round_{}", kind_for_node(node)?.suffix())),
             RiscOp::UniformLike { .. } => Some(format!(
                 "kernel_uniform_like_{}",
-                kind_for_node(node).suffix()
+                kind_for_node(node)?.suffix()
             )),
             RiscOp::Dropout { .. } | RiscOp::Drop => None,
-            RiscOp::Copy => Some(Self::cast_kernel_name(node, dag)),
+            RiscOp::Copy => Some(Self::cast_kernel_name(node, dag)?),
             // WS-A4: bind `accumulator` instead of `..` per the
             // destructure-`..` memory rule. The kernel name encodes
             // both source and accumulator dtype when they differ
@@ -966,7 +983,7 @@ impl HipEmitter {
                         Some(Self::reduction_kernel_name(
                             kernels::ReduceKind::Sum,
                             *axis,
-                            Self::elem_kind(&node.output_type),
+                            Self::elem_kind(&node.output_type)?,
                         ))
                     }
                 }
@@ -982,7 +999,7 @@ impl HipEmitter {
                     Some(Self::reduction_kernel_name(
                         kernels::ReduceKind::Max,
                         *axis,
-                        Self::elem_kind(&node.output_type),
+                        Self::elem_kind(&node.output_type)?,
                     ))
                 }
             }
@@ -991,7 +1008,7 @@ impl HipEmitter {
                 Some(Self::extra_reduction_kernel_name(
                     "min",
                     *axis,
-                    Self::elem_kind(input_ty),
+                    Self::elem_kind(input_ty)?,
                 ))
             }
             RiscOp::ProdReduce { axis } => {
@@ -999,7 +1016,7 @@ impl HipEmitter {
                 Some(Self::extra_reduction_kernel_name(
                     "prod",
                     *axis,
-                    Self::elem_kind(input_ty),
+                    Self::elem_kind(input_ty)?,
                 ))
             }
             RiscOp::Argmax { axis } => {
@@ -1007,7 +1024,7 @@ impl HipEmitter {
                 Some(Self::extra_reduction_kernel_name(
                     "argmax",
                     *axis,
-                    Self::elem_kind(input_ty),
+                    Self::elem_kind(input_ty)?,
                 ))
             }
             RiscOp::Argmin { axis } => {
@@ -1015,7 +1032,7 @@ impl HipEmitter {
                 Some(Self::extra_reduction_kernel_name(
                     "argmin",
                     *axis,
-                    Self::elem_kind(input_ty),
+                    Self::elem_kind(input_ty)?,
                 ))
             }
             // `reduce_window_*` HIP codegen is deferred per the
@@ -1034,12 +1051,12 @@ impl HipEmitter {
             // codegen, so no kernel name is registered. The launch-emit arm
             // below is a defensive `todo!` if one ever reaches codegen.
             RiscOp::Shape { .. } => None,
-            RiscOp::Const { .. } => Some(format!("kernel_fill_{}", kind_for_node(node).suffix())),
+            RiscOp::Const { .. } => Some(format!("kernel_fill_{}", kind_for_node(node)?.suffix())),
             RiscOp::ConstTensor { .. } => {
-                Some(format!("kernel_fill_{}", kind_for_node(node).suffix()))
+                Some(format!("kernel_fill_{}", kind_for_node(node)?.suffix()))
             }
-            RiscOp::Realize => Some(Self::cast_kernel_name(node, dag)),
-            RiscOp::Cast { .. } => Some(Self::cast_kernel_name(node, dag)),
+            RiscOp::Realize => Some(Self::cast_kernel_name(node, dag)?),
+            RiscOp::Cast { .. } => Some(Self::cast_kernel_name(node, dag)?),
             // `pad` / `shrink` materialize a fresh buffer via a typed
             // per-output-element kernel (see `kernels::pad_typed` /
             // `kernels::shrink_typed`); the kernel name carries the output
@@ -1063,7 +1080,7 @@ impl HipEmitter {
             | RiscOp::BlasMatmul { .. } => None,
             RiscOp::Gather { .. } => {
                 let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
-                let elem = Self::elem_kind(&node.output_type);
+                let elem = Self::elem_kind(&node.output_type)?;
                 Some(match indices_ty.precision {
                     Prim::Int32 => format!("kernel_gather_i32_{}", elem.suffix()),
                     Prim::Int64 => format!("kernel_gather_i64_{}", elem.suffix()),
@@ -1072,7 +1089,7 @@ impl HipEmitter {
             }
             RiscOp::ScatterAdd { .. } => {
                 let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
-                let elem = Self::elem_kind(&node.output_type);
+                let elem = Self::elem_kind(&node.output_type)?;
                 Some(match indices_ty.precision {
                     Prim::Int32 => format!("kernel_scatter_add_i32_{}", elem.suffix()),
                     Prim::Int64 => format!("kernel_scatter_add_i64_{}", elem.suffix()),
@@ -1096,24 +1113,30 @@ impl HipEmitter {
                 })
             }
             RiscOp::FusedElem { .. } => Some(format!("kernel_fused_{}", node.id.0)),
-        }
+        })
     }
 
     /// Build the cast kernel name. When src/dst precision agree, this is
     /// the in-precision identity kernel; when they differ, it's the
     /// cross-precision conversion kernel.
-    fn cast_kernel_name(node: &DagNode, dag: &Dag) -> String {
+    fn cast_kernel_name(node: &DagNode, dag: &Dag) -> Result<String, Unsupported> {
         let src_ty = &dag.get(node.inputs[0]).unwrap().output_type;
-        let dst_kind = Self::elem_kind(&node.output_type);
-        let src_kind = Self::elem_kind(src_ty);
-        if src_kind == dst_kind {
+        let dst_kind = Self::elem_kind(&node.output_type)?;
+        let src_kind = Self::elem_kind(src_ty)?;
+        Ok(if src_kind == dst_kind {
             format!("kernel_cast_{}", dst_kind.suffix())
         } else {
             format!("kernel_cast_{}_to_{}", src_kind.suffix(), dst_kind.suffix())
-        }
+        })
     }
 
-    fn kernel_source_for_op(&self, name: &str, op: &RiscOp, node: &DagNode, dag: &Dag) -> String {
+    fn kernel_source_for_op(
+        &self,
+        name: &str,
+        op: &RiscOp,
+        node: &DagNode,
+        dag: &Dag,
+    ) -> Result<String, Unsupported> {
         // CmpLt's output type is `bool` (semantically) but the kernel
         // writes 1.0/0.0 of operand precision to the GPU buffer. Use the
         // operand precision for kernel emission; the rest of the
@@ -1123,9 +1146,10 @@ impl HipEmitter {
         // i8/i16 for narrow-int Add/Mul), so each of those arms
         // resolves the right template inline rather than touching the
         // float-only `elem_kind` shorthand.
-        let elem_for_unary = || Self::elem_kind(&node.output_type);
+        let elem_for_unary =
+            || -> Result<kernels::ElemKind, Unsupported> { Self::elem_kind(&node.output_type) };
         let operand_prec = || dag.get(node.inputs[0]).unwrap().output_type.precision;
-        match op {
+        Ok(match op {
             // WS-A4: Add / Mul dispatch on operand precision so each
             // dtype gets its own kernel source. f32/f64 route through
             // the WS-A2 `ElemKind` template (which now also handles
@@ -1136,7 +1160,7 @@ impl HipEmitter {
                     kernels::binary_elementwise(
                         name,
                         "+",
-                        Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type),
+                        Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
                     )
                 } else {
                     kernels::binary_elementwise_typed(name, "+", Self::dtype_c_type(prec))
@@ -1148,7 +1172,7 @@ impl HipEmitter {
                     kernels::binary_elementwise(
                         name,
                         "*",
-                        Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type),
+                        Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
                     )
                 } else {
                     kernels::binary_elementwise_typed(name, "*", Self::dtype_c_type(prec))
@@ -1173,7 +1197,7 @@ impl HipEmitter {
                 kernels::binary_elementwise(
                     name,
                     "/",
-                    Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type),
+                    Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
                 )
             }
             // chelis#178: floor division (round toward -inf). Integer
@@ -1196,26 +1220,26 @@ impl HipEmitter {
                 );
                 kernels::binary_elementwise_typed(name, "/", Self::dtype_c_type(prec))
             }
-            RiscOp::MaxElem => kernels::binary_func(name, "fmaxf", elem_for_unary()),
+            RiscOp::MaxElem => kernels::binary_func(name, "fmaxf", elem_for_unary()?),
             RiscOp::CmpLt => kernels::cmplt(
                 name,
-                Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type),
+                Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
             ),
-            RiscOp::Neg => kernels::unary_prefix(name, "-", elem_for_unary()),
+            RiscOp::Neg => kernels::unary_prefix(name, "-", elem_for_unary()?),
             // IEEE reciprocal kernel.
-            RiscOp::Recip => kernels::unary_recip(name, elem_for_unary()),
-            RiscOp::Exp => kernels::unary_func(name, "expf", elem_for_unary()),
-            RiscOp::Log => kernels::unary_func(name, "logf", elem_for_unary()),
-            RiscOp::Sin => kernels::unary_func(name, "sinf", elem_for_unary()),
-            RiscOp::Sqrt => kernels::unary_func(name, "sqrtf", elem_for_unary()),
-            RiscOp::Cos => kernels::unary_func(name, "cosf", elem_for_unary()),
-            RiscOp::Tan => kernels::unary_func(name, "tanf", elem_for_unary()),
-            RiscOp::Atan => kernels::unary_func(name, "atanf", elem_for_unary()),
-            RiscOp::Abs => kernels::unary_func(name, "fabsf", elem_for_unary()),
-            RiscOp::Floor => kernels::unary_func(name, "floorf", elem_for_unary()),
-            RiscOp::Ceil => kernels::unary_func(name, "ceilf", elem_for_unary()),
-            RiscOp::Round => kernels::unary_func(name, "rintf", elem_for_unary()),
-            RiscOp::UniformLike { .. } => kernels::uniform_like(name, elem_for_unary()),
+            RiscOp::Recip => kernels::unary_recip(name, elem_for_unary()?),
+            RiscOp::Exp => kernels::unary_func(name, "expf", elem_for_unary()?),
+            RiscOp::Log => kernels::unary_func(name, "logf", elem_for_unary()?),
+            RiscOp::Sin => kernels::unary_func(name, "sinf", elem_for_unary()?),
+            RiscOp::Sqrt => kernels::unary_func(name, "sqrtf", elem_for_unary()?),
+            RiscOp::Cos => kernels::unary_func(name, "cosf", elem_for_unary()?),
+            RiscOp::Tan => kernels::unary_func(name, "tanf", elem_for_unary()?),
+            RiscOp::Atan => kernels::unary_func(name, "atanf", elem_for_unary()?),
+            RiscOp::Abs => kernels::unary_func(name, "fabsf", elem_for_unary()?),
+            RiscOp::Floor => kernels::unary_func(name, "floorf", elem_for_unary()?),
+            RiscOp::Ceil => kernels::unary_func(name, "ceilf", elem_for_unary()?),
+            RiscOp::Round => kernels::unary_func(name, "rintf", elem_for_unary()?),
+            RiscOp::UniformLike { .. } => kernels::uniform_like(name, elem_for_unary()?),
             // WS-A4: bind `accumulator` instead of `..`. The fused
             // reduction path is f32-only today (its source kernel
             // template doesn't carry a dtype suffix); the unfused path
@@ -1224,7 +1248,7 @@ impl HipEmitter {
             // case.
             RiscOp::Sum { axis, accumulator } => {
                 let input_id = node.inputs[0];
-                let operand_kind = Self::elem_kind(&dag.get(input_id).unwrap().output_type);
+                let operand_kind = Self::elem_kind(&dag.get(input_id).unwrap().output_type)?;
                 if self.reduction_inlined.contains(&input_id.0) {
                     let fused_node = dag.get(input_id).unwrap();
                     let (steps, n_ext) = Self::extract_fused_steps(&fused_node.op);
@@ -1253,7 +1277,7 @@ impl HipEmitter {
                         // template; non-float dtypes that aren't covered
                         // by the WS-A4 promoted path panic loudly inside
                         // `elem_kind` rather than silently downgrading.
-                        let acc_kind = Self::elem_kind(&node.output_type);
+                        let acc_kind = Self::elem_kind(&node.output_type)?;
                         kernels::reduce_sum(name, *axis, operand_kind, acc_kind)
                     }
                 }
@@ -1263,7 +1287,7 @@ impl HipEmitter {
                 if self.reduction_inlined.contains(&input_id.0) {
                     let fused_node = dag.get(input_id).unwrap();
                     let (steps, n_ext) = Self::extract_fused_steps(&fused_node.op);
-                    let inner_kind = Self::elem_kind(&fused_node.output_type);
+                    let inner_kind = Self::elem_kind(&fused_node.output_type)?;
                     kernels::reduce_fused(
                         name,
                         *axis,
@@ -1273,30 +1297,30 @@ impl HipEmitter {
                         inner_kind,
                     )
                 } else {
-                    kernels::reduce_max(name, *axis, elem_for_unary())
+                    kernels::reduce_max(name, *axis, elem_for_unary()?)
                 }
             }
             RiscOp::MinReduce { axis } => {
                 let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
-                kernels::reduce_min(name, *axis, Self::elem_kind(input_ty))
+                kernels::reduce_min(name, *axis, Self::elem_kind(input_ty)?)
             }
             RiscOp::ProdReduce { axis } => {
                 let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
-                kernels::reduce_prod(name, *axis, Self::elem_kind(input_ty))
+                kernels::reduce_prod(name, *axis, Self::elem_kind(input_ty)?)
             }
             RiscOp::Argmax { axis } => {
                 let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
-                kernels::reduce_argmax(name, *axis, Self::elem_kind(input_ty))
+                kernels::reduce_argmax(name, *axis, Self::elem_kind(input_ty)?)
             }
             RiscOp::Argmin { axis } => {
                 let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
-                kernels::reduce_argmin(name, *axis, Self::elem_kind(input_ty))
+                kernels::reduce_argmin(name, *axis, Self::elem_kind(input_ty)?)
             }
-            RiscOp::Const { .. } => kernels::fill(name, elem_for_unary()),
-            RiscOp::ConstTensor { .. } => kernels::fill(name, elem_for_unary()),
-            RiscOp::Realize => Self::cast_kernel_source(name, node, dag),
-            RiscOp::Cast { .. } => Self::cast_kernel_source(name, node, dag),
-            RiscOp::Copy => Self::cast_kernel_source(name, node, dag),
+            RiscOp::Const { .. } => kernels::fill(name, elem_for_unary()?),
+            RiscOp::ConstTensor { .. } => kernels::fill(name, elem_for_unary()?),
+            RiscOp::Realize => Self::cast_kernel_source(name, node, dag)?,
+            RiscOp::Cast { .. } => Self::cast_kernel_source(name, node, dag)?,
+            RiscOp::Copy => Self::cast_kernel_source(name, node, dag)?,
             RiscOp::FusedElem { ops } => {
                 let aliased_ext = fused_in_place_spec(node, dag).map(|reusable| {
                     node.inputs
@@ -1309,12 +1333,12 @@ impl HipEmitter {
                     ops,
                     node.inputs.len(),
                     aliased_ext,
-                    elem_for_unary(),
+                    elem_for_unary()?,
                 )
             }
             RiscOp::Gather { .. } => {
                 let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
-                let elem = elem_for_unary();
+                let elem = elem_for_unary()?;
                 match indices_ty.precision {
                     Prim::Int32 => kernels::gather(name, "int", elem),
                     Prim::Int64 => kernels::gather(name, "long long", elem),
@@ -1326,7 +1350,7 @@ impl HipEmitter {
             }
             RiscOp::ScatterAdd { .. } => {
                 let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
-                let elem = elem_for_unary();
+                let elem = elem_for_unary()?;
                 match indices_ty.precision {
                     Prim::Int32 => kernels::scatter_add(name, "int", elem),
                     Prim::Int64 => kernels::scatter_add(name, "long long", elem),
@@ -1369,20 +1393,20 @@ impl HipEmitter {
                 kernels::shrink_typed(name, Self::dtype_c_type(node.output_type.precision))
             }
             _ => unreachable!("no kernel for op: {op:?}"),
-        }
+        })
     }
 
     /// Cast / Realize / Copy kernel source: in-precision identity when
     /// src and dst kinds agree, cross-precision conversion otherwise.
-    fn cast_kernel_source(name: &str, node: &DagNode, dag: &Dag) -> String {
+    fn cast_kernel_source(name: &str, node: &DagNode, dag: &Dag) -> Result<String, Unsupported> {
         let src_ty = &dag.get(node.inputs[0]).unwrap().output_type;
-        let dst_kind = Self::elem_kind(&node.output_type);
-        let src_kind = Self::elem_kind(src_ty);
-        if src_kind == dst_kind {
+        let dst_kind = Self::elem_kind(&node.output_type)?;
+        let src_kind = Self::elem_kind(src_ty)?;
+        Ok(if src_kind == dst_kind {
             kernels::cast(name, dst_kind)
         } else {
             kernels::cast_convert(name, src_kind, dst_kind)
-        }
+        })
     }
 
     /// Extract the fused steps and number of external inputs from a FusedElem op.
@@ -1427,34 +1451,35 @@ impl HipEmitter {
     // Node emission
     // ------------------------------------------------------------------
 
-    fn emit_node(&mut self, node: &DagNode, dag: &Dag) {
+    fn emit_node(&mut self, node: &DagNode, dag: &Dag) -> Result<(), Unsupported> {
         let id = node.id.0;
         // Resolve the precision-suffixed kernel name once, so the launch
         // shims agree with the kernel-source emitter on the symbol the
         // host references (e.g. `kernel_add_f32` vs `kernel_add_f64`).
-        let resolved_kernel_name = || -> String {
-            self.kernel_name_for_op(&node.op, node, dag)
-                .unwrap_or_else(|| panic!("op {:?} has no kernel name", node.op))
+        let resolved_kernel_name = || -> Result<String, Unsupported> {
+            Ok(self
+                .kernel_name_for_op(&node.op, node, dag)?
+                .unwrap_or_else(|| panic!("op {:?} has no kernel name", node.op)))
         };
         match &node.op {
-            RiscOp::Const { value } => self.emit_const(id, *value, &node.output_type),
-            RiscOp::ConstTensor { data } => self.emit_const_tensor(id, data, &node.output_type),
+            RiscOp::Const { value } => self.emit_const(id, *value, &node.output_type)?,
+            RiscOp::ConstTensor { data } => self.emit_const_tensor(id, data, &node.output_type)?,
             RiscOp::Load { .. } => unreachable!("handled in emit_dag"),
             RiscOp::Add => self.emit_binary_launch(
                 id,
-                &resolved_kernel_name(),
+                &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
             ),
             RiscOp::Mul => self.emit_binary_launch(
                 id,
-                &resolved_kernel_name(),
+                &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
             ),
             RiscOp::Div => self.emit_binary_launch(
                 id,
-                &resolved_kernel_name(),
+                &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
             ),
@@ -1462,70 +1487,112 @@ impl HipEmitter {
             // any other binary elementwise kernel.
             RiscOp::FloorDiv | RiscOp::TruncDiv => self.emit_binary_launch(
                 id,
-                &resolved_kernel_name(),
+                &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
             ),
             RiscOp::MaxElem => self.emit_binary_launch(
                 id,
-                &resolved_kernel_name(),
+                &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
             ),
             RiscOp::CmpLt => self.emit_binary_launch(
                 id,
-                &resolved_kernel_name(),
+                &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
             ),
-            RiscOp::Neg => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Recip => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Exp => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Log => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Sin => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Sqrt => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Cos => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Tan => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Atan => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Abs => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Floor => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Ceil => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Round => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
+            RiscOp::Neg => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Recip => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Exp => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Log => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Sin => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Sqrt => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Cos => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Tan => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Atan => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Abs => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Floor => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Ceil => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Round => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
             RiscOp::UniformLike { low, high, seed } => {
-                self.emit_uniform_like_launch(id, *low, *high, *seed, &node.output_type)
+                self.emit_uniform_like_launch(id, *low, *high, *seed, &node.output_type)?
             }
             RiscOp::Dropout { .. } => {
                 unreachable!("dropout should be rejected before HIP code generation")
             }
-            RiscOp::Copy => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
+            RiscOp::Copy => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
             RiscOp::Drop => {}
             // WS-A4: bind `accumulator` instead of `..` and thread it
             // through to `emit_reduce_launch` so the launch-side kernel
@@ -1545,7 +1612,7 @@ impl HipEmitter {
                         dag,
                         kernels::ReduceKind::Sum,
                         Some(*accumulator),
-                    );
+                    )?;
                 }
             }
             RiscOp::MaxReduce { axis } => {
@@ -1561,7 +1628,7 @@ impl HipEmitter {
                         dag,
                         kernels::ReduceKind::Max,
                         None,
-                    );
+                    )?;
                 }
             }
             RiscOp::MinReduce { axis }
@@ -1573,7 +1640,7 @@ impl HipEmitter {
                 // launch shape mirrors `emit_reduce_launch` but the
                 // kernel source comes from `extra_reduction_kernel_sources`
                 // collected by the first pass.
-                self.emit_extra_reduce_launch(id, *axis, &node.inputs, &node.output_type, dag);
+                self.emit_extra_reduce_launch(id, *axis, &node.inputs, &node.output_type, dag)?;
             }
             // `reduce_window_*` HIP codegen is deferred per the
             // initial-admission scope (issue #254 / spec §2.3.1). C is
@@ -1624,7 +1691,7 @@ impl HipEmitter {
                     id,
                     &hip_pairs_to_usize(padding),
                     *fill,
-                    &resolved_kernel_name(),
+                    &resolved_kernel_name()?,
                     &node.inputs,
                     &node.output_type,
                     dag,
@@ -1634,7 +1701,7 @@ impl HipEmitter {
                 self.emit_shrink_launch(
                     id,
                     &hip_pairs_to_usize(bounds),
-                    &resolved_kernel_name(),
+                    &resolved_kernel_name()?,
                     &node.inputs,
                     &node.output_type,
                     dag,
@@ -1648,12 +1715,18 @@ impl HipEmitter {
                     &node.output_type,
                 );
             }
-            RiscOp::Realize => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
-            RiscOp::Cast { .. } => {
-                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
-            }
+            RiscOp::Realize => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Cast { .. } => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
             RiscOp::Store { name } => {
                 self.emit_store(id, name.as_str(), &node.inputs, &node.output_type)
             }
@@ -1702,10 +1775,10 @@ impl HipEmitter {
                 );
             }
             RiscOp::Gather { axis } => {
-                self.emit_gather_launch(id, *axis, &node.inputs, &node.output_type, dag)
+                self.emit_gather_launch(id, *axis, &node.inputs, &node.output_type, dag)?
             }
             RiscOp::ScatterAdd { axis } => {
-                self.emit_scatter_add_launch(id, *axis, &node.inputs, &node.output_type, dag)
+                self.emit_scatter_add_launch(id, *axis, &node.inputs, &node.output_type, dag)?
             }
             RiscOp::Scatter { axis } => {
                 self.emit_scatter_replace_launch(id, *axis, &node.inputs, &node.output_type, dag)
@@ -1714,6 +1787,7 @@ impl HipEmitter {
                 self.emit_scatter_elements_launch(id, *axis, &node.inputs, &node.output_type, dag)
             }
         }
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -1803,9 +1877,9 @@ impl HipEmitter {
         ));
     }
 
-    fn emit_const(&mut self, id: usize, value: f64, ty: &TensorType) {
+    fn emit_const(&mut self, id: usize, value: f64, ty: &TensorType) -> Result<(), Unsupported> {
         self.emit_slot_wrapper(id, ty);
-        let elem = Self::elem_kind(ty);
+        let elem = Self::elem_kind(ty)?;
         let kernel = format!("kernel_fill_{}", elem.suffix());
         self.line("{");
         self.indent += 1;
@@ -1850,13 +1924,19 @@ impl HipEmitter {
         );
         self.indent -= 1;
         self.line("}");
+        Ok(())
     }
 
     /// Emit a multi-element constant tensor on HIP. Uploads data
     /// element-by-element via fill calls (same kernel as Const).
-    fn emit_const_tensor(&mut self, id: usize, data: &[f64], ty: &TensorType) {
+    fn emit_const_tensor(
+        &mut self,
+        id: usize,
+        data: &[f64],
+        ty: &TensorType,
+    ) -> Result<(), Unsupported> {
         self.emit_slot_wrapper(id, ty);
-        let elem = Self::elem_kind(ty);
+        let elem = Self::elem_kind(ty)?;
         self.line("{");
         self.indent += 1;
         match elem {
@@ -1903,6 +1983,7 @@ impl HipEmitter {
         }
         self.indent -= 1;
         self.line("}");
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -2044,9 +2125,9 @@ impl HipEmitter {
         high: f64,
         seed: u64,
         ty: &TensorType,
-    ) {
+    ) -> Result<(), Unsupported> {
         self.emit_slot_wrapper(id, ty);
-        let elem = Self::elem_kind(ty);
+        let elem = Self::elem_kind(ty)?;
         let kernel = format!("kernel_uniform_like_{}", elem.suffix());
         self.line("{");
         self.indent += 1;
@@ -2084,6 +2165,7 @@ impl HipEmitter {
         );
         self.indent -= 1;
         self.line("}");
+        Ok(())
     }
 
     fn emit_gather_launch(
@@ -2093,7 +2175,7 @@ impl HipEmitter {
         inputs: &[NodeId],
         ty: &TensorType,
         dag: &Dag,
-    ) {
+    ) -> Result<(), Unsupported> {
         let values = inputs[0].0;
         let indices = inputs[1].0;
         let values_ty = &dag.get(inputs[0]).unwrap().output_type;
@@ -2117,7 +2199,7 @@ impl HipEmitter {
         let before = Self::dim_product_expr(&values_ty.dims[..axis]);
         let axis_size = Self::emit_dim_info(&values_ty.dims[axis]);
         let after = Self::dim_product_expr(&values_ty.dims[axis + 1..]);
-        let elem = Self::elem_kind(ty);
+        let elem = Self::elem_kind(ty)?;
         let kernel_name = match indices_ty.precision {
             Prim::Int32 => format!("kernel_gather_i32_{}", elem.suffix()),
             Prim::Int64 => format!("kernel_gather_i64_{}", elem.suffix()),
@@ -2144,6 +2226,7 @@ impl HipEmitter {
         );
         self.indent -= 1;
         self.line("}");
+        Ok(())
     }
 
     fn emit_scatter_add_launch(
@@ -2153,7 +2236,7 @@ impl HipEmitter {
         inputs: &[NodeId],
         ty: &TensorType,
         dag: &Dag,
-    ) {
+    ) -> Result<(), Unsupported> {
         let target = inputs[0].0;
         let indices = inputs[1].0;
         let updates = inputs[2].0;
@@ -2181,7 +2264,7 @@ impl HipEmitter {
         let before = Self::dim_product_expr(&target_ty.dims[..axis]);
         let axis_size = Self::emit_dim_info(&target_ty.dims[axis]);
         let after = Self::dim_product_expr(&target_ty.dims[axis + 1..]);
-        let elem = Self::elem_kind(ty);
+        let elem = Self::elem_kind(ty)?;
         let kernel_name = match indices_ty.precision {
             Prim::Int32 => format!("kernel_scatter_add_i32_{}", elem.suffix()),
             Prim::Int64 => format!("kernel_scatter_add_i64_{}", elem.suffix()),
@@ -2211,6 +2294,7 @@ impl HipEmitter {
         );
         self.indent -= 1;
         self.line("}");
+        Ok(())
     }
 
     /// Launch the sparse replace-scatter (last-write-wins) kernel.
@@ -2480,7 +2564,7 @@ impl HipEmitter {
         // the dtype-suffixed kernel name so it matches the
         // kernel-source side.
         accumulator: Option<Prim>,
-    ) {
+    ) -> Result<(), Unsupported> {
         let a = inputs[0].0;
         if matches!(kind, kernels::ReduceKind::Sum)
             && let Some(matmul) = blas::detect_matmul_pattern(dag, NodeId(id))
@@ -2510,7 +2594,7 @@ impl HipEmitter {
                 ty,
                 dag,
             );
-            return;
+            return Ok(());
         }
         // WS-A2 + WS-A4: kernel-name dispatch must match the
         // kernel-source emission in `reduction_kernel_sources`. f32/f64
@@ -2528,7 +2612,7 @@ impl HipEmitter {
                 let src_prec = dag.get(NodeId(a)).unwrap().output_type.precision;
                 Self::reduction_kernel_name_typed(kind, axis, src_prec, acc)
             }
-            _ => Self::reduction_kernel_name(kind, axis, Self::elem_kind(ty)),
+            _ => Self::reduction_kernel_name(kind, axis, Self::elem_kind(ty)?),
         };
 
         self.emit_slot_wrapper(id, ty);
@@ -2556,6 +2640,7 @@ impl HipEmitter {
         );
         self.indent -= 1;
         self.line("}");
+        Ok(())
     }
 
     /// Launch shape mirrors `emit_reduce_launch` for the four reductions
@@ -2570,7 +2655,7 @@ impl HipEmitter {
         inputs: &[NodeId],
         ty: &TensorType,
         dag: &Dag,
-    ) {
+    ) -> Result<(), Unsupported> {
         let a = inputs[0].0;
         let input_ty = &dag.get(inputs[0]).unwrap().output_type;
         let node_op = &dag.get(NodeId(id)).unwrap().op;
@@ -2580,7 +2665,7 @@ impl HipEmitter {
         // value being compared is the operand precision. Reading the
         // input precision uniformly avoids the elem_kind panic on the
         // i64 output of the arg-reductions.
-        let elem_for_naming = Self::elem_kind(input_ty);
+        let elem_for_naming = Self::elem_kind(input_ty)?;
         let op_name = match node_op {
             RiscOp::MinReduce { .. } => "min",
             RiscOp::ProdReduce { .. } => "prod",
@@ -2615,6 +2700,7 @@ impl HipEmitter {
         );
         self.indent -= 1;
         self.line("}");
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -3600,20 +3686,38 @@ impl HipEmitter {
     /// matmul-only via `hipblasGemmEx` in WS-A3; i8/i16 routes through
     /// the WS-A4 typed templates via [`Self::dtype_c_type`]) and panic
     /// so callers see the limit immediately.
-    fn elem_kind(ty: &TensorType) -> kernels::ElemKind {
-        match ty.precision {
+    /// chelis#730 Phase 1 (census row 5, chelis#689): the former `_ =>
+    /// ElemKind::F32` wildcard silently dispatched f32 kernels over
+    /// non-f32 buffers - runtime-confirmed corrupt on gfx1151 (int64
+    /// `neg` read 8-byte lanes as 4-byte floats and left half the output
+    /// buffer unwritten). Every precision without an f32/f64 kernel
+    /// family is now a section C2 diagnostic; the ops with typed WS-A4
+    /// templates (Add/Mul/Div/FloorDiv/TruncDiv, pad/shrink, i8/i16 sum)
+    /// never call this shorthand. Exhaustive per section C4.1 - no
+    /// wildcard arm.
+    fn elem_kind(ty: &TensorType) -> Result<kernels::ElemKind, Unsupported> {
+        Ok(match ty.precision {
             Prim::F32 | Prim::Bool => kernels::ElemKind::F32,
             Prim::F64 => kernels::ElemKind::F64,
-            // For non-float precisions reaching this float-only shorthand
-            // (e.g. an i32 Realize node forwarded from an upstream load),
-            // fall back to the F32 stride convention. The narrow-int and
-            // i32 paths route through the WS-A4 typed templates via
-            // [`Self::dtype_c_type`] when the kernel is precision-aware;
-            // this fallback only fires from legacy float-only paths and
-            // the actual storage width is enforced by the runtime's
-            // `tensor_elem_size` and the launch-site `dtype_c_type` cast.
-            _ => kernels::ElemKind::F32,
-        }
+            Prim::F16
+            | Prim::Bf16
+            | Prim::F8e4m3
+            | Prim::Int8
+            | Prim::Int16
+            | Prim::Int32
+            | Prim::Int64
+            | Prim::String => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Dtype(ty.precision.name().to_string()),
+                    "a HIP kernel family with f32/f64 variants only",
+                    Stage::Codegen("hip"),
+                    "this op has no typed HIP kernel for the operand dtype; the former \
+                     silent F32 fallback emitted a corrupting kernel (chelis#689). \
+                     Cast to f32/f64, or use the ops with typed templates \
+                     (add/mul/div and the i8/i16 promoted sum)",
+                ));
+            }
+        })
     }
 
     /// WS-A4: C++ element-type spelling for an active-set dtype. Used
@@ -3786,7 +3890,7 @@ mod tests {
         );
         dag.add_root(out);
 
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_sparse");
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_sparse").unwrap();
 
         assert!(hip.contains("kernel_scatter_add_i64"));
         assert!(hip.contains("const long long *indices"));
@@ -3801,7 +3905,7 @@ mod tests {
     #[test]
     fn fused_reusable_input_emits_hip_in_place_restrict_shape() {
         let dag = fused_mul_reusable_input_dag();
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn");
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
 
         assert!(hip.contains("extern \\\"C\\\" __global__ void kernel_fused_2("));
         // Aliased external (ext0 ↔ x) must NOT carry __restrict__.
@@ -3830,7 +3934,7 @@ mod tests {
         // No set_reusable_input call — the in-place gate must reject.
         dag.add_root(fused);
 
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn");
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
 
         assert!(hip.contains("extern \\\"C\\\" __global__ void kernel_fused_2("));
         assert!(hip.contains("const float *ext0"));
@@ -3855,7 +3959,7 @@ mod tests {
         let mut dag = Dag::new();
         let c = dag.add_node(RiscOp::Const { value }, vec![], vec_f32(4), None);
         dag.add_root(c);
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn");
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
 
         let want_bits = (value as f32).to_bits();
         assert_ne!(
@@ -3884,7 +3988,7 @@ mod tests {
         let mut dag = Dag::new();
         let c = dag.add_node(RiscOp::Const { value }, vec![], vec_f64(4), None);
         dag.add_root(c);
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn");
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
 
         let want_bits = value.to_bits();
         let needle = format!("chelis_f64_from_bits(0x{want_bits:016x}uLL)");
@@ -3910,7 +4014,7 @@ mod tests {
             None,
         );
         dag.add_root(u);
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn");
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
 
         let low_bits = (low as f32).to_bits();
         let high_bits = (high as f32).to_bits();

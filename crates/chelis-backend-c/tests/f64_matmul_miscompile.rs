@@ -95,7 +95,8 @@ fn f64_matmul_subgraph_stays_off_blas_path_in_c_backend() {
             use_blas: true,
             ..CodegenOptions::default()
         },
-    );
+    )
+    .unwrap();
 
     // The IR specializer must NOT replace the F64 matmul with BlasMatmul
     // (cblas_sgemm is F32-only), and the C backend must NOT emit
@@ -188,7 +189,8 @@ fn f32_matmul_subgraph_still_hits_blas_path_in_c_backend() {
             use_blas: true,
             ..CodegenOptions::default()
         },
-    );
+    )
+    .unwrap();
 
     assert!(
         result.c_source.contains("cblas_sgemm("),

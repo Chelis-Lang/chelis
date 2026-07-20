@@ -65,11 +65,11 @@ fn build_multi_input_dag() -> Dag {
 #[test]
 fn codegen_is_byte_deterministic_across_repeated_emissions() {
     let dag = build_multi_input_dag();
-    let baseline = codegen(&dag, "multi_input").c_source;
+    let baseline = codegen(&dag, "multi_input").unwrap().c_source;
     // Run many times; every emission constructs fresh HashMaps internally,
     // so any residual hash-iteration non-determinism would show up here.
     for i in 0..32 {
-        let again = codegen(&dag, "multi_input").c_source;
+        let again = codegen(&dag, "multi_input").unwrap().c_source;
         assert_eq!(
             baseline, again,
             "C codegen must be byte-deterministic; iteration {i} differs"
@@ -80,7 +80,7 @@ fn codegen_is_byte_deterministic_across_repeated_emissions() {
 #[test]
 fn input_validation_preamble_emits_labels_in_lex_sorted_order() {
     let dag = build_multi_input_dag();
-    let src = codegen(&dag, "multi_input").c_source;
+    let src = codegen(&dag, "multi_input").unwrap().c_source;
 
     // Pull out the order in which input labels appear in the
     // input-validation block. Each label `L` shows up first as an
