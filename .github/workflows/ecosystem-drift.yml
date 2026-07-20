@@ -248,7 +248,7 @@ jobs:
           - repo: octant
             type: cargo
             needs_chelis_sibling: true
-            reef_deps: "Chelis-Lang/nautilus@v0.7.26"
+            reef_deps: "Chelis-Lang/nautilus@v0.7.34"
             token_repos: |-
               octant
               nautilus
