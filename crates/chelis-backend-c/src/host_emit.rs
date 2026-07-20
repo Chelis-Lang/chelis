@@ -316,7 +316,66 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> Result<St
             &format!("{program_name}__global__tensor_{index}"),
         )?);
     }
+    // chelis#730 Phase 1: an emission failure inside a function that the
+    // program's globals can actually REACH is a hard build error; a
+    // failure inside an exported-but-unreachable wrapper (e.g. a def
+    // whose only use was inlined into a grad DAG, leaving the standalone
+    // host wrapper dead) emits a branded self-naming ABORT stub instead -
+    // the loud fallback shape the Metal rank-2 stub established. Object
+    // mode (no globals, no main) has no reachability notion; every
+    // function is live export surface there and fails hard.
+    let reachable_functions = if program.globals.is_empty() {
+        None
+    } else {
+        Some(host_functions_reachable_from_main(program))
+    };
+    let function_is_live = |name: &str| -> bool {
+        reachable_functions
+            .as_ref()
+            .is_none_or(|reachable| reachable.contains(name))
+    };
+
+    let mut stubbed_functions: HashSet<String> = HashSet::new();
+    let mut function_bodies: Vec<String> = Vec::new();
     for function in &program.functions {
+        let emitted_name = emitted_names
+            .get(&function.name)
+            .expect("host function emitted name");
+        let mut fn_buf: Vec<String> = Vec::new();
+        match emit_function(
+            &mut fn_buf,
+            function,
+            emitted_name,
+            &emitted_names,
+            &function_specializations,
+            &returns_arg,
+            internal_linkage,
+        ) {
+            Ok(()) => {
+                function_bodies.extend(fn_buf);
+                function_bodies.push(String::new());
+            }
+            Err(unsupported) if !function_is_live(&function.name) => {
+                stubbed_functions.insert(function.name.clone());
+                append_unreachable_fn_abort_stub(
+                    &mut function_bodies,
+                    function,
+                    emitted_name,
+                    internal_linkage,
+                    &unsupported,
+                );
+                function_bodies.push(String::new());
+            }
+            Err(unsupported) => return Err(unsupported),
+        }
+    }
+
+    for function in &program.functions {
+        if stubbed_functions.contains(&function.name) {
+            // A stubbed wrapper aborts before any helper call; skip its
+            // (possibly unemittable) tensor helpers entirely.
+            continue;
+        }
         for (index, helper) in function.tensor_helpers.iter().enumerate() {
             let function_name = emitted_names
                 .get(&function.name)
@@ -329,20 +388,7 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> Result<St
         }
     }
 
-    for function in &program.functions {
-        emit_function(
-            &mut body,
-            function,
-            emitted_names
-                .get(&function.name)
-                .expect("host function emitted name"),
-            &emitted_names,
-            &function_specializations,
-            &returns_arg,
-            internal_linkage,
-        )?;
-        body.push(String::new());
-    }
+    body.extend(function_bodies);
 
     if !program.globals.is_empty() {
         let hoisted: HashSet<&str> = captured_globals.iter().map(String::as_str).collect();
@@ -741,6 +787,43 @@ fn identity_helper_input(
     }
 }
 
+/// chelis#730 Phase 1: the branded self-naming abort stub emitted for an
+/// exported-but-unreachable host wrapper whose real body cannot be
+/// emitted (see the reachability gate in `emit_host_program`). If an
+/// external consumer links the object and calls it anyway, the failure
+/// is loud at run time - the section C1 runtime-abort row, mirroring the
+/// Metal rank-2 fallback stub - never a silently-wrong value.
+fn append_unreachable_fn_abort_stub(
+    out: &mut Vec<String>,
+    function: &HostFunction,
+    emitted_name: &str,
+    internal_linkage: bool,
+    unsupported: &Unsupported,
+) {
+    let params = function
+        .params
+        .iter()
+        .map(|param| c_decl(&param.ty, &param.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let prefix = if internal_linkage {
+        "static inline "
+    } else {
+        ""
+    };
+    out.push(format!(
+        "{prefix}{} {}({}) {{",
+        c_type(&function.ret_ty),
+        emitted_name,
+        params
+    ));
+    let rendered = unsupported.to_string();
+    let safe = chelis_ir::span_sanitize::sanitize_for_format_string(&rendered);
+    out.push(format!("    fprintf(stderr, \"%s\\n\", \"{safe}\");"));
+    out.push("    abort();".to_string());
+    out.push("}".to_string());
+}
+
 fn emit_function(
     out: &mut Vec<String>,
     function: &HostFunction,
@@ -984,6 +1067,162 @@ fn collect_callback_var_names(callback: &HostCallback, out: &mut HashSet<String>
         HostCallbackKind::Named { .. } => {}
         HostCallbackKind::Inline { body, .. } => collect_var_names(body, out),
     }
+}
+
+/// Function names referenced from `expr` - `Call`/`Named`-callback
+/// targets plus bare `Var` references (a def passed as a value). The
+/// over-approximation direction is the safe one for the reachability
+/// gate below: an over-counted reference makes a failing wrapper a hard
+/// build error rather than a loud stub.
+fn collect_referenced_fn_names(expr: &HostExpr, out: &mut HashSet<String>) {
+    collect_var_names(expr, out);
+    fn walk(expr: &HostExpr, out: &mut HashSet<String>) {
+        match &expr.kind {
+            HostExprKind::Call { function, args, .. } => {
+                out.insert(function.clone());
+                for arg in args {
+                    walk(arg, out);
+                }
+            }
+            HostExprKind::Builtin { args, .. } | HostExprKind::TensorCall { args, .. } => {
+                for arg in args {
+                    walk(arg, out);
+                }
+            }
+            HostExprKind::List(items, _) | HostExprKind::Tuple(items, _) => {
+                for item in items {
+                    walk(item, out);
+                }
+            }
+            HostExprKind::AdtConstruct { fields, .. } => {
+                for field in fields {
+                    walk(field, out);
+                }
+            }
+            HostExprKind::AdtFieldAccess { base, .. } => walk(base, out),
+            HostExprKind::If {
+                cond,
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                walk(cond, out);
+                walk(then_expr, out);
+                walk(else_expr, out);
+            }
+            HostExprKind::MatchOption {
+                scrutinee,
+                some_expr,
+                none_expr,
+                ..
+            } => {
+                walk(scrutinee, out);
+                walk(some_expr, out);
+                walk(none_expr, out);
+            }
+            HostExprKind::MatchAdt {
+                scrutinee,
+                arms,
+                default_expr,
+                ..
+            } => {
+                walk(scrutinee, out);
+                for arm in arms {
+                    walk(&arm.expr, out);
+                }
+                if let Some(default_expr) = default_expr {
+                    walk(default_expr, out);
+                }
+            }
+            HostExprKind::Let { bindings, body, .. } => {
+                for binding in bindings {
+                    walk(&binding.value, out);
+                }
+                walk(body, out);
+            }
+            HostExprKind::Map { callback, list, .. }
+            | HostExprKind::Filter { callback, list, .. }
+            | HostExprKind::Partition { callback, list, .. }
+            | HostExprKind::FlatMap { callback, list, .. } => {
+                walk_callback(callback, out);
+                walk(list, out);
+            }
+            HostExprKind::Fold {
+                callback,
+                init,
+                list,
+                ..
+            }
+            | HostExprKind::Scan {
+                callback,
+                init,
+                list,
+                ..
+            } => {
+                walk_callback(callback, out);
+                walk(init, out);
+                walk(list, out);
+            }
+            HostExprKind::WithSeed { seed, body, .. } => {
+                walk(seed, out);
+                walk(body, out);
+            }
+            HostExprKind::Int(_)
+            | HostExprKind::Float(_)
+            | HostExprKind::Bool(_)
+            | HostExprKind::String(_)
+            | HostExprKind::Unit
+            | HostExprKind::Var(_, _) => {}
+        }
+    }
+    fn walk_callback(callback: &HostCallback, out: &mut HashSet<String>) {
+        match &callback.kind {
+            HostCallbackKind::Named { function, .. } => {
+                out.insert(function.clone());
+            }
+            HostCallbackKind::Inline { body, .. } => walk(body, out),
+        }
+    }
+    walk(expr, out);
+}
+
+/// The set of host functions transitively reachable from the program's
+/// global bindings (the emitted `main`). Used by `emit_host_program` to
+/// decide whether an UNSUPPORTED emission failure inside a function is a
+/// hard build error (the function is on the program's live surface) or a
+/// loud abort stub (an exported-but-unreachable wrapper - e.g. a def
+/// whose only use was inlined into a grad DAG; the abort keeps an
+/// external caller loud at run time, the Metal rank-2 stub precedent).
+fn host_functions_reachable_from_main(program: &HostProgram) -> HashSet<String> {
+    let by_name: HashMap<&str, &HostFunction> = program
+        .functions
+        .iter()
+        .map(|function| (function.name.as_str(), function))
+        .collect();
+    let mut seed = HashSet::new();
+    for binding in &program.globals {
+        collect_referenced_fn_names(&binding.value, &mut seed);
+    }
+    let mut reachable: HashSet<String> = HashSet::new();
+    let mut stack: Vec<String> = seed
+        .into_iter()
+        .filter(|name| by_name.contains_key(name.as_str()))
+        .collect();
+    while let Some(name) = stack.pop() {
+        if !reachable.insert(name.clone()) {
+            continue;
+        }
+        if let Some(function) = by_name.get(name.as_str()) {
+            let mut refs = HashSet::new();
+            collect_referenced_fn_names(&function.body, &mut refs);
+            for r in refs {
+                if by_name.contains_key(r.as_str()) && !reachable.contains(&r) {
+                    stack.push(r);
+                }
+            }
+        }
+    }
+    reachable
 }
 
 struct HostEmitter<'a> {

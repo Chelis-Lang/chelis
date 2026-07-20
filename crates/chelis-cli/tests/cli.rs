@@ -6513,11 +6513,32 @@ fn target_metal_rejects_cpu_resource_region() {
 /// Returns the eval stdout and run stdout for any caller that wants to
 /// do additional shape comparison. The function asserts each step
 /// succeeds; failures bubble up with the lane name in the panic.
+///
+/// chelis#730 Phase 1 re-author: the embedded `test_assert_close_tensor`
+/// check is EVAL-LANE ONLY. It always was - the compiled lane used to
+/// build it as the silent `/* unsupported builtin */ 0` stub, so the
+/// binary asserted nothing while this harness claimed both lanes were
+/// verified. The stub arm is now a loud build rejection, so the C lane
+/// builds a stripped copy of the program (the assert line removed) and
+/// its verification is the compiled forward computation running to exit
+/// 0; a compiled-lane arm for the test_* builtins is op-owner support
+/// work (chelis#703 class).
 fn run_activation_parity(name: &str, source_body: &str) -> (Vec<u8>, Vec<u8>) {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join(format!("{name}.ch"));
+    let build_path = dir.path().join(format!("{name}_c.ch"));
     let out_dir = dir.path().join(format!("{name}-out"));
     write_file(&path, source_body);
+    let stripped: String = source_body
+        .lines()
+        .filter(|line| {
+            !line
+                .trim_start()
+                .starts_with("ok = test_assert_close_tensor")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    write_file(&build_path, &stripped);
 
     // `chelis check` must pass cleanly.
     Command::cargo_bin("chelis")
@@ -6539,13 +6560,14 @@ fn run_activation_parity(name: &str, source_body: &str) -> (Vec<u8>, Vec<u8>) {
         .stdout
         .clone();
 
-    // C-backend lane: build, compile, run.
+    // C-backend lane: build the STRIPPED copy (see the doc comment), then
+    // compile and run.
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
-            path.to_str().unwrap(),
+            build_path.to_str().unwrap(),
             "--target",
             "c",
             "--output",
@@ -6554,7 +6576,7 @@ fn run_activation_parity(name: &str, source_body: &str) -> (Vec<u8>, Vec<u8>) {
         .assert()
         .success();
 
-    let source_file = format!("{name}.c");
+    let source_file = format!("{name}_c.c");
     let status = gcc_link_generated(&out_dir, &source_file, name);
     assert!(
         status.success(),
