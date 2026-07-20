@@ -242,10 +242,10 @@ fn rt_p1b_inline_forward_exact_output_no_fabricated_roots() {
          cast(abs(cast(to_tensor([-100.0, 200.0, -300.0, 400.0]), int64)), f32)), 0))\n";
     let stdout = eval_full(program, ".ch").expect("the inline host forward must evaluate");
     let first = stdout.lines().next().unwrap_or_default();
-    assert!(
-        first.contains("data=[300.0]"),
-        "sum must be 300.0; got: {first}"
-    );
+    // Re-baselined at the chelis#792 rebase ([05-OBS-4]): a rank-0 eval
+    // result renders bare, not tensor(shape=[], data=[...]).
+    assert_eq!(first, "300.0", "sum must be 300.0; got: {first}");
+
     assert!(
         !stdout.contains("data=[0.0, 0.0, 0.0, 0.0]"),
         "no fabricated zero root may trail the correct print; full stdout:\n{stdout}"
@@ -389,12 +389,13 @@ fn rt_keep5_taken_fail_branch_never_yields_values() {
         ),
     }
     if c_toolchain_available() {
-        match c_run(program, "rt_keep5_fail_taken") {
-            Ok((ran_ok, stdout, _)) => assert!(
+        // A build-time rejection is also acceptable; only a RUNNING binary
+        // that prints values pierces the keep.
+        if let Ok((ran_ok, stdout, _)) = c_run(program, "rt_keep5_fail_taken") {
+            assert!(
                 !ran_ok,
                 "the compiled taken-fail branch must abort, not print; stdout:\n{stdout}"
-            ),
-            Err(_) => {} // a build-time rejection is also acceptable
+            );
         }
     }
 }
@@ -459,9 +460,15 @@ fn rt_p4_branded_bytes_agree_across_lanes() {
     assert_eq!(c, h, "C vs HIP branded bytes must agree");
 }
 
-/// The effect-kind rejection must agree byte-for-byte between the eval
-/// lane and the build lane on the same `.dp` (rows 9/20 landed as two
-/// arms in two files - IR-lane and host-lane - so skew is plausible).
+/// The effect-kind rejection must agree between the eval lane and the
+/// build lane on the same `.dp`. Re-baselined at the chelis#793 rebase:
+/// the CHECKER's handle-effect case (chelis#731 P1) now rejects the
+/// unknown kind FIRST in both lanes - the earliest competent stage - so
+/// the surviving parity surface is the checker's `MalformedForm`
+/// diagnostic naming the kind, identical in content across lanes; the
+/// chelis#730 rows 9/20 lowering raises are defense-in-depth behind it
+/// and no longer reachable from this surface (the section I1 interlock,
+/// honored from both sides).
 #[test]
 fn rt_p4_effect_kind_bytes_agree_across_lanes() {
     let dp = "(defsig {} f (t-fn {} (t-prim {} f32)))\n\n(def {}\n  f\n  (fn {}\n    (params {})\n    \
@@ -472,21 +479,12 @@ fn rt_p4_effect_kind_bytes_agree_across_lanes() {
     let (b_ok, b_err, _) = build_target(dp, ".dp", "rt_effect_parity", "c");
     match (eval_out, b_ok) {
         (Err(e), false) => {
-            let eb = branded_line(&e).map(str::to_string);
-            let bb = branded_line(&b_err).map(str::to_string);
-            match (eb, bb) {
-                (Some(el), Some(bl)) => {
-                    let tail = |l: &str| l.split_once("unsupported: ").map(|(_, t)| t.to_string());
-                    assert_eq!(
-                        tail(&el),
-                        tail(&bl),
-                        "effect-kind branded bytes must agree across lanes"
-                    );
-                }
-                (eb, bb) => panic!(
-                    "both lanes must brand the effect-kind rejection; eval: {eb:?}, \
-                     build: {bb:?}\n  eval stderr: {e}\n  build stderr: {b_err}"
-                ),
+            for (lane, text) in [("eval", &e), ("build", &b_err)] {
+                assert!(
+                    text.contains("unknown effect kind `teleport`"),
+                    "{lane} must reject with the checker diagnostic naming the \
+                     kind; got: {text}"
+                );
             }
         }
         (Ok(stdout), _) => panic!("eval must reject effect kind `teleport`; stdout:\n{stdout}"),

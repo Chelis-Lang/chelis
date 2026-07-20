@@ -292,7 +292,9 @@ const BASELINE: &[Entry] = &[
          / padding unwrap_or(0) - the chelis#776 shape (census row 23) - \
          and the with-seed defaults, whose effects-checker cover the \
          chelis#793 red team pierced (a negative .dp int64 seed extracts \
-         to None and falls to seed 0); both arrive as filed census rows",
+         to None and falls to seed 0) - that .dp repro is now rejected at \
+         CHECK time by chelis#793's negative-seed checker case, so the \
+         sites are checker-guarded pending their census rows",
     ),
     (
         Pat::UnwrapOrNumericLiteral,
@@ -341,9 +343,9 @@ const BASELINE: &[Entry] = &[
         Pat::UnwrapOrNumericLiteral,
         "crates/chelis-compiler-api/src/runtime/eval.rs",
         2,
-        "with-seed default (mirrors lower.rs; same chelis#793 negative-seed \
-         caveat) and a scalarization first-element read; P1-frozen for \
-         the Phase 2 lint audit",
+        "with-seed default (mirrors lower.rs; the chelis#793 negative-seed \
+         repro is now checker-rejected) and a scalarization first-element \
+         read; P1-frozen for the Phase 2 lint audit",
     ),
     (
         Pat::UnwrapOrNumericLiteral,
