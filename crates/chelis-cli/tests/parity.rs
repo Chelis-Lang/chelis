@@ -307,31 +307,77 @@ fn migrated_render_equivalent(eval_line: &str, c_line: &str) -> bool {
             _ => (None, line.trim()),
         }
     }
-    fn value_tokens(payload: &str) -> Option<Vec<f64>> {
-        let body: String = match payload.find("data=[") {
-            Some(start) => {
-                let rest = &payload[start + "data=[".len()..];
-                rest[..rest.find(']')?].to_string()
+    /// One value token, or `None` when the token cannot be compared. An
+    /// integer-SYNTAX token at or above 2^53 refuses the f64 parse: two
+    /// distinct exact int64 renderings in that range collapse to one f64,
+    /// so "bit-identical after parse" would pass a real divergence
+    /// (PR #792 red-team F3). Refusing makes the pair non-equivalent and
+    /// the parity harness reports the raw line diff.
+    fn token_value(t: &str) -> Option<f64> {
+        match t {
+            "true" => Some(1.0),
+            "false" => Some(0.0),
+            other => {
+                let v: f64 = other.parse().ok()?;
+                if !other.contains('.') && !other.contains('e') && v.abs() >= 9007199254740992.0
+                {
+                    return None;
+                }
+                Some(v)
             }
-            None => payload
-                .chars()
-                .filter(|ch| !matches!(ch, '[' | ']' | '(' | ')'))
-                .collect(),
+        }
+    }
+    /// Every bracketed segment named `marker` on the line, inner text.
+    fn segments(payload: &str, marker: &str) -> Option<Vec<String>> {
+        let mut out = Vec::new();
+        let mut rest = payload;
+        while let Some(start) = rest.find(marker) {
+            let inner = &rest[start + marker.len()..];
+            let end = inner.find(']')?;
+            out.push(inner[..end].to_string());
+            rest = &inner[end + 1..];
+        }
+        Some(out)
+    }
+    /// All value tokens: every `data=[..]` segment when tensors are
+    /// present (PR #792 red-team F3: a second tensor's divergence must not
+    /// escape), the whole bracket-stripped payload otherwise.
+    fn value_tokens(payload: &str) -> Option<Vec<f64>> {
+        let bodies: Vec<String> = if payload.contains("data=[") {
+            segments(payload, "data=[")?
+        } else {
+            vec![
+                payload
+                    .chars()
+                    .filter(|ch| !matches!(ch, '[' | ']' | '(' | ')'))
+                    .collect(),
+            ]
         };
-        body.split(',')
+        bodies
+            .iter()
+            .flat_map(|body| body.split(','))
             .map(str::trim)
             .filter(|t| !t.is_empty() && *t != "...")
-            .map(|t| match t {
-                "true" => Some(1.0),
-                "false" => Some(0.0),
-                other => other.parse::<f64>().ok(),
-            })
+            .map(token_value)
             .collect()
     }
     let (eval_name, eval_payload) = split_named(eval_line);
     let (c_name, c_payload) = split_named(c_line);
     if eval_name != c_name {
         return false;
+    }
+    // Tensor SHAPE tokens are part of the value (PR #792 red-team F3): a
+    // shape divergence with equal data must not pass.
+    match (
+        segments(eval_payload, "shape=["),
+        segments(c_payload, "shape=["),
+    ) {
+        (Some(eval_shapes), Some(c_shapes)) => {
+            if eval_shapes != c_shapes {
+                return false;
+            }
+        }
+        _ => return false,
     }
     match (value_tokens(eval_payload), value_tokens(c_payload)) {
         (Some(eval_values), Some(c_values)) => {
@@ -583,4 +629,80 @@ fn parity_comparator_rejects_non_tensor_diff() {
     let a = b"len=4, items=4, shape=2x2\n";
     let b = b"len=5, items=4, shape=2x2\n";
     assert!(assert_parity(a, b, "byte-diff").is_err());
+}
+
+// ===========================================================================
+// RT792 probes (PR #792 fresh-context red team, adopted): the interim
+// equivalence's former blind spots, now locked as rejections. The red
+// team's originals demonstrated the holes; these assert the tightened
+// behavior.
+// ===========================================================================
+
+/// Two DIFFERENT stored int64 values above 2^53 (eval's exact digits vs
+/// C's through-double digits) parse to the SAME f64, so the equivalence
+/// REFUSES integer-syntax tokens in that range instead of comparing
+/// them; the pair reports as a raw line diff.
+#[test]
+fn rt792_migrated_equivalence_rejects_distinct_int64_above_2p53() {
+    assert!(!migrated_render_equivalent(
+        "out = tensor(shape=[1], data=[9007199254740993])",
+        "out = tensor(shape=[1], data=[9007199254740992.0])",
+    ));
+    // The refusal is syntactic, not value-based: even a WOULD-BE-equal
+    // pair refuses (byte-equal lines never reach the equivalence - the
+    // comparator short-circuits on equality first).
+    assert!(!migrated_render_equivalent(
+        "out = tensor(shape=[1], data=[9007199254740993])",
+        "out = tensor(shape=[1], data=[9007199254740993.0])",
+    ));
+}
+
+/// A value divergence in a SECOND tensor on the same line (a list of
+/// tensors) is detected: every `data=[..]` segment is tokenized.
+#[test]
+fn rt792_migrated_equivalence_detects_second_tensor_divergence() {
+    assert!(!migrated_render_equivalent(
+        "out = [tensor(shape=[1], data=[1.0]), tensor(shape=[1], data=[2.0])]",
+        "out = [tensor(shape=[1], data=[1.0]), tensor(shape=[1], data=[999.0])]",
+    ));
+    // Positive control: equal values across BOTH segments (int-vs-float
+    // render forms) are equivalent.
+    assert!(migrated_render_equivalent(
+        "out = [tensor(shape=[1], data=[1]), tensor(shape=[1], data=[2])]",
+        "out = [tensor(shape=[1], data=[1.0]), tensor(shape=[1], data=[2.0])]",
+    ));
+}
+
+/// A cross-lane SHAPE divergence with equal data is detected: shape
+/// segments are compared alongside the values.
+#[test]
+fn rt792_migrated_equivalence_detects_shape_divergence() {
+    assert!(!migrated_render_equivalent(
+        "out = tensor(shape=[2, 2], data=[1.0, 2.0, 3.0, 4.0])",
+        "out = tensor(shape=[4], data=[1.0, 2.0, 3.0, 4.0])",
+    ));
+    // Positive control: same shape, int-vs-float data forms.
+    assert!(migrated_render_equivalent(
+        "out = tensor(shape=[2, 2], data=[1, 2, 3, 4])",
+        "out = tensor(shape=[2, 2], data=[1.0, 2.0, 3.0, 4.0])",
+    ));
+}
+
+/// Control (red-team authored): a first-tensor value divergence IS
+/// detected.
+#[test]
+fn rt792_migrated_equivalence_detects_first_tensor_divergence() {
+    assert!(!migrated_render_equivalent(
+        "out = tensor(shape=[1], data=[1.0])",
+        "out = tensor(shape=[1], data=[1.5])",
+    ));
+}
+
+/// Control (red-team authored): a binding-name mismatch IS detected.
+#[test]
+fn rt792_migrated_equivalence_detects_name_mismatch() {
+    assert!(!migrated_render_equivalent(
+        "a = tensor(shape=[1], data=[1.0])",
+        "b = tensor(shape=[1], data=[1.0])",
+    ));
 }

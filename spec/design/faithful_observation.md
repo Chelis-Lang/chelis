@@ -6,7 +6,11 @@ exit census) landed 2026-07-17 (PR #752, tightened by PR #774). Phase 1
 2026-07-20: `format_element` lives at `chelis-types::observation`, every
 eval exit routes through it, §C1 and the number grammar are FROZEN (B1),
 and the contract is ratified as `spec/05-risc-primitives.md` §8 atoms
-[05-OBS-1..5] (the chelis#775 scalar-root decision is [05-OBS-4]).
+[05-OBS-1..5] (the chelis#775 scalar-root decision is [05-OBS-4]). One
+annexed value-layer exception, surfaced by PR #792's red team: int64
+scalar roots above 2^53 render the f64-collapsed stored value at the
+labeled root ([#684]'s rank-0 realization, repaired by [#729]; the
+exception and its ignored red cell are recorded at spec/05 §8).
 Phases 2-3 remain. Tracking issue: [#732].
 **Owning specs:** `spec/05-risc-primitives.md` (its §8 carries this
 plan's decided contract as provisional atoms [05-OBS-1..3], seeded ahead
@@ -141,9 +145,12 @@ Per-dtype rules:
    two-digit exponents) must not leak. **Pinned at Phase 1**: the
    decimal/e-notation thresholds are the normative constants
    `DECIMAL_LOWER_BOUND = 1e-4` / `DECIMAL_UPPER_BOUND = 1e16`
-   (`chelis-types::observation`, rustc-locked by unit tests); the full
-   ratified grammar, including the f16/bf16 shortest-at-width rule and
-   its tie-break, is spec/05 §8.1.
+   (`chelis-types::observation`, rustc-locked by unit tests), decided on
+   the RENDERED magnitude - the value the chosen shortest digits denote
+   - which is rustc's actual `{:?}` behavior at straddling-ulp
+   boundaries (PR #792 red-team F2); the full ratified grammar,
+   including the f16/bf16 shortest-at-width rule and its tie-break, is
+   spec/05 §8.1.
 4. **bool prints `true`/`false`** at every exit, including inside tensor
    `data=[...]`.
 5. **Containers**: tensor rendering stays `tensor(shape=[..],

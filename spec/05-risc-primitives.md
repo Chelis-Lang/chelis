@@ -1211,8 +1211,15 @@ elaboration is `spec/design/faithful_observation.md` (meta chelis#728).
 > other and with the stored bits.
 
 *(Eval lane conformant since chelis#732 Phase 1, with one deliberate
-width note recorded in §8.1. Not honored in the C lane: chelis#716,
-#723, #748, #749 - Phase 2's oracle.)*
+width note recorded in §8.1 and one annexed value-layer exception: an
+int64 SCALAR ROOT above 2^53 renders the f64-collapsed stored value at
+the labeled root while `print`/`to_string` of the same def are exact -
+the interpreter's rank-0 realization collapses the value BEFORE the
+renderer sees it (chelis#684, [#729]'s value layer; surfaced by PR
+#792's red team). Rendering reports the collapsed bits faithfully; the
+cell is an issue-linked ignored red test in the observation harness and
+returns with chelis#729. Not honored in the C lane: chelis#716, #723,
+#748, #749 - Phase 2's oracle.)*
 
 > **[05-OBS-2]** Integer dtypes SHALL print as integers with all digits
 > exact; floats SHALL print the shortest string that round-trips at
@@ -1249,7 +1256,10 @@ scalar already rendered bare in BOTH lanes and the compiled lane's
 labeled roots did too, so the bare form is the only choice consistent
 with [05-OBS-1]'s intra-lane exit agreement; the rank-0 wrapper was an
 eval-interpreter storage artifact. Conformant in both lanes for the
-locked repro; general C-lane digit grammar is Phase 2.)*
+locked repro; general C-lane digit grammar is Phase 2. The bare-scalar
+rendering inherits [05-OBS-1]'s annexed chelis#684 exception: an int64
+scalar root above 2^53 renders bare but carries the f64-collapsed
+stored value until chelis#729 repairs the realization's storage.)*
 
 > **[05-OBS-5]** Every exit in both lanes SHALL truncate tensor element
 > rendering after 32 elements, marking the cut with `, ...` inside the
@@ -1270,11 +1280,21 @@ The grammar is Rust `{:?}` (`Debug`) float formatting, normatively
 never emits e-notation):
 
 - shortest round-trip digits at the value's own width;
-- decimal form exactly when the value is zero or
+- decimal form exactly when the RENDERED magnitude - the value the
+  chosen shortest digits denote - is zero or satisfies
   `1e-4 <= |v| < 1e16` (the normative threshold constants
   `DECIMAL_LOWER_BOUND` / `DECIMAL_UPPER_BOUND` in
   `chelis-types::observation`, captured empirically from rustc and
-  locked by unit tests so a rustc formatting change breaks loudly);
+  locked by unit tests so a rustc formatting change breaks loudly).
+  The rule follows the digits actually printed, not the stored
+  magnitude: when a width's ulp straddles a threshold, the shortest
+  rendering can sit on the other side of it - the bf16 whose image is
+  9.9921e15 renders `1e16` (e-notation), and the f32 whose image is
+  9.9999997e-5 renders `0.0001` (decimal). This is rustc's observed
+  `{:?}` behavior, which compares against the constants at the value's
+  own width - equivalent to the rendered-magnitude rule at every
+  representable boundary (ratified at PR #792 after its red team's F2
+  finding; the exhaustive half-format tests lock the boundary cases);
 - decimal renderings of integral values keep one fractional digit
   (`2048.0`, never `2048`);
 - e-notation is `<mantissa>e<exp>`: lowercase `e`, no `+`, no zero
@@ -1285,9 +1305,9 @@ never emits e-notation):
   f64, then one correctly-rounded narrowing to the half width - safe by
   [04-NUM-1]'s single-rounding argument) yields the stored bits,
   verified exhaustively over all 65536 bit patterns per format; their
-  decimal/e-notation decision applies the same threshold constants to
-  the value's exact f64 image, and a same-length candidate tie breaks
-  to the numerically closest, then the even mantissa;
+  decimal/e-notation decision applies the same rendered-magnitude rule
+  to the chosen digits, and a same-length candidate tie breaks to the
+  numerically closest, then the even mantissa;
 - integer dtypes print exact base-10 digits (i64 formatting, never
   through double).
 

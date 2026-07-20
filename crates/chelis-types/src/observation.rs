@@ -15,10 +15,15 @@
 //! (`faithful_observation.md` §C1.3, ratified into spec/05 §8.1):
 //!
 //! * shortest round-trip digits AT THE VALUE'S OWN WIDTH;
-//! * decimal form exactly when the value is zero or `1e-4 <= |v| < 1e16`
-//!   ([`DECIMAL_LOWER_BOUND`] / [`DECIMAL_UPPER_BOUND`], normative
-//!   constants captured empirically from rustc - the unit tests below break
-//!   loudly if a rustc formatting change ever shifts them);
+//! * decimal form exactly when the RENDERED magnitude - the value the
+//!   chosen shortest digits denote - is zero or satisfies
+//!   `1e-4 <= |v| < 1e16` ([`DECIMAL_LOWER_BOUND`] /
+//!   [`DECIMAL_UPPER_BOUND`], normative constants captured empirically
+//!   from rustc; the unit tests below break loudly if a rustc formatting
+//!   change ever shifts them). The rule follows the digits actually
+//!   printed, not the stored magnitude: when a width's ulp straddles a
+//!   threshold, the shortest rendering can sit on the other side of it
+//!   (PR #792 red-team finding F2 has the executed boundary cases);
 //! * decimal renderings of integral values keep one fractional digit
 //!   (`2048.0`, never `2048`);
 //! * e-notation is `<mantissa>e<exp>` with no `+` and no zero padding
@@ -35,7 +40,7 @@
 //! correctly-rounded narrowing to the half width (safe by the same
 //! excess-precision argument as [04-NUM-1]'s single-rounding rule) - yields
 //! the stored bits; the decimal/e-notation decision applies the same
-//! threshold constants to the half value's exact f64 image. Verified
+//! rendered-magnitude rule to the chosen digits. Verified
 //! EXHAUSTIVELY over all 65536 bit patterns per half format in the tests
 //! below (faithful_observation.md open question 1).
 //!
@@ -49,14 +54,14 @@
 
 use crate::types::Prim;
 
-/// Decimal-form lower threshold: values with `|v| < 1e-4` (and not zero)
-/// print in e-notation. Normative constant (spec/05 §8.1), captured from
-/// Rust `{:?}` behavior and locked by tests.
+/// Decimal-form lower threshold: a rendering whose RENDERED magnitude is
+/// below `1e-4` (and not zero) takes e-notation. Normative constant
+/// (spec/05 §8.1), captured from Rust `{:?}` behavior and locked by tests.
 pub const DECIMAL_LOWER_BOUND: f64 = 1e-4;
 
-/// Decimal-form upper threshold: values with `|v| >= 1e16` print in
-/// e-notation. Normative constant (spec/05 §8.1), captured from Rust `{:?}`
-/// behavior and locked by tests.
+/// Decimal-form upper threshold: a rendering whose RENDERED magnitude is
+/// `>= 1e16` takes e-notation. Normative constant (spec/05 §8.1), captured
+/// from Rust `{:?}` behavior and locked by tests.
 pub const DECIMAL_UPPER_BOUND: f64 = 1e16;
 
 /// One stored element at its dtype's own width.
@@ -204,7 +209,7 @@ fn format_half(image: f64, stored_bits: u64, narrow: &dyn Fn(f64) -> u64, width:
         narrow(if neg { -parsed } else { parsed }) == stored_bits
     };
     let (digits, sci_exp) = shortest_digits(abs, &round_trips, width);
-    assemble(neg, &digits, sci_exp, abs)
+    assemble(neg, &digits, sci_exp)
 }
 
 /// Find the shortest decimal digit string `D` (no trailing zeros) and
@@ -286,11 +291,21 @@ fn split_sci(sci: &str) -> (String, i32) {
 }
 
 /// Assemble digits + scientific exponent into the normative grammar,
-/// choosing decimal vs e-notation from the STORED value's magnitude
-/// (`abs`, the exact f64 image) against the normative thresholds.
-fn assemble(neg: bool, digits: &str, sci_exp: i32, abs: f64) -> String {
+/// choosing decimal vs e-notation from the RENDERED magnitude - the value
+/// the chosen shortest digits denote, whose decade is exactly `sci_exp` -
+/// against the normative thresholds: decimal iff the rendered value `v`
+/// satisfies `1e-4 <= |v| < 1e16`, i.e. iff `-4 <= sci_exp <= 15` (zero
+/// is handled earlier and renders decimal). This is rustc's actual `{:?}`
+/// rule (PR #792 red-team finding F2): the stored magnitude can sit on
+/// the other side of a threshold from its own shortest rendering when the
+/// width's ulp straddles the boundary - e.g. the bf16 whose image is
+/// 9.992e15 renders shortest as `1e16`, which must take e-notation, and
+/// the f32 whose image is 9.9999997e-5 renders shortest as `0.0001`,
+/// which must take decimal form - and the form follows the digits that
+/// are actually printed.
+fn assemble(neg: bool, digits: &str, sci_exp: i32) -> String {
     let sign = if neg { "-" } else { "" };
-    let decimal_form = (DECIMAL_LOWER_BOUND..DECIMAL_UPPER_BOUND).contains(&abs);
+    let decimal_form = (-4..=15).contains(&sci_exp);
     if decimal_form {
         let len = digits.len() as i32;
         let body = if sci_exp >= len - 1 {
@@ -355,6 +370,13 @@ mod tests {
         );
     }
 
+    /// The f32 grammar follows the same thresholds - decided on the
+    /// RENDERED magnitude (rustc compares against the constants at the
+    /// value's own width, which coincides with the rendered-magnitude rule
+    /// at every representable boundary; PR #792 red-team F2). Note the
+    /// first row: 1e-4f32 STORES 9.9999997e-5, strictly below the f64
+    /// constant, yet renders decimal because its shortest digits denote
+    /// exactly 1e-4.
     #[test]
     fn f32_debug_grammar_matches_the_same_thresholds() {
         assert_eq!(format!("{:?}", 1e-4f32), "0.0001");
@@ -589,6 +611,24 @@ mod tests {
         }
     }
 
+    /// The decimal/e-notation decision is made on the RENDERED magnitude
+    /// (spec/05 section 8.1; PR #792 red-team F2): parse the emitted text
+    /// back and require e-notation exactly when the denoted value falls
+    /// outside `[1e-4, 1e16)`. Run over every bit pattern, this locks the
+    /// straddling-ulp boundary cases (e.g. bf16 image 9.9921e15 rendering
+    /// `1e16`).
+    fn assert_form_matches_rendered_magnitude(text: &str, bits: u16) {
+        let rendered: f64 = text.parse().expect("grammar output parses");
+        let expect_e = rendered != 0.0
+            && !(DECIMAL_LOWER_BOUND..DECIMAL_UPPER_BOUND).contains(&rendered.abs());
+        assert_eq!(
+            text.contains('e'),
+            expect_e,
+            "bits {bits:#06x}: `{text}` denotes {rendered:e}; its form must \
+             follow the rendered magnitude"
+        );
+    }
+
     #[test]
     fn every_f16_bit_pattern_round_trips_shortest() {
         for bits in 0..=u16::MAX {
@@ -615,6 +655,7 @@ mod tests {
                     &|x| u64::from(half::f16::from_f64(x).to_bits()),
                     significant_digits(&text),
                 );
+                assert_form_matches_rendered_magnitude(&text, bits);
             }
         }
     }
@@ -645,6 +686,7 @@ mod tests {
                     &|x| u64::from(half::bf16::from_f64(x).to_bits()),
                     significant_digits(&text),
                 );
+                assert_form_matches_rendered_magnitude(&text, bits);
             }
         }
     }
@@ -672,5 +714,15 @@ mod tests {
         // In range: decimal with a fractional digit.
         let mid = bf(256.0);
         assert_eq!(format_element(Prim::Bf16, ElementRef::Bf16(mid)), "256.0");
+        // The F2 boundary case: bf16(1e16) STORES an image below 1e16
+        // (9.9921e15), but its shortest digits denote exactly 1e16, so the
+        // rendered-magnitude rule takes e-notation - never the 17-character
+        // decimal the stored-magnitude reading would produce.
+        let boundary = bf(1e16);
+        assert!(f64::from(boundary) < 1e16, "precondition: image below 1e16");
+        assert_eq!(
+            format_element(Prim::Bf16, ElementRef::Bf16(boundary)),
+            "1e16"
+        );
     }
 }

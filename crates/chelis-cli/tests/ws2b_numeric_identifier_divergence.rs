@@ -244,6 +244,14 @@ fn tensor_ints(stdout: &str, name: &str) -> Vec<i64> {
                 v.fract() == 0.0,
                 "non-integral element `{s}` in `{payload}`"
             );
+            // Above 2^53 the f64 parse collapses distinct int64s (the
+            // PR #792 red-team F3 class); this helper's rows are small
+            // indices/quotients, so refuse loudly rather than compare.
+            assert!(
+                v.abs() < 9007199254740992.0,
+                "element `{s}` at or above 2^53 cannot be decoded through \
+                 f64 in `{payload}`"
+            );
             v as i64
         })
         .collect()

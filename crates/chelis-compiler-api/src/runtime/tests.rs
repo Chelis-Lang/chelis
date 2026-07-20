@@ -1844,3 +1844,87 @@ fn render_value_scalars_render_at_own_width() {
     let f64_scalar = RuntimeValue::scalar(Prim::F64, ScalarBits::F64(f64::MAX)).expect("scalar");
     assert_eq!(render_value(&f64_scalar), "1.7976931348623157e308");
 }
+
+// ===========================================================================
+// RT792 probes (PR #792 fresh-context red team, adopted): the tag-vs-bits
+// arithmetic edges of render_tensor_element, locked at the boundaries.
+// ===========================================================================
+
+/// int_or_bits boundary sweep at +/-2^63 (red-team authored): stored
+/// exactly -2^63 sits inside the exact-i64 guard and prints the integer;
+/// stored exactly +2^63 (where f64 has no i64 twin) is outside and prints
+/// the faithful f64 bits, never a saturated integer; the largest f64
+/// below 2^63 prints exactly. Non-integral / non-finite stored values
+/// under an integer tag print the f64 bits.
+#[test]
+fn rt792_render_value_int64_tag_pow63_boundaries() {
+    assert_eq!(
+        render_value(&tensor_value(
+            Prim::Int64,
+            vec![1],
+            vec![-9223372036854775808.0]
+        )),
+        "tensor(shape=[1], data=[-9223372036854775808])"
+    );
+    assert_eq!(
+        render_value(&tensor_value(
+            Prim::Int64,
+            vec![1],
+            vec![9223372036854775808.0]
+        )),
+        "tensor(shape=[1], data=[9.223372036854776e18])"
+    );
+    assert_eq!(
+        render_value(&tensor_value(
+            Prim::Int64,
+            vec![1],
+            vec![9223372036854774784.0]
+        )),
+        "tensor(shape=[1], data=[9223372036854774784])"
+    );
+    assert_eq!(
+        render_value(&tensor_value(Prim::Int64, vec![1], vec![187.5])),
+        "tensor(shape=[1], data=[187.5])"
+    );
+    assert_eq!(
+        render_value(&tensor_value(Prim::Int64, vec![1], vec![f64::INFINITY])),
+        "tensor(shape=[1], data=[inf])"
+    );
+    assert_eq!(
+        render_value(&tensor_value(Prim::Int64, vec![1], vec![f64::NAN])),
+        "tensor(shape=[1], data=[NaN])"
+    );
+}
+
+/// A bool-tagged slot storing -0.0 prints the BITS (`-0.0`), never
+/// `false`: the sign bit is stored state a boolean rendering would
+/// launder, and the slot is source-reachable via
+/// `print(neg(to_tensor([false, true])))`. Red-team finding F6, fixed;
+/// this is the tightened lock (the red team's original test pinned the
+/// laundering behavior as evidence). A bool-tagged 2.0 / 0.5 prints the
+/// bits per the tag-vs-bits rule; +0.0 stays `false`; an int-tagged -0.0
+/// prints `0` (integers have no signed zero - the sign bit there is an
+/// f64-backing-store artifact, not integer state).
+#[test]
+fn rt792_render_value_bool_tag_negative_zero_prints_bits() {
+    assert_eq!(
+        render_value(&tensor_value(Prim::Bool, vec![1], vec![-0.0])),
+        "tensor(shape=[1], data=[-0.0])"
+    );
+    assert_eq!(
+        render_value(&tensor_value(Prim::Bool, vec![1], vec![0.0])),
+        "tensor(shape=[1], data=[false])"
+    );
+    assert_eq!(
+        render_value(&tensor_value(Prim::Bool, vec![1], vec![2.0])),
+        "tensor(shape=[1], data=[2.0])"
+    );
+    assert_eq!(
+        render_value(&tensor_value(Prim::Bool, vec![1], vec![0.5])),
+        "tensor(shape=[1], data=[0.5])"
+    );
+    assert_eq!(
+        render_value(&tensor_value(Prim::Int32, vec![1], vec![-0.0])),
+        "tensor(shape=[1], data=[0])"
+    );
+}

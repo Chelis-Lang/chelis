@@ -42,6 +42,7 @@
 //! | bool tensor `print` (1.0/0.0) vs `to_list` (true/false), C lane | chelis#726 observation half (eval half went green at #732 Phase 1) |
 //! | C print format selection (`%.1f` collapses tiny values, `%.16g` starves 17-digit f64) | chelis#748 (§B2.5 discovery) |
 //! | C nested-in-list tensor renderer (int64 via f64, 10-element silent truncation) | chelis#749 (§B2.5 discovery) |
+//! | eval int64 SCALAR ROOT above 2^53 (rank-0 f64 realization collapses the value before the renderer) | chelis#684 ([#729] value layer; PR #792 red-team F1) |
 //!
 //! Everything else is green by contract; a new red here is a new
 //! faithful-observation bug (file it, per §B2.5).
@@ -1051,12 +1052,55 @@ fn scalar_render_lines(stdout: &str) -> Vec<String> {
     lines
 }
 
+/// RED (chelis#684, [#729] value layer; surfaced by PR #792's red team,
+/// F1): an int64 SCALAR ROOT above 2^53 loses exactness at the labeled
+/// root while print and to_string of the same def render it exactly -
+/// the interpreter's rank-0 f64 realization collapses the value BEFORE
+/// the renderer sees it, so this is a stored-value defect upstream of the
+/// [05-OBS] rendering contract, not a formatter bug. The exception is
+/// annexed in spec/05 §8's [05-OBS-1]/[05-OBS-4] status text; the cell
+/// goes green (by un-ignoring, §B2.3) when [#729] repairs scalar-root
+/// storage. Rendering must NOT paper over it: the root faithfully shows
+/// the collapsed stored value.
+#[test]
+#[ignore = "chelis#684 ([#729] value layer): the rank-0 f64 realization collapses int64 \
+            scalar roots above 2^53 before the renderer sees them; print/to_string are \
+            exact, the labeled root is not. Un-ignore when [#729] repairs scalar-root \
+            storage. Run with \
+            `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
+fn eval_int64_scalar_root_above_2p53_renders_exact() {
+    let program = "module M.Main\n\
+         def run() -> int64 = cast(9007199254740993, int64)\n\
+         shown = print(run())\n\
+         sroot = run()\n";
+    let out = eval_stdout(program).expect("eval");
+    // Green half (control): the print transcript is exact at own width.
+    let transcript = out
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.ends_with("()") && !l.starts_with("sroot = "))
+        .unwrap_or_else(|| panic!("no print transcript in:\n{out}"));
+    assert_eq!(transcript, "9007199254740993", "print exit must stay exact");
+    // Red half: the labeled root must carry the same exact value. Today it
+    // renders the f64-collapsed 9007199254740992 (chelis#684).
+    let root = out
+        .lines()
+        .find(|l| l.starts_with("sroot = "))
+        .unwrap_or_else(|| panic!("no sroot line in:\n{out}"));
+    assert_eq!(
+        root, "sroot = 9007199254740993",
+        "the labeled root must carry the exact stored int64; [05-OBS-1] \
+         intra-lane exit agreement is broken by the rank-0 realization"
+    );
+}
+
 /// [05-OBS-4] (the chelis#775 decision, eval half): a scalar-typed
 /// top-level root renders as the BARE scalar - byte-identical to the print
 /// transcript of the same value (intra-lane exit agreement, §C2.1/2) - and
 /// the rank-0 `tensor(shape=[], data=[..])` wrapper appears at no exit.
 /// Values are chosen exactly representable at their dtype so the [#684]
-/// storage collapse (a value bug, not a rendering one) cannot blur the
+/// storage collapse (a value bug, not a rendering one - its above-2^53
+/// int64 face is the ignored red cell directly above) cannot blur the
 /// row; the C lane's conformance for the same repro is locked by
 /// `c_def_call_scalar_root_emitted_issue_750` below.
 #[test]

@@ -1205,46 +1205,86 @@ fn assert_stdout_value_parity(c_out: &[u8], eval_out: &[u8], label: &str) {
         eval_lines.len(),
         "[{label}] line count mismatch:\n--- c ---\n{c_text}\n--- eval ---\n{eval_text}"
     );
-    let tokens = |line: &str| -> (Option<String>, Vec<f64>) {
+    // Every bracketed `marker` segment on the line, inner text.
+    let segments = |payload: &str, marker: &str| -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = payload;
+        while let Some(start) = rest.find(marker) {
+            let inner = &rest[start + marker.len()..];
+            let end = inner.find(']').unwrap_or_else(|| {
+                panic!("[{label}] unterminated `{marker}` segment in `{payload}`")
+            });
+            out.push(inner[..end].to_string());
+            rest = &inner[end + 1..];
+        }
+        out
+    };
+    let tokens = |line: &str| -> (Option<String>, Vec<String>, Vec<f64>) {
         let (name, payload) = match line.split_once(" = ") {
             Some((n, p)) if !line.trim_start().starts_with('[') => {
                 (Some(n.trim().to_string()), p.trim().to_string())
             }
             _ => (None, line.trim().to_string()),
         };
-        let body = match payload.find("data=[") {
-            Some(start) => {
-                let rest = &payload[start + "data=[".len()..];
-                rest[..rest.find(']').unwrap_or(rest.len())].to_string()
-            }
-            None => payload
-                .chars()
-                .filter(|c| *c != '[' && *c != ']' && *c != '(' && *c != ')')
-                .collect(),
+        // Every data segment is tokenized and every shape segment joins
+        // the comparison (PR #792 red-team F3: a second tensor's
+        // divergence, or a shape divergence with equal data, must fail).
+        let shapes = segments(&payload, "shape=[");
+        let bodies: Vec<String> = if payload.contains("data=[") {
+            segments(&payload, "data=[")
+        } else {
+            vec![
+                payload
+                    .chars()
+                    .filter(|c| *c != '[' && *c != ']' && *c != '(' && *c != ')')
+                    .collect(),
+            ]
         };
-        let values = body
-            .split(',')
+        let values = bodies
+            .iter()
+            .flat_map(|body| body.split(','))
             .map(str::trim)
             .filter(|t| !t.is_empty() && *t != "...")
             .map(|t| match t {
                 "true" => 1.0,
                 "false" => 0.0,
-                other => other.parse::<f64>().unwrap_or_else(|e| {
-                    panic!("[{label}] non-numeric token `{other}` in `{line}`: {e}")
-                }),
+                other => {
+                    let v: f64 = other.parse().unwrap_or_else(|e| {
+                        panic!("[{label}] non-numeric token `{other}` in `{line}`: {e}")
+                    });
+                    // Integer-syntax tokens at or above 2^53 cannot be
+                    // compared through f64: distinct exact int64 renderings
+                    // collapse to one f64 (PR #792 red-team F3). Fail loud;
+                    // such a pair needs a width-exact comparison, not this
+                    // interim helper.
+                    if !other.contains('.')
+                        && !other.contains('e')
+                        && v.abs() >= 9007199254740992.0
+                    {
+                        panic!(
+                            "[{label}] exact-int64 token `{other}` at or above 2^53 \
+                             cannot be compared through f64 in `{line}`"
+                        );
+                    }
+                    v
+                }
             })
             .collect();
-        (name, values)
+        (name, shapes, values)
     };
     for (c_line, eval_line) in c_lines.iter().zip(eval_lines.iter()) {
         if c_line == eval_line {
             continue;
         }
-        let (c_name, c_values) = tokens(c_line);
-        let (eval_name, eval_values) = tokens(eval_line);
+        let (c_name, c_shapes, c_values) = tokens(c_line);
+        let (eval_name, eval_shapes, eval_values) = tokens(eval_line);
         assert_eq!(
             c_name, eval_name,
             "[{label}] binding name mismatch:\n  c:    {c_line}\n  eval: {eval_line}"
+        );
+        assert_eq!(
+            c_shapes, eval_shapes,
+            "[{label}] shape mismatch:\n  c:    {c_line}\n  eval: {eval_line}"
         );
         assert_eq!(
             c_values.len(),
@@ -9102,5 +9142,59 @@ fn build_c_call_fresh_result_does_not_over_retain_under_valgrind() {
          }\n\
          out = mk(cast(5, int64))\n",
         &["out = [3, 3]"],
+    );
+}
+
+// ===========================================================================
+// RT792 probes (PR #792 fresh-context red team, adopted): the interim
+// stdout comparator's former blind spots, now locked as loud failures.
+// The red team's originals demonstrated the holes; these assert the
+// tightened behavior.
+// ===========================================================================
+
+/// Distinct stored int64 values above 2^53 collapse to one f64 under a
+/// numeric parse, so the comparator refuses exact-int64 tokens in that
+/// range outright.
+#[test]
+#[should_panic(expected = "cannot be compared through f64")]
+fn rt792_stdout_parity_rejects_int64_tokens_above_2p53() {
+    assert_stdout_value_parity(
+        b"out = tensor(shape=[1], data=[9007199254740992.0])",
+        b"out = tensor(shape=[1], data=[9007199254740993])",
+        "rt792-int64-reject",
+    );
+}
+
+/// A value divergence in a SECOND tensor on the same line is detected:
+/// every `data=[..]` segment is tokenized.
+#[test]
+#[should_panic(expected = "value divergence")]
+fn rt792_stdout_parity_detects_second_tensor_divergence() {
+    assert_stdout_value_parity(
+        b"out = [tensor(shape=[1], data=[1.0]), tensor(shape=[1], data=[2.0])]",
+        b"out = [tensor(shape=[1], data=[1.0]), tensor(shape=[1], data=[999.0])]",
+        "rt792-second-tensor",
+    );
+}
+
+/// A shape divergence with equal data is detected.
+#[test]
+#[should_panic(expected = "shape mismatch")]
+fn rt792_stdout_parity_detects_shape_divergence() {
+    assert_stdout_value_parity(
+        b"out = tensor(shape=[2, 2], data=[1.0, 2.0, 3.0, 4.0])",
+        b"out = tensor(shape=[4], data=[1.0, 2.0, 3.0, 4.0])",
+        "rt792-shape",
+    );
+}
+
+/// Positive control: equal values across multiple segments in the
+/// migrated int-vs-float render forms are accepted, shapes matching.
+#[test]
+fn rt792_stdout_parity_accepts_equal_values_across_segments() {
+    assert_stdout_value_parity(
+        b"out = [tensor(shape=[1], data=[1.0]), tensor(shape=[1], data=[2.0])]",
+        b"out = [tensor(shape=[1], data=[1]), tensor(shape=[1], data=[2])]",
+        "rt792-accept",
     );
 }

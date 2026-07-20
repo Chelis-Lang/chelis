@@ -3124,10 +3124,13 @@ fn render_tensor_element(precision: Prim, stored: f64) -> String {
         Prim::Bool => {
             if stored == 1.0 {
                 format_element(Prim::Bool, ElementRef::Bool(true))
-            } else if stored == 0.0 {
+            } else if stored == 0.0 && !stored.is_sign_negative() {
                 format_element(Prim::Bool, ElementRef::Bool(false))
             } else {
-                // A bool-tagged slot holding neither 0 nor 1: print the bits.
+                // A bool-tagged slot holding neither +0 nor 1 prints the
+                // bits - including -0.0, whose sign bit is stored state a
+                // `false` rendering would launder (PR #792 red-team F6;
+                // reachable from source via `print(neg(bool_tensor))`).
                 faithful_f64()
             }
         }
