@@ -177,8 +177,9 @@ fn forward_pass_without_grad_is_correct_in_eval() {
          }\n\
          out = print(g(to_tensor([0.1, 0.2, 0.3, 0.4])))\n";
     let line = eval_first_line(program).expect("eval should run");
-    assert!(
-        line.contains("data=[300.0]"),
+    // chelis#732 P1 ([05-OBS-4]): the rank-0 result renders bare.
+    assert_eq!(
+        line, "300.0",
         "0.1*100 + 0.2*200 + 0.3*300 + 0.4*400 = 300; got: {line}"
     );
 }

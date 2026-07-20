@@ -556,12 +556,10 @@ out = f(1.0)\n";
 
     let build = chelis_build_c(source, "scalarcap");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("scalarcap.c"));
-    // The C backend prints a rank-0 scalar in its bare scalar form
-    // (`out = 3.5`); the evaluator wraps it as `tensor(shape=[], ...)`.
-    // That display difference is a separate, pre-existing scalar-print
-    // divergence, not part of #378 (which is about the captured binding
-    // reaching the backend at all). Pin the C value exactly and assert the
-    // evaluator agrees on the numeric value.
+    // Both lanes print the scalar root bare since chelis#732 Phase 1's
+    // [05-OBS-4] (the chelis#775 decision): the evaluator's old
+    // `tensor(shape=[], ...)` wrapper was an internal realization artifact
+    // and is no longer an exit form, so the lanes now agree byte-for-byte.
     assert_eq!(
         binding_line(&stdout, "out"),
         "out = 3.5",
@@ -572,7 +570,7 @@ out = f(1.0)\n";
     let eval_out = chelis_eval(source, "scalarcap");
     assert_eq!(
         binding_line(&eval_out, "out"),
-        "out = tensor(shape=[], data=[3.5])",
+        "out = 3.5",
         "evaluator must compute the same scalar-capture value (issue #378)",
     );
 }

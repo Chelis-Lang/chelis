@@ -125,7 +125,7 @@ fn expected_stdout(package_root: &Path, snippet: &str) -> String {
     let mut lines = result.transcript.clone();
     if result.roots.len() == 1 {
         if let Some(root) = result.roots.first() {
-            lines.push(format_execution_value(&root.value));
+            lines.push(root_display(root));
         }
     } else {
         for (index, root) in result.roots.iter().enumerate() {
@@ -133,7 +133,7 @@ fn expected_stdout(package_root: &Path, snippet: &str) -> String {
             lines.push(format!(
                 "{} = {}",
                 display_root_name(&name),
-                format_execution_value(&root.value)
+                root_display(root)
             ));
         }
     }
@@ -153,70 +153,16 @@ fn display_root_name(name: &str) -> String {
     name.strip_prefix("__test_").unwrap_or(name).to_string()
 }
 
-/// Mirror of `chelis-cli`'s `format_execution_value`. Kept in sync with
-/// the CLI's formatter; the Phase G suite locks the `EvaluatedRoot`
-/// values themselves, so the shape parity here is what closes the loop
-/// for the CLI's stdout contract.
-fn format_execution_value(value: &chelis_compiler_api::schema::ExecutionValue) -> String {
-    use chelis_compiler_api::schema::ExecutionValue;
-    match value {
-        ExecutionValue::Tensor { value } => {
-            const PRINT_LIMIT: usize = 32;
-            let visible = value.data.len().min(PRINT_LIMIT);
-            if visible < value.data.len() {
-                format!(
-                    "tensor(shape={:?}, data={:?} + ...)",
-                    value.shape,
-                    &value.data[..visible]
-                )
-            } else {
-                format!("tensor(shape={:?}, data={:?})", value.shape, value.data)
-            }
-        }
-        ExecutionValue::Int64 { value } => value.to_string(),
-        ExecutionValue::Float64 { value } => value.to_string(),
-        ExecutionValue::Bool { value } => value.to_string(),
-        ExecutionValue::String { value } => value.clone(),
-        ExecutionValue::List { value: items } => format!(
-            "[{}]",
-            items
-                .iter()
-                .map(format_execution_value)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        ExecutionValue::Dict { entries } => format!(
-            "dict({})",
-            entries
-                .iter()
-                .map(|entry| format!(
-                    "{}: {}",
-                    format_execution_value(&entry.key),
-                    format_execution_value(&entry.value)
-                ))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        ExecutionValue::Tuple { value: items } => format!(
-            "({})",
-            items
-                .iter()
-                .map(format_execution_value)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        ExecutionValue::Adt { ctor, fields } if fields.is_empty() => ctor.clone(),
-        ExecutionValue::Adt { ctor, fields } => format!(
-            "{}({})",
-            ctor,
-            fields
-                .iter()
-                .map(format_execution_value)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        ExecutionValue::Unit => "()".to_string(),
-    }
+/// Mirror of the CLI's root-display consumption (chelis#732 Phase 1):
+/// each evaluated root carries display text pre-rendered in-process by
+/// the runtime's single [05-OBS-1] renderer, and the CLI formats stdout
+/// from it. The old mirrored `format_execution_value` copy died with the
+/// CLI's - a wire-side re-formatter can no longer reproduce faithful
+/// output because `ExecutionValue` carries no dtype tags.
+fn root_display(root: &chelis_compiler_api::schema::EvaluatedRoot) -> String {
+    root.display
+        .clone()
+        .expect("eval_in_context roots carry in-process display text")
 }
 
 /// Fixture #1: simple def inside a reef package — covers the

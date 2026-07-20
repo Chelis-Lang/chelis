@@ -1415,6 +1415,10 @@ fn eval_compiled(
             Ok(EvaluatedRoot {
                 node_id,
                 name: Some(name),
+                // Render the display text HERE, where the runtime value's
+                // dtype tags still exist; the wire `value` below cannot
+                // carry them (chelis#732 P1, [05-OBS-1]).
+                display: Some(crate::runtime::render_value(&value)),
                 value: runtime_value_to_schema(&value)
                     .map_err(|message| stage_error("eval", message, "eval_error"))?,
             })

@@ -1,6 +1,17 @@
 # Faithful Observation: one dtype-true formatter for every exit, both lanes
 
-**Status:** Design proposal, pre-implementation. Tracking issue: [#732].
+**Status:** Phases 0-1 LANDED. Phase 0 (the round-trip harness and the
+exit census) landed 2026-07-17 (PR #752, tightened by PR #774). Phase 1
+(the formatter, eval adoption, and the eval-side §B2.1 migration) landed
+2026-07-20: `format_element` lives at `chelis-types::observation`, every
+eval exit routes through it, §C1 and the number grammar are FROZEN (B1),
+and the contract is ratified as `spec/05-risc-primitives.md` §8 atoms
+[05-OBS-1..5] (the chelis#775 scalar-root decision is [05-OBS-4]). One
+annexed value-layer exception, surfaced by PR #792's red team: int64
+scalar roots above 2^53 render the f64-collapsed stored value at the
+labeled root ([#684]'s rank-0 realization, repaired by [#729]; the
+exception and its ignored red cell are recorded at spec/05 §8).
+Phases 2-3 remain. Tracking issue: [#732].
 **Owning specs:** `spec/05-risc-primitives.md` (its §8 carries this
 plan's decided contract as provisional atoms [05-OBS-1..3], seeded ahead
 of Phase 1; the per-op tolerance table lands into the same section at
@@ -100,8 +111,14 @@ One function, one output, every exit, both lanes:
 /// THE printed form of one element. Eval calls it directly; the C print
 /// helper is GENERATED from it (§C3). No other formatting path for
 /// tensor/scalar payloads may exist in any lane.
-pub fn format_element(prim: Prim, value: ElementRef<'_>) -> String;
+pub fn format_element(prim: Prim, value: ElementRef) -> String;
 ```
+
+(Landed signature note, Phase 1: `ElementRef` is a `Copy` enum carrying
+the element at its dtype's own width, mirroring the runtime's
+`ScalarBits`; the pre-implementation sketch's lifetime was dropped - no
+borrow is needed for scalar payloads. A `prim`/variant mismatch panics
+loudly, the same dtype/bits invariant `ScalarPayload` enforces.)
 
 Per-dtype rules:
 
@@ -111,7 +128,12 @@ Per-dtype rules:
    string that parses back to exactly the stored f64 / f32 / f16 / bf16
    value. This single rule replaces C's `%.1f`/`%.16g` split and eval's
    f64-width formatting, and is what makes byte-equal lane comparison
-   possible.
+   possible. (Phase 1 width note: eval TENSOR float elements still
+   render at the stored f64 width - the eval tensor store is f64-backed
+   and its precision tag is [#717]-unreliable, so narrowing at render
+   time would launder stored bits, which §C2.1 forbids. Scalar exits
+   render at own width now; own-width tensor digits arrive when [#729]
+   repairs the metadata. Recorded normatively at spec/05 §8.1.)
 3. **The number grammar is Rust `{:?}` (`Debug`) float formatting,
    normatively**: shortest round-trip digits, `inf`/`-inf`/`NaN`
    spellings, lowercase `e` with unpadded exponent (`1e-7`, not `1e-07`),
@@ -120,7 +142,15 @@ Per-dtype rules:
    `100000000000000000000` under `Display`; eval's current output is
    already `{:?}`-shaped, e.g. `9.999999980506448e19`.) The generated C
    normalizes to this grammar (§C3.2) - platform printf variance (`nan`,
-   two-digit exponents) must not leak.
+   two-digit exponents) must not leak. **Pinned at Phase 1**: the
+   decimal/e-notation thresholds are the normative constants
+   `DECIMAL_LOWER_BOUND = 1e-4` / `DECIMAL_UPPER_BOUND = 1e16`
+   (`chelis-types::observation`, rustc-locked by unit tests), decided on
+   the RENDERED magnitude - the value the chosen shortest digits denote
+   - which is rustc's actual `{:?}` behavior at straddling-ulp
+   boundaries (PR #792 red-team F2); the full ratified grammar,
+   including the f16/bf16 shortest-at-width rule and its tie-break, is
+   spec/05 §8.1.
 4. **bool prints `true`/`false`** at every exit, including inside tensor
    `data=[...]`.
 5. **Containers**: tensor rendering stays `tensor(shape=[..],
@@ -130,6 +160,16 @@ Per-dtype rules:
    tensor element rendering at 32 with the marker `, ...` - one rule,
    no exceptions (open question 4 has the rationale and the migration
    note). Full-element fidelity is `to_list`'s and the wire's job.
+   **Scalar roots and rank-0 tensors (decided 2026-07-20, [#775]'s
+   acceptance; ratified as [05-OBS-4])**: a scalar-typed value renders
+   as the BARE scalar at every exit in both lanes, including as a
+   top-level labeled root (`root = 0.1`); a rank-0 tensor renders as
+   its single element, bare - `tensor(shape=[], data=[..])` is not an
+   exit form. Rationale: `print` of a scalar already rendered bare in
+   both lanes and the compiled lane's labeled roots did too, so the
+   bare form is the only choice consistent with §C2.2's intra-lane
+   exit agreement; eval's rank-0 realization of scalar bindings is an
+   interpreter storage artifact and must not leak.
 6. **Diagnostics that embed values** (traps, mismatch messages) use
    `format_element` for the embedded value - a diagnostic must not
    launder what it reports.
@@ -221,9 +261,9 @@ For every dtype and every storable value:
 
 | contract | frozen at end of | may change after only by |
 |---|---|---|
-| §C1 rules + number grammar | Phase 1 | this doc + dtype_semantics.md §C4 + the migration corpus, one change set |
-| §C2 agreement contract | Phase 1 (intra-lane), Phase 2 (cross-lane byte equality) | same protocol |
-| §C3.3 C formatting routine behavior | Phase 2 | this doc; must stay grammar-identical to Rust `Display` |
+| §C1 rules + number grammar | Phase 1 (FROZEN 2026-07-20; ratified as spec/05 §8/§8.1) | this doc + dtype_semantics.md §C4 + the migration corpus, one change set |
+| §C2 agreement contract | Phase 1 (intra-lane; FROZEN for eval 2026-07-20), Phase 2 (cross-lane byte equality) | same protocol |
+| §C3.3 C formatting routine behavior | Phase 2 | this doc; must stay grammar-identical to Rust `{:?}` (§C1.3 - an earlier revision of this row said `Display`, which §C1.3 explicitly rules out) |
 | §C4.2 tolerance table | Phase 3 | spec/05 edit + [#687] corpus, one change set |
 
 ## B2. Invariants that hold across every boundary
@@ -430,7 +470,7 @@ never as tolerance.
 
 | # | question | decided in | recorded where |
 |---|---|---|---|
-| 1 | exact number grammar edge set | DECIDED 2026-07-17 (mechanics; exact constants pinned by P1's tests): `{:?}`'s e-notation thresholds are captured empirically and recorded as NORMATIVE CONSTANTS in §C1.3, so a rustc formatting change breaks our tests loudly instead of silently shifting the grammar the generated C must match. f16/bf16 shortest-digit = the shortest string whose parse-back (strtod to f64, then round to the half width - safe by the same excess-precision argument as [04-NUM-1]'s single-rounding rule) yields the stored bits, verified EXHAUSTIVELY over all 65536 bit patterns per format (a required P1 deliverable - the narrow widths are fully enumerable, so no boundary-case debate survives) | §C1.3 + the formatter's unit tests |
+| 1 | exact number grammar edge set | DECIDED 2026-07-17 (mechanics; exact constants pinned by P1's tests): `{:?}`'s e-notation thresholds are captured empirically and recorded as NORMATIVE CONSTANTS in §C1.3, so a rustc formatting change breaks our tests loudly instead of silently shifting the grammar the generated C must match. f16/bf16 shortest-digit = the shortest string whose parse-back (strtod to f64, then round to the half width - safe by the same excess-precision argument as [04-NUM-1]'s single-rounding rule) yields the stored bits, verified EXHAUSTIVELY over all 65536 bit patterns per format (a required P1 deliverable - the narrow widths are fully enumerable, so no boundary-case debate survives). DELIVERED at P1 (2026-07-20): constants pinned and rustc-locked, both exhaustive half-format tests landed in `chelis-types::observation` | §C1.3 + spec/05 §8.1 + the formatter's unit tests |
 | 2 | precision-escalation loop vs vendored Ryū for the C routine | Phase 2 (loop is the default; revisit only on measured cost) | §C3.3 |
 | 3 | whether the wire schema renders numbers as JSON numbers or strings for int64 once [#729]'s storage lands | with [#729] Phase 1 | schema.rs + both docs' §I1 |
 | 4 | truncation story | DECIDED 2026-07-17: ONE rule at every exit in both lanes - truncate tensor element rendering at 32 with the marker `, ...` (C's existing form). P0's census proved "keep as-is" was incoherent (three stories: eval transcript unlimited, eval root `+ ...`@32, C `, ...`@32). Eval-transcript's unlimited printing is REMOVED in the migration (the one place §B2.1's carve-out changes how MUCH is printed, flagged with §B2.2 bit-level companions); print-based cross-lane comparison beyond 32 never worked (the C lane already capped), and full-element fidelity is `to_list`'s and the wire's job, never print's. The threshold is one documented constant; configurability deferred until a real need | §C1.5 |

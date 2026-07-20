@@ -99,11 +99,20 @@ fn parse_tensor_data_after_prefix(line: &str) -> Option<Vec<f32>> {
 }
 
 fn parse_anonymous_scalar(stdout: &str) -> Option<f32> {
-    let elements = parse_anonymous_tensor_data(stdout)?;
-    if elements.len() != 1 {
-        return None;
+    if let Some(elements) = parse_anonymous_tensor_data(stdout) {
+        if elements.len() != 1 {
+            return None;
+        }
+        return Some(elements[0]);
     }
-    Some(elements[0])
+    // [05-OBS-4] (chelis#732 P1): a scalar/rank-0 root renders bare, so the
+    // anonymous single-root output is the value line itself.
+    stdout
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())?
+        .parse::<f32>()
+        .ok()
 }
 
 // ── eval (runtime evaluator) ─────────────────────────────────────────────────

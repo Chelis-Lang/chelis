@@ -574,6 +574,16 @@ pub struct EvaluatedRoot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub value: ExecutionValue,
+    /// Human-rendered display text for this root, produced by the
+    /// runtime's single [05-OBS-1] renderer while the dtype tags still
+    /// exist (`ExecutionValue` cannot carry them: its tensor payload is an
+    /// untagged `Vec<f64>`). In-process transport only - `#[serde(skip)]`
+    /// keeps the machine-facing `--json` wire byte-identical, and a
+    /// deserialized `EvalResult` carries `None` here. The CLI's
+    /// labeled-root exit consumes this so it shares the transcript exit's
+    /// renderer byte-for-byte (chelis#732 Phase 1).
+    #[serde(skip)]
+    pub display: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

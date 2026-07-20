@@ -8,6 +8,7 @@ pub mod fitness;
 pub mod infer;
 pub mod invariants;
 pub mod linearity;
+pub mod observation;
 pub(crate) mod opacity;
 pub(crate) mod pipe_stage;
 pub mod types;
@@ -27,6 +28,7 @@ pub use infer::{
     infer_program, run_on_grown_stack, set_grow_segment_bytes_for_test,
 };
 pub use linearity::{LinearityInfo, check_linearity, check_linearity_with_context};
+pub use observation::{ElementRef, format_element};
 pub use opacity::{
     LinkedProgramGuard, demangle_ident, install_linked_program_guard, is_linker_format_name,
 };

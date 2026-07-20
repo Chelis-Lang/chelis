@@ -245,20 +245,29 @@ fn cbackend_print_tensor_int64() {
     let eval_out = chelis_eval(source, "print_i64");
     let (build, kernel_c) = chelis_build_c(source, "print_i64");
     let cbuild_out = gcc_compile_and_run(build.path(), &kernel_c, "print_i64");
-    // Ground-truth eval renders int64 tensor elements through the
-    // shared formatter, which prints them with a `.0` suffix.  Pin
+    // Ground-truth eval: since chelis#732 P1, int64 tensor elements print
+    // as integers ([05-OBS-2]) while f64 elements keep the `.0` form. Pin
     // the eval output explicitly so the C-build comparison cannot
     // silently agree on garbage.
     assert_eq!(
         eval_out,
         "src = tensor(shape=[4], data=[100000.0, 200000.0, 300000.0, 400000.0])\n\
          mid = tensor(shape=[4], data=[100000.0, 200000.0, 300000.0, 400000.0])\n\
-         result = tensor(shape=[4], data=[100000.0, 200000.0, 300000.0, 400000.0])",
+         result = tensor(shape=[4], data=[100000, 200000, 300000, 400000])",
         "eval ground truth changed; update fixture"
     );
+    // The compiled lane keeps its pre-contract float-formatted int64
+    // print until the chelis#732 Phase 2 generated printer, so the
+    // decode-correctness comparison is per-line at the VALUE level: the
+    // f64 lines are byte-identical, the int64 line agrees numerically.
     assert_eq!(
-        cbuild_out, eval_out,
-        "chelis build --target c print routine must agree with eval for int64"
+        cbuild_out,
+        "src = tensor(shape=[4], data=[100000.0, 200000.0, 300000.0, 400000.0])\n\
+         mid = tensor(shape=[4], data=[100000.0, 200000.0, 300000.0, 400000.0])\n\
+         result = tensor(shape=[4], data=[100000.0, 200000.0, 300000.0, 400000.0])",
+        "chelis build --target c print routine must decode int64 elements \
+         at the correct stride (byte parity with eval returns at chelis#732 \
+         Phase 2)"
     );
 }
 

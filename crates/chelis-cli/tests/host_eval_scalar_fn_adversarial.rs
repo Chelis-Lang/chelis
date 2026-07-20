@@ -53,9 +53,9 @@ fn host_eval_two_level_nested_zero_arg_i32() {
         "def inner -> i32 = 42\ndef outer -> i32 = inner()\nresult = outer()\n",
     );
 
-    eval_file(&fixture)
-        .success()
-        .stdout(predicate::str::contains("tensor(shape=[], data=[42.0])"));
+    // chelis#732 P1 ([05-OBS-4]/[05-OBS-2]): scalar roots render bare,
+    // integers as integers.
+    eval_file(&fixture).success().stdout("42\n");
 }
 
 /// Three-level zero-arg chain. Each level returns f32 via the bare-def
@@ -72,9 +72,11 @@ fn host_eval_three_level_nested_zero_arg_f32() {
          result = outer()\n",
     );
 
+    // Bare scalar root; the exact digits are the stored f32 value's
+    // rendering (pinned value-level by the observation harness).
     eval_file(&fixture)
         .success()
-        .stdout(predicate::str::contains("tensor(shape=[], data=[3.14"));
+        .stdout(predicate::str::starts_with("3.14"));
 }
 
 /// Zero-arg fn-call used as a subexpression inside a non-trivial app.
@@ -113,9 +115,7 @@ fn host_eval_zero_arg_bool() {
     let fixture = dir.path().join("zero_arg_bool.ch");
     write_file(&fixture, "def go -> bool = true\nresult = go()\n");
 
-    eval_file(&fixture)
-        .success()
-        .stdout(predicate::str::contains("tensor(shape=[], data=[1.0])"));
+    eval_file(&fixture).success().stdout("true\n");
 }
 
 /// Zero-arg fn returning large i64 (above f32 representable-int range).
@@ -129,5 +129,5 @@ fn host_eval_zero_arg_i64_large_value() {
 
     eval_file(&fixture)
         .success()
-        .stdout(predicate::str::contains("data=[9999999999"));
+        .stdout(predicate::str::contains("9999999999"));
 }

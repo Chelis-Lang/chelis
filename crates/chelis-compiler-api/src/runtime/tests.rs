@@ -1721,3 +1721,210 @@ fn scalar_constructor_accepts_matching_dtype_bits_pairs() {
         }
     }
 }
+
+// ===========================================================================
+// chelis#732 Phase 1: render_value's [05-OBS] behavior at the unit level.
+// The end-to-end exits are locked by the CLI observation harness; these pin
+// the renderer's edge policy directly.
+// ===========================================================================
+
+fn tensor_value(precision: Prim, shape: Vec<usize>, data: Vec<f64>) -> RuntimeValue {
+    RuntimeValue::Tensor(RuntimeTensorValue {
+        value: IrTensorValue { shape, data },
+        precision,
+    })
+}
+
+/// Integer/bool tensor elements render per their tag's class
+/// ([05-OBS-2]): integers lose the `.0`, bools print true/false.
+#[test]
+fn render_value_tensor_elements_follow_tag_class() {
+    assert_eq!(
+        render_value(&tensor_value(Prim::Int8, vec![3], vec![127.0, -127.0, 0.0])),
+        "tensor(shape=[3], data=[127, -127, 0])"
+    );
+    assert_eq!(
+        render_value(&tensor_value(Prim::Bool, vec![2], vec![1.0, 0.0])),
+        "tensor(shape=[2], data=[true, false])"
+    );
+    // Float elements render at the stored f64 width (the chelis#717 width
+    // note, spec/05 section 8.1).
+    assert_eq!(
+        render_value(&tensor_value(
+            Prim::F64,
+            vec![2],
+            vec![0.30000000000000004, -0.0]
+        )),
+        "tensor(shape=[2], data=[0.30000000000000004, -0.0])"
+    );
+}
+
+/// Tag-vs-bits disagreements print the BITS (spec/05 section 8.1): an
+/// int64-tagged slot holding 187.5 (the live `mean`-of-int64 example,
+/// chelis#724 territory) renders 187.5, never a truncated 187; a
+/// bool-tagged slot holding 2.0 renders 2.0, never `true`; an
+/// int8-tagged slot holding 400 renders 400.0's bits faithfully rather
+/// than a wrapped/saturated lie.
+#[test]
+fn render_value_prints_bits_when_tag_and_storage_disagree() {
+    assert_eq!(
+        render_value(&tensor_value(Prim::Int64, vec![1], vec![187.5])),
+        "tensor(shape=[1], data=[187.5])"
+    );
+    assert_eq!(
+        render_value(&tensor_value(Prim::Bool, vec![1], vec![2.0])),
+        "tensor(shape=[1], data=[2.0])"
+    );
+    assert_eq!(
+        render_value(&tensor_value(Prim::Int8, vec![1], vec![400.0])),
+        "tensor(shape=[1], data=[400.0])"
+    );
+    // Above the exact i64 range: the stored f64 renders, not a saturated
+    // integer near-miss.
+    assert_eq!(
+        render_value(&tensor_value(
+            Prim::Int64,
+            vec![1],
+            vec![18446744073709551616.0]
+        )),
+        "tensor(shape=[1], data=[1.8446744073709552e19])"
+    );
+}
+
+/// [05-OBS-4]: a rank-0 tensor renders as its single element, bare, at
+/// the renderer level - the wrapper is not an exit form.
+#[test]
+fn render_value_rank_zero_tensor_renders_bare() {
+    assert_eq!(
+        render_value(&tensor_value(Prim::F64, vec![], vec![0.1])),
+        "0.1"
+    );
+    assert_eq!(
+        render_value(&tensor_value(Prim::Int32, vec![], vec![7.0])),
+        "7"
+    );
+    assert_eq!(
+        render_value(&tensor_value(Prim::Bool, vec![], vec![1.0])),
+        "true"
+    );
+}
+
+/// [05-OBS-5]: tensor renders truncate after 32 elements with the
+/// `, ...` marker; a 32-element tensor renders in full.
+#[test]
+fn render_value_truncates_at_32_with_marker() {
+    let data: Vec<f64> = (1..=33).map(f64::from).collect();
+    let rendered = render_value(&tensor_value(Prim::F64, vec![33], data));
+    let visible: Vec<String> = (1..=32).map(|i| format!("{i}.0")).collect();
+    assert_eq!(
+        rendered,
+        format!("tensor(shape=[33], data=[{}, ...])", visible.join(", "))
+    );
+
+    let full: Vec<f64> = (1..=32).map(f64::from).collect();
+    let rendered = render_value(&tensor_value(Prim::F64, vec![32], full));
+    assert!(
+        !rendered.contains("..."),
+        "a 32-element tensor renders in full: {rendered}"
+    );
+}
+
+/// Scalar payloads render at their OWN width ([05-OBS-2]): the f32
+/// scalar prints its shortest-at-f32 digits, not the f64 image.
+#[test]
+fn render_value_scalars_render_at_own_width() {
+    let f32_scalar = RuntimeValue::scalar(Prim::F32, ScalarBits::F32(0.1)).expect("scalar");
+    assert_eq!(render_value(&f32_scalar), "0.1");
+    let f16_scalar = RuntimeValue::scalar(Prim::F16, ScalarBits::F16(half::f16::from_f32(2048.0)))
+        .expect("scalar");
+    assert_eq!(render_value(&f16_scalar), "2048.0");
+    let i64_scalar =
+        RuntimeValue::scalar(Prim::Int64, ScalarBits::I64(9007199254740993)).expect("scalar");
+    assert_eq!(render_value(&i64_scalar), "9007199254740993");
+    let f64_scalar = RuntimeValue::scalar(Prim::F64, ScalarBits::F64(f64::MAX)).expect("scalar");
+    assert_eq!(render_value(&f64_scalar), "1.7976931348623157e308");
+}
+
+// ===========================================================================
+// RT792 probes (PR #792 fresh-context red team, adopted): the tag-vs-bits
+// arithmetic edges of render_tensor_element, locked at the boundaries.
+// ===========================================================================
+
+/// int_or_bits boundary sweep at +/-2^63 (red-team authored): stored
+/// exactly -2^63 sits inside the exact-i64 guard and prints the integer;
+/// stored exactly +2^63 (where f64 has no i64 twin) is outside and prints
+/// the faithful f64 bits, never a saturated integer; the largest f64
+/// below 2^63 prints exactly. Non-integral / non-finite stored values
+/// under an integer tag print the f64 bits.
+#[test]
+fn rt792_render_value_int64_tag_pow63_boundaries() {
+    assert_eq!(
+        render_value(&tensor_value(
+            Prim::Int64,
+            vec![1],
+            vec![-9223372036854775808.0]
+        )),
+        "tensor(shape=[1], data=[-9223372036854775808])"
+    );
+    assert_eq!(
+        render_value(&tensor_value(
+            Prim::Int64,
+            vec![1],
+            vec![9223372036854775808.0]
+        )),
+        "tensor(shape=[1], data=[9.223372036854776e18])"
+    );
+    assert_eq!(
+        render_value(&tensor_value(
+            Prim::Int64,
+            vec![1],
+            vec![9223372036854774784.0]
+        )),
+        "tensor(shape=[1], data=[9223372036854774784])"
+    );
+    assert_eq!(
+        render_value(&tensor_value(Prim::Int64, vec![1], vec![187.5])),
+        "tensor(shape=[1], data=[187.5])"
+    );
+    assert_eq!(
+        render_value(&tensor_value(Prim::Int64, vec![1], vec![f64::INFINITY])),
+        "tensor(shape=[1], data=[inf])"
+    );
+    assert_eq!(
+        render_value(&tensor_value(Prim::Int64, vec![1], vec![f64::NAN])),
+        "tensor(shape=[1], data=[NaN])"
+    );
+}
+
+/// A bool-tagged slot storing -0.0 prints the BITS (`-0.0`), never
+/// `false`: the sign bit is stored state a boolean rendering would
+/// launder, and the slot is source-reachable via
+/// `print(neg(to_tensor([false, true])))`. Red-team finding F6, fixed;
+/// this is the tightened lock (the red team's original test pinned the
+/// laundering behavior as evidence). A bool-tagged 2.0 / 0.5 prints the
+/// bits per the tag-vs-bits rule; +0.0 stays `false`; an int-tagged -0.0
+/// prints `0` (integers have no signed zero - the sign bit there is an
+/// f64-backing-store artifact, not integer state).
+#[test]
+fn rt792_render_value_bool_tag_negative_zero_prints_bits() {
+    assert_eq!(
+        render_value(&tensor_value(Prim::Bool, vec![1], vec![-0.0])),
+        "tensor(shape=[1], data=[-0.0])"
+    );
+    assert_eq!(
+        render_value(&tensor_value(Prim::Bool, vec![1], vec![0.0])),
+        "tensor(shape=[1], data=[false])"
+    );
+    assert_eq!(
+        render_value(&tensor_value(Prim::Bool, vec![1], vec![2.0])),
+        "tensor(shape=[1], data=[2.0])"
+    );
+    assert_eq!(
+        render_value(&tensor_value(Prim::Bool, vec![1], vec![0.5])),
+        "tensor(shape=[1], data=[0.5])"
+    );
+    assert_eq!(
+        render_value(&tensor_value(Prim::Int32, vec![1], vec![-0.0])),
+        "tensor(shape=[1], data=[0])"
+    );
+}

@@ -23,15 +23,24 @@ fn run_json_check(path: &Path) -> Value {
     serde_json::from_slice(&output.stdout).expect("check output should be json")
 }
 
+/// chelis#732 P1 migration ([05-OBS-4], the chelis#775 decision): a
+/// rank-0 tensor renders as its bare element at every exit, so
+/// `scalar_to_tensor` output is observationally the scalar. The
+/// rank-0-vs-scalar distinction is a TYPE-level fact (visible to
+/// `chelis check` and `shape`), not an observation-channel one - the
+/// pre-migration assertion that eval "distinguishes" rank-0 tensors by
+/// printing the `tensor(shape=[])` wrapper locked exactly the leak the
+/// atom removes.
 #[test]
-fn eval_distinguishes_rank_zero_tensors_from_host_scalars() {
+fn eval_renders_rank_zero_tensors_bare() {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["eval", "scalar_to_tensor(cast(3, int64))"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("tensor(shape=[]"));
+        .stdout(predicate::str::contains("3"))
+        .stdout(predicate::str::contains("tensor(shape=[]").not());
 }
 
 #[test]

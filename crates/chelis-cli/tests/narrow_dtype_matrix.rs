@@ -174,16 +174,20 @@ fn build_target(program: &str, name: &str, target: &str) -> (bool, String, Strin
 fn eval_scalar_f16_rounds_per_op() {
     assert_eq!(
         eval_expr("add(cast(2048.0, f16), cast(1.0, f16))").unwrap(),
-        "2048"
+        // chelis#732 P1 migration: own-width Debug-grammar f16 scalar.
+        "2048.0"
     );
     assert_eq!(
         eval_expr("add(add(cast(2048.0, f16), cast(1.0, f16)), cast(1.0, f16))").unwrap(),
-        "2048",
+        "2048.0",
         "sequential f16 rounding: each add must round before the next"
     );
     assert_eq!(
+        // chelis#732 P1 migration: shortest digits AT F16 WIDTH replace the
+        // f64-image digits (0.0099945068359375); parse-back at f16 width
+        // yields the same stored bits (the exhaustive observation lock).
         eval_expr("mul(cast(0.1, f16), cast(0.1, f16))").unwrap(),
-        "0.0099945068359375",
+        "0.009995",
         "correctly rounded f16 product of f16(0.1) with itself"
     );
     assert_eq!(
@@ -191,7 +195,7 @@ fn eval_scalar_f16_rounds_per_op() {
         "inf",
         "f16 overflow must saturate to infinity, not keep a wider value"
     );
-    assert_eq!(eval_expr("cast(2049.0, f16)").unwrap(), "2048");
+    assert_eq!(eval_expr("cast(2049.0, f16)").unwrap(), "2048.0");
 }
 
 /// bf16 sibling: mantissa is 8 bits, first non-representable integer is 257.
@@ -199,13 +203,14 @@ fn eval_scalar_f16_rounds_per_op() {
 fn eval_scalar_bf16_rounds_per_op() {
     assert_eq!(
         eval_expr("add(cast(256.0, bf16), cast(1.0, bf16))").unwrap(),
-        "256"
+        // chelis#732 P1 migration: own-width Debug-grammar bf16 scalar.
+        "256.0"
     );
     assert_eq!(
         eval_expr("add(cast(0.5, bf16), cast(0.25, bf16))").unwrap(),
         "0.75"
     );
-    assert_eq!(eval_expr("cast(257.0, bf16)").unwrap(), "256");
+    assert_eq!(eval_expr("cast(257.0, bf16)").unwrap(), "256.0");
 }
 
 /// The remaining f16/bf16 scalar op surface, distilled from the probe

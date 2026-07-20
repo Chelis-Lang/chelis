@@ -223,6 +223,40 @@ fn binding_line<'a>(stdout: &'a str, name: &str) -> &'a str {
 /// label (`tensor(...)`), while the C backend always labels it
 /// (`out = tensor(...)`); both render the value identically. This helper
 /// normalizes that asymmetry so eval-vs-C parity compares the values.
+/// Integer decode of a printed tensor payload for cross-lane VALUE
+/// comparison (chelis#732 P1): eval renders int64 tensor elements as
+/// integers ([05-OBS-2]) while the compiled lane keeps its float-formatted
+/// pre-contract form until Phase 2, so byte comparison of these lines is
+/// per-lane and the cross-lane assertion decodes both.
+fn tensor_ints(stdout: &str, name: &str) -> Vec<i64> {
+    let payload = tensor_value(stdout, name);
+    let start = payload.find("data=[").map(|i| i + "data=[".len());
+    let (Some(start), Some(end)) = (start, payload.rfind(']')) else {
+        panic!("no data payload in `{payload}`");
+    };
+    payload[start..end]
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let v: f64 = s.parse().unwrap_or_else(|e| panic!("`{s}`: {e}"));
+            assert!(
+                v.fract() == 0.0,
+                "non-integral element `{s}` in `{payload}`"
+            );
+            // Above 2^53 the f64 parse collapses distinct int64s (the
+            // PR #792 red-team F3 class); this helper's rows are small
+            // indices/quotients, so refuse loudly rather than compare.
+            assert!(
+                v.abs() < 9007199254740992.0,
+                "element `{s}` at or above 2^53 cannot be decoded through \
+                 f64 in `{payload}`"
+            );
+            v as i64
+        })
+        .collect()
+}
+
 fn tensor_value<'a>(stdout: &'a str, name: &str) -> &'a str {
     let labeled = format!("{name} = ");
     stdout
@@ -270,9 +304,9 @@ out = d(cast(to_tensor([7, -7]), int64), cast(to_tensor([2, 2]), int64))\n";
 
     let eval_out = chelis_eval_ok(source, "inttruncdiv");
     assert_eq!(
-        tensor_value(&stdout, "out"),
-        tensor_value(&eval_out, "out"),
-        "eval and C backend must agree byte-for-byte on integer trunc_div",
+        tensor_ints(&stdout, "out"),
+        tensor_ints(&eval_out, "out"),
+        "eval and C backend must agree on the VALUES of integer trunc_div (values; byte parity returns at chelis#732 Phase 2)",
     );
 }
 
@@ -296,9 +330,9 @@ out = d(cast(to_tensor([7, -7]), int64), cast(to_tensor([2, 2]), int64))\n";
 
     let eval_out = chelis_eval_ok(source, "intfloordiv");
     assert_eq!(
-        tensor_value(&stdout, "out"),
-        tensor_value(&eval_out, "out"),
-        "eval and C backend must agree byte-for-byte on integer floor_div",
+        tensor_ints(&stdout, "out"),
+        tensor_ints(&eval_out, "out"),
+        "eval and C backend must agree on the VALUES of integer floor_div (values; byte parity returns at chelis#732 Phase 2)",
     );
 }
 
@@ -661,9 +695,9 @@ out = am(to_tensor([[1.0, 9.0, 3.0], [7.0, 5.0, 6.0]]))\n";
 
     let eval_out = chelis_eval_ok(source, "argmax");
     assert_eq!(
-        tensor_value(&stdout, "out"),
-        tensor_value(&eval_out, "out"),
-        "eval and C backend must agree on argmax int64 indices (#347)",
+        tensor_ints(&stdout, "out"),
+        tensor_ints(&eval_out, "out"),
+        "eval and C backend must agree on the VALUES of argmax int64 indices (#347) (values; byte parity returns at chelis#732 Phase 2)",
     );
 }
 
@@ -687,9 +721,9 @@ out = am(to_tensor([[1.0, 9.0, 3.0], [7.0, 5.0, 6.0]]))\n";
 
     let eval_out = chelis_eval_ok(source, "argmin");
     assert_eq!(
-        tensor_value(&stdout, "out"),
-        tensor_value(&eval_out, "out"),
-        "eval and C backend must agree on argmin int64 indices (#347)",
+        tensor_ints(&stdout, "out"),
+        tensor_ints(&eval_out, "out"),
+        "eval and C backend must agree on the VALUES of argmin int64 indices (#347) (values; byte parity returns at chelis#732 Phase 2)",
     );
 }
 

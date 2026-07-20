@@ -16,6 +16,11 @@ mod tests;
 mod transforms;
 
 pub(crate) use host_ops::collect_adt_ctor_fields;
+// The [05-OBS-1] single renderer: compiler.rs uses it to pre-render each
+// evaluated root's display text while the dtype tags still exist (the wire
+// schema's `ExecutionValue` does not carry them), so the CLI's labeled-root
+// exit shares the transcript exit's renderer byte-for-byte (chelis#732 P1).
+pub(crate) use host_ops::render_value;
 // Decode-boundary invariant revalidation surface (RFC D-DECODE). The
 // `crate::decode` chokepoint imports these as `crate::runtime::<name>`.
 pub(crate) use invariant::{

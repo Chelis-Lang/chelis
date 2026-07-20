@@ -5,10 +5,13 @@
 //!
 //! For every dtype and every storable value, the text a lane emits at any
 //! exit (`print`, `to_list`, diagnostics, wire rendering) must parse back
-//! to exactly the stored bits AT THE DTYPE'S OWN WIDTH. Phase 0 asserts the
-//! invariant at the VALUE level only; the number grammar (`750` vs `750.0`,
-//! e-notation form, truncation markers) freezes later, at Phase 1 (§C1.3),
-//! so these tests stay valid across the §B2.1 expectations migration.
+//! to exactly the stored bits AT THE DTYPE'S OWN WIDTH. Phase 0 asserted
+//! the invariant at the VALUE level only; chelis#732 Phase 1 froze the
+//! number grammar (§C1.3, ratified as spec/05 §8.1) and adopted it at
+//! every EVAL exit - the value-level assertions here survived that §B2.1
+//! migration unchanged, which is the migration's proof that only rendering
+//! moved. The C lane still renders through its pre-contract paths until
+//! Phase 2.
 //!
 //! Two assertion tiers, chosen so that VALUE bugs (chelis#684, #714, #717 -
 //! all [#729] territory per §I1) never redden a cell here:
@@ -36,9 +39,10 @@
 //! | C print of f16/bf16 tensors (reads 2-byte buffers as f32) | chelis#716 |
 //! | C `to_list` of f16/bf16 tensors (runtime abort) | chelis#716 |
 //! | C print of int64 tensors above 2^53 (renders through double) | chelis#723 |
-//! | bool tensor `print` (1.0/0.0) vs `to_list` (true/false), both lanes | chelis#726 observation half |
+//! | bool tensor `print` (1.0/0.0) vs `to_list` (true/false), C lane | chelis#726 observation half (eval half went green at #732 Phase 1) |
 //! | C print format selection (`%.1f` collapses tiny values, `%.16g` starves 17-digit f64) | chelis#748 (§B2.5 discovery) |
 //! | C nested-in-list tensor renderer (int64 via f64, 10-element silent truncation) | chelis#749 (§B2.5 discovery) |
+//! | eval int64 SCALAR ROOT above 2^53 (rank-0 f64 realization collapses the value before the renderer) | chelis#684 ([#729] value layer; PR #792 red-team F1) |
 //!
 //! Everything else is green by contract; a new red here is a new
 //! faithful-observation bug (file it, per §B2.5).
@@ -801,12 +805,23 @@ fn c_lane_rows(r: &FRow) -> bool {
 /// VALUE/metadata bug, [#729]'s per §I1, so these are exclusions with a
 /// probe comment on [#729], not red rendering cells. Only f32-exact f64
 /// values survive the tag; the print exit is asserted on EVERY row.
+///
+/// `f64-2p53` joined the list at chelis#732 Phase 1: 2^53 IS f32-exact, so
+/// the narrowed VALUE survives the tag, but the Phase 1 own-width scalar
+/// renderer now prints the to_list element AT ITS (narrowed) F32 width -
+/// and the shortest f32 string for 2^53 does not parse back to the same
+/// f64. The row's earlier green was rendering-accidental: the pre-contract
+/// f64-width renderer masked the chelis#717 narrowing for exactly this
+/// value class. Faithful rendering makes the value bug visible instead of
+/// laundered (faithful_observation.md, non-goals) - the cell returns when
+/// [#729] repairs the to_list value path.
 const EVAL_F64_LIST_EXCLUDED: &[&str] = &[
     "f64-max",
     "f64-min-subnormal",
     "f64-min-normal",
     "f64-tenth",
     "f64-17-digit",
+    "f64-2p53",
     "f64-2p53-plus-2",
     "f64-audit-e19",
 ];
@@ -1017,15 +1032,11 @@ fn eval_scalar_exits_round_trip() {
 
 /// The scalar print-transcript render of a single `shown = print(expr)`
 /// program. The print root itself renders as `()` (print returns unit) and
-/// is dropped. Scalar VALUE roots are deliberately not driven here: eval
-/// realizes them to rank-0 f64 tensors before rendering (`root = tensor(
-/// shape=[], data=[0.1])`, the [#684]/[#687] noted behavior) while the
-/// compiled lane — now that chelis#750 emits the root rather than dropping
-/// it — renders the same binding as a bare scalar (`root = 0.1`). The two
-/// lanes therefore still disagree on a scalar value root's SHAPE, so there
-/// is no shared bare-scalar root render to hold to §C2.1; the rank-0
-/// realization gap is [#684]/[#687] territory, tracked separately from the
-/// chelis#750 emission fix. The census records both.
+/// is dropped. Scalar VALUE roots - deliberately undriven at Phase 0 while
+/// the canonical scalar-root rendering was undecided (chelis#775) - are
+/// driven since chelis#732 Phase 1 by `eval_scalar_value_roots_render_bare`
+/// below: [05-OBS-4] makes the bare scalar canonical at every exit, so the
+/// eval-internal rank-0 realization no longer leaks into root renders.
 fn scalar_render_lines(stdout: &str) -> Vec<String> {
     let lines: Vec<String> = stdout
         .lines()
@@ -1039,6 +1050,223 @@ fn scalar_render_lines(stdout: &str) -> Vec<String> {
         "expected exactly the scalar print transcript, got:\n{stdout}"
     );
     lines
+}
+
+/// RED (chelis#684, [#729] value layer; surfaced by PR #792's red team,
+/// F1): an int64 SCALAR ROOT above 2^53 loses exactness at the labeled
+/// root while print and to_string of the same def render it exactly -
+/// the interpreter's rank-0 f64 realization collapses the value BEFORE
+/// the renderer sees it, so this is a stored-value defect upstream of the
+/// [05-OBS] rendering contract, not a formatter bug. The exception is
+/// annexed in spec/05 §8's [05-OBS-1]/[05-OBS-4] status text; the cell
+/// goes green (by un-ignoring, §B2.3) when [#729] repairs scalar-root
+/// storage. Rendering must NOT paper over it: the root faithfully shows
+/// the collapsed stored value.
+#[test]
+#[ignore = "chelis#684 ([#729] value layer): the rank-0 f64 realization collapses int64 \
+            scalar roots above 2^53 before the renderer sees them; print/to_string are \
+            exact, the labeled root is not. Un-ignore when [#729] repairs scalar-root \
+            storage. Run with \
+            `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
+fn eval_int64_scalar_root_above_2p53_renders_exact() {
+    let program = "module M.Main\n\
+         def run() -> int64 = cast(9007199254740993, int64)\n\
+         shown = print(run())\n\
+         sroot = run()\n";
+    let out = eval_stdout(program).expect("eval");
+    // Green half (control): the print transcript is exact at own width.
+    let transcript = out
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.ends_with("()") && !l.starts_with("sroot = "))
+        .unwrap_or_else(|| panic!("no print transcript in:\n{out}"));
+    assert_eq!(transcript, "9007199254740993", "print exit must stay exact");
+    // Red half: the labeled root must carry the same exact value. Today it
+    // renders the f64-collapsed 9007199254740992 (chelis#684).
+    let root = out
+        .lines()
+        .find(|l| l.starts_with("sroot = "))
+        .unwrap_or_else(|| panic!("no sroot line in:\n{out}"));
+    assert_eq!(
+        root, "sroot = 9007199254740993",
+        "the labeled root must carry the exact stored int64; [05-OBS-1] \
+         intra-lane exit agreement is broken by the rank-0 realization"
+    );
+}
+
+/// [05-OBS-4] (the chelis#775 decision, eval half): a scalar-typed
+/// top-level root renders as the BARE scalar - byte-identical to the print
+/// transcript of the same value (intra-lane exit agreement, §C2.1/2) - and
+/// the rank-0 `tensor(shape=[], data=[..])` wrapper appears at no exit.
+/// Values are chosen exactly representable at their dtype so the [#684]
+/// storage collapse (a value bug, not a rendering one - its above-2^53
+/// int64 face is the ignored red cell directly above) cannot blur the
+/// row; the C lane's conformance for the same repro is locked by
+/// `c_def_call_scalar_root_emitted_issue_750` below.
+#[test]
+fn eval_scalar_value_roots_render_bare() {
+    let rows: &[(&str, &str, &str)] = &[
+        ("f64", "cast(0.1, f64)", "0.1"),
+        ("f32", "0.5", "0.5"),
+        ("int64", "cast(750, int64)", "750"),
+        ("int32", "7", "7"),
+        ("bool", "and(true, true)", "true"),
+    ];
+    for (ret, expr, expected) in rows {
+        let program = format!(
+            "module M.Main\n\
+             def run() -> {ret} = {expr}\n\
+             shown = print(run())\n\
+             root = run()\n"
+        );
+        let out = eval_stdout(&program).expect("eval");
+        assert!(
+            !out.contains("tensor(shape="),
+            "[eval scalar root {expr}] the rank-0 tensor wrapper is not an \
+             exit form ([05-OBS-4]), got:\n{out}"
+        );
+        let root_line = out
+            .lines()
+            .find(|l| l.starts_with("root = "))
+            .unwrap_or_else(|| panic!("[eval scalar root {expr}] no root line in:\n{out}"));
+        assert_eq!(
+            root_line,
+            format!("root = {expected}"),
+            "[eval scalar root {expr}] bare scalar root render"
+        );
+        // Intra-lane exit agreement: the print transcript of the same
+        // value is byte-identical to the root's payload.
+        let transcript = out
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.ends_with("()") && !l.starts_with("root = "))
+            .unwrap_or_else(|| panic!("[eval scalar root {expr}] no transcript in:\n{out}"));
+        assert_eq!(
+            transcript, *expected,
+            "[eval scalar root {expr}] print transcript and root payload \
+             must agree within the lane"
+        );
+    }
+}
+
+// ===========================================================================
+// GREEN - chelis#732 Phase 1: the frozen eval grammar (§C1.3 / spec/05 §8.1)
+//
+// Exact-string locks, deliberately scoped to surfaces the grammar freeze
+// makes permanent: integer/bool tensor elements, f64 digits, own-width
+// scalars, and the truncation form. Narrow-float TENSOR element digits are
+// NOT locked here: eval renders those at the stored f64 width until [#729]
+// repairs the chelis#717 precision metadata, and locking the interim
+// digits would turn that value-layer fix into a formatting break.
+// ===========================================================================
+
+#[test]
+fn eval_exit_grammar_locks() {
+    let cases: &[(&str, &str)] = &[
+        // Integers print as integers in tensor data ([05-OBS-2]).
+        (
+            "print(to_tensor([cast(127, int8), cast(-127, int8), cast(0, int8)]))",
+            "tensor(shape=[3], data=[127, -127, 0])",
+        ),
+        (
+            "print(to_tensor([cast(9007199254740992, int64)]))",
+            "tensor(shape=[1], data=[9007199254740992])",
+        ),
+        // bool tensor data prints true/false (chelis#726's eval half).
+        (
+            "print(to_tensor([true, false]))",
+            "tensor(shape=[2], data=[true, false])",
+        ),
+        // f64 scalars: shortest round-trip digits, Debug grammar.
+        (
+            "print(cast(0.30000000000000004, f64))",
+            "0.30000000000000004",
+        ),
+        (
+            "print(cast(9.999999980506448e19, f64))",
+            "9.999999980506448e19",
+        ),
+        ("print(cast(-0.0, f64))", "-0.0"),
+        ("print(div(cast(1.0, f64), cast(0.0, f64)))", "inf"),
+        ("print(div(cast(-1.0, f64), cast(0.0, f64)))", "-inf"),
+        ("print(div(cast(0.0, f64), cast(0.0, f64)))", "NaN"),
+        // f32 scalar at OWN width: the f64-image digits are gone.
+        ("print(0.1)", "0.1"),
+        // f16 scalar: integral decimal keeps one fractional digit.
+        ("print(cast(2048.0, f16))", "2048.0"),
+    ];
+    for (expr, expected) in cases {
+        let out = eval_stdout(&format!("module M.Main\nshown = {expr}\n")).expect("eval");
+        let line = out
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.ends_with("()"))
+            .unwrap_or_else(|| panic!("[grammar {expr}] no render in:\n{out}"));
+        assert_eq!(line, *expected, "[grammar {expr}]");
+    }
+}
+
+/// [05-OBS-5]: every eval exit truncates tensor element rendering after 32
+/// elements with the `, ...` marker (the compiled lane's existing form).
+/// Locks BOTH eval renders: the transcript (unlimited before chelis#732
+/// Phase 1 - the one place the §B2.1 migration changed how MUCH is
+/// printed) and the labeled root (whose old marker was `+ ...`). The
+/// elements are integers 1..=33 held at the bit level by construction, so
+/// the truncation change provably altered rendering only (§B2.2).
+#[test]
+fn eval_tensor_renders_truncate_at_32_with_marker() {
+    let elems: Vec<String> = (1..=33).map(|i| format!("{i}.0")).collect();
+    let program = format!(
+        "module M.Main\n\
+         def mk() -> tensor[33, f32] = to_tensor([{}])\n\
+         shown = print(mk())\n\
+         troot = mk()\n",
+        elems.join(", ")
+    );
+    let out = eval_stdout(&program).expect("eval");
+    let visible: Vec<String> = (1..=32).map(|i| format!("{i}.0")).collect();
+    let expected = format!("tensor(shape=[33], data=[{}, ...])", visible.join(", "));
+    let tlines = tensor_lines(&out);
+    assert_eq!(
+        tlines.len(),
+        2,
+        "expected the transcript and root renders:\n{out}"
+    );
+    assert_eq!(tlines[0], expected, "transcript truncation form");
+    assert_eq!(
+        tlines[1],
+        format!("troot = {expected}"),
+        "labeled-root truncation form"
+    );
+    // Bit-level companion: the full 33 elements stay reachable through
+    // to_list (full-element fidelity is to_list's job, [05-OBS-5]).
+    let list_program = format!(
+        "module M.Main\n\
+         def mk() -> tensor[33, f32] = to_tensor([{}])\n\
+         lroot = to_list(mk())\n",
+        elems.join(", ")
+    );
+    let out = eval_stdout(&list_program).expect("eval");
+    let lline = list_lines(&out)
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("no to_list render in:\n{out}"))
+        .to_string();
+    let listed = list_payload_elems(&lline);
+    assert_eq!(
+        listed.len(),
+        33,
+        "to_list must carry every element: {lline}"
+    );
+    for (i, text) in listed.iter().enumerate() {
+        let got =
+            text_bits_at(text, Width::F32).unwrap_or_else(|e| panic!("to_list element {i}: {e}"));
+        assert_eq!(
+            got,
+            value_bits_at((i + 1) as f64, Width::F32),
+            "to_list element {i} drifted: {text}"
+        );
+    }
 }
 
 // ===========================================================================
@@ -1233,9 +1461,14 @@ fn c_scalar_exits_round_trip() {
 // ===========================================================================
 
 /// chelis#750 (tensor): the issue's exact int8 repro. The def-call value
-/// root `troot = mk()` was silently dropped by the compiled lane; it is now
-/// emitted with the exact stored values (127 / -127 / 0), and its labeled
-/// line is byte-identical to eval's.
+/// root `troot = mk()` was silently dropped by the compiled lane; it is
+/// now emitted with the exact stored values (127 / -127 / 0). Each lane's
+/// exact line is pinned: eval renders integers as integers per [05-OBS-2]
+/// (chelis#732 Phase 1's §B2.1 migration moved this expectation), while
+/// the compiled lane still prints the pre-contract `127.0` form until its
+/// Phase 2 migration - so this lock asserts VALUE-level cross-lane
+/// agreement plus line-count parity, and the byte-identical assertion
+/// returns with the Phase 2 generated printer (§C2.3).
 #[test]
 fn c_def_call_tensor_root_matches_eval_issue_750() {
     if !c_toolchain_available() {
@@ -1250,14 +1483,20 @@ fn c_def_call_tensor_root_matches_eval_issue_750() {
     let eval_out = eval_stdout(program).expect("eval");
     let c_out = c_stdout(program, "issue750_tensor").expect("C lane");
 
-    let expected = "troot = tensor(shape=[3], data=[127.0, -127.0, 0.0])";
+    let expected_c = "troot = tensor(shape=[3], data=[127.0, -127.0, 0.0])";
     assert!(
-        c_out.lines().any(|l| l == expected),
+        c_out.lines().any(|l| l == expected_c),
         "chelis#750: the compiled lane must emit the def-call tensor root \
-         `{expected}`, got:\n{c_out}"
+         `{expected_c}`, got:\n{c_out}"
     );
-    // The `troot` render is byte-identical across lanes and both lanes emit
-    // the same number of lines (no silent drop).
+    let expected_eval = "troot = tensor(shape=[3], data=[127, -127, 0])";
+    assert!(
+        eval_out.lines().any(|l| l == expected_eval),
+        "chelis#750/[05-OBS-2]: eval must emit the def-call tensor root \
+         `{expected_eval}`, got:\n{eval_out}"
+    );
+    // Cross-lane agreement at the value level (byte equality is Phase 2's
+    // exit): both troot renders decode to the same stored integers.
     let eval_troot = eval_out
         .lines()
         .find(|l| l.starts_with("troot = "))
@@ -1266,9 +1505,16 @@ fn c_def_call_tensor_root_matches_eval_issue_750() {
         .lines()
         .find(|l| l.starts_with("troot = "))
         .expect("c troot line");
+    let decode = |line: &str| -> Vec<i64> {
+        tensor_elems(line)
+            .iter()
+            .map(|text| text_int_lenient(text).expect("troot element"))
+            .collect()
+    };
     assert_eq!(
-        eval_troot, c_troot,
-        "chelis#750: the troot render diverges between lanes:\n eval: {eval_troot}\n c:    {c_troot}"
+        decode(eval_troot),
+        decode(c_troot),
+        "chelis#750: the troot values diverge between lanes:\n eval: {eval_troot}\n c:    {c_troot}"
     );
     assert_eq!(
         eval_out.lines().count(),
@@ -1277,14 +1523,16 @@ fn c_def_call_tensor_root_matches_eval_issue_750() {
     );
 }
 
-/// chelis#750 (scalar): the issue's exact f64 repro. The def-call value
-/// root `root = run()` was silently dropped by the compiled lane; it is now
-/// emitted as `root = 0.1`, byte-identical to a direct-construction scalar
-/// root of the same value (the acceptance target). Eval realizes the same
-/// binding to a rank-0 f64 tensor (`root = tensor(shape=[], data=[0.1])`),
-/// the [#684]/[#687] rank-0 realization gap tracked separately from this
-/// emission fix — so the lanes agree on VALUE and line COUNT but not on the
-/// scalar root's SHAPE.
+/// chelis#750 (scalar) + chelis#775 (eval half): the issues' exact f64
+/// repro. The def-call value root `root = run()` was silently dropped by
+/// the compiled lane (chelis#750, fixed by PR #774); eval then rendered its
+/// rank-0 realization (`root = tensor(shape=[], data=[0.1])`) while the C
+/// lane printed the bare scalar - the chelis#775 shape divergence. The
+/// [05-OBS-4] decision (chelis#732 Phase 1) makes the bare scalar
+/// canonical: a scalar-typed root renders exactly as `print` of the same
+/// value would, and the rank-0 wrapper is not an exit form. This is the
+/// cross-lane exact lock chelis#775 asked for: both lanes emit
+/// `root = 0.1`, byte-identical, with full line-count parity.
 #[test]
 fn c_def_call_scalar_root_emitted_issue_750() {
     if !c_toolchain_available() {
@@ -1305,12 +1553,25 @@ fn c_def_call_scalar_root_emitted_issue_750() {
         "chelis#750: the compiled lane must emit the def-call scalar root \
          `root = 0.1`, got:\n{c_out}"
     );
-    // Eval realizes the scalar root as a rank-0 tensor ([#684]/[#687]).
+    // [05-OBS-4]: eval renders the same scalar root bare - the rank-0
+    // realization must not leak into the observation channel (chelis#775).
     assert!(
-        eval_out
-            .lines()
-            .any(|l| l == "root = tensor(shape=[], data=[0.1])"),
-        "chelis#750: eval realizes the scalar root as a rank-0 tensor, got:\n{eval_out}"
+        eval_out.lines().any(|l| l == "root = 0.1"),
+        "chelis#775/[05-OBS-4]: eval must render the scalar root bare as \
+         `root = 0.1`, got:\n{eval_out}"
+    );
+    // The root render is byte-identical across lanes.
+    let eval_root = eval_out
+        .lines()
+        .find(|l| l.starts_with("root = "))
+        .expect("eval root line");
+    let c_root = c_out
+        .lines()
+        .find(|l| l.starts_with("root = "))
+        .expect("c root line");
+    assert_eq!(
+        eval_root, c_root,
+        "chelis#775: the scalar root render diverges between lanes:\n eval: {eval_root}\n c:    {c_root}"
     );
     // The lanes still agree on line count (no silent drop).
     assert_eq!(
@@ -1514,28 +1775,46 @@ def make(x: f32) -> Probability = Probability { value: x }
 // ===========================================================================
 
 /// §C1.4/§C1.5: one bool tensor must read identically from print and
-/// to_list. Observed today in BOTH lanes: print renders `data=[1.0, 0.0]`
-/// while to_list renders `[true, false]` (chelis#726's observation half;
-/// eval side lands with [#732] Phase 1, C side Phase 2).
+/// to_list. The EVAL half of chelis#726's observation split went green at
+/// chelis#732 Phase 1 (un-ignored per §B2.3): every eval exit - print
+/// transcript, labeled root, both to_list renders - says `true`/`false`.
 #[test]
-#[ignore = "chelis#726 (observation half; fixed by chelis#732 Phases 1-2): bool tensor print \
-            says 1.0/0.0 while to_list says true/false in both lanes. Run with \
-            `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
-fn bool_tensor_print_matches_to_list_exit() {
+fn eval_bool_tensor_print_matches_to_list_exit() {
     let program = exits_program("tensor[2, bool]", "to_tensor([true, false])");
     let expected = ["true", "false"];
 
     let out = eval_stdout(&program).expect("eval");
-    for line in tensor_lines(&out) {
+    let tlines = tensor_lines(&out);
+    assert_eq!(tlines.len(), 2, "transcript and root renders:\n{out}");
+    for line in tlines {
         assert_eq!(
             tensor_elems(line),
             expected,
             "eval bool tensor print must render true/false: {line}"
         );
     }
-    for line in list_lines(&out) {
+    let llines = list_lines(&out);
+    assert_eq!(
+        llines.len(),
+        2,
+        "transcript and root to_list renders:\n{out}"
+    );
+    for line in llines {
         assert_eq!(list_payload_elems(line), expected, "eval to_list: {line}");
     }
+}
+
+/// The C half of the same split stays red: the emitted print helper still
+/// renders bool tensor elements as `1.0`/`0.0` while to_list says
+/// `true`/`false` (chelis#726's observation half, fixed by chelis#732
+/// Phase 2's generated print helper).
+#[test]
+#[ignore = "chelis#726 (observation half, C lane; fixed by chelis#732 Phase 2): the emitted \
+            bool tensor print says 1.0/0.0 while to_list says true/false. Run with \
+            `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
+fn c_bool_tensor_print_matches_to_list_exit() {
+    let program = exits_program("tensor[2, bool]", "to_tensor([true, false])");
+    let expected = ["true", "false"];
 
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
