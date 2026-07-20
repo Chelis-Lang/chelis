@@ -65,14 +65,20 @@ fn parse_numeric_result(stdout: &str, name: &str) -> f64 {
     }
 
     let prefix = format!("{name} = ");
-    let line = stdout
-        .lines()
-        .find(|line| line.starts_with(&prefix))
-        .unwrap_or_else(|| panic!("output does not contain `{prefix}` line:\n{stdout}"));
-    line[prefix.len()..]
+    let payload = match stdout.lines().find(|line| line.starts_with(&prefix)) {
+        Some(line) => &line[prefix.len()..],
+        // [05-OBS-4] (chelis#732 P1): a single scalar/rank-0 root renders
+        // bare, so the anonymous single-root output is the value line.
+        None => stdout
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or_else(|| panic!("output does not contain `{prefix}` line:\n{stdout}")),
+    };
+    payload
         .trim()
         .parse::<f64>()
-        .unwrap_or_else(|err| panic!("numeric output parse failed for `{line}`: {err}"))
+        .unwrap_or_else(|err| panic!("numeric output parse failed for `{payload}`: {err}"))
 }
 
 fn assert_close(actual: &[f64], expected: &[f64], tol: f64, label: &str) {

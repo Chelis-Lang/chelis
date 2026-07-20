@@ -39,9 +39,7 @@ fn host_eval_scalar_f32_zero_arg_returns_body_literal() {
     let fixture = dir.path().join("scalar_f32_zero_arg.ch");
     write_file(&fixture, "def go() -> f32 = 7.5\nresult = go()\n");
 
-    eval_file(&fixture)
-        .success()
-        .stdout("7.5\n");
+    eval_file(&fixture).success().stdout("7.5\n");
 }
 
 #[test]
@@ -55,9 +53,7 @@ fn host_eval_scalar_f64_zero_arg_returns_body_literal() {
         "def go() -> f64 = cast(7.5, f64)\nresult = go()\n",
     );
 
-    eval_file(&fixture)
-        .success()
-        .stdout("7.5\n");
+    eval_file(&fixture).success().stdout("7.5\n");
 }
 
 #[test]
@@ -67,9 +63,7 @@ fn host_eval_scalar_i64_zero_arg_returns_body_literal() {
     let fixture = dir.path().join("scalar_i64_zero_arg.ch");
     write_file(&fixture, "def go() -> i64 = 7\nresult = go()\n");
 
-    eval_file(&fixture)
-        .success()
-        .stdout("7\n");
+    eval_file(&fixture).success().stdout("7\n");
 }
 
 #[test]
@@ -79,9 +73,7 @@ fn host_eval_scalar_bool_zero_arg_returns_body_literal() {
     let fixture = dir.path().join("scalar_bool_zero_arg.ch");
     write_file(&fixture, "def go() -> bool = true\nresult = go()\n");
 
-    eval_file(&fixture)
-        .success()
-        .stdout("true\n");
+    eval_file(&fixture).success().stdout("true\n");
 }
 
 #[test]
@@ -93,7 +85,5 @@ fn host_eval_scalar_one_arg_returns_arg_value() {
     let fixture = dir.path().join("scalar_one_arg.ch");
     write_file(&fixture, "def go(x: f32) -> f32 = x\nresult = go(7.5)\n");
 
-    eval_file(&fixture)
-        .success()
-        .stdout("7.5\n");
+    eval_file(&fixture).success().stdout("7.5\n");
 }

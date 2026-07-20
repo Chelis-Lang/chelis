@@ -1102,10 +1102,13 @@ fn eval_supports_lists_and_tensor_bridge() {
         .assert()
         .success()
         .stdout(predicate::str::contains("len=4, items=4, shape=2x2"))
+        // chelis#732 P1: float list elements render with one fractional
+        // digit; the genuinely int-typed token lists keep bare integers.
+        .stdout(predicate::str::contains("\n[1.0, 2.0, 3.0]\n"))
+        .stdout(predicate::str::contains("\n[2.0, 3.0, 4.0]\n"))
         .stdout(predicate::str::contains("\n[1, 2, 3]\n"))
-        .stdout(predicate::str::contains("\n[2, 3, 4]\n"))
         .stdout(predicate::str::contains("\n[[1, 2], [3]]\n"))
-        .stdout(predicate::str::contains("[1, 2, 3, 4]\n"));
+        .stdout(predicate::str::contains("[1.0, 2.0, 3.0, 4.0]\n"));
 }
 
 #[test]
@@ -1172,9 +1175,90 @@ fn eval_supports_phase3h_tensor_structural_ops() {
         .stdout(predicate::str::contains(
             "contracted = tensor(shape=[2, 2], data=[19.0, 22.0, 43.0, 50.0])",
         ))
+        // chelis#732 P1: int64 sort indices print as integers.
         .stdout(predicate::str::contains(
-            "sorted_indices = tensor(shape=[2], data=[0.0, 1.0])",
+            "sorted_indices = tensor(shape=[2], data=[0, 1])",
         ));
+}
+
+/// Interim cross-lane stdout comparator (chelis#732 Phase 1 to Phase 2).
+///
+/// The Phase 1 eval-side migration moved eval's rendering onto the
+/// [05-OBS] grammar (integer elements without `.0`, bool `true`/`false`,
+/// bare rank-0 scalars, own-width float scalars) while the compiled lane
+/// keeps its pre-contract printf forms until the Phase 2 generated
+/// printer, so byte equality between the lanes is structurally impossible
+/// for those render classes this cycle. This comparator holds the line:
+/// same line count, same binding names, and every printed VALUE token
+/// pair numerically identical (bool spellings map to 1/0; the comparison
+/// is exact f64 bit equality after parse, never a tolerance). It is
+/// shape-blind on the rank-0 wrapper by construction - exactly the render
+/// class Phase 2 reconciles - and is DELETED when Phase 2 restores the
+/// plain byte-equality assertion (chelis#732).
+fn assert_stdout_value_parity(c_out: &[u8], eval_out: &[u8], label: &str) {
+    let c_text = String::from_utf8_lossy(c_out);
+    let eval_text = String::from_utf8_lossy(eval_out);
+    let c_lines: Vec<&str> = c_text.lines().collect();
+    let eval_lines: Vec<&str> = eval_text.lines().collect();
+    assert_eq!(
+        c_lines.len(),
+        eval_lines.len(),
+        "[{label}] line count mismatch:\n--- c ---\n{c_text}\n--- eval ---\n{eval_text}"
+    );
+    let tokens = |line: &str| -> (Option<String>, Vec<f64>) {
+        let (name, payload) = match line.split_once(" = ") {
+            Some((n, p)) if !line.trim_start().starts_with('[') => {
+                (Some(n.trim().to_string()), p.trim().to_string())
+            }
+            _ => (None, line.trim().to_string()),
+        };
+        let body = match payload.find("data=[") {
+            Some(start) => {
+                let rest = &payload[start + "data=[".len()..];
+                rest[..rest.find(']').unwrap_or(rest.len())].to_string()
+            }
+            None => payload
+                .chars()
+                .filter(|c| *c != '[' && *c != ']' && *c != '(' && *c != ')')
+                .collect(),
+        };
+        let values = body
+            .split(',')
+            .map(str::trim)
+            .filter(|t| !t.is_empty() && *t != "...")
+            .map(|t| match t {
+                "true" => 1.0,
+                "false" => 0.0,
+                other => other.parse::<f64>().unwrap_or_else(|e| {
+                    panic!("[{label}] non-numeric token `{other}` in `{line}`: {e}")
+                }),
+            })
+            .collect();
+        (name, values)
+    };
+    for (c_line, eval_line) in c_lines.iter().zip(eval_lines.iter()) {
+        if c_line == eval_line {
+            continue;
+        }
+        let (c_name, c_values) = tokens(c_line);
+        let (eval_name, eval_values) = tokens(eval_line);
+        assert_eq!(
+            c_name, eval_name,
+            "[{label}] binding name mismatch:\n  c:    {c_line}\n  eval: {eval_line}"
+        );
+        assert_eq!(
+            c_values.len(),
+            eval_values.len(),
+            "[{label}] value count mismatch:\n  c:    {c_line}\n  eval: {eval_line}"
+        );
+        for (a, b) in c_values.iter().zip(eval_values.iter()) {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "[{label}] value divergence:\n  c:    {c_line}\n  eval: {eval_line}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1218,7 +1302,7 @@ fn build_c_runs_list_foundation_and_matches_eval_output() {
         "compiled binary failed with status {}",
         run_output.status
     );
-    assert_eq!(run_output.stdout, eval_stdout);
+    assert_stdout_value_parity(&run_output.stdout, &eval_stdout, "list_foundation");
 }
 
 #[test]
@@ -1347,7 +1431,7 @@ fn build_c_runs_tensor_structural_ops_and_matches_eval_output() {
         "compiled binary failed with status {}",
         run_output.status
     );
-    assert_eq!(run_output.stdout, eval_stdout);
+    assert_stdout_value_parity(&run_output.stdout, &eval_stdout, "tensor_structural_ops");
 }
 
 #[test]
@@ -3262,10 +3346,9 @@ fn build_c_runs_round_and_scatter_elements_matches_eval_output() {
         "compiled binary failed with status {}",
         run_output.status
     );
-    assert_eq!(
-        run_output.stdout, eval_stdout,
-        "round / scatter_elements C-backend output must be byte-identical to eval"
-    );
+    // Value-identical across lanes; byte identity returns at chelis#732
+    // Phase 2 (the int-typed `indices` line renders `.0`-free in eval now).
+    assert_stdout_value_parity(&run_output.stdout, &eval_stdout, "round_scatter_elements");
 }
 
 #[test]
@@ -7649,12 +7732,13 @@ fn eval_grad_inline_application_returns_correct_gradient() {
          result = grad(f)(cast(3.0, f32))\n",
     );
 
+    // chelis#732 P1 ([05-OBS-4]): the rank-0 gradient renders bare.
     Command::cargo_bin("chelis")
         .expect("binary")
         .args(["eval", "--file", path.to_str().unwrap()])
         .assert()
         .success()
-        .stdout(predicate::str::contains("data=[6.0]"));
+        .stdout(predicate::str::contains("6.0"));
 }
 
 /// Positive: locally-bound `g = grad(f); g(x)` form. Closure is captured
@@ -7671,12 +7755,13 @@ fn eval_grad_locally_bound_then_applied_returns_correct_gradient() {
          result = g(cast(3.0, f32))\n",
     );
 
+    // chelis#732 P1 ([05-OBS-4]): the rank-0 gradient renders bare.
     Command::cargo_bin("chelis")
         .expect("binary")
         .args(["eval", "--file", path.to_str().unwrap()])
         .assert()
         .success()
-        .stdout(predicate::str::contains("data=[6.0]"));
+        .stdout(predicate::str::contains("6.0"));
 }
 
 /// Positive: wrapper-fn-param form. `grad(loss, wrt=theta)(theta, x)`
@@ -7837,7 +7922,8 @@ fn eval_grad_does_not_regress_to_host_runtime_unsupported() {
         .stdout(
             predicate::str::contains("host runtime does not support `grad`")
                 .not()
-                .and(predicate::str::contains("data=[4.0]")),
+                // chelis#732 P1 ([05-OBS-4]): the rank-0 gradient renders bare.
+                .and(predicate::str::contains("4.0")),
         );
 }
 

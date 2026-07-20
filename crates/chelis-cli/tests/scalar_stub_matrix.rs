@@ -106,9 +106,19 @@ fn scalar_program(op_expr: &str, ret_ty: &str) -> String {
 
 const STUB_MARKER: &str = "unsupported builtin";
 
-/// One broken row: eval computes `expected`, the C lane must agree and must
-/// not contain the stub marker. Fails today with C printing `0`.
-fn assert_scalar_parity(op_expr: &str, ret_ty: &str, expected: &str, name: &str) {
+/// One broken row: eval computes `eval_expected`, the C lane must agree on
+/// the VALUE and must not contain the stub marker. Fails today with C
+/// printing `0`. Per-lane expected strings since chelis#732 Phase 1: eval
+/// renders in the pinned grammar (own-width digits, integral floats keep
+/// one fractional digit) while the compiled lane keeps its pre-contract
+/// printf forms until the Phase 2 generated printer restores byte parity.
+fn assert_scalar_parity(
+    op_expr: &str,
+    ret_ty: &str,
+    eval_expected: &str,
+    c_expected: &str,
+    name: &str,
+) {
     let program = scalar_program(op_expr, ret_ty);
     let eval_got = eval_first_line(&program)
         .unwrap_or_else(|e| panic!("{name}: eval failed for `{op_expr}`: {e}"));
@@ -116,7 +126,7 @@ fn assert_scalar_parity(op_expr: &str, ret_ty: &str, expected: &str, name: &str)
     // dtype's value set in both lanes before any parity compare.
     common::assert_elements_in_domain(ret_ty, &eval_got, name);
     assert_eq!(
-        eval_got, expected,
+        eval_got, eval_expected,
         "{name}: eval value drifted; update the row"
     );
     if !c_toolchain_available() {
@@ -129,7 +139,7 @@ fn assert_scalar_parity(op_expr: &str, ret_ty: &str, expected: &str, name: &str)
     );
     common::assert_elements_in_domain(ret_ty, &c_got, name);
     assert_eq!(
-        c_got, expected,
+        c_got, c_expected,
         "{name}: LANE DIVERGENCE for `{op_expr}`: eval={eval_got}, C={c_got}"
     );
 }
@@ -145,6 +155,7 @@ fn f32_scalar_tan_agrees_across_lanes() {
     assert_scalar_parity(
         "tan(cast(1.0, f32))",
         "f32",
+        "1.5574077",
         "1.5574077367782593",
         "f32_tan",
     );
@@ -157,6 +168,7 @@ fn f32_scalar_atan_agrees_across_lanes() {
     assert_scalar_parity(
         "atan(cast(1.0, f32))",
         "f32",
+        "0.7853982",
         "0.7853981852531433",
         "f32_atan",
     );
@@ -166,28 +178,28 @@ fn f32_scalar_atan_agrees_across_lanes() {
 #[ignore = "chelis#715: scalar floor compiles to the 0 stub at plain f32 (C prints 0; eval 1). \
             Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_floor_agrees_across_lanes() {
-    assert_scalar_parity("floor(cast(1.5, f32))", "f32", "1", "f32_floor");
+    assert_scalar_parity("floor(cast(1.5, f32))", "f32", "1.0", "1", "f32_floor");
 }
 
 #[test]
 #[ignore = "chelis#715: scalar ceil compiles to the 0 stub (C prints 0; eval 2). \
             Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_ceil_agrees_across_lanes() {
-    assert_scalar_parity("ceil(cast(1.5, f32))", "f32", "2", "f32_ceil");
+    assert_scalar_parity("ceil(cast(1.5, f32))", "f32", "2.0", "2", "f32_ceil");
 }
 
 #[test]
 #[ignore = "chelis#715: scalar round compiles to the 0 stub (C prints 0; eval 2). \
             Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_round_agrees_across_lanes() {
-    assert_scalar_parity("round(cast(1.5, f32))", "f32", "2", "f32_round");
+    assert_scalar_parity("round(cast(1.5, f32))", "f32", "2.0", "2", "f32_round");
 }
 
 #[test]
 #[ignore = "chelis#715: scalar recip compiles to the 0 stub (C prints 0; eval 0.25). \
             Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_recip_agrees_across_lanes() {
-    assert_scalar_parity("recip(cast(4.0, f32))", "f32", "0.25", "f32_recip");
+    assert_scalar_parity("recip(cast(4.0, f32))", "f32", "0.25", "0.25", "f32_recip");
 }
 
 #[test]
@@ -198,6 +210,7 @@ fn f32_scalar_max_elem_agrees_across_lanes() {
     assert_scalar_parity(
         "max_elem(cast(1.5, f32), cast(0.25, f32))",
         "f32",
+        "1.5",
         "1.5",
         "f32_max_elem",
     );
@@ -211,6 +224,7 @@ fn f32_scalar_min_elem_agrees_across_lanes() {
         "min_elem(cast(1.5, f32), cast(0.25, f32))",
         "f32",
         "0.25",
+        "0.25",
         "f32_min_elem",
     );
 }
@@ -219,7 +233,7 @@ fn f32_scalar_min_elem_agrees_across_lanes() {
 #[ignore = "chelis#715: the stub fires at f64 too - scalar floor(1.5f64) compiles to 0. \
             Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f64_scalar_floor_agrees_across_lanes() {
-    assert_scalar_parity("floor(cast(1.5, f64))", "f64", "1", "f64_floor");
+    assert_scalar_parity("floor(cast(1.5, f64))", "f64", "1.0", "1", "f64_floor");
 }
 
 #[test]
@@ -229,6 +243,7 @@ fn i64_scalar_max_elem_agrees_across_lanes() {
     assert_scalar_parity(
         "max_elem(cast(7, int64), cast(3, int64))",
         "int64",
+        "7",
         "7",
         "i64_max_elem",
     );
@@ -245,7 +260,7 @@ fn i64_scalar_max_elem_agrees_across_lanes() {
             prints 0. Three lanes, three answers. Correct is 5 everywhere. Run with \
             `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn i64_scalar_floor_is_identity_in_all_lanes() {
-    assert_scalar_parity("floor(cast(5, int64))", "int64", "5", "i64_floor");
+    assert_scalar_parity("floor(cast(5, int64))", "int64", "5", "5", "i64_floor");
 }
 
 /// The f64 rows of the stub family, distilled from the probe battery
@@ -258,24 +273,36 @@ fn i64_scalar_floor_is_identity_in_all_lanes() {
             own row above). Run with \
             `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f64_scalar_stub_family_agrees_across_lanes() {
-    for (expr, expected, name) in [
-        ("tan(cast(1.0, f64))", "1.557407724654902", "f64_tan"),
-        ("atan(cast(1.0, f64))", "0.7853981633974483", "f64_atan"),
-        ("ceil(cast(1.5, f64))", "2", "f64_ceil"),
-        ("round(cast(1.5, f64))", "2", "f64_round"),
-        ("recip(cast(4.0, f64))", "0.25", "f64_recip"),
+    for (expr, eval_expected, c_expected, name) in [
+        (
+            "tan(cast(1.0, f64))",
+            "1.557407724654902",
+            "1.557407724654902",
+            "f64_tan",
+        ),
+        (
+            "atan(cast(1.0, f64))",
+            "0.7853981633974483",
+            "0.7853981633974483",
+            "f64_atan",
+        ),
+        ("ceil(cast(1.5, f64))", "2.0", "2", "f64_ceil"),
+        ("round(cast(1.5, f64))", "2.0", "2", "f64_round"),
+        ("recip(cast(4.0, f64))", "0.25", "0.25", "f64_recip"),
         (
             "max_elem(cast(1.5, f64), cast(0.25, f64))",
+            "1.5",
             "1.5",
             "f64_max_elem",
         ),
         (
             "min_elem(cast(1.5, f64), cast(0.25, f64))",
             "0.25",
+            "0.25",
             "f64_min_elem",
         ),
     ] {
-        assert_scalar_parity(expr, "f64", expected, name);
+        assert_scalar_parity(expr, "f64", eval_expected, c_expected, name);
     }
 }
 
@@ -287,20 +314,40 @@ fn working_f64_scalar_ops_agree_across_lanes() {
         eprintln!("skipping: no host C toolchain");
         return;
     }
-    for (op_expr, expected, name) in [
-        ("abs(cast(-1.5, f64))", "1.5", "ctl64_abs"),
-        ("neg(cast(1.5, f64))", "-1.5", "ctl64_neg"),
-        ("sqrt(cast(2.25, f64))", "1.5", "ctl64_sqrt"),
-        ("exp(cast(0.0, f64))", "1", "ctl64_exp"),
-        ("log(cast(1.0, f64))", "0", "ctl64_log"),
-        ("sin(cast(0.0, f64))", "0", "ctl64_sin"),
-        ("cos(cast(0.0, f64))", "1", "ctl64_cos"),
-        ("add(cast(1.5, f64), cast(0.25, f64))", "1.75", "ctl64_add"),
-        ("sub(cast(1.5, f64), cast(0.25, f64))", "1.25", "ctl64_sub"),
-        ("mul(cast(1.5, f64), cast(0.25, f64))", "0.375", "ctl64_mul"),
-        ("div(cast(1.5, f64), cast(0.25, f64))", "6", "ctl64_div"),
+    for (op_expr, eval_expected, c_expected, name) in [
+        ("abs(cast(-1.5, f64))", "1.5", "1.5", "ctl64_abs"),
+        ("neg(cast(1.5, f64))", "-1.5", "-1.5", "ctl64_neg"),
+        ("sqrt(cast(2.25, f64))", "1.5", "1.5", "ctl64_sqrt"),
+        ("exp(cast(0.0, f64))", "1.0", "1", "ctl64_exp"),
+        ("log(cast(1.0, f64))", "0.0", "0", "ctl64_log"),
+        ("sin(cast(0.0, f64))", "0.0", "0", "ctl64_sin"),
+        ("cos(cast(0.0, f64))", "1.0", "1", "ctl64_cos"),
+        (
+            "add(cast(1.5, f64), cast(0.25, f64))",
+            "1.75",
+            "1.75",
+            "ctl64_add",
+        ),
+        (
+            "sub(cast(1.5, f64), cast(0.25, f64))",
+            "1.25",
+            "1.25",
+            "ctl64_sub",
+        ),
+        (
+            "mul(cast(1.5, f64), cast(0.25, f64))",
+            "0.375",
+            "0.375",
+            "ctl64_mul",
+        ),
+        (
+            "div(cast(1.5, f64), cast(0.25, f64))",
+            "6.0",
+            "6",
+            "ctl64_div",
+        ),
     ] {
-        assert_scalar_parity(op_expr, "f64", expected, name);
+        assert_scalar_parity(op_expr, "f64", eval_expected, c_expected, name);
     }
 }
 
@@ -452,20 +499,40 @@ fn working_f32_scalar_ops_agree_across_lanes() {
         eprintln!("skipping: no host C toolchain");
         return;
     }
-    for (op_expr, expected, name) in [
-        ("abs(cast(-1.5, f32))", "1.5", "ctl_abs"),
-        ("neg(cast(1.5, f32))", "-1.5", "ctl_neg"),
-        ("sqrt(cast(2.25, f32))", "1.5", "ctl_sqrt"),
-        ("exp(cast(0.0, f32))", "1", "ctl_exp"),
-        ("log(cast(1.0, f32))", "0", "ctl_log"),
-        ("sin(cast(0.0, f32))", "0", "ctl_sin"),
-        ("cos(cast(0.0, f32))", "1", "ctl_cos"),
-        ("add(cast(1.5, f32), cast(0.25, f32))", "1.75", "ctl_add"),
-        ("sub(cast(1.5, f32), cast(0.25, f32))", "1.25", "ctl_sub"),
-        ("mul(cast(1.5, f32), cast(0.25, f32))", "0.375", "ctl_mul"),
-        ("div(cast(1.5, f32), cast(0.25, f32))", "6", "ctl_div"),
+    for (op_expr, eval_expected, c_expected, name) in [
+        ("abs(cast(-1.5, f32))", "1.5", "1.5", "ctl_abs"),
+        ("neg(cast(1.5, f32))", "-1.5", "-1.5", "ctl_neg"),
+        ("sqrt(cast(2.25, f32))", "1.5", "1.5", "ctl_sqrt"),
+        ("exp(cast(0.0, f32))", "1.0", "1", "ctl_exp"),
+        ("log(cast(1.0, f32))", "0.0", "0", "ctl_log"),
+        ("sin(cast(0.0, f32))", "0.0", "0", "ctl_sin"),
+        ("cos(cast(0.0, f32))", "1.0", "1", "ctl_cos"),
+        (
+            "add(cast(1.5, f32), cast(0.25, f32))",
+            "1.75",
+            "1.75",
+            "ctl_add",
+        ),
+        (
+            "sub(cast(1.5, f32), cast(0.25, f32))",
+            "1.25",
+            "1.25",
+            "ctl_sub",
+        ),
+        (
+            "mul(cast(1.5, f32), cast(0.25, f32))",
+            "0.375",
+            "0.375",
+            "ctl_mul",
+        ),
+        (
+            "div(cast(1.5, f32), cast(0.25, f32))",
+            "6.0",
+            "6",
+            "ctl_div",
+        ),
     ] {
-        assert_scalar_parity(op_expr, "f32", expected, name);
+        assert_scalar_parity(op_expr, "f32", eval_expected, c_expected, name);
     }
 }
 
@@ -493,7 +560,9 @@ fn working_i64_scalar_ops_agree_across_lanes() {
         ("abs(cast(-5, int64))", "5", "ctl_i64_abs"),
         ("neg(cast(5, int64))", "-5", "ctl_i64_neg"),
     ] {
-        assert_scalar_parity(op_expr, "int64", expected, name);
+        // Integer scalar digits are grammar-stable: one expected string
+        // serves both lanes.
+        assert_scalar_parity(op_expr, "int64", expected, expected, name);
     }
 }
 

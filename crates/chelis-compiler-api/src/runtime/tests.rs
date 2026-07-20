@@ -1740,11 +1740,7 @@ fn tensor_value(precision: Prim, shape: Vec<usize>, data: Vec<f64>) -> RuntimeVa
 #[test]
 fn render_value_tensor_elements_follow_tag_class() {
     assert_eq!(
-        render_value(&tensor_value(
-            Prim::Int8,
-            vec![3],
-            vec![127.0, -127.0, 0.0]
-        )),
+        render_value(&tensor_value(Prim::Int8, vec![3], vec![127.0, -127.0, 0.0])),
         "tensor(shape=[3], data=[127, -127, 0])"
     );
     assert_eq!(
@@ -1845,7 +1841,6 @@ fn render_value_scalars_render_at_own_width() {
     let i64_scalar =
         RuntimeValue::scalar(Prim::Int64, ScalarBits::I64(9007199254740993)).expect("scalar");
     assert_eq!(render_value(&i64_scalar), "9007199254740993");
-    let f64_scalar =
-        RuntimeValue::scalar(Prim::F64, ScalarBits::F64(f64::MAX)).expect("scalar");
+    let f64_scalar = RuntimeValue::scalar(Prim::F64, ScalarBits::F64(f64::MAX)).expect("scalar");
     assert_eq!(render_value(&f64_scalar), "1.7976931348623157e308");
 }

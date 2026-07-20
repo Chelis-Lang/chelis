@@ -406,8 +406,10 @@ fn tensor_scan_is_correct_in_the_eval_lane() {
          out = print(to_list(gen()))\n",
     )
     .expect("tensor_scan should evaluate");
+    // chelis#732 P1 migration: to_list elements of the F32-tagged scan
+    // render at f32 width in the pinned grammar (integral floats keep .0).
     assert_eq!(
-        got, "[1, 2, 3, 4, 5]",
+        got, "[1.0, 2.0, 3.0, 4.0, 5.0]",
         "the eval lane must compute tensor_scan correctly; it is the compiled \
          lane that stubs it out (chelis#705)"
     );

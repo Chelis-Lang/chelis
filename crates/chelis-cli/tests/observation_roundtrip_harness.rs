@@ -1087,7 +1087,7 @@ fn eval_scalar_value_roots_render_bare() {
             .unwrap_or_else(|| panic!("[eval scalar root {expr}] no root line in:\n{out}"));
         assert_eq!(
             root_line,
-            &format!("root = {expected}"),
+            format!("root = {expected}"),
             "[eval scalar root {expr}] bare scalar root render"
         );
         // Intra-lane exit agreement: the print transcript of the same
@@ -1134,8 +1134,14 @@ fn eval_exit_grammar_locks() {
             "tensor(shape=[2], data=[true, false])",
         ),
         // f64 scalars: shortest round-trip digits, Debug grammar.
-        ("print(cast(0.30000000000000004, f64))", "0.30000000000000004"),
-        ("print(cast(9.999999980506448e19, f64))", "9.999999980506448e19"),
+        (
+            "print(cast(0.30000000000000004, f64))",
+            "0.30000000000000004",
+        ),
+        (
+            "print(cast(9.999999980506448e19, f64))",
+            "9.999999980506448e19",
+        ),
         ("print(cast(-0.0, f64))", "-0.0"),
         ("print(div(cast(1.0, f64), cast(0.0, f64)))", "inf"),
         ("print(div(cast(-1.0, f64), cast(0.0, f64)))", "-inf"),
@@ -1203,10 +1209,14 @@ fn eval_tensor_renders_truncate_at_32_with_marker() {
         .unwrap_or_else(|| panic!("no to_list render in:\n{out}"))
         .to_string();
     let listed = list_payload_elems(&lline);
-    assert_eq!(listed.len(), 33, "to_list must carry every element: {lline}");
+    assert_eq!(
+        listed.len(),
+        33,
+        "to_list must carry every element: {lline}"
+    );
     for (i, text) in listed.iter().enumerate() {
-        let got = text_bits_at(text, Width::F32)
-            .unwrap_or_else(|e| panic!("to_list element {i}: {e}"));
+        let got =
+            text_bits_at(text, Width::F32).unwrap_or_else(|e| panic!("to_list element {i}: {e}"));
         assert_eq!(
             got,
             value_bits_at((i + 1) as f64, Width::F32),
@@ -1740,7 +1750,11 @@ fn eval_bool_tensor_print_matches_to_list_exit() {
         );
     }
     let llines = list_lines(&out);
-    assert_eq!(llines.len(), 2, "transcript and root to_list renders:\n{out}");
+    assert_eq!(
+        llines.len(),
+        2,
+        "transcript and root to_list renders:\n{out}"
+    );
     for line in llines {
         assert_eq!(list_payload_elems(line), expected, "eval to_list: {line}");
     }

@@ -1257,6 +1257,15 @@ fn parse_printed_tensors(stdout: &str) -> Vec<(String, Vec<usize>, Vec<f64>)> {
     let mut out = Vec::new();
     for line in stdout.lines() {
         let Some((name, rest)) = line.split_once(" = tensor(") else {
+            // [05-OBS-4] (chelis#732 P1): eval renders a rank-0 root as its
+            // bare element, so a labeled `name = <number>` line is a rank-0
+            // tensor twin for the agreement oracle. The compiled lane keeps
+            // the wrapper until Phase 2.
+            if let Some((name, payload)) = line.split_once(" = ")
+                && let Ok(value) = payload.trim().parse::<f64>()
+            {
+                out.push((name.trim().to_string(), Vec::new(), vec![value]));
+            }
             continue;
         };
         let shape = rest

@@ -415,7 +415,8 @@ fn nullary_fn_deep_roundtrips_through_eval() {
 fn nullary_fn_applied_twice_through_eval() {
     let dp = deep_of("def f() -> f32 = 2.5\nout = print(add(f(), f()))\n");
     let stdout = eval_with_ext(&dp, ".dp").expect("nullary applied twice must evaluate");
-    assert_eq!(first_line(&stdout), "5", "full stdout: {stdout}");
+    // chelis#732 P1 migration: integral f32 scalars render "5.0".
+    assert_eq!(first_line(&stdout), "5.0", "full stdout: {stdout}");
 }
 
 /// A nullary def whose body is NOT a bare literal but still DAG-folds into
@@ -447,7 +448,8 @@ fn local_binding_shadows_nullary_def_in_eval() {
     );
     let stdout =
         eval_with_ext(&dp, ".dp").expect("local binding must shadow the top-level nullary def");
-    assert_eq!(first_line(&stdout), "101", "full stdout: {stdout}");
+    // chelis#732 P1 migration: integral f32 scalars render "101.0".
+    assert_eq!(first_line(&stdout), "101.0", "full stdout: {stdout}");
 }
 
 // ---------------------------------------------------------------------------
@@ -465,7 +467,8 @@ fn local_binding_shadows_nullary_def_in_eval() {
 fn rt721_nullary_calls_nullary_through_eval() {
     let dp = deep_of("def a() -> f32 = 2.0\ndef b() -> f32 = add(a(), 1.0)\nout = print(b())\n");
     let stdout = eval_with_ext(&dp, ".dp").expect("chained nullary defs must evaluate");
-    assert_eq!(first_line(&stdout), "3", "full stdout: {stdout}");
+    // chelis#732 P1 migration: integral f32 scalars render "3.0".
+    assert_eq!(first_line(&stdout), "3.0", "full stdout: {stdout}");
 }
 
 /// A nullary def whose body is host-gated to a Closure (a scalar `add` of two

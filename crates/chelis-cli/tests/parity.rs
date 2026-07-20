@@ -22,12 +22,15 @@
 //! bug takes (chelis#687). Ops with a legitimate cross-lane value
 //! tolerance get it from the per-op tolerance table
 //! (`spec/design/dtype_semantics.md` §C4.5, to be authored into spec/05
-//! [05-OBS-3]) once it exists, never from a blanket re-parse. The corpus
-//! passes byte-exact
-//! today (123/123 lines) because it prints dyadic floats exclusively; a
-//! new example printing a computed non-dyadic float will fail here for
-//! formatting reasons until chelis#732 Phase 2 lands byte-identical
-//! rendering - that is the release valve.
+//! [05-OBS-3]) once it exists, never from a blanket re-parse.
+//!
+//! chelis#732 Phase 1 interim: the eval lane now renders in the ratified
+//! [05-OBS] grammar while the compiled lane keeps its pre-contract forms
+//! until Phase 2's generated printer, so a differing line pair is accepted
+//! ONLY through `migrated_render_equivalent` - same binding name, every
+//! value token BIT-IDENTICAL after parse (never a tolerance). Phase 2
+//! deletes that equivalence and restores plain byte equality on every
+//! line (its release valve for legitimate float-formatting differences).
 //!
 //! Examples that compile to an object only (no `main`) — i.e. files that
 //! define functions but never invoke them at top level — produce empty eval
@@ -274,14 +277,72 @@ fn assert_parity(eval_out: &[u8], c_out: &[u8], label: &str) -> Result<(), Strin
     }
 
     for (i, (e, c)) in eval_lines.iter().zip(c_lines.iter()).enumerate() {
-        if e != c {
+        if e != c && !migrated_render_equivalent(e, c) {
             return Err(format!(
                 "[{label}] line {i} differs between lanes (byte-exact contract; \
-                 no tolerant fallback exists - see the module docs):\n  eval: {e}\n  c:    {c}",
+                 the only sanctioned exception is the chelis#732 Phase 1 \
+                 grammar delta, which requires bit-identical values - see the \
+                 module docs):\n  eval: {e}\n  c:    {c}",
             ));
         }
     }
     Ok(())
+}
+
+/// The chelis#732 Phase 1 interim line equivalence: the eval lane now
+/// renders in the ratified [05-OBS] grammar (integer elements without
+/// `.0`, bool `true`/`false`, bare rank-0 scalars, own-width float digits)
+/// while the compiled lane keeps its pre-contract printf forms until the
+/// Phase 2 generated printer. Two differing lines are equivalent ONLY when
+/// the binding name matches and every printed value token pair is
+/// BIT-IDENTICAL after parse (bool spellings map to 1/0). This is not a
+/// tolerance - a real value divergence still fails - and the whole
+/// function is deleted at Phase 2 when byte equality returns.
+fn migrated_render_equivalent(eval_line: &str, c_line: &str) -> bool {
+    fn split_named(line: &str) -> (Option<&str>, &str) {
+        match line.split_once(" = ") {
+            Some((name, payload)) if !line.trim_start().starts_with('[') => {
+                (Some(name.trim()), payload.trim())
+            }
+            _ => (None, line.trim()),
+        }
+    }
+    fn value_tokens(payload: &str) -> Option<Vec<f64>> {
+        let body: String = match payload.find("data=[") {
+            Some(start) => {
+                let rest = &payload[start + "data=[".len()..];
+                rest[..rest.find(']')?].to_string()
+            }
+            None => payload
+                .chars()
+                .filter(|ch| !matches!(ch, '[' | ']' | '(' | ')'))
+                .collect(),
+        };
+        body.split(',')
+            .map(str::trim)
+            .filter(|t| !t.is_empty() && *t != "...")
+            .map(|t| match t {
+                "true" => Some(1.0),
+                "false" => Some(0.0),
+                other => other.parse::<f64>().ok(),
+            })
+            .collect()
+    }
+    let (eval_name, eval_payload) = split_named(eval_line);
+    let (c_name, c_payload) = split_named(c_line);
+    if eval_name != c_name {
+        return false;
+    }
+    match (value_tokens(eval_payload), value_tokens(c_payload)) {
+        (Some(eval_values), Some(c_values)) => {
+            eval_values.len() == c_values.len()
+                && eval_values
+                    .iter()
+                    .zip(&c_values)
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+        }
+        _ => false,
+    }
 }
 
 // -----------------------------------------------------------------------------
