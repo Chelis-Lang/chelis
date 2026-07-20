@@ -3058,26 +3058,131 @@ pub(super) fn tensor_einsum_value(
     })
 }
 
-pub(super) fn render_value(value: &RuntimeValue) -> String {
-    match value {
-        RuntimeValue::Tensor(tensor) => format!(
-            "tensor(shape={:?}, data={:?})",
-            tensor.value.shape, tensor.value.data
-        ),
-        RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
-            payload.bits().as_i64().to_string()
-        }
-        RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
-            payload.bits().as_f64().to_string()
-        }
-        RuntimeValue::Scalar(payload) => {
-            format!(
-                "<scalar dtype={} bits={:?}>",
-                payload.dtype().name(),
-                payload.bits()
+/// Every exit in the eval lane truncates tensor element rendering after
+/// this many elements, marking the cut with `, ...` - one rule at every
+/// exit in both lanes ([05-OBS-5]; faithful_observation.md open question 4,
+/// decided 2026-07-17, matching the compiled lane's existing form).
+/// Full-element fidelity is `to_list`'s and the wire's job, never print's.
+pub(super) const TENSOR_RENDER_LIMIT: usize = 32;
+
+/// The [05-OBS-1] renderer for one eval-lane element of a TENSOR payload.
+///
+/// Width policy (chelis#732 Phase 1, deliberate): the eval tensor store is
+/// f64-backed and its runtime precision tag is unreliable for float WIDTH
+/// (chelis#717 pins checker-f64 tensors at an F32 tag), so float elements
+/// format at the STORED width (f64) - narrowing at render time would
+/// launder stored bits, which [05-OBS-1] forbids. The tag is trusted for
+/// dtype CLASS only (bool/integer/float), which is structurally sound: the
+/// class comes from what `to_tensor`/`cast`/the DAG actually stored.
+/// Own-width float tensor digits arrive when chelis#729 repairs the value
+/// metadata; scalar exits already render at their own width below.
+fn render_tensor_element(precision: Prim, stored: f64) -> String {
+    use chelis_types::{ElementRef, format_element};
+    // Exhaustive over Prim, no `_` arm (loud_unsupported.md section C4.1).
+    // Integer conversions are exact: integer tensor data is constructed
+    // from typed integer scalars widened through f64 (lossless to 2^53;
+    // above that the storage itself already collapsed the value -
+    // chelis#684, a value bug this renderer reports faithfully, not
+    // around). An out-of-range stored value would be an upstream storage
+    // corruption; the loud panic names that invariant.
+    let int_element = |width: Prim| -> ElementRef {
+        let as_int = stored as i64;
+        let element = match width {
+            Prim::Int8 => i8::try_from(as_int).map(ElementRef::I8).ok(),
+            Prim::Int16 => i16::try_from(as_int).map(ElementRef::I16).ok(),
+            Prim::Int32 => i32::try_from(as_int).map(ElementRef::I32).ok(),
+            Prim::Int64 => Some(ElementRef::I64(as_int)),
+            Prim::F16
+            | Prim::Bf16
+            | Prim::F32
+            | Prim::F64
+            | Prim::F8e4m3
+            | Prim::Bool
+            | Prim::String => None,
+        };
+        element.unwrap_or_else(|| {
+            panic!(
+                "render_tensor_element: stored value {stored} does not fit the \
+                 {} tensor tag (eval int tensor data is width-ranged by \
+                 construction; see spec/05-risc-primitives.md section 8)",
+                width.name()
             )
+        })
+    };
+    match precision {
+        Prim::Bool => format_element(Prim::Bool, ElementRef::Bool(stored != 0.0)),
+        Prim::Int8 => format_element(Prim::Int8, int_element(Prim::Int8)),
+        Prim::Int16 => format_element(Prim::Int16, int_element(Prim::Int16)),
+        Prim::Int32 => format_element(Prim::Int32, int_element(Prim::Int32)),
+        Prim::Int64 => format_element(Prim::Int64, int_element(Prim::Int64)),
+        Prim::F16 | Prim::Bf16 | Prim::F32 | Prim::F64 => {
+            format_element(Prim::F64, ElementRef::F64(stored))
         }
-        RuntimeValue::Bool(value) => value.to_string(),
+        Prim::F8e4m3 => panic!(
+            "render_tensor_element: f8e4m3 is not in the active dtype set \
+             (spec/04-type-system.md section 1.1.1); the checker rejects it, \
+             so no tensor tag can carry it"
+        ),
+        Prim::String => panic!(
+            "render_tensor_element: no string tensors exist \
+             (to_tensor/cast/DAG typing only produce numeric/bool tensors)"
+        ),
+    }
+}
+
+/// Render a tensor payload: `tensor(shape=[..], data=[..])`, elements via
+/// [`render_tensor_element`], truncated per [`TENSOR_RENDER_LIMIT`]. A
+/// rank-0 tensor renders as its single element, bare: the
+/// `tensor(shape=[], data=[..])` wrapper is not an exit form ([05-OBS-4],
+/// the chelis#775 scalar-root decision - eval's internal rank-0
+/// realization of scalar bindings must not leak into the observation
+/// channel, and `print` of the same scalar already renders bare).
+fn render_tensor(tensor: &RuntimeTensorValue) -> String {
+    if tensor.value.shape.is_empty() {
+        let stored = *tensor.value.data.first().unwrap_or_else(|| {
+            panic!(
+                "render_tensor: rank-0 tensor with no element (IrTensorValue \
+                 guarantees numel(shape=[]) == 1 at construction)"
+            )
+        });
+        return render_tensor_element(tensor.precision, stored);
+    }
+    let visible = tensor.value.data.len().min(TENSOR_RENDER_LIMIT);
+    let mut elements: Vec<String> = tensor.value.data[..visible]
+        .iter()
+        .map(|stored| render_tensor_element(tensor.precision, *stored))
+        .collect();
+    if tensor.value.data.len() > visible {
+        elements.push("...".to_string());
+    }
+    format!(
+        "tensor(shape={:?}, data=[{}])",
+        tensor.value.shape,
+        elements.join(", ")
+    )
+}
+
+pub(super) fn render_value(value: &RuntimeValue) -> String {
+    use chelis_types::{ElementRef, format_element};
+    match value {
+        RuntimeValue::Tensor(tensor) => render_tensor(tensor),
+        RuntimeValue::Scalar(payload) => {
+            // Scalars carry their dtype in ScalarBits (the dtype/bits
+            // invariant is enforced at construction), so every scalar exit
+            // renders at its OWN width per [05-OBS-2].
+            let element = match payload.bits() {
+                ScalarBits::I8(v) => ElementRef::I8(v),
+                ScalarBits::I16(v) => ElementRef::I16(v),
+                ScalarBits::I32(v) => ElementRef::I32(v),
+                ScalarBits::I64(v) => ElementRef::I64(v),
+                ScalarBits::F16(v) => ElementRef::F16(v),
+                ScalarBits::Bf16(v) => ElementRef::Bf16(v),
+                ScalarBits::F32(v) => ElementRef::F32(v),
+                ScalarBits::F64(v) => ElementRef::F64(v),
+            };
+            format_element(payload.dtype(), element)
+        }
+        RuntimeValue::Bool(value) => format_element(Prim::Bool, ElementRef::Bool(*value)),
         RuntimeValue::String(value) => value.clone(),
         RuntimeValue::List(items) => format!(
             "[{}]",

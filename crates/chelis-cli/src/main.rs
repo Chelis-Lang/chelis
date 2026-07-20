@@ -4,8 +4,8 @@ mod prove;
 mod style_gate;
 
 use chelis_compiler_api::schema::{
-    EvalRequest, ExecutionValue, SourceKind, WireInferredDim, WireInferredEffect,
-    WireInferredPrecision, WireInferredType,
+    EvalRequest, SourceKind, WireInferredDim, WireInferredEffect, WireInferredPrecision,
+    WireInferredType,
 };
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr};
 use chelis_surf::ast::Decl;
@@ -7808,90 +7808,40 @@ fn try_eval(
 /// `eval_in_context` path so the output is byte-identical for either
 /// dispatch.
 fn format_eval_result(result: &chelis_compiler_api::schema::EvalResult) -> String {
+    // Each root carries its display text pre-rendered by the runtime's
+    // single [05-OBS-1] renderer (compiler-api fills it where the dtype
+    // tags still exist; the wire `ExecutionValue` cannot carry them). The
+    // expect names that in-process contract: every EvalResult this CLI
+    // formats comes straight from compiler-api, never from a deserialized
+    // wire payload (chelis#732 Phase 1 - no second formatter may exist).
+    let root_display = |root: &chelis_compiler_api::schema::EvaluatedRoot| -> String {
+        root.display
+            .clone()
+            .expect("eval roots carry display text rendered in-process by compiler-api")
+    };
     let mut lines = result.transcript.clone();
     if result.roots.len() == 1 {
         if let Some(root) = result.roots.first() {
-            lines.push(format_execution_value(&root.value));
+            lines.push(root_display(root));
         }
         return lines.join("\n");
     }
 
     lines.extend(result.roots.iter().enumerate().map(|(index, root)| {
         let name = root.name.clone().unwrap_or_else(|| format!("_{index}"));
-        format!(
-            "{} = {}",
-            display_root_name(&name),
-            format_execution_value(&root.value)
-        )
+        format!("{} = {}", display_root_name(&name), root_display(root))
     }));
     lines.join("\n")
 }
 
-fn format_execution_value(value: &ExecutionValue) -> String {
-    match value {
-        ExecutionValue::Tensor { value } => {
-            // Limit raised from 10 to 32 to match the build-target renderer
-            // (red-team v0.2.6 MEDIUM: a 4x4 attention output rendered only
-            // 10 of 16 elements with no truncation marker). When the tensor
-            // exceeds the cap, append a trailing `...` so downstream parsers
-            // can distinguish a truncated prefix from a complete render.
-            const PRINT_LIMIT: usize = 32;
-            let visible = value.data.len().min(PRINT_LIMIT);
-            if visible < value.data.len() {
-                format!(
-                    "tensor(shape={:?}, data={:?} + ...)",
-                    value.shape,
-                    &value.data[..visible]
-                )
-            } else {
-                format!("tensor(shape={:?}, data={:?})", value.shape, value.data)
-            }
-        }
-        ExecutionValue::Int64 { value } => value.to_string(),
-        ExecutionValue::Float64 { value } => value.to_string(),
-        ExecutionValue::Bool { value } => value.to_string(),
-        ExecutionValue::String { value } => value.clone(),
-        ExecutionValue::List { value: items } => format!(
-            "[{}]",
-            items
-                .iter()
-                .map(format_execution_value)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        ExecutionValue::Dict { entries } => format!(
-            "dict({})",
-            entries
-                .iter()
-                .map(|entry| format!(
-                    "{}: {}",
-                    format_execution_value(&entry.key),
-                    format_execution_value(&entry.value)
-                ))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        ExecutionValue::Tuple { value: items } => format!(
-            "({})",
-            items
-                .iter()
-                .map(format_execution_value)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        ExecutionValue::Adt { ctor, fields } if fields.is_empty() => ctor.clone(),
-        ExecutionValue::Adt { ctor, fields } => format!(
-            "{}({})",
-            ctor,
-            fields
-                .iter()
-                .map(format_execution_value)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        ExecutionValue::Unit => "()".to_string(),
-    }
-}
+// NOTE (chelis#732 Phase 1): the CLI-side `format_execution_value` renderer
+// was deleted here. It was a second hand-written formatting path for
+// numeric payloads (faithful_observation.md section B2.4 forbids those) and
+// it rendered from the wire `ExecutionValue`, which carries no dtype tags -
+// so it could not be made [05-OBS-1]-faithful (bool/int tensor elements and
+// scalar widths were unrecoverable). Labeled roots now consume the display
+// text pre-rendered by the runtime's single renderer (see
+// `format_eval_result` above and `EvaluatedRoot::display`).
 
 fn checked_program_with_effects(
     deep_exprs: &[chelis_deep::ast::Expr],

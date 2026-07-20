@@ -655,14 +655,15 @@ fn check_representation_finite(
     }
 }
 
+/// Spell a non-finite value for a diagnostic. Routes through
+/// `format_element` so diagnostics share the one normative grammar
+/// (`inf`/`-inf`/`NaN`, [05-OBS-2]); the pre-chelis#732 `+Inf`/`-Inf`
+/// spellings migrated with the Phase 1 grammar freeze.
 fn describe_non_finite(v: f64) -> String {
-    if v.is_nan() {
-        "NaN".to_string()
-    } else if v == f64::INFINITY {
-        "+Inf".to_string()
-    } else {
-        "-Inf".to_string()
-    }
+    chelis_types::format_element(
+        chelis_types::types::Prim::F64,
+        chelis_types::ElementRef::F64(v),
+    )
 }
 
 /// Revalidate a (possibly nested) ADT value against the declared
