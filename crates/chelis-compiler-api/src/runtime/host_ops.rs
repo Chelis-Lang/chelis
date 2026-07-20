@@ -3079,13 +3079,27 @@ pub(super) const TENSOR_RENDER_LIMIT: usize = 32;
 fn render_tensor_element(precision: Prim, stored: f64) -> String {
     use chelis_types::{ElementRef, format_element};
     // Exhaustive over Prim, no `_` arm (loud_unsupported.md section C4.1).
-    // Integer conversions are exact: integer tensor data is constructed
-    // from typed integer scalars widened through f64 (lossless to 2^53;
-    // above that the storage itself already collapsed the value -
-    // chelis#684, a value bug this renderer reports faithfully, not
-    // around). An out-of-range stored value would be an upstream storage
-    // corruption; the loud panic names that invariant.
-    let int_element = |width: Prim| -> ElementRef {
+    //
+    // Tag-vs-bits disagreements print the BITS: when an integer- or
+    // bool-tagged slot holds a value outside the tag's value set (the live
+    // example: `mean` of an int64 tensor stores 187.5 - chelis#724/[#729]
+    // domain territory), the element renders as the stored f64 so the
+    // value bug stays visible instead of laundered through truncation
+    // (faithful_observation.md non-goals: printing wrong stored bits
+    // faithfully is a feature). Panicking here would turn a runnable
+    // program's print into a crash ([05-UNS-3] forbids source-reachable
+    // panics), and truncating would manufacture a well-formed lie.
+    let faithful_f64 = || format_element(Prim::F64, ElementRef::F64(stored));
+    let int_or_bits = |width: Prim| -> String {
+        if stored.fract() != 0.0 || !stored.is_finite() {
+            return faithful_f64();
+        }
+        // Exact i64 range at f64 precision: [-2^63, 2^63). A saturating
+        // `as` cast outside it would print a near-miss integer for bits
+        // that are not that integer.
+        if stored >= 9223372036854775808.0 || stored < -9223372036854775808.0 {
+            return faithful_f64();
+        }
         let as_int = stored as i64;
         let element = match width {
             Prim::Int8 => i8::try_from(as_int).map(ElementRef::I8).ok(),
@@ -3100,24 +3114,28 @@ fn render_tensor_element(precision: Prim, stored: f64) -> String {
             | Prim::Bool
             | Prim::String => None,
         };
-        element.unwrap_or_else(|| {
-            panic!(
-                "render_tensor_element: stored value {stored} does not fit the \
-                 {} tensor tag (eval int tensor data is width-ranged by \
-                 construction; see spec/05-risc-primitives.md section 8)",
-                width.name()
-            )
-        })
+        match element {
+            Some(element) => format_element(width, element),
+            // Out of the width's range: same tag-vs-bits story.
+            None => faithful_f64(),
+        }
     };
     match precision {
-        Prim::Bool => format_element(Prim::Bool, ElementRef::Bool(stored != 0.0)),
-        Prim::Int8 => format_element(Prim::Int8, int_element(Prim::Int8)),
-        Prim::Int16 => format_element(Prim::Int16, int_element(Prim::Int16)),
-        Prim::Int32 => format_element(Prim::Int32, int_element(Prim::Int32)),
-        Prim::Int64 => format_element(Prim::Int64, int_element(Prim::Int64)),
-        Prim::F16 | Prim::Bf16 | Prim::F32 | Prim::F64 => {
-            format_element(Prim::F64, ElementRef::F64(stored))
+        Prim::Bool => {
+            if stored == 1.0 {
+                format_element(Prim::Bool, ElementRef::Bool(true))
+            } else if stored == 0.0 {
+                format_element(Prim::Bool, ElementRef::Bool(false))
+            } else {
+                // A bool-tagged slot holding neither 0 nor 1: print the bits.
+                faithful_f64()
+            }
         }
+        Prim::Int8 => int_or_bits(Prim::Int8),
+        Prim::Int16 => int_or_bits(Prim::Int16),
+        Prim::Int32 => int_or_bits(Prim::Int32),
+        Prim::Int64 => int_or_bits(Prim::Int64),
+        Prim::F16 | Prim::Bf16 | Prim::F32 | Prim::F64 => faithful_f64(),
         Prim::F8e4m3 => panic!(
             "render_tensor_element: f8e4m3 is not in the active dtype set \
              (spec/04-type-system.md section 1.1.1); the checker rejects it, \

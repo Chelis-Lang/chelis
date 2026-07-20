@@ -1298,3 +1298,11 @@ width (chelis#717); narrowing at render time would launder stored bits,
 which [05-OBS-1] forbids. Scalar exits render at their own width. Own-
 width tensor digits arrive when chelis#729 repairs the value metadata -
 a value-layer fix, not a grammar change.
+
+**Tag-vs-bits disagreements print the bits:** when an integer- or
+bool-tagged tensor slot stores a value outside the tag's value set (the
+live example: `mean` of an int64 tensor stores 187.5 - chelis#724
+domain territory), the element renders as the stored f64, so the value
+bug stays visible at the exit instead of being truncated into a
+well-formed lie. Rendering never repairs, rounds, or rejects stored
+values.
