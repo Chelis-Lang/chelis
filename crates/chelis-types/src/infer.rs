@@ -19936,7 +19936,11 @@ fn infer_cast(
         // for the unparseable target, and this use site -- which has the error
         // vector -- reports the rejection naming the offending target.
         _ => {
-            let target = cast_target_prim_name(&kids[1]).unwrap_or("<non-primitive type>");
+            // Name the offending target for both cast-target spellings: the
+            // `(t-prim {} name)` node and the bare `name` symbol atom.
+            let target = cast_target_prim_name(&kids[1])
+                .or_else(|| symbol_name(&kids[1]))
+                .unwrap_or("<non-primitive type>");
             return report(
                 errors,
                 CheckError::new(

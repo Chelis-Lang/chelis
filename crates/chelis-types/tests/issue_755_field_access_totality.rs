@@ -1,4 +1,4 @@
-//! Chelis-Lang/chelis#755 — Surf-reachable false green: field access on a
+//! Chelis-Lang/chelis#755 -- Surf-reachable false green: field access on a
 //! multi-variant / positional-field / non-record target silently typed as
 //! `Type::Error` with NO diagnostic, so `chelis check` scored a perfect 1.0
 //! on programs that could not run (they failed only at runtime). This is the

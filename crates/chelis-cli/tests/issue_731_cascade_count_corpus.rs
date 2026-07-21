@@ -1,4 +1,4 @@
-//! chelis#731 Phase 2 — the cascade-count corpus (Part II B2.3 of
+//! chelis#731 Phase 2 -- the cascade-count corpus (Part II B2.3 of
 //! `spec/design/checker_totality.md`).
 //!
 //! The `ErrorWitness` migration replaced ~250 `errors.push(...); return

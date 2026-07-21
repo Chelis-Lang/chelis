@@ -383,7 +383,7 @@ pub enum Type {
     Tuple(Vec<Type>),
     /// Unit type.
     Unit,
-    /// Error sentinel — used for partial inference past errors. Carries a
+    /// Error sentinel -- used for partial inference past errors. Carries a
     /// zero-sized [`ErrorWitness`](crate::errors::ErrorWitness) that can only
     /// be minted by `crate::errors::report` (which pushes a diagnostic) or
     /// `crate::errors::propagate` (cascade from an existing witness), so a

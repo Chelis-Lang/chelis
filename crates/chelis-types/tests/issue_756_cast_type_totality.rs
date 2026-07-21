@@ -1,4 +1,4 @@
-//! Chelis-Lang/chelis#756 — Surf-reachable false green: `cast` to an unknown
+//! Chelis-Lang/chelis#756 -- Surf-reachable false green: `cast` to an unknown
 //! type name scored a perfect 1.0 with an empty error list, because the
 //! deep-type conversion family (`deep_type_to_type_inner`,
 //! `deep_type_to_type_with_params`) reduced every malformed or unknown type
