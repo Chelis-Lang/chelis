@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use tempfile::tempdir;
 
+const NO_EVALUABLE_ROOTS_WARNING: &str =
+    "warning: input contains only def declarations; nothing to evaluate";
+
 fn example_path(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join(rel)
@@ -943,6 +946,11 @@ fn eval_json_file_form_emits_json() {
         .output()
         .expect("run chelis eval --json --file");
     assert!(output.status.success(), "eval --json --file should succeed");
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains(NO_EVALUABLE_ROOTS_WARNING),
+        "non-empty eval must not emit the no-roots warning: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: Value = serde_json::from_slice(&output.stdout).expect("stdout JSON");
     let roots = json["roots"].as_array().expect("roots array");
     let answer = roots
@@ -953,9 +961,9 @@ fn eval_json_file_form_emits_json() {
     assert_eq!(answer["value"]["value"], 2);
 }
 
-// Empty-roots input (only `def` declarations) emits valid JSON
-// `{"roots":[]}` on stdout with exit 0, instead of the human-mode
-// stderr-only breadcrumb. Negative parity for the non-empty cases.
+// Empty-roots input (only `def` declarations) preserves the JSON wire
+// document and exit status while adding the same stderr breadcrumb as
+// human mode.
 #[test]
 fn eval_json_def_only_emits_empty_roots_json() {
     let dir = tempdir().expect("tempdir");
@@ -971,11 +979,17 @@ fn eval_json_def_only_emits_empty_roots_json() {
         .args(["eval", "--json", "--file", path.to_str().unwrap()])
         .output()
         .expect("run chelis eval --json --file");
-    assert!(output.status.success(), "def-only eval --json exits 0");
-    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
-    assert_eq!(stdout.trim(), r#"{"roots":[]}"#);
-    let json: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
-    assert_eq!(json["roots"].as_array().expect("roots").len(), 0);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "def-only eval --json exits 0"
+    );
+    assert_eq!(output.stdout, b"{\"roots\":[]}\n");
+    assert_eq!(
+        output.stderr,
+        format!("{NO_EVALUABLE_ROOTS_WARNING}\n").as_bytes(),
+        "def-only JSON eval emits exactly one warning line"
+    );
 }
 
 // Negative: a failing eval in `--json` mode still errors. Stdout carries
@@ -997,9 +1011,14 @@ fn eval_json_unbound_name_errors_with_empty_stdout() {
         "stdout must stay empty on error, got {:?}",
         String::from_utf8_lossy(&json_output.stdout)
     );
+    let stderr = String::from_utf8_lossy(&json_output.stderr);
     assert!(
-        String::from_utf8_lossy(&json_output.stderr).contains("unbound variable: input"),
+        stderr.contains("unbound variable: input"),
         "error must name the unbound variable on stderr"
+    );
+    assert!(
+        !stderr.contains(NO_EVALUABLE_ROOTS_WARNING),
+        "evaluation errors must not be replaced by the no-roots warning"
     );
 }
 

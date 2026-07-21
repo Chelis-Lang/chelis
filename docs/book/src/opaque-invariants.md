@@ -109,8 +109,9 @@ chelis prove examples/opaque_invariants.ch --json
 
 The example is a library module — it declares types and exported producers
 but has no top-level expression, so `chelis eval`/`chelis build` succeed
-with nothing to run (`chelis eval` reports `{"roots":[]}`). `chelis prove`
-is where its obligations are exercised.
+with nothing to run. `chelis eval --json` writes `{"roots":[]}` to stdout;
+both JSON and text eval add the no-evaluable-roots warning on stderr and
+exit `0`. `chelis prove` is where its obligations are exercised.
 
 Each exported producer yields one `{kind:"obligation"}` record, the user
 `@property` yields a `{kind:"property"}` record, and a final
@@ -327,8 +328,9 @@ which is what owns transitive flows.
 actually reduces an opaque value to a result it prints the constructor and
 its fields, and Tier C counterexamples print representation values. (The
 library examples in this chapter have no top-level expression, so `eval`
-prints no roots; the disclosure applies to a program that evaluates an
-opaque value to a root.) This is disclosure, not a secrecy break: none of
+reports that there is nothing to evaluate; JSON mode also preserves the
+`{"roots":[]}` stdout document. The disclosure applies to a program that
+evaluates an opaque value to a root.) This is disclosure, not a secrecy break: none of
 those outputs are re-importable as typed values, so the construction
 guarantee is unaffected. Opacity is a construction-and-provenance
 guarantee, not an encryption scheme.

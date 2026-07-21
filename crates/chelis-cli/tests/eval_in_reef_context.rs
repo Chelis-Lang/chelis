@@ -25,6 +25,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::{TempDir, tempdir};
 
+const NO_EVALUABLE_ROOTS_WARNING: &str =
+    "warning: input contains only def declarations; nothing to evaluate";
+
 fn write_file(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("create parent");
@@ -225,6 +228,11 @@ fn cmd_eval_json_reef_package_simple_def_emits_json() {
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains(NO_EVALUABLE_ROOTS_WARNING),
+        "non-empty reef-context eval must not emit the no-roots warning: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("reef-context eval --json stdout is JSON");
     let roots = json["roots"].as_array().expect("roots array");
@@ -241,6 +249,39 @@ fn cmd_eval_json_reef_package_simple_def_emits_json() {
             .expect("shape")
             .len(),
         0
+    );
+}
+
+#[test]
+fn cmd_eval_json_reef_package_def_only_warns_with_wire_compatible_stdout() {
+    let (_dir, root) = path_dep_package();
+    let entry_path = root.join("src/evaljsonempty.ch");
+    write_file(
+        &entry_path,
+        "module App.EvalJsonEmpty\n\ndef helper(x: int32) -> int32 = x + 1\n",
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--json", "--file", entry_path.to_str().unwrap()])
+        .output()
+        .expect("run reef-context def-only chelis eval --json");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "reef-context def-only eval exits 0: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"{\"roots\":[]}\n");
+    let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+    assert_eq!(
+        stderr
+            .lines()
+            .filter(|line| *line == NO_EVALUABLE_ROOTS_WARNING)
+            .count(),
+        1,
+        "reef-context def-only JSON eval emits exactly one warning line: {stderr:?}"
     );
 }
 

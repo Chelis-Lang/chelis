@@ -152,6 +152,11 @@ property unsupported by the v1 generator, and `3` setup/input/config error.
 ## Output Contract
 
 - `check` is machine-facing: perfect score implies an empty error list.
+- `eval --json` writes one `EvalResult` document to stdout. A successful
+  result with empty `roots` and `transcript` writes exactly `{"roots":[]}\n`,
+  exits `0`, and adds `warning: input contains only def declarations;
+  nothing to evaluate` on stderr. Non-empty roots or transcript output do
+  not trigger that warning.
 - `deep` defaults to canonical pretty output.
 - `build` emits source and runtime artifacts; it does not invoke
   `gcc` or `hipcc` for you.

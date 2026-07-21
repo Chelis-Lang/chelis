@@ -1250,13 +1250,13 @@ fn run_eval_in_context(
         )
     })?;
     if json {
-        // JSON mode: stdout carries the raw `EvalResult` serde JSON
-        // only. Empty-roots inputs serialize to `{"roots":[]}` (valid
-        // JSON); the stderr breadcrumb is suppressed so scripted
-        // consumers get a single parseable document on stdout.
+        // JSON mode keeps stdout as the raw `EvalResult` serde JSON.
+        // Empty observable results serialize to `{"roots":[]}` and add
+        // the human breadcrumb on stderr without changing that document.
         let rendered = serde_json::to_string(&result)
             .map_err(|err| EvalInContextError::Compile(format!("eval JSON serialize: {err}")))?;
         println!("{rendered}");
+        warn_eval_no_roots_if_empty(&result);
         return Ok(());
     }
     let formatted = format_eval_result(&result);
@@ -1282,12 +1282,11 @@ fn run_eval_emit(outcome: Result<String, String>) -> Result<(), Box<dyn std::err
     }
 }
 
-/// JSON counterpart to [`run_eval_emit`]. Stdout carries the raw
-/// `EvalResult` serde JSON only; nothing else is written there. An
-/// empty-roots program serializes to `{"roots":[]}` (valid JSON) rather
-/// than emitting the human stderr breadcrumb, so a scripted consumer
-/// always receives a single parseable document. Errors propagate as a
-/// boxed error (stderr + nonzero exit), unchanged from the text path.
+/// JSON counterpart to [`run_eval_emit`]. Stdout carries only the raw
+/// `EvalResult` serde JSON. An empty observable result serializes to
+/// `{"roots":[]}` and adds the human breadcrumb on stderr, preserving a
+/// single parseable stdout document. Errors propagate as a boxed error
+/// (stderr + nonzero exit), unchanged from the text path.
 fn run_eval_json_emit(
     outcome: Result<chelis_compiler_api::schema::EvalResult, String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1295,22 +1294,47 @@ fn run_eval_json_emit(
         Ok(result) => {
             let rendered = serde_json::to_string(&result)?;
             println!("{rendered}");
+            warn_eval_no_roots_if_empty(&result);
             Ok(())
         }
         Err(e) => Err(e.into()),
     }
 }
 
-// G7 CLI sub-bug: when `chelis eval --file <foo.ch>` is handed a Surf
-// input that contains only `def` declarations and no top-level
-// evaluable expression, `format_eval_result` returns an empty string
-// and both eval paths short-circuit with exit 0 and no output. That
-// silent success is a footgun for interactive users. Emit a stderr
-// warning at the short-circuit site so humans get a breadcrumb;
-// preserve exit 0 so scripted consumers that pipe stdout downstream
-// keep working. See `docs/investigations/cli_eval_empty_roots_diagnosis.md`.
+fn eval_result_is_empty(result: &chelis_compiler_api::schema::EvalResult) -> bool {
+    result.roots.is_empty() && result.transcript.is_empty()
+}
+
+fn warn_eval_no_roots_if_empty(result: &chelis_compiler_api::schema::EvalResult) {
+    if eval_result_is_empty(result) {
+        warn_eval_no_roots();
+    }
+}
+
+// G7 CLI sub-bug: a Surf input containing only `def` declarations has
+// neither evaluated roots nor transcript output. Human mode therefore
+// has empty stdout, while JSON mode emits the wire-compatible
+// `{"roots":[]}` document. Every successful empty-result path adds this
+// stderr breadcrumb without changing stdout or exit 0. See
+// `docs/investigations/cli_eval_empty_roots_diagnosis.md`.
 fn warn_eval_no_roots() {
     eprintln!("warning: input contains only def declarations; nothing to evaluate");
+}
+
+#[cfg(test)]
+mod eval_json_diagnostic_tests {
+    use super::eval_result_is_empty;
+    use chelis_compiler_api::schema::EvalResult;
+
+    #[test]
+    fn transcript_only_eval_result_is_not_empty() {
+        let result = EvalResult {
+            roots: Vec::new(),
+            transcript: vec!["trace".to_string()],
+        };
+
+        assert!(!eval_result_is_empty(&result));
+    }
 }
 
 fn cmd_cost(file: &Path, json: bool) -> Result<(), Box<dyn std::error::Error>> {

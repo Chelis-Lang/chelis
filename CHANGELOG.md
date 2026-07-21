@@ -29,6 +29,12 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Empty `chelis eval --json` results now retain the operator warning
+  (chelis#639).** Successful results with empty `roots` and `transcript`
+  still exit `0` and write exactly `{"roots":[]}\n` to stdout, while stderr
+  now receives the existing no-evaluable-roots warning in both direct-file
+  and Reef-context dispatch. Non-empty results, transcript-only results,
+  and evaluation errors keep their existing channels.
 - **Deep DAGs from the bounded unroll no longer overflow the stack in
   consumer passes (chelis#620 red team).** Lowering's per-level
   `stacker::maybe_grow` protected the unroll itself, but the passes that
@@ -3511,7 +3517,8 @@ required in this shape.
 Programs whose `--file` contains only `def` declarations no longer
 silently return success with no output. A stderr warning is emitted
 (`warning: input contains only def declarations; nothing to evaluate`)
-and the process exits 0. Scripted consumers are unaffected.
+and the process exits 0. This release covered text mode; chelis#639 later
+extended the warning to JSON mode while preserving its stdout document.
 
 ### Fixed - lint auto-fix re-enabled with typed-pipeline proof
 
