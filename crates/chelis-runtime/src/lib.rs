@@ -12,6 +12,9 @@ use std::fs;
 use std::fs::File;
 use std::ptr;
 
+#[cfg(test)]
+mod runtime_dtype_contract_tests;
+
 pub const CHELIS_F32: c_int = 0;
 pub const CHELIS_F64: c_int = 1;
 pub const CHELIS_I32: c_int = 2;

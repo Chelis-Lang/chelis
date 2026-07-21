@@ -11,3 +11,6 @@ crate-type = ["staticlib", "rlib"]
 [dependencies]
 libc.workspace = true
 memmap2 = "0.9"
+
+[dev-dependencies]
+chelis-vocab.workspace = true

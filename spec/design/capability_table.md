@@ -13,6 +13,17 @@ cite), `spec/04-type-system.md` (dtype rules), and the four sibling plans.
 
 ## The two-table design
 
+### Dependency owner
+
+The machine form will live above the dependency-free `chelis-vocab` crate,
+which owns closed identities shared by the checker, runtimes, and backends.
+Phase 2 of `loud_unsupported.md` first establishes that owner for
+`EffectKind` and `RuntimeDType`. Phase 4 then moves `Prim` and introduces
+`BuiltinId` there, with temporary re-exports from `chelis-types`. This avoids
+making the C runtime depend on the type checker and ensures table rows,
+backend dispatch, runtime dtype IDs, and generated C spellings consume one
+closed declaration without a dependency cycle.
+
 The audit's lane-skew findings force a separation the single-table sketch
 in [#729] glossed over: *what an op means* is target-independent, while
 *whether a backend implements it* is not. Conflating them is how "the
