@@ -26,4 +26,3 @@ fn internal_sizing_and_reading_helpers_require_a_decoded_dtype() {
     let _: unsafe fn(*const chelis_tensor, usize, RuntimeDType) -> i64 = read_index_slot;
     let _: unsafe fn(*const chelis_tensor, RuntimeDType) -> f64 = super::read_scalar_as_f64;
 }
-

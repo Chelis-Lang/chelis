@@ -1214,24 +1214,10 @@ impl CEmitter {
     }
 
     fn dtype_macro(ty: &TensorType) -> &'static str {
-        match ty.precision {
-            Prim::F32 => "CHELIS_F32",
-            Prim::F64 => "CHELIS_F64",
-            Prim::Bool => "CHELIS_BOOL",
-            // WS-A4: narrow signed integer dtypes per spec/04-type-system.md §1.1.
-            // Runtime-side macros are defined in chelis-runtime/include/chelis_runtime.h
-            // and `chelis_alloc` honors the per-dtype element width.
-            Prim::Int8 => "CHELIS_I8",
-            Prim::Int16 => "CHELIS_I16",
-            Prim::Int32 => "CHELIS_I32",
-            Prim::Int64 => "CHELIS_I64",
-            // WS-1: bf16 / f16 tensors store data as `uint16_t`; the
-            // runtime allocator already sizes the buffer correctly via
-            // `chelis_dtype_size` returning 2 bytes.
-            Prim::Bf16 => "CHELIS_BF16",
-            Prim::F16 => "CHELIS_F16",
-            other => panic!("C backend does not yet support {} tensors", other.name()),
-        }
+        ty.precision
+            .runtime_dtype()
+            .unwrap_or_else(|error| panic!("C backend does not support this tensor: {error}"))
+            .c_macro()
     }
 
     /// Returns the C element type for direct element access in generated loops.

@@ -44,6 +44,7 @@ fn c_fused_codegen_compiles() {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include");
     for header in &[
         "chelis_runtime.h",
+        "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",
         "chelis_math.h",
@@ -238,6 +239,7 @@ fn c_fused_reduce_compiles() {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include");
     for header in &[
         "chelis_runtime.h",
+        "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",
         "chelis_math.h",

@@ -552,10 +552,11 @@ pub fn install_chelis_panic_hook() {
     });
 }
 
-use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+use chelis_deep::{Span, decode_effect_kind};
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
-use chelis_types::{BUILTIN_NAMES, CheckedProgram, EffectKind, LinearityInfo, types::Prim};
+use chelis_types::{BUILTIN_NAMES, CheckedProgram, LinearityInfo, types::Prim};
+use chelis_vocab::EffectKind;
 
 use crate::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType};
 use crate::grad::grad_dag_checked;
@@ -4936,7 +4937,7 @@ impl LowerCtx {
             "access" => self.lower_access(elems),
             "match" => self.lower_match(elems),
             "grad" => self.lower_grad(elems),
-            "handle-effect" => self.lower_handle_effect(elems),
+            "handle-effect" => self.lower_handle_effect(list),
             "jit" => self.lower_jit(elems),
             "vmap" => self.lower_unsupported(tag, elems),
             // Declarations lowered as an inert zero node: these forms are
@@ -9606,60 +9607,50 @@ impl LowerCtx {
         self.shape_bindings.get(&alias).cloned()
     }
 
-    fn lower_handle_effect(&mut self, elems: &[Expr]) -> LoweredValue {
-        let effect = match elems.get(1) {
-            Some(Expr::Map(meta, _)) => meta
-                .entries
-                .iter()
-                .find(|(key, _)| key == "effect")
-                .and_then(|(_, value)| match value {
-                    Expr::Atom(Atom::Symbol(name), _) => Some(name.as_str()),
-                    _ => None,
-                }),
-            _ => None,
-        };
+    fn lower_handle_effect(&mut self, list: &List) -> LoweredValue {
+        let elems = &list.elements;
         // chelis#730 Phase 1 (census row 9, chelis#709-adjacent): the
         // former `_ if elems.len() >= 4` catch-all lowered the body and
         // silently DROPPED the handler for any unrecognized effect kind
         // (`effect: teleport` built and ran). chelis#730 Phase 2 (section
         // C4.4) closes the future-kinds hole structurally: the kind is
         // parsed once into the closed [`EffectKind`] set and the match is
-        // exhaustive over `Option<EffectKind>` with no `_` arm, so adding a
+        // exhaustive over `EffectKind` with no `_` arm, so adding a
         // kind fails the build here until this site handles it. Fatal so
         // the host-fallback lane cannot launder the drop (its own
         // handle-effect arm carries the same closed-set match).
-        let effect_kind = effect.and_then(EffectKind::from_symbol);
+        let effect_kind = decode_effect_kind(list);
+        let current_span_id = self.current_span_id.clone();
+        let reject = |what: String| {
+            let unsupported = Unsupported::new(
+                UnsupportedKind::EffectKind(what),
+                "a `handle-effect` form in IR lowering",
+                Stage::Lowering,
+                "known effect kinds are `random` and `resource` \
+                 (spec/03-deep-syntax.md); an unknown kind previously dropped its \
+                 handler silently (chelis#730 census row 9)",
+            );
+            raise_fatal_lowering_error(unsupported.to_string(), None, current_span_id.clone())
+        };
         match effect_kind {
-            Some(EffectKind::Random) if elems.len() >= 4 => {
+            Ok(EffectKind::Random) if elems.len() >= 4 => {
                 let saved_seed = self.random_seed;
                 self.random_seed = self.extract_u64_value(&elems[2]).or(saved_seed);
                 let result = self.lower_expr(&elems[3]);
                 self.random_seed = saved_seed;
                 result
             }
-            Some(EffectKind::Resource) if elems.len() >= 4 => self.lower_expr(&elems[3]),
-            // Unknown kind (`None`), or a KNOWN kind whose form is malformed
+            Ok(EffectKind::Resource) if elems.len() >= 4 => self.lower_expr(&elems[3]),
+            // A decode error, or a KNOWN kind whose form is malformed
             // (fewer than 4 elements). Both raise the same fatal branded
             // diagnostic; the `what` payload names the original symbol so a
             // short `random`/`resource` form still reports its own kind, as
             // the pre-enum `other =>` arm did. Every variant is named
             // explicitly, so a new `EffectKind` variant is a compile error
             // here rather than a silent fall-through.
-            Some(EffectKind::Random) | Some(EffectKind::Resource) | None => {
-                let unsupported = Unsupported::new(
-                    UnsupportedKind::EffectKind(effect.unwrap_or("<missing>").to_string()),
-                    "a `handle-effect` form in IR lowering",
-                    Stage::Lowering,
-                    "known effect kinds are `random` and `resource` \
-                     (spec/03-deep-syntax.md); an unknown kind previously dropped its \
-                     handler silently (chelis#730 census row 9)",
-                );
-                raise_fatal_lowering_error(
-                    unsupported.to_string(),
-                    None,
-                    self.current_span_id.clone(),
-                )
-            }
+            Ok(EffectKind::Random) => reject(EffectKind::Random.symbol().to_owned()),
+            Ok(EffectKind::Resource) => reject(EffectKind::Resource.symbol().to_owned()),
+            Err(error) => reject(error.to_string()),
         }
     }
 

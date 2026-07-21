@@ -12,6 +12,7 @@ sleef = []
 [dependencies]
 chelis-ir = { path = "../chelis-ir" }
 chelis-types = { path = "../chelis-types" }
+chelis-vocab.workspace = true
 # WS-1 (dtype + Metal cleanup cycle): bit-pattern computation for the
 # bf16/f16 Const emit path. Codegen evaluates `half::bf16::from_f64(value)`
 # and `half::f16::from_f64(value)` at compile time so the emitted C

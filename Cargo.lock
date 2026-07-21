@@ -457,6 +457,7 @@ dependencies = [
  "chelis-ir",
  "chelis-runtime",
  "chelis-types",
+ "chelis-vocab",
  "half",
  "pkg-config",
  "serde_json",
@@ -470,6 +471,7 @@ dependencies = [
  "chelis-ir",
  "chelis-runtime",
  "chelis-types",
+ "chelis-vocab",
  "half",
  "serde_json",
  "tempfile",
@@ -482,6 +484,7 @@ dependencies = [
  "chelis-ir",
  "chelis-runtime",
  "chelis-types",
+ "chelis-vocab",
  "half",
  "serde_json",
  "tempfile",
@@ -548,6 +551,7 @@ dependencies = [
  "chelis-surf",
  "chelis-types",
  "chelis-validate",
+ "chelis-vocab",
  "half",
  "schemars",
  "serde",
@@ -582,6 +586,7 @@ dependencies = [
 name = "chelis-deep"
 version = "0.17.1"
 dependencies = [
+ "chelis-vocab",
  "miette",
  "proptest",
  "serde",
@@ -616,6 +621,7 @@ dependencies = [
  "chelis-deep",
  "chelis-surf",
  "chelis-types",
+ "chelis-vocab",
 ]
 
 [[package]]
@@ -628,6 +634,7 @@ dependencies = [
  "chelis-macros",
  "chelis-surf",
  "chelis-types",
+ "chelis-vocab",
  "serde",
  "serde_json",
  "stacker",
@@ -717,6 +724,7 @@ dependencies = [
  "assert_cmd",
  "chelis-backend-c",
  "chelis-compiler-api",
+ "chelis-vocab",
  "libc",
  "libloading",
  "pyo3",
@@ -757,6 +765,7 @@ dependencies = [
 name = "chelis-runtime"
 version = "0.17.1"
 dependencies = [
+ "chelis-vocab",
  "libc",
  "memmap2",
 ]
@@ -786,6 +795,7 @@ version = "0.17.1"
 dependencies = [
  "chelis-deep",
  "chelis-pred",
+ "chelis-vocab",
  "miette",
  "proptest",
  "serde",
@@ -820,6 +830,7 @@ dependencies = [
  "chelis-macros",
  "chelis-pred",
  "chelis-surf",
+ "chelis-vocab",
  "half",
  "quote",
  "serde",
@@ -844,6 +855,10 @@ dependencies = [
 [[package]]
 name = "chelis-version"
 version = "0.17.1"
+
+[[package]]
+name = "chelis-vocab"
+version = "0.16.1"
 
 [[package]]
 name = "chelisup"

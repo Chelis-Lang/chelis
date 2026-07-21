@@ -219,9 +219,9 @@ const BASELINE: &[Entry] = &[
     (
         Pat::UnwrapOrDefault,
         "crates/chelis-ir/src/host.rs",
-        9,
-        "pre-existing at the P0 baseline; not censused as substituting; \
-         Phase 2 lint audits them",
+        8,
+        "one effect-kind extraction fallback removed by the Phase 2 typed \
+         decoder; the remaining 8 pre-existing non-censused uses stay frozen",
     ),
     (
         Pat::UnwrapOrDefault,

@@ -145,6 +145,7 @@ fn compile_and_run(dag: &Dag, func_name: &str) -> String {
     let rt_dir = runtime_src_dir();
     for header in &[
         "chelis_runtime.h",
+        "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",
         "chelis_math.h",
@@ -341,6 +342,7 @@ fn compile_and_run_reduced(dag: &Dag, func_name: &str, is_bf16: bool) -> f64 {
     let rt_dir = runtime_src_dir();
     for header in &[
         "chelis_runtime.h",
+        "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",
         "chelis_math.h",
@@ -487,6 +489,7 @@ fn agreement_bf16_reduce_sum_matches_eval_within_tol() {
     let rt_dir = runtime_src_dir();
     for header in &[
         "chelis_runtime.h",
+        "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",
         "chelis_math.h",

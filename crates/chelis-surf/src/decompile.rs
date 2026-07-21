@@ -4,6 +4,8 @@
 //! that should re-parse without errors.
 
 use chelis_deep::ast::{Atom, Expr, List, MetaExpr, MetaMap};
+use chelis_deep::decode_effect_kind;
+use chelis_vocab::EffectKind;
 
 const SURF_WIDTH: usize = 80;
 
@@ -834,12 +836,6 @@ impl<'a> IdiomaticDecompiler<'a> {
     }
 
     fn decompile_handle_effect(&self, list: &List) -> String {
-        let effect = meta(list).and_then(|meta| {
-            meta.entries
-                .iter()
-                .find(|(key, _)| key == "effect")
-                .and_then(|(_, value)| sym_str(value))
-        });
         let kids = children(list);
         if kids.len() < 2 {
             return "()".to_string();
@@ -855,10 +851,10 @@ impl<'a> IdiomaticDecompiler<'a> {
                 2,
             )
         };
-        match effect {
-            Some("random") => format!("with seed({arg}) {{\n{body}\n}}"),
-            Some("resource") => format!("with device({arg}) {{\n{body}\n}}"),
-            _ => format!("handle-effect({}, {})", arg, self.decompile_expr(&kids[1])),
+        match decode_effect_kind(list) {
+            Ok(EffectKind::Random) => format!("with seed({arg}) {{\n{body}\n}}"),
+            Ok(EffectKind::Resource) => format!("with device({arg}) {{\n{body}\n}}"),
+            Err(_) => format!("handle-effect({}, {})", arg, self.decompile_expr(&kids[1])),
         }
     }
 }
@@ -2042,22 +2038,16 @@ fn decompile_dim_or_prim(expr: &Expr) -> String {
 }
 
 fn decompile_handle_effect(list: &List) -> String {
-    let effect = meta(list).and_then(|meta| {
-        meta.entries
-            .iter()
-            .find(|(key, _)| key == "effect")
-            .and_then(|(_, value)| sym_str(value))
-    });
     let kids = children(list);
     if kids.len() < 2 {
         return "()".to_string();
     }
     let arg = decompile_expr_without_annotation(&kids[0]);
     let body = decompile_block_contents(&kids[1]);
-    match effect {
-        Some("random") => format!("with seed({arg}) {{\n{body}\n}}"),
-        Some("resource") => format!("with device({arg}) {{\n{body}\n}}"),
-        _ => format!("handle-effect({}, {})", arg, decompile_expr(&kids[1])),
+    match decode_effect_kind(list) {
+        Ok(EffectKind::Random) => format!("with seed({arg}) {{\n{body}\n}}"),
+        Ok(EffectKind::Resource) => format!("with device({arg}) {{\n{body}\n}}"),
+        Err(_) => format!("handle-effect({}, {})", arg, decompile_expr(&kids[1])),
     }
 }
 

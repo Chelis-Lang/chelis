@@ -6,6 +6,7 @@
 
 pub mod ast;
 pub mod authoring;
+pub mod effect_kind;
 pub mod lexer;
 pub mod parser;
 pub mod path;
@@ -14,6 +15,7 @@ pub mod span;
 pub mod validate;
 
 pub use ast::{Atom, Expr, List, MetaExpr, MetaMap};
+pub use effect_kind::decode_effect_kind;
 pub use lexer::LiteralSuffix;
 pub use path::{
     DeepPath, InsertFunctionError, PathError, PathSegment, ResolveError, ResolvedFunction,

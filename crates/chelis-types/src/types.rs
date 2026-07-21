@@ -6,6 +6,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+use chelis_vocab::RuntimeDType;
 use serde::{Deserialize, Serialize};
 
 use crate::errors::ErrorWitness;
@@ -80,6 +81,24 @@ impl Prim {
             Prim::Int64 => "int64",
             Prim::Bool => "bool",
             Prim::String => "string",
+        }
+    }
+
+    /// Map an active, runtime-storable primitive to the shared ABI dtype.
+    /// Deferred and non-tensor primitives fail instead of borrowing another
+    /// dtype's tag.
+    pub fn runtime_dtype(self) -> Result<RuntimeDType, RuntimeDTypeMappingError> {
+        match self {
+            Prim::F32 => Ok(RuntimeDType::F32),
+            Prim::F64 => Ok(RuntimeDType::F64),
+            Prim::F16 => Ok(RuntimeDType::F16),
+            Prim::Bf16 => Ok(RuntimeDType::Bf16),
+            Prim::Int8 => Ok(RuntimeDType::I8),
+            Prim::Int16 => Ok(RuntimeDType::I16),
+            Prim::Int32 => Ok(RuntimeDType::I32),
+            Prim::Int64 => Ok(RuntimeDType::I64),
+            Prim::Bool => Ok(RuntimeDType::Bool),
+            Prim::F8e4m3 | Prim::String => Err(RuntimeDTypeMappingError { prim: self }),
         }
     }
 
@@ -244,6 +263,19 @@ impl Prim {
         }
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeDTypeMappingError {
+    pub prim: Prim,
+}
+
+impl fmt::Display for RuntimeDTypeMappingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "primitive `{}` has no runtime dtype", self.prim.name())
+    }
+}
+
+impl std::error::Error for RuntimeDTypeMappingError {}
 
 /// A tensor dimension.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

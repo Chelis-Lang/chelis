@@ -18,6 +18,7 @@ chelis-std-bundle.workspace = true
 chelis-surf.workspace = true
 chelis-types.workspace = true
 chelis-validate.workspace = true
+chelis-vocab.workspace = true
 bincode = "1"
 half.workspace = true
 schemars = { version = "0.8", features = ["derive"] }

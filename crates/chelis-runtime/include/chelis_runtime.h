@@ -8,28 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "chelis_simd.h"
-
-#define CHELIS_F32 0
-#define CHELIS_F64 1
-#define CHELIS_I32 2
-#define CHELIS_BOOL 3
-#define CHELIS_I64 4
-/* WS-A3 introduced bf16 / f16 dtype tags as storage-only. WS-1 (dtype
- * + Metal cleanup cycle) promotes both to arithmetic-supported on the
- * C backend: storage stays two bytes (uint16_t), and the C backend
- * routes every arithmetic kernel through `chelis_bf16_to_f32` /
- * `chelis_f32_to_bf16` (and f16 analogues), keeping per-element math
- * in f32. Matmul on bf16/f16 dispatches via convert-then-`cblas_sgemm`
- * with f32 scratch buffers (spec/04-type-system.md §5.7.1). The HIP
- * and Metal backends continue to use their native dispatch paths. */
-#define CHELIS_BF16 5
-#define CHELIS_F16 6
-/* WS-A4: narrow signed integer dtypes per spec/04-type-system.md §1.1.
- * Element sizes (1 byte for i8, 2 bytes for i16) are honored by
- * `chelis_alloc` so generated C code can index `(int8_t*)t->data` /
- * `(int16_t*)t->data` directly without overrunning the buffer. */
-#define CHELIS_I8 7
-#define CHELIS_I16 8
+#include "chelis_runtime_dtype.h"
 #define CHELIS_MAX_DIM 8
 
 typedef struct {
