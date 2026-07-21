@@ -358,16 +358,24 @@ def call_b(z: int64) -> int64 = lib_id(z)
         "snippet B's call_b must NOT inherit any test effect, got:\n{b_text}"
     );
 
-    // Stronger probe: a snippet C with `def stamp() -> unit ! {} = lib_id(...)`
-    // — same name as snippet A's stamp, but pure body and `! {}` declared.
-    // If snippet A's `! {Test}` row leaked into lib_checked, the stamp
-    // entry would still be `{Test}` and validate_declared_vs_inferred
-    // would reject. Library is unchanged — must accept.
+    // Stronger probe: a snippet C that re-defines `stamp` (same name as
+    // snippet A's `stamp`), pure body, `! {}` declared. If snippet A's
+    // `! {Test}` row leaked into lib_checked, the stamp entry would still be
+    // `{Test}` and validate_declared_vs_inferred would reject. Library is
+    // unchanged -- must accept.
+    //
+    // chelis#756 / chelis#731 Phase 2: the previous body was
+    // `{ _u = lib_id(cast(1, int64)); cast((), unit) }`, where `cast((), unit)`
+    // coerced a value to the `unit` return type. Casting to `unit` (a
+    // non-primitive) is not a spec-defined cast; on the pre-Phase-2 tree it
+    // returned a SILENT `Type::Error` that unified permissively with the
+    // declared `-> unit`, so the def type-checked only via that hole. The hole
+    // is now closed (the cast is rejected at check), so this probe uses a pure,
+    // validly-typed `int64` body instead -- the effect-leak isolation it
+    // exercises is unchanged (a pure new-code `stamp` declared `! {}` must be
+    // accepted against the unmutated library).
     let snippet_c = r#"
-def stamp() -> unit ! {} = {
-  _u = lib_id(cast(1, int64))
-  cast((), unit)
-}
+def stamp() -> int64 ! {} = lib_id(cast(1, int64))
 "#;
     let c_checked = build_new_code_checked(&typeenv, snippet_c);
     check_effects_with_context(&lib_checked, &c_checked).expect(
