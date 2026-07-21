@@ -2483,7 +2483,7 @@ impl<'a> HostEmitter<'a> {
         // unmatched-builtin arm below does not produce an `EmittedExpr` at
         // all - it returns `Err(Unsupported)`. There is deliberately no
         // `EmittedExpr::raw` on the unsupported path, so the audit's
-        // `"/* unsupported builtin */ 0"` stub is unwritable here.
+        // `/* unsupported builtin */ 0`-style stub is unwritable here.
         let expr = match name {
             "add" => EmittedExpr::raw(format!("{} + {}", arg_vars[0].0, arg_vars[1].0)),
             "sub" => EmittedExpr::raw(format!("{} - {}", arg_vars[0].0, arg_vars[1].0)),
@@ -2646,13 +2646,15 @@ impl<'a> HostEmitter<'a> {
                 HostType::Dict(_, _) => format!("chelis_dict_len({})", arg_vars[0].0),
                 _ => format!("chelis_list_len({})", arg_vars[0].0),
             }),
-            "range" => {
-                EmittedExpr::raw(format!("chelis_range_i64({}, {})", arg_vars[0].0, arg_vars[1].0))
-            }
+            "range" => EmittedExpr::raw(format!(
+                "chelis_range_i64({}, {})",
+                arg_vars[0].0, arg_vars[1].0
+            )),
             "rank" => EmittedExpr::raw(format!("chelis_tensor_rank({})", arg_vars[0].0)),
-            "shape" => {
-                EmittedExpr::raw(format!("chelis_tensor_shape({}, {})", arg_vars[0].0, arg_vars[1].0))
-            }
+            "shape" => EmittedExpr::raw(format!(
+                "chelis_tensor_shape({}, {})",
+                arg_vars[0].0, arg_vars[1].0
+            )),
             "numel" => EmittedExpr::raw(format!("chelis_tensor_numel({})", arg_vars[0].0)),
             // Scalar math — these run on host `double` values in lowered
             // closures (e.g. the per-element GELU / RMSNorm map bodies).

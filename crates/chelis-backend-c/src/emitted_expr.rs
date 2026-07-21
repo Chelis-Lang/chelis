@@ -3,8 +3,8 @@
 //!
 //! The C host emitter builds expression fragments as text. Before this
 //! newtype, an expression builder returned a bare `String`, so ANY string
-//! was a legal emission - including the audit's
-//! `format!("/* unsupported builtin {other} */ 0")` stub (census row 2).
+//! was a legal emission - including the audit's silent
+//! `/* unsupported builtin ... */ 0` stub (census row 2).
 //! Phase 1 converted that terminal to `Err(Unsupported)`; Phase 2 removes
 //! the *ability* to reintroduce it.
 //!
@@ -26,7 +26,7 @@
 //! // fabricate an emission payload from a raw stub string. This block is
 //! // a `compile_fail` doctest - it is a PASS iff it does NOT compile.
 //! use chelis_backend_c::emitted_expr::EmittedExpr;
-//! let _stub = EmittedExpr::raw("/* unsupported builtin */ 0".to_string());
+//! let _stub = EmittedExpr::raw("/* unsupported builtin */ 0;".to_string());
 //! ```
 //!
 //! And there is no public constructor of any other name either:
@@ -35,7 +35,7 @@
 //! use chelis_backend_c::emitted_expr::EmittedExpr;
 //! // No `From<String>`, no `new`, no `Default` - the type cannot be
 //! // constructed from text outside `chelis-backend-c`.
-//! let _stub: EmittedExpr = "/* unsupported builtin */ 0".to_string().into();
+//! let _stub: EmittedExpr = "/* unsupported builtin */ 0;".to_string().into();
 //! ```
 
 use std::fmt;
@@ -56,8 +56,8 @@ impl EmittedExpr {
     /// arms build their fragments through here, but no code outside the
     /// emitter can turn an arbitrary string - least of all an `unsupported`
     /// stub - into an emission. Section C4.2's lint and the Phase 0
-    /// tripwire (`*/ 0"`) patrol the in-crate use sites; the type system
-    /// closes the out-of-crate door.
+    /// tripwire (the stub-zero token class) patrol the in-crate use sites;
+    /// the type system closes the out-of-crate door.
     pub(crate) fn raw(text: String) -> Self {
         EmittedExpr(text)
     }
