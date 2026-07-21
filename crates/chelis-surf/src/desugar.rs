@@ -2011,7 +2011,9 @@ fn desugar_type_with_scope(
             // - Otherwise the lexical case-split applies: a PascalCase
             //   name is an ADT; a lowercase name is a free `t-var`
             //   whose binding the type checker resolves downstream.
-            if PRIMITIVES.contains(&name.as_str()) {
+            if name == "unit" {
+                node("t-unit", vec![])
+            } else if PRIMITIVES.contains(&name.as_str()) {
                 node("t-prim", vec![sym(name)])
             } else if tvar_set.contains(name.as_str()) {
                 node("t-var", vec![sym(name)])

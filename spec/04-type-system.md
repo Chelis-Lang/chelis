@@ -2326,8 +2326,17 @@ which remains as its independent test-side mirror; the fitness-honesty corpus
 (§C4.4) and the cascade-count corpus (Part II B2.3,
 `crates/chelis-cli/tests/issue_731_cascade_count_corpus.rs`) enforce the
 behavior. The Surf-reachable chelis#755 (field access) and chelis#756
-(deep-type conversion) sites are closed here: their converters gained the
-error vector and now report.)*
+(deep-type conversion) sites are closed here. Deep type and dimension
+resolution has one centralized, witnessed, fallible boundary: it returns a
+resolved type or an `ErrorWitness` minted while pushing the owning diagnostic.
+Recursive parents propagate that witness without re-reporting. The resolver's
+explicit context distinguishes closed input, explicit `deftype`/`typealias`
+binders, implicit-generic `defsig` binders, and trusted compiler-generated
+metadata; only a real binder or a use-site-approved inference hole may allocate
+a type/dimension/rank variable. Nominal headers and arities are precollected so
+self/forward references remain legal while unknown names, wrong arities,
+malformed nested nodes, and bare declaration-field types cannot enter a
+successful or cacheable checked context. See spec/03 §2.5.1/§2.6.)*
 
 > **[04-TOT-3]** A structurally malformed Deep form that reaches the
 > checker SHALL be rejected with a diagnostic naming the tag and the

@@ -2,11 +2,13 @@
 //!
 //! Processes `deftype` Deep nodes to extract constructor type signatures.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chelis_deep::ast as deep;
 use serde::{Deserialize, Serialize};
 
+use crate::deep_type::{BinderMode, DeepTypeResolver, KnownTypeHeaders, TypeUseSite};
+use crate::errors::{CheckError, ErrorWitness};
 use crate::types::*;
 
 /// Information about a single variant of an ADT.
@@ -90,23 +92,25 @@ impl AdtRegistry {
     /// `defining_module` the module identity computed by the caller
     /// (RFC D-CHECK); both are recorded on the [`AdtDef`].
     /// Returns constructor schemes to add to the type environment.
-    pub fn register_deftype(
+    pub(crate) fn register_deftype(
         &mut self,
         children: &[deep::Expr],
         vg: &mut VarGen,
+        headers: &KnownTypeHeaders,
+        errors: &mut Vec<CheckError>,
         opaque: bool,
         defining_module: Option<String>,
-    ) -> Vec<(String, Scheme)> {
+    ) -> Result<Vec<(String, Scheme)>, ErrorWitness> {
         // children[0] = name (symbol)
         // children[1] = type params list like (a) or (a b) -- a bare list of symbols wrapped in parens
         // children[2..] = variant nodes
         if children.is_empty() {
-            return vec![];
+            return Ok(vec![]);
         }
 
         let name = match &children[0] {
             deep::Expr::Atom(deep::Atom::Symbol(s), _) => s.clone(),
-            _ => return vec![],
+            _ => return Ok(vec![]),
         };
 
         // Parse type parameters -- could be (a b) as a list, or just individual symbols
@@ -149,16 +153,17 @@ impl AdtRegistry {
             variant_start = 1;
         }
 
-        // Build a mapping from type param names to fresh TypeVars
-        let mut param_map: HashMap<String, TypeVar> = HashMap::new();
-        for p in &type_params {
-            param_map.insert(p.clone(), vg.fresh_tvar());
-        }
+        let explicit_params: HashSet<String> = type_params.iter().cloned().collect();
+        let mut resolver = DeepTypeResolver::new(
+            TypeUseSite::DeftypeField,
+            BinderMode::Explicit(&explicit_params),
+            headers,
+            vg,
+            errors,
+        );
 
         // Parse variants
         let mut variants = Vec::new();
-        let mut constructor_schemes = Vec::new();
-
         let variant_children = if variant_start < children.len() {
             &children[variant_start..]
         } else {
@@ -196,51 +201,19 @@ impl AdtRegistry {
                                     deep::Expr::Atom(deep::Atom::Symbol(s), _) => s.clone(),
                                     _ => continue,
                                 };
-                                let ftype = self.expand_aliases(&deep_type_to_type_with_params(
-                                    &fchildren[1],
-                                    &param_map,
-                                    vg,
-                                ));
+                                let ftype = self
+                                    .expand_aliases(&resolver.resolve(&fchildren[1])?.into_type());
                                 fields.push((Some(fname), ftype));
                             }
                         }
                         _ => {
                             // Positional type argument
-                            let ftype = self.expand_aliases(&deep_type_to_type_with_params(
-                                field_expr, &param_map, vg,
-                            ));
+                            let ftype =
+                                self.expand_aliases(&resolver.resolve(field_expr)?.into_type());
                             fields.push((None, ftype));
                         }
                     }
                 }
-
-                // Build constructor type
-                let adt_type = Type::Adt(
-                    name.clone(),
-                    type_params
-                        .iter()
-                        .map(|p| Type::Var(*param_map.get(p).unwrap()))
-                        .collect(),
-                );
-
-                let ctor_type = if fields.is_empty() {
-                    // Nullary constructor: just the ADT type
-                    adt_type.clone()
-                } else {
-                    // Constructor function: field types -> ADT type
-                    let arg_types: Vec<Type> = fields.iter().map(|(_, t)| t.clone()).collect();
-                    Type::Fn(arg_types, Box::new(adt_type.clone()))
-                };
-
-                let all_tvars: Vec<TypeVar> = param_map.values().copied().collect();
-                let scheme = Scheme {
-                    tvars: all_tvars,
-                    dvars: vec![],
-                    rvars: vec![],
-                    body: ctor_type,
-                };
-
-                constructor_schemes.push((vname.clone(), scheme));
 
                 variants.push(VariantInfo {
                     name: vname,
@@ -249,9 +222,46 @@ impl AdtRegistry {
             }
         }
 
+        let all_tvars = resolver.type_vars();
+        let all_dvars = resolver.dim_vars();
+        let all_rvars = resolver.rank_vars();
         let param_vars: Vec<TypeVar> = type_params
             .iter()
-            .map(|p| *param_map.get(p).expect("param_map covers every type param"))
+            .map(|param| {
+                resolver
+                    .type_var(param)
+                    .expect("explicit parameters are pre-bound as nominal type arguments")
+            })
+            .collect();
+        let adt_type = Type::Adt(
+            name.clone(),
+            param_vars.iter().copied().map(Type::Var).collect(),
+        );
+        let constructor_schemes = variants
+            .iter()
+            .map(|variant| {
+                let ctor_type = if variant.fields.is_empty() {
+                    adt_type.clone()
+                } else {
+                    Type::Fn(
+                        variant
+                            .fields
+                            .iter()
+                            .map(|(_, field_type)| field_type.clone())
+                            .collect(),
+                        Box::new(adt_type.clone()),
+                    )
+                };
+                (
+                    variant.name.clone(),
+                    Scheme {
+                        tvars: all_tvars.clone(),
+                        dvars: all_dvars.clone(),
+                        rvars: all_rvars.clone(),
+                        body: ctor_type,
+                    },
+                )
+            })
             .collect();
         self.defs.insert(
             name.clone(),
@@ -265,7 +275,7 @@ impl AdtRegistry {
             },
         );
 
-        constructor_schemes
+        Ok(constructor_schemes)
     }
 
     /// Look up an ADT definition by name.
@@ -523,138 +533,5 @@ pub(crate) fn substitute_alias_type(ty: &Type, subst: &HashMap<TypeVar, Type>) -
                 .collect(),
         ),
         _ => ty.clone(),
-    }
-}
-
-/// Convert a Deep type expression to internal Type, resolving type param names.
-///
-/// chelis#731 Phase 2 / chelis#756: this deftype-field converter has no error
-/// vector, so a malformed or unknown field type can no longer become a silent
-/// `Type::Error` (unconstructible outside the checker's diagnostics module,
-/// §C3). The typed rule is a FRESH type variable (`vg.fresh_type()`) -- "a
-/// field type we could not parse, to be pinned by unification" -- the same
-/// explicit-typed-rule direction chelis#755 took for deferred field access. A
-/// fresh var is never `Type::Error`, so the §C4.1 totality invariant holds.
-fn deep_type_to_type_with_params(
-    expr: &deep::Expr,
-    param_map: &HashMap<String, TypeVar>,
-    vg: &mut VarGen,
-) -> Type {
-    match expr {
-        deep::Expr::List(list, _) => {
-            let tag = get_tag(list).unwrap_or("");
-            let children = list_children(list);
-            match tag {
-                "t-prim" => {
-                    if let Some(deep::Expr::Atom(deep::Atom::Symbol(name), _)) = children.first() {
-                        Prim::parse_name(name)
-                            .map(Type::Prim)
-                            .unwrap_or_else(|| vg.fresh_type())
-                    } else {
-                        vg.fresh_type()
-                    }
-                }
-                "t-var" => {
-                    if let Some(deep::Expr::Atom(deep::Atom::Symbol(name), _)) = children.first() {
-                        if let Some(&tv) = param_map.get(name.as_str()) {
-                            Type::Var(tv)
-                        } else {
-                            vg.fresh_type()
-                        }
-                    } else {
-                        vg.fresh_type()
-                    }
-                }
-                "t-fn" => {
-                    if children.is_empty() {
-                        return vg.fresh_type();
-                    }
-                    let args: Vec<Type> = children[..children.len() - 1]
-                        .iter()
-                        .map(|c| deep_type_to_type_with_params(c, param_map, vg))
-                        .collect();
-                    let ret =
-                        deep_type_to_type_with_params(&children[children.len() - 1], param_map, vg);
-                    Type::Fn(args, Box::new(ret))
-                }
-                "t-tensor" => {
-                    if children.is_empty() {
-                        return vg.fresh_type();
-                    }
-                    let prec_expr = &children[children.len() - 1];
-                    // Per WS-A5 (spec/04-type-system.md §5.8) the precision
-                    // slot may be either a concrete primitive or a type
-                    // variable (within a sig). Translate both shapes; any
-                    // other shape is an ill-formed tensor.
-                    let prec = match deep_type_to_type_with_params(prec_expr, param_map, vg) {
-                        Type::Prim(p) => TensorPrec::Concrete(p),
-                        Type::Var(v) => TensorPrec::Var(v),
-                        _ => return vg.fresh_type(),
-                    };
-                    let dims: Vec<Dim> = children[..children.len() - 1]
-                        .iter()
-                        .filter_map(deep_dim)
-                        .collect();
-                    Type::Tensor(dims, prec)
-                }
-                "t-adt" => {
-                    if let Some(deep::Expr::Atom(deep::Atom::Symbol(name), _)) = children.first() {
-                        let args: Vec<Type> = children[1..]
-                            .iter()
-                            .map(|c| deep_type_to_type_with_params(c, param_map, vg))
-                            .collect();
-                        Type::Adt(name.clone(), args)
-                    } else {
-                        vg.fresh_type()
-                    }
-                }
-                "t-tuple" => {
-                    let elems: Vec<Type> = children
-                        .iter()
-                        .map(|c| deep_type_to_type_with_params(c, param_map, vg))
-                        .collect();
-                    Type::Tuple(elems)
-                }
-                "t-unit" => Type::Unit,
-                _ => vg.fresh_type(),
-            }
-        }
-        _ => vg.fresh_type(),
-    }
-}
-
-/// Parse a dimension expression from Deep AST.
-fn deep_dim(expr: &deep::Expr) -> Option<Dim> {
-    match expr {
-        deep::Expr::List(list, _) => {
-            let tag = get_tag(list).unwrap_or("");
-            let children = list_children(list);
-            match tag {
-                "d-name" => {
-                    if let Some(deep::Expr::Atom(deep::Atom::Symbol(name), _)) = children.first() {
-                        if name == "*" {
-                            Some(Dim::Wildcard)
-                        } else {
-                            Some(Dim::Name(name.clone()))
-                        }
-                    } else {
-                        None
-                    }
-                }
-                "d-var" => {
-                    // Dimension variables in ADT context aren't common, treat as wildcard
-                    Some(Dim::Wildcard)
-                }
-                "d-lit" => {
-                    if let Some(deep::Expr::Atom(deep::Atom::Int(n), _)) = children.first() {
-                        Some(Dim::Lit(*n))
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            }
-        }
-        _ => None,
     }
 }

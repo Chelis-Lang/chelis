@@ -2,6 +2,7 @@
 
 pub mod adt;
 pub mod context;
+pub(crate) mod deep_type;
 pub mod env;
 pub mod errors;
 pub mod fitness;

@@ -79,7 +79,7 @@ fn positional_ctor_call_resolves_to_positional_variant_when_record_collides() {
     write_file(
         &fixture,
         "module CtorCollision\n\
-         type RecordIntCol = | IntCol { values: tensor[n, int64] }\n\
+         type RecordIntCol[n] = | IntCol { values: tensor[n, int64] }\n\
          type PositionalIntCol[n] = | IntCol(tensor[n, int64], tensor[n, bool])\n\
          def make_positional[n](xs: tensor[n, int64], mask: tensor[n, bool]) -> PositionalIntCol[n] = {\n\
            IntCol(xs, mask)\n\

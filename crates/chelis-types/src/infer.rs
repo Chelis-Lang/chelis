@@ -10,6 +10,7 @@ use chelis_deep::ast as deep;
 use crate::adt::{AdtRegistry, CallShape};
 use crate::builtins;
 use crate::context::{TypeEnv, TypeEnvInner};
+use crate::deep_type::{BinderMode, DeepTypeResolver, KnownTypeHeaders, TypeUseSite};
 use crate::env::Env;
 use crate::errors::*;
 use crate::linearity::LinearityInfo;
@@ -373,8 +374,41 @@ thread_local! {
     ///
     /// Populated for the duration of `annotate_ir_program` /
     /// `annotate_ir_program_with_context` and cleared afterwards.
-    static DECLARED_SIG_PARAM_TYPES: RefCell<HashMap<String, Vec<deep::Expr>>> =
+    static DECLARED_SIG_PARAM_TYPES: RefCell<HashMap<String, DeclaredSigMetadata>> =
         RefCell::new(HashMap::new());
+    /// Binder names owned by the top-level def currently being inferred.
+    /// This is transient per-run state: it validates nested ascription
+    /// metadata against the enclosing `defsig` without entering cached or
+    /// serialized checker state.
+    static CURRENT_TYPE_BINDERS: RefCell<Option<HashSet<String>>> = const { RefCell::new(None) };
+}
+
+#[derive(Clone)]
+struct DeclaredSigMetadata {
+    param_types: Vec<deep::Expr>,
+    binders: HashSet<String>,
+}
+
+struct CurrentTypeBindersGuard {
+    previous: Option<HashSet<String>>,
+}
+
+fn install_current_type_binders(names: Option<&HashSet<String>>) -> CurrentTypeBindersGuard {
+    let next = names.cloned();
+    let previous =
+        CURRENT_TYPE_BINDERS.with(|cell| std::mem::replace(&mut *cell.borrow_mut(), next));
+    CurrentTypeBindersGuard { previous }
+}
+
+impl Drop for CurrentTypeBindersGuard {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        CURRENT_TYPE_BINDERS.with(|cell| *cell.borrow_mut() = previous);
+    }
+}
+
+fn current_type_binders() -> Option<HashSet<String>> {
+    CURRENT_TYPE_BINDERS.with(|cell| cell.borrow().clone())
 }
 
 /// Scan `exprs` for `(defsig name (t-fn ...))` nodes and install a
@@ -383,7 +417,7 @@ thread_local! {
 /// (typically empty) on drop so nested / re-entrant annotation passes
 /// do not leak state.
 fn install_declared_sig_param_types(exprs: &[deep::Expr]) -> DeclaredSigGuard {
-    let mut map: HashMap<String, Vec<deep::Expr>> = HashMap::new();
+    let mut map: HashMap<String, DeclaredSigMetadata> = HashMap::new();
     for expr in exprs {
         collect_defsig_param_types(expr, &mut map);
     }
@@ -393,7 +427,7 @@ fn install_declared_sig_param_types(exprs: &[deep::Expr]) -> DeclaredSigGuard {
 }
 
 struct DeclaredSigGuard {
-    previous: HashMap<String, Vec<deep::Expr>>,
+    previous: HashMap<String, DeclaredSigMetadata>,
 }
 
 impl Drop for DeclaredSigGuard {
@@ -407,7 +441,7 @@ impl Drop for DeclaredSigGuard {
 /// descending through `(module ...)` wrappers. Only the leading
 /// argument type expressions are stored (the trailing return type is
 /// dropped). A re-declared name keeps the first sig seen.
-fn collect_defsig_param_types(expr: &deep::Expr, map: &mut HashMap<String, Vec<deep::Expr>>) {
+fn collect_defsig_param_types(expr: &deep::Expr, map: &mut HashMap<String, DeclaredSigMetadata>) {
     // Bail before unbounded recursion exhausts the native stack on a
     // deeply-nested input. No error vector here; `stack_guard_tripped`
     // records the bail so the check entry boundary fails hard with a located
@@ -442,10 +476,32 @@ fn collect_defsig_param_types(expr: &deep::Expr, map: &mut HashMap<String, Vec<d
             }
             // All but the trailing return type are parameter types.
             let param_type_exprs: Vec<deep::Expr> = fn_kids[..fn_kids.len() - 1].to_vec();
-            map.entry(name.to_string()).or_insert(param_type_exprs);
+            map.entry(name.to_string())
+                .or_insert_with(|| DeclaredSigMetadata {
+                    param_types: param_type_exprs,
+                    binders: deep_type_binder_names(&kids[1]),
+                });
         }
         _ => {}
     }
+}
+
+fn deep_type_binder_names(type_expr: &deep::Expr) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let mut pending = vec![type_expr];
+    while let Some(current) = pending.pop() {
+        let deep::Expr::List(type_list, _) = current else {
+            continue;
+        };
+        if matches!(get_tag(type_list), Some("t-var" | "d-var" | "d-rank"))
+            && let Some(variable) = children(type_list).first().and_then(symbol_name)
+            && variable != "_"
+        {
+            names.insert(variable.to_string());
+        }
+        pending.extend(children(type_list));
+    }
+    names
 }
 
 /// Result of running type inference on a program.
@@ -469,7 +525,21 @@ impl CheckedProgram {
         annotated_exprs: Vec<deep::Expr>,
         type_env: HashMap<String, deep::Expr>,
     ) -> Self {
-        let signature_inference = infer_signature_metadata(&annotated_exprs, &type_env);
+        let type_headers = signature_metadata_type_headers(&annotated_exprs);
+        Self::from_parts_with_headers(annotated_exprs, type_env, &type_headers)
+    }
+
+    fn from_parts_with_headers(
+        annotated_exprs: Vec<deep::Expr>,
+        type_env: HashMap<String, deep::Expr>,
+        type_headers: &KnownTypeHeaders,
+    ) -> Self {
+        let signature_inference = infer_signature_metadata_with_context_and_headers(
+            &annotated_exprs,
+            &type_env,
+            &SignatureInferenceMetadata::default(),
+            type_headers,
+        );
         Self {
             annotated_exprs,
             type_env,
@@ -483,8 +553,27 @@ impl CheckedProgram {
         type_env: HashMap<String, deep::Expr>,
         signature_context: &SignatureInferenceMetadata,
     ) -> Self {
-        let signature_inference =
-            infer_signature_metadata_with_context(&annotated_exprs, &type_env, signature_context);
+        let type_headers = signature_metadata_type_headers(&annotated_exprs);
+        Self::from_parts_with_signature_context_and_headers(
+            annotated_exprs,
+            type_env,
+            signature_context,
+            &type_headers,
+        )
+    }
+
+    fn from_parts_with_signature_context_and_headers(
+        annotated_exprs: Vec<deep::Expr>,
+        type_env: HashMap<String, deep::Expr>,
+        signature_context: &SignatureInferenceMetadata,
+        type_headers: &KnownTypeHeaders,
+    ) -> Self {
+        let signature_inference = infer_signature_metadata_with_context_and_headers(
+            &annotated_exprs,
+            &type_env,
+            signature_context,
+            type_headers,
+        );
         Self {
             annotated_exprs,
             type_env,
@@ -650,7 +739,7 @@ fn infer_program_inner(exprs: &[deep::Expr]) -> InferResult {
     // Checker-enforced opacity (RFC D-CHECK): install the per-run
     // context so the inference hooks see module identity, exports,
     // and producer text. Dropped at the end of this function.
-    let opacity_meta = build_opacity_meta(&items, &adt_reg, &mut vg);
+    let opacity_meta = build_opacity_meta(&items, &adt_reg, &env);
     let _opacity_guard = crate::opacity::install_opacity_context(
         crate::opacity::OpacityContextData::from_meta(opacity_meta),
     );
@@ -659,6 +748,7 @@ fn infer_program_inner(exprs: &[deep::Expr]) -> InferResult {
     // declaration pass — without it, the entire HM checker is a no-op on
     // module-wrapped programs.
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
+    let defsig_type_binders = collect_defsig_type_binders(&items);
     for (module, expr) in &items {
         let decl_name = top_level_decl_name(expr);
         crate::opacity::set_current_item(
@@ -675,6 +765,7 @@ fn infer_program_inner(exprs: &[deep::Expr]) -> InferResult {
             &mut typed_nodes,
             &mut total_nodes,
             &user_def_names,
+            &defsig_type_binders,
         );
         // Issue #256 round 2: re-check each deferred borrow against the
         // now-complete substitution (see `validate_deferred_borrow_vars`).
@@ -959,6 +1050,7 @@ pub fn build_compiled_library_context(
     }
     let library_ir_annotated = build_ir_type_env(&library_annotated);
 
+    let signature_type_headers = KnownTypeHeaders::from_registry(&state.adt_reg);
     let type_env = TypeEnv::from_inner(TypeEnvInner {
         env: state.env,
         var_gen: state.var_gen,
@@ -974,7 +1066,11 @@ pub fn build_compiled_library_context(
     // empty outer scope, `context.inner().ir_types` is empty, so the
     // union step is a no-op and `annotated_type_env ==
     // library_ir_annotated`.
-    let checked = CheckedProgram::from_parts(library_annotated, library_ir_annotated);
+    let checked = CheckedProgram::from_parts_with_headers(
+        library_annotated,
+        library_ir_annotated,
+        &signature_type_headers,
+    );
 
     Ok((type_env, checked))
 }
@@ -1104,6 +1200,7 @@ pub fn build_compiled_library_context_with_base(
             .or_insert_with(|| ty.clone());
     }
 
+    let signature_type_headers = KnownTypeHeaders::from_registry(&state.adt_reg);
     let type_env = TypeEnv::from_inner(TypeEnvInner {
         env: state.env,
         var_gen: state.var_gen,
@@ -1124,7 +1221,11 @@ pub fn build_compiled_library_context_with_base(
             .entry(name.clone())
             .or_insert_with(|| ty.clone());
     }
-    let checked = CheckedProgram::from_parts(library_annotated, checked_type_env);
+    let checked = CheckedProgram::from_parts_with_headers(
+        library_annotated,
+        checked_type_env,
+        &signature_type_headers,
+    );
 
     Ok((type_env, checked))
 }
@@ -1262,10 +1363,12 @@ fn check_ir_with_signature_context_inner(
             .or_insert_with(|| ty.clone());
     }
     log_sub("annotated_type_env_build", &mut sub_t);
-    let checked = CheckedProgram::from_parts_with_signature_context(
+    let signature_type_headers = KnownTypeHeaders::from_registry(&state.adt_reg);
+    let checked = CheckedProgram::from_parts_with_signature_context_and_headers(
         annotated_exprs,
         annotated_type_env,
         signature_context,
+        &signature_type_headers,
     );
     // chelis#731 Phase 2 ([04-TOT-2] / §C4.1): the always-on totality
     // invariant. errors is empty here (we passed the gate above), so any
@@ -1460,19 +1563,23 @@ fn infer_ir_program_with_state(
     // program-shape metadata into the persistent state (so the
     // stacked library/new-code paths keep library exports visible)
     // and install the per-run context for the inference hooks.
-    let phase_meta = build_opacity_meta(&items, &state.adt_reg, &mut state.var_gen);
+    let phase_meta = build_opacity_meta(&items, &state.adt_reg, &state.env);
     state.opacity.merge_from(&phase_meta);
     let _opacity_guard = crate::opacity::install_opacity_context(
         crate::opacity::OpacityContextData::from_meta(state.opacity.clone()),
     );
 
     for (name, ty_expr) in new_ir_types {
-        let ty = deep_type_to_resolved_type(
+        let Ok(ty) = resolve_deep_type(
             ty_expr,
             &mut state.var_gen,
             &state.adt_reg,
-            &mut HashMap::new(),
-        );
+            TypeUseSite::CompilerMetadata,
+            BinderMode::TrustedCompilerMetadata,
+            &mut errors,
+        ) else {
+            continue;
+        };
         let scheme = state.env.generalize(&ty, &state.subst);
         state.env.bind(name.clone(), scheme);
     }
@@ -1484,6 +1591,7 @@ fn infer_ir_program_with_state(
         .map(|v| v == "1")
         .unwrap_or(false);
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
+    let defsig_type_binders = collect_defsig_type_binders(&items);
     for (module, expr) in &items {
         let t0 = if detail_profile {
             Some(std::time::Instant::now())
@@ -1505,6 +1613,7 @@ fn infer_ir_program_with_state(
             &mut typed_nodes,
             &mut total_nodes,
             &user_def_names,
+            &defsig_type_binders,
         );
         if let Some(t0) = t0 {
             let elapsed = t0.elapsed();
@@ -2109,17 +2218,11 @@ fn detect_forged_linker_names(exprs: &[deep::Expr], errors: &mut Vec<CheckError>
     }
 }
 
-fn infer_signature_metadata(
-    exprs: &[deep::Expr],
-    type_env: &HashMap<String, deep::Expr>,
-) -> SignatureInferenceMetadata {
-    infer_signature_metadata_with_context(exprs, type_env, &SignatureInferenceMetadata::default())
-}
-
-fn infer_signature_metadata_with_context(
+fn infer_signature_metadata_with_context_and_headers(
     exprs: &[deep::Expr],
     type_env: &HashMap<String, deep::Expr>,
     signature_context: &SignatureInferenceMetadata,
+    type_headers: &KnownTypeHeaders,
 ) -> SignatureInferenceMetadata {
     let defsig_names = collect_defsig_names(exprs);
     let recursive_members = recursive_call_cycle_members(exprs);
@@ -2149,7 +2252,10 @@ fn infer_signature_metadata_with_context(
             let Some(fn_list) = kids.get(1).and_then(as_tagged_list_expr("fn")) else {
                 continue;
             };
-            let Some(checked_signature) = type_env.get(name).and_then(type_from_deep_expr) else {
+            let Some(checked_signature) = type_env
+                .get(name)
+                .and_then(|expr| type_from_deep_expr(expr, type_headers))
+            else {
                 continue;
             };
             let Type::Fn(checked_args, checked_ret) = checked_signature.clone() else {
@@ -2179,7 +2285,13 @@ fn infer_signature_metadata_with_context(
                     && type_contains_tensor(&checked_type)
                     && !matches!(checked_type, Type::Ref(_));
                 let inferred_read_only = can_infer
-                    && !param_has_consuming_use(body, pname, &available_signatures, type_env);
+                    && !param_has_consuming_use_with_headers(
+                        body,
+                        pname,
+                        &available_signatures,
+                        type_env,
+                        type_headers,
+                    );
                 let display_type = if inferred_read_only {
                     Type::Ref(Box::new(checked_type.clone()))
                 } else {
@@ -2214,6 +2326,14 @@ fn infer_signature_metadata_with_context(
     }
 
     SignatureInferenceMetadata { functions }
+}
+
+fn signature_metadata_type_headers(exprs: &[deep::Expr]) -> KnownTypeHeaders {
+    let empty = TypeEnv::empty();
+    precollect_type_headers(
+        &top_level_decl_items_with_modules(exprs),
+        &empty.inner().adt_reg,
+    )
 }
 
 fn signature_inference_def_order(exprs: &[deep::Expr]) -> Vec<&deep::Expr> {
@@ -2499,8 +2619,26 @@ pub(crate) fn param_has_consuming_use(
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
 ) -> bool {
+    let headers = KnownTypeHeaders::from_registry(&AdtRegistry::new());
+    param_has_consuming_use_with_headers(expr, param, available_signatures, type_env, &headers)
+}
+
+fn param_has_consuming_use_with_headers(
+    expr: &deep::Expr,
+    param: &str,
+    available_signatures: &HashMap<String, Type>,
+    type_env: &HashMap<String, deep::Expr>,
+    type_headers: &KnownTypeHeaders,
+) -> bool {
     let mut bound = Vec::new();
-    param_has_consuming_use_inner(expr, param, &mut bound, available_signatures, type_env)
+    param_has_consuming_use_inner(
+        expr,
+        param,
+        &mut bound,
+        available_signatures,
+        type_env,
+        type_headers,
+    )
 }
 
 fn param_has_consuming_use_inner(
@@ -2509,26 +2647,60 @@ fn param_has_consuming_use_inner(
     bound: &mut Vec<HashSet<String>>,
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
+    type_headers: &KnownTypeHeaders,
 ) -> bool {
     stack_guard!("param_has_consuming_use_inner", expr, false);
     match expr {
         deep::Expr::Atom(_, _) => false,
         deep::Expr::Map(map, _) => map.entries.iter().any(|(_, value)| {
-            param_has_consuming_use_inner(value, param, bound, available_signatures, type_env)
+            param_has_consuming_use_inner(
+                value,
+                param,
+                bound,
+                available_signatures,
+                type_env,
+                type_headers,
+            )
         }),
-        deep::Expr::MetaExpr(meta, _) => {
-            param_has_consuming_use_inner(&meta.expr, param, bound, available_signatures, type_env)
-        }
+        deep::Expr::MetaExpr(meta, _) => param_has_consuming_use_inner(
+            &meta.expr,
+            param,
+            bound,
+            available_signatures,
+            type_env,
+            type_headers,
+        ),
         deep::Expr::List(list, _) => match get_tag(list) {
             Some("var") => var_name_list(list) == Some(param) && !is_bound_name(param, bound),
             Some("borrow") | Some("copy") => children(list).first().is_some_and(|child| {
-                param_nested_consuming_use(child, param, bound, available_signatures, type_env)
+                param_nested_consuming_use(
+                    child,
+                    param,
+                    bound,
+                    available_signatures,
+                    type_env,
+                    type_headers,
+                )
             }),
             Some("drop") | Some("realize") => children(list)
                 .first()
                 .is_some_and(|child| expr_mentions_unshadowed_name(child, param, bound)),
-            Some("app") => app_consumes_param(list, param, bound, available_signatures, type_env),
-            Some("pipe") => pipe_consumes_param(list, param, bound, available_signatures, type_env),
+            Some("app") => app_consumes_param(
+                list,
+                param,
+                bound,
+                available_signatures,
+                type_env,
+                type_headers,
+            ),
+            Some("pipe") => pipe_consumes_param(
+                list,
+                param,
+                bound,
+                available_signatures,
+                type_env,
+                type_headers,
+            ),
             Some("fn") => {
                 let kids = children(list);
                 if kids.len() < 2 {
@@ -2555,6 +2727,7 @@ fn param_has_consuming_use_inner(
                             bound,
                             available_signatures,
                             type_env,
+                            type_headers,
                         ) {
                             return true;
                         }
@@ -2571,6 +2744,7 @@ fn param_has_consuming_use_inner(
                     bound,
                     available_signatures,
                     type_env,
+                    type_headers,
                 );
                 bound.pop();
                 result
@@ -2598,12 +2772,14 @@ fn param_has_consuming_use_inner(
                         bound,
                         available_signatures,
                         type_env,
+                        type_headers,
                     ) || param_has_consuming_use_inner(
                         &arm_kids[2],
                         param,
                         bound,
                         available_signatures,
                         type_env,
+                        type_headers,
                     );
                     bound.pop();
                     if consumes {
@@ -2613,7 +2789,14 @@ fn param_has_consuming_use_inner(
                 false
             }
             _ => children(list).iter().any(|child| {
-                param_has_consuming_use_inner(child, param, bound, available_signatures, type_env)
+                param_has_consuming_use_inner(
+                    child,
+                    param,
+                    bound,
+                    available_signatures,
+                    type_env,
+                    type_headers,
+                )
             }),
         },
     }
@@ -2625,11 +2808,19 @@ fn param_nested_consuming_use(
     bound: &mut Vec<HashSet<String>>,
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
+    type_headers: &KnownTypeHeaders,
 ) -> bool {
     if is_direct_unshadowed_var(expr, param, bound) {
         return false;
     }
-    param_has_consuming_use_inner(expr, param, bound, available_signatures, type_env)
+    param_has_consuming_use_inner(
+        expr,
+        param,
+        bound,
+        available_signatures,
+        type_env,
+        type_headers,
+    )
 }
 
 fn app_consumes_param(
@@ -2638,12 +2829,20 @@ fn app_consumes_param(
     bound: &mut Vec<HashSet<String>>,
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
+    type_headers: &KnownTypeHeaders,
 ) -> bool {
     let kids = children(list);
     let callee = kids.first().and_then(var_name_expr);
     if let Some(func) = kids.first()
         && !matches!(callee, Some(name) if name != param)
-        && param_has_consuming_use_inner(func, param, bound, available_signatures, type_env)
+        && param_has_consuming_use_inner(
+            func,
+            param,
+            bound,
+            available_signatures,
+            type_env,
+            type_headers,
+        )
     {
         return true;
     }
@@ -2654,12 +2853,19 @@ fn app_consumes_param(
             continue;
         }
         if is_direct_unshadowed_var(arg, param, bound) {
-            if callee_arg_is_borrowed(callee, index, available_signatures, type_env) {
+            if callee_arg_is_borrowed(callee, index, available_signatures, type_env, type_headers) {
                 continue;
             }
             return true;
         }
-        if param_has_consuming_use_inner(arg, param, bound, available_signatures, type_env) {
+        if param_has_consuming_use_inner(
+            arg,
+            param,
+            bound,
+            available_signatures,
+            type_env,
+            type_headers,
+        ) {
             return true;
         }
     }
@@ -2672,6 +2878,7 @@ fn pipe_consumes_param(
     bound: &mut Vec<HashSet<String>>,
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
+    type_headers: &KnownTypeHeaders,
 ) -> bool {
     let kids = children(list);
     if kids.is_empty() {
@@ -2695,6 +2902,7 @@ fn pipe_consumes_param(
                 piped_arg_index,
                 available_signatures,
                 type_env,
+                type_headers,
             ) {
                 return true;
             }
@@ -2704,6 +2912,7 @@ fn pipe_consumes_param(
             bound,
             available_signatures,
             type_env,
+            type_headers,
         ) {
             return true;
         }
@@ -2717,6 +2926,7 @@ fn callee_arg_is_borrowed(
     index: usize,
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
+    type_headers: &KnownTypeHeaders,
 ) -> bool {
     let Some(callee) = callee else {
         return false;
@@ -2726,7 +2936,9 @@ fn callee_arg_is_borrowed(
     {
         return true;
     }
-    if let Some(Type::Fn(args, _)) = type_env.get(callee).and_then(type_from_deep_expr)
+    if let Some(Type::Fn(args, _)) = type_env
+        .get(callee)
+        .and_then(|expr| type_from_deep_expr(expr, type_headers))
         && args.get(index).is_some_and(|ty| matches!(ty, Type::Ref(_)))
     {
         return true;
@@ -2779,11 +2991,19 @@ fn expr_mentions_unshadowed_name(
     }
 }
 
-fn type_from_deep_expr(expr: &deep::Expr) -> Option<Type> {
+fn type_from_deep_expr(expr: &deep::Expr, headers: &KnownTypeHeaders) -> Option<Type> {
     let mut vg = VarGen::default();
-    let mut tvar_map = HashMap::new();
-    let ty = deep_type_to_type(expr, &mut vg, &mut tvar_map);
-    (!matches!(ty, Type::Error(_))).then_some(ty)
+    let mut errors = Vec::new();
+    DeepTypeResolver::new(
+        TypeUseSite::CompilerMetadata,
+        BinderMode::TrustedCompilerMetadata,
+        headers,
+        &mut vg,
+        &mut errors,
+    )
+    .resolve(expr)
+    .ok()
+    .map(|ty| ty.into_type())
 }
 
 fn type_contains_tensor(ty: &Type) -> bool {
@@ -3615,7 +3835,8 @@ fn walk_for_tensor_precision(
                         // param without a surrounding sig that quantified
                         // it) where the closed primitive set must apply.
                         // Without this guard the name silently collapses
-                        // to `Type::Error` via `deep_type_to_type_inner`'s
+                        // to a witnessed resolution failure at the centralized
+                        // Deep type boundary's
                         // `Prim::parse_name` fall-through and the
                         // permissive unify rule absorbs the mismatch.
                         errors.push(CheckError::new(
@@ -5284,14 +5505,16 @@ fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
     // and every other annotation-time env query for a user-declared
     // name silently misses. See `infer_program` for the parallel
     // iteration.
+    let items = top_level_decl_items_with_modules(exprs);
     collect_all_declarations(
-        &top_level_decl_items_with_modules(exprs),
+        &items,
         &mut env,
         &mut vg,
         &mut subst,
         &mut adt_reg,
         &mut declaration_errors,
     );
+    let defsig_type_binders = collect_defsig_type_binders(&items);
 
     let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
         .map(|v| v == "1")
@@ -5325,6 +5548,7 @@ fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
                 &mut typed_nodes,
                 &mut total_nodes,
                 &user_def_names,
+                &defsig_type_binders,
             );
         }
 
@@ -5350,15 +5574,13 @@ fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
 /// scope. Library schemes are visible during inference; only the
 /// new-code exprs are returned in the annotated result.
 ///
-/// When the context is empty (`library_def_count() == 0`) this falls
-/// back to [`annotate_ir_program`] to preserve the legacy
-/// "no-prelude" annotation shape that downstream tooling depends on.
-/// Once a non-empty library context is supplied, the library's prelude
-/// ADTs and decls are visible during annotation.
+/// The supplied context is always used, even when it contains only type
+/// declarations and therefore has no value-level `def` names. Treating
+/// `library_def_count() == 0` as an empty context loses imported constructors
+/// during annotation and degrades their result types to inference holes.
+/// [`TypeEnv::empty`] contains the same builtin/prelude annotation state as
+/// [`annotate_ir_program`], so the monolithic path retains its metadata shape.
 fn annotate_ir_program_with_context(context: &TypeEnv, exprs: &[deep::Expr]) -> Vec<deep::Expr> {
-    if context.library_def_count() == 0 {
-        return annotate_ir_program(exprs);
-    }
     let mut state = context.inner().clone();
     let mut declaration_errors = Vec::new();
 
@@ -5370,14 +5592,16 @@ fn annotate_ir_program_with_context(context: &TypeEnv, exprs: &[deep::Expr]) -> 
     // Descend through `(module {} name ...)` wrappers when collecting
     // declarations; mirrors the `infer_program` shape and the parallel
     // fix in `annotate_ir_program`. (closes #181)
+    let items = top_level_decl_items_with_modules(exprs);
     collect_all_declarations(
-        &top_level_decl_items_with_modules(exprs),
+        &items,
         &mut state.env,
         &mut state.var_gen,
         &mut state.subst,
         &mut state.adt_reg,
         &mut declaration_errors,
     );
+    let defsig_type_binders = collect_defsig_type_binders(&items);
 
     let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
         .map(|v| v == "1")
@@ -5407,6 +5631,7 @@ fn annotate_ir_program_with_context(context: &TypeEnv, exprs: &[deep::Expr]) -> 
                 &mut typed_nodes,
                 &mut total_nodes,
                 &user_def_names,
+                &defsig_type_binders,
             );
         }
 
@@ -5510,6 +5735,23 @@ fn annotate_expr_with_scope(
             }
 
             let tag = get_tag(list);
+            let declared_sig = if tag == Some("def") {
+                children(list)
+                    .first()
+                    .and_then(symbol_name)
+                    .and_then(|name| {
+                        DECLARED_SIG_PARAM_TYPES.with(|cell| cell.borrow().get(name).cloned())
+                    })
+            } else {
+                None
+            };
+            // Keep the defsig binder scope live for both child annotation and
+            // the outer node's metadata re-inference below.
+            let _def_type_binder_guard = (tag == Some("def")).then(|| {
+                install_current_type_binders(
+                    declared_sig.as_ref().map(|metadata| &metadata.binders),
+                )
+            });
             let (annotated_children, fn_ty_override) = match tag {
                 Some("fn") => {
                     let (kids, fn_ty) = annotate_fn_children(list, env, vg, subst, adt_reg, None);
@@ -5528,10 +5770,14 @@ fn annotate_expr_with_scope(
                 // `infer_signature_metadata`).
                 Some("def") => {
                     let kids = children(list);
-                    let declared_param_types =
-                        kids.first().and_then(symbol_name).and_then(|name| {
-                            DECLARED_SIG_PARAM_TYPES.with(|cell| cell.borrow().get(name).cloned())
-                        });
+                    // The primary inference pass installs the matching
+                    // defsig's binders while checking a def. Annotation
+                    // re-infers the same body in a separate pass, so it must
+                    // restore that scope too; otherwise a legal nested
+                    // `tensor[n, ...]` ascription fails closed only during
+                    // annotation and silently degrades the stamped function
+                    // return type to an error placeholder.
+                    let declared_param_types = declared_sig.map(|metadata| metadata.param_types);
                     let annotated: Vec<deep::Expr> = kids
                         .iter()
                         .map(|child| {
@@ -5707,7 +5953,13 @@ fn annotate_fn_children(
     };
 
     let mut param_vg = vg.clone();
-    let raw_params = extract_params(&kids[0], &mut param_vg, adt_reg);
+    let mut annotation_resolution_errors = Vec::new();
+    let raw_params = extract_params(
+        &kids[0],
+        &mut param_vg,
+        adt_reg,
+        &mut annotation_resolution_errors,
+    );
     // issue #319: when the def carries a separate `sig`, the `fn`
     // literal's params are bare symbols, so the inference above seeds
     // each with an unconstrained fresh tvar — the body's shape-sensitive
@@ -5762,28 +6014,24 @@ fn annotate_fn_children(
     // error vector.)
     let declared_param_types: Vec<Option<Type>> = match declared_param_type_exprs {
         Some(declared) => {
-            let mut tvar_map: HashMap<String, TypeVar> = HashMap::new();
-            let mut dvar_map: HashMap<String, DimVar> = HashMap::new();
-            // Tier-2 rank polymorphism (#286): a `..r` rank var recurring
-            // across params must map to the SAME `RankVar`, so the rvar map
-            // is shared across the declared params exactly like tvar/dvar.
-            let mut rvar_map = HashMap::new();
+            let headers = KnownTypeHeaders::from_registry(adt_reg);
+            let mut resolver = DeepTypeResolver::new(
+                TypeUseSite::CompilerMetadata,
+                BinderMode::TrustedCompilerMetadata,
+                &headers,
+                &mut param_vg,
+                &mut annotation_resolution_errors,
+            );
             declared
                 .iter()
                 .map(|expr| {
                     if is_wildcard_tvar_expr(expr) {
                         None
                     } else {
-                        match deep_type_to_type_inner(
-                            expr,
-                            &mut param_vg,
-                            &mut tvar_map,
-                            &mut dvar_map,
-                            &mut rvar_map,
-                        ) {
-                            Type::Error(_) => None,
-                            ty => Some(ty),
-                        }
+                        resolver
+                            .resolve(expr)
+                            .ok()
+                            .map(|ty| resolve_type_aliases(&ty.into_type(), adt_reg))
                     }
                 })
                 .collect()
@@ -8092,14 +8340,18 @@ fn resolve_type_aliases_inner(
     }
 }
 
-fn deep_type_to_resolved_type(
+fn resolve_deep_type(
     expr: &deep::Expr,
     vg: &mut VarGen,
     adt_reg: &AdtRegistry,
-    tvar_map: &mut HashMap<String, TypeVar>,
-) -> Type {
-    let ty = deep_type_to_type(expr, vg, tvar_map);
-    resolve_type_aliases(&ty, adt_reg)
+    use_site: TypeUseSite,
+    binder_mode: BinderMode<'_>,
+    errors: &mut Vec<CheckError>,
+) -> Result<Type, ErrorWitness> {
+    let headers = KnownTypeHeaders::from_registry(adt_reg);
+    let mut resolver = DeepTypeResolver::new(use_site, binder_mode, &headers, vg, errors);
+    let ty = resolver.resolve(expr)?.into_type();
+    Ok(resolve_type_aliases(&ty, adt_reg))
 }
 
 // ── Declaration collection (first pass) ──────────────────────────
@@ -8139,6 +8391,7 @@ fn collect_all_declarations(
     report_duplicate_defs(&bare_items, errors);
     report_duplicate_defsigs(&bare_items, errors);
     report_builtin_shadowing(&bare_items, errors);
+    let headers = precollect_type_headers(items, adt_reg);
     for (module, expr) in items {
         collect_declarations(
             expr,
@@ -8147,6 +8400,7 @@ fn collect_all_declarations(
             vg,
             subst,
             adt_reg,
+            &headers,
             errors,
             DeclPhase::Aliases,
         );
@@ -8159,10 +8413,72 @@ fn collect_all_declarations(
             vg,
             subst,
             adt_reg,
+            &headers,
             errors,
             DeclPhase::Rest,
         );
     }
+}
+
+/// Collect nominal names and arities before resolving any declaration body.
+/// This permits self and forward references without registering an unchecked
+/// definition in the serde-backed ADT registry.
+fn precollect_type_headers(
+    items: &[(Option<String>, &deep::Expr)],
+    adt_reg: &AdtRegistry,
+) -> KnownTypeHeaders {
+    let mut headers = KnownTypeHeaders::from_registry(adt_reg);
+    for (_, expr) in items {
+        let deep::Expr::List(list, _) = expr else {
+            continue;
+        };
+        if !matches!(get_tag(list), Some("deftype") | Some("typealias")) {
+            continue;
+        }
+        let kids = children(list);
+        let (Some(name), Some(deep::Expr::List(params, _))) =
+            (kids.first().and_then(symbol_name), kids.get(1))
+        else {
+            continue;
+        };
+        if get_tag(params) == Some("variant") {
+            // Legacy Deep permits omitting the explicit empty parameter list.
+            headers.insert(name, 0);
+        } else if params
+            .elements
+            .iter()
+            .all(|param| symbol_name(param).is_some())
+        {
+            headers.insert(name, params.elements.len());
+        }
+    }
+    headers
+}
+
+/// Binder names introduced by each `defsig`. The Deep signature grammar uses
+/// implicit quantification, so every named `t-var`, `d-var`, and `d-rank`
+/// inside the signature is an actual binder for nested annotations in the
+/// matching def body.
+fn collect_defsig_type_binders(
+    items: &[(Option<String>, &deep::Expr)],
+) -> HashMap<String, HashSet<String>> {
+    let mut by_def = HashMap::new();
+    for (_, expr) in items {
+        let deep::Expr::List(list, _) = expr else {
+            continue;
+        };
+        if get_tag(list) != Some("defsig") {
+            continue;
+        }
+        let kids = children(list);
+        let (Some(name), Some(type_expr)) = (kids.first().and_then(symbol_name), kids.get(1))
+        else {
+            continue;
+        };
+        let names = deep_type_binder_names(type_expr);
+        by_def.entry(name.to_string()).or_insert(names);
+    }
+    by_def
 }
 
 /// Build the program-shape opacity metadata (RFC D-CHECK) from the
@@ -8175,7 +8491,7 @@ fn collect_all_declarations(
 fn build_opacity_meta(
     items: &[(Option<String>, &deep::Expr)],
     adt_reg: &AdtRegistry,
-    vg: &mut VarGen,
+    env: &Env,
 ) -> crate::opacity::OpacityModuleMeta {
     let mut meta = crate::opacity::OpacityModuleMeta::default();
     // Declared signature types (from `defsig` nodes) for producer
@@ -8236,10 +8552,9 @@ fn build_opacity_meta(
         };
         meta.bindings.insert(name.to_string(), target);
         if get_tag(list) == Some("defsig")
-            && let Some(ty_expr) = kids.get(1)
+            && let Some(scheme) = env.lookup(name)
         {
-            let ty = deep_type_to_resolved_type(ty_expr, vg, adt_reg, &mut HashMap::new());
-            declared_sigs.insert(name.to_string(), ty);
+            declared_sigs.insert(name.to_string(), scheme.body.clone());
         }
     }
     // Producer enumeration per opaque type: exported bindings of the
@@ -8445,6 +8760,7 @@ fn collect_declarations(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &mut AdtRegistry,
+    headers: &KnownTypeHeaders,
     errors: &mut Vec<CheckError>,
     phase: DeclPhase,
 ) {
@@ -8510,9 +8826,12 @@ fn collect_declarations(
             {
                 errors.push(crate::opacity::unmoduled_opaque_error(name));
             }
-            let ctors = adt_reg.register_deftype(kids, vg, opaque, defining_module);
-            for (name, scheme) in ctors {
-                env.bind(name, scheme);
+            if let Ok(ctors) =
+                adt_reg.register_deftype(kids, vg, headers, errors, opaque, defining_module)
+            {
+                for (name, scheme) in ctors {
+                    env.bind(name, scheme);
+                }
             }
         }
         "defsig" => {
@@ -8520,9 +8839,18 @@ fn collect_declarations(
             if kids.len() >= 2
                 && let Some(name) = symbol_name(&kids[0])
             {
-                let ty = deep_type_to_resolved_type(&kids[1], vg, adt_reg, &mut HashMap::new());
-                let scheme = env.generalize(&ty, subst);
-                env.bind(name.to_string(), scheme);
+                let mut resolver = DeepTypeResolver::new(
+                    TypeUseSite::Defsig,
+                    BinderMode::ImplicitGeneric,
+                    headers,
+                    vg,
+                    errors,
+                );
+                if let Ok(ty) = resolver.resolve(&kids[1]) {
+                    let ty = resolve_type_aliases(&ty.into_type(), adt_reg);
+                    let scheme = env.generalize(&ty, subst);
+                    env.bind(name.to_string(), scheme);
+                }
             }
         }
         "typealias" => {
@@ -8550,16 +8878,30 @@ fn collect_declarations(
                     _ => Vec::new(),
                 };
 
-                let mut tvar_map = HashMap::new();
-                let mut param_vars = Vec::with_capacity(params.len());
-                for param in &params {
-                    let tv = vg.fresh_tvar();
-                    tvar_map.insert(param.clone(), tv);
-                    param_vars.push(tv);
+                let explicit_params: HashSet<String> = params.iter().cloned().collect();
+                let mut resolver = DeepTypeResolver::new(
+                    TypeUseSite::TypeAliasBody,
+                    BinderMode::Explicit(&explicit_params),
+                    headers,
+                    vg,
+                    errors,
+                );
+                if let Ok(aliased_ty) = resolver.resolve(&kids[2]) {
+                    let param_vars = params
+                        .iter()
+                        .map(|param| {
+                            resolver.type_var(param).expect(
+                                "explicit alias params are pre-bound as nominal type arguments",
+                            )
+                        })
+                        .collect();
+                    adt_reg.register_alias(
+                        name.to_string(),
+                        params,
+                        param_vars,
+                        aliased_ty.into_type(),
+                    );
                 }
-
-                let aliased_ty = deep_type_to_type(&kids[2], vg, &mut tvar_map);
-                adt_reg.register_alias(name.to_string(), params, param_vars, aliased_ty);
             }
         }
         _ => {}
@@ -8742,6 +9084,7 @@ fn infer_top_level(
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
     user_def_names: &HashSet<String>,
+    defsig_type_binders: &HashMap<String, HashSet<String>>,
 ) {
     let list = match expr {
         deep::Expr::List(list, _) => list,
@@ -8765,6 +9108,7 @@ fn infer_top_level(
             Some(n) => n.to_string(),
             None => return,
         };
+        let _type_binder_guard = install_current_type_binders(defsig_type_binders.get(&name));
 
         // Save declared type from defsig BEFORE inferring (it may get overwritten)
         let declared_ty = env.lookup(&name).map(|s| {
@@ -9884,7 +10228,22 @@ fn infer_lit(
     if let Some(meta) = meta {
         for (key, val) in &meta.entries {
             if key == "type" {
-                let resolved = deep_type_to_resolved_type(val, vg, adt_reg, &mut HashMap::new());
+                let enclosing_binders = current_type_binders();
+                let binder_mode = enclosing_binders
+                    .as_ref()
+                    .map(BinderMode::Explicit)
+                    .unwrap_or(BinderMode::ClosedInput);
+                let resolved = match resolve_deep_type(
+                    val,
+                    vg,
+                    adt_reg,
+                    TypeUseSite::Annotation,
+                    binder_mode,
+                    errors,
+                ) {
+                    Ok(ty) => ty,
+                    Err(witness) => return propagate(&witness),
+                };
                 // RFC D-CHECK lit-forge gate: `{type: (t-adt ...)}`
                 // metadata on a literal outside the defining module
                 // forges an opaque value. Reachable from BOTH
@@ -9892,7 +10251,7 @@ fn infer_lit(
                 // (`0.5 : Probability`) and block-binding ascription
                 // desugar to exactly this metadata (RT-0), so the
                 // gate is not scoped to `.dp` ingestion.
-                // `deep_type_to_resolved_type` expands transparent
+                // `resolve_deep_type` expands transparent
                 // aliases, so `0.5 : P2` cannot launder the gate.
                 if let Type::Adt(adt_name, _) = &resolved {
                     crate::opacity::check_opaque_use(
@@ -17911,7 +18270,7 @@ fn infer_fn(
 
     // kids[0] = (params {} x1 ... xn)
     // kids[1] = body
-    let params = extract_params(&kids[0], vg, adt_reg);
+    let params = extract_params(&kids[0], vg, adt_reg, errors);
     let mut param_types = Vec::new();
     let mut fn_env = env.clone();
 
@@ -18027,7 +18386,7 @@ fn infer_def_body_with_sig(
     if kids.len() < 2 {
         return malformed_form(fn_list, "fn", "parameters and a body", errors);
     }
-    let params = extract_params(&kids[0], vg, adt_reg);
+    let params = extract_params(&kids[0], vg, adt_reg, errors);
     if params.len() != decl_args.len() {
         // Arity mismatch between params and sig: fall back so the post-body
         // unify produces a clear ArityMismatch diagnostic.
@@ -18093,61 +18452,68 @@ fn extract_params(
     expr: &deep::Expr,
     vg: &mut VarGen,
     adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
 ) -> Vec<(String, Option<Type>)> {
-    match expr {
-        deep::Expr::List(list, _) => {
-            let tag = get_tag(list);
-            let elems = if tag == Some("params") {
-                children(list)
-            } else {
-                &list.elements
-            };
-            elems
-                .iter()
-                .filter_map(|e| match e {
-                    deep::Expr::Atom(deep::Atom::Symbol(s), _) => Some((s.to_string(), None)),
-                    deep::Expr::MetaExpr(meta, _) => {
-                        let deep::Expr::Atom(deep::Atom::Symbol(name), _) = meta.expr.as_ref()
-                        else {
-                            return None;
-                        };
-                        let ty_ann = meta.entries.iter().find_map(|(key, val)| {
-                            (key == "type").then(|| {
-                                deep_type_to_resolved_type(val, vg, adt_reg, &mut HashMap::new())
-                            })
+    let deep::Expr::List(list, _) = expr else {
+        return vec![];
+    };
+    let elems = if get_tag(list) == Some("params") {
+        children(list)
+    } else {
+        &list.elements
+    };
+    let headers = KnownTypeHeaders::from_registry(adt_reg);
+    let mut resolver = DeepTypeResolver::new(
+        TypeUseSite::Annotation,
+        BinderMode::ImplicitGeneric,
+        &headers,
+        vg,
+        errors,
+    );
+    let mut params = Vec::with_capacity(elems.len());
+
+    for expr in elems {
+        match expr {
+            deep::Expr::Atom(deep::Atom::Symbol(name), _) => {
+                params.push((name.to_string(), None));
+            }
+            deep::Expr::MetaExpr(meta, _) => {
+                let deep::Expr::Atom(deep::Atom::Symbol(name), _) = meta.expr.as_ref() else {
+                    continue;
+                };
+                let annotation =
+                    meta.entries
+                        .iter()
+                        .find(|(key, _)| key == "type")
+                        .map(|(_, value)| match resolver.resolve(value) {
+                            Ok(ty) => resolve_type_aliases(&ty.into_type(), adt_reg),
+                            Err(witness) => propagate(&witness),
                         });
-                        Some((name.to_string(), ty_ann))
-                    }
-                    deep::Expr::List(plist, _) => {
-                        // Typed param: (name {type: T}) — elements[0] is the name symbol,
-                        // elements[1] is the metadata map with type annotation
-                        if let Some(deep::Expr::Atom(deep::Atom::Symbol(name), _)) =
-                            plist.elements.first()
-                        {
-                            let mut ty_ann = None;
-                            if let Some(deep::Expr::Map(meta, _)) = plist.elements.get(1) {
-                                for (key, val) in &meta.entries {
-                                    if key == "type" {
-                                        ty_ann = Some(deep_type_to_resolved_type(
-                                            val,
-                                            vg,
-                                            adt_reg,
-                                            &mut HashMap::new(),
-                                        ));
-                                    }
-                                }
-                            }
-                            Some((name.to_string(), ty_ann))
-                        } else {
-                            None
-                        }
-                    }
+                params.push((name.to_string(), annotation));
+            }
+            deep::Expr::List(param_list, _) => {
+                // Typed param: (name {type: T}) — elements[0] is the name symbol,
+                // elements[1] is the metadata map with type annotation.
+                let Some(name) = param_list.elements.first().and_then(symbol_name) else {
+                    continue;
+                };
+                let annotation = match param_list.elements.get(1) {
+                    Some(deep::Expr::Map(meta, _)) => meta
+                        .entries
+                        .iter()
+                        .find(|(key, _)| key == "type")
+                        .map(|(_, value)| match resolver.resolve(value) {
+                            Ok(ty) => resolve_type_aliases(&ty.into_type(), adt_reg),
+                            Err(witness) => propagate(&witness),
+                        }),
                     _ => None,
-                })
-                .collect()
+                };
+                params.push((name.to_string(), annotation));
+            }
+            _ => {}
         }
-        _ => vec![],
     }
+    params
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -18205,12 +18571,22 @@ fn infer_let(
                         .find(|(k, _)| k == "type")
                         .map(|(_, v)| v)
                 {
-                    let declared_ty = deep_type_to_resolved_type(
+                    let enclosing_binders = current_type_binders();
+                    let binder_mode = enclosing_binders
+                        .as_ref()
+                        .map(BinderMode::Explicit)
+                        .unwrap_or(BinderMode::ClosedInput);
+                    let declared_ty = match resolve_deep_type(
                         declared_ty_expr,
                         vg,
                         adt_reg,
-                        &mut HashMap::new(),
-                    );
+                        TypeUseSite::Annotation,
+                        binder_mode,
+                        errors,
+                    ) {
+                        Ok(ty) => ty,
+                        Err(witness) => propagate(&witness),
+                    };
                     if let Err(e) = unify(&expr_ty, &declared_ty, subst) {
                         errors.push(CheckError::new(
                             check_error_kind_from_type_error_kind(&e.kind),
@@ -19875,50 +20251,6 @@ fn infer_cast(
     );
     let resolved = subst.apply(&expr_ty);
 
-    // RFC D-CHECK cast gates: cast-into an out-of-module opaque type
-    // (both Deep target shapes, `t-prim` and `t-adt`, with aliases
-    // expanded) and cast-out of an out-of-module opaque value. Each
-    // pushes one OpaqueTypeViolation and returns the TRUE type of the
-    // expression so no error cascades; inside the defining module the
-    // existing cast semantics (including `CastNonTensor` for ADT
-    // sources) are unchanged.
-    if let Some(target_adt) = cast_target_adt_name(&kids[1], adt_reg) {
-        if crate::opacity::check_opaque_use(
-            crate::opacity::OpaqueAction::CastInto,
-            &target_adt,
-            adt_reg,
-            errors,
-        ) {
-            return Type::Adt(target_adt, Vec::new());
-        }
-    } else {
-        let mut peeled = &resolved;
-        while let Type::Ref(inner) = peeled {
-            peeled = inner.as_ref();
-        }
-        if let Type::Adt(source_adt, _) = peeled {
-            let source_adt = source_adt.clone();
-            if crate::opacity::check_opaque_use(
-                crate::opacity::OpaqueAction::CastOut,
-                &source_adt,
-                adt_reg,
-                errors,
-            ) {
-                return match deep_type_to_resolved_type(&kids[1], vg, adt_reg, &mut HashMap::new())
-                {
-                    Type::Prim(p) => Type::Prim(p),
-                    // The out-of-module opaque cast-out was already reported by
-                    // `check_opaque_use` above; a non-primitive target here is a
-                    // secondary malformation. Yield a fresh var (not a silent
-                    // `Type::Error`) so the totality invariant holds and the
-                    // opaque violation stays the single reported diagnostic
-                    // (chelis#731 §C3).
-                    _ => vg.fresh_type(),
-                };
-            }
-        }
-    }
-
     // kids[1] = (t-prim {} new_precision)
     // A1 (WS-A0 RT-1 fixup): per spec/04-type-system.md §1.1.2, unsigned
     // integer types (u8/u16/u32/u64 and the uint8/uint16/uint32/uint64
@@ -19927,35 +20259,94 @@ fn infer_cast(
     // `cast(_, u8)` would silently fall through to `Type::Error` with
     // no diagnostic — exactly the silent-cast pattern §1.1.1 was added
     // to avoid for f8e4m3. Mirror the f8e4m3 rejection path here.
-    if let Some(name) = cast_target_prim_name(&kids[1])
+    let target_name = cast_target_prim_name(&kids[1]);
+    if let Some(name) = target_name
         && let Some(diag) = unsigned_family_diagnostic(name, /* tensor = */ false)
     {
         return report(errors, diag);
     }
-    let new_prec = match deep_type_to_resolved_type(&kids[1], vg, adt_reg, &mut HashMap::new()) {
+    let target_ty = if let Some(name) = target_name {
+        match Prim::parse_name(name) {
+            Some(prim) => Type::Prim(prim),
+            // RFC D-CHECK's historical Deep compatibility spelling uses
+            // `(t-prim {} Nominal)` for cast-into probes. Keep that narrow
+            // exception only for a registered ADT or alias.
+            None if cast_target_nominal_name(&kids[1], adt_reg).is_some() => Type::Adt(
+                cast_target_nominal_name(&kids[1], adt_reg)
+                    .expect("guard established a nominal cast target"),
+                Vec::new(),
+            ),
+            None => {
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::CastNonTensor,
+                        format!(
+                            "cast target `{name}` is not a recognized primitive type (chelis#756)"
+                        ),
+                        vec![
+                            "cast targets a scalar primitive: f32, f64, bf16, f16, bool, \
+                             int8, int16, int32, int64"
+                                .to_string(),
+                        ],
+                    ),
+                );
+            }
+        }
+    } else {
+        match resolve_deep_type(
+            &kids[1],
+            vg,
+            adt_reg,
+            TypeUseSite::CastTarget,
+            BinderMode::ClosedInput,
+            errors,
+        ) {
+            Ok(ty) => ty,
+            Err(witness) => return propagate(&witness),
+        }
+    };
+
+    // RFC D-CHECK cast gates operate on the same resolved target as ordinary
+    // cast typing, including transparent alias expansion.
+    if let Type::Adt(target_adt, _) = &target_ty
+        && crate::opacity::check_opaque_use(
+            crate::opacity::OpaqueAction::CastInto,
+            target_adt,
+            adt_reg,
+            errors,
+        )
+    {
+        return target_ty;
+    }
+    let mut peeled = &resolved;
+    while let Type::Ref(inner) = peeled {
+        peeled = inner.as_ref();
+    }
+    if let Type::Adt(source_adt, _) = peeled
+        && crate::opacity::check_opaque_use(
+            crate::opacity::OpaqueAction::CastOut,
+            source_adt,
+            adt_reg,
+            errors,
+        )
+    {
+        return target_ty;
+    }
+
+    let new_prec = match target_ty {
         Type::Prim(p) => p,
-        // chelis#756 (discovered-hole conversion, chelis#731 Phase 2): a cast
-        // target that does not resolve to a recognized primitive type used to
-        // fall through to a SILENT `Type::Error` (score 1.0 on
-        // `cast(1.0, madeup)`). The deep-type converter now yields a fresh var
-        // for the unparseable target, and this use site -- which has the error
-        // vector -- reports the rejection naming the offending target.
-        _ => {
-            // Name the offending target for both cast-target spellings: the
-            // `(t-prim {} name)` node and the bare `name` symbol atom.
-            let target = cast_target_prim_name(&kids[1])
-                .or_else(|| symbol_name(&kids[1]))
-                .unwrap_or("<non-primitive type>");
+        other => {
             return report(
                 errors,
                 CheckError::new(
                     CheckErrorKind::CastNonTensor,
                     format!(
-                        "cast target `{target}` is not a recognized primitive type (chelis#756)"
+                        "cast target `{other}` is not a recognized primitive type (chelis#756)"
                     ),
                     vec![
                         "cast targets a scalar primitive: f32, f64, bf16, f16, bool, \
-                         int8, int16, int32, int64"
+                     int8, int16, int32, int64"
                             .to_string(),
                     ],
                 ),
@@ -19992,42 +20383,36 @@ fn infer_cast(
     }
 }
 
-/// The nominal ADT a cast target names, if any: `(t-adt {} Name)` or
-/// a `(t-prim {} Name)` whose name is not a primitive but resolves in
-/// the ADT registry, with transparent aliases expanded to the nominal
-/// entry. Returns `None` for genuine primitive targets.
-fn cast_target_adt_name(expr: &deep::Expr, adt_reg: &AdtRegistry) -> Option<String> {
+fn cast_target_nominal_name(expr: &deep::Expr, adt_reg: &AdtRegistry) -> Option<String> {
     let deep::Expr::List(list, _) = expr else {
         return None;
     };
-    let name = children(list).first().and_then(symbol_name)?;
-    match get_tag(list) {
-        Some("t-adt") => {}
-        Some("t-prim") => {
-            if Prim::parse_name(name).is_some() {
-                return None;
-            }
-        }
-        _ => return None,
+    if get_tag(list) != Some("t-prim") {
+        return None;
     }
+    let name = children(list).first().and_then(symbol_name)?;
     if adt_reg.lookup(name).is_some() {
         return Some(name.to_string());
     }
-    if let Some(alias) = adt_reg.resolve_alias(name)
-        && let Type::Adt(target, _) = &alias.body
-    {
-        return Some(target.clone());
-    }
-    None
+    adt_reg
+        .resolve_alias(name)
+        .and_then(|alias| match &alias.body {
+            Type::Adt(target, _) => Some(target.clone()),
+            _ => None,
+        })
 }
 
-/// Extract the symbol-name from a `(t-prim {} <name>)` Deep node so a
-/// rejection path can run before `Prim::parse_name` returns `None` and
-/// erases the spelling. Returns `None` for any other shape.
+/// Extract a cast target's primitive spelling from either accepted Deep form:
+/// canonical `(t-prim {} <name>)` or the historically supported bare symbol.
+/// This lets `infer_cast` parse known bare primitives before the general Deep
+/// type converter treats the atom as an unparseable type expression, while
+/// preserving the spelling for a loud rejection of unknown targets.
 fn cast_target_prim_name(expr: &deep::Expr) -> Option<&str> {
-    let list = match expr {
-        deep::Expr::List(l, _) => l,
-        _ => return None,
+    if let Some(name) = symbol_name(expr) {
+        return Some(name);
+    }
+    let deep::Expr::List(list, _) = expr else {
+        return None;
     };
     if get_tag(list) != Some("t-prim") {
         return None;
@@ -20518,199 +20903,6 @@ fn infer_def(
     note_list_literal_binding(env, &name, &kids[1]);
     env.bind(name, scheme);
     body_ty
-}
-
-// ── Type conversion from Deep AST ───────────────────────────────
-
-/// Convert a Deep type expression to an internal Type.
-/// `tvar_map` maps type variable names to TypeVars (created on demand).
-/// `dvar_map` maps dimension variable names to DimVars (created on demand).
-fn deep_type_to_type(
-    expr: &deep::Expr,
-    vg: &mut VarGen,
-    tvar_map: &mut HashMap<String, TypeVar>,
-) -> Type {
-    let mut dvar_map = HashMap::new();
-    let mut rvar_map = HashMap::new();
-    deep_type_to_type_inner(expr, vg, tvar_map, &mut dvar_map, &mut rvar_map)
-}
-
-fn deep_type_to_type_inner(
-    expr: &deep::Expr,
-    vg: &mut VarGen,
-    tvar_map: &mut HashMap<String, TypeVar>,
-    dvar_map: &mut HashMap<String, DimVar>,
-    rvar_map: &mut HashMap<String, RankVar>,
-) -> Type {
-    // chelis#731 Phase 2 / chelis#756: this converter has no error vector, so
-    // a malformed or unknown type expression can no longer produce a silent
-    // `Type::Error` (unconstructible outside the diagnostics module, §C3).
-    // The typed rule is a FRESH type variable -- "a type we could not parse,
-    // to be pinned by unification" -- the same explicit-typed-rule direction
-    // chelis#755 took for deferred field access. The USE sites that CAN report
-    // (e.g. `infer_cast`, which sees a non-primitive cast target) surface the
-    // rejection with a diagnostic; a fresh var is never `Type::Error`, so the
-    // §C4.1 totality invariant holds.
-    stack_guard!("deep_type_to_type_inner", expr, vg.fresh_type());
-    match expr {
-        deep::Expr::List(list, _) => {
-            let tag = get_tag(list).unwrap_or("");
-            let kids = children(list);
-            match tag {
-                "t-prim" => {
-                    if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
-                        Prim::parse_name(name)
-                            .map(Type::Prim)
-                            .unwrap_or_else(|| vg.fresh_type())
-                    } else {
-                        vg.fresh_type()
-                    }
-                }
-                "t-var" => {
-                    if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
-                        if name == "_" {
-                            vg.fresh_type()
-                        } else {
-                            let tv = *tvar_map
-                                .entry(name.to_string())
-                                .or_insert_with(|| vg.fresh_tvar());
-                            Type::Var(tv)
-                        }
-                    } else {
-                        vg.fresh_type()
-                    }
-                }
-                "t-fn" => {
-                    if kids.is_empty() {
-                        return vg.fresh_type();
-                    }
-                    let args: Vec<Type> = kids[..kids.len() - 1]
-                        .iter()
-                        .map(|c| deep_type_to_type_inner(c, vg, tvar_map, dvar_map, rvar_map))
-                        .collect();
-                    let ret = deep_type_to_type_inner(
-                        &kids[kids.len() - 1],
-                        vg,
-                        tvar_map,
-                        dvar_map,
-                        rvar_map,
-                    );
-                    Type::Fn(args, Box::new(ret))
-                }
-                "t-ref" => {
-                    if kids.len() != 1 {
-                        return vg.fresh_type();
-                    }
-                    Type::Ref(Box::new(deep_type_to_type_inner(
-                        &kids[0], vg, tvar_map, dvar_map, rvar_map,
-                    )))
-                }
-                "t-tensor" => {
-                    if kids.is_empty() {
-                        return vg.fresh_type();
-                    }
-                    let prec_expr = &kids[kids.len() - 1];
-                    // WS-A5 (spec/04-type-system.md §5.8): the precision
-                    // slot may be a concrete primitive (`(t-prim {} f32)`)
-                    // or a sig-quantified type variable (`(t-var {} p)`).
-                    // Both shapes are well-formed; any other shape (e.g.,
-                    // a `t-fn` or a `t-prim` with an unknown name) is an
-                    // ill-formed tensor and is reduced to `Type::Error`.
-                    let prec = match deep_type_to_type_inner(
-                        prec_expr, vg, tvar_map, dvar_map, rvar_map,
-                    ) {
-                        Type::Prim(p) => TensorPrec::Concrete(p),
-                        Type::Var(v) => TensorPrec::Var(v),
-                        _ => return vg.fresh_type(),
-                    };
-                    let dims: Vec<Dim> = kids[..kids.len() - 1]
-                        .iter()
-                        .filter_map(|c| parse_dim(c, vg, dvar_map, rvar_map))
-                        .collect();
-                    Type::Tensor(dims, prec)
-                }
-                "t-adt" => {
-                    if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
-                        let args: Vec<Type> = kids[1..]
-                            .iter()
-                            .map(|c| deep_type_to_type_inner(c, vg, tvar_map, dvar_map, rvar_map))
-                            .collect();
-                        Type::Adt(name.to_string(), args)
-                    } else {
-                        vg.fresh_type()
-                    }
-                }
-                "t-tuple" => {
-                    let elems: Vec<Type> = kids
-                        .iter()
-                        .map(|c| deep_type_to_type_inner(c, vg, tvar_map, dvar_map, rvar_map))
-                        .collect();
-                    Type::Tuple(elems)
-                }
-                "t-unit" => Type::Unit,
-                _ => vg.fresh_type(),
-            }
-        }
-        _ => vg.fresh_type(),
-    }
-}
-
-/// Parse a dimension expression from Deep AST, with support for dim variables
-/// and rank variables. `rvar_map` memoizes `..r` names to a single `RankVar`
-/// so the same rank variable shared across tensor positions ties together.
-fn parse_dim(
-    expr: &deep::Expr,
-    vg: &mut VarGen,
-    dvar_map: &mut HashMap<String, DimVar>,
-    rvar_map: &mut HashMap<String, RankVar>,
-) -> Option<Dim> {
-    match expr {
-        deep::Expr::List(list, _) => {
-            let tag = get_tag(list).unwrap_or("");
-            let kids = children(list);
-            match tag {
-                "d-name" => {
-                    if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
-                        if name == "*" {
-                            Some(Dim::Wildcard)
-                        } else {
-                            Some(Dim::Name(name.to_string()))
-                        }
-                    } else {
-                        None
-                    }
-                }
-                "d-var" => {
-                    if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
-                        let dv = *dvar_map
-                            .entry(name.to_string())
-                            .or_insert_with(|| vg.fresh_dvar());
-                        Some(Dim::Var(dv))
-                    } else {
-                        Some(vg.fresh_dim())
-                    }
-                }
-                "d-lit" => {
-                    if let Some(deep::Expr::Atom(deep::Atom::Int(n), _)) = kids.first() {
-                        Some(Dim::Lit(*n))
-                    } else {
-                        None
-                    }
-                }
-                "d-rank" => {
-                    let name = kids
-                        .first()
-                        .and_then(|e| symbol_name(e))
-                        .unwrap_or("_")
-                        .to_string();
-                    let rv = *rvar_map.entry(name).or_insert_with(|| vg.fresh_rvar());
-                    Some(Dim::Rank(rv))
-                }
-                _ => None,
-            }
-        }
-        _ => None,
-    }
 }
 
 #[cfg(test)]

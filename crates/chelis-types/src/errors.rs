@@ -33,6 +33,14 @@ use crate::unify::{TypeError, TypeErrorKind};
 /// write time, so re-materializing its (dataless) witness on read does not
 /// manufacture a silent error. This is the only entry point that bypasses
 /// the two mints, and it is recorded here as the cache boundary.
+///
+/// The constructor privacy is a compile-time boundary:
+///
+/// ```compile_fail
+/// use chelis_types::errors::ErrorWitness;
+/// use chelis_types::types::Type;
+/// let _silent = Type::Error(ErrorWitness(()));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorWitness(());
 
@@ -46,8 +54,16 @@ pub struct ErrorWitness(());
 /// `return report(errors, e);` is exactly that, with the push and the mint
 /// welded into one expression.
 pub fn report(errors: &mut Vec<CheckError>, error: CheckError) -> Type {
+    Type::Error(report_witness(errors, error))
+}
+
+/// Crate-private result-boundary form of [`report`]. Deep type resolution
+/// cannot manufacture a usable [`Type`] after malformed input, so it returns
+/// this witness through `Result` and requires its caller to propagate the
+/// failure explicitly. The constructor remains private to this module.
+pub(crate) fn report_witness(errors: &mut Vec<CheckError>, error: CheckError) -> ErrorWitness {
     errors.push(error);
-    Type::Error(ErrorWitness(()))
+    ErrorWitness(())
 }
 
 /// Cascade suppression: a node whose child already typed as `Type::Error(w)`

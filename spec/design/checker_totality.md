@@ -1,6 +1,7 @@
 # Checker Totality: every construct is checked or loudly rejected
 
-**Status:** Design proposal, pre-implementation. Tracking issue: [#731].
+**Status:** Phase 2 implemented; Phase 3 (`DeepTag`) remains open. Tracking
+issue: [#731].
 **Owning specs:** `spec/03-deep-syntax.md` (the 62-tag closed vocabulary),
 `spec/04-type-system.md` (what "checked" means per construct; its §10
 carries this plan's decided contract as current blockquote authorities
@@ -217,6 +218,33 @@ minting a witness is acceptable - cached entries were produced by a
 legitimate `report`/`propagate` at write time - but the cache boundary is
 recorded as the one non-constructor entry point (open question 2).
 
+### C3.1 Deep type/dimension resolution boundary (chelis#756)
+
+`ErrorWitness` also governs conversion from Deep `t-*`/`d-*` syntax into the
+internal `Type`/`Dim` representation. There is one recursive resolver, shared
+by inference and ADT/alias declaration collection. Its private successful
+value (`ResolvedDeepType`) cannot be forged by callers, and its public-to-the-
+crate boundary is `Result<ResolvedDeepType, ErrorWitness>`:
+
+- a fresh resolution failure pushes exactly one located diagnostic and returns
+  its witness;
+- recursive parents compose with `?`, never substitute a fresh variable,
+  wildcard, dropped dimension, or unchecked nominal type;
+- callers that require poison for ordinary checker cascade suppression convert
+  the returned witness explicitly with `propagate`;
+- a transient resolution context carries the use site, binder mode, known
+  nominal headers/arity, and variable generator. This state is deliberately
+  outside serialized `TypeEnv`, ADT, and compiler-cache layouts;
+- binder modes are closed input, explicit `deftype`/`typealias` parameters,
+  implicit-generic `defsig` parameters, and trusted compiler-generated
+  metadata. Only actual binders or explicitly legal inference holes mint
+  type/dimension/rank variables;
+- declaration headers are precollected before bodies, preserving legal self
+  and forward ADT/alias references while rejecting unknown names and wrong
+  arities before a context can be cached.
+
+The exact Deep grammar and binder rules are normative in spec/03 §2.5.1/§2.6.
+
 ## C4. The invariants and the enum
 
 1. **The totality invariant** (§C1.3), executable: a post-check validation
@@ -380,6 +408,9 @@ census enumerating every construction site.
 4. Typecheck-cache boundary note executed: cache (de)serialization keeps
    working; the entry point documented as the one non-constructor mint
    (open question 2 resolved in this PR).
+5. The chelis#756 converter family retired in favor of §C3.1's centralized
+   witnessed resolver; malformed/unknown types and dimensions are rejected
+   exactly once before declarations or cached contexts become successful.
 
 **Frozen at your exit:** §C3 API; §C4.1 always-on.
 
