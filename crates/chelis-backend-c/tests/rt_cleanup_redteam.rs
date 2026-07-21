@@ -156,6 +156,7 @@ fn compile_and_run_kernel(
     let include_dir = runtime_include_dir();
     for hdr in &[
         "chelis_runtime.h",
+        "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",
         "chelis_math.h",

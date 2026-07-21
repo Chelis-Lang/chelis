@@ -13,8 +13,8 @@ use std::os::raw::c_int;
 use std::ptr;
 
 use chelis_runtime::{
-    CHELIS_BOOL, CHELIS_F32, CHELIS_F64, CHELIS_I32, CHELIS_I64, TensorElement, chelis_alloc,
-    chelis_free, chelis_tensor, chelis_tensor_to_f64,
+    CHELIS_BOOL, CHELIS_F32, CHELIS_F64, CHELIS_I32, CHELIS_I64, RuntimeDType, TensorElement,
+    chelis_alloc, chelis_free, chelis_tensor, chelis_tensor_to_f64,
 };
 
 unsafe fn alloc_scalar(dtype: c_int) -> *mut chelis_tensor {
@@ -38,8 +38,8 @@ fn data_ptr_f32_rejects_f64_tensor() {
         let res = <f32 as TensorElement>::data_ptr(t);
         assert!(res.is_err(), "f32::data_ptr must reject CHELIS_F64");
         let err = res.unwrap_err();
-        assert_eq!(err.expected, CHELIS_F32);
-        assert_eq!(err.actual, CHELIS_F64);
+        assert_eq!(err.expected, RuntimeDType::F32);
+        assert_eq!(err.actual, RuntimeDType::F64);
         chelis_free(t);
     }
 }
@@ -61,8 +61,8 @@ fn data_ptr_f64_rejects_f32_tensor() {
         let res = <f64 as TensorElement>::data_ptr(t);
         assert!(res.is_err(), "f64::data_ptr must reject CHELIS_F32");
         let err = res.unwrap_err();
-        assert_eq!(err.expected, CHELIS_F64);
-        assert_eq!(err.actual, CHELIS_F32);
+        assert_eq!(err.expected, RuntimeDType::F64);
+        assert_eq!(err.actual, RuntimeDType::F32);
         chelis_free(t);
     }
 }
@@ -74,8 +74,8 @@ fn data_ptr_i64_rejects_f64_tensor() {
         let res = <i64 as TensorElement>::data_ptr(t);
         assert!(res.is_err(), "i64::data_ptr must reject CHELIS_F64");
         let err = res.unwrap_err();
-        assert_eq!(err.expected, CHELIS_I64);
-        assert_eq!(err.actual, CHELIS_F64);
+        assert_eq!(err.expected, RuntimeDType::I64);
+        assert_eq!(err.actual, RuntimeDType::F64);
         chelis_free(t);
     }
 }
@@ -90,8 +90,8 @@ fn data_ptr_i64_rejects_i32_tensor() {
             "i64::data_ptr must reject CHELIS_I32 (f32-encoded storage)"
         );
         let err = res.unwrap_err();
-        assert_eq!(err.expected, CHELIS_I64);
-        assert_eq!(err.actual, CHELIS_I32);
+        assert_eq!(err.expected, RuntimeDType::I64);
+        assert_eq!(err.actual, RuntimeDType::I32);
         chelis_free(t);
     }
 }
@@ -106,8 +106,8 @@ fn data_ptr_i64_rejects_bool_tensor() {
             "i64::data_ptr must reject CHELIS_BOOL (f32-encoded storage)"
         );
         let err = res.unwrap_err();
-        assert_eq!(err.expected, CHELIS_I64);
-        assert_eq!(err.actual, CHELIS_BOOL);
+        assert_eq!(err.expected, RuntimeDType::I64);
+        assert_eq!(err.actual, RuntimeDType::Bool);
         chelis_free(t);
     }
 }

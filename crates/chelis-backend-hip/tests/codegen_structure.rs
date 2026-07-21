@@ -127,6 +127,7 @@ fn copy_runtime_artifacts(dst: &Path) {
     let include = cpu_runtime_include_dir();
     for header in &[
         "chelis_runtime.h",
+        "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",
         "chelis_math.h",

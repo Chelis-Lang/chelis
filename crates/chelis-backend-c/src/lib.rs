@@ -192,6 +192,11 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include/chelis_runtime.h")
     }
 
+    fn runtime_dtype_header_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../chelis-runtime/include/chelis_runtime_dtype.h")
+    }
+
     fn runtime_blas_header_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include/chelis_blas.h")
     }
@@ -253,6 +258,8 @@ mod tests {
     fn copy_runtime_artifacts(dst: &std::path::Path) {
         let h_src = std::fs::read_to_string(runtime_header_path()).unwrap();
         write_temp_file(dst, "chelis_runtime.h", &h_src);
+        let dtype_h_src = std::fs::read_to_string(runtime_dtype_header_path()).unwrap();
+        write_temp_file(dst, "chelis_runtime_dtype.h", &dtype_h_src);
         let blas_h_src = std::fs::read_to_string(runtime_blas_header_path()).unwrap();
         write_temp_file(dst, "chelis_blas.h", &blas_h_src);
         let simd_h_src = std::fs::read_to_string(runtime_simd_header_path()).unwrap();

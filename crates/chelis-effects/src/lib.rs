@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
-use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+use chelis_deep::{Span, decode_effect_kind};
 use chelis_types::CheckedProgram;
 use chelis_types::types::{Effect, EffectSet};
+use chelis_vocab::EffectKind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EffectErrorKind {
@@ -472,10 +473,12 @@ fn infer_handle_effects(
     let mut effects = infer_expr_effects(&kids[0], top_level_effects, top_level_callables, locals);
     let mut body_effects =
         infer_expr_effects(&kids[1], top_level_effects, top_level_callables, locals);
-    match effect_name(list) {
-        Some("random") => body_effects.remove(&Effect::Random),
-        Some("resource") => {}
-        _ => {}
+    match decode_effect_kind(list) {
+        Ok(EffectKind::Random) => body_effects.remove(&Effect::Random),
+        Ok(EffectKind::Resource) => {}
+        // Validation reports the structural decode error. Inference leaves the
+        // body's effects unhandled instead of substituting a known kind.
+        Err(_) => {}
     }
     effects.extend(&body_effects);
     effects
@@ -662,8 +665,8 @@ fn validate_handler_expr(expr: &Expr, errors: &mut Vec<EffectError>) {
         Expr::List(list, _) => {
             if get_tag(list) == Some("handle-effect") {
                 let kids = children(list);
-                match effect_name(list) {
-                    Some("random") if kids.first().and_then(int_literal).is_none() => {
+                match decode_effect_kind(list) {
+                    Ok(EffectKind::Random) if kids.first().and_then(int_literal).is_none() => {
                         errors.push(EffectError {
                             kind: EffectErrorKind::InvalidHandler,
                             message: "with seed(...) currently requires an int literal seed"
@@ -674,7 +677,7 @@ fn validate_handler_expr(expr: &Expr, errors: &mut Vec<EffectError>) {
                             ],
                         });
                     }
-                    Some("resource") if kids.first().and_then(string_literal).is_none() => {
+                    Ok(EffectKind::Resource) if kids.first().and_then(string_literal).is_none() => {
                         errors.push(EffectError {
                             kind: EffectErrorKind::InvalidHandler,
                             message:
@@ -686,7 +689,14 @@ fn validate_handler_expr(expr: &Expr, errors: &mut Vec<EffectError>) {
                             ],
                         });
                     }
-                    _ => {}
+                    Ok(EffectKind::Random) | Ok(EffectKind::Resource) => {}
+                    Err(error) => errors.push(EffectError {
+                        kind: EffectErrorKind::InvalidHandler,
+                        message: format!("{error} in `handle-effect`"),
+                        suggestions: vec![
+                            "Use one of the closed effect kinds `random` or `resource`".to_string(),
+                        ],
+                    }),
                 }
             }
             for kid in &list.elements {
@@ -857,33 +867,40 @@ fn validate_declared_vs_inferred(
 fn validate_build_target_expr(expr: &Expr, target: &str, errors: &mut Vec<EffectError>) {
     match expr {
         Expr::List(list, _) => {
-            if get_tag(list) == Some("handle-effect")
-                && effect_name(list) == Some("resource")
-                && let Some(device) = children(list).first().and_then(string_literal)
-            {
-                let ok = match target {
-                    "c" => !device.starts_with("gpu"),
-                    "hip" | "metal" => device.starts_with("gpu"),
-                    _ => true,
-                };
-                if !ok {
-                    errors.push(EffectError {
-                        kind: EffectErrorKind::BuildTargetMismatch,
-                        message: format!(
-                            "`chelis build --target {target}` cannot satisfy resource region `{device}`"
-                        ),
-                        suggestions: match target {
-                            "c" => vec![
-                                "Use `with device(\"cpu\") { ... }` or build with `--target hip` or `--target metal`"
-                                    .to_string(),
-                            ],
-                            "hip" | "metal" => vec![
-                                "Use a GPU device such as `with device(\"gpu:0\") { ... }`"
-                                    .to_string(),
-                            ],
-                            _ => vec![],
-                        },
-                    });
+            if get_tag(list) == Some("handle-effect") {
+                match decode_effect_kind(list) {
+                    Ok(EffectKind::Random) => {}
+                    Ok(EffectKind::Resource) => {
+                        if let Some(device) = children(list).first().and_then(string_literal) {
+                            let ok = match target {
+                                "c" => !device.starts_with("gpu"),
+                                "hip" | "metal" => device.starts_with("gpu"),
+                                _ => true,
+                            };
+                            if !ok {
+                                errors.push(EffectError {
+                                    kind: EffectErrorKind::BuildTargetMismatch,
+                                    message: format!(
+                                        "`chelis build --target {target}` cannot satisfy resource region `{device}`"
+                                    ),
+                                    suggestions: match target {
+                                        "c" => vec![
+                                            "Use `with device(\"cpu\") { ... }` or build with `--target hip` or `--target metal`"
+                                                .to_string(),
+                                        ],
+                                        "hip" | "metal" => vec![
+                                            "Use a GPU device such as `with device(\"gpu:0\") { ... }`"
+                                                .to_string(),
+                                        ],
+                                        _ => vec![],
+                                    },
+                                });
+                            }
+                        }
+                    }
+                    // `validate_handlers` is the owning structural diagnostic
+                    // pass. Do not assign target semantics after decode fails.
+                    Err(_) => {}
                 }
             }
             for kid in &list.elements {
@@ -951,20 +968,6 @@ fn var_name(expr: &Expr) -> Option<&str> {
         return None;
     }
     children(list).first().and_then(symbol_name)
-}
-
-fn effect_name(list: &List) -> Option<&str> {
-    match list.elements.get(1) {
-        Some(Expr::Map(meta, _)) => meta
-            .entries
-            .iter()
-            .find(|(key, _)| key == "effect")
-            .and_then(|(_, value)| match value {
-                Expr::Atom(Atom::Symbol(name), _) => Some(name.as_str()),
-                _ => None,
-            }),
-        _ => None,
-    }
 }
 
 fn get_tag(list: &List) -> Option<&str> {

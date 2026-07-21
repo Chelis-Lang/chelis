@@ -22,3 +22,12 @@ fn generated_c_dtype_decoder_has_a_loud_default() {
     assert!(!generated.contains("default: return sizeof(float)"));
 }
 
+#[test]
+fn public_runtime_header_includes_the_generated_dtype_contract() {
+    let runtime_header = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("include")
+        .join("chelis_runtime.h");
+    let checked_in = fs::read_to_string(&runtime_header)
+        .unwrap_or_else(|err| panic!("read runtime header {}: {err}", runtime_header.display()));
+    assert!(checked_in.contains("#include \"chelis_runtime_dtype.h\""));
+}

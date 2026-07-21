@@ -2273,38 +2273,16 @@ impl<'a> HostEmitter<'a> {
                 // (CHELIS_VALUE_FLOAT64) for both f32 and f64 sources,
                 // so a declared `tensor[3, f64] = [1.0, 2.0, 3.0]`
                 // silently truncated to f32 storage.
-                if let HostType::Tensor(t) = ty {
-                    let dtype_macro = match t.precision {
-                        chelis_types::types::Prim::F32 => "CHELIS_F32",
-                        chelis_types::types::Prim::F64 => "CHELIS_F64",
-                        chelis_types::types::Prim::Bool => "CHELIS_BOOL",
-                        chelis_types::types::Prim::Int8 => "CHELIS_I8",
-                        chelis_types::types::Prim::Int16 => "CHELIS_I16",
-                        chelis_types::types::Prim::Int32 => "CHELIS_I32",
-                        chelis_types::types::Prim::Int64 => "CHELIS_I64",
-                        // WS-1: bf16 / f16 admitted on `--target c`;
-                        // typed host-lane construction stamps the
-                        // declared 16-bit pattern into the tensor
-                        // buffer via the runtime's `CHELIS_BF16` /
-                        // `CHELIS_F16` allocator path.
-                        chelis_types::types::Prim::Bf16 => "CHELIS_BF16",
-                        chelis_types::types::Prim::F16 => "CHELIS_F16",
-                        // f8e4m3 host literals are rejected by the C
-                        // backend's precision gate (deferred per spec
-                        // §1.1.1); if we reach here, fall through to
-                        // the legacy entry so the diagnostic surfaces
-                        // consistently. String tensors and any other
-                        // non-numeric precision class are also routed
-                        // through the legacy path.
-                        _ => "",
-                    };
-                    if !dtype_macro.is_empty() {
-                        self.lines.push(format!(
-                            "{}{target} = chelis_tensor_from_value_list_typed({}, {dtype_macro});",
-                            self.indent, arg_vars[0].0
-                        ));
-                        return Ok(());
-                    }
+                if let HostType::Tensor(t) = ty
+                    && let Ok(dtype) = t.precision.runtime_dtype()
+                {
+                    self.lines.push(format!(
+                        "{}{target} = chelis_tensor_from_value_list_typed({}, {});",
+                        self.indent,
+                        arg_vars[0].0,
+                        dtype.c_macro()
+                    ));
+                    return Ok(());
                 }
                 self.lines.push(format!(
                     "{}{target} = chelis_tensor_from_value_list({});",
@@ -5288,22 +5266,9 @@ fn sparse_elem_type(prim: Prim) -> &'static str {
 /// `CEmitter::dtype_macro`. Used by the summary-derived sparse path
 /// for both output allocation and contract assertions.
 fn sparse_dtype_macro(prim: Prim) -> &'static str {
-    match prim {
-        Prim::F32 => "CHELIS_F32",
-        Prim::F64 => "CHELIS_F64",
-        Prim::Bool => "CHELIS_BOOL",
-        Prim::Int8 => "CHELIS_I8",
-        Prim::Int16 => "CHELIS_I16",
-        Prim::Int32 => "CHELIS_I32",
-        Prim::Int64 => "CHELIS_I64",
-        // WS-1: bf16 / f16 routed via the runtime's matching tags.
-        Prim::Bf16 => "CHELIS_BF16",
-        Prim::F16 => "CHELIS_F16",
-        other => panic!(
-            "C backend sparse summary does not support {} tensors",
-            other.name()
-        ),
-    }
+    prim.runtime_dtype()
+        .unwrap_or_else(|error| panic!("C backend sparse summary: {error}"))
+        .c_macro()
 }
 
 /// One arm of the runtime-dtype dispatch emitted by the elementwise
@@ -5331,12 +5296,16 @@ enum DtypeArm {
 
 impl DtypeArm {
     fn dtype_macro(self) -> &'static str {
+        self.runtime_dtype().c_macro()
+    }
+
+    fn runtime_dtype(self) -> chelis_vocab::RuntimeDType {
         match self {
-            DtypeArm::F32 => "CHELIS_F32",
-            DtypeArm::F64 => "CHELIS_F64",
-            DtypeArm::I32 => "CHELIS_I32",
-            DtypeArm::I64 => "CHELIS_I64",
-            DtypeArm::Bool => "CHELIS_BOOL",
+            DtypeArm::F32 => chelis_vocab::RuntimeDType::F32,
+            DtypeArm::F64 => chelis_vocab::RuntimeDType::F64,
+            DtypeArm::I32 => chelis_vocab::RuntimeDType::I32,
+            DtypeArm::I64 => chelis_vocab::RuntimeDType::I64,
+            DtypeArm::Bool => chelis_vocab::RuntimeDType::Bool,
         }
     }
 

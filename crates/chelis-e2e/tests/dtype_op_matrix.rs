@@ -292,8 +292,8 @@ fn data_ptr_dtype_mismatch_f32_on_f64_tensor() {
         assert_eq!(
             err,
             DtypeMismatch {
-                expected: CHELIS_F32,
-                actual: CHELIS_F64,
+                expected: <f32 as TensorElement>::DTYPE,
+                actual: <f64 as TensorElement>::DTYPE,
             }
         );
         chelis_free(t);
@@ -308,8 +308,8 @@ fn data_ptr_dtype_mismatch_i64_on_i32_tensor() {
         assert_eq!(
             err,
             DtypeMismatch {
-                expected: CHELIS_I64,
-                actual: CHELIS_I32,
+                expected: <i64 as TensorElement>::DTYPE,
+                actual: <i32 as TensorElement>::DTYPE,
             }
         );
         chelis_free(t);
@@ -327,8 +327,8 @@ fn data_ptr_dtype_mismatch_f64_on_i64_tensor() {
         assert_eq!(
             err,
             DtypeMismatch {
-                expected: CHELIS_F64,
-                actual: CHELIS_I64,
+                expected: <f64 as TensorElement>::DTYPE,
+                actual: <i64 as TensorElement>::DTYPE,
             }
         );
         chelis_free(t);

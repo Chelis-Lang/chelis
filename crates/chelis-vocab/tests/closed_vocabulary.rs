@@ -1,6 +1,5 @@
 use chelis_vocab::{
-    EffectKind, EffectKindDecodeError, EffectKindInput, RuntimeDType,
-    RuntimeDTypeDecodeError,
+    EffectKind, EffectKindDecodeError, EffectKindInput, RuntimeDType, RuntimeDTypeDecodeError,
 };
 
 #[test]
@@ -49,6 +48,20 @@ fn effect_kind_decoder_never_returns_option_or_a_default_kind() {
 }
 
 #[test]
+fn effect_kind_consumer_match_is_a_compile_time_ratchet() {
+    fn semantic_decision(kind: EffectKind) -> &'static str {
+        match kind {
+            EffectKind::Random => "seed scope",
+            EffectKind::Resource => "device scope",
+        }
+    }
+
+    for kind in EffectKind::ALL {
+        assert!(!semantic_decision(kind).is_empty());
+    }
+}
+
+#[test]
 fn runtime_dtype_ids_names_c_macros_and_widths_round_trip() {
     let expected = [
         (RuntimeDType::F32, 0, "f32", "CHELIS_F32", 4),
@@ -88,3 +101,23 @@ fn runtime_dtype_invalid_ids_are_errors_not_f32() {
     }
 }
 
+#[test]
+fn runtime_dtype_consumer_match_is_a_compile_time_ratchet() {
+    fn storage_family(dtype: RuntimeDType) -> &'static str {
+        match dtype {
+            RuntimeDType::F32 => "f32",
+            RuntimeDType::F64 => "f64",
+            RuntimeDType::I32 => "i32",
+            RuntimeDType::Bool => "f32-bool",
+            RuntimeDType::I64 => "i64",
+            RuntimeDType::Bf16 => "u16-bf16",
+            RuntimeDType::F16 => "u16-f16",
+            RuntimeDType::I8 => "i8",
+            RuntimeDType::I16 => "i16",
+        }
+    }
+
+    for dtype in RuntimeDType::ALL {
+        assert!(!storage_family(dtype).is_empty());
+    }
+}

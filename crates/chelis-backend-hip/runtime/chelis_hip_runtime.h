@@ -187,15 +187,7 @@ typedef struct {
 /* ---- Allocation / deallocation ---- */
 
 static inline size_t chelis_gpu_dtype_size(int dtype) {
-    if (dtype == CHELIS_I64 || dtype == CHELIS_F64) {
-        return sizeof(int64_t);
-    }
-    if (dtype == CHELIS_BF16 || dtype == CHELIS_F16) {
-        /* WS-A3: bf16 / f16 storage is 2 bytes. Mirrors the host
-         * runtime's `chelis_alloc` dispatch. */
-        return 2;
-    }
-    return sizeof(float);
+    return chelis_runtime_dtype_size_checked(dtype);
 }
 
 static inline chelis_gpu_tensor* chelis_gpu_alloc(int ndim, const int *shape, int dtype) {
