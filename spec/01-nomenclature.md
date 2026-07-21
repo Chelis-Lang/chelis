@@ -1298,8 +1298,9 @@ the blocking registry:
 
 ### 12.3 Closed-enum dispatch substitution (Rust source)
 
-The blocking `rust-no-wildcard-dispatch` rule is ratchet #2 of the
-loud-unsupported plan (`spec/design/loud_unsupported.md` §C4.2, tracking
+The blocking `rust-no-wildcard-dispatch` rule is a temporary
+defense-in-depth instrument of the loud-unsupported plan
+(`spec/design/loud_unsupported.md` §C4.5, tracking
 issue chelis#730; the language-level contract is
 `spec/05-risc-primitives.md` §7 [05-UNS-1]). It forbids a catch-all
 `_ =>` (or `_ if <guard> =>`) match arm that MANUFACTURES a concrete
@@ -1309,10 +1310,14 @@ emission crates.
 The recurring chelis#703 defect is a stage answering an unsupported
 input by defaulting a closed-enum dispatch to a plausible value - HIP's
 `_ => ElemKind::F32`, the host-type arithmetic default
-`_ => HostType::Int64`. rustc cannot forbid a wildcard arm; this lint
-does. Adding a variant to a closed dtype enum should force a real
-dispatch decision at every site, not fall silently to a manufactured
-default.
+`_ => HostType::Int64`. The rule detects those known source shapes while
+the typed migration is underway. It is not the structural authority:
+aliases, binding patterns, helper/macro/const indirection, equivalent
+numeric defaults, and count relocation can preserve the same semantics
+without preserving the scanned text. The Phase 2 authority is a closed
+dependency-bottom enum, Result decoding at the raw boundary, and
+wildcard-free exhaustive semantic matches, so rustc itself produces the
+consumer work-list when a variant is added.
 
 - **Configured enums:** `Prim`, `ElemKind`, `RiscOp`, `HostType`
   (chelis#731 Phase 3 adds `DeepTag` without a config-freeze exception).
@@ -1336,13 +1341,17 @@ default.
 
 Keeps are recorded in the rule's `ALLOWLIST` (a per-`(file,
 enum::variant)` count baseline, each with a written justification,
-robust to line shifts like the §C4.3 tripwire), not as free-form path
+robust to line shifts like the §C4.5 tripwire), not as free-form path
 exceptions. Adding a keep is a reviewable allowlist edit; the FIRST
 unrecorded occurrence goes red. The complementary token tripwire
-(`crates/chelis-cli/tests/loud_unsupported_tripwire.rs`, §C4.3) covers
+(`crates/chelis-cli/tests/loud_unsupported_tripwire.rs`, §C4.5) covers
 the generated-string contexts and the numeric-default `unwrap_or(...)` /
 `unwrap_or_else(|| ...)` / `map_or(..., ...)` spellings this AST-shape
-rule does not see.
+rule does not see. Neither mechanism identifies a semantic site, and a
+green count does not establish un-writability. Once the owning typed
+boundary and its added-variant mutation oracle are green, this rule may
+be narrowed or retired through the freeze process in
+`loud_unsupported.md` §B1.
 
 ---
 

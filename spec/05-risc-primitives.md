@@ -1189,16 +1189,19 @@ These C implementations are the ground truth. The GPU backend (Phase 1) must pro
 **Status banner - read before citing.** RATIFIED and enforced for the
 censused live sites by chelis#730 Phase 1 (the Result-typed failure
 channel, the branded `unsupported:` diagnostic, and the live-site
-sweep; PR chelis#791). Phase 2 added the reintroduction ratchets that
-make regressions unwritable: the blocking `rust-no-wildcard-dispatch`
-lint (spec/01-nomenclature.md §12.3) against a wildcard arm that
-manufactures a concrete closed-enum value, the `EmittedExpr` newtype
-that makes a raw unsupported-stub emission unwritable outside the
-backend crate, and the `EffectKind` enum that replaces the
-`handle-effect` string-match catch-alls in both the lowering lanes and
-the checker. Residuals are per-atom noted below; [05-UNS-4]'s gate
-demotion is that plan's Phase 3. The delivery plan and full elaboration
-(the failure channel, the census, the ratchets) is
+sweep; PR chelis#791). Phase 2 is IN PROGRESS. PR chelis#799 added useful
+defense evidence (a blocking lexical wildcard scanner, count baselines,
+a first `EmittedExpr` newtype, and a partial `EffectKind` migration), but
+those mechanisms do not yet make regressions unwritable: semantic effect
+consumers still dispatch on strings, runtime dtype IDs still admit f32
+fallback sizing/reads, and crate-internal raw C expressions remain
+constructible. Phase 2 completes only when the dependency-bottom
+`EffectKind`/`RuntimeDType` vocabularies are Result-decoded at their
+boundaries and matched exhaustively by every semantic consumer. The lint
+and token tripwire remain temporary defense-in-depth, not the authority.
+Residuals are per-atom noted below; [05-UNS-4]'s gate demotion is that
+plan's Phase 3. The delivery plan and full elaboration (the failure
+channel, the census, the typed ratchets) is
 `spec/design/loud_unsupported.md`. Atom IDs are stable and are the
 citation grammar (chelis#733 re-scope: no rev hashes).
 
@@ -1206,6 +1209,13 @@ citation grammar (chelis#733 re-scope: no rev hashes).
 > an op, builtin, dtype, kernel, construct, or parameter shape - it
 > SHALL respond with a diagnostic through its failure channel. No stage
 > SHALL substitute a value, type, dtype, kernel, or emission.
+
+For closed compiler/runtime vocabularies, "SHALL NOT substitute" is enforced
+by construction: raw symbols and numeric IDs are converted through a
+`Result` decoder into a no-`Unknown`, no-`Default` enum at the first boundary;
+all semantic matches are exhaustive and wildcard-free. An unknown runtime
+dtype ID must fail before sizing or buffer access. A source-text scanner or
+count allowlist is supporting evidence only and cannot satisfy [05-UNS-1].
 
 *(Enforced since chelis#730 Phase 1 for the censused sites: the
 formerly substituting encounters of chelis#682/#689/#699/#714/#715/

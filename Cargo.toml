@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/chelis-vocab",
     "crates/chelis-prove",
     "crates/chelis-runtime",
     "crates/chelis-compiler-api",
@@ -38,6 +39,7 @@ license = "MIT"
 repository = "https://github.com/Chelis-Lang/chelis"
 
 [workspace.dependencies]
+chelis-vocab = { path = "crates/chelis-vocab" }
 chelis-deep = { path = "crates/chelis-deep" }
 chelis-pred = { path = "crates/chelis-pred" }
 chelis-runtime = { path = "crates/chelis-runtime" }
