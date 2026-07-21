@@ -41,10 +41,10 @@ invariant + [#687] oracle lanes ([#729] P0, PR #758), the substitution
 census verification + token tripwire ([#730] P0, PR #746), the
 `Type::Error` census + red totality invariant ([#731] P0, PR #757 -
 `issue_731_totality_invariant.rs`), the round-trip harness + exit
-census ([#732] P0, PR #752). The one outstanding Wave 0 item is
-lightweight PR review routing + `spec/**` signoff ([#733] P0). It makes
-no Buoy assurance claim and keeps
-provider metadata outside canonical authority. The two ordering handshakes
+census ([#732] P0, PR #752). The one outstanding Wave 0 item is immediate
+OpenSpec adoption + PR review routing + `spec/**` signoff ([#733] P0). It
+makes no Buoy assurance claim and keeps OpenSpec and provider metadata outside
+canonical product authority. The two ordering handshakes
 (the `%.16g`/`%.1f` grep pattern landing in [#730] P0's tripwire; [#729]
 P0 and [#732] P0 sharing lane drivers) were honored and are now
 historical.
@@ -129,7 +129,7 @@ flowchart TB
 
   subgraph S733["#733 spec provenance"]
     direction TB
-    n733p0["P0 · PR review routing<br/>+ spec/** signoff"]:::w0
+    n733p0["P0 · OpenSpec adoption<br/>+ PR review routing"]:::w0
     n733p1["P1 · advisory Buoy adapter"]:::w2
     n733p2["P2 · neutral change impact"]:::w2
     n733p3["P3 · blocking coverage<br/>+ surface ratchet"]:::w4

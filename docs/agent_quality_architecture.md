@@ -104,11 +104,12 @@ cleared. Additions to the existing red-team protocol:
   justify divergence in the PR body. The direct countermeasure to
   scattered implementation; checkable by a reviewer agent.
 - **Contract-first for multi-session features**: any feature spanning
-  sessions or branches lands its spec/design contract (phase-handoff
-  style: inherit / deliver / frozen-at-exit / not-yours / oracle) as a
-  docs-only PR FIRST. Parallel agents then implement against frozen
-  interfaces instead of colliding; every implementation PR names the
-  contract it implements (enforced by [#733] Phase 0's PR gate).
+  sessions or branches first lands or updates its OpenSpec proposal,
+  requirement deltas, scenarios, design, and phase-handoff contract
+  (inherit / deliver / frozen-at-exit / not-yours / oracle). Parallel agents
+  then implement against reviewed interfaces instead of colliding; every
+  implementation PR links the active OpenSpec change and names the specific
+  requirement or design section it implements (enforced by [#733] Phase 0).
 - Claim-before-work stays as the `issue-resolution` skill states
   (assignee set before branching).
 

@@ -1,10 +1,12 @@
 # Spec Provenance: Buoy-backed authority, evidence, and change impact
 
-**Status:** Integration design; advisory adoption proposed. The standalone
-repository-independent Rust workspace is now [Buoy] 0.2.0. Its initial
-acceptance oracle has been exercised, but its production-hardening work and
-Chelis integration remain active changes. Buoy is therefore the intended
-provenance engine, not yet a blocking Chelis dependency.
+**Status:** Immediate OpenSpec adoption contract + Buoy integration design.
+OpenSpec is the required planning and agent-communication workflow now; Buoy
+adoption begins advisory. The standalone repository-independent Rust workspace
+is [Buoy] 0.2.0. Its initial acceptance oracle has been exercised, but its
+production-hardening work and Chelis integration remain active changes. Buoy
+is therefore the intended provenance engine, not yet a blocking Chelis
+dependency.
 
 Tracking issue: [#733].
 
@@ -62,8 +64,29 @@ fixtures, format, and oracle. No previous contract survives by implication.
 | Green test or issue-linked ignored test as the two coverage states | **Superseded.** Registration, freshness, selection, five-state execution verdict, debt, waiver, and assurance class remain independent facts. | §C3 and §C4 |
 | Blocking coverage manifest and advisory debt reports | **Replaced by versioned coverage policies, adoption ratchets, repository-owned debt, and repository-owned waivers.** Phase 3 freezes initial policy IDs, selectors, required roles, reports, and negative controls. | Phase 3; §C4 |
 | Capability-row, Deep-tag, tolerance-row, and diagnostic citations | **Retained and generalized as governed structural surfaces.** Selected members bind one current controlling atom revision; intentional duplicates also require derivations. | Phase 3; §C5 |
-| OpenSpec proving inadequate as the trigger for provenance work | **Superseded.** OpenSpec remains planning-only; a nonblocking Buoy pilot may begin once Phase 1 fixtures and a pin exist. Blocking still waits for the readiness rule. | OpenSpec boundary; Phases 1 and 3 |
+| OpenSpec proving inadequate as the trigger for provenance work | **Superseded.** OpenSpec is required immediately for planning and agent communication; a nonblocking Buoy pilot may begin once Phase 1 fixtures and a pin exist. Blocking still waits for the readiness rule. | Immediate-term OpenSpec adoption; Phases 1 and 3 |
 | Executable atoms through `chelis prove` | **Retained as optional stronger evidence, not a replacement for ordinary carriers.** Exact properties, models, proofs, assumptions, and exclusions are bound only when justified. | Phase 4 |
+
+## Immediate-term OpenSpec adoption
+
+Until Buoy integration reaches its blocking phase, OpenSpec is the required
+planning and agent-communication workflow for Chelis changes. Every
+agent-authored feature or behavior change SHALL:
+
+1. create or update an OpenSpec change before implementation;
+2. identify the affected specification requirements;
+3. record positive and negative scenarios before production code;
+4. keep proposal, design, specification deltas, and tasks synchronized; and
+5. link the active OpenSpec change from its implementation pull request.
+
+Implementation may begin only after the OpenSpec proposal and requirement
+deltas have entered the human review queue. Human acceptance of an OpenSpec
+plan is review-only evidence: it authorizes the planned change but does not
+prove implementation correctness.
+
+An implementation agent SHALL name the active OpenSpec change and the specific
+requirement or design section it implements. “Follow the spec” without an
+addressable requirement is not a valid implementation claim.
 
 ## OpenSpec boundary
 
@@ -287,16 +310,20 @@ record. Provider state cannot be the only durable exemption ledger.
 
 # Part II — staged adoption
 
-## Phase 0 — lightweight review routing
+## Phase 0 — OpenSpec adoption and review routing
 
-Deliver the PR template, `spec/**` review routing, citation checks, and planted
-positive/negative tests for missing citations and temporary exemptions.
+Deliver the repository's OpenSpec configuration, change templates and agent
+instructions, strict validation, human review queue, PR template, `spec/**`
+review routing, citation checks, and temporary-exemption path.
 
-This phase makes no Buoy assurance claim and does not make provider metadata
-canonical.
+This phase makes no Buoy assurance claim and does not make OpenSpec or provider
+metadata canonical product authority.
 
-**Oracle:** the PR-gate suite plus planted no-citation, cited, docs-only, and
-exempted PR cases.
+**Oracle:** the named `openspec_adoption` suite plus the PR-gate suite prove
+that valid changes pass strict OpenSpec validation; missing requirement
+deltas, positive or negative scenarios, and implementation-PR change links
+fail; and cited, docs-only, and explicitly exempted PR cases follow their
+defined paths.
 
 ## Phase 1 — advisory Buoy pilot
 
