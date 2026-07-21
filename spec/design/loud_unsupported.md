@@ -2,13 +2,17 @@
 
 **Status:** Phases 0-1 implemented (Phase 0: PR [#746]; Phase 1: PR
 [#791] - the failure channel, the live-site sweep, and the section C2/C3
-freeze). Phase 2 is IN PROGRESS. PR [#799] supplied useful defense evidence
-(the lexical wildcard scanner, count baselines, a first `EmittedExpr`
-newtype, and a partial `EffectKind` migration), but its red team showed that
-those mechanisms do not make substitution structurally unrealizable. The
-Phase 2 completion boundary is therefore the typed/exhaustive contract in
-§C4 and the migration inventory in §C6, not a green lexical scan. Phase 3
-(gate demotion) remains pending. Tracking issue: [#730].
+freeze). Phase 2 is IN PROGRESS. The dependency-bottom `EffectKind` and
+`RuntimeDType` slice is now implemented: Result-only boundary decoders,
+exhaustive semantic consumers, Rust-generated C dtype agreement, immediate
+runtime ABI decoding, and executed added-variant mutation oracles. PR [#799]
+also supplied useful defense evidence (the lexical wildcard scanner, count
+baselines, and a first `EmittedExpr` newtype), but its red team showed that
+those mechanisms alone do not make substitution structurally unrealizable.
+Phase 2 is not complete: the HostType failure-channel split, capability-cell
+proofs, and private structured C-expression AST remain. The completion
+boundary is §C4/§C6, not a green lexical scan. Phase 3 (gate demotion) remains
+pending. Tracking issue: [#730].
 **Owning specs:** `spec/05-risc-primitives.md` (op support statements;
 its §7 carries this plan's ratified contract as current blockquote authorities
 [05-UNS-1..4], independently of their later chelis#733 migration through the
@@ -404,9 +408,11 @@ Future ownership remains cycle-free: move `Prim` and the future `BuiltinId`
 declaration into `chelis-vocab`, then re-export them from `chelis-types` while
 callers migrate. No Deep/runtime/backend edge points back upward from vocab.
 
-The effect migration work-list is exhaustive for the current tree:
+The effect migration work-list is exhaustive for the current tree. Every row
+is implemented in the typed slice; the middle column records the replaced
+behavior at `42d61a2`:
 
-| boundary/consumer | current raw behavior | required typed behavior |
+| boundary/consumer | replaced raw behavior | delivered typed behavior |
 |---|---|---|
 | `chelis-vocab::{EffectKind, EffectKindInput, EffectKindDecodeError}` | `chelis-types::EffectKind::from_symbol -> Option` | one declaration; `decode -> Result`; distinct missing/malformed/unknown errors; canonical `symbol()` inverse |
 | `chelis-deep` effect-metadata adapter (new) | every caller re-walks `{effect: ...}` | one adapter maps absent key, non-symbol value, and unknown symbol without collapsing them |
@@ -419,6 +425,11 @@ The effect migration work-list is exhaustive for the current tree:
 | `chelis-compiler-api::runtime::eval::HostEvaluator::eval_expr` | `if effect == "random"`, else evaluate body | exhaustive typed `Random` and `Resource`; every decode error is `Err`; no unknown/non-random passthrough |
 | `chelis-surf::desugar` `WithSeed`/`WithDevice` | hand-written `"random"`/`"resource"` | emit `EffectKind::symbol()` |
 | both `chelis-surf::decompile_handle_effect` implementations | raw-string match with generic fallback | decode once and exhaust known kinds; preserve malformed/unknown Deep only through an explicit decode-error observation path, never semantic execution |
+
+The checked-in source inventory keeps every row inside the mutation oracle.
+The executed oracle added a fully decoded temporary variant and produced
+Rust `E0004` at an exhaustive consumer; the variant was then removed. This
+compile failure, not the inventory's string scan, is the structural proof.
 
 The added-kind mutation oracle inserts one temporary variant in the single
 vocab declaration and builds `chelis-deep`, `chelis-surf`, `chelis-types`,
@@ -435,7 +446,7 @@ language spellings, C macro spellings, and byte widths. The numeric IDs do
 not change in this migration. `chelis_tensor.dtype` and the C ABI arguments
 remain `int`; that is the wire representation, not the internal type.
 
-| boundary/consumer | required migration |
+| boundary/consumer | delivered migration |
 |---|---|
 | `chelis-runtime/include/chelis_runtime.h` and HIP/Metal runtime headers | include a generated dtype fragment from the vocab declaration; remove handwritten ID/size copies |
 | `chelis-runtime::{CHELIS_*}` | compatibility constants derive from `RuntimeDType::id()`, never literal integers |
@@ -453,6 +464,13 @@ subprocess tests then pass those IDs to each public FFI dtype boundary and
 assert nonzero exit before any allocation-size result or buffer read can be
 observed. Positive coverage round-trips every ID and compares the generated C
 fragment byte-for-byte with its checked-in artifact.
+
+The runtime slice is implemented. Its subprocess suite drives every raw dtype
+argument boundary plus a tensor-field read with ID `9` and requires nonzero
+exit carrying the raw ID. The executed added-dtype oracle likewise produced
+Rust `E0004` at an exhaustive consumer before the temporary variant was
+removed. These results freeze the vocabulary slice, but do not complete Phase
+2's unrelated HostType and structured-emission work.
 
 ---
 
@@ -593,13 +611,13 @@ census shrinks to rows 10, 17, 18.
 
 ## Phase 2 - un-writability (typed closed vocabularies)
 
-**Status: IN PROGRESS.** PR [#799]'s lexical scanner, count allowlist,
-newtype, partial `EffectKind`, and widened tripwire are retained as useful
-groundwork and red-team evidence. They do not satisfy the exit boundary:
-semantic effect consumers still compare strings, the evaluator still treats
-every non-`random` string as body passthrough, runtime dtype IDs still default
-to f32 sizing/reads, and the backend crate can still construct arbitrary raw
-`EmittedExpr` strings.
+**Status: IN PROGRESS.** The `EffectKind`/`RuntimeDType` items 1-3 below are
+implemented and their mutation/negative oracles have been executed. PR
+[#799]'s lexical scanner, count allowlist, newtype, and widened tripwire remain
+useful defense evidence. They do not satisfy the remaining exit boundary:
+the HostType failure-channel split and capability proofs remain, and the
+backend crate can still construct arbitrary raw `EmittedExpr` strings instead
+of a private structured C-expression AST.
 
 **You inherit:** a tree with no live silent fallbacks (Phase 1) and the
 tripwire proving it.
