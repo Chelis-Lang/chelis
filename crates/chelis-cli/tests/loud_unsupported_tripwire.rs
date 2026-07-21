@@ -67,12 +67,19 @@ enum Pat {
     /// A wildcard match arm producing an `ElemKind` (census row 5: HIP's
     /// `_ => kernels::ElemKind::F32` dtype substitution).
     ElemKindWildcardArm,
-    /// `.unwrap_or(<numeric literal>)` on a NON-COMMENT line in
+    /// A numeric-literal default on a NON-COMMENT line in
     /// lowering/emission/runtime-packing paths - the value-default shape
     /// chelis#776 exposed (a user value silently replaced by a baked
     /// default). Added at Phase 1 per the census-maintenance obligation;
     /// the baseline annotates each surviving site as proven-structural
-    /// or P1-frozen for the Phase 2 lint audit.
+    /// or P1-frozen for the Phase 2 lint audit. Phase 2 (rt791 F6) widens
+    /// the class beyond `.unwrap_or(<lit>)` to the closure/`map_or`
+    /// spellings that evaded it: `.unwrap_or_else(|| <lit>)` and
+    /// `.map_or(<lit>, ...)` - the same silent numeric default wearing a
+    /// closure. The section C4.2 `rust-no-wildcard-dispatch` lint closes
+    /// the AST-shape half (a wildcard manufacturing a closed-enum value);
+    /// this token class stays the bridge for the numeric-default spellings
+    /// that are not an enum construction.
     UnwrapOrNumericLiteral,
     /// `%.16g` / `%.1f` / `{value:.1}` anywhere in crate sources - the
     /// f64-shaped observation-channel exits (chelis#716/#723/#728; owned by
@@ -167,23 +174,16 @@ impl Pat {
             // Comment lines are skipped so a doc reference to the banned
             // token (e.g. a conversion comment quoting the pre-fix code)
             // does not count as a live site; the section C4.2 lint closes
-            // string/comment evasions structurally at Phase 2.
+            // string/comment evasions structurally at Phase 2. The three
+            // spellings counted are the direct default `.unwrap_or(<lit>)`,
+            // the closure default `.unwrap_or_else(|| <lit>)`, and the
+            // map-or default `.map_or(<lit>, ...)` - rt791 F6 (Phase 2)
+            // added the latter two, which wore a closure to evade the
+            // original single-spelling scan.
             Pat::UnwrapOrNumericLiteral => content
                 .lines()
                 .filter(|line| !line.trim_start().starts_with("//"))
-                .map(|line| {
-                    let mut hits = 0;
-                    let mut rest = line;
-                    while let Some(pos) = rest.find(".unwrap_or(") {
-                        let after = &rest[pos + ".unwrap_or(".len()..];
-                        let after = after.strip_prefix('-').unwrap_or(after);
-                        if after.starts_with(|c: char| c.is_ascii_digit()) {
-                            hits += 1;
-                        }
-                        rest = &rest[pos + ".unwrap_or(".len()..];
-                    }
-                    hits
-                })
+                .map(count_numeric_defaults)
                 .sum(),
             Pat::CFormatNarrowing => {
                 occurrences(content, "%.16g")
@@ -342,10 +342,14 @@ const BASELINE: &[Entry] = &[
     (
         Pat::UnwrapOrNumericLiteral,
         "crates/chelis-compiler-api/src/runtime/eval.rs",
-        2,
+        3,
         "with-seed default (mirrors lower.rs; the chelis#793 negative-seed \
          repro is now checker-rejected) and a scalarization first-element \
-         read; P1-frozen for the Phase 2 lint audit",
+         read; plus the `map_or(-1_i64, ...)` process-exit-code default \
+         (proven-structural: a signal-killed child has no exit code, and -1 \
+         is the conventional sentinel, not a chelis#703 value substitution) \
+         newly counted by the rt791 F6 widening; P1-frozen for the Phase 2 \
+         lint audit",
     ),
     (
         Pat::UnwrapOrNumericLiteral,
@@ -379,6 +383,47 @@ const BASELINE: &[Entry] = &[
          hand-written main.c fixture strings, not product exits",
     ),
 ];
+
+/// Count the numeric-literal-default spellings on one source line: the
+/// direct `.unwrap_or(<lit>)`, the closure `.unwrap_or_else(|| <lit>)`, and
+/// the `.map_or(<lit>, ...)` form. rt791 F6 (chelis#730 Phase 2) added the
+/// latter two: `.unwrap_or_else(|| 0)` / `.map_or(0, ...)` are the same
+/// silent numeric default the direct spelling produces, dressed in a
+/// closure to slip past the original single-token scan. A non-numeric
+/// default (`.unwrap_or_else(|| compute())`, `.map_or(other, ...)`) is not
+/// counted - only a baked numeric literal is the chelis#703 shape.
+fn count_numeric_defaults(line: &str) -> usize {
+    // Directly after the delimiter (no whitespace trim) - preserves the
+    // exact pre-widening `.unwrap_or(` count so existing baselines do not
+    // shift.
+    fn immediately_numeric(s: &str) -> bool {
+        let s = s.strip_prefix('-').unwrap_or(s);
+        s.starts_with(|c: char| c.is_ascii_digit())
+    }
+    // After the closure head `||`, a space is idiomatic (`|| 0`), so the
+    // widened spellings trim leading whitespace before the literal check.
+    fn numeric_after_ws(s: &str) -> bool {
+        immediately_numeric(s.trim_start())
+    }
+    fn count(line: &str, needle: &str, check: fn(&str) -> bool) -> usize {
+        let mut hits = 0usize;
+        let mut rest = line;
+        while let Some(pos) = rest.find(needle) {
+            let after = &rest[pos + needle.len()..];
+            if check(after) {
+                hits += 1;
+            }
+            rest = after;
+        }
+        hits
+    }
+    // `.unwrap_or(<lit>)` (NOT `.unwrap_or_else(...)`: its substring is
+    // `.unwrap_or_` so `.unwrap_or(` never matches it), plus the two
+    // closure/map spellings rt791 F6 added.
+    count(line, ".unwrap_or(", immediately_numeric)
+        + count(line, ".unwrap_or_else(||", numeric_after_ws)
+        + count(line, ".map_or(", numeric_after_ws)
+}
 
 /// Recursively collect `.rs` files under `dir`.
 fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -609,5 +654,82 @@ fn tripwire_goes_red_on_every_planted_token_class() {
             && v.contains("faithful_observation.md")),
         "the planted {{value:.1}} narrowing arm must trip with the chelis#732 \
          doc pointer; got: {got:?}"
+    );
+}
+
+/// rt791 F6 (chelis#730 Phase 2): the closure/`map_or` numeric-default
+/// spellings that evaded the original single-token scan now join the
+/// `unwrap-or-numeric-literal` class. Positive: each spelling counts.
+#[test]
+fn count_numeric_defaults_counts_all_three_spellings() {
+    assert_eq!(count_numeric_defaults("let x = a.unwrap_or(0);"), 1);
+    assert_eq!(count_numeric_defaults("let x = a.unwrap_or(-1);"), 1);
+    assert_eq!(count_numeric_defaults("let x = a.unwrap_or_else(|| 0);"), 1);
+    assert_eq!(
+        count_numeric_defaults("let x = a.unwrap_or_else(|| -1_i64);"),
+        1
+    );
+    assert_eq!(count_numeric_defaults("let x = a.map_or(0, f);"), 1);
+    assert_eq!(count_numeric_defaults("let x = a.map_or(-1_i64, f);"), 1);
+    // Multiple spellings on one line all count.
+    assert_eq!(
+        count_numeric_defaults("a.unwrap_or(0) + b.unwrap_or_else(|| 1) + c.map_or(2, f)"),
+        3
+    );
+}
+
+/// Negative parity: a NON-numeric default is not the chelis#703 shape and
+/// must not count, and `.unwrap_or_else(...)` must not be double-counted by
+/// the `.unwrap_or(` scan.
+#[test]
+fn count_numeric_defaults_ignores_non_numeric_defaults() {
+    assert_eq!(count_numeric_defaults("let x = a.unwrap_or(default_val);"), 0);
+    assert_eq!(
+        count_numeric_defaults("let x = a.unwrap_or_else(|| compute());"),
+        0
+    );
+    assert_eq!(
+        count_numeric_defaults("let x = a.unwrap_or_else(|| Prim::F32);"),
+        0
+    );
+    assert_eq!(count_numeric_defaults("let x = a.map_or(other, f);"), 0);
+    // `unwrap_or_else` with a numeric literal counts exactly once (the
+    // closure scan), never also via the `.unwrap_or(` scan.
+    assert_eq!(count_numeric_defaults("let x = a.unwrap_or_else(|| 0);"), 1);
+    // A bare closure with no default and an unrelated numeric are inert.
+    assert_eq!(count_numeric_defaults("let n = 0; let f = || 0;"), 0);
+}
+
+/// The widening trips inside a planted lowering file for the two new
+/// spellings, and a non-numeric closure default stays clean.
+#[test]
+fn tripwire_widening_trips_on_planted_closure_defaults() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ir = dir.path().join("crates/chelis-ir/src");
+    fs::create_dir_all(&ir).expect("mkdir");
+    fs::write(
+        ir.join("lower.rs"),
+        "fn f() {\n    let a = seed.unwrap_or_else(|| 0);\n    \
+         let b = code.map_or(-1, i64::from);\n}\n",
+    )
+    .expect("write");
+    let got = violations(dir.path(), &[]);
+    assert!(
+        got.iter().any(|v| v.contains("unwrap-or-numeric-literal")),
+        "planted closure/map_or numeric defaults must trip; got: {got:?}"
+    );
+
+    // Negative: a non-numeric closure default in the same scope is clean.
+    fs::write(
+        ir.join("lower.rs"),
+        "fn f() {\n    let a = seed.unwrap_or_else(|| compute());\n    \
+         let b = code.map_or(fallback, i64::from);\n}\n",
+    )
+    .expect("write");
+    assert!(
+        !violations(dir.path(), &[])
+            .iter()
+            .any(|v| v.contains("unwrap-or-numeric-literal")),
+        "non-numeric closure/map_or defaults must NOT trip"
     );
 }

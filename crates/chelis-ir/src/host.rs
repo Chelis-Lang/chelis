@@ -3662,10 +3662,12 @@ fn lower_host_expr_kind(
             // row 9, discovered during the row 9 conversion): the former
             // unconditional body-passthrough silently dropped the handler
             // for every non-`random` effect kind, including unknown ones.
-            // Known kinds are `random` (seed scope) and `resource` (pure
-            // passthrough); anything else raises the same fatal branded
-            // diagnostic as the IR-lane arm.
-            if effect != "random" && effect != "resource" {
+            // chelis#730 Phase 2 (section C4.4): the kind is parsed once
+            // into the closed [`EffectKind`] set and dispatched with an
+            // exhaustive `match` (no `_` arm), so a new kind is a compile
+            // error here. An unrecognized kind (`None`) raises the same
+            // fatal branded diagnostic as the IR-lane arm.
+            let Some(effect_kind) = chelis_types::EffectKind::from_symbol(&effect) else {
                 let unsupported = chelis_types::unsupported::Unsupported::new(
                     chelis_types::unsupported::UnsupportedKind::EffectKind(if effect.is_empty() {
                         "<missing>".to_string()
@@ -3684,22 +3686,27 @@ fn lower_host_expr_kind(
                     span_id: expr.span_id().map(ToOwned::to_owned),
                     fatal: true,
                 });
-            }
+            };
             let body = kids.get(1).or_else(|| kids.first());
             if let Some(body) = body {
-                if effect == "random"
-                    && let Some(seed_expr) = kids.first()
-                {
-                    let seed = lower_host_expr(seed_expr, program, scope, tensor_helpers);
-                    let body = lower_host_expr(body, program, scope, tensor_helpers);
-                    let ty = host_expr_type(&body);
-                    return HostExpr::new(HostExprKind::WithSeed {
-                        seed: Box::new(seed),
-                        body: Box::new(body),
-                        ty,
-                    });
+                match effect_kind {
+                    chelis_types::EffectKind::Random => {
+                        if let Some(seed_expr) = kids.first() {
+                            let seed = lower_host_expr(seed_expr, program, scope, tensor_helpers);
+                            let body = lower_host_expr(body, program, scope, tensor_helpers);
+                            let ty = host_expr_type(&body);
+                            return HostExpr::new(HostExprKind::WithSeed {
+                                seed: Box::new(seed),
+                                body: Box::new(body),
+                                ty,
+                            });
+                        }
+                        lower_host_expr(body, program, scope, tensor_helpers)
+                    }
+                    chelis_types::EffectKind::Resource => {
+                        lower_host_expr(body, program, scope, tensor_helpers)
+                    }
                 }
-                lower_host_expr(body, program, scope, tensor_helpers)
             } else {
                 HostExpr::new(HostExprKind::Unit)
             }

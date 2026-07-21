@@ -15,6 +15,7 @@ enum SparseSummaryKind {
 }
 
 use crate::emit::CEmitter;
+use crate::emitted_expr::EmittedExpr;
 use chelis_ir::dag::{DimExpr, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
@@ -2476,10 +2477,17 @@ impl<'a> HostEmitter<'a> {
             ));
         }
 
+        // chelis#730 Phase 2 (section C3 / C4.2): the expression payload is
+        // an `EmittedExpr`, not a bare `String`. Every legitimate arm builds
+        // its C fragment through the crate-private `EmittedExpr::raw`; the
+        // unmatched-builtin arm below does not produce an `EmittedExpr` at
+        // all - it returns `Err(Unsupported)`. There is deliberately no
+        // `EmittedExpr::raw` on the unsupported path, so the audit's
+        // `"/* unsupported builtin */ 0"` stub is unwritable here.
         let expr = match name {
-            "add" => format!("{} + {}", arg_vars[0].0, arg_vars[1].0),
-            "sub" => format!("{} - {}", arg_vars[0].0, arg_vars[1].0),
-            "mul" => format!("{} * {}", arg_vars[0].0, arg_vars[1].0),
+            "add" => EmittedExpr::raw(format!("{} + {}", arg_vars[0].0, arg_vars[1].0)),
+            "sub" => EmittedExpr::raw(format!("{} - {}", arg_vars[0].0, arg_vars[1].0)),
+            "mul" => EmittedExpr::raw(format!("{} * {}", arg_vars[0].0, arg_vars[1].0)),
             // #387: integer scalar `div`/`mod` trap portably on a zero
             // divisor (ARM64 does not fault on integer div-by-zero), using the
             // same clean diagnostic the evaluator emits. `chelis_int_div_guard`
@@ -2488,88 +2496,88 @@ impl<'a> HostEmitter<'a> {
             // chelis#178: integer `div` is a type error; this arm is dead
             // (the checker rejects it before host-emit) but kept as a
             // defensive guard. Float `div` is IEEE-754 and never guarded.
-            "div" if matches!(arg_vars[0].1, HostType::Int64) => format!(
+            "div" if matches!(arg_vars[0].1, HostType::Int64) => EmittedExpr::raw(format!(
                 "{} / chelis_int_div_guard({})",
                 arg_vars[0].0, arg_vars[1].0
-            ),
-            "div" => format!("{} / {}", arg_vars[0].0, arg_vars[1].0),
+            )),
+            "div" => EmittedExpr::raw(format!("{} / {}", arg_vars[0].0, arg_vars[1].0)),
             // chelis#178: `trunc_div` is integer-only — the guarded C `/`
             // quotient (round toward zero).
-            "trunc_div" => format!(
+            "trunc_div" => EmittedExpr::raw(format!(
                 "{} / chelis_int_div_guard({})",
                 arg_vars[0].0, arg_vars[1].0
-            ),
+            )),
             // chelis#178: `floor_div` rounds toward -inf. Integer (host
             // scalar) operands use the guarded `/` plus a remainder-sign
             // correction; float operands use `floor(a / b)`.
             "floor_div" if matches!(arg_vars[0].1, HostType::Int64) => {
                 let a = &arg_vars[0].0;
                 let b = &arg_vars[1].0;
-                format!(
+                EmittedExpr::raw(format!(
                     "({a} / chelis_int_div_guard({b}) - \
                      (((({a}) % chelis_int_div_guard({b})) != 0 && \
                      (((({a}) % chelis_int_div_guard({b})) < 0) != (({b}) < 0))) ? 1 : 0))"
-                )
+                ))
             }
-            "floor_div" => format!("floor({} / {})", arg_vars[0].0, arg_vars[1].0),
-            "mod" => format!(
+            "floor_div" => {
+                EmittedExpr::raw(format!("floor({} / {})", arg_vars[0].0, arg_vars[1].0))
+            }
+            "mod" => EmittedExpr::raw(format!(
                 "{} % chelis_int_div_guard({})",
                 arg_vars[0].0, arg_vars[1].0
-            ),
-            "cmplt" if matches!(arg_vars[0].1, HostType::Tensor(_)) => {
-                format!("chelis_tensor_cmplt({}, {})", arg_vars[0].0, arg_vars[1].0)
-            }
-            "cmplt" => format!("{} < {}", arg_vars[0].0, arg_vars[1].0),
-            "lt" => format!("{} < {}", arg_vars[0].0, arg_vars[1].0),
-            "gt" => format!("{} > {}", arg_vars[0].0, arg_vars[1].0),
-            "gte" => format!("{} >= {}", arg_vars[0].0, arg_vars[1].0),
-            "lte" => format!("{} <= {}", arg_vars[0].0, arg_vars[1].0),
-            "eq" => match (&arg_vars[0].1, &arg_vars[1].1) {
+            )),
+            "cmplt" if matches!(arg_vars[0].1, HostType::Tensor(_)) => EmittedExpr::raw(format!(
+                "chelis_tensor_cmplt({}, {})",
+                arg_vars[0].0, arg_vars[1].0
+            )),
+            "cmplt" => EmittedExpr::raw(format!("{} < {}", arg_vars[0].0, arg_vars[1].0)),
+            "lt" => EmittedExpr::raw(format!("{} < {}", arg_vars[0].0, arg_vars[1].0)),
+            "gt" => EmittedExpr::raw(format!("{} > {}", arg_vars[0].0, arg_vars[1].0)),
+            "gte" => EmittedExpr::raw(format!("{} >= {}", arg_vars[0].0, arg_vars[1].0)),
+            "lte" => EmittedExpr::raw(format!("{} <= {}", arg_vars[0].0, arg_vars[1].0)),
+            "eq" => EmittedExpr::raw(match (&arg_vars[0].1, &arg_vars[1].1) {
                 (HostType::String, HostType::String) => {
                     format!("chelis_string_eq({}, {})", arg_vars[0].0, arg_vars[1].0)
                 }
                 _ => format!("{} == {}", arg_vars[0].0, arg_vars[1].0),
-            },
-            "neq" => match (&arg_vars[0].1, &arg_vars[1].1) {
+            }),
+            "neq" => EmittedExpr::raw(match (&arg_vars[0].1, &arg_vars[1].1) {
                 (HostType::String, HostType::String) => {
                     format!("!chelis_string_eq({}, {})", arg_vars[0].0, arg_vars[1].0)
                 }
                 _ => format!("{} != {}", arg_vars[0].0, arg_vars[1].0),
-            },
-            "and" => format!("{} && {}", arg_vars[0].0, arg_vars[1].0),
-            "or" => format!("{} || {}", arg_vars[0].0, arg_vars[1].0),
-            "not" => format!("!{}", arg_vars[0].0),
-            "neg" => format!("-({})", arg_vars[0].0),
-            "string_concat" => {
-                format!("chelis_string_concat({}, {})", arg_vars[0].0, arg_vars[1].0)
-            }
-            "string_trim" => format!("chelis_string_trim({})", arg_vars[0].0),
-            "reshape" => {
-                format!(
-                    "chelis_host_reshape_tensor({}, {})",
-                    arg_vars[0].0, arg_vars[1].0
-                )
-            }
-            "string_slice" => format!(
+            }),
+            "and" => EmittedExpr::raw(format!("{} && {}", arg_vars[0].0, arg_vars[1].0)),
+            "or" => EmittedExpr::raw(format!("{} || {}", arg_vars[0].0, arg_vars[1].0)),
+            "not" => EmittedExpr::raw(format!("!{}", arg_vars[0].0)),
+            "neg" => EmittedExpr::raw(format!("-({})", arg_vars[0].0)),
+            "string_concat" => EmittedExpr::raw(format!(
+                "chelis_string_concat({}, {})",
+                arg_vars[0].0, arg_vars[1].0
+            )),
+            "string_trim" => EmittedExpr::raw(format!("chelis_string_trim({})", arg_vars[0].0)),
+            "reshape" => EmittedExpr::raw(format!(
+                "chelis_host_reshape_tensor({}, {})",
+                arg_vars[0].0, arg_vars[1].0
+            )),
+            "string_slice" => EmittedExpr::raw(format!(
                 "chelis_string_slice({}, {}, {})",
                 arg_vars[0].0, arg_vars[1].0, arg_vars[2].0
-            ),
-            "string_contains" => {
-                format!(
-                    "chelis_string_contains({}, {})",
-                    arg_vars[0].0, arg_vars[1].0
-                )
-            }
-            "string_starts_with" => format!(
+            )),
+            "string_contains" => EmittedExpr::raw(format!(
+                "chelis_string_contains({}, {})",
+                arg_vars[0].0, arg_vars[1].0
+            )),
+            "string_starts_with" => EmittedExpr::raw(format!(
                 "chelis_string_starts_with({}, {})",
                 arg_vars[0].0, arg_vars[1].0
-            ),
-            "string_ends_with" => format!(
+            )),
+            "string_ends_with" => EmittedExpr::raw(format!(
                 "chelis_string_ends_with({}, {})",
                 arg_vars[0].0, arg_vars[1].0
-            ),
-            "string_len" => format!("chelis_string_len({})", arg_vars[0].0),
-            "to_string" => match &arg_vars[0].1 {
+            )),
+            "string_len" => EmittedExpr::raw(format!("chelis_string_len({})", arg_vars[0].0)),
+            "to_string" => EmittedExpr::raw(match &arg_vars[0].1 {
                 HostType::Int64 => format!("chelis_string_from_int64({})", arg_vars[0].0),
                 // f32 promotes to double for formatting (lossless); there is
                 // no separate f32 formatter in the runtime.
@@ -2595,12 +2603,12 @@ impl<'a> HostEmitter<'a> {
                          (was the `<value>` placeholder, chelis#734)",
                     ));
                 }
-            },
-            "to_int" => format!("chelis_parse_int64({})", arg_vars[0].0),
-            "to_float" => format!("chelis_parse_f64({})", arg_vars[0].0),
+            }),
+            "to_int" => EmittedExpr::raw(format!("chelis_parse_int64({})", arg_vars[0].0)),
+            "to_float" => EmittedExpr::raw(format!("chelis_parse_f64({})", arg_vars[0].0)),
             "print" => {
                 self.emit_print_value(&arg_vars[0].0, &arg_vars[0].1)?;
-                "0".to_string()
+                EmittedExpr::raw("0".to_string())
             }
             "fail" => {
                 self.lines
@@ -2609,9 +2617,11 @@ impl<'a> HostEmitter<'a> {
             }
             "debug" => {
                 self.emit_print_value(&arg_vars[0].0, &arg_vars[0].1)?;
-                arg_vars[0].0.clone()
+                EmittedExpr::raw(arg_vars[0].0.clone())
             }
-            "tensor_to_scalar" => format!("chelis_tensor_to_f64({})", arg_vars[0].0),
+            "tensor_to_scalar" => {
+                EmittedExpr::raw(format!("chelis_tensor_to_f64({})", arg_vars[0].0))
+            }
             // Issue #300: dispatch on the *result* tensor precision, not just
             // the (coarse) argument host type. `scalar_to_tensor(cast(c,
             // f32))` must materialize an f32-backed rank-0 tensor: the f64
@@ -2621,7 +2631,7 @@ impl<'a> HostEmitter<'a> {
             // value like 2.5. `Float64` host-classifies both f32 and f64, so
             // the argument type alone cannot distinguish them; the result
             // `ty` carries the real precision.
-            "scalar_to_tensor" => match (&arg_vars[0].1, ty) {
+            "scalar_to_tensor" => EmittedExpr::raw(match (&arg_vars[0].1, ty) {
                 (HostType::Int64, _) => {
                     format!("chelis_scalar_tensor_from_i64({})", arg_vars[0].0)
                 }
@@ -2631,33 +2641,37 @@ impl<'a> HostEmitter<'a> {
                 // Default float storage is f32 (matches the IR's `Const`
                 // f32 default and the DAG-helper operand precision).
                 _ => format!("chelis_scalar_tensor_from_f32({})", arg_vars[0].0),
-            },
-            "len" => match arg_vars[0].1 {
+            }),
+            "len" => EmittedExpr::raw(match arg_vars[0].1 {
                 HostType::Dict(_, _) => format!("chelis_dict_len({})", arg_vars[0].0),
                 _ => format!("chelis_list_len({})", arg_vars[0].0),
-            },
-            "range" => format!("chelis_range_i64({}, {})", arg_vars[0].0, arg_vars[1].0),
-            "rank" => format!("chelis_tensor_rank({})", arg_vars[0].0),
-            "shape" => format!("chelis_tensor_shape({}, {})", arg_vars[0].0, arg_vars[1].0),
-            "numel" => format!("chelis_tensor_numel({})", arg_vars[0].0),
+            }),
+            "range" => {
+                EmittedExpr::raw(format!("chelis_range_i64({}, {})", arg_vars[0].0, arg_vars[1].0))
+            }
+            "rank" => EmittedExpr::raw(format!("chelis_tensor_rank({})", arg_vars[0].0)),
+            "shape" => {
+                EmittedExpr::raw(format!("chelis_tensor_shape({}, {})", arg_vars[0].0, arg_vars[1].0))
+            }
+            "numel" => EmittedExpr::raw(format!("chelis_tensor_numel({})", arg_vars[0].0)),
             // Scalar math — these run on host `double` values in lowered
             // closures (e.g. the per-element GELU / RMSNorm map bodies).
             // The RISC DAG variants of these ops are handled separately in
             // `emit.rs`, but when a Surf `def` body is routed through the
             // host interpreter, we need the libm names directly.
-            "sqrt" => format!("sqrt({})", arg_vars[0].0),
-            "exp" => format!("exp({})", arg_vars[0].0),
-            "log" => format!("log({})", arg_vars[0].0),
-            "sin" => format!("sin({})", arg_vars[0].0),
-            "cos" => format!("cos({})", arg_vars[0].0),
-            "tanh" => format!("tanh({})", arg_vars[0].0),
-            "pow" => format!("pow({}, {})", arg_vars[0].0, arg_vars[1].0),
-            "abs" => match arg_vars[0].1 {
+            "sqrt" => EmittedExpr::raw(format!("sqrt({})", arg_vars[0].0)),
+            "exp" => EmittedExpr::raw(format!("exp({})", arg_vars[0].0)),
+            "log" => EmittedExpr::raw(format!("log({})", arg_vars[0].0)),
+            "sin" => EmittedExpr::raw(format!("sin({})", arg_vars[0].0)),
+            "cos" => EmittedExpr::raw(format!("cos({})", arg_vars[0].0)),
+            "tanh" => EmittedExpr::raw(format!("tanh({})", arg_vars[0].0)),
+            "pow" => EmittedExpr::raw(format!("pow({}, {})", arg_vars[0].0, arg_vars[1].0)),
+            "abs" => EmittedExpr::raw(match arg_vars[0].1 {
                 HostType::Int64 => format!("llabs({})", arg_vars[0].0),
                 _ => format!("fabs({})", arg_vars[0].0),
-            },
-            "min" => format!("fmin({}, {})", arg_vars[0].0, arg_vars[1].0),
-            "max" => format!("fmax({}, {})", arg_vars[0].0, arg_vars[1].0),
+            }),
+            "min" => EmittedExpr::raw(format!("fmin({}, {})", arg_vars[0].0, arg_vars[1].0)),
+            "max" => EmittedExpr::raw(format!("fmax({}, {})", arg_vars[0].0, arg_vars[1].0)),
             // chelis#730 Phase 1 (census row 2; chelis#682/#704/#705/#715):
             // a builtin with no C emission arm is a build error, never a
             // silent literal-0 stub. This arm is also the terminal of the
@@ -2676,7 +2690,7 @@ impl<'a> HostEmitter<'a> {
             }
         };
         self.lines
-            .push(format!("{}{target} = {expr};", self.indent));
+            .push(format!("{}{target} = {};", self.indent, expr.as_c()));
         if matches!(ty, HostType::Unit) {
             self.lines.push(format!("{}{target} = 0;", self.indent));
         }

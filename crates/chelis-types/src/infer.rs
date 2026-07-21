@@ -10,6 +10,7 @@ use chelis_deep::ast as deep;
 use crate::adt::{AdtRegistry, CallShape};
 use crate::builtins;
 use crate::context::{TypeEnv, TypeEnvInner};
+use crate::effect_kind::EffectKind;
 use crate::env::Env;
 use crate::errors::*;
 use crate::linearity::LinearityInfo;
@@ -9342,8 +9343,16 @@ fn infer_handle_effect(
     // "requires an int literal seed" message, and the effects gate already
     // rejects every non-literal form loudly and identically across lanes. The
     // checker's only handler-side addition is the int64-suffix rule below.
-    match effect {
-        Some("random") => {
+    //
+    // chelis#730 Phase 2 (section C4.4; the pinned §I1 interlock): the kind
+    // is parsed once into the closed [`EffectKind`] set - the same enum the
+    // lowering lanes now use - and dispatched with an exhaustive `match`
+    // over `Option<EffectKind>` (no `_` arm). Adding a kind is a compile
+    // error here until this checker case handles it. The `None` arm keeps
+    // the loud `MalformedForm` for an unknown kind.
+    let effect_kind = effect.and_then(EffectKind::from_symbol);
+    match effect_kind {
+        Some(EffectKind::Random) => {
             // Open question 1 (decided 2026-07-17): the seed is semantically
             // int64, and a seed written as an integer LITERAL must carry the
             // `i64` suffix (the reject-diagnostic half chelis#771 left to Phase
@@ -9383,17 +9392,17 @@ fn infer_handle_effect(
                 SeedLiteralForm::NotIntLiteral | SeedLiteralForm::ValidInt64 => {}
             }
         }
-        Some("resource") => {
+        Some(EffectKind::Resource) => {
             // Device literal-ness is the effects gate's job; the device-name
             // vocabulary is not validated here (target knowledge, chelis#735).
         }
-        other => {
-            // §C1.5 / §I1: an unknown effect kind is malformed. chelis#730's
-            // lowering catch-all still lowers the body and silently drops the
-            // handler for an unknown kind (`lower_handle_effect`), so until its
-            // raise lands the checker is the loud gate for the bogus-effect
-            // `.dp`.
-            let named = other.unwrap_or("<missing>");
+        None => {
+            // §C1.5 / §I1: an unknown effect kind is malformed. Both the IR
+            // and host lowering lanes now raise a branded `unsupported:`
+            // diagnostic for an unknown kind too (chelis#730 Phase 1 rows
+            // 9/20), but the checker is the earliest competent stage and
+            // rejects it first here ([05-UNS-2]).
+            let named = effect.unwrap_or("<missing>");
             errors.push(CheckError::new(
                 CheckErrorKind::MalformedForm,
                 format!(

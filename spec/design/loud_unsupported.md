@@ -1,8 +1,10 @@
 # Loud Unsupported: the failure-channel contract
 
-**Status:** Phases 0-1 implemented (Phase 0: PR [#746]; Phase 1: PR
+**Status:** Phases 0-2 implemented (Phase 0: PR [#746]; Phase 1: PR
 [#791] - the failure channel, the live-site sweep, and the section C2/C3
-freeze). Phases 2-3 pending. Tracking issue: [#730].
+freeze; Phase 2 - the `rust-no-wildcard-dispatch` lint ratchet, the
+`EmittedExpr` newtype, the `EffectKind` enum, and the rt791 F6 tripwire
+widening). Phase 3 (gate demotion) pending. Tracking issue: [#730].
 **Owning specs:** `spec/05-risc-primitives.md` (op support statements;
 its §7 carries this plan's ratified contract as current blockquote authorities
 [05-UNS-1..4], independently of their later chelis#733 migration through the
@@ -244,45 +246,70 @@ FATAL raise when the host fallback would mis-emit the same construct
 acceptable only where the host fallback legitimately owns the form,
 because its own unsupported terminal is now loud.
 
-**The `EmittedExpr` rule:** the C expression type is a newtype over
-`String` whose constructors are the typed builders. There is deliberately
-no `EmittedExpr::raw(String)` on the unsupported path - the only way to
-respond to an unmatched builtin is to construct `Unsupported`. The audit's
-`format!("/* unsupported builtin {other} */ 0")` becomes unwritable, not
-just unfashionable. (A `raw` constructor may exist `pub(crate)` for the
-legitimate template snippets; the lint in §C4.2 patrols its use sites.)
+**The `EmittedExpr` rule (delivered Phase 2):** the C expression payload
+is `chelis_backend_c::emitted_expr::EmittedExpr`, a newtype over `String`
+whose only constructor, `EmittedExpr::raw`, is `pub(crate)`. Outside the
+backend crate there is no public constructor at all (no `raw`, no
+`From<String>`, no `Default`), so an out-of-crate caller cannot fabricate
+an emission from a raw stub string - demonstrated by the `compile_fail`
+doctests on the type. `assign_builtin` threads `EmittedExpr` as its
+expression arm type, and the response to an unmatched builtin is not an
+`EmittedExpr` at all - it is `Err(Unsupported)`. The audit's
+`format!("/* unsupported builtin {other} */ 0")` is unwritable there, not
+just unfashionable. In-crate, `raw` exists for the legitimate template
+snippets; the §C4.3 tripwire (`*/ 0"`) patrols its use sites.
 
 ## C4. The ratchets (making reintroduction near-impossible)
 
 Four mechanisms, ordered by strength. §C3 removes the *need* to
 substitute; these remove the *ability*:
 
-1. **Closed enums match exhaustively.** No `_` arm over `Prim`,
+1. **Closed enums match exhaustively.** Ideally no `_` arm over `Prim`,
    `RiscOp`, `ElemKind`, `UnsupportedKind`, or the CHELIS dtype ids in the
    numeric/backends crates. Adding a variant then produces a compile-error
    work-list at every dispatch site. Where an arm is genuinely N/A it says
    so per-variant (`Prim::String => unreachable-per-<cited guarantee>` or
-   a §C1.4 raise).
-2. **The lint rule** (new, in `chelis-lint`, which already lints Rust
-   source for §8.6): `rust-no-wildcard-dispatch` - a blocking rule that
-   forbids `_ =>` / `default:`-emitting arms in matches over a configured
-   list of enum types within configured crates, with a per-site allowlist
-   file that requires a written justification string. The rule also flags
-   `unwrap_or_default()` / `unwrap_or(Prim::` / `unwrap_or(HostType::` in
-   the same crates. This is the ratchet's enforcement: rustc cannot forbid
-   wildcards; the repo gate can.
+   a §C1.4 raise). **Phase 2 scoping (delivered):** a blanket wildcard ban
+   is intractable for `RiscOp` (52 variants; most `_ => None`-shaped
+   classification filters are not the substitution class), so ratchet #2's
+   lint targets the substitution SHAPE precisely (a wildcard that
+   MANUFACTURES a concrete closed-enum value) rather than every wildcard.
+   The exhaustive-match ideal still applies to the small dtype enums by
+   convention; the lint enforces the dangerous subset that regressed.
+2. **The lint rule** (delivered Phase 2, in `chelis-lint`, which already
+   lints Rust source for §8.6): `rust-no-wildcard-dispatch` - a blocking
+   rule (spec/01-nomenclature.md §12.3) that flags a `_ =>` / `_ if =>`
+   arm whose body constructs a concrete variant of a configured enum
+   (`Prim`/`ElemKind`/`RiscOp`/`HostType`, excluding the blessed
+   `HostType::Unknown` marker) within the configured crates, with a
+   per-`(file, enum::variant)` count allowlist that requires a written
+   justification string. Current tree: six documented structural keeps,
+   all allowlisted; a planted `_ => ElemKind::F32` / `_ => Prim::F32` /
+   `_ => HostType::Int64` goes red (the rule's mutation oracle). The
+   numeric-default `unwrap_or(...)` spellings stay with the tripwire
+   (ratchet #3), which the same phase widened; the division keeps this
+   lint an AST-shape rule and the tripwire a token-shape rule. This is the
+   ratchet's enforcement: rustc cannot forbid wildcards; the repo gate
+   can.
 3. **The token tripwire** (test, land-first, cheapest): a unit test in the
    workspace that greps the source tree for the recidivist tokens -
    `*/ 0"`, `<value>`, `unwrap_or_default()` and `unwrap_or(Prim::` in
    lowering/emission paths, `=> ElemKind::` wildcards - against the §C5
    census. Any NEW site fails with a message pointing at this document.
-   Exists purely to bridge until 1+2 land and to catch generated-string
-   contexts the lint cannot see.
-4. **`EffectKind` becomes an enum** (shared deliverable with [#709]'s plan):
-   `lower_handle_effect`'s `_ if elems.len() >= 4 => lower body, drop
-   handler` catch-all is deleted; unknown effect kinds in `.dp` input get
-   a §C2 diagnostic. (Proven live today: `effect: teleport` builds and
-   runs.)
+   Bridges until 1+2 land and catches generated-string contexts the lint
+   cannot see. **Phase 2 (rt791 F6):** the `unwrap-or-numeric-literal`
+   class was widened past `.unwrap_or(<lit>)` to the closure/`map_or`
+   spellings that evaded it - `.unwrap_or_else(|| <lit>)` and
+   `.map_or(<lit>, ...)` - with both-polarity tests.
+4. **`EffectKind` becomes an enum** (delivered Phase 2; shared deliverable
+   with [#709]'s plan): `lower_handle_effect`'s catch-all is gone -
+   `chelis_types::EffectKind` (`from_symbol` returning `Option`) is parsed
+   once and dispatched with an exhaustive `match` (no `_` arm) in BOTH the
+   IR/host lowering lanes (census rows 9/20) AND the checker's
+   `infer_handle_effect` (the pinned §I1 interlock, [#793]). An unknown
+   kind is a branded §C2 `Unsupported`/`MalformedForm`; adding a kind is a
+   compile error at every dispatch site. (Was live: `effect: teleport`
+   built and ran.)
 
 ## C5. The census (normative appendix; Phase 0 re-verifies by execution)
 
@@ -487,6 +514,16 @@ row 1's raise (a loud lowering error, not zero gradients); the tripwire
 census shrinks to rows 10, 17, 18.
 
 ## Phase 2 - un-writability (the lint ratchet)
+
+**Status: DELIVERED** (the `rust-no-wildcard-dispatch` lint, the
+`EmittedExpr` newtype, the `EffectKind` enum across both consumers, and
+the rt791 F6 tripwire widening). The one scoping deviation is recorded in
+ratchet #1 above: the lint targets the substitution SHAPE (a wildcard
+manufacturing a concrete closed-enum value) rather than banning every
+wildcard over the enums, because a blanket ban is intractable for the
+52-variant `RiscOp` and would not be single-digit-allowlist-able. The
+frozen config is the six-entry `ALLOWLIST` in the rule plus the enum and
+crate lists (§B1).
 
 **You inherit:** a tree with no live silent fallbacks (Phase 1) and the
 tripwire proving it.
