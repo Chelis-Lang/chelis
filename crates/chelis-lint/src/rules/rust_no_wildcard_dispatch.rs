@@ -37,6 +37,13 @@
 //!   rule.)
 //! - Field/pass-through: `_ => node.output_type.precision` - no
 //!   `Enum::Variant` construction.
+//! - Further dispatch: `_ => match x { Enum::V => .. }` - the enum names in
+//!   the inner arm PATTERNS construct nothing (pattern-position refs are
+//!   excluded).
+//! - IR generation: a `RiscOp` variant other than `Const` built in a
+//!   wildcard fallback (`_ => dag.add_node(RiscOp::Load { .. }, ..)`) is
+//!   real IR, not a substitution. The only flagged `RiscOp` shape is the
+//!   silent zero-seed `RiscOp::Const { value: 0.0 }` (census row 16).
 //!
 //! The narrow, precise signal keeps the rule green on the current tree with
 //! a single-digit allowlist of pre-existing legitimate keeps, while a
@@ -220,7 +227,7 @@ impl Rule for RustNoWildcardDispatch {
                 });
             }
         }
-        out.sort_by(|a, b| a.line.cmp(&b.line));
+        out.sort_by_key(|v| v.line);
         out
     }
 }
@@ -505,8 +512,7 @@ fn top_level_arms(code: &str, open: usize, close: usize) -> Vec<ArmSpan> {
         while i < close && bytes[i].is_ascii_whitespace() {
             i += 1;
         }
-        let body_end;
-        if i < close && bytes[i] == b'{' {
+        let body_end = if i < close && bytes[i] == b'{' {
             // Brace-block arm: end at the matching `}`.
             let mut bdepth = 0i32;
             let mut k = i;
@@ -523,7 +529,7 @@ fn top_level_arms(code: &str, open: usize, close: usize) -> Vec<ArmSpan> {
                 }
                 k += 1;
             }
-            body_end = (k + 1).min(close);
+            (k + 1).min(close)
         } else {
             // Expression arm: end at the next top-level comma.
             let mut d = 0i32;
@@ -537,8 +543,8 @@ fn top_level_arms(code: &str, open: usize, close: usize) -> Vec<ArmSpan> {
                 }
                 k += 1;
             }
-            body_end = k.min(close);
-        }
+            k.min(close)
+        };
         arms.push(ArmSpan {
             pat_start,
             arrow,
@@ -562,9 +568,18 @@ fn is_wildcard_pattern(pat: &str) -> bool {
     p == "_"
 }
 
-/// If `body` constructs a concrete configured-enum variant, return the
-/// `Enum::Variant` token (leading-normalized). `HostType::Unknown` is the
-/// blessed polymorphic marker and returns `None`.
+/// If `body` constructs a concrete configured-enum variant in EXPRESSION
+/// position, return the `Enum::Variant` token. Returns `None` when the only
+/// occurrences are exclusions:
+///
+/// - `HostType::Unknown` - the blessed polymorphic marker (§C3).
+/// - a `RiscOp` variant other than `Const` - a `RiscOp::Load`/`MatMul`/...
+///   built in a wildcard fallback is legitimate IR generation, not a
+///   value substitution; the ONLY `RiscOp` substitution shape is the
+///   silent zero-seed `RiscOp::Const { value: 0.0 }` (census row 16).
+/// - a PATTERN-position ref (`Enum::Variant(..)? =>` / `... if`) - an inner
+///   `match`/`if let` arm inside the wildcard body dispatches further; its
+///   arm patterns name the enum but construct nothing.
 fn concrete_construction(body: &str) -> Option<&'static str> {
     for &enm in CONFIGURED_ENUMS {
         let needle = format!("{enm}::");
@@ -575,15 +590,64 @@ fn concrete_construction(body: &str) -> Option<&'static str> {
                 .chars()
                 .take_while(|c| c.is_alphanumeric() || *c == '_')
                 .collect();
-            let first_upper = variant.chars().next().is_some_and(|c| c.is_ascii_uppercase());
-            let is_unknown_marker = enm == "HostType" && variant == "Unknown";
-            if first_upper && !is_unknown_marker {
-                return Some(intern_token(enm, &variant));
-            }
             from = at;
+            let Some(first) = variant.chars().next() else {
+                continue;
+            };
+            if !first.is_ascii_uppercase() {
+                continue; // an assoc fn / const (`Prim::parse_name`), not a variant.
+            }
+            if enm == "HostType" && variant == "Unknown" {
+                continue;
+            }
+            if enm == "RiscOp" && variant != "Const" {
+                continue;
+            }
+            if in_pattern_position(body, at + variant.len()) {
+                continue;
+            }
+            return Some(intern_token(enm, &variant));
         }
     }
     None
+}
+
+/// True if the enum ref whose variant ends at byte `pos` is a match/`if let`
+/// PATTERN rather than a constructed value: after the optional
+/// variant-args group it is immediately followed by `=>` or a match guard
+/// `if `.
+fn in_pattern_position(body: &str, pos: usize) -> bool {
+    let bytes = body.as_bytes();
+    let n = body.len();
+    let mut i = pos;
+    while i < n && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    // Skip a balanced tuple/struct args group `(..)` or `{..}`.
+    if i < n && (bytes[i] == b'(' || bytes[i] == b'{') {
+        let (open, close) = if bytes[i] == b'(' {
+            (b'(', b')')
+        } else {
+            (b'{', b'}')
+        };
+        let mut depth = 0i32;
+        while i < n {
+            if bytes[i] == open {
+                depth += 1;
+            } else if bytes[i] == close {
+                depth -= 1;
+                if depth == 0 {
+                    i += 1;
+                    break;
+                }
+            }
+            i += 1;
+        }
+        while i < n && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+    }
+    body[i..].starts_with("=>") || body[i..].starts_with("if ")
 }
 
 /// Map an `(enum, variant)` pair to a `'static` token for grouping and
@@ -758,6 +822,55 @@ mod tests {
                 .check(&ctx("crates/chelis-ir/src/specialize.rs", src))
                 .is_empty(),
             "a field-access pass-through wildcard must not fire"
+        );
+    }
+
+    #[test]
+    fn ignores_inner_match_pattern_refs() {
+        // A wildcard whose body dispatches FURTHER through a nested match
+        // names the enum in the inner arm PATTERNS - it constructs nothing.
+        // (The host.rs `lookup_access_field` shape.)
+        let src = "fn f(base: &X) -> Option<u8> {\n    match base {\n        \
+                   X::A => Some(0),\n        _ => match host_type(base) {\n            \
+                   HostType::Adt(name, args) => lookup(name, args),\n            \
+                   _ => None,\n        },\n    }\n}\n";
+        assert!(
+            RustNoWildcardDispatch
+                .check(&ctx("crates/chelis-ir/src/host.rs", src))
+                .is_empty(),
+            "an enum ref in a nested-match PATTERN must not be read as a \
+             construction"
+        );
+    }
+
+    #[test]
+    fn riscop_ir_gen_is_ignored_but_const_zero_seed_flags() {
+        // A wildcard fallback building a real IR node (Load/MatMul) is IR
+        // generation, not a value substitution - not flagged.
+        let load = "fn l(name: &str) -> Node {\n    match name {\n        \
+                    \"mm\" => make(RiscOp::MatMul),\n        \
+                    _ => dag.add_node(RiscOp::Load { name: name.into() }, vec![]),\n    }\n}\n";
+        assert!(
+            RustNoWildcardDispatch
+                .check(&ctx("crates/chelis-ir/src/lower.rs", load))
+                .is_empty(),
+            "a `_ => RiscOp::Load(...)` IR-gen fallback must not fire"
+        );
+        // The silent zero-seed shape (census row 16) IS the RiscOp
+        // substitution and DOES fire (planted a second time, since lower.rs
+        // allowlists exactly one).
+        let seed = "fn s(tag: &str) -> V {\n    match tag {\n        \
+                    \"a\" => real(),\n        \
+                    _ => Node(dag.add_node(RiscOp::Const { value: 0.0 }, vec![])),\n    }\n}\n\
+                    fn s2(tag: &str) -> V {\n    match tag {\n        \
+                    \"a\" => real(),\n        \
+                    _ => Node(dag.add_node(RiscOp::Const { value: 0.0 }, vec![])),\n    }\n}\n";
+        assert!(
+            !RustNoWildcardDispatch
+                .check(&ctx("crates/chelis-ir/src/lower.rs", seed))
+                .is_empty(),
+            "two `_ => RiscOp::Const {{ 0.0 }}` seeds exceed the single \
+             allowlisted keep and must fire"
         );
     }
 
