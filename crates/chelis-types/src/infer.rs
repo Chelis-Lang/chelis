@@ -6656,6 +6656,14 @@ fn validate_conv2d_symbolic_requirements(
     failed_let_names: &HashSet<String>,
     errors: &mut Vec<CheckError>,
 ) {
+    // The inference pass owns builtin arity diagnostics. This validator only
+    // owns the symbolic requirements of the canonical 4-argument call:
+    // (app {} (var conv2d) input kernel stride padding). Returning here keeps
+    // malformed calls total and prevents a secondary validator diagnostic.
+    let [_, _, _, input, kernel, _, _] = list.elements.as_slice() else {
+        return;
+    };
+
     // RT-205 round-2 F3: if either tensor arg is a `(var <name>)`
     // whose `name` is in the failed-derivation set, the owning
     // diagnostic was already emitted for the let-binding's own RHS.
@@ -6673,11 +6681,8 @@ fn validate_conv2d_symbolic_requirements(
     // symbolic batch through. All OTHER input axes (in_c, h, w) and
     // all kernel axes must remain concrete -- they appear in the
     // im2col/matmul lowering and must be statically knowable.
-    if !conv2d_input_dims_concrete_modulo_batch(list.elements.get(3).map(peel_borrow), type_env)
-        || !expr_tensor_type_is_concrete(
-            list.elements.get(4).expect("arity already implicit"),
-            type_env,
-        )
+    if !conv2d_input_dims_concrete_modulo_batch(Some(peel_borrow(input)), type_env)
+        || !expr_tensor_type_is_concrete(kernel, type_env)
     {
         errors.push(validator_error(
             CheckErrorKind::DimensionMismatch,
