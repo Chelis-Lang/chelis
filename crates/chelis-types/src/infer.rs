@@ -1251,6 +1251,14 @@ fn check_ir_with_signature_context_inner(
     if !result.errors.is_empty() {
         return Err(result);
     }
+    // chelis#731 Phase 2 ([04-TOT-2] / §C4.1): the always-on totality
+    // invariant. errors is empty here (we passed the gate above), so any
+    // silent Type::Error surviving in the annotated result is a violation.
+    let totality_traces = totality_invariant_traces(&annotated_exprs);
+    if !totality_traces.is_empty() {
+        result.errors.push(totality_violation_error(&totality_traces));
+        return Err(result);
+    }
     // Surface library declared types in the returned type_env so downstream
     // passes (lower, effects, linearity) can resolve `(var libname)` calls
     // from new-code without a separate library lookup. New-code types take
@@ -1287,6 +1295,13 @@ fn check_typed_program_inner(exprs: &[deep::Expr]) -> Result<CheckedProgram, Inf
         // Annotation recurses; reject if it bailed on low stack.
         stack_scope.drain_into(&mut result.errors);
         if !result.errors.is_empty() {
+            return Err(result);
+        }
+        // chelis#731 Phase 2 ([04-TOT-2] / §C4.1): the always-on totality
+        // invariant (see `totality_invariant_traces`). errors is empty here.
+        let totality_traces = totality_invariant_traces(&annotated_exprs);
+        if !totality_traces.is_empty() {
+            result.errors.push(totality_violation_error(&totality_traces));
             return Err(result);
         }
         Ok(CheckedProgram::from_parts(
@@ -2763,7 +2778,7 @@ fn type_from_deep_expr(expr: &deep::Expr) -> Option<Type> {
     let mut vg = VarGen::default();
     let mut tvar_map = HashMap::new();
     let ty = deep_type_to_type(expr, &mut vg, &mut tvar_map);
-    (!matches!(ty, Type::Error)).then_some(ty)
+    (!matches!(ty, Type::Error(_))).then_some(ty)
 }
 
 fn type_contains_tensor(ty: &Type) -> bool {
@@ -2771,7 +2786,7 @@ fn type_contains_tensor(ty: &Type) -> bool {
         Type::Tensor(_, _) => true,
         Type::Ref(inner) => type_contains_tensor(inner),
         Type::Adt(_, args) | Type::Tuple(args) => args.iter().any(type_contains_tensor),
-        Type::Fn(_, _) | Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error => false,
+        Type::Fn(_, _) | Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error(_) => false,
     }
 }
 
@@ -2797,7 +2812,7 @@ fn type_carries_tensor_with_carriers(ty: &Type, carriers: &HashSet<String>) -> b
                     .iter()
                     .any(|a| type_carries_tensor_with_carriers(a, carriers))
         }
-        Type::Fn(_, _) | Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error => false,
+        Type::Fn(_, _) | Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error(_) => false,
     }
 }
 
@@ -2897,7 +2912,7 @@ fn validate_deferred_borrow_vars(
                 type_carries_tensor_with_carriers(peeled, &carriers)
             }
             // Don't double-report an inner that already failed inference.
-            Type::Error => true,
+            Type::Error(_) => true,
             // Never pinned, or pinned to a concretely-non-tensor value.
             Type::Var(_) | Type::Prim(_) | Type::Unit | Type::Fn(_, _) => false,
             // `Ref` is fully peeled above; treat as sound to avoid a
@@ -5757,7 +5772,7 @@ fn annotate_fn_children(
                             &mut dvar_map,
                             &mut rvar_map,
                         ) {
-                            Type::Error => None,
+                            Type::Error(_) => None,
                             ty => Some(ty),
                         }
                     }
@@ -6013,7 +6028,7 @@ fn stamp_pattern_binding_types(
                     .and_then(symbol_name)
                     .and_then(|name| arm_env.lookup(name))
                     .map(|scheme| pattern_subst.apply(&scheme.body))
-                    .filter(|ty| !matches!(ty, Type::Error))
+                    .filter(|ty| !matches!(ty, Type::Error(_)))
             } else {
                 None
             };
@@ -6080,7 +6095,7 @@ fn annotated_meta_map_with_override(
     };
 
     if let Some(ty) = ty_for_meta
-        && !matches!(ty, Type::Error)
+        && !matches!(ty, Type::Error(_))
     {
         let ty_expr = type_to_deep_expr(&ty);
         if let Some((_, existing)) = entries.iter_mut().find(|(key, _)| key == "type") {
@@ -6189,7 +6204,7 @@ fn type_to_deep_expr(ty: &Type) -> deep::Expr {
         Type::Var(var) => node_expr("t-var", vec![symbol_expr(&format!("t{}", var.0))]),
         Type::Tuple(types) => node_expr("t-tuple", types.iter().map(type_to_deep_expr).collect()),
         Type::Unit => node_expr("t-unit", vec![]),
-        Type::Error => node_expr("t-var", vec![symbol_expr("_")]),
+        Type::Error(_) => node_expr("t-var", vec![symbol_expr("_")]),
     }
 }
 
@@ -7258,6 +7273,114 @@ fn type_expr_is_ir_concrete(expr: &deep::Expr) -> bool {
 
 // ── Helpers ──────────────────────────────────────────────────────
 
+/// chelis#731 Phase 2 ([04-TOT-2] / spec/design/checker_totality.md §C4.1):
+/// the ALWAYS-ON totality invariant. After a check completes with an EMPTY
+/// error vector, the typed result must contain no error-typed node. With the
+/// §C3 `ErrorWitness` token a silent `Type::Error` is unconstructible (every
+/// `Type::Error` is minted by `report`, which pushes a diagnostic, or
+/// `propagate`, which is downstream of one), so `errors.is_empty()`
+/// structurally implies no fresh error was produced. This pass stays on as
+/// the standing tripwire that verifies the claim -- it is a pushed internal
+/// error, never a panic (the checker is reachable-input territory).
+///
+/// Detection mirrors the Phase 0 harness
+/// (`crates/chelis-cli/tests/issue_731_totality_invariant.rs`): the annotation
+/// pass stamps a `type:` entry on every `should_attach_type_metadata` node
+/// EXCEPT when the node's inferred type is `Type::Error` (the stamp is
+/// skipped), and `type_to_deep_expr` encodes `Type::Error` as `(t-var {} _)`.
+/// So in an empty-error result, a stamp-eligible node with a missing `type:`
+/// stamp or a `(t-var {} _)` stamp is exactly a silent `Type::Error` verdict.
+/// The `should_attach_type_metadata` eligibility function is called directly
+/// (not mirrored) so the two can never drift.
+fn totality_invariant_traces(annotated_exprs: &[deep::Expr]) -> Vec<String> {
+    fn is_error_stamp(expr: &deep::Expr) -> bool {
+        let deep::Expr::List(list, _) = expr else {
+            return false;
+        };
+        get_tag(list) == Some("t-var")
+            && matches!(
+                list.elements.get(2),
+                Some(deep::Expr::Atom(deep::Atom::Symbol(s), _)) if s == "_"
+            )
+    }
+    fn walk(expr: &deep::Expr, path: &str, check_stamp: bool, out: &mut Vec<String>) {
+        match expr {
+            deep::Expr::Atom(_, _) => {}
+            deep::Expr::Map(map, _) => {
+                for (key, value) in &map.entries {
+                    if key == "type" {
+                        continue;
+                    }
+                    walk(value, &format!("{path}.{key}"), check_stamp, out);
+                }
+            }
+            deep::Expr::MetaExpr(meta, _) => {
+                walk(&meta.expr, path, check_stamp, out);
+                for (key, value) in &meta.entries {
+                    if key == "type" {
+                        continue;
+                    }
+                    walk(value, &format!("{path}.{key}"), check_stamp, out);
+                }
+            }
+            deep::Expr::List(list, _) => {
+                let tag = get_tag(list);
+                if check_stamp
+                    && let (Some(tag), Some(deep::Expr::Map(meta, _))) =
+                        (tag, list.elements.get(1))
+                    && should_attach_type_metadata(tag)
+                {
+                    match meta.entries.iter().find(|(key, _)| key == "type") {
+                        None => out.push(format!(
+                            "{path}/{tag}: stamp-eligible node with no `type:` stamp \
+                             (a silent Type::Error verdict)"
+                        )),
+                        Some((_, value)) if is_error_stamp(value) => out.push(format!(
+                            "{path}/{tag}: `type:` stamp is `(t-var {{}} _)` (the \
+                             Type::Error encoding)"
+                        )),
+                        Some(_) => {}
+                    }
+                }
+                let label = tag.unwrap_or("<untagged>");
+                let child_check = tag != Some("params");
+                for (index, element) in list.elements.iter().enumerate() {
+                    walk(
+                        element,
+                        &format!("{path}/{label}[{index}]"),
+                        child_check,
+                        out,
+                    );
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (index, expr) in annotated_exprs.iter().enumerate() {
+        walk(expr, &format!("top[{index}]"), true, &mut out);
+    }
+    out
+}
+
+/// Build the internal diagnostic for a totality-invariant violation
+/// ([04-TOT-2]). Only reachable if the §C3 witness token were bypassed (a
+/// deserialization mint or a genuine bug); it names the offending nodes so a
+/// regression is localizable rather than a bare "internal error".
+fn totality_violation_error(traces: &[String]) -> CheckError {
+    CheckError::new(
+        CheckErrorKind::Other,
+        format!(
+            "internal: [04-TOT-2] totality invariant violated -- the check reported \
+             success (empty error vector) but the typed result carries {} silent \
+             Type::Error verdict(s): {} (spec/design/checker_totality.md \u{00a7}C4.1; \
+             chelis#731 Phase 2)",
+            traces.len(),
+            traces.join("; ")
+        ),
+        vec![],
+    )
+}
+
 fn get_tag(list: &deep::List) -> Option<&str> {
     if let Some(deep::Expr::Atom(deep::Atom::Symbol(tag), _)) = list.elements.first() {
         Some(tag.as_str())
@@ -7289,15 +7412,63 @@ fn malformed_form(
     errors: &mut Vec<CheckError>,
 ) -> Type {
     let found = children(list).len();
-    errors.push(CheckError::new(
-        CheckErrorKind::MalformedForm,
-        format!(
-            "malformed `{tag}`: expected {expected}, found a `{tag}` with {found} \
-             child element(s) (spec/03-deep-syntax.md; chelis#731 [04-TOT-3])"
+    report(
+        errors,
+        CheckError::new(
+            CheckErrorKind::MalformedForm,
+            format!(
+                "malformed `{tag}`: expected {expected}, found a `{tag}` with {found} \
+                 child element(s) (spec/03-deep-syntax.md; chelis#731 [04-TOT-3])"
+            ),
+            vec![],
         ),
-        vec![],
-    ));
-    Type::Error
+    )
+}
+
+/// chelis#731 Phase 2 (spec/design/checker_totality.md §C3): cascade
+/// suppression helper. When one of `tys` already typed as `Type::Error(w)`,
+/// return `Some(propagate(w))` so the enclosing node re-types as `Type::Error`
+/// WITHOUT re-reporting -- the pre-token permissive behavior where an error's
+/// descendants unify freely so one root cause does not spray a dozen
+/// secondary diagnostics. Returns `None` when no operand is an error, so the
+/// caller falls through to its normal typing. The witness is threaded from
+/// the real upstream `report`, keeping the cascade provably downstream of a
+/// reported error.
+fn propagate_if_error<'a>(tys: impl IntoIterator<Item = &'a Type>) -> Option<Type> {
+    tys.into_iter().find_map(|ty| match ty {
+        Type::Error(w) => Some(propagate(w)),
+        _ => None,
+    })
+}
+
+/// chelis#731 Phase 2 (spec/design/checker_totality.md §C3): report a
+/// wrong-arity call of a shape-polymorphic builtin. Before the witness-token
+/// migration these arity guards returned a SILENT `Type::Error` -- an
+/// `einsum(a, b)` (two args) scored a perfect 1.0, the chelis#709 defect on
+/// the builtin lane. The guard now pushes an `ArityMismatch` naming the
+/// builtin and the expected/found counts, so the malformed call is rejected
+/// with a diagnostic instead of exempted from checking.
+fn report_builtin_arity(
+    errors: &mut Vec<CheckError>,
+    list: &deep::List,
+    builtin: &str,
+    expected: usize,
+    got: usize,
+) -> Type {
+    report(
+        errors,
+        CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "builtin `{builtin}` expects {expected} argument(s), got {got} \
+                     (chelis#731 [04-TOT-3])"
+                ),
+            ),
+            vec![],
+        ),
+    )
 }
 
 /// True when a `uniform_like` low/high bound is a statically-resolvable numeric
@@ -8389,7 +8560,7 @@ fn type_contains_rank(ty: &Type) -> bool {
         Type::Ref(inner) => type_contains_rank(inner),
         Type::Adt(_, args) => args.iter().any(type_contains_rank),
         Type::Tuple(ts) => ts.iter().any(type_contains_rank),
-        Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error => false,
+        Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error(_) => false,
     }
 }
 
@@ -8763,9 +8934,9 @@ fn infer_top_level(
             // inference gap that has already been surfaced upstream
             // and should not double-report the def-level diagnostic).
             let body_return_collapsed = match (&resolved_body, &resolved_decl) {
-                (Type::Error, decl) => !matches!(decl, Type::Error),
+                (Type::Error, decl) => !matches!(decl, Type::Error(_)),
                 (Type::Fn(_, ret), Type::Fn(_, decl_ret))
-                    if matches!(**ret, Type::Error) && !matches!(**decl_ret, Type::Error) =>
+                    if matches!(**ret, Type::Error(_)) && !matches!(**decl_ret, Type::Error(_)) =>
                 {
                     true
                 }
@@ -9134,17 +9305,16 @@ fn infer_expr(
                         );
                         let resolved = subst.apply(&inner_ty);
                         match resolved {
-                            Type::Tensor(_, _) | Type::Error => resolved,
+                            Type::Tensor(_, _) | Type::Error(_) => resolved,
                             Type::Ref(inner) if matches!(inner.as_ref(), Type::Tensor(_, _)) => {
                                 *inner
                             }
                             _ => {
-                                errors.push(CheckError::new(
+                                report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     format!("copy requires tensor input, got {resolved}"),
                                     vec!["Wrap only tensor values in copy".to_string()],
-                                ));
-                                Type::Error
+                                ))
                             }
                         }
                     } else {
@@ -9167,7 +9337,7 @@ fn infer_expr(
                         let resolved = subst.apply(&inner_ty);
                         match resolved {
                             Type::Ref(_) => resolved,
-                            Type::Tensor(_, _) | Type::Adt(_, _) | Type::Tuple(_) | Type::Error => {
+                            Type::Tensor(_, _) | Type::Adt(_, _) | Type::Tuple(_) | Type::Error(_) => {
                                 Type::Ref(Box::new(resolved))
                             }
                             // Issue #256: when the borrow inner is still an
@@ -9204,12 +9374,11 @@ fn infer_expr(
                                 Type::Ref(Box::new(Type::Var(tv)))
                             }
                             _ => {
-                                errors.push(CheckError::new(
+                                report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     format!("borrow requires tensor or tensor-carrying input, got {resolved}"),
                                     vec!["Use `&x` only with tensor values".to_string()],
-                                ));
-                                Type::Error
+                                ))
                             }
                         }
                     } else {
@@ -9235,7 +9404,7 @@ fn infer_expr(
                     // would exempt the whole subtree from checking (the
                     // chelis#709 class defect: the default must be to fail).
                     let named = tag.unwrap_or("<none>");
-                    errors.push(CheckError::new(
+                    report(errors, CheckError::new(
                         CheckErrorKind::UnknownForm,
                         format!(
                             "unknown Deep tag `{named}` has no checker disposition \
@@ -9243,8 +9412,7 @@ fn infer_expr(
                              spec/03-deep-syntax.md; chelis#731 [04-TOT-1])"
                         ),
                         vec![],
-                    ));
-                    Type::Error
+                    ))
                 }
             }
         }
@@ -9261,7 +9429,7 @@ fn infer_expr(
         ),
     };
 
-    if !matches!(result, Type::Error) {
+    if !matches!(result, Type::Error(_)) {
         *typed_nodes += 1;
     }
 
@@ -9544,8 +9712,7 @@ fn infer_var(
                 }
                 err.span_id = Some(sid.to_string());
             }
-            errors.push(err);
-            return Type::Error;
+            return report(errors, err);
         }
         if let Some(scheme) = env
             .lookup(name)
@@ -9578,8 +9745,7 @@ fn infer_var(
                 }
                 err.span_id = Some(sid.to_string());
             }
-            errors.push(err);
-            Type::Error
+            report(errors, err)
         }
     } else {
         malformed_form(list, "var", "a symbol name as its first child", errors)
@@ -9727,7 +9893,7 @@ fn infer_lit(
                 // form. Without this guard the bare-form path would
                 // silently default to int32 and wrap.
                 if i32::try_from(*n).is_err() {
-                    errors.push(CheckError::new(
+                    report(errors, CheckError::new(
                         CheckErrorKind::TypeMismatch,
                         format!(
                             "literal {n} out of range for default int32; use the \
@@ -9740,8 +9906,7 @@ fn infer_lit(
                              tokens can be diagnosed before the narrowing rather \
                              than wrapping silently"
                         )],
-                    ));
-                    Type::Error
+                    ))
                 } else {
                     Type::Prim(Prim::Int32)
                 }
@@ -9984,12 +10149,11 @@ fn infer_app(
             .iter()
             .all(|(field_name, _)| field_name.is_some())
     {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::TypeMismatch,
             format!("{fname} is a record constructor and must use named fields: {fname} {{ ... }}"),
             vec![],
         ));
-        return Type::Error;
     }
 
     let func_ty = {
@@ -10089,8 +10253,8 @@ fn infer_app(
     // `arg_tys[2]`), and now that no argument short-circuits here, an
     // Error-typed size slot always reaches the per-form located diagnostic.
     // A genuinely sourced size never infers to `Error`.
-    if matches!(func_ty, Type::Error) {
-        return Type::Error;
+    if let Some(err) = propagate_if_error([&func_ty]) {
+        return err;
     }
 
     // Issue Chelis-Lang/chelis#218 R3 HIGH-CONCAT: when `Cons` is
@@ -10134,7 +10298,7 @@ fn infer_app(
                 // a rank-mixed literal. The dim slot `k` is a
                 // dimension variable, not a shape-vector variable;
                 // see spec/04-type-system.md §4.5.1.
-                errors.push(CheckError::new(
+                return report(errors, CheckError::new(
                     CheckErrorKind::DimensionMismatch,
                     with_macro_provenance(
                         &deep::Expr::List(list.clone(), zero_span()),
@@ -10151,11 +10315,9 @@ fn infer_app(
                     ),
                     vec![],
                 ));
-                return Type::Error;
             }
             if let Err(te) = unify_tensor_prec(head_prec, &tail_prec, subst) {
-                errors.push(te.into());
-                return Type::Error;
+                return report(errors, te.into());
             }
             // Per-axis join (chelis#218 concat ergonomics, tightened
             // by chelis#272). Resolve each dim through the current
@@ -10206,8 +10368,7 @@ fn infer_app(
                     // identity and `check_declared_dvars_rigid` can fire.
                     _ => {
                         if let Err(te) = unify_dim(&hr, &tr, subst) {
-                            errors.push(te.into());
-                            return Type::Error;
+                            return report(errors, te.into());
                         }
                         subst.apply_dim(&hr)
                     }
@@ -10326,10 +10487,10 @@ fn infer_app(
                     let resolved = type_for_readonly_check(arg_ty, subst);
                     let ok = match fname.as_str() {
                         "matmul" | "layer_norm" | "normalize" => {
-                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
+                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
                         }
                         "add" | "mul" | "sub" | "max_elem" | "min_elem" | "neg" => {
-                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
+                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
                                 || matches!(resolved, Type::Prim(prec) if prec.is_numeric())
                         }
                         "floor_div" => {
@@ -10337,7 +10498,7 @@ fn infer_app(
                             // and float operands (round toward -inf for
                             // ints, `floor(a/b)` for floats), so any
                             // numeric precision is admissible.
-                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
+                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
                                 || matches!(resolved, Type::Prim(prec) if prec.is_numeric())
                         }
                         "div" => {
@@ -10352,7 +10513,7 @@ fn infer_app(
                             // site.
                             matches!(
                                 resolved,
-                                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error
+                                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_)
                             ) || matches!(resolved, Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_float())
                                 || matches!(resolved, Type::Prim(prec) if prec.is_float())
                         }
@@ -10363,7 +10524,7 @@ fn infer_app(
                             // are accepted for polymorphic bodies.
                             matches!(
                                 resolved,
-                                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error
+                                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_)
                             ) || matches!(resolved, Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_integer())
                                 || matches!(resolved, Type::Prim(prec) if prec.is_integer())
                         }
@@ -10384,16 +10545,16 @@ fn infer_app(
                             // call site.
                             matches!(
                                 resolved,
-                                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error
+                                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_)
                             ) || matches!(resolved, Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_float())
                                 || matches!(resolved, Type::Prim(prec) if prec.is_float())
                         }
                         "cmplt" | "lt" | "gt" | "lte" | "gte" => {
-                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
+                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
                                 || matches!(resolved, Type::Prim(prec) if prec.is_numeric())
                         }
                         "eq" | "neq" => {
-                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
+                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
                                 || matches!(resolved, Type::Prim(_))
                         }
                         "and" | "or" | "not" => {
@@ -10401,10 +10562,10 @@ fn infer_app(
                                 resolved,
                                 Type::Tensor(_, TensorPrec::Concrete(Prim::Bool))
                                     | Type::Var(_)
-                                    | Type::Error
+                                    | Type::Error(_)
                             ) || matches!(resolved, Type::Prim(Prim::Bool))
                         }
-                        _ => matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error),
+                        _ => matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_)),
                     };
                     if !ok {
                         // WS-A8: surface a §5.4 citation when a
@@ -10502,7 +10663,7 @@ fn infer_app(
                                 vec![],
                             )
                         };
-                        errors.push(CheckError::new(
+                        return report(errors, CheckError::new(
                             kind,
                             with_macro_provenance(
                                 &deep::Expr::List(list.clone(), zero_span()),
@@ -10510,7 +10671,6 @@ fn infer_app(
                             ),
                             hints,
                         ));
-                        return Type::Error;
                     }
                 }
             }
@@ -10531,9 +10691,9 @@ fn infer_app(
                 if let Some(first_arg) = arg_tys.first() {
                     let resolved = type_for_readonly_check(first_arg, subst);
                     match &resolved {
-                        Type::Tensor(_, _) | Type::Var(_) | Type::Error => {}
+                        Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {}
                         _ => {
-                            errors.push(CheckError::new(
+                            return report(errors, CheckError::new(
                                 CheckErrorKind::TypeMismatch,
                                 with_macro_provenance(
                                     &deep::Expr::List(list.clone(), zero_span()),
@@ -10541,7 +10701,6 @@ fn infer_app(
                                 ),
                                 vec![],
                             ));
-                            return Type::Error;
                         }
                     }
                     // WS-A8 / RT-3 F3: softmax is a transcendental row
@@ -10554,7 +10713,7 @@ fn infer_app(
                         && let Type::Tensor(_, TensorPrec::Concrete(p)) = &resolved
                         && !p.is_float()
                     {
-                        errors.push(CheckError::new(
+                        return report(errors, CheckError::new(
                             CheckErrorKind::PrecisionMismatch,
                             with_macro_provenance(
                                 &deep::Expr::List(list.clone(), zero_span()),
@@ -10571,16 +10730,15 @@ fn infer_app(
                                  precision before applying softmax."
                             )],
                         ));
-                        return Type::Error;
                     }
                 }
 
                 if let Some(axis_arg) = arg_tys.get(1) {
                     let resolved = subst.apply(axis_arg);
                     match &resolved {
-                        Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error => {}
+                        Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {}
                         _ => {
-                            errors.push(CheckError::new(
+                            return report(errors, CheckError::new(
                                 CheckErrorKind::TypeMismatch,
                                 with_macro_provenance(
                                     &deep::Expr::List(list.clone(), zero_span()),
@@ -10588,7 +10746,6 @@ fn infer_app(
                                 ),
                                 vec![],
                             ));
-                            return Type::Error;
                         }
                     }
                 }
@@ -10606,7 +10763,7 @@ fn infer_app(
                     && let Some(raw) = kids.get(2).and_then(extract_int_for_dim)
                     && normalize_static_axis(dims.len(), raw).is_none()
                 {
-                    errors.push(CheckError::new(
+                    return report(errors, CheckError::new(
                         CheckErrorKind::DimensionMismatch,
                         with_macro_provenance(
                             &deep::Expr::List(list.clone(), zero_span()),
@@ -10617,7 +10774,6 @@ fn infer_app(
                         ),
                         vec![],
                     ));
-                    return Type::Error;
                 }
             }
 
@@ -10629,7 +10785,7 @@ fn infer_app(
                     match &resolved {
                         Type::Tensor(_, prim) if prim.is_float() => {}
                         Type::Tensor(_, _) => {
-                            errors.push(CheckError::new(
+                            return report(errors, CheckError::new(
                                 CheckErrorKind::TypeMismatch,
                                 with_macro_provenance(
                                     &deep::Expr::List(list.clone(), zero_span()),
@@ -10640,11 +10796,10 @@ fn infer_app(
                                 ),
                                 vec![],
                             ));
-                            return Type::Error;
                         }
-                        Type::Var(_) | Type::Error => {}
+                        Type::Var(_) | Type::Error(_) => {}
                         _ => {
-                            errors.push(CheckError::new(
+                            return report(errors, CheckError::new(
                                 CheckErrorKind::TypeMismatch,
                                 with_macro_provenance(
                                     &deep::Expr::List(list.clone(), zero_span()),
@@ -10655,7 +10810,6 @@ fn infer_app(
                                 ),
                                 vec![],
                             ));
-                            return Type::Error;
                         }
                     }
                 }
@@ -10663,9 +10817,9 @@ fn infer_app(
                 for (index, arg_ty) in arg_tys.iter().enumerate().skip(1).take(2) {
                     let resolved = type_for_readonly_check(arg_ty, subst);
                     match &resolved {
-                        Type::Prim(Prim::F32) | Type::Var(_) | Type::Error => {}
+                        Type::Prim(Prim::F32) | Type::Var(_) | Type::Error(_) => {}
                         _ => {
-                            errors.push(CheckError::new(
+                            return report(errors, CheckError::new(
                                 CheckErrorKind::TypeMismatch,
                                 with_macro_provenance(
                                     &deep::Expr::List(list.clone(), zero_span()),
@@ -10676,14 +10830,13 @@ fn infer_app(
                                 ),
                                 vec![],
                             ));
-                            return Type::Error;
                         }
                     }
 
                     if let Some(expr) = kids.get(index + 1)
                         && !is_static_numeric_bound(expr)
                     {
-                        errors.push(CheckError::new(
+                        return report(errors, CheckError::new(
                             CheckErrorKind::TypeMismatch,
                             with_macro_provenance(
                                 &deep::Expr::List(list.clone(), zero_span()),
@@ -10694,7 +10847,6 @@ fn infer_app(
                             ),
                             vec![],
                         ));
-                        return Type::Error;
                     }
                 }
             }
@@ -10705,9 +10857,9 @@ fn infer_app(
                 if let Some(first_arg) = arg_tys.first() {
                     let resolved = type_for_readonly_check(first_arg, subst);
                     match &resolved {
-                        Type::Tensor(_, _) | Type::Var(_) | Type::Error => {}
+                        Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {}
                         _ => {
-                            errors.push(CheckError::new(
+                            return report(errors, CheckError::new(
                                 CheckErrorKind::TypeMismatch,
                                 with_macro_provenance(
                                     &deep::Expr::List(list.clone(), zero_span()),
@@ -10715,7 +10867,6 @@ fn infer_app(
                                 ),
                                 vec![],
                             ));
-                            return Type::Error;
                         }
                     }
                 }
@@ -10723,9 +10874,9 @@ fn infer_app(
                 if let Some(rate_arg) = arg_tys.get(1) {
                     let resolved = subst.apply(rate_arg);
                     match &resolved {
-                        Type::Prim(Prim::F32) | Type::Var(_) | Type::Error => {}
+                        Type::Prim(Prim::F32) | Type::Var(_) | Type::Error(_) => {}
                         _ => {
-                            errors.push(CheckError::new(
+                            return report(errors, CheckError::new(
                                 CheckErrorKind::TypeMismatch,
                                 with_macro_provenance(
                                     &deep::Expr::List(list.clone(), zero_span()),
@@ -10733,7 +10884,6 @@ fn infer_app(
                                 ),
                                 vec![],
                             ));
-                            return Type::Error;
                         }
                     }
                 }
@@ -10746,9 +10896,9 @@ fn infer_app(
                     let resolved = type_for_readonly_check(arg_ty, subst);
                     if index < 2 {
                         match &resolved {
-                            Type::Tensor(_, _) | Type::Var(_) | Type::Error => {}
+                            Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {}
                             _ => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -10759,14 +10909,13 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                     } else {
                         match &resolved {
-                            Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error => {}
+                            Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {}
                             _ => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -10777,7 +10926,6 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                     }
@@ -10809,11 +10957,11 @@ fn infer_app(
                     (Type::Prim(lhs_prec), Type::Var(_)) if lhs_prec.is_integer() => {
                         return lhs;
                     }
-                    (Type::Var(_), Type::Var(_)) | (Type::Error, _) | (_, Type::Error) => {
+                    (Type::Var(_), Type::Var(_)) | (Type::Error(_), _) | (_, Type::Error(_)) => {
                         return lhs;
                     }
                     _ => {
-                        errors.push(CheckError::new(
+                        return report(errors, CheckError::new(
                             CheckErrorKind::TypeMismatch,
                             with_macro_provenance(
                                 &deep::Expr::List(list.clone(), zero_span()),
@@ -10824,7 +10972,6 @@ fn infer_app(
                             ),
                             vec![],
                         ));
-                        return Type::Error;
                     }
                 }
             }
@@ -10841,13 +10988,13 @@ fn infer_app(
                     .map(|ty| subst.apply(ty))
                     .unwrap_or(Type::Error);
                 let lhs_ok = matches!(&lhs, Type::Prim(prec) if prec.is_integer())
-                    || matches!(&lhs, Type::Var(_) | Type::Error);
+                    || matches!(&lhs, Type::Var(_) | Type::Error(_));
                 let rhs_ok = matches!(&rhs, Type::Prim(prec) if prec.is_integer())
-                    || matches!(&rhs, Type::Var(_) | Type::Error);
+                    || matches!(&rhs, Type::Var(_) | Type::Error(_));
                 if lhs_ok && rhs_ok {
                     return lhs;
                 }
-                errors.push(CheckError::new(
+                return report(errors, CheckError::new(
                     CheckErrorKind::TypeMismatch,
                     with_macro_provenance(
                         &deep::Expr::List(list.clone(), zero_span()),
@@ -10858,7 +11005,6 @@ fn infer_app(
                     ),
                     vec![],
                 ));
-                return Type::Error;
             }
 
             // chelis#778 follow-up: a shape-computed builtin override derives
@@ -10894,7 +11040,7 @@ fn infer_app(
                         | "conv2d"
                 ) && arg_tys
                     .iter()
-                    .any(|ty| matches!(subst.apply(ty), Type::Error))
+                    .any(|ty| matches!(subst.apply(ty), Type::Error(_)))
             });
             if shape_override_operand_error {
                 result_ty = Type::Error;
@@ -10972,9 +11118,9 @@ fn infer_app(
                         Type::Tensor(_, TensorPrec::Concrete(Prim::Bool))
                         | Type::Prim(Prim::Bool)
                         | Type::Var(_)
-                        | Type::Error => {} // OK
+                        | Type::Error(_) => {} // OK
                         Type::Tensor(_, prec) => {
-                            errors.push(CheckError::new(
+                            return report(errors, CheckError::new(
                                 CheckErrorKind::TypeMismatch,
                                 with_macro_provenance(
                                     &deep::Expr::List(list.clone(), zero_span()),
@@ -10986,10 +11132,9 @@ fn infer_app(
                                 ),
                                 vec!["Logical ops only work on bool tensors".to_string()],
                             ));
-                            return Type::Error;
                         }
                         other => {
-                            errors.push(CheckError::new(
+                            return report(errors, CheckError::new(
                                 CheckErrorKind::TypeMismatch,
                                 with_macro_provenance(
                                     &deep::Expr::List(list.clone(), zero_span()),
@@ -10997,7 +11142,6 @@ fn infer_app(
                                 ),
                                 vec!["Logical ops only work on bool values".to_string()],
                             ));
-                            return Type::Error;
                         }
                     }
                 }
@@ -11038,11 +11182,11 @@ fn infer_app(
                     "fail" => {
                         if let Some(first_arg) = arg_tys.first() {
                             match subst.apply(first_arg) {
-                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error => {
+                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {
                                     return Type::Var(vg.fresh_tvar());
                                 }
                                 other => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -11050,7 +11194,6 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         }
@@ -11063,11 +11206,11 @@ fn infer_app(
                     "string_len" => {
                         if let Some(first_arg) = arg_tys.first() {
                             match subst.apply(first_arg) {
-                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error => {
+                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {
                                     return Type::Prim(Prim::Int64);
                                 }
                                 other => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -11075,7 +11218,6 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         }
@@ -11083,9 +11225,9 @@ fn infer_app(
                     "string_concat" => {
                         for arg_ty in &arg_tys {
                             match subst.apply(arg_ty) {
-                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error => {}
+                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {}
                                 other => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -11095,7 +11237,6 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         }
@@ -11104,9 +11245,9 @@ fn infer_app(
                     "string_slice" => {
                         if let Some(first_arg) = arg_tys.first() {
                             match subst.apply(first_arg) {
-                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error => {}
+                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {}
                                 other => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -11116,16 +11257,15 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         }
                         for (index, arg_ty) in arg_tys.iter().enumerate().skip(1) {
                             match subst.apply(arg_ty) {
                                 Type::Prim(precision) if precision.is_integer() => {}
-                                Type::Var(_) | Type::Error => {}
+                                Type::Var(_) | Type::Error(_) => {}
                                 other => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -11136,7 +11276,6 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         }
@@ -11145,9 +11284,9 @@ fn infer_app(
                     "string_contains" | "string_starts_with" | "string_ends_with" => {
                         for arg_ty in &arg_tys {
                             match subst.apply(arg_ty) {
-                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error => {}
+                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {}
                                 other => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -11158,7 +11297,6 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         }
@@ -11167,11 +11305,11 @@ fn infer_app(
                     "string_trim" => {
                         if let Some(first_arg) = arg_tys.first() {
                             match subst.apply(first_arg) {
-                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error => {
+                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {
                                     return Type::Prim(Prim::String);
                                 }
                                 other => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -11181,7 +11319,6 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         }
@@ -11192,14 +11329,14 @@ fn infer_app(
                     "to_int" => {
                         if let Some(first_arg) = arg_tys.first() {
                             match subst.apply(first_arg) {
-                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error => {
+                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {
                                     return Type::Adt(
                                         "Option".to_string(),
                                         vec![Type::Prim(Prim::Int64)],
                                     );
                                 }
                                 other => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -11207,7 +11344,6 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         }
@@ -11215,14 +11351,14 @@ fn infer_app(
                     "to_float" => {
                         if let Some(first_arg) = arg_tys.first() {
                             match subst.apply(first_arg) {
-                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error => {
+                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {
                                     return Type::Adt(
                                         "Option".to_string(),
                                         vec![Type::Prim(Prim::F64)],
                                     );
                                 }
                                 other => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -11230,7 +11366,6 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         }
@@ -11238,11 +11373,11 @@ fn infer_app(
                     "rank" => {
                         if let Some(first_arg) = arg_tys.first() {
                             match type_for_readonly_check(first_arg, subst) {
-                                Type::Tensor(_, _) | Type::Var(_) | Type::Error => {
+                                Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {
                                     return Type::Prim(Prim::Int32);
                                 }
                                 other => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -11250,7 +11385,6 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         }
@@ -11259,9 +11393,9 @@ fn infer_app(
                         let input_dims = if let Some(first_arg) = arg_tys.first() {
                             match type_for_readonly_check(first_arg, subst) {
                                 Type::Tensor(dims, _) => Some(dims),
-                                Type::Var(_) | Type::Error => None,
+                                Type::Var(_) | Type::Error(_) => None,
                                 other => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -11269,7 +11403,6 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         } else {
@@ -11283,7 +11416,7 @@ fn infer_app(
                             && let Some(axis) = extract_int_for_dim(axis_expr)
                         {
                             if axis < 0 {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::DimensionMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -11291,12 +11424,11 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                             if let Some(dims) = input_dims.as_ref() {
                                 let axis = axis as usize;
                                 if axis >= dims.len() {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::DimensionMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -11307,17 +11439,16 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         }
                         if let Some(axis_arg) = arg_tys.get(1) {
                             match subst.apply(axis_arg) {
-                                Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error => {
+                                Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {
                                     return Type::Prim(Prim::Int32);
                                 }
                                 other => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -11325,7 +11456,6 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         }
@@ -11333,11 +11463,11 @@ fn infer_app(
                     "numel" => {
                         if let Some(first_arg) = arg_tys.first() {
                             match type_for_readonly_check(first_arg, subst) {
-                                Type::Tensor(_, _) | Type::Var(_) | Type::Error => {
+                                Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {
                                     return Type::Prim(Prim::Int64);
                                 }
                                 other => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -11345,7 +11475,6 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         }
@@ -11355,7 +11484,7 @@ fn infer_app(
                             match type_for_readonly_check(first_arg, subst) {
                                 Type::Tensor(dims, precision) => {
                                     if !dims.is_empty() {
-                                        errors.push(CheckError::new(
+                                        return report(errors, CheckError::new(
                                             CheckErrorKind::TypeMismatch,
                                             with_macro_provenance(
                                                 &deep::Expr::List(list.clone(), zero_span()),
@@ -11364,7 +11493,6 @@ fn infer_app(
                                             ),
                                             vec![],
                                         ));
-                                        return Type::Error;
                                     }
                                     // tensor_to_scalar requires a fully
                                     // resolved precision. Polymorphic precision
@@ -11375,9 +11503,9 @@ fn infer_app(
                                         TensorPrec::Var(_) => result_ty,
                                     };
                                 }
-                                Type::Var(_) | Type::Error => return result_ty,
+                                Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -11387,7 +11515,6 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         }
@@ -11398,9 +11525,9 @@ fn infer_app(
                                 Type::Prim(precision) if !matches!(precision, Prim::String) => {
                                     return Type::Tensor(vec![], TensorPrec::Concrete(precision));
                                 }
-                                Type::Var(_) | Type::Error => return result_ty,
+                                Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -11410,17 +11537,16 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         }
                     }
                     "einsum" => {
                         if arg_tys.len() != 3 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
                         }
                         let Some(equation) = kids.get(1).and_then(extract_string_literal) else {
-                            errors.push(CheckError::new(
+                            return report(errors, CheckError::new(
                                 CheckErrorKind::TypeMismatch,
                                 with_macro_provenance(
                                     &deep::Expr::List(list.clone(), zero_span()),
@@ -11429,10 +11555,9 @@ fn infer_app(
                                 ),
                                 vec![],
                             ));
-                            return Type::Error;
                         };
                         if equation.contains("...") {
-                            errors.push(CheckError::new(
+                            return report(errors, CheckError::new(
                                 CheckErrorKind::TypeMismatch,
                                 with_macro_provenance(
                                     &deep::Expr::List(list.clone(), zero_span()),
@@ -11440,13 +11565,12 @@ fn infer_app(
                                 ),
                                 vec![],
                             ));
-                            return Type::Error;
                         }
                         return result_ty;
                     }
                     "gather" => {
                         if arg_tys.len() != 3 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
                         }
                         let tensor_ty = type_for_readonly_check(&arg_tys[0], subst);
                         let indices_ty = type_for_readonly_check(&arg_tys[1], subst);
@@ -11458,7 +11582,7 @@ fn infer_app(
                         match infer_gather_result_type(&tensor_ty, &indices_ty, axis) {
                             Ok(ty) => return ty,
                             Err(message) => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -11466,13 +11590,12 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                     }
                     "where" => {
                         if arg_tys.len() != 3 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
                         }
                         let cond_ty = type_for_readonly_check(&arg_tys[0], subst);
                         let then_ty = type_for_readonly_check(&arg_tys[1], subst);
@@ -11487,7 +11610,7 @@ fn infer_app(
                                     || cond_dims != then_dims
                                     || then_dims != else_dims
                                 {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -11497,18 +11620,17 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                                 return Type::Tensor(then_dims.clone(), then_prec.clone());
                             }
                             (Type::Var(_), _, _)
                             | (_, Type::Var(_), _)
                             | (_, _, Type::Var(_))
-                            | (Type::Error, _, _)
-                            | (_, Type::Error, _)
-                            | (_, _, Type::Error) => return result_ty,
+                            | (Type::Error(_), _, _)
+                            | (_, Type::Error(_), _)
+                            | (_, _, Type::Error(_)) => return result_ty,
                             _ => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -11518,13 +11640,12 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                     }
                     "cumsum" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
                         }
                         let cumsum_operand = type_for_readonly_check(&arg_tys[0], subst);
                         let Some(_axis) = resolve_builtin_axis(
@@ -11540,9 +11661,9 @@ fn infer_app(
                             Type::Tensor(dims, precision) => {
                                 return Type::Tensor(dims, precision);
                             }
-                            Type::Var(_) | Type::Error => return result_ty,
+                            Type::Var(_) | Type::Error(_) => return result_ty,
                             other => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -11550,13 +11671,12 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                     }
                     "diagonal" => {
                         if arg_tys.len() != 3 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
                         }
                         let diagonal_operand = type_for_readonly_check(&arg_tys[0], subst);
                         let axis1 = match resolve_axis_pair_member(
@@ -11584,7 +11704,7 @@ fn infer_app(
                         match infer_diagonal_result_type(&diagonal_operand, axis1, axis2) {
                             Ok(ty) => return ty,
                             Err(message) => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -11592,13 +11712,12 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                     }
                     "trace" => {
                         if arg_tys.len() != 3 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
                         }
                         let trace_operand = type_for_readonly_check(&arg_tys[0], subst);
                         let axis1 = match resolve_axis_pair_member(
@@ -11626,7 +11745,7 @@ fn infer_app(
                         match infer_trace_result_type(&trace_operand, axis1, axis2) {
                             Ok(ty) => return ty,
                             Err(message) => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -11634,13 +11753,12 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                     }
                     "clamp" => {
                         if arg_tys.len() != 3 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
                         }
                         let input_ty = type_for_readonly_check(&arg_tys[0], subst);
                         let low_ty = type_for_readonly_check(&arg_tys[1], subst);
@@ -11660,7 +11778,7 @@ fn infer_app(
                                 {
                                     return input_ty;
                                 }
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -11670,16 +11788,15 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                             (Type::Var(_), _, _)
                             | (_, Type::Var(_), _)
                             | (_, _, Type::Var(_))
-                            | (Type::Error, _, _)
-                            | (_, Type::Error, _)
-                            | (_, _, Type::Error) => return result_ty,
+                            | (Type::Error(_), _, _)
+                            | (_, Type::Error(_), _)
+                            | (_, _, Type::Error(_)) => return result_ty,
                             _ => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -11689,13 +11806,12 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                     }
                     "sort" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
                         }
                         let sort_operand = type_for_readonly_check(&arg_tys[0], subst);
                         let Some(_axis) =
@@ -11710,9 +11826,9 @@ fn infer_app(
                                     Type::Tensor(dims, TensorPrec::Concrete(Prim::Int64)),
                                 ]);
                             }
-                            Type::Var(_) | Type::Error => return result_ty,
+                            Type::Var(_) | Type::Error(_) => return result_ty,
                             other => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -11720,13 +11836,12 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                     }
                     "scatter" => {
                         if arg_tys.len() != 5 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 5, arg_tys.len());
                         }
                         let base_ty = subst.apply(&arg_tys[0]);
                         let indices_ty = subst.apply(&arg_tys[1]);
@@ -11740,7 +11855,7 @@ fn infer_app(
                         match mode.as_deref() {
                             Some("replace") | Some("add") => {}
                             _ => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -11748,19 +11863,17 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                         match infer_gather_result_type(&base_ty, &indices_ty, axis) {
                             Ok(expected_updates) => {
                                 if let Err(te) = unify(&expected_updates, &updates_ty, subst) {
-                                    errors.push(te.into());
-                                    return Type::Error;
+                                    return report(errors, te.into());
                                 }
                                 return base_ty;
                             }
                             Err(message) => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -11768,7 +11881,6 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                     }
@@ -11779,7 +11891,7 @@ fn infer_app(
                         // (rejected via AdError::NotSupported); see
                         // spec/05-risc-primitives.md §3.5.
                         if arg_tys.len() != 4 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 4, arg_tys.len());
                         }
                         let base_ty = subst.apply(&arg_tys[0]);
                         let indices_ty = subst.apply(&arg_tys[1]);
@@ -11796,13 +11908,12 @@ fn infer_app(
                         match infer_gather_result_type(&base_ty, &indices_ty, axis) {
                             Ok(expected_updates) => {
                                 if let Err(te) = unify(&expected_updates, &updates_ty, subst) {
-                                    errors.push(te.into());
-                                    return Type::Error;
+                                    return report(errors, te.into());
                                 }
                                 return base_ty;
                             }
                             Err(message) => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -11810,7 +11921,6 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                     }
@@ -11820,10 +11930,10 @@ fn infer_app(
                                 Type::Adt(name, _) if name == "List" || name == "Dict" => {
                                     return Type::Prim(Prim::Int64);
                                 }
-                                Type::Var(_) | Type::Error => return Type::Prim(Prim::Int64),
+                                Type::Var(_) | Type::Error(_) => return Type::Prim(Prim::Int64),
                                 Type::Ref(inner) if matches!(&*inner, Type::Adt(name, _) if name == "List" || name == "Dict") =>
                                 {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -11834,10 +11944,9 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                                 other => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -11845,21 +11954,20 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         }
                     }
                     "index" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
                         }
                         let list_arg = subst.apply(&arg_tys[0]);
                         let index_arg = subst.apply(&arg_tys[1]);
                         if !matches!(index_arg, Type::Prim(prec) if prec.is_integer())
-                            && !matches!(index_arg, Type::Var(_) | Type::Error)
+                            && !matches!(index_arg, Type::Var(_) | Type::Error(_))
                         {
-                            errors.push(CheckError::new(
+                            return report(errors, CheckError::new(
                                 CheckErrorKind::TypeMismatch,
                                 with_macro_provenance(
                                     &deep::Expr::List(list.clone(), zero_span()),
@@ -11867,16 +11975,15 @@ fn infer_app(
                                 ),
                                 vec![],
                             ));
-                            return Type::Error;
                         }
                         match list_arg {
                             Type::Adt(name, mut args) if name == "List" && args.len() == 1 => {
                                 return args.remove(0);
                             }
-                            Type::Var(_) | Type::Error => return result_ty,
+                            Type::Var(_) | Type::Error(_) => return result_ty,
                             Type::Ref(inner) if matches!(&*inner, Type::Adt(name, _) if name == "List") =>
                             {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -11887,10 +11994,9 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                             other => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -11898,27 +12004,25 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                     }
                     "append" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
                         }
                         let list_arg = subst.apply(&arg_tys[0]);
                         let value_arg = subst.apply(&arg_tys[1]);
                         match list_arg {
                             Type::Adt(name, args) if name == "List" && args.len() == 1 => {
                                 if let Err(te) = unify(&args[0], &value_arg, subst) {
-                                    errors.push(te.into());
-                                    return Type::Error;
+                                    return report(errors, te.into());
                                 }
                                 return Type::Adt("List".to_string(), vec![subst.apply(&args[0])]);
                             }
-                            Type::Var(_) | Type::Error => return result_ty,
+                            Type::Var(_) | Type::Error(_) => return result_ty,
                             other => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -11926,13 +12030,12 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                     }
                     "concat" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
                         }
                         let lhs = subst.apply(&arg_tys[0]);
                         let rhs = subst.apply(&arg_tys[1]);
@@ -11979,7 +12082,7 @@ fn infer_app(
                                 match tensor_concat_result_type(&lhs_args[0], raw_axis, list_info) {
                                     Ok(ty) => return ty,
                                     Err(message) => {
-                                        errors.push(CheckError::new(
+                                        return report(errors, CheckError::new(
                                             CheckErrorKind::TypeMismatch,
                                             with_macro_provenance(
                                                 &deep::Expr::List(list.clone(), zero_span()),
@@ -11987,7 +12090,6 @@ fn infer_app(
                                             ),
                                             vec![],
                                         ));
-                                        return Type::Error;
                                     }
                                 }
                             }
@@ -11998,8 +12100,7 @@ fn infer_app(
                                     && rhs_args.len() == 1 =>
                             {
                                 if let Err(te) = unify(&lhs_args[0], &rhs_args[0], subst) {
-                                    errors.push(te.into());
-                                    return Type::Error;
+                                    return report(errors, te.into());
                                 }
                                 return Type::Adt(
                                     "List".to_string(),
@@ -12008,12 +12109,12 @@ fn infer_app(
                             }
                             (Type::Var(_), _)
                             | (_, Type::Var(_))
-                            | (Type::Error, _)
-                            | (_, Type::Error) => {
+                            | (Type::Error(_), _)
+                            | (_, Type::Error(_)) => {
                                 return result_ty;
                             }
                             (lhs, rhs) => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -12023,21 +12124,20 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                     }
                     "split" => {
                         if arg_tys.len() != 3 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
                         }
                         let tensor_ty = type_for_readonly_check(&arg_tys[0], subst);
                         let axis_ty = subst.apply(&arg_tys[1]);
                         let sizes_ty = subst.apply(&arg_tys[2]);
                         if !matches!(axis_ty, Type::Prim(prec) if prec.is_integer())
-                            && !matches!(axis_ty, Type::Var(_) | Type::Error)
+                            && !matches!(axis_ty, Type::Var(_) | Type::Error(_))
                         {
-                            errors.push(CheckError::new(
+                            return report(errors, CheckError::new(
                                 CheckErrorKind::TypeMismatch,
                                 with_macro_provenance(
                                     &deep::Expr::List(list.clone(), zero_span()),
@@ -12045,16 +12145,15 @@ fn infer_app(
                                 ),
                                 vec![],
                             ));
-                            return Type::Error;
                         }
                         match (tensor_ty, sizes_ty) {
                             (Type::Tensor(dims, precision), Type::Adt(name, args))
                                 if name == "List" && args.len() == 1 =>
                             {
                                 if !matches!(&args[0], Type::Prim(prec) if prec.is_integer())
-                                    && !matches!(&args[0], Type::Var(_) | Type::Error)
+                                    && !matches!(&args[0], Type::Var(_) | Type::Error(_))
                                 {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -12062,7 +12161,6 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                                 // Negative axes index from the end.
                                 // Issue #216: cast-aware so a
@@ -12073,7 +12171,7 @@ fn infer_app(
                                     Some(raw) => match normalize_static_axis(dims.len(), raw) {
                                         Some(axis) => axis,
                                         None => {
-                                            errors.push(CheckError::new(
+                                            return report(errors, CheckError::new(
                                                 CheckErrorKind::TypeMismatch,
                                                 with_macro_provenance(
                                                     &deep::Expr::List(list.clone(), zero_span()),
@@ -12084,7 +12182,6 @@ fn infer_app(
                                                 ),
                                                 vec![],
                                             ));
-                                            return Type::Error;
                                         }
                                     },
                                     None => 0,
@@ -12098,12 +12195,12 @@ fn infer_app(
                             }
                             (Type::Var(_), _)
                             | (_, Type::Var(_))
-                            | (Type::Error, _)
-                            | (_, Type::Error) => {
+                            | (Type::Error(_), _)
+                            | (_, Type::Error(_)) => {
                                 return result_ty;
                             }
                             (tensor_ty, sizes_ty) => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -12113,21 +12210,20 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                     }
                     "take" | "drop" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
                         }
                         let op_name = func_name.as_deref().unwrap_or("collection helper");
                         let list_arg = subst.apply(&arg_tys[0]);
                         let count_arg = subst.apply(&arg_tys[1]);
                         if !matches!(count_arg, Type::Prim(prec) if prec.is_integer())
-                            && !matches!(count_arg, Type::Var(_) | Type::Error)
+                            && !matches!(count_arg, Type::Var(_) | Type::Error(_))
                         {
-                            errors.push(CheckError::new(
+                            return report(errors, CheckError::new(
                                 CheckErrorKind::TypeMismatch,
                                 with_macro_provenance(
                                     &deep::Expr::List(list.clone(), zero_span()),
@@ -12135,15 +12231,14 @@ fn infer_app(
                                 ),
                                 vec![],
                             ));
-                            return Type::Error;
                         }
                         match list_arg {
                             Type::Adt(name, args) if name == "List" && args.len() == 1 => {
                                 return Type::Adt("List".to_string(), vec![args[0].clone()]);
                             }
-                            Type::Var(_) | Type::Error => return result_ty,
+                            Type::Var(_) | Type::Error(_) => return result_ty,
                             other => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -12151,20 +12246,19 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                     }
                     "chunk" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
                         }
                         let list_arg = subst.apply(&arg_tys[0]);
                         let count_arg = subst.apply(&arg_tys[1]);
                         if !matches!(count_arg, Type::Prim(prec) if prec.is_integer())
-                            && !matches!(count_arg, Type::Var(_) | Type::Error)
+                            && !matches!(count_arg, Type::Var(_) | Type::Error(_))
                         {
-                            errors.push(CheckError::new(
+                            return report(errors, CheckError::new(
                                 CheckErrorKind::TypeMismatch,
                                 with_macro_provenance(
                                     &deep::Expr::List(list.clone(), zero_span()),
@@ -12172,7 +12266,6 @@ fn infer_app(
                                 ),
                                 vec![],
                             ));
-                            return Type::Error;
                         }
                         match list_arg {
                             Type::Adt(name, args) if name == "List" && args.len() == 1 => {
@@ -12181,9 +12274,9 @@ fn infer_app(
                                     vec![Type::Adt("List".to_string(), vec![args[0].clone()])],
                                 );
                             }
-                            Type::Var(_) | Type::Error => return result_ty,
+                            Type::Var(_) | Type::Error(_) => return result_ty,
                             other => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -12191,20 +12284,19 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                     }
                     "range" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
                         }
                         for arg_ty in &arg_tys {
                             match subst.apply(arg_ty) {
                                 Type::Prim(prec) if prec.is_integer() => {}
-                                Type::Var(_) | Type::Error => {}
+                                Type::Var(_) | Type::Error(_) => {}
                                 other => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -12212,7 +12304,6 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         }
@@ -12220,7 +12311,7 @@ fn infer_app(
                     }
                     "map" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
                         }
                         let elem_ty = vg.fresh_type();
                         let out_ty = vg.fresh_type();
@@ -12229,22 +12320,20 @@ fn infer_app(
                             &Type::Fn(vec![elem_ty.clone()], Box::new(out_ty.clone())),
                             subst,
                         ) {
-                            errors.push(te.into());
-                            return Type::Error;
+                            return report(errors, te.into());
                         }
                         if let Err(te) = unify(
                             &subst.apply(&arg_tys[1]),
                             &Type::Adt("List".to_string(), vec![elem_ty]),
                             subst,
                         ) {
-                            errors.push(te.into());
-                            return Type::Error;
+                            return report(errors, te.into());
                         }
                         return Type::Adt("List".to_string(), vec![subst.apply(&out_ty)]);
                     }
                     "filter" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
                         }
                         let elem_ty = vg.fresh_type();
                         let list_expr = deep::Expr::List(list.clone(), zero_span());
@@ -12253,27 +12342,25 @@ fn infer_app(
                             &Type::Fn(vec![elem_ty.clone()], Box::new(Type::Prim(Prim::Bool))),
                             subst,
                         ) {
-                            errors.push(collection_helper_type_error(
+                            return report(errors, collection_helper_type_error(
                                 &list_expr,
                                 "filter",
                                 "expects a callback that returns bool",
                                 te,
                             ));
-                            return Type::Error;
                         }
                         if let Err(te) = unify(
                             &subst.apply(&arg_tys[1]),
                             &Type::Adt("List".to_string(), vec![elem_ty.clone()]),
                             subst,
                         ) {
-                            errors.push(te.into());
-                            return Type::Error;
+                            return report(errors, te.into());
                         }
                         return Type::Adt("List".to_string(), vec![subst.apply(&elem_ty)]);
                     }
                     "fold" => {
                         if arg_tys.len() != 3 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
                         }
                         let acc_ty = vg.fresh_type();
                         let elem_ty = vg.fresh_type();
@@ -12286,36 +12373,33 @@ fn infer_app(
                             ),
                             subst,
                         ) {
-                            errors.push(collection_helper_type_error(
+                            return report(errors, collection_helper_type_error(
                                 &list_expr,
                                 "fold",
                                 "expects a callback whose accumulator/result type matches the initial accumulator",
                                 te,
                             ));
-                            return Type::Error;
                         }
                         if let Err(te) = unify(&subst.apply(&arg_tys[1]), &acc_ty.clone(), subst) {
-                            errors.push(collection_helper_type_error(
+                            return report(errors, collection_helper_type_error(
                                 &list_expr,
                                 "fold",
                                 "expects a callback whose accumulator/result type matches the initial accumulator",
                                 te,
                             ));
-                            return Type::Error;
                         }
                         if let Err(te) = unify(
                             &subst.apply(&arg_tys[2]),
                             &Type::Adt("List".to_string(), vec![elem_ty]),
                             subst,
                         ) {
-                            errors.push(te.into());
-                            return Type::Error;
+                            return report(errors, te.into());
                         }
                         return subst.apply(&acc_ty);
                     }
                     "scan" => {
                         if arg_tys.len() != 3 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
                         }
                         let acc_ty = vg.fresh_type();
                         let elem_ty = vg.fresh_type();
@@ -12328,30 +12412,27 @@ fn infer_app(
                             ),
                             subst,
                         ) {
-                            errors.push(collection_helper_type_error(
+                            return report(errors, collection_helper_type_error(
                                 &list_expr,
                                 "scan",
                                 "expects a callback whose accumulator/result type matches the initial accumulator",
                                 te,
                             ));
-                            return Type::Error;
                         }
                         if let Err(te) = unify(&subst.apply(&arg_tys[1]), &acc_ty.clone(), subst) {
-                            errors.push(collection_helper_type_error(
+                            return report(errors, collection_helper_type_error(
                                 &list_expr,
                                 "scan",
                                 "expects a callback whose accumulator/result type matches the initial accumulator",
                                 te,
                             ));
-                            return Type::Error;
                         }
                         if let Err(te) = unify(
                             &subst.apply(&arg_tys[2]),
                             &Type::Adt("List".to_string(), vec![elem_ty]),
                             subst,
                         ) {
-                            errors.push(te.into());
-                            return Type::Error;
+                            return report(errors, te.into());
                         }
                         return Type::Adt("List".to_string(), vec![subst.apply(&acc_ty)]);
                     }
@@ -12366,20 +12447,19 @@ fn infer_app(
                         // that at execution time. At type-check time we accept
                         // any Type::Prim and let unification do the rest.
                         if arg_tys.len() != 3 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
                         }
                         let elem_ty = vg.fresh_type();
                         let int64 = Type::Prim(Prim::Int64);
                         let list_expr = deep::Expr::List(list.clone(), zero_span());
                         // arg 0: initial accumulator of type T.
                         if let Err(te) = unify(&subst.apply(&arg_tys[0]), &elem_ty.clone(), subst) {
-                            errors.push(collection_helper_type_error(
+                            return report(errors, collection_helper_type_error(
                                 &list_expr,
                                 "tensor_scan",
                                 "expects an initial value whose type matches the callback element type",
                                 te,
                             ));
-                            return Type::Error;
                         }
                         // arg 1: callback `(T, int64) -> T`.
                         if let Err(te) = unify(
@@ -12390,23 +12470,21 @@ fn infer_app(
                             ),
                             subst,
                         ) {
-                            errors.push(collection_helper_type_error(
+                            return report(errors, collection_helper_type_error(
                                 &list_expr,
                                 "tensor_scan",
                                 "expects a callback (T, int64) -> T",
                                 te,
                             ));
-                            return Type::Error;
                         }
                         // arg 2: length `n: int64`.
                         if let Err(te) = unify(&subst.apply(&arg_tys[2]), &int64, subst) {
-                            errors.push(collection_helper_type_error(
+                            return report(errors, collection_helper_type_error(
                                 &list_expr,
                                 "tensor_scan",
                                 "expects a length `n: int64`",
                                 te,
                             ));
-                            return Type::Error;
                         }
                         // Element type must be a concrete scalar Prim once
                         // unified. If it's still a Var the call site is
@@ -12426,7 +12504,7 @@ fn infer_app(
                                 TensorPrec::Var(*tv)
                             }
                             other => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &list_expr,
@@ -12436,14 +12514,13 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         };
                         return Type::Tensor(vec![Dim::Wildcard], precision);
                     }
                     "partition" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
                         }
                         let elem_ty = vg.fresh_type();
                         let list_expr = deep::Expr::List(list.clone(), zero_span());
@@ -12452,28 +12529,26 @@ fn infer_app(
                             &Type::Fn(vec![elem_ty.clone()], Box::new(Type::Prim(Prim::Bool))),
                             subst,
                         ) {
-                            errors.push(collection_helper_type_error(
+                            return report(errors, collection_helper_type_error(
                                 &list_expr,
                                 "partition",
                                 "expects a callback that returns bool",
                                 te,
                             ));
-                            return Type::Error;
                         }
                         if let Err(te) = unify(
                             &subst.apply(&arg_tys[1]),
                             &Type::Adt("List".to_string(), vec![elem_ty.clone()]),
                             subst,
                         ) {
-                            errors.push(te.into());
-                            return Type::Error;
+                            return report(errors, te.into());
                         }
                         let out_list = Type::Adt("List".to_string(), vec![subst.apply(&elem_ty)]);
                         return Type::Tuple(vec![out_list.clone(), out_list]);
                     }
                     "flat_map" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
                         }
                         let elem_ty = vg.fresh_type();
                         let out_elem_ty = vg.fresh_type();
@@ -12485,16 +12560,14 @@ fn infer_app(
                             ),
                             subst,
                         ) {
-                            errors.push(te.into());
-                            return Type::Error;
+                            return report(errors, te.into());
                         }
                         if let Err(te) = unify(
                             &subst.apply(&arg_tys[1]),
                             &Type::Adt("List".to_string(), vec![elem_ty]),
                             subst,
                         ) {
-                            errors.push(te.into());
-                            return Type::Error;
+                            return report(errors, te.into());
                         }
                         return Type::Adt("List".to_string(), vec![subst.apply(&out_elem_ty)]);
                     }
@@ -12513,9 +12586,9 @@ fn infer_app(
                                                 vec![inner_args[0].clone()],
                                             );
                                         }
-                                        Type::Var(_) | Type::Error => return result_ty,
+                                        Type::Var(_) | Type::Error(_) => return result_ty,
                                         other => {
-                                            errors.push(CheckError::new(
+                                            return report(errors, CheckError::new(
                                                 CheckErrorKind::TypeMismatch,
                                                 with_macro_provenance(
                                                     &deep::Expr::List(
@@ -12528,13 +12601,12 @@ fn infer_app(
                                                 ),
                                                 vec![],
                                             ));
-                                            return Type::Error;
                                         }
                                     }
                                 }
-                                Type::Var(_) | Type::Error => return result_ty,
+                                Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -12544,14 +12616,13 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         }
                     }
                     "zip" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
                         }
                         let lhs = subst.apply(&arg_tys[0]);
                         let rhs = subst.apply(&arg_tys[1]);
@@ -12572,12 +12643,12 @@ fn infer_app(
                             }
                             (Type::Var(_), _)
                             | (_, Type::Var(_))
-                            | (Type::Error, _)
-                            | (_, Type::Error) => {
+                            | (Type::Error(_), _)
+                            | (_, Type::Error(_)) => {
                                 return result_ty;
                             }
                             (lhs, rhs) => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -12585,7 +12656,6 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                     }
@@ -12601,9 +12671,9 @@ fn infer_app(
                                         ])],
                                     );
                                 }
-                                Type::Var(_) | Type::Error => return result_ty,
+                                Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -12611,7 +12681,6 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         }
@@ -12625,9 +12694,9 @@ fn infer_app(
                                             match &items[0] {
                                                 Type::Prim(Prim::Int64)
                                                 | Type::Prim(Prim::String) => {}
-                                                Type::Var(_) | Type::Error => return result_ty,
+                                                Type::Var(_) | Type::Error(_) => return result_ty,
                                                 other => {
-                                                    errors.push(CheckError::new(
+                                                    return report(errors, CheckError::new(
                                                         CheckErrorKind::TypeMismatch,
                                                         with_macro_provenance(
                                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -12637,7 +12706,6 @@ fn infer_app(
                                                         ),
                                                         vec![],
                                                     ));
-                                                    return Type::Error;
                                                 }
                                             }
                                             return Type::Adt(
@@ -12645,9 +12713,9 @@ fn infer_app(
                                                 vec![items[0].clone(), items[1].clone()],
                                             );
                                         }
-                                        Type::Var(_) | Type::Error => return result_ty,
+                                        Type::Var(_) | Type::Error(_) => return result_ty,
                                         other => {
-                                            errors.push(CheckError::new(
+                                            return report(errors, CheckError::new(
                                                 CheckErrorKind::TypeMismatch,
                                                 with_macro_provenance(
                                                     &deep::Expr::List(list.clone(), zero_span()),
@@ -12657,13 +12725,12 @@ fn infer_app(
                                                 ),
                                                 vec![],
                                             ));
-                                            return Type::Error;
                                         }
                                     }
                                 }
-                                Type::Var(_) | Type::Error => return result_ty,
+                                Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -12671,22 +12738,20 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         }
                     }
                     "dict_get" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
                         }
                         match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
                             (Type::Adt(name, args), key_ty)
                                 if name == "Dict" && args.len() == 2 =>
                             {
                                 if let Err(te) = unify(&args[0], &key_ty, subst) {
-                                    errors.push(te.into());
-                                    return Type::Error;
+                                    return report(errors, te.into());
                                 }
                                 return Type::Adt(
                                     "Option".to_string(),
@@ -12695,12 +12760,12 @@ fn infer_app(
                             }
                             (Type::Var(_), _)
                             | (_, Type::Var(_))
-                            | (Type::Error, _)
-                            | (_, Type::Error) => {
+                            | (Type::Error(_), _)
+                            | (_, Type::Error(_)) => {
                                 return result_ty;
                             }
                             (dict_ty, key_ty) => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -12708,32 +12773,30 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                     }
                     "dict_contains" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
                         }
                         match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
                             (Type::Adt(name, args), key_ty)
                                 if name == "Dict" && args.len() == 2 =>
                             {
                                 if let Err(te) = unify(&args[0], &key_ty, subst) {
-                                    errors.push(te.into());
-                                    return Type::Error;
+                                    return report(errors, te.into());
                                 }
                                 return Type::Prim(Prim::Bool);
                             }
                             (Type::Var(_), _)
                             | (_, Type::Var(_))
-                            | (Type::Error, _)
-                            | (_, Type::Error) => {
+                            | (Type::Error(_), _)
+                            | (_, Type::Error(_)) => {
                                 return result_ty;
                             }
                             (dict_ty, key_ty) => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -12743,21 +12806,19 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                     }
                     "dict_remove" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
                         }
                         match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
                             (Type::Adt(name, args), key_ty)
                                 if name == "Dict" && args.len() == 2 =>
                             {
                                 if let Err(te) = unify(&args[0], &key_ty, subst) {
-                                    errors.push(te.into());
-                                    return Type::Error;
+                                    return report(errors, te.into());
                                 }
                                 return Type::Adt(
                                     "Dict".to_string(),
@@ -12766,12 +12827,12 @@ fn infer_app(
                             }
                             (Type::Var(_), _)
                             | (_, Type::Var(_))
-                            | (Type::Error, _)
-                            | (_, Type::Error) => {
+                            | (Type::Error(_), _)
+                            | (_, Type::Error(_)) => {
                                 return result_ty;
                             }
                             (dict_ty, key_ty) => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -12781,13 +12842,12 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                     }
                     "dict_insert" => {
                         if arg_tys.len() != 3 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
                         }
                         match (
                             subst.apply(&arg_tys[0]),
@@ -12798,12 +12858,10 @@ fn infer_app(
                                 if name == "Dict" && args.len() == 2 =>
                             {
                                 if let Err(te) = unify(&args[0], &key_ty, subst) {
-                                    errors.push(te.into());
-                                    return Type::Error;
+                                    return report(errors, te.into());
                                 }
                                 if let Err(te) = unify(&args[1], &value_ty, subst) {
-                                    errors.push(te.into());
-                                    return Type::Error;
+                                    return report(errors, te.into());
                                 }
                                 return Type::Adt(
                                     "Dict".to_string(),
@@ -12813,13 +12871,13 @@ fn infer_app(
                             (Type::Var(_), _, _)
                             | (_, Type::Var(_), _)
                             | (_, _, Type::Var(_))
-                            | (Type::Error, _, _)
-                            | (_, Type::Error, _)
-                            | (_, _, Type::Error) => {
+                            | (Type::Error(_), _, _)
+                            | (_, Type::Error(_), _)
+                            | (_, _, Type::Error(_)) => {
                                 return result_ty;
                             }
                             (dict_ty, key_ty, value_ty) => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -12829,13 +12887,12 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                     }
                     "dict_merge" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
                         }
                         match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
                             (Type::Adt(lhs_name, lhs_args), Type::Adt(rhs_name, rhs_args))
@@ -12845,12 +12902,10 @@ fn infer_app(
                                     && rhs_args.len() == 2 =>
                             {
                                 if let Err(te) = unify(&lhs_args[0], &rhs_args[0], subst) {
-                                    errors.push(te.into());
-                                    return Type::Error;
+                                    return report(errors, te.into());
                                 }
                                 if let Err(te) = unify(&lhs_args[1], &rhs_args[1], subst) {
-                                    errors.push(te.into());
-                                    return Type::Error;
+                                    return report(errors, te.into());
                                 }
                                 return Type::Adt(
                                     "Dict".to_string(),
@@ -12859,12 +12914,12 @@ fn infer_app(
                             }
                             (Type::Var(_), _)
                             | (_, Type::Var(_))
-                            | (Type::Error, _)
-                            | (_, Type::Error) => {
+                            | (Type::Error(_), _)
+                            | (_, Type::Error(_)) => {
                                 return result_ty;
                             }
                             (lhs_ty, rhs_ty) => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -12874,7 +12929,6 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                     }
@@ -12884,9 +12938,9 @@ fn infer_app(
                                 Type::Adt(name, args) if name == "Dict" && args.len() == 2 => {
                                     return Type::Adt("List".to_string(), vec![args[0].clone()]);
                                 }
-                                Type::Var(_) | Type::Error => return result_ty,
+                                Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -12894,7 +12948,6 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         }
@@ -12905,9 +12958,9 @@ fn infer_app(
                                 Type::Adt(name, args) if name == "Dict" && args.len() == 2 => {
                                     return Type::Adt("List".to_string(), vec![args[1].clone()]);
                                 }
-                                Type::Var(_) | Type::Error => return result_ty,
+                                Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -12915,7 +12968,6 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         }
@@ -12929,9 +12981,9 @@ fn infer_app(
                                         vec![Type::Tuple(vec![args[0].clone(), args[1].clone()])],
                                     );
                                 }
-                                Type::Var(_) | Type::Error => return result_ty,
+                                Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -12939,7 +12991,6 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         }
@@ -12965,7 +13016,7 @@ fn infer_app(
                             // the to_tensor app's `type:` metadata) sees a
                             // sound shape instead of `Dim::Wildcard`.
                             let resolved = subst.apply(first_arg);
-                            if matches!(resolved, Type::Var(_) | Type::Error) {
+                            if matches!(resolved, Type::Var(_) | Type::Error(_)) {
                                 return result_ty;
                             }
                             match peel_to_tensor_argument(&resolved) {
@@ -12974,7 +13025,7 @@ fn infer_app(
                                         // Defensive: a bare scalar should never
                                         // hit this branch (the typer requires
                                         // a `List` head), but guard anyway.
-                                        errors.push(CheckError::new(
+                                        return report(errors, CheckError::new(
                                             CheckErrorKind::TypeMismatch,
                                             with_macro_provenance(
                                                 &deep::Expr::List(list.clone(), zero_span()),
@@ -12984,7 +13035,6 @@ fn infer_app(
                                             ),
                                             vec![],
                                         ));
-                                        return Type::Error;
                                     }
                                     // R2 HIGH-A: try the static-shape walker
                                     // on the actual argument expression
@@ -13003,7 +13053,7 @@ fn infer_app(
                                 }
                                 ToTensorPeel::Pending => return result_ty,
                                 ToTensorPeel::BadInner(inner) => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -13013,10 +13063,9 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                                 ToTensorPeel::NotList => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -13024,7 +13073,6 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         }
@@ -13034,7 +13082,7 @@ fn infer_app(
                             match type_for_readonly_check(first_arg, subst) {
                                 Type::Tensor(dims, precision) => {
                                     if dims.len() != 1 {
-                                        errors.push(CheckError::new(
+                                        return report(errors, CheckError::new(
                                             CheckErrorKind::TypeMismatch,
                                             with_macro_provenance(
                                                 &deep::Expr::List(list.clone(), zero_span()),
@@ -13045,7 +13093,6 @@ fn infer_app(
                                             ),
                                             vec![],
                                         ));
-                                        return Type::Error;
                                     }
                                     // to_list requires a fully resolved
                                     // precision: a polymorphic precision must
@@ -13057,7 +13104,7 @@ fn infer_app(
                                         TensorPrec::Var(_) => return result_ty,
                                     };
                                     if !precision.is_numeric() && !matches!(precision, Prim::Bool) {
-                                        errors.push(CheckError::new(
+                                        return report(errors, CheckError::new(
                                             CheckErrorKind::TypeMismatch,
                                             with_macro_provenance(
                                                 &deep::Expr::List(list.clone(), zero_span()),
@@ -13067,16 +13114,15 @@ fn infer_app(
                                             ),
                                             vec![],
                                         ));
-                                        return Type::Error;
                                     }
                                     return Type::Adt(
                                         "List".to_string(),
                                         vec![Type::Prim(precision)],
                                     );
                                 }
-                                Type::Var(_) | Type::Error => return result_ty,
+                                Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    errors.push(CheckError::new(
+                                    return report(errors, CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
@@ -13084,14 +13130,13 @@ fn infer_app(
                                         ),
                                         vec![],
                                     ));
-                                    return Type::Error;
                                 }
                             }
                         }
                     }
                     "pad_sequences" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
                         }
                         let seqs_ty = subst.apply(&arg_tys[0]);
                         let pad_ty = subst.apply(&arg_tys[1]);
@@ -13104,8 +13149,7 @@ fn infer_app(
                                         if inner_name == "List" && inner_args.len() == 1 =>
                                     {
                                         if let Err(te) = unify(&inner_args[0], &pad_ty, subst) {
-                                            errors.push(te.into());
-                                            return Type::Error;
+                                            return report(errors, te.into());
                                         }
                                         match subst.apply(&inner_args[0]) {
                                             Type::Prim(precision) if precision.is_numeric() => {
@@ -13114,9 +13158,9 @@ fn infer_app(
                                                     TensorPrec::Concrete(precision),
                                                 );
                                             }
-                                            Type::Var(_) | Type::Error => return result_ty,
+                                            Type::Var(_) | Type::Error(_) => return result_ty,
                                             other => {
-                                                errors.push(CheckError::new(
+                                                return report(errors, CheckError::new(
                                                     CheckErrorKind::TypeMismatch,
                                                     with_macro_provenance(
                                                         &deep::Expr::List(
@@ -13129,12 +13173,11 @@ fn infer_app(
                                                     ),
                                                     vec![],
                                                 ));
-                                                return Type::Error;
                                             }
                                         }
                                     }
                                     other => {
-                                        errors.push(CheckError::new(
+                                        return report(errors, CheckError::new(
                                             CheckErrorKind::TypeMismatch,
                                             with_macro_provenance(
                                                 &deep::Expr::List(list.clone(), zero_span()),
@@ -13144,13 +13187,12 @@ fn infer_app(
                                             ),
                                             vec![],
                                         ));
-                                        return Type::Error;
                                     }
                                 }
                             }
-                            Type::Var(_) | Type::Error => return result_ty,
+                            Type::Var(_) | Type::Error(_) => return result_ty,
                             other => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -13160,20 +13202,18 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                     }
                     "pad_sequences_to" => {
                         if arg_tys.len() != 3 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
                         }
                         let seqs_ty = subst.apply(&arg_tys[0]);
                         let width_ty = subst.apply(&arg_tys[1]);
                         let pad_ty = subst.apply(&arg_tys[2]);
                         if let Err(te) = unify(&width_ty, &Type::Prim(Prim::Int64), subst) {
-                            errors.push(te.into());
-                            return Type::Error;
+                            return report(errors, te.into());
                         }
                         // The padded (axis-1) dimension equals the `width`
                         // argument. When `width` is a literal — including
@@ -13198,8 +13238,7 @@ fn infer_app(
                                         if inner_name == "List" && inner_args.len() == 1 =>
                                     {
                                         if let Err(te) = unify(&inner_args[0], &pad_ty, subst) {
-                                            errors.push(te.into());
-                                            return Type::Error;
+                                            return report(errors, te.into());
                                         }
                                         match subst.apply(&inner_args[0]) {
                                             Type::Prim(precision) if precision.is_numeric() => {
@@ -13208,9 +13247,9 @@ fn infer_app(
                                                     TensorPrec::Concrete(precision),
                                                 );
                                             }
-                                            Type::Var(_) | Type::Error => return result_ty,
+                                            Type::Var(_) | Type::Error(_) => return result_ty,
                                             other => {
-                                                errors.push(CheckError::new(
+                                                return report(errors, CheckError::new(
                                                     CheckErrorKind::TypeMismatch,
                                                     with_macro_provenance(
                                                         &deep::Expr::List(
@@ -13223,12 +13262,11 @@ fn infer_app(
                                                     ),
                                                     vec![],
                                                 ));
-                                                return Type::Error;
                                             }
                                         }
                                     }
                                     other => {
-                                        errors.push(CheckError::new(
+                                        return report(errors, CheckError::new(
                                             CheckErrorKind::TypeMismatch,
                                             with_macro_provenance(
                                                 &deep::Expr::List(list.clone(), zero_span()),
@@ -13238,13 +13276,12 @@ fn infer_app(
                                             ),
                                             vec![],
                                         ));
-                                        return Type::Error;
                                     }
                                 }
                             }
-                            Type::Var(_) | Type::Error => return result_ty,
+                            Type::Var(_) | Type::Error(_) => return result_ty,
                             other => {
-                                errors.push(CheckError::new(
+                                return report(errors, CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
@@ -13254,7 +13291,6 @@ fn infer_app(
                                     ),
                                     vec![],
                                 ));
-                                return Type::Error;
                             }
                         }
                     }
@@ -13302,8 +13338,7 @@ fn infer_app(
                     e.span_offset = Some(off);
                 }
             }
-            errors.push(e);
-            Type::Error
+            report(errors, e)
         }
     }
 }
@@ -13531,7 +13566,7 @@ fn types_structurally_equal(a: &Type, b: &Type) -> bool {
                 && types_structurally_equal(r1, r2)
         }
         (Type::Var(_), Type::Var(_)) => true,
-        (Type::Error, _) | (_, Type::Error) => true,
+        (Type::Error(_), _) | (_, Type::Error(_)) => true,
         _ => false,
     }
 }
@@ -13565,7 +13600,7 @@ fn infer_reduction_app(
     total_nodes: &mut usize,
 ) -> Type {
     if fname == "argmax_reduce" || fname == "argmin_reduce" {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::ArityMismatch,
             format!(
                 "{fname} is an index-returning reduction and has no variadic \
@@ -13575,7 +13610,6 @@ fn infer_reduction_app(
             ),
             vec![],
         ));
-        return Type::Error;
     }
 
     let kids = children(list);
@@ -13612,8 +13646,8 @@ fn infer_reduction_app(
             }
         })
         .collect();
-    if arg_tys.iter().any(|ty| matches!(ty, Type::Error)) {
-        return Type::Error;
+    if let Some(err) = propagate_if_error(&arg_tys) {
+        return err;
     }
 
     let result_ty = Type::Var(vg.fresh_tvar());
@@ -13641,7 +13675,7 @@ fn infer_expand_app(
 ) -> Type {
     let kids = children(list);
     if kids.len() != 5 {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::ArityMismatch,
             format!(
                 "expand expects (tensor, axis, size) or the named-axis form \
@@ -13650,7 +13684,6 @@ fn infer_expand_app(
             ),
             vec![],
         ));
-        return Type::Error;
     }
 
     let _func_ty = infer_expr(
@@ -13697,7 +13730,7 @@ fn infer_expand_app(
     if arg_tys
         .iter()
         .enumerate()
-        .any(|(index, ty)| index != 2 && matches!(ty, Type::Error))
+        .any(|(index, ty)| index != 2 && matches!(ty, Type::Error(_)))
     {
         return Type::Error;
     }
@@ -13706,9 +13739,9 @@ fn infer_expand_app(
     // arity-3 scheme would otherwise have caught.
     let size_ty = subst.apply(&arg_tys[2]);
     match size_ty {
-        Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error => {}
+        Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {}
         other => {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
@@ -13716,7 +13749,6 @@ fn infer_expand_app(
                 ),
                 vec![],
             ));
-            return Type::Error;
         }
     }
 
@@ -13762,12 +13794,11 @@ fn infer_permute_app(
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::ArityMismatch,
             "permute expects a tensor followed by one or more axis indices".to_string(),
             vec![],
         ));
-        return Type::Error;
     }
 
     let _func_ty = infer_expr(
@@ -13806,16 +13837,16 @@ fn infer_permute_app(
         })
         .collect();
 
-    if matches!(input_ty, Type::Error) || axis_tys.iter().any(|ty| matches!(ty, Type::Error)) {
+    if matches!(input_ty, Type::Error(_)) || axis_tys.iter().any(|ty| matches!(ty, Type::Error(_))) {
         return Type::Error;
     }
 
     for axis_ty in &axis_tys {
         let resolved = subst.apply(axis_ty);
         match resolved {
-            Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error => {}
+            Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {}
             other => {
-                errors.push(CheckError::new(
+                return report(errors, CheckError::new(
                     CheckErrorKind::TypeMismatch,
                     with_macro_provenance(
                         &deep::Expr::List(list.clone(), zero_span()),
@@ -13823,22 +13854,20 @@ fn infer_permute_app(
                     ),
                     vec![],
                 ));
-                return Type::Error;
             }
         }
     }
 
     let input_ty = type_for_readonly_check(&input_ty, subst);
     let Type::Tensor(dims, prec) = input_ty else {
-        if matches!(input_ty, Type::Var(_) | Type::Error) {
+        if matches!(input_ty, Type::Var(_) | Type::Error(_)) {
             return input_ty;
         }
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::TypeMismatch,
             format!("permute expects tensor input, got {input_ty}"),
             vec![],
         ));
-        return Type::Error;
     };
 
     // Uses `extract_int_for_dim` so `cast(N, int32)`-wrapped literal
@@ -13855,7 +13884,7 @@ fn infer_permute_app(
     };
 
     if axes.len() != dims.len() {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::ArityMismatch,
             format!(
                 "permute expects {} axis indices for rank {} tensor, got {}",
@@ -13865,14 +13894,13 @@ fn infer_permute_app(
             ),
             vec![],
         ));
-        return Type::Error;
     }
 
     let mut seen = HashSet::new();
     let mut reordered = Vec::with_capacity(dims.len());
     for axis in axes {
         if axis < 0 || axis as usize >= dims.len() {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 format!(
                     "permute axis {axis} is out of bounds for rank {} tensor",
@@ -13880,16 +13908,14 @@ fn infer_permute_app(
                 ),
                 vec![],
             ));
-            return Type::Error;
         }
         let axis = axis as usize;
         if !seen.insert(axis) {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 format!("permute axis {axis} appears more than once"),
                 vec![],
             ));
-            return Type::Error;
         }
         reordered.push(dims[axis].clone());
     }
@@ -13910,12 +13936,11 @@ fn infer_reshape_app(
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 || kids.len() > 3 {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::ArityMismatch,
             "reshape expects a tensor and an optional shape list".to_string(),
             vec![],
         ));
-        return Type::Error;
     }
 
     let _func_ty = infer_expr(
@@ -13955,8 +13980,7 @@ fn infer_reshape_app(
                 let expected_shape_ty =
                     Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
                 if let Err(te) = unify(&shape_ty, &expected_shape_ty, subst) {
-                    errors.push(te.into());
-                    return Type::Error;
+                    return report(errors, te.into());
                 }
                 let dims = reshape_output_dims(shape_expr, input_var_name.as_deref(), &[], subst);
                 return Type::Tensor(dims, TensorPrec::Concrete(precision));
@@ -13979,8 +14003,7 @@ fn infer_reshape_app(
                 let expected_shape_ty =
                     Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
                 if let Err(te) = unify(&shape_ty, &expected_shape_ty, subst) {
-                    errors.push(te.into());
-                    return Type::Error;
+                    return report(errors, te.into());
                 }
                 let dims =
                     reshape_output_dims(shape_expr, input_var_name.as_deref(), &input_dims, subst);
@@ -13989,7 +14012,7 @@ fn infer_reshape_app(
 
             Type::Tensor(vec![Dim::Wildcard], precision)
         }
-        Type::Var(_) | Type::Error => {
+        Type::Var(_) | Type::Error(_) => {
             if let Some(shape_expr) = kids.get(2) {
                 let shape_ty = infer_expr(
                     shape_expr,
@@ -14004,19 +14027,17 @@ fn infer_reshape_app(
                 let expected_shape_ty =
                     Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
                 if let Err(te) = unify(&shape_ty, &expected_shape_ty, subst) {
-                    errors.push(te.into());
-                    return Type::Error;
+                    return report(errors, te.into());
                 }
             }
             input_ty
         }
         _ => {
-            errors.push(CheckError::new(
+            report(errors, CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 "reshape expects tensor input".to_string(),
                 vec![],
-            ));
-            Type::Error
+            ))
         }
     }
 }
@@ -14046,13 +14067,12 @@ fn infer_shrink_app(
 ) -> Type {
     let kids = children(list);
     if kids.len() != 3 {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::ArityMismatch,
             "shrink expects a tensor and a list of [start, end] bounds pairs, one pair per axis"
                 .to_string(),
             vec![],
         ));
-        return Type::Error;
     }
 
     let _func_ty = infer_expr(
@@ -14086,7 +14106,7 @@ fn infer_shrink_app(
         total_nodes,
     );
 
-    if matches!(input_ty, Type::Error) || matches!(bounds_ty, Type::Error) {
+    if matches!(input_ty, Type::Error(_)) || matches!(bounds_ty, Type::Error(_)) {
         return Type::Error;
     }
 
@@ -14094,7 +14114,7 @@ fn infer_shrink_app(
     let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int32)]);
     let expected_bounds_ty = Type::Adt("List".to_string(), vec![int_list]);
     if let Err(_te) = unify(&bounds_ty, &expected_bounds_ty, subst) {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::TypeMismatch,
             with_macro_provenance(
                 &deep::Expr::List(list.clone(), zero_span()),
@@ -14105,15 +14125,14 @@ fn infer_shrink_app(
             ),
             vec![],
         ));
-        return Type::Error;
     }
 
     let input_resolved = type_for_readonly_check(&input_ty, subst);
     let (dims, prec) = match input_resolved {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(&input_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(&input_ty),
         other => {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
@@ -14121,7 +14140,6 @@ fn infer_shrink_app(
                 ),
                 vec![],
             ));
-            return Type::Error;
         }
     };
 
@@ -14143,7 +14161,7 @@ fn infer_shrink_app(
             return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
         }
         PairListShape::Malformed { axis, reason } => {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
@@ -14151,12 +14169,11 @@ fn infer_shrink_app(
                 ),
                 vec![],
             ));
-            return Type::Error;
         }
     };
 
     if bounds.len() != dims.len() {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::ArityMismatch,
             with_macro_provenance(
                 &deep::Expr::List(list.clone(), zero_span()),
@@ -14169,7 +14186,6 @@ fn infer_shrink_app(
             ),
             vec![],
         ));
-        return Type::Error;
     }
 
     let mut out_dims = Vec::with_capacity(dims.len());
@@ -14187,7 +14203,7 @@ fn infer_shrink_app(
             continue;
         };
         if *start < 0 || *end < 0 {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
@@ -14195,10 +14211,9 @@ fn infer_shrink_app(
                 ),
                 vec![],
             ));
-            return Type::Error;
         }
         if *start >= *end {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
@@ -14208,12 +14223,11 @@ fn infer_shrink_app(
                 ),
                 vec![],
             ));
-            return Type::Error;
         }
         if let Dim::Lit(input_dim) = dim
             && *end > *input_dim
         {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
@@ -14223,7 +14237,6 @@ fn infer_shrink_app(
                 ),
                 vec![],
             ));
-            return Type::Error;
         }
         out_dims.push(Dim::Lit(end - start));
     }
@@ -14255,12 +14268,11 @@ fn infer_stride_app(
 ) -> Type {
     let kids = children(list);
     if kids.len() < 3 {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::ArityMismatch,
             "stride expects a tensor followed by one positive int32 stride per axis".to_string(),
             vec![],
         ));
-        return Type::Error;
     }
 
     let _func_ty = infer_expr(
@@ -14299,16 +14311,16 @@ fn infer_stride_app(
         })
         .collect();
 
-    if matches!(input_ty, Type::Error) || stride_tys.iter().any(|ty| matches!(ty, Type::Error)) {
+    if matches!(input_ty, Type::Error(_)) || stride_tys.iter().any(|ty| matches!(ty, Type::Error(_))) {
         return Type::Error;
     }
 
     for stride_ty in &stride_tys {
         let resolved = subst.apply(stride_ty);
         match resolved {
-            Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error => {}
+            Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {}
             other => {
-                errors.push(CheckError::new(
+                return report(errors, CheckError::new(
                     CheckErrorKind::TypeMismatch,
                     with_macro_provenance(
                         &deep::Expr::List(list.clone(), zero_span()),
@@ -14316,7 +14328,6 @@ fn infer_stride_app(
                     ),
                     vec![],
                 ));
-                return Type::Error;
             }
         }
     }
@@ -14324,9 +14335,9 @@ fn infer_stride_app(
     let input_resolved = type_for_readonly_check(&input_ty, subst);
     let (dims, prec) = match input_resolved {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(&input_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(&input_ty),
         other => {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
@@ -14334,7 +14345,6 @@ fn infer_stride_app(
                 ),
                 vec![],
             ));
-            return Type::Error;
         }
     };
 
@@ -14349,7 +14359,7 @@ fn infer_stride_app(
     let strides: Vec<Option<i64>> = kids[2..].iter().map(extract_int_for_dim).collect();
 
     if strides.len() != dims.len() {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::ArityMismatch,
             with_macro_provenance(
                 &deep::Expr::List(list.clone(), zero_span()),
@@ -14362,7 +14372,6 @@ fn infer_stride_app(
             ),
             vec![],
         ));
-        return Type::Error;
     }
 
     let mut out_dims = Vec::with_capacity(dims.len());
@@ -14373,7 +14382,7 @@ fn infer_stride_app(
             continue;
         };
         if *step <= 0 {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
@@ -14383,7 +14392,6 @@ fn infer_stride_app(
                 ),
                 vec![],
             ));
-            return Type::Error;
         }
         let step_us = *step as usize;
         match dim {
@@ -14432,12 +14440,11 @@ fn infer_pad_app(
 ) -> Type {
     let kids = children(list);
     if kids.len() != 4 {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::ArityMismatch,
             "pad expects a tensor, a list of [lo, hi] padding pairs (one per axis), and a fill scalar".to_string(),
             vec![],
         ));
-        return Type::Error;
     }
 
     let _func_ty = infer_expr(
@@ -14481,14 +14488,14 @@ fn infer_pad_app(
         total_nodes,
     );
 
-    if matches!(input_ty, Type::Error) || matches!(padding_ty, Type::Error) {
+    if matches!(input_ty, Type::Error(_)) || matches!(padding_ty, Type::Error(_)) {
         return Type::Error;
     }
 
     let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int32)]);
     let expected_padding_ty = Type::Adt("List".to_string(), vec![int_list]);
     if let Err(_te) = unify(&padding_ty, &expected_padding_ty, subst) {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::TypeMismatch,
             with_macro_provenance(
                 &deep::Expr::List(list.clone(), zero_span()),
@@ -14499,15 +14506,14 @@ fn infer_pad_app(
             ),
             vec![],
         ));
-        return Type::Error;
     }
 
     let input_resolved = type_for_readonly_check(&input_ty, subst);
     let (dims, prec) = match input_resolved {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(&input_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(&input_ty),
         other => {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
@@ -14515,7 +14521,6 @@ fn infer_pad_app(
                 ),
                 vec![],
             ));
-            return Type::Error;
         }
     };
 
@@ -14539,7 +14544,7 @@ fn infer_pad_app(
         }
     };
     if let Err(_te) = unify(&fill_ty, &expected_fill_ty, subst) {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::TypeMismatch,
             with_macro_provenance(
                 &deep::Expr::List(list.clone(), zero_span()),
@@ -14550,7 +14555,6 @@ fn infer_pad_app(
             ),
             vec![],
         ));
-        return Type::Error;
     }
 
     let padding: Vec<Option<(i64, i64)>> = match cons_chain_int_pairs(&kids[2]) {
@@ -14562,7 +14566,7 @@ fn infer_pad_app(
             return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
         }
         PairListShape::Malformed { axis, reason } => {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
@@ -14570,12 +14574,11 @@ fn infer_pad_app(
                 ),
                 vec![],
             ));
-            return Type::Error;
         }
     };
 
     if padding.len() != dims.len() {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::ArityMismatch,
             with_macro_provenance(
                 &deep::Expr::List(list.clone(), zero_span()),
@@ -14588,7 +14591,6 @@ fn infer_pad_app(
             ),
             vec![],
         ));
-        return Type::Error;
     }
 
     let mut out_dims = Vec::with_capacity(dims.len());
@@ -14599,7 +14601,7 @@ fn infer_pad_app(
             continue;
         };
         if *lo < 0 || *hi < 0 {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
@@ -14607,7 +14609,6 @@ fn infer_pad_app(
                 ),
                 vec![],
             ));
-            return Type::Error;
         }
         match dim {
             Dim::Lit(input_dim) => {
@@ -14656,7 +14657,7 @@ fn infer_reduce_window_app(
 ) -> Type {
     let kids = children(list);
     if kids.len() != 4 {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::ArityMismatch,
             format!(
                 "{name} expects 3 arguments (tensor, window_shape, strides), got {}",
@@ -14664,7 +14665,6 @@ fn infer_reduce_window_app(
             ),
             vec![],
         ));
-        return Type::Error;
     }
     let _func_ty = infer_expr(
         &kids[0],
@@ -14707,16 +14707,16 @@ fn infer_reduce_window_app(
         total_nodes,
     );
 
-    if matches!(input_ty, Type::Error)
-        || matches!(window_ty, Type::Error)
-        || matches!(stride_ty, Type::Error)
+    if matches!(input_ty, Type::Error(_))
+        || matches!(window_ty, Type::Error(_))
+        || matches!(stride_ty, Type::Error(_))
     {
         return Type::Error;
     }
 
     let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int32)]);
     if let Err(_te) = unify(&window_ty, &int_list, subst) {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::TypeMismatch,
             with_macro_provenance(
                 &deep::Expr::List(list.clone(), zero_span()),
@@ -14727,10 +14727,9 @@ fn infer_reduce_window_app(
             ),
             vec![],
         ));
-        return Type::Error;
     }
     if let Err(_te) = unify(&stride_ty, &int_list, subst) {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::TypeMismatch,
             with_macro_provenance(
                 &deep::Expr::List(list.clone(), zero_span()),
@@ -14741,15 +14740,14 @@ fn infer_reduce_window_app(
             ),
             vec![],
         ));
-        return Type::Error;
     }
 
     let input_resolved = type_for_readonly_check(&input_ty, subst);
     let (dims, prec) = match input_resolved {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(&input_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(&input_ty),
         other => {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
@@ -14757,7 +14755,6 @@ fn infer_reduce_window_app(
                 ),
                 vec![],
             ));
-            return Type::Error;
         }
     };
 
@@ -14772,7 +14769,7 @@ fn infer_reduce_window_app(
     };
 
     if window_shape.is_empty() || strides.is_empty() {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::ArityMismatch,
             with_macro_provenance(
                 &deep::Expr::List(list.clone(), zero_span()),
@@ -14780,10 +14777,9 @@ fn infer_reduce_window_app(
             ),
             vec![],
         ));
-        return Type::Error;
     }
     if window_shape.len() != strides.len() {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::ArityMismatch,
             with_macro_provenance(
                 &deep::Expr::List(list.clone(), zero_span()),
@@ -14795,11 +14791,10 @@ fn infer_reduce_window_app(
             ),
             vec![],
         ));
-        return Type::Error;
     }
     let n = window_shape.len();
     if dims.len() < n {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::DimensionMismatch,
             with_macro_provenance(
                 &deep::Expr::List(list.clone(), zero_span()),
@@ -14807,11 +14802,10 @@ fn infer_reduce_window_app(
             ),
             vec![],
         ));
-        return Type::Error;
     }
     for (i, &w) in window_shape.iter().enumerate() {
         if w <= 0 {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
@@ -14819,12 +14813,11 @@ fn infer_reduce_window_app(
                 ),
                 vec![],
             ));
-            return Type::Error;
         }
     }
     for (i, &s) in strides.iter().enumerate() {
         if s <= 0 {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
@@ -14832,7 +14825,6 @@ fn infer_reduce_window_app(
                 ),
                 vec![],
             ));
-            return Type::Error;
         }
     }
     let leading = dims.len() - n;
@@ -14845,7 +14837,7 @@ fn infer_reduce_window_app(
                 let w = window_shape[i];
                 let s = strides[i];
                 if *in_dim < w {
-                    errors.push(CheckError::new(
+                    return report(errors, CheckError::new(
                         CheckErrorKind::DimensionMismatch,
                         with_macro_provenance(
                             &deep::Expr::List(list.clone(), zero_span()),
@@ -14856,7 +14848,6 @@ fn infer_reduce_window_app(
                         ),
                         vec![],
                     ));
-                    return Type::Error;
                 }
                 // `in_dim >= w` (checked above) and `s >= 1` guarantee
                 // `out = floor((in_dim - w) / s) + 1 >= 1`, so the Valid
@@ -15408,7 +15399,7 @@ fn check_layer_norm_signature(
     errors: &mut Vec<CheckError>,
 ) -> Type {
     if arg_tys.len() != 3 {
-        return Type::Error;
+        return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
     }
 
     let x_ty = type_for_readonly_check(&arg_tys[0], subst);
@@ -15417,53 +15408,49 @@ fn check_layer_norm_signature(
 
     let (x_dims, x_prec) = match x_ty {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 format!("layer_norm expects tensor input, got {other}"),
                 vec![],
             ));
-            return Type::Error;
         }
     };
 
     let (gamma_dims, gamma_prec) = match gamma_ty {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 format!("layer_norm expects tensor gamma, got {other}"),
                 vec![],
             ));
-            return Type::Error;
         }
     };
 
     let (beta_dims, beta_prec) = match beta_ty {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 format!("layer_norm expects tensor beta, got {other}"),
                 vec![],
             ));
-            return Type::Error;
         }
     };
 
     if x_dims.is_empty() {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::DimensionMismatch,
             "layer_norm expects rank >= 1 input tensor".to_string(),
             vec![],
         ));
-        return Type::Error;
     }
     if gamma_dims.len() != 1 {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::DimensionMismatch,
             format!(
                 "layer_norm expects rank-1 gamma, got rank {}",
@@ -15471,10 +15458,9 @@ fn check_layer_norm_signature(
             ),
             vec![],
         ));
-        return Type::Error;
     }
     if beta_dims.len() != 1 {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::DimensionMismatch,
             format!(
                 "layer_norm expects rank-1 beta, got rank {}",
@@ -15482,10 +15468,9 @@ fn check_layer_norm_signature(
             ),
             vec![],
         ));
-        return Type::Error;
     }
     if x_prec != gamma_prec || x_prec != beta_prec {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::PrecisionMismatch,
             format!(
                 "layer_norm requires matching precisions, got {}, {}, {}",
@@ -15495,17 +15480,14 @@ fn check_layer_norm_signature(
             ),
             vec!["Insert explicit cast".to_string()],
         ));
-        return Type::Error;
     }
 
     let hidden_dim = x_dims.last().cloned().expect("checked non-empty");
     if let Err(te) = unify_dim(&hidden_dim, &gamma_dims[0], subst) {
-        errors.push(te.into());
-        return Type::Error;
+        return report(errors, te.into());
     }
     if let Err(te) = unify_dim(&hidden_dim, &beta_dims[0], subst) {
-        errors.push(te.into());
-        return Type::Error;
+        return report(errors, te.into());
     }
 
     let canonical = Type::Tensor(
@@ -15513,8 +15495,7 @@ fn check_layer_norm_signature(
         x_prec,
     );
     if let Err(te) = unify(result_ty, &canonical, subst) {
-        errors.push(te.into());
-        return Type::Error;
+        return report(errors, te.into());
     }
     subst.apply(&canonical)
 }
@@ -15591,31 +15572,29 @@ fn check_conv2d_signature(
 
     let (input_dims, input_prec) = match input_ty {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 format!("conv2d expects tensor input, got {other}"),
                 vec![],
             ));
-            return Type::Error;
         }
     };
     let (kernel_dims, kernel_prec) = match kernel_ty {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 format!("conv2d expects tensor kernel, got {other}"),
                 vec![],
             ));
-            return Type::Error;
         }
     };
 
     if input_dims.len() != 4 {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::DimensionMismatch,
             format!(
                 "conv2d expects rank-4 input tensor, got rank {}",
@@ -15623,10 +15602,9 @@ fn check_conv2d_signature(
             ),
             vec![],
         ));
-        return Type::Error;
     }
     if kernel_dims.len() != 4 {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::DimensionMismatch,
             format!(
                 "conv2d expects rank-4 kernel tensor, got rank {}",
@@ -15634,10 +15612,9 @@ fn check_conv2d_signature(
             ),
             vec![],
         ));
-        return Type::Error;
     }
     if input_prec != kernel_prec {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::PrecisionMismatch,
             format!(
                 "conv2d requires matching input/kernel precision, got {} and {}",
@@ -15646,11 +15623,9 @@ fn check_conv2d_signature(
             ),
             vec!["Insert explicit cast".to_string()],
         ));
-        return Type::Error;
     }
     if let Err(te) = unify_dim(&input_dims[1], &kernel_dims[1], subst) {
-        errors.push(te.into());
-        return Type::Error;
+        return report(errors, te.into());
     }
 
     // RT-205 F8: when stride/padding are integer literals and the
@@ -15679,22 +15654,20 @@ fn check_conv2d_signature(
         input_prec.clone(),
     );
     if let Err(te) = unify(result_ty, &output_template, subst) {
-        errors.push(te.into());
-        return Type::Error;
+        return report(errors, te.into());
     }
 
     let resolved_output = subst.apply(&output_template);
     if let Type::Tensor(out_dims, out_prec) = &resolved_output {
         if out_dims.len() != 4 {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 format!("conv2d result must be rank 4, got rank {}", out_dims.len()),
                 vec![],
             ));
-            return Type::Error;
         }
         if *out_prec != input_prec {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::PrecisionMismatch,
                 format!(
                     "conv2d result precision must match input/kernel precision {}, got {}",
@@ -15703,15 +15676,12 @@ fn check_conv2d_signature(
                 ),
                 vec!["Insert explicit cast".to_string()],
             ));
-            return Type::Error;
         }
         if let Err(te) = unify_dim(&out_dims[0], &input_dims[0], subst) {
-            errors.push(te.into());
-            return Type::Error;
+            return report(errors, te.into());
         }
         if let Err(te) = unify_dim(&out_dims[1], &kernel_dims[0], subst) {
-            errors.push(te.into());
-            return Type::Error;
+            return report(errors, te.into());
         }
     }
 
@@ -15725,7 +15695,7 @@ fn check_matmul_signature(
     errors: &mut Vec<CheckError>,
 ) -> Type {
     if arg_tys.len() != 2 {
-        return Type::Error;
+        return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
     }
 
     let lhs = type_for_readonly_check(&arg_tys[0], subst);
@@ -15733,31 +15703,29 @@ fn check_matmul_signature(
 
     let (lhs_dims, lhs_prec) = match lhs {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 format!("matmul expects tensor lhs, got {other}"),
                 vec![],
             ));
-            return Type::Error;
         }
     };
     let (rhs_dims, rhs_prec) = match rhs {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 format!("matmul expects tensor rhs, got {other}"),
                 vec![],
             ));
-            return Type::Error;
         }
     };
 
     if lhs_prec != rhs_prec {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::PrecisionMismatch,
             format!(
                 "matmul requires matching precisions, got {} and {}",
@@ -15766,7 +15734,6 @@ fn check_matmul_signature(
             ),
             vec!["Insert explicit cast".to_string()],
         ));
-        return Type::Error;
     }
     // RT-2 fixup B6: per spec/04-type-system.md §5.7.2, the active
     // matmul signature does not admit integer operand precisions
@@ -15775,7 +15742,7 @@ fn check_matmul_signature(
     // here, not as a downstream IR-verify or codegen failure. The
     // verify-layer F1 guard remains as defense in depth.
     if lhs_prec.is_integer() {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::PrecisionMismatch,
             format!(
                 "matmul on integer operand precision `{}` is not admitted in this \
@@ -15793,10 +15760,9 @@ fn check_matmul_signature(
                  reduce_sum is supported per §5.7.1."
             )],
         ));
-        return Type::Error;
     }
     if lhs_dims.len() < 2 || rhs_dims.len() < 2 {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::DimensionMismatch,
             format!(
                 "matmul expects tensors of rank >= 2, got rank {} and {}",
@@ -15805,15 +15771,13 @@ fn check_matmul_signature(
             ),
             vec![],
         ));
-        return Type::Error;
     }
     if let Err(te) = unify_dim(
         &lhs_dims[lhs_dims.len() - 1],
         &rhs_dims[rhs_dims.len() - 2],
         subst,
     ) {
-        errors.push(te.into());
-        return Type::Error;
+        return report(errors, te.into());
     }
 
     let lhs_lead = &lhs_dims[..lhs_dims.len() - 2];
@@ -15836,8 +15800,7 @@ fn check_matmul_signature(
                     lhs_applied
                 } else {
                     if let Err(te) = unify_dim(&lhs_applied, &rhs_applied, subst) {
-                        errors.push(te.into());
-                        return Type::Error;
+                        return report(errors, te.into());
                     }
                     subst.apply_dim(&lhs_applied)
                 }
@@ -15853,8 +15816,7 @@ fn check_matmul_signature(
 
     let canonical = Type::Tensor(out_dims, lhs_prec);
     if let Err(te) = unify(result_ty, &canonical, subst) {
-        errors.push(te.into());
-        return Type::Error;
+        return report(errors, te.into());
     }
     subst.apply(&canonical)
 }
@@ -15874,14 +15836,13 @@ fn check_reduction_signature(
     let input_ty = type_for_readonly_check(&arg_tys[0], subst);
     let (dims, prec) = match input_ty {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 format!("{name} expects tensor input, got {other}"),
                 vec![],
             ));
-            return Type::Error;
         }
     };
 
@@ -15915,7 +15876,7 @@ fn check_reduction_signature(
         match normalize_static_axis(dims.len(), raw) {
             Some(axis) => remove.push(axis),
             None => {
-                errors.push(CheckError::new(
+                return report(errors, CheckError::new(
                     CheckErrorKind::DimensionMismatch,
                     format!(
                         "{name} axis {raw} is out of bounds for rank {} tensor",
@@ -15923,7 +15884,6 @@ fn check_reduction_signature(
                     ),
                     vec![],
                 ));
-                return Type::Error;
             }
         }
     } else {
@@ -15932,7 +15892,7 @@ fn check_reduction_signature(
             // operand is rank-spread (index meaningless at symbolic rank) or it
             // is mixed with other axes. Direct the user to name each axis.
             if extract_int_for_dim(ax).is_some() {
-                errors.push(CheckError::new(
+                return report(errors, CheckError::new(
                     CheckErrorKind::DimensionMismatch,
                     format!(
                         "{name}: a positional integer axis is only valid as the single axis of a \
@@ -15942,14 +15902,13 @@ fn check_reduction_signature(
                     ),
                     vec![],
                 ));
-                return Type::Error;
             }
             // Issue #259: a non-literal, non-name axis (a runtime `int32`
             // binding) cannot determine which dimension is removed; emit the
             // targeted compile-time-constant diagnostic rather than leaking an
             // unresolved output type downstream.
             let Some(axis_name) = symbolic_dim_ref_name(ax) else {
-                errors.push(CheckError::new(
+                return report(errors, CheckError::new(
                     CheckErrorKind::DimensionMismatch,
                     format!(
                         "{name} axis must be a compile-time constant or a named axis of the \
@@ -15961,7 +15920,6 @@ fn check_reduction_signature(
                          name the axis (e.g. `{name}(x, seq)`) to reduce by name."
                     )],
                 ));
-                return Type::Error;
             };
             let hits: Vec<usize> = dims
                 .iter()
@@ -15974,7 +15932,7 @@ fn check_reduction_signature(
                     // chelis#339: a duplicate axis name in the variadic list
                     // is a hard error, never a silent deduplication.
                     if remove.contains(i) {
-                        errors.push(CheckError::new(
+                        return report(errors, CheckError::new(
                             CheckErrorKind::DimensionMismatch,
                             format!(
                                 "{name}: duplicate reduction axis `{axis_name}`; each named \
@@ -15983,12 +15941,11 @@ fn check_reduction_signature(
                             ),
                             vec![],
                         ));
-                        return Type::Error;
                     }
                     remove.push(*i);
                 }
                 [] if has_spread => {
-                    errors.push(CheckError::new(
+                    return report(errors, CheckError::new(
                         CheckErrorKind::DimensionMismatch,
                         format!(
                             "{name}: rank-spread operand has no named `{axis_name}` axis to \
@@ -15996,7 +15953,6 @@ fn check_reduction_signature(
                         ),
                         vec![],
                     ));
-                    return Type::Error;
                 }
                 [] => {
                     // Concrete operand: `axis_name` is neither a literal nor a
@@ -16004,7 +15960,7 @@ fn check_reduction_signature(
                     // runtime `int32` binding (issue #259) and a mistyped/absent
                     // axis name — so the message stays neutral between them
                     // rather than asserting "runtime value".
-                    errors.push(CheckError::new(
+                    return report(errors, CheckError::new(
                         CheckErrorKind::DimensionMismatch,
                         format!(
                             "{name} axis `{axis_name}` is neither a compile-time constant nor a \
@@ -16016,10 +15972,9 @@ fn check_reduction_signature(
                              name an existing axis of the operand (e.g. `{name}(x, seq)`)."
                         )],
                     ));
-                    return Type::Error;
                 }
                 _ => {
-                    errors.push(CheckError::new(
+                    return report(errors, CheckError::new(
                         CheckErrorKind::DimensionMismatch,
                         format!(
                             "{name}: named axis `{axis_name}` is ambiguous; it appears more than \
@@ -16027,7 +15982,6 @@ fn check_reduction_signature(
                         ),
                         vec![],
                     ));
-                    return Type::Error;
                 }
             }
         }
@@ -16072,12 +16026,11 @@ fn check_reduction_signature(
             TensorPrec::Concrete(p) => match p.default_reduce_sum_result_precision() {
                 Ok(rp) => TensorPrec::Concrete(rp),
                 Err(msg) => {
-                    errors.push(CheckError::new(
+                    return report(errors, CheckError::new(
                         CheckErrorKind::TypeMismatch,
                         format!("sum: {msg}"),
                         vec![],
                     ));
-                    return Type::Error;
                 }
             },
             TensorPrec::Var(_) => prec.clone(),
@@ -16096,7 +16049,7 @@ fn check_reduction_signature(
         if let Type::Tensor(_, declared_prec) = resolved_result
             && declared_prec != result_prec
         {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::PrecisionMismatch,
                 format!(
                     "sum on operand precision `{}` produces result precision `{}` per \
@@ -16116,13 +16069,11 @@ fn check_reduction_signature(
                     result_prec.render(),
                 )],
             ));
-            return Type::Error;
         }
     }
     let canonical = Type::Tensor(out_dims, result_prec);
     if let Err(te) = unify(result_ty, &canonical, subst) {
-        errors.push(te.into());
-        return Type::Error;
+        return report(errors, te.into());
     }
     subst.apply(&canonical)
 }
@@ -16145,14 +16096,13 @@ fn check_expand_signature(
     let input_ty = type_for_readonly_check(&arg_tys[0], subst);
     let (input_dims, input_prec) = match input_ty {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 format!("expand expects tensor input, got {other}"),
                 vec![],
             ));
-            return Type::Error;
         }
     };
 
@@ -16185,7 +16135,7 @@ fn check_expand_signature(
     // From here on the call is the positional concrete-rank form. A fourth
     // (anchor) argument is only meaningful in the named-axis form.
     if arg_exprs.len() == 4 {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::DimensionMismatch,
             "expand takes a fourth (anchor) argument only in the named-axis form \
              `expand(x, new, size, anchor)`, where `new` names the inserted axis \
@@ -16193,13 +16143,12 @@ fn check_expand_signature(
                 .to_string(),
             vec![],
         ));
-        return Type::Error;
     }
     // A positional index is meaningless at symbolic rank: against a spread
     // there is no fixed position to insert at. Mirror the reduction arm —
     // name the inserted axis instead.
     if has_spread {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::DimensionMismatch,
             "expand: a positional integer axis is only valid on a concrete-rank \
              operand; on a rank-spread operand, name the inserted axis (e.g. \
@@ -16209,7 +16158,6 @@ fn check_expand_signature(
                 .to_string(),
             vec![],
         ));
-        return Type::Error;
     }
 
     // Uses `extract_int_for_dim` so `cast(N, int32)`-wrapped literal
@@ -16219,12 +16167,11 @@ fn check_expand_signature(
     let axis = match arg_exprs.get(1).and_then(extract_int_for_dim) {
         Some(axis) if axis >= 0 => axis as usize,
         Some(axis) => {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 format!("expand requires non-negative axis, got {axis}"),
                 vec![],
             ));
-            return Type::Error;
         }
         // Issue #259: the input is a concrete tensor (past the
         // `Var | Error` guard above), so the output shape is determinable
@@ -16236,7 +16183,7 @@ fn check_expand_signature(
         // `borrow requires tensor or tensor-carrying input, got ?N`. Emit a
         // targeted diagnostic at the expand call site naming the root cause.
         None => {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 format!(
                     "expand axis must be a compile-time constant for the output \
@@ -16250,18 +16197,16 @@ fn check_expand_signature(
                         .to_string(),
                 ],
             ));
-            return Type::Error;
         }
     };
     let size = match arg_exprs.get(2).and_then(extract_int_for_dim) {
         Some(size) if size > 0 => Dim::Lit(size),
         Some(size) => {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 format!("expand requires positive size, got {size}"),
                 vec![],
             ));
-            return Type::Error;
         }
         // A non-literal runtime size. chelis#397/#469: discriminate by
         // PROVENANCE (computed by the caller as `size_class`), not by the
@@ -16276,8 +16221,7 @@ fn check_expand_signature(
         // bare-`var`, `cast(var, _)`, `let`-bound, and arithmetic.
         None => {
             if size_class == SizeClass::Sourceless {
-                errors.push(sourceless_expand_size_error(arg_exprs.get(2)));
-                return Type::Error;
+                return report(errors, sourceless_expand_size_error(arg_exprs.get(2)));
             }
             // A bare `var` naming a genuine §4.7.2 Form-2 symbolic dim — a
             // declared dim parameter (not a value binding) or a dim carried
@@ -16299,7 +16243,7 @@ fn check_expand_signature(
     let canonical = match resolved_result {
         Type::Tensor(out_dims, out_prec) => {
             if out_prec != input_prec {
-                errors.push(CheckError::new(
+                return report(errors, CheckError::new(
                     CheckErrorKind::PrecisionMismatch,
                     format!(
                         "expand output precision {} does not match input precision {}",
@@ -16308,11 +16252,10 @@ fn check_expand_signature(
                     ),
                     vec![],
                 ));
-                return Type::Error;
             }
             if out_dims.len() == input_dims.len() + 1 {
                 if axis > input_dims.len() {
-                    errors.push(CheckError::new(
+                    return report(errors, CheckError::new(
                         CheckErrorKind::DimensionMismatch,
                         format!(
                             "expand insert axis {axis} is out of bounds for rank {} tensor",
@@ -16320,14 +16263,13 @@ fn check_expand_signature(
                         ),
                         vec![],
                     ));
-                    return Type::Error;
                 }
                 let mut expected = input_dims.clone();
                 expected.insert(axis, size.clone());
                 Type::Tensor(expected, input_prec)
             } else if out_dims.len() == input_dims.len() {
                 if axis >= input_dims.len() {
-                    errors.push(CheckError::new(
+                    return report(errors, CheckError::new(
                         CheckErrorKind::DimensionMismatch,
                         format!(
                             "expand axis {axis} is out of bounds for rank {} tensor",
@@ -16335,13 +16277,12 @@ fn check_expand_signature(
                         ),
                         vec![],
                     ));
-                    return Type::Error;
                 }
                 let mut expected = input_dims.clone();
                 expected[axis] = size.clone();
                 Type::Tensor(expected, input_prec)
             } else {
-                errors.push(CheckError::new(
+                return report(errors, CheckError::new(
                     CheckErrorKind::DimensionMismatch,
                     format!(
                         "expand output rank {} must equal input rank {} or {}",
@@ -16351,23 +16292,20 @@ fn check_expand_signature(
                     ),
                     vec![],
                 ));
-                return Type::Error;
             }
         }
-        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 format!("expand expects tensor output, got {other}"),
                 vec![],
             ));
-            return Type::Error;
         }
     };
 
     if let Err(te) = unify(result_ty, &canonical, subst) {
-        errors.push(te.into());
-        return Type::Error;
+        return report(errors, te.into());
     }
     subst.apply(&canonical)
 }
@@ -16398,7 +16336,7 @@ fn check_named_expand_signature(
         .iter()
         .any(|d| matches!(d, Dim::Name(n) if n == new_name))
     {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::DimensionMismatch,
             format!(
                 "expand: inserted axis `{new_name}` already names an axis of the operand; \
@@ -16408,7 +16346,6 @@ fn check_named_expand_signature(
             ),
             vec![],
         ));
-        return Type::Error;
     }
 
     // The named-insert size must be a positive compile-time literal (a bare
@@ -16419,7 +16356,7 @@ fn check_named_expand_signature(
     // checker rejects the form outright rather than letting a check-clean
     // program break downstream (chelis#339).
     let Some(size) = arg_exprs.get(2).and_then(extract_int_for_dim) else {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::DimensionMismatch,
             format!(
                 "expand: the named-axis insert form requires a compile-time literal size \
@@ -16430,15 +16367,13 @@ fn check_named_expand_signature(
             ),
             vec![],
         ));
-        return Type::Error;
     };
     if size <= 0 {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::DimensionMismatch,
             format!("expand requires positive size, got {size}"),
             vec![],
         ));
-        return Type::Error;
     }
 
     // Resolve the insertion point: before the unique named anchor (4-arg
@@ -16446,7 +16381,7 @@ fn check_named_expand_signature(
     let insert_at = match arg_exprs.get(3) {
         Some(anchor_expr) => {
             let Some(anchor) = symbolic_dim_ref_name(anchor_expr) else {
-                errors.push(CheckError::new(
+                return report(errors, CheckError::new(
                     CheckErrorKind::DimensionMismatch,
                     format!(
                         "expand anchor must name an existing axis of the operand, got {} \
@@ -16455,7 +16390,6 @@ fn check_named_expand_signature(
                     ),
                     vec![],
                 ));
-                return Type::Error;
             };
             let hits: Vec<usize> = input_dims
                 .iter()
@@ -16466,7 +16400,7 @@ fn check_named_expand_signature(
             match hits.as_slice() {
                 [i] => *i,
                 [] if has_spread => {
-                    errors.push(CheckError::new(
+                    return report(errors, CheckError::new(
                         CheckErrorKind::DimensionMismatch,
                         format!(
                             "expand: rank-spread operand has no named `{anchor}` axis to \
@@ -16476,10 +16410,9 @@ fn check_named_expand_signature(
                         ),
                         vec![],
                     ));
-                    return Type::Error;
                 }
                 [] => {
-                    errors.push(CheckError::new(
+                    return report(errors, CheckError::new(
                         CheckErrorKind::DimensionMismatch,
                         format!(
                             "expand anchor `{anchor}` is not a named axis of the operand: \
@@ -16489,10 +16422,9 @@ fn check_named_expand_signature(
                         ),
                         vec![],
                     ));
-                    return Type::Error;
                 }
                 _ => {
-                    errors.push(CheckError::new(
+                    return report(errors, CheckError::new(
                         CheckErrorKind::DimensionMismatch,
                         format!(
                             "expand: anchor `{anchor}` is ambiguous; it appears more than \
@@ -16500,7 +16432,6 @@ fn check_named_expand_signature(
                         ),
                         vec![],
                     ));
-                    return Type::Error;
                 }
             }
         }
@@ -16513,8 +16444,7 @@ fn check_named_expand_signature(
     out_dims.insert(insert_at, Dim::Name(new_name.to_string()));
     let canonical = Type::Tensor(out_dims, input_prec);
     if let Err(te) = unify(result_ty, &canonical, subst) {
-        errors.push(te.into());
-        return Type::Error;
+        return report(errors, te.into());
     }
     subst.apply(&canonical)
 }
@@ -16552,7 +16482,7 @@ fn peel_to_tensor_argument(ty: &Type) -> ToTensorPeel<'_> {
                     precision: *precision,
                 };
             }
-            Type::Var(_) | Type::Error => {
+            Type::Var(_) | Type::Error(_) => {
                 return ToTensorPeel::Pending;
             }
             other => {
@@ -18247,7 +18177,7 @@ fn pattern_bindings(
                                             }
                                         } else if !known_field_set.is_empty() {
                                             // Unknown field name — error
-                                            errors.push(CheckError::new(
+                                            report(errors, CheckError::new(
                                                 CheckErrorKind::TypeMismatch,
                                                 format!(
                                                     "unknown record field '{}' in pattern for {}",
@@ -18260,8 +18190,7 @@ fn pattern_bindings(
                                                         .filter_map(|f| f.as_deref())
                                                         .collect::<Vec<_>>()
                                                 )],
-                                            ));
-                                            Type::Error
+                                            ))
                                         } else {
                                             vg.fresh_type() // no ADT info available
                                         }
@@ -18411,8 +18340,7 @@ fn infer_pipe(
                         e.span_offset = Some(off);
                     }
                 }
-                errors.push(e);
-                return Type::Error;
+                return report(errors, e);
             }
         }
     }
@@ -18613,7 +18541,7 @@ fn infer_tuple_get(
             // silently swallowed — both are undiagnosed `Type::Error`
             // under an empty error vector, the §04-TOT-2 hole this fix
             // otherwise closes (chelis#707, rt-707).
-            errors.push(CheckError::new(
+            return report(errors, CheckError::new(
                 CheckErrorKind::TupleIndexOutOfBounds,
                 format!(
                     "invalid tuple index: expected a non-negative integer \
@@ -18622,7 +18550,6 @@ fn infer_tuple_get(
                 ),
                 vec![],
             ));
-            return Type::Error;
         }
     };
 
@@ -18631,7 +18558,7 @@ fn infer_tuple_get(
             if index < elems.len() {
                 elems[index].clone()
             } else {
-                errors.push(CheckError::new(
+                report(errors, CheckError::new(
                     CheckErrorKind::TupleIndexOutOfBounds,
                     format!(
                         "tuple index {} out of bounds for tuple of size {}",
@@ -18639,11 +18566,10 @@ fn infer_tuple_get(
                         elems.len()
                     ),
                     vec![],
-                ));
-                Type::Error
+                ))
             }
         }
-        Type::Error => Type::Error,
+        Type::Error(_) => Type::Error,
         // The target is not yet known to be a tuple — e.g. an
         // unannotated closure parameter (a `fold` accumulator)
         // constrained only structurally by its own projections. This
@@ -18657,12 +18583,11 @@ fn infer_tuple_get(
         // type for concrete tuples.
         Type::Var(_) => vg.fresh_type(),
         _ => {
-            errors.push(CheckError::new(
+            report(errors, CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 format!("expected tuple type, got {resolved}"),
                 vec![],
-            ));
-            Type::Error
+            ))
         }
     }
 }
@@ -18738,12 +18663,11 @@ fn infer_record(
                 );
             }
         }
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::TypeMismatch,
             format!("unknown record constructor `{head}`"),
             vec![format!("declare `type {head} = | {head} {{ ... }}`")],
         ));
-        return Type::Error;
     };
     // chelis#317: a registry-known but OUT-OF-SCOPE record constructor (a
     // type-only import constructing e.g. `AdamState { ... }`, whose ADT is in
@@ -18771,7 +18695,7 @@ fn infer_record(
                 );
             }
         }
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::UnknownConstructor,
             with_macro_provenance(
                 &deep::Expr::List(list.clone(), zero_span()),
@@ -18782,7 +18706,6 @@ fn infer_record(
                  add it to an import (e.g. `import Mod ({head})`)"
             )],
         ));
-        return Type::Error;
     }
     // RFC D-CHECK: record construction of an out-of-module opaque
     // type is rejected; inference continues so the literal still
@@ -18986,18 +18909,37 @@ fn infer_access(
                 errors,
             );
             let Some(variant) = single_record_variant(adt_reg, adt_name) else {
-                // Multi-variant or positional-field ADT: field access
-                // is not defined for it; conservative status quo
-                // (silently untyped) to keep the blast radius of the
-                // new inference at the single-record idiom.
-                return Type::Error;
+                // chelis#755 (discovered-hole conversion, chelis#731 Phase 2):
+                // field access on a multi-variant or positional-field ADT is
+                // not defined. This used to return a SILENT `Type::Error`
+                // ("conservative status quo") so `s.radius` on a two-variant
+                // `Shape` scored a perfect 1.0 and only failed at runtime
+                // (`unknown record constructor`). It is now an explicit
+                // rejection with a diagnostic (spec/design/checker_totality.md
+                // §C3; the sanctioned direction from chelis#755).
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        format!(
+                            "field access `.{field_name}` is only defined on a \
+                             single-record-variant type; `{adt_name}` is a \
+                             multi-variant or positional-field type (chelis#755)"
+                        ),
+                        vec![
+                            "pattern-match on the variants with `match` to read \
+                             their fields"
+                                .to_string(),
+                        ],
+                    ),
+                );
             };
             let pos = variant
                 .fields
                 .iter()
                 .position(|(n, _)| n.as_deref() == Some(field_name));
             let Some(pos) = pos else {
-                errors.push(CheckError::new(
+                return report(errors, CheckError::new(
                     CheckErrorKind::TypeMismatch,
                     format!("unknown record field '{field_name}' on {adt_name}"),
                     vec![format!(
@@ -19009,28 +18951,60 @@ fn infer_access(
                             .collect::<Vec<_>>()
                     )],
                 ));
-                return Type::Error;
             };
             let field_types =
                 instantiated_field_types(adt_name, variant, &resolved, adt_reg, vg, subst);
             match field_types.get(pos) {
                 Some(ty) => subst.apply(ty),
-                None => Type::Error,
+                // `pos` came from a validated `.position(...)` hit, so the
+                // field-type list should always be at least that long; a
+                // shorter list is an internal inconsistency between the
+                // variant's field names and its instantiated field types.
+                // Report it loudly rather than exempt the access silently
+                // (chelis#731 §C3).
+                None => report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        format!(
+                            "internal: field `{field_name}` of `{adt_name}` resolved \
+                             to position {pos} but no instantiated field type is \
+                             available (chelis#731 [04-TOT-2])"
+                        ),
+                        vec![],
+                    ),
+                ),
             }
         }
         Type::Var(tv) => {
             // Target not yet pinned (e.g. unannotated lambda param):
-            // register in the deferred-access ledger so a later pin to
-            // an out-of-module opaque ADT is still rejected at
-            // def-level resolution (D-CHECK). The result type keeps
-            // the conservative status quo.
+            // register in the deferred-access ledger so a later pin to an
+            // out-of-module opaque ADT is still rejected at def-level
+            // resolution (D-CHECK). chelis#755 / chelis#731 Phase 2: the
+            // result is now a FRESH type variable, not a silent `Type::Error`
+            // -- the access type is genuinely "unknown until the target is
+            // pinned", an explicit typed rule (the alternative chelis#755
+            // sanctions) rather than an exemption. Unification narrows it, and
+            // the deferred ledger still catches an out-of-module opaque pin.
             subst.record_deferred_opaque_use(tv, crate::unify::DeferredOpaqueUse::Access);
-            Type::Error
+            vg.fresh_type()
         }
-        // Conservative status quo for non-record targets: `access` on
-        // tensors/prims/tuples stays silently untyped in W1 rather
-        // than newly rejecting shapes the corpus may rely on.
-        _ => Type::Error,
+        // chelis#755 (discovered-hole conversion, chelis#731 Phase 2): field
+        // access on a non-record value (a tensor, prim, tuple, function, ...)
+        // used to return a SILENT `Type::Error` so `x.field` on an `f32`
+        // scored 1.0 and only failed at runtime. It is now an explicit
+        // rejection with a diagnostic.
+        other => report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!(
+                    "field access `.{field_name}` expects a record value, got a \
+                     value of type `{other}` (chelis#755)"
+                ),
+                vec![],
+            ),
+        ),
     }
 }
 
@@ -19150,14 +19124,13 @@ fn infer_record_update(
             // The update returns the target's (still-unresolved) type.
             Type::Var(tv)
         }
-        Type::Error => Type::Error,
+        Type::Error(_) => Type::Error,
         other => {
-            errors.push(CheckError::new(
+            report(errors, CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 format!("record-update requires a record-typed target, got {other}"),
                 vec![],
-            ));
-            Type::Error
+            ))
         }
     }
 }
@@ -19239,8 +19212,7 @@ fn infer_cast(
     if let Some(name) = cast_target_prim_name(&kids[1])
         && let Some(diag) = unsigned_family_diagnostic(name, /* tensor = */ false)
     {
-        errors.push(diag);
-        return Type::Error;
+        return report(errors, diag);
     }
     let new_prec = match deep_type_to_resolved_type(&kids[1], vg, adt_reg, &mut HashMap::new()) {
         Type::Prim(p) => p,
@@ -19262,15 +19234,15 @@ fn infer_cast(
             }
             Type::Prim(new_prec)
         }
-        Type::Error => Type::Error,
-        _ => {
-            errors.push(CheckError::new(
+        Type::Error(w) => propagate(&w),
+        _ => report(
+            errors,
+            CheckError::new(
                 CheckErrorKind::CastNonTensor,
                 format!("cast requires tensor or prim type, got {resolved}"),
                 vec![],
-            ));
-            Type::Error
-        }
+            ),
+        ),
     }
 }
 
@@ -19419,12 +19391,11 @@ fn infer_grad(
         Type::Fn(args, ret) => {
             let ret = *ret;
             if !grad_output_supported(&ret) {
-                errors.push(CheckError::new(
+                return report(errors, CheckError::new(
                     CheckErrorKind::Other,
                     format!("grad requires a scalar floating output, got {}", ret),
                     vec!["Reduce the function result to a scalar before applying grad".to_string()],
                 ));
-                return Type::Error;
             }
 
             match grad_result_type(list, &args, adt_reg, errors) {
@@ -19432,7 +19403,7 @@ fn infer_grad(
                 None => Type::Error,
             }
         }
-        Type::Error => Type::Error,
+        Type::Error(_) => Type::Error,
         _ => {
             // Can't determine function structure, return fresh var
             vg.fresh_type()
@@ -19624,12 +19595,11 @@ fn infer_vmap(
     // ints, so this is defense-in-depth for Deep-direct callers.
     let axis = kids.get(1).and_then(extract_int_for_dim).unwrap_or(0);
     if axis < 0 {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::DimensionMismatch,
             format!("vmap axis must be non-negative, got {axis}"),
             vec!["Use `vmap(f)` or `vmap(f, axis=n)` with n >= 0".to_string()],
         ));
-        return Type::Error;
     }
     let axis = axis as usize;
 
@@ -19657,25 +19627,23 @@ fn infer_vmap(
             match (args, ret) {
                 (Ok(args), Ok(ret)) => Type::Fn(args, Box::new(ret)),
                 (Err(message), _) | (_, Err(message)) => {
-                    errors.push(CheckError::new(
+                    report(errors, CheckError::new(
                         CheckErrorKind::DimensionMismatch,
                         message,
                         vec![
                             "Choose an axis that is in bounds for every vmapped tensor".to_string(),
                         ],
-                    ));
-                    Type::Error
+                    ))
                 }
             }
         }
-        Type::Error => Type::Error,
+        Type::Error(_) => Type::Error,
         other => {
-            errors.push(CheckError::new(
+            report(errors, CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 format!("vmap expects a function, got {other}"),
                 vec!["Apply `vmap` to a named function or inline lambda".to_string()],
-            ));
-            Type::Error
+            ))
         }
     }
 }

@@ -2222,7 +2222,7 @@ fn wire_inferred_type(ty: &Type) -> WireInferredType {
             items: types.iter().map(wire_inferred_type).collect(),
         },
         Type::Unit => WireInferredType::Unit,
-        Type::Error => WireInferredType::Error,
+        Type::Error(_) => WireInferredType::Error,
     }
 }
 
@@ -2306,7 +2306,7 @@ fn format_cli_type(ty: &Type) -> String {
             format!("({})", types.join(", "))
         }
         Type::Unit => "unit".to_string(),
-        Type::Error => "<error>".to_string(),
+        Type::Error(_) => "<error>".to_string(),
     }
 }
 

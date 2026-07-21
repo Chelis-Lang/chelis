@@ -348,7 +348,7 @@ impl Subst {
                 let ts = ts.iter().map(|t| self.apply(t)).collect();
                 Type::Tuple(ts)
             }
-            Type::Prim(_) | Type::Unit | Type::Error => ty.clone(),
+            Type::Prim(_) | Type::Unit | Type::Error(_) => ty.clone(),
         }
     }
 
@@ -577,7 +577,7 @@ pub fn unify(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
         // body collapses to Error but the declared type is concrete, we
         // still emit a "body has type `<error>`, declared type is `T`"
         // diagnostic so the user sees the unresolved declared shape).
-        (Type::Error, _) | (_, Type::Error) => Ok(()),
+        (Type::Error(_), _) | (_, Type::Error(_)) => Ok(()),
 
         // Everything else is a mismatch
         _ => Err(TypeError {
@@ -1004,7 +1004,7 @@ fn occurs_in(v: TypeVar, ty: &Type, subst: &Subst) -> bool {
         },
         Type::Adt(_, args) => args.iter().any(|a| occurs_in(v, a, subst)),
         Type::Tuple(ts) => ts.iter().any(|t| occurs_in(v, t, subst)),
-        Type::Prim(_) | Type::Unit | Type::Error => false,
+        Type::Prim(_) | Type::Unit | Type::Error(_) => false,
     }
 }
 
@@ -1676,8 +1676,9 @@ mod tests {
         // closed at the call site in `infer.rs`, not by tightening the
         // unification rule.
         let mut s = Subst::new();
-        assert!(unify(&Type::Error, &Type::Prim(Prim::F32), &mut s).is_ok());
-        assert!(unify(&Type::Prim(Prim::F32), &Type::Error, &mut s).is_ok());
+        let err = crate::errors::error_sentinel_for_test();
+        assert!(unify(&err, &Type::Prim(Prim::F32), &mut s).is_ok());
+        assert!(unify(&Type::Prim(Prim::F32), &err, &mut s).is_ok());
     }
 
     #[test]

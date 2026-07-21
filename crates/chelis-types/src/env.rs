@@ -293,7 +293,7 @@ fn collect_tvars(ty: &Type, vars: &mut Vec<TypeVar>) {
                 vars.push(*v);
             }
         }
-        Type::Prim(_) | Type::Unit | Type::Error => {}
+        Type::Prim(_) | Type::Unit | Type::Error(_) => {}
     }
 }
 

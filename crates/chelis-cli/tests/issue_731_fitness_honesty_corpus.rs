@@ -15,12 +15,13 @@
 //! Membership (Phase 1): the wrapper battery's ill-typed variants, the four
 //! Phase 0 holes (chelis#709 `with seed`/`with device` bodies, chelis#710
 //! `(def)`/`(cast)` malformed forms), the seed-suffix and unknown-effect-kind
-//! diagnostics, and the chelis#710 census-extension malformed `.dp` family. The
-//! Surf-reachable chelis#755 (field access) and chelis#756 (deep-type
-//! conversion) silent holes are NOT yet members: they are unfixed at Phase 1
-//! (global restoration over every census site is Phase 2's witness migration),
-//! so adding them here would assert a property the tree does not yet have. They
-//! join when their fix lands.
+//! diagnostics, and the chelis#710 census-extension malformed `.dp` family.
+//!
+//! Membership (Phase 2, chelis#731): the Surf-reachable chelis#755 (field
+//! access on a multi-variant / non-record target) and chelis#756 (`cast` to an
+//! unknown type name) silent holes JOIN here, now that the `ErrorWitness`
+//! migration has made their sites `report(...)` diagnostics -- the property
+//! they assert (score < 1.0) is one the tree now has.
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -141,6 +142,26 @@ fn surf_known_bad_programs_score_below_one() {
         (
             "unsuffixed_seed",
             "def f() -> f32 = with seed(42) { add(cast(1.0, f32), cast(2.0, f32)) }\n".to_string(),
+            ".ch",
+        ),
+        // chelis#755 (Phase 2 join): field access on a multi-variant ADT.
+        (
+            "field_access_multi_variant",
+            "type Shape = | Circle(f32) | Square(f32)\n\
+             def f(s: Shape) -> f32 = s.radius\nout = print(f(Circle(1.0)))\n"
+                .to_string(),
+            ".ch",
+        ),
+        // chelis#755 (Phase 2 join): field access on a scalar.
+        (
+            "field_access_scalar",
+            "def f(x: f32) -> f32 = x.field\nout = print(f(2.0))\n".to_string(),
+            ".ch",
+        ),
+        // chelis#756 (Phase 2 join): cast to an unknown type name.
+        (
+            "cast_unknown_type",
+            "def f() -> f32 = cast(1.0, madeup)\nout = print(f())\n".to_string(),
             ".ch",
         ),
     ];

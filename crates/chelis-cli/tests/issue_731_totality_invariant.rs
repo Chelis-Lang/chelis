@@ -3,10 +3,17 @@
 //! [04-TOT-2] (spec/04-type-system.md §10) / §C4.1 of
 //! `spec/design/checker_totality.md`: if a check completes with an empty
 //! error vector, the typed result SHALL contain no error-typed expression.
-//! chelis#709 and chelis#710 violate this today; this harness makes the
-//! violation executable ahead of the Phase 1 fix and stays as the
-//! test-side mirror until Phase 2 promotes the validation into
-//! `check_ir_with_signature_context_inner` itself.
+//! chelis#709 and chelis#710 violated this before Phase 1; this harness makes
+//! the violation executable. Phase 2 (chelis#731) PROMOTED [04-TOT-2] to an
+//! on-by-default post-check validation inside
+//! `check_ir_with_signature_context_inner` / `check_typed_program`
+//! (`totality_invariant_traces` in `chelis-types::infer`), so a silent
+//! `Type::Error` under an empty error vector now becomes a pushed internal
+//! error, and `Type::Error` itself is unconstructible without a diagnostic
+//! (the §C3 `ErrorWitness` token). This harness remains as the independent
+//! test-side mirror of that promoted invariant: it drives the same funnels
+//! from outside and asserts the same property, so a regression in the
+//! in-checker pass is caught here too.
 //!
 //! ## How a silent `Type::Error` is detected from the outside
 //!
@@ -191,7 +198,7 @@ fn collect_tree_traces(expr: &deep::Expr, path: &str, check_stamp: bool, out: &m
 
 fn type_contains_error(ty: &Type) -> bool {
     match ty {
-        Type::Error => true,
+        Type::Error(_) => true,
         Type::Fn(args, ret) => args.iter().any(type_contains_error) || type_contains_error(ret),
         Type::Ref(inner) => type_contains_error(inner),
         Type::Adt(_, args) => args.iter().any(type_contains_error),

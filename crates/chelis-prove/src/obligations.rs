@@ -213,11 +213,17 @@ fn collect_declared_returns_in(
 /// Parse a Deep type node into a [`Type`] for producer-set analysis. The
 /// only purpose of the parsed `Type` is name-matching the opaque type, so
 /// nodes that CANNOT contain an opaque type are mapped to the inert
-/// `Type::Error` placeholder (CR-14): `t-prim` (a scalar), `t-tensor` (a
+/// `Type::Unit` placeholder (CR-14): `t-prim` (a scalar), `t-tensor` (a
 /// numeric tensor of prims), `t-var` (a free type variable; an opaque type
 /// is nominal, never a variable), and `t-unit`. `t-adt`/`t-tuple`/`t-fn`
 /// recurse; `t-ref` (a borrow `&T`) recurses into its inner type so a
 /// borrow of (or containing) the opaque type is NOT silently dropped.
+///
+/// (chelis#731 Phase 2: this placeholder was `Type::Error` before the
+/// `ErrorWitness` token made `Type::Error` mintable only inside the checker's
+/// diagnostics module. `Type::Unit` is a behavior-preserving substitute here
+/// -- this analyzer only ever name-matches ADTs, never pattern-matches or
+/// unifies the placeholder, so an inert non-ADT type is all it needs.)
 ///
 /// `aliases` maps each `(typealias ...)` name to its target Deep type
 /// node. A `(t-adt {} <name>)` whose name is an alias is resolved through
@@ -231,13 +237,13 @@ fn type_from_deep(ty: &Expr, aliases: &BTreeMap<String, Expr>) -> Option<Type> {
 
 fn type_from_deep_depth(ty: &Expr, aliases: &BTreeMap<String, Expr>, depth: usize) -> Option<Type> {
     if depth > 32 {
-        return Some(Type::Error);
+        return Some(Type::Unit);
     }
     match tag(ty)? {
         "t-prim" => {
             // The producer-set logic only matches ADT names; map prims to
             // a placeholder that never matches an opaque type name.
-            Some(Type::Error)
+            Some(Type::Unit)
         }
         "t-adt" => {
             let kids = children(ty);
@@ -255,7 +261,7 @@ fn type_from_deep_depth(ty: &Expr, aliases: &BTreeMap<String, Expr>, depth: usiz
             }
             let args = kids[1..]
                 .iter()
-                .map(|a| type_from_deep_depth(a, aliases, depth + 1).unwrap_or(Type::Error))
+                .map(|a| type_from_deep_depth(a, aliases, depth + 1).unwrap_or(Type::Unit))
                 .collect();
             Some(Type::Adt(name, args))
         }
@@ -267,14 +273,14 @@ fn type_from_deep_depth(ty: &Expr, aliases: &BTreeMap<String, Expr>, depth: usiz
             let ret = type_from_deep_depth(kids.last()?, aliases, depth + 1)?;
             let args = kids[..kids.len() - 1]
                 .iter()
-                .map(|a| type_from_deep_depth(a, aliases, depth + 1).unwrap_or(Type::Error))
+                .map(|a| type_from_deep_depth(a, aliases, depth + 1).unwrap_or(Type::Unit))
                 .collect();
             Some(Type::Fn(args, Box::new(ret)))
         }
         "t-tuple" => {
             let items = children(ty)
                 .iter()
-                .map(|a| type_from_deep_depth(a, aliases, depth + 1).unwrap_or(Type::Error))
+                .map(|a| type_from_deep_depth(a, aliases, depth + 1).unwrap_or(Type::Unit))
                 .collect();
             Some(Type::Tuple(items))
         }
@@ -282,14 +288,14 @@ fn type_from_deep_depth(ty: &Expr, aliases: &BTreeMap<String, Expr>, depth: usiz
             // A borrow `&T`: recurse into the inner type so a borrow of (or
             // containing) the opaque type is reachable by type_contains
             // (CR-14). A record field `inner: &T` was otherwise mapped to
-            // Type::Error and the T inside hidden.
+            // the inert placeholder and the T inside hidden.
             let inner = type_from_deep_depth(children(ty).first()?, aliases, depth + 1)?;
             Some(Type::Ref(Box::new(inner)))
         }
         // `t-prim` / `t-tensor` / `t-var` / `t-unit` (and any other leaf):
         // none can contain a nominal opaque type, so the inert Error
         // placeholder is safe (it never name-matches an opaque type).
-        _ => Some(Type::Error),
+        _ => Some(Type::Unit),
     }
 }
 

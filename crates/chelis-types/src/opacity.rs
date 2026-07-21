@@ -515,7 +515,7 @@ fn mentions_inner(
         Type::Tuple(items) => items
             .iter()
             .any(|t| mentions_inner(t, target, adt_reg, seen)),
-        Type::Var(_) | Type::Prim(_) | Type::Tensor(_, _) | Type::Unit | Type::Error => false,
+        Type::Var(_) | Type::Prim(_) | Type::Tensor(_, _) | Type::Unit | Type::Error(_) => false,
     }
 }
 

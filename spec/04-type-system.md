@@ -2313,14 +2313,21 @@ chelis#731 Phase 3.)*
 > typed result SHALL contain no error-typed expression: `Type::Error`
 > without a corresponding reported diagnostic SHALL be unconstructible.
 
-*(The four Phase 0 holes and the chelis#710 malformed-form family are
-closed at chelis#731 Phase 1, and the totality-invariant harness
-(`crates/chelis-cli/tests/issue_731_totality_invariant.rs`) plus the
-fitness-honesty corpus (§C4.4) enforce it. Structural
-unconstructibility of a silent `Type::Error` - the `ErrorWitness` token -
-is chelis#731 Phase 2; the Surf-reachable chelis#755 (field access) and
-chelis#756 (deep-type conversion) sites remain silent until that global
-migration.)*
+*(Structurally honored as of chelis#731 Phase 2: `Type::Error` now carries
+a private `ErrorWitness` token mintable only by `chelis_types::errors::report`
+(which pushes the diagnostic in the same expression) or `propagate` (cascade
+from an existing witness), so a silent `Type::Error` is unconstructible
+outside the diagnostics module - a planted bare `Type::Error` fails to
+compile. The invariant itself is now an ALWAYS-ON post-check pass inside
+`check_ir_with_signature_context_inner` / `check_typed_program`
+(`totality_invariant_traces` in `chelis-types::infer`), promoted from the
+Phase 0 harness (`crates/chelis-cli/tests/issue_731_totality_invariant.rs`),
+which remains as its independent test-side mirror; the fitness-honesty corpus
+(§C4.4) and the cascade-count corpus (Part II B2.3,
+`crates/chelis-cli/tests/issue_731_cascade_count_corpus.rs`) enforce the
+behavior. The Surf-reachable chelis#755 (field access) and chelis#756
+(deep-type conversion) sites are closed here: their converters gained the
+error vector and now report.)*
 
 > **[04-TOT-3]** A structurally malformed Deep form that reaches the
 > checker SHALL be rejected with a diagnostic naming the tag and the

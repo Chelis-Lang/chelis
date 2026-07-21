@@ -1,6 +1,76 @@
 //! Error types for the Chelis type checker.
 
+use serde::{Deserialize, Serialize};
+
+use crate::types::Type;
 use crate::unify::{TypeError, TypeErrorKind};
+
+/// Zero-sized witness that a `Type::Error` was minted HONESTLY: either a
+/// diagnostic reached the error vector (via [`report`]) or an existing
+/// witness was propagated for cascade suppression (via [`propagate`]).
+///
+/// The single field is private, so no code outside this module can call the
+/// `ErrorWitness(())` constructor. Because the only way to obtain a witness
+/// is [`report`] (which pushes a `CheckError` in the same expression) or
+/// [`propagate`] (which requires an *existing* witness, tracing back to a
+/// real report), a `Type::Error` can never be conjured from nothing anywhere
+/// else in the tree. That makes a silent `Type::Error` -- the chelis#709 /
+/// chelis#710 class defect where an unrecognized or malformed construct
+/// disabled checking for its whole subtree without a diagnostic --
+/// unconstructible by construction (spec/design/checker_totality.md §C3,
+/// frozen at Phase 2).
+///
+/// The mutation oracle: a planted bare `Type::Error` fails to compile (the
+/// variant now takes a field), and `Type::Error(ErrorWitness(()))` fails to
+/// compile outside this module (the field is private). The checker's own
+/// `infer.rs` must therefore route every error through [`report`] /
+/// [`propagate`]; it cannot mint one directly.
+///
+/// Serialization note (chelis#731 open question 2, resolved at Phase 2):
+/// `Serialize`/`Deserialize` are derived because `Type` is cached. A
+/// deserialized witness is the ONE sanctioned non-constructor mint -- a
+/// cached `Type::Error` was produced by a legitimate `report`/`propagate` at
+/// write time, so re-materializing its (dataless) witness on read does not
+/// manufacture a silent error. This is the only entry point that bypasses
+/// the two mints, and it is recorded here as the cache boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ErrorWitness(());
+
+/// The ONLY honest way to turn a *fresh* problem into `Type::Error`: push the
+/// diagnostic onto the error vector and mint the witness in the same
+/// expression, so the two can never be separated by a later refactor, a
+/// review miss, or a new contributor (spec/design/checker_totality.md §C3).
+/// Returns the `Type::Error` carrying the freshly-minted witness.
+///
+/// This replaces the historical `errors.push(e); return Type::Error;` idiom:
+/// `return report(errors, e);` is exactly that, with the push and the mint
+/// welded into one expression.
+pub fn report(errors: &mut Vec<CheckError>, error: CheckError) -> Type {
+    errors.push(error);
+    Type::Error(ErrorWitness(()))
+}
+
+/// Cascade suppression: a node whose child already typed as `Type::Error(w)`
+/// types itself `Type::Error` WITHOUT re-reporting, by propagating the
+/// existing witness `w`. This preserves the pre-token behavior where an
+/// error's descendants unify freely so one mistake does not spray dozens of
+/// secondary diagnostics (spec/design/checker_totality.md §C3). Because
+/// `propagate` requires an existing witness, the cascade is provably
+/// downstream of a real reported error.
+pub fn propagate(witness: &ErrorWitness) -> Type {
+    Type::Error(*witness)
+}
+
+/// A `Type::Error` sentinel for in-crate UNIT tests that need to feed an
+/// error-typed value into unification/equality directly (e.g. verifying the
+/// permissive `(Error, _) => Ok(())` unify arm). Gated on `#[cfg(test)]`, so
+/// it does not exist in a production build and cannot be used to mint a
+/// silent `Type::Error` in the shipped checker -- the §C3 oracle is
+/// unaffected. Integration tests are separate crates and never see this.
+#[cfg(test)]
+pub(crate) fn error_sentinel_for_test() -> Type {
+    Type::Error(ErrorWitness(()))
+}
 
 #[derive(Debug, Clone)]
 pub struct CheckError {
