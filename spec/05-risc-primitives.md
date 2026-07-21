@@ -1189,14 +1189,18 @@ These C implementations are the ground truth. The GPU backend (Phase 1) must pro
 **Status banner - read before citing.** RATIFIED and enforced for the
 censused live sites by chelis#730 Phase 1 (the Result-typed failure
 channel, the branded `unsupported:` diagnostic, and the live-site
-sweep; PR chelis#791). Residuals are per-atom noted below; the ratchets
-that make regressions unwritable ([05-UNS-4]'s gate demotion, the lint
-rule) are that plan's Phases 2-3. The delivery plan and full
-elaboration (the failure channel, the census, the ratchets) is
-`spec/design/loud_unsupported.md`. Atom IDs are stable, and the current
-blockquote authorities remain normative until selected for chelis#733 Phase 1
-migration. Full revisions are attached and checked through the pinned Buoy
-shell-side integration, not a Chelis provenance lint.
+sweep; PR chelis#791). Phase 2 added the reintroduction ratchets that
+make regressions unwritable: the blocking `rust-no-wildcard-dispatch`
+lint (spec/01-nomenclature.md §12.3) against a wildcard arm that
+manufactures a concrete closed-enum value, the `EmittedExpr` newtype
+that makes a raw unsupported-stub emission unwritable outside the
+backend crate, and the `EffectKind` enum that replaces the
+`handle-effect` string-match catch-alls in both the lowering lanes and
+the checker. Residuals are per-atom noted below; [05-UNS-4]'s gate
+demotion is that plan's Phase 3. The delivery plan and full elaboration
+(the failure channel, the census, the ratchets) is
+`spec/design/loud_unsupported.md`. Atom IDs are stable and are the
+citation grammar (chelis#733 re-scope: no rev hashes).
 
 > **[05-UNS-1]** When any stage encounters a case it does not support -
 > an op, builtin, dtype, kernel, construct, or parameter shape - it

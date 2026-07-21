@@ -555,7 +555,7 @@ pub fn install_chelis_panic_hook() {
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
-use chelis_types::{BUILTIN_NAMES, CheckedProgram, LinearityInfo, types::Prim};
+use chelis_types::{BUILTIN_NAMES, CheckedProgram, EffectKind, LinearityInfo, types::Prim};
 
 use crate::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType};
 use crate::grad::grad_dag_checked;
@@ -9621,24 +9621,33 @@ impl LowerCtx {
         // chelis#730 Phase 1 (census row 9, chelis#709-adjacent): the
         // former `_ if elems.len() >= 4` catch-all lowered the body and
         // silently DROPPED the handler for any unrecognized effect kind
-        // (`effect: teleport` built and ran). The known kinds are the two
-        // the desugarer produces - `random` (seed scope) and `resource`
-        // (pure passthrough) - matched by string here; the `EffectKind`
-        // enum that closes the future-kinds hole structurally is Phase 2
-        // (section C4.4). Fatal so the host-fallback lane cannot launder
-        // the drop (its own handle-effect arm carries the same match).
-        match effect {
-            Some("random") if elems.len() >= 4 => {
+        // (`effect: teleport` built and ran). chelis#730 Phase 2 (section
+        // C4.4) closes the future-kinds hole structurally: the kind is
+        // parsed once into the closed [`EffectKind`] set and the match is
+        // exhaustive over `Option<EffectKind>` with no `_` arm, so adding a
+        // kind fails the build here until this site handles it. Fatal so
+        // the host-fallback lane cannot launder the drop (its own
+        // handle-effect arm carries the same closed-set match).
+        let effect_kind = effect.and_then(EffectKind::from_symbol);
+        match effect_kind {
+            Some(EffectKind::Random) if elems.len() >= 4 => {
                 let saved_seed = self.random_seed;
                 self.random_seed = self.extract_u64_value(&elems[2]).or(saved_seed);
                 let result = self.lower_expr(&elems[3]);
                 self.random_seed = saved_seed;
                 result
             }
-            Some("resource") if elems.len() >= 4 => self.lower_expr(&elems[3]),
-            other => {
+            Some(EffectKind::Resource) if elems.len() >= 4 => self.lower_expr(&elems[3]),
+            // Unknown kind (`None`), or a KNOWN kind whose form is malformed
+            // (fewer than 4 elements). Both raise the same fatal branded
+            // diagnostic; the `what` payload names the original symbol so a
+            // short `random`/`resource` form still reports its own kind, as
+            // the pre-enum `other =>` arm did. Every variant is named
+            // explicitly, so a new `EffectKind` variant is a compile error
+            // here rather than a silent fall-through.
+            Some(EffectKind::Random) | Some(EffectKind::Resource) | None => {
                 let unsupported = Unsupported::new(
-                    UnsupportedKind::EffectKind(other.unwrap_or("<missing>").to_string()),
+                    UnsupportedKind::EffectKind(effect.unwrap_or("<missing>").to_string()),
                     "a `handle-effect` form in IR lowering",
                     Stage::Lowering,
                     "known effect kinds are `random` and `resource` \

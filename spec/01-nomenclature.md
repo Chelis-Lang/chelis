@@ -1296,6 +1296,54 @@ the blocking registry:
   first-argument semantics in §3.6 rather than accepting last-argument
   insertion.
 
+### 12.3 Closed-enum dispatch substitution (Rust source)
+
+The blocking `rust-no-wildcard-dispatch` rule is ratchet #2 of the
+loud-unsupported plan (`spec/design/loud_unsupported.md` §C4.2, tracking
+issue chelis#730; the language-level contract is
+`spec/05-risc-primitives.md` §7 [05-UNS-1]). It forbids a catch-all
+`_ =>` (or `_ if <guard> =>`) match arm that MANUFACTURES a concrete
+value of a configured closed dtype/IR enum inside the lowering and
+emission crates.
+
+The recurring chelis#703 defect is a stage answering an unsupported
+input by defaulting a closed-enum dispatch to a plausible value - HIP's
+`_ => ElemKind::F32`, the host-type arithmetic default
+`_ => HostType::Int64`. rustc cannot forbid a wildcard arm; this lint
+does. Adding a variant to a closed dtype enum should force a real
+dispatch decision at every site, not fall silently to a manufactured
+default.
+
+- **Configured enums:** `Prim`, `ElemKind`, `RiscOp`, `HostType`
+  (chelis#731 Phase 3 adds `DeepTag` without a config-freeze exception).
+  A wildcard arm is flagged when its body constructs `Enum::<Variant>`
+  for one of these, with `<Variant>` an uppercase variant name.
+- **Configured crates:** `chelis-ir`, `chelis-backend-c`,
+  `chelis-backend-hip`, `chelis-backend-metal`, and the
+  `chelis-compiler-api` numeric modules.
+- **`HostType::Unknown` is exempt.** It is the blessed polymorphic marker
+  (`spec/design/loud_unsupported.md` §C3): legal for genuinely
+  polymorphic signatures, and it fails LOUD downstream at the
+  numeric-baking point, never a silent narrow. It is not a manufactured
+  concrete value.
+- **Not flagged (by design):** classification filters that produce a
+  non-enum value (`_ => None`, `_ => continue`, `_ => false`), loud
+  invariant guards (`_ => unreachable!(...)`, `_ => panic!(...)`), and
+  field pass-throughs (`_ => node.output_type.precision`). Requiring
+  exhaustiveness over the 52-variant `RiscOp` in every classification
+  filter is neither the chelis#703 class nor tractable; the rule targets
+  the substitution shape precisely.
+
+Keeps are recorded in the rule's `ALLOWLIST` (a per-`(file,
+enum::variant)` count baseline, each with a written justification,
+robust to line shifts like the §C4.3 tripwire), not as free-form path
+exceptions. Adding a keep is a reviewable allowlist edit; the FIRST
+unrecorded occurrence goes red. The complementary token tripwire
+(`crates/chelis-cli/tests/loud_unsupported_tripwire.rs`, §C4.3) covers
+the generated-string contexts and the numeric-default `unwrap_or(...)` /
+`unwrap_or_else(|| ...)` / `map_or(..., ...)` spellings this AST-shape
+rule does not see.
+
 ---
 
 ## 13. References
