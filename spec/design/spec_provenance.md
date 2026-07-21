@@ -1,7 +1,7 @@
 # Spec Provenance: Buoy-backed authority, evidence, and change impact
 
 **Status:** Integration design; advisory adoption proposed. The standalone
-repository-independent implementation is now [Buoy] 0.2.0. Its initial
+repository-independent Rust workspace is now [Buoy] 0.2.0. Its initial
 acceptance oracle has been exercised, but its production-hardening work and
 Chelis integration remain active changes. Buoy is therefore the intended
 provenance engine, not yet a blocking Chelis dependency.
@@ -24,7 +24,8 @@ as proof that behavior is correct.
 Chelis will not implement a second provenance graph, revision algorithm,
 coverage engine, or change-impact checker inside `chelis-lint`.
 
-Chelis will instead integrate with Buoy through a shell-side adapter:
+Chelis will instead integrate with Buoy through a Chelis-owned Rust crate or
+module that depends on Buoy's repository-independent Rust APIs:
 
 - Buoy owns repository-independent graph values, deterministic identity,
   lifecycle, freshness, coverage-policy evaluation, impact closure, and
@@ -287,8 +288,9 @@ adapter code, freeze positive and negative fixtures for:
 - provider/root/order independence; and
 - an expected-authority selector that produces no authorities.
 
-Add a shell-side `chelis-provenance` adapter and advisory static report over a
-small initial scope. No existing Chelis command becomes blocking.
+Add a Chelis-owned Rust integration crate or module, provisionally named
+`chelis-provenance`, and an advisory static report over a small initial scope.
+No existing Chelis command becomes blocking.
 
 **Oracle:** the named `chelis_provenance_advisory` integration suite proves
 byte-identical reports under separate roots, rejects planted malformed/stale
