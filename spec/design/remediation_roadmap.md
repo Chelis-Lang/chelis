@@ -48,14 +48,21 @@ spec gate + `spec/**` signoff ([#733] P0), unaffected by [#733]'s
 P0 and [#732] P0 sharing lane drivers) were honored and are now
 historical.
 
-**Wave 1 - the small loud fixes.** [#731] Phase 1 (the checker holes -
-days) and [#730] Phase 1 (the failure channel + live-site sweep). These
-convert every silent-wrong-answer into either a correct answer or a clean
-rejection, which shrinks the danger surface before the big refactor and
-makes the remaining reds honest.
+**Wave 1 - the small loud fixes.** STATUS 2026-07-20: COMPLETE. [#731]
+Phase 1 (the checker holes: loud wildcard, the handle-effect case, the
+seed-literal diagnostic, the MalformedForm sweep) merged as PR #793;
+[#730] Phase 1 (the Unsupported Result channel with the speculative-
+sub-lowering laundering path closed structurally, every live census row
+converted) merged as PR #791. [#732] Phase 1 (the formatter + eval
+adoption + the eval-side migration, a Wave 2 item entered early per the
+standing exception) merged as PR #792 the same day. All three were
+fresh-context red-teamed (QUALIFIED PASS x3) with every confirmed
+finding folded in before merge; the red teams' discoveries are filed as
+[#794]/[#795]/[#796].
 
-**Wave 2 - the independently-landable value work.** [#732] Phases 1-2 (the
-formatter + generated C side: fixes [#716]/[#723] outright and gives the
+**Wave 2 - the independently-landable value work.** [#732] Phase 1
+landed with Wave 1 (above); the remaining Wave 2 set is [#732] Phase 2
+(the generated C side: fixes [#716]/[#723] outright and gives the
 refactor its byte-exact instrument) in parallel with [#731] Phases 2-3 (the
 witness token + DeepTag) and [#730] Phase 2 (the lint ratchets). [#733]'s
 OpenSpec track rides alongside (per the 2026-07-20 re-scope): new
@@ -105,7 +112,8 @@ rendering. Not drawn (for legibility):
 above: grey = Wave 0, green = Wave 1, blue = Wave 2, orange = Wave 3,
 purple = Wave 4 (so [#733]'s OpenSpec track, blue, rides Wave 2); white
 boxes with dashed borders are standalone fixes outside the wave
-structure. LANDED marks the four Phase 0s merged 2026-07-17.
+structure. LANDED marks the four Phase 0s merged 2026-07-17 and the
+three Phase 1s merged 2026-07-20 (PRs #793/#792/#791).
 
 ```mermaid
 %%{init: {"themeVariables": {"fontSize": "18px"}, "flowchart": {"nodeSpacing": 45, "rankSpacing": 42}}}%%
@@ -128,7 +136,7 @@ flowchart TB
   subgraph S730["#730 loud unsupported"]
     direction TB
     n730p0["P0 · census re-verify + token tripwire<br/>+ rejected-cells corpus stub (LANDED)"]:::w0
-    n730p1["P1 · Result channel + live-site sweep"]:::w1
+    n730p1["P1 · Result channel + live-site sweep (LANDED)"]:::w1
     n730p2["P2 · lint ratchet + EmittedExpr<br/>+ EffectKind enum"]:::w2
     n730p3["P3 · gates become UX"]:::w4
     n730p0 --> n730p1 --> n730p2 --> n730p3
@@ -137,7 +145,7 @@ flowchart TB
   subgraph S731["#731 checker totality"]
     direction TB
     n731p0["P0 · Type::Error census<br/>+ red totality invariant (LANDED)"]:::w0
-    n731p1["P1 · loud wildcard + handle-effect case<br/>+ #710 guard sweep"]:::w1
+    n731p1["P1 · loud wildcard + handle-effect case<br/>+ #710 guard sweep (LANDED)"]:::w1
     n731p2["P2 · ErrorWitness token,<br/>invariant always-on"]:::w2
     n731p3["P3 · DeepTag exhaustive dispatch"]:::w2
     n731p0 --> n731p1 --> n731p2 --> n731p3
@@ -146,7 +154,7 @@ flowchart TB
   subgraph S732["#732 faithful observation"]
     direction TB
     n732p0["P0 · round-trip harness + exit census (LANDED)"]:::w0
-    n732p1["P1 · format_element + eval adoption<br/>+ eval-side migration"]:::w2
+    n732p1["P1 · format_element + eval adoption<br/>+ eval-side migration (LANDED)"]:::w2
     n732p2["P2 · generated C helper + to_list arms<br/>+ C-side migration"]:::w2
     n732p3["P3 · tolerance table + #687 handshake"]:::w4
     n732p0 --> n732p1 --> n732p2 --> n732p3
@@ -213,6 +221,9 @@ the capability table's seed decisions, or by being closed.
 | [#775] | scalar top-level roots render as a rank-0 tensor in eval but a bare scalar in compiled C (value and line count agree; shape diverges; unmasked, not caused, by [#750]'s fix) | [#732]'s concrete acceptance case for its Phase 1 scalar-root rendering decision. Disposition (Jeff, 2026-07-18): deliberately fixed in NEITHER lane now - [05-OBS-1..3] and the container rule do not decide it, and a unilateral pick would preempt the one-formatter-both-lanes contract; the [#732] P0 harness pins the divergence as deliberately-undriven until Phase 1 decides |
 | [#780] | matmul shape checking lost through an unannotated lambda parameter - a Surf-reachable false green (found in [#773]'s red team; pre-existing on both sides of the [#773] fix) | [#731] family: a silent unresolved-var acceptance, the deferral-shaped cousin of silent `Type::Error`; sequenced behind [#731] Phase 1-2 rather than fixed standalone so lambda-param binding/re-check semantics are decided once inside the track |
 | [#783] | annotation writeback degrades an unresolved Var to a rank-0 default and clobbers a concrete annotation (a silent [#703]-class substitution; the enabler of the transient [#773]-fix conv2d ICE, hotfixed same day) | sits between [#731] (the silent-degradation discipline) and [#730] (the substitution shape): the durable invariant is covered-or-rejected on the type-metadata channel - never replace a concrete annotation with a degraded one silently. Not urgent: the known trigger is guarded (all eleven shape-computed overrides), regression-locked by `issue_778_conv2d_annotation_clobber.rs` |
+| [#794] | `.dp`-reachable lowering-side value substitutions the PR #793 red team confirmed: `extract_f64_value`'s catch-all folds a `(par ...)` bound's FIRST child (spec/03 says last), and `extract_usize_value` silently maps a negative `.dp` int64 seed to 0 | [#730] census extension rows. The checker side is already closed (PR #793 narrowed its accept-set to `lit` and rejects negative literal seeds), so both are checker-unreachable today - the lowering fix is defense-in-depth per §C1.4 |
+| [#795] | conv2d's present-but-non-literal stride/padding fall to `unwrap_or(1)`/`unwrap_or(0)` in lower.rs (the [#776] value-default shape; census row 23, discovered in [#730] Phase 1's sweep) | [#730] census row 23; liveness honestly not-execution-confirmed (the checker's shape rules may cover it) - §C1.4 raise-or-prove; tripwire-baselined interim |
+| [#796] | compiled-lane `test_*` assertion builtins: pre-[#730]-P1 binaries compiled assertions to inert `0` stubs (could never fail); now loudly rejected | op-owner work: real C emission arms, or an authored eval-only contract + an earlier gate; surfaced by [#730] Phase 1's bucket3 adjudication |
 
 Also tracked to closure but already claimed (listed for completeness):
 [#680]/[#684]/[#685]/[#686]/[#688] -> [#729]; [#682]/[#692]/[#697]/[#698]/[#699]/[#704]/[#705]/[#725] ->
@@ -243,7 +254,7 @@ standard ("execute everything"). Each has a tracked task.
 | HIP runtime behavior ([#689]/[#690] symptoms at runtime) | **executed on gfx1151** (HIP 7.13, chelis 0.16.1, via `scripts/hip_test.py`): [#689] confirmed - `neg`/`sum` run an `_f32` kernel over the `CHELIS_I64` buffer and return garbage (e.g. `sum([10¹²,2·10¹²,3·10¹²,4·10¹²])` = 3567587328 vs 10¹³; `neg` also drops the upper lanes), while `add`/`mul` (correct `_i64` kernels) and f32 `neg` are exact. [#690] confirmed - HIP `trunc_div` by zero returns silently (exit 0, garbage) where the evaluator aborts branded. Repro archived at `docs/investigations/probes/hip_runtime/`; red-team re-ran the probes (PASS) and the runtime results are posted on [#689](https://github.com/Chelis-Lang/chelis/issues/689#issuecomment-5011825763), [#690](https://github.com/Chelis-Lang/chelis/issues/690#issuecomment-5011825818), and [#736](https://github.com/Chelis-Lang/chelis/issues/736#issuecomment-5011825877) | [#736]: probes executed + posted; both issues off the emission-only caveat |
 | Metal runtime execution (typed kernels actually computing) | emission-locked (`metal_dtype_emission_and_bool_add.rs`); never executed | [#737]: a small driver harness (main.mm + chelis runtime link) on an arm64 Mac; promote the emission locks to run locks |
 | [#688]'s opaque produced-value chokepoint (`flatten_field_value`) | the CLASS is executed (spurious fuzz-tier counterexample); the cited site is not | tracked on [#688] itself: needs `--features smt` + an `@opaque` int64-field type; exact repro sketch is in the issue comments |
-| `with seed` / `with device` semantics (cross-lane seeding reproducibility) | the `with seed` half is SWEPT (2026-07-18 sweep + 2026-07-19 re-sweep on [#735]: eval vs compiled-C host lane, all probes f32-bit-identical post the [#770]/[#771]/[#776] fixes, independently re-run 253/253); [05-RNG-1] shipped (PR #781) | [#735]: remaining authoring - `with device` selection, vmap x seed, grad-through-seeded-draws numerics; GPU/kernel-lane RNG sweep is the [#736] follow-on; the unconditional cross-lane atom is parked solely behind [#731] Phase 1's seed-literal diagnostic |
+| `with seed` / `with device` semantics (cross-lane seeding reproducibility) | the `with seed` half is SWEPT (2026-07-18 sweep + 2026-07-19 re-sweep on [#735]: eval vs compiled-C host lane, all probes f32-bit-identical post the [#770]/[#771]/[#776] fixes, independently re-run 253/253); [05-RNG-1] shipped (PR #781) | [#735]: remaining authoring - `with device` selection, vmap x seed, grad-through-seeded-draws numerics; GPU/kernel-lane RNG sweep is the [#736] follow-on; the unconditional cross-lane atom's blocker cleared 2026-07-20 ([#731] Phase 1 merged, PR #793) - re-sweep + atom (b) shipment unblocked |
 | shell repos' compiled-lane numerics (school validates eval-only) | audit note, unexecuted downstream | [#738]: conform-contract amendment proposal - shells gain a compiled-lane numerical row |
 | census rows 13-16 of [#730] (dead-by-probe placeholder sites) | probed dead or dead-by-inspection | re-verified mechanically at [#730] Phase 0; §C1.4 raise-or-prove applies regardless |
 
@@ -280,11 +291,14 @@ formal development (the canonical calculus; our spec text lags it):
   (PR #781, spec/05 §2.6) - grounded in the sweep evidence, deliberately
   NOT in LaCaDiLE, whose `Random` effect is abstract and says nothing
   about stream values, so the cross-repo citation question does not
-  arise for it. The unconditional CROSS-LANE atom is drafted and parked
-  with exactly one remaining blocker: [#731] Phase 1's
-  out-of-range/unsuffixed seed-literal diagnostic (until the checker
-  rejects those literals, the invariant would be silent about inputs
-  the compiler accepts).
+  arise for it. The unconditional CROSS-LANE atom's sole blocker CLEARED
+  2026-07-20: [#731] Phase 1 merged (PR #793) with the
+  out-of-range/unsuffixed seed-literal diagnostic plus the
+  negative-int64-literal rejection its red team forced - the
+  confirmation re-sweep and the atom (b) shipment are now fully
+  unblocked (noted on [#735]; the `.dp`-only lowering-side
+  negative-seed fallback is checker-unreachable and tracked at
+  [#794]).
 - **Genuinely open, still owed**: what `with device` selects
   operationally, vmap x seed (not in LaCaDiLE at all; its own sweep),
   the numerics of grad THROUGH seeded draws (LaCaDiLE yields only
@@ -368,3 +382,6 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#776]: https://github.com/Chelis-Lang/chelis/issues/776
 [#780]: https://github.com/Chelis-Lang/chelis/issues/780
 [#783]: https://github.com/Chelis-Lang/chelis/issues/783
+[#794]: https://github.com/Chelis-Lang/chelis/issues/794
+[#795]: https://github.com/Chelis-Lang/chelis/issues/795
+[#796]: https://github.com/Chelis-Lang/chelis/issues/796
