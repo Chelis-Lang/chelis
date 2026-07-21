@@ -199,6 +199,7 @@ impl AdtRegistry {
                                 let ftype = self.expand_aliases(&deep_type_to_type_with_params(
                                     &fchildren[1],
                                     &param_map,
+                                    vg,
                                 ));
                                 fields.push((Some(fname), ftype));
                             }
@@ -206,7 +207,7 @@ impl AdtRegistry {
                         _ => {
                             // Positional type argument
                             let ftype = self.expand_aliases(&deep_type_to_type_with_params(
-                                field_expr, &param_map,
+                                field_expr, &param_map, vg,
                             ));
                             fields.push((None, ftype));
                         }
@@ -526,7 +527,19 @@ pub(crate) fn substitute_alias_type(ty: &Type, subst: &HashMap<TypeVar, Type>) -
 }
 
 /// Convert a Deep type expression to internal Type, resolving type param names.
-fn deep_type_to_type_with_params(expr: &deep::Expr, param_map: &HashMap<String, TypeVar>) -> Type {
+///
+/// chelis#731 Phase 2 / chelis#756: this deftype-field converter has no error
+/// vector, so a malformed or unknown field type can no longer become a silent
+/// `Type::Error` (unconstructible outside the checker's diagnostics module,
+/// §C3). The typed rule is a FRESH type variable (`vg.fresh_type()`) -- "a
+/// field type we could not parse, to be pinned by unification" -- the same
+/// explicit-typed-rule direction chelis#755 took for deferred field access. A
+/// fresh var is never `Type::Error`, so the §C4.1 totality invariant holds.
+fn deep_type_to_type_with_params(
+    expr: &deep::Expr,
+    param_map: &HashMap<String, TypeVar>,
+    vg: &mut VarGen,
+) -> Type {
     match expr {
         deep::Expr::List(list, _) => {
             let tag = get_tag(list).unwrap_or("");
@@ -536,9 +549,9 @@ fn deep_type_to_type_with_params(expr: &deep::Expr, param_map: &HashMap<String, 
                     if let Some(deep::Expr::Atom(deep::Atom::Symbol(name), _)) = children.first() {
                         Prim::parse_name(name)
                             .map(Type::Prim)
-                            .unwrap_or(Type::Error)
+                            .unwrap_or_else(|| vg.fresh_type())
                     } else {
-                        Type::Error
+                        vg.fresh_type()
                     }
                 }
                 "t-var" => {
@@ -546,37 +559,37 @@ fn deep_type_to_type_with_params(expr: &deep::Expr, param_map: &HashMap<String, 
                         if let Some(&tv) = param_map.get(name.as_str()) {
                             Type::Var(tv)
                         } else {
-                            Type::Error
+                            vg.fresh_type()
                         }
                     } else {
-                        Type::Error
+                        vg.fresh_type()
                     }
                 }
                 "t-fn" => {
                     if children.is_empty() {
-                        return Type::Error;
+                        return vg.fresh_type();
                     }
                     let args: Vec<Type> = children[..children.len() - 1]
                         .iter()
-                        .map(|c| deep_type_to_type_with_params(c, param_map))
+                        .map(|c| deep_type_to_type_with_params(c, param_map, vg))
                         .collect();
                     let ret =
-                        deep_type_to_type_with_params(&children[children.len() - 1], param_map);
+                        deep_type_to_type_with_params(&children[children.len() - 1], param_map, vg);
                     Type::Fn(args, Box::new(ret))
                 }
                 "t-tensor" => {
                     if children.is_empty() {
-                        return Type::Error;
+                        return vg.fresh_type();
                     }
                     let prec_expr = &children[children.len() - 1];
                     // Per WS-A5 (spec/04-type-system.md §5.8) the precision
                     // slot may be either a concrete primitive or a type
                     // variable (within a sig). Translate both shapes; any
                     // other shape is an ill-formed tensor.
-                    let prec = match deep_type_to_type_with_params(prec_expr, param_map) {
+                    let prec = match deep_type_to_type_with_params(prec_expr, param_map, vg) {
                         Type::Prim(p) => TensorPrec::Concrete(p),
                         Type::Var(v) => TensorPrec::Var(v),
-                        _ => return Type::Error,
+                        _ => return vg.fresh_type(),
                     };
                     let dims: Vec<Dim> = children[..children.len() - 1]
                         .iter()
@@ -588,25 +601,25 @@ fn deep_type_to_type_with_params(expr: &deep::Expr, param_map: &HashMap<String, 
                     if let Some(deep::Expr::Atom(deep::Atom::Symbol(name), _)) = children.first() {
                         let args: Vec<Type> = children[1..]
                             .iter()
-                            .map(|c| deep_type_to_type_with_params(c, param_map))
+                            .map(|c| deep_type_to_type_with_params(c, param_map, vg))
                             .collect();
                         Type::Adt(name.clone(), args)
                     } else {
-                        Type::Error
+                        vg.fresh_type()
                     }
                 }
                 "t-tuple" => {
                     let elems: Vec<Type> = children
                         .iter()
-                        .map(|c| deep_type_to_type_with_params(c, param_map))
+                        .map(|c| deep_type_to_type_with_params(c, param_map, vg))
                         .collect();
                     Type::Tuple(elems)
                 }
                 "t-unit" => Type::Unit,
-                _ => Type::Error,
+                _ => vg.fresh_type(),
             }
         }
-        _ => Type::Error,
+        _ => vg.fresh_type(),
     }
 }
 

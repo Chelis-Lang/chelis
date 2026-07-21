@@ -1251,14 +1251,6 @@ fn check_ir_with_signature_context_inner(
     if !result.errors.is_empty() {
         return Err(result);
     }
-    // chelis#731 Phase 2 ([04-TOT-2] / §C4.1): the always-on totality
-    // invariant. errors is empty here (we passed the gate above), so any
-    // silent Type::Error surviving in the annotated result is a violation.
-    let totality_traces = totality_invariant_traces(&annotated_exprs);
-    if !totality_traces.is_empty() {
-        result.errors.push(totality_violation_error(&totality_traces));
-        return Err(result);
-    }
     // Surface library declared types in the returned type_env so downstream
     // passes (lower, effects, linearity) can resolve `(var libname)` calls
     // from new-code without a separate library lookup. New-code types take
@@ -1270,11 +1262,24 @@ fn check_ir_with_signature_context_inner(
             .or_insert_with(|| ty.clone());
     }
     log_sub("annotated_type_env_build", &mut sub_t);
-    Ok(CheckedProgram::from_parts_with_signature_context(
+    let checked = CheckedProgram::from_parts_with_signature_context(
         annotated_exprs,
         annotated_type_env,
         signature_context,
-    ))
+    );
+    // chelis#731 Phase 2 ([04-TOT-2] / §C4.1): the always-on totality
+    // invariant. errors is empty here (we passed the gate above), so any
+    // silent Type::Error surviving in the typed signature results is a
+    // violation (see `totality_invariant_traces` for why the signature table
+    // is the reliable surface).
+    let totality_traces = totality_invariant_traces(checked.signature_inference());
+    if !totality_traces.is_empty() {
+        result
+            .errors
+            .push(totality_violation_error(&totality_traces));
+        return Err(result);
+    }
+    Ok(checked)
 }
 
 pub fn check_typed_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, InferResult> {
@@ -1297,17 +1302,17 @@ fn check_typed_program_inner(exprs: &[deep::Expr]) -> Result<CheckedProgram, Inf
         if !result.errors.is_empty() {
             return Err(result);
         }
+        let checked = CheckedProgram::from_parts(annotated_exprs, annotated_type_env);
         // chelis#731 Phase 2 ([04-TOT-2] / §C4.1): the always-on totality
         // invariant (see `totality_invariant_traces`). errors is empty here.
-        let totality_traces = totality_invariant_traces(&annotated_exprs);
+        let totality_traces = totality_invariant_traces(checked.signature_inference());
         if !totality_traces.is_empty() {
-            result.errors.push(totality_violation_error(&totality_traces));
+            result
+                .errors
+                .push(totality_violation_error(&totality_traces));
             return Err(result);
         }
-        Ok(CheckedProgram::from_parts(
-            annotated_exprs,
-            annotated_type_env,
-        ))
+        Ok(checked)
     } else {
         Err(result)
     }
@@ -5130,25 +5135,27 @@ fn resolve_axis_pair_member(
     default: usize,
     list: &deep::List,
     errors: &mut Vec<CheckError>,
-) -> Result<usize, ()> {
+) -> Result<usize, Type> {
     // Issue #216: use the cast-aware extractor so `cast(N, int32)`-wrapped
     // axis literals trip the infer-time bounds check instead of slipping
     // through to host-runtime defense-in-depth.
+    // chelis#731 §C3: the out-of-bounds `Err` now carries the
+    // witness-`Type::Error` from `report`, so the caller propagates it.
     match axis_expr.and_then(extract_int_for_dim) {
         Some(raw) => match tensor_ty {
             Type::Tensor(dims, _) => match normalize_static_axis(dims.len(), raw) {
                 Some(axis) => Ok(axis),
-                None => {
-                    errors.push(CheckError::new(
+                None => Err(report(
+                    errors,
+                    CheckError::new(
                         CheckErrorKind::TypeMismatch,
                         with_macro_provenance(
                             &deep::Expr::List(list.clone(), zero_span()),
                             format!("{op} axis {raw} out of bounds for rank {}", dims.len()),
                         ),
                         vec![],
-                    ));
-                    Err(())
-                }
+                    ),
+                )),
             },
             // Non-tensor operand: keep a non-negative literal verbatim
             // and let the downstream shape checker surface the real
@@ -5171,36 +5178,38 @@ fn resolve_axis_pair_member(
 /// downstream shape checker surfaces any real mismatch. The negative
 /// normalization itself only needs the operand rank, which a
 /// `Type::Tensor` always carries.
+/// Resolve a builtin's axis argument. On the out-of-bounds failure path it
+/// reports a diagnostic and returns the witness-carrying `Type::Error` as the
+/// `Err` value (chelis#731 §C3), so the caller propagates it with a plain
+/// `return` rather than minting a fresh `Type::Error`.
 fn resolve_builtin_axis(
     op: &str,
     axis_expr: Option<&deep::Expr>,
     tensor_ty: &Type,
     list: &deep::List,
     errors: &mut Vec<CheckError>,
-) -> Option<usize> {
+) -> Result<usize, Type> {
     // Issue #216: cast-aware extractor; see `resolve_axis_pair_member`.
     let raw_axis = axis_expr.and_then(extract_int_for_dim);
     match (tensor_ty, raw_axis) {
         (Type::Tensor(dims, _), Some(raw)) => match normalize_static_axis(dims.len(), raw) {
-            Some(axis) => Some(axis),
-            None => {
-                errors.push(CheckError::new(
+            Some(axis) => Ok(axis),
+            None => Err(report(
+                errors,
+                CheckError::new(
                     CheckErrorKind::TypeMismatch,
                     with_macro_provenance(
                         &deep::Expr::List(list.clone(), zero_span()),
                         format!("{op} axis {raw} out of bounds for rank {}", dims.len()),
                     ),
                     vec![],
-                ));
-                None
-            }
+                ),
+            )),
         },
-        _ => Some(
-            raw_axis
-                .filter(|raw| *raw >= 0)
-                .map(|raw| raw as usize)
-                .unwrap_or(0),
-        ),
+        _ => Ok(raw_axis
+            .filter(|raw| *raw >= 0)
+            .map(|raw| raw as usize)
+            .unwrap_or(0)),
     }
 }
 
@@ -5681,7 +5690,7 @@ fn annotate_fn_children(
 ) -> (Vec<deep::Expr>, Type) {
     let kids = children(list);
     if kids.is_empty() {
-        return (vec![], Type::Error);
+        return (vec![], Type::Unit);
     }
 
     let fn_ty = infer_expr_in_scope(
@@ -5787,7 +5796,7 @@ fn annotate_fn_children(
             .clone()
             .or_else(|| declared_param_types.get(index).cloned().flatten())
             .or_else(|| param_types.get(index).cloned())
-            .unwrap_or(Type::Error);
+            .unwrap_or(Type::Unit);
         fn_env.bind(name.clone(), Scheme::mono(ty));
         // chelis#397/#469: a fresh parameter has no size provenance; clear any
         // entry inherited from an outer name it shadows (BLOCKER C).
@@ -7283,83 +7292,60 @@ fn type_expr_is_ir_concrete(expr: &deep::Expr) -> bool {
 /// the standing tripwire that verifies the claim -- it is a pushed internal
 /// error, never a panic (the checker is reachable-input territory).
 ///
-/// Detection mirrors the Phase 0 harness
-/// (`crates/chelis-cli/tests/issue_731_totality_invariant.rs`): the annotation
-/// pass stamps a `type:` entry on every `should_attach_type_metadata` node
-/// EXCEPT when the node's inferred type is `Type::Error` (the stamp is
-/// skipped), and `type_to_deep_expr` encodes `Type::Error` as `(t-var {} _)`.
-/// So in an empty-error result, a stamp-eligible node with a missing `type:`
-/// stamp or a `(t-var {} _)` stamp is exactly a silent `Type::Error` verdict.
-/// The `should_attach_type_metadata` eligibility function is called directly
-/// (not mirrored) so the two can never drift.
-fn totality_invariant_traces(annotated_exprs: &[deep::Expr]) -> Vec<String> {
-    fn is_error_stamp(expr: &deep::Expr) -> bool {
-        let deep::Expr::List(list, _) = expr else {
-            return false;
-        };
-        get_tag(list) == Some("t-var")
-            && matches!(
-                list.elements.get(2),
-                Some(deep::Expr::Atom(deep::Atom::Symbol(s), _)) if s == "_"
-            )
-    }
-    fn walk(expr: &deep::Expr, path: &str, check_stamp: bool, out: &mut Vec<String>) {
-        match expr {
-            deep::Expr::Atom(_, _) => {}
-            deep::Expr::Map(map, _) => {
-                for (key, value) in &map.entries {
-                    if key == "type" {
-                        continue;
-                    }
-                    walk(value, &format!("{path}.{key}"), check_stamp, out);
-                }
-            }
-            deep::Expr::MetaExpr(meta, _) => {
-                walk(&meta.expr, path, check_stamp, out);
-                for (key, value) in &meta.entries {
-                    if key == "type" {
-                        continue;
-                    }
-                    walk(value, &format!("{path}.{key}"), check_stamp, out);
-                }
-            }
-            deep::Expr::List(list, _) => {
-                let tag = get_tag(list);
-                if check_stamp
-                    && let (Some(tag), Some(deep::Expr::Map(meta, _))) =
-                        (tag, list.elements.get(1))
-                    && should_attach_type_metadata(tag)
-                {
-                    match meta.entries.iter().find(|(key, _)| key == "type") {
-                        None => out.push(format!(
-                            "{path}/{tag}: stamp-eligible node with no `type:` stamp \
-                             (a silent Type::Error verdict)"
-                        )),
-                        Some((_, value)) if is_error_stamp(value) => out.push(format!(
-                            "{path}/{tag}: `type:` stamp is `(t-var {{}} _)` (the \
-                             Type::Error encoding)"
-                        )),
-                        Some(_) => {}
-                    }
-                }
-                let label = tag.unwrap_or("<untagged>");
-                let child_check = tag != Some("params");
-                for (index, element) in list.elements.iter().enumerate() {
-                    walk(
-                        element,
-                        &format!("{path}/{label}[{index}]"),
-                        child_check,
-                        out,
-                    );
-                }
+/// Detection surface: the SIGNATURE-INFERENCE table, which carries resolved
+/// `Type` VALUES (not Deep `type:` encodings). This is the reliable typed
+/// surface for an always-on check: every function's `checked_signature`,
+/// `display_signature`, and per-parameter types are real `Type`s, so a silent
+/// `Type::Error` in any of them is unambiguous ([`type_carries_error`]).
+///
+/// Why NOT walk the annotated Deep tree (the Phase 0 harness's approach): the
+/// annotator RE-INFERS each node in a fresh scope and skips the `type:` stamp
+/// when that re-inference returns `Type::Error`. A node whose type depends on
+/// dataflow the annotation scope does not reproduce -- a synthesized
+/// pipe-stage lambda body whose parameter is pinned only by the piped input,
+/// a top-level declaration node which is not an expression at all -- is then
+/// UNSTAMPED even in a program that checks perfectly clean. "Missing stamp" is
+/// therefore not a reliable silent-`Type::Error` signal for arbitrary
+/// programs; it only holds on the harness's curated corpus, where it stays as
+/// the test-side approximation. The signature table has no such re-inference
+/// gap. With the §C3 witness token the whole guarantee is structural anyway
+/// (a `Type::Error` cannot be minted without a pushed diagnostic), so this
+/// always-on pass is the reliable-surface backstop that verifies the claim.
+fn totality_invariant_traces(sig: &SignatureInferenceMetadata) -> Vec<String> {
+    let mut out = Vec::new();
+    for (name, f) in &sig.functions {
+        if type_carries_error(&f.checked_signature) {
+            out.push(format!(
+                "function `{name}` checked_signature carries Type::Error"
+            ));
+        }
+        if type_carries_error(&f.display_signature) {
+            out.push(format!(
+                "function `{name}` display_signature carries Type::Error"
+            ));
+        }
+        for param in &f.params {
+            if type_carries_error(&param.checked_type) || type_carries_error(&param.display_type) {
+                out.push(format!(
+                    "function `{name}` parameter #{} carries Type::Error",
+                    param.index
+                ));
             }
         }
     }
-    let mut out = Vec::new();
-    for (index, expr) in annotated_exprs.iter().enumerate() {
-        walk(expr, &format!("top[{index}]"), true, &mut out);
-    }
     out
+}
+
+/// True if `ty` is, or structurally contains, a `Type::Error`.
+fn type_carries_error(ty: &Type) -> bool {
+    match ty {
+        Type::Error(_) => true,
+        Type::Fn(args, ret) => args.iter().any(type_carries_error) || type_carries_error(ret),
+        Type::Ref(inner) => type_carries_error(inner),
+        Type::Adt(_, args) => args.iter().any(type_carries_error),
+        Type::Tuple(elems) => elems.iter().any(type_carries_error),
+        Type::Prim(_) | Type::Tensor(_, _) | Type::Var(_) | Type::Unit => false,
+    }
 }
 
 /// Build the internal diagnostic for a totality-invariant violation
@@ -7448,6 +7434,31 @@ fn propagate_if_error<'a>(tys: impl IntoIterator<Item = &'a Type>) -> Option<Typ
 /// the builtin lane. The guard now pushes an `ArityMismatch` naming the
 /// builtin and the expected/found counts, so the malformed call is rejected
 /// with a diagnostic instead of exempted from checking.
+/// Span-free sibling of [`report_builtin_arity`] for the `check_*_signature`
+/// helpers, which receive `arg_tys`/`errors` but not the `(list)` node. Same
+/// chelis#731 §C3 role: a wrong-arity signature-checked builtin used to return
+/// a silent `Type::Error`; it now reports an `ArityMismatch`. `expected` is a
+/// prose description ("at least 2 arguments", "3 or 4 arguments") since these
+/// guards range over exact and minimum arities.
+fn report_builtin_arity_bare(
+    errors: &mut Vec<CheckError>,
+    builtin: &str,
+    expected: &str,
+    got: usize,
+) -> Type {
+    report(
+        errors,
+        CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            format!(
+                "builtin `{builtin}` expects {expected}, got {got} argument(s) \
+                 (chelis#731 [04-TOT-3])"
+            ),
+            vec![],
+        ),
+    )
+}
+
 fn report_builtin_arity(
     errors: &mut Vec<CheckError>,
     list: &deep::List,
@@ -8934,7 +8945,7 @@ fn infer_top_level(
             // inference gap that has already been surfaced upstream
             // and should not double-report the def-level diagnostic).
             let body_return_collapsed = match (&resolved_body, &resolved_decl) {
-                (Type::Error, decl) => !matches!(decl, Type::Error(_)),
+                (Type::Error(_), decl) => !matches!(decl, Type::Error(_)),
                 (Type::Fn(_, ret), Type::Fn(_, decl_ret))
                     if matches!(**ret, Type::Error(_)) && !matches!(**decl_ret, Type::Error(_)) =>
                 {
@@ -9053,7 +9064,7 @@ fn infer_expr(
     // annotate / clone / drop passes -- runs inside the grown segment and this
     // guard does not fire; it remains the safety net for input deeper than the
     // grown segment can hold (covered-or-rejected).
-    stack_guard!("infer_expr", expr, Type::Error);
+    stack_guard!("infer_expr", expr, vg.fresh_type());
 
     *total_nodes += 1;
 
@@ -9309,13 +9320,14 @@ fn infer_expr(
                             Type::Ref(inner) if matches!(inner.as_ref(), Type::Tensor(_, _)) => {
                                 *inner
                             }
-                            _ => {
-                                report(errors, CheckError::new(
+                            _ => report(
+                                errors,
+                                CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     format!("copy requires tensor input, got {resolved}"),
                                     vec!["Wrap only tensor values in copy".to_string()],
-                                ))
-                            }
+                                ),
+                            ),
                         }
                     } else {
                         malformed_form(list, "copy", "one wrapped expression", errors)
@@ -9337,9 +9349,10 @@ fn infer_expr(
                         let resolved = subst.apply(&inner_ty);
                         match resolved {
                             Type::Ref(_) => resolved,
-                            Type::Tensor(_, _) | Type::Adt(_, _) | Type::Tuple(_) | Type::Error(_) => {
-                                Type::Ref(Box::new(resolved))
-                            }
+                            Type::Tensor(_, _)
+                            | Type::Adt(_, _)
+                            | Type::Tuple(_)
+                            | Type::Error(_) => Type::Ref(Box::new(resolved)),
                             // Issue #256: when the borrow inner is still an
                             // unresolved type variable (e.g. the output of a
                             // polymorphic-return call whose dim variables
@@ -9373,13 +9386,16 @@ fn infer_expr(
                                 subst.record_deferred_borrow_var(tv);
                                 Type::Ref(Box::new(Type::Var(tv)))
                             }
-                            _ => {
-                                report(errors, CheckError::new(
+                            _ => report(
+                                errors,
+                                CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    format!("borrow requires tensor or tensor-carrying input, got {resolved}"),
+                                    format!(
+                                        "borrow requires tensor or tensor-carrying input, got {resolved}"
+                                    ),
                                     vec!["Use `&x` only with tensor values".to_string()],
-                                ))
-                            }
+                                ),
+                            ),
                         }
                     } else {
                         malformed_form(list, "borrow", "one wrapped expression", errors)
@@ -9404,15 +9420,18 @@ fn infer_expr(
                     // would exempt the whole subtree from checking (the
                     // chelis#709 class defect: the default must be to fail).
                     let named = tag.unwrap_or("<none>");
-                    report(errors, CheckError::new(
-                        CheckErrorKind::UnknownForm,
-                        format!(
-                            "unknown Deep tag `{named}` has no checker disposition \
+                    report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::UnknownForm,
+                            format!(
+                                "unknown Deep tag `{named}` has no checker disposition \
                              (not in the 62-tag closed vocabulary of \
                              spec/03-deep-syntax.md; chelis#731 [04-TOT-1])"
+                            ),
+                            vec![],
                         ),
-                        vec![],
-                    ))
+                    )
                 }
             }
         }
@@ -9673,7 +9692,7 @@ fn infer_atom(atom: &deep::Atom) -> Type {
         deep::Atom::Float(_) => Type::Prim(Prim::F32),
         deep::Atom::Bool(_) => Type::Prim(Prim::Bool),
         deep::Atom::Str(_) => Type::Prim(Prim::String),
-        deep::Atom::Symbol(_) | deep::Atom::Keyword(_) => Type::Error,
+        deep::Atom::Symbol(_) | deep::Atom::Keyword(_) => Type::Unit,
     }
 }
 
@@ -9852,7 +9871,7 @@ fn infer_lit(
                     )],
                 ));
             }
-            return Type::Error;
+            return vg.fresh_type();
         }
     }
 
@@ -9893,20 +9912,23 @@ fn infer_lit(
                 // form. Without this guard the bare-form path would
                 // silently default to int32 and wrap.
                 if i32::try_from(*n).is_err() {
-                    report(errors, CheckError::new(
-                        CheckErrorKind::TypeMismatch,
-                        format!(
-                            "literal {n} out of range for default int32; use the \
+                    report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::TypeMismatch,
+                            format!(
+                                "literal {n} out of range for default int32; use the \
                              `{n}i64` literal suffix or an explicit cast({n}, int64) \
                              (spec/04-type-system.md §5.3, §5.5)"
-                        ),
-                        vec![format!(
-                            "spec/04-type-system.md §5.3: integer literals default \
+                            ),
+                            vec![format!(
+                                "spec/04-type-system.md §5.3: integer literals default \
                              to int32; the lexer parses at i64 so out-of-range \
                              tokens can be diagnosed before the narrowing rather \
                              than wrapping silently"
-                        )],
-                    ))
+                            )],
+                        ),
+                    )
                 } else {
                     Type::Prim(Prim::Int32)
                 }
@@ -9934,7 +9956,7 @@ fn infer_app(
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
-        return Type::Error;
+        return malformed_form(list, "app", "a callee expression", errors);
     }
 
     // Check if func is a comparison op (for special return type handling)
@@ -10149,11 +10171,16 @@ fn infer_app(
             .iter()
             .all(|(field_name, _)| field_name.is_some())
     {
-        return report(errors, CheckError::new(
-            CheckErrorKind::TypeMismatch,
-            format!("{fname} is a record constructor and must use named fields: {fname} {{ ... }}"),
-            vec![],
-        ));
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!(
+                    "{fname} is a record constructor and must use named fields: {fname} {{ ... }}"
+                ),
+                vec![],
+            ),
+        );
     }
 
     let func_ty = {
@@ -10298,23 +10325,26 @@ fn infer_app(
                 // a rank-mixed literal. The dim slot `k` is a
                 // dimension variable, not a shape-vector variable;
                 // see spec/04-type-system.md §4.5.1.
-                return report(errors, CheckError::new(
-                    CheckErrorKind::DimensionMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
-                        format!(
-                            "list element rank mismatch: {} dims vs {} dims; \
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        with_macro_provenance(
+                            &deep::Expr::List(list.clone(), zero_span()),
+                            format!(
+                                "list element rank mismatch: {} dims vs {} dims; \
                              List[tensor[...]] requires rank-uniform elements \
                              (the dim slot is a dimension variable, not a \
                              shape-vector variable). Reshape or flatten \
                              elements to a common rank before listing \
                              (spec/04-type-system.md §4.5.1).",
-                            head_dims.len(),
-                            tail_dims.len(),
+                                head_dims.len(),
+                                tail_dims.len(),
+                            ),
                         ),
+                        vec![],
                     ),
-                    vec![],
-                ));
+                );
             }
             if let Err(te) = unify_tensor_prec(head_prec, &tail_prec, subst) {
                 return report(errors, te.into());
@@ -10663,14 +10693,17 @@ fn infer_app(
                                 vec![],
                             )
                         };
-                        return report(errors, CheckError::new(
-                            kind,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                message,
+                        return report(
+                            errors,
+                            CheckError::new(
+                                kind,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    message,
+                                ),
+                                hints,
                             ),
-                            hints,
-                        ));
+                        );
                     }
                 }
             }
@@ -10693,14 +10726,17 @@ fn infer_app(
                     match &resolved {
                         Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {}
                         _ => {
-                            return report(errors, CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("{} expects tensor input, got {}", fname, resolved),
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("{} expects tensor input, got {}", fname, resolved),
+                                    ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
+                            );
                         }
                     }
                     // WS-A8 / RT-3 F3: softmax is a transcendental row
@@ -10713,23 +10749,26 @@ fn infer_app(
                         && let Type::Tensor(_, TensorPrec::Concrete(p)) = &resolved
                         && !p.is_float()
                     {
-                        return report(errors, CheckError::new(
-                            CheckErrorKind::PrecisionMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!(
-                                    "softmax on operand precision `{}` is not admitted per \
+                        return report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::PrecisionMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!(
+                                        "softmax on operand precision `{}` is not admitted per \
                                      spec/04-type-system.md \u{00a7}5.4: transcendental \
                                      operations are restricted to f32, f64, bf16, f16 \
                                      (not integer)",
-                                    p.name()
+                                        p.name()
+                                    ),
                                 ),
-                            ),
-                            vec![format!(
-                                "spec/04-type-system.md \u{00a7}5.4: cast to a float \
+                                vec![format!(
+                                    "spec/04-type-system.md \u{00a7}5.4: cast to a float \
                                  precision before applying softmax."
-                            )],
-                        ));
+                                )],
+                            ),
+                        );
                     }
                 }
 
@@ -10738,14 +10777,17 @@ fn infer_app(
                     match &resolved {
                         Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {}
                         _ => {
-                            return report(errors, CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("{} expects int32 axis, got {}", fname, resolved),
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("{} expects int32 axis, got {}", fname, resolved),
+                                    ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
+                            );
                         }
                     }
                 }
@@ -10763,17 +10805,20 @@ fn infer_app(
                     && let Some(raw) = kids.get(2).and_then(extract_int_for_dim)
                     && normalize_static_axis(dims.len(), raw).is_none()
                 {
-                    return report(errors, CheckError::new(
-                        CheckErrorKind::DimensionMismatch,
-                        with_macro_provenance(
-                            &deep::Expr::List(list.clone(), zero_span()),
-                            format!(
-                                "softmax axis {raw} is out of bounds for rank {} tensor",
-                                dims.len()
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            with_macro_provenance(
+                                &deep::Expr::List(list.clone(), zero_span()),
+                                format!(
+                                    "softmax axis {raw} is out of bounds for rank {} tensor",
+                                    dims.len()
+                                ),
                             ),
+                            vec![],
                         ),
-                        vec![],
-                    ));
+                    );
                 }
             }
 
@@ -10785,31 +10830,37 @@ fn infer_app(
                     match &resolved {
                         Type::Tensor(_, prim) if prim.is_float() => {}
                         Type::Tensor(_, _) => {
-                            return report(errors, CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!(
-                                        "uniform_like expects a float tensor template, got {}",
-                                        resolved
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!(
+                                            "uniform_like expects a float tensor template, got {}",
+                                            resolved
+                                        ),
                                     ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
+                            );
                         }
                         Type::Var(_) | Type::Error(_) => {}
                         _ => {
-                            return report(errors, CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!(
-                                        "uniform_like expects tensor template input, got {}",
-                                        resolved
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!(
+                                            "uniform_like expects tensor template input, got {}",
+                                            resolved
+                                        ),
                                     ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
+                            );
                         }
                     }
                 }
@@ -10819,34 +10870,40 @@ fn infer_app(
                     match &resolved {
                         Type::Prim(Prim::F32) | Type::Var(_) | Type::Error(_) => {}
                         _ => {
-                            return report(errors, CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!(
-                                        "uniform_like expects f32 bounds for args 2-3, got {}",
-                                        resolved
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!(
+                                            "uniform_like expects f32 bounds for args 2-3, got {}",
+                                            resolved
+                                        ),
                                     ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
+                            );
                         }
                     }
 
                     if let Some(expr) = kids.get(index + 1)
                         && !is_static_numeric_bound(expr)
                     {
-                        return report(errors, CheckError::new(
-                            CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                "uniform_like currently requires literal low/high bounds \
+                        return report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    "uniform_like currently requires literal low/high bounds \
                                  (a numeric literal, optionally negated or cast to a float \
                                  type); a runtime-computed bound is not supported"
-                                    .to_string(),
+                                        .to_string(),
+                                ),
+                                vec![],
                             ),
-                            vec![],
-                        ));
+                        );
                     }
                 }
             }
@@ -10859,14 +10916,17 @@ fn infer_app(
                     match &resolved {
                         Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {}
                         _ => {
-                            return report(errors, CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("dropout expects tensor input, got {}", resolved),
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("dropout expects tensor input, got {}", resolved),
+                                    ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
+                            );
                         }
                     }
                 }
@@ -10876,14 +10936,17 @@ fn infer_app(
                     match &resolved {
                         Type::Prim(Prim::F32) | Type::Var(_) | Type::Error(_) => {}
                         _ => {
-                            return report(errors, CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("dropout expects f32 rate, got {}", resolved),
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("dropout expects f32 rate, got {}", resolved),
+                                    ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
+                            );
                         }
                     }
                 }
@@ -10898,34 +10961,40 @@ fn infer_app(
                         match &resolved {
                             Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {}
                             _ => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "conv2d expects tensor inputs for args 1-2, got {}",
-                                            resolved
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "conv2d expects tensor inputs for args 1-2, got {}",
+                                                resolved
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                     } else {
                         match &resolved {
                             Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {}
                             _ => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "conv2d expects int32 stride/padding, got {}",
-                                            resolved
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "conv2d expects int32 stride/padding, got {}",
+                                                resolved
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                     }
@@ -10938,11 +11007,11 @@ fn infer_app(
                 let lhs = arg_tys
                     .first()
                     .map(|ty| subst.apply(ty))
-                    .unwrap_or(Type::Error);
+                    .unwrap_or_else(|| vg.fresh_type());
                 let rhs = arg_tys
                     .get(1)
                     .map(|ty| subst.apply(ty))
-                    .unwrap_or(Type::Error);
+                    .unwrap_or_else(|| vg.fresh_type());
                 match (&lhs, &rhs) {
                     (Type::Prim(lhs_prec), Type::Prim(rhs_prec))
                         if lhs_prec.is_integer()
@@ -10961,17 +11030,20 @@ fn infer_app(
                         return lhs;
                     }
                     _ => {
-                        return report(errors, CheckError::new(
-                            CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!(
-                                    "{} requires matching integer arguments, got {} and {}",
-                                    fname, lhs, rhs
+                        return report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!(
+                                        "{} requires matching integer arguments, got {} and {}",
+                                        fname, lhs, rhs
+                                    ),
                                 ),
+                                vec![],
                             ),
-                            vec![],
-                        ));
+                        );
                     }
                 }
             }
@@ -10982,11 +11054,11 @@ fn infer_app(
                 let lhs = arg_tys
                     .first()
                     .map(|ty| subst.apply(ty))
-                    .unwrap_or(Type::Error);
+                    .unwrap_or_else(|| vg.fresh_type());
                 let rhs = arg_tys
                     .get(1)
                     .map(|ty| subst.apply(ty))
-                    .unwrap_or(Type::Error);
+                    .unwrap_or_else(|| vg.fresh_type());
                 let lhs_ok = matches!(&lhs, Type::Prim(prec) if prec.is_integer())
                     || matches!(&lhs, Type::Var(_) | Type::Error(_));
                 let rhs_ok = matches!(&rhs, Type::Prim(prec) if prec.is_integer())
@@ -10994,17 +11066,20 @@ fn infer_app(
                 if lhs_ok && rhs_ok {
                     return lhs;
                 }
-                return report(errors, CheckError::new(
-                    CheckErrorKind::TypeMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
-                        format!(
-                            "{} requires integer lhs and shift amount, got {} and {}",
-                            fname, lhs, rhs
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        with_macro_provenance(
+                            &deep::Expr::List(list.clone(), zero_span()),
+                            format!(
+                                "{} requires integer lhs and shift amount, got {} and {}",
+                                fname, lhs, rhs
+                            ),
                         ),
+                        vec![],
                     ),
-                    vec![],
-                ));
+                );
             }
 
             // chelis#778 follow-up: a shape-computed builtin override derives
@@ -11043,7 +11118,17 @@ fn infer_app(
                     .any(|ty| matches!(subst.apply(ty), Type::Error(_)))
             });
             if shape_override_operand_error {
-                result_ty = Type::Error;
+                // Cascade: a shape-computed builtin operand already typed as
+                // `Type::Error`; propagate its witness rather than mint a fresh
+                // error (chelis#731 §C3). The `.any(... Error ...)` guard above
+                // guarantees a witness is present, so the fallback is inert.
+                result_ty = arg_tys
+                    .iter()
+                    .find_map(|ty| match subst.apply(ty) {
+                        Type::Error(w) => Some(propagate(&w)),
+                        _ => None,
+                    })
+                    .unwrap_or(result_ty);
             } else if let Some(ref fname) = func_name {
                 match fname.as_str() {
                     "matmul" => {
@@ -11120,28 +11205,34 @@ fn infer_app(
                         | Type::Var(_)
                         | Type::Error(_) => {} // OK
                         Type::Tensor(_, prec) => {
-                            return report(errors, CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!(
-                                        "{} requires tensor[D, bool] arguments, got tensor[D, {}]",
-                                        fname,
-                                        prec.name()
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!(
+                                            "{} requires tensor[D, bool] arguments, got tensor[D, {}]",
+                                            fname,
+                                            prec.name()
+                                        ),
                                     ),
+                                    vec!["Logical ops only work on bool tensors".to_string()],
                                 ),
-                                vec!["Logical ops only work on bool tensors".to_string()],
-                            ));
+                            );
                         }
                         other => {
-                            return report(errors, CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("{} requires bool arguments, got {}", fname, other),
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("{} requires bool arguments, got {}", fname, other),
+                                    ),
+                                    vec!["Logical ops only work on bool values".to_string()],
                                 ),
-                                vec!["Logical ops only work on bool values".to_string()],
-                            ));
+                            );
                         }
                     }
                 }
@@ -11186,14 +11277,17 @@ fn infer_app(
                                     return Type::Var(vg.fresh_tvar());
                                 }
                                 other => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("fail expects string input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!("fail expects string input, got {other}"),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         }
@@ -11210,14 +11304,19 @@ fn infer_app(
                                     return Type::Prim(Prim::Int64);
                                 }
                                 other => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("string_len expects string input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "string_len expects string input, got {other}"
+                                                ),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         }
@@ -11227,16 +11326,19 @@ fn infer_app(
                             match subst.apply(arg_ty) {
                                 Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {}
                                 other => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "string_concat expects string arguments, got {other}"
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "string_concat expects string arguments, got {other}"
+                                                ),
                                             ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         }
@@ -11247,16 +11349,19 @@ fn infer_app(
                             match subst.apply(first_arg) {
                                 Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {}
                                 other => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "string_slice expects string input, got {other}"
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "string_slice expects string input, got {other}"
+                                                ),
                                             ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         }
@@ -11265,17 +11370,20 @@ fn infer_app(
                                 Type::Prim(precision) if precision.is_integer() => {}
                                 Type::Var(_) | Type::Error(_) => {}
                                 other => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "string_slice expects integer index arguments; arg {} was {other}",
-                                                index + 1
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "string_slice expects integer index arguments; arg {} was {other}",
+                                                    index + 1
+                                                ),
                                             ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         }
@@ -11286,17 +11394,20 @@ fn infer_app(
                             match subst.apply(arg_ty) {
                                 Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {}
                                 other => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "{} expects string arguments, got {other}",
-                                                fname
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "{} expects string arguments, got {other}",
+                                                    fname
+                                                ),
                                             ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         }
@@ -11309,16 +11420,19 @@ fn infer_app(
                                     return Type::Prim(Prim::String);
                                 }
                                 other => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "string_trim expects string input, got {other}"
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "string_trim expects string input, got {other}"
+                                                ),
                                             ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         }
@@ -11336,14 +11450,17 @@ fn infer_app(
                                     );
                                 }
                                 other => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("to_int expects string input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!("to_int expects string input, got {other}"),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         }
@@ -11358,14 +11475,19 @@ fn infer_app(
                                     );
                                 }
                                 other => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("to_float expects string input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "to_float expects string input, got {other}"
+                                                ),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         }
@@ -11377,14 +11499,17 @@ fn infer_app(
                                     return Type::Prim(Prim::Int32);
                                 }
                                 other => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("rank expects tensor input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!("rank expects tensor input, got {other}"),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         }
@@ -11395,14 +11520,17 @@ fn infer_app(
                                 Type::Tensor(dims, _) => Some(dims),
                                 Type::Var(_) | Type::Error(_) => None,
                                 other => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("shape expects tensor input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!("shape expects tensor input, got {other}"),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         } else {
@@ -11416,29 +11544,35 @@ fn infer_app(
                             && let Some(axis) = extract_int_for_dim(axis_expr)
                         {
                             if axis < 0 {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::DimensionMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("shape requires non-negative axis, got {axis}"),
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::DimensionMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("shape requires non-negative axis, got {axis}"),
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                             if let Some(dims) = input_dims.as_ref() {
                                 let axis = axis as usize;
                                 if axis >= dims.len() {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::DimensionMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "shape axis {axis} is out of bounds for rank {} tensor",
-                                                dims.len()
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::DimensionMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "shape axis {axis} is out of bounds for rank {} tensor",
+                                                    dims.len()
+                                                ),
                                             ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         }
@@ -11448,14 +11582,17 @@ fn infer_app(
                                     return Type::Prim(Prim::Int32);
                                 }
                                 other => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("shape expects int32 axis, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!("shape expects int32 axis, got {other}"),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         }
@@ -11467,14 +11604,17 @@ fn infer_app(
                                     return Type::Prim(Prim::Int64);
                                 }
                                 other => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("numel expects tensor input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!("numel expects tensor input, got {other}"),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         }
@@ -11484,15 +11624,18 @@ fn infer_app(
                             match type_for_readonly_check(first_arg, subst) {
                                 Type::Tensor(dims, precision) => {
                                     if !dims.is_empty() {
-                                        return report(errors, CheckError::new(
-                                            CheckErrorKind::TypeMismatch,
-                                            with_macro_provenance(
-                                                &deep::Expr::List(list.clone(), zero_span()),
-                                                "tensor_to_scalar expects a rank-0 tensor"
-                                                    .to_string(),
+                                        return report(
+                                            errors,
+                                            CheckError::new(
+                                                CheckErrorKind::TypeMismatch,
+                                                with_macro_provenance(
+                                                    &deep::Expr::List(list.clone(), zero_span()),
+                                                    "tensor_to_scalar expects a rank-0 tensor"
+                                                        .to_string(),
+                                                ),
+                                                vec![],
                                             ),
-                                            vec![],
-                                        ));
+                                        );
                                     }
                                     // tensor_to_scalar requires a fully
                                     // resolved precision. Polymorphic precision
@@ -11505,16 +11648,19 @@ fn infer_app(
                                 }
                                 Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "tensor_to_scalar expects tensor input, got {other}"
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "tensor_to_scalar expects tensor input, got {other}"
+                                                ),
                                             ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         }
@@ -11527,75 +11673,92 @@ fn infer_app(
                                 }
                                 Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "scalar_to_tensor expects scalar numeric/bool input, got {other}"
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "scalar_to_tensor expects scalar numeric/bool input, got {other}"
+                                                ),
                                             ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         }
                     }
                     "einsum" => {
                         if arg_tys.len() != 3 {
-                            return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                         }
                         let Some(equation) = kids.get(1).and_then(extract_string_literal) else {
-                            return report(errors, CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    "einsum expects a string equation as its first argument"
-                                        .to_string(),
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        "einsum expects a string equation as its first argument"
+                                            .to_string(),
+                                    ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
+                            );
                         };
                         if equation.contains("...") {
-                            return report(errors, CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    "einsum ellipsis support is deferred in 3h".to_string(),
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        "einsum ellipsis support is deferred in 3h".to_string(),
+                                    ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
+                            );
                         }
                         return result_ty;
                     }
                     "gather" => {
                         if arg_tys.len() != 3 {
-                            return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                         }
                         let tensor_ty = type_for_readonly_check(&arg_tys[0], subst);
                         let indices_ty = type_for_readonly_check(&arg_tys[1], subst);
-                        let Some(axis) =
-                            resolve_builtin_axis("gather", kids.get(3), &tensor_ty, list, errors)
-                        else {
-                            return Type::Error;
+                        let axis = match resolve_builtin_axis(
+                            "gather",
+                            kids.get(3),
+                            &tensor_ty,
+                            list,
+                            errors,
+                        ) {
+                            Ok(axis) => axis,
+                            Err(err) => return err,
                         };
                         match infer_gather_result_type(&tensor_ty, &indices_ty, axis) {
                             Ok(ty) => return ty,
                             Err(message) => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        message,
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            message,
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                     }
                     "where" => {
                         if arg_tys.len() != 3 {
-                            return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                         }
                         let cond_ty = type_for_readonly_check(&arg_tys[0], subst);
                         let then_ty = type_for_readonly_check(&arg_tys[1], subst);
@@ -11610,16 +11773,19 @@ fn infer_app(
                                     || cond_dims != then_dims
                                     || then_dims != else_dims
                                 {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "where expects cond/both branches to have matching tensor shapes and branch precision, got {cond_ty}, {then_ty}, and {else_ty}"
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "where expects cond/both branches to have matching tensor shapes and branch precision, got {cond_ty}, {then_ty}, and {else_ty}"
+                                                ),
                                             ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                                 return Type::Tensor(then_dims.clone(), then_prec.clone());
                             }
@@ -11630,32 +11796,36 @@ fn infer_app(
                             | (_, Type::Error(_), _)
                             | (_, _, Type::Error(_)) => return result_ty,
                             _ => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "where expects a bool tensor condition and matching tensor branches, got {cond_ty}, {then_ty}, and {else_ty}"
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "where expects a bool tensor condition and matching tensor branches, got {cond_ty}, {then_ty}, and {else_ty}"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                     }
                     "cumsum" => {
                         if arg_tys.len() != 2 {
-                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let cumsum_operand = type_for_readonly_check(&arg_tys[0], subst);
-                        let Some(_axis) = resolve_builtin_axis(
+                        let _axis = match resolve_builtin_axis(
                             "cumsum",
                             kids.get(2),
                             &cumsum_operand,
                             list,
                             errors,
-                        ) else {
-                            return Type::Error;
+                        ) {
+                            Ok(axis) => axis,
+                            Err(err) => return err,
                         };
                         match cumsum_operand {
                             Type::Tensor(dims, precision) => {
@@ -11663,20 +11833,23 @@ fn infer_app(
                             }
                             Type::Var(_) | Type::Error(_) => return result_ty,
                             other => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("cumsum expects tensor input, got {other}"),
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("cumsum expects tensor input, got {other}"),
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                     }
                     "diagonal" => {
                         if arg_tys.len() != 3 {
-                            return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                         }
                         let diagonal_operand = type_for_readonly_check(&arg_tys[0], subst);
                         let axis1 = match resolve_axis_pair_member(
@@ -11688,7 +11861,7 @@ fn infer_app(
                             errors,
                         ) {
                             Ok(axis) => axis,
-                            Err(()) => return Type::Error,
+                            Err(err) => return err,
                         };
                         let axis2 = match resolve_axis_pair_member(
                             "diagonal",
@@ -11699,25 +11872,28 @@ fn infer_app(
                             errors,
                         ) {
                             Ok(axis) => axis,
-                            Err(()) => return Type::Error,
+                            Err(err) => return err,
                         };
                         match infer_diagonal_result_type(&diagonal_operand, axis1, axis2) {
                             Ok(ty) => return ty,
                             Err(message) => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        message,
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            message,
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                     }
                     "trace" => {
                         if arg_tys.len() != 3 {
-                            return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                         }
                         let trace_operand = type_for_readonly_check(&arg_tys[0], subst);
                         let axis1 = match resolve_axis_pair_member(
@@ -11729,7 +11905,7 @@ fn infer_app(
                             errors,
                         ) {
                             Ok(axis) => axis,
-                            Err(()) => return Type::Error,
+                            Err(err) => return err,
                         };
                         let axis2 = match resolve_axis_pair_member(
                             "trace",
@@ -11740,25 +11916,28 @@ fn infer_app(
                             errors,
                         ) {
                             Ok(axis) => axis,
-                            Err(()) => return Type::Error,
+                            Err(err) => return err,
                         };
                         match infer_trace_result_type(&trace_operand, axis1, axis2) {
                             Ok(ty) => return ty,
                             Err(message) => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        message,
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            message,
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                     }
                     "clamp" => {
                         if arg_tys.len() != 3 {
-                            return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                         }
                         let input_ty = type_for_readonly_check(&arg_tys[0], subst);
                         let low_ty = type_for_readonly_check(&arg_tys[1], subst);
@@ -11778,16 +11957,19 @@ fn infer_app(
                                 {
                                     return input_ty;
                                 }
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "clamp expects tensor input plus scalar-tensor or matching-shape tensor bounds of the same precision, got {input_ty}, {low_ty}, and {high_ty}"
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "clamp expects tensor input plus scalar-tensor or matching-shape tensor bounds of the same precision, got {input_ty}, {low_ty}, and {high_ty}"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                             (Type::Var(_), _, _)
                             | (_, Type::Var(_), _)
@@ -11796,28 +11978,36 @@ fn infer_app(
                             | (_, Type::Error(_), _)
                             | (_, _, Type::Error(_)) => return result_ty,
                             _ => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "clamp expects tensor input and tensor bounds, got {input_ty}, {low_ty}, and {high_ty}"
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "clamp expects tensor input and tensor bounds, got {input_ty}, {low_ty}, and {high_ty}"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                     }
                     "sort" => {
                         if arg_tys.len() != 2 {
-                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let sort_operand = type_for_readonly_check(&arg_tys[0], subst);
-                        let Some(_axis) =
-                            resolve_builtin_axis("sort", kids.get(2), &sort_operand, list, errors)
-                        else {
-                            return Type::Error;
+                        let _axis = match resolve_builtin_axis(
+                            "sort",
+                            kids.get(2),
+                            &sort_operand,
+                            list,
+                            errors,
+                        ) {
+                            Ok(axis) => axis,
+                            Err(err) => return err,
                         };
                         match sort_operand {
                             Type::Tensor(dims, precision) => {
@@ -11828,41 +12018,53 @@ fn infer_app(
                             }
                             Type::Var(_) | Type::Error(_) => return result_ty,
                             other => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("sort expects tensor input, got {other}"),
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("sort expects tensor input, got {other}"),
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                     }
                     "scatter" => {
                         if arg_tys.len() != 5 {
-                            return report_builtin_arity(errors, list, &fname, 5, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 5, arg_tys.len());
                         }
                         let base_ty = subst.apply(&arg_tys[0]);
                         let indices_ty = subst.apply(&arg_tys[1]);
                         let updates_ty = subst.apply(&arg_tys[2]);
-                        let Some(axis) =
-                            resolve_builtin_axis("scatter", kids.get(4), &base_ty, list, errors)
-                        else {
-                            return Type::Error;
+                        let axis = match resolve_builtin_axis(
+                            "scatter",
+                            kids.get(4),
+                            &base_ty,
+                            list,
+                            errors,
+                        ) {
+                            Ok(axis) => axis,
+                            Err(err) => return err,
                         };
                         let mode = kids.get(5).and_then(extract_string_literal);
                         match mode.as_deref() {
                             Some("replace") | Some("add") => {}
                             _ => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        "scatter mode must be \"replace\" or \"add\"".to_string(),
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            "scatter mode must be \"replace\" or \"add\""
+                                                .to_string(),
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                         match infer_gather_result_type(&base_ty, &indices_ty, axis) {
@@ -11873,14 +12075,17 @@ fn infer_app(
                                 return base_ty;
                             }
                             Err(message) => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        message,
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            message,
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                     }
@@ -11891,19 +12096,20 @@ fn infer_app(
                         // (rejected via AdError::NotSupported); see
                         // spec/05-risc-primitives.md §3.5.
                         if arg_tys.len() != 4 {
-                            return report_builtin_arity(errors, list, &fname, 4, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 4, arg_tys.len());
                         }
                         let base_ty = subst.apply(&arg_tys[0]);
                         let indices_ty = subst.apply(&arg_tys[1]);
                         let updates_ty = subst.apply(&arg_tys[2]);
-                        let Some(axis) = resolve_builtin_axis(
+                        let axis = match resolve_builtin_axis(
                             "scatter_replace",
                             kids.get(4),
                             &base_ty,
                             list,
                             errors,
-                        ) else {
-                            return Type::Error;
+                        ) {
+                            Ok(axis) => axis,
+                            Err(err) => return err,
                         };
                         match infer_gather_result_type(&base_ty, &indices_ty, axis) {
                             Ok(expected_updates) => {
@@ -11913,14 +12119,17 @@ fn infer_app(
                                 return base_ty;
                             }
                             Err(message) => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        message,
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            message,
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                     }
@@ -11933,48 +12142,59 @@ fn infer_app(
                                 Type::Var(_) | Type::Error(_) => return Type::Prim(Prim::Int64),
                                 Type::Ref(inner) if matches!(&*inner, Type::Adt(name, _) if name == "List" || name == "Dict") =>
                                 {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "len auto-borrows its List/Dict argument, so an explicit `&` is not a \
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "len auto-borrows its List/Dict argument, so an explicit `&` is not a \
                                                  supported surface form: write `len(xs)`, not `len(&xs)` (got &{inner})"
+                                                ),
                                             ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                                 other => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("len expects List or Dict input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "len expects List or Dict input, got {other}"
+                                                ),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         }
                     }
                     "index" => {
                         if arg_tys.len() != 2 {
-                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let list_arg = subst.apply(&arg_tys[0]);
                         let index_arg = subst.apply(&arg_tys[1]);
                         if !matches!(index_arg, Type::Prim(prec) if prec.is_integer())
                             && !matches!(index_arg, Type::Var(_) | Type::Error(_))
                         {
-                            return report(errors, CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("index expects integer index, got {index_arg}"),
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("index expects integer index, got {index_arg}"),
+                                    ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
+                            );
                         }
                         match list_arg {
                             Type::Adt(name, mut args) if name == "List" && args.len() == 1 => {
@@ -11983,33 +12203,39 @@ fn infer_app(
                             Type::Var(_) | Type::Error(_) => return result_ty,
                             Type::Ref(inner) if matches!(&*inner, Type::Adt(name, _) if name == "List") =>
                             {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "index auto-borrows its List argument, so an explicit `&` is not a \
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "index auto-borrows its List argument, so an explicit `&` is not a \
                                              supported surface form: write `index(xs, i)`, not `index(&xs, i)` (got &{inner})"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                             other => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("index expects List input, got {other}"),
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("index expects List input, got {other}"),
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                     }
                     "append" => {
                         if arg_tys.len() != 2 {
-                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let list_arg = subst.apply(&arg_tys[0]);
                         let value_arg = subst.apply(&arg_tys[1]);
@@ -12022,20 +12248,23 @@ fn infer_app(
                             }
                             Type::Var(_) | Type::Error(_) => return result_ty,
                             other => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("append expects List input, got {other}"),
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("append expects List input, got {other}"),
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                     }
                     "concat" => {
                         if arg_tys.len() != 2 {
-                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let lhs = subst.apply(&arg_tys[0]);
                         let rhs = subst.apply(&arg_tys[1]);
@@ -12082,14 +12311,17 @@ fn infer_app(
                                 match tensor_concat_result_type(&lhs_args[0], raw_axis, list_info) {
                                     Ok(ty) => return ty,
                                     Err(message) => {
-                                        return report(errors, CheckError::new(
-                                            CheckErrorKind::TypeMismatch,
-                                            with_macro_provenance(
-                                                &deep::Expr::List(list.clone(), zero_span()),
-                                                message,
+                                        return report(
+                                            errors,
+                                            CheckError::new(
+                                                CheckErrorKind::TypeMismatch,
+                                                with_macro_provenance(
+                                                    &deep::Expr::List(list.clone(), zero_span()),
+                                                    message,
+                                                ),
+                                                vec![],
                                             ),
-                                            vec![],
-                                        ));
+                                        );
                                     }
                                 }
                             }
@@ -12114,22 +12346,25 @@ fn infer_app(
                                 return result_ty;
                             }
                             (lhs, rhs) => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "concat expects matching List inputs, got {lhs} and {rhs}"
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "concat expects matching List inputs, got {lhs} and {rhs}"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                     }
                     "split" => {
                         if arg_tys.len() != 3 {
-                            return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                         }
                         let tensor_ty = type_for_readonly_check(&arg_tys[0], subst);
                         let axis_ty = subst.apply(&arg_tys[1]);
@@ -12137,14 +12372,17 @@ fn infer_app(
                         if !matches!(axis_ty, Type::Prim(prec) if prec.is_integer())
                             && !matches!(axis_ty, Type::Var(_) | Type::Error(_))
                         {
-                            return report(errors, CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("split expects integer axis, got {axis_ty}"),
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("split expects integer axis, got {axis_ty}"),
+                                    ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
+                            );
                         }
                         match (tensor_ty, sizes_ty) {
                             (Type::Tensor(dims, precision), Type::Adt(name, args))
@@ -12153,14 +12391,17 @@ fn infer_app(
                                 if !matches!(&args[0], Type::Prim(prec) if prec.is_integer())
                                     && !matches!(&args[0], Type::Var(_) | Type::Error(_))
                                 {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            "split expects List[int] sizes".to_string(),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                "split expects List[int] sizes".to_string(),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                                 // Negative axes index from the end.
                                 // Issue #216: cast-aware so a
@@ -12171,17 +12412,23 @@ fn infer_app(
                                     Some(raw) => match normalize_static_axis(dims.len(), raw) {
                                         Some(axis) => axis,
                                         None => {
-                                            return report(errors, CheckError::new(
-                                                CheckErrorKind::TypeMismatch,
-                                                with_macro_provenance(
-                                                    &deep::Expr::List(list.clone(), zero_span()),
-                                                    format!(
-                                                        "split axis {raw} out of bounds for rank {}",
-                                                        dims.len()
+                                            return report(
+                                                errors,
+                                                CheckError::new(
+                                                    CheckErrorKind::TypeMismatch,
+                                                    with_macro_provenance(
+                                                        &deep::Expr::List(
+                                                            list.clone(),
+                                                            zero_span(),
+                                                        ),
+                                                        format!(
+                                                            "split axis {raw} out of bounds for rank {}",
+                                                            dims.len()
+                                                        ),
                                                     ),
+                                                    vec![],
                                                 ),
-                                                vec![],
-                                            ));
+                                            );
                                         }
                                     },
                                     None => 0,
@@ -12200,22 +12447,25 @@ fn infer_app(
                                 return result_ty;
                             }
                             (tensor_ty, sizes_ty) => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "split expects tensor input and List[int] sizes, got {tensor_ty} and {sizes_ty}"
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "split expects tensor input and List[int] sizes, got {tensor_ty} and {sizes_ty}"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                     }
                     "take" | "drop" => {
                         if arg_tys.len() != 2 {
-                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let op_name = func_name.as_deref().unwrap_or("collection helper");
                         let list_arg = subst.apply(&arg_tys[0]);
@@ -12223,14 +12473,17 @@ fn infer_app(
                         if !matches!(count_arg, Type::Prim(prec) if prec.is_integer())
                             && !matches!(count_arg, Type::Var(_) | Type::Error(_))
                         {
-                            return report(errors, CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("{op_name} expects integer count, got {count_arg}"),
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("{op_name} expects integer count, got {count_arg}"),
+                                    ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
+                            );
                         }
                         match list_arg {
                             Type::Adt(name, args) if name == "List" && args.len() == 1 => {
@@ -12238,34 +12491,40 @@ fn infer_app(
                             }
                             Type::Var(_) | Type::Error(_) => return result_ty,
                             other => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("{op_name} expects List input, got {other}"),
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("{op_name} expects List input, got {other}"),
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                     }
                     "chunk" => {
                         if arg_tys.len() != 2 {
-                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let list_arg = subst.apply(&arg_tys[0]);
                         let count_arg = subst.apply(&arg_tys[1]);
                         if !matches!(count_arg, Type::Prim(prec) if prec.is_integer())
                             && !matches!(count_arg, Type::Var(_) | Type::Error(_))
                         {
-                            return report(errors, CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("chunk expects integer size, got {count_arg}"),
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("chunk expects integer size, got {count_arg}"),
+                                    ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
+                            );
                         }
                         match list_arg {
                             Type::Adt(name, args) if name == "List" && args.len() == 1 => {
@@ -12276,34 +12535,42 @@ fn infer_app(
                             }
                             Type::Var(_) | Type::Error(_) => return result_ty,
                             other => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("chunk expects List input, got {other}"),
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("chunk expects List input, got {other}"),
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                     }
                     "range" => {
                         if arg_tys.len() != 2 {
-                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         for arg_ty in &arg_tys {
                             match subst.apply(arg_ty) {
                                 Type::Prim(prec) if prec.is_integer() => {}
                                 Type::Var(_) | Type::Error(_) => {}
                                 other => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("range expects integer arguments, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "range expects integer arguments, got {other}"
+                                                ),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         }
@@ -12311,7 +12578,7 @@ fn infer_app(
                     }
                     "map" => {
                         if arg_tys.len() != 2 {
-                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let elem_ty = vg.fresh_type();
                         let out_ty = vg.fresh_type();
@@ -12333,7 +12600,7 @@ fn infer_app(
                     }
                     "filter" => {
                         if arg_tys.len() != 2 {
-                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let elem_ty = vg.fresh_type();
                         let list_expr = deep::Expr::List(list.clone(), zero_span());
@@ -12342,12 +12609,15 @@ fn infer_app(
                             &Type::Fn(vec![elem_ty.clone()], Box::new(Type::Prim(Prim::Bool))),
                             subst,
                         ) {
-                            return report(errors, collection_helper_type_error(
-                                &list_expr,
-                                "filter",
-                                "expects a callback that returns bool",
-                                te,
-                            ));
+                            return report(
+                                errors,
+                                collection_helper_type_error(
+                                    &list_expr,
+                                    "filter",
+                                    "expects a callback that returns bool",
+                                    te,
+                                ),
+                            );
                         }
                         if let Err(te) = unify(
                             &subst.apply(&arg_tys[1]),
@@ -12360,7 +12630,7 @@ fn infer_app(
                     }
                     "fold" => {
                         if arg_tys.len() != 3 {
-                            return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                         }
                         let acc_ty = vg.fresh_type();
                         let elem_ty = vg.fresh_type();
@@ -12373,20 +12643,26 @@ fn infer_app(
                             ),
                             subst,
                         ) {
-                            return report(errors, collection_helper_type_error(
-                                &list_expr,
-                                "fold",
-                                "expects a callback whose accumulator/result type matches the initial accumulator",
-                                te,
-                            ));
+                            return report(
+                                errors,
+                                collection_helper_type_error(
+                                    &list_expr,
+                                    "fold",
+                                    "expects a callback whose accumulator/result type matches the initial accumulator",
+                                    te,
+                                ),
+                            );
                         }
                         if let Err(te) = unify(&subst.apply(&arg_tys[1]), &acc_ty.clone(), subst) {
-                            return report(errors, collection_helper_type_error(
-                                &list_expr,
-                                "fold",
-                                "expects a callback whose accumulator/result type matches the initial accumulator",
-                                te,
-                            ));
+                            return report(
+                                errors,
+                                collection_helper_type_error(
+                                    &list_expr,
+                                    "fold",
+                                    "expects a callback whose accumulator/result type matches the initial accumulator",
+                                    te,
+                                ),
+                            );
                         }
                         if let Err(te) = unify(
                             &subst.apply(&arg_tys[2]),
@@ -12399,7 +12675,7 @@ fn infer_app(
                     }
                     "scan" => {
                         if arg_tys.len() != 3 {
-                            return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                         }
                         let acc_ty = vg.fresh_type();
                         let elem_ty = vg.fresh_type();
@@ -12412,20 +12688,26 @@ fn infer_app(
                             ),
                             subst,
                         ) {
-                            return report(errors, collection_helper_type_error(
-                                &list_expr,
-                                "scan",
-                                "expects a callback whose accumulator/result type matches the initial accumulator",
-                                te,
-                            ));
+                            return report(
+                                errors,
+                                collection_helper_type_error(
+                                    &list_expr,
+                                    "scan",
+                                    "expects a callback whose accumulator/result type matches the initial accumulator",
+                                    te,
+                                ),
+                            );
                         }
                         if let Err(te) = unify(&subst.apply(&arg_tys[1]), &acc_ty.clone(), subst) {
-                            return report(errors, collection_helper_type_error(
-                                &list_expr,
-                                "scan",
-                                "expects a callback whose accumulator/result type matches the initial accumulator",
-                                te,
-                            ));
+                            return report(
+                                errors,
+                                collection_helper_type_error(
+                                    &list_expr,
+                                    "scan",
+                                    "expects a callback whose accumulator/result type matches the initial accumulator",
+                                    te,
+                                ),
+                            );
                         }
                         if let Err(te) = unify(
                             &subst.apply(&arg_tys[2]),
@@ -12447,19 +12729,22 @@ fn infer_app(
                         // that at execution time. At type-check time we accept
                         // any Type::Prim and let unification do the rest.
                         if arg_tys.len() != 3 {
-                            return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                         }
                         let elem_ty = vg.fresh_type();
                         let int64 = Type::Prim(Prim::Int64);
                         let list_expr = deep::Expr::List(list.clone(), zero_span());
                         // arg 0: initial accumulator of type T.
                         if let Err(te) = unify(&subst.apply(&arg_tys[0]), &elem_ty.clone(), subst) {
-                            return report(errors, collection_helper_type_error(
-                                &list_expr,
-                                "tensor_scan",
-                                "expects an initial value whose type matches the callback element type",
-                                te,
-                            ));
+                            return report(
+                                errors,
+                                collection_helper_type_error(
+                                    &list_expr,
+                                    "tensor_scan",
+                                    "expects an initial value whose type matches the callback element type",
+                                    te,
+                                ),
+                            );
                         }
                         // arg 1: callback `(T, int64) -> T`.
                         if let Err(te) = unify(
@@ -12470,21 +12755,27 @@ fn infer_app(
                             ),
                             subst,
                         ) {
-                            return report(errors, collection_helper_type_error(
-                                &list_expr,
-                                "tensor_scan",
-                                "expects a callback (T, int64) -> T",
-                                te,
-                            ));
+                            return report(
+                                errors,
+                                collection_helper_type_error(
+                                    &list_expr,
+                                    "tensor_scan",
+                                    "expects a callback (T, int64) -> T",
+                                    te,
+                                ),
+                            );
                         }
                         // arg 2: length `n: int64`.
                         if let Err(te) = unify(&subst.apply(&arg_tys[2]), &int64, subst) {
-                            return report(errors, collection_helper_type_error(
-                                &list_expr,
-                                "tensor_scan",
-                                "expects a length `n: int64`",
-                                te,
-                            ));
+                            return report(
+                                errors,
+                                collection_helper_type_error(
+                                    &list_expr,
+                                    "tensor_scan",
+                                    "expects a length `n: int64`",
+                                    te,
+                                ),
+                            );
                         }
                         // Element type must be a concrete scalar Prim once
                         // unified. If it's still a Var the call site is
@@ -12504,23 +12795,26 @@ fn infer_app(
                                 TensorPrec::Var(*tv)
                             }
                             other => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &list_expr,
-                                        format!(
-                                            "tensor_scan element type must be a scalar primitive, got {other}"
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &list_expr,
+                                            format!(
+                                                "tensor_scan element type must be a scalar primitive, got {other}"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         };
                         return Type::Tensor(vec![Dim::Wildcard], precision);
                     }
                     "partition" => {
                         if arg_tys.len() != 2 {
-                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let elem_ty = vg.fresh_type();
                         let list_expr = deep::Expr::List(list.clone(), zero_span());
@@ -12529,12 +12823,15 @@ fn infer_app(
                             &Type::Fn(vec![elem_ty.clone()], Box::new(Type::Prim(Prim::Bool))),
                             subst,
                         ) {
-                            return report(errors, collection_helper_type_error(
-                                &list_expr,
-                                "partition",
-                                "expects a callback that returns bool",
-                                te,
-                            ));
+                            return report(
+                                errors,
+                                collection_helper_type_error(
+                                    &list_expr,
+                                    "partition",
+                                    "expects a callback that returns bool",
+                                    te,
+                                ),
+                            );
                         }
                         if let Err(te) = unify(
                             &subst.apply(&arg_tys[1]),
@@ -12548,7 +12845,7 @@ fn infer_app(
                     }
                     "flat_map" => {
                         if arg_tys.len() != 2 {
-                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let elem_ty = vg.fresh_type();
                         let out_elem_ty = vg.fresh_type();
@@ -12588,41 +12885,47 @@ fn infer_app(
                                         }
                                         Type::Var(_) | Type::Error(_) => return result_ty,
                                         other => {
-                                            return report(errors, CheckError::new(
-                                                CheckErrorKind::TypeMismatch,
-                                                with_macro_provenance(
-                                                    &deep::Expr::List(
-                                                        list.clone(),
-                                                        zero_span(),
+                                            return report(
+                                                errors,
+                                                CheckError::new(
+                                                    CheckErrorKind::TypeMismatch,
+                                                    with_macro_provenance(
+                                                        &deep::Expr::List(
+                                                            list.clone(),
+                                                            zero_span(),
+                                                        ),
+                                                        format!(
+                                                            "flatten expects List[List[T]] input, got List[{other}]"
+                                                        ),
                                                     ),
-                                                    format!(
-                                                        "flatten expects List[List[T]] input, got List[{other}]"
-                                                    ),
+                                                    vec![],
                                                 ),
-                                                vec![],
-                                            ));
+                                            );
                                         }
                                     }
                                 }
                                 Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "flatten expects List[List[T]] input, got {other}"
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "flatten expects List[List[T]] input, got {other}"
+                                                ),
                                             ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         }
                     }
                     "zip" => {
                         if arg_tys.len() != 2 {
-                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let lhs = subst.apply(&arg_tys[0]);
                         let rhs = subst.apply(&arg_tys[1]);
@@ -12648,14 +12951,17 @@ fn infer_app(
                                 return result_ty;
                             }
                             (lhs, rhs) => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("zip expects List inputs, got {lhs} and {rhs}"),
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("zip expects List inputs, got {lhs} and {rhs}"),
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                     }
@@ -12673,14 +12979,19 @@ fn infer_app(
                                 }
                                 Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("enumerate expects List input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "enumerate expects List input, got {other}"
+                                                ),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         }
@@ -12696,16 +13007,22 @@ fn infer_app(
                                                 | Type::Prim(Prim::String) => {}
                                                 Type::Var(_) | Type::Error(_) => return result_ty,
                                                 other => {
-                                                    return report(errors, CheckError::new(
-                                                        CheckErrorKind::TypeMismatch,
-                                                        with_macro_provenance(
-                                                            &deep::Expr::List(list.clone(), zero_span()),
-                                                            format!(
-                                                                "dict_of keys must be int64 or string, got {other}"
+                                                    return report(
+                                                        errors,
+                                                        CheckError::new(
+                                                            CheckErrorKind::TypeMismatch,
+                                                            with_macro_provenance(
+                                                                &deep::Expr::List(
+                                                                    list.clone(),
+                                                                    zero_span(),
+                                                                ),
+                                                                format!(
+                                                                    "dict_of keys must be int64 or string, got {other}"
+                                                                ),
                                                             ),
+                                                            vec![],
                                                         ),
-                                                        vec![],
-                                                    ));
+                                                    );
                                                 }
                                             }
                                             return Type::Adt(
@@ -12715,36 +13032,45 @@ fn infer_app(
                                         }
                                         Type::Var(_) | Type::Error(_) => return result_ty,
                                         other => {
-                                            return report(errors, CheckError::new(
-                                                CheckErrorKind::TypeMismatch,
-                                                with_macro_provenance(
-                                                    &deep::Expr::List(list.clone(), zero_span()),
-                                                    format!(
-                                                        "dict_of expects List[(K, V)] input, got List[{other}]"
+                                            return report(
+                                                errors,
+                                                CheckError::new(
+                                                    CheckErrorKind::TypeMismatch,
+                                                    with_macro_provenance(
+                                                        &deep::Expr::List(
+                                                            list.clone(),
+                                                            zero_span(),
+                                                        ),
+                                                        format!(
+                                                            "dict_of expects List[(K, V)] input, got List[{other}]"
+                                                        ),
                                                     ),
+                                                    vec![],
                                                 ),
-                                                vec![],
-                                            ));
+                                            );
                                         }
                                     }
                                 }
                                 Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("dict_of expects List input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!("dict_of expects List input, got {other}"),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         }
                     }
                     "dict_get" => {
                         if arg_tys.len() != 2 {
-                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
                             (Type::Adt(name, args), key_ty)
@@ -12765,20 +13091,25 @@ fn infer_app(
                                 return result_ty;
                             }
                             (dict_ty, key_ty) => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("dict_get expects Dict[K, V] and K, got {dict_ty} and {key_ty}"),
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "dict_get expects Dict[K, V] and K, got {dict_ty} and {key_ty}"
+                                            ),
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                     }
                     "dict_contains" => {
                         if arg_tys.len() != 2 {
-                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
                             (Type::Adt(name, args), key_ty)
@@ -12796,22 +13127,25 @@ fn infer_app(
                                 return result_ty;
                             }
                             (dict_ty, key_ty) => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "dict_contains expects Dict[K, V] and K, got {dict_ty} and {key_ty}"
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "dict_contains expects Dict[K, V] and K, got {dict_ty} and {key_ty}"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                     }
                     "dict_remove" => {
                         if arg_tys.len() != 2 {
-                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
                             (Type::Adt(name, args), key_ty)
@@ -12832,22 +13166,25 @@ fn infer_app(
                                 return result_ty;
                             }
                             (dict_ty, key_ty) => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "dict_remove expects Dict[K, V] and K, got {dict_ty} and {key_ty}"
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "dict_remove expects Dict[K, V] and K, got {dict_ty} and {key_ty}"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                     }
                     "dict_insert" => {
                         if arg_tys.len() != 3 {
-                            return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                         }
                         match (
                             subst.apply(&arg_tys[0]),
@@ -12877,22 +13214,25 @@ fn infer_app(
                                 return result_ty;
                             }
                             (dict_ty, key_ty, value_ty) => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "dict_insert expects Dict[K, V], K, and V, got {dict_ty}, {key_ty}, and {value_ty}"
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "dict_insert expects Dict[K, V], K, and V, got {dict_ty}, {key_ty}, and {value_ty}"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                     }
                     "dict_merge" => {
                         if arg_tys.len() != 2 {
-                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
                             (Type::Adt(lhs_name, lhs_args), Type::Adt(rhs_name, rhs_args))
@@ -12919,16 +13259,19 @@ fn infer_app(
                                 return result_ty;
                             }
                             (lhs_ty, rhs_ty) => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "dict_merge expects matching Dict inputs, got {lhs_ty} and {rhs_ty}"
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "dict_merge expects matching Dict inputs, got {lhs_ty} and {rhs_ty}"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                     }
@@ -12940,14 +13283,19 @@ fn infer_app(
                                 }
                                 Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("dict_keys expects Dict input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "dict_keys expects Dict input, got {other}"
+                                                ),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         }
@@ -12960,14 +13308,19 @@ fn infer_app(
                                 }
                                 Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("dict_values expects Dict input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "dict_values expects Dict input, got {other}"
+                                                ),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         }
@@ -12983,14 +13336,19 @@ fn infer_app(
                                 }
                                 Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("dict_entries expects Dict input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "dict_entries expects Dict input, got {other}"
+                                                ),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         }
@@ -13025,16 +13383,19 @@ fn infer_app(
                                         // Defensive: a bare scalar should never
                                         // hit this branch (the typer requires
                                         // a `List` head), but guard anyway.
-                                        return report(errors, CheckError::new(
-                                            CheckErrorKind::TypeMismatch,
-                                            with_macro_provenance(
-                                                &deep::Expr::List(list.clone(), zero_span()),
-                                                format!(
-                                                    "to_tensor expects List input, got {resolved}"
+                                        return report(
+                                            errors,
+                                            CheckError::new(
+                                                CheckErrorKind::TypeMismatch,
+                                                with_macro_provenance(
+                                                    &deep::Expr::List(list.clone(), zero_span()),
+                                                    format!(
+                                                        "to_tensor expects List input, got {resolved}"
+                                                    ),
                                                 ),
+                                                vec![],
                                             ),
-                                            vec![],
-                                        ));
+                                        );
                                     }
                                     // R2 HIGH-A: try the static-shape walker
                                     // on the actual argument expression
@@ -13053,26 +13414,34 @@ fn infer_app(
                                 }
                                 ToTensorPeel::Pending => return result_ty,
                                 ToTensorPeel::BadInner(inner) => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "to_tensor expects numeric or bool elements at the innermost level, got {inner}"
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "to_tensor expects numeric or bool elements at the innermost level, got {inner}"
+                                                ),
                                             ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                                 ToTensorPeel::NotList => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("to_tensor expects List input, got {resolved}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "to_tensor expects List input, got {resolved}"
+                                                ),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         }
@@ -13082,17 +13451,20 @@ fn infer_app(
                             match type_for_readonly_check(first_arg, subst) {
                                 Type::Tensor(dims, precision) => {
                                     if dims.len() != 1 {
-                                        return report(errors, CheckError::new(
-                                            CheckErrorKind::TypeMismatch,
-                                            with_macro_provenance(
-                                                &deep::Expr::List(list.clone(), zero_span()),
-                                                format!(
-                                                    "to_list expects a rank-1 tensor, got rank {} tensor",
-                                                    dims.len()
+                                        return report(
+                                            errors,
+                                            CheckError::new(
+                                                CheckErrorKind::TypeMismatch,
+                                                with_macro_provenance(
+                                                    &deep::Expr::List(list.clone(), zero_span()),
+                                                    format!(
+                                                        "to_list expects a rank-1 tensor, got rank {} tensor",
+                                                        dims.len()
+                                                    ),
                                                 ),
+                                                vec![],
                                             ),
-                                            vec![],
-                                        ));
+                                        );
                                     }
                                     // to_list requires a fully resolved
                                     // precision: a polymorphic precision must
@@ -13104,16 +13476,19 @@ fn infer_app(
                                         TensorPrec::Var(_) => return result_ty,
                                     };
                                     if !precision.is_numeric() && !matches!(precision, Prim::Bool) {
-                                        return report(errors, CheckError::new(
-                                            CheckErrorKind::TypeMismatch,
-                                            with_macro_provenance(
-                                                &deep::Expr::List(list.clone(), zero_span()),
-                                                format!(
-                                                    "to_list expects numeric or bool tensor input, got {precision:?}"
+                                        return report(
+                                            errors,
+                                            CheckError::new(
+                                                CheckErrorKind::TypeMismatch,
+                                                with_macro_provenance(
+                                                    &deep::Expr::List(list.clone(), zero_span()),
+                                                    format!(
+                                                        "to_list expects numeric or bool tensor input, got {precision:?}"
+                                                    ),
                                                 ),
+                                                vec![],
                                             ),
-                                            vec![],
-                                        ));
+                                        );
                                     }
                                     return Type::Adt(
                                         "List".to_string(),
@@ -13122,21 +13497,26 @@ fn infer_app(
                                 }
                                 Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    return report(errors, CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("to_list expects Tensor input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "to_list expects Tensor input, got {other}"
+                                                ),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
+                                    );
                                 }
                             }
                         }
                     }
                     "pad_sequences" => {
                         if arg_tys.len() != 2 {
-                            return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let seqs_ty = subst.apply(&arg_tys[0]);
                         let pad_ty = subst.apply(&arg_tys[1]);
@@ -13160,54 +13540,63 @@ fn infer_app(
                                             }
                                             Type::Var(_) | Type::Error(_) => return result_ty,
                                             other => {
-                                                return report(errors, CheckError::new(
-                                                    CheckErrorKind::TypeMismatch,
-                                                    with_macro_provenance(
-                                                        &deep::Expr::List(
-                                                            list.clone(),
-                                                            zero_span(),
+                                                return report(
+                                                    errors,
+                                                    CheckError::new(
+                                                        CheckErrorKind::TypeMismatch,
+                                                        with_macro_provenance(
+                                                            &deep::Expr::List(
+                                                                list.clone(),
+                                                                zero_span(),
+                                                            ),
+                                                            format!(
+                                                                "pad_sequences expects numeric nested lists, got {other}"
+                                                            ),
                                                         ),
-                                                        format!(
-                                                            "pad_sequences expects numeric nested lists, got {other}"
-                                                        ),
+                                                        vec![],
                                                     ),
-                                                    vec![],
-                                                ));
+                                                );
                                             }
                                         }
                                     }
                                     other => {
-                                        return report(errors, CheckError::new(
-                                            CheckErrorKind::TypeMismatch,
-                                            with_macro_provenance(
-                                                &deep::Expr::List(list.clone(), zero_span()),
-                                                format!(
-                                                    "pad_sequences expects List[List[T]], got List[{other}]"
+                                        return report(
+                                            errors,
+                                            CheckError::new(
+                                                CheckErrorKind::TypeMismatch,
+                                                with_macro_provenance(
+                                                    &deep::Expr::List(list.clone(), zero_span()),
+                                                    format!(
+                                                        "pad_sequences expects List[List[T]], got List[{other}]"
+                                                    ),
                                                 ),
+                                                vec![],
                                             ),
-                                            vec![],
-                                        ));
+                                        );
                                     }
                                 }
                             }
                             Type::Var(_) | Type::Error(_) => return result_ty,
                             other => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "pad_sequences expects List[List[T]] input, got {other}"
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "pad_sequences expects List[List[T]] input, got {other}"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                     }
                     "pad_sequences_to" => {
                         if arg_tys.len() != 3 {
-                            return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
+                            return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                         }
                         let seqs_ty = subst.apply(&arg_tys[0]);
                         let width_ty = subst.apply(&arg_tys[1]);
@@ -13249,48 +13638,57 @@ fn infer_app(
                                             }
                                             Type::Var(_) | Type::Error(_) => return result_ty,
                                             other => {
-                                                return report(errors, CheckError::new(
-                                                    CheckErrorKind::TypeMismatch,
-                                                    with_macro_provenance(
-                                                        &deep::Expr::List(
-                                                            list.clone(),
-                                                            zero_span(),
+                                                return report(
+                                                    errors,
+                                                    CheckError::new(
+                                                        CheckErrorKind::TypeMismatch,
+                                                        with_macro_provenance(
+                                                            &deep::Expr::List(
+                                                                list.clone(),
+                                                                zero_span(),
+                                                            ),
+                                                            format!(
+                                                                "pad_sequences_to expects numeric nested lists, got {other}"
+                                                            ),
                                                         ),
-                                                        format!(
-                                                            "pad_sequences_to expects numeric nested lists, got {other}"
-                                                        ),
+                                                        vec![],
                                                     ),
-                                                    vec![],
-                                                ));
+                                                );
                                             }
                                         }
                                     }
                                     other => {
-                                        return report(errors, CheckError::new(
-                                            CheckErrorKind::TypeMismatch,
-                                            with_macro_provenance(
-                                                &deep::Expr::List(list.clone(), zero_span()),
-                                                format!(
-                                                    "pad_sequences_to expects List[List[T]], got List[{other}]"
+                                        return report(
+                                            errors,
+                                            CheckError::new(
+                                                CheckErrorKind::TypeMismatch,
+                                                with_macro_provenance(
+                                                    &deep::Expr::List(list.clone(), zero_span()),
+                                                    format!(
+                                                        "pad_sequences_to expects List[List[T]], got List[{other}]"
+                                                    ),
                                                 ),
+                                                vec![],
                                             ),
-                                            vec![],
-                                        ));
+                                        );
                                     }
                                 }
                             }
                             Type::Var(_) | Type::Error(_) => return result_ty,
                             other => {
-                                return report(errors, CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "pad_sequences_to expects List[List[T]] input, got {other}"
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "pad_sequences_to expects List[List[T]] input, got {other}"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
+                                );
                             }
                         }
                     }
@@ -13600,16 +13998,19 @@ fn infer_reduction_app(
     total_nodes: &mut usize,
 ) -> Type {
     if fname == "argmax_reduce" || fname == "argmin_reduce" {
-        return report(errors, CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            format!(
-                "{fname} is an index-returning reduction and has no variadic \
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                format!(
+                    "{fname} is an index-returning reduction and has no variadic \
                  named-axis form: an index along one axis is not composable with a \
                  second reduction (spec/04-type-system.md \u{00a7}4.5.3). Reduce one \
                  axis at a time."
+                ),
+                vec![],
             ),
-            vec![],
-        ));
+        );
     }
 
     let kids = children(list);
@@ -13675,15 +14076,18 @@ fn infer_expand_app(
 ) -> Type {
     let kids = children(list);
     if kids.len() != 5 {
-        return report(errors, CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            format!(
-                "expand expects (tensor, axis, size) or the named-axis form \
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                format!(
+                    "expand expects (tensor, axis, size) or the named-axis form \
                  (tensor, name, size, anchor), got {} arguments",
-                kids.len() - 1
+                    kids.len() - 1
+                ),
+                vec![],
             ),
-            vec![],
-        ));
+        );
     }
 
     let _func_ty = infer_expr(
@@ -13727,12 +14131,14 @@ fn infer_expand_app(
     // check below (`check_named_expand_signature` reads the size from the raw
     // AST), rather than being silently accepted. Mirrors the generic-path
     // exemption in `infer_app`.
-    if arg_tys
-        .iter()
-        .enumerate()
-        .any(|(index, ty)| index != 2 && matches!(ty, Type::Error(_)))
-    {
-        return Type::Error;
+    if let Some(err) = propagate_if_error(
+        arg_tys
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != 2)
+            .map(|(_, ty)| ty),
+    ) {
+        return err;
     }
     // The size slot must still be an int32 (a literal, a symbolic dim, or a
     // runtime int32 expression — §4.7.2); a non-int size is a type error the
@@ -13741,14 +14147,17 @@ fn infer_expand_app(
     match size_ty {
         Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {}
         other => {
-            return report(errors, CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("expand expects an int32 size, got {other}"),
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("expand expects an int32 size, got {other}"),
+                    ),
+                    vec![],
                 ),
-                vec![],
-            ));
+            );
         }
     }
 
@@ -13794,11 +14203,14 @@ fn infer_permute_app(
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 {
-        return report(errors, CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            "permute expects a tensor followed by one or more axis indices".to_string(),
-            vec![],
-        ));
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                "permute expects a tensor followed by one or more axis indices".to_string(),
+                vec![],
+            ),
+        );
     }
 
     let _func_ty = infer_expr(
@@ -13837,8 +14249,8 @@ fn infer_permute_app(
         })
         .collect();
 
-    if matches!(input_ty, Type::Error(_)) || axis_tys.iter().any(|ty| matches!(ty, Type::Error(_))) {
-        return Type::Error;
+    if let Some(err) = propagate_if_error(std::iter::once(&input_ty).chain(axis_tys.iter())) {
+        return err;
     }
 
     for axis_ty in &axis_tys {
@@ -13846,14 +14258,17 @@ fn infer_permute_app(
         match resolved {
             Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {}
             other => {
-                return report(errors, CheckError::new(
-                    CheckErrorKind::TypeMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
-                        format!("permute expects int32 axis indices, got {other}"),
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        with_macro_provenance(
+                            &deep::Expr::List(list.clone(), zero_span()),
+                            format!("permute expects int32 axis indices, got {other}"),
+                        ),
+                        vec![],
                     ),
-                    vec![],
-                ));
+                );
             }
         }
     }
@@ -13863,11 +14278,14 @@ fn infer_permute_app(
         if matches!(input_ty, Type::Var(_) | Type::Error(_)) {
             return input_ty;
         }
-        return report(errors, CheckError::new(
-            CheckErrorKind::TypeMismatch,
-            format!("permute expects tensor input, got {input_ty}"),
-            vec![],
-        ));
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("permute expects tensor input, got {input_ty}"),
+                vec![],
+            ),
+        );
     };
 
     // Uses `extract_int_for_dim` so `cast(N, int32)`-wrapped literal
@@ -13884,38 +14302,47 @@ fn infer_permute_app(
     };
 
     if axes.len() != dims.len() {
-        return report(errors, CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            format!(
-                "permute expects {} axis indices for rank {} tensor, got {}",
-                dims.len(),
-                dims.len(),
-                axes.len()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                format!(
+                    "permute expects {} axis indices for rank {} tensor, got {}",
+                    dims.len(),
+                    dims.len(),
+                    axes.len()
+                ),
+                vec![],
             ),
-            vec![],
-        ));
+        );
     }
 
     let mut seen = HashSet::new();
     let mut reordered = Vec::with_capacity(dims.len());
     for axis in axes {
         if axis < 0 || axis as usize >= dims.len() {
-            return report(errors, CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                format!(
-                    "permute axis {axis} is out of bounds for rank {} tensor",
-                    dims.len()
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "permute axis {axis} is out of bounds for rank {} tensor",
+                        dims.len()
+                    ),
+                    vec![],
                 ),
-                vec![],
-            ));
+            );
         }
         let axis = axis as usize;
         if !seen.insert(axis) {
-            return report(errors, CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                format!("permute axis {axis} appears more than once"),
-                vec![],
-            ));
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!("permute axis {axis} appears more than once"),
+                    vec![],
+                ),
+            );
         }
         reordered.push(dims[axis].clone());
     }
@@ -13936,11 +14363,14 @@ fn infer_reshape_app(
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 || kids.len() > 3 {
-        return report(errors, CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            "reshape expects a tensor and an optional shape list".to_string(),
-            vec![],
-        ));
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                "reshape expects a tensor and an optional shape list".to_string(),
+                vec![],
+            ),
+        );
     }
 
     let _func_ty = infer_expr(
@@ -14032,13 +14462,14 @@ fn infer_reshape_app(
             }
             input_ty
         }
-        _ => {
-            report(errors, CheckError::new(
+        _ => report(
+            errors,
+            CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 "reshape expects tensor input".to_string(),
                 vec![],
-            ))
-        }
+            ),
+        ),
     }
 }
 
@@ -14106,25 +14537,28 @@ fn infer_shrink_app(
         total_nodes,
     );
 
-    if matches!(input_ty, Type::Error(_)) || matches!(bounds_ty, Type::Error(_)) {
-        return Type::Error;
+    if let Some(err) = propagate_if_error([&input_ty, &bounds_ty]) {
+        return err;
     }
 
     // The bounds argument must be a `List[List[Int32]]`.
     let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int32)]);
     let expected_bounds_ty = Type::Adt("List".to_string(), vec![int_list]);
     if let Err(_te) = unify(&bounds_ty, &expected_bounds_ty, subst) {
-        return report(errors, CheckError::new(
-            CheckErrorKind::TypeMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
-                format!(
-                    "shrink expects a list of [start, end] int32 bounds pairs, got {}",
-                    subst.apply(&bounds_ty)
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "shrink expects a list of [start, end] int32 bounds pairs, got {}",
+                        subst.apply(&bounds_ty)
+                    ),
                 ),
+                vec![],
             ),
-            vec![],
-        ));
+        );
     }
 
     let input_resolved = type_for_readonly_check(&input_ty, subst);
@@ -14132,14 +14566,17 @@ fn infer_shrink_app(
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error(_) => return subst.apply(&input_ty),
         other => {
-            return report(errors, CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("shrink expects tensor input, got {other}"),
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("shrink expects tensor input, got {other}"),
+                    ),
+                    vec![],
                 ),
-                vec![],
-            ));
+            );
         }
     };
 
@@ -14161,31 +14598,37 @@ fn infer_shrink_app(
             return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
         }
         PairListShape::Malformed { axis, reason } => {
-            return report(errors, CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("shrink axis {axis} pair {reason}"),
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("shrink axis {axis} pair {reason}"),
+                    ),
+                    vec![],
                 ),
-                vec![],
-            ));
+            );
         }
     };
 
     if bounds.len() != dims.len() {
-        return report(errors, CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
-                format!(
-                    "shrink expects {} bounds pairs for rank {} tensor, got {}",
-                    dims.len(),
-                    dims.len(),
-                    bounds.len()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "shrink expects {} bounds pairs for rank {} tensor, got {}",
+                        dims.len(),
+                        dims.len(),
+                        bounds.len()
+                    ),
                 ),
+                vec![],
             ),
-            vec![],
-        ));
+        );
     }
 
     let mut out_dims = Vec::with_capacity(dims.len());
@@ -14203,40 +14646,49 @@ fn infer_shrink_app(
             continue;
         };
         if *start < 0 || *end < 0 {
-            return report(errors, CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("shrink axis {axis} bound [{start}, {end}] has negative endpoint"),
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("shrink axis {axis} bound [{start}, {end}] has negative endpoint"),
+                    ),
+                    vec![],
                 ),
-                vec![],
-            ));
+            );
         }
         if *start >= *end {
-            return report(errors, CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!(
-                        "shrink axis {axis} bound [{start}, {end}] is empty or inverted (start >= end)"
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!(
+                            "shrink axis {axis} bound [{start}, {end}] is empty or inverted (start >= end)"
+                        ),
                     ),
+                    vec![],
                 ),
-                vec![],
-            ));
+            );
         }
         if let Dim::Lit(input_dim) = dim
             && *end > *input_dim
         {
-            return report(errors, CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!(
-                        "shrink axis {axis} bound [{start}, {end}] is out of range for input dim {input_dim}"
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!(
+                            "shrink axis {axis} bound [{start}, {end}] is out of range for input dim {input_dim}"
+                        ),
                     ),
+                    vec![],
                 ),
-                vec![],
-            ));
+            );
         }
         out_dims.push(Dim::Lit(end - start));
     }
@@ -14268,11 +14720,15 @@ fn infer_stride_app(
 ) -> Type {
     let kids = children(list);
     if kids.len() < 3 {
-        return report(errors, CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            "stride expects a tensor followed by one positive int32 stride per axis".to_string(),
-            vec![],
-        ));
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                "stride expects a tensor followed by one positive int32 stride per axis"
+                    .to_string(),
+                vec![],
+            ),
+        );
     }
 
     let _func_ty = infer_expr(
@@ -14311,8 +14767,8 @@ fn infer_stride_app(
         })
         .collect();
 
-    if matches!(input_ty, Type::Error(_)) || stride_tys.iter().any(|ty| matches!(ty, Type::Error(_))) {
-        return Type::Error;
+    if let Some(err) = propagate_if_error(std::iter::once(&input_ty).chain(stride_tys.iter())) {
+        return err;
     }
 
     for stride_ty in &stride_tys {
@@ -14320,14 +14776,17 @@ fn infer_stride_app(
         match resolved {
             Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {}
             other => {
-                return report(errors, CheckError::new(
-                    CheckErrorKind::TypeMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
-                        format!("stride expects int32 strides, got {other}"),
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        with_macro_provenance(
+                            &deep::Expr::List(list.clone(), zero_span()),
+                            format!("stride expects int32 strides, got {other}"),
+                        ),
+                        vec![],
                     ),
-                    vec![],
-                ));
+                );
             }
         }
     }
@@ -14337,14 +14796,17 @@ fn infer_stride_app(
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error(_) => return subst.apply(&input_ty),
         other => {
-            return report(errors, CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("stride expects tensor input, got {other}"),
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("stride expects tensor input, got {other}"),
+                    ),
+                    vec![],
                 ),
-                vec![],
-            ));
+            );
         }
     };
 
@@ -14359,19 +14821,22 @@ fn infer_stride_app(
     let strides: Vec<Option<i64>> = kids[2..].iter().map(extract_int_for_dim).collect();
 
     if strides.len() != dims.len() {
-        return report(errors, CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
-                format!(
-                    "stride expects {} strides for rank {} tensor, got {}",
-                    dims.len(),
-                    dims.len(),
-                    strides.len()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "stride expects {} strides for rank {} tensor, got {}",
+                        dims.len(),
+                        dims.len(),
+                        strides.len()
+                    ),
                 ),
+                vec![],
             ),
-            vec![],
-        ));
+        );
     }
 
     let mut out_dims = Vec::with_capacity(dims.len());
@@ -14382,16 +14847,19 @@ fn infer_stride_app(
             continue;
         };
         if *step <= 0 {
-            return report(errors, CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!(
-                        "stride axis {axis} step {step} must be positive (zero or negative strides are not allowed)"
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!(
+                            "stride axis {axis} step {step} must be positive (zero or negative strides are not allowed)"
+                        ),
                     ),
+                    vec![],
                 ),
-                vec![],
-            ));
+            );
         }
         let step_us = *step as usize;
         match dim {
@@ -14488,24 +14956,27 @@ fn infer_pad_app(
         total_nodes,
     );
 
-    if matches!(input_ty, Type::Error(_)) || matches!(padding_ty, Type::Error(_)) {
-        return Type::Error;
+    if let Some(err) = propagate_if_error([&input_ty, &padding_ty]) {
+        return err;
     }
 
     let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int32)]);
     let expected_padding_ty = Type::Adt("List".to_string(), vec![int_list]);
     if let Err(_te) = unify(&padding_ty, &expected_padding_ty, subst) {
-        return report(errors, CheckError::new(
-            CheckErrorKind::TypeMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
-                format!(
-                    "pad expects a list of [lo, hi] int32 padding pairs, got {}",
-                    subst.apply(&padding_ty)
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "pad expects a list of [lo, hi] int32 padding pairs, got {}",
+                        subst.apply(&padding_ty)
+                    ),
                 ),
+                vec![],
             ),
-            vec![],
-        ));
+        );
     }
 
     let input_resolved = type_for_readonly_check(&input_ty, subst);
@@ -14513,14 +14984,17 @@ fn infer_pad_app(
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error(_) => return subst.apply(&input_ty),
         other => {
-            return report(errors, CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("pad expects tensor input, got {other}"),
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("pad expects tensor input, got {other}"),
+                    ),
+                    vec![],
                 ),
-                vec![],
-            ));
+            );
         }
     };
 
@@ -14544,17 +15018,20 @@ fn infer_pad_app(
         }
     };
     if let Err(_te) = unify(&fill_ty, &expected_fill_ty, subst) {
-        return report(errors, CheckError::new(
-            CheckErrorKind::TypeMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
-                format!(
-                    "pad fill must be a scalar of the input tensor precision ({expected_fill_ty}), got {}",
-                    subst.apply(&fill_ty)
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "pad fill must be a scalar of the input tensor precision ({expected_fill_ty}), got {}",
+                        subst.apply(&fill_ty)
+                    ),
                 ),
+                vec![],
             ),
-            vec![],
-        ));
+        );
     }
 
     let padding: Vec<Option<(i64, i64)>> = match cons_chain_int_pairs(&kids[2]) {
@@ -14566,31 +15043,37 @@ fn infer_pad_app(
             return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
         }
         PairListShape::Malformed { axis, reason } => {
-            return report(errors, CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("pad axis {axis} pair {reason}"),
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("pad axis {axis} pair {reason}"),
+                    ),
+                    vec![],
                 ),
-                vec![],
-            ));
+            );
         }
     };
 
     if padding.len() != dims.len() {
-        return report(errors, CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
-                format!(
-                    "pad expects {} padding pairs for rank {} tensor, got {}",
-                    dims.len(),
-                    dims.len(),
-                    padding.len()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "pad expects {} padding pairs for rank {} tensor, got {}",
+                        dims.len(),
+                        dims.len(),
+                        padding.len()
+                    ),
                 ),
+                vec![],
             ),
-            vec![],
-        ));
+        );
     }
 
     let mut out_dims = Vec::with_capacity(dims.len());
@@ -14601,14 +15084,17 @@ fn infer_pad_app(
             continue;
         };
         if *lo < 0 || *hi < 0 {
-            return report(errors, CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("pad axis {axis} padding [{lo}, {hi}] has negative entry"),
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("pad axis {axis} padding [{lo}, {hi}] has negative entry"),
+                    ),
+                    vec![],
                 ),
-                vec![],
-            ));
+            );
         }
         match dim {
             Dim::Lit(input_dim) => {
@@ -14657,14 +15143,17 @@ fn infer_reduce_window_app(
 ) -> Type {
     let kids = children(list);
     if kids.len() != 4 {
-        return report(errors, CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            format!(
-                "{name} expects 3 arguments (tensor, window_shape, strides), got {}",
-                kids.len().saturating_sub(1)
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                format!(
+                    "{name} expects 3 arguments (tensor, window_shape, strides), got {}",
+                    kids.len().saturating_sub(1)
+                ),
+                vec![],
             ),
-            vec![],
-        ));
+        );
     }
     let _func_ty = infer_expr(
         &kids[0],
@@ -14707,39 +15196,42 @@ fn infer_reduce_window_app(
         total_nodes,
     );
 
-    if matches!(input_ty, Type::Error(_))
-        || matches!(window_ty, Type::Error(_))
-        || matches!(stride_ty, Type::Error(_))
-    {
-        return Type::Error;
+    if let Some(err) = propagate_if_error([&input_ty, &window_ty, &stride_ty]) {
+        return err;
     }
 
     let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int32)]);
     if let Err(_te) = unify(&window_ty, &int_list, subst) {
-        return report(errors, CheckError::new(
-            CheckErrorKind::TypeMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
-                format!(
-                    "{name} expects window_shape to be List[int32], got {}",
-                    subst.apply(&window_ty)
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "{name} expects window_shape to be List[int32], got {}",
+                        subst.apply(&window_ty)
+                    ),
                 ),
+                vec![],
             ),
-            vec![],
-        ));
+        );
     }
     if let Err(_te) = unify(&stride_ty, &int_list, subst) {
-        return report(errors, CheckError::new(
-            CheckErrorKind::TypeMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
-                format!(
-                    "{name} expects strides to be List[int32], got {}",
-                    subst.apply(&stride_ty)
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "{name} expects strides to be List[int32], got {}",
+                        subst.apply(&stride_ty)
+                    ),
                 ),
+                vec![],
             ),
-            vec![],
-        ));
+        );
     }
 
     let input_resolved = type_for_readonly_check(&input_ty, subst);
@@ -14747,14 +15239,17 @@ fn infer_reduce_window_app(
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error(_) => return subst.apply(&input_ty),
         other => {
-            return report(errors, CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("{name} expects tensor input, got {other}"),
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("{name} expects tensor input, got {other}"),
+                    ),
+                    vec![],
                 ),
-                vec![],
-            ));
+            );
         }
     };
 
@@ -14769,62 +15264,77 @@ fn infer_reduce_window_app(
     };
 
     if window_shape.is_empty() || strides.is_empty() {
-        return report(errors, CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
-                format!("{name} requires a non-empty window_shape and strides"),
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("{name} requires a non-empty window_shape and strides"),
+                ),
+                vec![],
             ),
-            vec![],
-        ));
+        );
     }
     if window_shape.len() != strides.len() {
-        return report(errors, CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
-                format!(
-                    "{name} window_shape (len {}) and strides (len {}) must agree",
-                    window_shape.len(),
-                    strides.len()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "{name} window_shape (len {}) and strides (len {}) must agree",
+                        window_shape.len(),
+                        strides.len()
+                    ),
                 ),
+                vec![],
             ),
-            vec![],
-        ));
+        );
     }
     let n = window_shape.len();
     if dims.len() < n {
-        return report(errors, CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
-                format!("{name} window arity {n} exceeds tensor rank {}", dims.len()),
-            ),
-            vec![],
-        ));
-    }
-    for (i, &w) in window_shape.iter().enumerate() {
-        if w <= 0 {
-            return report(errors, CheckError::new(
+        return report(
+            errors,
+            CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
-                    format!("{name} window_shape[{i}] = {w} must be >= 1"),
+                    format!("{name} window arity {n} exceeds tensor rank {}", dims.len()),
                 ),
                 vec![],
-            ));
+            ),
+        );
+    }
+    for (i, &w) in window_shape.iter().enumerate() {
+        if w <= 0 {
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("{name} window_shape[{i}] = {w} must be >= 1"),
+                    ),
+                    vec![],
+                ),
+            );
         }
     }
     for (i, &s) in strides.iter().enumerate() {
         if s <= 0 {
-            return report(errors, CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("{name} strides[{i}] = {s} must be >= 1"),
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("{name} strides[{i}] = {s} must be >= 1"),
+                    ),
+                    vec![],
                 ),
-                vec![],
-            ));
+            );
         }
     }
     let leading = dims.len() - n;
@@ -14837,17 +15347,20 @@ fn infer_reduce_window_app(
                 let w = window_shape[i];
                 let s = strides[i];
                 if *in_dim < w {
-                    return report(errors, CheckError::new(
-                        CheckErrorKind::DimensionMismatch,
-                        with_macro_provenance(
-                            &deep::Expr::List(list.clone(), zero_span()),
-                            format!(
-                                "{name} axis {} input dim {in_dim} < window_shape[{i}] = {w}",
-                                leading + i
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            with_macro_provenance(
+                                &deep::Expr::List(list.clone(), zero_span()),
+                                format!(
+                                    "{name} axis {} input dim {in_dim} < window_shape[{i}] = {w}",
+                                    leading + i
+                                ),
                             ),
+                            vec![],
                         ),
-                        vec![],
-                    ));
+                    );
                 }
                 // `in_dim >= w` (checked above) and `s >= 1` guarantee
                 // `out = floor((in_dim - w) / s) + 1 >= 1`, so the Valid
@@ -15399,7 +15912,7 @@ fn check_layer_norm_signature(
     errors: &mut Vec<CheckError>,
 ) -> Type {
     if arg_tys.len() != 3 {
-        return report_builtin_arity(errors, list, &fname, 3, arg_tys.len());
+        return report_builtin_arity_bare(errors, "layer_norm", "3 arguments", arg_tys.len());
     }
 
     let x_ty = type_for_readonly_check(&arg_tys[0], subst);
@@ -15410,11 +15923,14 @@ fn check_layer_norm_signature(
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            return report(errors, CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("layer_norm expects tensor input, got {other}"),
-                vec![],
-            ));
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("layer_norm expects tensor input, got {other}"),
+                    vec![],
+                ),
+            );
         }
     };
 
@@ -15422,11 +15938,14 @@ fn check_layer_norm_signature(
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            return report(errors, CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("layer_norm expects tensor gamma, got {other}"),
-                vec![],
-            ));
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("layer_norm expects tensor gamma, got {other}"),
+                    vec![],
+                ),
+            );
         }
     };
 
@@ -15434,52 +15953,67 @@ fn check_layer_norm_signature(
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            return report(errors, CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("layer_norm expects tensor beta, got {other}"),
-                vec![],
-            ));
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("layer_norm expects tensor beta, got {other}"),
+                    vec![],
+                ),
+            );
         }
     };
 
     if x_dims.is_empty() {
-        return report(errors, CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            "layer_norm expects rank >= 1 input tensor".to_string(),
-            vec![],
-        ));
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                "layer_norm expects rank >= 1 input tensor".to_string(),
+                vec![],
+            ),
+        );
     }
     if gamma_dims.len() != 1 {
-        return report(errors, CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            format!(
-                "layer_norm expects rank-1 gamma, got rank {}",
-                gamma_dims.len()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "layer_norm expects rank-1 gamma, got rank {}",
+                    gamma_dims.len()
+                ),
+                vec![],
             ),
-            vec![],
-        ));
+        );
     }
     if beta_dims.len() != 1 {
-        return report(errors, CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            format!(
-                "layer_norm expects rank-1 beta, got rank {}",
-                beta_dims.len()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "layer_norm expects rank-1 beta, got rank {}",
+                    beta_dims.len()
+                ),
+                vec![],
             ),
-            vec![],
-        ));
+        );
     }
     if x_prec != gamma_prec || x_prec != beta_prec {
-        return report(errors, CheckError::new(
-            CheckErrorKind::PrecisionMismatch,
-            format!(
-                "layer_norm requires matching precisions, got {}, {}, {}",
-                x_prec.name(),
-                gamma_prec.name(),
-                beta_prec.name()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "layer_norm requires matching precisions, got {}, {}, {}",
+                    x_prec.name(),
+                    gamma_prec.name(),
+                    beta_prec.name()
+                ),
+                vec!["Insert explicit cast".to_string()],
             ),
-            vec!["Insert explicit cast".to_string()],
-        ));
+        );
     }
 
     let hidden_dim = x_dims.last().cloned().expect("checked non-empty");
@@ -15564,7 +16098,7 @@ fn check_conv2d_signature(
     errors: &mut Vec<CheckError>,
 ) -> Type {
     if arg_tys.len() < 2 {
-        return Type::Error;
+        return report_builtin_arity_bare(errors, "conv2d", "at least 2 arguments", arg_tys.len());
     }
 
     let input_ty = type_for_readonly_check(&arg_tys[0], subst);
@@ -15574,55 +16108,70 @@ fn check_conv2d_signature(
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            return report(errors, CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("conv2d expects tensor input, got {other}"),
-                vec![],
-            ));
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("conv2d expects tensor input, got {other}"),
+                    vec![],
+                ),
+            );
         }
     };
     let (kernel_dims, kernel_prec) = match kernel_ty {
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            return report(errors, CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("conv2d expects tensor kernel, got {other}"),
-                vec![],
-            ));
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("conv2d expects tensor kernel, got {other}"),
+                    vec![],
+                ),
+            );
         }
     };
 
     if input_dims.len() != 4 {
-        return report(errors, CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            format!(
-                "conv2d expects rank-4 input tensor, got rank {}",
-                input_dims.len()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "conv2d expects rank-4 input tensor, got rank {}",
+                    input_dims.len()
+                ),
+                vec![],
             ),
-            vec![],
-        ));
+        );
     }
     if kernel_dims.len() != 4 {
-        return report(errors, CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            format!(
-                "conv2d expects rank-4 kernel tensor, got rank {}",
-                kernel_dims.len()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "conv2d expects rank-4 kernel tensor, got rank {}",
+                    kernel_dims.len()
+                ),
+                vec![],
             ),
-            vec![],
-        ));
+        );
     }
     if input_prec != kernel_prec {
-        return report(errors, CheckError::new(
-            CheckErrorKind::PrecisionMismatch,
-            format!(
-                "conv2d requires matching input/kernel precision, got {} and {}",
-                input_prec.name(),
-                kernel_prec.name()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "conv2d requires matching input/kernel precision, got {} and {}",
+                    input_prec.name(),
+                    kernel_prec.name()
+                ),
+                vec!["Insert explicit cast".to_string()],
             ),
-            vec!["Insert explicit cast".to_string()],
-        ));
+        );
     }
     if let Err(te) = unify_dim(&input_dims[1], &kernel_dims[1], subst) {
         return report(errors, te.into());
@@ -15660,22 +16209,28 @@ fn check_conv2d_signature(
     let resolved_output = subst.apply(&output_template);
     if let Type::Tensor(out_dims, out_prec) = &resolved_output {
         if out_dims.len() != 4 {
-            return report(errors, CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                format!("conv2d result must be rank 4, got rank {}", out_dims.len()),
-                vec![],
-            ));
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!("conv2d result must be rank 4, got rank {}", out_dims.len()),
+                    vec![],
+                ),
+            );
         }
         if *out_prec != input_prec {
-            return report(errors, CheckError::new(
-                CheckErrorKind::PrecisionMismatch,
-                format!(
-                    "conv2d result precision must match input/kernel precision {}, got {}",
-                    input_prec.name(),
-                    out_prec.name()
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::PrecisionMismatch,
+                    format!(
+                        "conv2d result precision must match input/kernel precision {}, got {}",
+                        input_prec.name(),
+                        out_prec.name()
+                    ),
+                    vec!["Insert explicit cast".to_string()],
                 ),
-                vec!["Insert explicit cast".to_string()],
-            ));
+            );
         }
         if let Err(te) = unify_dim(&out_dims[0], &input_dims[0], subst) {
             return report(errors, te.into());
@@ -15695,7 +16250,7 @@ fn check_matmul_signature(
     errors: &mut Vec<CheckError>,
 ) -> Type {
     if arg_tys.len() != 2 {
-        return report_builtin_arity(errors, list, &fname, 2, arg_tys.len());
+        return report_builtin_arity_bare(errors, "matmul", "2 arguments", arg_tys.len());
     }
 
     let lhs = type_for_readonly_check(&arg_tys[0], subst);
@@ -15705,35 +16260,44 @@ fn check_matmul_signature(
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            return report(errors, CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("matmul expects tensor lhs, got {other}"),
-                vec![],
-            ));
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("matmul expects tensor lhs, got {other}"),
+                    vec![],
+                ),
+            );
         }
     };
     let (rhs_dims, rhs_prec) = match rhs {
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            return report(errors, CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("matmul expects tensor rhs, got {other}"),
-                vec![],
-            ));
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("matmul expects tensor rhs, got {other}"),
+                    vec![],
+                ),
+            );
         }
     };
 
     if lhs_prec != rhs_prec {
-        return report(errors, CheckError::new(
-            CheckErrorKind::PrecisionMismatch,
-            format!(
-                "matmul requires matching precisions, got {} and {}",
-                lhs_prec.name(),
-                rhs_prec.name()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "matmul requires matching precisions, got {} and {}",
+                    lhs_prec.name(),
+                    rhs_prec.name()
+                ),
+                vec!["Insert explicit cast".to_string()],
             ),
-            vec!["Insert explicit cast".to_string()],
-        ));
+        );
     }
     // RT-2 fixup B6: per spec/04-type-system.md §5.7.2, the active
     // matmul signature does not admit integer operand precisions
@@ -15742,35 +16306,41 @@ fn check_matmul_signature(
     // here, not as a downstream IR-verify or codegen failure. The
     // verify-layer F1 guard remains as defense in depth.
     if lhs_prec.is_integer() {
-        return report(errors, CheckError::new(
-            CheckErrorKind::PrecisionMismatch,
-            format!(
-                "matmul on integer operand precision `{}` is not admitted in this \
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "matmul on integer operand precision `{}` is not admitted in this \
                  cycle per spec/04-type-system.md §5.7.2: integer matmul not admitted \
                  (the spec deliberately defers the integer-matmul accumulator rule; \
                  use reduce_sum over an explicit expand+mul lowering for integer \
                  inner products)",
-                lhs_prec.name()
-            ),
-            vec![format!(
-                "spec/04-type-system.md §5.7.2: there is no current backend that \
+                    lhs_prec.name()
+                ),
+                vec![format!(
+                    "spec/04-type-system.md §5.7.2: there is no current backend that \
                  supports integer BLAS, and an integer-matmul surface raises \
                  questions (saturating vs wrapping accumulator, signed-vs-unsigned \
                  interaction with §1.1.2) that are out of scope here. Integer \
                  reduce_sum is supported per §5.7.1."
-            )],
-        ));
+                )],
+            ),
+        );
     }
     if lhs_dims.len() < 2 || rhs_dims.len() < 2 {
-        return report(errors, CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            format!(
-                "matmul expects tensors of rank >= 2, got rank {} and {}",
-                lhs_dims.len(),
-                rhs_dims.len()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "matmul expects tensors of rank >= 2, got rank {} and {}",
+                    lhs_dims.len(),
+                    rhs_dims.len()
+                ),
+                vec![],
             ),
-            vec![],
-        ));
+        );
     }
     if let Err(te) = unify_dim(
         &lhs_dims[lhs_dims.len() - 1],
@@ -15830,7 +16400,7 @@ fn check_reduction_signature(
     errors: &mut Vec<CheckError>,
 ) -> Type {
     if arg_tys.len() < 2 {
-        return Type::Error;
+        return report_builtin_arity_bare(errors, name, "at least 2 arguments", arg_tys.len());
     }
 
     let input_ty = type_for_readonly_check(&arg_tys[0], subst);
@@ -15838,11 +16408,14 @@ fn check_reduction_signature(
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            return report(errors, CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("{name} expects tensor input, got {other}"),
-                vec![],
-            ));
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("{name} expects tensor input, got {other}"),
+                    vec![],
+                ),
+            );
         }
     };
 
@@ -15876,14 +16449,17 @@ fn check_reduction_signature(
         match normalize_static_axis(dims.len(), raw) {
             Some(axis) => remove.push(axis),
             None => {
-                return report(errors, CheckError::new(
-                    CheckErrorKind::DimensionMismatch,
-                    format!(
-                        "{name} axis {raw} is out of bounds for rank {} tensor",
-                        dims.len()
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "{name} axis {raw} is out of bounds for rank {} tensor",
+                            dims.len()
+                        ),
+                        vec![],
                     ),
-                    vec![],
-                ));
+                );
             }
         }
     } else {
@@ -15892,34 +16468,40 @@ fn check_reduction_signature(
             // operand is rank-spread (index meaningless at symbolic rank) or it
             // is mixed with other axes. Direct the user to name each axis.
             if extract_int_for_dim(ax).is_some() {
-                return report(errors, CheckError::new(
-                    CheckErrorKind::DimensionMismatch,
-                    format!(
-                        "{name}: a positional integer axis is only valid as the single axis of a \
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "{name}: a positional integer axis is only valid as the single axis of a \
                          concrete-rank operand; on a rank-spread operand or for multiple axes, \
                          name each axis (e.g. `{name}(x, seq)` or `{name}(x, seq, head)`) so it \
                          is located by name (spec/04-type-system.md \u{00a7}4.5.3)"
+                        ),
+                        vec![],
                     ),
-                    vec![],
-                ));
+                );
             }
             // Issue #259: a non-literal, non-name axis (a runtime `int32`
             // binding) cannot determine which dimension is removed; emit the
             // targeted compile-time-constant diagnostic rather than leaking an
             // unresolved output type downstream.
             let Some(axis_name) = symbolic_dim_ref_name(ax) else {
-                return report(errors, CheckError::new(
-                    CheckErrorKind::DimensionMismatch,
-                    format!(
-                        "{name} axis must be a compile-time constant or a named axis of the \
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "{name} axis must be a compile-time constant or a named axis of the \
                          operand, got {}",
-                        describe_axis_arg(Some(ax)),
-                    ),
-                    vec![format!(
-                        "Pass a literal axis (e.g. `{name}(x, 0)`) on a concrete-rank operand, or \
+                            describe_axis_arg(Some(ax)),
+                        ),
+                        vec![format!(
+                            "Pass a literal axis (e.g. `{name}(x, 0)`) on a concrete-rank operand, or \
                          name the axis (e.g. `{name}(x, seq)`) to reduce by name."
-                    )],
-                ));
+                        )],
+                    ),
+                );
             };
             let hits: Vec<usize> = dims
                 .iter()
@@ -15932,27 +16514,33 @@ fn check_reduction_signature(
                     // chelis#339: a duplicate axis name in the variadic list
                     // is a hard error, never a silent deduplication.
                     if remove.contains(i) {
-                        return report(errors, CheckError::new(
-                            CheckErrorKind::DimensionMismatch,
-                            format!(
-                                "{name}: duplicate reduction axis `{axis_name}`; each named \
+                        return report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::DimensionMismatch,
+                                format!(
+                                    "{name}: duplicate reduction axis `{axis_name}`; each named \
                                  axis may appear at most once in a variadic reduction \
                                  (spec/04-type-system.md \u{00a7}4.5.3)"
+                                ),
+                                vec![],
                             ),
-                            vec![],
-                        ));
+                        );
                     }
                     remove.push(*i);
                 }
                 [] if has_spread => {
-                    return report(errors, CheckError::new(
-                        CheckErrorKind::DimensionMismatch,
-                        format!(
-                            "{name}: rank-spread operand has no named `{axis_name}` axis to \
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            format!(
+                                "{name}: rank-spread operand has no named `{axis_name}` axis to \
                              reduce (spec/04-type-system.md \u{00a7}4.5.3)"
+                            ),
+                            vec![],
                         ),
-                        vec![],
-                    ));
+                    );
                 }
                 [] => {
                     // Concrete operand: `axis_name` is neither a literal nor a
@@ -15960,28 +16548,34 @@ fn check_reduction_signature(
                     // runtime `int32` binding (issue #259) and a mistyped/absent
                     // axis name — so the message stays neutral between them
                     // rather than asserting "runtime value".
-                    return report(errors, CheckError::new(
-                        CheckErrorKind::DimensionMismatch,
-                        format!(
-                            "{name} axis `{axis_name}` is neither a compile-time constant nor a \
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            format!(
+                                "{name} axis `{axis_name}` is neither a compile-time constant nor a \
                              named axis of the operand: a reduction axis must be a literal or \
                              `cast(N, int32)` constant, or the name of an existing axis"
-                        ),
-                        vec![format!(
-                            "Pass a literal axis (e.g. `{name}(x, 0)`) or `cast(N, int32)`, or \
+                            ),
+                            vec![format!(
+                                "Pass a literal axis (e.g. `{name}(x, 0)`) or `cast(N, int32)`, or \
                              name an existing axis of the operand (e.g. `{name}(x, seq)`)."
-                        )],
-                    ));
+                            )],
+                        ),
+                    );
                 }
                 _ => {
-                    return report(errors, CheckError::new(
-                        CheckErrorKind::DimensionMismatch,
-                        format!(
-                            "{name}: named axis `{axis_name}` is ambiguous; it appears more than \
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            format!(
+                                "{name}: named axis `{axis_name}` is ambiguous; it appears more than \
                              once in the operand shape"
+                            ),
+                            vec![],
                         ),
-                        vec![],
-                    ));
+                    );
                 }
             }
         }
@@ -16026,11 +16620,14 @@ fn check_reduction_signature(
             TensorPrec::Concrete(p) => match p.default_reduce_sum_result_precision() {
                 Ok(rp) => TensorPrec::Concrete(rp),
                 Err(msg) => {
-                    return report(errors, CheckError::new(
-                        CheckErrorKind::TypeMismatch,
-                        format!("sum: {msg}"),
-                        vec![],
-                    ));
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::TypeMismatch,
+                            format!("sum: {msg}"),
+                            vec![],
+                        ),
+                    );
                 }
             },
             TensorPrec::Var(_) => prec.clone(),
@@ -16049,26 +16646,29 @@ fn check_reduction_signature(
         if let Type::Tensor(_, declared_prec) = resolved_result
             && declared_prec != result_prec
         {
-            return report(errors, CheckError::new(
-                CheckErrorKind::PrecisionMismatch,
-                format!(
-                    "sum on operand precision `{}` produces result precision `{}` per \
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::PrecisionMismatch,
+                    format!(
+                        "sum on operand precision `{}` produces result precision `{}` per \
                      spec/04-type-system.md §5.7.1 (the §5.7.1 result-precision table \
                      widens narrow integer operands to int32 to prevent silent overflow); \
                      declared result precision `{}` is incompatible. Use `tensor[{}]` or \
                      omit the result type to accept the spec default.",
-                    prec.render(),
-                    result_prec.render(),
-                    declared_prec.render(),
-                    result_prec.render(),
-                ),
-                vec![format!(
-                    "spec/04-type-system.md §5.7.1: `reduce_sum` on `{}` operands \
+                        prec.render(),
+                        result_prec.render(),
+                        declared_prec.render(),
+                        result_prec.render(),
+                    ),
+                    vec![format!(
+                        "spec/04-type-system.md §5.7.1: `reduce_sum` on `{}` operands \
                      produces a `{}` result by default to prevent silent overflow",
-                    prec.render(),
-                    result_prec.render(),
-                )],
-            ));
+                        prec.render(),
+                        result_prec.render(),
+                    )],
+                ),
+            );
         }
     }
     let canonical = Type::Tensor(out_dims, result_prec);
@@ -16090,7 +16690,7 @@ fn check_expand_signature(
     errors: &mut Vec<CheckError>,
 ) -> Type {
     if arg_tys.len() != 3 && arg_tys.len() != 4 {
-        return Type::Error;
+        return report_builtin_arity_bare(errors, "expand", "3 or 4 arguments", arg_tys.len());
     }
 
     let input_ty = type_for_readonly_check(&arg_tys[0], subst);
@@ -16098,11 +16698,14 @@ fn check_expand_signature(
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            return report(errors, CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("expand expects tensor input, got {other}"),
-                vec![],
-            ));
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("expand expects tensor input, got {other}"),
+                    vec![],
+                ),
+            );
         }
     };
 
@@ -16135,29 +16738,35 @@ fn check_expand_signature(
     // From here on the call is the positional concrete-rank form. A fourth
     // (anchor) argument is only meaningful in the named-axis form.
     if arg_exprs.len() == 4 {
-        return report(errors, CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            "expand takes a fourth (anchor) argument only in the named-axis form \
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                "expand takes a fourth (anchor) argument only in the named-axis form \
              `expand(x, new, size, anchor)`, where `new` names the inserted axis \
              (spec/04-type-system.md \u{00a7}4.5.3)"
-                .to_string(),
-            vec![],
-        ));
+                    .to_string(),
+                vec![],
+            ),
+        );
     }
     // A positional index is meaningless at symbolic rank: against a spread
     // there is no fixed position to insert at. Mirror the reduction arm —
     // name the inserted axis instead.
     if has_spread {
-        return report(errors, CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            "expand: a positional integer axis is only valid on a concrete-rank \
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                "expand: a positional integer axis is only valid on a concrete-rank \
              operand; on a rank-spread operand, name the inserted axis (e.g. \
              `expand(x, one, 1)` for a trailing insert, or `expand(x, c, n, seq)` \
              to insert before the named `seq` anchor) so the insertion point stays \
              name-anchored (spec/04-type-system.md \u{00a7}4.5.3)"
-                .to_string(),
-            vec![],
-        ));
+                    .to_string(),
+                vec![],
+            ),
+        );
     }
 
     // Uses `extract_int_for_dim` so `cast(N, int32)`-wrapped literal
@@ -16167,11 +16776,14 @@ fn check_expand_signature(
     let axis = match arg_exprs.get(1).and_then(extract_int_for_dim) {
         Some(axis) if axis >= 0 => axis as usize,
         Some(axis) => {
-            return report(errors, CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                format!("expand requires non-negative axis, got {axis}"),
-                vec![],
-            ));
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!("expand requires non-negative axis, got {axis}"),
+                    vec![],
+                ),
+            );
         }
         // Issue #259: the input is a concrete tensor (past the
         // `Var | Error` guard above), so the output shape is determinable
@@ -16183,30 +16795,36 @@ fn check_expand_signature(
         // `borrow requires tensor or tensor-carrying input, got ?N`. Emit a
         // targeted diagnostic at the expand call site naming the root cause.
         None => {
-            return report(errors, CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                format!(
-                    "expand axis must be a compile-time constant for the output \
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "expand axis must be a compile-time constant for the output \
                      shape to be inferable, got {}",
-                    describe_axis_arg(arg_exprs.get(1)),
-                ),
-                vec![
-                    "Pass a literal axis (e.g. `expand(x, 0, n)`) or a `cast(N, int32)` \
+                        describe_axis_arg(arg_exprs.get(1)),
+                    ),
+                    vec![
+                        "Pass a literal axis (e.g. `expand(x, 0, n)`) or a `cast(N, int32)` \
                      literal. The axis selects where the new dimension is inserted, so \
                      it must be known at compile time."
-                        .to_string(),
-                ],
-            ));
+                            .to_string(),
+                    ],
+                ),
+            );
         }
     };
     let size = match arg_exprs.get(2).and_then(extract_int_for_dim) {
         Some(size) if size > 0 => Dim::Lit(size),
         Some(size) => {
-            return report(errors, CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                format!("expand requires positive size, got {size}"),
-                vec![],
-            ));
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!("expand requires positive size, got {size}"),
+                    vec![],
+                ),
+            );
         }
         // A non-literal runtime size. chelis#397/#469: discriminate by
         // PROVENANCE (computed by the caller as `size_class`), not by the
@@ -16243,64 +16861,79 @@ fn check_expand_signature(
     let canonical = match resolved_result {
         Type::Tensor(out_dims, out_prec) => {
             if out_prec != input_prec {
-                return report(errors, CheckError::new(
-                    CheckErrorKind::PrecisionMismatch,
-                    format!(
-                        "expand output precision {} does not match input precision {}",
-                        out_prec.name(),
-                        input_prec.name()
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::PrecisionMismatch,
+                        format!(
+                            "expand output precision {} does not match input precision {}",
+                            out_prec.name(),
+                            input_prec.name()
+                        ),
+                        vec![],
                     ),
-                    vec![],
-                ));
+                );
             }
             if out_dims.len() == input_dims.len() + 1 {
                 if axis > input_dims.len() {
-                    return report(errors, CheckError::new(
-                        CheckErrorKind::DimensionMismatch,
-                        format!(
-                            "expand insert axis {axis} is out of bounds for rank {} tensor",
-                            input_dims.len()
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            format!(
+                                "expand insert axis {axis} is out of bounds for rank {} tensor",
+                                input_dims.len()
+                            ),
+                            vec![],
                         ),
-                        vec![],
-                    ));
+                    );
                 }
                 let mut expected = input_dims.clone();
                 expected.insert(axis, size.clone());
                 Type::Tensor(expected, input_prec)
             } else if out_dims.len() == input_dims.len() {
                 if axis >= input_dims.len() {
-                    return report(errors, CheckError::new(
-                        CheckErrorKind::DimensionMismatch,
-                        format!(
-                            "expand axis {axis} is out of bounds for rank {} tensor",
-                            input_dims.len()
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            format!(
+                                "expand axis {axis} is out of bounds for rank {} tensor",
+                                input_dims.len()
+                            ),
+                            vec![],
                         ),
-                        vec![],
-                    ));
+                    );
                 }
                 let mut expected = input_dims.clone();
                 expected[axis] = size.clone();
                 Type::Tensor(expected, input_prec)
             } else {
-                return report(errors, CheckError::new(
-                    CheckErrorKind::DimensionMismatch,
-                    format!(
-                        "expand output rank {} must equal input rank {} or {}",
-                        out_dims.len(),
-                        input_dims.len(),
-                        input_dims.len() + 1
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "expand output rank {} must equal input rank {} or {}",
+                            out_dims.len(),
+                            input_dims.len(),
+                            input_dims.len() + 1
+                        ),
+                        vec![],
                     ),
-                    vec![],
-                ));
+                );
             }
         }
         Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            return report(errors, CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("expand expects tensor output, got {other}"),
-                vec![],
-            ));
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("expand expects tensor output, got {other}"),
+                    vec![],
+                ),
+            );
         }
     };
 
@@ -16336,16 +16969,19 @@ fn check_named_expand_signature(
         .iter()
         .any(|d| matches!(d, Dim::Name(n) if n == new_name))
     {
-        return report(errors, CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            format!(
-                "expand: inserted axis `{new_name}` already names an axis of the operand; \
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "expand: inserted axis `{new_name}` already names an axis of the operand; \
                  a duplicate dim name would make later by-name axis lookups ambiguous \
                  (spec/04-type-system.md \u{00a7}4.5.3). Pick a fresh name for the inserted \
                  axis."
+                ),
+                vec![],
             ),
-            vec![],
-        ));
+        );
     }
 
     // The named-insert size must be a positive compile-time literal (a bare
@@ -16356,24 +16992,30 @@ fn check_named_expand_signature(
     // checker rejects the form outright rather than letting a check-clean
     // program break downstream (chelis#339).
     let Some(size) = arg_exprs.get(2).and_then(extract_int_for_dim) else {
-        return report(errors, CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            format!(
-                "expand: the named-axis insert form requires a compile-time literal size \
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "expand: the named-axis insert form requires a compile-time literal size \
                  (a literal or `cast(N, int32)` constant), got {}; the inserted axis's \
                  extent must be stampable onto the new named dim at lowering \
                  (spec/04-type-system.md \u{00a7}4.5.3)",
-                describe_axis_arg(arg_exprs.get(2)),
+                    describe_axis_arg(arg_exprs.get(2)),
+                ),
+                vec![],
             ),
-            vec![],
-        ));
+        );
     };
     if size <= 0 {
-        return report(errors, CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            format!("expand requires positive size, got {size}"),
-            vec![],
-        ));
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!("expand requires positive size, got {size}"),
+                vec![],
+            ),
+        );
     }
 
     // Resolve the insertion point: before the unique named anchor (4-arg
@@ -16381,15 +17023,18 @@ fn check_named_expand_signature(
     let insert_at = match arg_exprs.get(3) {
         Some(anchor_expr) => {
             let Some(anchor) = symbolic_dim_ref_name(anchor_expr) else {
-                return report(errors, CheckError::new(
-                    CheckErrorKind::DimensionMismatch,
-                    format!(
-                        "expand anchor must name an existing axis of the operand, got {} \
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "expand anchor must name an existing axis of the operand, got {} \
                          (spec/04-type-system.md \u{00a7}4.5.3)",
-                        describe_axis_arg(arg_exprs.get(3)),
+                            describe_axis_arg(arg_exprs.get(3)),
+                        ),
+                        vec![],
                     ),
-                    vec![],
-                ));
+                );
             };
             let hits: Vec<usize> = input_dims
                 .iter()
@@ -16400,38 +17045,47 @@ fn check_named_expand_signature(
             match hits.as_slice() {
                 [i] => *i,
                 [] if has_spread => {
-                    return report(errors, CheckError::new(
-                        CheckErrorKind::DimensionMismatch,
-                        format!(
-                            "expand: rank-spread operand has no named `{anchor}` axis to \
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            format!(
+                                "expand: rank-spread operand has no named `{anchor}` axis to \
                              anchor the insertion; insertion strictly inside an opaque \
                              spread has no anchor and is rejected \
                              (spec/04-type-system.md \u{00a7}4.5.3)"
+                            ),
+                            vec![],
                         ),
-                        vec![],
-                    ));
+                    );
                 }
                 [] => {
-                    return report(errors, CheckError::new(
-                        CheckErrorKind::DimensionMismatch,
-                        format!(
-                            "expand anchor `{anchor}` is not a named axis of the operand: \
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            format!(
+                                "expand anchor `{anchor}` is not a named axis of the operand: \
                              the named-axis form inserts at the trailing end or immediately \
                              before an existing named anchor (spec/04-type-system.md \
                              \u{00a7}4.5.3)"
+                            ),
+                            vec![],
                         ),
-                        vec![],
-                    ));
+                    );
                 }
                 _ => {
-                    return report(errors, CheckError::new(
-                        CheckErrorKind::DimensionMismatch,
-                        format!(
-                            "expand: anchor `{anchor}` is ambiguous; it appears more than \
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            format!(
+                                "expand: anchor `{anchor}` is ambiguous; it appears more than \
                              once in the operand shape (spec/04-type-system.md \u{00a7}4.5.3)"
+                            ),
+                            vec![],
                         ),
-                        vec![],
-                    ));
+                    );
                 }
             }
         }
@@ -17247,7 +17901,7 @@ fn infer_fn(
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
-        return Type::Error;
+        return malformed_form(list, "fn", "parameters and a body", errors);
     }
 
     // kids[0] = (params {} x1 ... xn)
@@ -17289,7 +17943,7 @@ fn infer_fn(
     let body = if kids.len() > 1 {
         &kids[1]
     } else {
-        return Type::Error;
+        return malformed_form(list, "fn", "a body expression", errors);
     };
     let body_ty = infer_expr(
         body,
@@ -17366,7 +18020,7 @@ fn infer_def_body_with_sig(
 
     let kids = children(fn_list);
     if kids.len() < 2 {
-        return Type::Error;
+        return malformed_form(fn_list, "fn", "parameters and a body", errors);
     }
     let params = extract_params(&kids[0], vg, adt_reg);
     if params.len() != decl_args.len() {
@@ -17504,7 +18158,7 @@ fn infer_let(
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 {
-        return Type::Error;
+        return malformed_form(list, "let", "bindings and a body", errors);
     }
 
     // kids[0] = (bind {} x1 e1 x2 e2 ...)
@@ -17640,7 +18294,12 @@ fn infer_if(
 ) -> Type {
     let kids = children(list);
     if kids.len() < 3 {
-        return Type::Error;
+        return malformed_form(
+            list,
+            "if",
+            "a condition, a then-branch, and an else-branch",
+            errors,
+        );
     }
 
     let cond_ty = infer_expr(
@@ -17831,7 +18490,10 @@ fn infer_match(
         }
     }
 
-    result_ty.unwrap_or(Type::Error)
+    // A match with no arms is screened by the `(match {})` malformed guard
+    // upstream, so `result_ty` is `Some` for any well-formed match; the
+    // fallback is a fresh var (never a silent `Type::Error`, chelis#731 §C3).
+    result_ty.unwrap_or_else(|| vg.fresh_type())
 }
 
 /// True for arm patterns that match every value of the scrutinee:
@@ -18177,20 +18839,23 @@ fn pattern_bindings(
                                             }
                                         } else if !known_field_set.is_empty() {
                                             // Unknown field name — error
-                                            report(errors, CheckError::new(
-                                                CheckErrorKind::TypeMismatch,
-                                                format!(
-                                                    "unknown record field '{}' in pattern for {}",
-                                                    n, ctor_name
+                                            report(
+                                                errors,
+                                                CheckError::new(
+                                                    CheckErrorKind::TypeMismatch,
+                                                    format!(
+                                                        "unknown record field '{}' in pattern for {}",
+                                                        n, ctor_name
+                                                    ),
+                                                    vec![format!(
+                                                        "known fields: {:?}",
+                                                        declared_field_names
+                                                            .iter()
+                                                            .filter_map(|f| f.as_deref())
+                                                            .collect::<Vec<_>>()
+                                                    )],
                                                 ),
-                                                vec![format!(
-                                                    "known fields: {:?}",
-                                                    declared_field_names
-                                                        .iter()
-                                                        .filter_map(|f| f.as_deref())
-                                                        .collect::<Vec<_>>()
-                                                )],
-                                            ))
+                                            )
                                         } else {
                                             vg.fresh_type() // no ADT info available
                                         }
@@ -18409,12 +19074,21 @@ fn infer_pipe_stage_lambda(
     total_nodes: &mut usize,
 ) -> Type {
     let deep::Expr::List(list, _) = stage else {
-        return Type::Error;
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::MalformedForm,
+                "malformed pipe stage: expected a list-form stage node \
+                 (spec/03-deep-syntax.md; chelis#731 [04-TOT-3])"
+                    .to_string(),
+                vec![],
+            ),
+        );
     };
     let kids = children(list);
     let body = match kids.get(1) {
         Some(body) => body,
-        None => return Type::Error,
+        None => return malformed_form(list, "pipe stage", "a body", errors),
     };
 
     let mut fn_env = env.clone();
@@ -18541,15 +19215,18 @@ fn infer_tuple_get(
             // silently swallowed — both are undiagnosed `Type::Error`
             // under an empty error vector, the §04-TOT-2 hole this fix
             // otherwise closes (chelis#707, rt-707).
-            return report(errors, CheckError::new(
-                CheckErrorKind::TupleIndexOutOfBounds,
-                format!(
-                    "invalid tuple index: expected a non-negative integer \
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TupleIndexOutOfBounds,
+                    format!(
+                        "invalid tuple index: expected a non-negative integer \
                      literal, found {}",
-                    describe_tuple_index(&kids[1]),
+                        describe_tuple_index(&kids[1]),
+                    ),
+                    vec![],
                 ),
-                vec![],
-            ));
+            );
         }
     };
 
@@ -18558,18 +19235,21 @@ fn infer_tuple_get(
             if index < elems.len() {
                 elems[index].clone()
             } else {
-                report(errors, CheckError::new(
-                    CheckErrorKind::TupleIndexOutOfBounds,
-                    format!(
-                        "tuple index {} out of bounds for tuple of size {}",
-                        index,
-                        elems.len()
+                report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::TupleIndexOutOfBounds,
+                        format!(
+                            "tuple index {} out of bounds for tuple of size {}",
+                            index,
+                            elems.len()
+                        ),
+                        vec![],
                     ),
-                    vec![],
-                ))
+                )
             }
         }
-        Type::Error(_) => Type::Error,
+        Type::Error(w) => propagate(&w),
         // The target is not yet known to be a tuple — e.g. an
         // unannotated closure parameter (a `fold` accumulator)
         // constrained only structurally by its own projections. This
@@ -18582,13 +19262,14 @@ fn infer_tuple_get(
         // targets while the `Tuple` arm now carries the real element
         // type for concrete tuples.
         Type::Var(_) => vg.fresh_type(),
-        _ => {
-            report(errors, CheckError::new(
+        _ => report(
+            errors,
+            CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 format!("expected tuple type, got {resolved}"),
                 vec![],
-            ))
-        }
+            ),
+        ),
     }
 }
 
@@ -18663,11 +19344,14 @@ fn infer_record(
                 );
             }
         }
-        return report(errors, CheckError::new(
-            CheckErrorKind::TypeMismatch,
-            format!("unknown record constructor `{head}`"),
-            vec![format!("declare `type {head} = | {head} {{ ... }}`")],
-        ));
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("unknown record constructor `{head}`"),
+                vec![format!("declare `type {head} = | {head} {{ ... }}`")],
+            ),
+        );
     };
     // chelis#317: a registry-known but OUT-OF-SCOPE record constructor (a
     // type-only import constructing e.g. `AdamState { ... }`, whose ADT is in
@@ -18695,17 +19379,20 @@ fn infer_record(
                 );
             }
         }
-        return report(errors, CheckError::new(
-            CheckErrorKind::UnknownConstructor,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
-                format!("unknown constructor: {head}"),
-            ),
-            vec![format!(
-                "Constructor '{head}' is not in scope. Declare it locally or \
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::UnknownConstructor,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("unknown constructor: {head}"),
+                ),
+                vec![format!(
+                    "Constructor '{head}' is not in scope. Declare it locally or \
                  add it to an import (e.g. `import Mod ({head})`)"
-            )],
-        ));
+                )],
+            ),
+        );
     }
     // RFC D-CHECK: record construction of an out-of-module opaque
     // type is rejected; inference continues so the literal still
@@ -18732,7 +19419,7 @@ fn infer_record(
     // deftype registered last.
     let (instantiated_arg_types, instantiated_ret) = match adt_reg.lookup(adt_name) {
         Some(adt_def) => instantiate_variant_of(adt_def, variant, vg),
-        None => (Vec::new(), Type::Error),
+        None => (Vec::new(), vg.fresh_type()),
     };
 
     for kv_expr in kids.iter().skip(1) {
@@ -18939,18 +19626,21 @@ fn infer_access(
                 .iter()
                 .position(|(n, _)| n.as_deref() == Some(field_name));
             let Some(pos) = pos else {
-                return report(errors, CheckError::new(
-                    CheckErrorKind::TypeMismatch,
-                    format!("unknown record field '{field_name}' on {adt_name}"),
-                    vec![format!(
-                        "known fields: {:?}",
-                        variant
-                            .fields
-                            .iter()
-                            .filter_map(|(n, _)| n.as_deref())
-                            .collect::<Vec<_>>()
-                    )],
-                ));
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        format!("unknown record field '{field_name}' on {adt_name}"),
+                        vec![format!(
+                            "known fields: {:?}",
+                            variant
+                                .fields
+                                .iter()
+                                .filter_map(|(n, _)| n.as_deref())
+                                .collect::<Vec<_>>()
+                        )],
+                    ),
+                );
             };
             let field_types =
                 instantiated_field_types(adt_name, variant, &resolved, adt_reg, vg, subst);
@@ -19084,7 +19774,23 @@ fn infer_record_update(
                 errors,
             );
             let Some(variant) = single_record_variant(adt_reg, adt_name) else {
-                return Type::Error;
+                // chelis#755 sibling (record-update, chelis#731 Phase 2):
+                // functional record update on a multi-variant / positional
+                // ADT is not defined; this used to return a silent
+                // `Type::Error`. Reject it with a diagnostic like the field
+                // access path.
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        format!(
+                            "record update is only defined on a single-record-variant \
+                             type; `{adt_name}` is a multi-variant or positional-field \
+                             type (chelis#755)"
+                        ),
+                        vec![],
+                    ),
+                );
             };
             let field_types =
                 instantiated_field_types(adt_name, variant, &resolved, adt_reg, vg, subst);
@@ -19124,14 +19830,15 @@ fn infer_record_update(
             // The update returns the target's (still-unresolved) type.
             Type::Var(tv)
         }
-        Type::Error(_) => Type::Error,
-        other => {
-            report(errors, CheckError::new(
+        Type::Error(w) => propagate(&w),
+        other => report(
+            errors,
+            CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 format!("record-update requires a record-typed target, got {other}"),
                 vec![],
-            ))
-        }
+            ),
+        ),
     }
 }
 
@@ -19195,7 +19902,13 @@ fn infer_cast(
                 return match deep_type_to_resolved_type(&kids[1], vg, adt_reg, &mut HashMap::new())
                 {
                     Type::Prim(p) => Type::Prim(p),
-                    _ => Type::Error,
+                    // The out-of-module opaque cast-out was already reported by
+                    // `check_opaque_use` above; a non-primitive target here is a
+                    // secondary malformation. Yield a fresh var (not a silent
+                    // `Type::Error`) so the totality invariant holds and the
+                    // opaque violation stays the single reported diagnostic
+                    // (chelis#731 §C3).
+                    _ => vg.fresh_type(),
                 };
             }
         }
@@ -19216,21 +19929,45 @@ fn infer_cast(
     }
     let new_prec = match deep_type_to_resolved_type(&kids[1], vg, adt_reg, &mut HashMap::new()) {
         Type::Prim(p) => p,
-        _ => return Type::Error,
+        // chelis#756 (discovered-hole conversion, chelis#731 Phase 2): a cast
+        // target that does not resolve to a recognized primitive type used to
+        // fall through to a SILENT `Type::Error` (score 1.0 on
+        // `cast(1.0, madeup)`). The deep-type converter now yields a fresh var
+        // for the unparseable target, and this use site -- which has the error
+        // vector -- reports the rejection naming the offending target.
+        _ => {
+            let target = cast_target_prim_name(&kids[1]).unwrap_or("<non-primitive type>");
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::CastNonTensor,
+                    format!(
+                        "cast target `{target}` is not a recognized primitive type (chelis#756)"
+                    ),
+                    vec![
+                        "cast targets a scalar primitive: f32, f64, bf16, f16, bool, \
+                         int8, int16, int32, int64"
+                            .to_string(),
+                    ],
+                ),
+            );
+        }
     };
 
     match resolved {
         Type::Tensor(dims, _) => {
             if !new_prec.is_valid_tensor_precision() {
-                push_unsupported_precision_error(errors, new_prec, /* tensor = */ true);
-                return Type::Error;
+                return push_unsupported_precision_error(
+                    errors, new_prec, /* tensor = */ true,
+                );
             }
             Type::Tensor(dims, TensorPrec::Concrete(new_prec))
         }
         Type::Prim(_) => {
             if !new_prec.is_valid_scalar_cast_target() {
-                push_unsupported_precision_error(errors, new_prec, /* tensor = */ false);
-                return Type::Error;
+                return push_unsupported_precision_error(
+                    errors, new_prec, /* tensor = */ false,
+                );
             }
             Type::Prim(new_prec)
         }
@@ -19329,11 +20066,19 @@ fn unsigned_family_diagnostic(name: &str, tensor: bool) -> Option<CheckError> {
 /// (`spec/04-type-system.md` §1.1.1) gets a specific diagnostic citing the
 /// owning spec section so producers can resolve the deferral state without
 /// guessing.
-fn push_unsupported_precision_error(errors: &mut Vec<CheckError>, new_prec: Prim, tensor: bool) {
+/// chelis#731 Phase 2 (§C3): report an unsupported cast precision and return
+/// the witness-carrying `Type::Error`. Every caller does `return
+/// push_unsupported_precision_error(...)`, so the push and the error return
+/// are one expression.
+fn push_unsupported_precision_error(
+    errors: &mut Vec<CheckError>,
+    new_prec: Prim,
+    tensor: bool,
+) -> Type {
     let surface = if tensor { "tensor element" } else { "scalar" };
     let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
-    if matches!(new_prec, Prim::F8e4m3) {
-        errors.push(CheckError::new(
+    let err = if matches!(new_prec, Prim::F8e4m3) {
+        CheckError::new(
             CheckErrorKind::UnsupportedTensorPrecision,
             format!(
                 "cannot cast {surface} to `f8e4m3`: f8e4m3 is deferred per \
@@ -19345,9 +20090,9 @@ fn push_unsupported_precision_error(errors: &mut Vec<CheckError>, new_prec: Prim
                  {active_set} instead, or follow spec/04-type-system.md §1.1.1 \
                  for the deferral rationale"
             )],
-        ));
+        )
     } else {
-        errors.push(CheckError::new(
+        CheckError::new(
             CheckErrorKind::UnsupportedTensorPrecision,
             format!(
                 "cannot cast {surface} to unsupported precision `{}` \
@@ -19355,8 +20100,9 @@ fn push_unsupported_precision_error(errors: &mut Vec<CheckError>, new_prec: Prim
                 new_prec.name()
             ),
             vec![format!("Use a supported {surface} precision")],
-        ));
-    }
+        )
+    };
+    report(errors, err)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -19391,19 +20137,25 @@ fn infer_grad(
         Type::Fn(args, ret) => {
             let ret = *ret;
             if !grad_output_supported(&ret) {
-                return report(errors, CheckError::new(
-                    CheckErrorKind::Other,
-                    format!("grad requires a scalar floating output, got {}", ret),
-                    vec!["Reduce the function result to a scalar before applying grad".to_string()],
-                ));
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::Other,
+                        format!("grad requires a scalar floating output, got {}", ret),
+                        vec![
+                            "Reduce the function result to a scalar before applying grad"
+                                .to_string(),
+                        ],
+                    ),
+                );
             }
 
             match grad_result_type(list, &args, adt_reg, errors) {
                 Some(grad_ret) => Type::Fn(args, Box::new(grad_ret)),
-                None => Type::Error,
+                None => vg.fresh_type(),
             }
         }
-        Type::Error(_) => Type::Error,
+        Type::Error(w) => propagate(&w),
         _ => {
             // Can't determine function structure, return fresh var
             vg.fresh_type()
@@ -19595,11 +20347,14 @@ fn infer_vmap(
     // ints, so this is defense-in-depth for Deep-direct callers.
     let axis = kids.get(1).and_then(extract_int_for_dim).unwrap_or(0);
     if axis < 0 {
-        return report(errors, CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            format!("vmap axis must be non-negative, got {axis}"),
-            vec!["Use `vmap(f)` or `vmap(f, axis=n)` with n >= 0".to_string()],
-        ));
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!("vmap axis must be non-negative, got {axis}"),
+                vec!["Use `vmap(f)` or `vmap(f, axis=n)` with n >= 0".to_string()],
+            ),
+        );
     }
     let axis = axis as usize;
 
@@ -19626,25 +20381,27 @@ fn infer_vmap(
 
             match (args, ret) {
                 (Ok(args), Ok(ret)) => Type::Fn(args, Box::new(ret)),
-                (Err(message), _) | (_, Err(message)) => {
-                    report(errors, CheckError::new(
+                (Err(message), _) | (_, Err(message)) => report(
+                    errors,
+                    CheckError::new(
                         CheckErrorKind::DimensionMismatch,
                         message,
                         vec![
                             "Choose an axis that is in bounds for every vmapped tensor".to_string(),
                         ],
-                    ))
-                }
+                    ),
+                ),
             }
         }
-        Type::Error(_) => Type::Error,
-        other => {
-            report(errors, CheckError::new(
+        Type::Error(w) => propagate(&w),
+        other => report(
+            errors,
+            CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 format!("vmap expects a function, got {other}"),
                 vec!["Apply `vmap` to a named function or inline lambda".to_string()],
-            ))
-        }
+            ),
+        ),
     }
 }
 
@@ -19776,7 +20533,16 @@ fn deep_type_to_type_inner(
     dvar_map: &mut HashMap<String, DimVar>,
     rvar_map: &mut HashMap<String, RankVar>,
 ) -> Type {
-    stack_guard!("deep_type_to_type_inner", expr, Type::Error);
+    // chelis#731 Phase 2 / chelis#756: this converter has no error vector, so
+    // a malformed or unknown type expression can no longer produce a silent
+    // `Type::Error` (unconstructible outside the diagnostics module, §C3).
+    // The typed rule is a FRESH type variable -- "a type we could not parse,
+    // to be pinned by unification" -- the same explicit-typed-rule direction
+    // chelis#755 took for deferred field access. The USE sites that CAN report
+    // (e.g. `infer_cast`, which sees a non-primitive cast target) surface the
+    // rejection with a diagnostic; a fresh var is never `Type::Error`, so the
+    // §C4.1 totality invariant holds.
+    stack_guard!("deep_type_to_type_inner", expr, vg.fresh_type());
     match expr {
         deep::Expr::List(list, _) => {
             let tag = get_tag(list).unwrap_or("");
@@ -19786,9 +20552,9 @@ fn deep_type_to_type_inner(
                     if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
                         Prim::parse_name(name)
                             .map(Type::Prim)
-                            .unwrap_or(Type::Error)
+                            .unwrap_or_else(|| vg.fresh_type())
                     } else {
-                        Type::Error
+                        vg.fresh_type()
                     }
                 }
                 "t-var" => {
@@ -19802,12 +20568,12 @@ fn deep_type_to_type_inner(
                             Type::Var(tv)
                         }
                     } else {
-                        Type::Error
+                        vg.fresh_type()
                     }
                 }
                 "t-fn" => {
                     if kids.is_empty() {
-                        return Type::Error;
+                        return vg.fresh_type();
                     }
                     let args: Vec<Type> = kids[..kids.len() - 1]
                         .iter()
@@ -19824,7 +20590,7 @@ fn deep_type_to_type_inner(
                 }
                 "t-ref" => {
                     if kids.len() != 1 {
-                        return Type::Error;
+                        return vg.fresh_type();
                     }
                     Type::Ref(Box::new(deep_type_to_type_inner(
                         &kids[0], vg, tvar_map, dvar_map, rvar_map,
@@ -19832,7 +20598,7 @@ fn deep_type_to_type_inner(
                 }
                 "t-tensor" => {
                     if kids.is_empty() {
-                        return Type::Error;
+                        return vg.fresh_type();
                     }
                     let prec_expr = &kids[kids.len() - 1];
                     // WS-A5 (spec/04-type-system.md §5.8): the precision
@@ -19846,7 +20612,7 @@ fn deep_type_to_type_inner(
                     ) {
                         Type::Prim(p) => TensorPrec::Concrete(p),
                         Type::Var(v) => TensorPrec::Var(v),
-                        _ => return Type::Error,
+                        _ => return vg.fresh_type(),
                     };
                     let dims: Vec<Dim> = kids[..kids.len() - 1]
                         .iter()
@@ -19862,7 +20628,7 @@ fn deep_type_to_type_inner(
                             .collect();
                         Type::Adt(name.to_string(), args)
                     } else {
-                        Type::Error
+                        vg.fresh_type()
                     }
                 }
                 "t-tuple" => {
@@ -19873,10 +20639,10 @@ fn deep_type_to_type_inner(
                     Type::Tuple(elems)
                 }
                 "t-unit" => Type::Unit,
-                _ => Type::Error,
+                _ => vg.fresh_type(),
             }
         }
-        _ => Type::Error,
+        _ => vg.fresh_type(),
     }
 }
 

@@ -76,7 +76,8 @@ fn field_access_on_multi_variant_adt_is_rejected() {
         "multi-variant field access",
     );
     assert!(
-        msgs.iter().any(|m| m.contains("single-record-variant") && m.contains("755")),
+        msgs.iter()
+            .any(|m| m.contains("single-record-variant") && m.contains("755")),
         "expected the chelis#755 multi-variant diagnostic, got: {msgs:?}"
     );
 }
@@ -84,10 +85,7 @@ fn field_access_on_multi_variant_adt_is_rejected() {
 #[test]
 fn field_access_on_scalar_is_rejected() {
     // The second chelis#755 repro: `.field` on a scalar `f32`.
-    let msgs = reject_messages(
-        "def f(x: f32) -> f32 = x.field\n",
-        "scalar field access",
-    );
+    let msgs = reject_messages("def f(x: f32) -> f32 = x.field\n", "scalar field access");
     assert!(
         msgs.iter()
             .any(|m| m.contains("record value") && m.contains("755")),

@@ -59,7 +59,11 @@ fn diagnostic_count(program: &str) -> usize {
 fn corpus() -> Vec<(&'static str, String, usize)> {
     vec![
         // One root error in tail position: reported once.
-        ("single_error", format!("def f() -> f32 = {MASKED_ERROR}\n"), 1),
+        (
+            "single_error",
+            format!("def f() -> f32 = {MASKED_ERROR}\n"),
+            1,
+        ),
         // Cascade: the masked error is one root cause; the enclosing `add`
         // propagates it and must NOT add a second diagnostic.
         (
@@ -89,9 +93,7 @@ fn corpus() -> Vec<(&'static str, String, usize)> {
         // reported, no suppression across independent causes).
         (
             "two_independent_errors",
-            format!(
-                "def f() -> f32 = {MASKED_ERROR}\ndef g() -> f32 = {MASKED_ERROR}\n"
-            ),
+            format!("def f() -> f32 = {MASKED_ERROR}\ndef g() -> f32 = {MASKED_ERROR}\n"),
             2,
         ),
     ]
