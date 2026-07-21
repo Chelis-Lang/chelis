@@ -3667,7 +3667,7 @@ fn lower_host_expr_kind(
             // exhaustive `match` (no `_` arm), so a new kind is a compile
             // error here. An unrecognized kind (`None`) raises the same
             // fatal branded diagnostic as the IR-lane arm.
-            let Some(effect_kind) = chelis_types::EffectKind::from_symbol(&effect) else {
+            let Some(effect_kind) = chelis_types::EffectKind::from_symbol(effect) else {
                 let unsupported = chelis_types::unsupported::Unsupported::new(
                     chelis_types::unsupported::UnsupportedKind::EffectKind(if effect.is_empty() {
                         "<missing>".to_string()
