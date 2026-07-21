@@ -57,8 +57,10 @@ generated formatter ([#732]).
 
 `chelis-lint` lints Rust source and runs in the gate (the §8.6 rule
 proves the pattern). **Every incident closes with a lint rule when one
-is expressible.** In flight: `rust-no-wildcard-dispatch` ([#730] Phase 2),
-the `spec-provenance` family ([#733] Phase 1). The closing-move checklist
+is expressible.** In flight: `rust-no-wildcard-dispatch` ([#730] Phase 2).
+Repository-wide authority, freshness, and impact analysis instead use the
+Buoy-backed provenance adapter and gate ([#733] Phases 1-3), avoiding a
+second provenance engine inside `chelis-lint`. The closing-move checklist
 for any future incident: fix, test, THEN ask "what lint rule makes this
 unwritable?"
 

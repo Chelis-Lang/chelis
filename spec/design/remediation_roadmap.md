@@ -22,7 +22,7 @@ The plan set: [`dtype_semantics.md`](dtype_semantics.md) ([#729]), [`loud_unsupp
 | [#703] unsupported cases substitute values instead of failing | [`loud_unsupported.md`](loud_unsupported.md) - Result-typed failure channel, the 18-row census sweep, un-writability ratchets (lint, newtype, tripwire), gates demoted to UX | [#730] |
 | [#709] unrecognized constructs silently exempt from checking (+[#710]'s silent half) | [`checker_totality.md`](checker_totality.md) - loud wildcard + handle-effect case, ErrorWitness token (silent Type::Error unconstructible), totality invariant, DeepTag exhaustiveness | [#731] |
 | [#728] the observation channel is not dtype-faithful | [`faithful_observation.md`](faithful_observation.md) - one Rust formatter, generated C print helper, round-trip invariant, tolerance table; landable before [#729]; unblocks [#687] | [#732] |
-| spec silence + stale claims ([#694]; the unauthored cells) | [`spec_provenance.md`](spec_provenance.md) - re-scoped 2026-07-20 to OpenSpec-first (brittonr driving): the PR authority gate + `spec/**` signoff land as designed, atom IDs stay the citation grammar, and the hash/lint provenance machinery (xxhash revs, not SHA-256) is the growth target entered on a recorded trigger | [#733] |
+| spec silence + stale claims ([#694]; the unauthored cells) | [`spec_provenance.md`](spec_provenance.md) - OpenSpec plans changes while Buoy supplies repository-independent authority, freshness, coverage, and impact enforcement through a Chelis-owned adapter; adoption is advisory first and blocks only after the pinned Buoy and Chelis integration oracles are green | [#733] |
 
 Supporting: [`capability_table.md`](capability_table.md) (schema; rides [#729] Phase 4),
 [`docs/agent_quality_architecture.md`](../../docs/agent_quality_architecture.md) ([#740]), the seeded atoms
@@ -41,9 +41,10 @@ invariant + [#687] oracle lanes ([#729] P0, PR #758), the substitution
 census verification + token tripwire ([#730] P0, PR #746), the
 `Type::Error` census + red totality invariant ([#731] P0, PR #757 -
 `issue_731_totality_invariant.rs`), the round-trip harness + exit
-census ([#732] P0, PR #752). The one outstanding Wave 0 item is the PR
-spec gate + `spec/**` signoff ([#733] P0), unaffected by [#733]'s
-2026-07-20 OpenSpec-first re-scope. The two ordering handshakes
+census ([#732] P0, PR #752). The one outstanding Wave 0 item is
+lightweight PR review routing + `spec/**` signoff ([#733] P0). It makes
+no Buoy assurance claim and keeps
+provider metadata outside canonical authority. The two ordering handshakes
 (the `%.16g`/`%.1f` grep pattern landing in [#730] P0's tripwire; [#729]
 P0 and [#732] P0 sharing lane drivers) were honored and are now
 historical.
@@ -65,10 +66,10 @@ landed with Wave 1 (above); the remaining Wave 2 set is [#732] Phase 2
 (the generated C side: fixes [#716]/[#723] outright and gives the
 refactor its byte-exact instrument) in parallel with [#731] Phases 2-3 (the
 witness token + DeepTag) and [#730] Phase 2 (the lint ratchets). [#733]'s
-OpenSpec track rides alongside (per the 2026-07-20 re-scope): new
-normative text Waves 1-2 author is born with atom IDs and goes through
-the OpenSpec claim flow; the rev/lint machinery (the re-scoped Phase 1)
-stays deferred.
+Phase 1 advisory Buoy pilot may ride alongside: OpenSpec still plans new
+normative text, atom IDs remain stable, and the Chelis adapter reports
+malformed authorities and stale registrations without blocking existing
+Chelis commands.
 [#732] Phase 2 additionally gates the ECOSYSTEM's compiled-lane
 validation: no shell runs a compiled binary today, and [#754]'s
 cross-lane agreement gate (the mechanism [#738]'s conform row points
@@ -80,11 +81,12 @@ validated by everything Waves 0-2 built.
 
 **Wave 4 - the permanent guards.** [#729] Phase 4 delivers the capability
 table per [`capability_table.md`](capability_table.md); [#730] Phase 3 (gates become UX) and [#733]
-Phase 3 (citation PRESENCE - atom IDs on rows, not deferred by the
-re-scope) ship inside it; [#732] Phase 3 (tolerance table + the [#687]
-handshake) closes the oracle. [#733] Phase 2's coverage ratchet is
-growth-target work: it turns on only if/when the re-scope's trigger
-fires and the rev/lint tier is built.
+Phase 3 (the first blocking provenance ratchet) ships with it only after
+the advisory adapter and change-impact phases are green; [#732] Phase 3
+(the tolerance table + the [#687] handshake) closes the oracle. Citation
+presence may land before blocking freshness and coverage, but every
+selected capability row ultimately binds one current controlling atom
+revision.
 
 Standing exception: any Wave may be entered early for a cell that becomes
 urgent - the interlock sections make that safe; this ordering is advice,
@@ -107,13 +109,13 @@ plan set, [#719]'s fix precedes [#732] Phase 3's `sqrt = 0` tolerance
 row (SATISFIED 2026-07-17: PR #760 merged, [#719] closed - the row may
 be authored when Phase 3 arrives); downstream of the set, [#754]'s
 ecosystem gate is hard-gated on [#732] Phase 2's byte-identical
-rendering. Not drawn (for legibility):
-[#733]'s OpenSpec track covers whatever spec text Waves 1-2 author. The graph is acyclic. Node colors are the waves
-above: grey = Wave 0, green = Wave 1, blue = Wave 2, orange = Wave 3,
-purple = Wave 4 (so [#733]'s OpenSpec track, blue, rides Wave 2); white
-boxes with dashed borders are standalone fixes outside the wave
-structure. LANDED marks the four Phase 0s merged 2026-07-17 and the
-three Phase 1s merged 2026-07-20 (PRs #793/#792/#791).
+rendering. Not drawn (for legibility): OpenSpec remains [#733]'s planning
+workflow while Buoy supplies enforcement. The graph is acyclic. Node colors
+are the waves above: grey = Wave 0, green = Wave 1, blue = Wave 2, orange =
+Wave 3, purple = Wave 4 (so [#733]'s advisory Buoy pilot, blue, may ride Wave
+2); white boxes with dashed borders are standalone fixes outside the wave
+structure. LANDED marks the four Phase 0s merged 2026-07-17 and the three
+Phase 1s merged 2026-07-20 (PRs #793/#792/#791).
 
 ```mermaid
 %%{init: {"themeVariables": {"fontSize": "18px"}, "flowchart": {"nodeSpacing": 45, "rankSpacing": 42}}}%%
@@ -127,10 +129,11 @@ flowchart TB
 
   subgraph S733["#733 spec provenance"]
     direction TB
-    n733p0["P0 · PR spec gate + spec/** signoff"]:::w0
-    n733p1["OpenSpec track · claim discipline<br/>(P1 rev/lint: growth target)"]:::w2
-    n733p23["P3 citation presence<br/>(P2 ratchet: growth target)"]:::w4
-    n733p0 --> n733p1 --> n733p23
+    n733p0["P0 · PR review routing<br/>+ spec/** signoff"]:::w0
+    n733p1["P1 · advisory Buoy adapter"]:::w2
+    n733p2["P2 · neutral change impact"]:::w2
+    n733p3["P3 · blocking coverage<br/>+ surface ratchet"]:::w4
+    n733p0 --> n733p1 --> n733p2 --> n733p3
   end
 
   subgraph S730["#730 loud unsupported"]

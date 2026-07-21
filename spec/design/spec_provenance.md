@@ -1,574 +1,384 @@
-# Spec Provenance: atoms, hash-linked claims, and the coverage gate
+# Spec Provenance: Buoy-backed authority, evidence, and change impact
 
-**Status:** Design target, re-scoped 2026-07-20 (see "The 2026-07
-re-scope" below): delivery is OpenSpec-first with brittonr driving; the
-atom + provenance machinery specified in this document is the growth
-target, not the next step. Phase 0 (the PR gate) is unaffected.
+**Status:** Integration design; advisory adoption proposed. The standalone
+repository-independent implementation is now [Buoy] 0.2.0. Its initial
+acceptance oracle has been exercised, but its production-hardening work and
+Chelis integration remain active changes. Buoy is therefore the intended
+provenance engine, not yet a blocking Chelis dependency.
+
 Tracking issue: [#733].
-**Owning specs:** every file under `spec/` (this plan changes how normative
-text in them is WRITTEN and REFERENCED, not what any of them says);
-`spec/design/ears_chelis_bridge.md` (the existing EARS anchor, developed in
-concert - see open question 1); the repo Contract Invariants and the
-Spec-First Development section of `CLAUDE.md` (this plan is that section
-made machine-checkable).
-**Class fixed:** the recurring failure BENEATH the four numeric-audit
-classes: **spec silence and stale spec claims**. `spec/04-type-system.md`
-said nothing about integer overflow, which is why int8-wraps and
-int64-saturates coexisted unauthored ([#680]/[#718]); integer `mean`
-([#724]) and bool arithmetic ([#726]) were never decided by anyone; and four
-code comments asserted safety properties the code lacked ([#694]) because
-nothing invalidates a prose claim when reality moves.
-**Sibling plans:** [#729]/[#730]/[#731]/[#732] fix the four classes; this
-plan is the fifth and sits underneath them - it makes "there is no spec
-for this" and "the spec moved under this claim" mechanically detectable,
-which none of the four can do for themselves.
 
-## Summary
+**Owning specs:** every file under `spec/`; the capability-table,
+checker-totality, unsupported-behavior, observation, and dtype-semantics
+designs; the repository's Spec-First Development and Negative Test Parity
+contracts.
 
-Chelis already runs a doc-to-code tripwire in production: `chelis reef
-conform` locks a machine-readable MANIFEST to the shell-contract document
-and fails CI on drift. This plan points the same idea inward at `spec/`:
+**Class fixed:** specification silence, stale claims, incomplete decision
+surfaces, and assurance laundering. The system must expose both “no decision
+was authored for this cell” and “this evidence still points at an obsolete
+revision” without treating an annotation, waiver, review, or discovered test
+as proof that behavior is correct.
 
-1. **Atoms**: normative statements in spec files become addressable blocks
-   with stable IDs and content hashes (EARS-shaped where it fits).
-2. **Hash-linked claims**: tests (primarily) and code (secondarily) carry
-   `@spec <ID> rev <hash>` annotations; `chelis-lint` - which already
-   parses Rust source repo-wide (the §8.6 rule) and runs in the gate -
-   verifies that every referenced atom exists and that its hash still
-   matches the atom's current text. **A spec edit automatically invalidates
-   every claim made against the old text**, and the gate stays red until
-   each carrier is re-affirmed or honestly downgraded.
-3. **The coverage gate**: atoms must be carried by tests (spec-first made
-   checkable); PRs must cite the atoms or design doc they build against,
-   or carry an explicitly signed-off exemption; and structural surface
-   (capability-table rows, tag dispositions, tolerance rows) must cite
-   atoms once the sibling plans' tables exist.
+## Decision
 
-**The asymmetric-hashing decision** (the load-carrying design choice):
-hash the SPEC side only; let TESTS pin the code side. Code churns
-constantly - hashing code bodies (the full Unison move) produces either
-noise or nothing. Spec text is stable, and behavior is already pinned by
-the artifact this repo produces in abundance: executable tests. So the
-enforceable triple is **atom <-> test <-> code**, where the atom-test edge
-is machine-checked (existence, freshness, coverage) and the test-code edge
-is what tests already are.
+Chelis will not implement a second provenance graph, revision algorithm,
+coverage engine, or change-impact checker inside `chelis-lint`.
 
-**Scope verdict (as re-scoped 2026-07):** the near-term mechanism is the
-in-org OpenSpec flow plus the Phase 0 PR gate - process and existing
-tooling, nothing new to build. The in-repo machinery this doc specifies
-(one new lint rule family, one atom grammar, rev hashing, the coverage
-ratchet) is deferred to the growth tier and built only when OpenSpec
-proves inadequate for a concrete need. Incremental atomization of IDs
-continues regardless: the sibling plans' spec deliverables are BORN with
-atom IDs (the seeded [04-NUM-*]/[04-TOT-*]/[05-UNS-*]/[05-OBS-*] sets,
-and [05-RNG-1] after them), so the addressing grows with the work
-whether or not the enforcement tier ever fires.
+Chelis will instead integrate with Buoy through a shell-side adapter:
 
-## The 2026-07 re-scope: OpenSpec-first, atoms as the growth target
+- Buoy owns repository-independent graph values, deterministic identity,
+  lifecycle, freshness, coverage-policy evaluation, impact closure, and
+  conservative assurance aggregation.
+- Chelis owns normative text, stable ID namespaces, complete capability
+  domains, host payload schemas, evidence scopes, approval authorities,
+  policies, debt, waivers, and command integration.
+- `buoy-core` never depends on Chelis.
+- Chelis lint, CI, and any future editor surface consume the same
+  saved-repository semantics; they do not independently reimplement
+  provenance.
 
-Decision record, 2026-07-20. Basis: Jeff's design review on [#733]
-([comment](https://github.com/Chelis-Lang/chelis/issues/733#issuecomment-5006123938))
-backing brittonr's OpenSpec-first call from the design-set PR thread
-(PR [#742]); Robert defers to brittonr on the mechanism. The goal is
-endorsed unchanged - a spec that stays honest, "specified but silently
-not honored" made visible. The re-scope is about mechanism weight:
-hash-addressed atoms, a custom extractor, `@spec ... rev ...` claim
-discipline, and truncated-hash revs are each something to author,
-build, maintain, and teach; under "future-proof without over-building"
-(spec/00-context.md §5, principle 8) we grow into that rather than
-prebuild it.
+This supersedes the 2026-07-20 plan to leave atom/hash enforcement as a future
+`chelis-lint` growth tier. The concrete standalone implementation now exists,
+so the remaining problem is integration and readiness, not invention of
+another mechanism.
 
-**Live now (unchanged by the re-scope):**
+## OpenSpec boundary
 
-1. **Phase 0 as written** - the PR spec gate (`Spec-Atoms:` /
-   `Spec-Design:` trailers, the `spec-exempt` label + rolling report),
-   CODEOWNERS on `spec/**`, the PR template. Still afternoon-scale,
-   still land-first, still the only unlanded Phase 0 in the plan set.
-2. **Atom IDs as the citation grammar.** The seeded provisional atoms
-   (spec/04 §9-§10, spec/05 §7-§8) and every atom authored after them
-   ([05-RNG-1], PR #781, is the working example) keep the §C1 ID and
-   blockquote shape and remain the citation targets for PR trailers,
-   capability-table rows, and code comments. IDs are addressable
-   without the hash machinery; what defers is freshness ENFORCEMENT,
-   not addressing.
-3. **The structural tier's citation requirements (§C5)** - rows, tag
-   dispositions, and tolerance entries cite atom IDs as the sibling
-   plans' table phases land. Citation-presence checks ride those
-   plans; rev-freshness checks arrive with the growth tier.
+OpenSpec remains the proposal and review workflow for changes. It is not:
 
-**The near-term mechanism (brittonr driving):** the in-org OpenSpec
-setup (the FCIS/dylint precedent) supplies the spec-delta-before-code
-claim discipline - what changes, against which spec statement, before
-the code lands. Exact flow, artifact locations, and its oracle are
-brittonr's call and land with the adoption PR; this doc deliberately
-does not over-specify them.
+- the runtime authority format;
+- the atom lifecycle engine;
+- the freshness or coverage oracle;
+- an input to canonical graph identity; or
+- a substitute for repository-owned approval and change records.
 
-**Deferred to the growth tier** (Phases 1-2 below, unchanged in
-content, no longer next): the atom extractor, the `spec-ref-valid` /
-`spec-ref-fresh` / `spec-atom-wellformed` lint family, rev computation
-and the freshness protocol, the tombstone registry, and the blocking
-coverage manifest.
+The near-term discipline is therefore **OpenSpec for planning, Buoy for
+enforcement**. OpenSpec validation proves only that planning artifacts are
+internally valid.
 
-**The entry trigger:** the growth tier is built when OpenSpec proves
-inadequate for a concrete, named need - the expected first trigger is a
-spec edit that SHOULD auto-invalidate dependent claims and has no clean
-OpenSpec expression. Entering is a decision recorded on [#733], never a
-silent drift.
+## Architecture
 
-**Hashing, pinned:** when the rev machinery lands it hashes with
-**xxhash**, not SHA-256 (§C1.3 amended below). This is an integrity
-check in a non-adversarial setting - "did this text change" - so a
-fast non-cryptographic hash fits the requirement; a cryptographic hash
-is over-engineered here. Reference revs computed under the original
-SHA-256 rule before this re-scope (e.g. the `27c28528` noted in
-PR #781's description for [05-RNG-1]) are void; no landed spec text
-embeds a rev, so nothing needs migration.
+```text
+OpenSpec proposal
+       |
+       | planning and review only
+       v
+Chelis repository-owned authorities and records
+       |
+       | total Chelis adapter
+       v
+Buoy static graph and change-impact engine
+       |
+       +--> advisory/blocking policy report
+       +--> deterministic change report
+       +--> effectful oracle execution report
+       |
+       v
+Chelis gate and reviewer decision
+```
 
-## What this plan can and cannot enforce (read first)
+Provider state sits outside this graph. GitHub may help materialize candidate
+records, but labels, users, timestamps, issue state, and live review APIs do
+not determine canonical authority or graph identity.
 
-It enforces that **claims exist, are specific, and stay fresh**. It cannot
-enforce that claims are **true** - an agent can paste an `@spec`
-annotation onto code that does not conform. Three things bound that
-honestly:
+---
 
-1. the required carrier is a **test** (a test that executes the
-   requirement is hard to annotate falsely and stay green);
-2. the sibling plans' oracles (matrix tests, invariants, generated
-   conformance) are where truth lives - this plan routes attention, it
-   does not replace execution ("execute everything" remains the law);
-3. reviewer effort is re-aimed, not eliminated: checking "does this test
-   actually exercise atom 04-OVF-3" is a far smaller ask than "is this
-   PR's spec story coherent at all", which is what reviews silently carry
-   today.
+# Part I — normative integration contracts
+
+## C1. Atom authority and lifecycle
+
+A live atom has:
+
+- one stable Chelis-owned ID;
+- exactly one explicit authority;
+- one lifecycle state;
+- one kind and nonempty scope;
+- one self-contained normative statement; and
+- repository-owned approval when ratified.
+
+The existing IDs such as `04-NUM-1`, `04-TOT-1`, `05-UNS-1`, `05-OBS-1`,
+and `05-RNG-1` remain allocated and are never silently renamed.
+
+Current blockquote atoms remain normative under the existing Chelis spec
+contract until migrated, but they are not silently treated as Buoy
+authorities. A selected section enters Buoy policy only after its authorities
+have been converted or handled by a fixture-proven Chelis adapter.
+
+The preferred authority form is Buoy's parser-backed fenced object:
+
+````markdown
+```spec-provenance-atom-v1
+id = "04-NUM-3"
+state = "ratified"
+kind = "behavioral"
+scope = ["chelis.numeric.integer-overflow"]
+statement = """
+Integer op results that are not exactly representable in their declared
+width SHALL trap; ordinary arithmetic SHALL NOT wrap, saturate, or silently
+widen.
+"""
+
+[approval]
+authority = "chelis-spec-maintainers"
+record = "spec/reviews/04-NUM-3.md"
+digest = "xxh3-128:<full-review-record-digest>"
+```
+````
+
+`spec-provenance-atom-v1` identifies the Markdown syntax contract. Active
+semantic identity uses the separately versioned `spec-provenance/v2`
+profile.
+
+Allowed lifecycle transitions are closed. Withdrawn and superseded IDs remain
+permanently reserved by tombstones; deletion does not make an ID reusable.
+
+## C2. Semantic revisions
+
+A stable atom ID denotes identity. A semantic revision is the full canonical
+XXH3-128 digest of the atom's normative kind, scope, and statement under the
+active versioned envelope.
+
+The revision excludes source location, formatting trivia, lifecycle state,
+approval, and the stable ID itself. Moving unchanged authority preserves the
+atom revision while changing repository source-map and complete-graph
+identity.
+
+The former eight-hex `xxh3-64` proposal is superseded. Truncated display
+hashes never establish identity.
+
+XXH3 is non-cryptographic. It answers “did these canonical semantic bytes
+change?” It does not establish authenticity, authorization, natural-language
+truth, collision impossibility, or supply-chain integrity.
+
+## C3. Evidence and navigation
+
+Evidence metadata must be parser-attached to an eligible executable item.
+Comments, strings, prose mentions, file-level annotations, and nearby atom IDs
+do not create carriers.
+
+Every carrier declares an explicit role:
+
+- positive;
+- negative;
+- property;
+- exhaustive-model;
+- formal-property; or
+- structural.
+
+The role is never inferred from a test name. Coverage policy states which
+roles are required, preserving the repository's positive/negative parity
+contract mechanically.
+
+A carrier binds its exact atom revision, parsed item, oracle, configuration,
+corpus, claim scope, assumptions, and exclusions.
+
+Registration means only `linked`. Execution separately reports `not-run`,
+`pass`, `fail`, `error`, or `timeout`. A discovered or fresh test is not
+`tested` until every applicable required carrier is selected and passing
+within its declared scope.
+
+Implementation links remain navigational. They support ownership and impact
+analysis but never satisfy behavioral coverage.
+
+## C4. Coverage policy, debt, and waivers
+
+Coverage is controlled by versioned Chelis-owned policies. A policy declares:
+
+- a finite atom and decision-surface scope;
+- required evidence roles;
+- advisory or blocking enforcement;
+- an adoption-ratchet identity; and
+- any authority or derivation requirements.
+
+Adoption starts advisory. Promotion to blocking retains the same ratchet and
+occurs only after every selected obligation is visible and current.
+
+Debt and waivers are repository-owned, digest-bound objects. An issue link may
+be informational, but issue state is not canonical. A waiver may permit a
+process gate to continue; it does not satisfy, freshen, execute, test, prove,
+or structurally enforce the waived obligation.
+
+Known failures retain their actual `fail` or `not-run` state. They are not
+converted into passing coverage because an ignored test or issue exists.
+
+## C5. Governed structural surfaces
+
+1. **Capability rows:** every member of the complete operation × surface ×
+   dtype × lane domain remains present, including prohibited, deferred, and
+   not-applicable members. No adapter predicate may filter difficult cells
+   before completeness checking. Every disposition cites one controlling
+   current atom revision.
+2. **Deep tags:** every member of the closed Deep vocabulary receives exactly
+   one checker disposition and controlling atom revision.
+3. **Tolerance rows:** every governed cross-lane tolerance entry is explicit,
+   authority-bound, and independently covered. Missing rows are not inferred
+   from current implementation behavior.
+4. **Generated or mirrored artifacts:** intentional copies—including spec
+   tables, generated capability data, duplicated gates, and checked-in
+   reports—carry a derivation binding source, target, tool, configuration,
+   relation, consistency oracle, and exclusions.
+
+A disposition proves that a decision exists. It does not prove that the
+implementation honors the decision.
+
+## C6. Static, change, and execution checks
+
+The integration preserves three distinct surfaces:
+
+- **static:** build and validate the current saved-repository graph;
+- **change:** compare explicit base and head graphs and require complete impact
+  dispositions; and
+- **execute:** run selected effectful oracles and normalize their results.
+
+Static graph identity never changes because an oracle runs.
+
+A changed atom or other bound object produces a transitive impact set over
+carriers, implementation links, surface dispositions, policies, derivations,
+assumptions, properties, models, and proofs.
+
+Every required impact receives exactly one disposition:
+
+- `reaffirmed`;
+- `revised`;
+- `retired`; or
+- `waived`.
+
+Reaffirmation binds exact base and head values and records a deliberate
+reread. It is review-only evidence. It cannot make stale evidence fresh, and
+wildcard or bulk “reaffirm everything” records are invalid.
+
+## C7. Pull-request and provider integration
+
+`CODEOWNERS` on `spec/**`, PR-template citations, and GitHub labels remain
+useful review-routing controls, but they are provider-level process evidence.
+
+`Spec-Atoms:` and `Spec-Design:` trailers may seed a candidate neutral change
+manifest. They do not replace that committed manifest once change checking is
+blocking.
+
+Likewise, a `spec-exempt` label may support the pre-integration process gate,
+but blocking provenance adoption requires a repository-owned debt or waiver
+record. Provider state cannot be the only durable exemption ledger.
+
+---
+
+# Part II — staged adoption
+
+## Phase 0 — lightweight review routing
+
+Deliver the PR template, `spec/**` review routing, citation checks, and planted
+positive/negative tests for missing citations and temporary exemptions.
+
+This phase makes no Buoy assurance claim and does not make provider metadata
+canonical.
+
+**Oracle:** the PR-gate suite plus planted no-citation, cited, docs-only, and
+exempted PR cases.
+
+## Phase 1 — advisory Buoy pilot
+
+Pin one exact Buoy revision and compatibility profile. Before production
+adapter code, freeze positive and negative fixtures for:
+
+- existing atom IDs and authority migration;
+- malformed and duplicate authorities;
+- stale carrier revisions;
+- unattached carrier metadata;
+- provider/root/order independence; and
+- an expected-authority selector that produces no authorities.
+
+Add a shell-side `chelis-provenance` adapter and advisory static report over a
+small initial scope. No existing Chelis command becomes blocking.
+
+**Oracle:** the named `chelis_provenance_advisory` integration suite proves
+byte-identical reports under separate roots, rejects planted malformed/stale
+inputs, and leaves the existing Chelis gate unchanged.
+
+## Phase 2 — provider-neutral change impact
+
+Materialize repository-owned approvals, review records, debt, waivers,
+reaffirmations, and neutral base-to-head manifests. Enable advisory change
+reports.
+
+**Oracle:** the named `chelis_provenance_change_impact` suite proves that a
+planted atom edit enumerates every transitive dependent claim; it rejects a
+missing, duplicate, stale, or inapplicable disposition and accepts one exact
+complete manifest.
+
+## Phase 3 — first blocking ratchet
+
+Select the first finite surfaces—initially the atomized spec/04 and spec/05
+sections plus their corresponding capability/tag/tolerance domains. Require
+positive and negative roles where applicable.
+
+Promotion requires:
+
+- the pinned Buoy acceptance oracle green at the exact integrated revision;
+- all Chelis adapter positive and negative fixtures green;
+- no missing or filtered selected surface member;
+- every selected carrier current;
+- every required oracle selected and passing; and
+- policy weakening and waiver negative controls green.
+
+**Oracle:** the named `chelis_provenance_blocking_policy` suite proves that a
+planted uncovered atom, missing surface member, stale carrier, and silent
+policy weakening each fail while the complete selected scope passes.
+
+## Phase 4 — execution and stronger evidence
+
+Add effectful oracle execution, bounded models, properties, and formal records
+only where their exact scope justifies the maintenance cost. Preserve the
+boundary that source-level proof does not prove rustc, LLVM, emitted
+C/HIP/Metal, or machine code.
+
+**Oracle:** the named `chelis_provenance_execution` suite proves five-state
+result normalization, static-identity independence, exact scopes, negative
+controls, and current bindings.
+
+## Readiness rule
+
+An advisory pilot may begin before Buoy's production-hardening program is
+complete because it cannot block Chelis or replace existing acceptance
+evidence.
+
+Blocking adoption may not begin merely because the initial Buoy repository
+gate is green. It requires a reviewed, pinned Buoy revision whose relevant
+hardening obligations are complete, plus the Chelis-specific Phase 3 oracle.
+
+This design records the target; it does not claim that condition is satisfied
+today.
 
 ## Non-goals
 
-- **Not** a retrofit of all thirteen spec files at once. Atomization is
-  incremental and demand-driven (§C1 scope rules); un-atomized prose
-  stays valid editorial text.
-- **Not** code content-addressing (Unison's language-level move). Spec-
-  side hashes only, per the asymmetric-hashing decision.
-- **Not** an external requirements tool or format lock-in. EARS shapes
-  the atom grammar; openspec.dev's spec-delta-before-code flow shapes the
-  PR gate; both are implemented in-repo.
-- **Not** a replacement for the four sibling plans' enforcement. The
-  capability table still makes undecided cells unbuildable ([#729]); this
-  plan makes the table's rows CITE their authority and makes authoring
-  that authority a visible, gated act.
-- **Not** prose policing. Only text inside atom blocks is normative,
-  hashed, and protected; everything else in `spec/` remains freely
-  editable documentation.
-
-## Vocabulary
-
-- **Atom** - one addressable normative statement: an ID, a hash, and a
-  block of SHALL-text. The unit of citation, coverage, and freshness.
-- **Rev** - the truncated content hash of an atom's normalized text,
-  recorded at claim sites. Stale rev = the spec moved under the claim.
-- **Carrier** - an annotated site. *Test carriers* (in `tests/`,
-  `#[test]` functions, probe fixtures) are load-carrying for coverage;
-  *code carriers* (implementation sites) are navigation/ownership
-  metadata and optional.
-- **Coverage edge** - the atom-to-test-carrier requirement, enforced per
-  the blocking manifest (§C4).
-- **Tombstone** - a retired atom ID kept in a registry with its
-  disposition (superseded-by, withdrawn), so stale references produce a
-  pointed message instead of "unknown ID". IDs are never reused.
-- **The exemption** - the signed-off escape hatch for PRs that genuinely
-  precede spec (prototypes, investigations); loud, labeled, and tracked.
-
----
-
-# Part I - the normative contracts (§C1-§C5)
-
-## C1. The atom grammar
-
-An atom is a Markdown blockquote block, machine-extractable, inside any
-`spec/*.md` or `spec/design/*.md` file:
-
-```markdown
-> **[04-OVF-3]** WHEN an integer op result exceeds its declared width,
-> every lane SHALL trap with the branded overflow diagnostic
-> (`numeric trap: overflow in <op> at <prim>`); no lane SHALL wrap or
-> saturate.
-```
-
-Rules:
-
-1. **ID**: `[<file-prefix>-<topic>-<n>]` - file prefix from the owning
-   spec (`04`, `05`, `design/dtype` for design docs...; exact scheme
-   fixed in Phase 1), topic slug, monotonically increasing `n`. IDs are
-   immutable and never reused; retirement goes through the tombstone
-   registry (§C3.4).
-2. **Shape**: EARS-style where the statement is behavioral (WHEN/WHILE
-   trigger + SHALL response); plain declarative SHALL-text where it is
-   structural ("the Deep vocabulary SHALL comprise exactly the 62 tags
-   listed in ..."). MUST/SHALL only inside atoms; aspirational prose
-   stays outside them.
-3. **Hash**: xxhash (xxh3-64) of the whitespace-normalized atom text
-   (collapse runs of whitespace, strip the ID marker itself), rendered
-   as 8 hex chars. Pinned on [#733] in the 2026-07 re-scope,
-   superseding this doc's original SHA-256 choice: this is integrity
-   ("did this text change"), not an adversarial setting, so a fast
-   non-cryptographic hash fits. Normalization means reflowing or
-   re-wrapping an atom does NOT invalidate claims; changing any word
-   does.
-4. **Extent**: the blockquote is the atom. Tables can be atoms (a
-   blockquoted table, e.g. the tolerance table's rows); one atom per
-   decision, not per paragraph of exposition.
-5. **Scope of atomization** (the incremental rule): (a) all NEW normative
-   text lands atomized from Phase 1 onward - in particular the spec
-   sections the sibling plans deliver ([#729]'s overflow/rounding section,
-   [#732]'s tolerance table, [#731]'s disposition rules, [#730]'s diagnostic
-   format) are born as atoms; (b) EXISTING text is atomized when it is
-   first cited, amended, or found load-bearing by an audit - never as a
-   standalone bulk pass. Un-atomized normative prose is a known-debt
-   report line (§C4.3), not an error.
-
-## C2. The claim annotation and the lint rules
-
-Carrier syntax, valid in Rust, Python, `.ch`/`.dp` fixtures, and Markdown
-(comment syntax of the host language):
-
-```rust
-// @spec 04-OVF-3 rev 9f3ac2d1
-// @spec 05-TOL-1 rev 04b77e10   (multiple atoms per site allowed)
-#[test]
-fn int8_add_overflow_traps() { ... }
-```
-
-The `spec-provenance` lint family (in `chelis-lint`, blocking in the gate
-like §8.6):
-
-1. **`spec-ref-valid`**: every `@spec` ID resolves to a live atom or a
-   tombstone. A tombstone hit reports the disposition ("superseded by
-   04-OVF-7; re-read and re-point"). An unknown ID is an error.
-2. **`spec-ref-fresh`**: the recorded rev equals the atom's current hash.
-   A stale rev is an error naming the atom, its file/line, and both
-   hashes. There is deliberately NO auto-fix: the fix is a human/agent
-   act - re-read the atom, then either re-affirm (update the rev - the
-   carrier still conforms) or downgrade honestly (the carrier no longer
-   conforms: flip the test red/`#[ignore]` with an issue, per the
-   sibling plans' red-to-green discipline).
-3. **`spec-atom-wellformed`**: atom blocks parse, IDs are unique
-   repo-wide, hashes in the tombstone registry are consistent.
-4. **One parser**: the atom extractor lives in `chelis-lint` (Rust),
-   which both enforces and exports; a `--spec-report` mode dumps the
-   atom index and coverage data as JSON for CI jobs and scripts (exact
-   CLI surface: open question 3). No second parser anywhere (the
-   conform-framework lesson: duplicated readers drift).
-
-**The freshness protocol** (the point of the whole mechanism): a PR that
-edits an atom's text MUST, in the same change set, visit every carrier of
-that atom - the lint enumerates them - and re-affirm or downgrade each.
-This is the [#694] fix generalized: a safety claim can no longer outlive
-the text it was made against. The cost (spec edits fan out) is the
-feature: editing normative text SHOULD be a deliberate act that confronts
-its consequences, and the normalization rule (§C1.3) keeps purely
-editorial edits free.
-
-## C3. The PR spec gate
-
-A CI job (Python, tested, per repo scripting policy) on every PR:
-
-1. The PR description names its authority: a `Spec-Atoms:` trailer
-   listing atom IDs it implements/affects, and/or a `Spec-Design:`
-   trailer naming a `spec/design/*.md` it adds or amends.
-2. PRs with neither fail the job UNLESS they are (a) mechanically
-   docs-only, (b) labeled `spec-exempt` - a label only maintainers can
-   apply (ruleset-gated), carrying a one-line reason; the job posts the
-   exemption into a rolling report so exemptions are visible debt, not
-   silence.
-3. `spec/**` paths are CODEOWNERS-protected: normative changes always
-   cross a human (the signoff the audit's undecided cells never got).
-4. The job cross-checks cheaply: cited atom IDs must exist; a PR whose
-   diff touches files carrying `@spec` annotations inherits those atoms
-   into its expected citation set (advisory note, not a failure, in
-   Phase 0; tightened later per §C4).
-
-This tier is deliberately process-level and gameable in isolation - its
-job is to make "no spec story at all" impossible and to route reviewer
-attention; the lint tier (§C2) and the structural tier (§C5) carry the
-mechanical weight.
-
-## C4. The coverage contract
-
-1. **Coverage edge**: every atom in a *blocking-manifest* spec file must
-   have at least one green (or issue-linked `#[ignore]`d red) TEST
-   carrier. The manifest starts empty, gains `spec/04` and `spec/05`
-   sections as Phases 1-2 atomize them, and only ever grows (a ratchet,
-   like the tripwire baselines).
-2. **The two honest states**: a green test carrier = "specified and
-   honored"; an `#[ignore]`d carrier naming an issue = "specified, not
-   yet honored" (exactly the audit's red-test discipline - the ~70
-   ignored tests on PR [#696] become carriers for the atoms the sibling
-   plans author). There is no representable state for "specified,
-   silently unhonored" - that is the point.
-3. **The debt reports** (CI artifacts, advisory): atoms with no carrier;
-   normative-looking prose outside atoms (SHALL/MUST outside blockquotes)
-   in manifest files; live exemption labels; carrier counts per atom.
-   Reports precede ratchets: a section enters the blocking manifest only
-   when its report is clean.
-
-## C5. The structural tier (rides the sibling plans)
-
-Where the sibling plans create machine-readable surface, atoms become
-build-relevant, which is the strongest form of this plan:
-
-1. **Capability-table rows cite atoms** ([#729] Phase 4): every
-   `Supported | Rejected(reason)` cell carries the atom ID that decided
-   it; the table's conformance generator fails on a row with no citation.
-   Undecided-cell bugs ([#724], [#726]) become unwritable-without-an-atom -
-   the signoff flow the user-facing question asked for, enforced by the
-   build.
-2. **Tag dispositions cite atoms** ([#731] Phase 3): each `DeepTag`
-   variant's checker disposition names its spec/03 atom.
-3. **Tolerance rows are atoms** ([#732] Phase 3): the per-op cross-lane
-   bounds land as a blockquoted atom table in spec/05; the [#687] oracle
-   reads the same rows the lint hashes.
-4. **Diagnostic strings cite atoms** ([#730]): the frozen `unsupported:`
-   and trap message constants carry code-carrier annotations to their
-   atoms, so a message edit and its spec move together or the gate says
-   why not.
-
----
-
-# Part II - process rules at every boundary
-
-## B1. Freeze points
-
-| contract | frozen at end of | may change after only by |
-|---|---|---|
-| atom grammar + ID scheme + hash normalization (§C1) | Phase 1 | this doc + a migration script for existing atoms, one change set |
-| lint rule semantics (§C2) | Phase 1 | this doc + lint rule spec registration |
-| PR gate requirements (§C3) | Phase 0 (mechanics), Phase 2 (tightening) | this doc |
-| blocking manifest contents | grows per §C4.3 | additions only; a removal is an incident |
-| tombstone registry | append-only from Phase 1 | never rewritten |
-
-## B2. Invariants that hold across every boundary
-
-1. **Atoms are append-mostly.** Editing an atom's meaning retires the ID
-   (tombstone, superseded-by) and mints a new one when the change is
-   substantive; the rev mechanism handles wording refinement. Which of
-   the two applies is a review judgment - the default for anything a
-   carrier might no longer satisfy is retire-and-mint.
-2. **No claim without a reader.** A rev may only be updated by a change
-   set whose description affirms the re-read ("re-affirmed against
-   04-OVF-3 rev 9f3ac2d1"). Mechanical rev-bumping across many sites
-   without per-site affirmation is the failure mode; reviews reject it.
-3. **Tests are the coverage currency.** Code carriers never satisfy the
-   coverage edge; a plan or PR that "covers" an atom with only
-   implementation annotations has not covered it.
-4. **The sibling plans' controls rules are inherited**: red-to-green by
-   un-ignoring; discoveries fork; both-lanes-or-neither for behavioral
-   carriers.
-5. **Exemptions decay.** A `spec-exempt` PR creates a follow-up
-   obligation (write the atoms or the design doc); the rolling report
-   (§C3.2) keeps them visible until discharged.
-
-## B3. How to pick up a phase
-
-1. Read Part I, your phase, and the previous phase's frozen-at-exit
-   list; §C5 items ship jointly with the named sibling-plan phases -
-   coordinate via both tracking issues.
-2. Run the debt reports first (once they exist); the deltas are your
-   work-list.
-3. The four sibling design docs are the first citation targets - when in
-   doubt about what to atomize first, atomize what they are about to
-   need.
-4. Gate with `scripts/gate.py --local`; docs-only stages per the repo's
-   docs-only rule.
-
----
-
-# Part III - the phases
-
-## Phase 0 - the PR spec gate (process tier; afternoon-scale, land-first)
-
-**You inherit:** nothing but this document and the repo's CI.
-
-**You deliver:**
-
-1. The PR-gate CI job (§C3.1-2): trailer parsing, docs-only detection,
-   the `spec-exempt` label path, the rolling exemption report. Python,
-   with tests, per repo policy.
-2. `spec/**` CODEOWNERS protection and the maintainers-only label
-   ruleset.
-3. The PR template gains the `Spec-Atoms:` / `Spec-Design:` trailers and
-   one line pointing here.
-
-**Frozen at your exit:** the gate's requirement set (§C3.1-2).
-
-**Explicitly not yours:** atoms, hashes, the lint, any spec edits.
-
-**Oracle:** a planted PR with no citation and no exemption fails the
-job; a `spec-exempt` PR passes and appears in the report; a docs-only PR
-passes untouched. (The job's own test suite is the named suite.)
-
-## Phase 1 - atoms, the extractor, and the lint (GROWTH TARGET)
-
-**Deferred by the 2026-07 re-scope.** Entered only on the re-scope
-section's trigger, as a recorded decision on [#733]. The near-term
-substitute is the OpenSpec track (brittonr). Content below is
-unchanged and remains the specification for when the tier is entered.
-
-**You inherit:** the gate (your delivery vehicle) and the sibling plans'
-imminent spec deliverables (your first atoms).
-
-**You deliver:**
-
-1. The atom grammar finalized (§C1; resolve open question 1 with the
-   EARS bridge doc) and the tombstone registry file.
-2. The extractor + `spec-ref-valid` / `spec-ref-fresh` /
-   `spec-atom-wellformed` in chelis-lint, with the rule-spec
-   registration and the lint crate's standard positive/negative rule
-   tests; `--spec-report` JSON export.
-3. **First atoms**: spec/04 §9-§10 and spec/05 §7-§8 carry the four
-   sibling plans' decided contracts as provisional atoms (seeded ahead
-   of this plan) , i.e. ([04-NUM-*], [04-TOT-*], [05-UNS-*], [05-OBS-*])
-   with status banners. This phase RATIFIES their grammar against the
-   finalized §C1, computes their revs, and additionally atomizes the
-   audit-proven load-bearing statements (the §5.7 precision-widening
-   rule, the §1.1.1 f8e4m3 deferral, the 62-tag vocabulary sentence).
-4. **First carriers**: the audit matrix tests annotated against those
-   atoms (they were born from these exact claims; the mapping is
-   mechanical).
-
-**Frozen at your exit:** §C1 grammar + §C2 semantics.
-
-**Explicitly not yours:** coverage BLOCKING (Phase 2); bulk atomization.
-
-**Oracle:** the lint green on the tree; red on a planted bogus ID AND a
-planted stale rev (the rules' negative tests); the extractor's unit
-suite; at least one real spec-edit exercised end-to-end (edit an atom,
-watch carriers fail, re-affirm, green).
-
-## Phase 2 - the coverage edge and the first ratchet (GROWTH TARGET)
-
-**Deferred by the 2026-07 re-scope**, same terms as Phase 1 (it
-consumes Phase 1's machinery).
-
-**You inherit:** live atoms, live lint, annotated audit tests.
-
-**You deliver:**
-
-1. The coverage computation in `--spec-report` (atoms x test-carriers,
-   the two honest states) and the CI debt-report artifact (§C4.3).
-2. The blocking manifest with its first entries: the atomized sections
-   of spec/04 and spec/05, once their reports are clean.
-3. The §C3.4 tightening: PRs touching carrier-bearing files must cite
-   those atoms (from advisory to failing).
-
-**Frozen at your exit:** the coverage rules and the manifest ratchet.
-
-**Explicitly not yours:** the structural tier.
-
-**Oracle:** a planted uncovered atom in a manifest file fails the gate;
-the debt report runs in CI on every PR; the exemption report shows only
-discharged or in-flight entries.
-
-## Phase 3 - the structural tier (jointly with [#729]/[#731]/[#732])
-
-**Re-scope note:** NOT deferred - citation PRESENCE (every row / tag
-disposition / tolerance entry names its atom ID) ships inside the
-sibling plans' table phases regardless, enforced by their own
-generators. Only the rev-FRESHNESS check on those citations waits for
-the growth tier's lint.
-
-**You inherit:** the mechanism, the coverage gate, and the sibling
-plans' tables as they land.
-
-**You deliver:** §C5's four hooks, each shipped inside the corresponding
-sibling-plan phase with this plan's lint checking citation presence:
-capability rows cite atoms; tag dispositions cite atoms; tolerance rows
-ARE atoms; frozen diagnostic constants carry code annotations.
-
-**Frozen at your exit:** the citation requirements per table.
-
-**Explicitly not yours:** the tables themselves.
-
-**Oracle:** per hook, the mutation test - a table row / variant /
-tolerance entry without a citation fails the corresponding build or
-lint; recorded once in each joint PR.
-
-## Phase 4 - executable atoms (opportunistic, long-term)
-
-**You inherit:** everything above, plus a trustworthy prove lane
-(gated on [#688]'s fix for integer properties).
-
-**You deliver:** semantic atoms mapped to in-language `@property`
-declarations carrying `@spec` annotations - spec claims checked by
-`chelis prove` rather than sampled by tests, starting with the overflow
-and rounding atoms (which are property-shaped by construction). Each
-mapping retires no test carriers; properties are additional evidence.
-
-**Oracle:** the property suite per atom set, named in the owning spec
-section, run per the repo's manual-gate documentation rules.
-
----
-
-# Part IV - bookkeeping
-
-## I1. Interlocks
-
-- **[#729]/[#730]/[#731]/[#732]**: their spec deliverables are born atomized
-  (Phase 1 here coordinates with whichever of their phases is in
-  flight); their tables are the structural tier (Phase 3 here ships
-  inside their table-bearing phases). Nothing here blocks them: if this
-  plan lags, they land un-atomized normative text and §C1.5's
-  "atomize-on-first-citation" rule catches it later.
-- **`chelis reef conform`**: the shell-contract MANIFEST mechanism is
-  the architectural precedent; this plan deliberately mirrors its
-  tripwire discipline (doc and machine-readable form move in lockstep or
-  CI fails). Long-term, `conform`'s own contract document is a
-  candidate for the same atom grammar (open question 4).
-- **`ears_chelis_bridge.md`**: the atom grammar's EARS shape is decided
-  WITH that document, not beside it (open question 1).
-- **The agent-QC layer** (nested CLAUDE.md files, change-shape skills,
-  mechanism index - per the standing quality discussion): skills like
-  `add-a-builtin` gain a step "cite or author the atom"; the PR gate is
-  the enforcement behind that step.
+- Reimplementing Buoy semantics in `chelis-lint`.
+- Making OpenSpec or GitHub state canonical.
+- Treating annotations, implementation links, waivers, review records, test
+  discovery, or passing siblings as proof.
+- Atomizing all existing prose in one pass.
+- Inferring a decision surface from whatever atoms or tests happen to exist.
+- Claiming that provenance proves natural-language truth or emitted backend
+  correctness.
 
 ## Issue map
 
 | phase | what becomes impossible |
 |---|---|
-| 0 | a PR with no spec story at all; unsignposted spec edits |
-| 1 | stale spec claims ([#694]'s class); citations to nothing |
-| 2 | "specified, silently unhonored" atoms in ratcheted files; new spec-silent surface in them |
-| 3 | undecided table cells without an authoring act ([#724]/[#726]'s class, at the build) |
-| 4 | (additive) semantic atoms drifting from checked behavior |
+| 0 | a PR with no visible spec story; unsignposted spec edits |
+| 1 | silently malformed authorities or stale registrations inside the advisory scope |
+| 2 | an atom change whose transitive dependents receive no explicit disposition |
+| 3 | missing selected surface members, uncovered required roles, and silent policy weakening |
+| 4 | effectful results or stronger evidence being reported outside their exact bindings and scope |
 
-## Open questions and where they get decided
+## Open decisions
 
-| # | question | decided in | recorded where |
-|---|---|---|---|
-| 1 | atom grammar's EARS profile (which EARS templates; how far to push structure into the blockquote) | Phase 1, with `ears_chelis_bridge.md` | §C1 + that doc |
-| 2 | ID scheme details (file-prefix stability across spec renumbering; design-doc prefixes) | Phase 1 | §C1.1 |
-| 3 | CLI surface for the extractor/report (`chelis lint --spec-report` vs a `chelis spec` subcommand) | Phase 1 | §C2.4 + CLI docs |
-| 4 | whether `shell_repo_contract.md` + conform MANIFEST migrate to the atom grammar | after Phase 2, separate proposal | conform docs |
-| 5 | rev-affirmation ergonomics for large fan-outs (a spec edit touching 50 carriers): per-site vs per-atom affirmation blocks | Phase 1, revisit Phase 2 | §B2.2 |
+The Phase 1 adoption proposal must freeze:
 
-## The one-sentence summary for a reviewer
+1. the exact Buoy revision and compatibility policy;
+2. the Chelis adapter crate/module and command namespace;
+3. the first advisory authority selectors and finite decision surfaces;
+4. the existing blockquote-atom migration strategy; and
+5. the initial derivation inventory for generated and mirrored artifacts.
 
-Give every normative sentence an address and a fingerprint, make tests
-the citizens that carry them, let the gate refuse claims to nothing and
-claims gone stale, and require every PR to name its authority or visibly
-ask for forgiveness - so that "the spec was silent" and "the comment was
-stale" (the two failures beneath this year's forty numeric bugs) stop
-being discoverable only by a three-day adversarial audit.
-
-[#680]: https://github.com/Chelis-Lang/chelis/issues/680
-[#687]: https://github.com/Chelis-Lang/chelis/issues/687
-[#688]: https://github.com/Chelis-Lang/chelis/issues/688
+[Buoy]: https://github.com/Chelis-Lang/buoy
 [#694]: https://github.com/Chelis-Lang/chelis/issues/694
-[#696]: https://github.com/Chelis-Lang/chelis/pull/696
-[#718]: https://github.com/Chelis-Lang/chelis/issues/718
-[#724]: https://github.com/Chelis-Lang/chelis/issues/724
-[#726]: https://github.com/Chelis-Lang/chelis/issues/726
-[#729]: https://github.com/Chelis-Lang/chelis/issues/729
-[#730]: https://github.com/Chelis-Lang/chelis/issues/730
-[#731]: https://github.com/Chelis-Lang/chelis/issues/731
-[#732]: https://github.com/Chelis-Lang/chelis/issues/732
 [#733]: https://github.com/Chelis-Lang/chelis/issues/733
-[#742]: https://github.com/Chelis-Lang/chelis/pull/742
