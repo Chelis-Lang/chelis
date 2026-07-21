@@ -1189,16 +1189,16 @@ These C implementations are the ground truth. The GPU backend (Phase 1) must pro
 **Status banner - read before citing.** RATIFIED and enforced for the
 censused live sites by chelis#730 Phase 1 (the Result-typed failure
 channel, the branded `unsupported:` diagnostic, and the live-site
-sweep; PR chelis#791). Phase 2 is IN PROGRESS. PR chelis#799 added useful
-defense evidence (a blocking lexical wildcard scanner, count baselines,
-a first `EmittedExpr` newtype, and a partial `EffectKind` migration), but
-those mechanisms do not yet make regressions unwritable: semantic effect
-consumers still dispatch on strings, runtime dtype IDs still admit f32
-fallback sizing/reads, and crate-internal raw C expressions remain
-constructible. Phase 2 completes only when the dependency-bottom
-`EffectKind`/`RuntimeDType` vocabularies are Result-decoded at their
-boundaries and matched exhaustively by every semantic consumer. The lint
-and token tripwire remain temporary defense-in-depth, not the authority.
+sweep; PR chelis#791). Phase 2 is IN PROGRESS. Its dependency-bottom
+`EffectKind`/`RuntimeDType` slice is implemented: boundary decoding is
+Result-only, semantic consumers are exhaustive, invalid runtime IDs fail
+before sizing/access, and the generated C dtype header is locked to Rust.
+Executed temporary-variant mutations produced the intended compile errors.
+PR chelis#799's lexical scanner, count baselines, and first `EmittedExpr`
+newtype remain useful defense evidence, but Phase 2 is not complete: the
+HostType failure-channel split, capability proofs, and private structured C
+expression representation remain. The lint and token tripwire are temporary
+defense-in-depth, not the authority.
 Residuals are per-atom noted below; [05-UNS-4]'s gate demotion is that
 plan's Phase 3. The delivery plan and full elaboration (the failure
 channel, the census, the typed ratchets) is
