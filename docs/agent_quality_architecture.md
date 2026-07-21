@@ -58,9 +58,10 @@ generated formatter ([#732]).
 `chelis-lint` lints Rust source and runs in the gate (the §8.6 rule
 proves the pattern). **Every incident closes with a lint rule when one
 is expressible.** In flight: `rust-no-wildcard-dispatch` ([#730] Phase 2).
-Repository-wide authority, freshness, and impact analysis instead use the
-Buoy-backed provenance adapter and gate ([#733] Phases 1-3), avoiding a
-second provenance engine inside `chelis-lint`. The closing-move checklist
+Repository-wide authority, freshness, and impact analysis instead use a
+future OpenSpec-type provenance tool backed by Buoy ([#733] Phases 1-3),
+avoiding both a direct Buoy adapter and a second provenance engine inside
+`chelis-lint`. The closing-move checklist
 for any future incident: fix, test, THEN ask "what lint rule makes this
 unwritable?"
 
@@ -103,13 +104,14 @@ cleared. Additions to the existing red-team protocol:
   must show the search for an existing equivalent and either use it or
   justify divergence in the PR body. The direct countermeasure to
   scattered implementation; checkable by a reviewer agent.
-- **Contract-first for multi-session features**: any feature spanning
-  sessions or branches first lands or updates its OpenSpec proposal,
-  requirement deltas, scenarios, design, and phase-handoff contract
-  (inherit / deliver / frozen-at-exit / not-yours / oracle). Parallel agents
-  then implement against reviewed interfaces instead of colliding; every
-  implementation PR links the active OpenSpec change and names the specific
-  requirement or design section it implements (enforced by [#733] Phase 0).
+- **Contract-first for multi-session features**: after [#733] Phase 0's
+  adoption oracle is green, any feature spanning sessions or branches first
+  creates or updates its OpenSpec proposal, requirement deltas, scenarios,
+  design, and phase-handoff contract (inherit / deliver / frozen-at-exit /
+  not-yours / oracle), then places them in the human review queue. Parallel
+  agents implement against those review-queued interfaces instead of
+  colliding; every implementation PR links the active OpenSpec change and
+  names the specific requirement or design section it implements.
 - Claim-before-work stays as the `issue-resolution` skill states
   (assignee set before branching).
 

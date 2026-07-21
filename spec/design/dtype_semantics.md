@@ -462,11 +462,12 @@ Part I as the spec of what to build.
    repo's negative-test-parity rule: every rounding case, every trap
    case, every special value).
 2. **The spec/04 section**: spec/04 §9 carries the decided contract as
-   provisional atoms [04-NUM-1..6] with an honest status banner (seeded
-   ahead of this phase; implementation tracked here). This phase
-   RATIFIES and refines that section (and its §C1/§C2 correspondence)
-   in the same PR as the module, so spec and code cannot diverge at
-   the moment the semantics become real.
+   current blockquote authorities [04-NUM-1..6] with an honest status banner
+   (seeded ahead of this phase; implementation tracked here). This phase
+   RATIFIES and refines those semantics (and their §C1/§C2 correspondence) in
+   the same PR as the module, so spec and code cannot diverge at the moment the
+   semantics become real. Chelis#733 Phase 1 separately migrates the authority
+   form and revisions through the future OpenSpec-type provenance tool.
 3. **The storage decision at all four layers** (§C3): `TensorStorage`
    per-dtype buffers in eval, the versioned wire-schema change, the
    Python boundary, prove's env type swap can be deferred to Phase 2 ONLY

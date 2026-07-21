@@ -3,8 +3,9 @@
 **Status:** Design proposal, pre-implementation. Tracking issue: [#731].
 **Owning specs:** `spec/03-deep-syntax.md` (the 62-tag closed vocabulary),
 `spec/04-type-system.md` (what "checked" means per construct; its §10
-carries this plan's decided contract as provisional atoms [04-TOT-1..3],
-seeded ahead of Phase 1, which ratifies them), the repo
+carries this plan's decided contract as current blockquote authorities
+[04-TOT-1..3], whose semantics this plan ratifies independently of their
+future chelis#733 migration), the repo
 Contract Invariants ("if a command reports perfect success, its error list
 must be empty"), and the audit record in
 `docs/investigations/numeric_audit_next_sweeps.md` (sweep 6) /

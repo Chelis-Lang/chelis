@@ -1,12 +1,14 @@
 # Spec Provenance: Buoy-backed authority, evidence, and change impact
 
-**Status:** Immediate OpenSpec adoption contract + Buoy integration design.
-OpenSpec is the required planning and agent-communication workflow now; Buoy
-adoption begins advisory. The standalone repository-independent Rust workspace
-is [Buoy] 0.2.0. Its initial acceptance oracle has been exercised, but its
-production-hardening work and Chelis integration remain active changes. Buoy
-is therefore the intended provenance engine, not yet a blocking Chelis
-dependency.
+**Status:** Phase 0 OpenSpec adoption contract + future Buoy-backed tooling
+design. This PR defines but does not activate Phase 0. Once Phase 0's
+configuration, instructions, review routing, validation suite, and PR gate
+land, OpenSpec becomes the required planning and agent-communication workflow.
+The standalone repository-independent [Buoy] workspace currently reports
+version 0.2.0 and its initial acceptance oracle has been exercised, but no
+Chelis integration-tool or Buoy revision is pinned yet. Buoy production
+hardening and the future integration tool remain active work; neither is a
+blocking Chelis dependency today.
 
 Tracking issue: [#733].
 
@@ -24,26 +26,33 @@ as proof that behavior is correct.
 ## Decision
 
 Chelis will not implement a second provenance graph, revision algorithm,
-coverage engine, or change-impact checker inside `chelis-lint`.
+coverage engine, change-impact checker, or direct Buoy adapter inside
+`chelis-lint` or another Chelis crate.
 
-Chelis will instead integrate with Buoy through a Chelis-owned Rust crate or
-module that depends on Buoy's repository-independent Rust APIs:
+A future OpenSpec-type provenance tool, distinct from the current OpenSpec
+planning workflow, will integrate Buoy's repository-independent Rust APIs.
+Chelis will pin and invoke that tool rather than depend on Buoy directly:
 
 - Buoy owns repository-independent graph values, deterministic identity,
   lifecycle, freshness, coverage-policy evaluation, impact closure, and
   conservative assurance aggregation.
+- The future tool owns repository snapshotting, syntax-aware adapters,
+  configuration loading, oracle orchestration, and stable report surfaces over
+  Buoy.
 - Chelis owns normative text, stable ID namespaces, complete capability
   domains, host payload schemas, evidence scopes, approval authorities,
-  policies, debt, waivers, and command integration.
-- `buoy-core` never depends on Chelis.
-- Chelis lint, CI, and any future editor surface consume the same
-  saved-repository semantics; they do not independently reimplement
-  provenance.
+  policies, debt, waivers, and the checked-in configuration passed to the tool.
+- `buoy-core` never depends on Chelis, and the future tool must express
+  Chelis-specific semantics through versioned configuration and payloads rather
+  than hard-coded repository knowledge.
+- Chelis lint, CI, and any future editor surface consume the same pinned tool
+  reports; they do not independently reimplement provenance.
 
 This supersedes the 2026-07-20 plan to leave atom/hash enforcement as a future
-`chelis-lint` growth tier. The concrete standalone implementation now exists,
-so the remaining problem is integration and readiness, not invention of
-another mechanism.
+`chelis-lint` growth tier. The concrete standalone Buoy implementation now
+exists, so the remaining problem is a stable OpenSpec-type integration tool,
+readiness, and Chelis-owned configuration—not invention of another provenance
+engine inside Chelis.
 
 ## Disposition of the previous #733 contracts
 
@@ -58,20 +67,22 @@ fixtures, format, and oracle. No previous contract survives by implication.
 | Markdown blockquote atoms | **Retained only as migration input.** Existing blocks remain normative Chelis text until selected; final Buoy authority uses a parser-backed, fixture-proven form. | Phase 1; §C1 |
 | EARS-shaped normative statements | **Retained as authoring guidance, not parser authority.** Normative meaning lives in the atom statement and its approved scope/kind. | Phase 1; §C1 |
 | Eight-hex `xxh3-64` revisions | **Superseded.** Identity uses the complete canonical XXH3-128 value under the active versioned Buoy envelope. | §C2 |
-| `@spec ID rev HASH` comment annotations and a `chelis-lint` provenance rule family | **Superseded.** Syntax-aware Buoy adapters attach typed metadata to eligible items; Chelis does not build a second provenance engine. | Phase 1; §C3 |
-| One in-repo extractor plus `--spec-report` | **Replaced by shared Buoy Rust semantics.** Phase 1 freezes the Chelis Rust integration crate/module and command/report surface without duplicating authority or freshness logic. | Phase 1; §C6 |
+| `@spec ID rev HASH` comment annotations and a `chelis-lint` provenance rule family | **Superseded.** The future OpenSpec-type tool uses syntax-aware adapters backed by Buoy to attach typed metadata to eligible items; Chelis does not build a second provenance engine. | Phase 1; §C3 |
+| One in-repo extractor plus `--spec-report` | **Replaced by the pinned future tool over shared Buoy semantics.** Phase 1 freezes the external command/configuration/report boundary without duplicating authority or freshness logic in Chelis. | Phase 1; §C6 |
 | Spec-edit freshness by mechanically comparing carrier revs | **Strengthened.** Current revisions are necessary, and Phase 2 additionally requires complete provider-neutral transitive impact dispositions. | Phase 2; §C2 and §C6 |
 | Green test or issue-linked ignored test as the two coverage states | **Superseded.** Registration, freshness, selection, five-state execution verdict, debt, waiver, and assurance class remain independent facts. | §C3 and §C4 |
 | Blocking coverage manifest and advisory debt reports | **Replaced by versioned coverage policies, adoption ratchets, repository-owned debt, and repository-owned waivers.** Phase 3 freezes initial policy IDs, selectors, required roles, reports, and negative controls. | Phase 3; §C4 |
 | Capability-row, Deep-tag, tolerance-row, and diagnostic citations | **Retained and generalized as governed structural surfaces.** Selected members bind one current controlling atom revision; intentional duplicates also require derivations. | Phase 3; §C5 |
-| OpenSpec proving inadequate as the trigger for provenance work | **Superseded.** OpenSpec is required immediately for planning and agent communication; a nonblocking Buoy pilot may begin once Phase 1 fixtures and a pin exist. Blocking still waits for the readiness rule. | Immediate-term OpenSpec adoption; Phases 1 and 3 |
+| OpenSpec proving inadequate as the trigger for provenance work | **Superseded.** OpenSpec becomes required for planning and agent communication when Phase 0's executable adoption surface lands; a nonblocking pilot through the future Buoy-backed tool may begin once Phase 1 fixtures and pins exist. Blocking still waits for the readiness rule. | Phase 0; Phases 1 and 3 |
 | Executable atoms through `chelis prove` | **Retained as optional stronger evidence, not a replacement for ordinary carriers.** Exact properties, models, proofs, assumptions, and exclusions are bound only when justified. | Phase 4 |
 
-## Immediate-term OpenSpec adoption
+## Phase 0 OpenSpec activation contract
 
-Until Buoy integration reaches its blocking phase, OpenSpec is the required
-planning and agent-communication workflow for Chelis changes. Every
-agent-authored feature or behavior change SHALL:
+Once Phase 0's executable adoption surface is green, OpenSpec becomes the
+required planning and agent-communication workflow for Chelis changes. This
+requirement continues after Buoy-backed blocking adoption: provenance
+enforcement does not replace change planning. Every agent-authored feature or
+behavior change SHALL:
 
 1. create or update an OpenSpec change before implementation;
 2. identify the affected specification requirements;
@@ -98,9 +109,12 @@ OpenSpec remains the proposal and review workflow for changes. It is not:
 - an input to canonical graph identity; or
 - a substitute for repository-owned approval and change records.
 
-The near-term discipline is therefore **OpenSpec for planning, Buoy for
-enforcement**. OpenSpec validation proves only that planning artifacts are
-internally valid.
+The staged discipline is therefore **OpenSpec for planning, then a future
+OpenSpec-type tool backed by Buoy for enforcement**. Current OpenSpec
+validation proves only that planning artifacts are internally valid. The
+future tool may consume explicit repository-owned links to planning artifacts,
+but current OpenSpec state, lifecycle, and provider metadata never become
+canonical Buoy inputs.
 
 ## Architecture
 
@@ -111,7 +125,11 @@ OpenSpec proposal
        v
 Chelis repository-owned authorities and records
        |
-       | total Chelis adapter
+       | saved repository + pinned configuration
+       v
+Future OpenSpec-type provenance tool
+       |
+       | repository-independent Rust APIs
        v
 Buoy static graph and change-impact engine
        |
@@ -148,7 +166,8 @@ and `05-RNG-1` remain allocated and are never silently renamed.
 Current blockquote atoms remain normative under the existing Chelis spec
 contract until migrated, but they are not silently treated as Buoy
 authorities. A selected section enters Buoy policy only after its authorities
-have been converted or handled by a fixture-proven Chelis adapter.
+have been converted or handled by a fixture-proven adapter in the pinned future
+tool.
 
 The preferred authority form is Buoy's parser-backed fenced object:
 
@@ -198,7 +217,8 @@ truth, collision impossibility, or supply-chain integrity.
 
 ## C3. Evidence and navigation
 
-Evidence metadata must be parser-attached to an eligible executable item.
+Evidence metadata must be attached to an eligible executable item by a
+syntax-aware adapter owned and versioned by the future integration tool.
 Comments, strings, prose mentions, file-level annotations, and nearby atom IDs
 do not create carriers.
 
@@ -269,7 +289,7 @@ implementation honors the decision.
 
 ## C6. Static, change, and execution checks
 
-The integration preserves three distinct surfaces:
+The future tool's Buoy-backed integration preserves three distinct surfaces:
 
 - **static:** build and validate the current saved-repository graph;
 - **change:** compare explicit base and head graphs and require complete impact
@@ -310,14 +330,15 @@ record. Provider state cannot be the only durable exemption ledger.
 
 # Part II — staged adoption
 
-## Phase 0 — OpenSpec adoption and review routing
+## Phase 0 — activate OpenSpec planning and review routing
 
 Deliver the repository's OpenSpec configuration, change templates and agent
 instructions, strict validation, human review queue, PR template, `spec/**`
 review routing, citation checks, and temporary-exemption path.
 
-This phase makes no Buoy assurance claim and does not make OpenSpec or provider
-metadata canonical product authority.
+This PR defines the phase; the OpenSpec requirement becomes active only when
+the phase oracle is green. The phase makes no Buoy assurance claim and does
+not make OpenSpec or provider metadata canonical product authority.
 
 **Oracle:** the named `openspec_adoption` suite plus the PR-gate suite prove
 that valid changes pass strict OpenSpec validation; missing requirement
@@ -325,10 +346,12 @@ deltas, positive or negative scenarios, and implementation-PR change links
 fail; and cited, docs-only, and explicitly exempted PR cases follow their
 defined paths.
 
-## Phase 1 — advisory Buoy pilot
+## Phase 1 — advisory Buoy-backed tool pilot
 
-Pin one exact Buoy revision and compatibility profile. Before production
-adapter code, freeze positive and negative fixtures for:
+Select and pin one exact revision of the future OpenSpec-type provenance tool;
+that tool revision must pin one exact Buoy revision and compatibility profile.
+Before production tool configuration or adapter code, freeze positive and
+negative fixtures for:
 
 - existing atom IDs and authority migration;
 - malformed and duplicate authorities;
@@ -337,19 +360,21 @@ adapter code, freeze positive and negative fixtures for:
 - provider/root/order independence; and
 - an expected-authority selector that produces no authorities.
 
-Add a Chelis-owned Rust integration crate or module, provisionally named
-`chelis-provenance`, and an advisory static report over a small initial scope.
-No existing Chelis command becomes blocking.
+Adopt the pinned tool in advisory mode with Chelis-owned configuration and a
+small initial scope. Do not add a direct Buoy dependency, provenance parser, or
+parallel graph implementation to the Chelis workspace. No existing Chelis
+command becomes blocking.
 
-**Oracle:** the named `chelis_provenance_advisory` integration suite proves
-byte-identical reports under separate roots, rejects planted malformed/stale
-inputs, and leaves the existing Chelis gate unchanged.
+**Oracle:** the named `chelis_provenance_advisory` integration suite invokes
+the pinned tool, proves byte-identical reports under separate roots, rejects
+planted malformed/stale inputs, verifies the tool and Buoy pins, and leaves the
+existing Chelis gate unchanged.
 
 ## Phase 2 — provider-neutral change impact
 
-Materialize repository-owned approvals, review records, debt, waivers,
-reaffirmations, and neutral base-to-head manifests. Enable advisory change
-reports.
+Through the pinned tool, materialize repository-owned approvals, review
+records, debt, waivers, reaffirmations, and neutral base-to-head manifests.
+Enable advisory change reports.
 
 **Oracle:** the named `chelis_provenance_change_impact` suite proves that a
 planted atom edit enumerates every transitive dependent claim; it rejects a
@@ -362,10 +387,18 @@ Select the first finite surfaces—initially the atomized spec/04 and spec/05
 sections plus their corresponding capability/tag/tolerance domains. Require
 positive and negative roles where applicable.
 
+Integrate the ordinary required oracles through the pinned tool in this phase:
+selection, effectful execution, five-state result normalization, and exact
+binding back to carriers. This is the minimum execution surface needed for a
+blocking coverage claim; stronger model/property/proof evidence remains Phase
+4.
+
 Promotion requires:
 
-- the pinned Buoy acceptance oracle green at the exact integrated revision;
-- all Chelis adapter positive and negative fixtures green;
+- the pinned Buoy acceptance oracle green at the exact revision selected by the
+  pinned future tool;
+- all future-tool adapter and Chelis-configuration positive and negative
+  fixtures green;
 - no missing or filtered selected surface member;
 - every selected carrier current;
 - every required oracle selected and passing; and
@@ -375,16 +408,17 @@ Promotion requires:
 planted uncovered atom, missing surface member, stale carrier, and silent
 policy weakening each fail while the complete selected scope passes.
 
-## Phase 4 — execution and stronger evidence
+## Phase 4 — stronger evidence
 
-Add effectful oracle execution, bounded models, properties, and formal records
-only where their exact scope justifies the maintenance cost. Preserve the
-boundary that source-level proof does not prove rustc, LLVM, emitted
-C/HIP/Metal, or machine code.
+Add bounded models, sampled properties, formal properties, and proof records
+only where their exact scope justifies the maintenance cost. Reuse Phase 3's
+execution and result-normalization path rather than creating another identity
+or report surface. Preserve the boundary that source-level proof does not prove
+rustc, LLVM, emitted C/HIP/Metal, or machine code.
 
-**Oracle:** the named `chelis_provenance_execution` suite proves five-state
-result normalization, static-identity independence, exact scopes, negative
-controls, and current bindings.
+**Oracle:** the named `chelis_provenance_stronger_evidence` suite proves exact
+model/property/proof scopes, assumptions, exclusions, negative controls, and
+current bindings while leaving static identity independent of execution.
 
 ## Readiness rule
 
@@ -393,15 +427,16 @@ complete because it cannot block Chelis or replace existing acceptance
 evidence.
 
 Blocking adoption may not begin merely because the initial Buoy repository
-gate is green. It requires a reviewed, pinned Buoy revision whose relevant
-hardening obligations are complete, plus the Chelis-specific Phase 3 oracle.
+gate is green. It requires a reviewed, pinned future-tool revision, that tool's
+exact pinned Buoy revision with relevant hardening obligations complete, plus
+the Chelis-specific Phase 3 oracle.
 
 This design records the target; it does not claim that condition is satisfied
 today.
 
 ## Non-goals
 
-- Reimplementing Buoy semantics in `chelis-lint`.
+- Reimplementing Buoy semantics or a direct Buoy adapter in any Chelis crate.
 - Making OpenSpec or GitHub state canonical.
 - Treating annotations, implementation links, waivers, review records, test
   discovery, or passing siblings as proof.
@@ -418,14 +453,14 @@ today.
 | 1 | silently malformed authorities or stale registrations inside the advisory scope |
 | 2 | an atom change whose transitive dependents receive no explicit disposition |
 | 3 | missing selected surface members, uncovered required roles, and silent policy weakening |
-| 4 | effectful results or stronger evidence being reported outside their exact bindings and scope |
+| 4 | model, property, or proof evidence being reported outside its exact bindings and scope |
 
 ## Open decisions
 
 The Phase 1 adoption proposal must freeze:
 
-1. the exact Buoy revision and compatibility policy;
-2. the Chelis adapter crate/module and command namespace;
+1. the exact future-tool revision, its exact Buoy revision, and compatibility policy;
+2. the external command, configuration, and report-schema boundary Chelis consumes;
 3. the first advisory authority selectors and finite decision surfaces;
 4. the existing blockquote-atom migration strategy; and
 5. the initial derivation inventory for generated and mirrored artifacts.
