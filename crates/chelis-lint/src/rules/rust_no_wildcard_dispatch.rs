@@ -719,8 +719,7 @@ mod tests {
     fn flags_planted_elemkind_f32_default() {
         let src = "fn k(p: Prim) -> ElemKind {\n    match p {\n        \
                    Prim::F32 => ElemKind::F32,\n        _ => ElemKind::F32,\n    }\n}\n";
-        let v = RustNoWildcardDispatch
-            .check(&ctx("crates/chelis-backend-hip/src/emit.rs", src));
+        let v = RustNoWildcardDispatch.check(&ctx("crates/chelis-backend-hip/src/emit.rs", src));
         assert_eq!(v.len(), 1, "planted `_ => ElemKind::F32` must fire");
         assert_eq!(v[0].rule_id, "rust-no-wildcard-dispatch");
         assert_eq!(v[0].spec_ref, "§12.3");
@@ -730,8 +729,7 @@ mod tests {
     fn flags_planted_prim_f32_default() {
         let src = "fn f(x: HostType) -> Prim {\n    match x {\n        \
                    HostType::Int64 => Prim::Int64,\n        _ => Prim::F32,\n    }\n}\n";
-        let v = RustNoWildcardDispatch
-            .check(&ctx("crates/chelis-ir/src/specialize.rs", src));
+        let v = RustNoWildcardDispatch.check(&ctx("crates/chelis-ir/src/specialize.rs", src));
         assert_eq!(v.len(), 1, "planted `_ => Prim::F32` must fire");
     }
 
@@ -741,8 +739,7 @@ mod tests {
         let src = "fn t(a: HostType) -> HostType {\n    match a {\n        \
                    HostType::Float64 => HostType::Float64,\n        \
                    _ => HostType::Int64,\n    }\n}\n";
-        let v = RustNoWildcardDispatch
-            .check(&ctx("crates/chelis-ir/src/host.rs", src));
+        let v = RustNoWildcardDispatch.check(&ctx("crates/chelis-ir/src/host.rs", src));
         assert!(
             v.iter().any(|x| x.message.contains("HostType::Int64")),
             "planted `_ => HostType::Int64` must fire; got {v:?}"
@@ -753,8 +750,7 @@ mod tests {
     fn flags_wildcard_with_guard() {
         let src = "fn f(p: Prim) -> ElemKind {\n    match p {\n        \
                    Prim::F64 => ElemKind::F64,\n        _ if true => ElemKind::F32,\n    }\n}\n";
-        let v = RustNoWildcardDispatch
-            .check(&ctx("crates/chelis-backend-metal/src/emit.rs", src));
+        let v = RustNoWildcardDispatch.check(&ctx("crates/chelis-backend-metal/src/emit.rs", src));
         assert_eq!(v.len(), 1, "`_ if <guard>` wildcard must fire too");
     }
 
@@ -763,9 +759,12 @@ mod tests {
         let src = "fn f(p: Prim) -> ElemKind {\n    match p {\n        \
                    Prim::F64 => ElemKind::F64,\n        _ => {\n            \
                    let k = ElemKind::F32;\n            k\n        }\n    }\n}\n";
-        let v = RustNoWildcardDispatch
-            .check(&ctx("crates/chelis-backend-hip/src/emit.rs", src));
-        assert_eq!(v.len(), 1, "a block-bodied wildcard manufacturing must fire");
+        let v = RustNoWildcardDispatch.check(&ctx("crates/chelis-backend-hip/src/emit.rs", src));
+        assert_eq!(
+            v.len(),
+            1,
+            "a block-bodied wildcard manufacturing must fire"
+        );
     }
 
     // ---- negative parity: the safe shapes stay green ----------------------
@@ -876,7 +875,8 @@ mod tests {
 
     #[test]
     fn does_not_scan_unconfigured_crates() {
-        let src = "fn k(p: Prim) -> ElemKind {\n    match p {\n        _ => ElemKind::F32,\n    }\n}\n";
+        let src =
+            "fn k(p: Prim) -> ElemKind {\n    match p {\n        _ => ElemKind::F32,\n    }\n}\n";
         assert!(
             RustNoWildcardDispatch
                 .check(&ctx("crates/chelis-lint/src/lib.rs", src))
@@ -885,7 +885,10 @@ mod tests {
         );
         assert!(
             RustNoWildcardDispatch
-                .check(&ctx("crates/chelis-cli/tests/loud_unsupported_tripwire.rs", src))
+                .check(&ctx(
+                    "crates/chelis-cli/tests/loud_unsupported_tripwire.rs",
+                    src
+                ))
                 .is_empty(),
             "the tripwire test's own planted strings are out of scope"
         );

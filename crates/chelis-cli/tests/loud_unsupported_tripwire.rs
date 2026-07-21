@@ -683,7 +683,10 @@ fn count_numeric_defaults_counts_all_three_spellings() {
 /// the `.unwrap_or(` scan.
 #[test]
 fn count_numeric_defaults_ignores_non_numeric_defaults() {
-    assert_eq!(count_numeric_defaults("let x = a.unwrap_or(default_val);"), 0);
+    assert_eq!(
+        count_numeric_defaults("let x = a.unwrap_or(default_val);"),
+        0
+    );
     assert_eq!(
         count_numeric_defaults("let x = a.unwrap_or_else(|| compute());"),
         0
