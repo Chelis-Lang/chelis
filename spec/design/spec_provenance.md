@@ -43,6 +43,28 @@ This supersedes the 2026-07-20 plan to leave atom/hash enforcement as a future
 so the remaining problem is integration and readiness, not invention of
 another mechanism.
 
+## Disposition of the previous #733 contracts
+
+This table makes the supersession explicit. A retained or replaced contract is
+not implemented merely because it appears here; the named phase owns its exact
+fixtures, format, and oracle. No previous contract survives by implication.
+
+| Previous #733 contract | Disposition in this design | Owning phase or section |
+|---|---|---|
+| PR trailers, docs-only detection, `spec-exempt`, `CODEOWNERS`, and the PR template | **Retained as provider-level review routing.** Exact parsing, authorization, reporting, and planted cases remain Phase 0 deliverables. Provider state never becomes canonical authority. | Phase 0; §C7 |
+| Stable Chelis atom IDs | **Retained.** Existing IDs remain allocated; Phase 1 freezes the registry, namespaces, and migration mapping. | Phase 1; §C1 |
+| Markdown blockquote atoms | **Retained only as migration input.** Existing blocks remain normative Chelis text until selected; final Buoy authority uses a parser-backed, fixture-proven form. | Phase 1; §C1 |
+| EARS-shaped normative statements | **Retained as authoring guidance, not parser authority.** Normative meaning lives in the atom statement and its approved scope/kind. | Phase 1; §C1 |
+| Eight-hex `xxh3-64` revisions | **Superseded.** Identity uses the complete canonical XXH3-128 value under the active versioned Buoy envelope. | §C2 |
+| `@spec ID rev HASH` comment annotations and a `chelis-lint` provenance rule family | **Superseded.** Syntax-aware Buoy adapters attach typed metadata to eligible items; Chelis does not build a second provenance engine. | Phase 1; §C3 |
+| One in-repo extractor plus `--spec-report` | **Replaced by shared Buoy Rust semantics.** Phase 1 freezes the Chelis Rust integration crate/module and command/report surface without duplicating authority or freshness logic. | Phase 1; §C6 |
+| Spec-edit freshness by mechanically comparing carrier revs | **Strengthened.** Current revisions are necessary, and Phase 2 additionally requires complete provider-neutral transitive impact dispositions. | Phase 2; §C2 and §C6 |
+| Green test or issue-linked ignored test as the two coverage states | **Superseded.** Registration, freshness, selection, five-state execution verdict, debt, waiver, and assurance class remain independent facts. | §C3 and §C4 |
+| Blocking coverage manifest and advisory debt reports | **Replaced by versioned coverage policies, adoption ratchets, repository-owned debt, and repository-owned waivers.** Phase 3 freezes initial policy IDs, selectors, required roles, reports, and negative controls. | Phase 3; §C4 |
+| Capability-row, Deep-tag, tolerance-row, and diagnostic citations | **Retained and generalized as governed structural surfaces.** Selected members bind one current controlling atom revision; intentional duplicates also require derivations. | Phase 3; §C5 |
+| OpenSpec proving inadequate as the trigger for provenance work | **Superseded.** OpenSpec remains planning-only; a nonblocking Buoy pilot may begin once Phase 1 fixtures and a pin exist. Blocking still waits for the readiness rule. | OpenSpec boundary; Phases 1 and 3 |
+| Executable atoms through `chelis prove` | **Retained as optional stronger evidence, not a replacement for ordinary carriers.** Exact properties, models, proofs, assumptions, and exclusions are bound only when justified. | Phase 4 |
+
 ## OpenSpec boundary
 
 OpenSpec remains the proposal and review workflow for changes. It is not:
