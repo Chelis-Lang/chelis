@@ -17,11 +17,9 @@
 //! A top-level `_` / `_ if <guard>` match arm whose BODY constructs a
 //! CONCRETE variant of a configured enum: `Prim::<V>`, `ElemKind::<V>`,
 //! `RiscOp::<V>`, or `HostType::<V>` where `<V>` is an uppercase variant
-//! name. `HostType::Unknown` is the one exclusion: it is the blessed
-//! polymorphic marker (`spec/design/loud_unsupported.md` section C3 - legal
-//! for genuinely polymorphic signatures, and it fails LOUD downstream at
-//! the numeric-baking point, never a silent narrow), not a manufactured
-//! concrete value.
+//! name. `HostType::Unknown` is a temporary migration exclusion while the
+//! typed state split in `spec/design/loud_unsupported.md` §C4.6/§C6.3 lands.
+//! It is not a blessed final marker or structural safety evidence.
 //!
 //! # What it does NOT flag (by design)
 //!
@@ -86,8 +84,9 @@ const CONFIGURED_CRATE_SRC: &[&str] = &[
 ];
 
 /// The closed enums whose manufactured-in-a-wildcard variants are the
-/// chelis#703 substitution shape. `HostType::Unknown` is exempt in
-/// [`is_concrete_construction`].
+/// chelis#703 substitution shape. `HostType::Unknown` is temporarily exempt
+/// in [`is_concrete_construction`] only while the HostType migration is
+/// incomplete; the exemption is deleted with the legacy enum.
 const CONFIGURED_ENUMS: &[&str] = &["Prim", "ElemKind", "RiscOp", "HostType"];
 
 /// One allowlisted keep: `(repo-relative path, enum::variant token, count,
@@ -572,7 +571,7 @@ fn is_wildcard_pattern(pat: &str) -> bool {
 /// position, return the `Enum::Variant` token. Returns `None` when the only
 /// occurrences are exclusions:
 ///
-/// - `HostType::Unknown` - the blessed polymorphic marker (§C3).
+/// - `HostType::Unknown` - temporary HostType-migration exemption (§C4.6/C6.3).
 /// - a `RiscOp` variant other than `Const` - a `RiscOp::Load`/`MatMul`/...
 ///   built in a wildcard fallback is legitimate IR generation, not a
 ///   value substitution; the ONLY `RiscOp` substitution shape is the
@@ -797,8 +796,8 @@ mod tests {
     }
 
     #[test]
-    fn ignores_hosttype_unknown_polymorphic_marker() {
-        // The blessed polymorphic default (section C3) - stays green.
+    fn ignores_hosttype_unknown_during_temporary_migration() {
+        // Transitional only; this self-test is deleted with the legacy enum.
         let src = "fn f(a: Option<HostType>) -> Option<HostType> {\n    match a {\n        \
                    Some(HostType::Tensor(t)) => Some(HostType::Tensor(t)),\n        \
                    _ => Some(HostType::Unknown),\n    }\n}\n";
@@ -806,7 +805,7 @@ mod tests {
             RustNoWildcardDispatch
                 .check(&ctx("crates/chelis-ir/src/host.rs", src))
                 .is_empty(),
-            "`_ => Some(HostType::Unknown)` must not fire (blessed marker)"
+            "`_ => Some(HostType::Unknown)` must not fire during the temporary exemption"
         );
     }
 

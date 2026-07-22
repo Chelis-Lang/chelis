@@ -13,6 +13,7 @@ pub mod eval;
 pub mod fuse;
 pub mod grad;
 pub mod host;
+pub mod host_type_state;
 pub mod load_store_name;
 pub mod lower;
 pub mod optimize;
@@ -33,6 +34,11 @@ pub use host::{
     BlasDimRole, BlasSummaryAttempt, CompiledProgram, HelperPath, HelperSummaryRejection,
     PayloadRole, SparseOpKind, SummaryRejection, SummaryRejectionClass, SummaryRejectionDetail,
     WildcardLocation, host_program_summary_rejections,
+};
+pub use host_type_state::{
+    ConcreteHostType, HostInferenceVar, HostPrecisionTerm, HostShapeSlot, HostShapeTerm,
+    HostTensorTypeTerm, HostTypeDecodeError, HostTypeResolutionError, HostTypeTerm,
+    decode_host_type, decode_host_type_metadata,
 };
 pub use load_store_name::{LoadStoreName, LoadStoreNameError};
 pub use lower::{

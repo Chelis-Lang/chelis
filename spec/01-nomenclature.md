@@ -1326,11 +1326,14 @@ consumer work-list when a variant is added.
 - **Configured crates:** `chelis-ir`, `chelis-backend-c`,
   `chelis-backend-hip`, `chelis-backend-metal`, and the
   `chelis-compiler-api` numeric modules.
-- **`HostType::Unknown` is exempt.** It is the blessed polymorphic marker
-  (`spec/design/loud_unsupported.md` §C3): legal for genuinely
-  polymorphic signatures, and it fails LOUD downstream at the
-  numeric-baking point, never a silent narrow. It is not a manufactured
-  concrete value.
+- **`HostType::Unknown` is a temporary migration exemption, not a blessed
+  marker.** The legacy enum currently conflates genuine polymorphism with
+  inference, malformed/missing metadata, bottom, and absent backend
+  representations. `spec/design/loud_unsupported.md` §C4.6/§C6.3 replaces it
+  with named `HostTypeTerm` states, Result-typed decode/resolution, and a
+  fallible `ConcreteHostType -> HostAbiType` boundary. The lint exemption is
+  removed with that migration; it is not safety evidence and must not justify
+  a new occurrence.
 - **Not flagged (by design):** classification filters that produce a
   non-enum value (`_ => None`, `_ => continue`, `_ => false`), loud
   invariant guards (`_ => unreachable!(...)`, `_ => panic!(...)`), and

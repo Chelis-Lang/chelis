@@ -232,10 +232,11 @@ because nobody built it yet" are never conflated again.
 
 Per stage, what exists and what this plan builds:
 
-| stage | today | after Phase 1 |
+| stage | today | target state |
 |---|---|---|
 | lowering (`chelis-ir/src/lower.rs`) | `raise_lowering_error` exists and works (used by `lower_unsupported`) | unchanged mechanism; every censused lowering site calls it |
-| host-type resolution (`chelis-ir/src/host.rs`) | infallible `-> HostType`, silent `Unknown`/`Int64` defaults | numeric-prim resolution returns `Result<HostType, Unsupported>`; `Unknown` remains legal ONLY for genuinely polymorphic signatures (the documented rank/precision-poly cases), never as a numeric fallback |
+| host-type resolution (`chelis-ir/src/host.rs`) | infallible `-> HostType`, with one `Unknown` state shared by malformed/missing metadata, polymorphism, inference, bottom, and unimplemented logical dtypes | syntax decoding returns `Result<HostTypeTerm, HostTypeDecodeError>`; named type/precision/rank variables, inference variables, and `Never` are distinct terms; resolution returns `Result<ConcreteHostType, HostTypeResolutionError>` and never chooses a default |
+| host ABI selection (`chelis-ir` -> C host emitter) | infallible `HostType -> &'static str`; `Unknown -> void*`, plus zero defaults in boxing/unboxing | `ConcreteHostType -> Result<HostAbiType, Unsupported>`; the emitter accepts only `HostAbiType`; a known logical type with an unimplemented target representation is a Table-B `Unimplemented` diagnostic, never a type-erasure or emitted value |
 | C host emitter (`chelis-backend-c/src/host_emit.rs`) | **no channel**: expression builders return `String`, statement emitters return `()` | expression builders return `Result<EmittedExpr, Unsupported>`; statement emitters `Result<(), Unsupported>`; the compile entry surfaces the first error as a §C2 diagnostic. This is THE plumbing refactor - mechanical (`?` all the way up), moderate in size, and the enabling move for everything else |
 | DAG C emitter (`chelis-backend-c/src/emit.rs`) | panics ([#692]) | same Result channel; the reduce-family panic arms become diagnostics |
 | HIP emitter | gate rejects much; `elem_kind` substitutes F32 ([#689]) | `elem_kind` returns `Result`; its `_` arm deleted (§C4.2) |
@@ -310,6 +311,17 @@ be represented.
    equivalent numeric-default spellings, count relocation, and in-crate raw
    emission can evade them. Phase 2 may remove or narrow them only after the
    corresponding typed mutation oracle is green.
+6. **Host types are a staged typed pipeline.** `HostTypeTerm` preserves exact
+   logical scalar precision and gives named type, precision, rank, inference,
+   and bottom states distinct variants. Missing and malformed metadata are
+   `HostTypeDecodeError`, not terms. Only `HostTypeTerm::into_concrete` may
+   produce `ConcreteHostType`, and it returns `HostTypeResolutionError` while
+   any variable or `Never` remains. Target ABI selection consumes only
+   `ConcreteHostType` and returns `Result<HostAbiType, Unsupported>`; backend
+   emitters consume only `HostAbiType`. Thus `f16`, `bf16`, `int8`, and `int16`
+   remain known logical types even while the C-host capability cell rejects
+   their representation. There is no `Unknown` variant, no `Default`, and no
+   conversion from a decode/resolution failure to a concrete or ABI type.
 
 ## C5. The census (normative appendix; Phase 0 re-verifies by execution)
 
@@ -472,6 +484,70 @@ Rust `E0004` at an exhaustive consumer before the temporary variant was
 removed. These results freeze the vocabulary slice, but do not complete Phase
 2's unrelated HostType and structured-emission work.
 
+### C6.3 Host-type state and ABI migration
+
+The HostType inventory at PR [#799] base `42d61a2` found 167 textual
+`HostType::Unknown` occurrences in `chelis-ir/src/host.rs` and 22 in
+`chelis-backend-c/src/host_emit.rs`, including comments. Those numbers are
+**migration telemetry only**. They are not an allowlist, a safety gate, or the
+completion oracle: an exact-count scanner repeats the lexical-design failure
+described in C4.5 and can be evaded by aliases or relocation. The authoritative
+endpoint is zero direct legacy constructions plus compile-time boundaries that
+make an unresolved term impossible to pass to codegen.
+
+Every production occurrence belongs to one of the following semantic classes.
+The ranges are navigation aids at that base, not stable identities:
+
+| semantic class | producer/consumer inventory at `42d61a2` | required migration |
+|---|---|---|
+| missing or malformed metadata/type syntax | `expr_type`/`expr_fn_type` and `parse_host_type[_with_subst]` (`host.rs:7614-7776`): non-list input, absent metadata, unknown primitive, malformed `t-ref`/`t-adt`/`t-fn`, unknown tag | boundary returns `HostTypeDecodeError::{MissingTypeMetadata, MalformedTypeSyntax, UnknownPrimitive}`; no type term is manufactured |
+| legitimate type polymorphism | precision/rank-poly filters and standalone-emission skips (`host.rs:1068-1398`, `2035-2064`, `7691-7725`), plus signature/inlining substitutions (`8427-8506`, `8615-8617`) | preserve names in `TypeVariable`, `HostPrecisionTerm::Variable`, and ordered `HostShapeSlot::RankVariable` entries (including Tier-3 prefix/suffix spreads); specialize or return a resolution error before codegen |
+| underconstrained inference | function/parameter defaults (`2161-2274`), expression inference/refinement (`3428-4618`, `4796-6007`), inlining/call metadata (`6469-7253`) | allocate stable `HostInferenceVar` identities; empty collections retain an element inference variable; joins/refinement unify terms and unresolved holes return `HostTypeResolutionError` |
+| builtin result inference failure | `infer_builtin_host_type[_from_arg_tys]` (`7924-8348`): invalid argument shapes, tuple indices, collection element extraction, and absent callback/result facts | distinguish an invalid builtin application (typed error) from a valid underconstrained result (inference variable); no `Some(Unknown)` success value |
+| bottom/divergence | `fail` result (`8223`) and branch joins that currently use `Unknown` as the missing side | represent `fail` as `HostTypeTerm::Never`; a join may eliminate bottom in favor of the other branch, but `Never` cannot resolve to a value or ABI representation |
+| known logical type, target representation absent | `t-prim` fallback (`7684`), scalar arithmetic propagation (`7981-7988`), tensor/scalar/list conversions (`8271-8348`), with C baking guard (`host_emit.rs:2388-2422`) | retain exact `Prim` in `ConcreteHostType::Scalar`; C-host selection returns `Unsupported` for an unimplemented Table-B cell such as f16/bf16/int8/int16 |
+| emitter expectation/refinement sentinel | C list/tuple/call/callback paths (`host_emit.rs:1471-1812`, `3902-4466`, `5192-5212`) choose expected vs inferred types and synthesize unknown container fields | resolve before entering the emitter; collection/callback helpers receive concrete element/parameter ABI types, not a fallback marker |
+| emitted representation/default | `c_type` maps `Unknown` to `void*` (`4995`); boxing and unboxing catch-alls return boxed/bare zero (`4760-4810` vicinity) | delete the conversions; `c_type`, box, and unbox consume `HostAbiType` exhaustively and return the existing `Unsupported` channel where an operation-specific capability is absent |
+
+The non-production carriers are also inventoried: three span-survival fixtures
+construct placeholder host expressions
+(`span_threading_through_host_lowering.rs:629,646,781`); the Phase-1 and
+narrow-dtype CLI tests describe the old failure chain
+(`loud_unsupported_phase1.rs:284`, `narrow_dtype_matrix.rs:12`); and the
+temporary wildcard-dispatch lint's docs/self-tests contain six exemption
+examples (`rust_no_wildcard_dispatch.rs:20,89,575,804,809,903`). Fixtures move
+to the explicit term appropriate to their role, historical comments are
+rewritten as history, and the lint exemption/self-tests are deleted. None is a
+semantic producer, and none is allowed to keep the legacy enum alive.
+
+The staged source contract is:
+
+1. `decode_host_type(...) -> Result<HostTypeTerm, HostTypeDecodeError>` owns raw
+   Deep syntax and metadata.
+2. Inference and specialization operate on `HostTypeTerm`. A successful
+   `into_concrete` is the only path to `ConcreteHostType`.
+3. Target selection consumes `ConcreteHostType` and the capability Table-B
+   cell, returning `Result<HostAbiType, Unsupported>`.
+4. Host codegen accepts `HostAbiType` only. Its declaration, boxing, unboxing,
+   call, and callback matches are exhaustive and cannot observe a term or
+   resolution error.
+
+During migration, any unavoidable compatibility bridge is private and named
+`LegacyUnresolvedHostType`; it may support legacy inference/refinement only. It
+has no `From`/`TryFrom` path to `ConcreteHostType` or `HostAbiType`, cannot be
+passed to emission, and is deleted at this subsection's exit. Direct
+`HostType::Unknown` construction outside that one bridge is not an accepted
+transitional architecture. A source endpoint test requires zero direct legacy
+constructions; compile-time function signatures, not that source scan, prove
+that only resolved types reach codegen.
+
+Positive/negative parity covers: every concrete primitive; each named variable
+kind; missing versus malformed syntax; empty-list inference; `Never`
+value-boundary rejection; supported ABI representations; and known logical
+f16/bf16/int8/int16 values rejected by an unimplemented C-host ABI cell. The
+negative ABI tests assert the structured `UnsupportedKind::Dtype` and
+`Stage::Codegen("c")`, not diagnostic prose alone.
+
 ---
 
 # Part II - process rules at every boundary
@@ -633,9 +709,14 @@ tripwire proving it.
 3. The runtime dtype migration in §C6.2: generated Rust/C agreement,
    immediate FFI decoding, typed sizing/reading helpers, and invalid-ID tests
    for `-1`, the first unused ID, and both `i32` extrema.
-4. The private structured C-expression AST described in §C4.4, replacing
+4. The HostType state/ABI split in §C4.6 and §C6.3: Result-only syntax
+   decoding, named polymorphic and inference states, `Never`, resolution to
+   `ConcreteHostType`, and fallible target conversion to `HostAbiType`. Host
+   codegen accepts only the resolved ABI vocabulary; the legacy `Unknown`
+   sentinel and every emitted/default-value conversion from it are deleted.
+5. The private structured C-expression AST described in §C4.4, replacing
    `EmittedExpr::raw` as a general construction path.
-5. Keep the PR [#799] lint and tripwire green as defense evidence during the
+6. Keep the PR [#799] lint and tripwire green as defense evidence during the
    migration. Their allowlists do not freeze as the safety authority.
 
 **Frozen at your exit:** the two vocabulary declarations, their external
@@ -650,8 +731,11 @@ DeepTag later without a config freeze exception).
 **Oracle:** the Phase 2 closed-vocabulary suite is green; adding one temporary
 `EffectKind` variant fails compilation in every §C6.1 semantic consumer;
 invalid runtime dtype IDs fail before any §C6.2 sizing or access helper;
-regenerating the C dtype header is byte-identical. The lint and tripwire are
-supporting evidence, not the oracle.
+regenerating the C dtype header is byte-identical; every §C6.3 term-state parity
+test is green; and the C emitter's codegen boundary is typed in `HostAbiType`
+so a compile-fail test cannot pass `HostTypeTerm`, `Never`, a decode/resolution
+error, or the deleted legacy sentinel. The lint, tripwire, and zero-occurrence
+endpoint scan are supporting evidence, not the oracle.
 
 ## Phase 3 - gates become UX, not safety
 

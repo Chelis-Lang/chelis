@@ -1199,6 +1199,12 @@ newtype remain useful defense evidence, but Phase 2 is not complete: the
 HostType failure-channel split, capability proofs, and private structured C
 expression representation remain. The lint and token tripwire are temporary
 defense-in-depth, not the authority.
+The HostType completion architecture is the staged contract in
+`loud_unsupported.md` §C4.6/§C6.3: logical terms preserve named polymorphism,
+inference identity, bottom, and exact dtype; only resolved concrete types may
+enter a fallible target-ABI conversion; codegen accepts the ABI vocabulary,
+never an anonymous sentinel. Initial vocabulary and parity-test scaffolding do
+not complete that migration while legacy producers/consumers remain.
 Residuals are per-atom noted below; [05-UNS-4]'s gate demotion is that
 plan's Phase 3. The delivery plan and full elaboration (the failure
 channel, the census, the typed ratchets) is

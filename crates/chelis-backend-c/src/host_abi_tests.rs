@@ -1,0 +1,58 @@
+//! chelis#730 Phase 2 red contract for the C-host Table-B type boundary.
+//!
+//! This test module is intentionally uncompilable until the backend owns an
+//! opaque, crate-private `HostAbiType` whose only constructor is the fallible
+//! conversion from a fully resolved `ConcreteHostType`.
+
+use crate::host_abi::HostAbiType;
+use chelis_ir::{ConcreteHostType, TensorType};
+use chelis_types::types::Prim;
+use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
+
+#[test]
+fn abi_conversion_accepts_only_resolved_logical_types() {
+    let conversion: fn(&ConcreteHostType) -> Result<HostAbiType, Unsupported> =
+        HostAbiType::try_from_concrete;
+    let _ = conversion;
+}
+
+#[test]
+fn supported_concrete_types_map_to_exact_c_host_abis() {
+    let f32_abi = HostAbiType::try_from_concrete(&ConcreteHostType::Scalar(Prim::F32))
+        .expect("f32 has a C-host representation");
+    assert_eq!(f32_abi.c_type_name(), "float");
+
+    let i32_abi = HostAbiType::try_from_concrete(&ConcreteHostType::Scalar(Prim::Int32))
+        .expect("int32 has a C-host representation");
+    assert_eq!(i32_abi.c_type_name(), "int32_t");
+
+    let tensor_abi = HostAbiType::try_from_concrete(&ConcreteHostType::Tensor(TensorType {
+        dims: Vec::new(),
+        precision: Prim::F16,
+    }))
+    .expect("f16 tensors use the typed tensor runtime and have a pointer ABI");
+    assert_eq!(tensor_abi.c_type_name(), "chelis_tensor*");
+}
+
+#[test]
+fn unsupported_scalar_abis_return_the_shared_typed_diagnostic() {
+    for precision in [Prim::F16, Prim::Bf16, Prim::Int8, Prim::Int16] {
+        let logical = ConcreteHostType::Scalar(precision);
+        let err = HostAbiType::try_from_concrete(&logical)
+            .expect_err("this scalar C-host representation is unimplemented");
+        assert_eq!(
+            err.what,
+            UnsupportedKind::Dtype(precision.name().to_string())
+        );
+        assert_eq!(err.stage, Stage::Codegen("c"));
+        assert!(err.to_string().starts_with("unsupported: "));
+    }
+}
+
+#[test]
+fn nested_values_cannot_hide_an_unsupported_scalar_abi() {
+    let list = ConcreteHostType::List(Box::new(ConcreteHostType::Scalar(Prim::F16)));
+    let err = HostAbiType::try_from_concrete(&list)
+        .expect_err("a pointer container must not erase an unsupported element ABI");
+    assert_eq!(err.what, UnsupportedKind::Dtype("f16".into()));
+}
