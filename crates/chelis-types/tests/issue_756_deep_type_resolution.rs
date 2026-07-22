@@ -192,7 +192,7 @@ fn annotation_pass_preserves_nested_defsig_binder_result_type() {
     let rendered = chelis_deep::printer::print_canonical(checked.annotated_exprs());
     assert!(
         !rendered.contains("(t-var {} _)"),
-        "annotation re-inference must retain the tensor result instead of silently stamping an error hole:\n{rendered}"
+        "authoritative owner writeback must retain the tensor result instead of silently stamping an error hole:\n{rendered}"
     );
 }
 

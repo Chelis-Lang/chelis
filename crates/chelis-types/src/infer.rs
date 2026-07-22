@@ -6620,64 +6620,13 @@ fn annotate_fn_children(
     let resolved_fn_ty = product
         .owner_type(owner_expr, "function node", errors)
         .unwrap_or(Type::Unit);
-    // issue #319: when the def carries a separate `sig`, the `fn`
-    // literal's params are bare symbols, so the inference above seeds
-    // each with an unconstrained fresh tvar — the body's shape-sensitive
-    // ops (`matmul`, `permute`) then annotate as bare type variables
-    // rather than resolved tensor types. Recovering the declared param
-    // types from `declared_param_type_exprs` and binding them into
-    // `fn_env` lets the recursive body annotation resolve those ops to
-    // their true `tensor[...]` shapes. Without this, IR lowering reads a
-    // rank-0 `default_type()` off a `(t-var ...)` body-node annotation
-    // and `tier2::lower_matmul` panics with `expects rank >= 2`.
-    //
-    // A SHARED `tvar_map`/`dvar_map` is used across every declared param
-    // so a dim/precision variable that recurs across parameters (e.g.
-    // `tensor[s, d, p]` for `q`, `k`, and `v`) maps to the SAME `DimVar`
-    // / `TypeVar` — preserving the inter-parameter shape relationships
-    // (`q: [s, d]`, `kt: [d, s]` ⇒ `matmul(q, kt): [s, s]`) that the
-    // matmul typing rule depends on. `param_vg` (the cloned `VarGen`)
-    // feeds fresh-var allocation so it does not perturb the caller's.
-    //
-    // We cannot advance the CALLER's `vg` past these param-type vars:
-    // `vg: &VarGen` is borrowed SHARED in this post-inference annotation
-    // pass, and threading `&mut VarGen` through the whole annotation
-    // call-chain is a far larger change for a pass whose vars never escape.
-    // Instead we feed the already-advanced `param_vg` clone to the body
-    // annotation below (see the body call) — the "advance the counter" fix
-    // scoped to exactly where it matters.
-    //
-    // chelis#773 — why the body pass MUST mint from `param_vg`, not `vg`:
-    // The former per-node annotation re-inference
-    // CLONES the `VarGen` it is given and instantiates each builtin scheme
-    // (`matmul`, `mul`, …) from that clone. If it cloned the un-advanced
-    // `vg`, a scheme's fresh parameter/return var would numerically COLLIDE
-    // with a param-type var — e.g. the `tensor[s, d, p]` precision
-    // `TypeVar(N)` and `matmul`'s instantiated first-param `TypeVar(N)`.
-    // `unify` then attempts `Tensor([.., .., Var(N)]) ~ Var(N)`, the
-    // occurs-check rejects it, and the body op collapses to `Type::Error`,
-    // cascading down the let-chain. Before #773 that Error was swallowed by
-    // `infer_app`'s arg-Error short-circuit (every downstream op collapsed
-    // to a clean `Error`, so the negative-parity test saw no bare `t-var`);
-    // removing that short-circuit exposed the collision as a bare-`t-var`
-    // result on the shape-computed `matmul` override
-    // (`check_matmul_signature` returns `subst.apply(ret_tv)` — an unbound
-    // `Var` — when an operand is `Error`). Because `param_vg` has already
-    // consumed every param-type var, feeding it to the body pass makes
-    // every scheme-instantiated var strictly greater, so no collision can
-    // occur. Nothing from `param_vg` flows back into the caller's
-    // `vg`/`subst` or the program's global type state; the annotation runs
-    // in its own throwaway `Subst`. (Re-using the already-resolved declared
-    // `Fn` type — as the WS-A7 `infer_def_body_with_sig` inference path
-    // does — would also work, but is not reachable from this post-inference
-    // annotation pass, which has no access to that resolved type or the
-    // error vector.)
-    // Only stamp parameter types when they come from the def's
-    // declared `sig`. A bare `fn` literal with no declared signature
-    // keeps bare params: the inferred function type loses `&` borrow
-    // wrappers, and stamping it would also pre-empt the
-    // read-only/borrow inference that `infer_signature_metadata`
-    // performs on parameters left bare.
+    // Issue #319/#773: declared parameter syntax is copied from the owning
+    // `sig` so borrow wrappers and shared symbolic variables remain exact.
+    // Body expression types are not recomputed here: they come from the
+    // completed `InferenceProduct` epoch, eliminating the former fresh-var /
+    // fresh-substitution annotation collision. A bare `fn` with no declared
+    // signature keeps bare parameters so signature metadata can still infer
+    // its read-only display form.
     let annotated_params = match declared_param_type_exprs {
         Some(declared) => annotate_params_node(&kids[0], declared),
         None => kids[0].clone(),
@@ -8496,7 +8445,8 @@ fn param_bound_dvars(decl_ty: &Type) -> HashSet<DimVar> {
 /// How the concat arm can see the list's elements (chelis#594).
 enum ConcatListInfo {
     /// A literal `Cons` chain at the call site: each element's full dim
-    /// vector, in list order (re-inferred read-only at the concat site).
+    /// vector, in list order (read from the current inference epoch's
+    /// already-recorded child types).
     /// Ragged literal extents SUM.
     Direct(Vec<Vec<Dim>>),
     /// A variable (or anything else): only a binding-carried literal
@@ -11607,11 +11557,9 @@ fn infer_app(
             // `subst.apply(ret_tv)`. When an operand type is `Error`, the
             // Error-permissive per-slot unify above (`(Error, _) => Ok(())`)
             // never bound `ret_tv`, so the override would leak an unbound
-            // `Var` as the call's result type. In the post-inference
-            // type-annotation/writeback pass — which re-infers a node in a
-            // scope where its operands can be unbound and thus `Error` — that
-            // bare `Var` is then degraded to a rank-0 default `TensorType`
-            // that CLOBBERS the node's concrete type annotation, ICEing the IR
+            // `Var` as the call's result type. That bare `Var` would be
+            // degraded to a rank-0 default `TensorType` during writeback and
+            // CLOBBER the node's concrete type annotation, ICEing the IR
             // lowering (`conv2d output height axis requires a statically known
             // axis`; #778's short-circuit removal exposed this). Returning
             // `Type::Error` instead restores the pre-#778 downstream shape
