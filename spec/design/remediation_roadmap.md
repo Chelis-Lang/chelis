@@ -217,9 +217,12 @@ once is cheap; a break they make and later unmake is the expensive kind. Like
 the sequencing above, this ordering is advice, not law; a cut may move if a
 cell becomes urgent.
 
-Baseline (2026-07): the shipped release is **v0.16.1**; Wave 1 (the merged
-Phase 1s, PRs #791/#792/#793) sits on `main` unreleased. Step zero is to cut
-it - it is tested and its shell impact is entirely final.
+Baseline (2026-07): the shipped release is **v0.16.1**; everything merged since
+- the Phase 1s (PRs #791/#792/#793) and the ordinary work alongside them - sits
+on `main` unreleased. Step zero is to cut it as v0.17.0. A cut's migration note
+is the **breaking-change summary**, not the full release contents: most of what
+a cut carries is ordinary work, and only the deltas called out below force a
+downstream change.
 
 ### What actually forces a downstream change
 
@@ -231,26 +234,36 @@ it - it is tested and its shell impact is entirely final.
 | D - rendering change | [#732] printed-output strings | churn ONLY if one lane changes twice |
 | E - reject-now-support-later | [#730] loud reject -> [#729] kernel lands | the add-then-remove-workaround trap |
 
-The capability table's `Unimplemented { issue: #N }` cell is the anti-churn
-tool for class E: a not-yet-supported cell becomes a *stable, cited*
-rejection, so a shell writes the `chelis#N` narrowing citation once and removes
-it only when the kernel actually lands - a real event, not a slicing artifact.
+The class-E anti-churn tool is the capability *decision* itself: whether a cell
+is supported or a stable, cited `Unimplemented { issue: #N }` rejection is a
+behavior fact, and **every such decision ships in v0.19 with the dtype break** -
+never deferred to the v0.20 table. A shell then writes the `chelis#N` narrowing
+citation once, against 0.19, and removes it only when the kernel actually lands
+- a real event, not a slicing artifact. The v0.20 table only *mechanizes*
+decisions 0.19 already made, so it is behavior-preserving by construction.
 
 ### The cuts
 
-| cut | carries | shell impact | why it is final |
+| cut | carries | shell impact | notes |
 |---|---|---|---|
-| **v0.17.0 - loud checking** (ship now) | [#730] P1 + [#731] P1 + [#732] P1 (all merged) | A + B + the eval-side of D | seed form frozen (only [#735] semantics change later); [#732] P1 freezes the Rust/eval render - the C side matches it later, so no eval lane re-adapts |
-| **v0.18.0 - totality + host-type loudness** | [#731] P2 (PR #800) + [#731] P3 (DeepTag) + [#730] P2 (PR #799 vocab + host-type state) + [#732] P2 (C render) | more B + D reaching final | no wire break ([#730] P2 preserves the `CHELIS_*` ids); bundling [#732] P2 here completes byte-identical rendering in the same bump cross-lane shells already take for host-type loudness |
-| **v0.19.0 / v1.0.0 - grounded dtypes** | [#729] P1-P3, landed atomic per §C3 | C + E *resolving* | the one wire break, isolated from the checker-loudness cuts; the cells [#730] loudly rejected reach their final disposition (supported, or stable `Unimplemented`). Natural 1.0 candidate: dtype discipline is the language's stated value proposition, and this is when it becomes true |
-| **v0.20.0 - permanent guards** | [#729] P4 (capability table) + [#730] P3 (gates -> UX) + [#732] P3 (tolerance / cross-lane oracle) + [#733] P3 | table becomes the stable contract; `tests_blocked/` probes re-adjudicated | small delta; may ride the 1.0 cut |
+| **v0.17.0 - loud checking + canonical eval rendering** (ship now) | [#730] P1 + [#731] P1 + [#732] P1, and everything else merged since 0.16.1 | **source migration** (wave 1) | breaking deltas only: loud rejections (incl. the new loud compiled-lane `test_*` assert, [#796] - the old inert-`0` stub is gone, so anything leaning on it fails heavily in E2E), `with seed(n)` -> `42i64` ([#731] P1 - the Shoals / Whale / hello-chelis HEAD canaries fail on unsuffixed seeds), and dtype-faithful eval rendering. Seed form frozen ([#735] changes only meaning); eval render frozen (C matches it at 0.18) |
+| **v0.18.0 - checker totality, DeepTag, host-type/ABI boundary, compiled rendering** | [#731] P2 (PR #800) + [#731] P3 (DeepTag) + [#730] P2 (PR #799 vocab + host-type/ABI state) + [#732] P2 (compiled render) | **mechanical** for shells | no wire break ([#730] P2 preserves the `CHELIS_*` ids); the added loudness lands on already-broken code, so no *expected* source migration. Completes byte-identical rendering. Release-hygiene gate: the tarball must now ship `chelis_runtime_dtype.h` - PR 799's public `chelis_runtime.h` `#include`s it, but the release workflow currently copies only `chelis_runtime.h` |
+| **v0.19.0 - grounded dtype storage/wire break + every behavior-changing capability decision** | [#729] P1-P3 landed atomic per §C3, **plus every capability decision that changes behavior** - integer-overflow traps and each supported-vs-`Unimplemented` disposition (int `mean` [#724], bool arithmetic [#726], the [#715] rows, the HIP/Metal/C reject cells) | **source migration** (wave 2) | the one wire break, isolated from the checker-loudness cuts; class E resolves here, not at the 0.20 table. Bindings adapt to the per-dtype payload once; capability behavior is final |
+| **v0.20.0 - behavior-preserving permanent guards** | [#729] P4 (the capability *table*, mechanizing 0.19's decisions) + [#730] P3 (gates -> UX) + [#732] P3 (tolerance / cross-lane oracle) + [#733] provenance | **mechanical** for shells | guaranteed behavior-preserving: no decision, rejection, or rendered byte changes here - 0.19 shipped them all. `tests_blocked/` probes are re-adjudicated against the now-standing table |
 
-Net downstream shape: shells feel **two** genuinely disruptive `conform` bumps
-- **0.17** (syntax + loud) and **0.19/1.0** (wire break + dtypes) - plus two
-smaller ones, and in none of them do they make a change they later reverse.
-Non-contract releases (bugfixes such as PR #819's `compile_and_load` metadata
-fix, internal refactors, doc-only work) need no disruptive bump and should not
-be gated on this cadence.
+Net downstream shape: there are **four mechanical `conform` bump waves** - one
+per cut, each a pin bump plus a probe re-run and an inventory refresh - but only
+**two expected source-migration waves**: **v0.17** (seed suffix + fixing
+loud-rejected code) and **v0.19** (the wire break + capability behavior). At
+v0.18 and v0.20 shells bump the pin and change no source. In none of the four
+does a shell make a change it later reverses.
+
+Cadence for non-contract work: an **internal-only** change (a refactor, a
+checker-internal fix, doc-only work) normally **rides the next planned cut**
+rather than getting its own release; only an **urgent downstream bug fix** - a
+shell blocked on a real defect - justifies an out-of-band patch release. PR
+#819's `compile_and_load` metadata fix qualifies for a patch only if a shell
+needs it now; otherwise it rides 0.18.
 
 ### The anti-churn invariants
 
@@ -258,43 +271,84 @@ be gated on this cadence.
    storage decision across releases or binding consumers adapt N times.
 2. **Per-lane-render-once.** [#732] freezes the eval render at P1 and the C
    render at P2; a given lane never changes shape twice. Keep P1/P2 in
-   different cuts but tell cross-lane shells P1 is "eval-final, C follows in
+   different cuts but tell cross-lane shells P1 is "eval-final, C follows at
    0.18".
 3. **Frozen seed form.** [#731] P1's `i64` suffix is the final syntax; [#735]
    authors only meaning. Safe to ship to shells at 0.17.
-4. **Stable rejections via the table.** Land [#730] loud-rejects close to their
-   `Unimplemented { issue }` classification so a shell cites once; never leave
-   a bare loud error that a later cut reclassifies.
-5. **Reserve the pain.** Only the 0.17 and 0.19/1.0 cuts cost shells; keep
-   internal refactors and bugfixes out of those bumps.
+4. **Decisions before tables.** Every behavior-changing capability decision
+   (supported vs a stable, cited `Unimplemented { issue }`) ships in v0.19; the
+   v0.20 table only mechanizes them. Never leave a bare loud error in one cut
+   that a later cut reclassifies - a shell cites once, against 0.19.
+5. **v0.20 is mechanically behavior-preserving.** If any change in the guards
+   cut would alter a result, a rejection, or a rendered byte, it belongs in 0.19
+   instead. That guarantee is what lets shells treat the 0.20 bump as pin-only.
+6. **Ship what the public headers include.** A release whose public runtime
+   header gains an `#include` (0.18's `chelis_runtime_dtype.h`) must add that
+   file to every tarball; a published-artifact smoke that compiles a trivial C
+   unit against the shipped `chelis_runtime.h` catches the omission before it
+   reaches a downstream build.
 
 ### Per-cut conform checklist
 
-For each disruptive cut, the `conform bump` PR wave across the shells carries:
+Every cut gets a mechanical `conform bump` PR wave across the shells; the two
+source-migration cuts (0.17, 0.19) additionally carry real source edits. Each
+wave carries:
 
-- a migration note naming the one behavior delta (below), the `chelis#NNN`
-  refs it closes, and the exact surface that changed;
+- a migration note as the **breaking-change summary** (the delta below), the
+  `chelis#NNN` refs it closes, and the exact surface that changed - not the full
+  changelog;
 - a re-run of every shell's `tests_blocked/` probes (a probe flipping green =
   remove the narrowing citation for that ref);
 - the multi-location pin-consistency guard and the `docs/CHELIS_SURFACE.md`
   capability-inventory refresh;
-- for 0.19/1.0 only: the wire-schema version bump acknowledged at each Python
+- a published-artifact smoke that compiles a trivial C unit against the shipped
+  `chelis_runtime.h`, so a header the release forgot to package (0.18's
+  `chelis_runtime_dtype.h`) fails the release, not the downstream build;
+- at 0.19 only: the wire-schema version bump acknowledged at each Python
   consumer.
 
-Migration-note stubs (one behavior delta per cut):
+Migration-note stubs (the breaking delta per cut):
 
-- **0.17** - "`check`/`build` now fail loudly where they silently substituted;
-  `with seed(n)` requires an `i64`-suffixed literal (`seed(42i64)`); eval
-  output is dtype-faithful (integers print as integers), with the compiled
-  lane matching it in 0.18."
-- **0.18** - "more previously-silent errors are now caught (bogus cast targets,
-  field access on non-records, malformed/unknown host types); compiled and
-  eval output now render byte-identically."
-- **0.19/1.0** - "dtype semantics are grounded: integer overflow traps instead
-  of wrapping, per-dtype tensor storage (wire-format v2, Python payload shape
-  changed), narrow dtypes preserved end-to-end."
-- **0.20** - "the capability table is the standing op x dtype contract;
-  unsupported cells reject with a cited, stable diagnostic."
+- **0.17** (source migration) - "`check`/`build` now fail loudly where they
+  silently substituted (incl. compiled-lane `test_*` asserts, which no longer
+  stub to an inert `0`); `with seed(n)` requires an `i64`-suffixed literal
+  (`seed(42i64)`); eval output is dtype-faithful (integers print as integers).
+  Known HEAD-canary casualties: Shoals, Whale, hello-chelis (unsuffixed seeds),
+  plus any E2E leaning on the old assert stub."
+- **0.18** (mechanical) - "pin bump only: more previously-silent errors are
+  caught (bogus casts, non-record field access, malformed host types) but on
+  already-broken code; compiled and eval output now render byte-identically; the
+  runtime tarball gains `chelis_runtime_dtype.h`."
+- **0.19** (source migration) - "dtype semantics are grounded: integer overflow
+  traps instead of wrapping, per-dtype tensor storage (wire-format v2, Python
+  payload shape changed), narrow dtypes preserved end-to-end; every op x dtype
+  capability decision is now fixed (supported, or a cited stable rejection)."
+- **0.20** (mechanical) - "pin bump only: the capability table, gates-as-UX,
+  provenance, and the cross-lane oracle land, all encoding decisions already
+  shipped in 0.19 - no behavior change."
+
+### Tag gate and the 0.17 sequence
+
+A source-migration cut separates two kinds of breakage, handled differently:
+
+- **Repo-owned** failures gate the tag. The heavy E2E failures from the new
+  loud compiled-lane `test_*` rejection ([#796]) are the repo's own tests and
+  **must be green before tagging** - a cut is never tagged over a red repo E2E.
+- **Shell-owned** failures do not gate the tag; they are the *expected*
+  migration signal (the Shoals / Whale / hello-chelis HEAD canaries failing on
+  unsuffixed seeds). Their `conform` bump fixes are **prepared before the tag**
+  so shells migrate promptly once it lands.
+
+The 0.17 sequence, concretely:
+
+1. Merge the corrected release-slicing change (this PR).
+2. Once the repo-owned `test_*` E2E is green, make the short-lived 0.17 release
+   commit and tag it.
+3. Verify the published assets (the header smoke: every `#include`d runtime
+   header is in the tarball).
+4. Start the shell `conform` bump migrations (the seed-suffix fixes, prepared
+   in advance).
+5. Merge PR #800 (the 0.18 witness work) only afterward - it does not ride 0.17.
 
 ## The unclaimed-issue ledger
 
