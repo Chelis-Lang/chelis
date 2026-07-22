@@ -427,6 +427,199 @@ impl<'a> AnnotationResolutionContext<'a> {
     }
 }
 
+/// One checker operation's typed inference result. The product is private,
+/// session-local, and never serialized: annotation consumes it immediately
+/// after the owning inference traversal completes.
+#[derive(Default)]
+struct InferenceProduct {
+    typed_nodes: usize,
+    total_nodes: usize,
+    next_epoch: u64,
+    active_epoch: Option<TypeStampEpoch>,
+    owner_types: HashMap<usize, FinalOwnerType>,
+}
+
+struct TypeStampEpoch {
+    id: u64,
+    required: HashMap<usize, StampRequirement>,
+    writes: HashMap<usize, Vec<OwnerTypeWrite>>,
+}
+
+#[derive(Clone, Copy)]
+struct StampRequirement {
+    role: &'static str,
+}
+
+struct OwnerTypeWrite {
+    ty: Type,
+    source: &'static str,
+}
+
+struct FinalOwnerType {
+    epoch: u64,
+    ty: Type,
+}
+
+impl InferenceProduct {
+    fn stats(&self) -> InferStats {
+        InferStats {
+            typed_nodes: self.typed_nodes,
+            total_nodes: self.total_nodes,
+        }
+    }
+
+    fn begin_root(&mut self, root: &deep::Expr) {
+        assert!(
+            self.active_epoch.is_none(),
+            "type-stamp epochs must not overlap"
+        );
+        let id = self.next_epoch;
+        self.next_epoch += 1;
+        let mut epoch = TypeStampEpoch {
+            id,
+            required: HashMap::new(),
+            writes: HashMap::new(),
+        };
+        register_annotation_owners(root, &mut epoch);
+        self.active_epoch = Some(epoch);
+    }
+
+    fn record_canonical(&mut self, expr: &deep::Expr, ty: Type) {
+        self.record(expr, ty, "canonical infer_expr traversal");
+    }
+
+    fn record_bypass(&mut self, expr: &deep::Expr, ty: Type, source: &'static str) {
+        self.record(expr, ty, source);
+    }
+
+    fn record(&mut self, expr: &deep::Expr, ty: Type, source: &'static str) {
+        let Some(epoch) = self.active_epoch.as_mut() else {
+            return;
+        };
+        let key = expr_key(expr);
+        if !epoch.required.contains_key(&key) {
+            return;
+        }
+        epoch
+            .writes
+            .entry(key)
+            .or_default()
+            .push(OwnerTypeWrite { ty, source });
+    }
+
+    fn finish_root(&mut self, subst: &Subst, errors: &mut DiagnosticSink<'_>) {
+        let Some(epoch) = self.active_epoch.take() else {
+            errors.push(internal_owner_stamp_error(
+                "attempted to finish a type-stamp epoch that was not active".to_string(),
+            ));
+            return;
+        };
+
+        for (key, requirement) in epoch.required {
+            let Some(writes) = epoch.writes.get(&key) else {
+                // Missing owners are diagnosed at the exact annotation lookup,
+                // where the original construct and role are still available.
+                continue;
+            };
+            let mut resolved = writes
+                .iter()
+                .map(|write| (subst.apply(&write.ty), write.source));
+            let Some((canonical, canonical_source)) = resolved.next() else {
+                continue;
+            };
+            for (candidate, candidate_source) in resolved {
+                if !owner_types_compatible(&canonical, &candidate) {
+                    errors.push(internal_owner_stamp_error(format!(
+                        "conflicting authoritative type writes for {} in epoch {}: \
+                         `{canonical}` from {canonical_source} vs `{candidate}` from \
+                         {candidate_source}",
+                        requirement.role, epoch.id
+                    )));
+                }
+            }
+            self.owner_types.insert(
+                key,
+                FinalOwnerType {
+                    epoch: epoch.id,
+                    ty: canonical,
+                },
+            );
+        }
+    }
+
+    fn owner_type(
+        &self,
+        expr: &deep::Expr,
+        role: &'static str,
+        errors: &mut DiagnosticSink<'_>,
+    ) -> Option<Type> {
+        match self.owner_types.get(&expr_key(expr)) {
+            Some(owner) => {
+                let _owning_epoch = owner.epoch;
+                Some(owner.ty.clone())
+            }
+            None => {
+                errors.push(internal_owner_stamp_error(format!(
+                    "missing authoritative type stamp for {role}"
+                )));
+                None
+            }
+        }
+    }
+}
+
+fn expr_key(expr: &deep::Expr) -> usize {
+    std::ptr::from_ref(expr).addr()
+}
+
+fn owner_types_compatible(left: &Type, right: &Type) -> bool {
+    let mut compatibility_subst = Subst::new();
+    unify(left, right, &mut compatibility_subst).is_ok()
+}
+
+fn internal_owner_stamp_error(message: String) -> CheckError {
+    CheckError::new(
+        CheckErrorKind::Other,
+        format!("internal: annotation owner-stamp invariant violated: {message}"),
+        vec![],
+    )
+}
+
+fn register_annotation_owners(expr: &deep::Expr, epoch: &mut TypeStampEpoch) {
+    let deep::Expr::List(list, _) = expr else {
+        if let deep::Expr::MetaExpr(meta, _) = expr {
+            register_annotation_owners(&meta.expr, epoch);
+        }
+        return;
+    };
+    let tag = get_tag(list);
+    if let Some(tag) = tag {
+        if tag == "fn" {
+            register_owner(epoch, expr, "function node");
+        } else if should_attach_type_metadata(tag) {
+            register_owner(epoch, expr, "metadata-eligible expression");
+        }
+        if matches!(tag, "pat-var" | "pat-as") {
+            register_owner(epoch, expr, "pattern binding");
+        }
+        if matches!(tag, "defsig" | "deftype" | "typealias") {
+            return;
+        }
+    }
+    // Element 1 is metadata. Metadata is compiler/source context, not a
+    // runtime child owned by the expression inference traversal.
+    for child in list.elements.iter().skip(2) {
+        register_annotation_owners(child, epoch);
+    }
+}
+
+fn register_owner(epoch: &mut TypeStampEpoch, expr: &deep::Expr, role: &'static str) {
+    epoch
+        .required
+        .entry(expr_key(expr))
+        .or_insert(StampRequirement { role });
+}
+
 /// Collect the declared signature metadata owned by one inference or
 /// annotation unit. The returned map is passed explicitly; nested, sequential,
 /// and parallel checks cannot observe another unit's declarations.
@@ -742,6 +935,13 @@ pub(crate) fn infer_program_in_session(
     exprs: &[deep::Expr],
     errors: &mut DiagnosticSink<'_>,
 ) -> InferStats {
+    infer_program_with_product_in_session(exprs, errors).stats()
+}
+
+fn infer_program_with_product_in_session(
+    exprs: &[deep::Expr],
+    errors: &mut DiagnosticSink<'_>,
+) -> InferenceProduct {
     // Reset the stack-exhaustion flag for this check unit; `drain` below
     // turns any walker stack bail into a hard located error so deep input
     // can never produce a silent green / partial result.
@@ -750,8 +950,7 @@ pub(crate) fn infer_program_in_session(
     let mut subst = Subst::new();
     let mut adt_reg = AdtRegistry::new();
     builtins::register_prelude_adts(&mut env, &mut vg, &mut adt_reg);
-    let mut typed_nodes = 0;
-    let mut total_nodes = 0;
+    let mut product = InferenceProduct::default();
 
     // RFC v4b (RT-1 F2): reject a named module opened by more than one
     // wrapper in this check unit (module-identity forgery).
@@ -788,6 +987,7 @@ pub(crate) fn infer_program_in_session(
     let declared_signatures =
         collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
     for (module, expr) in &items {
+        product.begin_root(expr);
         let decl_name = top_level_decl_name(expr);
         crate::opacity::set_current_item(
             crate::opacity::module_key_for_item(module.as_deref(), decl_name),
@@ -800,12 +1000,12 @@ pub(crate) fn infer_program_in_session(
             &mut subst,
             &adt_reg,
             errors,
-            &mut typed_nodes,
-            &mut total_nodes,
+            &mut product,
             None,
             &user_def_names,
             &declared_signatures,
         );
+        product.finish_root(&subst, errors);
         // Issue #256 round 2: re-check each deferred borrow against the
         // now-complete substitution (see `validate_deferred_borrow_vars`).
         validate_deferred_borrow_vars(&subst, &adt_reg, errors);
@@ -832,10 +1032,7 @@ pub(crate) fn infer_program_in_session(
     // surface it as a hard located failure (covered-or-rejected).
     stack_scope.drain_into(errors);
 
-    InferStats {
-        typed_nodes,
-        total_nodes,
-    }
+    product
 }
 
 pub fn check_ir_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, InferResult> {
@@ -886,13 +1083,14 @@ pub(crate) fn build_type_env_from_library_in_session(
     let library_ir = build_ir_type_env(library_exprs);
     log_sub("build_ir_type_env_initial", &mut sub_t);
 
-    let stats = infer_ir_program_with_state(
+    let product = infer_ir_program_with_state(
         library_exprs,
         &mut state,
         /* combined_ir_for_validate = */ &library_ir,
         /* run_validate_passes_on = */ None,
         errors,
     );
+    let stats = product.stats();
     log_sub("infer_ir_program_with_state", &mut sub_t);
     validate_ir_program(library_exprs, &library_ir, errors);
     log_sub("validate_ir_program", &mut sub_t);
@@ -1034,13 +1232,14 @@ pub(crate) fn build_compiled_library_context_in_session(
 
     let library_ir = build_ir_type_env(library_exprs);
 
-    let stats = infer_ir_program_with_state(
+    let product = infer_ir_program_with_state(
         library_exprs,
         &mut state,
         /* combined_ir_for_validate = */ &library_ir,
         /* run_validate_passes_on = */ None,
         errors,
     );
+    let stats = product.stats();
     validate_ir_program(library_exprs, &library_ir, errors);
     validate_tensor_precisions_in_program(library_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
@@ -1188,13 +1387,14 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
     // `library_exprs`' own declared types (base schemes are already in
     // `state.env`); the combined IR env is supplied to the validators so
     // `(var basefoo)` references resolve to the base's declared type.
-    let stats = infer_ir_program_with_state(
+    let product = infer_ir_program_with_state(
         library_exprs,
         &mut state,
         &combined_ir,
         /* run_validate_passes_on = */ None,
         errors,
     );
+    let stats = product.stats();
     validate_ir_program(library_exprs, &combined_ir, errors);
     validate_tensor_precisions_in_program(library_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
@@ -1370,13 +1570,14 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     // Library is already validated; only run validate / inference on
     // new exprs. Inference's canonical collector binds the new-code's
     // own declared types (library schemes are already in state.env).
-    let stats = infer_ir_program_with_state(
+    let product = infer_ir_program_with_state(
         new_exprs,
         &mut state,
         &combined_ir,
         /* run_validate_passes_on = */ None,
         errors,
     );
+    let stats = product.stats();
     log_sub("infer_ir_program_with_state", &mut sub_t);
     // Run cycle / shape / precision validators on new_exprs only. The
     // combined IR env is supplied so `(var libfoo)` references
@@ -1589,6 +1790,7 @@ fn infer_ir_program_with_env(
         /* run_validate_passes_on = */ None,
         errors,
     )
+    .stats()
 }
 
 /// Run the inference / IR binding / shape-validation passes against
@@ -1605,9 +1807,8 @@ fn infer_ir_program_with_state(
     combined_ir: &IrTypeEnv,
     run_validate_passes_on: Option<&[deep::Expr]>,
     errors: &mut DiagnosticSink<'_>,
-) -> InferStats {
-    let mut typed_nodes = 0;
-    let mut total_nodes = 0;
+) -> InferenceProduct {
+    let mut product = InferenceProduct::default();
 
     // RFC v4b (RT-1 F2): reject a named module opened by more than one
     // wrapper in this check unit (module-identity forgery). Reef-linked
@@ -1681,6 +1882,7 @@ fn infer_ir_program_with_state(
     let declared_signatures =
         collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
     for (declaration_index, (module, expr)) in items.iter().enumerate() {
+        product.begin_root(expr);
         let t0 = if detail_profile {
             Some(std::time::Instant::now())
         } else {
@@ -1698,12 +1900,12 @@ fn infer_ir_program_with_state(
             &mut state.subst,
             &state.adt_reg,
             errors,
-            &mut typed_nodes,
-            &mut total_nodes,
+            &mut product,
             prebound_type_failures.get(&declaration_index),
             &user_def_names,
             &declared_signatures,
         );
+        product.finish_root(&state.subst, errors);
         if let Some(t0) = t0 {
             let elapsed = t0.elapsed();
             let name = top_level_decl_name(expr).unwrap_or("<anon>");
@@ -1738,10 +1940,7 @@ fn infer_ir_program_with_state(
         validate_ir_program(target_exprs, combined_ir, errors);
     }
 
-    InferStats {
-        typed_nodes,
-        total_nodes,
-    }
+    product
 }
 
 type IrTypeEnv = HashMap<String, deep::Expr>;
@@ -5634,219 +5833,22 @@ fn push_static_runtime_error(expr: &deep::Expr, errors: &mut DiagnosticSink<'_>,
 
 fn annotate_ir_program(
     exprs: &[deep::Expr],
+    product: &InferenceProduct,
     errors: &mut DiagnosticSink<'_>,
 ) -> Vec<deep::Expr> {
-    // Preserve historical behavior: build a fresh annotation state from
-    // `builtin_env()` + an EMPTY ADT registry (no prelude registration).
-    // This is asymmetric with `infer_ir_program_with_env` (which DOES
-    // register prelude ADTs), but downstream tooling — the host pipeline's
-    // `expr_type` reader, eval-result root expansion via
-    // `extend_root_names_from_value` — depends on this asymmetric type
-    // metadata shape. Phase C does NOT touch this; the
-    // `_with_context` variant accepts a non-empty context and uses
-    // library state as-is.
-    let (mut env, mut vg) = builtins::builtin_env();
-    let mut subst = Subst::new();
-    let mut adt_reg = AdtRegistry::new();
-    builtins::register_prelude_adts(&mut env, &mut vg, &mut adt_reg);
-
-    let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
-
-    // Descend through `(module {} name ...)` wrappers when collecting
-    // declarations, matching `infer_program`. Without this, module-
-    // wrapped user ADTs and defsigs never reach `env` / `adt_reg`
-    // during annotation, so `pat-record`'s constructor lookup (#181)
-    // and every other annotation-time env query for a user-declared
-    // name silently misses. See `infer_program` for the parallel
-    // iteration.
     let items = top_level_decl_items_with_modules(exprs);
-    collect_all_declarations(
-        &items,
-        &mut env,
-        &mut vg,
-        &mut subst,
-        &mut adt_reg,
-        errors,
-    );
     let declared_signatures =
         collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
     let annotation_context = AnnotationResolutionContext::root(&declared_signatures);
-
-    let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    let mut annotated = Vec::with_capacity(exprs.len());
-    for expr in exprs {
-        let t0 = if detail_profile {
-            Some(std::time::Instant::now())
-        } else {
-            None
-        };
-        // Run `infer_top_level` on the unit being annotated; for a
-        // `(module {} ...)` wrapper, this means inferring every inner
-        // decl before annotating the wrapper, so that annotation's
-        // recursive walk sees fully-inferred bindings for each inner
-        // decl. For a bare top-level decl, this preserves the original
-        // per-expr alternation (infer THIS decl, then annotate THIS
-        // decl) that signature-inference forward-reference assertions
-        // depend on. (closes #181)
-        let mut typed_nodes = 0;
-        let mut total_nodes = 0;
-        for decl in top_level_decl_items(std::slice::from_ref(expr)) {
-            infer_top_level(
-                decl,
-                &mut env,
-                &mut vg,
-                &mut subst,
-                &adt_reg,
-                errors,
-                &mut typed_nodes,
-                &mut total_nodes,
-                None,
-                &user_def_names,
-                &declared_signatures,
-            );
-        }
-
-        let annotated_expr = annotate_expr_with_scope(
-            expr,
-            &env,
-            &vg,
-            &subst,
-            &adt_reg,
-            annotation_context,
-            errors,
-        );
-        if let Some(t0) = t0 {
-            let elapsed = t0.elapsed();
-            let label = top_level_decl_name(expr)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "<anon>".to_string());
-            eprintln!(
-                "annotate_ir_decl: {:>8.4}s {}",
-                elapsed.as_secs_f64(),
-                label
-            );
-        }
-        annotated.push(annotated_expr);
-    }
-
-    annotated
-}
-
-/// Annotate `exprs` with inferred types, using `context` as the outer
-/// scope. Library schemes are visible during inference; only the
-/// new-code exprs are returned in the annotated result.
-///
-/// The supplied context is always used, even when it contains only type
-/// declarations and therefore has no value-level `def` names. Treating
-/// `library_def_count() == 0` as an empty context loses imported constructors
-/// during annotation and degrades their result types to inference holes.
-/// [`TypeEnv::empty`] contains the same builtin/prelude annotation state as
-/// [`annotate_ir_program`], so the monolithic path retains its metadata shape.
-fn annotate_ir_program_with_context(
-    context: &TypeEnv,
-    exprs: &[deep::Expr],
-    errors: &mut DiagnosticSink<'_>,
-) -> Vec<deep::Expr> {
-    let mut state = context.inner().clone();
-
-    let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
-
-    // Descend through `(module {} name ...)` wrappers when collecting
-    // declarations; mirrors the `infer_program` shape and the parallel
-    // fix in `annotate_ir_program`. (closes #181)
-    let items = top_level_decl_items_with_modules(exprs);
-    collect_all_declarations(
-        &items,
-        &mut state.env,
-        &mut state.var_gen,
-        &mut state.subst,
-        &mut state.adt_reg,
-        errors,
-    );
-    let declared_signatures =
-        collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
-    let annotation_context = AnnotationResolutionContext::root(&declared_signatures);
-
-    let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    let mut annotated = Vec::with_capacity(exprs.len());
-    for expr in exprs {
-        let t0 = if detail_profile {
-            Some(std::time::Instant::now())
-        } else {
-            None
-        };
-        // See the parallel comment in `annotate_ir_program`: infer
-        // every inner decl of a module wrapper before annotating, so
-        // user-declared ADT constructors and defsigs are visible at
-        // annotation time; preserve per-expr alternation otherwise.
-        let mut typed_nodes = 0;
-        let mut total_nodes = 0;
-        for decl in top_level_decl_items(std::slice::from_ref(expr)) {
-            infer_top_level(
-                decl,
-                &mut state.env,
-                &mut state.var_gen,
-                &mut state.subst,
-                &state.adt_reg,
-                errors,
-                &mut typed_nodes,
-                &mut total_nodes,
-                None,
-                &user_def_names,
-                &declared_signatures,
-            );
-        }
-
-        let annotated_expr = annotate_expr_with_scope(
-            expr,
-            &state.env,
-            &state.var_gen,
-            &state.subst,
-            &state.adt_reg,
-            annotation_context,
-            errors,
-        );
-        if let Some(t0) = t0 {
-            let elapsed = t0.elapsed();
-            // exprs here is at the module-wrapper level; pull a label.
-            let label = top_level_decl_name(expr)
-                .map(|s| s.to_string())
-                .or_else(|| module_name(expr).map(|m| format!("module:{m}")))
-                .unwrap_or_else(|| "<anon>".to_string());
-            eprintln!(
-                "annotate_ir_decl: {:>8.4}s {}",
-                elapsed.as_secs_f64(),
-                label
-            );
-        }
-        annotated.push(annotated_expr);
-    }
-
-    annotated
-}
-
-/// Extract the module name from a `(module {} name ...)` expr for
-/// profile labeling. Returns `None` if `expr` is not a module.
-fn module_name(expr: &deep::Expr) -> Option<&str> {
-    let deep::Expr::List(list, _) = expr else {
-        return None;
-    };
-    if get_tag(list) != Some("module") {
-        return None;
-    }
-    children(list).first().and_then(symbol_name)
+    exprs
+        .iter()
+        .map(|expr| annotate_expr_with_scope(expr, product, annotation_context, errors))
+        .collect()
 }
 
 fn annotate_expr_with_scope(
     expr: &deep::Expr,
-    env: &Env,
-    vg: &VarGen,
-    subst: &Subst,
-    adt_reg: &AdtRegistry,
+    product: &InferenceProduct,
     annotation_context: AnnotationResolutionContext<'_>,
     errors: &mut DiagnosticSink<'_>,
 ) -> deep::Expr {
@@ -5855,62 +5857,18 @@ fn annotate_expr_with_scope(
     stack_guard!("annotate_expr_with_scope", expr, expr.clone());
     match expr {
         deep::Expr::Atom(_, _) => expr.clone(),
-        deep::Expr::Map(map, span) => deep::Expr::Map(
-            deep::MetaMap {
-                entries: map
-                    .entries
-                    .iter()
-                    .map(|(key, value)| {
-                        let value = if key == "type" {
-                            value.clone()
-                        } else {
-                            annotate_expr_with_scope(
-                                value,
-                                env,
-                                vg,
-                                subst,
-                                adt_reg,
-                                annotation_context,
-                                errors,
-                            )
-                        };
-                        (key.clone(), value)
-                    })
-                    .collect(),
-            },
-            *span,
-        ),
+        // Metadata values are source/compiler context, not runtime children
+        // owned by expression inference. Preserve them verbatim.
+        deep::Expr::Map(map, span) => deep::Expr::Map(map.clone(), *span),
         deep::Expr::MetaExpr(meta, span) => deep::Expr::MetaExpr(
             deep::MetaExpr {
                 expr: Box::new(annotate_expr_with_scope(
                     &meta.expr,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
+                    product,
                     annotation_context,
                     errors,
                 )),
-                entries: meta
-                    .entries
-                    .iter()
-                    .map(|(key, value)| {
-                        let value = if key == "type" {
-                            value.clone()
-                        } else {
-                            annotate_expr_with_scope(
-                                value,
-                                env,
-                                vg,
-                                subst,
-                                adt_reg,
-                                annotation_context,
-                                errors,
-                            )
-                        };
-                        (key.clone(), value)
-                    })
-                    .collect(),
+                entries: meta.entries.clone(),
             },
             *span,
         ),
@@ -5924,10 +5882,7 @@ fn annotate_expr_with_scope(
                             .map(|element| {
                                 annotate_expr_with_scope(
                                     element,
-                                    env,
-                                    vg,
-                                    subst,
-                                    adt_reg,
+                                    product,
                                     annotation_context,
                                     errors,
                                 )
@@ -5947,23 +5902,12 @@ fn annotate_expr_with_scope(
                 .unwrap_or(annotation_context);
             let declared_sig =
                 def_name.and_then(|name| annotation_context.declared_signature(name));
-            // The annotation pass re-infers nodes to stamp metadata. Give that
-            // inference the same lexical binder scope via a declaration-local
-            // Env clone; sibling defs continue to receive closed input.
-            let scoped_env = (tag == Some("def")).then(|| {
-                let mut scoped = env.clone();
-                scoped.set_type_resolution_binders(annotation_context.current_type_binders);
-                scoped
-            });
-            let env = scoped_env.as_ref().unwrap_or(env);
             let (annotated_children, fn_ty_override) = match tag {
                 Some("fn") => {
                     let (kids, fn_ty) = annotate_fn_children(
                         list,
-                        env,
-                        vg,
-                        subst,
-                        adt_reg,
+                        expr,
+                        product,
                         None,
                         annotation_context,
                         errors,
@@ -5983,13 +5927,6 @@ fn annotate_expr_with_scope(
                 // `infer_signature_metadata`).
                 Some("def") => {
                     let kids = children(list);
-                    // The primary inference pass installs the matching
-                    // defsig's binders while checking a def. Annotation
-                    // re-infers the same body in a separate pass, so it must
-                    // restore that scope too; otherwise a legal nested
-                    // `tensor[n, ...]` ascription fails closed only during
-                    // annotation and silently degrades the stamped function
-                    // return type to an error placeholder.
                     let declared_param_types =
                         declared_sig.map(|metadata| metadata.param_types.as_slice());
                     let annotated: Vec<deep::Expr> = kids
@@ -6001,10 +5938,8 @@ fn annotate_expr_with_scope(
                             {
                                 let (fn_kids, fn_ty) = annotate_fn_children(
                                     fn_list,
-                                    env,
-                                    vg,
-                                    subst,
-                                    adt_reg,
+                                    child,
+                                    product,
                                     Some(declared),
                                     annotation_context,
                                     errors,
@@ -6014,10 +5949,7 @@ fn annotate_expr_with_scope(
                                     annotated_meta_map_with_override(
                                         fn_list,
                                         child,
-                                        env,
-                                        vg,
-                                        subst,
-                                        adt_reg,
+                                        product,
                                         Some(fn_ty),
                                         errors,
                                     ),
@@ -6027,10 +5959,7 @@ fn annotate_expr_with_scope(
                             } else {
                                 annotate_expr_with_scope(
                                     child,
-                                    env,
-                                    vg,
-                                    subst,
-                                    adt_reg,
+                                    product,
                                     annotation_context,
                                     errors,
                                 )
@@ -6042,10 +5971,7 @@ fn annotate_expr_with_scope(
                 Some("let") => (
                     annotate_let_children(
                         list,
-                        env,
-                        vg,
-                        subst,
-                        adt_reg,
+                        product,
                         annotation_context,
                         errors,
                     ),
@@ -6054,10 +5980,7 @@ fn annotate_expr_with_scope(
                 Some("match") => (
                     annotate_match_children(
                         list,
-                        env,
-                        vg,
-                        subst,
-                        adt_reg,
+                        product,
                         annotation_context,
                         errors,
                     ),
@@ -6075,10 +5998,7 @@ fn annotate_expr_with_scope(
                         .map(|child| {
                             annotate_expr_with_scope(
                                 child,
-                                env,
-                                vg,
-                                subst,
-                                adt_reg,
+                                product,
                                 annotation_context,
                                 errors,
                             )
@@ -6093,10 +6013,7 @@ fn annotate_expr_with_scope(
                 annotated_meta_map_with_override(
                     list,
                     expr,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
+                    product,
                     fn_ty_override,
                     errors,
                 ),
@@ -6192,10 +6109,8 @@ fn annotate_params_node(
 /// `None` and keep bare params.
 fn annotate_fn_children(
     list: &deep::List,
-    env: &Env,
-    vg: &VarGen,
-    subst: &Subst,
-    adt_reg: &AdtRegistry,
+    owner_expr: &deep::Expr,
+    product: &InferenceProduct,
     declared_param_type_exprs: Option<&[deep::Expr]>,
     annotation_context: AnnotationResolutionContext<'_>,
     errors: &mut DiagnosticSink<'_>,
@@ -6205,28 +6120,9 @@ fn annotate_fn_children(
         return (vec![], Type::Unit);
     }
 
-    let fn_ty = infer_expr_in_scope(
-        &deep::Expr::List(list.clone(), span_of_list(list)),
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-    );
-    let resolved_fn_ty = subst.apply(&fn_ty);
-    let param_types = match &resolved_fn_ty {
-        Type::Fn(args, _) => args.clone(),
-        _ => Vec::new(),
-    };
-
-    let mut param_vg = vg.clone();
-    let raw_params = extract_params(
-        &kids[0],
-        &mut param_vg,
-        adt_reg,
-        errors,
-        annotation_context.binder_mode(),
-    );
+    let resolved_fn_ty = product
+        .owner_type(owner_expr, "function node", errors)
+        .unwrap_or(Type::Unit);
     // issue #319: when the def carries a separate `sig`, the `fn`
     // literal's params are bare symbols, so the inference above seeds
     // each with an unconstrained fresh tvar — the body's shape-sensitive
@@ -6279,46 +6175,6 @@ fn annotate_fn_children(
     // does — would also work, but is not reachable from this post-inference
     // annotation pass, which has no access to that resolved type or the
     // error vector.)
-    let declared_param_types: Vec<Option<Type>> = match declared_param_type_exprs {
-        Some(declared) => {
-            let mut resolver = DeepTypeResolver::new(
-                TypeUseSite::Annotation,
-                annotation_context.binder_mode(),
-                adt_reg.resolution_env(),
-                &mut param_vg,
-                errors,
-            );
-            declared
-                .iter()
-                .map(|expr| {
-                    if is_wildcard_tvar_expr(expr) {
-                        None
-                    } else {
-                        resolver
-                            .resolve(expr)
-                            .ok()
-                            .map(|ty| resolve_type_aliases(&ty.into_type(), adt_reg))
-                    }
-                })
-                .collect()
-        }
-        None => Vec::new(),
-    };
-    let mut fn_env = env.clone();
-    for (index, (name, maybe_ty)) in raw_params.iter().enumerate() {
-        let ty = maybe_ty
-            .clone()
-            .or_else(|| declared_param_types.get(index).cloned().flatten())
-            .or_else(|| param_types.get(index).cloned())
-            .unwrap_or(Type::Unit);
-        fn_env.bind(name.clone(), Scheme::mono(ty));
-        // chelis#397/#469: a fresh parameter has no size provenance; clear any
-        // entry inherited from an outer name it shadows (BLOCKER C).
-        fn_env.clear_size_provenance(name);
-        // chelis#631: same for a shadowed list-literal length.
-        fn_env.clear_list_literal_len(name);
-    }
-
     // Only stamp parameter types when they come from the def's
     // declared `sig`. A bare `fn` literal with no declared signature
     // keeps bare params: the inferred function type loses `&` borrow
@@ -6337,22 +6193,9 @@ fn annotate_fn_children(
     // `extract_params` above, exactly once, through this same session sink.
     let mut result = vec![annotated_params];
     if let Some(body) = kids.get(1) {
-        // chelis#773: mint body-annotation vars from the advanced
-        // `param_vg` (past every param-type var) when the params were
-        // seeded from a declared sig, so builtin-scheme instantiation
-        // cannot collide with a param-type var (see the note above). Bare
-        // `fn` literals (no declared sig) keep the caller's `vg`.
-        let body_vg: &VarGen = if declared_param_type_exprs.is_some() {
-            &param_vg
-        } else {
-            vg
-        };
         result.push(annotate_expr_with_scope(
             body,
-            &fn_env,
-            body_vg,
-            subst,
-            adt_reg,
+            product,
             annotation_context,
             errors,
         ));
@@ -6362,10 +6205,7 @@ fn annotate_fn_children(
 
 fn annotate_let_children(
     list: &deep::List,
-    env: &Env,
-    vg: &VarGen,
-    subst: &Subst,
-    adt_reg: &AdtRegistry,
+    product: &InferenceProduct,
     annotation_context: AnnotationResolutionContext<'_>,
     errors: &mut DiagnosticSink<'_>,
 ) -> Vec<deep::Expr> {
@@ -6374,7 +6214,6 @@ fn annotate_let_children(
         return kids.to_vec();
     }
 
-    let mut let_env = env.clone();
     let annotated_bind = if let deep::Expr::List(bind_list, bind_span) = &kids[0] {
         let bind_kids = children(bind_list);
         let mut bind_elements = vec![bind_list.elements[0].clone(), bind_list.elements[1].clone()];
@@ -6383,24 +6222,10 @@ fn annotate_let_children(
             bind_elements.push(bind_kids[i].clone());
             let value = annotate_expr_with_scope(
                 &bind_kids[i + 1],
-                &let_env,
-                vg,
-                subst,
-                adt_reg,
+                product,
                 annotation_context,
                 errors,
             );
-            let value_ty =
-                infer_expr_in_scope(&bind_kids[i + 1], &let_env, vg, subst, adt_reg, errors);
-            if let Some(name) = symbol_name(&bind_kids[i]) {
-                // chelis#631: the annotation pass stamps each node's type
-                // through its own env walk (it does not share infer_let's
-                // scope), so the list-literal length must be recorded here
-                // too or the STAMPED concat type — what the host lane
-                // reads — degrades to the wildcard fallback.
-                note_list_literal_binding(&mut let_env, name, &bind_kids[i + 1]);
-                let_env.bind(name.to_string(), let_env.generalize(&value_ty, subst));
-            }
             bind_elements.push(value);
             i += 2;
         }
@@ -6413,10 +6238,7 @@ fn annotate_let_children(
     } else {
         annotate_expr_with_scope(
             &kids[0],
-            env,
-            vg,
-            subst,
-            adt_reg,
+            product,
             annotation_context,
             errors,
         )
@@ -6426,10 +6248,7 @@ fn annotate_let_children(
         annotated_bind,
         annotate_expr_with_scope(
             &kids[1],
-            &let_env,
-            vg,
-            subst,
-            adt_reg,
+            product,
             annotation_context,
             errors,
         ),
@@ -6438,10 +6257,7 @@ fn annotate_let_children(
 
 fn annotate_match_children(
     list: &deep::List,
-    env: &Env,
-    vg: &VarGen,
-    subst: &Subst,
-    adt_reg: &AdtRegistry,
+    product: &InferenceProduct,
     annotation_context: AnnotationResolutionContext<'_>,
     errors: &mut DiagnosticSink<'_>,
 ) -> Vec<deep::Expr> {
@@ -6452,14 +6268,10 @@ fn annotate_match_children(
 
     let scrutinee = annotate_expr_with_scope(
         &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
+        product,
         annotation_context,
         errors,
     );
-    let scrutinee_ty = infer_expr_in_scope(&kids[0], env, vg, subst, adt_reg, errors);
     let mut result = vec![scrutinee];
 
     for arm in &kids[1..] {
@@ -6467,7 +6279,6 @@ fn annotate_match_children(
             && get_tag(arm_list) == Some("arm")
         {
             let arm_kids = children(arm_list);
-            let mut arm_env = env.clone();
             // `pattern_vg` and `pattern_subst` are clones rather than
             // shared refs with the outer state. The clone is safe
             // because the primary inference pass (`infer_program` →
@@ -6482,24 +6293,6 @@ fn annotate_match_children(
             // pre-populated by `infer_program`, this invariant breaks
             // and body-annotation type variables go stale; that's a bug
             // in the caller, not here.
-            let mut pattern_vg = vg.clone();
-            let mut pattern_subst = subst.clone();
-            let mut covered = Vec::new();
-            let mut wildcard = false;
-            if let Some(pattern) = arm_kids.first() {
-                pattern_bindings(
-                    pattern,
-                    &scrutinee_ty,
-                    &mut arm_env,
-                    &mut pattern_vg,
-                    &mut pattern_subst,
-                    adt_reg,
-                    errors,
-                    &mut covered,
-                    &mut wildcard,
-                );
-            }
-
             let mut elements = vec![arm_list.elements[0].clone(), arm_list.elements[1].clone()];
             if let Some(pattern) = arm_kids.first() {
                 // Stamp pattern-binding types onto `pat-var`/`pat-as`
@@ -6511,24 +6304,18 @@ fn annotate_match_children(
                 // resolve the binding's type. (closes #181)
                 let annotated_pattern = annotate_expr_with_scope(
                     pattern,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
+                    product,
                     annotation_context,
                     errors,
                 );
                 let annotated_pattern =
-                    stamp_pattern_binding_types(&annotated_pattern, &arm_env, &pattern_subst);
+                    stamp_pattern_binding_types(pattern, &annotated_pattern, product, errors);
                 elements.push(annotated_pattern);
             }
             if let Some(guard) = arm_kids.get(1) {
                 elements.push(annotate_expr_with_scope(
                     guard,
-                    &arm_env,
-                    vg,
-                    subst,
-                    adt_reg,
+                    product,
                     annotation_context,
                     errors,
                 ));
@@ -6536,10 +6323,7 @@ fn annotate_match_children(
             if let Some(body) = arm_kids.get(2) {
                 elements.push(annotate_expr_with_scope(
                     body,
-                    &arm_env,
-                    vg,
-                    subst,
-                    adt_reg,
+                    product,
                     annotation_context,
                     errors,
                 ));
@@ -6549,10 +6333,7 @@ fn annotate_match_children(
         }
         result.push(annotate_expr_with_scope(
             arm,
-            env,
-            vg,
-            subst,
-            adt_reg,
+            product,
             annotation_context,
             errors,
         ));
@@ -6577,27 +6358,30 @@ fn annotate_match_children(
 /// untyped at linearity time and `&field` fails `expr_is_owned_or_borrow_linear`.
 /// (closes #181)
 fn stamp_pattern_binding_types(
-    pat: &deep::Expr,
-    arm_env: &Env,
-    pattern_subst: &Subst,
+    original: &deep::Expr,
+    annotated: &deep::Expr,
+    product: &InferenceProduct,
+    errors: &mut DiagnosticSink<'_>,
 ) -> deep::Expr {
-    stack_guard!("stamp_pattern_binding_types", pat, pat.clone());
-    match pat {
-        deep::Expr::Atom(_, _) | deep::Expr::Map(_, _) => pat.clone(),
-        deep::Expr::MetaExpr(meta, span) => deep::Expr::MetaExpr(
+    stack_guard!("stamp_pattern_binding_types", original, annotated.clone());
+    match (original, annotated) {
+        (deep::Expr::Atom(_, _) | deep::Expr::Map(_, _), _) => annotated.clone(),
+        (deep::Expr::MetaExpr(original_meta, _), deep::Expr::MetaExpr(meta, span)) => deep::Expr::MetaExpr(
             deep::MetaExpr {
                 expr: Box::new(stamp_pattern_binding_types(
+                    &original_meta.expr,
                     &meta.expr,
-                    arm_env,
-                    pattern_subst,
+                    product,
+                    errors,
                 )),
                 entries: meta.entries.clone(),
             },
             *span,
         ),
-        deep::Expr::List(list, span) => {
+        (deep::Expr::List(original_list, _), deep::Expr::List(list, span)) => {
             let tag = get_tag(list);
             let kids = children(list);
+            let original_kids = children(original_list);
             let needs_type_stamp = matches!(tag, Some("pat-var") | Some("pat-as"));
 
             // The binding's name lives at the first child for both
@@ -6619,11 +6403,7 @@ fn stamp_pattern_binding_types(
             // must be tensor or tensor-carrying values" diagnostic
             // without inventing a fictional type for the binding.
             let resolved_ty = if needs_type_stamp {
-                kids.first()
-                    .and_then(symbol_name)
-                    .and_then(|name| arm_env.lookup(name))
-                    .map(|scheme| pattern_subst.apply(&scheme.body))
-                    .filter(|ty| !matches!(ty, Type::Error(_)))
+                product.owner_type(original, "pattern binding", errors)
             } else {
                 None
             };
@@ -6652,21 +6432,24 @@ fn stamp_pattern_binding_types(
                 };
 
             let mut elements = vec![list.elements[0].clone(), meta_expr];
-            for child in kids {
-                elements.push(stamp_pattern_binding_types(child, arm_env, pattern_subst));
+            for (original_child, child) in original_kids.iter().zip(kids) {
+                elements.push(stamp_pattern_binding_types(
+                    original_child,
+                    child,
+                    product,
+                    errors,
+                ));
             }
             deep::Expr::List(deep::List { elements }, *span)
         }
+        _ => annotated.clone(),
     }
 }
 
 fn annotated_meta_map_with_override(
     list: &deep::List,
     expr: &deep::Expr,
-    env: &Env,
-    vg: &VarGen,
-    subst: &Subst,
-    adt_reg: &AdtRegistry,
+    product: &InferenceProduct,
     precomputed_ty: Option<Type>,
     errors: &mut DiagnosticSink<'_>,
 ) -> deep::Expr {
@@ -6681,9 +6464,8 @@ fn annotated_meta_map_with_override(
     let ty_for_meta = if let Some(tag) = get_tag(list) {
         match (tag, precomputed_ty) {
             ("fn", Some(ty)) => Some(ty),
-            (t, _) if should_attach_type_metadata(t) => {
-                Some(infer_expr_in_scope(expr, env, vg, subst, adt_reg, errors))
-            }
+            (t, _) if should_attach_type_metadata(t) =>
+                product.owner_type(expr, "metadata-eligible expression", errors),
             _ => None,
         }
     } else {
@@ -6702,32 +6484,6 @@ fn annotated_meta_map_with_override(
     }
 
     deep::Expr::Map(deep::MetaMap { entries }, meta_span)
-}
-
-fn infer_expr_in_scope(
-    expr: &deep::Expr,
-    env: &Env,
-    vg: &VarGen,
-    _subst: &Subst,
-    adt_reg: &AdtRegistry,
-    errors: &mut DiagnosticSink<'_>,
-) -> Type {
-    let mut env = env.clone();
-    let mut vg = vg.clone();
-    let mut subst = Subst::new();
-    let mut typed_nodes = 0;
-    let mut total_nodes = 0;
-    let ty = infer_expr(
-        expr,
-        &mut env,
-        &mut vg,
-        &mut subst,
-        adt_reg,
-        errors,
-        &mut typed_nodes,
-        &mut total_nodes,
-    );
-    subst.apply(&ty)
 }
 
 fn should_attach_type_metadata(tag: &str) -> bool {
@@ -9398,8 +9154,7 @@ fn infer_top_level(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
     prebound_type_failure: Option<&ErrorWitness>,
     user_def_names: &HashSet<String>,
     declared_signatures: &HashMap<String, DeclaredSigMetadata>,
@@ -9473,8 +9228,7 @@ fn infer_top_level(
                 subst,
                 adt_reg,
                 errors,
-                typed_nodes,
-                total_nodes,
+                product,
             )
         } else {
             infer_expr(
@@ -9484,8 +9238,7 @@ fn infer_top_level(
                 subst,
                 adt_reg,
                 errors,
-                typed_nodes,
-                total_nodes,
+                product,
             )
         };
         // Did the body's inference report any UnboundVariable diagnostic?
@@ -9712,8 +9465,7 @@ fn infer_top_level(
             subst,
             adt_reg,
             errors,
-            typed_nodes,
-            total_nodes,
+            product,
         );
     }
 }
@@ -9746,8 +9498,7 @@ fn infer_expr(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     infer_expr_with_type_metadata_ownership(
         expr,
@@ -9756,8 +9507,7 @@ fn infer_expr(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
         None,
     )
 }
@@ -9770,8 +9520,7 @@ fn infer_expr_with_type_metadata_ownership(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
     type_metadata_resolution: Option<&mut Option<OwnedTypeMetadataResolution>>,
 ) -> Type {
     // Bail before a deeply-nested `app` tree exhausts the native stack and
@@ -9787,7 +9536,7 @@ fn infer_expr_with_type_metadata_ownership(
     // grown segment can hold (covered-or-rejected).
     stack_guard!("infer_expr", expr, vg.fresh_type());
 
-    *total_nodes += 1;
+    product.total_nodes += 1;
 
     let result = match expr {
         deep::Expr::Atom(atom, _) => infer_atom(atom),
@@ -9810,8 +9559,7 @@ fn infer_expr_with_type_metadata_ownership(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 ),
                 Some("fn") => infer_fn(
                     list,
@@ -9820,8 +9568,7 @@ fn infer_expr_with_type_metadata_ownership(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 ),
                 Some("let") => infer_let(
                     list,
@@ -9830,8 +9577,7 @@ fn infer_expr_with_type_metadata_ownership(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 ),
                 Some("if") => infer_if(
                     list,
@@ -9840,8 +9586,7 @@ fn infer_expr_with_type_metadata_ownership(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 ),
                 Some("match") => infer_match(
                     list,
@@ -9850,8 +9595,7 @@ fn infer_expr_with_type_metadata_ownership(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 ),
                 Some("pipe") => infer_pipe(
                     list,
@@ -9860,8 +9604,7 @@ fn infer_expr_with_type_metadata_ownership(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 ),
                 Some("tuple") => infer_tuple(
                     list,
@@ -9870,8 +9613,7 @@ fn infer_expr_with_type_metadata_ownership(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 ),
                 Some("tuple-get") => infer_tuple_get(
                     list,
@@ -9880,8 +9622,7 @@ fn infer_expr_with_type_metadata_ownership(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 ),
                 Some("record") => infer_record(
                     list,
@@ -9890,8 +9631,7 @@ fn infer_expr_with_type_metadata_ownership(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 ),
                 Some("access") => infer_access(
                     list,
@@ -9900,8 +9640,7 @@ fn infer_expr_with_type_metadata_ownership(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 ),
                 Some("record-update") => infer_record_update(
                     list,
@@ -9910,8 +9649,7 @@ fn infer_expr_with_type_metadata_ownership(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 ),
                 Some("cast") => infer_cast(
                     list,
@@ -9920,8 +9658,7 @@ fn infer_expr_with_type_metadata_ownership(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 ),
                 Some("grad") => infer_grad(
                     list,
@@ -9930,8 +9667,7 @@ fn infer_expr_with_type_metadata_ownership(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 ),
                 Some("vmap") => infer_vmap(
                     list,
@@ -9940,8 +9676,7 @@ fn infer_expr_with_type_metadata_ownership(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 ),
                 Some("def") => infer_def(
                     list,
@@ -9950,8 +9685,7 @@ fn infer_expr_with_type_metadata_ownership(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 ),
                 Some("defsig") => {
                     // Already handled in first pass
@@ -9986,8 +9720,7 @@ fn infer_expr_with_type_metadata_ownership(
                             subst,
                             adt_reg,
                             errors,
-                            typed_nodes,
-                            total_nodes,
+                            product,
                         );
                     }
                     last_ty
@@ -10005,8 +9738,7 @@ fn infer_expr_with_type_metadata_ownership(
                             subst,
                             adt_reg,
                             errors,
-                            typed_nodes,
-                            total_nodes,
+                            product,
                         )
                     } else {
                         malformed_form(list, "jit", "one wrapped expression", errors)
@@ -10022,8 +9754,7 @@ fn infer_expr_with_type_metadata_ownership(
                             subst,
                             adt_reg,
                             errors,
-                            typed_nodes,
-                            total_nodes,
+                            product,
                         )
                     } else {
                         malformed_form(list, "realize", "one wrapped expression", errors)
@@ -10039,8 +9770,7 @@ fn infer_expr_with_type_metadata_ownership(
                             subst,
                             adt_reg,
                             errors,
-                            typed_nodes,
-                            total_nodes,
+                            product,
                         );
                         let resolved = subst.apply(&inner_ty);
                         match resolved {
@@ -10071,8 +9801,7 @@ fn infer_expr_with_type_metadata_ownership(
                             subst,
                             adt_reg,
                             errors,
-                            typed_nodes,
-                            total_nodes,
+                            product,
                         );
                         let resolved = subst.apply(&inner_ty);
                         match resolved {
@@ -10136,8 +9865,7 @@ fn infer_expr_with_type_metadata_ownership(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 ),
                 _ => {
                     // chelis#731 [04-TOT-1] / §C1.2: a Deep tag reached
@@ -10171,13 +9899,12 @@ fn infer_expr_with_type_metadata_ownership(
             subst,
             adt_reg,
             errors,
-            typed_nodes,
-            total_nodes,
+            product,
         ),
     };
 
     if !matches!(result, Type::Error(_)) {
-        *typed_nodes += 1;
+        product.typed_nodes += 1;
     }
 
     result
@@ -10217,8 +9944,7 @@ fn infer_handle_effect(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     // Structural arity: spec/03-deep-syntax.md gives `handle-effect` EXACTLY
@@ -10332,8 +10058,7 @@ fn infer_handle_effect(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     )
 }
 
@@ -10699,8 +10424,7 @@ fn infer_app(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
@@ -10729,8 +10453,7 @@ fn infer_app(
             subst,
             adt_reg,
             errors,
-            typed_nodes,
-            total_nodes,
+            product,
         );
     }
 
@@ -10742,8 +10465,7 @@ fn infer_app(
             subst,
             adt_reg,
             errors,
-            typed_nodes,
-            total_nodes,
+            product,
         );
     }
 
@@ -10755,8 +10477,7 @@ fn infer_app(
             subst,
             adt_reg,
             errors,
-            typed_nodes,
-            total_nodes,
+            product,
         );
     }
 
@@ -10768,8 +10489,7 @@ fn infer_app(
             subst,
             adt_reg,
             errors,
-            typed_nodes,
-            total_nodes,
+            product,
         );
     }
 
@@ -10781,8 +10501,7 @@ fn infer_app(
             subst,
             adt_reg,
             errors,
-            typed_nodes,
-            total_nodes,
+            product,
         );
     }
 
@@ -10800,8 +10519,7 @@ fn infer_app(
             subst,
             adt_reg,
             errors,
-            typed_nodes,
-            total_nodes,
+            product,
         );
     }
 
@@ -10833,8 +10551,7 @@ fn infer_app(
             subst,
             adt_reg,
             errors,
-            typed_nodes,
-            total_nodes,
+            product,
         );
     }
 
@@ -10852,8 +10569,7 @@ fn infer_app(
             subst,
             adt_reg,
             errors,
-            typed_nodes,
-            total_nodes,
+            product,
         );
     }
 
@@ -10942,8 +10658,7 @@ fn infer_app(
             subst,
             adt_reg,
             errors,
-            typed_nodes,
-            total_nodes,
+            product,
         )
     };
     // A reduction's axis argument may name a *dimension* of the operand
@@ -10995,8 +10710,7 @@ fn infer_app(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 )
             }
         })
@@ -14742,8 +14456,7 @@ fn infer_reduction_app(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     if fname == "argmax_reduce" || fname == "argmin_reduce" {
         return report(
@@ -14769,8 +14482,7 @@ fn infer_reduction_app(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
     let arg_tys: Vec<Type> = kids[1..]
         .iter()
@@ -14789,8 +14501,7 @@ fn infer_reduction_app(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 )
             }
         })
@@ -14819,8 +14530,7 @@ fn infer_expand_app(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() != 5 {
@@ -14845,8 +14555,7 @@ fn infer_expand_app(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
     let arg_tys: Vec<Type> = kids[1..]
         .iter()
@@ -14867,8 +14576,7 @@ fn infer_expand_app(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 )
             }
         })
@@ -14946,8 +14654,7 @@ fn infer_permute_app(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 {
@@ -14968,8 +14675,7 @@ fn infer_permute_app(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
     let input_ty = infer_expr(
         &kids[1],
@@ -14978,8 +14684,7 @@ fn infer_permute_app(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
     let axis_tys: Vec<Type> = kids[2..]
         .iter()
@@ -14991,8 +14696,7 @@ fn infer_permute_app(
                 subst,
                 adt_reg,
                 errors,
-                typed_nodes,
-                total_nodes,
+                product,
             )
         })
         .collect();
@@ -15106,8 +14810,7 @@ fn infer_reshape_app(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 || kids.len() > 3 {
@@ -15128,8 +14831,7 @@ fn infer_reshape_app(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
     let input_ty = infer_expr(
         &kids[1],
@@ -15138,8 +14840,7 @@ fn infer_reshape_app(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
     let input_var_name = symbolic_dim_ref_name(&kids[1]).map(|s| s.to_string());
     match type_for_readonly_check(&input_ty, subst) {
@@ -15152,8 +14853,7 @@ fn infer_reshape_app(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 );
                 let expected_shape_ty =
                     Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
@@ -15175,8 +14875,7 @@ fn infer_reshape_app(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 );
                 let expected_shape_ty =
                     Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
@@ -15199,8 +14898,7 @@ fn infer_reshape_app(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 );
                 let expected_shape_ty =
                     Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
@@ -15241,8 +14939,7 @@ fn infer_shrink_app(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() != 3 {
@@ -15261,8 +14958,7 @@ fn infer_shrink_app(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
     let input_ty = infer_expr(
         &kids[1],
@@ -15271,8 +14967,7 @@ fn infer_shrink_app(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
     let bounds_ty = infer_expr(
         &kids[2],
@@ -15281,8 +14976,7 @@ fn infer_shrink_app(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
 
     if let Some(err) = propagate_if_error([&input_ty, &bounds_ty]) {
@@ -15463,8 +15157,7 @@ fn infer_stride_app(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() < 3 {
@@ -15486,8 +15179,7 @@ fn infer_stride_app(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
     let input_ty = infer_expr(
         &kids[1],
@@ -15496,8 +15188,7 @@ fn infer_stride_app(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
     let stride_tys: Vec<Type> = kids[2..]
         .iter()
@@ -15509,8 +15200,7 @@ fn infer_stride_app(
                 subst,
                 adt_reg,
                 errors,
-                typed_nodes,
-                total_nodes,
+                product,
             )
         })
         .collect();
@@ -15651,8 +15341,7 @@ fn infer_pad_app(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() != 4 {
@@ -15670,8 +15359,7 @@ fn infer_pad_app(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
     let input_ty = infer_expr(
         &kids[1],
@@ -15680,8 +15368,7 @@ fn infer_pad_app(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
     let padding_ty = infer_expr(
         &kids[2],
@@ -15690,8 +15377,7 @@ fn infer_pad_app(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
     let fill_ty = infer_expr(
         &kids[3],
@@ -15700,8 +15386,7 @@ fn infer_pad_app(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
 
     if let Some(err) = propagate_if_error([&input_ty, &padding_ty]) {
@@ -15886,8 +15571,7 @@ fn infer_reduce_window_app(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() != 4 {
@@ -15910,8 +15594,7 @@ fn infer_reduce_window_app(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
     let input_ty = infer_expr(
         &kids[1],
@@ -15920,8 +15603,7 @@ fn infer_reduce_window_app(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
     let window_ty = infer_expr(
         &kids[2],
@@ -15930,8 +15612,7 @@ fn infer_reduce_window_app(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
     let stride_ty = infer_expr(
         &kids[3],
@@ -15940,8 +15621,7 @@ fn infer_reduce_window_app(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
 
     if let Some(err) = propagate_if_error([&input_ty, &window_ty, &stride_ty]) {
@@ -18644,8 +18324,7 @@ fn infer_fn(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
@@ -18706,8 +18385,7 @@ fn infer_fn(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
 
     check_declared_dvars_rigid(&declared_dvars, subst, errors);
@@ -18737,8 +18415,7 @@ fn infer_def_body_with_sig(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     // Match: body is `(fn (params ...) body-expr)` AND decl is `Fn(args, ret)`.
     let fn_list = match body {
@@ -18751,8 +18428,7 @@ fn infer_def_body_with_sig(
                 subst,
                 adt_reg,
                 errors,
-                typed_nodes,
-                total_nodes,
+                product,
             );
         }
     };
@@ -18766,8 +18442,7 @@ fn infer_def_body_with_sig(
                 subst,
                 adt_reg,
                 errors,
-                typed_nodes,
-                total_nodes,
+                product,
             );
         }
     };
@@ -18793,8 +18468,7 @@ fn infer_def_body_with_sig(
             subst,
             adt_reg,
             errors,
-            typed_nodes,
-            total_nodes,
+            product,
         );
     }
 
@@ -18830,8 +18504,7 @@ fn infer_def_body_with_sig(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
 
     let resolved_params: Vec<Type> = param_types.iter().map(|t| subst.apply(t)).collect();
@@ -18920,8 +18593,7 @@ fn infer_let(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 {
@@ -18947,8 +18619,7 @@ fn infer_let(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                     Some(&mut rhs_type_metadata_resolution),
                 );
 
@@ -19060,8 +18731,7 @@ fn infer_let(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     )
 }
 
@@ -19073,8 +18743,7 @@ fn infer_if(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() < 3 {
@@ -19093,8 +18762,7 @@ fn infer_if(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
 
     // Condition should be bool (or tensor[D, bool])
@@ -19113,8 +18781,7 @@ fn infer_if(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
     let else_ty = infer_expr(
         &kids[2],
@@ -19123,8 +18790,7 @@ fn infer_if(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
 
     match unify(&then_ty, &else_ty, subst) {
@@ -19154,8 +18820,7 @@ fn infer_match(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
@@ -19174,8 +18839,7 @@ fn infer_match(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
 
     // chelis#710 [04-TOT-3]: a match with a scrutinee but no arms is
@@ -19233,8 +18897,7 @@ fn infer_match(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 );
 
                 match &result_ty {
@@ -19715,8 +19378,7 @@ fn infer_pipe(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
@@ -19730,8 +19392,7 @@ fn infer_pipe(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
 
     for stage in &kids[1..] {
@@ -19755,8 +19416,7 @@ fn infer_pipe(
                 subst,
                 adt_reg,
                 errors,
-                typed_nodes,
-                total_nodes,
+                product,
             )
         } else {
             infer_expr(
@@ -19766,8 +19426,7 @@ fn infer_pipe(
                 subst,
                 adt_reg,
                 errors,
-                typed_nodes,
-                total_nodes,
+                product,
             )
         };
         let ret_tv = vg.fresh_type();
@@ -19854,8 +19513,7 @@ fn infer_pipe_stage_lambda(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     let deep::Expr::List(list, _) = stage else {
         return report(
@@ -19890,8 +19548,7 @@ fn infer_pipe_stage_lambda(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
 
     let resolved_param = subst.apply(&param_ty);
@@ -19907,8 +19564,7 @@ fn infer_tuple(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     let elems: Vec<Type> = kids
@@ -19960,8 +19616,7 @@ fn infer_tuple_get(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 {
@@ -19975,8 +19630,7 @@ fn infer_tuple_get(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
     let resolved = subst.apply(&tuple_ty);
 
@@ -20095,8 +19749,7 @@ fn infer_record(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     let Some(head) = kids.first().and_then(symbol_name) else {
@@ -20123,8 +19776,7 @@ fn infer_record(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 );
             }
         }
@@ -20158,8 +19810,7 @@ fn infer_record(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 );
             }
         }
@@ -20226,8 +19877,7 @@ fn infer_record(
             subst,
             adt_reg,
             errors,
-            typed_nodes,
-            total_nodes,
+            product,
         );
         if known_field_set.contains(field_name) {
             let pos = declared_field_names
@@ -20333,8 +19983,7 @@ fn infer_access(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 {
@@ -20352,8 +20001,7 @@ fn infer_access(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
     let Some(field_name) = symbol_name(&kids[1]) else {
         return malformed_form(
@@ -20492,8 +20140,7 @@ fn infer_record_update(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
@@ -20511,8 +20158,7 @@ fn infer_record_update(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
     // Infer the update values regardless of target resolution so
     // nested errors surface exactly once.
@@ -20537,8 +20183,7 @@ fn infer_record_update(
             subst,
             adt_reg,
             errors,
-            typed_nodes,
-            total_nodes,
+            product,
         );
         kv_pairs.push((field_name, value_ty));
     }
@@ -20634,8 +20279,7 @@ fn infer_cast(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 {
@@ -20649,8 +20293,7 @@ fn infer_cast(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
     let resolved = subst.apply(&expr_ty);
 
@@ -20912,8 +20555,7 @@ fn infer_grad(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
@@ -20927,8 +20569,7 @@ fn infer_grad(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
     let resolved = subst.apply(&f_ty);
 
@@ -21132,8 +20773,7 @@ fn infer_vmap(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
@@ -21164,8 +20804,7 @@ fn infer_vmap(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
     let resolved = subst.apply(&f_ty);
 
@@ -21268,8 +20907,7 @@ fn infer_def(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 {
@@ -21288,8 +20926,7 @@ fn infer_def(
         subst,
         adt_reg,
         errors,
-        typed_nodes,
-        total_nodes,
+        product,
     );
     let scheme = env.generalize(&body_ty, subst);
     // chelis#397/#469: record the size provenance (see `infer_top_level` /
