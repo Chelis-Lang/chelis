@@ -44,7 +44,23 @@ impl BeaconContractProver {
     /// Attempt to prove a contract by invoking `chelis-beacon contract --query -`
     /// with the contract id on stdin. Returns `Some(AssumptionDischarge)` if the
     /// response indicates a certified-envelope proof, `None` otherwise.
+    ///
+    /// Returns `None` (honest fallback to fuzz) on ANY failure: spawn error,
+    /// timeout, non-zero exit, parse error, unexpected verdict. This is
+    /// intentionally silent — a misconfigured `CHELIS_BEACON_BIN` degrades to
+    /// fuzz rather than crashing the prover.
+    ///
+    /// # Pipe buffer assumption
+    ///
+    /// Stdout is read AFTER `wait_timeout` returns. This is safe because the
+    /// Beacon contract response is always a small JSON object (~1KB), well under
+    /// the OS pipe buffer (~64KB on Linux). If Beacon ever produces responses
+    /// larger than the pipe buffer, the child would block and this would timeout.
     pub fn prove_contract(&self, contract_id: &str) -> Option<AssumptionDischarge> {
+        // The domain [-300, 300] is the committed erf envelope's full coverage.
+        // For structural proofs (monotonicity, reflection), Beacon ignores the
+        // domain entirely — the proof is universal. For the range contract, the
+        // envelope covers [-300, 300] which maps to input |x| < 300*sqrt(2) ≈ 424.
         let request = serde_json::json!({
             "contract_id": contract_id,
             "domain": [{"name": "x", "lo": -300.0, "hi": 300.0}],
@@ -59,13 +75,16 @@ impl BeaconContractProver {
             .spawn()
             .ok()?;
 
-        // Write the request to stdin and close the handle so the child sees EOF.
-        if let Some(mut stdin) = child.stdin.take() {
+        // Write the request to stdin and explicitly close the handle so the
+        // child sees EOF immediately.
+        {
+            let mut stdin = child.stdin.take()?;
             if stdin.write_all(&request_bytes).is_err() {
                 let _ = child.kill();
                 let _ = child.wait();
                 return None;
             }
+            drop(stdin); // Explicit EOF delivery
         }
 
         // Wait with timeout; hard-kill on expiry.
@@ -88,7 +107,8 @@ impl BeaconContractProver {
             return None;
         }
 
-        // Read stdout. The child has exited, so reading is safe.
+        // Read stdout. The child has exited and the response is small (~1KB),
+        // so the pipe buffer was never full and the data is available.
         let stdout = {
             use std::io::Read;
             let mut buf = Vec::new();
