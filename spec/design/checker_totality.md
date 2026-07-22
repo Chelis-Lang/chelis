@@ -78,14 +78,17 @@ The current implementation has one explicit ownership chain:
 6. Annotation consumes the completed epoch's canonical owner stamps. It does
    not semantically re-infer expressions with a fresh `VarGen`/`Subst`; a
    missing or conflicting owner write is a diagnostic, never a default type.
-7. `finalize_checked_program` checks fresh inference and reconstruction
-   results: the annotated runtime tree and pattern/function stamps, with input
-   and output signature metadata as structural backstops.
-   `CheckedProgram::try_from_parts*` is fallible, and the effects pass uses the
-   signature-aware variant and maps a failed reconstruction to
-   `EffectErrorKind::TypeTotality`; no effects path can rebuild an infallible
-   checked result. `CheckedProgram::compose` is the distinct trusted operation
-   that combines two already-successful checked halves.
+7. `finalize_checked_program` checks fresh inference results: the annotated
+   runtime tree and pattern/function stamps, with input and output signature
+   metadata as structural backstops. There is no public raw `from_parts` or
+   `try_from_parts` API. The effects pass can call only
+   `CheckedProgram::try_with_effect_annotations`: it proves every root, span,
+   atom, child, and metadata entry is identical to the checked input except
+   the effects-owned `effects` entry, preserves the original type environment,
+   signature inference, and linearity, and reruns totality validation. A
+   violation maps to `EffectErrorKind::TypeTotality` exactly once.
+   `CheckedProgram::compose` is the distinct trusted operation that combines
+   two already-successful checked halves.
 8. Recursive callable availability is planned by the canonical function SCC
    schedule. Only a genuinely recursive SCC receives provisional monomorphic
    bindings; its members infer, unify, remove the provisional entries, and
@@ -315,10 +318,12 @@ The exact Deep grammar and binder rules are normative in spec/03 §2.5.1/§2.6.
 ## C4. The invariants and the enum
 
 1. **The totality invariant** (§C1.3), executable: the shared
-   `finalize_checked_program` boundary validates every fresh inference and
-   reconstruction result path, including public reconstruction. It inspects
-   the authoritative annotated runtime tree and its required owner stamps,
-   then uses both incoming and inferred signature metadata as a structural
+   `finalize_checked_program` boundary validates every fresh inference result.
+   The narrow effects-only transformation reruns the same annotated/signature
+   totality validation after proving that no type-owned structure changed;
+   arbitrary public reconstruction does not exist. The finalizer inspects the
+   authoritative annotated runtime tree and its required owner stamps, then
+   uses both incoming and inferred signature metadata as a structural
    backstop. (`CheckedProgram::compose` combines already-successful checked
    halves.) Combined with the session veto, `errors.is_empty() => the checked
    result contains no silent error or missing owner stamp`.
@@ -494,12 +499,12 @@ census enumerating every construction site.
    `conv2d` validator panic. The fix and complete arity 0-through-6 regression
    matrix land here, so the Phase 2 PR may truthfully close #813.
 7. Diagnostic ownership hardened around the one append-only session sink,
-   fallible checked-program reconstruction/effects propagation, explicit
-   lexical binder scope, authoritative inference epochs, annotated-tree
-   finalization, and SCC-scoped recursive prebinding. The structural source
-   tests lock the absence of ambient binders, throwaway production sinks,
-   infallible reconstruction, error deletion, annotation re-inference, and
-   post-report recursive-cycle suppression.
+   the verified effects-only checked-program transformation, explicit lexical
+   binder scope, authoritative inference epochs, annotated-tree finalization,
+   and SCC-scoped recursive prebinding. The structural source tests lock the
+   absence of ambient binders, throwaway production sinks, public raw
+   reconstruction, error deletion, annotation re-inference, and post-report
+   recursive-cycle suppression.
    The 2026-07-22 sink-construction census finds five textual constructions in
    `session.rs`: three production owners (`infer_program`, `run_result`, and
    `infer_ir_program`) that return their error vector, plus two `#[cfg(test)]`

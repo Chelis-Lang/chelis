@@ -67,9 +67,10 @@ finding folded in before merge; the red teams' discoveries are filed as
 
 **Wave 2 - the independently-landable value work.** STATUS 2026-07-22:
 [#731] Phase 2 is implemented on the active PR #800 branch: the witness token,
-append-only checker-owned diagnostic session, fallible reconstruction/effects
-propagation, explicit binder scope, authoritative annotation-owner epochs,
-annotated-tree finalization, and SCC-scoped recursive prebinding are in place.
+append-only checker-owned diagnostic session, verified effects-only checked
+transformation (no public raw reconstruction), explicit binder scope,
+authoritative annotation-owner epochs, annotated-tree finalization, and
+SCC-scoped recursive prebinding are in place.
 Phase 3 (`DeepTag`) remains open. [#732] Phase 1 landed with Wave 1 (above);
 the remaining Wave 2 set is [#732] Phase 2 (the generated C side: fixes
 [#716]/[#723] outright and gives the refactor its byte-exact instrument) in

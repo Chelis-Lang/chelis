@@ -2322,17 +2322,20 @@ for cascade suppression. The sink is append-only, and the shared
 is non-empty. A planted bare `Type::Error` fails to compile outside the
 diagnostics module.)*
 
-*(Fresh inference and reconstruction results converge on the fallible
-`finalize_checked_program` boundary. It validates the annotated runtime tree's
-required function, pattern, and expression stamps, with incoming and inferred
-signature metadata as backstops. Annotation consumes canonical stamps from the
-owning `InferenceProduct` epoch; it does not semantically re-infer a node under
-a fresh substitution. The exhaustive child-role classification includes an
-effects-owned `EffectHandler` payload and a type-owned handled body. Public
-`CheckedProgram::try_from_parts*` reconstruction therefore cannot return an
-unchecked success; the effects pass uses the signature-aware fallible path and
-turns reconstruction diagnostics into `TypeTotality` errors.
-`CheckedProgram::compose` is separate: it combines two already-successful
+*(Fresh inference results converge on `finalize_checked_program`, which
+validates the annotated runtime tree's required function, pattern, and
+expression stamps, with incoming and inferred signature metadata as
+backstops. Annotation consumes canonical stamps from the owning
+`InferenceProduct` epoch; it does not semantically re-infer a node under a
+fresh substitution. The exhaustive child-role classification includes an
+effects-owned `EffectHandler` payload and a type-owned handled body. Public raw
+`from_parts`/`try_from_parts` reconstruction does not exist. The sole external
+transformation is fallible `CheckedProgram::try_with_effect_annotations`: it
+requires identical roots, spans, atoms, children, and all metadata except the
+effects-owned `effects` entry; preserves the checked type environment,
+signature inference, and linearity; and reruns totality validation. The
+effects pass maps a violation to one `TypeTotality` error.
+`CheckedProgram::compose` remains separate: it combines two already-successful
 checked halves.)*
 
 *(The Surf-reachable chelis#755 field-access and chelis#756 deep-type sites are
