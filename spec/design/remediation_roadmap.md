@@ -75,8 +75,7 @@ Phase 3 (`DeepTag`) remains open. [#732] Phase 1 landed with Wave 1 (above);
 the remaining Wave 2 set is [#732] Phase 2 (the generated C side: fixes
 [#716]/[#723] outright and gives the refactor its byte-exact instrument) in
 parallel with [#731] Phase 3 and [#730] Phase 2 (typed closed vocabularies,
-HostType/ABI separation, and structured emission; lexical ratchets remain
-supporting checks). [#733]
+HostType/ABI separation, and structured emission). [#733]
 Phase 1's Buoy shell-side design and fixture preparation may ride alongside:
 OpenSpec still plans new normative text and atom IDs remain stable. The
 executable advisory pilot waits for the selected Buoy revision's standalone
@@ -155,7 +154,7 @@ flowchart TB
     direction TB
     n730p0["P0 · census re-verify + token tripwire<br/>+ rejected-cells corpus stub (LANDED)"]:::w0
     n730p1["P1 · Result channel + live-site sweep (LANDED)"]:::w1
-    n730p2["P2 · lint ratchet + EmittedExpr<br/>+ EffectKind enum"]:::w2
+    n730p2["P2 · typed vocabularies + Host ABI<br/>+ structured emission"]:::w2
     n730p3["P3 · gates become UX"]:::w4
     n730p0 --> n730p1 --> n730p2 --> n730p3
   end
