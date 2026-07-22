@@ -1865,14 +1865,14 @@ fn match_pattern_operand_is_a_pinned_gap() {
     );
 }
 
-/// Known residual gap, pinned: a *shape-rewriting* pipe stage (`permute`)
-/// between the typed head and the named reduction drops the threaded type
-/// (only Identity-class stages and def stages propagate it), so eval declines
-/// with the targeted chelis#338 diagnostic while the backend builds and runs.
-/// If this test starts failing because eval learned to handle it, delete the
-/// decline assertion and fold the case into the parity corners above.
+/// PR #800 closes the former chelis#338 pinned gap: authoritative owner
+/// inference stamps the shape-rewriting `permute` stage with its named output
+/// dims, so the following named reduction resolves `seq` in eval just as the
+/// backend does. Keep this in the executable parity corpus; a future loss of
+/// the stage stamp must fail as an eval-vs-backend divergence, not be accepted
+/// as a targeted decline.
 #[test]
-fn pipe_rewriting_stage_then_named_reduce_is_a_pinned_gap() {
+fn pipe_rewriting_stage_then_named_reduce_eval_matches_backend() {
     let source = "def id2(x: &tensor[batch, seq, f32]) -> tensor[batch, seq, f32] = relu(x)\n\
          y = id2(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n\
          out = y |> permute(1, 0) |> sum(seq)\n";
@@ -1893,17 +1893,7 @@ fn pipe_rewriting_stage_then_named_reduce_is_a_pinned_gap() {
             out.2[i]
         );
     }
-    // Eval lane: targeted decline, never the bare `unknown runtime name`.
-    let dir = tempdir().expect("tempdir");
-    let stderr = eval_stderr_expecting_failure(dir.path(), source, "pipe_rewriting_gap");
-    assert!(
-        stderr.contains("chelis#338") && stderr.contains("statically known tensor type"),
-        "expected the targeted named-axis decline diagnostic, got: {stderr}"
-    );
-    assert!(
-        !stderr.contains("unknown runtime name"),
-        "the pre-#338 error must not resurface: {stderr}"
-    );
+    assert_eval_agrees_with_backend(source, "pipe_rewriting_gap", &backend);
 }
 
 /// chelis#388: a named-axis reduction over a *literal-shaped* operand
