@@ -341,16 +341,14 @@ pub(crate) fn param_has_consuming_use(
     param: &str,
     available_signatures: &std::collections::HashMap<String, crate::types::Type>,
     type_env: &std::collections::HashMap<String, chelis_deep::Expr>,
-) -> bool {
-    let mut errors = Vec::new();
-    let mut sink = DiagnosticSink {
-        errors: &mut errors,
-    };
-    crate::infer::param_has_consuming_use_in_session(
-        expr,
-        param,
-        available_signatures,
-        type_env,
-        &mut sink,
-    )
+) -> Result<bool, InferResult> {
+    run_result(|sink| {
+        Ok(crate::infer::param_has_consuming_use_in_session(
+            expr,
+            param,
+            available_signatures,
+            type_env,
+            sink,
+        ))
+    })
 }

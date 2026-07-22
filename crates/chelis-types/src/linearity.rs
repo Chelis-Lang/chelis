@@ -873,7 +873,14 @@ impl Checker {
                 name.as_str(),
                 &available_signatures,
                 &self.top_level_types,
-            );
+            )
+            .unwrap_or_else(|result| {
+                // The resolver diagnostic is part of linearity's
+                // authoritative error result. Classify conservatively while
+                // the walk finishes, but never expose that fallback as Ok.
+                self.errors.extend(result.errors);
+                true
+            });
             if body_consumes {
                 self.read_or_error(name.as_str(), expr, outer_scope);
                 outer_scope.consume(

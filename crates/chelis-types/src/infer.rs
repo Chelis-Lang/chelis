@@ -25,6 +25,7 @@ trait DiagnosticOutput {
     fn push(&mut self, error: CheckError);
 }
 
+#[cfg(test)]
 impl DiagnosticOutput for Vec<CheckError> {
     fn push(&mut self, error: CheckError) {
         Vec::push(self, error);
@@ -3421,7 +3422,7 @@ pub(crate) fn param_has_consuming_use(
     param: &str,
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
-) -> bool {
+) -> Result<bool, InferResult> {
     crate::session::param_has_consuming_use(expr, param, available_signatures, type_env)
 }
 
