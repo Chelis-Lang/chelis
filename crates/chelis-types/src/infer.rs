@@ -566,6 +566,35 @@ impl InferenceProduct {
             }
         }
     }
+
+    fn current_owner_type(
+        &self,
+        expr: &deep::Expr,
+        subst: &Subst,
+        errors: &mut DiagnosticSink<'_>,
+    ) -> Option<Type> {
+        let Some(epoch) = self.active_epoch.as_ref() else {
+            errors.push(internal_owner_stamp_error(
+                "canonical inference requested a stamp outside an active epoch".to_string(),
+            ));
+            return None;
+        };
+        let Some(writes) = epoch.writes.get(&expr_key(expr)) else {
+            errors.push(internal_owner_stamp_error(
+                "canonical inference could not find an already-inferred child stamp".to_string(),
+            ));
+            return None;
+        };
+        let mut resolved = writes.iter().map(|write| subst.apply(&write.ty));
+        let canonical = resolved.next()?;
+        if resolved.any(|candidate| !owner_types_compatible(&canonical, &candidate)) {
+            errors.push(internal_owner_stamp_error(
+                "canonical inference observed conflicting child stamps".to_string(),
+            ));
+            return None;
+        }
+        Some(canonical)
+    }
 }
 
 fn expr_key(expr: &deep::Expr) -> usize {
@@ -1142,10 +1171,7 @@ pub(crate) fn build_type_env_from_library_in_session(
         .map(|e| {
             annotate_expr_with_scope(
                 e,
-                &state.env,
-                &state.var_gen,
-                &state.subst,
-                &state.adt_reg,
+                &product,
                 annotation_context,
                 errors,
             )
@@ -1278,10 +1304,7 @@ pub(crate) fn build_compiled_library_context_in_session(
         .map(|e| {
             annotate_expr_with_scope(
                 e,
-                &state.env,
-                &state.var_gen,
-                &state.subst,
-                &state.adt_reg,
+                &product,
                 annotation_context,
                 errors,
             )
@@ -1436,10 +1459,7 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
         .map(|e| {
             annotate_expr_with_scope(
                 e,
-                &state.env,
-                &state.var_gen,
-                &state.subst,
-                &state.adt_reg,
+                &product,
                 annotation_context,
                 errors,
             )
@@ -1604,8 +1624,8 @@ pub(crate) fn check_ir_with_signature_context_in_session(
 
     // Annotate ONLY the new-code exprs, starting from the library
     // snapshot state so library names resolve during annotation.
-    let annotated_exprs = annotate_ir_program_with_context(context, new_exprs, errors);
-    log_sub("annotate_ir_program_with_context", &mut sub_t);
+    let annotated_exprs = annotate_ir_program(new_exprs, &product, errors);
+    log_sub("annotate_ir_program", &mut sub_t);
     // Annotation also recurses (annotate_expr_with_scope); if it bailed on
     // low stack, reject rather than return a partially-annotated program.
     stack_scope.drain_into(errors);
@@ -1656,9 +1676,10 @@ pub(crate) fn check_typed_program_in_session(
     // and the annotation pass below, so a bail in either surfaces as a hard
     // located failure rather than a partially-annotated `Ok`.
     let stack_scope = StackExhaustionScope::enter();
-    let stats = infer_program_in_session(exprs, errors);
+    let product = infer_program_with_product_in_session(exprs, errors);
+    let stats = product.stats();
     if errors.is_empty() {
-        let annotated_exprs = annotate_ir_program(exprs, errors);
+        let annotated_exprs = annotate_ir_program(exprs, &product, errors);
         let annotated_type_env = build_ir_type_env(&annotated_exprs);
         // Annotation recurses; reject if it bailed on low stack.
         stack_scope.drain_into(errors);
@@ -9906,6 +9927,7 @@ fn infer_expr_with_type_metadata_ownership(
     if !matches!(result, Type::Error(_)) {
         product.typed_nodes += 1;
     }
+    product.record_canonical(expr, result.clone());
 
     result
 }
@@ -12741,14 +12763,10 @@ fn infer_app(
                                 // elements decide the concat-axis extent.
                                 // kids[1] is the list expr, kids[2] the
                                 // axis expr (cast-aware extraction, #216).
-                                // A DIRECT literal chain re-infers each
-                                // element read-only (a fresh env/vg clone
-                                // per element; the elements were already
-                                // inferred as part of the list arg, so
-                                // this is a bounded second pass over
-                                // typically-tiny exprs) so ragged extents
-                                // can SUM; through a binding only the
-                                // length survives.
+                                // A DIRECT literal chain consumes the element
+                                // types already produced while inferring the
+                                // list argument, so ragged extents can SUM
+                                // without a second semantic traversal.
                                 let raw_axis = kids.get(2).and_then(extract_int_for_dim);
                                 let list_info =
                                     match kids.get(1).and_then(collect_cons_chain_for_shape) {
@@ -12756,10 +12774,10 @@ fn infer_app(
                                             elements
                                                 .iter()
                                                 .map(|elem| {
-                                                    match subst.apply(&infer_expr_in_scope(
-                                                        elem, env, vg, subst, adt_reg, errors,
-                                                    )) {
-                                                        Type::Tensor(dims, _) => dims,
+                                                    match product.current_owner_type(
+                                                        elem, subst, errors,
+                                                    ) {
+                                                        Some(Type::Tensor(dims, _)) => dims,
                                                         _ => Vec::new(),
                                                     }
                                                 })
@@ -19569,7 +19587,7 @@ fn infer_tuple(
     let kids = children(list);
     let elems: Vec<Type> = kids
         .iter()
-        .map(|e| infer_expr(e, env, vg, subst, adt_reg, errors, typed_nodes, total_nodes))
+        .map(|e| infer_expr(e, env, vg, subst, adt_reg, errors, product))
         .collect();
     Type::Tuple(elems)
 }
