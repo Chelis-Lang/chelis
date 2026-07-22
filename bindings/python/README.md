@@ -50,12 +50,14 @@ Reef dependency resolution (chelis#816):
   imports of reef-declared dependencies (`import Shoals.Pricing (bs_call_scalar)`) by
   compiling the source against the reef package's linked library context, instead of
   failing with `unbound variable`. Without a root the source is compiled/evaluated
-  self-contained, exactly as before.
+  self-contained, as before — with the single exception in the **Rank-0 scalars** bullet
+  below (a rank-0 tensor entry is now rejected with wrap guidance on every path).
 - Root selection differs by entry point:
   - `compile_and_load` **auto-discovers** the enclosing reef package by walking up from
     `source_path` (looking for `reef.toml`) — but **only when the source actually
     contains an `import` declaration**. An import-free (self-contained) source, or any
-    non-Surf source, takes the bare path exactly as before, so a self-contained file
+    non-Surf source, takes the bare path as before (save the rank-0 rejection below),
+    so a self-contained file
     that happens to sit inside a reef project neither pays the project's
     context-compile cost nor is coupled to a broken sibling file. Pass a
     `project_root=` path to force in-context resolution regardless of imports, or
@@ -83,6 +85,11 @@ Reef dependency resolution (chelis#816):
 - **Rank-0 scalars.** A tensor-in / scalar-out entry (e.g. a reduce to a `tensor[f32]`)
   is rejected on every path — including the bare self-contained path — with the same
   wrap-as-`tensor[1, f32]` guidance, rather than emitting an unbuildable scalar kernel.
+- **C-target only.** Reef-context resolution is supported only for `target="c"`. A
+  `target="hip"` compile with a `project_root=` (or auto-discovered root) is rejected as
+  unsupported, because the HIP backend does not yet apply the entry-scoped DAG selection
+  the C path uses and would otherwise merge every reef-linked def into one kernel. Use
+  `target="c"`, or run through `eval`. Tracked as chelis#829.
 
 Compiler selection:
 

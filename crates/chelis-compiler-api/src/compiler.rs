@@ -1618,6 +1618,31 @@ fn execution_artifact_from_compiled(
             Ok(artifact)
         }
         CompileTarget::Hip => {
+            // Reef-context (#816) HIP is not supported: the entry-scoped DAG
+            // selection the C arm applies (`resolve_in_context_entry`, gated on
+            // `library_runtime.is_some()`) is not implemented for HIP, which
+            // still clones the whole composed DAG and treats `entry_name` only
+            // as the emitted symbol. Compiling a multi-def reef context to HIP
+            // would therefore merge every reef-linked def's inputs/outputs into
+            // one kernel or ignore the requested entry — the #817/#818 class the
+            // C path fixes. Reject explicitly with actionable guidance rather
+            // than silently emit a mis-scoped kernel (an undocumented false
+            // promise, since the public API accepts `CompileTarget` and Python
+            // exposes `target="hip"`). Tracked as chelis#829 (apply the same
+            // entry-scoped selection to HIP, then lift this reject).
+            if compiled.library_runtime.is_some() {
+                return Err(stage_error(
+                    "compile",
+                    "reef-context compilation (a `project_root=` with reef-declared imports) \
+                     is currently supported only for the C target. The HIP backend does not \
+                     yet apply the entry-scoped DAG selection the C path uses, so it would \
+                     merge every reef-linked def's inputs/outputs into a single kernel instead \
+                     of compiling the requested entry. Compile the entry with `target=\"c\"`, \
+                     or run it through `eval`, until HIP reef-context support lands (chelis#829)."
+                        .to_string(),
+                    "compile_error",
+                ));
+            }
             let host_requires_host_backend = host_compiled
                 .host
                 .as_ref()
@@ -5034,6 +5059,30 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
         assert!(
             message.contains("`main`"),
             "rejection must name the requested entry_name, got: {message}"
+        );
+    }
+
+    // Reef-context HIP is rejected as unsupported (chelis#829): the HIP arm
+    // does not apply the entry-scoped DAG selection the C arm does, so rather
+    // than silently emit a mis-scoped kernel it must reject with guidance
+    // pointing at the C target. A clean tensor entry that compiles fine to C
+    // in-context is used, so only the target differs.
+    #[test]
+    fn compile_for_execution_in_context_rejects_hip_target() {
+        let (_dir, root) = copy_drop_context_fixture();
+        let context = crate::compile_reef_context(Path::new("/tmp/inctx-hip"), &root)
+            .expect("compile context");
+        let source = "module App.Hip\nimport Mylib.Copy (consume)\n\n\
+             def main(x: tensor[2, f32]) -> tensor[2, f32] = consume(x)\n";
+        // Sanity: the same source compiles in-context to C.
+        compile_for_execution_in_context(&context, source, CompileTarget::C, None)
+            .expect("in-context C compile succeeds");
+        let err = compile_for_execution_in_context(&context, source, CompileTarget::Hip, None)
+            .expect_err("reef-context HIP must be rejected");
+        let message = &err.errors[0].message;
+        assert!(
+            message.contains("only for the C target") && message.contains("chelis#829"),
+            "expected reef-context HIP rejection guidance, got: {message}"
         );
     }
 

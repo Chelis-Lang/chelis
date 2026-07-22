@@ -48,11 +48,15 @@ The Phase 3 Python path is split into two cuts:
   or non-Surf source, or `project_root=False`, takes the bare self-contained path. An
   explicit `project_root=` path forces in-context resolution regardless. `eval` (raw
   text) requires an explicit `project_root=`. With no applicable root the bare
-  self-contained behavior is unchanged. Default in-context entry selection prefers a
-  tensor def named `main`. A scalar-signature entry has no callable tensor kernel and is
-  rejected with tensor-wrap guidance; `eval` runs it. Roots sourced from the reef
-  library graph keep their linker-mangled names; entries from the package's own source
-  keep their bare names.
+  self-contained behavior is unchanged **except** that a rank-0 (scalar-out) tensor
+  entry is now rejected with wrap-as-`tensor[1, f32]` guidance on every path, bare
+  included (rather than emitting an unbuildable scalar kernel). Default in-context entry
+  selection prefers a tensor def named `main`. A scalar-signature entry has no callable
+  tensor kernel and is rejected with tensor-wrap guidance; `eval` runs it. Roots sourced
+  from the reef library graph keep their linker-mangled names; entries from the
+  package's own source keep their bare names. Reef-context resolution is **C-target
+  only**: a HIP reef-context compile (`target="hip"` with a `project_root=`) is rejected
+  as unsupported (chelis#829) rather than silently mis-scoped.
 
 ### Phase 5a
 
