@@ -1827,6 +1827,45 @@ pub fn host_program_uses_builtin<T>(program: &HostProgram<T>, builtin: &str) -> 
             .any(|function| host_body_uses_builtin(&function.body, builtin))
 }
 
+/// Find a direct application of one of `builtins` in checked Deep before host
+/// expression lowering descends into its arguments. Target frontends use this
+/// to preserve the owning builtin rejection when an argument (such as an
+/// inline callback) deliberately has no standalone compiled representation.
+/// The walk covers the whole checked program, including nested callback and
+/// otherwise-unreachable function bodies.
+pub fn find_direct_builtin_call(
+    program: &CheckedProgram,
+    builtins: &[&str],
+) -> Option<String> {
+    fn find(expr: &Expr, builtins: &[&str]) -> Option<String> {
+        match expr {
+            Expr::List(list, _) => {
+                if tag(list) == Some("app")
+                    && let Some(callee) = children(list).first().and_then(as_list)
+                    && tag(callee) == Some("var")
+                    && let Some(name) = children(callee).first().and_then(symbol_name)
+                    && builtins.contains(&name)
+                {
+                    return Some(name.to_string());
+                }
+                list.elements.iter().find_map(|expr| find(expr, builtins))
+            }
+            Expr::Map(map, _) => map
+                .entries
+                .iter()
+                .find_map(|(_, value)| find(value, builtins)),
+            Expr::MetaExpr(meta, _) => find(&meta.expr, builtins).or_else(|| {
+                meta.entries
+                    .iter()
+                    .find_map(|(_, value)| find(value, builtins))
+            }),
+            Expr::Atom(_, _) => None,
+        }
+    }
+
+    program.exprs().iter().find_map(|expr| find(expr, builtins))
+}
+
 fn host_callback_uses_builtin<T>(callback: &HostCallback<T>, builtin: &str) -> bool {
     match &callback.kind {
         HostCallbackKind::Inline { body, .. } => host_body_uses_builtin(body, builtin),
@@ -3749,7 +3788,7 @@ fn lower_host_expr_kind(
             HostExpr::new(HostExprKind::Tuple(items, ty))
         }
         Expr::List(list, _) if tag(list) == Some("record") => {
-            lower_record_host_expr(list, program, scope, tensor_helpers)
+            lower_record_host_expr(list, program, scope, tensor_helpers)?
         }
         Expr::List(list, _) if tag(list) == Some("lit") => lower_host_expr(
             children(list).first().ok_or_else(|| {
@@ -3779,13 +3818,19 @@ fn lower_host_expr_kind(
                     },
                 )));
             }
-            if let Some((adt_name, fields)) = lookup_adt_ctor(program, &name)
-                && fields.is_empty()
+            if let Some(definition) = lookup_adt_constructor_definition(program, &name)
+                && definition.is_nullary()
             {
+                let instantiated = definition.instantiate(&ty).map_err(|error| {
+                    host_expr_lowering_error(
+                        expr,
+                        format!("constructor `{name}` is not concretely instantiated: {error}"),
+                    )
+                })?;
                 return Ok(HostExpr::new(HostExprKind::AdtConstruct {
                     ctor: name,
                     fields: Vec::new(),
-                    ty: HostTypeTerm::Adt(adt_name, Vec::new()),
+                    ty: instantiated.ty,
                 }));
             }
             HostExpr::new(HostExprKind::Var(name, ty))
@@ -3819,7 +3864,7 @@ fn lower_host_expr_kind(
             })
         }
         Expr::List(list, _) if tag(list) == Some("match") => {
-            lower_match_host_expr(list, program, scope, tensor_helpers)
+            lower_match_host_expr(list, program, scope, tensor_helpers)?
         }
         Expr::List(list, _) if tag(list) == Some("let") => {
             let kids = children(list);
@@ -3877,10 +3922,10 @@ fn lower_host_expr_kind(
             })
         }
         Expr::List(list, _) if tag(list) == Some("tuple-get") => {
-            lower_tuple_get_host_expr(list, program, scope, tensor_helpers)
+            lower_tuple_get_host_expr(list, program, scope, tensor_helpers)?
         }
         Expr::List(list, _) if tag(list) == Some("access") => {
-            lower_access_host_expr(list, program, scope, tensor_helpers)
+            lower_access_host_expr(list, program, scope, tensor_helpers)?
         }
         Expr::List(list, _) if tag(list) == Some("cast") => {
             // chelis#730 Phase 1 (census row 13's host-lane half,
@@ -3942,7 +3987,7 @@ fn lower_host_expr_kind(
             })
         }
         Expr::List(list, _) if tag(list) == Some("app") => {
-            lower_app_host_expr(list, program, scope, tensor_helpers)
+            lower_app_host_expr(list, program, scope, tensor_helpers)?
         }
         Expr::List(list, _) if tag(list) == Some("pipe") => {
             // Bucket 4e: a pipe expression that survives to host
@@ -5050,7 +5095,7 @@ fn lower_match_host_expr(
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     let kids = children(list);
-    let match_expr = Expr::List(list.clone(), list.elements[0].span());
+    let match_expr = Expr::List(list.clone(), list_span(list));
     let scrutinee_node = kids
         .first()
         .ok_or_else(|| host_expr_lowering_error(&match_expr, "a `match` node has no scrutinee"))?;
@@ -5126,21 +5171,32 @@ fn lower_match_host_expr(
                     none_expr = Some(lower_host_expr(body, program, scope, tensor_helpers)?);
                 }
                 Some(ctor_name) => {
-                    let ctor_fields =
-                        lookup_adt_ctor_details_for_type(program, ctor_name, Some(&scrutinee_ty))
-                            .map(|(_, fields)| fields)
-                            .or_else(|| {
-                                program
-                                    .type_env()
-                                    .get(ctor_name)
-                                    .and_then(parse_fn_type_expr)
-                                    .map(|(args, _)| {
-                                        args.into_iter()
-                                            .map(|ty| HostAdtField { name: None, ty })
-                                            .collect::<Vec<_>>()
-                                    })
+                    let ctor_fields = if let Some(definition) =
+                        lookup_adt_constructor_definition(program, ctor_name)
+                    {
+                        definition
+                            .instantiate(&scrutinee_ty)
+                            .map_err(|error| {
+                                host_expr_lowering_error(
+                                    &match_expr,
+                                    format!(
+                                        "match constructor `{ctor_name}` is not concretely instantiated: {error}"
+                                    ),
+                                )
+                            })?
+                            .fields
+                    } else {
+                        program
+                            .type_env()
+                            .get(ctor_name)
+                            .and_then(parse_fn_type_expr)
+                            .map(|(args, _)| {
+                                args.into_iter()
+                                    .map(|ty| HostAdtField { name: None, ty })
+                                    .collect::<Vec<_>>()
                             })
-                            .unwrap_or_default();
+                            .unwrap_or_default()
+                    };
                     let mut scoped = scope.clone();
                     let mut bindings = Vec::new();
                     for (field_index, subpat, field_ty) in
@@ -5266,7 +5322,7 @@ fn lower_literal_match_host_expr(
     let kids = children(list);
     let mut literal_arms = Vec::new();
     let mut default_expr = None;
-    let match_expr = Expr::List(list.clone(), list.elements[0].span());
+    let match_expr = Expr::List(list.clone(), list_span(list));
     for arm in kids.iter().skip(1) {
         let Some(arm_list) = as_list(arm) else {
             continue;
@@ -5362,7 +5418,7 @@ fn lower_record_host_expr(
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     let kids = children(list);
-    let record_expr = Expr::List(list.clone(), list.elements[0].span());
+    let record_expr = Expr::List(list.clone(), list_span(list));
     let ctor = kids
         .first()
         .and_then(symbol_name)
@@ -5381,13 +5437,18 @@ fn lower_record_host_expr(
         program,
         scope,
     );
-    let ctor_info = lookup_adt_ctor_details_for_type(program, &ctor, Some(&explicit_ty))
-        .ok_or_else(|| {
-            host_expr_lowering_error(
-                &record_expr,
-                format!("record constructor `{ctor}` has no matching ADT declaration"),
-            )
-        })?;
+    let ctor_definition = lookup_adt_constructor_definition(program, &ctor).ok_or_else(|| {
+        host_expr_lowering_error(
+            &record_expr,
+            format!("record constructor `{ctor}` has no matching ADT declaration"),
+        )
+    })?;
+    let ctor_info = ctor_definition.instantiate(&explicit_ty).map_err(|error| {
+        host_expr_lowering_error(
+            &record_expr,
+            format!("record constructor `{ctor}` is not concretely instantiated: {error}"),
+        )
+    })?;
     let mut supplied = HashMap::new();
     for field in kids.iter().skip(1) {
         let kv_list = as_list(field).ok_or_else(|| {
@@ -5423,7 +5484,7 @@ fn lower_record_host_expr(
         }
     }
     let fields = ctor_info
-        .1
+        .fields
         .iter()
         .map(|field| {
             let name = field.name.as_ref().ok_or_else(|| {
@@ -5450,11 +5511,7 @@ fn lower_record_host_expr(
     Ok(HostExpr::new(HostExprKind::AdtConstruct {
         ctor,
         fields,
-        ty: if !explicit_ty.is_unresolved() {
-            explicit_ty
-        } else {
-            HostTypeTerm::Adt(ctor_info.0, Vec::new())
-        },
+        ty: ctor_info.ty,
     }))
 }
 
@@ -5465,7 +5522,7 @@ fn lower_access_host_expr(
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     let kids = children(list);
-    let access_expr = Expr::List(list.clone(), list.elements[0].span());
+    let access_expr = Expr::List(list.clone(), list_span(list));
     let base = lower_host_expr(
         kids.first().ok_or_else(|| {
             host_expr_lowering_error(&access_expr, "an `access` node has no base expression")
@@ -5477,8 +5534,14 @@ fn lower_access_host_expr(
     let field_name = kids.get(1).and_then(symbol_name).ok_or_else(|| {
         host_expr_lowering_error(&access_expr, "an `access` node has no field symbol")
     })?;
-    let (field_index, field_ty) =
-        lookup_access_field(program, &base, field_name).ok_or_else(|| {
+    let (field_index, field_ty) = lookup_access_field(program, &base, field_name)
+        .map_err(|error| {
+            host_expr_lowering_error(
+                &access_expr,
+                format!("field `{field_name}` has no concrete ADT instantiation: {error}"),
+            )
+        })?
+        .ok_or_else(|| {
             host_expr_lowering_error(
                 &access_expr,
                 format!("field `{field_name}` is absent or ambiguous on the resolved ADT type"),
@@ -5547,7 +5610,7 @@ fn lower_tuple_get_host_expr(
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     let kids = children(list);
-    let tuple_get_expr = Expr::List(list.clone(), list.elements[0].span());
+    let tuple_get_expr = Expr::List(list.clone(), list_span(list));
     if kids.len() != 2 {
         return Err(host_expr_lowering_error(
             &tuple_get_expr,
@@ -6157,7 +6220,7 @@ fn lower_app_host_expr(
         .or_else(|| lookup_declared_fn_type(program, &name))
         .or_else(|| kids.first().and_then(expr_fn_type));
     let explicit_ty = expr_host_type(&app_expr, program, scope);
-    let ctor_info = lookup_adt_ctor(program, &name);
+    let ctor_definition = lookup_adt_constructor_definition(program, &name);
     let inferred_ret_ty = fn_sig
         .as_ref()
         .map(|(_, ret_ty)| ret_ty.clone())
@@ -6443,18 +6506,25 @@ fn lower_app_host_expr(
         .iter()
         .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
         .collect::<Result<Vec<_>, _>>()?;
-    let construct_ty = if let Some((adt_name, _)) = &ctor_info {
+    let construct_ty = if let Some(definition) = &ctor_definition {
         if matches!(explicit_ty, HostTypeTerm::Adt(_, _)) {
             explicit_ty.clone()
         } else {
-            HostTypeTerm::Adt(adt_name.clone(), Vec::new())
+            HostTypeTerm::Adt(definition.adt_name.clone(), Vec::new())
         }
     } else {
         inferred_ret_ty.clone()
     };
-    if ctor_info.is_some() && !matches!(name.as_str(), "Some" | "None") {
-        let expected_fields = lookup_adt_ctor_details_for_type(program, &name, Some(&construct_ty))
-            .map_or_else(Vec::new, |(_, fields)| fields);
+    if let Some(definition) = ctor_definition
+        && !matches!(name.as_str(), "Some" | "None")
+    {
+        let instantiated = definition.instantiate(&construct_ty).map_err(|error| {
+            host_expr_lowering_error(
+                &app_expr,
+                format!("constructor `{name}` is not concretely instantiated: {error}"),
+            )
+        })?;
+        let expected_fields = instantiated.fields;
         let fields = args
             .into_iter()
             .enumerate()
@@ -6469,7 +6539,7 @@ fn lower_app_host_expr(
         return Ok(HostExpr::new(HostExprKind::AdtConstruct {
             ctor: name,
             fields,
-            ty: construct_ty,
+            ty: instantiated.ty,
         }));
     }
     if !BUILTIN_NAMES.contains(&name.as_str())
@@ -8439,14 +8509,14 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
                 .map(|expr| Box::new(force_host_expr_type(*expr, ty.clone()))),
             ty,
         },
-        HostExprKind::Let {
-            mut bindings, body, ..
-        } => {
-            for binding in &mut bindings {
-                let placeholder = HostExpr::new(HostExprKind::Unit);
-                let value = std::mem::replace(&mut binding.value, placeholder);
-                binding.value = force_host_expr_type(value, binding.ty.clone());
-            }
+        HostExprKind::Let { bindings, body, .. } => {
+            let bindings = bindings
+                .into_iter()
+                .map(|binding| HostBinding {
+                    value: force_host_expr_type(binding.value, binding.ty.clone()),
+                    ..binding
+                })
+                .collect();
             HostExprKind::Let {
                 bindings,
                 body: Box::new(force_host_expr_type(*body, ty.clone())),
@@ -8506,14 +8576,10 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
 /// and has no authority to pick a type when annotations disagree.
 fn conform_host_program_types(program: &mut HostProgram) {
     for binding in &mut program.globals {
-        let placeholder = HostExpr::new(HostExprKind::Unit);
-        let value = std::mem::replace(&mut binding.value, placeholder);
-        binding.value = force_host_expr_type(value, binding.ty.clone());
+        binding.value = force_host_expr_type(binding.value.clone(), binding.ty.clone());
     }
     for function in &mut program.functions {
-        let placeholder = HostExpr::new(HostExprKind::Unit);
-        let body = std::mem::replace(&mut function.body, placeholder);
-        function.body = force_host_expr_type(body, function.ret_ty.clone());
+        function.body = force_host_expr_type(function.body.clone(), function.ret_ty.clone());
     }
 }
 
@@ -9218,30 +9284,152 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
     }
 }
 
-fn lookup_adt_ctor(
-    program: &CheckedProgram,
-    ctor_name: &str,
-) -> Option<(String, Vec<HostTypeTerm>)> {
-    lookup_adt_ctor_details(program, ctor_name).map(|(adt_name, fields)| {
-        (
-            adt_name,
-            fields.into_iter().map(|field| field.ty).collect::<Vec<_>>(),
-        )
-    })
+#[derive(Debug, Clone)]
+struct GenericAdtConstructor {
+    adt_name: String,
+    ctor_name: String,
+    parameters: Vec<String>,
+    fields: Vec<GenericAdtField>,
 }
 
-fn lookup_adt_ctor_details(
-    program: &CheckedProgram,
-    ctor_name: &str,
-) -> Option<(String, Vec<HostAdtField>)> {
-    lookup_adt_ctor_details_for_type(program, ctor_name, None)
+#[derive(Debug, Clone)]
+struct GenericAdtField {
+    name: Option<String>,
+    term: HostTypeTerm,
 }
 
-fn lookup_adt_ctor_details_for_type(
-    program: &CheckedProgram,
-    ctor_name: &str,
-    instantiated_ty: Option<&HostTypeTerm>,
-) -> Option<(String, Vec<HostAdtField>)> {
+#[derive(Debug, Clone)]
+struct InstantiatedAdtConstructor {
+    ty: HostTypeTerm,
+    fields: Vec<HostAdtField>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AdtInstantiationError {
+    MissingAppliedType {
+        adt: String,
+    },
+    WrongAppliedType {
+        expected: String,
+        got: String,
+    },
+    Arity {
+        adt: String,
+        expected: usize,
+        got: usize,
+    },
+    UnresolvedArgument {
+        adt: String,
+        index: usize,
+    },
+    UnresolvedField {
+        adt: String,
+        field: String,
+    },
+}
+
+impl fmt::Display for AdtInstantiationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingAppliedType { adt } => {
+                write!(f, "generic ADT `{adt}` has no applied type arguments")
+            }
+            Self::WrongAppliedType { expected, got } => {
+                write!(f, "constructor for `{expected}` was applied as `{got}`")
+            }
+            Self::Arity { adt, expected, got } => write!(
+                f,
+                "generic ADT `{adt}` expects {expected} type arguments, got {got}"
+            ),
+            Self::UnresolvedArgument { adt, index } => {
+                write!(f, "generic ADT `{adt}` type argument {index} is unresolved")
+            }
+            Self::UnresolvedField { adt, field } => write!(
+                f,
+                "generic ADT `{adt}` field `{field}` remains unresolved after substitution"
+            ),
+        }
+    }
+}
+
+impl GenericAdtConstructor {
+    fn is_nullary(&self) -> bool {
+        self.fields.is_empty()
+    }
+
+    fn instantiate(
+        &self,
+        instantiated_ty: &HostTypeTerm,
+    ) -> Result<InstantiatedAdtConstructor, AdtInstantiationError> {
+        let (ty, arguments) = match instantiated_ty {
+            HostTypeTerm::Adt(name, arguments) => {
+                if !terminal_name_matches(name, &self.adt_name) {
+                    return Err(AdtInstantiationError::WrongAppliedType {
+                        expected: self.adt_name.clone(),
+                        got: name.clone(),
+                    });
+                }
+                (instantiated_ty.clone(), arguments.as_slice())
+            }
+            _ if self.parameters.is_empty() => (
+                HostTypeTerm::Adt(self.adt_name.clone(), Vec::new()),
+                &[][..],
+            ),
+            _ => {
+                return Err(AdtInstantiationError::MissingAppliedType {
+                    adt: self.adt_name.clone(),
+                });
+            }
+        };
+        if arguments.len() != self.parameters.len() {
+            return Err(AdtInstantiationError::Arity {
+                adt: self.adt_name.clone(),
+                expected: self.parameters.len(),
+                got: arguments.len(),
+            });
+        }
+        if let Some((index, _)) = arguments
+            .iter()
+            .enumerate()
+            .find(|(_, argument)| argument.is_unresolved())
+        {
+            return Err(AdtInstantiationError::UnresolvedArgument {
+                adt: self.adt_name.clone(),
+                index,
+            });
+        }
+        let substitutions = self
+            .parameters
+            .iter()
+            .cloned()
+            .zip(arguments.iter().cloned())
+            .collect();
+        let fields = self
+            .fields
+            .iter()
+            .map(|field| {
+                let ty = substitute_host_type_term(field.term.clone(), &substitutions);
+                if ty.is_unresolved() {
+                    return Err(AdtInstantiationError::UnresolvedField {
+                        adt: self.adt_name.clone(),
+                        field: field
+                            .name
+                            .clone()
+                            .unwrap_or_else(|| "<positional>".to_string()),
+                    });
+                }
+                Ok(HostAdtField {
+                    name: field.name.clone(),
+                    ty,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(InstantiatedAdtConstructor { ty, fields })
+    }
+}
+
+fn adt_constructor_definitions(program: &CheckedProgram) -> Vec<GenericAdtConstructor> {
+    let mut definitions = Vec::new();
     for expr in top_level_items(program.exprs()) {
         let Expr::List(list, _) = expr else {
             continue;
@@ -9253,7 +9441,18 @@ fn lookup_adt_ctor_details_for_type(
         let Some(adt_name) = kids.first().and_then(symbol_name) else {
             continue;
         };
-        let subst = adt_type_substitution(children(list).get(1), adt_name, instantiated_ty);
+        let parameters = children(list)
+            .get(1)
+            .and_then(as_list)
+            .map(|params| {
+                params
+                    .elements
+                    .iter()
+                    .filter_map(symbol_name)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         for variant in kids.iter().skip(2) {
             let Some(variant_list) = as_list(variant) else {
                 continue;
@@ -9265,9 +9464,6 @@ fn lookup_adt_ctor_details_for_type(
             let Some(name) = variant_kids.first().and_then(symbol_name) else {
                 continue;
             };
-            if !terminal_name_matches(name, ctor_name) {
-                continue;
-            }
             let mut fields = Vec::new();
             for field in variant_kids.iter().skip(1) {
                 if let Some(field_list) = as_list(field)
@@ -9275,42 +9471,62 @@ fn lookup_adt_ctor_details_for_type(
                 {
                     let field_kids = children(field_list);
                     if let Some(ty_expr) = field_kids.get(1) {
-                        fields.push(HostAdtField {
+                        fields.push(GenericAdtField {
                             name: field_kids.first().and_then(symbol_name).map(str::to_string),
-                            ty: decode_host_type_or_raise(ty_expr, &subst),
+                            term: decode_host_type_or_raise(ty_expr, &HashMap::new()),
                         });
                     }
                 } else {
-                    fields.push(HostAdtField {
+                    fields.push(GenericAdtField {
                         name: None,
-                        ty: decode_host_type_or_raise(field, &subst),
+                        term: decode_host_type_or_raise(field, &HashMap::new()),
                     });
                 }
             }
-            return Some((adt_name.to_string(), fields));
+            definitions.push(GenericAdtConstructor {
+                adt_name: adt_name.to_string(),
+                ctor_name: name.to_string(),
+                parameters: parameters.clone(),
+                fields,
+            });
         }
     }
-    None
+    definitions
+}
+
+fn lookup_adt_constructor_definition(
+    program: &CheckedProgram,
+    ctor_name: &str,
+) -> Option<GenericAdtConstructor> {
+    adt_constructor_definitions(program)
+        .into_iter()
+        .find(|definition| terminal_name_matches(&definition.ctor_name, ctor_name))
 }
 
 fn lookup_access_field(
     program: &CheckedProgram,
     base: &HostExpr,
     field_name: &str,
-) -> Option<(usize, HostTypeTerm)> {
+) -> Result<Option<(usize, HostTypeTerm)>, AdtInstantiationError> {
     match &base.kind {
-        HostExprKind::AdtConstruct { ctor, .. } => {
-            lookup_adt_ctor_details(program, ctor).and_then(|(_, fields)| {
-                fields.iter().enumerate().find_map(|(index, field)| {
+        HostExprKind::AdtConstruct { ctor, ty, .. } => {
+            let Some(definition) = lookup_adt_constructor_definition(program, ctor) else {
+                return Ok(None);
+            };
+            let instantiated = definition.instantiate(ty)?;
+            Ok(instantiated
+                .fields
+                .iter()
+                .enumerate()
+                .find_map(|(index, field)| {
                     (field.name.as_deref() == Some(field_name)).then_some((index, field.ty.clone()))
-                })
-            })
+                }))
         }
         _ => match host_expr_type(base) {
             HostTypeTerm::Adt(adt_name, args) => {
                 lookup_adt_field_on_type(program, &adt_name, &args, field_name)
             }
-            _ => None,
+            _ => Ok(None),
         },
     }
 }
@@ -9320,78 +9536,30 @@ fn lookup_adt_field_on_type(
     adt_name: &str,
     args: &[HostTypeTerm],
     field_name: &str,
-) -> Option<(usize, HostTypeTerm)> {
+) -> Result<Option<(usize, HostTypeTerm)>, AdtInstantiationError> {
     let mut found = None;
-    for expr in top_level_items(program.exprs()) {
-        let Expr::List(list, _) = expr else {
-            continue;
-        };
-        if tag(list) != Some("deftype") {
+    let instantiated_ty = HostTypeTerm::Adt(adt_name.to_string(), args.to_vec());
+    for definition in adt_constructor_definitions(program) {
+        if !terminal_name_matches(&definition.adt_name, adt_name) {
             continue;
         }
-        let kids = children(list);
-        if kids.first().and_then(symbol_name) != Some(adt_name) {
-            continue;
-        }
-        let subst = adt_type_substitution(
-            children(list).get(1),
-            adt_name,
-            Some(&HostTypeTerm::Adt(adt_name.to_string(), args.to_vec())),
-        );
-        for variant in kids.iter().skip(2) {
-            let Some(variant_list) = as_list(variant) else {
-                continue;
-            };
-            if tag(variant_list) != Some("variant") {
-                continue;
+        let instantiated = definition.instantiate(&instantiated_ty)?;
+        if let Some((index, field)) = instantiated
+            .fields
+            .iter()
+            .enumerate()
+            .find(|(_, field)| field.name.as_deref() == Some(field_name))
+        {
+            let candidate = (index, field.ty.clone());
+            if let Some(existing) = &found
+                && existing != &candidate
+            {
+                return Ok(None);
             }
-            for (index, field) in children(variant_list).iter().skip(1).enumerate() {
-                let Some(field_list) = as_list(field) else {
-                    continue;
-                };
-                if tag(field_list) != Some("field") {
-                    continue;
-                }
-                if children(field_list).first().and_then(symbol_name) == Some(field_name) {
-                    let ty = children(field_list)
-                        .get(1)
-                        .map(|expr| decode_host_type_or_raise(expr, &subst))
-                        .unwrap_or_else(fresh_host_inference);
-                    if let Some(existing) = &found
-                        && existing != &(index, ty.clone())
-                    {
-                        return None;
-                    }
-                    found = Some((index, ty));
-                }
-            }
+            found = Some(candidate);
         }
     }
-    found
-}
-
-fn adt_type_substitution(
-    params_expr: Option<&Expr>,
-    adt_name: &str,
-    instantiated_ty: Option<&HostTypeTerm>,
-) -> HashMap<String, HostTypeTerm> {
-    let params = params_expr
-        .and_then(as_list)
-        .map(|list| {
-            list.elements
-                .iter()
-                .filter_map(symbol_name)
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let actuals = match instantiated_ty {
-        Some(HostTypeTerm::Adt(name, args)) if terminal_name_matches(name, adt_name) => {
-            args.clone()
-        }
-        _ => Vec::new(),
-    };
-    params.into_iter().zip(actuals).collect()
+    Ok(found)
 }
 
 fn tag(list: &List) -> Option<&str> {
@@ -9399,6 +9567,13 @@ fn tag(list: &List) -> Option<&str> {
         Expr::Atom(Atom::Symbol(tag), _) => Some(tag.as_str()),
         _ => None,
     })
+}
+
+fn list_span(list: &List) -> chelis_deep::Span {
+    list.elements
+        .first()
+        .map(Expr::span)
+        .unwrap_or_else(|| chelis_deep::Span::new(0, 0))
 }
 
 fn children(list: &List) -> &[Expr] {
@@ -10260,7 +10435,7 @@ mod tests {
             "#,
         );
         let lowered = top_level_lowering_map(checked.exprs(), checked.type_env());
-        let host = lower_host_program(&checked, &lowered);
+        let host = lower_host_program(&checked, &lowered).expect("host program must lower");
         let out_binding = host
             .globals
             .iter()
