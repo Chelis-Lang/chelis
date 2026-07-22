@@ -1001,12 +1001,47 @@ fn compile_shared_library_inner(
         .unwrap_or("model");
     let lib_path = root.join(format!("{stem}.so"));
     let compiler = native_compiler_path(artifact.compile_result.target);
+
+    // #817/#818: this artifact is dlopen'd and called IN-PROCESS (see
+    // `load_artifact` / `call_host`), unlike the `chelis build` product,
+    // which is run as a standalone executable. On Linux/glibc, libgomp's
+    // OpenMP worker threads reach their `__thread` state through the
+    // initial-exec TLS model, which is only sound for modules present in the
+    // program's initial link set. When libgomp is pulled in as a dependency
+    // of a `dlopen`'d shared object, those worker-thread TLS accesses fault —
+    // a silent, output-free SIGSEGV that fires the first time a parallel
+    // region actually RUNS (loading the library is fine; calling it is not).
+    // macOS never hit this: `runtime_toolchain` only adds `-fopenmp` for real
+    // gcc, so the Apple-clang build of this same path was already serial.
+    // OpenMP is a pure throughput optimization here — a single in-process
+    // call of a typically small graph gains nothing from it, and stripping it
+    // makes every platform take the same correct serial path (the `#pragma
+    // omp` lines become inert). This mirrors `compile_result_hip_host`, which
+    // already drops `-fopenmp` for its own loadable-artifact reasons. The
+    // `chelis build` / subprocess-executable paths keep OpenMP untouched.
+    let openmp_dropped = |flag: &&String| *flag != "-fopenmp";
+    let compile_flags: Vec<&String> = artifact
+        .compile_result
+        .compile_flags
+        .iter()
+        .filter(openmp_dropped)
+        .collect();
+    let link_flags: Vec<&String> = artifact
+        .compile_result
+        .link_flags
+        .iter()
+        .filter(openmp_dropped)
+        .collect();
+
     let mut command = Command::new(&compiler);
     command.current_dir(root);
     command.arg("-O3");
     command.arg("-shared");
     command.arg("-fPIC");
-    command.args(&artifact.compile_result.compile_flags);
+    // Silence the now-unrecognized `#pragma omp ...` lines the serial build
+    // no longer acts on, so the diagnostics stay clean without changing codegen.
+    command.arg("-Wno-unknown-pragmas");
+    command.args(&compile_flags);
     for file in &artifact.compile_result.files {
         if file.path.ends_with(".c") || file.path.ends_with(".cpp") {
             command.arg(root.join(&file.path));
@@ -1017,7 +1052,7 @@ fn compile_shared_library_inner(
         command.arg("none");
     }
     command.arg(runtime_library);
-    command.args(&artifact.compile_result.link_flags);
+    command.args(&link_flags);
     command.arg("-o");
     command.arg(&lib_path);
 
