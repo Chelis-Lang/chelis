@@ -956,6 +956,7 @@ pub(crate) fn run_type_stamp_mutation_case(
 pub(crate) enum FinalizationMutationCase {
     MissingRuntimeStamp,
     SilentErrorOwner,
+    SilentErrorSignature,
 }
 
 #[cfg(test)]
@@ -964,6 +965,7 @@ pub(crate) fn run_finalization_mutation_case(
     errors: &mut DiagnosticSink<'_>,
 ) {
     let runtime = node_expr("app", vec![]);
+    let mut signature_context = SignatureInferenceMetadata::default();
     let annotated = match case {
         FinalizationMutationCase::MissingRuntimeStamp => vec![runtime],
         FinalizationMutationCase::SilentErrorOwner => {
@@ -973,11 +975,25 @@ pub(crate) fn run_finalization_mutation_case(
             product.finish_root(&Subst::new(), errors);
             annotate_ir_program(std::slice::from_ref(&runtime), &product, errors)
         }
+        FinalizationMutationCase::SilentErrorSignature => {
+            let error_ty = crate::errors::error_sentinel_for_test();
+            signature_context.functions.insert(
+                "poison".to_string(),
+                FunctionSignatureInference {
+                    name: "poison".to_string(),
+                    recursive_cycle: false,
+                    checked_signature: error_ty.clone(),
+                    display_signature: error_ty,
+                    params: vec![],
+                },
+            );
+            vec![]
+        }
     };
     let _ = finalize_checked_program(
         annotated,
         HashMap::new(),
-        &SignatureInferenceMetadata::default(),
+        &signature_context,
         &TypeResolutionEnv::default(),
         errors,
     );
@@ -1099,23 +1115,17 @@ impl CheckedProgram {
         }
     }
 
-    pub fn try_from_parts(
+    /// Replace only effects-owned metadata on an already-checked program.
+    ///
+    /// Every span, atom, child, and non-`effects` metadata entry must remain
+    /// byte-for-byte identical to `self`. The returned program preserves the
+    /// original type/signature/linearity contexts and crosses the same
+    /// fallible totality boundary as a fresh checker result.
+    pub fn try_with_effect_annotations(
+        &self,
         annotated_exprs: Vec<deep::Expr>,
-        type_env: HashMap<String, deep::Expr>,
     ) -> Result<Self, InferResult> {
-        crate::session::try_checked_program_from_parts(annotated_exprs, type_env)
-    }
-
-    pub fn try_from_parts_with_signature_context(
-        annotated_exprs: Vec<deep::Expr>,
-        type_env: HashMap<String, deep::Expr>,
-        signature_context: &SignatureInferenceMetadata,
-    ) -> Result<Self, InferResult> {
-        crate::session::try_checked_program_from_parts_with_signature_context(
-            annotated_exprs,
-            type_env,
-            signature_context,
-        )
+        crate::session::try_checked_program_with_effect_annotations(self, annotated_exprs)
     }
 
     pub fn exprs(&self) -> &[deep::Expr] {
@@ -1225,17 +1235,26 @@ fn finalize_checked_program(
         signature_inference,
     };
 
-    if errors.is_empty() {
-        let mut traces = totality_invariant_traces(signature_context);
-        traces.extend(annotated_totality_invariant_traces(
-            checked.annotated_exprs(),
-        ));
-        traces.extend(totality_invariant_traces(checked.signature_inference()));
-        if !traces.is_empty() {
-            errors.push(totality_violation_error(&traces));
-        }
-    }
+    validate_checked_program_totality(&checked, signature_context, errors);
     checked
+}
+
+fn validate_checked_program_totality(
+    checked: &CheckedProgram,
+    signature_context: &SignatureInferenceMetadata,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    if !errors.is_empty() {
+        return;
+    }
+    let mut traces = totality_invariant_traces(signature_context);
+    traces.extend(annotated_totality_invariant_traces(
+        checked.annotated_exprs(),
+    ));
+    traces.extend(totality_invariant_traces(checked.signature_inference()));
+    if !traces.is_empty() {
+        errors.push(totality_violation_error(&traces));
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1268,35 +1287,126 @@ pub struct ParamSignatureInference {
     pub display_type: Type,
 }
 
-pub(crate) fn checked_program_from_parts_in_session(
+pub(crate) fn checked_program_with_effect_annotations_in_session(
+    original: &CheckedProgram,
     annotated_exprs: Vec<deep::Expr>,
-    type_env: HashMap<String, deep::Expr>,
     errors: &mut DiagnosticSink<'_>,
 ) -> CheckedProgram {
-    let type_headers = signature_metadata_type_headers(&annotated_exprs);
-    finalize_checked_program(
+    if !effects_only_rewrite_matches(original.annotated_exprs(), &annotated_exprs) {
+        errors.push(CheckError::new(
+            CheckErrorKind::Other,
+            "checked-program effects-only reannotation changed a span, atom, child, or non-`effects` metadata entry"
+                .to_string(),
+            vec![
+                "Run type checking again for structural, body, type, `eff`, or source-span changes"
+                    .to_string(),
+            ],
+        ));
+    }
+
+    let checked = CheckedProgram {
         annotated_exprs,
-        type_env,
-        &SignatureInferenceMetadata::default(),
-        &type_headers,
-        errors,
-    )
+        type_env: original.type_env.clone(),
+        linearity: original.linearity.clone(),
+        signature_inference: original.signature_inference.clone(),
+    };
+    validate_checked_program_totality(&checked, original.signature_inference(), errors);
+    checked
 }
 
-pub(crate) fn checked_program_from_parts_with_signature_context_in_session(
-    annotated_exprs: Vec<deep::Expr>,
-    type_env: HashMap<String, deep::Expr>,
-    signature_context: &SignatureInferenceMetadata,
-    errors: &mut DiagnosticSink<'_>,
-) -> CheckedProgram {
-    let type_headers = signature_metadata_type_headers(&annotated_exprs);
-    finalize_checked_program(
-        annotated_exprs,
-        type_env,
-        signature_context,
-        &type_headers,
-        errors,
-    )
+fn effects_only_rewrite_matches(original: &[deep::Expr], candidate: &[deep::Expr]) -> bool {
+    original.len() == candidate.len()
+        && original.iter().zip(candidate).all(|(before, after)| {
+            strip_effect_annotations(before) == strip_effect_annotations(after)
+        })
+        && candidate.iter().all(effect_metadata_is_singular)
+}
+
+fn strip_effect_annotations(expr: &deep::Expr) -> deep::Expr {
+    match expr {
+        deep::Expr::Atom(_, _) => expr.clone(),
+        deep::Expr::Map(map, span) => deep::Expr::Map(
+            deep::MetaMap {
+                entries: map
+                    .entries
+                    .iter()
+                    .map(|(key, value)| (key.clone(), strip_effect_annotations(value)))
+                    .collect(),
+            },
+            *span,
+        ),
+        deep::Expr::MetaExpr(meta, span) => deep::Expr::MetaExpr(
+            deep::MetaExpr {
+                entries: meta
+                    .entries
+                    .iter()
+                    .map(|(key, value)| (key.clone(), strip_effect_annotations(value)))
+                    .collect(),
+                expr: Box::new(strip_effect_annotations(&meta.expr)),
+            },
+            *span,
+        ),
+        deep::Expr::List(list, span) => deep::Expr::List(
+            deep::List {
+                elements: list
+                    .elements
+                    .iter()
+                    .enumerate()
+                    .map(|(index, element)| {
+                        if index == 1
+                            && let deep::Expr::Map(map, map_span) = element
+                        {
+                            return deep::Expr::Map(
+                                deep::MetaMap {
+                                    entries: map
+                                        .entries
+                                        .iter()
+                                        .filter(|(key, _)| key != "effects")
+                                        .map(|(key, value)| {
+                                            (key.clone(), strip_effect_annotations(value))
+                                        })
+                                        .collect(),
+                                },
+                                *map_span,
+                            );
+                        }
+                        strip_effect_annotations(element)
+                    })
+                    .collect(),
+            },
+            *span,
+        ),
+    }
+}
+
+fn effect_metadata_is_singular(expr: &deep::Expr) -> bool {
+    match expr {
+        deep::Expr::Atom(_, _) => true,
+        deep::Expr::Map(map, _) => map
+            .entries
+            .iter()
+            .all(|(_, value)| effect_metadata_is_singular(value)),
+        deep::Expr::MetaExpr(meta, _) => {
+            effect_metadata_is_singular(&meta.expr)
+                && meta
+                    .entries
+                    .iter()
+                    .all(|(_, value)| effect_metadata_is_singular(value))
+        }
+        deep::Expr::List(list, _) => {
+            let singular_here = match list.elements.get(1) {
+                Some(deep::Expr::Map(map, _)) => {
+                    map.entries
+                        .iter()
+                        .filter(|(key, _)| key == "effects")
+                        .count()
+                        <= 1
+                }
+                _ => true,
+            };
+            singular_here && list.elements.iter().all(effect_metadata_is_singular)
+        }
+    }
 }
 
 /// Run type inference on a list of top-level Deep expressions.
@@ -2027,8 +2137,14 @@ pub(crate) fn check_typed_program_in_session(
         if !errors.is_empty() {
             return Err(stats);
         }
-        let checked =
-            checked_program_from_parts_in_session(annotated_exprs, annotated_type_env, errors);
+        let type_headers = signature_metadata_type_headers(&annotated_exprs);
+        let checked = finalize_checked_program(
+            annotated_exprs,
+            annotated_type_env,
+            &SignatureInferenceMetadata::default(),
+            &type_headers,
+            errors,
+        );
         if !errors.is_empty() {
             return Err(stats);
         }

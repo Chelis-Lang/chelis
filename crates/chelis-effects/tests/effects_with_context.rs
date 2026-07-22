@@ -78,8 +78,15 @@ def caller(y: int64) -> int64 = emit(y)
 
     let (typeenv, lib_checked) = build_library_pair(library);
     let new_checked = build_new_code_checked(&typeenv, snippet);
+    let expected_type_env = new_checked.type_env().clone();
+    let expected_signatures = new_checked.signature_inference().clone();
+    let expected_linearity = new_checked.linearity().clone();
     let new_with_effects = check_effects_with_context(&lib_checked, &new_checked)
         .expect("io-inheriting snippet must pass");
+
+    assert_eq!(new_with_effects.type_env(), &expected_type_env);
+    assert_eq!(new_with_effects.signature_inference(), &expected_signatures);
+    assert_eq!(new_with_effects.linearity(), &expected_linearity);
 
     // Verify the snippet's caller def does carry `effects` metadata
     // referencing io. The annotated decl list is the snippet's only.

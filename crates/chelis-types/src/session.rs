@@ -163,15 +163,19 @@ mod annotated_totality_finalization_tests {
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("missing its type stamp"));
     }
+
+    #[test]
+    fn silent_error_signature_is_rejected_at_private_finalization() {
+        let errors = errors_for(FinalizationMutationCase::SilentErrorSignature);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.contains("totality invariant"));
+    }
 }
 
 #[cfg(test)]
 mod result_boundary_tests {
-    use std::collections::{BTreeMap, HashMap};
-
     use super::*;
-    use crate::errors::{CheckErrorKind, error_sentinel_for_test};
-    use crate::infer::FunctionSignatureInference;
+    use crate::errors::CheckErrorKind;
 
     #[test]
     fn run_result_rejects_ok_after_an_authoritative_diagnostic() {
@@ -187,31 +191,6 @@ mod result_boundary_tests {
         assert_eq!(result.errors.len(), 1);
         assert_eq!(result.typed_nodes, 0);
         assert_eq!(result.total_nodes, 0);
-    }
-
-    #[test]
-    fn public_reconstruction_rejects_a_silent_error_signature_exactly_once() {
-        let error_ty = error_sentinel_for_test();
-        let signature_context = SignatureInferenceMetadata {
-            functions: BTreeMap::from([(
-                "poison".to_string(),
-                FunctionSignatureInference {
-                    name: "poison".to_string(),
-                    recursive_cycle: false,
-                    checked_signature: error_ty.clone(),
-                    display_signature: error_ty,
-                    params: vec![],
-                },
-            )]),
-        };
-        let result = CheckedProgram::try_from_parts_with_signature_context(
-            vec![],
-            HashMap::new(),
-            &signature_context,
-        )
-        .expect_err("silent Type::Error metadata must not reconstruct success");
-        assert_eq!(result.errors.len(), 1);
-        assert!(result.errors[0].message.contains("totality invariant"));
     }
 }
 
@@ -306,30 +285,15 @@ pub(crate) fn infer_ir_program(exprs: &[chelis_deep::Expr]) -> InferResult {
     })
 }
 
-pub(crate) fn try_checked_program_from_parts(
+pub(crate) fn try_checked_program_with_effect_annotations(
+    original: &CheckedProgram,
     annotated_exprs: Vec<chelis_deep::Expr>,
-    type_env: std::collections::HashMap<String, chelis_deep::Expr>,
-) -> Result<CheckedProgram, InferResult> {
-    run_result(|sink| {
-        Ok(crate::infer::checked_program_from_parts_in_session(
-            annotated_exprs,
-            type_env,
-            sink,
-        ))
-    })
-}
-
-pub(crate) fn try_checked_program_from_parts_with_signature_context(
-    annotated_exprs: Vec<chelis_deep::Expr>,
-    type_env: std::collections::HashMap<String, chelis_deep::Expr>,
-    signature_context: &SignatureInferenceMetadata,
 ) -> Result<CheckedProgram, InferResult> {
     run_result(|sink| {
         Ok(
-            crate::infer::checked_program_from_parts_with_signature_context_in_session(
+            crate::infer::checked_program_with_effect_annotations_in_session(
+                original,
                 annotated_exprs,
-                type_env,
-                signature_context,
                 sink,
             ),
         )

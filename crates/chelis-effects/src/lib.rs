@@ -52,12 +52,9 @@ pub fn check_program(program: &CheckedProgram) -> Result<CheckedProgram, Vec<Eff
     validate_declared_vs_inferred(&annotated_exprs, &effects_by_def, &mut errors);
 
     if errors.is_empty() {
-        CheckedProgram::try_from_parts_with_signature_context(
-            annotated_exprs,
-            program.type_env().clone(),
-            program.signature_inference(),
-        )
-        .map_err(type_totality_errors)
+        program
+            .try_with_effect_annotations(annotated_exprs)
+            .map_err(type_totality_errors)
     } else {
         Err(errors)
     }
@@ -122,12 +119,9 @@ pub fn check_effects_with_context(
     validate_declared_vs_inferred(&annotated_exprs, &effects_by_def, &mut errors);
 
     if errors.is_empty() {
-        CheckedProgram::try_from_parts_with_signature_context(
-            annotated_exprs,
-            new_program.type_env().clone(),
-            new_program.signature_inference(),
-        )
-        .map_err(type_totality_errors)
+        new_program
+            .try_with_effect_annotations(annotated_exprs)
+            .map_err(type_totality_errors)
     } else {
         Err(errors)
     }
