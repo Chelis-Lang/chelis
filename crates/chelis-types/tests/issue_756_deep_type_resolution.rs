@@ -420,6 +420,72 @@ fn malformed_canonical_primitive_reports_once_at_every_type_consumer() {
 }
 
 #[test]
+fn independent_rhs_and_malformed_let_ascription_each_report_once() {
+    let exprs = parse(
+        "(def {} bad
+           (let {} (bind {} value
+             (var {type: (t-prim {} f32 extra)} missing))
+             (lit {} 0)))",
+    );
+    let result = check_ir_program(&exprs)
+        .expect_err("the independent RHS and ascription roots must both fail the checker");
+    assert_eq!(
+        result.errors.len(),
+        2,
+        "independent roots must each report once without suppressing or spraying: {:?}",
+        result.errors
+    );
+    assert_eq!(
+        result
+            .errors
+            .iter()
+            .filter(|error| error.message.contains("missing"))
+            .count(),
+        1,
+        "the RHS root must report exactly once: {:?}",
+        result.errors
+    );
+    assert_eq!(
+        result
+            .errors
+            .iter()
+            .filter(|error| error.message.contains("t-prim"))
+            .count(),
+        1,
+        "the malformed ascription root must report exactly once: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn prebound_failure_is_owned_by_its_exact_duplicate_name_declaration() {
+    let exprs = parse(
+        "(def {} duplicate (var {} missing))
+         (def {} duplicate (lit {type: (t-prim {} f32 extra)} 1.0))",
+    );
+    let result = check_ir_program(&exprs)
+        .expect_err("duplicate declarations with independent roots must fail the checker");
+    assert_eq!(
+        result.errors.len(),
+        3,
+        "the duplicate plus both independent roots must each report once: {:?}",
+        result.errors
+    );
+    for needle in ["duplicate definition", "missing", "t-prim"] {
+        assert_eq!(
+            result
+                .errors
+                .iter()
+                .filter(|error| error.message.contains(needle))
+                .count(),
+            1,
+            "`{needle}` must belong to exactly one declaration/root: {:?}",
+            result.errors
+        );
+    }
+}
+
+#[test]
 fn undeclared_variable_in_closed_top_level_metadata_reports_once() {
     assert_one_type_resolution_error(
         "(def {} x (lit {type: (t-var {} rogue)} 1))",

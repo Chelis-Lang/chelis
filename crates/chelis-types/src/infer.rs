@@ -1572,6 +1572,36 @@ fn infer_ir_program_with_state(
         crate::opacity::OpacityContextData::from_meta(state.opacity.clone()),
     );
 
+    // Recover the exact source declaration that contributed each final
+    // `new_ir_types` entry. `IrTypeEnv` is name-keyed and therefore keeps the
+    // last type-producing declaration when duplicate `def` names are present;
+    // the diagnostic witness must be attached to that declaration only, not
+    // to every body sharing its name. The ordinal is stable for this check
+    // because both this pass and the body pass below traverse the same
+    // flattened `items` vector.
+    let mut source_ir_types = HashMap::new();
+    let mut ir_type_origin = HashMap::new();
+    for (declaration_index, (_, expr)) in items.iter().enumerate() {
+        let deep::Expr::List(list, _) = expr else {
+            continue;
+        };
+        if get_tag(list) != Some("def") {
+            continue;
+        }
+        let kids = children(list);
+        let (Some(name), Some(body)) = (kids.first().and_then(symbol_name), kids.get(1)) else {
+            continue;
+        };
+        if let Some(ty_expr) = expr_type_expr(body, &source_ir_types) {
+            source_ir_types.insert(name.to_string(), ty_expr);
+            ir_type_origin.insert(name.to_string(), declaration_index);
+        }
+    }
+    debug_assert_eq!(
+        &source_ir_types, new_ir_types,
+        "source-ordered IR type origins must reproduce build_ir_type_env"
+    );
+
     let mut prebound_type_failures = HashMap::new();
     for (name, ty_expr) in new_ir_types {
         match resolve_deep_type(
@@ -1591,7 +1621,11 @@ fn infer_ir_program_with_state(
                 // into the matching def-body pass so a literal/ascription
                 // consumer propagates the same failure instead of resolving
                 // the cloned metadata and reporting it a second time.
-                prebound_type_failures.insert(name.clone(), witness);
+                let declaration_index = ir_type_origin
+                    .get(name)
+                    .copied()
+                    .expect("every IR type entry has an exact source declaration");
+                prebound_type_failures.insert(declaration_index, witness);
             }
         }
     }
@@ -1604,7 +1638,7 @@ fn infer_ir_program_with_state(
         .unwrap_or(false);
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let defsig_type_binders = collect_defsig_type_binders(&items);
-    for (module, expr) in &items {
+    for (declaration_index, (module, expr)) in items.iter().enumerate() {
         let t0 = if detail_profile {
             Some(std::time::Instant::now())
         } else {
@@ -1624,7 +1658,7 @@ fn infer_ir_program_with_state(
             &mut errors,
             &mut typed_nodes,
             &mut total_nodes,
-            Some(&prebound_type_failures),
+            prebound_type_failures.get(&declaration_index),
             &user_def_names,
             &defsig_type_binders,
         );
@@ -9101,7 +9135,7 @@ fn infer_top_level(
     errors: &mut Vec<CheckError>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
-    prebound_type_failures: Option<&HashMap<String, ErrorWitness>>,
+    prebound_type_failure: Option<&ErrorWitness>,
     user_def_names: &HashSet<String>,
     defsig_type_binders: &HashMap<String, HashSet<String>>,
 ) {
@@ -9154,9 +9188,7 @@ fn infer_top_level(
         // bare params with the declared type here makes the bare-arg path
         // behave the same as the annotated path. See
         // `crates/chelis-cli/tests/bareref_return_inference.rs`.
-        let body_ty = if let Some(witness) =
-            prebound_type_failures.and_then(|failures| failures.get(&name))
-        {
+        let body_ty = if let Some(witness) = prebound_type_failure {
             propagate(witness)
         } else if let Some(decl_ty) = &declared_ty {
             infer_def_body_with_sig(
@@ -9414,6 +9446,15 @@ fn infer_top_level(
 
 // ── Core inference ───────────────────────────────────────────────
 
+/// Exact ownership record for a root expression consumer that resolves its
+/// own `type:` metadata. `infer_let` uses this instead of inferring ownership
+/// from a generic `Type::Error`: an unrelated RHS failure must not suppress an
+/// independently malformed let ascription.
+enum OwnedTypeMetadataResolution {
+    Resolved(Type),
+    Failed(ErrorWitness),
+}
+
 #[allow(clippy::too_many_arguments)]
 fn infer_expr(
     expr: &deep::Expr,
@@ -9424,6 +9465,31 @@ fn infer_expr(
     errors: &mut Vec<CheckError>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
+) -> Type {
+    infer_expr_with_type_metadata_ownership(
+        expr,
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn infer_expr_with_type_metadata_ownership(
+    expr: &deep::Expr,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+    type_metadata_resolution: Option<&mut Option<OwnedTypeMetadataResolution>>,
 ) -> Type {
     // Bail before a deeply-nested `app` tree exhausts the native stack and
     // aborts the process (this is the gdb-pinned real-pricer crash site):
@@ -9446,7 +9512,7 @@ fn infer_expr(
             let tag = get_tag(list);
             match tag {
                 Some("var") => infer_var(list, env, vg, subst, adt_reg, errors),
-                Some("lit") => infer_lit(list, vg, adt_reg, errors),
+                Some("lit") => infer_lit(list, vg, adt_reg, errors, type_metadata_resolution),
                 Some("app") => infer_app(
                     list,
                     env,
@@ -10148,6 +10214,7 @@ fn infer_lit(
     vg: &mut VarGen,
     adt_reg: &AdtRegistry,
     errors: &mut Vec<CheckError>,
+    mut type_metadata_resolution: Option<&mut Option<OwnedTypeMetadataResolution>>,
 ) -> Type {
     let meta = get_meta(list);
     let kids = children(list);
@@ -10265,8 +10332,16 @@ fn infer_lit(
                     errors,
                 ) {
                     Ok(ty) => ty,
-                    Err(witness) => return propagate(&witness),
+                    Err(witness) => {
+                        if let Some(owner) = type_metadata_resolution.as_deref_mut() {
+                            *owner = Some(OwnedTypeMetadataResolution::Failed(witness));
+                        }
+                        return propagate(&witness);
+                    }
                 };
+                if let Some(owner) = type_metadata_resolution.as_deref_mut() {
+                    *owner = Some(OwnedTypeMetadataResolution::Resolved(resolved.clone()));
+                }
                 // RFC D-CHECK lit-forge gate: `{type: (t-adt ...)}`
                 // metadata on a literal outside the defining module
                 // forges an opaque value. Reachable from BOTH
@@ -18565,7 +18640,8 @@ fn infer_let(
         while i + 1 < bind_children.len() {
             if let Some(name) = symbol_name(&bind_children[i]) {
                 let rhs_expr = &bind_children[i + 1];
-                let expr_ty = infer_expr(
+                let mut rhs_type_metadata_resolution = None;
+                let expr_ty = infer_expr_with_type_metadata_ownership(
                     rhs_expr,
                     &mut let_env,
                     vg,
@@ -18574,6 +18650,7 @@ fn infer_let(
                     errors,
                     typed_nodes,
                     total_nodes,
+                    Some(&mut rhs_type_metadata_resolution),
                 );
 
                 // chelis#159: block-scoped `let name: T = expr` desugars
@@ -18598,13 +18675,16 @@ fn infer_let(
                         .as_ref()
                         .map(BinderMode::Explicit)
                         .unwrap_or(BinderMode::ClosedInput);
-                    let declared_ty = match &expr_ty {
-                        // `infer_lit` and other metadata-aware RHS consumers
-                        // own failures in their own `type:` entry. Reuse that
-                        // witness here instead of resolving the same
-                        // ascription a second time and spraying a duplicate.
-                        Type::Error(witness) => propagate(witness),
-                        _ => match resolve_deep_type(
+                    let declared_ty = match &rhs_type_metadata_resolution {
+                        // A root metadata-aware RHS consumer records the exact
+                        // result it owns. Reuse that result here so the same
+                        // ascription is neither resolved nor reported twice.
+                        Some(OwnedTypeMetadataResolution::Resolved(ty)) => ty.clone(),
+                        Some(OwnedTypeMetadataResolution::Failed(witness)) => propagate(witness),
+                        // No ownership record means any `expr_ty` error came
+                        // from the RHS itself. Resolve the ascription as its
+                        // own root so two independent failures both surface.
+                        None => match resolve_deep_type(
                             declared_ty_expr,
                             vg,
                             adt_reg,
