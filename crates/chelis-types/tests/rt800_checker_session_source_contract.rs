@@ -11,6 +11,49 @@ const SESSION: &str = include_str!("../src/session.rs");
 const DEEP_VALIDATE: &str = include_str!("../../chelis-deep/src/validate.rs");
 
 #[test]
+fn every_production_sink_constructor_has_a_returned_diagnostic_owner() {
+    use quote::ToTokens;
+    use syn::Item;
+
+    let file = syn::parse_file(SESSION).expect("session.rs must remain valid Rust");
+    let mut owners = Vec::new();
+    for item in file.items {
+        let Item::Fn(function) = item else {
+            continue;
+        };
+        if !function
+            .block
+            .to_token_stream()
+            .to_string()
+            .contains("DiagnosticSink")
+        {
+            continue;
+        }
+        let return_type = function.sig.output.to_token_stream().to_string();
+        assert!(
+            return_type.contains("InferResult") || return_type.contains("Result"),
+            "production sink constructor `{}` must return the diagnostics it owns, got `{return_type}`",
+            function.sig.ident
+        );
+        owners.push(function.sig.ident.to_string());
+    }
+    owners.sort();
+    assert_eq!(
+        owners,
+        ["infer_ir_program", "infer_program", "run_result"],
+        "new production sink construction requires an explicit returned-error owner audit"
+    );
+}
+
+#[test]
+fn arbitrary_vec_diagnostic_output_is_test_only() {
+    assert!(
+        INFER.contains("#[cfg(test)]\nimpl DiagnosticOutput for Vec<CheckError>"),
+        "production validation must only emit through DiagnosticSink"
+    );
+}
+
+#[test]
 fn binder_and_signature_resolution_have_no_ambient_symbols() {
     for (label, source) in [
         ("infer", INFER),

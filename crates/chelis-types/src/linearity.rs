@@ -2260,4 +2260,40 @@ mod tests {
         let bindings = pattern_named_types(&pat);
         assert!(bindings.is_empty());
     }
+
+    #[test]
+    fn malformed_callee_type_reaches_linearity_exactly_once() {
+        let captured = node("x", vec![("type", tensor_4_f32())], vec![]);
+        let inner_body = node(
+            "app",
+            vec![],
+            vec![
+                node("var", vec![], vec![sym("poison")]),
+                node("var", vec![], vec![sym("x")]),
+            ],
+        );
+        let inner_fn = node(
+            "fn",
+            vec![],
+            vec![node("params", vec![], vec![]), inner_body],
+        );
+        let outer_fn = node(
+            "fn",
+            vec![],
+            vec![node("params", vec![], vec![captured]), inner_fn],
+        );
+        let program = CheckedProgram::unchecked_for_linearity_diagnostic_test(
+            vec![node("def", vec![], vec![sym("outer"), outer_fn])],
+            HashMap::from([("poison".to_string(), node("t-fn", vec![], vec![]))]),
+        );
+
+        let errors = check_linearity(&program)
+            .expect_err("malformed callee metadata must make linearity fail");
+        assert_eq!(
+            errors.len(),
+            1,
+            "the resolver diagnostic must join the authoritative linearity result exactly once: {errors:?}"
+        );
+        assert!(errors[0].message.contains("malformed `t-fn`"));
+    }
 }

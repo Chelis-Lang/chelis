@@ -1085,6 +1085,19 @@ pub struct CheckedProgram {
 }
 
 impl CheckedProgram {
+    #[cfg(test)]
+    pub(crate) fn unchecked_for_linearity_diagnostic_test(
+        annotated_exprs: Vec<deep::Expr>,
+        type_env: HashMap<String, deep::Expr>,
+    ) -> Self {
+        Self {
+            annotated_exprs,
+            type_env,
+            linearity: LinearityInfo::default(),
+            signature_inference: SignatureInferenceMetadata::default(),
+        }
+    }
+
     pub fn try_from_parts(
         annotated_exprs: Vec<deep::Expr>,
         type_env: HashMap<String, deep::Expr>,
