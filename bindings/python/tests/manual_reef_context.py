@@ -8,7 +8,9 @@ still produce a callable, correctly-scoped compiled kernel).
 This test builds its own temp reef project depending on the bundled `chelis-std`
 package plus a sibling library module, so it is dev-compiler-clean and needs no
 network. See the module docstring in `crates/chelis-python/tests/manual_reef_context.rs`
-for the environment prerequisites and the Shoals-specific note.
+for the environment prerequisites and the Shoals-specific note (the published
+Shoals 0.23.1 artifact fails HEAD's `with seed(...)` int64 rule — tracked as
+chelis#825).
 
 Run (from the repo root, with the bindings installed into `.venv`):
 

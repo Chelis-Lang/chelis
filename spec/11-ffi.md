@@ -44,10 +44,15 @@ The Phase 3 Python path is split into two cuts:
   (chelis#816): with a reef package root, imports of reef-declared dependencies resolve
   against the package's linked library context instead of failing with `unbound
   variable`. `compile_and_load` auto-discovers the root by walking up from the source
-  file; `eval` (raw text) requires an explicit `project_root=`. With no applicable root
-  the bare self-contained behavior is unchanged. A scalar-signature entry has no
-  callable tensor kernel and is rejected with tensor-wrap guidance; `eval` runs it.
-  Roots sourced from the library graph keep their linker-mangled names.
+  file, but only when the (Surf) source contains an `import` declaration; an import-free
+  or non-Surf source, or `project_root=False`, takes the bare self-contained path. An
+  explicit `project_root=` path forces in-context resolution regardless. `eval` (raw
+  text) requires an explicit `project_root=`. With no applicable root the bare
+  self-contained behavior is unchanged. Default in-context entry selection prefers a
+  tensor def named `main`. A scalar-signature entry has no callable tensor kernel and is
+  rejected with tensor-wrap guidance; `eval` runs it. Roots sourced from the reef
+  library graph keep their linker-mangled names; entries from the package's own source
+  keep their bare names.
 
 ### Phase 5a
 

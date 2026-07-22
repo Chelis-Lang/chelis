@@ -28,15 +28,17 @@
 //! Expected success condition: the child Python process exits 0 after printing
 //! "All reef-context acceptance checks passed."
 //!
-//! NOTE (Shoals): the plan's original acceptance imported `Shoals.Pricing`
-//! (Black-Scholes → 10.4506). On this branch the post-0.16.1 compiler tightened
-//! the `with seed(...)` int64 rule, which the published Shoals 0.23.1 dependency
-//! graph (built for the `=0.16.1` toolchain) trips during library-context
-//! compilation — reproducible with the branch's own CLI
-//! (`chelis eval --file`), independent of these bindings. The acceptance
-//! therefore uses `chelis-std` + a sibling module, which is dev-compiler-clean
-//! and exercises the identical resolution machinery. The scalar eval path DOES
-//! produce 10.450575828552246 through the shipped `0.16.1` CLI.
+//! NOTE (Shoals — chelis#825): the plan's original acceptance imported
+//! `Shoals.Pricing` (Black-Scholes → 10.4506). On this branch the post-0.16.1
+//! compiler tightened the `with seed(...)` int64 rule, which the published
+//! Shoals 0.23.1 dependency graph (built for the `=0.16.1` toolchain) trips
+//! during library-context compilation — reproducible with the branch's own CLI
+//! (`chelis eval --file`), independent of these bindings. Tracked as chelis#825
+//! (the ecosystem-drift canary checks Shoals `main`, not the published 0.23.1
+//! artifact). The acceptance therefore uses `chelis-std` + a sibling module,
+//! which is dev-compiler-clean and exercises the identical resolution
+//! machinery. The scalar eval path DOES produce 10.450575828552246 through the
+//! shipped `0.16.1` CLI.
 
 use std::path::PathBuf;
 use std::process::Command;

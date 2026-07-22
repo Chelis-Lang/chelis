@@ -53,10 +53,21 @@ Reef dependency resolution (chelis#816):
   self-contained, exactly as before.
 - Root selection differs by entry point:
   - `compile_and_load` **auto-discovers** the enclosing reef package by walking up from
-    `source_path` (looking for `reef.toml`); pass `project_root=` to override. A
+    `source_path` (looking for `reef.toml`) — but **only when the source actually
+    contains an `import` declaration**. An import-free (self-contained) source, or any
+    non-Surf source, takes the bare path exactly as before, so a self-contained file
+    that happens to sit inside a reef project neither pays the project's
+    context-compile cost nor is coupled to a broken sibling file. Pass a
+    `project_root=` path to force in-context resolution regardless of imports, or
+    `project_root=False` to force the bare path even for an importing source. A
     `project_root` with no `reef.toml` is a loud error naming `project_root=`.
   - `eval` takes raw text with no file to walk from, so it does **not** auto-discover:
-    pass `project_root=` explicitly, or omit it for the self-contained path.
+    pass `project_root=` explicitly, or omit it (or pass `False`) for the
+    self-contained path.
+  - Reef imports are a Surf-only construct: `source_kind="deep"` never routes
+    in-context (an explicit `project_root=` with a deep source is rejected).
+  - Default in-context entry selection prefers a tensor def named `main` (matching the
+    monolithic path), so a multi-def file behaves the same inside and outside a project.
 - `CHELIS_REEF_HOME` keys the on-disk context cache the same way the CLI uses it; the
   first build of a package's library context is slow (tens of seconds to minutes),
   subsequent calls hit the cache.
@@ -64,9 +75,14 @@ Reef dependency resolution (chelis#816):
   has no callable tensor kernel; `compile_and_load` rejects it with guidance to wrap
   scalars as rank-1 tensors (`tensor[1, f32]`). The same program runs through `eval`,
   which supports scalar and host-only entries.
-- **Mangled names.** Roots that come from the reef library graph carry linker-mangled
-  names (`pkg__<pkg>__<Module>__<name>`), matching the CLI (no demangling). A compiled
-  entry's `input_names` are its own parameter names; consult them (do not assume order).
+- **Mangled names.** Roots that come from the reef **library** graph carry
+  linker-mangled names (`pkg__<pkg>__<Module>__<name>`), matching the CLI (no
+  demangling); entries from the package's **own** source keep their bare names. A
+  compiled entry's `input_names` are its own parameter names; consult them (do not
+  assume order).
+- **Rank-0 scalars.** A tensor-in / scalar-out entry (e.g. a reduce to a `tensor[f32]`)
+  is rejected on every path — including the bare self-contained path — with the same
+  wrap-as-`tensor[1, f32]` guidance, rather than emitting an unbuildable scalar kernel.
 
 Compiler selection:
 

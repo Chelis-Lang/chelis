@@ -1260,12 +1260,17 @@ pub fn compile_for_execution_in_context(
 /// entry's inputs, #817) and keeps the dim/precision checks off unrelated
 /// library helper nodes (which may carry polymorphic symbolic dims).
 ///
-/// - explicit `entry_name` → the root matching it exactly, else one whose
-///   linker-mangled name ends with `__<entry_name>`; no match on a non-empty
-///   root set errors listing the tensor entries;
-/// - no `entry_name`, exactly one tensor root → that root;
-/// - no `entry_name`, several tensor roots → error asking for `entry_name`
-///   (no silent "merge every def", cf. #817);
+/// - explicit `entry_name` → the root matching it exactly, else the UNIQUE
+///   root whose linker-mangled name ends with `__<entry_name>` (two or more
+///   suffix matches error as ambiguous); no match on a non-empty root set
+///   errors listing the tensor entries. Own-package roots are BARE (the
+///   suffix arm only fires for library-originated mangled names);
+/// - no `entry_name`, a tensor root named `main` → that root (the same `main`
+///   preference `resolve_execution_entry` applies, so a file behaves the same
+///   inside and outside a reef project);
+/// - no `entry_name`, no `main`, exactly one tensor root → that root;
+/// - no `entry_name`, no `main`, several tensor roots → error asking for
+///   `entry_name` (no silent "merge every def", cf. #817);
 /// - no tensor roots at all → `Ok(None)`; the caller rejects with the
 ///   scalar/host-only guidance (a scalar or host-only entry).
 fn resolve_in_context_entry<'a>(
@@ -1275,42 +1280,78 @@ fn resolve_in_context_entry<'a>(
     let roots = &compiled.tensor_root_names;
     let index = match entry_name {
         Some(name) => {
-            let matched = roots.iter().position(|root| root == name).or_else(|| {
-                roots
+            // Exact match wins. Otherwise fall back to a linker-mangled root
+            // whose name ends with `__<name>` — but if MORE THAN ONE mangled
+            // root suffix-matches, that is genuinely ambiguous and must error
+            // rather than silently taking the first (review round 2). Own-
+            // package roots come back BARE, so the suffix arm only fires for
+            // library-originated (mangled) names.
+            if let Some(index) = roots.iter().position(|root| root == name) {
+                index
+            } else {
+                let suffix = format!("__{name}");
+                let matches: Vec<usize> = roots
                     .iter()
-                    .position(|root| root.ends_with(&format!("__{name}")))
-            });
-            match matched {
-                Some(index) => index,
-                None if roots.is_empty() => return Ok(None),
-                None => {
-                    return Err(stage_error(
-                        "compile",
-                        format!(
-                            "unknown entry_name `{name}`; this program's tensor entries are: \
-                             {}. Pass one of these as entry_name.",
-                            roots.join(", ")
-                        ),
-                        "compile_error",
-                    ));
+                    .enumerate()
+                    .filter(|(_, root)| root.ends_with(&suffix))
+                    .map(|(index, _)| index)
+                    .collect();
+                match matches.as_slice() {
+                    [index] => *index,
+                    [] if roots.is_empty() => return Ok(None),
+                    [] => {
+                        return Err(stage_error(
+                            "compile",
+                            format!(
+                                "unknown entry_name `{name}`; this program's tensor entries are: \
+                                 {}. Pass one of these as entry_name.",
+                                roots.join(", ")
+                            ),
+                            "compile_error",
+                        ));
+                    }
+                    _ => {
+                        let ambiguous: Vec<&str> =
+                            matches.iter().map(|&i| roots[i].as_str()).collect();
+                        return Err(stage_error(
+                            "compile",
+                            format!(
+                                "ambiguous entry_name `{name}`: it suffix-matches multiple \
+                                 linker-mangled tensor entries ({}). Pass the exact entry name \
+                                 to select one.",
+                                ambiguous.join(", ")
+                            ),
+                            "compile_error",
+                        ));
+                    }
                 }
             }
         }
-        None => match roots.len() {
-            0 => return Ok(None),
-            1 => 0,
-            _ => {
-                return Err(stage_error(
-                    "compile",
-                    format!(
-                        "ambiguous entry: this program has multiple tensor entries ({}). \
-                         Pass entry_name to select one.",
-                        roots.join(", ")
-                    ),
-                    "compile_error",
-                ));
+        None => {
+            // Default selection: prefer a tensor entry literally named `main`,
+            // mirroring the monolithic `resolve_execution_entry`. Without this
+            // a multi-def in-context file with a `main` erroneously reported
+            // "ambiguous" while the same file compiled fine outside a project.
+            if let Some(index) = roots.iter().position(|root| root == "main") {
+                index
+            } else {
+                match roots.len() {
+                    0 => return Ok(None),
+                    1 => 0,
+                    _ => {
+                        return Err(stage_error(
+                            "compile",
+                            format!(
+                                "ambiguous entry: this program has multiple tensor entries ({}) \
+                                 and none named `main`. Pass entry_name to select one.",
+                                roots.join(", ")
+                            ),
+                            "compile_error",
+                        ));
+                    }
+                }
             }
-        },
+        }
     };
     let root = *compiled.dag.roots().get(index).ok_or_else(|| {
         stage_error(
@@ -1497,14 +1538,23 @@ fn execution_artifact_from_compiled(
             // monolithic path — which routes these to the host lane below — is
             // byte-for-byte unchanged.)
             if compiled.library_runtime.is_some() && compiled.dag.roots().is_empty() {
+                // Name the explicitly-requested entry when the user passed one:
+                // "the selected entry" is opaque if they asked for `entry_name=foo`
+                // and foo has no tensor form (review round 2).
+                let selected = match entry_name {
+                    Some(name) => format!("the selected entry `{name}`"),
+                    None => "the selected entry".to_string(),
+                };
                 return Err(stage_error(
                     "compile",
-                    "the selected entry has no callable tensor-kernel form: it is scalar-\
-                     signature (e.g. `def main(s: f32, ...) -> f32`), host-only (top-level \
-                     bindings/globals, string/record/effect ops), or otherwise does not \
-                     lower to a tensor entry. Give it a tensor-in/tensor-out signature by \
-                     wrapping scalars as rank-1 tensors (`tensor[1, f32]`), or use `eval` to \
-                     run it (`eval` supports scalar and host-only programs).",
+                    format!(
+                        "{selected} has no callable tensor-kernel form: it is scalar-\
+                         signature (e.g. `def main(s: f32, ...) -> f32`), host-only (top-level \
+                         bindings/globals, string/record/effect ops), or otherwise does not \
+                         lower to a tensor entry. Give it a tensor-in/tensor-out signature by \
+                         wrapping scalars as rank-1 tensors (`tensor[1, f32]`), or use `eval` to \
+                         run it (`eval` supports scalar and host-only programs)."
+                    ),
                     "compile_error",
                 ));
             }
@@ -2428,6 +2478,26 @@ fn compile_source_scoped(
         forward_node_index: lowered_parts.forward_node_index,
         library_runtime: None,
     })
+}
+
+/// Does this Surf source contain at least one `import` declaration?
+///
+/// Used by reef-context auto-discovery (issue #816, review round 2): an
+/// import-free source can only reference its own decls, so it never needs a
+/// reef library context — it takes the bare self-contained compile path
+/// exactly as pre-#816, avoiding both the whole-project context-compile cost
+/// and coupling to unrelated sibling-file health. A source that DOES import is
+/// the only one auto-discovery routes in-context. `import` decls inside
+/// `module` wrappers are counted (they are flattened before resolution). A
+/// source that fails to parse returns `false`: the bare path then surfaces the
+/// real parse diagnostic, unchanged from pre-#816 behavior.
+pub fn surf_source_has_import(source: &str) -> bool {
+    match chelis_surf::parser::parse_str(source) {
+        Ok(decls) => flatten_module_decls(&decls)
+            .iter()
+            .any(|decl| matches!(decl, Decl::Import { .. })),
+        Err(_) => false,
+    }
 }
 
 fn parse_surf(source: &str) -> Result<Vec<Decl>> {
@@ -4847,6 +4917,143 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
                 Some(chelis_ir::dag::RiscOp::Drop)
             )
         }));
+    }
+
+    // --- In-context compiled-execution coverage (issue #816, review round 2) ---
+    //
+    // These gate the `compile_for_execution_in_context` path that had ZERO
+    // gated coverage before this round (the manual oracle needs the 0.16.1
+    // toolchain + chelis-std registry). They use `copy_drop_context_fixture` —
+    // a two-package path-dep reef project compiled fully in-process, no network,
+    // no installed toolchain — so they run in the default gate. The library
+    // exports `consume(x: tensor[2, f32]) -> tensor[2, f32] = realize(x)`
+    // (identity), which the new-code entry calls across the module boundary:
+    // the #816 scenario where `compiled.checked` holds new code only and the
+    // called def lives in the linked library context.
+
+    // Wrong-subgraph-slice + `main`-preference guard: a two-def in-context
+    // source (`main` with ONE input calling the library fn, `second` with TWO
+    // inputs) and NO `entry_name` must select `main` and scope the callable
+    // metadata to it — exactly ONE input, not the union of every def's params
+    // (the #817 regression) and not `second`.
+    #[test]
+    fn compile_for_execution_in_context_selects_main_and_scopes_metadata() {
+        let (_dir, root) = copy_drop_context_fixture();
+        let context = crate::compile_reef_context(Path::new("/tmp/inctx-main"), &root)
+            .expect("compile context");
+        let source = "module App.Entry\nimport Mylib.Copy (consume)\n\n\
+             def main(x: tensor[2, f32]) -> tensor[2, f32] = consume(x)\n\
+             def second(a: tensor[2, f32], b: tensor[2, f32]) -> tensor[2, f32] = add(a, b)\n";
+        let artifact = compile_for_execution_in_context(&context, source, CompileTarget::C, None)
+            .expect("in-context compile selects main");
+        assert_eq!(
+            artifact.inputs.len(),
+            1,
+            "entry must be scoped to `main` (1 input), not merged or `second`: {:?}",
+            artifact.inputs
+        );
+        assert_eq!(artifact.outputs.len(), 1, "{:?}", artifact.outputs);
+        let input_dims: Vec<Option<usize>> =
+            artifact.inputs[0].dims.iter().map(|d| d.size).collect();
+        assert_eq!(input_dims, vec![Some(2)], "main's input is tensor[2, f32]");
+        let output_dims: Vec<Option<usize>> =
+            artifact.outputs[0].dims.iter().map(|d| d.size).collect();
+        assert_eq!(output_dims, vec![Some(2)]);
+    }
+
+    // Compiled-metadata-vs-eval agreement on the SAME in-context program: the
+    // compiled artifact's output arity/shape must match what `eval_in_context`
+    // actually computes, and the numeric value proves the correct library def
+    // is invoked (identity `consume`, so `main([3, 4]) == [3, 4]`). The runtime
+    // numeric-through-cc leg is the manual oracle's job (it needs
+    // CHELIS_RUNTIME_DIR + a C toolchain); this gate proves eval and the
+    // compiled interface agree without either.
+    #[test]
+    fn in_context_compiled_metadata_agrees_with_eval() {
+        let (_dir, root) = copy_drop_context_fixture();
+        let context = crate::compile_reef_context(Path::new("/tmp/inctx-eval"), &root)
+            .expect("compile context");
+        let source = "module App.Eval\nimport Mylib.Copy (consume)\n\n\
+             def main(x: tensor[2, f32]) -> tensor[2, f32] = consume(x)\n";
+
+        let mut bindings = BTreeMap::new();
+        bindings.insert(
+            "x".to_string(),
+            crate::schema::TensorValue {
+                shape: vec![2],
+                data: vec![3.0, 4.0],
+            },
+        );
+        let eval_result = eval_in_context_with_bindings(&context, source, bindings)
+            .expect("eval in context succeeds");
+        let main_root = eval_result
+            .roots
+            .iter()
+            .find(|r| r.name.as_deref() == Some("main"))
+            .expect("main root present");
+        let data = match &main_root.value {
+            ExecutionValue::Tensor { value } => value.data.clone(),
+            other => panic!("expected a tensor root, got {other:?}"),
+        };
+        assert_eq!(data, vec![3.0, 4.0], "identity consume(x) == x");
+
+        let artifact = compile_for_execution_in_context(&context, source, CompileTarget::C, None)
+            .expect("in-context compile");
+        assert_eq!(
+            artifact.outputs.len(),
+            1,
+            "compiled output arity agrees with the single eval root"
+        );
+        let output_dims: Vec<Option<usize>> =
+            artifact.outputs[0].dims.iter().map(|d| d.size).collect();
+        assert_eq!(
+            output_dims,
+            vec![Some(2)],
+            "compiled output shape agrees with the [2] eval value"
+        );
+    }
+
+    // In-context scalar-entry rejection: a scalar-signature entry has no
+    // callable tensor-kernel form, so `compile_for_execution_in_context` must
+    // reject it with actionable wrap guidance (and name the requested
+    // `entry_name` when one was passed) rather than emit unbuildable C.
+    #[test]
+    fn compile_for_execution_in_context_rejects_scalar_entry() {
+        let (_dir, root) = copy_drop_context_fixture();
+        let context = crate::compile_reef_context(Path::new("/tmp/inctx-scalar"), &root)
+            .expect("compile context");
+        let source = "def main(a: f32, b: f32) -> f32 = add(a, b)\n";
+        let err =
+            compile_for_execution_in_context(&context, source, CompileTarget::C, Some("main"))
+                .expect_err("scalar in-context entry must be rejected");
+        let message = &err.errors[0].message;
+        assert!(
+            message.contains("no callable tensor-kernel form"),
+            "expected scalar-entry wrap guidance, got: {message}"
+        );
+        assert!(
+            message.contains("`main`"),
+            "rejection must name the requested entry_name, got: {message}"
+        );
+    }
+
+    // `main`-preference is a no-op when no def is named `main`: a single tensor
+    // entry is still selected, and two non-`main` entries are ambiguous.
+    #[test]
+    fn resolve_in_context_entry_ambiguous_without_main() {
+        let (_dir, root) = copy_drop_context_fixture();
+        let context = crate::compile_reef_context(Path::new("/tmp/inctx-ambig"), &root)
+            .expect("compile context");
+        let source = "module App.Ambig\nimport Mylib.Copy (consume)\n\n\
+             def first(x: tensor[2, f32]) -> tensor[2, f32] = consume(x)\n\
+             def other(y: tensor[2, f32]) -> tensor[2, f32] = realize(y)\n";
+        let err = compile_for_execution_in_context(&context, source, CompileTarget::C, None)
+            .expect_err("two non-main tensor entries are ambiguous");
+        let message = &err.errors[0].message;
+        assert!(
+            message.contains("ambiguous entry") && message.contains("none named `main`"),
+            "expected ambiguity guidance, got: {message}"
+        );
     }
 
     #[test]
