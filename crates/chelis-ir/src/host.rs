@@ -6924,7 +6924,7 @@ fn top_level_fn_helper_summary_rejects(
     if pushed {
         pop_inlining(name);
     }
-    let rejects = lowered?.map_or(false, |mut function| {
+    let rejects = lowered?.is_some_and(|mut function| {
         collect_function_summary_rejections(&mut function);
         !function.summary_rejections.is_empty()
     });
@@ -7056,14 +7056,15 @@ fn call_graph_reaches_any(
     false
 }
 
+type HoistedHostLaneBindings = (Expr, HashMap<String, HostTypeTerm>, Vec<HostBinding>);
+
 fn hoist_host_lane_tensor_bindings(
     expr: &Expr,
     program: &CheckedProgram,
     scope: &HashMap<String, HostTypeTerm>,
     fn_sig: Option<&(Vec<HostTypeTerm>, HostTypeTerm)>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
-) -> Result<(Expr, HashMap<String, HostTypeTerm>, Vec<HostBinding>), crate::lower::LowerDiagnostic>
-{
+) -> Result<HoistedHostLaneBindings, crate::lower::LowerDiagnostic> {
     let Expr::List(list, span) = expr else {
         return Ok((expr.clone(), scope.clone(), Vec::new()));
     };
