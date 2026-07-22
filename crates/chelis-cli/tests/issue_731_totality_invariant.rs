@@ -5,45 +5,35 @@
 //! error vector, the typed result SHALL contain no error-typed expression.
 //! chelis#709 and chelis#710 violated this before Phase 1; this harness makes
 //! the violation executable. Phase 2 (chelis#731) PROMOTED [04-TOT-2] to an
-//! on-by-default post-check validation inside
-//! `check_ir_with_signature_context_inner` / `check_typed_program`
-//! (`totality_invariant_traces` in `chelis-types::infer`), so a silent
-//! `Type::Error` under an empty error vector now becomes a pushed internal
-//! error, and `Type::Error` itself is unconstructible without a diagnostic
-//! (the §C3 `ErrorWitness` token). This harness remains as the independent
-//! test-side mirror of that promoted invariant: it drives the same funnels
-//! from outside and asserts the same property, so a regression in the
-//! in-checker pass is caught here too.
+//! on-by-default `finalize_checked_program` validation for fresh checker
+//! results, so a missing authoritative owner stamp under an otherwise empty
+//! error vector becomes a pushed internal error. `Type::Error` itself is
+//! unconstructible without an authoritative diagnostic (the §C3
+//! `ErrorWitness` token). This harness remains as the independent test-side
+//! mirror: it drives both public checker funnels and asserts the same property.
 //!
 //! ## How a silent `Type::Error` is detected from the outside
 //!
 //! The checker's public typed result is `CheckedProgram::annotated_exprs`.
-//! The annotation pass stamps a `type:` metadata entry on every node whose
-//! tag passes `should_attach_type_metadata` (infer.rs), EXCEPT when the
-//! node's scoped re-inference returns `Type::Error`
-//! (`annotated_meta_map_with_override` skips the stamp exactly then), and
-//! `type_to_deep_expr` encodes `Type::Error` as `(t-var {} _)`. So in an
-//! `Ok(CheckedProgram)` - which by construction means the error vector was
-//! empty - a stamp-eligible node with a missing `type:` entry or a
-//! `(t-var {} _)` entry is precisely a silent `Type::Error` verdict.
-//! Signature metadata carries `Type` values directly and is scanned as-is.
+//! The inference pass records canonical owner types in the root's
+//! `InferenceProduct`, applies the final substitution at `finish_root`, and
+//! annotation consumes the retained types for stamp-required owners. It never
+//! semantically re-infers a node. `type_to_deep_expr` encodes `Type::Error` as
+//! `(t-var {} _)`, so an `Ok(CheckedProgram)` with either a missing required
+//! stamp or that encoding violates the public result invariant. Signature
+//! metadata carries `Type` values directly and is scanned as an independent
+//! backstop.
 //!
-//! DETECTION SURFACE (limitation, on the record - PR #757 review): this
-//! harness sees a silent `Type::Error` only where it surfaces as (a) a
-//! stamp on a stamp-eligible EXPRESSION node or (b) a `Type` value in
-//! the signature-inference table. A silent Error confined to an ADT
-//! field-type DECLARATION (the chelis#756 `deftype` family, produced in
-//! `deep_type_to_type_with_params` and stored in the AdtRegistry)
-//! surfaces in neither and is invisible here. The red set below is
-//! exactly the four expression-level holes; GLOBAL restoration of
-//! [04-TOT-2] over all census sites is Phase 2's `ErrorWitness`
-//! migration, not this harness.
+//! This harness observes the public checked tree plus signature metadata. It
+//! does not replace the structural Phase 2 guarantees: fresh errors can be
+//! created only through the authoritative diagnostic sink, Deep type
+//! resolution is fallible and witnessed, and the in-checker finalizer validates
+//! the complete annotated result before success.
 //!
-//! Two funnels are driven, both returning `Result<CheckedProgram, _>`
-//! with the same empty-errors gate: `chelis_types::check_ir_program`
-//! (the `check_ir_with_signature_context_inner` route named by §C4.1,
-//! used by `chelis build`) and `chelis_types::check_typed_program` (the
-//! `chelis check` CLI's typed-program route).
+//! Two funnels are driven, both returning `Result<CheckedProgram, _>` through
+//! the same diagnostic-session and finalization boundary:
+//! `chelis_types::check_ir_program` (used by `chelis build`) and
+//! `chelis_types::check_typed_program` (used by `chelis check`).
 //!
 //! ## Red set and boundary law
 //!

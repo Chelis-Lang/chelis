@@ -9,10 +9,11 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use chelis_deep::Expr;
+use chelis_deep::parser::parse_str as parse_deep_lenient;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
-use chelis_types::check_ir_fitness;
 use chelis_types::errors::CheckErrorKind;
+use chelis_types::{BUILTIN_NAMES, check_ir_fitness};
 
 fn surf_to_deep(source: &str) -> Vec<Expr> {
     let decls = parse_surf(source).expect("Surf fixture must parse");
@@ -64,5 +65,25 @@ fn conv2d_arity_zero_through_six_is_total_and_exact() {
             "conv2d arity {arity} must report ArityMismatch, got {:?}",
             report.errors[0]
         );
+    }
+}
+
+#[test]
+fn every_builtin_rejects_zero_and_oversized_arity_without_panicking() {
+    for name in BUILTIN_NAMES {
+        for arity in [0, 12] {
+            let args = std::iter::repeat_n("(lit {type: (t-prim {} f32)} 1.0)", arity)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let source = format!("(def {{}} bad (app {{}} (var {{}} {name}) {args}))");
+            let deep = parse_deep_lenient(&source).expect("generated Deep fixture parses");
+            let outcome = catch_unwind(AssertUnwindSafe(|| check_ir_fitness(&deep)));
+            let report = outcome
+                .unwrap_or_else(|_| panic!("builtin `{name}` with arity {arity} must not panic"));
+            assert!(
+                report.score < 1.0 && !report.errors.is_empty(),
+                "builtin `{name}` with arity {arity} must reject loudly: {report:?}"
+            );
+        }
     }
 }

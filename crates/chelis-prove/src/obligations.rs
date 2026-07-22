@@ -293,7 +293,7 @@ fn type_from_deep_depth(ty: &Expr, aliases: &BTreeMap<String, Expr>, depth: usiz
             Some(Type::Ref(Box::new(inner)))
         }
         // `t-prim` / `t-tensor` / `t-var` / `t-unit` (and any other leaf):
-        // none can contain a nominal opaque type, so the inert Error
+        // none can contain a nominal opaque type, so the inert Unit
         // placeholder is safe (it never name-matches an opaque type).
         _ => Some(Type::Unit),
     }

@@ -4,7 +4,7 @@ use chelis_types::{CheckedProgram, check_ir_program, check_linearity};
 
 fn checked_program() -> CheckedProgram {
     let exprs = chelis_deep::parser::parse_str(
-        r#"(def {} apply_relu
+        r#"(def {span: "rt800:root"} apply_relu
               (fn {} (params {} (x {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}))
                 (app {} (var {} relu) (var {} x))))"#,
     )
@@ -149,6 +149,40 @@ fn remove_type_stamp(exprs: &mut [Expr]) {
     assert!(remove_first_metadata_key(&mut exprs[0], "type"));
 }
 
+fn root_metadata_mut(exprs: &mut [Expr]) -> &mut Vec<(String, Expr)> {
+    let Expr::List(root, _) = &mut exprs[0] else {
+        panic!("expected list root");
+    };
+    let Expr::Map(meta, _) = &mut root.elements[1] else {
+        panic!("expected canonical root metadata");
+    };
+    &mut meta.entries
+}
+
+fn reorder_non_effect_metadata(exprs: &mut [Expr]) {
+    let entries = root_metadata_mut(exprs);
+    assert!(
+        entries.len() >= 2,
+        "fixture must retain span and type metadata"
+    );
+    entries.swap(0, 1);
+}
+
+fn duplicate_non_effect_metadata(exprs: &mut [Expr]) {
+    let entries = root_metadata_mut(exprs);
+    let duplicate = entries
+        .iter()
+        .find(|(key, _)| key != "effects")
+        .expect("fixture has non-effects metadata")
+        .clone();
+    entries.push(duplicate);
+}
+
+fn duplicate_effects_metadata(exprs: &mut [Expr]) {
+    add_effects_metadata(exprs);
+    add_effects_metadata(exprs);
+}
+
 #[test]
 fn effect_only_reannotation_preserves_every_checked_context() {
     let checked = checked_program();
@@ -198,6 +232,43 @@ fn non_effect_reannotation_mutations_are_rejected_exactly_once() {
         assert!(
             result.errors[0].message.contains("effects-only"),
             "{label} mutation must name the narrow ownership boundary: {:?}",
+            result.errors
+        );
+    }
+}
+
+#[test]
+fn effects_only_boundary_rejects_order_duplicates_and_multiple_effect_rows() {
+    type MutationCase = (&'static str, fn(&mut [Expr]));
+
+    let checked = checked_program();
+    let cases: [MutationCase; 3] = [
+        (
+            "reordered non-effects metadata",
+            reorder_non_effect_metadata,
+        ),
+        (
+            "duplicated non-effects metadata",
+            duplicate_non_effect_metadata,
+        ),
+        ("duplicate effects rows", duplicate_effects_metadata),
+    ];
+
+    for (label, mutate) in cases {
+        let mut forged = checked.annotated_exprs().to_vec();
+        mutate(&mut forged);
+        let result = checked
+            .try_with_effect_annotations(forged)
+            .expect_err("the narrow effects-only boundary must reject the mutation");
+        assert_eq!(
+            result.errors.len(),
+            1,
+            "{label} must report exactly once: {:?}",
+            result.errors
+        );
+        assert!(
+            result.errors[0].message.contains("effects-only"),
+            "{label} must name the narrow ownership boundary: {:?}",
             result.errors
         );
     }
