@@ -62,6 +62,28 @@ fn assert_unrepresentable_function_value(result: Result<impl std::fmt::Debug, Co
     );
 }
 
+fn assert_named_function_value_has_no_c_abi(result: Result<impl std::fmt::Debug, CompilerError>) {
+    let error = result.expect_err("a first-class named function must not acquire a C value ABI");
+    assert_eq!(error.stage, "compile", "{error:?}");
+    assert_eq!(error.errors.len(), 1, "{error:?}");
+    let diagnostic = &error.errors[0];
+    assert_eq!(diagnostic.kind, "unsupported_feature", "{diagnostic:?}");
+    assert!(
+        diagnostic.message.contains("unsupported:")
+            && diagnostic.message.contains("function value")
+            && diagnostic.message.contains("C host ABI")
+            && diagnostic.message.contains("(codegen:c)")
+            && diagnostic.message.contains("[05-UNS-1]")
+            && diagnostic.message.contains("chelis#730"),
+        "the target boundary must reject the value without an alternate representation: \
+         {diagnostic:?}"
+    );
+    assert!(
+        !diagnostic.message.contains("grad") && !diagnostic.message.contains("vmap"),
+        "callable rejection must not be misclassified as an AD transform failure: {diagnostic:?}"
+    );
+}
+
 fn generic_record_source(dtype: &str, literal: &str) -> String {
     format!(
         "type ReviewBox[a] =\n\
@@ -178,6 +200,68 @@ fn function_value_stored_in_adt_rejects_before_codegen() {
          saved = FnBox { callback: fn (x: int8) -> add(x, cast(1, int8)) }\n\
          out = print(\"ok\")\n",
     )));
+}
+
+#[test]
+fn returned_named_function_rejects_across_both_public_compiler_apis() {
+    let source = "module M.ReturnedNamed\n\
+                  def increment(x: int8) -> int8 = add(x, cast(1, int8))\n\
+                  def choose() -> int8 -> int8 = increment\n\
+                  out = print(\"ok\")\n";
+    assert_named_function_value_has_no_c_abi(compile(c_request(source)));
+    assert_named_function_value_has_no_c_abi(compile_for_execution(c_request(source)));
+}
+
+#[test]
+fn used_returned_named_function_rejects_before_an_unresolved_c_call_is_emitted() {
+    let source = "module M.ReturnedNamedUsed\n\
+                  def increment(x: int8) -> int8 = add(x, cast(1, int8))\n\
+                  def choose() -> int8 -> int8 = increment\n\
+                  chosen = choose()\n\
+                  out = print(chosen(cast(6, int8)))\n";
+    assert_named_function_value_has_no_c_abi(compile(c_request(source)));
+    assert_named_function_value_has_no_c_abi(compile_for_execution(c_request(source)));
+}
+
+#[test]
+fn exact_named_callbacks_keep_typed_int8_and_int16_function_pointer_abis() {
+    let source = "module M.ExactCallbacks\n\
+                  def apply8(callback: int8 -> int8, value: int8) -> int8 = callback(value)\n\
+                  def apply16(callback: int16 -> int16, value: int16) -> int16 = callback(value)\n\
+                  def increment8(value: int8) -> int8 = add(value, cast(1, int8))\n\
+                  def increment16(value: int16) -> int16 = add(value, cast(2, int16))\n\
+                  out8 = print(apply8(increment8, cast(6, int8)))\n\
+                  out16 = print(apply16(increment16, cast(300, int16)))\n";
+    let output = compile(c_request(source)).expect("statically known callbacks have a typed C ABI");
+    let generated_c = output
+        .files
+        .iter()
+        .find(|file| file.path.ends_with(".c"))
+        .expect("C translation unit");
+    for declaration in ["int8_t (*callback)(int8_t)", "int16_t (*callback)(int16_t)"] {
+        assert!(
+            generated_c.contents.contains(declaration),
+            "missing exact callback declaration {declaration:?}:\n{}",
+            generated_c.contents
+        );
+    }
+    assert!(
+        !generated_c.contents.contains("void* apply")
+            && !generated_c.contents.contains("void *apply"),
+        "callbacks and returned function values must never be type-erased:\n{}",
+        generated_c.contents
+    );
+}
+
+#[test]
+fn direct_inline_callback_specialization_remains_supported() {
+    let source = "module M.InlineCallback\n\
+                  def apply(f: int8 -> int8, x: int8) -> int8 = f(x)\n\
+                  out = print(apply(\
+                    fn (x: int8) -> add(x, cast(1, int8)),\
+                    cast(6, int8)\
+                  ))\n";
+    compile(c_request(source)).expect("a direct inline callback is specialized before codegen");
 }
 
 fn generic_access_source(dtype: &str, literal: &str) -> String {
