@@ -13,17 +13,21 @@ fn prove_capabilities_emits_valid_json() {
         .unwrap();
     assert!(output.status.success(), "exit 0");
     let caps: Value = serde_json::from_slice(&output.stdout).expect("valid JSON");
-    assert_eq!(caps["schema_version"], 1);
+    assert_eq!(caps["schema_version"], 2);
     assert_eq!(caps["prove_json_schema_version"], 1);
     let tiers = caps["supported_tiers"].as_array().unwrap();
     assert!(tiers.contains(&Value::String("type_system".into())));
     assert!(tiers.contains(&Value::String("smt".into())));
     assert!(tiers.contains(&Value::String("fuzz".into())));
+    assert!(tiers.contains(&Value::String("certified_envelope".into())));
     // Boolean fields exist
     assert!(caps["smt_available"].is_boolean());
     assert!(caps["beacon_available"].is_boolean());
+    assert!(caps["beacon_contract_prover_available"].is_boolean());
     assert!(caps["dispatcher_available"].is_boolean());
     assert!(caps["obligation_engine_available"].is_boolean());
+    // reachable_bs_tier is a string
+    assert!(caps["reachable_bs_tier"].is_string());
     // supported_flags includes --package
     let flags = caps["supported_flags"].as_array().unwrap();
     assert!(flags.contains(&Value::String("--package".into())));
