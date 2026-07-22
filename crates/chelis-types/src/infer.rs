@@ -10,7 +10,9 @@ use chelis_deep::ast as deep;
 use crate::adt::{AdtRegistry, CallShape};
 use crate::builtins;
 use crate::context::{TypeEnv, TypeEnvInner};
-use crate::deep_type::{BinderMode, DeepTypeResolver, KnownTypeHeaders, TypeUseSite};
+use crate::deep_type::{
+    BinderMode, DeepTypeResolver, ResolvedCastTarget, TypeResolutionEnv, TypeUseSite,
+};
 use crate::env::Env;
 use crate::errors::*;
 use crate::linearity::LinearityInfo;
@@ -532,7 +534,7 @@ impl CheckedProgram {
     fn from_parts_with_headers(
         annotated_exprs: Vec<deep::Expr>,
         type_env: HashMap<String, deep::Expr>,
-        type_headers: &KnownTypeHeaders,
+        type_headers: &TypeResolutionEnv,
     ) -> Self {
         let signature_inference = infer_signature_metadata_with_context_and_headers(
             &annotated_exprs,
@@ -566,7 +568,7 @@ impl CheckedProgram {
         annotated_exprs: Vec<deep::Expr>,
         type_env: HashMap<String, deep::Expr>,
         signature_context: &SignatureInferenceMetadata,
-        type_headers: &KnownTypeHeaders,
+        type_headers: &TypeResolutionEnv,
     ) -> Self {
         let signature_inference = infer_signature_metadata_with_context_and_headers(
             &annotated_exprs,
@@ -764,6 +766,7 @@ fn infer_program_inner(exprs: &[deep::Expr]) -> InferResult {
             &mut errors,
             &mut typed_nodes,
             &mut total_nodes,
+            None,
             &user_def_names,
             &defsig_type_binders,
         );
@@ -1050,7 +1053,7 @@ pub fn build_compiled_library_context(
     }
     let library_ir_annotated = build_ir_type_env(&library_annotated);
 
-    let signature_type_headers = KnownTypeHeaders::from_registry(&state.adt_reg);
+    let signature_type_headers = TypeResolutionEnv::from_registry(&state.adt_reg);
     let type_env = TypeEnv::from_inner(TypeEnvInner {
         env: state.env,
         var_gen: state.var_gen,
@@ -1200,7 +1203,7 @@ pub fn build_compiled_library_context_with_base(
             .or_insert_with(|| ty.clone());
     }
 
-    let signature_type_headers = KnownTypeHeaders::from_registry(&state.adt_reg);
+    let signature_type_headers = TypeResolutionEnv::from_registry(&state.adt_reg);
     let type_env = TypeEnv::from_inner(TypeEnvInner {
         env: state.env,
         var_gen: state.var_gen,
@@ -1363,7 +1366,7 @@ fn check_ir_with_signature_context_inner(
             .or_insert_with(|| ty.clone());
     }
     log_sub("annotated_type_env_build", &mut sub_t);
-    let signature_type_headers = KnownTypeHeaders::from_registry(&state.adt_reg);
+    let signature_type_headers = TypeResolutionEnv::from_registry(&state.adt_reg);
     let checked = CheckedProgram::from_parts_with_signature_context_and_headers(
         annotated_exprs,
         annotated_type_env,
@@ -1569,19 +1572,28 @@ fn infer_ir_program_with_state(
         crate::opacity::OpacityContextData::from_meta(state.opacity.clone()),
     );
 
+    let mut prebound_type_failures = HashMap::new();
     for (name, ty_expr) in new_ir_types {
-        let Ok(ty) = resolve_deep_type(
+        match resolve_deep_type(
             ty_expr,
             &mut state.var_gen,
             &state.adt_reg,
             TypeUseSite::CompilerMetadata,
             BinderMode::TrustedCompilerMetadata,
             &mut errors,
-        ) else {
-            continue;
-        };
-        let scheme = state.env.generalize(&ty, &state.subst);
-        state.env.bind(name.clone(), scheme);
+        ) {
+            Ok(ty) => {
+                let scheme = state.env.generalize(&ty, &state.subst);
+                state.env.bind(name.clone(), scheme);
+            }
+            Err(witness) => {
+                // The prebinding pass owns this diagnostic. Carry its witness
+                // into the matching def-body pass so a literal/ascription
+                // consumer propagates the same failure instead of resolving
+                // the cloned metadata and reporting it a second time.
+                prebound_type_failures.insert(name.clone(), witness);
+            }
+        }
     }
 
     // Per-decl profile: when CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL=1, emit
@@ -1612,6 +1624,7 @@ fn infer_ir_program_with_state(
             &mut errors,
             &mut typed_nodes,
             &mut total_nodes,
+            Some(&prebound_type_failures),
             &user_def_names,
             &defsig_type_binders,
         );
@@ -2222,7 +2235,7 @@ fn infer_signature_metadata_with_context_and_headers(
     exprs: &[deep::Expr],
     type_env: &HashMap<String, deep::Expr>,
     signature_context: &SignatureInferenceMetadata,
-    type_headers: &KnownTypeHeaders,
+    type_headers: &TypeResolutionEnv,
 ) -> SignatureInferenceMetadata {
     let defsig_names = collect_defsig_names(exprs);
     let recursive_members = recursive_call_cycle_members(exprs);
@@ -2328,9 +2341,9 @@ fn infer_signature_metadata_with_context_and_headers(
     SignatureInferenceMetadata { functions }
 }
 
-fn signature_metadata_type_headers(exprs: &[deep::Expr]) -> KnownTypeHeaders {
+fn signature_metadata_type_headers(exprs: &[deep::Expr]) -> TypeResolutionEnv {
     let empty = TypeEnv::empty();
-    precollect_type_headers(
+    precollect_type_resolution_env(
         &top_level_decl_items_with_modules(exprs),
         &empty.inner().adt_reg,
     )
@@ -2619,7 +2632,7 @@ pub(crate) fn param_has_consuming_use(
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
 ) -> bool {
-    let headers = KnownTypeHeaders::from_registry(&AdtRegistry::new());
+    let headers = TypeResolutionEnv::from_registry(&AdtRegistry::new());
     param_has_consuming_use_with_headers(expr, param, available_signatures, type_env, &headers)
 }
 
@@ -2628,7 +2641,7 @@ fn param_has_consuming_use_with_headers(
     param: &str,
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
-    type_headers: &KnownTypeHeaders,
+    type_headers: &TypeResolutionEnv,
 ) -> bool {
     let mut bound = Vec::new();
     param_has_consuming_use_inner(
@@ -2647,7 +2660,7 @@ fn param_has_consuming_use_inner(
     bound: &mut Vec<HashSet<String>>,
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
-    type_headers: &KnownTypeHeaders,
+    type_headers: &TypeResolutionEnv,
 ) -> bool {
     stack_guard!("param_has_consuming_use_inner", expr, false);
     match expr {
@@ -2808,7 +2821,7 @@ fn param_nested_consuming_use(
     bound: &mut Vec<HashSet<String>>,
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
-    type_headers: &KnownTypeHeaders,
+    type_headers: &TypeResolutionEnv,
 ) -> bool {
     if is_direct_unshadowed_var(expr, param, bound) {
         return false;
@@ -2829,7 +2842,7 @@ fn app_consumes_param(
     bound: &mut Vec<HashSet<String>>,
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
-    type_headers: &KnownTypeHeaders,
+    type_headers: &TypeResolutionEnv,
 ) -> bool {
     let kids = children(list);
     let callee = kids.first().and_then(var_name_expr);
@@ -2878,7 +2891,7 @@ fn pipe_consumes_param(
     bound: &mut Vec<HashSet<String>>,
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
-    type_headers: &KnownTypeHeaders,
+    type_headers: &TypeResolutionEnv,
 ) -> bool {
     let kids = children(list);
     if kids.is_empty() {
@@ -2926,7 +2939,7 @@ fn callee_arg_is_borrowed(
     index: usize,
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
-    type_headers: &KnownTypeHeaders,
+    type_headers: &TypeResolutionEnv,
 ) -> bool {
     let Some(callee) = callee else {
         return false;
@@ -2991,7 +3004,7 @@ fn expr_mentions_unshadowed_name(
     }
 }
 
-fn type_from_deep_expr(expr: &deep::Expr, headers: &KnownTypeHeaders) -> Option<Type> {
+fn type_from_deep_expr(expr: &deep::Expr, headers: &TypeResolutionEnv) -> Option<Type> {
     let mut vg = VarGen::default();
     let mut errors = Vec::new();
     DeepTypeResolver::new(
@@ -5547,6 +5560,7 @@ fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
                 &mut step_errors,
                 &mut typed_nodes,
                 &mut total_nodes,
+                None,
                 &user_def_names,
                 &defsig_type_binders,
             );
@@ -5630,6 +5644,7 @@ fn annotate_ir_program_with_context(context: &TypeEnv, exprs: &[deep::Expr]) -> 
                 &mut step_errors,
                 &mut typed_nodes,
                 &mut total_nodes,
+                None,
                 &user_def_names,
                 &defsig_type_binders,
             );
@@ -6014,11 +6029,10 @@ fn annotate_fn_children(
     // error vector.)
     let declared_param_types: Vec<Option<Type>> = match declared_param_type_exprs {
         Some(declared) => {
-            let headers = KnownTypeHeaders::from_registry(adt_reg);
             let mut resolver = DeepTypeResolver::new(
                 TypeUseSite::CompilerMetadata,
                 BinderMode::TrustedCompilerMetadata,
-                &headers,
+                adt_reg.resolution_env(),
                 &mut param_vg,
                 &mut annotation_resolution_errors,
             );
@@ -8348,8 +8362,8 @@ fn resolve_deep_type(
     binder_mode: BinderMode<'_>,
     errors: &mut Vec<CheckError>,
 ) -> Result<Type, ErrorWitness> {
-    let headers = KnownTypeHeaders::from_registry(adt_reg);
-    let mut resolver = DeepTypeResolver::new(use_site, binder_mode, &headers, vg, errors);
+    let mut resolver =
+        DeepTypeResolver::new(use_site, binder_mode, adt_reg.resolution_env(), vg, errors);
     let ty = resolver.resolve(expr)?.into_type();
     Ok(resolve_type_aliases(&ty, adt_reg))
 }
@@ -8391,7 +8405,11 @@ fn collect_all_declarations(
     report_duplicate_defs(&bare_items, errors);
     report_duplicate_defsigs(&bare_items, errors);
     report_builtin_shadowing(&bare_items, errors);
-    let headers = precollect_type_headers(items, adt_reg);
+    let resolution_env = precollect_type_resolution_env(items, adt_reg);
+    // Install the provisional self/forward header scope explicitly in this
+    // per-check registry clone. Declaration bodies resolve against it, while
+    // only successful bodies enter the validated maps that survive serde.
+    adt_reg.install_resolution_env(resolution_env.clone());
     for (module, expr) in items {
         collect_declarations(
             expr,
@@ -8400,7 +8418,7 @@ fn collect_all_declarations(
             vg,
             subst,
             adt_reg,
-            &headers,
+            &resolution_env,
             errors,
             DeclPhase::Aliases,
         );
@@ -8413,7 +8431,7 @@ fn collect_all_declarations(
             vg,
             subst,
             adt_reg,
-            &headers,
+            &resolution_env,
             errors,
             DeclPhase::Rest,
         );
@@ -8423,11 +8441,11 @@ fn collect_all_declarations(
 /// Collect nominal names and arities before resolving any declaration body.
 /// This permits self and forward references without registering an unchecked
 /// definition in the serde-backed ADT registry.
-fn precollect_type_headers(
+fn precollect_type_resolution_env(
     items: &[(Option<String>, &deep::Expr)],
     adt_reg: &AdtRegistry,
-) -> KnownTypeHeaders {
-    let mut headers = KnownTypeHeaders::from_registry(adt_reg);
+) -> TypeResolutionEnv {
+    let mut headers = TypeResolutionEnv::from_registry(adt_reg);
     for (_, expr) in items {
         let deep::Expr::List(list, _) = expr else {
             continue;
@@ -8760,7 +8778,7 @@ fn collect_declarations(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &mut AdtRegistry,
-    headers: &KnownTypeHeaders,
+    headers: &TypeResolutionEnv,
     errors: &mut Vec<CheckError>,
     phase: DeclPhase,
 ) {
@@ -9083,6 +9101,7 @@ fn infer_top_level(
     errors: &mut Vec<CheckError>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
+    prebound_type_failures: Option<&HashMap<String, ErrorWitness>>,
     user_def_names: &HashSet<String>,
     defsig_type_binders: &HashMap<String, HashSet<String>>,
 ) {
@@ -9135,7 +9154,11 @@ fn infer_top_level(
         // bare params with the declared type here makes the bare-arg path
         // behave the same as the annotated path. See
         // `crates/chelis-cli/tests/bareref_return_inference.rs`.
-        let body_ty = if let Some(decl_ty) = &declared_ty {
+        let body_ty = if let Some(witness) =
+            prebound_type_failures.and_then(|failures| failures.get(&name))
+        {
+            propagate(witness)
+        } else if let Some(decl_ty) = &declared_ty {
             infer_def_body_with_sig(
                 &kids[1],
                 decl_ty,
@@ -18462,11 +18485,10 @@ fn extract_params(
     } else {
         &list.elements
     };
-    let headers = KnownTypeHeaders::from_registry(adt_reg);
     let mut resolver = DeepTypeResolver::new(
         TypeUseSite::Annotation,
         BinderMode::ImplicitGeneric,
-        &headers,
+        adt_reg.resolution_env(),
         vg,
         errors,
     );
@@ -18576,16 +18598,23 @@ fn infer_let(
                         .as_ref()
                         .map(BinderMode::Explicit)
                         .unwrap_or(BinderMode::ClosedInput);
-                    let declared_ty = match resolve_deep_type(
-                        declared_ty_expr,
-                        vg,
-                        adt_reg,
-                        TypeUseSite::Annotation,
-                        binder_mode,
-                        errors,
-                    ) {
-                        Ok(ty) => ty,
-                        Err(witness) => propagate(&witness),
+                    let declared_ty = match &expr_ty {
+                        // `infer_lit` and other metadata-aware RHS consumers
+                        // own failures in their own `type:` entry. Reuse that
+                        // witness here instead of resolving the same
+                        // ascription a second time and spraying a duplicate.
+                        Type::Error(witness) => propagate(witness),
+                        _ => match resolve_deep_type(
+                            declared_ty_expr,
+                            vg,
+                            adt_reg,
+                            TypeUseSite::Annotation,
+                            binder_mode,
+                            errors,
+                        ) {
+                            Ok(ty) => ty,
+                            Err(witness) => propagate(&witness),
+                        },
                     };
                     if let Err(e) = unify(&expr_ty, &declared_ty, subst) {
                         errors.push(CheckError::new(
@@ -20251,60 +20280,45 @@ fn infer_cast(
     );
     let resolved = subst.apply(&expr_ty);
 
-    // kids[1] = (t-prim {} new_precision)
-    // A1 (WS-A0 RT-1 fixup): per spec/04-type-system.md §1.1.2, unsigned
-    // integer types (u8/u16/u32/u64 and the uint8/uint16/uint32/uint64
-    // alias family) are explicitly out of scope for this cycle. They
-    // never resolve through `Prim::parse_name`, so without this guard
-    // `cast(_, u8)` would silently fall through to `Type::Error` with
-    // no diagnostic — exactly the silent-cast pattern §1.1.1 was added
-    // to avoid for f8e4m3. Mirror the f8e4m3 rejection path here.
-    let target_name = cast_target_prim_name(&kids[1]);
-    if let Some(name) = target_name
-        && let Some(diag) = unsigned_family_diagnostic(name, /* tensor = */ false)
-    {
-        return report(errors, diag);
-    }
-    let target_ty = if let Some(name) = target_name {
-        match Prim::parse_name(name) {
-            Some(prim) => Type::Prim(prim),
-            // RFC D-CHECK's historical Deep compatibility spelling uses
-            // `(t-prim {} Nominal)` for cast-into probes. Keep that narrow
-            // exception only for a registered ADT or alias.
-            None if cast_target_nominal_name(&kids[1], adt_reg).is_some() => Type::Adt(
-                cast_target_nominal_name(&kids[1], adt_reg)
-                    .expect("guard established a nominal cast target"),
-                Vec::new(),
-            ),
-            None => {
-                return report(
-                    errors,
-                    CheckError::new(
-                        CheckErrorKind::CastNonTensor,
-                        format!(
-                            "cast target `{name}` is not a recognized primitive type (chelis#756)"
-                        ),
-                        vec![
-                            "cast targets a scalar primitive: f32, f64, bf16, f16, bool, \
-                             int8, int16, int32, int64"
-                                .to_string(),
-                        ],
-                    ),
-                );
-            }
-        }
-    } else {
-        match resolve_deep_type(
-            &kids[1],
-            vg,
-            adt_reg,
+    // Every target spelling first crosses the centralized resolver. Bare
+    // primitive symbols are retained for historical compatibility; canonical
+    // `t-prim` still goes through the resolver's metadata and exact-arity
+    // checks before semantic cast classification.
+    let resolved_target = {
+        let mut resolver = DeepTypeResolver::new(
             TypeUseSite::CastTarget,
             BinderMode::ClosedInput,
+            adt_reg.resolution_env(),
+            vg,
             errors,
-        ) {
-            Ok(ty) => ty,
+        );
+        match resolver.resolve_cast_target(&kids[1]) {
+            Ok(target) => target,
             Err(witness) => return propagate(&witness),
         }
+    };
+    let target_ty = match resolved_target {
+        ResolvedCastTarget::PrimitiveSpelling { name, canonical } => {
+            // A1 (WS-A0 RT-1 fixup): per spec/04-type-system.md §1.1.2,
+            // unsigned integer types remain explicitly out of scope. Keep the
+            // owning precision diagnostic after syntax has validated.
+            if let Some(diag) = unsigned_family_diagnostic(&name, /* tensor = */ false) {
+                return report(errors, diag);
+            }
+            match Prim::parse_name(&name) {
+                Some(prim) => Type::Prim(prim),
+                // RFC D-CHECK's historical Deep compatibility spelling uses
+                // `(t-prim {} Nominal)` for cast-into probes. It is eligible
+                // only after exact canonical syntax validation and only for a
+                // registered zero-arity ADT or transparent alias target.
+                None if canonical => match cast_target_nominal_name(&name, adt_reg) {
+                    Some(target) => Type::Adt(target, Vec::new()),
+                    None => return report_unknown_cast_target(errors, &name),
+                },
+                None => return report_unknown_cast_target(errors, &name),
+            }
+        }
+        ResolvedCastTarget::Type(ty) => resolve_type_aliases(&ty.into_type(), adt_reg),
     };
 
     // RFC D-CHECK cast gates operate on the same resolved target as ordinary
@@ -20383,41 +20397,34 @@ fn infer_cast(
     }
 }
 
-fn cast_target_nominal_name(expr: &deep::Expr, adt_reg: &AdtRegistry) -> Option<String> {
-    let deep::Expr::List(list, _) = expr else {
-        return None;
-    };
-    if get_tag(list) != Some("t-prim") {
-        return None;
-    }
-    let name = children(list).first().and_then(symbol_name)?;
-    if adt_reg.lookup(name).is_some() {
+fn cast_target_nominal_name(name: &str, adt_reg: &AdtRegistry) -> Option<String> {
+    if adt_reg
+        .lookup(name)
+        .is_some_and(|definition| definition.type_params.is_empty())
+    {
         return Some(name.to_string());
     }
     adt_reg
         .resolve_alias(name)
-        .and_then(|alias| match &alias.body {
-            Type::Adt(target, _) => Some(target.clone()),
+        .and_then(|alias| match (&alias.params[..], &alias.body) {
+            ([], Type::Adt(target, args)) if args.is_empty() => Some(target.clone()),
             _ => None,
         })
 }
 
-/// Extract a cast target's primitive spelling from either accepted Deep form:
-/// canonical `(t-prim {} <name>)` or the historically supported bare symbol.
-/// This lets `infer_cast` parse known bare primitives before the general Deep
-/// type converter treats the atom as an unparseable type expression, while
-/// preserving the spelling for a loud rejection of unknown targets.
-fn cast_target_prim_name(expr: &deep::Expr) -> Option<&str> {
-    if let Some(name) = symbol_name(expr) {
-        return Some(name);
-    }
-    let deep::Expr::List(list, _) = expr else {
-        return None;
-    };
-    if get_tag(list) != Some("t-prim") {
-        return None;
-    }
-    children(list).first().and_then(symbol_name)
+fn report_unknown_cast_target(errors: &mut Vec<CheckError>, name: &str) -> Type {
+    report(
+        errors,
+        CheckError::new(
+            CheckErrorKind::CastNonTensor,
+            format!("cast target `{name}` is not a recognized primitive type (chelis#756)"),
+            vec![
+                "cast targets a scalar primitive: f32, f64, bf16, f16, bool, \
+                 int8, int16, int32, int64"
+                    .to_string(),
+            ],
+        ),
+    )
 }
 
 /// True if `name` is one of the unsigned integer dtype names that

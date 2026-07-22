@@ -20,6 +20,12 @@
 //!   reject every match (no constructors found ⇒ "missing all"), so we
 //!   use clone-then-extend instead — the cloned registry already
 //!   contains the library's constructor sets.
+//! - **Type-resolution environment**: rebuilt for each check from the cloned
+//!   registry's validated ADT/alias definitions plus the new unit's
+//!   precollected declaration headers. The provisional environment is a
+//!   serde-skipped runtime field: it permits self/forward references during
+//!   one check but cannot serialize a rejected declaration into the library
+//!   snapshot.
 //! - **`VarGen`**: cloned per check call. Library type-variable IDs are
 //!   already taken; new variables come from numbers above the library's
 //!   high-water mark.
@@ -44,6 +50,17 @@
 //! Deep AST nodes. The library was already checked when the context was
 //! built; its errors (if any) are surfaced at build time, not silently
 //! re-emitted with library spans during a new-code check.
+//!
+//! ## Deserialization boundary
+//!
+//! `TypeEnv` derives serde because compiler-api caches successful checker
+//! snapshots. Deserialization restores validated definitions; the transient
+//! type-resolution environment is skipped and is reconstructed at the next
+//! check. Serde can structurally decode the private `ErrorWitness` carried by
+//! `Type::Error`, but successful context construction rejects all checker
+//! errors and the totality invariant forbids error types in emitted snapshots.
+//! Cache decoding verifies its envelope and build identity but does not rerun
+//! semantic type checking, so cache bytes are a trusted internal artifact.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use chelis_deep::ast as deep;
 use serde::{Deserialize, Serialize};
 
-use crate::deep_type::{BinderMode, DeepTypeResolver, KnownTypeHeaders, TypeUseSite};
+use crate::deep_type::{BinderMode, DeepTypeResolver, TypeResolutionEnv, TypeUseSite};
 use crate::errors::{CheckError, ErrorWitness};
 use crate::types::*;
 
@@ -69,6 +69,13 @@ pub enum CallShape {
 pub struct AdtRegistry {
     pub defs: HashMap<String, AdtDef>,
     pub aliases: HashMap<String, TypeAliasDef>,
+    /// Runtime declaration-header scope for the current check. It is kept
+    /// separate from validated definitions because self/forward names must be
+    /// visible while their bodies are resolving. Rejected declarations never
+    /// enter `defs`/`aliases`, and this provisional scope is deliberately not
+    /// serialized into a reusable checker context.
+    #[serde(skip, default)]
+    pub(crate) resolution_env: TypeResolutionEnv,
 }
 
 impl Default for AdtRegistry {
@@ -83,7 +90,16 @@ impl AdtRegistry {
         AdtRegistry {
             aliases: HashMap::new(),
             defs: HashMap::new(),
+            resolution_env: TypeResolutionEnv::default(),
         }
+    }
+
+    pub(crate) fn resolution_env(&self) -> &TypeResolutionEnv {
+        &self.resolution_env
+    }
+
+    pub(crate) fn install_resolution_env(&mut self, resolution_env: TypeResolutionEnv) {
+        self.resolution_env = resolution_env;
     }
 
     /// Register an ADT from a deftype Deep node.
@@ -96,7 +112,7 @@ impl AdtRegistry {
         &mut self,
         children: &[deep::Expr],
         vg: &mut VarGen,
-        headers: &KnownTypeHeaders,
+        headers: &TypeResolutionEnv,
         errors: &mut Vec<CheckError>,
         opaque: bool,
         defining_module: Option<String>,

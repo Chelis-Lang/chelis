@@ -26,6 +26,16 @@ impl ResolvedDeepType {
     }
 }
 
+/// Cast-target syntax after it has crossed the same canonical-form and arity
+/// checks as every other Deep type consumer. Bare primitive spellings remain a
+/// compatibility surface; canonical `t-prim` records whether the historical
+/// zero-arity nominal spelling is eligible for the opacity checks.
+#[derive(Debug, Clone)]
+pub(crate) enum ResolvedCastTarget {
+    PrimitiveSpelling { name: String, canonical: bool },
+    Type(ResolvedDeepType),
+}
+
 /// The checker surface that owns a type expression. Included in diagnostics
 /// so malformed nested syntax points to the boundary that interpreted it.
 #[derive(Debug, Clone, Copy)]
@@ -66,14 +76,20 @@ pub(crate) enum BinderMode<'a> {
     TrustedCompilerMetadata,
 }
 
-/// Nominal names and arities visible while resolving a check unit. This is
-/// deliberately transient and never enters the serde-backed checker context.
+/// Nominal declaration headers visible while resolving one check unit.
+///
+/// This is the explicit, runtime-only half of declaration state. It may
+/// contain self/forward headers whose bodies have not yet validated; only
+/// successfully resolved declarations enter [`AdtRegistry::defs`] or
+/// [`AdtRegistry::aliases`]. The registry's serde representation skips this
+/// environment and reconstructs it from those validated definitions before a
+/// later check.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct KnownTypeHeaders {
+pub(crate) struct TypeResolutionEnv {
     arities: HashMap<String, usize>,
 }
 
-impl KnownTypeHeaders {
+impl TypeResolutionEnv {
     pub(crate) fn from_registry(registry: &AdtRegistry) -> Self {
         let mut headers = Self::default();
         // Checker-native nominal surfaces that are typed structurally by
@@ -108,7 +124,7 @@ impl KnownTypeHeaders {
 pub(crate) struct DeepTypeResolver<'a> {
     use_site: TypeUseSite,
     binder_mode: BinderMode<'a>,
-    headers: &'a KnownTypeHeaders,
+    headers: &'a TypeResolutionEnv,
     vg: &'a mut VarGen,
     errors: &'a mut Vec<CheckError>,
     type_vars: HashMap<String, TypeVar>,
@@ -120,7 +136,7 @@ impl<'a> DeepTypeResolver<'a> {
     pub(crate) fn new(
         use_site: TypeUseSite,
         binder_mode: BinderMode<'a>,
-        headers: &'a KnownTypeHeaders,
+        headers: &'a TypeResolutionEnv,
         vg: &'a mut VarGen,
         errors: &'a mut Vec<CheckError>,
     ) -> Self {
@@ -148,6 +164,32 @@ impl<'a> DeepTypeResolver<'a> {
 
     pub(crate) fn resolve(&mut self, expr: &deep::Expr) -> Result<ResolvedDeepType, ErrorWitness> {
         self.resolve_type(expr).map(ResolvedDeepType)
+    }
+
+    /// Resolve cast-target syntax through this boundary before semantic cast
+    /// classification. In particular, canonical `t-prim` uses `one_symbol`,
+    /// so an extra child cannot be ignored by a cast-only fast path.
+    pub(crate) fn resolve_cast_target(
+        &mut self,
+        expr: &deep::Expr,
+    ) -> Result<ResolvedCastTarget, ErrorWitness> {
+        if let Some(name) = symbol_name(expr) {
+            return Ok(ResolvedCastTarget::PrimitiveSpelling {
+                name: name.to_string(),
+                canonical: false,
+            });
+        }
+        if let deep::Expr::List(list, _) = expr {
+            let (tag, children) = self.type_form(list)?;
+            if tag == "t-prim" {
+                let name = self.one_symbol(tag, children)?;
+                return Ok(ResolvedCastTarget::PrimitiveSpelling {
+                    name: name.to_string(),
+                    canonical: true,
+                });
+            }
+        }
+        self.resolve(expr).map(ResolvedCastTarget::Type)
     }
 
     pub(crate) fn type_var(&self, name: &str) -> Option<TypeVar> {

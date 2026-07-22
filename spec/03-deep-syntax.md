@@ -371,6 +371,11 @@ environment or a cached compiler context. Resolution is fail-closed:
   header and exactly that header's declared number of type arguments. Headers
   are collected before bodies are resolved, so self-recursive and forward
   nominal references are legal; unknown names and wrong arities are errors.
+  The precollected header environment remains active for the entire check unit,
+  including annotations in declaration bodies. A rejected declaration body is
+  not installed in the reusable ADT/alias registry, but its already-declared
+  header remains visible until the failing check ends so downstream references
+  do not add a spurious `unknown nominal` cascade.
 - `t-var`, `d-var`, and `d-rank` introduce no binding by themselves. A name is
   legal only when the surrounding resolution context supplies it: the
   explicit parameter list of a `deftype`/`typealias`, the implicit-generic
@@ -381,7 +386,10 @@ environment or a cached compiler context. Resolution is fail-closed:
 - A `defsig` implicitly binds each well-formed `t-var`/`d-var`/`d-rank` name on
   first occurrence and reuses that binding throughout the signature. A
   `deftype` or `typealias` binds only names in its explicit parameter list;
-  an undeclared variable name is an error.
+  an undeclared variable name is an error. Surf declaration desugaring is
+  scope-aware: a declared parameter becomes the corresponding variable form
+  at a type/dimension/rank use site, while an unlisted symbolic tensor axis is
+  emitted as `d-name` rather than inventing an implicit declaration binder.
 - `t-fn` has at least one child (the last is its return type), `t-ref` has
   exactly one child, `t-tensor` has at least one child (the last is a
   primitive or bound type-variable precision), `t-unit` has no children, and
@@ -393,6 +401,10 @@ environment or a cached compiler context. Resolution is fail-closed:
   symbol in a `cast` target (for example `(cast {} x f16)`); it resolves with
   the same meaning as `(t-prim {} f16)`. Bare forms remain non-canonical and
   are not accepted in declaration fields, aliases, signatures, or metadata.
+  Both cast spellings cross this same resolver before cast semantics are
+  classified: canonical `t-prim` still requires exactly one symbol child, so
+  `(cast {} x (t-prim {} f16 extra))` is malformed rather than a cast to
+  `f16` with an ignored child.
 
 Each invalid type expression produces one owning checker diagnostic. Parents
 propagate that witnessed failure without re-reporting it, so a malformed

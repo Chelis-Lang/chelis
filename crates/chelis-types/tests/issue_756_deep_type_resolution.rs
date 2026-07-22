@@ -31,6 +31,27 @@ fn assert_accepts(source: &str, label: &str) {
     }
 }
 
+fn assert_surf_accepts(source: &str, label: &str) {
+    let declarations = chelis_surf::parser::parse_str(source)
+        .unwrap_or_else(|error| panic!("{label}: Surf fixture must parse: {error}"));
+    let exprs = chelis_surf::desugar::desugar_program(&declarations);
+    let fitness = chelis_types::check_program(&exprs);
+    assert!(
+        fitness.errors.is_empty(),
+        "{label}: fitness/check_program must be clean, got {:?}",
+        fitness.errors
+    );
+    assert!(
+        fitness.score >= 0.9,
+        "{label}: fitness/check_program scored {}, expected >= 0.9",
+        fitness.score
+    );
+    if let Err(result) = check_ir_program(&exprs) {
+        let messages: Vec<_> = result.errors.iter().map(|error| &error.message).collect();
+        panic!("{label}: expected a clean check, got {messages:?}");
+    }
+}
+
 fn assert_one_type_resolution_error(source: &str, needle: &str, label: &str) {
     let exprs = parse(source);
     let result =
@@ -87,6 +108,38 @@ fn explicit_deftype_type_dimension_and_rank_binders_are_accepted() {
              (field {} value
                (t-tensor {} (d-var {} n) (d-rank {} r) (t-var {} p)))))",
         "explicit deftype binders",
+    );
+}
+
+#[test]
+fn parameterized_typealias_type_and_dimension_binders_are_accepted() {
+    assert_surf_accepts(
+        "type Matrix[p, rows] = tensor[rows, p]\n\
+         def keep[p, rows](value: Matrix[p, rows]) -> Matrix[p, rows] = value",
+        "parameterized typealias type/dimension binders",
+    );
+}
+
+#[test]
+fn typealias_self_and_forward_nominal_headers_are_visible() {
+    assert_accepts(
+        "(typealias {} Recursive (a)
+           (t-tuple {} (t-var {} a) (t-adt {} Recursive (t-var {} a))))
+         (typealias {} First () (t-adt {} Second))
+         (typealias {} Second () (t-tuple {} (t-prim {} f32)))",
+        "typealias self and forward nominal references",
+    );
+}
+
+#[test]
+fn documented_zero_parameter_symbolic_dimension_alias_is_accepted() {
+    // Exact executable example shared by packages/chelis-std/SKILL.md and
+    // docs/book/src/surf-reference.md. With no `[n]` parameter, `n` is a
+    // concrete symbolic dimension (`d-name`), not an undeclared `d-var`.
+    assert_surf_accepts(
+        "type Weights = tensor[n, f32]\n\n\
+         def keep(w: Weights) -> Weights = w",
+        "documented Weights alias",
     );
 }
 
@@ -186,6 +239,21 @@ fn checked_metadata_resolves_nominals_imported_from_library_context() {
 }
 
 #[test]
+fn checked_metadata_resolves_aliases_imported_from_library_context() {
+    let library = parse(
+        "(deftype {} LibMarker () (variant {} LibMarker))
+         (typealias {} LibAlias () (t-adt {} LibMarker))",
+    );
+    let context = build_type_env_from_library(&library).expect("library context must check");
+    let new_exprs = parse(
+        "(defsig {} make (t-fn {} (t-adt {} LibAlias)))
+         (def {} make (fn {} (params {}) (var {} LibMarker)))",
+    );
+    check_ir_with_context(&context, &new_exprs)
+        .expect("a validated alias header must survive stacked context construction");
+}
+
+#[test]
 fn unknown_primitive_adt_and_wrong_nominal_arity_report_once() {
     let cases = [
         (
@@ -221,6 +289,31 @@ fn undeclared_type_dimension_and_rank_variables_report_once() {
     for (source, needle, label) in cases {
         assert_one_type_resolution_error(&source, needle, label);
     }
+}
+
+#[test]
+fn invalid_alias_body_does_not_make_its_declared_header_unknown_downstream() {
+    let source = "(typealias {} Broken ()
+           (t-tensor {} (d-var {} missing) (t-prim {} f32)))
+         (defsig {} keep (t-fn {} (t-adt {} Broken) (t-adt {} Broken)))
+         (def {} keep (fn {} (params {} x) (var {} x)))";
+    assert_one_type_resolution_error(
+        source,
+        "undeclared dimension variable `missing` in typealias body",
+        "invalid alias with a downstream annotation",
+    );
+}
+
+#[test]
+fn unknown_nominal_in_alias_body_reports_once_without_downstream_cascade() {
+    let source = "(typealias {} Broken () (t-adt {} Missing))
+         (defsig {} keep (t-fn {} (t-adt {} Broken) (t-adt {} Broken)))
+         (def {} keep (fn {} (params {} x) (var {} x)))";
+    assert_one_type_resolution_error(
+        source,
+        "unknown nominal type `Missing` in typealias body",
+        "unknown nominal in alias body",
+    );
 }
 
 #[test]
@@ -286,6 +379,43 @@ fn malformed_nested_type_and_dimension_forms_report_once_without_drops() {
 
     for (source, needle, label) in cases {
         assert_one_type_resolution_error(&source, needle, label);
+    }
+}
+
+#[test]
+fn malformed_canonical_primitive_reports_once_at_every_type_consumer() {
+    let cases = [
+        (field_type("(t-prim {} f32 extra)"), "deftype field"),
+        (
+            "(typealias {} Bad () (t-prim {} f32 extra))".to_string(),
+            "typealias body",
+        ),
+        (
+            "(defsig {} bad (t-fn {} (t-prim {} f32 extra)))".to_string(),
+            "defsig",
+        ),
+        (
+            "(def {} bad (lit {type: (t-prim {} f32 extra)} 1.0))".to_string(),
+            "type annotation",
+        ),
+        (
+            "(def {} bad
+               (let {} (bind {} value
+                 (lit {type: (t-prim {} f32 extra)} 1.0))
+                 (var {} value)))"
+                .to_string(),
+            "let-binding ascription",
+        ),
+        (
+            "(def {} x (lit {type: (t-prim {} f32)} 1.0))
+             (def {} bad (cast {} (var {} x) (t-prim {} f32 extra)))"
+                .to_string(),
+            "cast target",
+        ),
+    ];
+
+    for (source, label) in cases {
+        assert_one_type_resolution_error(&source, "t-prim", label);
     }
 }
 

@@ -213,10 +213,14 @@ pub enum Type {
 - Unification and equality treat `Type::Error(_)` exactly as before; the
   token carries no data and costs nothing.
 
-Serialization note: the typecheck cache serializes `Type`. Deserialization
-minting a witness is acceptable - cached entries were produced by a
-legitimate `report`/`propagate` at write time - but the cache boundary is
-recorded as the one non-constructor entry point (open question 2).
+Serialization note: the typecheck cache serializes `Type`, so serde is the one
+accepted non-constructor witness mint. Production writers only receive
+successful `TypeEnv`/`CheckedProgram` values: non-empty checker errors prevent
+context construction, and the totality invariant forbids `Type::Error` in a
+successful result. Cache envelopes verify format/build identity and byte
+integrity, but deserialization does not rerun semantic checking; cache bytes
+are a trusted internal artifact. This boundary is documented in the witness,
+type-context, and compiler-api cache module docs (open question 2).
 
 ### C3.1 Deep type/dimension resolution boundary (chelis#756)
 
@@ -232,16 +236,28 @@ crate boundary is `Result<ResolvedDeepType, ErrorWitness>`:
   wildcard, dropped dimension, or unchecked nominal type;
 - callers that require poison for ordinary checker cascade suppression convert
   the returned witness explicitly with `propagate`;
-- a transient resolution context carries the use site, binder mode, known
-  nominal headers/arity, and variable generator. This state is deliberately
-  outside serialized `TypeEnv`, ADT, and compiler-cache layouts;
+- cast targets use the same boundary before semantic classification. The bare
+  primitive compatibility spelling and canonical `t-prim` have parity for all
+  nine active scalar targets, while canonical metadata/child arity is still
+  validated exactly and no extra child can be ignored;
+- an explicit resolution context carries the use site, binder mode, known
+  nominal headers/arity, and variable generator. Its `TypeResolutionEnv` is a
+  serde-skipped runtime field in the per-check ADT-registry clone, separate
+  from the validated definition/alias maps;
 - binder modes are closed input, explicit `deftype`/`typealias` parameters,
   implicit-generic `defsig` parameters, and trusted compiler-generated
   metadata. Only actual binders or explicitly legal inference holes mint
   type/dimension/rank variables;
 - declaration headers are precollected before bodies, preserving legal self
   and forward ADT/alias references while rejecting unknown names and wrong
-  arities before a context can be cached.
+  arities before a context can be cached. That explicit header environment is
+  carried for the whole check unit (including body annotations), not rebuilt
+  mid-check from the subset of bodies that registered successfully. A failed
+  declaration therefore owns its one resolution diagnostic without downstream
+  unknown-nominal spray. It never enters the validated maps, the non-empty
+  error vector prevents context construction, and serde skips the provisional
+  environment. A later stacked or decoded check reconstructs visibility from
+  validated definitions plus its own precollected headers.
 
 The exact Deep grammar and binder rules are normative in spec/03 §2.5.1/§2.6.
 
@@ -400,7 +416,9 @@ census enumerating every construction site.
 
 1. `Type::Error(ErrorWitness)` and the `report`/`propagate` constructors
    (§C3); every construction site migrated (the compiler enumerates
-   them; the census predicts the count).
+   them; the current source census is 269 `report` call sites in `infer.rs`,
+   2 resolver-boundary `report_witness` call sites in `deep_type.rs`, 12
+   direct `propagate` uses, and 8 aggregate `propagate_if_error` uses).
 2. **The totality invariant promoted** from test harness to an
    on-by-default post-check validation (§C4.1).
 3. The cascade-behavior corpus (B2.3): diagnostic counts before/after on
@@ -411,6 +429,9 @@ census enumerating every construction site.
 5. The chelis#756 converter family retired in favor of §C3.1's centralized
    witnessed resolver; malformed/unknown types and dimensions are rejected
    exactly once before declarations or cached contexts become successful.
+6. The adversarial Phase 2 pass exposed chelis#813's pre-existing one-argument
+   `conv2d` validator panic. The fix and complete arity 0-through-6 regression
+   matrix land here, so the Phase 2 PR may truthfully close #813.
 
 **Frozen at your exit:** §C3 API; §C4.1 always-on.
 

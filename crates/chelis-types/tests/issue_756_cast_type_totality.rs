@@ -21,6 +21,7 @@
 //! spec/design/checker_totality.md §C3.
 
 use chelis_deep::Expr;
+use chelis_deep::parser::parse_str as parse_deep_lenient;
 use chelis_deep::parser::parse_str_strict as parse_deep;
 use chelis_deep::printer::print_canonical;
 use chelis_surf::desugar::desugar_program;
@@ -122,21 +123,56 @@ fn cast_to_unknown_type_name_is_rejected() {
 }
 
 #[test]
-fn unknown_bare_deep_cast_target_is_rejected_loudly() {
-    let report = deep_fitness(&deep_cast_program("madeup"));
+fn unknown_bare_and_canonical_deep_cast_targets_are_rejected_loudly() {
+    for target in ["madeup", "(t-prim {} madeup)"] {
+        let report = deep_fitness(&deep_cast_program(target));
+        assert!(
+            report.score < 1.0,
+            "unknown target `{target}` must reduce fitness below 1, got {report:?}"
+        );
+        assert_eq!(
+            report.errors.len(),
+            1,
+            "unknown target `{target}` must report once: {:?}",
+            report.errors
+        );
+        assert!(
+            report.errors.iter().any(|error| {
+                matches!(error.kind, CheckErrorKind::CastNonTensor)
+                    && error
+                        .message
+                        .contains("cast target `madeup` is not a recognized primitive type")
+            }),
+            "unknown target `{target}` must produce the intended cast diagnostic, got {:?}",
+            report.errors
+        );
+    }
+}
+
+#[test]
+fn canonical_t_prim_with_an_extra_child_is_rejected_once() {
+    // Deliberately lenient: strict Deep validation rejects this shape at the
+    // parser boundary, while this regression owns the checker's nested cast
+    // consumer when malformed Deep reaches it programmatically.
+    let deep = parse_deep_lenient(&deep_cast_program("(t-prim {} f32 extra)"))
+        .expect("malformed nested cast target must remain parseable leniently");
+    let report = check_ir_fitness(&deep);
     assert!(
         report.score < 1.0,
-        "unknown bare target must reduce fitness below 1, got {report:?}"
+        "malformed canonical target must reduce fitness below 1, got {report:?}"
     );
-    assert!(
-        report.errors.iter().any(|error| {
-            matches!(error.kind, CheckErrorKind::CastNonTensor)
-                && error
-                    .message
-                    .contains("cast target `madeup` is not a recognized primitive type")
-        }),
-        "unknown bare target must produce the intended cast diagnostic, got {:?}",
+    assert_eq!(
+        report.errors.len(),
+        1,
+        "the cast resolver must own the malformed target without a cascade: {:?}",
         report.errors
+    );
+    let error = &report.errors[0];
+    assert!(
+        matches!(error.kind, CheckErrorKind::MalformedForm)
+            && error.message.contains("malformed `t-prim` in cast target")
+            && error.message.contains("expected 1 child(ren), got 2"),
+        "unexpected malformed cast-target diagnostic: {error:?}"
     );
 }
 

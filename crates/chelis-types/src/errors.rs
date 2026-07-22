@@ -27,12 +27,14 @@ use crate::unify::{TypeError, TypeErrorKind};
 /// [`propagate`]; it cannot mint one directly.
 ///
 /// Serialization note (chelis#731 open question 2, resolved at Phase 2):
-/// `Serialize`/`Deserialize` are derived because `Type` is cached. A
-/// deserialized witness is the ONE sanctioned non-constructor mint -- a
-/// cached `Type::Error` was produced by a legitimate `report`/`propagate` at
-/// write time, so re-materializing its (dataless) witness on read does not
-/// manufacture a silent error. This is the only entry point that bypasses
-/// the two mints, and it is recorded here as the cache boundary.
+/// `Serialize`/`Deserialize` are derived because `Type` is cached, so serde is
+/// the ONE sanctioned non-constructor mint. Production cache writers receive
+/// only successful [`crate::CheckedProgram`] / [`crate::TypeEnv`] values; a
+/// non-empty checker error vector prevents construction, and the totality
+/// invariant forbids `Type::Error` in a successful result. The cache decoder
+/// is an internal-artifact boundary, not a semantic re-checker: its envelope
+/// verifies format/build identity and byte integrity, then trusts the decoded
+/// successful payload. See `context` and the compiler-api cache module docs.
 ///
 /// The constructor privacy is a compile-time boundary:
 ///

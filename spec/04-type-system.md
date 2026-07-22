@@ -2336,7 +2336,13 @@ metadata; only a real binder or a use-site-approved inference hole may allocate
 a type/dimension/rank variable. Nominal headers and arities are precollected so
 self/forward references remain legal while unknown names, wrong arities,
 malformed nested nodes, and bare declaration-field types cannot enter a
-successful or cacheable checked context. See spec/03 §2.5.1/§2.6.)*
+successful or cacheable checked context. The precollected header environment
+lives for the complete check unit rather than only declaration registration,
+so one rejected declaration body does not make its otherwise-declared name
+appear unknown in downstream annotations and spray a second diagnostic. Bare
+and canonical cast targets traverse the same boundary; canonical primitive
+forms retain exact-arity validation before cast classification. See spec/03
+§2.5.1/§2.6.)*
 
 > **[04-TOT-3]** A structurally malformed Deep form that reaches the
 > checker SHALL be rejected with a diagnostic naming the tag and the

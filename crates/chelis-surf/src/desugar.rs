@@ -777,9 +777,14 @@ impl DesugarCtx {
                 name, params, ty, ..
             } => {
                 let param_list = bare_list(params.iter().map(|p| sym(p)).collect());
+                let explicit_params: HashSet<String> = params.iter().cloned().collect();
                 vec![node(
                     "typealias",
-                    vec![sym(name), param_list, desugar_type(ty)],
+                    vec![
+                        sym(name),
+                        param_list,
+                        desugar_declaration_type(ty, &explicit_params),
+                    ],
                 )]
             }
 
@@ -1044,9 +1049,10 @@ impl DesugarCtx {
         invariant: Option<&TypeInvariant>,
     ) -> deep::Expr {
         let param_list = bare_list(params.iter().map(|p| sym(p)).collect());
+        let explicit_params: HashSet<String> = params.iter().cloned().collect();
         let mut children = vec![sym(name), param_list];
         for v in variants {
-            children.push(desugar_variant(v));
+            children.push(desugar_variant(v, &explicit_params));
         }
 
         if !opaque {
@@ -1072,19 +1078,25 @@ impl DesugarCtx {
     }
 }
 
-fn desugar_variant(variant: &Variant) -> deep::Expr {
+fn desugar_variant(variant: &Variant, explicit_params: &HashSet<String>) -> deep::Expr {
     match &variant.fields {
         VariantFields::Positional(fields) => {
             let mut children = vec![sym(&variant.name)];
             for f in fields {
-                children.push(desugar_type(f));
+                children.push(desugar_declaration_type(f, explicit_params));
             }
             node("variant", children)
         }
         VariantFields::Record(fields) => {
             let mut children = vec![sym(&variant.name)];
             for (field_name, field_ty) in fields {
-                children.push(node("field", vec![sym(field_name), desugar_type(field_ty)]));
+                children.push(node(
+                    "field",
+                    vec![
+                        sym(field_name),
+                        desugar_declaration_type(field_ty, explicit_params),
+                    ],
+                ));
             }
             node("variant", children)
         }
@@ -1888,6 +1900,17 @@ fn desugar_type(ty: &TypeExpr) -> deep::Expr {
     desugar_type_with_scope(ty, &HashSet::new(), &HashSet::new())
 }
 
+/// Desugar a `deftype` field or `typealias` body against that declaration's
+/// exact explicit parameter list. Unlike a signature, a declaration does not
+/// implicitly quantify a single-letter dimension name: an unlisted name is a
+/// concrete symbolic axis (`d-name`), matching spec/02 §P15's zero-parameter
+/// alias examples. Listed names remain unkinded declaration binders and are
+/// emitted according to their position (`t-var`, `d-var`, or precision
+/// `t-var`).
+fn desugar_declaration_type(ty: &TypeExpr, explicit_params: &HashSet<String>) -> deep::Expr {
+    desugar_type_with_scope_mode(ty, explicit_params, explicit_params, false)
+}
+
 /// True if `name` is a candidate quantified type variable per
 /// `spec/04-type-system.md` §5.8: lowercase, not a known active
 /// primitive, and not a §1.1.2 unsigned alias (those should reach the
@@ -1990,6 +2013,15 @@ fn desugar_type_with_scope(
     dim_vars: &HashSet<String>,
     tvar_set: &HashSet<String>,
 ) -> deep::Expr {
+    desugar_type_with_scope_mode(ty, dim_vars, tvar_set, true)
+}
+
+fn desugar_type_with_scope_mode(
+    ty: &TypeExpr,
+    dim_vars: &HashSet<String>,
+    tvar_set: &HashSet<String>,
+    implicit_single_letter_dims: bool,
+) -> deep::Expr {
     match ty {
         TypeExpr::Named(name, _) => {
             // The contextual rule for type-name positions:
@@ -2042,7 +2074,9 @@ fn desugar_type_with_scope(
                     }
                     // Single lowercase letter → d-var (heuristic fallback)
                     TypeExpr::Named(n, _)
-                        if n.len() == 1 && n.starts_with(|c: char| c.is_lowercase()) =>
+                        if implicit_single_letter_dims
+                            && n.len() == 1
+                            && n.starts_with(|c: char| c.is_lowercase()) =>
                     {
                         node("d-var", vec![sym(n)])
                     }
@@ -2055,7 +2089,12 @@ fn desugar_type_with_scope(
                     TypeExpr::RankSpread(n, _) => node("d-rank", vec![sym(n)]),
                     _ => node(
                         "d-var",
-                        vec![desugar_type_with_scope(d, dim_vars, tvar_set)],
+                        vec![desugar_type_with_scope_mode(
+                            d,
+                            dim_vars,
+                            tvar_set,
+                            implicit_single_letter_dims,
+                        )],
                     ),
                 })
                 .collect();
@@ -2078,23 +2117,34 @@ fn desugar_type_with_scope(
         TypeExpr::Arrow(params, ret, _) => {
             let mut children: Vec<deep::Expr> = params
                 .iter()
-                .map(|p| desugar_type_with_scope(p, dim_vars, tvar_set))
+                .map(|p| {
+                    desugar_type_with_scope_mode(p, dim_vars, tvar_set, implicit_single_letter_dims)
+                })
                 .collect();
-            children.push(desugar_type_with_scope(ret, dim_vars, tvar_set));
+            children.push(desugar_type_with_scope_mode(
+                ret,
+                dim_vars,
+                tvar_set,
+                implicit_single_letter_dims,
+            ));
             node("t-fn", children)
         }
 
         TypeExpr::Ref(inner, _) => node(
             "t-ref",
-            vec![desugar_type_with_scope(inner, dim_vars, tvar_set)],
+            vec![desugar_type_with_scope_mode(
+                inner,
+                dim_vars,
+                tvar_set,
+                implicit_single_letter_dims,
+            )],
         ),
 
         TypeExpr::App(name, args, _) => {
             let mut children = vec![sym(name)];
-            children.extend(
-                args.iter()
-                    .map(|a| desugar_type_with_scope(a, dim_vars, tvar_set)),
-            );
+            children.extend(args.iter().map(|a| {
+                desugar_type_with_scope_mode(a, dim_vars, tvar_set, implicit_single_letter_dims)
+            }));
             node("t-adt", children)
         }
 
@@ -2103,7 +2153,9 @@ fn desugar_type_with_scope(
             "t-tuple",
             elems
                 .iter()
-                .map(|e| desugar_type_with_scope(e, dim_vars, tvar_set))
+                .map(|e| {
+                    desugar_type_with_scope_mode(e, dim_vars, tvar_set, implicit_single_letter_dims)
+                })
                 .collect(),
         ),
 
@@ -2949,6 +3001,40 @@ mod tests {
         assert_eq!(
             print_expr(&desugar_type(&ty)),
             "(t-tensor {} (d-lit {} 32) (d-lit {} 784) (t-prim {} f32))"
+        );
+    }
+
+    #[test]
+    fn typealias_desugaring_uses_its_explicit_binder_scope() {
+        let declarations = crate::parser::parse_str("type Matrix[p, rows] = tensor[rows, p]")
+            .expect("typealias parses");
+        let deep = desugar_program(&declarations);
+        assert_eq!(
+            print_expr(&deep[0]),
+            "(typealias {} Matrix (p rows) (t-tensor {} (d-var {} rows) (t-var {} p)))"
+        );
+    }
+
+    #[test]
+    fn zero_parameter_typealias_dimension_is_symbolic_not_implicitly_bound() {
+        let declarations =
+            crate::parser::parse_str("type Weights = tensor[n, f32]").expect("alias parses");
+        let deep = desugar_program(&declarations);
+        assert_eq!(
+            print_expr(&deep[0]),
+            "(typealias {} Weights () (t-tensor {} (d-name {} n) (t-prim {} f32)))"
+        );
+    }
+
+    #[test]
+    fn deftype_desugaring_uses_multi_letter_dimension_binder_scope() {
+        let declarations =
+            crate::parser::parse_str("type Batch[rows] = | Batch { values: tensor[rows, f32] }")
+                .expect("deftype parses");
+        let deep = desugar_program(&declarations);
+        assert_eq!(
+            print_expr(&deep[0]),
+            "(deftype {}\n  Batch\n  (rows)\n  (variant {}\n    Batch\n    (field {} values (t-tensor {} (d-var {} rows) (t-prim {} f32)))))"
         );
     }
 
