@@ -64,3 +64,16 @@ fn nested_values_cannot_hide_an_unsupported_scalar_abi() {
         .expect_err("a pointer container must not erase an unsupported element ABI");
     assert_eq!(err.what, UnsupportedKind::Dtype("f16".into()));
 }
+
+#[test]
+fn first_class_function_type_has_no_general_c_host_value_abi() {
+    let function = ConcreteHostType::Function(
+        vec![ConcreteHostType::Scalar(Prim::Int8)],
+        Box::new(ConcreteHostType::Scalar(Prim::Int8)),
+    );
+    let error = HostAbiType::try_from_concrete(&function)
+        .expect_err("function values must not acquire an opaque C representation");
+    assert_eq!(error.stage, Stage::Codegen("c"));
+    assert!(matches!(error.what, UnsupportedKind::HostType(_)));
+    assert!(error.to_string().contains("function value"));
+}
