@@ -303,6 +303,27 @@ fn in_range_int8_named_callback_executes_exactly() {
     assert_eq!(line, "7");
 }
 
+/// Positive parity for the second pre-existing narrow scalar ABI. Callback
+/// projection must preserve the complete signature rather than widening or
+/// erasing it while closing first-class function values.
+#[test]
+fn in_range_int16_named_callback_executes_exactly() {
+    if !c_toolchain_available() {
+        return;
+    }
+    let program = "module M.Main\n\
+         def apply(f: int16 -> int16, x: int16) -> int16 = f(x)\n\
+         def increment(x: int16) -> int16 = add(x, cast(2, int16))\n\
+         out = print(apply(increment, cast(300, int16)))\n";
+    let (line, stderr, ok) = c_lane(program, "c_i16_named_callback").expect("C callback lane");
+    assert!(
+        ok,
+        "the emitted int16 callback must be callable; stdout `{line}`, stderr `{stderr}`"
+    );
+    common::assert_elements_in_domain("int16", &line, "i16 named callback C");
+    assert_eq!(line, "302");
+}
+
 /// A directly-constructed generic record must substitute its applied type
 /// before field access. The host boundary may not expose the declaration's
 /// `a` term as if it were a concrete field type.
