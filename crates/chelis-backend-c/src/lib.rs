@@ -7,6 +7,9 @@ pub mod host_emit;
 pub mod memory;
 pub mod toolchain;
 
+#[cfg(test)]
+mod host_abi_tests;
+
 /// Result of C code generation.
 pub struct CodegenResult {
     /// The generated C source code (includes `#include "chelis_runtime.h"`).

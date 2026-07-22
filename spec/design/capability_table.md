@@ -30,6 +30,15 @@ in [#729] glossed over: *what an op means* is target-independent, while
 checker accepts what eval rejects" ([#712]) and "Metal rejects rank-2 while
 C panics" ([#692]) coexisted. So:
 
+The same separation governs host types. `HostTypeTerm -> ConcreteHostType` is
+a logical/inference boundary and does not consult a backend. Exact primitive
+identity survives it. `ConcreteHostType -> HostAbiType` is a Table-B target
+query and returns `Unsupported` for `Unimplemented` or `RejectedByDesign`;
+there is no "unknown logical type" success case. In particular, f16, bf16,
+int8, and int16 are known logical scalar types even while their C-host ABI
+cells are unimplemented. A target must not answer that implementation gap by
+selecting int64, f32, `void *`, or a default emitted value.
+
 ### Table A - the semantic table (target-independent; the checker's law)
 
 One row per **(builtin, surface, dtype)**:
