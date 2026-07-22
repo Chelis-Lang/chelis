@@ -29,6 +29,15 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`opaque-domain-construction` repository linting is linear and honors
+  canonical skip filters (chelis#603).** The rule now prepares its Surf
+  declaration catalog once per `chelis_lint::lint` invocation from the main
+  walker's admitted entries, then reuses that immutable catalog for every
+  checked Surf file. It no longer starts an unfiltered `WalkDir` per file or
+  descends into `target/`, `.git/`, `.venv*`, dependency trees, agent
+  worktrees, and generated opaque-invariant programs. Prepared state remains
+  invocation-local so repeated `--fix` passes and reused rule objects observe
+  source edits without stale-cache behavior.
 - **Deep DAGs from the bounded unroll no longer overflow the stack in
   consumer passes (chelis#620 red team).** Lowering's per-level
   `stacker::maybe_grow` protected the unroll itself, but the passes that
