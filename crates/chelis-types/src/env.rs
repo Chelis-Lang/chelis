@@ -168,6 +168,14 @@ impl Env {
         self.bindings.insert(name, scheme);
     }
 
+    /// Remove a temporary inference binding before generalizing an SCC.
+    /// Recursive function components are prebound monomorphically while
+    /// their bodies are inferred, then all provisional members are removed
+    /// together so their resolved types can be generalized as one unit.
+    pub(crate) fn remove_binding(&mut self, name: &str) {
+        self.bindings.remove(name);
+    }
+
     /// Instantiate a polymorphic scheme with fresh variables.
     pub fn instantiate(&self, scheme: &Scheme, var_gen: &mut VarGen) -> Type {
         let mut subst = Subst::new();

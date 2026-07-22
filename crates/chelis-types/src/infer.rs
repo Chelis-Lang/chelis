@@ -1072,19 +1072,19 @@ pub struct CheckedProgram {
 }
 
 impl CheckedProgram {
-    pub fn from_parts(
+    pub fn try_from_parts(
         annotated_exprs: Vec<deep::Expr>,
         type_env: HashMap<String, deep::Expr>,
-    ) -> Self {
-        crate::session::checked_program_from_parts(annotated_exprs, type_env)
+    ) -> Result<Self, InferResult> {
+        crate::session::try_checked_program_from_parts(annotated_exprs, type_env)
     }
 
-    pub fn from_parts_with_signature_context(
+    pub fn try_from_parts_with_signature_context(
         annotated_exprs: Vec<deep::Expr>,
         type_env: HashMap<String, deep::Expr>,
         signature_context: &SignatureInferenceMetadata,
-    ) -> Self {
-        crate::session::checked_program_from_parts_with_signature_context(
+    ) -> Result<Self, InferResult> {
+        crate::session::try_checked_program_from_parts_with_signature_context(
             annotated_exprs,
             type_env,
             signature_context,
@@ -1199,7 +1199,10 @@ fn finalize_checked_program(
     };
 
     if errors.is_empty() {
-        let mut traces = annotated_totality_invariant_traces(checked.annotated_exprs());
+        let mut traces = totality_invariant_traces(signature_context);
+        traces.extend(annotated_totality_invariant_traces(
+            checked.annotated_exprs(),
+        ));
         traces.extend(totality_invariant_traces(checked.signature_inference()));
         if !traces.is_empty() {
             errors.push(totality_violation_error(&traces));
@@ -1324,34 +1327,67 @@ fn infer_program_with_product_in_session(
     // module-wrapped programs.
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
-    let inference_schedule = primary_inference_schedule(exprs, &items);
-    for declaration_index in inference_schedule {
-        let (module, expr) = &items[declaration_index];
-        product.begin_root(expr, errors);
-        let decl_name = top_level_decl_name(expr);
-        crate::opacity::set_current_item(
-            crate::opacity::module_key_for_item(module.as_deref(), decl_name),
-            decl_name.map(str::to_string),
-        );
-        infer_top_level(
-            expr,
-            &mut env,
-            &mut vg,
-            &mut subst,
-            &adt_reg,
-            errors,
-            &mut product,
-            None,
-            &user_def_names,
-            &declared_signatures,
-        );
-        product.finish_root(&subst, errors);
-        // Issue #256 round 2: re-check each deferred borrow against the
-        // now-complete substitution (see `validate_deferred_borrow_vars`).
-        validate_deferred_borrow_vars(&subst, &adt_reg, errors);
-        // D-CHECK: drain the per-def deferred-access ledger (see
-        // `validate_deferred_opaque_uses`).
-        validate_deferred_opaque_uses(&subst, &adt_reg, errors);
+    let inference_groups = primary_inference_groups(exprs, &items);
+    for group in inference_groups {
+        let provisional_types = if group.recursive {
+            prebind_recursive_function_schemes(
+                &group.indices,
+                &items,
+                &declared_signatures,
+                &mut env,
+                &mut vg,
+            )
+        } else {
+            HashMap::new()
+        };
+        let mut deferred_bindings = Vec::new();
+        for declaration_index in group.indices {
+            let (module, expr) = &items[declaration_index];
+            product.begin_root(expr, errors);
+            let decl_name = top_level_decl_name(expr);
+            crate::opacity::set_current_item(
+                crate::opacity::module_key_for_item(module.as_deref(), decl_name),
+                decl_name.map(str::to_string),
+            );
+            if let Some(binding) = infer_top_level(
+                expr,
+                &mut env,
+                &mut vg,
+                &mut subst,
+                &adt_reg,
+                errors,
+                &mut product,
+                None,
+                provisional_types.get(&declaration_index),
+                group.recursive,
+                &user_def_names,
+                &declared_signatures,
+            ) {
+                deferred_bindings.push(binding);
+            }
+            product.finish_root(&subst, errors);
+            // Issue #256 round 2: re-check each deferred borrow against the
+            // now-complete substitution (see `validate_deferred_borrow_vars`).
+            validate_deferred_borrow_vars(&subst, &adt_reg, errors);
+            // D-CHECK: drain the per-def deferred-access ledger (see
+            // `validate_deferred_opaque_uses`).
+            validate_deferred_opaque_uses(&subst, &adt_reg, errors);
+        }
+        if group.recursive {
+            for (name, _) in &deferred_bindings {
+                env.remove_binding(name);
+            }
+            let schemes = deferred_bindings
+                .into_iter()
+                .map(|(name, ty)| {
+                    let scheme = env.generalize(&ty, &subst);
+                    (name, scheme)
+                })
+                .collect::<Vec<_>>();
+            for (name, scheme) in schemes {
+                env.bind(name, scheme);
+            }
+        }
     }
     crate::opacity::set_current_item(None, None);
 
@@ -1439,8 +1475,6 @@ pub(crate) fn build_type_env_from_library_in_session(
     log_sub("validate_tensor_precisions", &mut sub_t);
     validate_polymorphic_op_constraints(library_exprs, &library_ir, errors);
     log_sub("validate_polymorphic_op_constraints", &mut sub_t);
-    suppress_unbound_for_cycle_members(library_exprs, errors);
-    log_sub("suppress_unbound_for_cycle", &mut sub_t);
     // Surface a stack-exhaustion bail from the passes above as a hard
     // located error before the gate (and before the errors drain below).
     stack_scope.drain_into(errors);
@@ -1532,8 +1566,7 @@ pub(crate) fn build_type_env_from_library_in_session(
 /// 1. Build the per-decl `IrTypeEnv` from un-annotated source.
 /// 2. Run `infer_ir_program_with_state` once, populating `state`.
 /// 3. Run all validators (`validate_ir_program`,
-///    `validate_tensor_precisions_in_program`,
-///    `suppress_unbound_for_cycle_members`).
+///    `validate_tensor_precisions_in_program`).
 /// 4. Annotate the library exprs once using the populated `state.env`.
 /// 5. Build `library_ir_annotated` from the annotated exprs.
 /// 6. Compose the `TypeEnv` from `state` + `library_ir_annotated`.
@@ -1574,7 +1607,6 @@ pub(crate) fn build_compiled_library_context_in_session(
     validate_tensor_precisions_in_program(library_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
     validate_polymorphic_op_constraints(library_exprs, &library_ir, errors);
-    suppress_unbound_for_cycle_members(library_exprs, errors);
     // Surface any stack-exhaustion bail from the passes above as a hard
     // located error (covered-or-rejected) before the empty-errors gate.
     stack_scope.drain_into(errors);
@@ -1723,11 +1755,6 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
     validate_tensor_precisions_in_program(library_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
     validate_polymorphic_op_constraints(library_exprs, &combined_ir, errors);
-    suppress_unbound_for_cycle_members_against_context(
-        library_exprs,
-        &base.inner().library_def_names,
-        errors,
-    );
     // Surface any stack-exhaustion bail from the passes above as a hard
     // located error (covered-or-rejected) before the empty-errors gate.
     stack_scope.drain_into(errors);
@@ -1907,12 +1934,6 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     log_sub("validate_tensor_precisions", &mut sub_t);
     validate_polymorphic_op_constraints(new_exprs, &combined_ir, errors);
     log_sub("validate_polymorphic_op_constraints", &mut sub_t);
-    suppress_unbound_for_cycle_members_against_context(
-        new_exprs,
-        &context.inner().library_def_names,
-        errors,
-    );
-    log_sub("suppress_unbound_for_cycle", &mut sub_t);
     // Surface any stack-exhaustion bail from the passes above as a hard
     // located error (covered-or-rejected) before the empty-errors gate.
     stack_scope.drain_into(errors);
@@ -2003,79 +2024,9 @@ pub(crate) fn infer_ir_program_in_session(
     validate_tensor_precisions_in_program(exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(exprs, errors);
     validate_polymorphic_op_constraints(exprs, &type_env, errors);
-    suppress_unbound_for_cycle_members(exprs, errors);
     // Surface any walker stack bail as a hard located error.
     stack_scope.drain_into(errors);
     stats
-}
-
-/// When a binding cycle is detected, the inference pass that processed
-/// the cycle in textual order often reports `UnboundVariable` for the
-/// later cycle members (the lookup landed before the subsequent def was
-/// elaborated). Those errors are spurious noise — the names ARE defined,
-/// they're just circularly. Drop any `UnboundVariable` whose name matches
-/// a top-level def.
-fn suppress_unbound_for_cycle_members(exprs: &[deep::Expr], errors: &mut DiagnosticSink<'_>) {
-    let mut def_names: HashSet<String> = HashSet::new();
-    for expr in top_level_decl_items(exprs) {
-        if let deep::Expr::List(list, _) = expr
-            && get_tag(list) == Some("def")
-            && let Some(name) = children(list).first().and_then(symbol_name)
-        {
-            def_names.insert(name.to_string());
-        }
-    }
-    errors.retain(|err| {
-        if !matches!(err.kind, CheckErrorKind::UnboundVariable) {
-            return true;
-        }
-        let name_start = match err.message.find("unbound variable: ") {
-            Some(start) => start + "unbound variable: ".len(),
-            None => return true,
-        };
-        let name = err.message[name_start..]
-            .split_whitespace()
-            .next()
-            .unwrap_or("");
-        !def_names.contains(name)
-    });
-}
-
-/// Stacked-context variant of `suppress_unbound_for_cycle_members`.
-///
-/// Drops `UnboundVariable` errors whose name matches either a new-code
-/// def OR a library def — the latter is needed because a library def
-/// referenced from the new code might temporarily look unbound during
-/// inference if the inferred error path runs before the env scheme
-/// lookup, but the name IS in the library context.
-fn suppress_unbound_for_cycle_members_against_context(
-    new_exprs: &[deep::Expr],
-    library_def_names: &HashSet<String>,
-    errors: &mut DiagnosticSink<'_>,
-) {
-    let mut def_names: HashSet<String> = library_def_names.clone();
-    for expr in top_level_decl_items(new_exprs) {
-        if let deep::Expr::List(list, _) = expr
-            && get_tag(list) == Some("def")
-            && let Some(name) = children(list).first().and_then(symbol_name)
-        {
-            def_names.insert(name.to_string());
-        }
-    }
-    errors.retain(|err| {
-        if !matches!(err.kind, CheckErrorKind::UnboundVariable) {
-            return true;
-        }
-        let name_start = match err.message.find("unbound variable: ") {
-            Some(start) => start + "unbound variable: ".len(),
-            None => return true,
-        };
-        let name = err.message[name_start..]
-            .split_whitespace()
-            .next()
-            .unwrap_or("");
-        !def_names.contains(name)
-    });
 }
 
 fn infer_ir_program_with_env(
@@ -2181,46 +2132,79 @@ fn infer_ir_program_with_state(
         .unwrap_or(false);
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
-    let inference_schedule = primary_inference_schedule(exprs, &items);
-    for declaration_index in inference_schedule {
-        let (module, expr) = &items[declaration_index];
-        product.begin_root(expr, errors);
-        let t0 = if detail_profile {
-            Some(std::time::Instant::now())
+    let inference_groups = primary_inference_groups(exprs, &items);
+    for group in inference_groups {
+        let provisional_types = if group.recursive {
+            prebind_recursive_function_schemes(
+                &group.indices,
+                &items,
+                &declared_signatures,
+                &mut state.env,
+                &mut state.var_gen,
+            )
         } else {
-            None
+            HashMap::new()
         };
-        let decl_name = top_level_decl_name(expr);
-        crate::opacity::set_current_item(
-            crate::opacity::module_key_for_item(module.as_deref(), decl_name),
-            decl_name.map(str::to_string),
-        );
-        infer_top_level(
-            expr,
-            &mut state.env,
-            &mut state.var_gen,
-            &mut state.subst,
-            &state.adt_reg,
-            errors,
-            &mut product,
-            prebound_type_failures.get(&declaration_index),
-            &user_def_names,
-            &declared_signatures,
-        );
-        product.finish_root(&state.subst, errors);
-        if let Some(t0) = t0 {
-            let elapsed = t0.elapsed();
-            let name = top_level_decl_name(expr).unwrap_or("<anon>");
-            eprintln!("infer_ir_decl: {:>8.4}s {}", elapsed.as_secs_f64(), name);
+        let mut deferred_bindings = Vec::new();
+        for declaration_index in group.indices {
+            let (module, expr) = &items[declaration_index];
+            product.begin_root(expr, errors);
+            let t0 = if detail_profile {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
+            let decl_name = top_level_decl_name(expr);
+            crate::opacity::set_current_item(
+                crate::opacity::module_key_for_item(module.as_deref(), decl_name),
+                decl_name.map(str::to_string),
+            );
+            if let Some(binding) = infer_top_level(
+                expr,
+                &mut state.env,
+                &mut state.var_gen,
+                &mut state.subst,
+                &state.adt_reg,
+                errors,
+                &mut product,
+                prebound_type_failures.get(&declaration_index),
+                provisional_types.get(&declaration_index),
+                group.recursive,
+                &user_def_names,
+                &declared_signatures,
+            ) {
+                deferred_bindings.push(binding);
+            }
+            product.finish_root(&state.subst, errors);
+            if let Some(t0) = t0 {
+                let elapsed = t0.elapsed();
+                let name = top_level_decl_name(expr).unwrap_or("<anon>");
+                eprintln!("infer_ir_decl: {:>8.4}s {}", elapsed.as_secs_f64(), name);
+            }
+            // Issue #256 round 2: drain the deferred-borrow ledger for this
+            // def and re-check each recorded variable against the now-complete
+            // substitution. Draining per-def keeps error attribution local and
+            // prevents one def's deferrals from leaking into the next.
+            validate_deferred_borrow_vars(&state.subst, &state.adt_reg, errors);
+            // D-CHECK: drain the per-def deferred-access ledger (see
+            // `validate_deferred_opaque_uses`).
+            validate_deferred_opaque_uses(&state.subst, &state.adt_reg, errors);
         }
-        // Issue #256 round 2: drain the deferred-borrow ledger for this
-        // def and re-check each recorded variable against the now-complete
-        // substitution. Draining per-def keeps error attribution local and
-        // prevents one def's deferrals from leaking into the next.
-        validate_deferred_borrow_vars(&state.subst, &state.adt_reg, errors);
-        // D-CHECK: drain the per-def deferred-access ledger (see
-        // `validate_deferred_opaque_uses`).
-        validate_deferred_opaque_uses(&state.subst, &state.adt_reg, errors);
+        if group.recursive {
+            for (name, _) in &deferred_bindings {
+                state.env.remove_binding(name);
+            }
+            let schemes = deferred_bindings
+                .into_iter()
+                .map(|(name, ty)| {
+                    let scheme = state.env.generalize(&ty, &state.subst);
+                    (name, scheme)
+                })
+                .collect::<Vec<_>>();
+            for (name, scheme) in schemes {
+                state.env.bind(name, scheme);
+            }
+        }
     }
     crate::opacity::set_current_item(None, None);
 
@@ -2294,6 +2278,110 @@ fn primary_inference_schedule(
         }
     }
     schedule
+}
+
+#[derive(Debug)]
+struct PrimaryInferenceGroup {
+    indices: Vec<usize>,
+    recursive: bool,
+}
+
+/// Group the flat primary schedule into recursive SCC inference units.
+/// Acyclic bare functions stay in textual order; acyclic module functions
+/// retain dependency order. Only a genuine recursive component is grouped
+/// and prebound, so a bare acyclic forward helper remains unavailable.
+fn primary_inference_groups(
+    exprs: &[deep::Expr],
+    items: &[(Option<String>, &deep::Expr)],
+) -> Vec<PrimaryInferenceGroup> {
+    let schedule = primary_inference_schedule(exprs, items);
+    let item_by_key = items
+        .iter()
+        .enumerate()
+        .map(|(index, (_, expr))| (expr_key(expr), index))
+        .collect::<HashMap<_, _>>();
+    let recursive_components = function_inference_sccs(exprs)
+        .into_iter()
+        .filter(|component| component.recursive)
+        .map(|component| {
+            component
+                .members
+                .into_iter()
+                .filter_map(|expr| item_by_key.get(&expr_key(expr)).copied())
+                .collect::<Vec<_>>()
+        })
+        .filter(|indices| !indices.is_empty())
+        .collect::<Vec<_>>();
+    let mut component_by_index = HashMap::new();
+    for (component_index, indices) in recursive_components.iter().enumerate() {
+        for index in indices {
+            component_by_index.insert(*index, component_index);
+        }
+    }
+
+    let mut emitted_components = HashSet::new();
+    let mut groups = Vec::new();
+    for index in schedule {
+        let Some(component_index) = component_by_index.get(&index).copied() else {
+            groups.push(PrimaryInferenceGroup {
+                indices: vec![index],
+                recursive: false,
+            });
+            continue;
+        };
+        if emitted_components.insert(component_index) {
+            groups.push(PrimaryInferenceGroup {
+                indices: recursive_components[component_index].clone(),
+                recursive: true,
+            });
+        }
+    }
+    groups
+}
+
+/// Install monomorphic arity-shaped types for the un-signed members of one
+/// recursive SCC. The component is removed and generalized as a unit after
+/// every body has unified with its provisional type.
+fn prebind_recursive_function_schemes(
+    indices: &[usize],
+    items: &[(Option<String>, &deep::Expr)],
+    declared_signatures: &HashMap<String, DeclaredSigMetadata>,
+    env: &mut Env,
+    vg: &mut VarGen,
+) -> HashMap<usize, Type> {
+    let mut provisional = HashMap::new();
+    for index in indices {
+        let expr = items[*index].1;
+        let deep::Expr::List(list, _) = expr else {
+            continue;
+        };
+        let kids = children(list);
+        let (Some(name), Some(fn_list)) = (
+            kids.first().and_then(symbol_name),
+            kids.get(1).and_then(as_tagged_list_expr("fn")),
+        ) else {
+            continue;
+        };
+        if declared_signatures.contains_key(name) {
+            continue;
+        }
+        let Some(params) = children(fn_list).first() else {
+            continue;
+        };
+        let arity = match params {
+            deep::Expr::List(params, _) if get_tag(params) == Some("params") => {
+                children(params).len()
+            }
+            _ => continue,
+        };
+        let ty = Type::Fn(
+            (0..arity).map(|_| vg.fresh_type()).collect(),
+            Box::new(vg.fresh_type()),
+        );
+        env.bind(name.to_string(), Scheme::mono(ty.clone()));
+        provisional.insert(*index, ty);
+    }
+    provisional
 }
 
 type IrTypeEnv = HashMap<String, deep::Expr>;
@@ -2996,7 +3084,17 @@ fn signature_metadata_type_headers(exprs: &[deep::Expr]) -> TypeResolutionEnv {
     )
 }
 
-fn signature_inference_def_order(exprs: &[deep::Expr]) -> Vec<&deep::Expr> {
+struct FunctionInferenceComponent<'a> {
+    members: Vec<&'a deep::Expr>,
+    recursive: bool,
+}
+
+/// Canonical dependency/SCC planner for top-level function declarations.
+/// Components are returned callee-first; member order within one SCC remains
+/// source order. Primary module scheduling and signature inference both
+/// consume this plan, while bare acyclic primary inference deliberately keeps
+/// its historical textual order.
+fn function_inference_sccs(exprs: &[deep::Expr]) -> Vec<FunctionInferenceComponent<'_>> {
     let def_items = top_level_decl_items(exprs)
         .into_iter()
         .filter_map(|expr| {
@@ -3015,10 +3113,6 @@ fn signature_inference_def_order(exprs: &[deep::Expr]) -> Vec<&deep::Expr> {
         .iter()
         .map(|(name, _)| name.clone())
         .collect::<HashSet<_>>();
-    let def_by_name = def_items
-        .iter()
-        .map(|(name, expr)| (name.clone(), *expr))
-        .collect::<HashMap<_, _>>();
     let mut graph = HashMap::<String, HashSet<String>>::new();
     for (name, expr) in &def_items {
         let deep::Expr::List(list, _) = expr else {
@@ -3042,45 +3136,101 @@ fn signature_inference_def_order(exprs: &[deep::Expr]) -> Vec<&deep::Expr> {
         graph.insert(name.clone(), calls);
     }
 
-    fn visit<'a>(
-        name: &str,
-        graph: &HashMap<String, HashSet<String>>,
-        def_by_name: &HashMap<String, &'a deep::Expr>,
-        visiting: &mut HashSet<String>,
-        visited: &mut HashSet<String>,
-        out: &mut Vec<&'a deep::Expr>,
-    ) {
-        if visited.contains(name) || !visiting.insert(name.to_string()) {
-            return;
+    let mut assigned = HashSet::new();
+    let mut unordered = Vec::<FunctionInferenceComponent<'_>>::new();
+    for (name, _) in &def_items {
+        if assigned.contains(name) {
+            continue;
         }
-        if let Some(callees) = graph.get(name) {
-            let mut callees = callees.iter().collect::<Vec<_>>();
-            callees.sort();
-            for callee in callees {
-                visit(callee, graph, def_by_name, visiting, visited, out);
+        let member_names = def_items
+            .iter()
+            .filter_map(|(candidate, _)| {
+                let same_component = candidate == name
+                    || (reaches_name(candidate, name, &graph, &mut HashSet::new())
+                        && reaches_name(name, candidate, &graph, &mut HashSet::new()));
+                same_component.then_some(candidate.clone())
+            })
+            .collect::<HashSet<_>>();
+        assigned.extend(member_names.iter().cloned());
+        let members = def_items
+            .iter()
+            .filter_map(|(candidate, expr)| member_names.contains(candidate).then_some(*expr))
+            .collect::<Vec<_>>();
+        let recursive = members.len() > 1
+            || graph
+                .get(name)
+                .is_some_and(|callees| callees.contains(name));
+        unordered.push(FunctionInferenceComponent { members, recursive });
+    }
+
+    let mut component_by_name = HashMap::new();
+    for (component_index, component) in unordered.iter().enumerate() {
+        for expr in &component.members {
+            if let deep::Expr::List(list, _) = expr
+                && let Some(name) = children(list).first().and_then(symbol_name)
+            {
+                component_by_name.insert(name.to_string(), component_index);
             }
         }
-        visiting.remove(name);
-        visited.insert(name.to_string());
-        if let Some(expr) = def_by_name.get(name) {
-            out.push(*expr);
+    }
+    let mut component_graph = vec![HashSet::<usize>::new(); unordered.len()];
+    for (caller, callees) in &graph {
+        let Some(caller_component) = component_by_name.get(caller).copied() else {
+            continue;
+        };
+        for callee in callees {
+            if let Some(callee_component) = component_by_name.get(callee).copied()
+                && callee_component != caller_component
+            {
+                component_graph[caller_component].insert(callee_component);
+            }
         }
     }
 
-    let mut out = Vec::new();
+    fn visit_component(
+        component: usize,
+        graph: &[HashSet<usize>],
+        visiting: &mut HashSet<usize>,
+        visited: &mut HashSet<usize>,
+        out: &mut Vec<usize>,
+    ) {
+        if visited.contains(&component) || !visiting.insert(component) {
+            return;
+        }
+        let mut dependencies = graph[component].iter().copied().collect::<Vec<_>>();
+        dependencies.sort_unstable();
+        for dependency in dependencies {
+            visit_component(dependency, graph, visiting, visited, out);
+        }
+        visiting.remove(&component);
+        visited.insert(component);
+        out.push(component);
+    }
+
+    let mut order = Vec::new();
     let mut visiting = HashSet::new();
     let mut visited = HashSet::new();
-    for (name, _) in &def_items {
-        visit(
-            name,
-            &graph,
-            &def_by_name,
+    for component in 0..unordered.len() {
+        visit_component(
+            component,
+            &component_graph,
             &mut visiting,
             &mut visited,
-            &mut out,
+            &mut order,
         );
     }
-    out
+    let mut slots = unordered.into_iter().map(Some).collect::<Vec<_>>();
+    order
+        .into_iter()
+        .filter_map(|index| slots[index].take())
+        .collect()
+}
+
+fn signature_inference_def_order(exprs: &[deep::Expr]) -> Vec<&deep::Expr> {
+    function_inference_sccs(exprs)
+        .into_iter()
+        .flat_map(|component| component.members)
+        .collect()
 }
 
 fn collect_defsig_names(exprs: &[deep::Expr]) -> HashSet<String> {
@@ -3097,59 +3247,17 @@ fn collect_defsig_names(exprs: &[deep::Expr]) -> HashSet<String> {
 }
 
 fn recursive_call_cycle_members(exprs: &[deep::Expr]) -> HashSet<String> {
-    let mut def_names = HashSet::new();
-    let mut graph: HashMap<String, HashSet<String>> = HashMap::new();
-
-    for expr in top_level_decl_items(exprs) {
-        if let deep::Expr::List(list, _) = expr
-            && get_tag(list) == Some("def")
-            && let Some(name) = children(list).first().and_then(symbol_name)
-            && children(list)
-                .get(1)
-                .and_then(as_tagged_list_expr("fn"))
-                .is_some()
-        {
-            def_names.insert(name.to_string());
-        }
-    }
-
-    for expr in top_level_decl_items(exprs) {
-        let deep::Expr::List(list, _) = expr else {
-            continue;
-        };
-        if get_tag(list) != Some("def") {
-            continue;
-        }
-        let kids = children(list);
-        let Some(name) = kids.first().and_then(symbol_name) else {
-            continue;
-        };
-        let Some(fn_list) = kids.get(1).and_then(as_tagged_list_expr("fn")) else {
-            continue;
-        };
-        let fn_kids = children(fn_list);
-        let Some(params) = fn_kids.first() else {
-            continue;
-        };
-        let Some(body) = fn_kids.get(1) else {
-            continue;
-        };
-        let mut bound = vec![
-            param_source_infos(params)
-                .into_iter()
-                .map(|(n, _)| n)
-                .collect(),
-        ];
-        let mut calls = HashSet::new();
-        collect_top_level_calls(body, &def_names, &mut bound, &mut calls);
-        graph.insert(name.to_string(), calls);
-    }
-
     let mut recursive = HashSet::new();
-    for name in &def_names {
-        let mut visited = HashSet::new();
-        if reaches_name(name, name, &graph, &mut visited) {
-            recursive.insert(name.clone());
+    for component in function_inference_sccs(exprs) {
+        if !component.recursive {
+            continue;
+        }
+        for expr in component.members {
+            if let deep::Expr::List(list, _) = expr
+                && let Some(name) = children(list).first().and_then(symbol_name)
+            {
+                recursive.insert(name.to_string());
+            }
         }
     }
     recursive
@@ -9330,22 +9438,24 @@ fn infer_top_level(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
     prebound_type_failure: Option<&ErrorWitness>,
+    provisional_recursive_type: Option<&Type>,
+    defer_recursive_binding: bool,
     user_def_names: &HashSet<String>,
     declared_signatures: &HashMap<String, DeclaredSigMetadata>,
-) {
+) -> Option<(String, Type)> {
     let list = match expr {
         deep::Expr::List(list, _) => list,
-        _ => return,
+        _ => return None,
     };
 
     let tag = match get_tag(list) {
         Some(t) => t,
-        None => return,
+        None => return None,
     };
 
     // Skip deftype/defsig/typealias (already processed in first pass)
     if tag == "deftype" || tag == "defsig" || tag == "typealias" {
-        return;
+        return None;
     }
 
     let kids = children(list);
@@ -9353,13 +9463,15 @@ fn infer_top_level(
     if tag == "def" && kids.len() >= 2 {
         let name = match symbol_name(&kids[0]) {
             Some(n) => n.to_string(),
-            None => return,
+            None => return None,
         };
 
         // Save declared type from defsig BEFORE inferring (it may get overwritten)
-        let declared_ty = env.lookup(&name).map(|s| {
-            let s = s.clone();
-            env.instantiate(&s, vg)
+        let declared_ty = declared_signatures.get(&name).and_then(|_| {
+            env.lookup(&name).map(|s| {
+                let s = s.clone();
+                env.instantiate(&s, vg)
+            })
         });
         // A declaration's signature owns the only named binders legal in its
         // nested source annotations. Infer against a lexical clone so the
@@ -9604,11 +9716,15 @@ fn infer_top_level(
             // wildcards (the RT-39+44 soundness boundary, commit 8067c9ce).
             let param_dvars = param_bound_dvars(&resolved_decl);
             narrow_wildcards_with(&resolved_body, &resolved_decl, &param_dvars)
+        } else if let Some(provisional) = provisional_recursive_type {
+            if let Err(error) = unify(&body_ty, provisional, subst) {
+                errors.push(error.into());
+            }
+            subst.apply(provisional)
         } else {
             body_ty
         };
 
-        let scheme = env.generalize(&scheme_body, subst);
         // chelis#397/#469: record the size provenance of a top-level value
         // binding (e.g. `zero_count = sub(cast(0, int32), cast(0, int32))`)
         // BEFORE binding it, so a later `expand(b, 0, zero_count)` recovers
@@ -9627,10 +9743,17 @@ fn infer_top_level(
         }
         // chelis#631: same discipline for list-literal lengths.
         note_list_literal_binding(env, &name, &kids[1]);
-        env.bind(name, scheme);
+        if defer_recursive_binding {
+            Some((name, scheme_body))
+        } else {
+            let scheme = env.generalize(&scheme_body, subst);
+            env.bind(name, scheme);
+            None
+        }
     } else {
         // Any other top-level expression
         let _ = infer_expr(expr, env, vg, subst, adt_reg, errors, product);
+        None
     }
 }
 

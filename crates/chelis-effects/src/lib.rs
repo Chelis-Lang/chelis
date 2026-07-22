@@ -2,14 +2,15 @@ use std::collections::{HashMap, HashSet};
 
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
-use chelis_types::CheckedProgram;
 use chelis_types::types::{Effect, EffectSet};
+use chelis_types::{CheckedProgram, InferResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EffectErrorKind {
     UnhandledEffect,
     InvalidHandler,
     BuildTargetMismatch,
+    TypeTotality,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,10 +52,12 @@ pub fn check_program(program: &CheckedProgram) -> Result<CheckedProgram, Vec<Eff
     validate_declared_vs_inferred(&annotated_exprs, &effects_by_def, &mut errors);
 
     if errors.is_empty() {
-        Ok(CheckedProgram::from_parts(
+        CheckedProgram::try_from_parts_with_signature_context(
             annotated_exprs,
             program.type_env().clone(),
-        ))
+            program.signature_inference(),
+        )
+        .map_err(type_totality_errors)
     } else {
         Err(errors)
     }
@@ -119,13 +122,35 @@ pub fn check_effects_with_context(
     validate_declared_vs_inferred(&annotated_exprs, &effects_by_def, &mut errors);
 
     if errors.is_empty() {
-        Ok(CheckedProgram::from_parts(
+        CheckedProgram::try_from_parts_with_signature_context(
             annotated_exprs,
             new_program.type_env().clone(),
-        ))
+            new_program.signature_inference(),
+        )
+        .map_err(type_totality_errors)
     } else {
         Err(errors)
     }
+}
+
+fn type_totality_errors(result: InferResult) -> Vec<EffectError> {
+    if result.errors.is_empty() {
+        return vec![EffectError {
+            kind: EffectErrorKind::TypeTotality,
+            message: "internal: checked-program reconstruction failed without a type diagnostic"
+                .to_string(),
+            suggestions: vec![],
+        }];
+    }
+    result
+        .errors
+        .into_iter()
+        .map(|error| EffectError {
+            kind: EffectErrorKind::TypeTotality,
+            message: error.message,
+            suggestions: error.suggestions,
+        })
+        .collect()
 }
 
 /// Validate that the program's target-relevant constructs are admissible
@@ -1040,10 +1065,7 @@ mod tests {
 
     #[test]
     fn effect_annotation_reconstruction_preserves_type_context() {
-        let decls = parse_surf(
-            "def add_one(x: int32) -> int32 = add(x, 1)",
-        )
-        .expect("surf parse");
+        let decls = parse_surf("def add_one(x: int32) -> int32 = add(x, 1)").expect("surf parse");
         let deep = desugar_program(&decls);
         let typed = chelis_types::check_ir_program(&deep).expect("type check");
         let expected_type_env = typed.type_env().clone();
