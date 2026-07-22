@@ -1,76 +1,197 @@
-//! `EmittedExpr` - the C-expression payload newtype (chelis#730 Phase 2,
-//! section C3 / C4.2 of `spec/design/loud_unsupported.md`).
+//! Structured C-expression vocabulary for chelis#730 Phase 2.
 //!
-//! The C host emitter builds expression fragments as text. Before this
-//! newtype, an expression builder returned a bare `String`, so ANY string
-//! was a legal emission - including the audit's silent
-//! `/* unsupported builtin ... */ 0` stub (census row 2).
-//! Phase 1 converted that terminal to `Err(Unsupported)`; Phase 2 removes
-//! the *ability* to reintroduce it.
+//! The host emitter may compose identifiers, literals, calls, and operators;
+//! it cannot inject an arbitrary C string and call it an expression.  Open-set
+//! dispatch therefore has only two outcomes: construct this closed AST, or
+//! return `Err(Unsupported)`.  Rendering happens after construction.
 //!
-//! [`EmittedExpr`] is a newtype over `String` whose only constructor,
-//! [`EmittedExpr::raw`], is `pub(crate)`. Outside `chelis-backend-c` an
-//! `EmittedExpr` cannot be built from an arbitrary string at all (there is
-//! no public constructor, no `From<String>`, no `Default`), so an
-//! expression payload can only originate inside the emitter. Inside the
-//! crate, `raw` exists for the legitimate template snippets the arms of
-//! `assign_builtin` build, and the response to an UNMATCHED builtin is not
-//! an `EmittedExpr` at all - it is `Err(Unsupported)`. The stub is
-//! unwritable, not merely unfashionable (section C3, "The `EmittedExpr`
-//! rule").
-//!
-//! # The unsupported stub is unwritable outside the crate
-//!
-//! ```compile_fail
-//! // `EmittedExpr::raw` is pub(crate): an out-of-crate caller cannot
-//! // fabricate an emission payload from a raw stub string. This block is
-//! // a `compile_fail` doctest - it is a PASS iff it does NOT compile.
-//! use chelis_backend_c::emitted_expr::EmittedExpr;
-//! let _stub = EmittedExpr::raw("/* unsupported builtin */ 0;".to_string());
-//! ```
-//!
-//! And there is no public constructor of any other name either:
+//! The representation is intentionally opaque outside this crate:
 //!
 //! ```compile_fail
 //! use chelis_backend_c::emitted_expr::EmittedExpr;
-//! // No `From<String>`, no `new`, no `Default` - the type cannot be
-//! // constructed from text outside `chelis-backend-c`.
-//! let _stub: EmittedExpr = "/* unsupported builtin */ 0;".to_string().into();
+//! let _: EmittedExpr = "/* unsupported builtin */ 0".to_string().into();
 //! ```
 
 use std::fmt;
 
-/// A single C-expression payload produced by the host emitter.
-///
-/// Wraps the emitted C text. Constructed only inside `chelis-backend-c`
-/// via [`EmittedExpr::raw`]; read back with [`EmittedExpr::as_c`] or
-/// `Display`. The unsupported path never produces one - it returns
-/// `Err(chelis_types::unsupported::Unsupported)`.
+/// A validated C identifier used by an expression node.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EmittedExpr(String);
+struct CIdentifier(String);
+
+impl CIdentifier {
+    fn new(identifier: impl Into<String>) -> Self {
+        let identifier = identifier.into();
+        assert!(
+            is_c_identifier(&identifier),
+            "emitted C identifier is not lexical C: {identifier:?}"
+        );
+        Self(identifier)
+    }
+}
+
+fn is_c_identifier(identifier: &str) -> bool {
+    let mut chars = identifier.chars();
+    chars
+        .next()
+        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BinaryOperator {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Remainder,
+    Less,
+    Greater,
+    GreaterEqual,
+    LessEqual,
+    Equal,
+    NotEqual,
+    LogicalAnd,
+    LogicalOr,
+}
+
+impl BinaryOperator {
+    fn spelling(self) -> &'static str {
+        match self {
+            Self::Add => "+",
+            Self::Subtract => "-",
+            Self::Multiply => "*",
+            Self::Divide => "/",
+            Self::Remainder => "%",
+            Self::Less => "<",
+            Self::Greater => ">",
+            Self::GreaterEqual => ">=",
+            Self::LessEqual => "<=",
+            Self::Equal => "==",
+            Self::NotEqual => "!=",
+            Self::LogicalAnd => "&&",
+            Self::LogicalOr => "||",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnaryOperator {
+    Negate,
+    LogicalNot,
+}
+
+impl UnaryOperator {
+    fn spelling(self) -> &'static str {
+        match self {
+            Self::Negate => "-",
+            Self::LogicalNot => "!",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CExpression {
+    Identifier(CIdentifier),
+    Integer(i64),
+    Call {
+        function: CIdentifier,
+        args: Vec<EmittedExpr>,
+    },
+    Binary {
+        operator: BinaryOperator,
+        lhs: Box<EmittedExpr>,
+        rhs: Box<EmittedExpr>,
+    },
+    Unary {
+        operator: UnaryOperator,
+        operand: Box<EmittedExpr>,
+    },
+    Conditional {
+        condition: Box<EmittedExpr>,
+        then_expr: Box<EmittedExpr>,
+        else_expr: Box<EmittedExpr>,
+    },
+}
+
+/// A C expression that was constructed from the closed node vocabulary.
+///
+/// There is deliberately no `raw`, `new(String)`, `From<String>`, or
+/// `Default` implementation.  An unsupported dispatch arm cannot construct a
+/// plausible expression payload ([05-UNS-1], chelis#730 C3/C4.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmittedExpr(CExpression);
 
 impl EmittedExpr {
-    /// Wrap a raw C-expression template snippet.
-    ///
-    /// `pub(crate)` by design (section C3): the legitimate `assign_builtin`
-    /// arms build their fragments through here, but no code outside the
-    /// emitter can turn an arbitrary string - least of all an `unsupported`
-    /// stub - into an emission. Section C4.2's lint and the Phase 0
-    /// tripwire (the stub-zero token class) patrol the in-crate use sites;
-    /// the type system closes the out-of-crate door.
-    pub(crate) fn raw(text: String) -> Self {
-        EmittedExpr(text)
+    pub(crate) fn identifier(identifier: impl Into<String>) -> Self {
+        Self(CExpression::Identifier(CIdentifier::new(identifier)))
     }
 
-    /// Borrow the emitted C text for interpolation into a statement.
-    pub(crate) fn as_c(&self) -> &str {
-        &self.0
+    pub(crate) fn integer(value: i64) -> Self {
+        Self(CExpression::Integer(value))
+    }
+
+    pub(crate) fn call(function: &'static str, args: impl IntoIterator<Item = Self>) -> Self {
+        Self(CExpression::Call {
+            function: CIdentifier::new(function),
+            args: args.into_iter().collect(),
+        })
+    }
+
+    pub(crate) fn binary(operator: BinaryOperator, lhs: Self, rhs: Self) -> Self {
+        Self(CExpression::Binary {
+            operator,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        })
+    }
+
+    pub(crate) fn unary(operator: UnaryOperator, operand: Self) -> Self {
+        Self(CExpression::Unary {
+            operator,
+            operand: Box::new(operand),
+        })
+    }
+
+    pub(crate) fn conditional(condition: Self, then_expr: Self, else_expr: Self) -> Self {
+        Self(CExpression::Conditional {
+            condition: Box::new(condition),
+            then_expr: Box::new(then_expr),
+            else_expr: Box::new(else_expr),
+        })
+    }
+
+    pub(crate) fn as_c(&self) -> String {
+        self.to_string()
     }
 }
 
 impl fmt::Display for EmittedExpr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        match &self.0 {
+            CExpression::Identifier(identifier) => f.write_str(&identifier.0),
+            CExpression::Integer(value) => write!(f, "{value}"),
+            CExpression::Call { function, args } => {
+                write!(f, "{}(", function.0)?;
+                for (index, arg) in args.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{arg}")?;
+                }
+                f.write_str(")")
+            }
+            CExpression::Binary { operator, lhs, rhs } => {
+                write!(f, "({lhs} {} {rhs})", operator.spelling())
+            }
+            CExpression::Unary { operator, operand } => {
+                write!(f, "({}{operand})", operator.spelling())
+            }
+            CExpression::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+            } => write!(f, "({condition} ? {then_expr} : {else_expr})"),
+        }
     }
 }
 
@@ -79,19 +200,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn raw_round_trips_the_text() {
-        let expr = EmittedExpr::raw("a + b".to_string());
-        assert_eq!(expr.as_c(), "a + b");
-        assert_eq!(expr.to_string(), "a + b");
+    fn structured_tree_renders_only_after_construction() {
+        let expr = EmittedExpr::call(
+            "floor",
+            [EmittedExpr::binary(
+                BinaryOperator::Divide,
+                EmittedExpr::identifier("a"),
+                EmittedExpr::identifier("b"),
+            )],
+        );
+        assert_eq!(expr.as_c(), "floor((a / b))");
     }
 
     #[test]
-    fn is_a_thin_newtype_over_string() {
-        // The wrapper carries exactly its String and nothing else, so it is
-        // a zero-overhead emission boundary, not a behavior change.
-        assert_eq!(
-            std::mem::size_of::<EmittedExpr>(),
-            std::mem::size_of::<String>()
+    fn operator_precedence_is_explicit_in_rendering() {
+        let expr = EmittedExpr::binary(
+            BinaryOperator::Multiply,
+            EmittedExpr::binary(
+                BinaryOperator::Add,
+                EmittedExpr::identifier("a"),
+                EmittedExpr::identifier("b"),
+            ),
+            EmittedExpr::identifier("c"),
         );
+        assert_eq!(expr.as_c(), "((a + b) * c)");
+    }
+
+    #[test]
+    #[should_panic(expected = "not lexical C")]
+    fn arbitrary_c_text_cannot_launder_through_identifier_node() {
+        let _ = EmittedExpr::identifier("/* unsupported */ 0");
+    }
+
+    #[test]
+    fn structured_vocabulary_has_no_raw_expression_node_or_constructor() {
+        let source = include_str!("emitted_expr.rs");
+        assert!(!source.contains(&["CExpression::", "Raw"].concat()));
+        assert!(!source.contains(&["fn ", "raw("].concat()));
+        assert!(!source.contains(&["From<", "String> for EmittedExpr"].concat()));
     }
 }
