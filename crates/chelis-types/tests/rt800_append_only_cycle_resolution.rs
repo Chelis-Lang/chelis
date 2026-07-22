@@ -78,7 +78,11 @@ fn genuinely_unknown_callable_still_reports_exactly_once() {
             )
         })
         .collect::<Vec<_>>();
-    assert_eq!(unbound.len(), 1, "unknown root owns one diagnostic: {result:?}");
+    assert_eq!(
+        unbound.len(),
+        1,
+        "unknown root owns one diagnostic: {result:?}"
+    );
     assert!(unbound[0].message.contains("missing"));
 }
 
@@ -95,13 +99,22 @@ def use_bool() = identity(true)
 
 #[test]
 fn bare_acyclic_later_helper_remains_textually_unavailable() {
-    let result = check_ir_program(&surf(
+    // Raw Deep deliberately carries no predeclared `defsig`; a Surf
+    // parameter annotation would synthesize one and make the name visible
+    // during declaration collection for a reason unrelated to SCC prebinding.
+    let deep = chelis_deep::parser::parse_str(
         r#"
-def caller(n: int32) = later(n)
-def later(n: int32) = add(n, 1)
+(def {} caller
+  (fn {} (params {} n)
+    (app {} (var {} later) (var {} n))))
+(def {} later
+  (fn {} (params {} n)
+    (app {} (var {} add) (var {} n) (lit {type: (t-prim {} int32)} 1))))
 "#,
-    ))
-    .expect_err("bare forward helpers retain textual semantics");
+    )
+    .expect("Deep fixture parses");
+    let result =
+        check_ir_program(&deep).expect_err("bare forward helpers retain textual semantics");
     let unbound = result
         .errors
         .iter()
@@ -112,6 +125,10 @@ def later(n: int32) = add(n, 1)
             )
         })
         .collect::<Vec<_>>();
-    assert_eq!(unbound.len(), 1, "forward root owns one diagnostic: {result:?}");
+    assert_eq!(
+        unbound.len(),
+        1,
+        "forward root owns one diagnostic: {result:?}"
+    );
     assert!(unbound[0].message.contains("later"));
 }
