@@ -13,6 +13,12 @@ fn surf(source: &str) -> Vec<Expr> {
     chelis_surf::desugar::desugar_program(&parsed)
 }
 
+fn expanded_surf(source: &str) -> Vec<Expr> {
+    chelis_macros::expand_program(&surf(source), &chelis_macros::ExpansionOptions::default())
+        .expect("Surf owner fixture should expand")
+        .into_exprs()
+}
+
 fn tag(expr: &Expr) -> Option<&str> {
     let Expr::List(list, _) = expr else {
         return None;
@@ -321,17 +327,57 @@ fn guarded_match_arm_records_the_guard_owner_before_annotation() {
         vec![true, true, true, true],
         "scrutinee, guard, and both bodies need authoritative stamps"
     );
+
+    let invalid = chelis_deep::parser::parse_str(
+        r#"(def {} choose
+              (match {}
+                (lit {type: (t-prim {} bool)} true)
+                (arm {}
+                  (pat-wild {})
+                  (lit {type: (t-prim {} int32)} 1)
+                  (lit {type: (t-prim {} int32)} 2))))"#,
+    )
+    .expect("non-boolean guard fixture must parse");
+    let errors = check_ir_program(&invalid)
+        .expect_err("a non-boolean match guard must reject")
+        .errors;
+    assert_eq!(
+        errors.len(),
+        1,
+        "guard mismatch must report once: {errors:?}"
+    );
+    assert!(
+        matches!(
+            errors[0].kind,
+            chelis_types::errors::CheckErrorKind::TypeMismatch
+        ) && errors[0].message.contains("guard")
+            && !errors[0].message.contains("owner-stamp invariant"),
+        "the guard owner must emit the user-facing mismatch: {errors:?}"
+    );
 }
 
 #[test]
 fn nominal_header_scope_reaches_generated_metadata_finalization() {
-    let checked = check_ir_program(&surf(
+    let checked = check_ir_program(&expanded_surf(
         r#"
+module Repro.ParamsOwner
+
 type Params =
   | Params { w: tensor[2, f32] }
 
-def unwrap(p: Params) -> Params = (fn (q: Params) -> q)(p)
-out = unwrap(Params { w: to_tensor([1.0, 2.0]) })
+def loss(p: Params, x: tensor[2, f32], y: tensor[2, f32]) -> f32 = {
+  match p with {
+    | Params { w: w } => {
+      d = sub(mul(&x, &w), y)
+      sum(mul(&d, &d), cast(0, int32)) |> tensor_to_scalar
+    }
+  }
+}
+x = to_tensor([cast(2.0, f32), cast(3.0, f32)])
+y = to_tensor([cast(1.0, f32), cast(1.0, f32)])
+out = grad(fn (p: Params) -> loss(p, x, y))(
+  Params { w: to_tensor([cast(0.5, f32), cast(-1.0, f32)]) }
+)
 "#,
     ))
     .unwrap_or_else(|result| {
@@ -340,10 +386,5 @@ out = unwrap(Params { w: to_tensor([1.0, 2.0]) })
             result.errors
         )
     });
-    assert!(
-        checked
-            .signature_inference()
-            .functions
-            .contains_key("unwrap")
-    );
+    assert!(checked.signature_inference().functions.contains_key("loss"));
 }
