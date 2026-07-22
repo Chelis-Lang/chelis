@@ -10,13 +10,14 @@ const LEGAL: &str = r#"
     (t-tensor {} (d-var {} n) (t-prim {} f32))))
 (def {} legal
   (fn {} (params {} x)
-    (var {type: (t-tensor {} (d-var {} n) (t-prim {} f32))} x)))
+    (let {} (bind {} y
+      (var {type: (t-tensor {} (d-var {} n) (t-prim {} f32))} x))
+      (var {} y))))
 "#;
 
 const ROGUE: &str = r#"
 (def {} rogue
-  (fn {} (params {} x)
-    (var {type: (t-tensor {} (d-var {} n) (t-prim {} f32))} x)))
+  (lit {type: (t-tensor {} (d-var {} n) (t-prim {} f32))} 1))
 "#;
 
 fn parse(source: &str) -> Vec<chelis_deep::Expr> {
@@ -85,4 +86,20 @@ fn serialized_context_drops_transient_binder_scope() {
     let restored: TypeEnv =
         bincode::deserialize(&bytes).expect("TypeEnv cache deserialization must succeed");
     assert_rogue_rejected(check_ir_with_context(&restored, &parse(ROGUE)));
+}
+
+#[test]
+fn malformed_parameter_is_rejected_once_by_the_binder_owner() {
+    let exprs = parse(
+        "(def {} bad (fn {} (params {} (x {type: (t-prim {} f32 extra)})) (var {} x)))",
+    );
+    let errors = check_ir_program(&exprs)
+        .expect_err("malformed binder syntax must fail")
+        .errors;
+    assert_eq!(errors.len(), 1, "malformed binder must report once: {errors:?}");
+    assert!(
+        matches!(errors[0].kind, chelis_types::errors::CheckErrorKind::MalformedForm)
+            && errors[0].message.contains("t-prim"),
+        "unexpected malformed-binder diagnostic: {errors:?}"
+    );
 }

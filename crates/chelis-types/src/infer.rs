@@ -6319,15 +6319,13 @@ fn annotate_fn_children(
         Some(declared) => annotate_params_node(&kids[0], declared),
         None => kids[0].clone(),
     };
-    let mut result = vec![annotate_expr_with_scope(
-        &annotated_params,
-        env,
-        vg,
-        subst,
-        adt_reg,
-        annotation_context,
-        errors,
-    )];
+    // The params node is the binder owner's completed output. A typed
+    // parameter is represented as `(name {type: ...})`, which is binder
+    // syntax rather than an expression tagged `name`; recursively feeding it
+    // back through expression annotation would misreport every valid stamped
+    // parameter as `UnknownForm`. Malformed params are rejected by
+    // `extract_params` above, exactly once, through this same session sink.
+    let mut result = vec![annotated_params];
     if let Some(body) = kids.get(1) {
         // chelis#773: mint body-annotation vars from the advanced
         // `param_vg` (past every param-type var) when the params were

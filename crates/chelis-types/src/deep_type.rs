@@ -73,7 +73,7 @@ pub(crate) struct TypeDiagnosticLocation {
 }
 
 impl TypeDiagnosticLocation {
-    fn from_expr(expr: &deep::Expr) -> Option<Self> {
+    pub(crate) fn from_expr(expr: &deep::Expr) -> Option<Self> {
         let structural = expr.span();
         let explicit_id = expr.span_id().map(str::to_string);
         let span_offset = explicit_id
