@@ -5861,8 +5861,9 @@ fn annotate_expr_with_scope(
                     .entries
                     .iter()
                     .map(|(key, value)| {
-                        (
-                            key.clone(),
+                        let value = if key == "type" {
+                            value.clone()
+                        } else {
                             annotate_expr_with_scope(
                                 value,
                                 env,
@@ -5871,8 +5872,9 @@ fn annotate_expr_with_scope(
                                 adt_reg,
                                 annotation_context,
                                 errors,
-                            ),
-                        )
+                            )
+                        };
+                        (key.clone(), value)
                     })
                     .collect(),
             },
@@ -5893,8 +5895,9 @@ fn annotate_expr_with_scope(
                     .entries
                     .iter()
                     .map(|(key, value)| {
-                        (
-                            key.clone(),
+                        let value = if key == "type" {
+                            value.clone()
+                        } else {
                             annotate_expr_with_scope(
                                 value,
                                 env,
@@ -5903,8 +5906,9 @@ fn annotate_expr_with_scope(
                                 adt_reg,
                                 annotation_context,
                                 errors,
-                            ),
-                        )
+                            )
+                        };
+                        (key.clone(), value)
                     })
                     .collect(),
             },
@@ -6059,6 +6063,12 @@ fn annotate_expr_with_scope(
                     ),
                     None,
                 ),
+                // Type declarations and signatures crossed their owning
+                // fail-closed resolver before annotation began. Their `t-*`
+                // and `d-*` children are type syntax, not runtime
+                // expressions; preserve that validated output instead of
+                // redispatching (for example) `d-rank` through `infer_expr`.
+                Some("defsig" | "deftype" | "typealias") => (children(list).to_vec(), None),
                 _ => (
                     children(list)
                         .iter()
