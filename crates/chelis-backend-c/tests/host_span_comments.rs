@@ -15,7 +15,12 @@
 //! Mirrors the DAG-side coverage in `span_comments.rs`.
 
 use chelis_backend_c::host_emit::emit_host_program;
-use chelis_ir::host::{HostExpr, HostExprKind, HostFunction, HostParam, HostProgram, HostType};
+use chelis_ir::ConcreteHostType as HostType;
+use chelis_ir::host::{
+    ConcreteHostExpr as HostExpr, ConcreteHostExprKind as HostExprKind,
+    ConcreteHostFunction as HostFunction, ConcreteHostParam as HostParam,
+    ConcreteHostProgram as HostProgram,
+};
 
 fn make_program(body: HostExpr) -> HostProgram {
     HostProgram {

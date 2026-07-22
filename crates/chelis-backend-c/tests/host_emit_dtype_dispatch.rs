@@ -29,9 +29,12 @@
 //! §5 entry: `docs/gap_synthesis.md` `CRuntime-F32Coupling`.
 
 use chelis_backend_c::host_emit::emit_host_program;
+use chelis_ir::ConcreteHostType as HostType;
 use chelis_ir::dag::{DimInfo, TensorType};
 use chelis_ir::host::{
-    HostBinding, HostExpr, HostExprKind, HostFunction, HostParam, HostProgram, HostType,
+    ConcreteHostBinding as HostBinding, ConcreteHostExpr as HostExpr,
+    ConcreteHostExprKind as HostExprKind, ConcreteHostFunction as HostFunction,
+    ConcreteHostParam as HostParam, ConcreteHostProgram as HostProgram,
 };
 use chelis_types::types::Prim;
 

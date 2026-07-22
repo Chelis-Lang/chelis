@@ -38,7 +38,7 @@ fn named_polymorphic_states_preserve_their_kind_and_identity() {
         }
     );
 
-    let precision_err = HostTypeTerm::Tensor(HostTensorTypeTerm {
+    let precision_err = HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm {
         precision: HostPrecisionTerm::Variable("p".into()),
         shape: HostShapeTerm::Concrete(Vec::new()),
     })
@@ -49,7 +49,7 @@ fn named_polymorphic_states_preserve_their_kind_and_identity() {
         HostTypeResolutionError::UnresolvedPrecisionVariable { name: "p".into() }
     );
 
-    let rank_err = HostTypeTerm::Tensor(HostTensorTypeTerm {
+    let rank_err = HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm {
         precision: HostPrecisionTerm::Concrete(Prim::F32),
         shape: HostShapeTerm::Polymorphic(vec![HostShapeSlot::RankVariable("rank".into())]),
     })
@@ -85,7 +85,7 @@ fn divergence_has_no_value_representation() {
 
 #[test]
 fn manually_invalid_polymorphic_shape_fails_instead_of_panicking_or_defaulting() {
-    let invalid = HostTypeTerm::Tensor(HostTensorTypeTerm {
+    let invalid = HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm {
         precision: HostPrecisionTerm::Concrete(Prim::F32),
         shape: HostShapeTerm::Polymorphic(Vec::new()),
     });
@@ -146,7 +146,7 @@ fn raw_decoder_preserves_exact_primitives_and_polymorphic_names() {
         parse_one("(t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-var {} p))");
     assert_eq!(
         decode_host_type(&tensor),
-        Ok(HostTypeTerm::Tensor(HostTensorTypeTerm {
+        Ok(HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm {
             precision: HostPrecisionTerm::Variable("p".into()),
             shape: HostShapeTerm::Polymorphic(vec![
                 HostShapeSlot::RankVariable("pre".into()),

@@ -60,7 +60,11 @@ pub struct LowerDiagnostic {
 }
 
 impl LowerDiagnostic {
-    fn new(message: impl Into<String>, span: Option<Span>, span_id: Option<String>) -> Self {
+    pub(crate) fn new(
+        message: impl Into<String>,
+        span: Option<Span>,
+        span_id: Option<String>,
+    ) -> Self {
         Self {
             message: message.into(),
             span,
@@ -74,7 +78,7 @@ impl LowerDiagnostic {
     /// for deliberate rejections (e.g. AD on non-differentiable ops)
     /// where falling back to the host path would silently emit an
     /// undefined-symbol reference.
-    fn fatal(mut self) -> Self {
+    pub(crate) fn fatal(mut self) -> Self {
         self.fatal = true;
         self
     }

@@ -24,6 +24,7 @@
 use std::collections::BTreeSet;
 
 use chelis_deep::Expr;
+use chelis_ir::HostTypeTerm;
 use chelis_ir::host::{
     HostCallback, HostCallbackKind, HostExpr, HostExprKind, HostProgram, lower_compiled_program,
 };
@@ -42,7 +43,7 @@ use chelis_types::{check_ir_program, check_linearity};
 /// future host-side optimizations that WILL produce merge candidates.
 #[test]
 fn host_expr_schema_carries_span_id_and_merged_spans() {
-    let e = HostExpr::new(HostExprKind::Int(0));
+    let e = HostExpr::<HostTypeTerm>::new(HostExprKind::Int(0));
     // The struct fields are public — they must stay public so the host
     // emitter (S6 step 5) can read them. If a refactor demotes them to
     // private, this test fails.
@@ -52,14 +53,15 @@ fn host_expr_schema_carries_span_id_and_merged_spans() {
         "fresh HostExpr has empty merged_spans"
     );
 
-    let with_span = HostExpr::with_span(HostExprKind::Int(1), Some("src_alpha".into()));
+    let with_span =
+        HostExpr::<HostTypeTerm>::with_span(HostExprKind::Int(1), Some("src_alpha".into()));
     assert_eq!(with_span.span_id.as_deref(), Some("src_alpha"));
     assert!(with_span.merged_spans.is_empty());
 
     // append_merged_span is the canonical N→1 collapse helper. Lock the
     // dedup / sort / None-noop / canonical-equal-noop semantics so any
     // future refactor is forced to preserve them.
-    let mut node = HostExpr::with_span(HostExprKind::Int(1), Some("a".into()));
+    let mut node = HostExpr::<HostTypeTerm>::with_span(HostExprKind::Int(1), Some("a".into()));
     node.append_merged_span(None);
     assert!(node.merged_spans.is_empty(), "None is a no-op");
     node.append_merged_span(Some("a"));
@@ -104,7 +106,7 @@ fn collect_input_spans(exprs: &[Expr]) -> BTreeSet<String> {
     out
 }
 
-fn collect_host_program_spans(program: &HostProgram) -> BTreeSet<String> {
+fn collect_host_program_spans<T>(program: &HostProgram<T>) -> BTreeSet<String> {
     let mut acc = BTreeSet::new();
     for binding in &program.globals {
         collect_host_expr_spans(&binding.value, &mut acc);
@@ -115,7 +117,7 @@ fn collect_host_program_spans(program: &HostProgram) -> BTreeSet<String> {
     acc
 }
 
-fn collect_host_expr_spans(expr: &HostExpr, acc: &mut BTreeSet<String>) {
+fn collect_host_expr_spans<T>(expr: &HostExpr<T>, acc: &mut BTreeSet<String>) {
     if let Some(s) = &expr.span_id {
         acc.insert(s.clone());
     }
@@ -213,13 +215,13 @@ fn collect_host_expr_spans(expr: &HostExpr, acc: &mut BTreeSet<String>) {
     }
 }
 
-fn collect_host_callback_spans(callback: &HostCallback, acc: &mut BTreeSet<String>) {
+fn collect_host_callback_spans<T>(callback: &HostCallback<T>, acc: &mut BTreeSet<String>) {
     if let HostCallbackKind::Inline { body, .. } = &callback.kind {
         collect_host_expr_spans(body, acc);
     }
 }
 
-fn walk_host_expr(expr: &HostExpr, visit: &mut dyn FnMut(&HostExpr)) {
+fn walk_host_expr<T>(expr: &HostExpr<T>, visit: &mut dyn FnMut(&HostExpr<T>)) {
     visit(expr);
     match &expr.kind {
         HostExprKind::List(items, _) | HostExprKind::Tuple(items, _) => {
@@ -310,13 +312,13 @@ fn walk_host_expr(expr: &HostExpr, visit: &mut dyn FnMut(&HostExpr)) {
     }
 }
 
-fn walk_host_callback(callback: &HostCallback, visit: &mut dyn FnMut(&HostExpr)) {
+fn walk_host_callback<T>(callback: &HostCallback<T>, visit: &mut dyn FnMut(&HostExpr<T>)) {
     if let HostCallbackKind::Inline { body, .. } = &callback.kind {
         walk_host_expr(body, visit);
     }
 }
 
-fn walk_host_program(program: &HostProgram, visit: &mut dyn FnMut(&HostExpr)) {
+fn walk_host_program<T>(program: &HostProgram<T>, visit: &mut dyn FnMut(&HostExpr<T>)) {
     for binding in &program.globals {
         walk_host_expr(&binding.value, visit);
     }
@@ -626,7 +628,7 @@ fn synthesized_marker_with_empty_merged_spans_is_invalid() {
         HostExprKind::Builtin {
             name: "__some_synthesized__".into(),
             args: Vec::new(),
-            ty: chelis_ir::host::HostType::Unknown,
+            ty: HostTypeTerm::Unit,
         },
         Some("__synthesized_future_pass__".into()),
     );
@@ -643,7 +645,7 @@ fn synthesized_marker_with_empty_merged_spans_is_invalid() {
         HostExprKind::Builtin {
             name: "__some_synthesized__".into(),
             args: Vec::new(),
-            ty: chelis_ir::host::HostType::Unknown,
+            ty: HostTypeTerm::Unit,
         },
         Some("__synthesized_future_pass__".into()),
     );
@@ -656,7 +658,8 @@ fn synthesized_marker_with_empty_merged_spans_is_invalid() {
 
     // Real source spans (no `__synthesized_` prefix) trivially satisfy
     // the invariant regardless of merged_spans population.
-    let real_node = HostExpr::with_span(HostExprKind::Int(0), Some("src_alpha".into()));
+    let real_node =
+        HostExpr::<HostTypeTerm>::with_span(HostExprKind::Int(0), Some("src_alpha".into()));
     assert!(!node_violates_synthesized_marker_invariant(&real_node));
 }
 
@@ -687,7 +690,7 @@ fn shipped_host_lowering_does_not_violate_synthesized_marker_invariant() {
     }
 }
 
-fn node_violates_synthesized_marker_invariant(node: &HostExpr) -> bool {
+fn node_violates_synthesized_marker_invariant<T>(node: &HostExpr<T>) -> bool {
     let Some(span) = &node.span_id else {
         return false;
     };
@@ -778,7 +781,7 @@ fn if_node_inherits_if_exprs_span() {
 #[test]
 fn synthesized_markers_with_provenance_are_well_formed() {
     let mut node = HostExpr::with_span(
-        HostExprKind::Var("placeholder".into(), chelis_ir::host::HostType::Unknown),
+        HostExprKind::Var("placeholder".into(), HostTypeTerm::Unit),
         Some("__synthesized_host_pass_a__".into()),
     );
     node.append_merged_span(Some("forward_src"));

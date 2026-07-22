@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use chelis_deep::ast::{Atom, Expr, List};
 use chelis_deep::decode_effect_kind;
@@ -9,6 +10,9 @@ use chelis_types::{BUILTIN_NAMES, CheckedProgram};
 use chelis_vocab::EffectKind;
 
 use crate::dag::{DimExpr, DimInfo, RiscOp, TensorType};
+use crate::host_type_state::{
+    ConcreteHostType, HostInferenceVar, HostTypeDecodeError, HostTypeTerm, decode_host_type,
+};
 use crate::lower::top_level_lowering_map;
 
 thread_local! {
@@ -17,6 +21,14 @@ thread_local! {
     // recursive/mutually recursive definitions — the specialized body would
     // re-encounter the same call and inline forever.
     static INLINING_STACK: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+static NEXT_HOST_INFERENCE_VAR: AtomicU32 = AtomicU32::new(0);
+
+fn fresh_host_inference() -> HostTypeTerm {
+    HostTypeTerm::InferenceVariable(HostInferenceVar(
+        NEXT_HOST_INFERENCE_VAR.fetch_add(1, Ordering::Relaxed),
+    ))
 }
 
 fn is_inlining(name: &str) -> bool {
@@ -36,14 +48,14 @@ fn pop_inlining(name: &str) {
 #[derive(Debug, Clone)]
 pub struct CompiledProgram {
     pub dag: Option<crate::Dag>,
-    pub host: Option<HostProgram>,
+    pub host: Option<ConcreteHostProgram>,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct HostProgram {
-    pub globals: Vec<HostBinding>,
+#[derive(Debug, Clone)]
+pub struct HostProgram<T = HostTypeTerm> {
+    pub globals: Vec<HostBinding<T>>,
     pub global_tensor_helpers: Vec<HostTensorHelper>,
-    pub functions: Vec<HostFunction>,
+    pub functions: Vec<HostFunction<T>>,
     /// Structured rejections collected during sparse-helper summary
     /// recognition. Populated by [`lower_compiled_program`] when a
     /// near-summary-eligible callsite (helper body contains a sparse
@@ -62,20 +74,31 @@ pub struct HostProgram {
     pub summary_rejections: Vec<SummaryRejection>,
 }
 
-#[derive(Debug, Clone)]
-pub struct HostBinding {
-    pub name: String,
-    pub display_name: Option<String>,
-    pub ty: HostType,
-    pub value: HostExpr,
+impl<T> Default for HostProgram<T> {
+    fn default() -> Self {
+        Self {
+            globals: Vec::new(),
+            global_tensor_helpers: Vec::new(),
+            functions: Vec::new(),
+            summary_rejections: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
-pub struct HostFunction {
+pub struct HostBinding<T = HostTypeTerm> {
     pub name: String,
-    pub params: Vec<HostParam>,
-    pub ret_ty: HostType,
-    pub body: HostExpr,
+    pub display_name: Option<String>,
+    pub ty: T,
+    pub value: HostExpr<T>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HostFunction<T = HostTypeTerm> {
+    pub name: String,
+    pub params: Vec<HostParam<T>>,
+    pub ret_ty: T,
+    pub body: HostExpr<T>,
     pub tensor_helpers: Vec<HostTensorHelper>,
     pub specialization: Option<HostFunctionSpecialization>,
     /// Structured rejections collected from this function's tensor
@@ -85,10 +108,15 @@ pub struct HostFunction {
 }
 
 #[derive(Debug, Clone)]
-pub struct HostParam {
+pub struct HostParam<T = HostTypeTerm> {
     pub name: String,
-    pub ty: HostType,
+    pub ty: T,
 }
+
+pub type ConcreteHostProgram = HostProgram<ConcreteHostType>;
+pub type ConcreteHostBinding = HostBinding<ConcreteHostType>;
+pub type ConcreteHostFunction = HostFunction<ConcreteHostType>;
+pub type ConcreteHostParam = HostParam<ConcreteHostType>;
 
 #[derive(Debug, Clone)]
 pub struct HostTensorHelper {
@@ -669,67 +697,41 @@ pub struct HelperSummaryRejection {
 }
 
 #[derive(Debug, Clone)]
-pub struct HostCallback {
-    pub kind: HostCallbackKind,
-    pub ret_ty: HostType,
+pub struct HostCallback<T = HostTypeTerm> {
+    pub kind: HostCallbackKind<T>,
+    pub ret_ty: T,
 }
 
 #[derive(Debug, Clone)]
-pub struct HostMatchArm {
+pub struct HostMatchArm<T = HostTypeTerm> {
     pub ctor: String,
-    pub bindings: Vec<HostPatternBinding>,
-    pub expr: HostExpr,
+    pub bindings: Vec<HostPatternBinding<T>>,
+    pub expr: HostExpr<T>,
 }
 
 #[derive(Debug, Clone)]
-pub struct HostPatternBinding {
+pub struct HostPatternBinding<T = HostTypeTerm> {
     pub name: String,
-    pub ty: HostType,
+    pub ty: T,
     pub field_index: usize,
 }
 
 #[derive(Debug, Clone)]
-pub struct HostAdtField {
+pub struct HostAdtField<T = HostTypeTerm> {
     pub name: Option<String>,
-    pub ty: HostType,
+    pub ty: T,
 }
 
 #[derive(Debug, Clone)]
-pub enum HostCallbackKind {
+pub enum HostCallbackKind<T = HostTypeTerm> {
     Named {
         function: String,
-        params: Vec<HostParam>,
+        params: Vec<HostParam<T>>,
     },
     Inline {
-        params: Vec<HostParam>,
-        body: Box<HostExpr>,
+        params: Vec<HostParam<T>>,
+        body: Box<HostExpr<T>>,
     },
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum HostType {
-    Int64,
-    /// IEEE single-precision (`f32`) host scalar. Kept distinct from
-    /// `Float64` so a declared `f32`/`f64` entry parameter lowers to a
-    /// `Load` of the *declared* width rather than silently downgrading
-    /// f64 to f32 (WS-4 / verification-stack Phase 2). Builtin-result
-    /// inference that genuinely cannot recover the operand width still
-    /// classifies floats coarsely as `Float64` (Issue #308); only the
-    /// type-syntax-driven entry-param path threads the precise variant.
-    Float32,
-    Float64,
-    Bool,
-    String,
-    Fn(Vec<HostType>, Box<HostType>),
-    Adt(String, Vec<HostType>),
-    List(Box<HostType>),
-    Dict(Box<HostType>, Box<HostType>),
-    Tuple(Vec<HostType>),
-    Tensor(TensorType),
-    Option(Box<HostType>),
-    MappedFile,
-    Unit,
-    Unknown,
 }
 
 /// Host-lane expression with span-survival metadata.
@@ -746,8 +748,8 @@ pub enum HostType {
 /// Reject simplification proposals on the same grounds the spec rejects
 /// collapsing `DagNode.merged_spans` back to a single `Option<String>`.
 #[derive(Debug, Clone)]
-pub struct HostExpr {
-    pub kind: HostExprKind,
+pub struct HostExpr<T = HostTypeTerm> {
+    pub kind: HostExprKind<T>,
     /// Canonical span ID, populated by host-lane lowering from the Deep
     /// `Expr`'s `meta["span"]` value. Threaded through later host-side
     /// passes per the rules in `spec/design/chelis_span_survival.md` §2.3
@@ -766,13 +768,13 @@ pub struct HostExpr {
     pub merged_spans: Vec<String>,
 }
 
-impl HostExpr {
+impl<T> HostExpr<T> {
     /// Construct a HostExpr from a kind with no span metadata. The host-side
     /// lowering layer (§2.3 host-side table, rule "Lowering") populates
     /// `span_id` from the enclosing Deep expr's `meta["span"]` via the
     /// `with_span` constructor; default constructions (e.g. tests) start
     /// span-free.
-    pub fn new(kind: HostExprKind) -> Self {
+    pub fn new(kind: HostExprKind<T>) -> Self {
         Self {
             kind,
             span_id: None,
@@ -783,7 +785,7 @@ impl HostExpr {
     /// Construct a HostExpr from a kind with an explicit span ID. Empty
     /// `merged_spans`. Used by the host-lane lowering pass (`lower_host_expr`)
     /// to attach the current Deep expr's span to every freshly-produced node.
-    pub fn with_span(kind: HostExprKind, span_id: Option<String>) -> Self {
+    pub fn with_span(kind: HostExprKind<T>, span_id: Option<String>) -> Self {
         Self {
             kind,
             span_id,
@@ -820,102 +822,383 @@ impl HostExpr {
 }
 
 #[derive(Debug, Clone)]
-pub enum HostExprKind {
+pub enum HostExprKind<T = HostTypeTerm> {
     Int(i64),
     Float(f64),
     Bool(bool),
     String(String),
-    List(Vec<HostExpr>, HostType),
-    Tuple(Vec<HostExpr>, HostType),
-    Var(String, HostType),
+    List(Vec<HostExpr<T>>, T),
+    Tuple(Vec<HostExpr<T>>, T),
+    Var(String, T),
     Call {
         function: String,
-        args: Vec<HostExpr>,
-        arg_tys: Vec<HostType>,
-        ty: HostType,
+        args: Vec<HostExpr<T>>,
+        arg_tys: Vec<T>,
+        ty: T,
     },
     Builtin {
         name: String,
-        args: Vec<HostExpr>,
-        ty: HostType,
+        args: Vec<HostExpr<T>>,
+        ty: T,
     },
     AdtConstruct {
         ctor: String,
-        fields: Vec<HostExpr>,
-        ty: HostType,
+        fields: Vec<HostExpr<T>>,
+        ty: T,
     },
     AdtFieldAccess {
-        base: Box<HostExpr>,
+        base: Box<HostExpr<T>>,
         field_index: usize,
-        ty: HostType,
+        ty: T,
     },
     If {
-        cond: Box<HostExpr>,
-        then_expr: Box<HostExpr>,
-        else_expr: Box<HostExpr>,
-        ty: HostType,
+        cond: Box<HostExpr<T>>,
+        then_expr: Box<HostExpr<T>>,
+        else_expr: Box<HostExpr<T>>,
+        ty: T,
     },
     MatchOption {
-        scrutinee: Box<HostExpr>,
+        scrutinee: Box<HostExpr<T>>,
         bind_name: String,
-        some_expr: Box<HostExpr>,
-        none_expr: Box<HostExpr>,
-        ty: HostType,
+        some_expr: Box<HostExpr<T>>,
+        none_expr: Box<HostExpr<T>>,
+        ty: T,
     },
     MatchAdt {
-        scrutinee: Box<HostExpr>,
-        arms: Vec<HostMatchArm>,
-        default_expr: Option<Box<HostExpr>>,
-        ty: HostType,
+        scrutinee: Box<HostExpr<T>>,
+        arms: Vec<HostMatchArm<T>>,
+        default_expr: Option<Box<HostExpr<T>>>,
+        ty: T,
     },
     Let {
-        bindings: Vec<HostBinding>,
-        body: Box<HostExpr>,
-        ty: HostType,
+        bindings: Vec<HostBinding<T>>,
+        body: Box<HostExpr<T>>,
+        ty: T,
     },
     Map {
-        callback: HostCallback,
-        list: Box<HostExpr>,
-        ty: HostType,
+        callback: HostCallback<T>,
+        list: Box<HostExpr<T>>,
+        ty: T,
     },
     Filter {
-        callback: HostCallback,
-        list: Box<HostExpr>,
-        ty: HostType,
+        callback: HostCallback<T>,
+        list: Box<HostExpr<T>>,
+        ty: T,
     },
     Fold {
-        callback: HostCallback,
-        init: Box<HostExpr>,
-        list: Box<HostExpr>,
-        ty: HostType,
+        callback: HostCallback<T>,
+        init: Box<HostExpr<T>>,
+        list: Box<HostExpr<T>>,
+        ty: T,
     },
     Scan {
-        callback: HostCallback,
-        init: Box<HostExpr>,
-        list: Box<HostExpr>,
-        ty: HostType,
+        callback: HostCallback<T>,
+        init: Box<HostExpr<T>>,
+        list: Box<HostExpr<T>>,
+        ty: T,
     },
     Partition {
-        callback: HostCallback,
-        list: Box<HostExpr>,
-        ty: HostType,
+        callback: HostCallback<T>,
+        list: Box<HostExpr<T>>,
+        ty: T,
     },
     FlatMap {
-        callback: HostCallback,
-        list: Box<HostExpr>,
-        ty: HostType,
+        callback: HostCallback<T>,
+        list: Box<HostExpr<T>>,
+        ty: T,
     },
     WithSeed {
-        seed: Box<HostExpr>,
-        body: Box<HostExpr>,
-        ty: HostType,
+        seed: Box<HostExpr<T>>,
+        body: Box<HostExpr<T>>,
+        ty: T,
     },
     TensorCall {
         helper: usize,
-        args: Vec<HostExpr>,
-        ty: HostType,
+        args: Vec<HostExpr<T>>,
+        ty: T,
     },
     Unit,
+}
+
+pub type ConcreteHostCallback = HostCallback<ConcreteHostType>;
+pub type ConcreteHostMatchArm = HostMatchArm<ConcreteHostType>;
+pub type ConcreteHostPatternBinding = HostPatternBinding<ConcreteHostType>;
+pub type ConcreteHostAdtField = HostAdtField<ConcreteHostType>;
+pub type ConcreteHostCallbackKind = HostCallbackKind<ConcreteHostType>;
+pub type ConcreteHostExpr = HostExpr<ConcreteHostType>;
+pub type ConcreteHostExprKind = HostExprKind<ConcreteHostType>;
+
+fn resolve_host_program(
+    program: HostProgram,
+) -> Result<ConcreteHostProgram, crate::HostTypeResolutionError> {
+    Ok(ConcreteHostProgram {
+        globals: program
+            .globals
+            .into_iter()
+            .map(resolve_host_binding)
+            .collect::<Result<Vec<_>, _>>()?,
+        global_tensor_helpers: program.global_tensor_helpers,
+        functions: program
+            .functions
+            .into_iter()
+            .map(resolve_host_function)
+            .collect::<Result<Vec<_>, _>>()?,
+        summary_rejections: program.summary_rejections,
+    })
+}
+
+fn resolve_host_binding(
+    binding: HostBinding,
+) -> Result<ConcreteHostBinding, crate::HostTypeResolutionError> {
+    Ok(ConcreteHostBinding {
+        name: binding.name,
+        display_name: binding.display_name,
+        ty: binding.ty.into_concrete()?,
+        value: resolve_host_expr(binding.value)?,
+    })
+}
+
+fn resolve_host_function(
+    function: HostFunction,
+) -> Result<ConcreteHostFunction, crate::HostTypeResolutionError> {
+    Ok(ConcreteHostFunction {
+        name: function.name,
+        params: function
+            .params
+            .into_iter()
+            .map(resolve_host_param)
+            .collect::<Result<Vec<_>, _>>()?,
+        ret_ty: function.ret_ty.into_concrete()?,
+        body: resolve_host_expr(function.body)?,
+        tensor_helpers: function.tensor_helpers,
+        specialization: function.specialization,
+        summary_rejections: function.summary_rejections,
+    })
+}
+
+fn resolve_host_param(
+    param: HostParam,
+) -> Result<ConcreteHostParam, crate::HostTypeResolutionError> {
+    Ok(ConcreteHostParam {
+        name: param.name,
+        ty: param.ty.into_concrete()?,
+    })
+}
+
+fn resolve_host_callback(
+    callback: HostCallback,
+) -> Result<ConcreteHostCallback, crate::HostTypeResolutionError> {
+    let kind = match callback.kind {
+        HostCallbackKind::Named { function, params } => ConcreteHostCallbackKind::Named {
+            function,
+            params: params
+                .into_iter()
+                .map(resolve_host_param)
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        HostCallbackKind::Inline { params, body } => ConcreteHostCallbackKind::Inline {
+            params: params
+                .into_iter()
+                .map(resolve_host_param)
+                .collect::<Result<Vec<_>, _>>()?,
+            body: Box::new(resolve_host_expr(*body)?),
+        },
+    };
+    Ok(ConcreteHostCallback {
+        kind,
+        ret_ty: callback.ret_ty.into_concrete()?,
+    })
+}
+
+fn resolve_host_expr(expr: HostExpr) -> Result<ConcreteHostExpr, crate::HostTypeResolutionError> {
+    let kind = match expr.kind {
+        HostExprKind::Int(value) => ConcreteHostExprKind::Int(value),
+        HostExprKind::Float(value) => ConcreteHostExprKind::Float(value),
+        HostExprKind::Bool(value) => ConcreteHostExprKind::Bool(value),
+        HostExprKind::String(value) => ConcreteHostExprKind::String(value),
+        HostExprKind::List(items, ty) => ConcreteHostExprKind::List(
+            items
+                .into_iter()
+                .map(resolve_host_expr)
+                .collect::<Result<Vec<_>, _>>()?,
+            ty.into_concrete()?,
+        ),
+        HostExprKind::Tuple(items, ty) => ConcreteHostExprKind::Tuple(
+            items
+                .into_iter()
+                .map(resolve_host_expr)
+                .collect::<Result<Vec<_>, _>>()?,
+            ty.into_concrete()?,
+        ),
+        HostExprKind::Var(name, ty) => ConcreteHostExprKind::Var(name, ty.into_concrete()?),
+        HostExprKind::Call {
+            function,
+            args,
+            arg_tys,
+            ty,
+        } => ConcreteHostExprKind::Call {
+            function,
+            args: args
+                .into_iter()
+                .map(resolve_host_expr)
+                .collect::<Result<Vec<_>, _>>()?,
+            arg_tys: arg_tys
+                .into_iter()
+                .map(HostTypeTerm::into_concrete)
+                .collect::<Result<Vec<_>, _>>()?,
+            ty: ty.into_concrete()?,
+        },
+        HostExprKind::Builtin { name, args, ty } => ConcreteHostExprKind::Builtin {
+            name,
+            args: args
+                .into_iter()
+                .map(resolve_host_expr)
+                .collect::<Result<Vec<_>, _>>()?,
+            ty: ty.into_concrete()?,
+        },
+        HostExprKind::AdtConstruct { ctor, fields, ty } => ConcreteHostExprKind::AdtConstruct {
+            ctor,
+            fields: fields
+                .into_iter()
+                .map(resolve_host_expr)
+                .collect::<Result<Vec<_>, _>>()?,
+            ty: ty.into_concrete()?,
+        },
+        HostExprKind::AdtFieldAccess {
+            base,
+            field_index,
+            ty,
+        } => ConcreteHostExprKind::AdtFieldAccess {
+            base: Box::new(resolve_host_expr(*base)?),
+            field_index,
+            ty: ty.into_concrete()?,
+        },
+        HostExprKind::If {
+            cond,
+            then_expr,
+            else_expr,
+            ty,
+        } => ConcreteHostExprKind::If {
+            cond: Box::new(resolve_host_expr(*cond)?),
+            then_expr: Box::new(resolve_host_expr(*then_expr)?),
+            else_expr: Box::new(resolve_host_expr(*else_expr)?),
+            ty: ty.into_concrete()?,
+        },
+        HostExprKind::MatchOption {
+            scrutinee,
+            bind_name,
+            some_expr,
+            none_expr,
+            ty,
+        } => ConcreteHostExprKind::MatchOption {
+            scrutinee: Box::new(resolve_host_expr(*scrutinee)?),
+            bind_name,
+            some_expr: Box::new(resolve_host_expr(*some_expr)?),
+            none_expr: Box::new(resolve_host_expr(*none_expr)?),
+            ty: ty.into_concrete()?,
+        },
+        HostExprKind::MatchAdt {
+            scrutinee,
+            arms,
+            default_expr,
+            ty,
+        } => ConcreteHostExprKind::MatchAdt {
+            scrutinee: Box::new(resolve_host_expr(*scrutinee)?),
+            arms: arms
+                .into_iter()
+                .map(|arm| {
+                    Ok(ConcreteHostMatchArm {
+                        ctor: arm.ctor,
+                        bindings: arm
+                            .bindings
+                            .into_iter()
+                            .map(|binding| {
+                                Ok(ConcreteHostPatternBinding {
+                                    name: binding.name,
+                                    ty: binding.ty.into_concrete()?,
+                                    field_index: binding.field_index,
+                                })
+                            })
+                            .collect::<Result<Vec<_>, crate::HostTypeResolutionError>>()?,
+                        expr: resolve_host_expr(arm.expr)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, crate::HostTypeResolutionError>>()?,
+            default_expr: default_expr
+                .map(|expr| resolve_host_expr(*expr).map(Box::new))
+                .transpose()?,
+            ty: ty.into_concrete()?,
+        },
+        HostExprKind::Let { bindings, body, ty } => ConcreteHostExprKind::Let {
+            bindings: bindings
+                .into_iter()
+                .map(resolve_host_binding)
+                .collect::<Result<Vec<_>, _>>()?,
+            body: Box::new(resolve_host_expr(*body)?),
+            ty: ty.into_concrete()?,
+        },
+        HostExprKind::Map { callback, list, ty } => ConcreteHostExprKind::Map {
+            callback: resolve_host_callback(callback)?,
+            list: Box::new(resolve_host_expr(*list)?),
+            ty: ty.into_concrete()?,
+        },
+        HostExprKind::Filter { callback, list, ty } => ConcreteHostExprKind::Filter {
+            callback: resolve_host_callback(callback)?,
+            list: Box::new(resolve_host_expr(*list)?),
+            ty: ty.into_concrete()?,
+        },
+        HostExprKind::Fold {
+            callback,
+            init,
+            list,
+            ty,
+        } => ConcreteHostExprKind::Fold {
+            callback: resolve_host_callback(callback)?,
+            init: Box::new(resolve_host_expr(*init)?),
+            list: Box::new(resolve_host_expr(*list)?),
+            ty: ty.into_concrete()?,
+        },
+        HostExprKind::Scan {
+            callback,
+            init,
+            list,
+            ty,
+        } => ConcreteHostExprKind::Scan {
+            callback: resolve_host_callback(callback)?,
+            init: Box::new(resolve_host_expr(*init)?),
+            list: Box::new(resolve_host_expr(*list)?),
+            ty: ty.into_concrete()?,
+        },
+        HostExprKind::Partition { callback, list, ty } => ConcreteHostExprKind::Partition {
+            callback: resolve_host_callback(callback)?,
+            list: Box::new(resolve_host_expr(*list)?),
+            ty: ty.into_concrete()?,
+        },
+        HostExprKind::FlatMap { callback, list, ty } => ConcreteHostExprKind::FlatMap {
+            callback: resolve_host_callback(callback)?,
+            list: Box::new(resolve_host_expr(*list)?),
+            ty: ty.into_concrete()?,
+        },
+        HostExprKind::WithSeed { seed, body, ty } => ConcreteHostExprKind::WithSeed {
+            seed: Box::new(resolve_host_expr(*seed)?),
+            body: Box::new(resolve_host_expr(*body)?),
+            ty: ty.into_concrete()?,
+        },
+        HostExprKind::TensorCall { helper, args, ty } => ConcreteHostExprKind::TensorCall {
+            helper,
+            args: args
+                .into_iter()
+                .map(resolve_host_expr)
+                .collect::<Result<Vec<_>, _>>()?,
+            ty: ty.into_concrete()?,
+        },
+        HostExprKind::Unit => ConcreteHostExprKind::Unit,
+    };
+    Ok(ConcreteHostExpr {
+        kind,
+        span_id: expr.span_id,
+        merged_spans: expr.merged_spans,
+    })
 }
 
 pub fn lower_compiled_program(program: &CheckedProgram) -> CompiledProgram {
@@ -924,7 +1207,7 @@ pub fn lower_compiled_program(program: &CheckedProgram) -> CompiledProgram {
 
 /// Fallible variant of [`lower_compiled_program`] that catches lowering
 /// panics (e.g. WS-A5 RT-3a F2: an unresolved tensor precision tvar
-/// reaching the `Type::Tensor` -> `HostType::Tensor` boundary, which
+/// reaching the `Type::Tensor` -> `HostTypeTerm::Tensor` boundary, which
 /// `try_extract_tensor_type` panics on per spec/04-type-system.md
 /// \u{00a7}5.8.1) and returns them as `LowerDiagnostic` so the build
 /// CLI can surface a clean user-facing error rather than a thread
@@ -946,8 +1229,19 @@ pub fn try_lower_compiled_program(
         Err(diagnostic) if diagnostic.fatal => return Err(diagnostic),
         Err(_) => None,
     };
-    let host =
+    let host_terms =
         crate::lower::catch_lowering_external(|| lower_host_program(program, &lowered_names))?;
+    let host = resolve_host_program(host_terms).map_err(|error| {
+        crate::lower::LowerDiagnostic::new(
+            format!(
+                "host type did not resolve before the code-generation boundary: {error} \
+                 ([05-UNS-1]; chelis#730)"
+            ),
+            None,
+            None,
+        )
+        .fatal()
+    })?;
 
     Ok(CompiledProgram {
         dag: dag.filter(|dag| !dag.roots().is_empty()),
@@ -968,11 +1262,11 @@ pub fn host_program_requires_host_backend(program: &HostProgram) -> bool {
         .functions
         .iter()
         .filter(|function| {
-            matches!(function.ret_ty, HostType::Tensor(_))
+            matches!(function.ret_ty, HostTypeTerm::Tensor(_))
                 && function
                     .params
                     .iter()
-                    .all(|param| matches!(param.ty, HostType::Tensor(_)))
+                    .all(|param| matches!(param.ty, HostTypeTerm::Tensor(_)))
         })
         .map(|function| function.name.clone())
         .collect::<HashSet<_>>();
@@ -988,7 +1282,7 @@ fn host_expr_stays_on_tensor_path(
     tensor_only_functions: &HashSet<String>,
 ) -> bool {
     match &expr.kind {
-        HostExprKind::Var(_, HostType::Tensor(_)) => true,
+        HostExprKind::Var(_, HostTypeTerm::Tensor(_)) => true,
         HostExprKind::TensorCall { .. } => true,
         HostExprKind::Call {
             function,
@@ -996,17 +1290,19 @@ fn host_expr_stays_on_tensor_path(
             arg_tys,
             ty,
         } => {
-            matches!(ty, HostType::Tensor(_))
+            matches!(ty, HostTypeTerm::Tensor(_))
                 && tensor_only_functions.contains(function)
-                && arg_tys.iter().all(|ty| matches!(ty, HostType::Tensor(_)))
+                && arg_tys
+                    .iter()
+                    .all(|ty| matches!(ty, HostTypeTerm::Tensor(_)))
                 && args
                     .iter()
                     .all(|arg| host_expr_stays_on_tensor_path(arg, tensor_only_functions))
         }
         HostExprKind::Let { bindings, body, ty } => {
-            matches!(ty, HostType::Tensor(_))
+            matches!(ty, HostTypeTerm::Tensor(_))
                 && bindings.iter().all(|binding| {
-                    matches!(binding.ty, HostType::Tensor(_))
+                    matches!(binding.ty, HostTypeTerm::Tensor(_))
                         && host_expr_stays_on_tensor_path(&binding.value, tensor_only_functions)
                 })
                 && host_expr_stays_on_tensor_path(body, tensor_only_functions)
@@ -1017,11 +1313,11 @@ fn host_expr_stays_on_tensor_path(
 
 pub fn preferred_tensor_entry_name(program: &HostProgram) -> Option<&str> {
     fn tensor_signature(function: &HostFunction) -> bool {
-        matches!(function.ret_ty, HostType::Tensor(_))
+        matches!(function.ret_ty, HostTypeTerm::Tensor(_))
             && function
                 .params
                 .iter()
-                .all(|param| matches!(param.ty, HostType::Tensor(_)))
+                .all(|param| matches!(param.ty, HostTypeTerm::Tensor(_)))
     }
 
     if let Some(function) = program
@@ -1065,7 +1361,7 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
         let pname = param_name(param)?;
         let pty = param_host_type(param)
             .or_else(|| declared_param_tys.get(index).cloned())
-            .filter(|ty| *ty != HostType::Unknown)?;
+            .filter(|ty| !ty.is_unresolved())?;
         let tensor_ty = tensor_type_from_host_input(&pty)?;
         scope.insert(pname, tensor_ty);
     }
@@ -1232,7 +1528,7 @@ fn lower_host_program(
         let is_fn_body = matches!(body, Expr::List(list, _) if tag(list) == Some("fn"));
         let has_any_host_lane_def = lowered_names.values().any(|lowered| !*lowered);
         let has_callable_params = lookup_declared_fn_type(program, name)
-            .is_some_and(|(params, _)| params.iter().any(|ty| matches!(ty, HostType::Fn(..))));
+            .is_some_and(|(params, _)| params.iter().any(|ty| matches!(ty, HostTypeTerm::Fn(..))));
         // Non-F32/Bool tensor precisions (e.g. int32, int64) aren't
         // representable in the Phase 0f DAG-only codegen path — it still
         // hard-asserts f32/bool. Force a host-lane wrapper for any fn whose
@@ -1240,20 +1536,20 @@ fn lower_host_program(
         // host-lane code path instead of panicking in DAG emit.
         let has_non_dag_tensor =
             lookup_declared_fn_type(program, name).is_some_and(|(params, ret)| {
-                fn ty_has_non_dag_tensor(ty: &HostType) -> bool {
+                fn ty_has_non_dag_tensor(ty: &HostTypeTerm) -> bool {
                     match ty {
-                        HostType::Tensor(tensor) => !matches!(
+                        HostTypeTerm::Tensor(tensor) => !matches!(
                             tensor.precision,
                             chelis_types::types::Prim::F32 | chelis_types::types::Prim::Bool
                         ),
-                        HostType::Option(inner) | HostType::List(inner) => {
+                        HostTypeTerm::Option(inner) | HostTypeTerm::List(inner) => {
                             ty_has_non_dag_tensor(inner)
                         }
-                        HostType::Tuple(items) => items.iter().any(ty_has_non_dag_tensor),
-                        HostType::Dict(k, v) => {
+                        HostTypeTerm::Tuple(items) => items.iter().any(ty_has_non_dag_tensor),
+                        HostTypeTerm::Dict(k, v) => {
                             ty_has_non_dag_tensor(k) || ty_has_non_dag_tensor(v)
                         }
-                        HostType::Fn(params, ret) => {
+                        HostTypeTerm::Fn(params, ret) => {
                             params.iter().any(ty_has_non_dag_tensor) || ty_has_non_dag_tensor(ret)
                         }
                         _ => false,
@@ -1283,18 +1579,20 @@ fn lower_host_program(
         // residual HOF emission issue (red-team A20.1).
         let scalar_only_callable_signature = has_callable_params
             && lookup_declared_fn_type(program, name).is_some_and(|(params, ret)| {
-                fn ty_is_scalar_or_callable_scalar(ty: &HostType) -> bool {
+                fn ty_is_scalar_or_callable_scalar(ty: &HostTypeTerm) -> bool {
                     match ty {
-                        HostType::Tensor(_) => false,
-                        HostType::Fn(params, ret) => {
+                        HostTypeTerm::Tensor(_) => false,
+                        HostTypeTerm::Fn(params, ret) => {
                             params.iter().all(ty_is_scalar_or_callable_scalar)
                                 && ty_is_scalar_or_callable_scalar(ret)
                         }
-                        HostType::Option(inner) | HostType::List(inner) => {
+                        HostTypeTerm::Option(inner) | HostTypeTerm::List(inner) => {
                             ty_is_scalar_or_callable_scalar(inner)
                         }
-                        HostType::Tuple(items) => items.iter().all(ty_is_scalar_or_callable_scalar),
-                        HostType::Dict(k, v) => {
+                        HostTypeTerm::Tuple(items) => {
+                            items.iter().all(ty_is_scalar_or_callable_scalar)
+                        }
+                        HostTypeTerm::Dict(k, v) => {
                             ty_is_scalar_or_callable_scalar(k) && ty_is_scalar_or_callable_scalar(v)
                         }
                         // Primitive (f32/int32/bool/...), Unit -- scalar OK.
@@ -1354,7 +1652,7 @@ fn lower_host_program(
             function.body.append_merged_span(expr.span_id());
             global_scope.insert(
                 name.to_string(),
-                HostType::Fn(
+                HostTypeTerm::Fn(
                     function
                         .params
                         .iter()
@@ -1394,8 +1692,8 @@ fn lower_host_program(
             // type to dispatch the typed runtime call so the storage
             // matches the declared dtype.
             let declared_ty = ty_expr
-                .map(parse_host_type)
-                .filter(|ty| !matches!(ty, HostType::Unknown));
+                .map(|ty| decode_host_type_or_raise(ty, &HashMap::new()))
+                .filter(|ty| !ty.is_unresolved());
             let ty = declared_ty.clone().unwrap_or_else(|| inferred_ty.clone());
             // When the declared type sharpens the inferred type (e.g.
             // declared f64, inferred f32), retag the outermost value
@@ -1488,7 +1786,7 @@ pub fn host_program_summary_rejections(program: &HostProgram) -> &[SummaryReject
 /// callee is itself an application). Emitting such a wrapper produces
 /// `__result = call(...)` C code that doesn't link. The CLI uses this
 /// to surface a clean error instead of shipping broken C.
-pub fn host_program_unresolved_call_sites(program: &HostProgram) -> Vec<String> {
+pub fn host_program_unresolved_call_sites<T>(program: &HostProgram<T>) -> Vec<String> {
     let mut out = Vec::new();
     for function in &program.functions {
         if host_body_has_fallback_call(&function.body) {
@@ -1508,7 +1806,7 @@ pub fn host_program_unresolved_call_sites(program: &HostProgram) -> Vec<String> 
 /// eval/test-only builtins (e.g. `process_run`, Hull Phase 0a) with a
 /// clean diagnostic rather than the silent `/* unsupported builtin */ 0`
 /// fallthrough in C codegen.
-pub fn host_program_uses_builtin(program: &HostProgram, builtin: &str) -> bool {
+pub fn host_program_uses_builtin<T>(program: &HostProgram<T>, builtin: &str) -> bool {
     program
         .globals
         .iter()
@@ -1519,14 +1817,14 @@ pub fn host_program_uses_builtin(program: &HostProgram, builtin: &str) -> bool {
             .any(|function| host_body_uses_builtin(&function.body, builtin))
 }
 
-fn host_callback_uses_builtin(callback: &HostCallback, builtin: &str) -> bool {
+fn host_callback_uses_builtin<T>(callback: &HostCallback<T>, builtin: &str) -> bool {
     match &callback.kind {
         HostCallbackKind::Inline { body, .. } => host_body_uses_builtin(body, builtin),
         HostCallbackKind::Named { .. } => false,
     }
 }
 
-fn host_body_uses_builtin(expr: &HostExpr, builtin: &str) -> bool {
+fn host_body_uses_builtin<T>(expr: &HostExpr<T>, builtin: &str) -> bool {
     match &expr.kind {
         HostExprKind::Builtin { name, args, .. } => {
             name == builtin || args.iter().any(|arg| host_body_uses_builtin(arg, builtin))
@@ -1951,7 +2249,7 @@ fn remap_sparse_summary_to_params(
     let arg_to_param = args
         .iter()
         .map(|arg| {
-            let HostExprKind::Var(name, HostType::Tensor(_)) = &arg.kind else {
+            let HostExprKind::Var(name, HostTypeTerm::Tensor(_)) = &arg.kind else {
                 return None;
             };
             params.iter().position(|param| param.name == *name)
@@ -1963,7 +2261,7 @@ fn remap_sparse_summary_to_params(
     let input_tys = params
         .iter()
         .map(|param| match &param.ty {
-            HostType::Tensor(ty) => Some(ty.clone()),
+            HostTypeTerm::Tensor(ty) => Some(ty.clone()),
             _ => None,
         })
         .collect::<Option<Vec<_>>>()?;
@@ -2000,7 +2298,7 @@ fn remap_blas_summary_to_params(
     let arg_to_param = args
         .iter()
         .map(|arg| {
-            let HostExprKind::Var(name, HostType::Tensor(_)) = &arg.kind else {
+            let HostExprKind::Var(name, HostTypeTerm::Tensor(_)) = &arg.kind else {
                 return None;
             };
             params.iter().position(|param| param.name == *name)
@@ -2011,7 +2309,7 @@ fn remap_blas_summary_to_params(
     let input_tys = params
         .iter()
         .map(|param| match &param.ty {
-            HostType::Tensor(ty) => Some(ty.clone()),
+            HostTypeTerm::Tensor(ty) => Some(ty.clone()),
             _ => None,
         })
         .collect::<Option<Vec<_>>>()?;
@@ -2032,48 +2330,11 @@ fn remap_blas_summary_to_params(
     })
 }
 
-/// Scan a host program for functions with `HostType::Unknown` params or
-/// return types — this happens for polymorphic defs where the type
-/// variable hasn't been resolved at lowering time (e.g. `hamt_put[a]`
-/// with `value: a`). The emitter currently collapses `Unknown` to `int`
-/// in C, which breaks links when callers pass concrete pointer types.
-/// Returns a list of `(def_name, position)` pairs for reporting.
-pub fn host_program_unknown_typed_params(program: &HostProgram) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    for function in &program.functions {
-        for param in &function.params {
-            if host_type_contains_unknown(&param.ty) {
-                out.push((
-                    function.name.clone(),
-                    format!("parameter `{}` has unresolved polymorphic type", param.name),
-                ));
-            }
-        }
-        if host_type_contains_unknown(&function.ret_ty) {
-            out.push((
-                function.name.clone(),
-                "return type is unresolved polymorphic".to_string(),
-            ));
-        }
-    }
-    out
+fn host_type_is_unresolved(ty: &HostTypeTerm) -> bool {
+    ty.is_unresolved()
 }
 
-fn host_type_contains_unknown(ty: &HostType) -> bool {
-    match ty {
-        HostType::Unknown => true,
-        HostType::Option(inner) | HostType::List(inner) => host_type_contains_unknown(inner),
-        HostType::Tuple(items) => items.iter().any(host_type_contains_unknown),
-        HostType::Dict(k, v) => host_type_contains_unknown(k) || host_type_contains_unknown(v),
-        HostType::Fn(params, ret) => {
-            params.iter().any(host_type_contains_unknown) || host_type_contains_unknown(ret)
-        }
-        HostType::Adt(_, args) => args.iter().any(host_type_contains_unknown),
-        _ => false,
-    }
-}
-
-fn host_body_has_fallback_call(expr: &HostExpr) -> bool {
+fn host_body_has_fallback_call<T>(expr: &HostExpr<T>) -> bool {
     match &expr.kind {
         HostExprKind::Builtin { name, args, .. } => {
             name == "call"
@@ -2158,7 +2419,7 @@ fn lower_host_function(
         .and_then(parse_fn_type_expr)
         .or_else(|| expr_fn_type(body))
         .or_else(|| lookup_declared_fn_type(program, name))
-        .unwrap_or((Vec::new(), HostType::Unknown));
+        .unwrap_or((Vec::new(), fresh_host_inference()));
 
     let mut scope = HashMap::new();
     let mut params = Vec::new();
@@ -2175,14 +2436,14 @@ fn lower_host_function(
                     continue;
                 };
                 let pty = param_host_type(param)
-                    .filter(|ty| *ty != HostType::Unknown)
+                    .filter(|ty| !ty.is_unresolved())
                     .or_else(|| {
                         param_tys
                             .get(index)
                             .cloned()
-                            .filter(|ty| *ty != HostType::Unknown)
+                            .filter(|ty| !ty.is_unresolved())
                     })
-                    .unwrap_or(HostType::Unknown);
+                    .unwrap_or_else(fresh_host_inference);
                 scope.insert(pname.clone(), pty.clone());
                 params.push(HostParam {
                     name: pname,
@@ -2191,7 +2452,7 @@ fn lower_host_function(
             }
             kids.get(1)?.clone()
         } else {
-            if param_tys.is_empty() && ret_ty == HostType::Unknown {
+            if param_tys.is_empty() && ret_ty.is_unresolved() {
                 return None;
             }
             for (index, param_ty) in param_tys.iter().enumerate() {
@@ -2236,8 +2497,8 @@ fn lower_host_function(
     // application becomes a direct `f(x)` call.
     let any_callable_param = params
         .iter()
-        .any(|param| matches!(param.ty, HostType::Fn(_, _)));
-    let mut host_body = if let HostType::Tensor(expected) = ret_ty.clone()
+        .any(|param| matches!(param.ty, HostTypeTerm::Fn(_, _)));
+    let mut host_body = if let HostTypeTerm::Tensor(expected) = ret_ty.clone()
         && !any_callable_param
         && !expr_needs_host_lane_tensor_lowering(&body_expr, program)
         && !expr_calls_top_level_fn_with_callable_param(&body_expr, program)
@@ -2271,7 +2532,7 @@ fn lower_host_function(
     host_body.append_merged_span(body_expr.span_id());
     host_body.append_merged_span(body.span_id());
     refine_function_params_from_body(&mut params, &host_body);
-    let ret_ty = if ret_ty == HostType::Unknown {
+    let ret_ty = if ret_ty.is_unresolved() {
         host_expr_type(&host_body)
     } else {
         ret_ty
@@ -2337,7 +2598,7 @@ fn synthesize_callable_application(
 fn try_lower_tensor_helper_call(
     expr: &Expr,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostType>,
+    scope: &HashMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
     expected: TensorType,
 ) -> Option<HostExpr> {
@@ -2347,7 +2608,7 @@ fn try_lower_tensor_helper_call(
     {
         return Some(HostExpr::new(HostExprKind::Var(
             name.to_string(),
-            HostType::Tensor(expected),
+            HostTypeTerm::Tensor(expected),
         )));
     }
     let dag = lower_tensor_helper_dag(expr, program, scope, &expected)?;
@@ -2374,7 +2635,7 @@ fn try_lower_tensor_helper_call(
 fn lower_tensor_helper_dag(
     expr: &Expr,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostType>,
+    scope: &HashMap<String, HostTypeTerm>,
     expected: &TensorType,
 ) -> Option<crate::Dag> {
     let defs = collect_program_defs(program.exprs());
@@ -2418,7 +2679,7 @@ fn lower_tensor_helper_dag(
 
 fn finish_tensor_helper_call(
     dag: crate::Dag,
-    scope: &HashMap<String, HostType>,
+    scope: &HashMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
     expected: TensorType,
 ) -> HostExpr {
@@ -2443,19 +2704,19 @@ fn finish_tensor_helper_call(
     // one slot for a two-output helper. Mirror the IR/eval-lane
     // `LoweredValue::Tuple` semantics by typing the multi-root call as
     // a `Tuple` of the per-root tensor types, in root order.
-    let root_tys: Vec<HostType> = dag
+    let root_tys: Vec<HostTypeTerm> = dag
         .roots()
         .iter()
         .map(|id| {
             dag.get(*id)
-                .map(|node| HostType::Tensor(node.output_type.clone()))
-                .unwrap_or_else(|| HostType::Tensor(expected.clone()))
+                .map(|node| HostTypeTerm::Tensor(node.output_type.clone()))
+                .unwrap_or_else(|| HostTypeTerm::Tensor(expected.clone()))
         })
         .collect();
     let call_ty = if root_tys.len() > 1 {
-        HostType::Tuple(root_tys)
+        HostTypeTerm::Tuple(root_tys)
     } else {
-        HostType::Tensor(expected.clone())
+        HostTypeTerm::Tensor(expected.clone())
     };
     let args = tensor_helper_args(&inputs, scope);
     let (sparse_specialization, sparse_rejection) =
@@ -3268,7 +3529,7 @@ fn summary_dims_bind_to_inputs(input_tys: &[TensorType], dims: &[DimExpr]) -> bo
 fn lower_host_expr(
     expr: &Expr,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostType>,
+    scope: &HashMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> HostExpr {
     let mut result = lower_host_expr_kind(expr, program, scope, tensor_helpers);
@@ -3401,7 +3662,7 @@ fn substitute_var(expr: &Expr, name: &str, replacement: &Expr) -> Expr {
 fn lower_host_expr_kind(
     expr: &Expr,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostType>,
+    scope: &HashMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> HostExpr {
     let is_app_expr = matches!(expr, Expr::List(list, _) if tag(list) == Some("app"));
@@ -3425,8 +3686,8 @@ fn lower_host_expr_kind(
                 .map(|child| lower_host_expr(child, program, scope, tensor_helpers))
                 .collect::<Vec<_>>();
             let ty = expr_host_type(expr, program, scope);
-            let ty = if ty == HostType::Unknown {
-                HostType::Tuple(items.iter().map(host_expr_type).collect())
+            let ty = if ty.is_unresolved() {
+                HostTypeTerm::Tuple(items.iter().map(host_expr_type).collect())
             } else {
                 ty
             };
@@ -3448,16 +3709,16 @@ fn lower_host_expr_kind(
                 .unwrap_or("_")
                 .to_string();
             let ty = expr_type(expr)
-                .filter(|ty| *ty != HostType::Unknown)
+                .filter(|ty| !ty.is_unresolved())
                 .or_else(|| scope.get(&name).cloned())
                 .or_else(|| lookup_declared_host_type(program, &name))
-                .unwrap_or(HostType::Unknown);
+                .unwrap_or_else(fresh_host_inference);
             if name == "Nil" {
                 return HostExpr::new(HostExprKind::List(
                     Vec::new(),
                     match ty {
-                        HostType::List(_) => ty,
-                        _ => HostType::List(Box::new(HostType::Unknown)),
+                        HostTypeTerm::List(_) => ty,
+                        _ => HostTypeTerm::List(Box::new(fresh_host_inference())),
                     },
                 ));
             }
@@ -3467,7 +3728,7 @@ fn lower_host_expr_kind(
                 return HostExpr::new(HostExprKind::AdtConstruct {
                     ctor: name,
                     fields: Vec::new(),
-                    ty: HostType::Adt(adt_name, Vec::new()),
+                    ty: HostTypeTerm::Adt(adt_name, Vec::new()),
                 });
             }
             HostExpr::new(HostExprKind::Var(name, ty))
@@ -3477,9 +3738,9 @@ fn lower_host_expr_kind(
             let then_expr = lower_host_expr(&kids[1], program, scope, tensor_helpers);
             let else_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers);
             let explicit_ty = expr_host_type(expr, program, scope);
-            let ty = if explicit_ty == HostType::Unknown {
+            let ty = if explicit_ty.is_unresolved() {
                 let then_ty = host_expr_type(&then_expr);
-                if then_ty == HostType::Unknown {
+                if then_ty.is_unresolved() {
                     host_expr_type(&else_expr)
                 } else {
                     then_ty
@@ -3542,7 +3803,7 @@ fn lower_host_expr_kind(
             HostExpr::new(HostExprKind::Let {
                 bindings,
                 body: Box::new(body.clone()),
-                ty: if explicit_ty == HostType::Unknown {
+                ty: if explicit_ty.is_unresolved() {
                     host_expr_type(&body)
                 } else {
                     explicit_ty
@@ -3609,11 +3870,7 @@ fn lower_host_expr_kind(
             HostExpr::new(HostExprKind::Builtin {
                 name: "cast".to_string(),
                 args: vec![value],
-                ty: if ty == HostType::Unknown {
-                    inferred_ty
-                } else {
-                    ty
-                },
+                ty: if ty.is_unresolved() { inferred_ty } else { ty },
             })
         }
         Expr::List(list, _) if tag(list) == Some("app") => {
@@ -3725,7 +3982,7 @@ fn lower_host_expr_kind(
                 .unwrap_or(HostExpr::new(HostExprKind::Unit));
             let inner_ty = host_expr_type(&inner);
             let explicit = expr_host_type(expr, program, scope);
-            let ty = if explicit == HostType::Unknown {
+            let ty = if explicit.is_unresolved() {
                 inner_ty
             } else {
                 explicit
@@ -3791,7 +4048,7 @@ fn refine_function_params_from_body(params: &mut [HostParam], body: &HostExpr) {
         return;
     };
     for (index, param) in params.iter_mut().enumerate() {
-        if param.ty != HostType::Unknown {
+        if !param.ty.is_unresolved() {
             continue;
         }
         let Some(HostExpr {
@@ -3807,7 +4064,7 @@ fn refine_function_params_from_body(params: &mut [HostParam], body: &HostExpr) {
         let Some(inferred) = arg_tys.get(index) else {
             continue;
         };
-        if *inferred != HostType::Unknown {
+        if !inferred.is_unresolved() {
             param.ty = inferred.clone();
         }
     }
@@ -3837,9 +4094,9 @@ fn refine_host_function_signatures(functions: &mut [HostFunction]) -> bool {
         for function in functions.iter_mut() {
             let inferred_param_fns = infer_callable_param_types(&function.params, &function.body);
             for param in function.params.iter_mut() {
-                if param.ty == HostType::Unknown
+                if param.ty.is_unresolved()
                     && let Some(inferred) = inferred_param_fns.get(&param.name)
-                    && !host_type_has_unknown(inferred)
+                    && !host_type_is_unresolved(inferred)
                     && param.ty != *inferred
                 {
                     param.ty = inferred.clone();
@@ -3855,9 +4112,9 @@ fn refine_host_function_signatures(functions: &mut [HostFunction]) -> bool {
             if refine_host_expr_types(&mut function.body, &mut scope, &signatures) {
                 changed = true;
             }
-            if function.ret_ty == HostType::Unknown {
+            if function.ret_ty.is_unresolved() {
                 let body_ty = host_expr_type(&function.body);
-                if body_ty != HostType::Unknown {
+                if !body_ty.is_unresolved() {
                     function.ret_ty = body_ty;
                     changed = true;
                 }
@@ -3876,16 +4133,16 @@ fn refine_host_function_signatures(functions: &mut [HostFunction]) -> bool {
                 continue;
             };
 
-            if function.ret_ty == HostType::Unknown && *callee_ret != HostType::Unknown {
+            if function.ret_ty.is_unresolved() && !callee_ret.is_unresolved() {
                 function.ret_ty = callee_ret.clone();
-                if *ty == HostType::Unknown {
+                if ty.is_unresolved() {
                     *ty = callee_ret.clone();
                 }
                 changed = true;
             }
 
             for (index, param) in function.params.iter_mut().enumerate() {
-                if param.ty != HostType::Unknown {
+                if !param.ty.is_unresolved() {
                     continue;
                 }
                 let Some(HostExpr {
@@ -3901,7 +4158,7 @@ fn refine_host_function_signatures(functions: &mut [HostFunction]) -> bool {
                 let Some(inferred) = callee_params.get(index) else {
                     continue;
                 };
-                if *inferred == HostType::Unknown {
+                if inferred.is_unresolved() {
                     continue;
                 }
                 param.ty = inferred.clone();
@@ -3948,7 +4205,7 @@ fn refine_host_globals(globals: &mut [HostBinding], functions: &[HostFunction]) 
                 changed = true;
             }
             let inferred = host_expr_type(&binding.value);
-            if binding.ty != inferred && inferred != HostType::Unknown {
+            if binding.ty != inferred && !inferred.is_unresolved() {
                 binding.ty = inferred.clone();
                 changed = true;
             }
@@ -3967,7 +4224,7 @@ fn propagate_named_callback_signatures(
     functions: &mut [HostFunction],
     globals: &[HostBinding],
 ) -> bool {
-    let mut inferred = HashMap::<String, (Vec<HostType>, HostType)>::new();
+    let mut inferred = HashMap::<String, (Vec<HostTypeTerm>, HostTypeTerm)>::new();
     for function in functions.iter() {
         collect_named_callback_signatures(&function.body, &mut inferred);
     }
@@ -3981,12 +4238,12 @@ fn propagate_named_callback_signatures(
             continue;
         };
         for (param, inferred_ty) in function.params.iter_mut().zip(param_tys.iter()) {
-            if host_type_has_unknown(&param.ty) && !host_type_has_unknown(inferred_ty) {
+            if host_type_is_unresolved(&param.ty) && !host_type_is_unresolved(inferred_ty) {
                 param.ty = inferred_ty.clone();
                 changed = true;
             }
         }
-        if host_type_has_unknown(&function.ret_ty) && !host_type_has_unknown(ret_ty) {
+        if host_type_is_unresolved(&function.ret_ty) && !host_type_is_unresolved(ret_ty) {
             function.ret_ty = ret_ty.clone();
             changed = true;
         }
@@ -3996,7 +4253,7 @@ fn propagate_named_callback_signatures(
 
 fn collect_named_callback_signatures(
     expr: &HostExpr,
-    out: &mut HashMap<String, (Vec<HostType>, HostType)>,
+    out: &mut HashMap<String, (Vec<HostTypeTerm>, HostTypeTerm)>,
 ) {
     match &expr.kind {
         HostExprKind::Call { args, .. } | HostExprKind::Builtin { args, .. } => {
@@ -4102,7 +4359,7 @@ fn collect_named_callback_signatures(
 
 fn collect_named_callback_signatures_in_callback(
     callback: &HostCallback,
-    out: &mut HashMap<String, (Vec<HostType>, HostType)>,
+    out: &mut HashMap<String, (Vec<HostTypeTerm>, HostTypeTerm)>,
 ) {
     if let HostCallbackKind::Inline { body, .. } = &callback.kind {
         collect_named_callback_signatures(body, out);
@@ -4111,31 +4368,41 @@ fn collect_named_callback_signatures_in_callback(
 
 fn merge_named_callback_signature(
     callback: &HostCallback,
-    out: &mut HashMap<String, (Vec<HostType>, HostType)>,
+    out: &mut HashMap<String, (Vec<HostTypeTerm>, HostTypeTerm)>,
 ) {
     let HostCallbackKind::Named { function, params } = &callback.kind else {
         return;
     };
-    let entry = out
-        .entry(function.clone())
-        .or_insert_with(|| (vec![HostType::Unknown; params.len()], HostType::Unknown));
+    let entry = out.entry(function.clone()).or_insert_with(|| {
+        (
+            std::iter::repeat_with(fresh_host_inference)
+                .take(params.len())
+                .collect(),
+            fresh_host_inference(),
+        )
+    });
     if entry.0.len() < params.len() {
-        entry.0.resize(params.len(), HostType::Unknown);
+        entry.0.extend(
+            std::iter::repeat_with(fresh_host_inference).take(params.len() - entry.0.len()),
+        );
     }
     for (index, param) in params.iter().enumerate() {
-        if entry.0[index] == HostType::Unknown && param.ty != HostType::Unknown {
+        if entry.0[index].is_unresolved() && !param.ty.is_unresolved() {
             entry.0[index] = param.ty.clone();
         }
     }
-    if entry.1 == HostType::Unknown && callback.ret_ty != HostType::Unknown {
+    if entry.1.is_unresolved() && !callback.ret_ty.is_unresolved() {
         entry.1 = callback.ret_ty.clone();
     }
 }
 
-fn infer_callable_param_types(params: &[HostParam], body: &HostExpr) -> HashMap<String, HostType> {
+fn infer_callable_param_types(
+    params: &[HostParam],
+    body: &HostExpr,
+) -> HashMap<String, HostTypeTerm> {
     let unknown = params
         .iter()
-        .filter(|param| param.ty == HostType::Unknown)
+        .filter(|param| param.ty.is_unresolved())
         .map(|param| param.name.clone())
         .collect::<HashSet<_>>();
     let mut out = HashMap::new();
@@ -4146,7 +4413,7 @@ fn infer_callable_param_types(params: &[HostParam], body: &HostExpr) -> HashMap<
 fn infer_callable_param_types_in_expr(
     expr: &HostExpr,
     unknown: &HashSet<String>,
-    out: &mut HashMap<String, HostType>,
+    out: &mut HashMap<String, HostTypeTerm>,
 ) {
     match &expr.kind {
         HostExprKind::Call {
@@ -4157,7 +4424,7 @@ fn infer_callable_param_types_in_expr(
         } => {
             if unknown.contains(function) {
                 out.entry(function.clone()).or_insert_with(|| {
-                    HostType::Fn(arg_tys.clone(), Box::new(HostType::Tuple(Vec::new())))
+                    HostTypeTerm::Fn(arg_tys.clone(), Box::new(HostTypeTerm::Tuple(Vec::new())))
                 });
             }
             for arg in args {
@@ -4266,7 +4533,7 @@ fn infer_callable_param_types_in_expr(
 fn infer_callable_param_types_in_callback(
     callback: &HostCallback,
     unknown: &HashSet<String>,
-    out: &mut HashMap<String, HostType>,
+    out: &mut HashMap<String, HostTypeTerm>,
 ) {
     if let HostCallbackKind::Inline { body, .. } = &callback.kind {
         infer_callable_param_types_in_expr(body, unknown, out);
@@ -4275,15 +4542,15 @@ fn infer_callable_param_types_in_callback(
 
 fn refine_host_expr_types(
     expr: &mut HostExpr,
-    scope: &mut HashMap<String, HostType>,
-    signatures: &HashMap<String, (Vec<HostType>, HostType)>,
+    scope: &mut HashMap<String, HostTypeTerm>,
+    signatures: &HashMap<String, (Vec<HostTypeTerm>, HostTypeTerm)>,
 ) -> bool {
     let mut changed = false;
     match &mut expr.kind {
         HostExprKind::Var(name, ty) => {
-            if host_type_has_unknown(ty)
+            if host_type_is_unresolved(ty)
                 && let Some(inferred) = scope.get(name)
-                && !host_type_has_unknown(inferred)
+                && !host_type_is_unresolved(inferred)
             {
                 *ty = inferred.clone();
                 changed = true;
@@ -4299,7 +4566,7 @@ fn refine_host_expr_types(
                 changed |= refine_host_expr_types(arg, scope, signatures);
             }
             let inferred_sig = scope.get(function).and_then(|ty| match ty {
-                HostType::Fn(params, ret) => Some((params.clone(), (**ret).clone())),
+                HostTypeTerm::Fn(params, ret) => Some((params.clone(), (**ret).clone())),
                 _ => None,
             });
             let declared_sig = signatures.get(function).cloned();
@@ -4307,14 +4574,14 @@ fn refine_host_expr_types(
             if let Some((params, ret)) = sig {
                 for (index, arg_ty) in arg_tys.iter_mut().enumerate() {
                     if let Some(inferred) = params.get(index)
-                        && *inferred != HostType::Unknown
+                        && !inferred.is_unresolved()
                         && *arg_ty != *inferred
                     {
                         *arg_ty = inferred.clone();
                         changed = true;
                     }
                 }
-                if *ty == HostType::Unknown && ret != HostType::Unknown {
+                if ty.is_unresolved() && !ret.is_unresolved() {
                     *ty = ret;
                     changed = true;
                 }
@@ -4330,9 +4597,9 @@ fn refine_host_expr_types(
             // `tensor[3, f64]` would be overwritten back to the
             // builtin's default `tensor[list, f32]` inferred return
             // type, defeating the F1 fix's typed runtime dispatch).
-            if host_type_has_unknown(ty)
+            if host_type_is_unresolved(ty)
                 && let Some(inferred) = infer_builtin_host_type(name, args)
-                && !host_type_has_unknown(&inferred)
+                && !host_type_is_unresolved(&inferred)
                 && *ty != inferred
             {
                 *ty = inferred;
@@ -4346,10 +4613,10 @@ fn refine_host_expr_types(
             let item_ty = items
                 .iter()
                 .map(host_expr_type)
-                .find(|item_ty| !host_type_has_unknown(item_ty))
-                .unwrap_or(HostType::Unknown);
-            let inferred = HostType::List(Box::new(item_ty));
-            if host_type_has_unknown(ty) && !host_type_has_unknown(&inferred) {
+                .find(|item_ty| !host_type_is_unresolved(item_ty))
+                .unwrap_or_else(fresh_host_inference);
+            let inferred = HostTypeTerm::List(Box::new(item_ty));
+            if host_type_is_unresolved(ty) && !host_type_is_unresolved(&inferred) {
                 *ty = inferred;
                 changed = true;
             }
@@ -4358,8 +4625,8 @@ fn refine_host_expr_types(
             for item in items.iter_mut() {
                 changed |= refine_host_expr_types(item, scope, signatures);
             }
-            let inferred = HostType::Tuple(items.iter().map(host_expr_type).collect());
-            if host_type_has_unknown(ty) && !host_type_has_unknown(&inferred) {
+            let inferred = HostTypeTerm::Tuple(items.iter().map(host_expr_type).collect());
+            if host_type_is_unresolved(ty) && !host_type_is_unresolved(&inferred) {
                 *ty = inferred;
                 changed = true;
             }
@@ -4381,15 +4648,15 @@ fn refine_host_expr_types(
             changed |= refine_host_expr_types(cond, scope, signatures);
             changed |= refine_host_expr_types(then_expr, scope, signatures);
             changed |= refine_host_expr_types(else_expr, scope, signatures);
-            if *ty == HostType::Unknown {
+            if ty.is_unresolved() {
                 let then_ty = host_expr_type(then_expr);
                 let else_ty = host_expr_type(else_expr);
-                let inferred = if then_ty != HostType::Unknown {
+                let inferred = if !then_ty.is_unresolved() {
                     then_ty
                 } else {
                     else_ty
                 };
-                if inferred != HostType::Unknown {
+                if !inferred.is_unresolved() {
                     *ty = inferred;
                     changed = true;
                 }
@@ -4405,20 +4672,20 @@ fn refine_host_expr_types(
             changed |= refine_host_expr_types(scrutinee, scope, signatures);
             let mut some_scope = scope.clone();
             let inner_ty = option_inner_type(scrutinee);
-            if inner_ty != HostType::Unknown {
+            if !inner_ty.is_unresolved() {
                 some_scope.insert(bind_name.clone(), inner_ty);
             }
             changed |= refine_host_expr_types(some_expr, &mut some_scope, signatures);
             changed |= refine_host_expr_types(none_expr, scope, signatures);
-            if *ty == HostType::Unknown {
+            if ty.is_unresolved() {
                 let some_ty = host_expr_type(some_expr);
                 let none_ty = host_expr_type(none_expr);
-                let inferred = if some_ty != HostType::Unknown {
+                let inferred = if !some_ty.is_unresolved() {
                     some_ty
                 } else {
                     none_ty
                 };
-                if inferred != HostType::Unknown {
+                if !inferred.is_unresolved() {
                     *ty = inferred;
                     changed = true;
                 }
@@ -4441,14 +4708,14 @@ fn refine_host_expr_types(
             if let Some(default_expr) = default_expr {
                 changed |= refine_host_expr_types(default_expr, scope, signatures);
             }
-            if *ty == HostType::Unknown {
+            if ty.is_unresolved() {
                 let inferred = arms
                     .iter()
                     .map(|arm| host_expr_type(&arm.expr))
-                    .find(|ty| *ty != HostType::Unknown)
+                    .find(|ty| !ty.is_unresolved())
                     .or_else(|| default_expr.as_ref().map(|expr| host_expr_type(expr)));
                 if let Some(inferred) = inferred
-                    && inferred != HostType::Unknown
+                    && !inferred.is_unresolved()
                 {
                     *ty = inferred;
                     changed = true;
@@ -4459,9 +4726,9 @@ fn refine_host_expr_types(
             let mut local_scope = scope.clone();
             for binding in bindings.iter_mut() {
                 changed |= refine_host_expr_types(&mut binding.value, &mut local_scope, signatures);
-                if binding.ty == HostType::Unknown {
+                if binding.ty.is_unresolved() {
                     let inferred = host_expr_type(&binding.value);
-                    if inferred != HostType::Unknown {
+                    if !inferred.is_unresolved() {
                         binding.ty = inferred.clone();
                         changed = true;
                     }
@@ -4469,9 +4736,9 @@ fn refine_host_expr_types(
                 local_scope.insert(binding.name.clone(), binding.ty.clone());
             }
             changed |= refine_host_expr_types(body, &mut local_scope, signatures);
-            if *ty == HostType::Unknown {
+            if ty.is_unresolved() {
                 let inferred = host_expr_type(body);
-                if inferred != HostType::Unknown {
+                if !inferred.is_unresolved() {
                     *ty = inferred;
                     changed = true;
                 }
@@ -4484,9 +4751,9 @@ fn refine_host_expr_types(
             let expected_ret = list_item_type(ty);
             changed |= specialize_host_callback_types(callback, &[item_ty], &expected_ret);
             changed |= refine_host_callback_types(callback, scope, signatures);
-            if *ty == HostType::Unknown {
+            if ty.is_unresolved() {
                 let inferred = host_expr_type(list);
-                if inferred != HostType::Unknown {
+                if !inferred.is_unresolved() {
                     *ty = inferred;
                     changed = true;
                 }
@@ -4497,11 +4764,11 @@ fn refine_host_expr_types(
             changed |= refine_host_expr_types(list, scope, signatures);
             let list_ty = host_expr_type(list);
             let item_ty = list_item_type(&list_ty);
-            changed |= specialize_host_callback_types(callback, &[item_ty], &HostType::Bool);
+            changed |= specialize_host_callback_types(callback, &[item_ty], &HostTypeTerm::Bool);
             changed |= refine_host_callback_types(callback, scope, signatures);
-            if *ty == HostType::Unknown {
+            if ty.is_unresolved() {
                 let inferred = host_expr_type(list);
-                if inferred != HostType::Unknown {
+                if !inferred.is_unresolved() {
                     *ty = inferred;
                     changed = true;
                 }
@@ -4512,14 +4779,14 @@ fn refine_host_expr_types(
             let list_ty = host_expr_type(list);
             let item_ty = list_item_type(&list_ty);
             let expected_ret = match ty {
-                HostType::List(inner) => HostType::List(Box::new((**inner).clone())),
-                _ => HostType::Unknown,
+                HostTypeTerm::List(inner) => HostTypeTerm::List(Box::new((**inner).clone())),
+                _ => fresh_host_inference(),
             };
             changed |= specialize_host_callback_types(callback, &[item_ty], &expected_ret);
             changed |= refine_host_callback_types(callback, scope, signatures);
-            if *ty == HostType::Unknown {
+            if ty.is_unresolved() {
                 let inferred = host_expr_type(list);
-                if inferred != HostType::Unknown {
+                if !inferred.is_unresolved() {
                     *ty = inferred;
                     changed = true;
                 }
@@ -4545,9 +4812,9 @@ fn refine_host_expr_types(
             changed |=
                 specialize_host_callback_types(callback, &[init_ty.clone(), item_ty], &init_ty);
             changed |= refine_host_callback_types(callback, scope, signatures);
-            if *ty == HostType::Unknown {
+            if ty.is_unresolved() {
                 let inferred = host_expr_type(init);
-                if inferred != HostType::Unknown {
+                if !inferred.is_unresolved() {
                     *ty = inferred;
                     changed = true;
                 }
@@ -4561,9 +4828,9 @@ fn refine_host_expr_types(
         HostExprKind::WithSeed { seed, body, ty } => {
             changed |= refine_host_expr_types(seed, scope, signatures);
             changed |= refine_host_expr_types(body, scope, signatures);
-            if *ty == HostType::Unknown {
+            if ty.is_unresolved() {
                 let inferred = host_expr_type(body);
-                if inferred != HostType::Unknown {
+                if !inferred.is_unresolved() {
                     *ty = inferred;
                     changed = true;
                 }
@@ -4578,10 +4845,10 @@ fn refine_host_expr_types(
     changed
 }
 
-fn list_item_type(ty: &HostType) -> HostType {
+fn list_item_type(ty: &HostTypeTerm) -> HostTypeTerm {
     match ty {
-        HostType::List(inner) => (**inner).clone(),
-        _ => HostType::Unknown,
+        HostTypeTerm::List(inner) => (**inner).clone(),
+        _ => fresh_host_inference(),
     }
 }
 
@@ -4593,43 +4860,30 @@ fn callback_params_mut(callback: &mut HostCallback) -> &mut [HostParam] {
 
 fn specialize_host_callback_types(
     callback: &mut HostCallback,
-    param_tys: &[HostType],
-    ret_ty: &HostType,
+    param_tys: &[HostTypeTerm],
+    ret_ty: &HostTypeTerm,
 ) -> bool {
     let mut changed = false;
     for (param, inferred) in callback_params_mut(callback)
         .iter_mut()
         .zip(param_tys.iter())
     {
-        if host_type_has_unknown(&param.ty) && !host_type_has_unknown(inferred) {
+        if host_type_is_unresolved(&param.ty) && !host_type_is_unresolved(inferred) {
             param.ty = inferred.clone();
             changed = true;
         }
     }
-    if host_type_has_unknown(&callback.ret_ty) && !host_type_has_unknown(ret_ty) {
+    if host_type_is_unresolved(&callback.ret_ty) && !host_type_is_unresolved(ret_ty) {
         callback.ret_ty = ret_ty.clone();
         changed = true;
     }
     changed
 }
 
-fn host_type_has_unknown(ty: &HostType) -> bool {
-    match ty {
-        HostType::Unknown => true,
-        HostType::Fn(params, ret) => {
-            params.iter().any(host_type_has_unknown) || host_type_has_unknown(ret)
-        }
-        HostType::List(inner) | HostType::Option(inner) => host_type_has_unknown(inner),
-        HostType::Dict(key, value) => host_type_has_unknown(key) || host_type_has_unknown(value),
-        HostType::Tuple(items) => items.iter().any(host_type_has_unknown),
-        _ => false,
-    }
-}
-
 fn refine_host_callback_types(
     callback: &mut HostCallback,
-    scope: &mut HashMap<String, HostType>,
-    signatures: &HashMap<String, (Vec<HostType>, HostType)>,
+    scope: &mut HashMap<String, HostTypeTerm>,
+    signatures: &HashMap<String, (Vec<HostTypeTerm>, HostTypeTerm)>,
 ) -> bool {
     match &mut callback.kind {
         HostCallbackKind::Inline { params, body } => {
@@ -4639,7 +4893,7 @@ fn refine_host_callback_types(
             }
             let mut changed = refine_host_expr_types(body, &mut callback_scope, signatures);
             let inferred = host_expr_type(body);
-            if !host_type_has_unknown(&inferred) && callback.ret_ty != inferred {
+            if !host_type_is_unresolved(&inferred) && callback.ret_ty != inferred {
                 callback.ret_ty = inferred;
                 changed = true;
             }
@@ -4699,7 +4953,7 @@ fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
 fn lower_match_host_expr(
     list: &List,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostType>,
+    scope: &HashMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> HostExpr {
     let kids = children(list);
@@ -4707,7 +4961,11 @@ fn lower_match_host_expr(
     let scrutinee_ty = host_expr_type(&scrutinee);
     if matches!(
         scrutinee_ty,
-        HostType::Int64 | HostType::Float64 | HostType::Float32 | HostType::Bool | HostType::String
+        HostTypeTerm::Int64
+            | HostTypeTerm::Float64
+            | HostTypeTerm::Float32
+            | HostTypeTerm::Bool
+            | HostTypeTerm::String
     ) {
         return lower_literal_match_host_expr(
             list,
@@ -4793,7 +5051,7 @@ fn lower_match_host_expr(
                         };
                         let ty = field_ty
                             .or_else(|| expr_type(subpat))
-                            .unwrap_or(HostType::Unknown);
+                            .unwrap_or_else(fresh_host_inference);
                         scoped.insert(name.to_string(), ty.clone());
                         bindings.push(HostPatternBinding {
                             name: name.to_string(),
@@ -4818,7 +5076,7 @@ fn lower_match_host_expr(
             program,
             scope,
         );
-        if explicit == HostType::Unknown {
+        if explicit.is_unresolved() {
             // For ADT matches with multiple arms, Some/None exprs aren't set —
             // the arm bodies live in `generic_arms` / `generic_default`. Fall
             // back through those first so the match's result type reflects the
@@ -4829,18 +5087,18 @@ fn lower_match_host_expr(
             let arm_ty = generic_arms
                 .iter()
                 .map(|arm| host_expr_type(&arm.expr))
-                .find(|ty| *ty != HostType::Unknown)
+                .find(|ty| !ty.is_unresolved())
                 .or_else(|| {
                     generic_default
                         .as_deref()
                         .map(host_expr_type)
-                        .filter(|ty| *ty != HostType::Unknown)
+                        .filter(|ty| !ty.is_unresolved())
                 });
             if let Some(ty) = arm_ty {
                 ty
             } else {
                 let some_ty = host_expr_type(&some_expr);
-                if some_ty == HostType::Unknown {
+                if some_ty.is_unresolved() {
                     host_expr_type(&none_expr)
                 } else {
                     some_ty
@@ -4851,7 +5109,7 @@ fn lower_match_host_expr(
         }
     };
 
-    if matches!(scrutinee_ty, HostType::Adt(_, _)) {
+    if matches!(scrutinee_ty, HostTypeTerm::Adt(_, _)) {
         return HostExpr::new(HostExprKind::MatchAdt {
             scrutinee: Box::new(scrutinee),
             arms: generic_arms,
@@ -4872,10 +5130,10 @@ fn lower_match_host_expr(
 fn lower_literal_match_host_expr(
     list: &List,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostType>,
+    scope: &HashMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
     scrutinee: HostExpr,
-    scrutinee_ty: HostType,
+    scrutinee_ty: HostTypeTerm,
 ) -> HostExpr {
     let kids = children(list);
     let mut literal_arms = Vec::new();
@@ -4912,7 +5170,7 @@ fn lower_literal_match_host_expr(
         scope,
     );
     let mut body = default_expr;
-    let result_ty = if explicit == HostType::Unknown {
+    let result_ty = if explicit.is_unresolved() {
         host_expr_type(&body)
     } else {
         explicit
@@ -4922,7 +5180,7 @@ fn lower_literal_match_host_expr(
             cond: Box::new(HostExpr::new(HostExprKind::Builtin {
                 name: "eq".to_string(),
                 args: vec![scrutinee.clone(), lit],
-                ty: HostType::Bool,
+                ty: HostTypeTerm::Bool,
             })),
             then_expr: Box::new(arm_expr),
             else_expr: Box::new(body),
@@ -4932,18 +5190,18 @@ fn lower_literal_match_host_expr(
     body
 }
 
-fn host_literal_expr(expr: &Expr, expected_ty: &HostType) -> Option<HostExpr> {
+fn host_literal_expr(expr: &Expr, expected_ty: &HostTypeTerm) -> Option<HostExpr> {
     match (expr, expected_ty) {
-        (Expr::Atom(Atom::Int(value), _), HostType::Int64) => {
+        (Expr::Atom(Atom::Int(value), _), &HostTypeTerm::Int64) => {
             Some(HostExpr::new(HostExprKind::Int(*value)))
         }
-        (Expr::Atom(Atom::Float(value), _), HostType::Float64) => {
+        (Expr::Atom(Atom::Float(value), _), &HostTypeTerm::Float64) => {
             Some(HostExpr::new(HostExprKind::Float(*value)))
         }
-        (Expr::Atom(Atom::Bool(value), _), HostType::Bool) => {
+        (Expr::Atom(Atom::Bool(value), _), &HostTypeTerm::Bool) => {
             Some(HostExpr::new(HostExprKind::Bool(*value)))
         }
-        (Expr::Atom(Atom::Str(value), _), HostType::String) => {
+        (Expr::Atom(Atom::Str(value), _), &HostTypeTerm::String) => {
             Some(HostExpr::new(HostExprKind::String(value.clone())))
         }
         (Expr::Atom(Atom::Int(value), _), _) => Some(HostExpr::new(HostExprKind::Int(*value))),
@@ -4959,7 +5217,7 @@ fn host_literal_expr(expr: &Expr, expected_ty: &HostType) -> Option<HostExpr> {
 fn lower_record_host_expr(
     list: &List,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostType>,
+    scope: &HashMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> HostExpr {
     let kids = children(list);
@@ -4998,7 +5256,7 @@ fn lower_record_host_expr(
                         .as_ref()
                         .and_then(|name| supplied.remove(name))
                         .unwrap_or(HostExpr::new(HostExprKind::Unit));
-                    if host_expr_type(&value) == HostType::Unknown {
+                    if host_expr_type(&value).is_unresolved() {
                         force_host_expr_type(value, field.ty.clone())
                     } else {
                         value
@@ -5015,12 +5273,12 @@ fn lower_record_host_expr(
     HostExpr::new(HostExprKind::AdtConstruct {
         ctor,
         fields,
-        ty: if explicit_ty != HostType::Unknown {
+        ty: if !explicit_ty.is_unresolved() {
             explicit_ty
         } else {
             ctor_info
-                .map(|(adt_name, _)| HostType::Adt(adt_name, Vec::new()))
-                .unwrap_or(HostType::Unknown)
+                .map(|(adt_name, _)| HostTypeTerm::Adt(adt_name, Vec::new()))
+                .unwrap_or_else(fresh_host_inference)
         },
     })
 }
@@ -5028,7 +5286,7 @@ fn lower_record_host_expr(
 fn lower_access_host_expr(
     list: &List,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostType>,
+    scope: &HashMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> HostExpr {
     let kids = children(list);
@@ -5038,7 +5296,7 @@ fn lower_access_host_expr(
         .unwrap_or(HostExpr::new(HostExprKind::Unit));
     let field_name = kids.get(1).and_then(symbol_name).unwrap_or("");
     let (field_index, field_ty) =
-        lookup_access_field(program, &base, field_name).unwrap_or((0, HostType::Unknown));
+        lookup_access_field(program, &base, field_name).unwrap_or((0, fresh_host_inference()));
     let explicit_ty = expr_host_type(
         &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
         program,
@@ -5047,7 +5305,7 @@ fn lower_access_host_expr(
     HostExpr::new(HostExprKind::AdtFieldAccess {
         base: Box::new(base),
         field_index,
-        ty: if explicit_ty != HostType::Unknown {
+        ty: if !explicit_ty.is_unresolved() {
             explicit_ty
         } else {
             field_ty
@@ -5058,7 +5316,7 @@ fn lower_access_host_expr(
 fn pattern_field_bindings<'a>(
     pattern: &'a List,
     ctor_fields: &'a [HostAdtField],
-) -> Vec<(usize, &'a Expr, Option<HostType>)> {
+) -> Vec<(usize, &'a Expr, Option<HostTypeTerm>)> {
     match tag(pattern) {
         Some("pat-record") => children(pattern)
             .iter()
@@ -5098,7 +5356,7 @@ fn pattern_field_bindings<'a>(
 fn lower_tuple_get_host_expr(
     list: &List,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostType>,
+    scope: &HashMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> HostExpr {
     let kids = children(list);
@@ -5114,8 +5372,8 @@ fn lower_tuple_get_host_expr(
         program,
         scope,
     );
-    let ty = if explicit_ty == HostType::Unknown {
-        infer_builtin_host_type("tuple-get", &args).unwrap_or(HostType::Unknown)
+    let ty = if explicit_ty.is_unresolved() {
+        infer_builtin_host_type("tuple-get", &args).unwrap_or_else(fresh_host_inference)
     } else {
         explicit_ty
     };
@@ -5173,7 +5431,7 @@ fn scalar_builtin(name: &str, args: Vec<HostExpr>) -> HostExpr {
     HostExpr::new(HostExprKind::Builtin {
         name: name.to_string(),
         args,
-        ty: HostType::Float64,
+        ty: HostTypeTerm::Float64,
     })
 }
 
@@ -5186,8 +5444,11 @@ fn host_float(value: f64) -> HostExpr {
 /// active `wrt`, but `wrt` over an integer is still a directional
 /// derivative). Everything else — list/dict/ADT/tuple/tensor/option — is a
 /// container and is rejected.
-fn is_dual_scalar_type(ty: &HostType) -> bool {
-    matches!(ty, HostType::Float64 | HostType::Float32 | HostType::Int64)
+fn is_dual_scalar_type(ty: &HostTypeTerm) -> bool {
+    matches!(
+        ty,
+        &HostTypeTerm::Float64 | &HostTypeTerm::Float32 | &HostTypeTerm::Int64
+    )
 }
 
 /// Resolve a top-level scalar def by name into `(param_names, param_tys, body)`.
@@ -5196,7 +5457,7 @@ fn is_dual_scalar_type(ty: &HostType) -> bool {
 fn resolve_scalar_def<'a>(
     program: &'a CheckedProgram,
     name: &str,
-) -> Option<(Vec<String>, Vec<HostType>, &'a Expr)> {
+) -> Option<(Vec<String>, Vec<HostTypeTerm>, &'a Expr)> {
     let mut found: Option<(&'a List,)> = None;
     for expr in top_level_items(program.exprs()) {
         let Expr::List(list, _) = expr else {
@@ -5235,7 +5496,7 @@ fn resolve_scalar_def<'a>(
             .or_else(|| {
                 lookup_declared_fn_type(program, name).and_then(|(tys, _)| tys.first().cloned())
             })
-            .unwrap_or(HostType::Float64);
+            .unwrap_or(HostTypeTerm::Float64);
         param_names.push(pname);
         param_tys.push(pty);
     }
@@ -5251,7 +5512,7 @@ fn resolve_scalar_def<'a>(
 fn try_lower_scalar_grad_app(
     list: &List,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostType>,
+    scope: &HashMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> Option<HostExpr> {
     let kids = children(list);
@@ -5323,10 +5584,10 @@ fn try_lower_scalar_grad_app(
     if derivs.len() == 1 {
         Some(derivs.pop().unwrap())
     } else {
-        let tys = derivs.iter().map(|_| HostType::Float64).collect();
+        let tys = derivs.iter().map(|_| HostTypeTerm::Float64).collect();
         Some(HostExpr::new(HostExprKind::Tuple(
             derivs,
-            HostType::Tuple(tys),
+            HostTypeTerm::Tuple(tys),
         )))
     }
 }
@@ -5649,7 +5910,7 @@ fn is_zero_float(expr: &HostExpr) -> bool {
 fn lower_app_host_expr(
     list: &List,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostType>,
+    scope: &HashMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> HostExpr {
     // chelis#405: host-lane scalar forward-mode AD. When the callee is a
@@ -5685,17 +5946,17 @@ fn lower_app_host_expr(
     let inferred_ret_ty = fn_sig
         .as_ref()
         .map(|(_, ret_ty)| ret_ty.clone())
-        .unwrap_or(HostType::Unknown);
+        .unwrap_or_else(fresh_host_inference);
     if name == "Cons" && kids.len() == 3 {
         let expr = Expr::List(list.clone(), chelis_deep::Span::new(0, 0));
         if let Some(items) = lower_list_literal_items(&expr, program, scope, tensor_helpers) {
             let ty = expr_host_type(&expr, program, scope);
-            let ty = if ty == HostType::Unknown {
-                HostType::List(Box::new(
+            let ty = if ty.is_unresolved() {
+                HostTypeTerm::List(Box::new(
                     items
                         .first()
                         .map(host_expr_type)
-                        .unwrap_or(HostType::Unknown),
+                        .unwrap_or_else(fresh_host_inference),
                 ))
             } else {
                 ty
@@ -5708,10 +5969,10 @@ fn lower_app_host_expr(
         return HostExpr::new(HostExprKind::Builtin {
             name,
             args: vec![arg.clone()],
-            ty: if explicit_ty != HostType::Unknown {
+            ty: if !explicit_ty.is_unresolved() {
                 explicit_ty
             } else {
-                HostType::Option(Box::new(host_expr_type(&arg)))
+                HostTypeTerm::Option(Box::new(host_expr_type(&arg)))
             },
         });
     }
@@ -5721,8 +5982,8 @@ fn lower_app_host_expr(
     {
         let list_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers);
         let ty = expr_host_type(&app_expr, program, scope);
-        let ty = if ty == HostType::Unknown {
-            HostType::List(Box::new(callback.ret_ty.clone()))
+        let ty = if ty.is_unresolved() {
+            HostTypeTerm::List(Box::new(callback.ret_ty.clone()))
         } else {
             ty
         };
@@ -5738,7 +5999,7 @@ fn lower_app_host_expr(
     {
         let list_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers);
         let ty = expr_host_type(&app_expr, program, scope);
-        let ty = if ty == HostType::Unknown {
+        let ty = if ty.is_unresolved() {
             host_expr_type(&list_expr)
         } else {
             ty
@@ -5756,7 +6017,7 @@ fn lower_app_host_expr(
         let init_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers);
         let list_expr = lower_host_expr(&kids[3], program, scope, tensor_helpers);
         let ty = expr_host_type(&app_expr, program, scope);
-        let ty = if ty == HostType::Unknown {
+        let ty = if ty.is_unresolved() {
             host_expr_type(&init_expr)
         } else {
             ty
@@ -5775,8 +6036,8 @@ fn lower_app_host_expr(
         let init_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers);
         let list_expr = lower_host_expr(&kids[3], program, scope, tensor_helpers);
         let ty = expr_host_type(&app_expr, program, scope);
-        let ty = if ty == HostType::Unknown {
-            HostType::List(Box::new(host_expr_type(&init_expr)))
+        let ty = if ty.is_unresolved() {
+            HostTypeTerm::List(Box::new(host_expr_type(&init_expr)))
         } else {
             ty
         };
@@ -5793,9 +6054,9 @@ fn lower_app_host_expr(
     {
         let list_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers);
         let ty = expr_host_type(&app_expr, program, scope);
-        let ty = if ty == HostType::Unknown {
+        let ty = if ty.is_unresolved() {
             let list_ty = host_expr_type(&list_expr);
-            HostType::Tuple(vec![list_ty.clone(), list_ty])
+            HostTypeTerm::Tuple(vec![list_ty.clone(), list_ty])
         } else {
             ty
         };
@@ -5811,10 +6072,10 @@ fn lower_app_host_expr(
     {
         let list_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers);
         let ty = expr_host_type(&app_expr, program, scope);
-        let ty = if ty == HostType::Unknown {
+        let ty = if ty.is_unresolved() {
             match callback.ret_ty.clone() {
-                HostType::List(inner) => HostType::List(inner),
-                _ => HostType::Unknown,
+                HostTypeTerm::List(inner) => HostTypeTerm::List(inner),
+                _ => fresh_host_inference(),
             }
         } else {
             ty
@@ -5827,9 +6088,9 @@ fn lower_app_host_expr(
     }
     let helper_tensor_ty = expr_tensor_type(&app_expr, program, scope)
         .or_else(|| {
-            if let HostType::Tensor(tensor_ty) = &inferred_ret_ty {
+            if let HostTypeTerm::Tensor(tensor_ty) = &inferred_ret_ty {
                 Some(tensor_ty.clone())
-            } else if let HostType::Tensor(tensor_ty) = &explicit_ty {
+            } else if let HostTypeTerm::Tensor(tensor_ty) = &explicit_ty {
                 Some(tensor_ty.clone())
             } else {
                 None
@@ -5859,7 +6120,7 @@ fn lower_app_host_expr(
     // the generic `HostExpr::new(HostExprKind::Call)` path so the wrapper emits `return f(x);`.
     let callee_is_local_callable = scope
         .get(&name)
-        .is_some_and(|ty| matches!(ty, HostType::Fn(_, _)));
+        .is_some_and(|ty| matches!(ty, HostTypeTerm::Fn(_, _)));
     // A callee carrying a callable (fn-pointer) parameter cannot be
     // summarized through the tensor-helper DAG: the DAG has no
     // representation for a fn-pointer input. Such a callee is lowered by
@@ -5871,7 +6132,7 @@ fn lower_app_host_expr(
     // over-broad recursion classification used to force.
     let has_callable_params = fn_sig
         .as_ref()
-        .is_some_and(|(params, _)| params.iter().any(|ty| matches!(ty, HostType::Fn(..))));
+        .is_some_and(|(params, _)| params.iter().any(|ty| matches!(ty, HostTypeTerm::Fn(..))));
     if let Some(tensor_ty) = helper_tensor_ty.clone()
         && !callee_is_local_callable
         && !has_callable_params
@@ -5914,8 +6175,8 @@ fn lower_app_host_expr(
             return tensor_call;
         }
     }
-    let tensor_result = matches!(explicit_ty, HostType::Tensor(_))
-        || matches!(inferred_ret_ty, HostType::Tensor(_));
+    let tensor_result = matches!(explicit_ty, HostTypeTerm::Tensor(_))
+        || matches!(inferred_ret_ty, HostTypeTerm::Tensor(_));
     // WS-A8: if the callee is a polymorphic-precision sig, the host
     // emitter elided its standalone definition (per the
     // `type_expr_has_precision_var` skip in `lower_host_program`).
@@ -5960,10 +6221,10 @@ fn lower_app_host_expr(
         .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
         .collect::<Vec<_>>();
     let construct_ty = if let Some((adt_name, _)) = &ctor_info {
-        if matches!(explicit_ty, HostType::Adt(_, _)) {
+        if matches!(explicit_ty, HostTypeTerm::Adt(_, _)) {
             explicit_ty.clone()
         } else {
-            HostType::Adt(adt_name.clone(), Vec::new())
+            HostTypeTerm::Adt(adt_name.clone(), Vec::new())
         }
     } else {
         inferred_ret_ty.clone()
@@ -5981,12 +6242,12 @@ fn lower_app_host_expr(
         && fn_sig.is_some()
     {
         // When the explicit metadata type is Unknown OR contains unresolved
-        // type variables (decoded as inner `HostType::Unknown`), prefer
+        // unresolved type variables preserve their named term; prefer
         // the inferred return type from the function's declared signature.
         // The metadata can decay to "Tuple([Unknown, Unknown])" when the
         // node-level annotator re-runs inference with a fresh subst that
         // doesn't share the outer pass's tvar bindings.
-        let prefer_inferred = host_type_has_unknown(&explicit_ty);
+        let prefer_inferred = host_type_is_unresolved(&explicit_ty);
         return HostExpr::new(HostExprKind::Call {
             function: name,
             args,
@@ -6001,10 +6262,10 @@ fn lower_app_host_expr(
             },
         });
     }
-    let ty = if explicit_ty != HostType::Unknown {
+    let ty = if !explicit_ty.is_unresolved() {
         explicit_ty
     } else {
-        infer_builtin_host_type(&name, &args).unwrap_or(HostType::Unknown)
+        infer_builtin_host_type(&name, &args).unwrap_or_else(fresh_host_inference)
     };
     HostExpr::new(HostExprKind::Builtin { name, args, ty })
 }
@@ -6335,7 +6596,9 @@ fn top_level_fn_has_callable_param(program: &CheckedProgram, name: &str) -> bool
     let Some((param_tys, _)) = lookup_declared_fn_type(program, name) else {
         return false;
     };
-    param_tys.iter().any(|ty| matches!(ty, HostType::Fn(_, _)))
+    param_tys
+        .iter()
+        .any(|ty| matches!(ty, HostTypeTerm::Fn(_, _)))
 }
 
 /// A tensor-returning body that calls a summary-rejecting top-level fn
@@ -6433,10 +6696,10 @@ fn call_graph_reaches_any(
 fn hoist_host_lane_tensor_bindings(
     expr: &Expr,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostType>,
-    fn_sig: Option<&(Vec<HostType>, HostType)>,
+    scope: &HashMap<String, HostTypeTerm>,
+    fn_sig: Option<&(Vec<HostTypeTerm>, HostTypeTerm)>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
-) -> (Expr, HashMap<String, HostType>, Vec<HostBinding>) {
+) -> (Expr, HashMap<String, HostTypeTerm>, Vec<HostBinding>) {
     let Expr::List(list, span) = expr else {
         return (expr.clone(), scope.clone(), Vec::new());
     };
@@ -6463,10 +6726,10 @@ fn hoist_host_lane_tensor_bindings(
             let preferred_ty = fn_sig
                 .and_then(|(param_tys, _)| param_tys.get(index - 1))
                 .cloned()
-                .or_else(|| expr_tensor_type(arg, program, scope).map(HostType::Tensor))
+                .or_else(|| expr_tensor_type(arg, program, scope).map(HostTypeTerm::Tensor))
                 .or_else(|| {
                     let ty = expr_host_type(arg, program, scope);
-                    (ty != HostType::Unknown).then_some(ty)
+                    (!ty.is_unresolved()).then_some(ty)
                 });
             let ty = preferred_ty.unwrap_or_else(|| host_expr_type(&value));
             let value = force_host_expr_type(value, ty.clone());
@@ -6510,9 +6773,9 @@ fn hoist_host_lane_tensor_bindings(
     )
 }
 
-fn host_fn_signature(ty: &HostType) -> Option<(Vec<HostType>, HostType)> {
+fn host_fn_signature(ty: &HostTypeTerm) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
     match ty {
-        HostType::Fn(params, ret) => Some((params.clone(), (**ret).clone())),
+        HostTypeTerm::Fn(params, ret) => Some((params.clone(), (**ret).clone())),
         _ => None,
     }
 }
@@ -6520,7 +6783,7 @@ fn host_fn_signature(ty: &HostType) -> Option<(Vec<HostType>, HostType)> {
 fn lower_host_callback(
     expr: &Expr,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostType>,
+    scope: &HashMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> Option<HostCallback> {
     match expr {
@@ -6531,7 +6794,8 @@ fn lower_host_callback(
             if tag(params_list) != Some("params") {
                 return None;
             }
-            let (param_tys, ret_ty) = expr_fn_type(expr).unwrap_or((Vec::new(), HostType::Unknown));
+            let (param_tys, ret_ty) =
+                expr_fn_type(expr).unwrap_or((Vec::new(), fresh_host_inference()));
             let mut callback_scope = scope.clone();
             let mut params = Vec::new();
             for (index, param) in children(params_list).iter().enumerate() {
@@ -6539,14 +6803,14 @@ fn lower_host_callback(
                 let ty = param_tys
                     .get(index)
                     .cloned()
-                    .filter(|ty| *ty != HostType::Unknown)
+                    .filter(|ty| !ty.is_unresolved())
                     .or_else(|| param_host_type(param))
-                    .unwrap_or(HostType::Unknown);
+                    .unwrap_or_else(fresh_host_inference);
                 callback_scope.insert(name.clone(), ty.clone());
                 params.push(HostParam { name, ty });
             }
             let body = lower_host_expr(kids.get(1)?, program, &callback_scope, tensor_helpers);
-            let ret_ty = if ret_ty == HostType::Unknown {
+            let ret_ty = if ret_ty.is_unresolved() {
                 host_expr_type(&body)
             } else {
                 ret_ty
@@ -6595,7 +6859,7 @@ fn lower_host_callback(
 fn lower_list_literal_items(
     expr: &Expr,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostType>,
+    scope: &HashMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> Option<Vec<HostExpr>> {
     match expr {
@@ -6629,7 +6893,7 @@ fn lower_list_literal_items(
 
 fn tensor_helper_args(
     inputs: &[HostTensorInput],
-    scope: &HashMap<String, HostType>,
+    scope: &HashMap<String, HostTypeTerm>,
 ) -> Vec<HostExpr> {
     inputs
         .iter()
@@ -6663,7 +6927,7 @@ fn tensor_helper_inputs(dag: &crate::Dag) -> Vec<HostTensorInput> {
 
 fn remap_tensor_helper_dim_symbols(
     dag: &crate::Dag,
-    scope: &HashMap<String, HostType>,
+    scope: &HashMap<String, HostTypeTerm>,
     expected_output: &TensorType,
 ) -> crate::Dag {
     fn tensor_type_has_synthetic_dims(tensor_ty: &TensorType) -> bool {
@@ -6679,7 +6943,7 @@ fn remap_tensor_helper_dim_symbols(
     let mut actual_inputs = formal_inputs
         .iter()
         .map(|input| match scope.get(&input.name) {
-            Some(HostType::Tensor(actual)) => actual.clone(),
+            Some(HostTypeTerm::Tensor(actual)) => actual.clone(),
             _ => input.ty.clone(),
         })
         .collect::<Vec<_>>();
@@ -6760,15 +7024,15 @@ fn remap_tensor_helper_dim_symbols(
 
 fn actualize_tensor_helper_types(
     dag: &crate::Dag,
-    scope: &HashMap<String, HostType>,
+    scope: &HashMap<String, HostTypeTerm>,
 ) -> crate::Dag {
     fn inferred_load_type(
         name: &str,
-        scope: &HashMap<String, HostType>,
+        scope: &HashMap<String, HostTypeTerm>,
         fallback: &TensorType,
     ) -> TensorType {
         match scope.get(name) {
-            Some(HostType::Tensor(actual)) => actual.clone(),
+            Some(HostTypeTerm::Tensor(actual)) => actual.clone(),
             _ => fallback.clone(),
         }
     }
@@ -7123,7 +7387,7 @@ fn collect_top_level_items<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
     out.push(expr);
 }
 
-fn collect_tensor_scope(scope: &HashMap<String, HostType>) -> HashMap<String, TensorType> {
+fn collect_tensor_scope(scope: &HashMap<String, HostTypeTerm>) -> HashMap<String, TensorType> {
     scope
         .iter()
         .filter_map(|(name, ty)| {
@@ -7132,27 +7396,27 @@ fn collect_tensor_scope(scope: &HashMap<String, HostType>) -> HashMap<String, Te
         .collect()
 }
 
-fn tensor_type_from_host_input(ty: &HostType) -> Option<TensorType> {
+fn tensor_type_from_host_input(ty: &HostTypeTerm) -> Option<TensorType> {
     match ty {
-        HostType::Tensor(tensor) => Some(tensor.clone()),
+        HostTypeTerm::Tensor(tensor) => Some(tensor.clone()),
         // WS-4: map each declared float width to its own precision. The
         // previous unconditional `Float64 -> F32` silently truncated f64
         // scalar entry parameters to 4-byte storage; the declared width
         // now survives because `parse_host_type_with_subst` preserves the
         // `f32`/`f64` distinction.
-        HostType::Float32 => Some(TensorType {
+        &HostTypeTerm::Float32 => Some(TensorType {
             dims: vec![],
             precision: chelis_types::types::Prim::F32,
         }),
-        HostType::Float64 => Some(TensorType {
+        &HostTypeTerm::Float64 => Some(TensorType {
             dims: vec![],
             precision: chelis_types::types::Prim::F64,
         }),
-        HostType::Int64 => Some(TensorType {
+        &HostTypeTerm::Int64 => Some(TensorType {
             dims: vec![],
             precision: chelis_types::types::Prim::Int64,
         }),
-        HostType::Bool => Some(TensorType {
+        &HostTypeTerm::Bool => Some(TensorType {
             dims: vec![],
             precision: chelis_types::types::Prim::Bool,
         }),
@@ -7160,14 +7424,14 @@ fn tensor_type_from_host_input(ty: &HostType) -> Option<TensorType> {
     }
 }
 
-fn host_type_from_tensor_input(ty: &TensorType) -> HostType {
+fn host_type_from_tensor_input(ty: &TensorType) -> HostTypeTerm {
     if ty.dims.is_empty() {
         match ty.precision {
-            chelis_types::types::Prim::Bool => HostType::Bool,
+            chelis_types::types::Prim::Bool => HostTypeTerm::Bool,
             chelis_types::types::Prim::Int8
             | chelis_types::types::Prim::Int16
             | chelis_types::types::Prim::Int32
-            | chelis_types::types::Prim::Int64 => HostType::Int64,
+            | chelis_types::types::Prim::Int64 => HostTypeTerm::Int64,
             // WS-4: restore the float width on the reverse boundary so a
             // rank-0 f32 tensor round-trips to `Float32` (declared width)
             // rather than collapsing every float to `Float64`. The
@@ -7176,31 +7440,31 @@ fn host_type_from_tensor_input(ty: &TensorType) -> HostType {
             chelis_types::types::Prim::F32
             | chelis_types::types::Prim::F16
             | chelis_types::types::Prim::Bf16
-            | chelis_types::types::Prim::F8e4m3 => HostType::Float32,
-            chelis_types::types::Prim::F64 => HostType::Float64,
-            chelis_types::types::Prim::String => HostType::String,
+            | chelis_types::types::Prim::F8e4m3 => HostTypeTerm::Float32,
+            chelis_types::types::Prim::F64 => HostTypeTerm::Float64,
+            chelis_types::types::Prim::String => HostTypeTerm::String,
         }
     } else {
-        HostType::Tensor(ty.clone())
+        HostTypeTerm::Tensor(ty.clone())
     }
 }
 
 fn expr_host_type(
     expr: &Expr,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostType>,
-) -> HostType {
+    scope: &HashMap<String, HostTypeTerm>,
+) -> HostTypeTerm {
     match expr {
-        Expr::Atom(Atom::Int(_), _) => HostType::Int64,
-        Expr::Atom(Atom::Float(_), _) => HostType::Float64,
-        Expr::Atom(Atom::Bool(_), _) => HostType::Bool,
-        Expr::Atom(Atom::Str(_), _) => HostType::String,
+        Expr::Atom(Atom::Int(_), _) => HostTypeTerm::Int64,
+        Expr::Atom(Atom::Float(_), _) => HostTypeTerm::Float64,
+        Expr::Atom(Atom::Bool(_), _) => HostTypeTerm::Bool,
+        Expr::Atom(Atom::Str(_), _) => HostTypeTerm::String,
         Expr::List(list, _) if tag(list) == Some("var") => children(list)
             .first()
             .and_then(symbol_name)
             .and_then(|name| {
                 expr_type(expr)
-                    .filter(|ty| *ty != HostType::Unknown)
+                    .filter(|ty| !ty.is_unresolved())
                     .or_else(|| {
                         scope
                             .get(name)
@@ -7208,15 +7472,15 @@ fn expr_host_type(
                             .or_else(|| lookup_declared_host_type(program, name))
                     })
             })
-            .unwrap_or(HostType::Unknown),
+            .unwrap_or_else(fresh_host_inference),
         Expr::List(list, _) if tag(list) == Some("app") => {
-            let explicit = expr_type(expr).unwrap_or(HostType::Unknown);
+            let explicit = expr_type(expr).unwrap_or_else(fresh_host_inference);
             if app_expr_needs_inferred_type(&explicit) {
-                let inferred =
-                    infer_app_expr_host_type(list, program, scope).unwrap_or(HostType::Unknown);
+                let inferred = infer_app_expr_host_type(list, program, scope)
+                    .unwrap_or_else(fresh_host_inference);
                 if should_prefer_inferred_app_type(&explicit, &inferred) {
                     inferred
-                } else if explicit != HostType::Unknown {
+                } else if !explicit.is_unresolved() {
                     explicit
                 } else {
                     inferred
@@ -7225,19 +7489,19 @@ fn expr_host_type(
                 explicit
             }
         }
-        _ => expr_type(expr).unwrap_or(HostType::Unknown),
+        _ => expr_type(expr).unwrap_or_else(fresh_host_inference),
     }
 }
 
-fn app_expr_needs_inferred_type(explicit: &HostType) -> bool {
-    explicit == &HostType::Unknown || host_type_has_synthetic_tensor_dims(explicit)
+fn app_expr_needs_inferred_type(explicit: &HostTypeTerm) -> bool {
+    explicit.is_unresolved() || host_type_has_synthetic_tensor_dims(explicit)
 }
 
 fn infer_app_expr_host_type(
     list: &List,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostType>,
-) -> Option<HostType> {
+    scope: &HashMap<String, HostTypeTerm>,
+) -> Option<HostTypeTerm> {
     let kids = children(list);
     let callee = kids.first().and_then(as_list)?;
     if tag(callee) != Some("var") {
@@ -7250,16 +7514,16 @@ fn infer_app_expr_host_type(
     if name == "einsum" {
         let equation = match kids.get(1) {
             Some(Expr::Atom(Atom::Str(value), _)) => value.as_str(),
-            _ => return Some(HostType::Unknown),
+            _ => return Some(fresh_host_inference()),
         };
         let tensors = kids[2..]
             .iter()
             .map(|arg| match expr_host_type(arg, program, scope) {
-                HostType::Tensor(tensor_ty) => Some(tensor_ty),
+                HostTypeTerm::Tensor(tensor_ty) => Some(tensor_ty),
                 _ => None,
             })
             .collect::<Option<Vec<_>>>()?;
-        return infer_einsum_tensor_type(equation, &tensors).map(HostType::Tensor);
+        return infer_einsum_tensor_type(equation, &tensors).map(HostTypeTerm::Tensor);
     }
     // chelis#340: the whole named-axis reduction family is type-inferred
     // here (the positional/int-literal axis form), not only `sum`/`mean`.
@@ -7280,26 +7544,26 @@ fn infer_app_expr_host_type(
             | "argmax_reduce"
             | "argmin_reduce"
     ) && let (Some(input), Some(axis_expr)) = (kids.get(1), kids.get(2))
-        && let HostType::Tensor(tensor_ty) = expr_host_type(input, program, scope)
+        && let HostTypeTerm::Tensor(tensor_ty) = expr_host_type(input, program, scope)
         && let Some(axis) = expr_int_literal(axis_expr)
     {
         let mut reduced = reduce_axis_tensor_type(&tensor_ty, axis as usize);
         if matches!(name, "argmax_reduce" | "argmin_reduce") {
             reduced.precision = chelis_types::types::Prim::Int64;
         }
-        return Some(HostType::Tensor(reduced));
+        return Some(HostTypeTerm::Tensor(reduced));
     }
     if name == "expand"
         && let (Some(input), Some(axis_expr), Some(size_expr)) =
             (kids.get(1), kids.get(2), kids.get(3))
-        && let HostType::Tensor(tensor_ty) = expr_host_type(input, program, scope)
+        && let HostTypeTerm::Tensor(tensor_ty) = expr_host_type(input, program, scope)
         && let (Some(axis), Some(size)) = (expr_int_literal(axis_expr), expr_int_literal(size_expr))
     {
         let mut dims = tensor_ty.dims.clone();
         let axis = axis as usize;
         if axis <= dims.len() {
             dims.insert(axis, crate::dag::DimInfo::Lit(size as usize));
-            return Some(HostType::Tensor(TensorType {
+            return Some(HostTypeTerm::Tensor(TensorType {
                 dims,
                 precision: tensor_ty.precision,
             }));
@@ -7307,7 +7571,7 @@ fn infer_app_expr_host_type(
     }
     // Issue #308: `scalar_to_tensor` result precision must follow the
     // operand's *float* precision. The coarse host lane collapses f32
-    // and f64 scalars into a single `HostType::Float64`, so the
+    // and f64 scalars into a single `HostTypeTerm::Float64`, so the
     // arg-ty-based fallback below cannot distinguish them and defaults
     // to f32 — mis-typing an f64 const-broadcast
     // (`scalar_to_tensor(cast(c, f64))`) as `Tensor(F32)`, which makes
@@ -7319,7 +7583,7 @@ fn infer_app_expr_host_type(
         && let Some(arg) = kids.get(1)
         && let Some(precision) = expr_scalar_float_precision(arg)
     {
-        return Some(HostType::Tensor(TensorType {
+        return Some(HostTypeTerm::Tensor(TensorType {
             dims: vec![],
             precision,
         }));
@@ -7331,8 +7595,8 @@ fn infer_app_expr_host_type(
     // fires when the checker annotation is absent or synthetic.)
     if name == "concat"
         && let Some(input) = kids.get(1)
-        && let HostType::List(inner) = expr_host_type(input, program, scope)
-        && let HostType::Tensor(element) = inner.as_ref()
+        && let HostTypeTerm::List(inner) = expr_host_type(input, program, scope)
+        && let HostTypeTerm::Tensor(element) = inner.as_ref()
     {
         let axis = kids
             .get(2)
@@ -7344,7 +7608,7 @@ fn infer_app_expr_host_type(
         .iter()
         .map(|arg| expr_host_type(arg, program, scope))
         .collect::<Vec<_>>();
-    infer_builtin_host_type_from_arg_tys(name, &arg_tys)
+    must_infer_builtin_host_type_from_arg_tys(name, &arg_tys)
 }
 
 /// Issue #308: recover the float precision of a scalar Deep expression
@@ -7394,16 +7658,16 @@ fn expr_scalar_float_precision(expr: &Expr) -> Option<chelis_types::types::Prim>
     None
 }
 
-fn should_prefer_inferred_app_type(explicit: &HostType, inferred: &HostType) -> bool {
-    explicit == &HostType::Unknown
+fn should_prefer_inferred_app_type(explicit: &HostTypeTerm, inferred: &HostTypeTerm) -> bool {
+    explicit.is_unresolved()
         || matches!(
             (explicit, inferred),
-            (HostType::Tensor(_), HostType::Tensor(_)) if host_type_has_synthetic_tensor_dims(explicit)
+            (HostTypeTerm::Tensor(_), HostTypeTerm::Tensor(_)) if host_type_has_synthetic_tensor_dims(explicit)
                 && !host_type_has_synthetic_tensor_dims(inferred)
         )
 }
 
-fn host_type_has_synthetic_tensor_dims(ty: &HostType) -> bool {
+fn host_type_has_synthetic_tensor_dims(ty: &HostTypeTerm) -> bool {
     // Known exposure (review #363 N5, pre-existing): a USER dim literally
     // named `d2` matches this minted-name heuristic and would be treated
     // as synthetic. The checker's dim-var minting owns the `d<digits>`
@@ -7415,11 +7679,11 @@ fn host_type_has_synthetic_tensor_dims(ty: &HostType) -> bool {
     }
 
     match ty {
-        HostType::Tensor(tensor_ty) => tensor_ty.dims.iter().any(
+        HostTypeTerm::Tensor(tensor_ty) => tensor_ty.dims.iter().any(
             |dim| matches!(dim, crate::dag::DimInfo::Named(name, None) if synthetic_dim_name(name)),
         ),
-        HostType::Tuple(items) => items.iter().any(host_type_has_synthetic_tensor_dims),
-        HostType::List(inner) | HostType::Option(inner) => {
+        HostTypeTerm::Tuple(items) => items.iter().any(host_type_has_synthetic_tensor_dims),
+        HostTypeTerm::List(inner) | HostTypeTerm::Option(inner) => {
             host_type_has_synthetic_tensor_dims(inner)
         }
         _ => false,
@@ -7510,14 +7774,14 @@ fn normalize_host_axis(rank: usize, raw: i64) -> Option<usize> {
 /// axis is unknown in the calling lane). The wildcard renames to a
 /// per-node anon dim in the C emitter and is sized from the runtime
 /// `chelis_tensor_concat` result, so helper signatures stay honest.
-fn concat_host_tensor_type(element: &TensorType, axis: Option<usize>) -> HostType {
+fn concat_host_tensor_type(element: &TensorType, axis: Option<usize>) -> HostTypeTerm {
     let anon = || crate::dag::DimInfo::Named("*".to_string(), None);
     let mut dims = element.dims.clone();
     match axis {
         Some(axis) if axis < dims.len() => dims[axis] = anon(),
         _ => dims.fill(anon()),
     }
-    HostType::Tensor(TensorType {
+    HostTypeTerm::Tensor(TensorType {
         dims,
         precision: element.precision,
     })
@@ -7549,14 +7813,15 @@ fn lookup_declared_type_expr<'a>(program: &'a CheckedProgram, name: &str) -> Opt
         .or_else(|| lookup_type_expr(program.type_env(), name))
 }
 
-fn lookup_declared_host_type(program: &CheckedProgram, name: &str) -> Option<HostType> {
-    lookup_declared_type_expr(program, name).map(parse_host_type)
+fn lookup_declared_host_type(program: &CheckedProgram, name: &str) -> Option<HostTypeTerm> {
+    lookup_declared_type_expr(program, name)
+        .map(|ty| decode_host_type_or_raise(ty, &HashMap::new()))
 }
 
 fn lookup_declared_fn_type(
     program: &CheckedProgram,
     name: &str,
-) -> Option<(Vec<HostType>, HostType)> {
+) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
     lookup_declared_type_expr(program, name).and_then(parse_fn_type_expr)
 }
 
@@ -7603,15 +7868,15 @@ fn find_top_level_sig_expr<'a>(exprs: &'a [Expr], name: &str) -> Option<&'a Expr
 fn expr_tensor_type(
     expr: &Expr,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostType>,
+    scope: &HashMap<String, HostTypeTerm>,
 ) -> Option<TensorType> {
     match expr_host_type(expr, program, scope) {
-        HostType::Tensor(ty) => Some(ty),
+        HostTypeTerm::Tensor(ty) => Some(ty),
         _ => None,
     }
 }
 
-fn expr_type(expr: &Expr) -> Option<HostType> {
+fn expr_type(expr: &Expr) -> Option<HostTypeTerm> {
     let Expr::List(list, _) = expr else {
         return None;
     };
@@ -7622,10 +7887,10 @@ fn expr_type(expr: &Expr) -> Option<HostType> {
     meta.entries
         .iter()
         .find(|(key, _)| key == "type")
-        .map(|(_, value)| parse_host_type(value))
+        .map(|(_, value)| decode_host_type_or_raise(value, &HashMap::new()))
 }
 
-fn expr_fn_type(expr: &Expr) -> Option<(Vec<HostType>, HostType)> {
+fn expr_fn_type(expr: &Expr) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
     let Expr::List(list, _) = expr else {
         return None;
     };
@@ -7639,11 +7904,13 @@ fn expr_fn_type(expr: &Expr) -> Option<(Vec<HostType>, HostType)> {
         .and_then(|(_, value)| parse_fn_type_expr(value))
 }
 
-fn parse_fn_type_expr(expr: &Expr) -> Option<(Vec<HostType>, HostType)> {
+fn parse_fn_type_expr(expr: &Expr) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
     let (args, ret) = parse_fn_type_expr_parts(expr)?;
     Some((
-        args.iter().map(parse_host_type).collect(),
-        parse_host_type(&ret),
+        args.iter()
+            .map(|arg| decode_host_type_or_raise(arg, &HashMap::new()))
+            .collect(),
+        decode_host_type_or_raise(&ret, &HashMap::new()),
     ))
 }
 
@@ -7659,130 +7926,81 @@ fn parse_fn_type_expr_parts(expr: &Expr) -> Option<(Vec<Expr>, Expr)> {
     Some((args.to_vec(), ret.clone()))
 }
 
-fn parse_host_type(expr: &Expr) -> HostType {
-    parse_host_type_with_subst(expr, &HashMap::new())
+fn decode_host_type_with_subst(
+    expr: &Expr,
+    subst: &HashMap<String, HostTypeTerm>,
+) -> Result<HostTypeTerm, HostTypeDecodeError> {
+    decode_host_type(expr).map(|term| substitute_host_type_term(term, subst))
 }
 
-fn parse_host_type_with_subst(expr: &Expr, subst: &HashMap<String, HostType>) -> HostType {
-    if let Expr::MetaExpr(meta, _) = expr {
-        return parse_host_type_with_subst(&meta.expr, subst);
-    }
-    let Expr::List(list, _) = expr else {
-        return HostType::Unknown;
-    };
-    match tag(list) {
-        Some("t-prim") => match children(list).first().and_then(symbol_name) {
-            Some("int64") | Some("int32") => HostType::Int64,
-            // Thread the declared float width through verbatim so a
-            // declared `f64` entry parameter lowers to an f64 `Load`
-            // instead of being silently downgraded to f32 by the
-            // `tensor_type_from_host_input` boundary (WS-4).
-            Some("f32") => HostType::Float32,
-            Some("f64") => HostType::Float64,
-            Some("bool") => HostType::Bool,
-            Some("string") => HostType::String,
-            _ => HostType::Unknown,
-        },
-        Some("t-tensor") => {
-            // WS-A5 RT-3a F2 / WS-A8: a `t-tensor` whose precision slot
-            // is `(t-var {} _)` is precision-polymorphic and has no
-            // concrete `HostType::Tensor` representation by itself per
-            // spec/04-type-system.md \u{00a7}5.8.1. Surface that as
-            // `HostType::Unknown` here so the host emitter falls back
-            // to call-site inlining (which carries the concrete
-            // precision) rather than panicking on the bare sig parse.
-            // The standalone-emit gate in `lower_host_program` already
-            // skips the def itself; this guard handles every secondary
-            // sig-parse path (e.g. `lookup_declared_fn_type` reached
-            // from a call-site lookup of a polymorphic callee's
-            // signature).
-            // Tier-2 rank polymorphism (spec/design/rank_polymorphism.md):
-            // a `t-tensor` whose shape is a sole `(d-rank {} r)` rank slot is
-            // rank-polymorphic and has no concrete `HostType::Tensor`
-            // representation by itself — its rank is supplied by call-site
-            // inlining (which carries the caller's concrete shape). Surface it
-            // as `HostType::Unknown`, the exact analogue of the precision-var
-            // guard, so any secondary sig-parse path (e.g. a call-site lookup
-            // of a rank-poly callee's signature) never trips the rank-poly
-            // lowering tripwire.
-            if crate::lower::type_expr_has_precision_var(expr)
-                || crate::lower::type_expr_has_rank_var(expr)
-            {
-                HostType::Unknown
-            } else {
-                HostType::Tensor(crate::lower::tensor_type_from_deep(expr))
-            }
-        }
-        Some("t-ref") => list
-            .elements
-            .get(2)
-            .map(|inner| parse_host_type_with_subst(inner, subst))
-            .unwrap_or(HostType::Unknown),
-        Some("t-var") => children(list)
-            .first()
-            .and_then(symbol_name)
-            .and_then(|name| subst.get(name).cloned())
-            .unwrap_or(HostType::Unknown),
-        Some("t-adt") => {
-            let kids = children(list);
-            match kids.first().and_then(symbol_name) {
-                Some("Option") if kids.len() == 2 => {
-                    HostType::Option(Box::new(parse_host_type_with_subst(&kids[1], subst)))
-                }
-                Some("List") if kids.len() == 2 => {
-                    HostType::List(Box::new(parse_host_type_with_subst(&kids[1], subst)))
-                }
-                Some("Dict") if kids.len() == 3 => HostType::Dict(
-                    Box::new(parse_host_type_with_subst(&kids[1], subst)),
-                    Box::new(parse_host_type_with_subst(&kids[2], subst)),
-                ),
-                Some("MappedFile") if kids.len() == 1 => HostType::MappedFile,
-                Some(name) => HostType::Adt(
-                    name.to_string(),
-                    kids.iter()
-                        .skip(1)
-                        .map(|kid| parse_host_type_with_subst(kid, subst))
-                        .collect(),
-                ),
-                _ => HostType::Unknown,
-            }
-        }
-        Some("t-tuple") => HostType::Tuple(
-            children(list)
-                .iter()
-                .map(|kid| parse_host_type_with_subst(kid, subst))
+fn substitute_host_type_term(
+    term: HostTypeTerm,
+    subst: &HashMap<String, HostTypeTerm>,
+) -> HostTypeTerm {
+    match term {
+        HostTypeTerm::TypeVariable(name) => subst
+            .get(&name)
+            .cloned()
+            .unwrap_or(HostTypeTerm::TypeVariable(name)),
+        HostTypeTerm::Fn(params, ret) => HostTypeTerm::Fn(
+            params
+                .into_iter()
+                .map(|param| substitute_host_type_term(param, subst))
+                .collect(),
+            Box::new(substitute_host_type_term(*ret, subst)),
+        ),
+        HostTypeTerm::Adt(name, args) => HostTypeTerm::Adt(
+            name,
+            args.into_iter()
+                .map(|arg| substitute_host_type_term(arg, subst))
                 .collect(),
         ),
-        Some("t-fn") => {
-            let kids = children(list);
-            match kids.split_last() {
-                Some((ret, args)) => HostType::Fn(
-                    args.iter()
-                        .map(|kid| parse_host_type_with_subst(kid, subst))
-                        .collect(),
-                    Box::new(parse_host_type_with_subst(ret, subst)),
-                ),
-                None => HostType::Unknown,
-            }
+        HostTypeTerm::List(inner) => {
+            HostTypeTerm::List(Box::new(substitute_host_type_term(*inner, subst)))
         }
-        Some("t-unit") => HostType::Unit,
-        _ => HostType::Unknown,
+        HostTypeTerm::Dict(key, value) => HostTypeTerm::Dict(
+            Box::new(substitute_host_type_term(*key, subst)),
+            Box::new(substitute_host_type_term(*value, subst)),
+        ),
+        HostTypeTerm::Tuple(items) => HostTypeTerm::Tuple(
+            items
+                .into_iter()
+                .map(|item| substitute_host_type_term(item, subst))
+                .collect(),
+        ),
+        HostTypeTerm::Option(inner) => {
+            HostTypeTerm::Option(Box::new(substitute_host_type_term(*inner, subst)))
+        }
+        concrete_or_state => concrete_or_state,
     }
 }
 
-fn option_inner_type(expr: &HostExpr) -> HostType {
+fn decode_host_type_or_raise(expr: &Expr, subst: &HashMap<String, HostTypeTerm>) -> HostTypeTerm {
+    decode_host_type_with_subst(expr, subst).unwrap_or_else(|error| {
+        crate::lower::raise_fatal_lowering_diagnostic(
+            crate::lower::LowerDiagnostic::new(
+                format!("invalid checked host type metadata: {error} ([05-UNS-1]; chelis#730)"),
+                Some(expr.span()),
+                expr.span_id().map(str::to_string),
+            )
+            .fatal(),
+        )
+    })
+}
+
+fn option_inner_type(expr: &HostExpr) -> HostTypeTerm {
     match host_expr_type(expr) {
-        HostType::Option(inner) => (*inner).clone(),
-        _ => HostType::Unknown,
+        HostTypeTerm::Option(inner) => (*inner).clone(),
+        _ => fresh_host_inference(),
     }
 }
 
-fn host_expr_type(expr: &HostExpr) -> HostType {
+fn host_expr_type(expr: &HostExpr) -> HostTypeTerm {
     match &expr.kind {
-        HostExprKind::Int(_) => HostType::Int64,
-        HostExprKind::Float(_) => HostType::Float64,
-        HostExprKind::Bool(_) => HostType::Bool,
-        HostExprKind::String(_) => HostType::String,
+        HostExprKind::Int(_) => HostTypeTerm::Int64,
+        HostExprKind::Float(_) => HostTypeTerm::Float64,
+        HostExprKind::Bool(_) => HostTypeTerm::Bool,
+        HostExprKind::String(_) => HostTypeTerm::String,
         HostExprKind::List(_, ty) => ty.clone(),
         HostExprKind::Tuple(_, ty) => ty.clone(),
         HostExprKind::Var(_, ty)
@@ -7802,11 +8020,11 @@ fn host_expr_type(expr: &HostExpr) -> HostType {
         | HostExprKind::FlatMap { ty, .. }
         | HostExprKind::WithSeed { ty, .. }
         | HostExprKind::TensorCall { ty, .. } => ty.clone(),
-        HostExprKind::Unit => HostType::Unit,
+        HostExprKind::Unit => HostTypeTerm::Unit,
     }
 }
 
-fn force_host_expr_type(expr: HostExpr, ty: HostType) -> HostExpr {
+fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
     let HostExpr {
         kind,
         span_id,
@@ -7915,53 +8133,221 @@ fn force_host_expr_type(expr: HostExpr, ty: HostType) -> HostExpr {
     }
 }
 
-fn infer_builtin_host_type(name: &str, args: &[HostExpr]) -> Option<HostType> {
+fn infer_builtin_host_type(name: &str, args: &[HostExpr]) -> Option<HostTypeTerm> {
     let arg_tys = args.iter().map(host_expr_type).collect::<Vec<_>>();
     match name {
         "einsum" => {
             let equation = match args.first().map(|e| &e.kind) {
                 Some(HostExprKind::String(value)) => value.as_str(),
-                _ => return Some(HostType::Unknown),
+                _ => return Some(fresh_host_inference()),
             };
             let tensors = args[1..]
                 .iter()
                 .map(|arg| match host_expr_type(arg) {
-                    HostType::Tensor(tensor_ty) => Some(tensor_ty),
+                    HostTypeTerm::Tensor(tensor_ty) => Some(tensor_ty),
                     _ => None,
                 })
                 .collect::<Option<Vec<_>>>()?;
-            infer_einsum_tensor_type(equation, &tensors).map(HostType::Tensor)
+            infer_einsum_tensor_type(equation, &tensors).map(HostTypeTerm::Tensor)
         }
         "tuple-get" => match (arg_tys.first(), args.get(1).map(|e| &e.kind)) {
-            (Some(HostType::Tuple(items)), Some(HostExprKind::Int(index))) => items
+            (Some(HostTypeTerm::Tuple(items)), Some(HostExprKind::Int(index))) => items
                 .get(*index as usize)
                 .cloned()
-                .or(Some(HostType::Unknown)),
-            _ => Some(HostType::Unknown),
+                .or(Some(fresh_host_inference())),
+            _ => Some(fresh_host_inference()),
         },
         // chelis#631: this lane still sees the axis ARGUMENT (unlike the
         // arg-tys-only fallback), so a literal axis wildcards only the
         // concat axis and keeps the element's other extents.
         "concat" => match arg_tys.first() {
-            Some(HostType::List(inner)) => match inner.as_ref() {
-                HostType::Tensor(element) => {
+            Some(HostTypeTerm::List(inner)) => match inner.as_ref() {
+                HostTypeTerm::Tensor(element) => {
                     let axis = args
                         .get(1)
                         .and_then(host_expr_int_literal)
                         .and_then(|raw| normalize_host_axis(element.dims.len(), raw));
                     Some(concat_host_tensor_type(element, axis))
                 }
-                _ => infer_builtin_host_type_from_arg_tys(name, &arg_tys),
+                _ => must_infer_builtin_host_type_from_arg_tys(name, &arg_tys),
             },
-            _ => infer_builtin_host_type_from_arg_tys(name, &arg_tys),
+            _ => must_infer_builtin_host_type_from_arg_tys(name, &arg_tys),
         },
-        _ => infer_builtin_host_type_from_arg_tys(name, &arg_tys),
+        _ => must_infer_builtin_host_type_from_arg_tys(name, &arg_tys),
     }
 }
 
-fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Option<HostType> {
+/// A builtin application reached host-result inference with an argument
+/// shape that cannot satisfy that builtin's typed contract.
+///
+/// This is deliberately not represented by an inference variable: invalid
+/// input and valid-but-underconstrained input are different states.  The
+/// former is a typed lowering failure; only the latter may allocate a fresh
+/// [`HostInferenceVar`].
+#[derive(Debug, Clone, PartialEq)]
+struct HostBuiltinInferenceError {
+    builtin: String,
+    argument_types: Vec<HostTypeTerm>,
+    requirement: String,
+}
+
+impl fmt::Display for HostBuiltinInferenceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "invalid host result inference for builtin `{}` with arguments {:?}: {} \
+             (chelis#730; [05-UNS-1])",
+            self.builtin, self.argument_types, self.requirement
+        )
+    }
+}
+
+impl std::error::Error for HostBuiltinInferenceError {}
+
+fn invalid_builtin_inference(
+    name: &str,
+    arg_tys: &[HostTypeTerm],
+    requirement: impl Into<String>,
+) -> HostBuiltinInferenceError {
+    HostBuiltinInferenceError {
+        builtin: name.to_string(),
+        argument_types: arg_tys.to_vec(),
+        requirement: requirement.into(),
+    }
+}
+
+fn term_matches_or_is_unresolved(
+    ty: &HostTypeTerm,
+    predicate: impl FnOnce(&HostTypeTerm) -> bool,
+) -> bool {
+    ty.is_unresolved() || predicate(ty)
+}
+
+/// Infer a builtin result without laundering invalid input into an anonymous
+/// type hole.  A successful unresolved result means inference genuinely
+/// needs context (for example arg-types-only `tuple-get` cannot see its index).
+fn infer_builtin_host_type_from_arg_tys(
+    name: &str,
+    arg_tys: &[HostTypeTerm],
+) -> Result<Option<HostTypeTerm>, HostBuiltinInferenceError> {
+    let require_first = |description: &str,
+                         predicate: fn(&HostTypeTerm) -> bool|
+     -> Result<(), HostBuiltinInferenceError> {
+        match arg_tys.first() {
+            Some(ty) if term_matches_or_is_unresolved(ty, predicate) => Ok(()),
+            _ => Err(invalid_builtin_inference(
+                name,
+                arg_tys,
+                format!("first argument must be {description}"),
+            )),
+        }
+    };
+    let is_tensor = |ty: &HostTypeTerm| matches!(ty, HostTypeTerm::Tensor(_));
+    let is_list = |ty: &HostTypeTerm| matches!(ty, HostTypeTerm::List(_));
+    let is_dict = |ty: &HostTypeTerm| matches!(ty, HostTypeTerm::Dict(_, _));
+
+    match name {
+        "sum" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce" | "argmax_reduce"
+        | "argmin_reduce" | "reshape" | "expand" | "pad" | "shrink" | "stride" | "permute"
+        | "split" | "sort" | "tensor_to_scalar" | "to_list" => {
+            require_first("a tensor", is_tensor)?;
+            if name == "to_list"
+                && matches!(
+                    arg_tys.first(),
+                    Some(HostTypeTerm::Tensor(TensorType {
+                        precision: Prim::F8e4m3,
+                        ..
+                    }))
+                )
+            {
+                return Err(invalid_builtin_inference(
+                    name,
+                    arg_tys,
+                    "f8e4m3 is deferred by spec/04-type-system.md section 1.1.1",
+                ));
+            }
+        }
+        "index" | "take" | "chunk" | "flatten" | "enumerate" | "dict_of" | "to_tensor"
+        | "pad_sequences" | "pad_sequences_to" => {
+            require_first("a list", is_list)?;
+        }
+        "drop" if arg_tys.len() != 1 => require_first("a list", is_list)?,
+        "concat" => {
+            require_first(
+                "a list of tensors",
+                |ty| matches!(ty, HostTypeTerm::List(inner) if matches!(inner.as_ref(), HostTypeTerm::Tensor(_))),
+            )?;
+            if arg_tys.get(1).is_none() {
+                return Err(invalid_builtin_inference(
+                    name,
+                    arg_tys,
+                    "concat requires an axis argument",
+                ));
+            }
+        }
+        "zip" | "dict_merge" => {
+            require_first(
+                if name == "zip" { "a list" } else { "a dict" },
+                if name == "zip" { is_list } else { is_dict },
+            )?;
+            let second_ok = arg_tys.get(1).is_some_and(|ty| {
+                term_matches_or_is_unresolved(ty, if name == "zip" { is_list } else { is_dict })
+            });
+            if !second_ok {
+                return Err(invalid_builtin_inference(
+                    name,
+                    arg_tys,
+                    if name == "zip" {
+                        "second argument must be a list"
+                    } else {
+                        "second argument must be a dict"
+                    },
+                ));
+            }
+        }
+        "dict_get" | "dict_remove" | "dict_insert" | "dict_keys" | "dict_values"
+        | "dict_entries" => require_first("a dict", is_dict)?,
+        "map" | "filter" | "fold" | "scan" | "partition" | "flat_map" => {
+            let list_index = if matches!(name, "fold" | "scan") {
+                2
+            } else {
+                1
+            };
+            if !arg_tys
+                .get(list_index)
+                .is_some_and(|ty| term_matches_or_is_unresolved(ty, is_list))
+            {
+                return Err(invalid_builtin_inference(
+                    name,
+                    arg_tys,
+                    format!("argument {list_index} must be a list"),
+                ));
+            }
+        }
+        "scalar_to_tensor" => {
+            require_first("a scalar", |ty| matches!(ty, HostTypeTerm::Scalar(_)))?
+        }
+        _ => {}
+    }
+
+    Ok(infer_builtin_host_type_from_arg_tys_unchecked(
+        name, arg_tys,
+    ))
+}
+
+fn must_infer_builtin_host_type_from_arg_tys(
+    name: &str,
+    arg_tys: &[HostTypeTerm],
+) -> Option<HostTypeTerm> {
+    infer_builtin_host_type_from_arg_tys(name, arg_tys).unwrap_or_else(|error| panic!("{error}"))
+}
+
+fn infer_builtin_host_type_from_arg_tys_unchecked(
+    name: &str,
+    arg_tys: &[HostTypeTerm],
+) -> Option<HostTypeTerm> {
     let tensor_arg = arg_tys.iter().find_map(|ty| match ty {
-        HostType::Tensor(tensor_ty) => Some(tensor_ty.clone()),
+        HostTypeTerm::Tensor(tensor_ty) => Some(tensor_ty.clone()),
         _ => None,
     });
     match name {
@@ -7969,25 +8355,31 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
         | "sin" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu" | "max_elem"
         | "min_elem" | "copy" | "uniform_like" | "dropout" | "softmax" => {
             if let Some(tensor_ty) = tensor_arg {
-                Some(HostType::Tensor(tensor_ty))
-            } else if arg_tys.iter().any(|ty| matches!(ty, HostType::Float64)) {
-                Some(HostType::Float64)
-            } else if arg_tys.iter().any(|ty| matches!(ty, HostType::Float32)) {
+                Some(HostTypeTerm::Tensor(tensor_ty))
+            } else if arg_tys
+                .iter()
+                .any(|ty| matches!(ty, &HostTypeTerm::Float64))
+            {
+                Some(HostTypeTerm::Float64)
+            } else if arg_tys
+                .iter()
+                .any(|ty| matches!(ty, &HostTypeTerm::Float32))
+            {
                 // WS-4: an f32 scalar operand keeps the result in f32; only
                 // a genuine f64 operand widens the result. Falling through
                 // to `Int64` here would mis-type an all-f32 scalar
                 // arithmetic result as an integer.
-                Some(HostType::Float32)
-            } else if arg_tys.iter().any(|ty| matches!(ty, HostType::Unknown)) {
+                Some(HostTypeTerm::Float32)
+            } else if arg_tys.iter().any(HostTypeTerm::is_unresolved) {
                 // chelis#730 Phase 1 (census row 7, chelis#714/#718): an
                 // Unknown-typed operand (an f16/bf16/int8/int16 scalar with
                 // no host representation) must not silently type the result
                 // as Int64 - propagate the Unknown so the C emitter's
                 // baking-point guard rejects loudly instead of emitting
                 // int64_t arithmetic over garbage.
-                Some(HostType::Unknown)
+                Some(fresh_host_inference())
             } else {
-                Some(HostType::Int64)
+                Some(HostTypeTerm::Int64)
             }
         }
         // chelis#340: the named-axis reduction family classifies as a
@@ -7999,28 +8391,28 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
         // precision; `argmax_reduce`/`argmin_reduce` return an int64 index
         // tensor.
         "sum" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce" => match arg_tys.first() {
-            Some(HostType::Tensor(tensor_ty)) => Some(HostType::Tensor(tensor_ty.clone())),
-            _ => Some(HostType::Unknown),
+            Some(HostTypeTerm::Tensor(tensor_ty)) => Some(HostTypeTerm::Tensor(tensor_ty.clone())),
+            _ => Some(fresh_host_inference()),
         },
         "argmax_reduce" | "argmin_reduce" => match arg_tys.first() {
-            Some(HostType::Tensor(tensor_ty)) => Some(HostType::Tensor(TensorType {
+            Some(HostTypeTerm::Tensor(tensor_ty)) => Some(HostTypeTerm::Tensor(TensorType {
                 dims: tensor_ty.dims.clone(),
                 precision: chelis_types::types::Prim::Int64,
             })),
-            _ => Some(HostType::Unknown),
+            _ => Some(fresh_host_inference()),
         },
         "mod" | "bitand" | "bitor" | "bitxor" | "shl" | "shr" | "string_len" | "rank" | "shape"
-        | "numel" => Some(HostType::Int64),
+        | "numel" => Some(HostTypeTerm::Int64),
         "cmplt" => match arg_tys.first() {
-            Some(HostType::Tensor(tensor_ty)) => Some(HostType::Tensor(TensorType {
+            Some(HostTypeTerm::Tensor(tensor_ty)) => Some(HostTypeTerm::Tensor(TensorType {
                 dims: tensor_ty.dims.clone(),
                 precision: chelis_types::types::Prim::Bool,
             })),
-            _ => Some(HostType::Bool),
+            _ => Some(HostTypeTerm::Bool),
         },
         // Movement ops preserve the element precision and stay tensors.
         // The concrete output shape (e.g. `expand`'s broadcast axis) is
-        // recomputed inside the tensor-helper DAG; the host `HostType`
+        // recomputed inside the tensor-helper DAG; the host `HostTypeTerm`
         // is coarse (precision + a dims placeholder used only for the
         // typed-runtime dispatch), so propagating the *input* tensor
         // type here is sufficient to keep the result classified as a
@@ -8031,18 +8423,20 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
         // expand */ 0`, then mistyped as a scalar at the consuming
         // tensor-helper callsite (`(float)(void* k)`, issue #300).
         "reshape" | "expand" | "pad" | "shrink" | "stride" | "permute" => match arg_tys.first() {
-            Some(HostType::Tensor(tensor_ty)) => Some(HostType::Tensor(tensor_ty.clone())),
-            _ => Some(HostType::Unknown),
+            Some(HostTypeTerm::Tensor(tensor_ty)) => Some(HostTypeTerm::Tensor(tensor_ty.clone())),
+            _ => Some(fresh_host_inference()),
         },
         "lt" | "gt" | "gte" | "lte" | "eq" | "neq" | "and" | "or" | "not" | "string_contains"
-        | "string_starts_with" | "string_ends_with" => Some(HostType::Bool),
-        "string_concat" | "string_trim" | "string_slice" | "to_string" => Some(HostType::String),
-        "to_int" => Some(HostType::Option(Box::new(HostType::Int64))),
-        "to_float" => Some(HostType::Option(Box::new(HostType::Float64))),
-        "len" => Some(HostType::Int64),
+        | "string_starts_with" | "string_ends_with" => Some(HostTypeTerm::Bool),
+        "string_concat" | "string_trim" | "string_slice" | "to_string" => {
+            Some(HostTypeTerm::String)
+        }
+        "to_int" => Some(HostTypeTerm::Option(Box::new(HostTypeTerm::Int64))),
+        "to_float" => Some(HostTypeTerm::Option(Box::new(HostTypeTerm::Float64))),
+        "len" => Some(HostTypeTerm::Int64),
         "index" => match arg_tys.first() {
-            Some(HostType::List(inner)) => Some((**inner).clone()),
-            _ => Some(HostType::Unknown),
+            Some(HostTypeTerm::List(inner)) => Some((**inner).clone()),
+            _ => Some(fresh_host_inference()),
         },
         "append" => arg_tys.first().cloned(),
         // chelis#631: this arg-tys-only lane cannot see the axis VALUE, so
@@ -8050,64 +8444,66 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
         // the element's concat-axis extent into tensor-helper signatures
         // (the host-lane copy of the checker's pre-#631 concat bug).
         "concat" => match (arg_tys.first(), arg_tys.get(1)) {
-            (Some(HostType::List(inner)), Some(HostType::Int64))
-                if matches!(inner.as_ref(), HostType::Tensor(_)) =>
+            (Some(HostTypeTerm::List(inner)), Some(&HostTypeTerm::Int64))
+                if matches!(inner.as_ref(), HostTypeTerm::Tensor(_)) =>
             {
                 match inner.as_ref() {
-                    HostType::Tensor(element) => Some(concat_host_tensor_type(element, None)),
-                    _ => Some(HostType::Unknown),
+                    HostTypeTerm::Tensor(element) => Some(concat_host_tensor_type(element, None)),
+                    _ => Some(fresh_host_inference()),
                 }
             }
             (Some(lhs), Some(_)) => Some(lhs.clone()),
-            _ => Some(HostType::Unknown),
+            _ => Some(fresh_host_inference()),
         },
         "split" => match arg_tys.first() {
-            Some(HostType::Tensor(tensor_ty)) => Some(HostType::List(Box::new(HostType::Tensor(
-                tensor_ty.clone(),
-            )))),
-            _ => Some(HostType::Unknown),
+            Some(HostTypeTerm::Tensor(tensor_ty)) => Some(HostTypeTerm::List(Box::new(
+                HostTypeTerm::Tensor(tensor_ty.clone()),
+            ))),
+            _ => Some(fresh_host_inference()),
         },
         "scatter" | "scatter_replace" | "scatter_elements" | "where" | "cumsum" | "diagonal"
         | "trace" | "clamp" => arg_tys.first().cloned(),
         "sort" => match arg_tys.first() {
-            Some(HostType::Tensor(tensor_ty)) => Some(HostType::Tuple(vec![
-                HostType::Tensor(tensor_ty.clone()),
-                HostType::Tensor(TensorType {
+            Some(HostTypeTerm::Tensor(tensor_ty)) => Some(HostTypeTerm::Tuple(vec![
+                HostTypeTerm::Tensor(tensor_ty.clone()),
+                HostTypeTerm::Tensor(TensorType {
                     dims: tensor_ty.dims.clone(),
                     precision: chelis_types::types::Prim::Int64,
                 }),
             ])),
-            _ => Some(HostType::Unknown),
+            _ => Some(fresh_host_inference()),
         },
-        "tuple-get" => Some(HostType::Unknown),
-        "drop" if arg_tys.len() == 1 => Some(HostType::Unit),
+        "tuple-get" => Some(fresh_host_inference()),
+        "drop" if arg_tys.len() == 1 => Some(HostTypeTerm::Unit),
         "take" | "drop" => match arg_tys.first() {
-            Some(HostType::List(inner)) => Some(HostType::List(Box::new((**inner).clone()))),
-            _ => Some(HostType::Unknown),
+            Some(HostTypeTerm::List(inner)) => {
+                Some(HostTypeTerm::List(Box::new((**inner).clone())))
+            }
+            _ => Some(fresh_host_inference()),
         },
         "chunk" => match arg_tys.first() {
-            Some(HostType::List(inner)) => Some(HostType::List(Box::new(HostType::List(
-                Box::new((**inner).clone()),
-            )))),
-            _ => Some(HostType::Unknown),
+            Some(HostTypeTerm::List(inner)) => Some(HostTypeTerm::List(Box::new(
+                HostTypeTerm::List(Box::new((**inner).clone())),
+            ))),
+            _ => Some(fresh_host_inference()),
         },
-        "range" => Some(HostType::List(Box::new(HostType::Int64))),
+        "range" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::Int64))),
         "map" => match (arg_tys.first(), arg_tys.get(1)) {
-            (Some(_), Some(HostType::List(inner))) => {
-                Some(HostType::List(Box::new((**inner).clone())))
+            (Some(_), Some(HostTypeTerm::List(inner))) => {
+                Some(HostTypeTerm::List(Box::new((**inner).clone())))
             }
-            _ => Some(HostType::Unknown),
+            _ => Some(fresh_host_inference()),
         },
         "filter" => arg_tys.get(1).cloned(),
         "fold" => arg_tys.get(1).cloned(),
         "scan" => match arg_tys.get(1) {
-            Some(init_ty) => Some(HostType::List(Box::new(init_ty.clone()))),
-            None => Some(HostType::Unknown),
+            Some(init_ty) => Some(HostTypeTerm::List(Box::new(init_ty.clone()))),
+            None => Some(fresh_host_inference()),
         },
         // Issue #257: `tensor_scan(initial: T, fn: (T, int64) -> T, n: int64) -> tensor[n, T]`.
         //
-        // We deliberately do NOT synthesize a concrete `HostType::Tensor`
-        // precision here. `HostType` is a *coarse* host-IR class: every
+        // We deliberately do NOT synthesize a concrete `HostTypeTerm::Tensor`
+        // precision here. `HostTypeTerm` is a *coarse* host-IR class: every
         // integer width collapses to `Int64` and every float width to
         // `Float64` (see `host_type_from_tensor_input`), so by the time
         // the initial value's type reaches this arm its real dtype
@@ -8127,112 +8523,120 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
         // runs, and the `chelis eval`/`chelis test` interpreter never
         // consults host-IR types at all. Emitting `Unknown` keeps this
         // arm from advertising a precision it cannot actually know.
-        "tensor_scan" => Some(HostType::Unknown),
+        "tensor_scan" => Some(fresh_host_inference()),
         "partition" => match arg_tys.get(1) {
-            Some(list_ty) => Some(HostType::Tuple(vec![list_ty.clone(), list_ty.clone()])),
-            None => Some(HostType::Unknown),
+            Some(list_ty) => Some(HostTypeTerm::Tuple(vec![list_ty.clone(), list_ty.clone()])),
+            None => Some(fresh_host_inference()),
         },
         "flat_map" => match (arg_tys.first(), arg_tys.get(1)) {
-            (Some(_), Some(HostType::List(_))) => match arg_tys.first() {
-                Some(HostType::Unknown) => Some(HostType::Unknown),
+            (Some(_), Some(HostTypeTerm::List(_))) => match arg_tys.first() {
+                Some(ty) if ty.is_unresolved() => Some(fresh_host_inference()),
                 Some(_) => None,
-                None => Some(HostType::Unknown),
+                None => Some(fresh_host_inference()),
             },
-            _ => Some(HostType::Unknown),
+            _ => Some(fresh_host_inference()),
         },
         "flatten" => match arg_tys.first() {
-            Some(HostType::List(inner)) => match inner.as_ref() {
-                HostType::List(nested) => Some(HostType::List(Box::new((**nested).clone()))),
-                _ => Some(HostType::Unknown),
+            Some(HostTypeTerm::List(inner)) => match inner.as_ref() {
+                HostTypeTerm::List(nested) => {
+                    Some(HostTypeTerm::List(Box::new((**nested).clone())))
+                }
+                _ => Some(fresh_host_inference()),
             },
-            _ => Some(HostType::Unknown),
+            _ => Some(fresh_host_inference()),
         },
         "zip" => match (arg_tys.first(), arg_tys.get(1)) {
-            (Some(HostType::List(lhs)), Some(HostType::List(rhs))) => {
-                Some(HostType::List(Box::new(HostType::Tuple(vec![
+            (Some(HostTypeTerm::List(lhs)), Some(HostTypeTerm::List(rhs))) => {
+                Some(HostTypeTerm::List(Box::new(HostTypeTerm::Tuple(vec![
                     (**lhs).clone(),
                     (**rhs).clone(),
                 ]))))
             }
-            _ => Some(HostType::Unknown),
+            _ => Some(fresh_host_inference()),
         },
         "enumerate" => match arg_tys.first() {
-            Some(HostType::List(inner)) => Some(HostType::List(Box::new(HostType::Tuple(vec![
-                HostType::Int64,
-                (**inner).clone(),
-            ])))),
-            _ => Some(HostType::Unknown),
+            Some(HostTypeTerm::List(inner)) => {
+                Some(HostTypeTerm::List(Box::new(HostTypeTerm::Tuple(vec![
+                    HostTypeTerm::Int64,
+                    (**inner).clone(),
+                ]))))
+            }
+            _ => Some(fresh_host_inference()),
         },
         "dict_of" => match arg_tys.first() {
-            Some(HostType::List(inner)) => match &**inner {
-                HostType::Tuple(parts) if parts.len() == 2 => Some(HostType::Dict(
+            Some(HostTypeTerm::List(inner)) => match &**inner {
+                HostTypeTerm::Tuple(parts) if parts.len() == 2 => Some(HostTypeTerm::Dict(
                     Box::new(parts[0].clone()),
                     Box::new(parts[1].clone()),
                 )),
-                _ => Some(HostType::Unknown),
+                _ => Some(fresh_host_inference()),
             },
-            _ => Some(HostType::Unknown),
+            _ => Some(fresh_host_inference()),
         },
         "dict_get" => match arg_tys.first() {
-            Some(HostType::Dict(_, value)) => Some(HostType::Option(Box::new((**value).clone()))),
-            _ => Some(HostType::Unknown),
+            Some(HostTypeTerm::Dict(_, value)) => {
+                Some(HostTypeTerm::Option(Box::new((**value).clone())))
+            }
+            _ => Some(fresh_host_inference()),
         },
-        "dict_contains" => Some(HostType::Bool),
+        "dict_contains" => Some(HostTypeTerm::Bool),
         "dict_remove" => match arg_tys.first() {
-            Some(HostType::Dict(key, value)) => Some(HostType::Dict(
+            Some(HostTypeTerm::Dict(key, value)) => Some(HostTypeTerm::Dict(
                 Box::new((**key).clone()),
                 Box::new((**value).clone()),
             )),
-            _ => Some(HostType::Unknown),
+            _ => Some(fresh_host_inference()),
         },
         "dict_insert" => match arg_tys.first() {
-            Some(HostType::Dict(key, value)) => Some(HostType::Dict(
+            Some(HostTypeTerm::Dict(key, value)) => Some(HostTypeTerm::Dict(
                 Box::new((**key).clone()),
                 Box::new((**value).clone()),
             )),
-            _ => Some(HostType::Unknown),
+            _ => Some(fresh_host_inference()),
         },
         "dict_merge" => match (arg_tys.first(), arg_tys.get(1)) {
             (
-                Some(HostType::Dict(lhs_key, lhs_value)),
-                Some(HostType::Dict(rhs_key, rhs_value)),
-            ) if **lhs_key == **rhs_key && **lhs_value == **rhs_value => Some(HostType::Dict(
+                Some(HostTypeTerm::Dict(lhs_key, lhs_value)),
+                Some(HostTypeTerm::Dict(rhs_key, rhs_value)),
+            ) if **lhs_key == **rhs_key && **lhs_value == **rhs_value => Some(HostTypeTerm::Dict(
                 Box::new((**lhs_key).clone()),
                 Box::new((**lhs_value).clone()),
             )),
-            _ => Some(HostType::Unknown),
+            _ => Some(fresh_host_inference()),
         },
         "dict_keys" => match arg_tys.first() {
-            Some(HostType::Dict(key, _)) => Some(HostType::List(Box::new((**key).clone()))),
-            _ => Some(HostType::Unknown),
+            Some(HostTypeTerm::Dict(key, _)) => Some(HostTypeTerm::List(Box::new((**key).clone()))),
+            _ => Some(fresh_host_inference()),
         },
         "dict_values" => match arg_tys.first() {
-            Some(HostType::Dict(_, value)) => Some(HostType::List(Box::new((**value).clone()))),
-            _ => Some(HostType::Unknown),
+            Some(HostTypeTerm::Dict(_, value)) => {
+                Some(HostTypeTerm::List(Box::new((**value).clone())))
+            }
+            _ => Some(fresh_host_inference()),
         },
         "dict_entries" => match arg_tys.first() {
-            Some(HostType::Dict(key, value)) => {
-                Some(HostType::List(Box::new(HostType::Tuple(vec![
+            Some(HostTypeTerm::Dict(key, value)) => {
+                Some(HostTypeTerm::List(Box::new(HostTypeTerm::Tuple(vec![
                     (**key).clone(),
                     (**value).clone(),
                 ]))))
             }
-            _ => Some(HostType::Unknown),
+            _ => Some(fresh_host_inference()),
         },
-        "print" => Some(HostType::Unit),
-        "fail" => Some(HostType::Unknown),
+        "print" => Some(HostTypeTerm::Unit),
+        "fail" => Some(HostTypeTerm::Never),
         "debug" => arg_tys.first().cloned(),
         "tensor_to_scalar" => match arg_tys.first() {
-            Some(HostType::Tensor(tensor)) => Some(match tensor.precision {
-                chelis_types::types::Prim::Bool => HostType::Bool,
+            Some(HostTypeTerm::Tensor(tensor)) => Some(match tensor.precision {
+                chelis_types::types::Prim::Bool => HostTypeTerm::Bool,
                 chelis_types::types::Prim::Int8
                 | chelis_types::types::Prim::Int32
-                | chelis_types::types::Prim::Int64 => HostType::Int64,
-                _ => HostType::Float64,
+                | chelis_types::types::Prim::Int64 => HostTypeTerm::Int64,
+                _ => HostTypeTerm::Float64,
             }),
-            _ => Some(HostType::Float64),
+            _ => Some(HostTypeTerm::Float64),
         },
-        // Issue #308: `HostType::Float64` classifies BOTH f32 and f64
+        // Issue #308: `HostTypeTerm::Float64` classifies BOTH f32 and f64
         // host scalars, so this coarse arm cannot recover the true
         // operand precision and defaults the float case to f32 (the
         // IR `Const` default for unsuffixed float literals). The
@@ -8244,131 +8648,129 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
         // the consuming tensor-helper Load share the same f32 answer,
         // so storage width stays consistent.
         "scalar_to_tensor" => match arg_tys.first() {
-            Some(HostType::Int64) => Some(HostType::Tensor(TensorType {
+            Some(&HostTypeTerm::Int64) => Some(HostTypeTerm::Tensor(TensorType {
                 dims: vec![],
                 precision: chelis_types::types::Prim::Int64,
             })),
-            Some(HostType::Bool) => Some(HostType::Tensor(TensorType {
+            Some(&HostTypeTerm::Bool) => Some(HostTypeTerm::Tensor(TensorType {
                 dims: vec![],
                 precision: chelis_types::types::Prim::Bool,
             })),
-            Some(HostType::Float64) => Some(HostType::Tensor(TensorType {
+            Some(&HostTypeTerm::Float64) => Some(HostTypeTerm::Tensor(TensorType {
                 dims: vec![],
                 precision: chelis_types::types::Prim::F32,
             })),
             _ => None,
         },
         "to_tensor" => match arg_tys.first() {
-            Some(HostType::List(inner)) => match &**inner {
-                HostType::Int64 => Some(HostType::Tensor(TensorType {
+            Some(HostTypeTerm::List(inner)) => match &**inner {
+                &HostTypeTerm::Int64 => Some(HostTypeTerm::Tensor(TensorType {
                     dims: vec![crate::dag::DimInfo::Named("list".to_string(), None)],
                     precision: chelis_types::types::Prim::Int64,
                 })),
-                HostType::Float64 => Some(HostType::Tensor(TensorType {
+                &HostTypeTerm::Float64 => Some(HostTypeTerm::Tensor(TensorType {
                     dims: vec![crate::dag::DimInfo::Named("list".to_string(), None)],
                     precision: chelis_types::types::Prim::F32,
                 })),
-                _ => Some(HostType::Unknown),
+                _ => Some(fresh_host_inference()),
             },
-            _ => Some(HostType::Unknown),
+            _ => Some(fresh_host_inference()),
         },
         "to_list" => match arg_tys.first() {
-            Some(HostType::Tensor(tensor)) if tensor.dims.len() == 1 => {
+            Some(HostTypeTerm::Tensor(tensor)) if tensor.dims.len() == 1 => {
                 let element_ty = match tensor.precision {
-                    chelis_types::types::Prim::Bool => HostType::Bool,
+                    chelis_types::types::Prim::Bool => HostTypeTerm::Bool,
                     chelis_types::types::Prim::Int8
                     | chelis_types::types::Prim::Int16
                     | chelis_types::types::Prim::Int32
-                    | chelis_types::types::Prim::Int64 => HostType::Int64,
+                    | chelis_types::types::Prim::Int64 => HostTypeTerm::Int64,
                     chelis_types::types::Prim::F16
                     | chelis_types::types::Prim::Bf16
                     | chelis_types::types::Prim::F32
-                    | chelis_types::types::Prim::F64 => HostType::Float64,
-                    // E2 (WS-A0 RT-1 fixup): per spec/04-type-system.md
-                    // §1.1.1 f8e4m3 is deferred and the type checker
-                    // must reject it upstream. If it ever reaches this
-                    // host-classification site there is a hole in the
-                    // upstream rejection — do not silently re-classify
-                    // as Float64.
-                    chelis_types::types::Prim::F8e4m3 => panic!(
-                        "f8e4m3 is deferred per spec/04-type-system.md §1.1.1 \
-                         and should have been rejected upstream"
-                    ),
-                    _ => HostType::Unknown,
+                    | chelis_types::types::Prim::F64 => HostTypeTerm::Float64,
+                    // The checked wrapper rejects this deferred dtype with
+                    // `HostBuiltinInferenceError` before entering this
+                    // implementation. Keep this arm non-defaulting if the
+                    // match is edited independently in the future.
+                    chelis_types::types::Prim::F8e4m3 => return None,
+                    _ => fresh_host_inference(),
                 };
-                Some(HostType::List(Box::new(element_ty)))
+                Some(HostTypeTerm::List(Box::new(element_ty)))
             }
-            Some(HostType::Tensor(_)) => Some(HostType::Unknown),
-            _ => Some(HostType::Unknown),
+            Some(HostTypeTerm::Tensor(_)) => Some(fresh_host_inference()),
+            _ => Some(fresh_host_inference()),
         },
         "pad_sequences" => match arg_tys.first() {
-            Some(HostType::List(inner)) => match &**inner {
-                HostType::List(nested) => match &**nested {
-                    HostType::Int64 => Some(HostType::Tensor(TensorType {
+            Some(HostTypeTerm::List(inner)) => match &**inner {
+                HostTypeTerm::List(nested) => match &**nested {
+                    &HostTypeTerm::Int64 => Some(HostTypeTerm::Tensor(TensorType {
                         dims: vec![
                             crate::dag::DimInfo::Named("batch".to_string(), None),
                             crate::dag::DimInfo::Named("seq".to_string(), None),
                         ],
                         precision: chelis_types::types::Prim::Int64,
                     })),
-                    HostType::Float64 => Some(HostType::Tensor(TensorType {
+                    &HostTypeTerm::Float64 => Some(HostTypeTerm::Tensor(TensorType {
                         dims: vec![
                             crate::dag::DimInfo::Named("batch".to_string(), None),
                             crate::dag::DimInfo::Named("seq".to_string(), None),
                         ],
                         precision: chelis_types::types::Prim::F32,
                     })),
-                    _ => Some(HostType::Unknown),
+                    _ => Some(fresh_host_inference()),
                 },
-                _ => Some(HostType::Unknown),
+                _ => Some(fresh_host_inference()),
             },
-            _ => Some(HostType::Unknown),
+            _ => Some(fresh_host_inference()),
         },
         "pad_sequences_to" => match arg_tys.first() {
-            Some(HostType::List(inner)) => match &**inner {
-                HostType::List(nested) => match &**nested {
-                    HostType::Int64 => Some(HostType::Tensor(TensorType {
+            Some(HostTypeTerm::List(inner)) => match &**inner {
+                HostTypeTerm::List(nested) => match &**nested {
+                    &HostTypeTerm::Int64 => Some(HostTypeTerm::Tensor(TensorType {
                         dims: vec![
                             crate::dag::DimInfo::Named("batch".to_string(), None),
                             crate::dag::DimInfo::Named("seq".to_string(), None),
                         ],
                         precision: chelis_types::types::Prim::Int64,
                     })),
-                    HostType::Float64 => Some(HostType::Tensor(TensorType {
+                    &HostTypeTerm::Float64 => Some(HostTypeTerm::Tensor(TensorType {
                         dims: vec![
                             crate::dag::DimInfo::Named("batch".to_string(), None),
                             crate::dag::DimInfo::Named("seq".to_string(), None),
                         ],
                         precision: chelis_types::types::Prim::F32,
                     })),
-                    _ => Some(HostType::Unknown),
+                    _ => Some(fresh_host_inference()),
                 },
-                _ => Some(HostType::Unknown),
+                _ => Some(fresh_host_inference()),
             },
-            _ => Some(HostType::Unknown),
+            _ => Some(fresh_host_inference()),
         },
-        "read_file" => Some(HostType::String),
-        "write_file" => Some(HostType::Unit),
-        "read_lines" => Some(HostType::List(Box::new(HostType::String))),
-        "read_bytes" => Some(HostType::List(Box::new(HostType::Int64))),
-        "file_exists" => Some(HostType::Bool),
-        "list_dir" => Some(HostType::List(Box::new(HostType::String))),
-        "mmap_file" => Some(HostType::MappedFile),
-        "mmap_read" => Some(HostType::List(Box::new(HostType::Int64))),
-        "mmap_len" => Some(HostType::Int64),
+        "read_file" => Some(HostTypeTerm::String),
+        "write_file" => Some(HostTypeTerm::Unit),
+        "read_lines" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::String))),
+        "read_bytes" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::Int64))),
+        "file_exists" => Some(HostTypeTerm::Bool),
+        "list_dir" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::String))),
+        "mmap_file" => Some(HostTypeTerm::MappedFile),
+        "mmap_read" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::Int64))),
+        "mmap_len" => Some(HostTypeTerm::Int64),
         // Hull Phase 0a: `process_run(cmd, args) -> (exit_code, stdout, stderr)`.
         // Eval/test-only; the C/HIP build backends reject it before codegen
         // (see `host_program_uses_builtin` / `reject_eval_only_builtins_host`).
-        "process_run" => Some(HostType::Tuple(vec![
-            HostType::Int64,
-            HostType::String,
-            HostType::String,
+        "process_run" => Some(HostTypeTerm::Tuple(vec![
+            HostTypeTerm::Int64,
+            HostTypeTerm::String,
+            HostTypeTerm::String,
         ])),
         _ => None,
     }
 }
 
-fn lookup_adt_ctor(program: &CheckedProgram, ctor_name: &str) -> Option<(String, Vec<HostType>)> {
+fn lookup_adt_ctor(
+    program: &CheckedProgram,
+    ctor_name: &str,
+) -> Option<(String, Vec<HostTypeTerm>)> {
     lookup_adt_ctor_details(program, ctor_name).map(|(adt_name, fields)| {
         (
             adt_name,
@@ -8387,7 +8789,7 @@ fn lookup_adt_ctor_details(
 fn lookup_adt_ctor_details_for_type(
     program: &CheckedProgram,
     ctor_name: &str,
-    instantiated_ty: Option<&HostType>,
+    instantiated_ty: Option<&HostTypeTerm>,
 ) -> Option<(String, Vec<HostAdtField>)> {
     for expr in top_level_items(program.exprs()) {
         let Expr::List(list, _) = expr else {
@@ -8424,13 +8826,13 @@ fn lookup_adt_ctor_details_for_type(
                     if let Some(ty_expr) = field_kids.get(1) {
                         fields.push(HostAdtField {
                             name: field_kids.first().and_then(symbol_name).map(str::to_string),
-                            ty: parse_host_type_with_subst(ty_expr, &subst),
+                            ty: decode_host_type_or_raise(ty_expr, &subst),
                         });
                     }
                 } else {
                     fields.push(HostAdtField {
                         name: None,
-                        ty: parse_host_type_with_subst(field, &subst),
+                        ty: decode_host_type_or_raise(field, &subst),
                     });
                 }
             }
@@ -8444,7 +8846,7 @@ fn lookup_access_field(
     program: &CheckedProgram,
     base: &HostExpr,
     field_name: &str,
-) -> Option<(usize, HostType)> {
+) -> Option<(usize, HostTypeTerm)> {
     match &base.kind {
         HostExprKind::AdtConstruct { ctor, .. } => {
             lookup_adt_ctor_details(program, ctor).and_then(|(_, fields)| {
@@ -8454,7 +8856,7 @@ fn lookup_access_field(
             })
         }
         _ => match host_expr_type(base) {
-            HostType::Adt(adt_name, args) => {
+            HostTypeTerm::Adt(adt_name, args) => {
                 lookup_adt_field_on_type(program, &adt_name, &args, field_name)
             }
             _ => None,
@@ -8465,9 +8867,9 @@ fn lookup_access_field(
 fn lookup_adt_field_on_type(
     program: &CheckedProgram,
     adt_name: &str,
-    args: &[HostType],
+    args: &[HostTypeTerm],
     field_name: &str,
-) -> Option<(usize, HostType)> {
+) -> Option<(usize, HostTypeTerm)> {
     let mut found = None;
     for expr in top_level_items(program.exprs()) {
         let Expr::List(list, _) = expr else {
@@ -8483,7 +8885,7 @@ fn lookup_adt_field_on_type(
         let subst = adt_type_substitution(
             children(list).get(1),
             adt_name,
-            Some(&HostType::Adt(adt_name.to_string(), args.to_vec())),
+            Some(&HostTypeTerm::Adt(adt_name.to_string(), args.to_vec())),
         );
         for variant in kids.iter().skip(2) {
             let Some(variant_list) = as_list(variant) else {
@@ -8502,8 +8904,8 @@ fn lookup_adt_field_on_type(
                 if children(field_list).first().and_then(symbol_name) == Some(field_name) {
                     let ty = children(field_list)
                         .get(1)
-                        .map(|expr| parse_host_type_with_subst(expr, &subst))
-                        .unwrap_or(HostType::Unknown);
+                        .map(|expr| decode_host_type_or_raise(expr, &subst))
+                        .unwrap_or_else(fresh_host_inference);
                     if let Some(existing) = &found
                         && existing != &(index, ty.clone())
                     {
@@ -8520,8 +8922,8 @@ fn lookup_adt_field_on_type(
 fn adt_type_substitution(
     params_expr: Option<&Expr>,
     adt_name: &str,
-    instantiated_ty: Option<&HostType>,
-) -> HashMap<String, HostType> {
+    instantiated_ty: Option<&HostTypeTerm>,
+) -> HashMap<String, HostTypeTerm> {
     let params = params_expr
         .and_then(as_list)
         .map(|list| {
@@ -8533,7 +8935,9 @@ fn adt_type_substitution(
         })
         .unwrap_or_default();
     let actuals = match instantiated_ty {
-        Some(HostType::Adt(name, args)) if terminal_name_matches(name, adt_name) => args.clone(),
+        Some(HostTypeTerm::Adt(name, args)) if terminal_name_matches(name, adt_name) => {
+            args.clone()
+        }
         _ => Vec::new(),
     };
     params.into_iter().zip(actuals).collect()
@@ -8609,12 +9013,12 @@ fn param_name(expr: &Expr) -> Option<String> {
     }
 }
 
-fn param_host_type(expr: &Expr) -> Option<HostType> {
+fn param_host_type(expr: &Expr) -> Option<HostTypeTerm> {
     match expr {
         Expr::MetaExpr(meta, _) => expr_type(expr)
-            .filter(|ty| *ty != HostType::Unknown)
+            .filter(|ty| !ty.is_unresolved())
             .or_else(|| param_host_type(&meta.expr)),
-        Expr::List(_, _) => expr_type(expr).filter(|ty| *ty != HostType::Unknown),
+        Expr::List(_, _) => expr_type(expr).filter(|ty| !ty.is_unresolved()),
         _ => None,
     }
 }
@@ -8669,13 +9073,13 @@ mod tests {
     }
 
     /// chelis#336: restore the guard that a function-typed parameter survives
-    /// as `HostType::Fn` through `lower_compiled_program`. #331 deleted the
+    /// as `HostTypeTerm::Fn` through `lower_compiled_program`. #331 deleted the
     /// only test asserting this (it relied on a reef-package HOF). A
     /// *same-module* HOF like `def apply(f, x) = f(x)` is inlined away, so a
     /// surviving fn-param needs a non-inlined HOF: here `apply_each` is kept
     /// as a real host function because it is called with a fn argument and
     /// uses the `map` combinator. The lowered `apply_each` must keep its
-    /// `f: f32 -> f32` parameter typed `HostType::Fn`, not collapsed to a
+    /// `f: f32 -> f32` parameter typed `HostTypeTerm::Fn`, not collapsed to a
     /// value type.
     #[test]
     fn host_program_preserves_fn_typed_param_through_lowering() {
@@ -8697,24 +9101,26 @@ mod tests {
             .find(|p| p.name == "f")
             .expect("apply_each must keep its `f` parameter");
         match &f_param.ty {
-            HostType::Fn(params, ret) => {
+            ConcreteHostType::Function(params, ret) => {
                 assert_eq!(params.len(), 1, "f takes one scalar arg, got {params:?}");
                 assert!(
-                    matches!(params[0], HostType::Float32 | HostType::Float64),
+                    matches!(params[0], ConcreteHostType::Scalar(Prim::F32 | Prim::F64)),
                     "f's arg must be a scalar, got {:?}",
                     params[0]
                 );
                 assert!(
-                    matches!(**ret, HostType::Float32 | HostType::Float64),
+                    matches!(**ret, ConcreteHostType::Scalar(Prim::F32 | Prim::F64)),
                     "f's return must be a scalar, got {ret:?}"
                 );
             }
-            other => panic!("fn-typed param `f` must lower to HostType::Fn, got {other:?}"),
+            other => {
+                panic!("fn-typed param `f` must lower to ConcreteHostType::Function, got {other:?}")
+            }
         }
     }
 
     /// chelis#336 negative parity: a program with no higher-order parameter
-    /// must produce no `HostType::Fn` parameter, so the positive guard above
+    /// must produce no `HostTypeTerm::Fn` parameter, so the positive guard above
     /// is not vacuously satisfied by some unrelated fn-typed param.
     #[test]
     fn host_program_has_no_fn_typed_param_without_hof() {
@@ -8728,16 +9134,16 @@ mod tests {
             .functions
             .iter()
             .flat_map(|f| f.params.iter())
-            .any(|p| matches!(p.ty, HostType::Fn(_, _)));
+            .any(|p| matches!(p.ty, ConcreteHostType::Function(_, _)));
         assert!(
             !has_fn_param,
-            "a non-HOF program must not lower any HostType::Fn parameter"
+            "a non-HOF program must not lower any HostTypeTerm::Fn parameter"
         );
     }
 
     // ── Issue #308: scalar_to_tensor operand-precision plumbing ──
     //
-    // `HostType::Float64` collapses f32 and f64, so the Deep-level
+    // `HostTypeTerm::Float64` collapses f32 and f64, so the Deep-level
     // `infer_app_expr_host_type` must recover the operand precision
     // before the coarse arg-ty fallback erases it to f32.
 
@@ -8749,7 +9155,7 @@ mod tests {
             .expect("one expr")
     }
 
-    fn infer_scalar_to_tensor_host_type(arg_src: &str) -> Option<HostType> {
+    fn infer_scalar_to_tensor_host_type(arg_src: &str) -> Option<HostTypeTerm> {
         let app = parse_deep_app(&format!("(app {{}} (var {{}} scalar_to_tensor) {arg_src})"));
         let Expr::List(list, _) = &app else {
             panic!("app expr must be a list");
@@ -8770,7 +9176,7 @@ mod tests {
         );
         assert_eq!(
             inferred,
-            Some(HostType::Tensor(TensorType {
+            Some(HostTypeTerm::Tensor(TensorType {
                 dims: vec![],
                 precision: Prim::F64,
             })),
@@ -8783,7 +9189,7 @@ mod tests {
         let inferred = infer_scalar_to_tensor_host_type("(var {type: (t-prim {} f64)} c)");
         assert_eq!(
             inferred,
-            Some(HostType::Tensor(TensorType {
+            Some(HostTypeTerm::Tensor(TensorType {
                 dims: vec![],
                 precision: Prim::F64,
             })),
@@ -8804,7 +9210,7 @@ mod tests {
             let inferred = infer_scalar_to_tensor_host_type(arg_src);
             assert_eq!(
                 inferred,
-                Some(HostType::Tensor(TensorType {
+                Some(HostTypeTerm::Tensor(TensorType {
                     dims: vec![],
                     precision: Prim::F32,
                 })),
@@ -8832,11 +9238,11 @@ mod tests {
         );
         // The coarse arm still owns the lowered-lane integer answer.
         assert_eq!(
-            infer_builtin_host_type_from_arg_tys("scalar_to_tensor", &[HostType::Int64]),
-            Some(HostType::Tensor(TensorType {
+            infer_builtin_host_type_from_arg_tys("scalar_to_tensor", &[HostTypeTerm::Int64]),
+            Ok(Some(HostTypeTerm::Tensor(TensorType {
                 dims: vec![],
                 precision: Prim::Int64,
-            })),
+            }))),
         );
     }
 
@@ -8857,7 +9263,7 @@ mod tests {
         DimInfo::Named("*".to_string(), None)
     }
 
-    fn infer_concat_host_type(axis_src: &str) -> Option<HostType> {
+    fn infer_concat_host_type(axis_src: &str) -> Option<HostTypeTerm> {
         let app = parse_deep_app(&format!(
             "(app {{}} (var {{}} concat) (var {{}} rows) {axis_src})"
         ));
@@ -8868,7 +9274,7 @@ mod tests {
         let mut scope = HashMap::new();
         scope.insert(
             "rows".to_string(),
-            HostType::List(Box::new(HostType::Tensor(rank2_element()))),
+            HostTypeTerm::List(Box::new(HostTypeTerm::Tensor(rank2_element()))),
         );
         infer_app_expr_host_type(list, &program, &scope)
     }
@@ -8881,7 +9287,7 @@ mod tests {
             let inferred = infer_concat_host_type(axis_src);
             assert_eq!(
                 inferred,
-                Some(HostType::Tensor(TensorType {
+                Some(HostTypeTerm::Tensor(TensorType {
                     dims: vec![anon_dim(), DimInfo::Lit(2)],
                     precision: Prim::F32,
                 })),
@@ -8895,7 +9301,7 @@ mod tests {
         let inferred = infer_concat_host_type("(lit {} -1)");
         assert_eq!(
             inferred,
-            Some(HostType::Tensor(TensorType {
+            Some(HostTypeTerm::Tensor(TensorType {
                 dims: vec![DimInfo::Lit(1), anon_dim()],
                 precision: Prim::F32,
             })),
@@ -8909,7 +9315,7 @@ mod tests {
         let inferred = infer_concat_host_type("(var {} ax)");
         assert_eq!(
             inferred,
-            Some(HostType::Tensor(TensorType {
+            Some(HostTypeTerm::Tensor(TensorType {
                 dims: vec![anon_dim(), anon_dim()],
                 precision: Prim::F32,
             })),
@@ -8925,16 +9331,16 @@ mod tests {
         let inferred = infer_builtin_host_type_from_arg_tys(
             "concat",
             &[
-                HostType::List(Box::new(HostType::Tensor(rank2_element()))),
-                HostType::Int64,
+                HostTypeTerm::List(Box::new(HostTypeTerm::Tensor(rank2_element()))),
+                HostTypeTerm::Int64,
             ],
         );
         assert_eq!(
             inferred,
-            Some(HostType::Tensor(TensorType {
+            Ok(Some(HostTypeTerm::Tensor(TensorType {
                 dims: vec![anon_dim(), anon_dim()],
                 precision: Prim::F32,
-            })),
+            }))),
         );
     }
 
@@ -8945,7 +9351,7 @@ mod tests {
         let list_arg = HostExpr {
             kind: HostExprKind::Var(
                 "rows".to_string(),
-                HostType::List(Box::new(HostType::Tensor(rank2_element()))),
+                HostTypeTerm::List(Box::new(HostTypeTerm::Tensor(rank2_element()))),
             ),
             span_id: None,
             merged_spans: Vec::new(),
@@ -8958,7 +9364,7 @@ mod tests {
                     span_id: None,
                     merged_spans: Vec::new(),
                 }],
-                ty: HostType::Int64,
+                ty: HostTypeTerm::Int64,
             },
             span_id: None,
             merged_spans: Vec::new(),
@@ -8966,7 +9372,7 @@ mod tests {
         let inferred = infer_builtin_host_type("concat", &[list_arg, axis_arg]);
         assert_eq!(
             inferred,
-            Some(HostType::Tensor(TensorType {
+            Some(HostTypeTerm::Tensor(TensorType {
                 dims: vec![anon_dim(), DimInfo::Lit(2)],
                 precision: Prim::F32,
             })),
@@ -8974,16 +9380,47 @@ mod tests {
     }
 
     /// E2 (WS-A0 RT-1 fixup): the `to_list` host classification arm
-    /// must panic on an f8e4m3-precision tensor with the §1.1.1
-    /// message rather than silently classifying as Float64.
+    /// returns a typed error for f8e4m3 rather than panicking or silently
+    /// classifying the deferred dtype as Float64.
     #[test]
-    #[should_panic(expected = "f8e4m3 is deferred per spec/04-type-system.md §1.1.1")]
-    fn to_list_classifier_panics_on_f8e4m3_tensor_per_spec_1_1_1() {
-        let f8_tensor = HostType::Tensor(crate::dag::TensorType {
+    fn to_list_classifier_rejects_f8e4m3_tensor_per_spec_1_1_1() {
+        let f8_tensor = HostTypeTerm::Tensor(crate::dag::TensorType {
             dims: vec![DimInfo::Lit(4)],
             precision: Prim::F8e4m3,
         });
-        let _ = infer_builtin_host_type_from_arg_tys("to_list", &[f8_tensor]);
+        let error = infer_builtin_host_type_from_arg_tys("to_list", &[f8_tensor])
+            .expect_err("the deferred dtype must be a typed inference error");
+        assert!(error.to_string().contains("f8e4m3 is deferred"));
+    }
+
+    #[test]
+    fn invalid_builtin_shape_is_not_an_inference_variable() {
+        let error = infer_builtin_host_type_from_arg_tys(
+            "sum",
+            &[HostTypeTerm::List(Box::new(HostTypeTerm::Int64))],
+        )
+        .expect_err("sum over a list is invalid, not underconstrained");
+        assert_eq!(error.builtin, "sum");
+        assert!(error.requirement.contains("must be a tensor"));
+    }
+
+    #[test]
+    fn genuinely_underconstrained_tuple_get_keeps_a_fresh_identity() {
+        let first = infer_builtin_host_type_from_arg_tys(
+            "tuple-get",
+            &[HostTypeTerm::Tuple(vec![HostTypeTerm::Int64])],
+        )
+        .expect("the arg-types-only lane lacks the index, but is not invalid")
+        .expect("tuple-get is a known builtin");
+        let second = infer_builtin_host_type_from_arg_tys(
+            "tuple-get",
+            &[HostTypeTerm::Tuple(vec![HostTypeTerm::Int64])],
+        )
+        .expect("the arg-types-only lane lacks the index, but is not invalid")
+        .expect("tuple-get is a known builtin");
+        assert!(matches!(first, HostTypeTerm::InferenceVariable(_)));
+        assert!(matches!(second, HostTypeTerm::InferenceVariable(_)));
+        assert_ne!(first, second, "fresh holes must retain distinct identity");
     }
 
     #[test]
@@ -9061,7 +9498,7 @@ mod tests {
     // ── WS-4: declared float width survives entry-param lowering ──
     //
     // `tensor_type_from_host_input` previously mapped every
-    // `HostType::Float64` (which collapsed both f32 and f64) to
+    // `HostTypeTerm::Float64` (which collapsed both f32 and f64) to
     // `Prim::F32`, silently truncating an f64 scalar entry parameter to
     // 4-byte storage. The declared `f32`/`f64` width now threads through
     // `parse_host_type_with_subst` so each lowers to a `Load` of its own
@@ -9155,14 +9592,14 @@ mod tests {
         // variants so the entry-param boundary can recover the width.
         let f32_ty = parse_deep_app("(t-prim {} f32)");
         assert_eq!(
-            parse_host_type_with_subst(&f32_ty, &HashMap::new()),
-            HostType::Float32,
+            decode_host_type_with_subst(&f32_ty, &HashMap::new()),
+            Ok(HostTypeTerm::Float32),
         );
 
         let f64_ty = parse_deep_app("(t-prim {} f64)");
         assert_eq!(
-            parse_host_type_with_subst(&f64_ty, &HashMap::new()),
-            HostType::Float64,
+            decode_host_type_with_subst(&f64_ty, &HashMap::new()),
+            Ok(HostTypeTerm::Float64),
         );
     }
 
@@ -9172,14 +9609,14 @@ mod tests {
         // scalar lowers to a rank-0 tensor of the matching precision, and
         // the reverse map restores the same host width.
         assert_eq!(
-            tensor_type_from_host_input(&HostType::Float32),
+            tensor_type_from_host_input(&HostTypeTerm::Float32),
             Some(TensorType {
                 dims: vec![],
                 precision: Prim::F32,
             }),
         );
         assert_eq!(
-            tensor_type_from_host_input(&HostType::Float64),
+            tensor_type_from_host_input(&HostTypeTerm::Float64),
             Some(TensorType {
                 dims: vec![],
                 precision: Prim::F64,
@@ -9190,14 +9627,14 @@ mod tests {
                 dims: vec![],
                 precision: Prim::F32,
             }),
-            HostType::Float32,
+            HostTypeTerm::Float32,
         );
         assert_eq!(
             host_type_from_tensor_input(&TensorType {
                 dims: vec![],
                 precision: Prim::F64,
             }),
-            HostType::Float64,
+            HostTypeTerm::Float64,
         );
     }
 
@@ -9256,7 +9693,7 @@ mod tests {
         let mut scope = HashMap::new();
         scope.insert(
             "x".to_string(),
-            HostType::Tensor(TensorType {
+            HostTypeTerm::Tensor(TensorType {
                 dims: vec![DimInfo::Lit(4)],
                 precision: Prim::F32,
             }),
@@ -9387,7 +9824,7 @@ mod tests {
                 )
             });
         match &theta_binding.ty {
-            HostType::Tensor(tensor) => assert_eq!(tensor.precision, Prim::F32),
+            HostTypeTerm::Tensor(tensor) => assert_eq!(tensor.precision, Prim::F32),
             other => panic!("expected hoisted theta binding to be tensor-typed, got {other:?}"),
         }
         let helper_index = match &body.kind {
@@ -9431,8 +9868,8 @@ mod tests {
         .next()
         .expect("one type expr");
 
-        match parse_host_type(&expr) {
-            HostType::Tensor(tensor) => {
+        match decode_host_type(&expr).expect("borrowed tensor type decodes") {
+            HostTypeTerm::Tensor(tensor) => {
                 assert_eq!(
                     tensor.dims,
                     vec![crate::dag::DimInfo::Named("n".into(), None)]
@@ -9521,14 +9958,14 @@ mod tests {
         let mut scope = HashMap::new();
         scope.insert(
             "x".into(),
-            HostType::Tensor(TensorType {
+            HostTypeTerm::Tensor(TensorType {
                 dims: vec![batch.clone(), in_dim.clone()],
                 precision: Prim::F32,
             }),
         );
         scope.insert(
             "w".into(),
-            HostType::Tensor(TensorType {
+            HostTypeTerm::Tensor(TensorType {
                 dims: vec![in_dim.clone(), out_dim.clone()],
                 precision: Prim::F32,
             }),
@@ -9613,7 +10050,7 @@ mod tests {
         let mut scope = HashMap::new();
         scope.insert(
             "x".into(),
-            HostType::Tensor(TensorType {
+            HostTypeTerm::Tensor(TensorType {
                 dims: vec![n.clone()],
                 precision: Prim::F32,
             }),
@@ -9694,7 +10131,7 @@ mod tests {
         let mut scope = HashMap::new();
         scope.insert(
             "x".into(),
-            HostType::Tensor(TensorType {
+            HostTypeTerm::Tensor(TensorType {
                 dims: vec![DimInfo::Named("batch".into(), None)],
                 precision: Prim::F32,
             }),
