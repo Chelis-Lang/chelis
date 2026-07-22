@@ -261,6 +261,48 @@ fn in_range_int8_scalar_add_agrees_across_lanes() {
     }
 }
 
+/// A function-typed int8 argument is a real callable value, not a nullable
+/// numeric slot. The C lane may specialize this closed call or emit a callable
+/// symbol, but emitting `0` for the argument is a forbidden §C6.3 callback
+/// substitution and traps when `apply` invokes it.
+#[test]
+fn in_range_int8_inline_callback_executes_exactly() {
+    if !c_toolchain_available() {
+        return;
+    }
+    let program = "module M.Main\n\
+         def apply(f: int8 -> int8, x: int8) -> int8 = f(x)\n\
+         out = print(apply(fn (x: int8) -> add(x, cast(1, int8)), cast(6, int8)))\n";
+    let (line, stderr, ok) = c_lane(program, "c_i8_inline_callback").expect("C callback lane");
+    assert!(
+        ok,
+        "the emitted callback must be callable; stdout `{line}`, stderr `{stderr}`"
+    );
+    common::assert_elements_in_domain("int8", &line, "i8 inline callback C");
+    assert_eq!(line, "7");
+}
+
+/// Positive parity for the ordinary named-function-pointer representation.
+/// The anonymous-call specialization must not weaken the existing C ABI path
+/// for a named callback.
+#[test]
+fn in_range_int8_named_callback_executes_exactly() {
+    if !c_toolchain_available() {
+        return;
+    }
+    let program = "module M.Main\n\
+         def apply(f: int8 -> int8, x: int8) -> int8 = f(x)\n\
+         def increment(x: int8) -> int8 = add(x, cast(1, int8))\n\
+         out = print(apply(increment, cast(6, int8)))\n";
+    let (line, stderr, ok) = c_lane(program, "c_i8_named_callback").expect("C callback lane");
+    assert!(
+        ok,
+        "named callback must execute; stdout `{line}`, stderr `{stderr}`"
+    );
+    common::assert_elements_in_domain("int8", &line, "i8 named callback C");
+    assert_eq!(line, "7");
+}
+
 /// In-range int16 tensor arithmetic agrees across lanes: both lanes hold
 /// value-100 elements. Since chelis#732 Phase 1, eval prints integer
 /// tensor elements as integers ([05-OBS-2]); the compiled lane keeps its

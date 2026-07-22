@@ -1896,6 +1896,7 @@ impl<'a> HostEmitter<'a> {
                 self.assign_tensor_call(target, *helper, args, ty)?;
             }
             HostExprKind::Unit => {
+                require_same_abi_type(ty, &HostType::Unit, "unit expression")?;
                 self.lines.push(format!("{}{target} = 0;", self.indent));
             }
         }

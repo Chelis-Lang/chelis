@@ -5,9 +5,11 @@
 `EffectKind`/`RuntimeDType` identities and consumers, generated Rust/C dtype
 agreement, staged `HostTypeTerm -> ConcreteHostType -> HostAbiType` boundary,
 and closed structured C-expression AST are implemented. Phase acceptance
-still requires the authoritative oracle and a fresh adversarial review; this
-status does not claim that validation early. Count baselines and the token
-tripwire are supporting checks, not completion evidence. Phase 3 is pending.
+still requires the authoritative oracle
+(`.venv/bin/python scripts/loud_unsupported_phase2_oracle.py`) and a fresh
+adversarial review; this status does not claim that validation early. Count
+baselines and the token tripwire are supporting checks, not completion
+evidence. Phase 3 is pending.
 Tracking issue: [#730].
 
 **Implementation record (re-planned 2026-07-22).** The initial Phase 2 draft
@@ -538,6 +540,18 @@ emission. The Phase 2 endpoint contains no legacy `HostType::Unknown` and no
 such bridge. Compile-time function signatures, not a source count, prove that
 only resolved types reach codegen.
 
+Every production compiler entry point returns host decode, inference,
+resolution, and target-selection failures through its declared `Result`.
+There is no public infallible host-lowering wrapper and no production caller
+may turn one of those failures into a panic. Substitution of a generic ADT's
+type arguments occurs before its constructor fields cross the concrete-type
+boundary, so a field cannot carry a declaration-scoped type variable into
+codegen. Direct anonymous callback applications are specialized before host
+emission; an unresolved callable is never represented by a null function
+pointer or numeric value. An expression node may inhabit only its resolved ABI
+type: in particular, `Unit` emission cannot satisfy a function, callback, or
+numeric ABI expectation.
+
 Positive/negative parity covers: every concrete primitive; each named variable
 kind; missing versus malformed syntax; empty-list inference; `Never`
 value-boundary rejection; supported ABI representations; and known logical
@@ -727,15 +741,22 @@ every semantic consumer.
 Table A/B policy ([#729]); [#709]'s `DeepTag` enum ([#731]); observation
 formatting ([#732]); capability atom authorship ([#733]).
 
-**Oracle:** the Phase 2 closed-vocabulary suite is green; adding one temporary
-`EffectKind` variant fails compilation in every §C6.1 semantic consumer;
-invalid runtime dtype IDs fail before any §C6.2 sizing or access helper;
-regenerating the C dtype header is byte-identical; every §C6.3 term-state parity
-test is green; the target selector derives an ABI type only from an
-implemented target decision; and the C emitter's codegen boundary is typed in
-`HostAbiType` so a compile-fail test cannot pass `HostTypeTerm`, `Never`, a
-decode/resolution error, or the deleted legacy sentinel. The tripwire and
-zero-occurrence endpoint scan are supporting evidence, not the oracle.
+**Authoritative oracle (owner: Phase 2):**
+
+```sh
+.venv/bin/python scripts/loud_unsupported_phase2_oracle.py
+```
+
+Success means exit 0 with the final line `PHASE 2 ORACLE: PASS`. This single
+runner executes the closed-vocabulary suite, generated-header and invalid-ID
+runtime checks, §C6.3 term-state and public-API parity (including generic ADT
+specialization and empty-list failure propagation), exact callback and
+reduced-float ABI cells, structured-emission and private-ABI compile-fail
+checks, the zero-occurrence endpoint scan, and a controlled temporary
+`EffectKind` variant mutation. The mutation must produce non-exhaustive-match
+errors in independent semantic consumers and the runner must restore the
+owner source byte-for-byte. The tripwire remains supporting evidence executed
+by the normal gate; it is not a second completion oracle.
 
 ## Phase 3 - gates become UX, not safety
 

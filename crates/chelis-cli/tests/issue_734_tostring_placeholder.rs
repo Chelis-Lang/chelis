@@ -13,13 +13,14 @@
 //! The former f16 "control" passed only because the C host silently widened
 //! the value through the Unknown/f64 path; Phase 2 replaces that accidental
 //! green with an explicit ABI rejection until chelis#729 supplies real
-//! reduced-float storage and rounding. That negative boundary is locked by
-//! `loud_unsupported_phase1::narrow_scalar_arithmetic_rejects_or_computes_never_zero`
-//! and the f16 row in `issue_687_rejected_cells_corpus`.
+//! reduced-float storage and rounding. The exact f16/bf16 `to_string` cells
+//! are locked below as typed ABI rejections with no emitted C artifact.
 
 #![allow(clippy::uninlined_format_args)]
 
 use assert_cmd::Command;
+use chelis_compiler_api::compiler::compile;
+use chelis_compiler_api::schema::{CompileRequest, CompileTarget, SourceKind};
 use tempfile::tempdir;
 
 #[path = "common/mod.rs"]
@@ -157,5 +158,72 @@ fn to_string_scalar_arms_agree_across_lanes() {
                 "{expr}"
             );
         }
+    }
+}
+
+/// Reduced-float scalar `to_string` used to appear green only because the C
+/// host widened the value through its old unknown/f64 representation. Until
+/// chelis#729 supplies exact storage and rounding, both known logical dtypes
+/// must reach the structured C-host ABI rejection; they must not widen and no
+/// translation unit may be emitted.
+#[test]
+fn to_string_reduced_float_scalars_reject_before_artifact_emission() {
+    for dtype in ["f16", "bf16"] {
+        let program = format!(
+            "module M.Main\ndef render() -> string = to_string(cast(1.5, {dtype}))\n\
+             out = print(render())\n"
+        );
+        let error = compile(CompileRequest {
+            source_kind: SourceKind::Surf,
+            source: program.clone(),
+            target: CompileTarget::C,
+            entry_name: None,
+        })
+        .expect_err("reduced-float to_string must not produce a widened C artifact");
+        assert_eq!(error.stage, "compile", "{dtype}: {error:?}");
+        assert_eq!(error.errors.len(), 1, "{dtype}: {error:?}");
+        let diagnostic = &error.errors[0];
+        assert_eq!(diagnostic.kind, "unsupported_feature", "{dtype}");
+        for expected in [
+            "unsupported:",
+            &format!("dtype `{dtype}`"),
+            "C host ABI selection",
+            "(codegen:c)",
+        ] {
+            assert!(
+                diagnostic.message.contains(expected),
+                "{dtype}: missing {expected:?} in {diagnostic:?}"
+            );
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join(format!("to_string_{dtype}.ch"));
+        let out_dir = dir.path().join("out");
+        write_file(&source_path, &program);
+        let output = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args([
+                "build",
+                source_path.to_str().unwrap(),
+                "--target",
+                "c",
+                "--output",
+                out_dir.to_str().unwrap(),
+            ])
+            .output()
+            .expect("chelis build should run");
+        assert!(!output.status.success(), "{dtype}: build must reject");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("unsupported:")
+                && stderr.contains(&format!("dtype `{dtype}`"))
+                && stderr.contains("C host ABI selection"),
+            "{dtype}: {stderr}"
+        );
+        assert!(
+            !out_dir.join(format!("to_string_{dtype}.c")).exists(),
+            "{dtype}: rejection must occur before a C translation unit is written"
+        );
     }
 }

@@ -6,6 +6,12 @@
 //! returns the shared structured [`Unsupported`] diagnostic.  No unresolved
 //! type term can be represented here, and no negative decision selects an
 //! alternate ABI type.
+//!
+//! The ABI vocabulary and its constructor stay private to this backend:
+//!
+//! ```compile_fail
+//! use chelis_backend_c::host_abi::HostAbiType;
+//! ```
 
 use chelis_ir::ConcreteHostType;
 use chelis_ir::host::{
