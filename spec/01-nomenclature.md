@@ -1296,6 +1296,42 @@ the blocking registry:
   first-argument semantics in §3.6 rather than accepting last-argument
   insertion.
 
+### 12.3 Closed-enum dispatch substitution (Rust source)
+
+The blocking `rust-no-wildcard-dispatch` rule is a defense-in-depth
+instrument for the loud-unsupported contract (tracking issue chelis#730;
+language-level contract `spec/05-risc-primitives.md` §7 [05-UNS-1]). It
+forbids a catch-all `_ =>` or `_ if <guard> =>` arm that manufactures a
+concrete value of a configured closed dtype/IR enum inside the lowering and
+emission crates.
+
+The recurring chelis#703 defect is a stage answering an unsupported input by
+defaulting a closed-enum dispatch to a plausible value, such as
+`_ => ElemKind::F32` or `_ => HostType::Int64`. This rule detects those source
+shapes. It is not a structural exhaustiveness proof: aliases, bindings,
+helper/macro/constant indirection, equivalent numeric-default spellings, and
+count relocation can preserve the same semantics without preserving the
+scanned text.
+
+- **Configured enums:** `Prim`, `ElemKind`, `RiscOp`, and `HostType`. A
+  wildcard arm is flagged when its body constructs `Enum::<Variant>` for one
+  of these and `<Variant>` begins with an uppercase character.
+- **Configured crates:** `chelis-ir`, `chelis-backend-c`,
+  `chelis-backend-hip`, `chelis-backend-metal`, and the
+  `chelis-compiler-api` numeric modules.
+- **`HostType::Unknown` is exempt:** the rule does not guard the legacy host
+  sentinel and therefore does not prove the host-type boundary complete.
+- **Not flagged:** classification filters producing a non-enum value, loud
+  invariant guards, and field pass-throughs. For `RiscOp`, only the silent
+  zero-seed `RiscOp::Const { value: 0.0 }` substitution shape is targeted.
+
+Keeps are recorded in the rule's `ALLOWLIST` as per-file, per-variant count
+baselines with written justifications. The first unrecorded occurrence fails
+the gate. The complementary token tripwire in
+`crates/chelis-cli/tests/loud_unsupported_tripwire.rs` covers generated-string
+contexts and numeric-default spellings. Neither mechanism identifies a
+semantic site, and a green count does not establish un-writability.
+
 ---
 
 ## 13. References
