@@ -44,6 +44,30 @@ Entry selection for `compile_and_load` (chelis#817 / chelis#818):
   that use `grad`/`vmap` or string/record/effect operations. `compile_and_load` fails
   loudly for these; select a tensor-in/tensor-out `def` with `entry_name=` instead.
 
+Reef dependency resolution (chelis#816):
+
+- `compile_and_load(..., project_root=)` and `eval(..., project_root=)` resolve
+  imports of reef-declared dependencies (`import Shoals.Pricing (bs_call_scalar)`) by
+  compiling the source against the reef package's linked library context, instead of
+  failing with `unbound variable`. Without a root the source is compiled/evaluated
+  self-contained, exactly as before.
+- Root selection differs by entry point:
+  - `compile_and_load` **auto-discovers** the enclosing reef package by walking up from
+    `source_path` (looking for `reef.toml`); pass `project_root=` to override. A
+    `project_root` with no `reef.toml` is a loud error naming `project_root=`.
+  - `eval` takes raw text with no file to walk from, so it does **not** auto-discover:
+    pass `project_root=` explicitly, or omit it for the self-contained path.
+- `CHELIS_REEF_HOME` keys the on-disk context cache the same way the CLI uses it; the
+  first build of a package's library context is slow (tens of seconds to minutes),
+  subsequent calls hit the cache.
+- **Scalar entries.** A def with a scalar signature (`def main(s: f32, ...) -> f32`)
+  has no callable tensor kernel; `compile_and_load` rejects it with guidance to wrap
+  scalars as rank-1 tensors (`tensor[1, f32]`). The same program runs through `eval`,
+  which supports scalar and host-only entries.
+- **Mangled names.** Roots that come from the reef library graph carry linker-mangled
+  names (`pkg__<pkg>__<Module>__<name>`), matching the CLI (no demangling). A compiled
+  entry's `input_names` are its own parameter names; consult them (do not assume order).
+
 Compiler selection:
 
 - native C compilation resolves through Chelis's shared platform toolchain:

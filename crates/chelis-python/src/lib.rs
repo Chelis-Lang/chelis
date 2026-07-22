@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
 use std::ffi::{c_char, c_int, c_void};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,7 +13,11 @@ use chelis_compiler_api::compiler::{
 };
 use chelis_compiler_api::schema::{
     CheckRequest, CompileRequest, CompileTarget, DecompileRequest, DesugarRequest, EvalRequest,
-    SourceKind, TensorValue, ValidateMode, ValidateRequest,
+    EvalResult, SourceKind, TensorValue, ValidateMode, ValidateRequest,
+};
+use chelis_compiler_api::{
+    CompiledContext, compile_for_execution_in_context, compile_reef_context,
+    eval_in_context_with_bindings, find_package_root_for_input, load_or_compile_for_package,
 };
 use chelis_vocab::RuntimeDType;
 use libloading::Library;
@@ -159,7 +164,25 @@ struct CompileAndLoadJob {
     target: CompileTarget,
     entry_name: Option<String>,
     artifact_dir: Option<PathBuf>,
+    /// Reef project root for dependency resolution (issue #816). `None` on
+    /// the legacy self-contained path — bare source with no reef context,
+    /// byte-for-byte the pre-#816 behavior. `Some` routes the compile
+    /// through `compile_for_execution_in_context` so library imports resolve.
+    project_root: Option<PathBuf>,
 }
+
+// Issue #816 in-process-memo gate: `run_compile_and_load_job` /
+// `run_eval_in_context_job` run under `py.allow_threads`, so any
+// `CompiledContext` they hold must be `Send`. This is the compile-time proof
+// the plan asked for. It holds today (every field — `PreparedReefGraph`,
+// `TypeEnv`, `CheckedProgram`, `LoweredLibrary` — is `Send`), which is why an
+// in-process memo would be sound; we still rely on the disk cache for
+// amortization (it invalidates on source-hash change, which a naive
+// path-keyed in-process memo would not — correctness first).
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<CompiledContext>();
+};
 
 struct CompileAndLoadOutput {
     lib_path: PathBuf,
@@ -527,14 +550,36 @@ fn compile_json(
     run_json(py, || compiler::compile(request))
 }
 
-#[pyfunction(signature = (source, bindings_json = "{}", *, source_kind = "surf"))]
+#[pyfunction(signature = (source, bindings_json = "{}", *, source_kind = "surf", project_root = None))]
 fn eval_json(
     py: Python<'_>,
     source: &str,
     bindings_json: &str,
     source_kind: &str,
+    project_root: Option<&str>,
 ) -> PyResult<String> {
     let bindings = parse_bindings_json(bindings_json)?;
+    // Issue #816: with `project_root=`, resolve reef-declared dependencies
+    // by evaluating the source against the package's compiled library
+    // context. `eval` takes raw text (no file to walk from), so — unlike
+    // `compile_and_load` — it does NOT auto-discover; the root is explicit
+    // or the legacy bare-source path runs unchanged. Only Surf source can
+    // carry reef imports, so `deep` source keeps the bare path.
+    if let Some(root) = project_root {
+        let source_kind = parse_source_kind(source_kind)?;
+        if source_kind != SourceKind::Surf {
+            return Err(PyValueError::new_err(
+                "project_root= reef resolution applies to Surf source only",
+            ));
+        }
+        let root = PathBuf::from(root);
+        let source = source.to_string();
+        let result = py
+            .allow_threads(move || run_eval_in_context_job(&root, &source, bindings))
+            .map_err(compile_and_load_error)?;
+        return serde_json::to_string(&result)
+            .map_err(|err| ChelisError::new_err(format!("serialization failed: {err}")));
+    }
     let request = EvalRequest {
         source_kind: parse_source_kind(source_kind)?,
         source: source.to_string(),
@@ -552,7 +597,7 @@ fn validate_json(py: Python<'_>, source: &str, mode: &str) -> PyResult<String> {
     run_json(py, || compiler::validate(request))
 }
 
-#[pyfunction(signature = (source_path, *, target = "c", source_kind = "surf", entry_name = None, artifact_dir = None))]
+#[pyfunction(signature = (source_path, *, target = "c", source_kind = "surf", entry_name = None, artifact_dir = None, project_root = None))]
 fn compile_and_load(
     py: Python<'_>,
     source_path: &str,
@@ -560,6 +605,7 @@ fn compile_and_load(
     source_kind: &str,
     entry_name: Option<String>,
     artifact_dir: Option<&str>,
+    project_root: Option<&str>,
 ) -> PyResult<NativeCompiledModel> {
     let job = CompileAndLoadJob {
         source_path: PathBuf::from(source_path),
@@ -567,6 +613,7 @@ fn compile_and_load(
         target: parse_compile_target(target)?,
         entry_name,
         artifact_dir: artifact_dir.map(PathBuf::from),
+        project_root: project_root.map(PathBuf::from),
     };
     let output = py
         .allow_threads(move || run_compile_and_load_job(job))
@@ -710,18 +757,108 @@ fn compile_and_load_error(err: CompileAndLoadError) -> PyErr {
     }
 }
 
+/// `reef_home` sourced exactly as the CLI does at its
+/// `load_or_compile_for_package` call site (`run_eval_in_context` in
+/// crates/chelis-cli/src/main.rs): `CHELIS_REEF_HOME` if set, else an empty
+/// path so `load_or_compile_for_package` resolves the XDG cache fallback.
+fn reef_home_from_env() -> PathBuf {
+    env::var_os("CHELIS_REEF_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(""))
+}
+
+/// Build (or load from cache) the compiled reef context for `root`, mapping a
+/// missing/invalid `reef.toml` to an actionable message that names
+/// `project_root=`. Verbose corruption logging is off (bindings run silent).
+fn load_reef_context(root: &Path) -> Result<CompiledContext, CompileAndLoadError> {
+    if !root.join("reef.toml").exists() {
+        return Err(CompileAndLoadError::Message(format!(
+            "no reef.toml found at project_root=`{}`. Point project_root= at the \
+             directory containing your project's reef.toml (the reef package root).",
+            root.display()
+        )));
+    }
+    let reef_home = reef_home_from_env();
+    match load_or_compile_for_package(&reef_home, root, false) {
+        Ok(context) => Ok(context),
+        // Mirror the CLI (`run_eval_in_context` in chelis-cli): a dependency
+        // resolved from the LocalRegistry (e.g. `chelis-std`) can't be
+        // source-hashed yet, so the disk-cache probe errors. That is not a
+        // real failure — fall back to an uncached in-memory `compile_reef_context`,
+        // which handles the LocalRegistry case (digests = None). Any other
+        // error is a genuine compile failure and propagates.
+        Err(err)
+            if err
+                .errors
+                .iter()
+                .any(|d| d.kind == "hash_error" && d.message.contains("LocalRegistry")) =>
+        {
+            compile_reef_context(&reef_home, root).map_err(CompileAndLoadError::Compiler)
+        }
+        Err(err) => Err(CompileAndLoadError::Compiler(err)),
+    }
+}
+
+/// Resolve the reef package root for a `compile_and_load` job (issue #816):
+/// an explicit `project_root` always wins; otherwise auto-discover by walking
+/// up from the source file. `Ok(None)` means no reef context applies and the
+/// legacy bare-source path runs unchanged.
+fn resolve_compile_reef_root(
+    job: &CompileAndLoadJob,
+) -> Result<Option<PathBuf>, CompileAndLoadError> {
+    match &job.project_root {
+        Some(explicit) => {
+            if !explicit.join("reef.toml").exists() {
+                return Err(CompileAndLoadError::Message(format!(
+                    "no reef.toml found at project_root=`{}`. Point project_root= at the \
+                     directory containing your project's reef.toml (the reef package root).",
+                    explicit.display()
+                )));
+            }
+            Ok(Some(explicit.clone()))
+        }
+        None => find_package_root_for_input(&job.source_path).map_err(|err| {
+            CompileAndLoadError::Message(format!("reef root discovery failed: {err}"))
+        }),
+    }
+}
+
+/// Evaluate `source` against the reef context at `root`, threading `bindings`
+/// through (issue #816). Backs `eval(..., project_root=...)`.
+fn run_eval_in_context_job(
+    root: &Path,
+    source: &str,
+    bindings: BTreeMap<String, TensorValue>,
+) -> Result<EvalResult, CompileAndLoadError> {
+    let context = load_reef_context(root)?;
+    eval_in_context_with_bindings(&context, source, bindings).map_err(CompileAndLoadError::Compiler)
+}
+
 fn run_compile_and_load_job(
     job: CompileAndLoadJob,
 ) -> Result<CompileAndLoadOutput, CompileAndLoadError> {
     let source = fs::read_to_string(&job.source_path)
         .map_err(|err| CompileAndLoadError::Message(format!("read source failed: {err}")))?;
-    let artifact = compiler::compile_for_execution(CompileRequest {
-        source_kind: job.source_kind,
-        source: source.clone(),
-        target: job.target,
-        entry_name: job.entry_name,
-    })
-    .map_err(CompileAndLoadError::Compiler)?;
+    let reef_root = resolve_compile_reef_root(&job)?;
+    let artifact = match &reef_root {
+        Some(root) => {
+            let context = load_reef_context(root)?;
+            compile_for_execution_in_context(
+                &context,
+                &source,
+                job.target,
+                job.entry_name.as_deref(),
+            )
+            .map_err(CompileAndLoadError::Compiler)?
+        }
+        None => compiler::compile_for_execution(CompileRequest {
+            source_kind: job.source_kind,
+            source: source.clone(),
+            target: job.target,
+            entry_name: job.entry_name,
+        })
+        .map_err(CompileAndLoadError::Compiler)?,
+    };
     ensure_supported_execution_artifact_inner(&artifact).map_err(CompileAndLoadError::Message)?;
 
     let tempdir = if job.artifact_dir.is_none() {
@@ -854,6 +991,25 @@ fn ensure_supported_execution_artifact_inner(
                  and compile_and_load cannot expose it as one."
             ),
         });
+    }
+    // Issue #816 Step 3: a scalar-signature entry (e.g. `def main(s: f32,
+    // ...) -> f32`) lowers with rank-0 (scalar) inputs/outputs. Those have no
+    // callable tensor ABI here and their scalar codegen is not linkable, so
+    // reject them BEFORE the C build with actionable wrap guidance rather than
+    // letting the user hit a raw clang error. `eval` has no such restriction —
+    // scalar entries evaluate fine through it.
+    for spec in artifact.inputs.iter().chain(artifact.outputs.iter()) {
+        if spec.dims.is_empty() {
+            return Err(format!(
+                "compile_and_load cannot expose a scalar `{}`: the selected entry has a \
+                 scalar (rank-0) signature. Wrap scalar parameters and results as rank-1 \
+                 tensors (`tensor[1, f32]`): pass values as length-1 tensors and use \
+                 `to_tensor`/indexing inside the def, so the entry is tensor-in/tensor-out. \
+                 If you want the scalar result directly, use `chelis.eval` instead, which \
+                 supports scalar entries.",
+                spec.name
+            ));
+        }
     }
     for spec in artifact.inputs.iter().chain(artifact.outputs.iter()) {
         if !supported.contains(&spec.dtype.as_str()) {
@@ -1913,6 +2069,7 @@ loss = (mean(x, 0) : tensor[f32])
             target: CompileTarget::C,
             entry_name: None,
             artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
         })
         .expect("compile and load job");
 
@@ -2543,6 +2700,7 @@ loss = (mean(x, 0) : tensor[f32])
             target: CompileTarget::C,
             entry_name: entry.map(str::to_string),
             artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
         })
         .expect("compile and load job");
         let manifest_text =
@@ -2613,6 +2771,7 @@ def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
             target: CompileTarget::C,
             entry_name: entry.map(str::to_string),
             artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
         })
         .expect("compile and load job");
         let manifest: ArtifactManifest = serde_json::from_str(
@@ -2731,6 +2890,7 @@ def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
             target: CompileTarget::C,
             entry_name: Some("nope".to_string()),
             artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
         });
         let message = match result {
             Ok(_) => panic!("unknown entry_name must not silently compile a wrong def"),
@@ -2799,6 +2959,7 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
             target: CompileTarget::C,
             entry_name: Some("scale".to_string()),
             artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
         });
         let message = match result {
             Ok(_) => panic!("scalar-signature entry must not silently compile"),
@@ -2840,6 +3001,7 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
             target: CompileTarget::C,
             entry_name: Some("dloss".to_string()),
             artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
         });
         let message = match result {
             Ok(_) => panic!("grad entry has no callable tensor ABI and must be rejected"),
@@ -2873,6 +3035,7 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
             target: CompileTarget::C,
             entry_name: None,
             artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
         });
         let message = match result {
             Ok(_) => panic!("host-only program must not silently yield a non-callable artifact"),
@@ -2885,6 +3048,103 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
         );
     }
 
+    // Issue #816 plumbing (cheap, no Shoals): an explicit `project_root` that
+    // has no `reef.toml` is a loud, actionable error naming `project_root=` —
+    // never a silent fall-through to the bare-source path.
+    #[test]
+    fn compile_and_load_project_root_without_reef_toml_errors() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "def main(x: tensor[1, f32]) -> tensor[1, f32] = mul(x, x)\n",
+        )
+        .expect("write source");
+        let no_reef = tempdir().expect("tempdir"); // deliberately has no reef.toml
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: Some(no_reef.path().to_path_buf()),
+        });
+        let message = match result {
+            Ok(_) => panic!("project_root with no reef.toml must error, not silently compile"),
+            Err(CompileAndLoadError::Message(m)) => m,
+            Err(CompileAndLoadError::Compiler(e)) => format!("{e:?}"),
+        };
+        assert!(
+            message.contains("no reef.toml") && message.contains("project_root="),
+            "expected an actionable no-reef.toml error naming project_root=, got: {message}"
+        );
+    }
+
+    // Issue #816 no-regression (cheap, no Shoals): with `project_root=None` and
+    // a source file NOT inside any reef package, root discovery returns `None`,
+    // so the bare-source path runs unchanged. This locks the "no root found or
+    // applicable → today's behavior EXACTLY" constraint at the resolver seam.
+    #[test]
+    fn compile_and_load_no_project_root_and_no_package_resolves_to_bare_path() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "def main(x: tensor[1, f32]) -> tensor[1, f32] = mul(x, x)\n",
+        )
+        .expect("write source");
+        let job = CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+        };
+        let resolved = resolve_compile_reef_root(&job).expect("root discovery must not error");
+        assert!(
+            resolved.is_none(),
+            "a source outside any reef package must resolve to the bare-source path, got {resolved:?}"
+        );
+    }
+
+    // chelis#747 red-team: `CHELIS_RUNTIME_DIR` is the first-priority override in
+    // `find_runtime_library_inner`. When the staticlib is absent there it MUST
+    // fail loud (naming the env var), never silently fall through to the
+    // `CARGO_TARGET_DIR` branch or the manifest-relative fallbacks. A valid
+    // `CARGO_TARGET_DIR` set simultaneously must NOT rescue it: the documented
+    // precedence is CHELIS_RUNTIME_DIR-wins-or-errors, then exe-relative, then
+    // CARGO_TARGET_DIR, then manifest. Env is process-global; save/restore and
+    // rely on nextest's process-per-test isolation (matches the repo pattern in
+    // reef_install_from_github.rs).
+    #[test]
+    fn find_runtime_library_bogus_chelis_runtime_dir_is_loud_error_even_with_valid_target_dir() {
+        let empty_runtime_dir = tempdir().expect("tempdir");
+        let valid_target_dir = tempdir().expect("tempdir");
+        let prior_runtime = std::env::var_os("CHELIS_RUNTIME_DIR");
+        let prior_target = std::env::var_os("CARGO_TARGET_DIR");
+        unsafe {
+            std::env::set_var("CHELIS_RUNTIME_DIR", empty_runtime_dir.path());
+            std::env::set_var("CARGO_TARGET_DIR", valid_target_dir.path());
+        }
+        let result = find_runtime_library_inner();
+        unsafe {
+            match prior_runtime {
+                Some(v) => std::env::set_var("CHELIS_RUNTIME_DIR", v),
+                None => std::env::remove_var("CHELIS_RUNTIME_DIR"),
+            }
+            match prior_target {
+                Some(v) => std::env::set_var("CARGO_TARGET_DIR", v),
+                None => std::env::remove_var("CARGO_TARGET_DIR"),
+            }
+        }
+        let err =
+            result.expect_err("bogus CHELIS_RUNTIME_DIR must be a loud error, not a fall-through");
+        assert!(
+            err.contains("CHELIS_RUNTIME_DIR"),
+            "error must name CHELIS_RUNTIME_DIR, got: {err}"
+        );
+    }
     // Reviewer S2: a top-level value binding in a multi-def program used to
     // hand back a silently MERGED model (every def's params in input_names,
     // three outputs) while ignoring entry_name entirely, because the
@@ -2908,6 +3168,7 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
             target: CompileTarget::C,
             entry_name: Some("main".to_string()),
             artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
         });
         let message = match result {
             Ok(_) => panic!("a top-level binding must not yield a merged callable model"),
@@ -2946,6 +3207,7 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
             target: CompileTarget::C,
             entry_name: Some("batch_process".to_string()),
             artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
         });
         let message = match result {
             Ok(_) => panic!("a vmap entry must not yield a whole-program callable model"),

@@ -40,6 +40,14 @@ The Phase 3 Python path is split into two cuts:
   The per-target admit-list is `supported_execution_dtypes` in `chelis-python`; the
   marshalling layer derives the NumPy dtype and the DLPack element width from it rather
   than assuming f32, and rejects any dtype it cannot describe
+- reef dependency resolution via `project_root=` on `compile_and_load` and `eval`
+  (chelis#816): with a reef package root, imports of reef-declared dependencies resolve
+  against the package's linked library context instead of failing with `unbound
+  variable`. `compile_and_load` auto-discovers the root by walking up from the source
+  file; `eval` (raw text) requires an explicit `project_root=`. With no applicable root
+  the bare self-contained behavior is unchanged. A scalar-signature entry has no
+  callable tensor kernel and is rejected with tensor-wrap guidance; `eval` runs it.
+  Roots sourced from the library graph keep their linker-mangled names.
 
 ### Phase 5a
 

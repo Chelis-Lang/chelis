@@ -196,11 +196,24 @@ def compile_and_load(
     source_kind: str = "surf",
     entry_name: str | None = None,
     artifact_dir: str | Path | None = None,
+    project_root: str | Path | None = None,
 ) -> CompiledModel:
     """Compile a source file to a shared library and return a callable model.
 
     This is the product path for Phase 3b-ii direct execution. Native compilation runs
     without holding the Python GIL.
+
+    ``project_root`` selects the reef package whose declared dependencies the source
+    may import (issue #816). When ``None`` (the default), the enclosing reef package is
+    auto-discovered by walking up from ``source_path``; if no ``reef.toml`` is found,
+    the source is compiled self-contained exactly as before. Pass ``project_root``
+    explicitly to override discovery (it must contain a ``reef.toml``).
+
+    Entry defs selected from a reef package come back with linker-mangled names
+    (``pkg__<pkg>__<Module>__<name>``); ``input_names`` / ``output_names`` reflect that,
+    matching the CLI. A scalar-signature entry (e.g. ``def main(s: f32, ...) -> f32``)
+    is not a compiled tensor kernel — wrap scalars as ``tensor[1, f32]``; use
+    :func:`eval` for scalar results.
     """
 
     native = _native.compile_and_load(
@@ -209,6 +222,7 @@ def compile_and_load(
         source_kind=source_kind,
         entry_name=entry_name,
         artifact_dir=None if artifact_dir is None else str(artifact_dir),
+        project_root=None if project_root is None else str(project_root),
     )
     return CompiledModel(native)
 
@@ -274,6 +288,7 @@ def eval(
     bindings: Mapping[str, Any] | None = None,
     *,
     source_kind: str = "surf",
+    project_root: str | Path | None = None,
 ) -> EvalResult:
     """Evaluate Chelis source.
 
@@ -284,6 +299,13 @@ def eval(
     `ChelisError` until the caller chooses an explicit numpy cast. Zero-copy
     execution of compiled artifacts belongs to `chelis.load()` in Phase
     `3b-ii`.
+
+    ``project_root`` resolves reef-declared dependencies the source imports (issue
+    #816): the source is evaluated against the compiled library context of the reef
+    package at that path (which must contain a ``reef.toml``). Because ``eval`` takes
+    raw text with no file to walk from, there is no auto-discovery — omit
+    ``project_root`` (the default) and self-contained source evaluates exactly as
+    before. Unlike :func:`compile_and_load`, scalar-signature entries work here.
     """
 
     serializable = {
@@ -294,6 +316,7 @@ def eval(
             source,
             json.dumps(serializable),
             source_kind=source_kind,
+            project_root=None if project_root is None else str(project_root),
         )
     )
     return EvalResult(

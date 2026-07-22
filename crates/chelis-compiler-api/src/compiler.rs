@@ -1218,7 +1218,126 @@ fn compile_for_execution_impl(
     strictness: EntryStrictness,
 ) -> Result<CompiledExecutionArtifact> {
     let compiled = compile_source(request.source_kind, &request.source)?;
-    reject_host_only_builtins_before_host_lowering(&compiled.checked, request.target)?;
+    execution_artifact_from_compiled(
+        compiled,
+        request.target,
+        request.entry_name.as_deref(),
+        strictness,
+    )
+}
+
+/// Compile `new_source` against an existing reef [`CompiledContext`] into a
+/// callable execution artifact — the reef-aware analogue of
+/// [`compile_for_execution`]. Library defs that `new_source` references
+/// (e.g. a `Shoals.Pricing` import) resolve against the pre-linked context
+/// instead of failing with `unbound variable`. The post-compile lowering /
+/// codegen (including the entry-scoped metadata lane, #817/#818) is shared
+/// with the monolithic path via [`execution_artifact_from_compiled`]. See
+/// issue #816.
+pub fn compile_for_execution_in_context(
+    context: &crate::context::CompiledContext,
+    new_source: &str,
+    target: CompileTarget,
+    entry_name: Option<&str>,
+) -> Result<CompiledExecutionArtifact> {
+    let compiled = compile_new_source_in_context(context, new_source)?;
+    // The in-context lane is a callable surface: strict entry integrity.
+    execution_artifact_from_compiled(compiled, target, entry_name, EntryStrictness::Strict)
+}
+
+/// Resolve and scope the entry for the in-context compiled path (#816).
+/// (The monolithic path uses [`entry_lane_decision`] instead, which re-lowers
+/// the named def from `compiled.checked` — that works only because the
+/// monolithic `compiled.checked` holds the whole program. In-context it holds
+/// new code only, so re-lowering a def that calls a library function would
+/// fail — the reviewer-flagged Step-1 trap.)
+///
+/// In-context, a clean tensor entry lowers straight into `compiled.dag` as a
+/// DAG root (its library calls already inlined by `compile_new_source_in_context`),
+/// NOT as a host-program function — so it is selected by new-code tensor-root
+/// name, and `compiled.dag` is sliced to that root and DCE'd. Scoping to the
+/// entry's reachable subgraph is what keeps the metadata correct (only the
+/// entry's inputs, #817) and keeps the dim/precision checks off unrelated
+/// library helper nodes (which may carry polymorphic symbolic dims).
+///
+/// - explicit `entry_name` → the root matching it exactly, else one whose
+///   linker-mangled name ends with `__<entry_name>`; no match on a non-empty
+///   root set errors listing the tensor entries;
+/// - no `entry_name`, exactly one tensor root → that root;
+/// - no `entry_name`, several tensor roots → error asking for `entry_name`
+///   (no silent "merge every def", cf. #817);
+/// - no tensor roots at all → `Ok(None)`; the caller rejects with the
+///   scalar/host-only guidance (a scalar or host-only entry).
+fn resolve_in_context_entry<'a>(
+    compiled: &'a CompiledSource,
+    entry_name: Option<&str>,
+) -> Result<Option<(&'a str, Dag)>> {
+    let roots = &compiled.tensor_root_names;
+    let index = match entry_name {
+        Some(name) => {
+            let matched = roots.iter().position(|root| root == name).or_else(|| {
+                roots
+                    .iter()
+                    .position(|root| root.ends_with(&format!("__{name}")))
+            });
+            match matched {
+                Some(index) => index,
+                None if roots.is_empty() => return Ok(None),
+                None => {
+                    return Err(stage_error(
+                        "compile",
+                        format!(
+                            "unknown entry_name `{name}`; this program's tensor entries are: \
+                             {}. Pass one of these as entry_name.",
+                            roots.join(", ")
+                        ),
+                        "compile_error",
+                    ));
+                }
+            }
+        }
+        None => match roots.len() {
+            0 => return Ok(None),
+            1 => 0,
+            _ => {
+                return Err(stage_error(
+                    "compile",
+                    format!(
+                        "ambiguous entry: this program has multiple tensor entries ({}). \
+                         Pass entry_name to select one.",
+                        roots.join(", ")
+                    ),
+                    "compile_error",
+                ));
+            }
+        },
+    };
+    let root = *compiled.dag.roots().get(index).ok_or_else(|| {
+        stage_error(
+            "compile",
+            "internal: in-context tensor root index out of range",
+            "compile_error",
+        )
+    })?;
+    let mut scoped = compiled.dag.clone();
+    scoped.set_roots(vec![root]);
+    let scoped = chelis_ir::optimize::dead_code_eliminate(&scoped);
+    Ok(Some((roots[index].as_str(), scoped)))
+}
+
+/// The post-`compile_source` body shared by [`compile_for_execution`] and
+/// [`compile_for_execution_in_context`]. It takes an already-`CompiledSource`
+/// (monolithic OR in-context) and lowers + codegens the execution artifact,
+/// including the entry-scoped metadata lane. Splitting this out is purely a
+/// refactor: the monolithic path's behavior is byte-for-byte identical to the
+/// pre-split inline body (the `execution_artifact_metadata` suite locks it).
+fn execution_artifact_from_compiled(
+    compiled: CompiledSource,
+    target: CompileTarget,
+    entry_name: Option<&str>,
+    strictness: EntryStrictness,
+) -> Result<CompiledExecutionArtifact> {
+    reject_host_only_builtins_before_host_lowering(&compiled.checked, target)?;
     let host_compiled =
         chelis_ir::host::try_lower_compiled_program(&compiled.checked).map_err(|diagnostic| {
             stage_error_with_span(
@@ -1228,7 +1347,7 @@ fn compile_for_execution_impl(
                 deep_span_to_schema(diagnostic.span),
             )
         })?;
-    let func_name = execution_c_symbol(request.entry_name.as_deref());
+    let func_name = execution_c_symbol(entry_name);
 
     // Reject host-runtime-only builtins early for any compiled-backend
     // target so both public compiler APIs preserve the owning builtin's
@@ -1237,7 +1356,7 @@ fn compile_for_execution_impl(
     // and is not the correctness boundary. See spec/05-risc-primitives.md
     // §3.6 and spec/design/loud_unsupported.md §C6.3.
     if let Some(host_program) = host_compiled.host.as_ref() {
-        reject_host_only_builtins(host_program, request.target)?;
+        reject_host_only_builtins(host_program, target)?;
     }
 
     // Two C-build-path guards over `reduce_window_*`, applied before
@@ -1253,7 +1372,7 @@ fn compile_for_execution_impl(
     // rejects `reduce_window_*` wholesale in `reject_unsupported_hip_ops`
     // (it never reaches the mis-allocation), so these messages would be
     // misleading there. See spec/05-risc-primitives.md §2.3.1.
-    if request.target == CompileTarget::C {
+    if target == CompileTarget::C {
         let check = |dag: &Dag| -> Result<()> {
             reject_symbolic_windowed_reduce(dag, "c")?;
             reject_unsupported_reduce_window_precision(dag, "c")?;
@@ -1272,7 +1391,7 @@ fn compile_for_execution_impl(
         }
     }
 
-    match request.target {
+    match target {
         CompileTarget::C => {
             let host_only = host_compiled
                 .host
@@ -1306,9 +1425,20 @@ fn compile_for_execution_impl(
             // tensor program the scoped DAG equals the whole-program DAG, so
             // this is a no-op there.
             let mut entry_lane_decline = None;
-            let scoped_entry = if let Some(host_program) = host_compiled.host.as_ref() {
+            let scoped_entry = if compiled.library_runtime.is_some() {
+                // In-context (#816): a clean tensor entry lowers straight into
+                // `compiled.dag` as a DAG root — it is NOT a host-program
+                // function, so `entry_lane_decision` (which reads the host
+                // program) can't see it. Resolve against the new-code tensor
+                // roots instead and slice `compiled.dag` to the entry's root,
+                // so the metadata / dim checks run on the entry's reachable
+                // subgraph only (not unreachable library helper nodes, which
+                // may carry polymorphic symbolic dims).
+                resolve_in_context_entry(&compiled, entry_name)?
+                    .filter(|(_, dag)| !dag.roots().is_empty())
+            } else if let Some(host_program) = host_compiled.host.as_ref() {
                 match entry_lane_decision(
-                    request.entry_name.as_deref(),
+                    entry_name,
                     &compiled.checked,
                     host_program,
                     host_only,
@@ -1343,13 +1473,39 @@ fn compile_for_execution_impl(
                 )
                 .map_err(unsupported_stage_error)?;
                 return Ok(compiled_execution_artifact(
-                    request.target,
+                    target,
                     entry_symbol,
                     None,
-                    compile_result_c(request.target, entry_symbol, &result),
+                    compile_result_c(target, entry_symbol, &result),
                     execution_input_specs(&entry_dag, &result.input_labels)?,
                     execution_output_specs(&entry_dag, &result.output_labels)?,
                     result.symbolic_dims,
+                ));
+            }
+
+            // In-context reef path (#816): a clean tensor entry lowers straight
+            // into `compiled.dag` (its roots are the new-code tensor roots), so
+            // the whole-program fallthrough below codegens it correctly — the
+            // entry lane above declines because such a def is a DAG root, not a
+            // host-program function. But when `compiled.dag` has NO roots, the
+            // new source produced no tensor kernel at all: a scalar-signature
+            // entry (`def main(s: f32, ...) -> f32`), a host-only entry, or one
+            // whose body needs the host runtime. The monolithic fallthrough
+            // would then codegen a root-less DAG into unbuildable C. Reject
+            // cleanly with actionable guidance instead. `eval`/`eval_in_context`
+            // still run these programs. (Gated on `library_runtime` so the
+            // monolithic path — which routes these to the host lane below — is
+            // byte-for-byte unchanged.)
+            if compiled.library_runtime.is_some() && compiled.dag.roots().is_empty() {
+                return Err(stage_error(
+                    "compile",
+                    "the selected entry has no callable tensor-kernel form: it is scalar-\
+                     signature (e.g. `def main(s: f32, ...) -> f32`), host-only (top-level \
+                     bindings/globals, string/record/effect ops), or otherwise does not \
+                     lower to a tensor entry. Give it a tensor-in/tensor-out signature by \
+                     wrapping scalars as rank-1 tensors (`tensor[1, f32]`), or use `eval` to \
+                     run it (`eval` supports scalar and host-only programs).",
+                    "compile_error",
                 ));
             }
 
@@ -1359,10 +1515,10 @@ fn compile_for_execution_impl(
                 let result = chelis_backend_c::codegen_host_program(host_program, &func_name)
                     .map_err(unsupported_stage_error)?;
                 let mut artifact = compiled_execution_artifact(
-                    request.target,
+                    target,
                     &func_name,
                     None,
-                    compile_result_c(request.target, &func_name, &result),
+                    compile_result_c(target, &func_name, &result),
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
@@ -1383,10 +1539,10 @@ fn compile_for_execution_impl(
             )
             .map_err(unsupported_stage_error)?;
             let mut artifact = compiled_execution_artifact(
-                request.target,
+                target,
                 &func_name,
                 None,
-                compile_result_c(request.target, &func_name, &result),
+                compile_result_c(target, &func_name, &result),
                 execution_input_specs(&compiled.dag, &result.input_labels)?,
                 execution_output_specs(&compiled.dag, &result.output_labels)?,
                 result.symbolic_dims,
@@ -1432,10 +1588,10 @@ fn compile_for_execution_impl(
                 let result = chelis_backend_c::codegen_host_program(host_program, &func_name)
                     .map_err(unsupported_stage_error)?;
                 return Ok(compiled_execution_artifact(
-                    request.target,
+                    target,
                     &func_name,
                     None,
-                    compile_result_hip_host(request.target, &func_name, &result),
+                    compile_result_hip_host(target, &func_name, &result),
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
@@ -1456,10 +1612,10 @@ fn compile_for_execution_impl(
             let result = chelis_backend_hip::codegen_hip(&fused, &func_name)
                 .map_err(unsupported_stage_error)?;
             Ok(compiled_execution_artifact(
-                request.target,
+                target,
                 &func_name,
                 Some(format!("{func_name}_device")),
-                compile_result_hip(request.target, &func_name, &result),
+                compile_result_hip(target, &func_name, &result),
                 execution_input_specs(&hip_dag, &result.input_labels)?,
                 execution_output_specs(&hip_dag, &result.output_labels)?,
                 result.symbolic_dims,
@@ -1685,6 +1841,20 @@ pub fn eval_in_context(
 ) -> Result<EvalResult> {
     let compiled = compile_new_source_in_context(context, new_source)?;
     eval_compiled(&compiled, BTreeMap::new(), None)
+}
+
+/// Like [`eval_in_context`], but threads caller-supplied tensor `bindings`
+/// into the evaluator instead of an empty map. This is the reef-aware
+/// analogue of [`eval`] with bindings: it lets the Python `eval(...,
+/// project_root=...)` path resolve library imports (issue #816) while still
+/// binding the new source's free `Load`s to the caller's inputs.
+pub fn eval_in_context_with_bindings(
+    context: &crate::context::CompiledContext,
+    new_source: &str,
+    bindings: BTreeMap<String, crate::schema::TensorValue>,
+) -> Result<EvalResult> {
+    let compiled = compile_new_source_in_context(context, new_source)?;
+    eval_compiled(&compiled, bindings, None)
 }
 
 /// Type-/effects-/linearity-check `new_source` against an existing
