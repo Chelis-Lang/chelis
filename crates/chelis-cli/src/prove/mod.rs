@@ -2945,6 +2945,14 @@ pub fn prove_capabilities() -> serde_json::Value {
     let beacon_available = beacon_binary_present && beacon_wired;
     let dispatcher_available = cfg!(feature = "chelis-prove");
     let obligation_engine_available = cfg!(feature = "chelis-prove");
+    // chelis#674: report whether the beacon contract prover can upgrade
+    // fuzz-discharged contracts to certified-envelope proofs.
+    let beacon_contract_prover_available = beacon_available;
+    let reachable_tier = if beacon_contract_prover_available {
+        "certified_envelope"
+    } else {
+        "fuzz_validated"
+    };
     // The tier entries are prove TIERS, not `DischargeRegistry` engines, and
     // `chelis-prove` is an optional dep, so the registry is not introspectable
     // in every build; they stay a literal. The Beacon entry is the one that
@@ -2953,14 +2961,23 @@ pub fn prove_capabilities() -> serde_json::Value {
     if beacon_wired {
         engine_registry.push("beacon_shim");
     }
+    if beacon_contract_prover_available {
+        engine_registry.push("beacon_contract_prover");
+    }
+    // Schema version 2: adds beacon_contract_prover_available, reachable_bs_tier,
+    // certified_envelope tier, beacon_contract_prover engine. Consumers that only
+    // check for fields they know handle this additively (new fields are ignored).
+    // The version bump signals that the contract prover capability exists.
     json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "prove_json_schema_version": 1,
-        "supported_tiers": ["type_system", "smt", "fuzz"],
+        "supported_tiers": ["type_system", "smt", "fuzz", "certified_envelope"],
         "smt_available": smt_available,
         "beacon_available": beacon_available,
         "beacon_binary_present": beacon_binary_present,
         "beacon_wired": beacon_wired,
+        "beacon_contract_prover_available": beacon_contract_prover_available,
+        "reachable_bs_tier": reachable_tier,
         "dispatcher_available": dispatcher_available,
         "obligation_engine_available": obligation_engine_available,
         "supported_flags": ["--json", "--only", "--samples", "--seed", "--tier", "--smt-timeout", "--package"],
