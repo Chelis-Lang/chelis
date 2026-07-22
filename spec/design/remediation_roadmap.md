@@ -1,11 +1,13 @@
 # Numeric Remediation Roadmap: sequencing, ownership, and the ledgers
 
 **Status:** Living coordination document for the plan set that came out of
-the 2026-07 numeric audit. This doc owns three things nothing else owns:
-the **global sequencing** across the five plans, the **unclaimed-issue
-ledger** (every filed issue that no plan's kill table claims, with its
-assigned home), and the **deferred-evidence ledger** (claims still resting
-on inspection, each with its verification task). It contains NO contracts
+the 2026-07 numeric audit. This doc owns four things nothing else owns:
+the **global sequencing** across the five plans, the **release boundaries**
+(where the version cuts fall, sliced to keep each downstream-shell bump
+digestible and never temporary), the **unclaimed-issue ledger** (every filed
+issue that no plan's kill table claims, with its assigned home), and the
+**deferred-evidence ledger** (claims still resting on inspection, each with
+its verification task). It contains NO contracts
 of its own - contracts live in the five plans; when this doc and a plan
 disagree, the plan wins and this doc has a bug.
 
@@ -197,6 +199,102 @@ flowchart TB
   linkStyle 16,17 stroke:#9AA7B0,color:#7A8894,stroke-width:2.5px
   linkStyle 23,26 stroke:#B3362B,stroke-width:5px,color:#B3362B
 ```
+
+## Release slicing: where the version cuts fall
+
+Sequencing above is about *phase dependencies*; this section is about *release
+boundaries* - a different axis. The plans are independently landable, so a
+version cut can fall wherever a coherent set of phases is green; the thing that
+decides *where* is **downstream-shell migration cost**, not the internal wave
+numbers.
+
+The governing rule: **every release moves a shell-facing surface to its FINAL
+state, or does not touch it at all.** The failure mode to avoid is a surface
+that lands in an intermediate state a shell must adapt to and then re-adapt to
+- silent to loud to supported in three separate bumps, `seed(42)` to `42i64`
+to some third form, render-shape A to B to C. A one-time break shells absorb
+once is cheap; a break they make and later unmake is the expensive kind. Like
+the sequencing above, this ordering is advice, not law; a cut may move if a
+cell becomes urgent.
+
+Baseline (2026-07): the shipped release is **v0.16.1**; Wave 1 (the merged
+Phase 1s, PRs #791/#792/#793) sits on `main` unreleased. Step zero is to cut
+it - it is tested and its shell impact is entirely final.
+
+### What actually forces a downstream change
+
+| class | shell-visible change | cost |
+|---|---|---|
+| A - syntax migration | `with seed(42)` -> `42i64` ([#731] P1) | one-time, final |
+| B - loud rejection of silently-wrong code | [#730]/[#731]/[#729] loud paths, [#730] P2 host-type | shells fix a real bug; permanent |
+| C - wire / binding break | [#729] §C3 per-dtype storage (schema + Python payload) | one-time; **must be atomic** (§C3 forbids partial adoption) |
+| D - rendering change | [#732] printed-output strings | churn ONLY if one lane changes twice |
+| E - reject-now-support-later | [#730] loud reject -> [#729] kernel lands | the add-then-remove-workaround trap |
+
+The capability table's `Unimplemented { issue: #N }` cell is the anti-churn
+tool for class E: a not-yet-supported cell becomes a *stable, cited*
+rejection, so a shell writes the `chelis#N` narrowing citation once and removes
+it only when the kernel actually lands - a real event, not a slicing artifact.
+
+### The cuts
+
+| cut | carries | shell impact | why it is final |
+|---|---|---|---|
+| **v0.17.0 - loud checking** (ship now) | [#730] P1 + [#731] P1 + [#732] P1 (all merged) | A + B + the eval-side of D | seed form frozen (only [#735] semantics change later); [#732] P1 freezes the Rust/eval render - the C side matches it later, so no eval lane re-adapts |
+| **v0.18.0 - totality + host-type loudness** | [#731] P2 (PR #800) + [#731] P3 (DeepTag) + [#730] P2 (PR #799 vocab + host-type state) + [#732] P2 (C render) | more B + D reaching final | no wire break ([#730] P2 preserves the `CHELIS_*` ids); bundling [#732] P2 here completes byte-identical rendering in the same bump cross-lane shells already take for host-type loudness |
+| **v0.19.0 / v1.0.0 - grounded dtypes** | [#729] P1-P3, landed atomic per §C3 | C + E *resolving* | the one wire break, isolated from the checker-loudness cuts; the cells [#730] loudly rejected reach their final disposition (supported, or stable `Unimplemented`). Natural 1.0 candidate: dtype discipline is the language's stated value proposition, and this is when it becomes true |
+| **v0.20.0 - permanent guards** | [#729] P4 (capability table) + [#730] P3 (gates -> UX) + [#732] P3 (tolerance / cross-lane oracle) + [#733] P3 | table becomes the stable contract; `tests_blocked/` probes re-adjudicated | small delta; may ride the 1.0 cut |
+
+Net downstream shape: shells feel **two** genuinely disruptive `conform` bumps
+- **0.17** (syntax + loud) and **0.19/1.0** (wire break + dtypes) - plus two
+smaller ones, and in none of them do they make a change they later reverse.
+Non-contract releases (bugfixes such as PR #819's `compile_and_load` metadata
+fix, internal refactors, doc-only work) need no disruptive bump and should not
+be gated on this cadence.
+
+### The anti-churn invariants
+
+1. **Atomic wire break.** [#729] §C3 is all-layers-or-nothing; never split the
+   storage decision across releases or binding consumers adapt N times.
+2. **Per-lane-render-once.** [#732] freezes the eval render at P1 and the C
+   render at P2; a given lane never changes shape twice. Keep P1/P2 in
+   different cuts but tell cross-lane shells P1 is "eval-final, C follows in
+   0.18".
+3. **Frozen seed form.** [#731] P1's `i64` suffix is the final syntax; [#735]
+   authors only meaning. Safe to ship to shells at 0.17.
+4. **Stable rejections via the table.** Land [#730] loud-rejects close to their
+   `Unimplemented { issue }` classification so a shell cites once; never leave
+   a bare loud error that a later cut reclassifies.
+5. **Reserve the pain.** Only the 0.17 and 0.19/1.0 cuts cost shells; keep
+   internal refactors and bugfixes out of those bumps.
+
+### Per-cut conform checklist
+
+For each disruptive cut, the `conform bump` PR wave across the shells carries:
+
+- a migration note naming the one behavior delta (below), the `chelis#NNN`
+  refs it closes, and the exact surface that changed;
+- a re-run of every shell's `tests_blocked/` probes (a probe flipping green =
+  remove the narrowing citation for that ref);
+- the multi-location pin-consistency guard and the `docs/CHELIS_SURFACE.md`
+  capability-inventory refresh;
+- for 0.19/1.0 only: the wire-schema version bump acknowledged at each Python
+  consumer.
+
+Migration-note stubs (one behavior delta per cut):
+
+- **0.17** - "`check`/`build` now fail loudly where they silently substituted;
+  `with seed(n)` requires an `i64`-suffixed literal (`seed(42i64)`); eval
+  output is dtype-faithful (integers print as integers), with the compiled
+  lane matching it in 0.18."
+- **0.18** - "more previously-silent errors are now caught (bogus cast targets,
+  field access on non-records, malformed/unknown host types); compiled and
+  eval output now render byte-identically."
+- **0.19/1.0** - "dtype semantics are grounded: integer overflow traps instead
+  of wrapping, per-dtype tensor storage (wire-format v2, Python payload shape
+  changed), narrow dtypes preserved end-to-end."
+- **0.20** - "the capability table is the standing op x dtype contract;
+  unsupported cells reject with a cited, stable diagnostic."
 
 ## The unclaimed-issue ledger
 
