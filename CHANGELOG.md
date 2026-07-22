@@ -4,6 +4,56 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.17.0] — 2026-07-22
+
+### Added
+
+- **`normal_cdf` and `erf` intrinsics in the fuzz evaluator (chelis#659).**
+  The Tier C concrete evaluator now handles `normal_cdf(x)` and `erf(x)` via
+  the Abramowitz & Stegun 7.1.26 rational approximation (max error < 1.5e-7).
+  Previously these returned NaN, causing every sample involving `normal_cdf`
+  to be rejected and producing the >200s single-sample stall on Black-Scholes
+  properties. Fuzz evaluation of transcendental finance properties now
+  completes in < 5s.
+
+- **`quantile` primitive with prover contracts.** `quantile(data..., q)`
+  evaluates quantiles with numpy-default linear interpolation semantics.
+  Three standard contracts are registered: range boundedness
+  (`min(xs) ≤ quantile(xs, q) ≤ max(xs)`), monotonicity in q, and boundary
+  values (`q=0 → min`, `q=1 → max`). All contracts fuzz-validated at
+  8192/4096 samples. This unblocks VaR and quantile-coherence properties in
+  the finance canon (chelis#284).
+
+- **Structural induction tier (Tier D) for recursive models.** New module
+  `tier_d` implementing structural induction over lattice steps (CRR binomial
+  tree) and periods (term structure). Proves base case + step case → general
+  result. Currently scaffolded (stub verification, not wired into dispatch);
+  the structural pattern classification, result types, and
+  `ProofTier::Induction` artifact variant are shipped and tested.
+
+- **Beacon death-path coverage.** Two new `mock-chelis-beacon` scenarios
+  (`crash` via SIGABRT, `partial_output` via truncated JSON) with matching
+  integration tests confirming the shim produces honest `Untrusted` verdicts
+  for every subprocess death mode (signal, partial output, hang, spawn
+  failure, nonzero exit).
+
+### Fixed
+
+- **Eval-side package import resolution confirmed working.** Cross-shell
+  imports in `chelis eval`/`check`/`build` modes are functional. A probe
+  against the current binary confirms the consumer blocker is resolved;
+  consumers should upgrade from pre-v0.16.1 binaries.
+
+### Documentation
+
+- `docs/issue_drafts/fuzz_sampler_transcendental_cost.md`: Tracker entry for
+  the BS deferral gate (chelis#659 + chelis#637), with gated invariants and
+  resolution path.
+- `docs/investigations/eval_import_probe_2026_07_22.md`: Eval-side import
+  probe report.
+- `docs/chelis_plan_execution.md`: Execution plan for the 7-item consumer
+  unblock.
+
 ## [0.16.1] — 2026-07-12
 
 ### Added

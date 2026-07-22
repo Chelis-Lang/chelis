@@ -49,6 +49,7 @@ pub mod tier_a;
 pub mod tier_b;
 pub mod tier_b_lower;
 pub mod tier_c;
+pub mod tier_d;
 pub mod transformation;
 pub mod transformation_harness;
 pub mod transformations;

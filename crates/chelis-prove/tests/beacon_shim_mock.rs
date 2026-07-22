@@ -855,3 +855,56 @@ fn verified_zonotope_mode_does_not_launder_unverified_transport_or_invalid_repor
         );
     }
 }
+
+// ===========================================================================
+// chelis_plan Task 2: beacon subprocess death path coverage (chelis#659).
+// These scenarios verify that EVERY way a beacon subprocess can die produces
+// an honest verdict, never a hang or silent pass.
+// ===========================================================================
+
+/// A process abort (SIGABRT / OOM kill) produces an honest error with the
+/// signal reason, not a hang or a silent pass.
+#[test]
+fn crash_signal_maps_to_untrusted_error_with_signal_reason() {
+    let _g = with_scenario("crash");
+    let start = std::time::Instant::now();
+    let discharge = shim().discharge(&box_goal(), FAST_TIMEOUT_MS);
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(30),
+        "a crashed beacon must return promptly (took {elapsed:?}), not hang"
+    );
+    assert!(matches!(discharge.result(), TierBResult::Error(_)));
+    assert_eq!(discharge.soundness(), Soundness::Untrusted);
+    assert!(discharge.qualifier_set().is_empty());
+    // The error reason must mention the nonzero/signal exit, not be an
+    // unparseable-report error (the child never produced output).
+    let err_str = match discharge.result() {
+        TierBResult::Error(s) => s.clone(),
+        _ => String::new(),
+    };
+    assert!(
+        err_str.contains("nonzero status") || err_str.contains("signal"),
+        "crash must report the signal/nonzero exit, got: {err_str:?}"
+    );
+    // Must NEVER be a proven badge.
+    let verdict = base_verdict_from_discharge(discharge.soundness(), discharge.qualifier_set());
+    assert_ne!(verdict, CompositeVerdict::Proven);
+    assert_ne!(verdict, CompositeVerdict::SoundApproximate);
+}
+
+/// Partial output (child exits successfully after writing incomplete JSON)
+/// is an honest unparseable-report error, not a hang or a proof.
+#[test]
+fn partial_output_maps_to_untrusted_error_unparseable() {
+    let _g = with_scenario("partial_output");
+    let discharge = shim().discharge(&box_goal(), FAST_TIMEOUT_MS);
+    assert!(matches!(discharge.result(), TierBResult::Error(_)));
+    assert_eq!(discharge.soundness(), Soundness::Untrusted);
+    assert!(discharge.qualifier_set().is_empty());
+    assert_eq!(
+        evidence_error(&discharge).as_deref(),
+        Some("unparseable_report"),
+        "partial output that is valid-exit but truncated JSON must fail as unparseable"
+    );
+}
