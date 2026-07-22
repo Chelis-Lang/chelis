@@ -21,7 +21,7 @@ The plan set: [`dtype_semantics.md`](dtype_semantics.md) ([#729]), [`loud_unsupp
 | meta (the class) | method (design spec) | tracker |
 |---|---|---|
 | [#727] no dtype's semantics enforced at any single point ([#695] = its integer instance) | [`dtype_semantics.md`](dtype_semantics.md) - per-dtype finalizer behind private constructors, int/float kernel split, one storage decision, generated backend dispatch | [#729] |
-| [#703] unsupported cases substitute values instead of failing | [`loud_unsupported.md`](loud_unsupported.md) - Result-typed failure channel, the 18-row census sweep, un-writability ratchets (lint, newtype, tripwire), gates demoted to UX | [#730] |
+| [#703] unsupported cases substitute values instead of failing | [`loud_unsupported.md`](loud_unsupported.md) - Result-typed failure channels, the census sweep, dependency-bottom closed identities, fail-closed HostType/ABI states, structured emission, and gates demoted to UX | [#730] |
 | [#709] unrecognized constructs silently exempt from checking (+[#710]'s silent half) | [`checker_totality.md`](checker_totality.md) - loud wildcard + handle-effect case, ErrorWitness token (silent Type::Error unconstructible), totality invariant, DeepTag exhaustiveness | [#731] |
 | [#728] the observation channel is not dtype-faithful | [`faithful_observation.md`](faithful_observation.md) - one Rust formatter, generated C print helper, round-trip invariant, tolerance table; landable before [#729]; unblocks [#687] | [#732] |
 | spec silence + stale claims ([#694]; the unauthored cells) | [`spec_provenance.md`](spec_provenance.md) - OpenSpec plans changes after Phase 0 activation, while a pinned Buoy shell and one-way Chelis adapter provide repository-independent authority, freshness, coverage, and impact enforcement; design/fixtures may proceed now, advisory execution waits for Buoy's final oracle, and blocking waits for the adapter and Chelis configuration oracles | [#733] |
@@ -69,13 +69,13 @@ finding folded in before merge; the red teams' discoveries are filed as
 landed with Wave 1 (above); the remaining Wave 2 set is [#732] Phase 2
 (the generated C side: fixes [#716]/[#723] outright and gives the
 refactor its byte-exact instrument) in parallel with [#731] Phases 2-3 (the
-witness token + DeepTag) and [#730] Phase 2 (the lint ratchets). [#733]
-Phase 1's Buoy shell-side design and fixture preparation may ride alongside:
-OpenSpec still plans new normative text and atom IDs remain stable. The
-executable advisory pilot waits for the selected Buoy revision's standalone
-`devenv test` final oracle and the shell-adapter prerequisites; once admitted,
-it reports malformed authorities and stale registrations without blocking
-existing Chelis commands or coupling `buoy-core` back to Chelis.
+witness token + DeepTag) and [#730] Phase 2 (typed closed vocabularies,
+HostType/ABI separation, and structured emission; lexical ratchets remain
+supporting checks). [#733]'s
+OpenSpec track rides alongside (per the 2026-07-20 re-scope): new
+normative text Waves 1-2 author is born with atom IDs and goes through
+the OpenSpec claim flow; the rev/lint machinery (the re-scoped Phase 1)
+stays deferred.
 [#732] Phase 2 additionally gates the ECOSYSTEM's compiled-lane
 validation: no shell runs a compiled binary today, and [#754]'s
 cross-lane agreement gate (the mechanism [#738]'s conform row points

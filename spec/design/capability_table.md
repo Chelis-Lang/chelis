@@ -1,13 +1,11 @@
 # The Capability Table: schema for the op x dtype x lane authority
 
-**Status:** Schema specification, pre-implementation. No tracking issue of
-its own: the table is DELIVERED by `spec/design/dtype_semantics.md`
-([#729]) Phase 4; this document owns its SCHEMA, authored now because
-three plans consume it ([#729] Phase 4, `loud_unsupported.md` [#730] Phase 3,
-`spec_provenance.md` [#733] Phase 3/§C5) and each was otherwise gesturing at
-an artifact nobody had specified. Freeze point: the schema freezes at
-[#729] Phase 4 ENTRY, changing after only via this doc + both consuming
-plans, one change set.
+**Status:** Schema contract, pre-implementation. The table is delivered by
+`spec/design/dtype_semantics.md` ([#729]) Phase 4. This document owns the
+schema consumed by [#729] Phase 4, `loud_unsupported.md` [#730] Phase 3, and
+`spec_provenance.md` [#733] Phase 3/§C5. The schema freezes at [#729] Phase 4
+entry and may then change only through this document and every consuming
+plan in one change set.
 **Owning specs:** `spec/05-risc-primitives.md` (op semantics the rows
 cite), `spec/04-type-system.md` (dtype rules), and the four sibling plans.
 
@@ -15,29 +13,28 @@ cite), `spec/04-type-system.md` (dtype rules), and the four sibling plans.
 
 ### Dependency owner
 
-The machine form will live above the dependency-free `chelis-vocab` crate,
-which owns closed identities shared by the checker, runtimes, and backends.
-Phase 2 of `loud_unsupported.md` first establishes that owner for
-`EffectKind` and `RuntimeDType`. Phase 4 then moves `Prim` and introduces
-`BuiltinId` there, with temporary re-exports from `chelis-types`. This avoids
-making the C runtime depend on the type checker and ensures table rows,
-backend dispatch, runtime dtype IDs, and generated C spellings consume one
-closed declaration without a dependency cycle.
+The machine form lives above dependency-free `chelis-vocab`, which owns
+closed identities shared by the checker, runtimes, and backends.
+`loud_unsupported.md` Phase 2 establishes `EffectKind` and `RuntimeDType` in
+that crate. Phase 4 places `Prim` and `BuiltinId` there, with compatibility
+re-exports from `chelis-types`. `chelis-vocab` owns identity and wire
+representation only. Numeric finalization, storage, operation semantics, and
+kernel behavior remain in `dtype_semantics.md` and its consumers.
 
-The audit's lane-skew findings force a separation the single-table sketch
-in [#729] glossed over: *what an op means* is target-independent, while
-*whether a backend implements it* is not. Conflating them is how "the
-checker accepts what eval rejects" ([#712]) and "Metal rejects rank-2 while
-C panics" ([#692]) coexisted. So:
+The schema separates target-independent operation semantics from
+per-backend implementation status.
 
 The same separation governs host types. `HostTypeTerm -> ConcreteHostType` is
-a logical/inference boundary and does not consult a backend. Exact primitive
-identity survives it. `ConcreteHostType -> HostAbiType` is a Table-B target
-query and returns `Unsupported` for `Unimplemented` or `RejectedByDesign`;
-there is no "unknown logical type" success case. In particular, f16, bf16,
-int8, and int16 are known logical scalar types even while their C-host ABI
-cells are unimplemented. A target must not answer that implementation gap by
-selecting int64, f32, `void *`, or a default emitted value.
+a logical-resolution boundary over checked metadata and does not consult a
+backend. Exact primitive identity survives it. `ConcreteHostType ->
+HostAbiType` consumes the Table-B target decision and returns `Unsupported`
+for `Unimplemented` or `RejectedByDesign`; there is no "unknown logical type"
+success case. Before Table B is generated, [#730] permits only a private,
+exhaustive target adapter whose negative decisions cite a spec atom or
+implementation issue. Table B replaces those decisions without changing the
+typed boundary. In particular, f16, bf16, int8, and int16 remain known
+logical scalar types even while C-host cells are unimplemented; no target may
+substitute int64, f32, `void *`, or a default emitted value.
 
 ### Table A - the semantic table (target-independent; the checker's law)
 
@@ -102,7 +99,7 @@ reference lane needs conformance rows too):
 | consumer | derives from | mechanism |
 |---|---|---|
 | checker acceptance | A | generated predicate; hand lists deleted ([#712]'s class dies here) |
-| `chelis check` reporting | A | check reports A-`Rejected` hits ALWAYS - target-independent truths need no target. **This resolves [#730]'s open question 2** (formerly orphaned between [#730] and [#731]): yes, check pre-reports, because A-rejections are type-level facts; B-level (target) rejections surface at build, where the target is known |
+| `chelis check` reporting | A | check always reports A-`Rejected` cells because they are target-independent type facts; B-level rejections surface at build where the target is known |
 | build gates | B | generated early-UX gates per [#730] Phase 3's gate contract (earlier/more specific, never the sole defense) |
 | backend dispatch | B | macro-generated skeletons; missing arm = compile error |
 | conformance suite | A x B | every (`Supported`, `Implemented`) cell executed in every backend, exact agreement or [#732]'s tolerance table; every `Rejected`/`Unimplemented` cell asserts its diagnostic from every stage that renders it |

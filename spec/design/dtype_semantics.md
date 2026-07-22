@@ -614,6 +614,37 @@ lane's arm for a Supported cell must fail the BUILD, not just the tests.
 
 ---
 
+## I1. Interlock with loud unsupported ([#730])
+
+The plans share representation identities and backend call sites but own
+different decisions:
+
+- `RuntimeDType` in `chelis-vocab` owns stable ABI identity, external
+  spelling, and byte width. It does not define finalization, value domains,
+  storage, cast behavior, operation legality, or kernel behavior; those remain
+  owned by this document.
+- `loud_unsupported.md` defines how every negative decision reaches the user.
+  This document defines correct behavior for supported cells. A cell may move
+  from silently wrong to loudly rejected under [#730], then to correctly
+  implemented under this plan; it may never move through a substituted value.
+- `HostTypeTerm -> ConcreteHostType` preserves checked logical identity and
+  does not consult a backend. `ConcreteHostType -> HostAbiType` consumes the
+  target implementation decision. Table B is the permanent authority for
+  that decision.
+- Before Table B is generated, [#730] may use only a private exhaustive target
+  adapter whose negative decisions cite a spec atom or implementation issue.
+  Phase 4 replaces those decisions without changing the HostType/ABI boundary.
+- Table A rejections are reported by the checker because they are
+  target-independent. Table B `Unimplemented` and `RejectedByDesign` cells are
+  reported by build/lowering where the target is known, using [#730]'s
+  diagnostic contract.
+
+Neither plan may duplicate the other's authority. Any change to this boundary
+updates this section, `loud_unsupported.md` §I1, and
+`capability_table.md` in the same change set.
+
+---
+
 # Part IV - bookkeeping
 
 ## Issue map

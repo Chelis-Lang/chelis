@@ -1331,9 +1331,9 @@ consumer work-list when a variant is added.
   inference, malformed/missing metadata, bottom, and absent backend
   representations. `spec/design/loud_unsupported.md` §C4.6/§C6.3 replaces it
   with named `HostTypeTerm` states, Result-typed decode/resolution, and a
-  fallible `ConcreteHostType -> HostAbiType` boundary. The lint exemption is
-  removed with that migration; it is not safety evidence and must not justify
-  a new occurrence.
+  fallible `ConcreteHostType` plus target-capability decision to `HostAbiType`
+  boundary. The lint exemption is removed when that boundary is complete; it
+  is not safety evidence and must not justify a new occurrence.
 - **Not flagged (by design):** classification filters that produce a
   non-enum value (`_ => None`, `_ => continue`, `_ => false`), loud
   invariant guards (`_ => unreachable!(...)`, `_ => panic!(...)`), and
