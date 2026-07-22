@@ -57,10 +57,7 @@ pub struct TraversalPolicy {
 impl TraversalPolicy {
     pub fn load_for(target: &Path) -> Result<Self, TraversalPolicyError> {
         let start = policy_search_start(target);
-        let repository_policy = start
-            .ancestors()
-            .map(|ancestor| ancestor.join(POLICY_FILE))
-            .find(|candidate| candidate.is_file());
+        let repository_policy = find_repository_policy(start)?;
         let repository_root = repository_policy
             .as_deref()
             .and_then(Path::parent)
@@ -86,11 +83,20 @@ impl TraversalPolicy {
             let document = parse_policy(&source, policy_path, true)?;
             let spec = document.spec.as_ref().expect("required by parse_policy");
             let spec_path = policy_root.join(spec);
-            let spec_source =
-                std::fs::read_to_string(&spec_path).map_err(|source| TraversalPolicyError::Io {
+            let canonical_policy_root = canonicalize_policy_root(policy_root)?;
+            let canonical_spec_path = canonicalize_input(&spec_path)?;
+            if !canonical_spec_path.starts_with(&canonical_policy_root) {
+                return Err(TraversalPolicyError::InvalidSpecPath {
+                    path: policy_path.to_path_buf(),
+                    spec: spec.clone(),
+                });
+            }
+            let spec_source = std::fs::read_to_string(&canonical_spec_path).map_err(|source| {
+                TraversalPolicyError::Io {
                     path: spec_path.clone(),
                     source,
-                })?;
+                }
+            })?;
             verify_cross_refs(policy_path, &document.exclusions, &spec_source)?;
             exclusions.extend(compile_exclusions(
                 policy_root,
@@ -152,6 +158,54 @@ fn policy_search_start(target: &Path) -> &Path {
     } else {
         target.parent().unwrap_or_else(|| Path::new("."))
     }
+}
+
+fn find_repository_policy(start: &Path) -> Result<Option<PathBuf>, TraversalPolicyError> {
+    for ancestor in start.ancestors() {
+        let candidate = ancestor.join(POLICY_FILE);
+        let metadata = match std::fs::symlink_metadata(&candidate) {
+            Ok(metadata) => metadata,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(TraversalPolicyError::Io {
+                    path: candidate,
+                    source,
+                });
+            }
+        };
+        if !metadata.is_file() && !metadata.file_type().is_symlink() {
+            return Err(TraversalPolicyError::InvalidPolicyPath {
+                path: candidate,
+                reason: "must be a regular file",
+            });
+        }
+        let canonical_root = canonicalize_policy_root(ancestor)?;
+        let canonical_candidate = canonicalize_input(&candidate)?;
+        if !canonical_candidate.is_file() || !canonical_candidate.starts_with(&canonical_root) {
+            return Err(TraversalPolicyError::InvalidPolicyPath {
+                path: candidate,
+                reason: "resolves outside its policy root",
+            });
+        }
+        return Ok(Some(candidate));
+    }
+    Ok(None)
+}
+
+fn canonicalize_policy_root(root: &Path) -> Result<PathBuf, TraversalPolicyError> {
+    let root = if root.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        root
+    };
+    canonicalize_input(root)
+}
+
+fn canonicalize_input(path: &Path) -> Result<PathBuf, TraversalPolicyError> {
+    std::fs::canonicalize(path).map_err(|source| TraversalPolicyError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 fn parse_policy(
@@ -297,6 +351,10 @@ pub enum TraversalPolicyError {
     MissingSpec {
         path: PathBuf,
     },
+    InvalidPolicyPath {
+        path: PathBuf,
+        reason: &'static str,
+    },
     InvalidSpecPath {
         path: PathBuf,
         spec: PathBuf,
@@ -345,6 +403,9 @@ impl fmt::Display for TraversalPolicyError {
                 "repository traversal policy {} is missing required `spec`",
                 path.display()
             ),
+            Self::InvalidPolicyPath { path, reason } => {
+                write!(f, "repository traversal policy {} {reason}", path.display())
+            }
             Self::InvalidSpecPath { path, spec } => write!(
                 f,
                 "repository traversal policy {} has spec path `{}` outside its policy root",

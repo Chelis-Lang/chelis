@@ -18,7 +18,7 @@ Define the deterministic, structured policy that admits filesystem entries into 
 - **THEN** the canonical walker applies only the shipped baseline policy without consulting Git or machine-local files
 
 ### Requirement: Policy schema is fail-closed and explainable
-Each policy SHALL declare `version = 1`. Every exclusion MUST contain one gitignore-style `pattern`, one closed `class` value (`infrastructure`, `build`, `dependency`, `generated`, or `immutable`), and one `cross_ref`. Repository policy SHALL name the active spec document used to validate its cross-references. Unsupported versions, unknown fields or classes, invalid patterns, missing spec files, and unresolved cross-references MUST fail the lint invocation with the policy path and reason.
+Each policy SHALL declare `version = 1`. Every exclusion MUST contain one gitignore-style `pattern`, one closed `class` value (`infrastructure`, `build`, `dependency`, `generated`, or `immutable`), and one `cross_ref`. Repository policy SHALL name the active spec document used to validate its cross-references. Unsupported versions, unknown fields or classes, invalid patterns, missing spec files, unresolved cross-references, non-file or broken policy paths, and policy or spec links resolving outside the policy root MUST fail the lint invocation with the policy path and reason. Symlinks whose resolved target remains inside the policy root MAY be used.
 
 #### Scenario: Valid exclusion loads
 - **WHEN** a policy entry has a valid pattern, known class, and cross-reference resolving in its declared spec
@@ -31,6 +31,18 @@ Each policy SHALL declare `version = 1`. Every exclusion MUST contain one gitign
 #### Scenario: Unresolved cross-reference fails
 - **WHEN** an exclusion's `cross_ref` does not resolve in the policy's declared spec document
 - **THEN** lint fails before walking the target
+
+#### Scenario: Machine-local policy link fails
+- **WHEN** `chelis-lint.toml` is a non-file path, is broken, or resolves outside the directory containing that policy path
+- **THEN** lint fails instead of treating the policy as absent or reading machine-local policy content
+
+#### Scenario: Escaping spec link fails
+- **WHEN** a repository policy's lexically local spec path resolves outside the policy root
+- **THEN** lint fails before using that spec to validate exclusions
+
+#### Scenario: Internal spec link remains valid
+- **WHEN** a repository policy's spec path resolves through a symlink to a regular file inside the policy root
+- **THEN** policy loading and cross-reference validation proceed normally
 
 ### Requirement: Traversal is deterministic across machines
 The `ignore` traversal engine MUST disable hidden-file filtering, `.gitignore`, `.ignore`, parent ignore files, global Git ignores, and `.git/info/exclude`. Only shipped and repository `chelis-lint` policies may exclude descendants.
@@ -72,6 +84,17 @@ A file or directory explicitly supplied as a lint root SHALL be admitted even wh
 #### Scenario: Explicit excluded directory is entered
 - **WHEN** the user names an otherwise excluded directory directly
 - **THEN** the directory is entered while separately excluded nested descendants remain pruned
+
+### Requirement: Standalone CLI preserves traversal-policy behavior
+The standalone `chelis lint` command SHALL use the canonical traversal policy and SHALL expose policy failures as nonzero command failures containing the policy path and reason.
+
+#### Scenario: Configured exclusion applies through CLI
+- **WHEN** `chelis lint --check` walks a directory with a valid exclusion
+- **THEN** violations below the excluded path do not contribute to output or exit failure
+
+#### Scenario: Malformed policy fails through CLI
+- **WHEN** `chelis lint --check` discovers a malformed repository policy
+- **THEN** it exits nonzero and reports the policy path and validation reason
 
 ### Requirement: Traversal exclusions remain distinct from diagnostic exceptions
 A traversal exclusion SHALL prevent all rule dispatch for its matched descendants. A rule-specific `Exception`, inline `allow`, or inline `keep` SHALL NOT alter traversal and SHALL retain its existing diagnostic or autofix semantics.

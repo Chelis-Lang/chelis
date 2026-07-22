@@ -114,8 +114,12 @@ now rejected at the offending site — see **Changed** for the migration.
   has a typed class and resolvable spec cross-reference. BurntSushi's `ignore`
   engine performs matching and pruning with ambient `.gitignore`, `.ignore`,
   parent/global Git, Git-exclude, and hidden-file filters disabled, so local
-  and CI scope is identical. Explicit targets remain lintable, and all rules
-  plus prepared catalogs consume one policy-admitted corpus.
+  and CI scope is identical. Policy and spec links are resolved inside the
+  policy root; non-file paths and broken or escaping links fail closed instead
+  of importing machine-local policy. Explicit targets remain lintable, and all rules plus
+  prepared catalogs consume one policy-admitted corpus. A crate-local
+  `CLAUDE.md` locks the rule-registration and canonical-traversal protocol at
+  edit time.
 - **`opaque-domain-construction` repository linting is linear and honors
   canonical skip filters (chelis#603).** The rule now prepares its Surf
   declaration catalog once per `chelis_lint::lint` invocation from the main

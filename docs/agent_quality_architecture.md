@@ -79,12 +79,12 @@ pattern to known-bad code shapes.
 
 - **Nested `CLAUDE.md` files per crate.** Claude Code loads a
   directory's CLAUDE.md when working there - guidance delivered at edit
-  time, which root-level prose cannot do. Backlog: guardrail files for
-  `crates/chelis-backend-c/` (emitted helpers are generated, never
-  hand-write a dtype switch; the failure channel is Result-typed),
-  `crates/chelis-ir/` (lowering must raise, never placeholder;
-  fold rules), `crates/chelis-types/` (Type::Error discipline),
-  `crates/chelis-lint/` (rule-registration protocol).
+  time, which root-level prose cannot do. The `crates/chelis-lint/`
+  rule-registration and canonical-traversal protocol is landed. Remaining
+  backlog: guardrail files for `crates/chelis-backend-c/` (emitted helpers are
+  generated, never hand-write a dtype switch; the failure channel is
+  Result-typed), `crates/chelis-ir/` (lowering must raise, never placeholder;
+  fold rules), and `crates/chelis-types/` (Type::Error discipline).
 - **The mechanism index** (below): the canonical-helpers list an agent
   must consult before writing numeric/dispatch/gate code. The audit's
   best search heuristic, inverted into prevention.

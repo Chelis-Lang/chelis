@@ -38,9 +38,11 @@ cross_ref = "§12.2"
 ```
 
 The allowed classes are `infrastructure`, `build`, `dependency`, `generated`,
-and `immutable`. Invalid policy fails lint before the walk. `.gitignore`,
-`.ignore`, parent and global Git ignores, `.git/info/exclude`, and hidden-file
-defaults do not affect lint scope. A directly named file or directory remains
+and `immutable`. Invalid policy fails lint before the walk. Non-file or broken
+policy paths and policy or spec links resolving outside the policy root also
+fail; internal links remain valid. `.gitignore`, `.ignore`, parent and global Git
+ignores, `.git/info/exclude`, and hidden-file defaults do not affect lint
+scope. A directly named file or directory remains
 lintable even when its path matches an exclusion; matching nested descendants
 are pruned. Use rule-specific exceptions or inline `allow`/`keep` when a path
 must still contribute to other lint rules.

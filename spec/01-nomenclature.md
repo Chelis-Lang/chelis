@@ -1306,8 +1306,10 @@ Every entry requires a pattern, a class from `infrastructure`, `build`,
 `dependency`, `generated`, or `immutable`, and a cross-reference resolving
 in the declared spec. Unknown fields, unsupported versions or classes,
 invalid patterns, missing specs, and unresolved references fail lint before
-traversal. Loose targets without repository policy receive only the shipped
-baseline.
+traversal. Policy and spec paths are resolved before use: non-file or broken
+policy paths and links escaping the policy root fail closed, while links that
+remain inside the policy root are allowed. Loose targets without repository policy
+receive only the shipped baseline.
 
 The traversal engine must not consult `.gitignore`, `.ignore`, parent or
 global Git configuration, `.git/info/exclude`, or hidden-file defaults. This

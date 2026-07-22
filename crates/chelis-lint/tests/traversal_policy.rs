@@ -192,6 +192,120 @@ fn malformed_policies_fail_loudly() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn external_policy_symlink_fails_closed() {
+    use std::os::unix::fs::symlink;
+
+    let repository = tempdir().unwrap();
+    let external = tempdir().unwrap();
+    write_spec(repository.path());
+    let external_policy = external.path().join("policy.toml");
+    fs::write(
+        &external_policy,
+        "version = 1\nspec = \"spec/01-nomenclature.md\"\n",
+    )
+    .unwrap();
+    let policy_path = repository.path().join("chelis-lint.toml");
+    symlink(&external_policy, &policy_path).unwrap();
+
+    let error = TraversalPolicy::load_for(repository.path()).unwrap_err();
+    assert!(error.to_string().contains("outside its policy root"));
+    assert!(error.to_string().contains("chelis-lint.toml"));
+}
+
+#[cfg(unix)]
+#[test]
+fn internal_policy_symlink_is_allowed() {
+    use std::os::unix::fs::symlink;
+
+    let repository = tempdir().unwrap();
+    write_spec(repository.path());
+    fs::create_dir_all(repository.path().join("config")).unwrap();
+    fs::write(
+        repository.path().join("config/policy.toml"),
+        "version = 1\nspec = \"spec/01-nomenclature.md\"\n",
+    )
+    .unwrap();
+    symlink(
+        "config/policy.toml",
+        repository.path().join("chelis-lint.toml"),
+    )
+    .unwrap();
+
+    TraversalPolicy::load_for(repository.path()).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn broken_policy_symlink_fails_closed() {
+    use std::os::unix::fs::symlink;
+
+    let repository = tempdir().unwrap();
+    let policy_path = repository.path().join("chelis-lint.toml");
+    symlink(repository.path().join("missing-policy.toml"), &policy_path).unwrap();
+
+    let error = TraversalPolicy::load_for(repository.path()).unwrap_err();
+    assert!(error.to_string().contains("chelis-lint.toml"));
+    assert!(
+        error
+            .to_string()
+            .contains("failed to read traversal policy input")
+    );
+}
+
+#[test]
+fn repository_policy_directory_fails_closed() {
+    let repository = tempdir().unwrap();
+    let policy_path = repository.path().join("chelis-lint.toml");
+    fs::create_dir(&policy_path).unwrap();
+
+    let error = TraversalPolicy::load_for(repository.path()).unwrap_err();
+    assert!(error.to_string().contains("chelis-lint.toml"));
+    assert!(error.to_string().contains("must be a regular file"));
+}
+
+#[cfg(unix)]
+#[test]
+fn external_spec_symlink_fails_closed_but_internal_spec_symlink_is_allowed() {
+    use std::os::unix::fs::symlink;
+
+    let external = tempdir().unwrap();
+    let external_spec = external.path().join("lint.md");
+    fs::write(&external_spec, "# Lint\n\n### 12.2 Traversal exclusions\n").unwrap();
+
+    let escaped_repository = tempdir().unwrap();
+    fs::create_dir_all(escaped_repository.path().join("spec")).unwrap();
+    fs::write(
+        escaped_repository.path().join("chelis-lint.toml"),
+        "version = 1\nspec = \"spec/lint.md\"\n",
+    )
+    .unwrap();
+    symlink(
+        &external_spec,
+        escaped_repository.path().join("spec/lint.md"),
+    )
+    .unwrap();
+    let error = TraversalPolicy::load_for(escaped_repository.path()).unwrap_err();
+    assert!(error.to_string().contains("outside its policy root"));
+    assert!(error.to_string().contains("spec/lint.md"));
+
+    let internal_repository = tempdir().unwrap();
+    fs::create_dir_all(internal_repository.path().join("spec")).unwrap();
+    fs::write(
+        internal_repository.path().join("spec/actual.md"),
+        "# Lint\n\n### 12.2 Traversal exclusions\n",
+    )
+    .unwrap();
+    symlink("actual.md", internal_repository.path().join("spec/lint.md")).unwrap();
+    fs::write(
+        internal_repository.path().join("chelis-lint.toml"),
+        "version = 1\nspec = \"spec/lint.md\"\n",
+    )
+    .unwrap();
+    TraversalPolicy::load_for(internal_repository.path()).unwrap();
+}
+
 #[test]
 fn git_and_hidden_ignore_sources_do_not_affect_lint_entries() {
     let temp = tempdir().unwrap();
@@ -394,14 +508,37 @@ fn shipped_policy_migrates_every_previous_walker_exclusion() {
             "walker.rs must not hard-code exclusion value {forbidden}"
         );
     }
-    let opaque_source = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/rules/opaque_domain_construction.rs"),
-    )
-    .unwrap();
-    for forbidden in ["WalkBuilder", "WalkDir"] {
+    let rules_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/rules");
+    for entry in fs::read_dir(&rules_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+            continue;
+        }
+        let rule_source = fs::read_to_string(&path).unwrap();
+        for forbidden in ["WalkBuilder", "WalkDir", "WalkParallel", "ignore::Walk"] {
+            assert!(
+                !rule_source.contains(forbidden),
+                "lint rule {} must consume canonical entries, not create an independent walker with {forbidden}",
+                path.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn crate_guardrail_locks_rule_registration_and_canonical_traversal_protocol() {
+    let guardrail = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("CLAUDE.md"))
+        .expect("crates/chelis-lint/CLAUDE.md must provide edit-time rule guardrails");
+    for required in [
+        "registry::all_rules",
+        "positive and negative",
+        "Rule::prepare_run",
+        "walker::walk",
+        "spec/01-nomenclature.md",
+    ] {
         assert!(
-            !opaque_source.contains(forbidden),
-            "rule must not create an independent walker: {forbidden}"
+            guardrail.contains(required),
+            "chelis-lint guardrail must document `{required}`"
         );
     }
 }
