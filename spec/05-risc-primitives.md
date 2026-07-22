@@ -1187,24 +1187,20 @@ These C implementations are the ground truth. The GPU backend (Phase 1) must pro
 ## 7. The Unsupported-Case Response Contract (Decided 2026-07; Implementation Tracked As chelis#730)
 
 **Status banner - read before citing.** RATIFIED and enforced for the
-censused live sites by chelis#730 Phase 1 (the Result-typed failure
-channel, the branded `unsupported:` diagnostic, and the live-site
-sweep; PR chelis#791). Phase 2 is IN PROGRESS. Its dependency-bottom
-`EffectKind`/`RuntimeDType` slice is implemented: boundary decoding is
-Result-only, semantic consumers are exhaustive, invalid runtime IDs fail
-before sizing/access, and the generated C dtype header is locked to Rust.
-Executed temporary-variant mutations produced the intended compile errors.
-PR chelis#799's lexical scanner, count baselines, and first `EmittedExpr`
-newtype remain useful defense evidence, but Phase 2 is not complete: the
-HostType failure-channel split, capability proofs, and private structured C
-expression representation remain. The lint and token tripwire are temporary
-defense-in-depth, not the authority.
-The HostType completion architecture is the staged contract in
-`loud_unsupported.md` §C4.6/§C6.3: logical terms preserve named polymorphism,
-inference identity, bottom, and exact dtype; only resolved concrete types may
-enter a fallible target-ABI conversion; codegen accepts the ABI vocabulary,
-never an anonymous sentinel. Initial vocabulary and parity-test scaffolding do
-not complete that migration while legacy producers/consumers remain.
+censused live sites by chelis#730 Phase 1. Phase 2 is in progress. Its
+dependency-bottom `EffectKind`/`RuntimeDType` identities, Result-only boundary
+decoders, exhaustive consumers, immediate invalid-ID rejection, and generated
+Rust/C dtype agreement are implemented. Phase 2 completes only when the
+HostType state/ABI boundary and private structured C-expression representation
+satisfy `loud_unsupported.md` §C4/§C6. The lint, count baselines, and token
+tripwire are supporting checks, not the authority.
+
+The HostType contract consumes checked type metadata, preserves named
+polymorphism, inference identity, bottom, and exact dtype, and permits only a
+resolved `ConcreteHostType` plus an authoritative target capability decision
+to produce `HostAbiType`. Codegen accepts only the ABI vocabulary. This
+contract owns failure representation; grounded dtype semantics and Table A/B
+policy remain owned by chelis#729.
 Residuals are per-atom noted below; [05-UNS-4]'s gate demotion is that
 plan's Phase 3. The delivery plan and full elaboration (the failure
 channel, the census, the typed ratchets) is
