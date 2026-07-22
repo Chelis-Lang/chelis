@@ -1028,6 +1028,7 @@ fn extend_declared_sig_binders_from_def_params(
     expr: &deep::Expr,
     map: &mut HashMap<String, DeclaredSigMetadata>,
 ) {
+    stack_guard!("extend_declared_sig_binders_from_def_params", expr);
     let deep::Expr::List(list, _) = expr else {
         return;
     };
