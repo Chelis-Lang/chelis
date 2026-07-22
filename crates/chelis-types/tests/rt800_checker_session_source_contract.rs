@@ -178,6 +178,7 @@ fn annotation_ownership_uses_the_canonical_exhaustive_child_role_table() {
         "RuntimeExpr",
         "Syntax",
         "Selector",
+        "EffectHandler",
         "Binder",
         "Type",
         "ExplicitInferenceBypass",

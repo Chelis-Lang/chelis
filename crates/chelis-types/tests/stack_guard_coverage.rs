@@ -191,15 +191,6 @@ fn collect_walkers() -> Vec<WalkerFn> {
 /// test can lock the regression boundary today rather than silently asserting a
 /// completeness the tree does not have.
 const GUARD_EXEMPT_WALKERS: &[(&str, &str)] = &[
-    // FALSE-POSITIVE: not an AST-depth recursion. `visit` is a DFS over a
-    // name-keyed call graph with a `visiting`/`visited` HashSet cycle guard;
-    // its depth is bounded by the finite number of def names, not by AST
-    // nesting, and it takes `&deep::Expr` only in lookup maps. It cannot
-    // stack-overflow on a deep AST, so `stack_guard!` does not apply.
-    (
-        "visit",
-        "FALSE-POSITIVE: cycle-guarded call-graph DFS, not AST-depth",
-    ),
     // MODULE-ONLY: descends through `(module ...)` wrappers only (skips every
     // non-module node). Surf emits one module per file and reef strips
     // wrappers before inference, so these do not nest deeply in practice --

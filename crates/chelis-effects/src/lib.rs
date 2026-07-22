@@ -1077,6 +1077,44 @@ mod tests {
     }
 
     #[test]
+    fn literal_random_and_resource_handlers_cross_the_type_effect_boundary() {
+        for source in [
+            r#"(def {} value
+                   (handle-effect {effect: random}
+                     (lit {type: (t-prim {} int64)} 7)
+                     (lit {type: (t-prim {} int32)} 1)))"#,
+            r#"(def {} value
+                   (handle-effect {effect: resource}
+                     (lit {type: (t-prim {} string)} "cpu")
+                     (lit {type: (t-prim {} int32)} 1)))"#,
+        ] {
+            let deep = parse_str(source).expect("Deep handler fixture parses");
+            let typed = chelis_types::check_ir_program(&deep).expect("type boundary accepts");
+            check_program(&typed).expect("effects boundary accepts literal handler");
+        }
+    }
+
+    #[test]
+    fn nonliteral_handlers_are_rejected_once_by_the_effect_owner() {
+        for (effect, expected) in [
+            ("random", "requires an int literal seed"),
+            ("resource", "requires a string literal device"),
+        ] {
+            let source = format!(
+                "(def {{}} value (handle-effect {{effect: {effect}}} \
+                 (var {{}} computed_handler) (lit {{type: (t-prim {{}} int32)}} 1)))"
+            );
+            let deep = parse_str(&source).expect("Deep handler fixture parses");
+            let typed = chelis_types::check_ir_program(&deep)
+                .expect("handler payload is owned by the effects gate");
+            let errors = check_program(&typed).expect_err("nonliteral handler must reject");
+            assert_eq!(errors.len(), 1, "one effects owner diagnostic: {errors:?}");
+            assert_eq!(errors[0].kind, EffectErrorKind::InvalidHandler);
+            assert!(errors[0].message.contains(expected), "{errors:?}");
+        }
+    }
+
+    #[test]
     fn infers_random_for_dropout_fn() {
         let exprs = parse_str(
             "(def {} x (lit {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))} 0))

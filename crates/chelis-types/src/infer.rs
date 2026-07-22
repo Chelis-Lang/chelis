@@ -418,6 +418,9 @@ enum ChildStampRole {
     Syntax,
     /// A field, axis, projection, or transform selector.
     Selector,
+    /// Handler payload syntax whose literal-form contract is owned by
+    /// `chelis-effects`, not expression inference.
+    EffectHandler,
     /// A declaration, parameter, or binding name.
     Binder,
     /// Type/dimension syntax resolved by its owning type consumer.
@@ -435,7 +438,9 @@ enum ChildStampRole {
 /// iterates `chelis_deep::validate::VALID_TAGS`, the grammar's single source
 /// of truth, so adding a tag requires an explicit ownership decision here.
 fn child_stamp_role(tag: &str, index: usize, _arity: usize) -> Option<ChildStampRole> {
-    use ChildStampRole::{Binder, ExplicitInferenceBypass, RuntimeExpr, Selector, Syntax, Type};
+    use ChildStampRole::{
+        Binder, EffectHandler, ExplicitInferenceBypass, RuntimeExpr, Selector, Syntax, Type,
+    };
 
     Some(match tag {
         // Module wrappers are not inferred as one expression. Their
@@ -481,8 +486,15 @@ fn child_stamp_role(tag: &str, index: usize, _arity: usize) -> Option<ChildStamp
                 RuntimeExpr
             }
         }
-        "app" | "if" | "block" | "tuple" | "par" | "handle-effect" | "jit" | "realize" | "copy"
-        | "borrow" | "unquote" | "splice" => RuntimeExpr,
+        "app" | "if" | "block" | "tuple" | "par" | "jit" | "realize" | "copy" | "borrow"
+        | "unquote" | "splice" => RuntimeExpr,
+        "handle-effect" => {
+            if index == 0 {
+                EffectHandler
+            } else {
+                RuntimeExpr
+            }
+        }
         "let" => {
             if index == 0 {
                 ExplicitInferenceBypass
@@ -838,6 +850,7 @@ fn register_annotation_owners(
             Some(
                 ChildStampRole::Syntax
                 | ChildStampRole::Selector
+                | ChildStampRole::EffectHandler
                 | ChildStampRole::Binder
                 | ChildStampRole::Type,
             ) => {}
@@ -1327,6 +1340,7 @@ fn infer_program_with_product_in_session(
     // module-wrapped programs.
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
+    let metadata_prebound_names = HashSet::new();
     let inference_groups = primary_inference_groups(exprs, &items);
     for group in inference_groups {
         let provisional_types = if group.recursive {
@@ -1334,6 +1348,7 @@ fn infer_program_with_product_in_session(
                 &group.indices,
                 &items,
                 &declared_signatures,
+                &metadata_prebound_names,
                 &mut env,
                 &mut vg,
             )
@@ -2132,6 +2147,11 @@ fn infer_ir_program_with_state(
         .unwrap_or(false);
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
+    let metadata_prebound_names = collected_ir_types
+        .type_env
+        .keys()
+        .cloned()
+        .collect::<HashSet<_>>();
     let inference_groups = primary_inference_groups(exprs, &items);
     for group in inference_groups {
         let provisional_types = if group.recursive {
@@ -2139,6 +2159,7 @@ fn infer_ir_program_with_state(
                 &group.indices,
                 &items,
                 &declared_signatures,
+                &metadata_prebound_names,
                 &mut state.env,
                 &mut state.var_gen,
             )
@@ -2346,6 +2367,7 @@ fn prebind_recursive_function_schemes(
     indices: &[usize],
     items: &[(Option<String>, &deep::Expr)],
     declared_signatures: &HashMap<String, DeclaredSigMetadata>,
+    metadata_prebound_names: &HashSet<String>,
     env: &mut Env,
     vg: &mut VarGen,
 ) -> HashMap<usize, Type> {
@@ -2362,7 +2384,7 @@ fn prebind_recursive_function_schemes(
         ) else {
             continue;
         };
-        if declared_signatures.contains_key(name) {
+        if declared_signatures.contains_key(name) || metadata_prebound_names.contains(name) {
             continue;
         }
         let Some(params) = children(fn_list).first() else {
@@ -6486,6 +6508,7 @@ fn annotate_child_for_role(
         Some(
             ChildStampRole::Syntax
             | ChildStampRole::Selector
+            | ChildStampRole::EffectHandler
             | ChildStampRole::Binder
             | ChildStampRole::Type,
         ) => child.clone(),
@@ -7917,6 +7940,7 @@ fn annotated_totality_invariant_traces(exprs: &[deep::Expr]) -> Vec<String> {
                         Some(
                             ChildStampRole::Syntax
                             | ChildStampRole::Selector
+                            | ChildStampRole::EffectHandler
                             | ChildStampRole::Binder
                             | ChildStampRole::Type,
                         ) => {}
@@ -9467,12 +9491,14 @@ fn infer_top_level(
         };
 
         // Save declared type from defsig BEFORE inferring (it may get overwritten)
-        let declared_ty = declared_signatures.get(&name).and_then(|_| {
+        let declared_ty = if provisional_recursive_type.is_none() {
             env.lookup(&name).map(|s| {
                 let s = s.clone();
                 env.instantiate(&s, vg)
             })
-        });
+        } else {
+            None
+        };
         // A declaration's signature owns the only named binders legal in its
         // nested source annotations. Infer against a lexical clone so the
         // scope follows nested env clones but cannot leak to the next `def`
@@ -20577,7 +20603,9 @@ mod tests {
 
     #[test]
     fn structural_child_stamp_roles_match_owner_positions() {
-        use ChildStampRole::{Binder, ExplicitInferenceBypass, RuntimeExpr, Selector, Type};
+        use ChildStampRole::{
+            Binder, EffectHandler, ExplicitInferenceBypass, RuntimeExpr, Selector, Type,
+        };
         let cases = [
             ("module", 0, 2, Binder),
             ("module", 1, 2, ExplicitInferenceBypass),
@@ -20585,6 +20613,8 @@ mod tests {
             ("def", 1, 2, RuntimeExpr),
             ("fn", 0, 2, Binder),
             ("fn", 1, 2, RuntimeExpr),
+            ("handle-effect", 0, 2, EffectHandler),
+            ("handle-effect", 1, 2, RuntimeExpr),
             ("bind", 0, 4, Binder),
             ("bind", 1, 4, RuntimeExpr),
             ("arm", 0, 3, ExplicitInferenceBypass),
