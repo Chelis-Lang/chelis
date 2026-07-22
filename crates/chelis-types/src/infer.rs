@@ -851,7 +851,6 @@ fn build_type_env_from_library_inner(library_exprs: &[deep::Expr]) -> Result<Typ
 
     let mut result = infer_ir_program_with_state(
         library_exprs,
-        &library_ir,
         &mut state,
         /* combined_ir_for_validate = */ &library_ir,
         /* run_validate_passes_on = */ None,
@@ -994,7 +993,6 @@ pub fn build_compiled_library_context(
 
     let mut result = infer_ir_program_with_state(
         library_exprs,
-        &library_ir,
         &mut state,
         /* combined_ir_for_validate = */ &library_ir,
         /* run_validate_passes_on = */ None,
@@ -1132,13 +1130,12 @@ pub fn build_compiled_library_context_with_base(
         .collect();
 
     // Base is already validated; run inference + validators on
-    // `library_exprs` only. The IR env passed to inference is the
+    // `library_exprs` only. Inference's canonical collector binds the
     // `library_exprs`' own declared types (base schemes are already in
     // `state.env`); the combined IR env is supplied to the validators so
     // `(var basefoo)` references resolve to the base's declared type.
     let mut result = infer_ir_program_with_state(
         library_exprs,
-        &new_ir,
         &mut state,
         &combined_ir,
         /* run_validate_passes_on = */ None,
@@ -1312,11 +1309,10 @@ fn check_ir_with_signature_context_inner(
     log_sub("build_ir_and_combine", &mut sub_t);
 
     // Library is already validated; only run validate / inference on
-    // new exprs. The IR env passed to inference is the new-code's
+    // new exprs. Inference's canonical collector binds the new-code's
     // own declared types (library schemes are already in state.env).
     let mut result = infer_ir_program_with_state(
         new_exprs,
-        &new_ir,
         &mut state,
         &combined_ir,
         /* run_validate_passes_on = */ None,
@@ -1519,20 +1515,20 @@ fn infer_ir_program_with_env(exprs: &[deep::Expr], type_env: &IrTypeEnv) -> Infe
     let empty_inner = crate::context::TypeEnv::empty();
     let mut state = empty_inner.inner().clone();
     infer_ir_program_with_state(
-        exprs, type_env, &mut state, type_env, /* run_validate_passes_on = */ None,
+        exprs, &mut state, type_env, /* run_validate_passes_on = */ None,
     )
 }
 
 /// Run the inference / IR binding / shape-validation passes against
 /// `state`, mutating it as it goes. Library state should be supplied by
 /// pre-cloning a snapshot; pass `&[]`-derived state for the monolithic
-/// path. `new_ir_types` are bound into `state.env` here; the
+/// path. Source IR types are collected with their exact final declaration
+/// origins and bound into `state.env` here; the
 /// `combined_ir` is what `validate_ir_program` consults so
 /// new-code shape validation can look up declared types of library
 /// references.
 fn infer_ir_program_with_state(
     exprs: &[deep::Expr],
-    new_ir_types: &IrTypeEnv,
     state: &mut TypeEnvInner,
     combined_ir: &IrTypeEnv,
     run_validate_passes_on: Option<&[deep::Expr]>,
@@ -1572,38 +1568,14 @@ fn infer_ir_program_with_state(
         crate::opacity::OpacityContextData::from_meta(state.opacity.clone()),
     );
 
-    // Recover the exact source declaration that contributed each final
-    // `new_ir_types` entry. `IrTypeEnv` is name-keyed and therefore keeps the
-    // last type-producing declaration when duplicate `def` names are present;
-    // the diagnostic witness must be attached to that declaration only, not
-    // to every body sharing its name. The ordinal is stable for this check
-    // because both this pass and the body pass below traverse the same
-    // flattened `items` vector.
-    let mut source_ir_types = HashMap::new();
-    let mut ir_type_origin = HashMap::new();
-    for (declaration_index, (_, expr)) in items.iter().enumerate() {
-        let deep::Expr::List(list, _) = expr else {
-            continue;
-        };
-        if get_tag(list) != Some("def") {
-            continue;
-        }
-        let kids = children(list);
-        let (Some(name), Some(body)) = (kids.first().and_then(symbol_name), kids.get(1)) else {
-            continue;
-        };
-        if let Some(ty_expr) = expr_type_expr(body, &source_ir_types) {
-            source_ir_types.insert(name.to_string(), ty_expr);
-            ir_type_origin.insert(name.to_string(), declaration_index);
-        }
-    }
-    debug_assert_eq!(
-        &source_ir_types, new_ir_types,
-        "source-ordered IR type origins must reproduce build_ir_type_env"
-    );
+    // The canonical collector returns each final name-keyed IR type together
+    // with the exact flattened declaration ordinal that produced it. Duplicate
+    // names intentionally retain last-declaration-wins semantics, while the
+    // origin keeps an owning witness from leaking into an earlier body.
+    let collected_ir_types = collect_ir_types_with_origins(items.iter().map(|(_, expr)| *expr));
 
     let mut prebound_type_failures = HashMap::new();
-    for (name, ty_expr) in new_ir_types {
+    for (name, ty_expr) in &collected_ir_types.type_env {
         match resolve_deep_type(
             ty_expr,
             &mut state.var_gen,
@@ -1621,10 +1593,7 @@ fn infer_ir_program_with_state(
                 // into the matching def-body pass so a literal/ascription
                 // consumer propagates the same failure instead of resolving
                 // the cloned metadata and reporting it a second time.
-                let declaration_index = ir_type_origin
-                    .get(name)
-                    .copied()
-                    .expect("every IR type entry has an exact source declaration");
+                let declaration_index = collected_ir_types.final_origin_by_name[name];
                 prebound_type_failures.insert(declaration_index, witness);
             }
         }
@@ -1705,29 +1674,43 @@ fn infer_ir_program_with_state(
 
 type IrTypeEnv = HashMap<String, deep::Expr>;
 
-fn build_ir_type_env(exprs: &[deep::Expr]) -> IrTypeEnv {
-    let mut env = HashMap::new();
-    for expr in top_level_decl_items(exprs) {
-        collect_ir_types(expr, &mut env);
-    }
-    env
+/// Canonical IR type collection result. The type environment retains the
+/// historical last-declaration-wins behavior for duplicate names; the paired
+/// ordinal identifies the exact flattened declaration that produced each
+/// final entry.
+struct CollectedIrTypes {
+    type_env: IrTypeEnv,
+    final_origin_by_name: HashMap<String, usize>,
 }
 
-fn collect_ir_types(expr: &deep::Expr, env: &mut IrTypeEnv) {
-    let deep::Expr::List(list, _) = expr else {
-        return;
-    };
-    if get_tag(list) != Some("def") {
-        return;
+fn build_ir_type_env(exprs: &[deep::Expr]) -> IrTypeEnv {
+    collect_ir_types_with_origins(top_level_decl_items(exprs)).type_env
+}
+
+fn collect_ir_types_with_origins<'a>(
+    items: impl IntoIterator<Item = &'a deep::Expr>,
+) -> CollectedIrTypes {
+    let mut type_env = HashMap::new();
+    let mut final_origin_by_name = HashMap::new();
+    for (declaration_index, expr) in items.into_iter().enumerate() {
+        let deep::Expr::List(list, _) = expr else {
+            continue;
+        };
+        if get_tag(list) != Some("def") {
+            continue;
+        }
+        let kids = children(list);
+        let (Some(name), Some(body)) = (kids.first().and_then(symbol_name), kids.get(1)) else {
+            continue;
+        };
+        if let Some(ty) = expr_type_expr(body, &type_env) {
+            type_env.insert(name.to_string(), ty);
+            final_origin_by_name.insert(name.to_string(), declaration_index);
+        }
     }
-    let kids = children(list);
-    if kids.len() < 2 {
-        return;
-    }
-    if let Some(name) = symbol_name(&kids[0])
-        && let Some(ty) = expr_type_expr(&kids[1], env)
-    {
-        env.insert(name.to_string(), ty);
+    CollectedIrTypes {
+        type_env,
+        final_origin_by_name,
     }
 }
 
