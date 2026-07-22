@@ -198,3 +198,72 @@ fn structural_child_roles_do_not_require_runtime_owner_stamps() {
         });
     }
 }
+
+#[test]
+fn concat_reuses_nested_runtime_child_types_without_reinference() {
+    let valid = surf(
+        r#"
+def combine(a: tensor[2, f32], b: tensor[3, f32]) -> tensor[5, f32] = {
+  pair = (a, b)
+  concat([pair.0, pair.1], 0)
+}
+"#,
+    );
+    check_ir_program(&valid).expect("nested tuple/list children retain canonical runtime types");
+
+    let malformed = surf(
+        r#"
+def bad(a: tensor[2, f32]) = {
+  pair = (a, cast(1.0, f32))
+  concat([pair.0, pair.1], 0)
+}
+"#,
+    );
+    let result = check_ir_program(&malformed).expect_err("mixed tensor/scalar list must reject");
+    assert!(
+        result.errors.iter().any(|error| {
+            matches!(
+                error.kind,
+                chelis_types::errors::CheckErrorKind::TypeMismatch
+                    | chelis_types::errors::CheckErrorKind::DimensionMismatch
+            )
+        }),
+        "malformed nested concat needs an owning type error: {:?}",
+        result.errors
+    );
+    assert!(
+        result
+            .errors
+            .iter()
+            .all(|error| !error.message.contains("owner-stamp invariant")),
+        "malformed parity must not fail through an internal owner lookup: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn module_helper_dependency_orders_keep_body_owner_stamps() {
+    for source in [
+        r#"
+module Forward
+def caller(a, b: tensor[4, f32]) = helper(a, b)
+def helper(x, y: tensor[4, f32]) = add(x, y)
+"#,
+        r#"
+module Backward
+def helper(x, y: tensor[4, f32]) = add(x, y)
+def caller(a, b: tensor[4, f32]) = helper(a, b)
+"#,
+    ] {
+        let checked = check_ir_program(&surf(source)).expect("module dependency order checks");
+        let mut stamps = Vec::new();
+        for expr in checked.annotated_exprs() {
+            collect_tag_stamp_state(expr, "app", &mut stamps);
+        }
+        assert!(!stamps.is_empty());
+        assert!(
+            stamps.iter().all(|stamped| *stamped),
+            "every module body app retains its primary owner stamp: {stamps:?}"
+        );
+    }
+}

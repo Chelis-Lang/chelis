@@ -622,13 +622,14 @@ struct InferenceProduct {
 
 struct TypeStampEpoch {
     id: u64,
-    required: HashMap<usize, StampRequirement>,
+    owners: HashMap<usize, StampRequirement>,
     writes: HashMap<usize, Vec<OwnerTypeWrite>>,
 }
 
 #[derive(Clone, Copy)]
 struct StampRequirement {
     role: &'static str,
+    stamp_required: bool,
 }
 
 struct OwnerTypeWrite {
@@ -658,7 +659,7 @@ impl InferenceProduct {
         self.next_epoch += 1;
         let mut epoch = TypeStampEpoch {
             id,
-            required: HashMap::new(),
+            owners: HashMap::new(),
             writes: HashMap::new(),
         };
         register_annotation_owners(root, &mut epoch, errors);
@@ -678,7 +679,7 @@ impl InferenceProduct {
             return;
         };
         let key = expr_key(expr);
-        if !epoch.required.contains_key(&key) {
+        if !epoch.owners.contains_key(&key) {
             return;
         }
         epoch
@@ -696,7 +697,7 @@ impl InferenceProduct {
             return;
         };
 
-        for (key, requirement) in epoch.required {
+        for (key, requirement) in epoch.owners {
             let Some(writes) = epoch.writes.get(&key) else {
                 // Missing owners are diagnosed at the exact annotation lookup,
                 // where the original construct and role are still available.
@@ -718,13 +719,15 @@ impl InferenceProduct {
                     )));
                 }
             }
-            self.owner_types.insert(
-                key,
-                FinalOwnerType {
-                    epoch: epoch.id,
-                    ty: canonical,
-                },
-            );
+            if requirement.stamp_required {
+                self.owner_types.insert(
+                    key,
+                    FinalOwnerType {
+                        epoch: epoch.id,
+                        ty: canonical,
+                    },
+                );
+            }
         }
     }
 
@@ -806,6 +809,7 @@ fn register_annotation_owners(
     epoch: &mut TypeStampEpoch,
     errors: &mut DiagnosticSink<'_>,
 ) {
+    stack_guard!("register_annotation_owners", expr, ());
     let deep::Expr::List(list, _) = expr else {
         if let deep::Expr::MetaExpr(meta, _) = expr {
             register_annotation_owners(&meta.expr, epoch, errors);
@@ -814,17 +818,16 @@ fn register_annotation_owners(
     };
     let tag = get_tag(list);
     if let Some(tag) = tag {
-        if tag == "fn" {
-            register_owner(epoch, expr, "function node");
+        let (role, stamp_required) = if tag == "fn" {
+            ("function node", true)
         } else if should_attach_type_metadata(tag) {
-            register_owner(epoch, expr, "metadata-eligible expression");
-        }
-        if matches!(tag, "pat-var" | "pat-as") {
-            register_owner(epoch, expr, "pattern binding");
-        }
-        if matches!(tag, "defsig" | "deftype" | "typealias") {
-            return;
-        }
+            ("metadata-eligible expression", true)
+        } else if matches!(tag, "pat-var" | "pat-as") {
+            ("pattern binding", true)
+        } else {
+            ("semantic runtime node", false)
+        };
+        register_owner(epoch, expr, role, stamp_required);
     }
     let kids = children(list);
     for (index, child) in kids.iter().enumerate() {
@@ -856,11 +859,19 @@ fn register_annotation_owners(
     }
 }
 
-fn register_owner(epoch: &mut TypeStampEpoch, expr: &deep::Expr, role: &'static str) {
+fn register_owner(
+    epoch: &mut TypeStampEpoch,
+    expr: &deep::Expr,
+    role: &'static str,
+    stamp_required: bool,
+) {
     epoch
-        .required
+        .owners
         .entry(expr_key(expr))
-        .or_insert(StampRequirement { role });
+        .or_insert(StampRequirement {
+            role,
+            stamp_required,
+        });
 }
 
 #[cfg(test)]
@@ -869,6 +880,7 @@ pub(crate) enum TypeStampMutationCase {
     CompatibleRepeat,
     IncompatibleRepeat,
     UnregisteredSynthesized,
+    RuntimeNonStampOwnerLookup,
 }
 
 #[cfg(test)]
@@ -909,6 +921,19 @@ pub(crate) fn run_type_stamp_mutation_case(
             product
                 .owner_type(&synthesized, "synthesized test node", errors)
                 .is_none()
+        }
+        TypeStampMutationCase::RuntimeNonStampOwnerLookup => {
+            let runtime_child = node_expr("var", vec![symbol_expr("x")]);
+            let root = node_expr("app", vec![runtime_child]);
+            let mut product = InferenceProduct::default();
+            product.begin_root(&root, errors);
+            let deep::Expr::List(root_list, _) = &root else {
+                unreachable!("node_expr produces a list")
+            };
+            let runtime_child = &children(root_list)[0];
+            product.record_canonical(&runtime_child, Type::Prim(Prim::Int64));
+            product.current_owner_type(&runtime_child, &Subst::new(), errors)
+                == Some(Type::Prim(Prim::Int64))
         }
     }
 }
@@ -1299,7 +1324,9 @@ fn infer_program_with_product_in_session(
     // module-wrapped programs.
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
-    for (module, expr) in &items {
+    let inference_schedule = primary_inference_schedule(exprs, &items);
+    for declaration_index in inference_schedule {
+        let (module, expr) = &items[declaration_index];
         product.begin_root(expr, errors);
         let decl_name = top_level_decl_name(expr);
         crate::opacity::set_current_item(
@@ -2154,7 +2181,9 @@ fn infer_ir_program_with_state(
         .unwrap_or(false);
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
-    for (declaration_index, (module, expr)) in items.iter().enumerate() {
+    let inference_schedule = primary_inference_schedule(exprs, &items);
+    for declaration_index in inference_schedule {
+        let (module, expr) = &items[declaration_index];
         product.begin_root(expr, errors);
         let t0 = if detail_profile {
             Some(std::time::Instant::now())
@@ -2214,6 +2243,57 @@ fn infer_ir_program_with_state(
     }
 
     product
+}
+
+/// Primary body-inference schedule. Function declarations inside a lexical
+/// module use the same dependency/SCC planner as signature inference, so a
+/// forward helper's body-derived scheme is available to its caller. Bare defs
+/// and every non-function declaration retain textual order. The returned
+/// values are original flattened ordinals: scheduling never changes diagnostic
+/// ownership, collected-type origins, or output order.
+fn primary_inference_schedule(
+    exprs: &[deep::Expr],
+    items: &[(Option<String>, &deep::Expr)],
+) -> Vec<usize> {
+    let module_fn_by_key = items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (module, expr))| {
+            module.as_ref()?;
+            let deep::Expr::List(list, _) = expr else {
+                return None;
+            };
+            if get_tag(list) != Some("def")
+                || children(list)
+                    .get(1)
+                    .and_then(as_tagged_list_expr("fn"))
+                    .is_none()
+            {
+                return None;
+            }
+            Some((expr_key(expr), index))
+        })
+        .collect::<HashMap<_, _>>();
+    if module_fn_by_key.is_empty() {
+        return (0..items.len()).collect();
+    }
+
+    let ordered_module_fns = signature_inference_def_order(exprs)
+        .into_iter()
+        .filter_map(|expr| module_fn_by_key.get(&expr_key(expr)).copied())
+        .collect::<Vec<_>>();
+    let module_fn_indices = module_fn_by_key.values().copied().collect::<HashSet<_>>();
+    let insertion = module_fn_indices.iter().copied().min().unwrap_or(0);
+    let mut schedule = Vec::with_capacity(items.len());
+    for index in 0..items.len() {
+        if index == insertion {
+            schedule.extend(ordered_module_fns.iter().copied());
+        }
+        if !module_fn_indices.contains(&index) {
+            schedule.push(index);
+        }
+    }
+    schedule
 }
 
 type IrTypeEnv = HashMap<String, deep::Expr>;

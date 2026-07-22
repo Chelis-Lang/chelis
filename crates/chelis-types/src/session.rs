@@ -126,6 +126,16 @@ mod authoritative_type_stamp_tests {
                 .contains("missing authoritative type stamp")
         );
     }
+
+    #[test]
+    fn inferred_runtime_non_stamp_owner_is_available_to_contextual_consumers() {
+        let (resolved, errors) = run(TypeStampMutationCase::RuntimeNonStampOwnerLookup);
+        assert!(resolved);
+        assert!(
+            errors.is_empty(),
+            "contextual consumers must reuse the canonical runtime child type: {errors:?}"
+        );
+    }
 }
 
 #[cfg(test)]

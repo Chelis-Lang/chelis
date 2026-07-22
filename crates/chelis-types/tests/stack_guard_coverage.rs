@@ -9,7 +9,10 @@
 //! silently reintroducing an unbounded-recursion stack-overflow surface.
 
 use syn::visit::{self, Visit};
-use syn::{Block, ExprMacro, File, ImplItemFn, ItemFn, Macro, Signature, Type};
+use syn::{
+    Block, Expr, ExprCall, ExprMacro, ExprMethodCall, File, ImplItemFn, ItemFn, Macro, Signature,
+    Type,
+};
 
 /// The Rust source under analysis. Compiled in at build time so the test has
 /// no filesystem dependency on the crate layout at run time.
@@ -77,16 +80,37 @@ impl<'a, 'ast> Visit<'ast> for BodyScan<'a> {
         visit::visit_expr_macro(self, node);
     }
 
-    fn visit_path(&mut self, path: &'ast syn::Path) {
-        // A self-call appears as a path whose final segment is the function's
-        // own name. This also matches a bare `name(...)` call (single-segment
-        // path) and a qualified `Self::name` / `module::name`.
-        if let Some(last) = path.segments.last()
-            && last.ident == self.own_name
+    fn visit_expr_call(&mut self, call: &'ast ExprCall) {
+        if let Expr::Path(callee) = call.func.as_ref() {
+            let segments = &callee.path.segments;
+            let direct_call = segments.len() == 1;
+            let self_associated_call = segments.len() == 2
+                && segments
+                    .first()
+                    .is_some_and(|segment| segment.ident == "Self");
+            if (direct_call || self_associated_call)
+                && segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == self.own_name)
+            {
+                self.calls_own_name = true;
+            }
+        }
+        visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
+        if call.method == self.own_name
+            && matches!(
+                call.receiver.as_ref(),
+                Expr::Path(receiver)
+                    if receiver.path.segments.len() == 1
+                        && receiver.path.segments[0].ident == "self"
+            )
         {
             self.calls_own_name = true;
         }
-        visit::visit_path(self, path);
+        visit::visit_expr_method_call(self, call);
     }
 }
 
@@ -188,34 +212,6 @@ const GUARD_EXEMPT_WALKERS: &[(&str, &str)] = &[
     (
         "missing_shape_sensitive_app",
         "TEST-HELPER: lives in #[cfg(test)] mod tests",
-    ),
-    // AST-DEPTH: genuine arbitrary-depth production walkers that SHOULD carry
-    // `stack_guard!` (real WI-1 coverage gap, tracked for a follow-up). Listed
-    // explicitly so the gap is visible rather than hidden, and so adding the
-    // guard later simply removes the entry.
-    (
-        "type_expr_has_tensor_prec_var",
-        "AST-DEPTH gap: recurses over t-fn/t-tuple/t-adt children",
-    ),
-    (
-        "literal_static_value",
-        "AST-DEPTH gap: recurses on (lit ...) children",
-    ),
-    (
-        "tensor_dim_exprs_from_type_expr",
-        "AST-DEPTH gap: recurses through nested (t-ref ...) wrappers",
-    ),
-    (
-        "tensor_precision_expr",
-        "AST-DEPTH gap: recurses through nested (t-ref ...) wrappers",
-    ),
-    (
-        "tensor_dims_from_type_expr",
-        "AST-DEPTH gap: recurses through nested (t-ref ...) wrappers",
-    ),
-    (
-        "top_level_arm_is_irrefutable",
-        "AST-DEPTH gap: recurses on (pat-as ...) inner pattern",
     ),
 ];
 
@@ -339,5 +335,29 @@ fn scan_ignores_a_non_recursive_deep_consumer() {
     assert!(
         !consumer.must_be_guarded(),
         "a non-recursive deep consumer needs no guard"
+    );
+}
+
+#[test]
+fn scan_ignores_a_qualified_delegation_with_the_same_terminal_name() {
+    let src = r#"
+        fn infer_program(exprs: &[deep::Expr]) -> Result {
+            crate::session::infer_program(exprs)
+        }
+    "#;
+    let file: File = syn::parse_file(src).expect("synthetic source parses");
+    let mut collector = FnCollector {
+        walkers: Vec::new(),
+    };
+    collector.visit_file(&file);
+    let wrapper = collector
+        .walkers
+        .iter()
+        .find(|walker| walker.name == "infer_program")
+        .expect("the synthetic wrapper was collected");
+    assert!(wrapper.walks_deep_ast);
+    assert!(
+        !wrapper.self_recurses,
+        "a qualified delegation is not a call to the wrapper itself"
     );
 }

@@ -187,6 +187,47 @@ def helper(x, y: tensor[4, f32]) = add(x, y)
 }
 
 #[test]
+fn module_wrapped_backward_helper_keeps_the_same_primary_signature() {
+    let checked = checked_surf(
+        r#"
+module Foo
+def helper(x, y: tensor[4, f32]) = add(x, y)
+def caller(a, b: tensor[4, f32]) = {
+  z = helper(a, b)
+  add(a, z)
+}
+"#,
+    );
+    let caller = checked
+        .signature_inference()
+        .functions
+        .get("caller")
+        .expect("caller metadata");
+    assert!(
+        caller.params[0].inferred_read_only,
+        "dependency scheduling must agree in both source orders"
+    );
+}
+
+#[test]
+fn module_wrapped_unknown_helper_reports_exactly_one_unbound_root() {
+    let decls = parse_str(
+        r#"
+module Foo
+def caller(a, b: tensor[4, f32]) = missing_helper(a, b)
+"#,
+    )
+    .expect("surf parse");
+    let deep = desugar_program(&decls);
+    let result = check_typed_program(&deep).expect_err("unknown helper must reject");
+    assert_eq!(result.errors.len(), 1, "unknown helper owns one diagnostic");
+    assert!(matches!(
+        result.errors[0].kind,
+        chelis_types::errors::CheckErrorKind::UnboundVariable
+    ));
+}
+
+#[test]
 fn recursive_cycle_member_does_not_infer_read_only_param() {
     let checked = checked_surf(
         r#"
