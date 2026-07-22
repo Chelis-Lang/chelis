@@ -167,18 +167,18 @@ fn checked_results_share_one_totality_finalizer() {
 }
 
 #[test]
-fn checked_result_reconstruction_is_fallible_and_session_owned() {
+fn checked_result_reconstruction_is_effect_only_fallible_and_session_owned() {
     assert!(
-        INFER.contains("pub fn try_from_parts("),
-        "public reconstruction must expose the fallible session result"
-    );
-    assert!(
-        INFER.contains("pub fn try_from_parts_with_signature_context("),
-        "signature-aware reconstruction must expose the same fallible boundary"
+        INFER.contains("pub fn try_with_effect_annotations("),
+        "the only public reconstruction seam must be effects-owned and fallible"
     );
     for forbidden in [
+        "pub fn try_from_parts(",
+        "pub fn try_from_parts_with_signature_context(",
         "pub fn from_parts(",
         "pub fn from_parts_with_signature_context(",
+        "pub(crate) fn try_checked_program_from_parts(",
+        "pub(crate) fn try_checked_program_from_parts_with_signature_context(",
         "pub(crate) fn checked_program_from_parts(",
         "pub(crate) fn checked_program_from_parts_with_signature_context(",
     ] {
