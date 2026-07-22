@@ -1316,70 +1316,87 @@ pub(crate) fn checked_program_with_effect_annotations_in_session(
 
 fn effects_only_rewrite_matches(original: &[deep::Expr], candidate: &[deep::Expr]) -> bool {
     original.len() == candidate.len()
-        && original.iter().zip(candidate).all(|(before, after)| {
-            strip_effect_annotations(before) == strip_effect_annotations(after)
-        })
+        && original
+            .iter()
+            .zip(candidate)
+            .all(|(before, after)| effects_only_expr_matches(before, after))
         && candidate.iter().all(effect_metadata_is_singular)
 }
 
-fn strip_effect_annotations(expr: &deep::Expr) -> deep::Expr {
-    match expr {
-        deep::Expr::Atom(_, _) => expr.clone(),
-        deep::Expr::Map(map, span) => deep::Expr::Map(
-            deep::MetaMap {
-                entries: map
-                    .entries
-                    .iter()
-                    .map(|(key, value)| (key.clone(), strip_effect_annotations(value)))
-                    .collect(),
-            },
-            *span,
-        ),
-        deep::Expr::MetaExpr(meta, span) => deep::Expr::MetaExpr(
-            deep::MetaExpr {
-                entries: meta
-                    .entries
-                    .iter()
-                    .map(|(key, value)| (key.clone(), strip_effect_annotations(value)))
-                    .collect(),
-                expr: Box::new(strip_effect_annotations(&meta.expr)),
-            },
-            *span,
-        ),
-        deep::Expr::List(list, span) => deep::Expr::List(
-            deep::List {
-                elements: list
+fn effects_only_expr_matches(before: &deep::Expr, after: &deep::Expr) -> bool {
+    stack_guard!("effects_only_expr_matches", before, false);
+    match (before, after) {
+        (deep::Expr::Atom(before_atom, before_span), deep::Expr::Atom(after_atom, after_span)) => {
+            before_atom == after_atom && before_span == after_span
+        }
+        (deep::Expr::Map(before_map, before_span), deep::Expr::Map(after_map, after_span)) => {
+            before_span == after_span
+                && metadata_entries_match(&before_map.entries, &after_map.entries, false)
+        }
+        (
+            deep::Expr::MetaExpr(before_meta, before_span),
+            deep::Expr::MetaExpr(after_meta, after_span),
+        ) => {
+            before_span == after_span
+                && metadata_entries_match(&before_meta.entries, &after_meta.entries, false)
+                && effects_only_expr_matches(&before_meta.expr, &after_meta.expr)
+        }
+        (deep::Expr::List(before_list, before_span), deep::Expr::List(after_list, after_span)) => {
+            before_span == after_span
+                && before_list.elements.len() == after_list.elements.len()
+                && before_list
                     .elements
                     .iter()
+                    .zip(&after_list.elements)
                     .enumerate()
-                    .map(|(index, element)| {
+                    .all(|(index, (before_element, after_element))| {
                         if index == 1
-                            && let deep::Expr::Map(map, map_span) = element
+                            && let (
+                                deep::Expr::Map(before_map, before_map_span),
+                                deep::Expr::Map(after_map, after_map_span),
+                            ) = (before_element, after_element)
                         {
-                            return deep::Expr::Map(
-                                deep::MetaMap {
-                                    entries: map
-                                        .entries
-                                        .iter()
-                                        .filter(|(key, _)| key != "effects")
-                                        .map(|(key, value)| {
-                                            (key.clone(), strip_effect_annotations(value))
-                                        })
-                                        .collect(),
-                                },
-                                *map_span,
-                            );
+                            return before_map_span == after_map_span
+                                && metadata_entries_match(
+                                    &before_map.entries,
+                                    &after_map.entries,
+                                    true,
+                                );
                         }
-                        strip_effect_annotations(element)
+                        effects_only_expr_matches(before_element, after_element)
                     })
-                    .collect(),
-            },
-            *span,
-        ),
+        }
+        _ => false,
+    }
+}
+
+fn metadata_entries_match(
+    before: &[(String, deep::Expr)],
+    after: &[(String, deep::Expr)],
+    ignore_effects: bool,
+) -> bool {
+    let mut before_entries = before
+        .iter()
+        .filter(|(key, _)| !ignore_effects || key != "effects");
+    let mut after_entries = after
+        .iter()
+        .filter(|(key, _)| !ignore_effects || key != "effects");
+    loop {
+        match (before_entries.next(), after_entries.next()) {
+            (Some((before_key, before_value)), Some((after_key, after_value))) => {
+                if before_key != after_key || !effects_only_expr_matches(before_value, after_value)
+                {
+                    return false;
+                }
+            }
+            (None, None) => return true,
+            _ => return false,
+        }
     }
 }
 
 fn effect_metadata_is_singular(expr: &deep::Expr) -> bool {
+    stack_guard!("effect_metadata_is_singular", expr, false);
     match expr {
         deep::Expr::Atom(_, _) => true,
         deep::Expr::Map(map, _) => map
