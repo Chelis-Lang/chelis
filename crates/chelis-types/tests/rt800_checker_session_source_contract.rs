@@ -72,3 +72,30 @@ fn sink_construction_and_storage_stay_inside_the_owner() {
         );
     }
 }
+
+#[test]
+fn annotation_consumes_owner_stamps_without_semantic_reinference() {
+    let annotation = INFER
+        .split_once("fn annotate_expr_with_scope(")
+        .expect("annotation entry should exist")
+        .1
+        .split_once("fn should_attach_type_metadata(")
+        .expect("annotation section should have a stable end")
+        .0;
+
+    for forbidden in [
+        "infer_expr_in_scope(",
+        "pattern_bindings(",
+        "DeepTypeResolver::new(",
+        "extract_params(",
+    ] {
+        assert!(
+            !annotation.contains(forbidden),
+            "annotation must consume the owning result instead of calling `{forbidden}`"
+        );
+    }
+    assert!(
+        !INFER.contains("fn infer_expr_in_scope("),
+        "the old fresh-substitution annotation inference seam must be deleted"
+    );
+}
