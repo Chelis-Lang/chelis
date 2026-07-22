@@ -21,27 +21,20 @@ delivered by [#730] Phase 2 and consumed here (§I1).
 
 ## Summary
 
-`chelis check` reports a perfect score of 1.0 on ill-typed programs. The
-mechanism: `infer_expr`'s unknown-tag wildcard returns bare `Type::Error`
-**without pushing a `CheckError`**, and `Type::Error` is a
-unify-with-anything sentinel, so an unrecognized construct - and its entire
-subtree - is silently *exempted* from checking rather than rejected.
-`check_ir_with_signature_context_inner` fails only on a non-empty error
-vector (`infer.rs:1240`), so a silent `Type::Error` is indistinguishable
-from success.
+Before Phase 1, `chelis check` could report a perfect score of 1.0 on an
+ill-typed program. The mechanism was an unknown-tag wildcard and malformed
+guards returning bare `Type::Error` without pushing a `CheckError`; because
+that sentinel unified with anything, a construct and its subtree could be
+silently exempted. The executed blast radius included `with seed` / `with
+device`, a runnable host binary with an invalid declared return type, and a
+tensor case that reached clang instead of a checker diagnostic.
 
-Today's blast radius, measured by execution (sweep 6's wrapper battery,
-locked as a canary test): `with seed` / `with device` bodies are the ONLY
-holes at the tag level - the same ill-typed expression is caught inside
-let/if/match/lambda/pipe/tuple/list/grad/vmap/jit, and the handler
-expressions themselves are checked. But the hole is not bounded by today's
-inventory: the *default* is wrong, so any tag ever added to `lower.rs`
-without an `infer.rs` case silently becomes the next black hole. And the
-consequences already escalated past "check is wrong": the masked error
-reaches a **runnable compiled binary** through the host lane (an int64
-flows out of a function declared `-> f32`, every stage reporting success),
-and the tensor variant produces emitted C that fails at clang - an internal
-toolchain error where a diagnostic belonged.
+Phase 1 closed the known holes. Phase 2 makes the class structurally hard to
+recreate: a fresh error type requires a witnessed, append-only diagnostic;
+checked-result construction is fallible; annotation consumes the types from
+the owning inference epoch; and one finalizer validates the annotated tree
+before the session boundary may return success. Phase 3 remains the separate
+compile-time exhaustiveness ratchet for the next Deep tag.
 
 **Scope verdict** (the question this document answers first): the immediate
 fix is genuinely SMALL (one checker case + one loud wildcard + the [#710]
@@ -53,6 +46,56 @@ pushing a diagnostic or propagating an existing error - and (b) the
 added, every consumer that has not decided what to do with it stops
 compiling. No rewrite; the Deep AST keeps its shape; only dispatch entry
 points and the `Type::Error` variant change.
+
+## Shipped Phase 2 architecture
+
+The current implementation has one explicit ownership chain:
+
+1. `session::DiagnosticSink` owns the check's one canonical error vector. Its
+   storage and constructor are private to `session.rs`; lower layers can only
+   append. There is no production clone/default/conversion, mutable deref,
+   extraction, `retain`, clear, truncate, drain, or post-report deletion seam.
+   `session::run_result` is the central success boundary: any non-empty sink
+   vetoes `Ok` and returns the exact diagnostics.
+2. `errors::report` appends through that sink and mints a fresh
+   `ErrorWitness`; `propagate` copies an existing witness without reporting a
+   duplicate. Production resolver/validation paths cannot use an arbitrary
+   `Vec<CheckError>` as a diagnostic output.
+3. Deep type syntax crosses one located `DeepTypeResolver`. The resolver owns
+   its use site, binder mode, nominal-header environment, variable generator,
+   and source/owner location, reports a failure once, and returns
+   `Result<ResolvedDeepType, ErrorWitness>`.
+4. Source binder state is lexical, not ambient. A serde-skipped
+   `TypeResolutionScope` field on `Env` is installed on the cloned environment
+   for one declaration and inherited only by its nested lexical clones; it
+   cannot leak into a sibling declaration, a stacked check, or a cached
+   `TypeEnv`.
+5. Each primary inference root opens an `InferenceProduct` owner epoch.
+   Registration and finalization use one exhaustive child-role table:
+   `RuntimeExpr`, `Syntax`, `Selector`, `EffectHandler`, `Binder`, `Type`, and
+   `ExplicitInferenceBypass`. `EffectHandler` is deliberately effects-owned;
+   the handled body remains a type-owned runtime child.
+6. Annotation consumes the completed epoch's canonical owner stamps. It does
+   not semantically re-infer expressions with a fresh `VarGen`/`Subst`; a
+   missing or conflicting owner write is a diagnostic, never a default type.
+7. `finalize_checked_program` checks fresh inference and reconstruction
+   results: the annotated runtime tree and pattern/function stamps, with input
+   and output signature metadata as structural backstops.
+   `CheckedProgram::try_from_parts*` is fallible, and the effects pass uses the
+   signature-aware variant and maps a failed reconstruction to
+   `EffectErrorKind::TypeTotality`; no effects path can rebuild an infallible
+   checked result. `CheckedProgram::compose` is the distinct trusted operation
+   that combines two already-successful checked halves.
+8. Recursive callable availability is planned by the canonical function SCC
+   schedule. Only a genuinely recursive SCC receives provisional monomorphic
+   bindings; its members infer, unify, remove the provisional entries, and
+   generalize as a unit. Acyclic generic helpers stay polymorphic, bare
+   acyclic forward calls retain textual semantics, and no diagnostic is
+   erased after it has been reported.
+
+PR #802's checker snapshot is advisory evidence only. The active specs, code,
+and executable tests above are the authority; this document does not derive or
+invent atom identifiers or content hashes from that snapshot.
 
 ## Why the default is the bug, not the instance
 
@@ -189,7 +232,7 @@ The type-state ratchet, this plan's structural core:
 ```rust
 /// Zero-sized witness that an error REACHED THE ERROR VECTOR. The only
 /// constructors live in the diagnostics module:
-///   report(errors, check_error) -> Type   // pushes, then mints
+///   report(sink, check_error)   -> Type   // appends, then mints
 ///   propagate(&ErrorWitness)    -> Type   // copies an existing witness
 /// Field is private: no other module can mint one.
 pub struct ErrorWitness(());
@@ -212,6 +255,14 @@ pub enum Type {
   `propagate(...)` (documented cascade).
 - Unification and equality treat `Type::Error(_)` exactly as before; the
   token carries no data and costs nothing.
+
+The sink is part of the witness contract, not incidental plumbing. Fresh
+witness minting accepts only the checker-owned `DiagnosticSink`; the
+`DiagnosticOutput for Vec<CheckError>` compatibility used by internal probes
+is `#[cfg(test)]`. `session::run_result` observes the same vector and rejects
+an otherwise-`Ok` value whenever a diagnostic was appended. This closes both
+ways the old invariant could be bypassed: minting into a throwaway vector and
+returning success while authoritative errors existed.
 
 Serialization note: the typecheck cache serializes `Type`, so serde is the one
 accepted non-constructor witness mint. Production writers only receive
@@ -263,9 +314,14 @@ The exact Deep grammar and binder rules are normative in spec/03 §2.5.1/§2.6.
 
 ## C4. The invariants and the enum
 
-1. **The totality invariant** (§C1.3), executable: a post-check validation
-   pass, on by default inside `check_ir_with_signature_context_inner`:
-   `errors.is_empty() => the typed tree contains no Type::Error`.
+1. **The totality invariant** (§C1.3), executable: the shared
+   `finalize_checked_program` boundary validates every fresh inference and
+   reconstruction result path, including public reconstruction. It inspects
+   the authoritative annotated runtime tree and its required owner stamps,
+   then uses both incoming and inferred signature metadata as a structural
+   backstop. (`CheckedProgram::compose` combines already-successful checked
+   halves.) Combined with the session veto, `errors.is_empty() => the checked
+   result contains no silent error or missing owner stamp`.
    Violation is itself a pushed internal error (never a panic - the
    checker is reachable-input territory, `loud_unsupported.md` §C1.3
    applies). This invariant is the tripwire that outlives everyone's
@@ -415,10 +471,15 @@ census enumerating every construction site.
 **You deliver:**
 
 1. `Type::Error(ErrorWitness)` and the `report`/`propagate` constructors
-   (§C3); every construction site migrated (the compiler enumerates
-   them; the current source census is 269 `report` call sites in `infer.rs`,
-   2 resolver-boundary `report_witness` call sites in `deep_type.rs`, 12
-   direct `propagate` uses, and 8 aggregate `propagate_if_error` uses).
+   (§C3); every construction site migrated. The source census recomputed
+   2026-07-22 is 269 `report(...)` call sites in `infer.rs`, 2
+   resolver-boundary `report_witness(...)` call sites in `deep_type.rs`, 14
+   direct production `propagate(...)` call sites, and 8 aggregate
+   `propagate_if_error(...)` call sites. The direct-propagate number excludes
+   the function definition and one rustdoc mention. The reproducible census
+   is `rg -n '\breport\(' crates/chelis-types/src/infer.rs`,
+   `rg -n '\breport_witness\(' crates/chelis-types/src/deep_type.rs`, and
+   `rg -n '\bpropagate(_if_error)?\(' crates/chelis-types/src`.
 2. **The totality invariant promoted** from test harness to an
    on-by-default post-check validation (§C4.1).
 3. The cascade-behavior corpus (B2.3): diagnostic counts before/after on
@@ -432,15 +493,36 @@ census enumerating every construction site.
 6. The adversarial Phase 2 pass exposed chelis#813's pre-existing one-argument
    `conv2d` validator panic. The fix and complete arity 0-through-6 regression
    matrix land here, so the Phase 2 PR may truthfully close #813.
+7. Diagnostic ownership hardened around the one append-only session sink,
+   fallible checked-program reconstruction/effects propagation, explicit
+   lexical binder scope, authoritative inference epochs, annotated-tree
+   finalization, and SCC-scoped recursive prebinding. The structural source
+   tests lock the absence of ambient binders, throwaway production sinks,
+   infallible reconstruction, error deletion, annotation re-inference, and
+   post-report recursive-cycle suppression.
+   The 2026-07-22 sink-construction census finds five textual constructions in
+   `session.rs`: three production owners (`infer_program`, `run_result`, and
+   `infer_ir_program`) that return their error vector, plus two `#[cfg(test)]`
+   harness owners. The source-contract test parses this ownership boundary;
+   it does not freeze a stale raw count as the invariant.
 
 **Frozen at your exit:** §C3 API; §C4.1 always-on.
 
 **Explicitly not yours:** `DeepTag`; new checker cases beyond what the
 migration forces.
 
-**Oracle:** workspace green with the invariant on; the cascade corpus
-byte-stable; a planted silent `Type::Error` (the negative test of the
-mechanism itself) fails to COMPILE outside the diagnostics module.
+**Authoritative Phase 2 oracle:**
+
+```sh
+cargo nextest run --profile ci --no-fail-fast \
+  -p chelis-types -p chelis-effects -p chelis-surf -p chelis-cli \
+  -p chelis-ir -p chelis-compiler-api -p chelis-e2e -p chelis-prove
+```
+
+The invariant and source contracts run inside that command, including the
+fitness/cascade/handler/owner-stamp controls. The compile-fail witness doctests
+and `scripts/gate.py --local` are required supporting evidence, but neither
+replaces this oracle.
 
 ## Phase 3 - `DeepTag` at the chokepoints
 

@@ -2313,35 +2313,45 @@ chelis#731 Phase 3.)*
 > typed result SHALL contain no error-typed expression: `Type::Error`
 > without a corresponding reported diagnostic SHALL be unconstructible.
 
-*(Structurally honored as of chelis#731 Phase 2: `Type::Error` now carries
-a private `ErrorWitness` token mintable only by `chelis_types::errors::report`
-(which pushes the diagnostic in the same expression) or `propagate` (cascade
-from an existing witness), so a silent `Type::Error` is unconstructible
-outside the diagnostics module - a planted bare `Type::Error` fails to
-compile. The invariant itself is now an ALWAYS-ON post-check pass inside
-`check_ir_with_signature_context_inner` / `check_typed_program`
-(`totality_invariant_traces` in `chelis-types::infer`), promoted from the
-Phase 0 harness (`crates/chelis-cli/tests/issue_731_totality_invariant.rs`),
-which remains as its independent test-side mirror; the fitness-honesty corpus
-(§C4.4) and the cascade-count corpus (Part II B2.3,
-`crates/chelis-cli/tests/issue_731_cascade_count_corpus.rs`) enforce the
-behavior. The Surf-reachable chelis#755 (field access) and chelis#756
-(deep-type conversion) sites are closed here. Deep type and dimension
-resolution has one centralized, witnessed, fallible boundary: it returns a
-resolved type or an `ErrorWitness` minted while pushing the owning diagnostic.
-Recursive parents propagate that witness without re-reporting. The resolver's
-explicit context distinguishes closed input, explicit `deftype`/`typealias`
-binders, implicit-generic `defsig` binders, and trusted compiler-generated
-metadata; only a real binder or a use-site-approved inference hole may allocate
-a type/dimension/rank variable. Nominal headers and arities are precollected so
-self/forward references remain legal while unknown names, wrong arities,
-malformed nested nodes, and bare declaration-field types cannot enter a
-successful or cacheable checked context. The precollected header environment
-lives for the complete check unit rather than only declaration registration,
-so one rejected declaration body does not make its otherwise-declared name
-appear unknown in downstream annotations and spray a second diagnostic. Bare
-and canonical cast targets traverse the same boundary; canonical primitive
-forms retain exact-arity validation before cast classification. See spec/03
+*(Structurally honored as of chelis#731 Phase 2: `Type::Error` carries a
+private `ErrorWitness`. A fresh witness is minted only by
+`chelis_types::errors::report`, which appends the owning diagnostic through
+the checker's private `DiagnosticSink`; `propagate` copies an existing witness
+for cascade suppression. The sink is append-only, and the shared
+`session::run_result` boundary vetoes `Ok` whenever that authoritative vector
+is non-empty. A planted bare `Type::Error` fails to compile outside the
+diagnostics module.)*
+
+*(Fresh inference and reconstruction results converge on the fallible
+`finalize_checked_program` boundary. It validates the annotated runtime tree's
+required function, pattern, and expression stamps, with incoming and inferred
+signature metadata as backstops. Annotation consumes canonical stamps from the
+owning `InferenceProduct` epoch; it does not semantically re-infer a node under
+a fresh substitution. The exhaustive child-role classification includes an
+effects-owned `EffectHandler` payload and a type-owned handled body. Public
+`CheckedProgram::try_from_parts*` reconstruction therefore cannot return an
+unchecked success; the effects pass uses the signature-aware fallible path and
+turns reconstruction diagnostics into `TypeTotality` errors.
+`CheckedProgram::compose` is separate: it combines two already-successful
+checked halves.)*
+
+*(The Surf-reachable chelis#755 field-access and chelis#756 deep-type sites are
+closed here. Deep type and dimension resolution has one centralized, located,
+witnessed boundary: `DeepTypeResolver` returns a resolved type or an
+`ErrorWitness` minted while appending the exact owning diagnostic. Recursive
+parents propagate without re-reporting. Binder visibility is an explicit,
+serde-skipped `TypeResolutionScope` field on the cloned lexical `Env`, never
+ambient process/thread state. Binder modes distinguish closed input, explicit
+`deftype`/`typealias` binders, implicit-generic `defsig` binders, and trusted
+compiler metadata. Nominal headers and arities are precollected for the full
+check unit, preserving legal self/forward references while preventing unknown
+names, wrong arities, malformed nested nodes, and bare declaration-field types
+from entering a successful/cacheable context. Bare and canonical cast targets
+use the same boundary and exact-arity checks. Recursive functions are
+prebound only within genuine SCCs, inferred/generalized as a unit, with no
+post-report diagnostic deletion. The Phase 0 invariant mirror, fitness-honesty
+corpus, cascade-count corpus, and checker-totality Phase 2 oracle in
+`spec/design/checker_totality.md` enforce these claims. See spec/03
 §2.5.1/§2.6.)*
 
 > **[04-TOT-3]** A structurally malformed Deep form that reaches the
