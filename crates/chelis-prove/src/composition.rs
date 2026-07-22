@@ -21,6 +21,10 @@ pub enum DischargeMethod {
     Smt,
     Fuzz,
     Axiom,
+    /// Discharged by Beacon's certified special-function envelope (chelis#674).
+    /// The proof is machine-checked (Gappa/Arb) and sound, but it is an
+    /// over-approximation — the envelope bounds the function, not equals it.
+    CertifiedEnvelope,
 }
 
 impl DischargeMethod {
@@ -29,6 +33,7 @@ impl DischargeMethod {
             DischargeMethod::Smt => "smt",
             DischargeMethod::Fuzz => "fuzz",
             DischargeMethod::Axiom => "axiom",
+            DischargeMethod::CertifiedEnvelope => "certified_envelope",
         }
     }
 
@@ -40,6 +45,7 @@ impl DischargeMethod {
             DischargeMethod::Smt => "cvc5",
             DischargeMethod::Fuzz => "fuzz-sampler",
             DischargeMethod::Axiom => "axiom",
+            DischargeMethod::CertifiedEnvelope => "beacon-envelope",
         }
     }
 }
@@ -397,6 +403,19 @@ impl AssumptionDischarge {
                     }
                 } else {
                     VerdictGuarantee::Unestablished
+                }
+            }
+            // chelis#674: a certified-envelope discharge from Beacon. The
+            // envelope is machine-checked (Gappa/Arb) and sound, so it is
+            // stronger than fuzz but still an over-approximation. It injects
+            // SpecialFunctionCertified, which renders as
+            // ProvenModuloCertifiedEnvelope in the badge rollup.
+            Some("proved") if self.method == DischargeMethod::CertifiedEnvelope => {
+                VerdictGuarantee::Green {
+                    soundness: Soundness::SoundApproximate,
+                    qualifiers: QualifierSet::from_iter_kinds([
+                        Qualifier::SpecialFunctionCertified,
+                    ]),
                 }
             }
             Some("failed") => {

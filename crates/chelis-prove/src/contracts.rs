@@ -122,6 +122,41 @@ pub fn standard_contract_registry() -> AssumptionRegistry {
     registry
 }
 
+/// Construct the standard contract registry, attempting to upgrade fuzz-discharged
+/// contracts to certified-envelope discharges using the given prover.
+/// Contracts the prover cannot prove stay fuzz-discharged (honest degradation).
+pub fn standard_contract_registry_with_prover(
+    prover: &crate::beacon_contract_prover::BeaconContractProver,
+) -> AssumptionRegistry {
+    let mut registry = AssumptionRegistry::new();
+    for contract in standard_contracts() {
+        for invariant in contract.invariants {
+            // Try to upgrade fuzz-discharged contracts
+            if invariant.record.discharge.as_ref().is_some_and(|d| d.method == DischargeMethod::Fuzz) {
+                if let Some(discharge) = prover.prove_contract(&invariant.id) {
+                    // Successfully proved by Beacon — use the certified discharge
+                    let upgraded = AssumptionRecord::new(
+                        &invariant.id,
+                        Some(discharge),
+                        invariant.record.non_vacuity.clone(),
+                    )
+                    .with_source("std_contract", &invariant.id)
+                    .with_discharge_tier(DischargeTier::new(
+                        DischargeMethod::CertifiedEnvelope.engine(),
+                        DischargeMethod::CertifiedEnvelope,
+                        Some(invariant.id.clone()),
+                    ));
+                    registry.insert(upgraded);
+                    continue;
+                }
+            }
+            // Fall through: keep original discharge (fuzz, smt, axiom)
+            registry.insert(invariant.record);
+        }
+    }
+    registry
+}
+
 fn smt_invariant(id: &str, description: &str, assumption: &str) -> ContractInvariant {
     ContractInvariant {
         id: id.to_string(),
@@ -187,6 +222,40 @@ fn fuzz_invariant(
         .with_discharge_tier(DischargeTier::new(
             DischargeMethod::Fuzz.engine(),
             DischargeMethod::Fuzz,
+            Some(id.to_string()),
+        )),
+    }
+}
+
+/// Construct a contract invariant discharged by Beacon's certified envelope.
+/// Used when the BeaconContractProver successfully proves a contract obligation
+/// that was previously fuzz-discharged.
+pub fn certified_envelope_invariant(
+    id: &str,
+    description: &str,
+    assumption: &str,
+    evidence: serde_json::Value,
+) -> ContractInvariant {
+    ContractInvariant {
+        id: id.to_string(),
+        description: description.to_string(),
+        assumption: assumption.to_string(),
+        record: AssumptionRecord::new(
+            id,
+            Some(AssumptionDischarge::new(
+                DischargeMethod::CertifiedEnvelope,
+                evidence,
+            )),
+            Some(NonVacuityRecord::established(serde_json::json!({
+                "method": "certified_envelope",
+                "result": "sat",
+                "contract": id,
+            }))),
+        )
+        .with_source("std_contract", id)
+        .with_discharge_tier(DischargeTier::new(
+            DischargeMethod::CertifiedEnvelope.engine(),
+            DischargeMethod::CertifiedEnvelope,
             Some(id.to_string()),
         )),
     }
@@ -545,6 +614,9 @@ mod tests {
                 }
                 DischargeMethod::Axiom => {
                     assert!(discharge.evidence.get("justification").is_some());
+                }
+                DischargeMethod::CertifiedEnvelope => {
+                    assert_eq!(discharge.evidence["status"], "proved");
                 }
             }
         }
