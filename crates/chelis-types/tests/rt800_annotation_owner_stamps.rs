@@ -267,3 +267,83 @@ def caller(a, b: tensor[4, f32]) = helper(a, b)
         );
     }
 }
+
+#[test]
+fn raw_top_level_def_and_cast_keep_primary_owner_stamps() {
+    let program = chelis_deep::parser::parse_str(
+        r#"(def {} answer
+              (cast {}
+                (lit {type: (t-prim {} int32)} 7)
+                (t-prim {} int64)))"#,
+    )
+    .expect("raw Deep owner fixture must parse");
+    let checked = check_ir_program(&program)
+        .unwrap_or_else(|result| panic!("raw def/cast owners must check: {:?}", result.errors));
+
+    for wanted in ["def", "cast", "lit"] {
+        let mut stamps = Vec::new();
+        for expr in checked.annotated_exprs() {
+            collect_tag_stamp_state(expr, wanted, &mut stamps);
+        }
+        assert_eq!(
+            stamps,
+            vec![true],
+            "the primary driver must stamp the original `{wanted}` owner"
+        );
+    }
+}
+
+#[test]
+fn guarded_match_arm_records_the_guard_owner_before_annotation() {
+    let program = chelis_deep::parser::parse_str(
+        r#"(def {} choose
+              (match {}
+                (lit {type: (t-prim {} bool)} true)
+                (arm {}
+                  (pat-lit {} true)
+                  (lit {type: (t-prim {} bool)} true)
+                  (lit {type: (t-prim {} int32)} 1))
+                (arm {}
+                  (pat-wild {})
+                  ()
+                  (lit {type: (t-prim {} int32)} 2))))"#,
+    )
+    .expect("guarded-arm owner fixture must parse");
+    let checked = check_ir_program(&program)
+        .unwrap_or_else(|result| panic!("guarded arm must check: {:?}", result.errors));
+
+    let mut lit_stamps = Vec::new();
+    for expr in checked.annotated_exprs() {
+        collect_tag_stamp_state(expr, "lit", &mut lit_stamps);
+    }
+    assert_eq!(
+        lit_stamps,
+        vec![true, true, true, true],
+        "scrutinee, guard, and both bodies need authoritative stamps"
+    );
+}
+
+#[test]
+fn nominal_header_scope_reaches_generated_metadata_finalization() {
+    let checked = check_ir_program(&surf(
+        r#"
+type Params =
+  | Params { w: tensor[2, f32] }
+
+def unwrap(p: Params) -> Params = (fn (q: Params) -> q)(p)
+out = unwrap(Params { w: to_tensor([1.0, 2.0]) })
+"#,
+    ))
+    .unwrap_or_else(|result| {
+        panic!(
+            "precollected nominal headers must reach generated metadata: {:?}",
+            result.errors
+        )
+    });
+    assert!(
+        checked
+            .signature_inference()
+            .functions
+            .contains_key("unwrap")
+    );
+}

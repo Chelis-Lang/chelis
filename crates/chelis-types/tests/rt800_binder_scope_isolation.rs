@@ -24,6 +24,11 @@ fn parse(source: &str) -> Vec<chelis_deep::Expr> {
     chelis_deep::parser::parse_str(source).expect("Deep binder fixture must parse")
 }
 
+fn surf(source: &str) -> Vec<chelis_deep::Expr> {
+    let parsed = chelis_surf::parser::parse_str(source).expect("Surf binder fixture must parse");
+    chelis_surf::desugar::desugar_program(&parsed)
+}
+
 fn assert_legal() {
     let exprs = parse(LEGAL);
     check_ir_program(&exprs)
@@ -110,4 +115,41 @@ fn malformed_parameter_is_rejected_once_by_the_binder_owner() {
         ) && errors[0].message.contains("t-prim"),
         "unexpected malformed-binder diagnostic: {errors:?}"
     );
+}
+
+#[test]
+fn explicit_signature_binders_reach_generated_annotation_finalization() {
+    let exprs = surf(
+        r#"
+sig row_argmax: &tensor[piece, classes, p] -> int64
+def row_argmax[piece, classes, p](row: &tensor[piece, classes, p]) -> int64 = {
+  pair = sort(row, cast(1, int32))
+  cast(0, int64)
+}
+def call(xs: &tensor[1, 3, f32]) -> int64 = row_argmax(xs)
+"#,
+    );
+    check_ir_program(&exprs).unwrap_or_else(|result| {
+        panic!(
+            "the declaration-owned `piece`/`classes`/`p` scope must survive finalization: {:?}",
+            result.errors
+        )
+    });
+}
+
+#[test]
+fn unknown_nominal_metadata_reports_once_without_finalizer_duplication() {
+    let exprs = parse(
+        "(def {} bad
+           (fn {} (params {} (x {type: (t-adt {} Missing)})) (var {} x)))",
+    );
+    let errors = check_ir_program(&exprs)
+        .expect_err("unknown nominal metadata must reject")
+        .errors;
+    assert_eq!(
+        errors.len(),
+        1,
+        "the inference owner reports once and finalization must not retry it: {errors:?}"
+    );
+    assert!(errors[0].message.contains("Missing"), "{errors:?}");
 }
