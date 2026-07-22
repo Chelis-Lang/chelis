@@ -2663,6 +2663,38 @@ def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
         );
     }
 
+    // Fix 2: a def named `free`, selected via `entry_name` in a multi-def
+    // program (so it goes through the entry-scoped metadata lane), must produce
+    // a linkable artifact. Emitting `void free(...)` would clash with libc, and
+    // even `void chelis_free(...)` would clash with the runtime's own
+    // `chelis_free` (declared in `chelis_runtime.h`) — so the entry lane emits
+    // the fixed, collision-free symbol `chelis_main`. This is an end-to-end
+    // compile: `run_compile_and_load_job` invokes cc to build the shared
+    // library, so a successful load + a callable manifest proves the
+    // translation unit linked, and we dlopen+call it ([9.] for free(3) =
+    // mul(3,3)).
+    //
+    // (The single-def program `def free(x) = ...` goes through the legacy
+    // free-form path instead, where `entry_name` passes through as a raw
+    // symbol and STILL collides — a documented pre-existing tide contract left
+    // unchanged; see `execution_c_symbol`. That is why this fixture is
+    // multi-def, forcing the entry lane.)
+    #[test]
+    fn compile_and_load_job_def_named_free_links_and_calls() {
+        let source = "\
+def other(y: tensor[1, f32]) -> tensor[1, f32] = add(y, y)
+def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
+";
+        let manifest = run_job_manifest(source, Some("free"));
+        assert_eq!(
+            manifest.host_entry_name, "chelis_main",
+            "def named `free` must emit the collision-free `chelis_main` symbol"
+        );
+        let outputs = run_job_and_call(source, Some("free"), &[(vec![3.0], vec![1])]);
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0], vec![9.0], "free(3) = 3*3 = 9");
+    }
+
     // A genuinely host-only program (top-level bindings/globals, no
     // tensor-signature entry) can't back a callable model. Instead of the old
     // silent empty manifest that failed later with "expected 0 positional

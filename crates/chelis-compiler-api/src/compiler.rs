@@ -771,10 +771,9 @@ pub fn compile(request: CompileRequest) -> Result<CompileResult> {
 /// public `chelis build`/tide contract left intact. It does NOT guard against
 /// a libc collision (`free`, `malloc`, …): a single-def program whose def is
 /// named `free`, compiled via that raw path, still emits `void free(...)`.
-/// The entry-scoped metadata lane instead uses [`execution_entry_c_symbol`],
-/// which ALWAYS `chelis_`-prefixes the resolved def name, because there
-/// `entry_name` is a def *selector* the user must pass and so cannot avoid
-/// such names.
+/// The entry-scoped metadata lane instead uses the fixed, collision-free
+/// [`EXECUTION_ENTRY_C_SYMBOL`] (`chelis_main`), because there `entry_name` is
+/// a def *selector* the user must pass and so cannot avoid such names.
 fn execution_c_symbol(entry_name: Option<&str>) -> String {
     let Some(name) = entry_name else {
         return "chelis_main".to_string();
@@ -800,27 +799,19 @@ fn execution_c_symbol(entry_name: Option<&str>) -> String {
 
 /// Emitted C symbol for the entry-scoped metadata lane (#817/#818).
 ///
-/// Because `entry_name` is now a def *selector* the user must supply, the
-/// selected name can be anything — `main` (collides with the reserved
-/// program entry), `free`/`malloc` (collide with libc). We therefore ALWAYS
-/// `chelis_`-prefix the sanitized def name, so the emitted translation unit
-/// is always linkable regardless of the def's name. `main` -> `chelis_main`,
-/// `free` -> `chelis_free`, `solve` -> `chelis_solve`. The artifact's
-/// `host_entry_name` carries this symbol so the loader (`dlsym`) and header
-/// stay consistent. Contrast the raw legacy path in [`execution_c_symbol`].
-fn execution_entry_c_symbol(entry: &str) -> String {
-    let body: String = entry
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    format!("chelis_{body}")
-}
+/// `entry_name` is now a def *selector* the user must supply, so the selected
+/// name can be anything — `main` (collides with the reserved program entry),
+/// `free`/`malloc` (collide with libc), or a name in the runtime's own
+/// `chelis_*` namespace (`chelis_runtime.h` declares `chelis_free`,
+/// `chelis_tuple_get`, …). To be collision-free against ALL of those, the
+/// entry-scoped artifact ALWAYS emits the fixed symbol `chelis_main`. This is
+/// safe because each artifact is scoped to exactly one entry def, so there is
+/// exactly one emitted entry function per translation unit; the metadata
+/// scoping is carried by the entry DAG, not the symbol name. The artifact's
+/// `host_entry_name` carries `chelis_main` so the loader (`dlsym`) and header
+/// stay consistent. Contrast the raw legacy path in [`execution_c_symbol`],
+/// which is left unchanged.
+const EXECUTION_ENTRY_C_SYMBOL: &str = "chelis_main";
 
 /// The tensor-signature top-level defs of a program, in source order —
 /// the candidate set the entry-scoped metadata lane can select from.
@@ -1038,10 +1029,10 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
                 None
             };
 
-            if let Some((entry, entry_dag)) = scoped_entry {
-                // Fix 2: the entry-scoped symbol always `chelis_`-prefixes the
-                // resolved def name so a def named `main`/`free`/... links.
-                let entry_symbol = execution_entry_c_symbol(entry);
+            if let Some((_entry, entry_dag)) = scoped_entry {
+                // Fix 2: the entry-scoped symbol is the fixed, collision-free
+                // `chelis_main` so a def named `main`/`free`/`chelis_*` links.
+                let entry_symbol = EXECUTION_ENTRY_C_SYMBOL;
                 reject_symbolic_windowed_reduce(&entry_dag, "c")?;
                 reject_unsupported_reduce_window_precision(&entry_dag, "c")?;
                 reject_unsized_named_dims(&entry_dag, "c")?;
@@ -1049,7 +1040,7 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
                 let fused = chelis_ir::fuse::fuse(&specialized);
                 let result = chelis_backend_c::codegen_with_options(
                     &fused,
-                    &entry_symbol,
+                    entry_symbol,
                     chelis_backend_c::CodegenOptions {
                         use_blas: true,
                         ..chelis_backend_c::CodegenOptions::default()
@@ -1058,9 +1049,9 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
                 .map_err(unsupported_stage_error)?;
                 return Ok(compiled_execution_artifact(
                     request.target,
-                    &entry_symbol,
+                    entry_symbol,
                     None,
-                    compile_result_c(request.target, &entry_symbol, &result),
+                    compile_result_c(request.target, entry_symbol, &result),
                     execution_input_specs(&entry_dag, &result.input_labels)?,
                     execution_output_specs(&entry_dag, &result.output_labels)?,
                     result.symbolic_dims,

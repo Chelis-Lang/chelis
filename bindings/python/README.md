@@ -28,10 +28,11 @@ Entry selection for `compile_and_load` (chelis#817 / chelis#818):
   with two or more tensor-signature defs and no `main`, `compile_and_load` errors and
   lists the candidates so you can pass `entry_name`. An `entry_name` that names no def
   in a clean tensor program is likewise a loud error listing the available defs.
-- Emitted symbol scheme: the artifact's C entry symbol is always `chelis_`-prefixed —
-  `chelis_main` for the default entry, `chelis_<def>` for a selected def — so a def
-  named `main`, `free`, or `malloc` still compiles and links. The manifest's
-  `host_entry_name` carries this symbol; the loader resolves it via `dlsym`.
+- Emitted symbol scheme: the artifact's C entry symbol is always the fixed
+  `chelis_main` (each artifact is scoped to one entry def, so one symbol suffices and
+  is collision-free), so a def named `main`, `free`, `malloc`, or a runtime
+  `chelis_*` name still compiles and links. The manifest's `host_entry_name` carries
+  this symbol; the loader resolves it via `dlsym`.
 - Unused parameters (pre-existing behavior, not changed here): a declared parameter
   that never appears in the def's body is dead-code-eliminated and does NOT appear in
   the manifest `input_names`. For example `def solve(a, b) = f(b)` exposes
