@@ -738,7 +738,15 @@ pub fn compile(request: CompileRequest) -> Result<CompileResult> {
 
 pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutionArtifact> {
     let compiled = compile_source(request.source_kind, &request.source)?;
-    let host_compiled = chelis_ir::host::lower_compiled_program(&compiled.checked);
+    let host_compiled =
+        chelis_ir::host::try_lower_compiled_program(&compiled.checked).map_err(|diagnostic| {
+            stage_error_with_span(
+                "lower",
+                diagnostic.to_string(),
+                "lower_error",
+                deep_span_to_schema(diagnostic.span),
+            )
+        })?;
     let func_name = request
         .entry_name
         .unwrap_or_else(|| "chelis_main".to_string());
@@ -4489,7 +4497,8 @@ def load_tokenizer(path: string) -> Option[Tokenizer] =
         )
         .expect("compile");
 
-        let host = chelis_ir::host::lower_compiled_program(&compiled.checked)
+        let host = chelis_ir::host::try_lower_compiled_program(&compiled.checked)
+            .expect("checked host program must lower")
             .host
             .expect("host lowering");
         let lowered = chelis_ir::lower::top_level_lowering_map(

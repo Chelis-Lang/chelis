@@ -5,7 +5,7 @@
 //! host-side rule table, every span ID present on the input Deep AST
 //! whose program lowers through the host-lane path must appear as either
 //! `span_id` or in `merged_spans` on at least one HostExpr node after
-//! `lower_compiled_program()`.
+//! `try_lower_compiled_program()`.
 //!
 //! This file is the named acceptance oracle for S6 steps 1-4. The S6
 //! step 5+ phase will extend the audit invariant to backend `// span:`
@@ -26,9 +26,17 @@ use std::collections::BTreeSet;
 use chelis_deep::Expr;
 use chelis_ir::HostTypeTerm;
 use chelis_ir::host::{
-    HostCallback, HostCallbackKind, HostExpr, HostExprKind, HostProgram, lower_compiled_program,
+    CompiledProgram, HostCallback, HostCallbackKind, HostExpr, HostExprKind, HostProgram,
+    try_lower_compiled_program,
 };
-use chelis_types::{check_ir_program, check_linearity};
+use chelis_types::{CheckedProgram, check_ir_program, check_linearity};
+
+/// Tests in this file provide checked programs that are expected to lower.
+/// Keep that expectation explicit while production callers retain the
+/// fallible boundary.
+fn lower_compiled_program(program: &CheckedProgram) -> CompiledProgram {
+    try_lower_compiled_program(program).expect("span fixture must lower through the host boundary")
+}
 
 // ── Schema lock test ──────────────────────────────────────────────────
 

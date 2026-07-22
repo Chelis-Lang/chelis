@@ -74,7 +74,10 @@ PR [#799] (acceptance validation pending): closed vocabularies, staged
 HostType/ABI separation, and structured emission. Its initial source-lint
 approach was explicitly re-planned after execution showed incomplete and
 false-positive behavior; the lint was extracted to PR [#815] and is not a
-Wave 2 dependency. [#733]'s
+Wave 2 dependency. Its one authoritative completion oracle is
+`.venv/bin/python scripts/loud_unsupported_phase2_oracle.py`; acceptance
+requires exit 0 with final line `PHASE 2 ORACLE: PASS` plus the plan-set's
+fresh-context adversarial review. [#733]'s
 OpenSpec track rides alongside (per the 2026-07-20 re-scope): new
 normative text Waves 1-2 author is born with atom IDs and goes through
 the OpenSpec claim flow; the rev/lint machinery (the re-scoped Phase 1)
