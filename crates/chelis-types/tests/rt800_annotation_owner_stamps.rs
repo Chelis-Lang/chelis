@@ -147,3 +147,52 @@ fn owner_stamps_are_isolated_across_context_and_parallel_sessions() {
         assert_eq!(app_stamps, vec![true]);
     }
 }
+
+#[test]
+fn structural_child_roles_do_not_require_runtime_owner_stamps() {
+    let fixtures = [
+        (
+            "grad wrt selector",
+            "(defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))
+             (def {} f (fn {} (params {} x) (var {} x)))
+             (def {} g (grad {} (var {} f) (lit {type: (t-prim {} int32)} 0)))",
+        ),
+        (
+            "vmap axis selector",
+            "(defsig {} f (t-fn {}
+                (t-tensor {} (d-lit {} 2) (t-prim {} f32))
+                (t-prim {} f32)))
+             (def {} f (fn {} (params {} x) (lit {type: (t-prim {} f32)} 1.0)))
+             (def {} g (vmap {} (var {} f) (lit {type: (t-prim {} int32)} 0)))",
+        ),
+        (
+            "tuple and record selectors with cast type syntax",
+            "(deftype {} Box ()
+                (variant {} Box (field {} value (t-prim {} int64))))
+             (def {} pair (tuple {}
+                (cast {} (lit {type: (t-prim {} int32)} 1) (t-prim {} int64))
+                (record {} Box (kv {} value
+                    (cast {} (lit {type: (t-prim {} int32)} 2) (t-prim {} int64))))))
+             (def {} selected (tuple-get {} (var {} pair)
+                (lit {type: (t-prim {} int32)} 1)))
+             (def {} answer (access {} (var {} selected) value))",
+        ),
+        (
+            "let binders and match patterns",
+            "(def {} answer
+                (let {} (bind {} x (lit {type: (t-prim {} int32)} 1))
+                    (match {} (var {} x)
+                        (arm {} (pat-lit {} 1) ()
+                            (lit {type: (t-prim {} int32)} 2))
+                        (arm {} (pat-as {} y (pat-wild {})) ()
+                            (var {} y)))))",
+        ),
+    ];
+
+    for (label, source) in fixtures {
+        let program = chelis_deep::parser::parse_str(source).expect("valid Deep fixture");
+        check_ir_program(&program).unwrap_or_else(|result| {
+            panic!("{label} must classify structural children outside runtime ownership: {result:?}")
+        });
+    }
+}

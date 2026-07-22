@@ -8,6 +8,7 @@ const ERRORS: &str = include_str!("../src/errors.rs");
 const DEEP_TYPE: &str = include_str!("../src/deep_type.rs");
 const OPACITY: &str = include_str!("../src/opacity.rs");
 const SESSION: &str = include_str!("../src/session.rs");
+const DEEP_VALIDATE: &str = include_str!("../../chelis-deep/src/validate.rs");
 
 #[test]
 fn binder_and_signature_resolution_have_no_ambient_symbols() {
@@ -115,5 +116,38 @@ fn checked_results_share_one_totality_finalizer() {
     assert_eq!(
         constructor_calls, 0,
         "result paths must not bypass finalize_checked_program; found {constructor_calls} direct constructors"
+    );
+}
+
+#[test]
+fn annotation_ownership_uses_the_canonical_exhaustive_child_role_table() {
+    for role in [
+        "RuntimeExpr",
+        "Syntax",
+        "Selector",
+        "Binder",
+        "Type",
+        "ExplicitInferenceBypass",
+    ] {
+        assert!(
+            INFER.contains(role),
+            "the shared child ownership classifier must name the `{role}` role"
+        );
+    }
+    assert!(
+        INFER.contains("child_stamp_role("),
+        "registration, annotation, and finalization need one shared child-role classifier"
+    );
+    assert!(
+        INFER.contains("chelis_deep::validate::VALID_TAGS"),
+        "classifier completeness must be checked against the canonical Deep vocabulary"
+    );
+    assert!(
+        DEEP_VALIDATE.contains("pub const VALID_TAGS"),
+        "the source contract expects chelis-deep to remain the vocabulary owner"
+    );
+    assert!(
+        !INFER.contains("unwrap_or(ChildStampRole::RuntimeExpr)"),
+        "unknown child roles must never silently default to runtime ownership"
     );
 }
