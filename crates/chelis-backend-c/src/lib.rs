@@ -3,6 +3,7 @@
 pub mod blas;
 pub mod emit;
 pub mod emitted_expr;
+mod host_abi;
 pub mod host_emit;
 pub mod memory;
 pub mod toolchain;
