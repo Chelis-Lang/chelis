@@ -167,6 +167,10 @@ fn malformed_policies_fail_loudly() {
             "not comments or negations",
         ),
         (
+            "version = 1\nspec = \"spec/01-nomenclature.md\"\n[[exclude]]\npattern = \"# generated/\"\nclass = \"generated\"\ncross_ref = \"§12.2\"\n",
+            "not comments or negations",
+        ),
+        (
             "version = 1\nspec = \"spec/01-nomenclature.md\"\n[[exclude]]\npattern = \"\"\nclass = \"generated\"\ncross_ref = \"§12.2\"\n",
             "non-empty",
         ),
@@ -301,6 +305,53 @@ fn explicit_excluded_roots_are_linted_but_nested_exclusions_still_prune() {
 
     let explicit_file = walked(&generated.join("keep.ch"));
     assert_eq!(explicit_file, vec![String::new()]);
+}
+
+#[test]
+fn exact_file_patterns_prune_nested_files_but_not_explicit_file_roots() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    write_policy(root, &exclusion("/blocked.ch", "immutable", "§12.2"));
+    let blocked = root.join("blocked.ch");
+    fs::write(&blocked, "def blocked() = 1\n").unwrap();
+    fs::write(root.join("visible.ch"), "def visible() = 1\n").unwrap();
+
+    let names = walked(root);
+    assert!(names.iter().any(|path| path == "visible.ch"));
+    assert!(!names.iter().any(|path| path == "blocked.ch"));
+
+    let policy = TraversalPolicy::load_for(root).unwrap();
+    assert!(policy.is_excluded(&blocked, false));
+    assert_eq!(walked(&blocked), vec![String::new()]);
+}
+
+#[test]
+fn combined_hot_path_and_explain_matchers_agree() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    write_policy(
+        root,
+        &format!(
+            "{}\n{}",
+            exclusion("/generated/", "generated", "§12.2"),
+            exclusion("/blocked.ch", "immutable", "§12.2")
+        ),
+    );
+    let policy = TraversalPolicy::load_for(root).unwrap();
+
+    for (path, is_dir) in [
+        (root.join("generated"), true),
+        (root.join("blocked.ch"), false),
+        (root.join("visible.ch"), false),
+        (root.join("other"), true),
+    ] {
+        assert_eq!(
+            policy.is_excluded(&path, is_dir),
+            policy.exclusion_for(&path, is_dir).is_some(),
+            "combined and explain matchers disagreed for {}",
+            path.display()
+        );
+    }
 }
 
 #[test]

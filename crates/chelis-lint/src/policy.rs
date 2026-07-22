@@ -49,6 +49,8 @@ struct CompiledExclusion {
 #[derive(Debug)]
 pub struct TraversalPolicy {
     repository_root: Option<PathBuf>,
+    matcher: Gitignore,
+    may_exclude_files: bool,
     exclusions: Vec<CompiledExclusion>,
 }
 
@@ -97,8 +99,18 @@ impl TraversalPolicy {
             )?);
         }
 
+        let combined_policy_path = repository_policy
+            .as_deref()
+            .unwrap_or_else(|| Path::new(SHIPPED_POLICY_PATH));
+        let matcher = compile_combined_matcher(baseline_root, combined_policy_path, &exclusions)?;
+        let may_exclude_files = exclusions
+            .iter()
+            .any(|compiled| !is_directory_only_pattern(&compiled.exclusion.pattern));
+
         Ok(Self {
             repository_root,
+            matcher,
+            may_exclude_files,
             exclusions,
         })
     }
@@ -107,6 +119,16 @@ impl TraversalPolicy {
         self.repository_root.as_deref()
     }
 
+    /// Return whether `path` is excluded using the combined hot-path matcher.
+    pub fn is_excluded(&self, path: &Path, is_dir: bool) -> bool {
+        (is_dir || self.may_exclude_files) && self.matcher.matched(path, is_dir).is_ignore()
+    }
+
+    /// Explain the first policy entry excluding `path`.
+    ///
+    /// The walker uses [`Self::is_excluded`] so normal traversal evaluates
+    /// one combined glob set. Per-entry matchers are retained only for this
+    /// lower-frequency explainability path.
     pub fn exclusion_for(&self, path: &Path, is_dir: bool) -> Option<&TraversalExclusion> {
         self.exclusions
             .iter()
@@ -204,6 +226,40 @@ fn compile_exclusions(
             Ok(CompiledExclusion { exclusion, matcher })
         })
         .collect()
+}
+
+fn is_directory_only_pattern(pattern: &str) -> bool {
+    let normalized = if pattern.ends_with("\\ ") {
+        pattern
+    } else {
+        pattern.trim_end()
+    };
+    normalized.ends_with('/')
+}
+
+fn compile_combined_matcher(
+    root: &Path,
+    policy_path: &Path,
+    exclusions: &[CompiledExclusion],
+) -> Result<Gitignore, TraversalPolicyError> {
+    let mut builder = GitignoreBuilder::new(root);
+    builder.allow_unclosed_class(false);
+    for compiled in exclusions {
+        builder
+            .add_line(None::<PathBuf>, &compiled.exclusion.pattern)
+            .map_err(|source| TraversalPolicyError::Pattern {
+                path: policy_path.to_path_buf(),
+                pattern: compiled.exclusion.pattern.clone(),
+                source,
+            })?;
+    }
+    builder
+        .build()
+        .map_err(|source| TraversalPolicyError::Pattern {
+            path: policy_path.to_path_buf(),
+            pattern: "<combined policy>".to_string(),
+            source,
+        })
 }
 
 fn verify_cross_refs(
@@ -333,6 +389,38 @@ impl std::error::Error for TraversalPolicyError {
             Self::Toml { source, .. } => Some(source),
             Self::Pattern { source, .. } => Some(source),
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn directory_only_fast_path_matches_ignore_parser_edges() {
+        let cases = [
+            ("archive/", "archive"),
+            ("archive/   ", "archive"),
+            ("archive/\\ ", "archive/ "),
+            ("archive\\/", "archive"),
+            ("archive", "archive"),
+            ("/blocked.ch", "blocked.ch"),
+            ("\\!literal", "!literal"),
+        ];
+
+        for (pattern, candidate) in cases {
+            let mut builder = GitignoreBuilder::new(".");
+            builder.allow_unclosed_class(false);
+            builder.add_line(None::<PathBuf>, pattern).unwrap();
+            let matcher = builder.build().unwrap();
+            let parser_directory_only = matcher.matched(candidate, true).is_ignore()
+                && !matcher.matched(candidate, false).is_ignore();
+            assert_eq!(
+                is_directory_only_pattern(pattern),
+                parser_directory_only,
+                "fast-path classification drifted for {pattern:?}"
+            );
         }
     }
 }

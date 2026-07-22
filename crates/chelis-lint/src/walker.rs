@@ -34,9 +34,7 @@ pub fn walk(
                 return true;
             }
             let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
-            policy_for_filter
-                .exclusion_for(entry.path(), is_dir)
-                .is_none()
+            !policy_for_filter.is_excluded(entry.path(), is_dir)
         });
 
     let mut out = Vec::new();
