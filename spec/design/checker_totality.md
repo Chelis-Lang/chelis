@@ -4,10 +4,8 @@
 issue: [#731].
 **Owning specs:** `spec/03-deep-syntax.md` (the 62-tag closed vocabulary),
 `spec/04-type-system.md` (what "checked" means per construct; its §10
-carries this plan's decided contract as current blockquote authorities
-[04-TOT-1..3], whose semantics this plan ratifies independently of their
-later chelis#733 migration through the pinned Buoy shell-side integration),
-the repo Contract Invariants ("if a command reports perfect success, its error list
+carries the normative contract atoms [04-TOT-1..3]), the repo
+Contract Invariants ("if a command reports perfect success, its error list
 must be empty"), and the audit record in
 `docs/investigations/numeric_audit_next_sweeps.md` (sweep 6) /
 `docs/investigations/numeric_audit_structural_prevention.md` (item 5).
@@ -36,18 +34,16 @@ the owning inference epoch; and one finalizer validates the annotated tree
 before the session boundary may return success. Phase 3 remains the separate
 compile-time exhaustiveness ratchet for the next Deep tag.
 
-**Scope verdict** (the question this document answers first): the immediate
-fix is genuinely SMALL (one checker case + one loud wildcard + the [#710]
-guard pushes - Phase 1 is days, not weeks). What merits design is the
-ratchet: (a) a **type-state change** that makes a silent `Type::Error`
-*unconstructible* - the variant carries a witness token obtainable only by
-pushing a diagnostic or propagating an existing error - and (b) the
-**`DeepTag` enum** at the dispatch chokepoints, so that the day tag 63 is
-added, every consumer that has not decided what to do with it stops
-compiling. No rewrite; the Deep AST keeps its shape; only dispatch entry
-points and the `Type::Error` variant change.
+## Phase boundaries
 
-## Shipped Phase 2 architecture
+Phase 1 provides the loud checker cases for the known holes. Phase 2 makes a
+silent `Type::Error` unconstructible by coupling fresh error types to the
+authoritative diagnostic session, preserving inferred type provenance through
+annotation, and validating every successful checked result. Phase 3 adds the
+`DeepTag` enum at dispatch chokepoints so that a new tag makes every undecided
+consumer fail to compile. The Deep AST representation remains unchanged.
+
+## Phase 2 architecture
 
 The current implementation has one explicit ownership chain:
 
@@ -74,10 +70,13 @@ The current implementation has one explicit ownership chain:
    Registration and finalization use one exhaustive child-role table:
    `RuntimeExpr`, `Syntax`, `Selector`, `EffectHandler`, `Binder`, `Type`, and
    `ExplicitInferenceBypass`. `EffectHandler` is deliberately effects-owned;
-   the handled body remains a type-owned runtime child.
-6. Annotation consumes the completed epoch's canonical owner stamps. It does
-   not semantically re-infer expressions with a fresh `VarGen`/`Subst`; a
-   missing or conflicting owner write is a diagnostic, never a default type.
+   the handled body remains a type-owned runtime child. During `finish_root`,
+   the final substitution is applied to every recorded owner write,
+   conflicting writes are rejected, and canonical types for stamp-required
+   owners remain available through annotation.
+6. Annotation consumes those finalized canonical owner types. It does not
+   semantically re-infer expressions with a fresh `VarGen`/`Subst`; a missing
+   or conflicting owner write is a diagnostic, never a default type.
 7. `finalize_checked_program` checks fresh inference results: the annotated
    runtime tree and pattern/function stamps, with input and output signature
    metadata as structural backstops. There is no public raw `from_parts` or
@@ -86,19 +85,17 @@ The current implementation has one explicit ownership chain:
    atom, child, and metadata entry is identical to the checked input except
    the effects-owned `effects` entry, preserves the original type environment,
    signature inference, and linearity, and reruns totality validation. A
-   violation maps to `EffectErrorKind::TypeTotality` exactly once.
-   `CheckedProgram::compose` is the distinct trusted operation that combines
-   two already-successful checked halves.
+   violation maps to `EffectErrorKind::TypeTotality` exactly once. The other
+   checked-result operations have disjoint ownership:
+   `CheckedProgram::with_linearity` changes only linearity metadata, while
+   `CheckedProgram::compose` combines two already-successful, context-stacked
+   checked halves. Neither operation rewrites type-owned tree structure.
 8. Recursive callable availability is planned by the canonical function SCC
    schedule. Only a genuinely recursive SCC receives provisional monomorphic
    bindings; its members infer, unify, remove the provisional entries, and
    generalize as a unit. Acyclic generic helpers stay polymorphic, bare
    acyclic forward calls retain textual semantics, and no diagnostic is
    erased after it has been reported.
-
-PR #802's checker snapshot is advisory evidence only. The active specs, code,
-and executable tests above are the authority; this document does not derive or
-invent atom identifiers or content hashes from that snapshot.
 
 ## Why the default is the bug, not the instance
 
@@ -247,8 +244,8 @@ pub enum Type {
 ```
 
 - `report` is the ONLY path that turns a fresh problem into `Type::Error`,
-  and it pushes the diagnostic in the same expression - the two can no
-  longer be separated by a refactor, a review miss, or a new contributor.
+  and it pushes the diagnostic in the same expression; the two operations
+  cannot diverge.
 - `propagate` preserves cascade suppression exactly as today: a node whose
   child is `Type::Error(w)` may type itself `Type::Error(propagate(w))`
   without re-reporting.
@@ -274,7 +271,7 @@ context construction, and the totality invariant forbids `Type::Error` in a
 successful result. Cache envelopes verify format/build identity and byte
 integrity, but deserialization does not rerun semantic checking; cache bytes
 are a trusted internal artifact. This boundary is documented in the witness,
-type-context, and compiler-api cache module docs (open question 2).
+type-context, and compiler-api cache module docs.
 
 ### C3.1 Deep type/dimension resolution boundary (chelis#756)
 
@@ -343,16 +340,15 @@ The exact Deep grammar and binder rules are normative in spec/03 §2.5.1/§2.6.
    loud arm.
 3. **The canary stays forever**: the wrapper battery is cheap, runs in the
    default suite, and is the behavioral proof the structural claims cash
-   out. New wrapper constructs added to the language get a row in it as
-   part of landing (a one-line reviewer checklist item, recorded here).
-   Known fixture caveat (PR #757): six of the eleven wrapper strings are
+   out. Every new wrapper construct SHALL add a positive and negative row in
+   the same change set. Six legacy wrapper strings are
    parse-rejected Surf as written, so those rows score below 1 via the
    parser, not the checker; re-probed with corrected syntax, the
    ill-typed variants ARE checker-caught, so the coverage claim
-   survives. Fixtures corrected at Phase 1 (B2.1: rows may be fixed to
-   test what they claim, never removed or weakened).
-4. **The fitness-honesty corpus** (2026-07 review integration): a CI
-   suite of known-ill-typed programs - the wrapper battery plus every
+   survives. Rows may be corrected to test what they claim, but never removed
+   or weakened.
+4. **The fitness-honesty corpus**: the permanent CI suite contains
+   known-ill-typed programs - the wrapper battery plus every
    census-verified silent-hole repro ([#709]/[#710]/[#755]/[#756] and
    future finds) - asserting every member scores strictly below 1.0;
    any member scoring 1.0 fails the build. This is the continuous,
@@ -586,7 +582,7 @@ the scratch variant deleted); the canary and full matrix stay green.
 | 2 | the future supply of silent exemptions (type-state) |
 | 3 | the future supply of undecided TAGS (compile-time totality) |
 
-## Open questions and where they get decided
+## Decisions and remaining questions
 
 | # | question | decided in | recorded where |
 |---|---|---|---|
@@ -595,14 +591,14 @@ the scratch variant deleted); the canary and full matrix stay green.
 | 3 | whether printers/desugar also migrate to `DeepTag` (nice-to-have; they are not chokepoints) | Phase 3, may defer | this doc |
 | 4 | score semantics for `UnknownForm`/`MalformedForm` | DECIDED 2026-07-17: severity parity with `TypeMismatch` (the existing 0.5-class precedent), no new weight class. The invariant that matters - any pushed error forces score < 1.0 - is locked by §C4.4's corpus independently of the weights, so calibration can move later without touching it | scoring code + this doc |
 
-## The one-sentence summary for a reviewer
+## Contract summary
 
-Make the checker's default loud (one wildcard, one new case, the [#710]
-guards), then take the pen away twice: `Type::Error` without a pushed
-diagnostic becomes unconstructible (witness token), and a Deep tag without
-a checker disposition becomes uncompilable (`DeepTag` exhaustive matches) -
-with an always-on invariant (empty errors implies no `Type::Error` in the
-tree) standing guard over both claims.
+The checker rejects unsupported or malformed constructs loudly.
+`Type::Error` without an authoritative pushed diagnostic is unconstructible,
+and the always-on finalizer enforces that successful checked output contains
+neither an error type nor a missing authoritative owner stamp. Phase 3 makes a
+Deep tag without a checker disposition uncompilable through exhaustive
+`DeepTag` matching.
 
 [#696]: https://github.com/Chelis-Lang/chelis/pull/696
 [#703]: https://github.com/Chelis-Lang/chelis/issues/703

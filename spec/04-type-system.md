@@ -2329,14 +2329,17 @@ backstops. Annotation consumes canonical stamps from the owning
 `InferenceProduct` epoch; it does not semantically re-infer a node under a
 fresh substitution. The exhaustive child-role classification includes an
 effects-owned `EffectHandler` payload and a type-owned handled body. Public raw
-`from_parts`/`try_from_parts` reconstruction does not exist. The sole external
-transformation is fallible `CheckedProgram::try_with_effect_annotations`: it
-requires identical roots, spans, atoms, children, and all metadata except the
-effects-owned `effects` entry; preserves the checked type environment,
-signature inference, and linearity; and reruns totality validation. The
-effects pass maps a violation to one `TypeTotality` error.
-`CheckedProgram::compose` remains separate: it combines two already-successful
-checked halves.)*
+`from_parts`/`try_from_parts` reconstruction does not exist. The effects-owned
+tree transformation is fallible
+`CheckedProgram::try_with_effect_annotations`: it requires identical roots,
+spans, atoms, children, and all metadata except the effects-owned `effects`
+entry; preserves the checked type environment, signature inference, and
+linearity; and reruns totality validation. The
+effects pass maps a violation to one `TypeTotality` error. Other operations
+have disjoint ownership: `CheckedProgram::with_linearity` changes only
+linearity metadata, and `CheckedProgram::compose` combines two
+already-successful, context-stacked checked halves. Neither rewrites
+type-owned tree structure.)*
 
 *(The Surf-reachable chelis#755 field-access and chelis#756 deep-type sites are
 closed here. Deep type and dimension resolution has one centralized, located,
