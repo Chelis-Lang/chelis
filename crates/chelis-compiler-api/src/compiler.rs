@@ -2298,15 +2298,9 @@ fn host_only_builtin_error(name: &str, target: CompileTarget) -> CompilerError {
         CompileTarget::C => "c",
         CompileTarget::Hip => "hip",
     };
-    let unsupported = chelis_types::unsupported::Unsupported::compiled_host_only_builtin(
-        name,
-        target_label,
-    );
-    stage_error(
-        "compile",
-        unsupported.to_string(),
-        "unsupported_feature",
-    )
+    let unsupported =
+        chelis_types::unsupported::Unsupported::compiled_host_only_builtin(name, target_label);
+    stage_error("compile", unsupported.to_string(), "unsupported_feature")
 }
 
 /// Reject direct host-runtime-only calls on checked Deep before host lowering

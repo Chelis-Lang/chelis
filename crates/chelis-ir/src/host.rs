@@ -1833,10 +1833,7 @@ pub fn host_program_uses_builtin<T>(program: &HostProgram<T>, builtin: &str) -> 
 /// inline callback) deliberately has no standalone compiled representation.
 /// The walk covers the whole checked program, including nested callback and
 /// otherwise-unreachable function bodies.
-pub fn find_direct_builtin_call(
-    program: &CheckedProgram,
-    builtins: &[&str],
-) -> Option<String> {
+pub fn find_direct_builtin_call(program: &CheckedProgram, builtins: &[&str]) -> Option<String> {
     fn find(expr: &Expr, builtins: &[&str]) -> Option<String> {
         match expr {
             Expr::List(list, _) => {
@@ -2464,7 +2461,14 @@ fn lower_host_function(
     let fn_type_parts = declared_fn_type_expr
         .as_ref()
         .and_then(parse_fn_type_expr_parts);
-    let (param_tys, ret_ty) = ty_expr
+    // Always parse the canonical declared signature when one exists. Some
+    // callers (notably summary classification) intentionally do not carry
+    // the enclosing `def`'s type child, but they must not re-lower the same
+    // checked function under fresh inference variables: that loses symbolic
+    // dimension provenance and can turn a valid tensor helper into a false
+    // Form-3 materialization rejection.
+    let (param_tys, ret_ty) = declared_fn_type_expr
+        .as_ref()
         .and_then(parse_fn_type_expr)
         .or_else(|| expr_fn_type(body))
         .or_else(|| lookup_declared_fn_type(program, name))
