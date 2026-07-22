@@ -104,7 +104,7 @@ pub fn codegen_host_program(
     // header generation can re-interpret logical types independently.
     let abi_program = host_abi::project_program(program)?;
     let c_source = host_emit::emit_host_abi_program(&abi_program, func_name)?;
-    let h_header = host_emit::emit_host_abi_header(&abi_program, func_name);
+    let h_header = host_emit::emit_host_abi_header(&abi_program, func_name)?;
     let needs_blas = c_source.contains("#include \"chelis_blas.h\"")
         || c_source.contains("cblas_sgemm(")
         || c_source.contains("cblas_dgemm(")

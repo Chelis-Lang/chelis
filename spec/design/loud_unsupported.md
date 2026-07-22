@@ -559,6 +559,18 @@ never represented by a null function pointer or numeric value. An expression
 node may inhabit only its resolved ABI type: in particular, `Unit` emission
 cannot satisfy a function, callback, or numeric ABI expectation.
 
+The C ABI vocabulary distinguishes a typed callback declarator from a
+first-class function value. General `ConcreteHostType -> HostAbiType`
+conversion rejects `Function`; the callback constructor is private and is
+available only for declared callback parameters and direct statically-known
+callback arguments. It recursively requires ordinary value ABIs for every
+parameter and result. A callback therefore has no standalone C type spelling,
+and the former `Function -> void *` arm does not exist. Function results,
+bindings, ADT fields, collection elements, dynamic callback selection, and
+indirect values cannot acquire the callback variant. Both public compiler APIs
+cross this same projection and return its structured `Unsupported` before any
+C source or header is produced.
+
 Positive/negative parity covers: every concrete primitive; each named variable
 kind; missing versus malformed syntax; empty-list inference; `Never`
 value-boundary rejection; supported ABI representations; and known logical

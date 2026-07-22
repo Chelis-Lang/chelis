@@ -242,6 +242,8 @@ def endpoint_violations(root: Path) -> list[str]:
             Path("crates/chelis-ir/src/host.rs"),
             "fn lookup_adt_ctor_details_for_type(",
         ),
+        (Path("crates/chelis-backend-c/src/host_abi.rs"), '"void*"'),
+        (Path("crates/chelis-backend-c/src/host_abi.rs"), '"void *"'),
     )
     required = (
         (

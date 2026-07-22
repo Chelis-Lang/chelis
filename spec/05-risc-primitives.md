@@ -1210,6 +1210,11 @@ policy remain owned by chelis#729. The current C decision selects exact
 while f16/bf16 scalar values reject at selection until chelis#729 supplies
 exact storage and rounding; an accidentally-green widened value is not a
 supported ABI cell.
+Typed C callback parameters and direct statically-known callback arguments
+cross a private callback-declarator path; general function values do not.
+Function results, stored function values, and dynamically selected callables
+return `Unsupported` before emission, and no function type maps to `void *`,
+zero, or a raw call target.
 Residuals are per-atom noted below; [05-UNS-4]'s gate demotion is that
 plan's Phase 3. The delivery plan and full elaboration (the failure
 channel, the census, the typed ratchets) is
