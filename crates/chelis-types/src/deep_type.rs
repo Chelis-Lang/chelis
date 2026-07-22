@@ -573,10 +573,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         let error = self
             .diagnostic_location()
             .map_or(error.clone(), |location| location.attach(error));
-        report_witness(
-            self.errors,
-            error,
-        )
+        report_witness(self.errors, error)
     }
 
     fn type_error(&mut self, message: String) -> ErrorWitness {
@@ -584,10 +581,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         let error = self
             .diagnostic_location()
             .map_or(error.clone(), |location| location.attach(error));
-        report_witness(
-            self.errors,
-            error,
-        )
+        report_witness(self.errors, error)
     }
 }
 

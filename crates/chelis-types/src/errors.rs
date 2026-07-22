@@ -2,10 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::Type;
-use crate::unify::{TypeError, TypeErrorKind};
 #[doc(hidden)]
 pub use crate::session::DiagnosticSink;
+use crate::types::Type;
+use crate::unify::{TypeError, TypeErrorKind};
 
 /// Zero-sized witness that a `Type::Error` was minted HONESTLY: either a
 /// diagnostic reached the error vector (via [`report`]) or an existing
@@ -111,10 +111,7 @@ pub fn report(errors: &mut DiagnosticSink<'_>, error: CheckError) -> Type {
 /// cannot manufacture a usable [`Type`] after malformed input, so it returns
 /// this witness through `Result` and requires its caller to propagate the
 /// failure explicitly. The constructor remains private to this module.
-pub(crate) fn report_witness(
-    errors: &mut DiagnosticSink<'_>,
-    error: CheckError,
-) -> ErrorWitness {
+pub(crate) fn report_witness(errors: &mut DiagnosticSink<'_>, error: CheckError) -> ErrorWitness {
     errors.push(error);
     ErrorWitness(())
 }

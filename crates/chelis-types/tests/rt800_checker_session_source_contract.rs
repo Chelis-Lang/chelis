@@ -50,7 +50,11 @@ fn witness_minting_requires_the_session_sink() {
 
 #[test]
 fn sink_construction_and_storage_stay_inside_the_owner() {
-    for (label, source) in [("infer", INFER), ("errors", ERRORS), ("deep_type", DEEP_TYPE)] {
+    for (label, source) in [
+        ("infer", INFER),
+        ("errors", ERRORS),
+        ("deep_type", DEEP_TYPE),
+    ] {
         assert!(
             !source.contains("let mut sink = DiagnosticSink {"),
             "{label} must only receive a sink; construction belongs to session.rs"

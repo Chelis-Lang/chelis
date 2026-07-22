@@ -35,7 +35,11 @@ fn einsum_with_only_equation_and_one_operand_reports_one_arity_root() {
                 (lit {type: (t-prim {} string)} "i->i")
                 (lit {type: (t-prim {} f32)} 1.0)))"#,
     );
-    assert_eq!(errors.len(), 1, "einsum arity must have one root: {errors:?}");
+    assert_eq!(
+        errors.len(),
+        1,
+        "einsum arity must have one root: {errors:?}"
+    );
     assert!(matches!(errors[0].kind, CheckErrorKind::ArityMismatch));
     assert!(
         errors[0].message.contains("expected 3 args, got 2"),
@@ -45,22 +49,21 @@ fn einsum_with_only_equation_and_one_operand_reports_one_arity_root() {
 
 #[test]
 fn cast_operand_and_target_failures_remain_two_independent_roots() {
-    let errors = deep_errors(
-        "(def {} bad (cast {} (var {} missing_value) (t-prim {} f32 extra)))",
-    );
+    let errors = deep_errors("(def {} bad (cast {} (var {} missing_value) (t-prim {} f32 extra)))");
     assert_eq!(
         errors.len(),
         2,
         "the bad operand and malformed target are independent roots: {errors:?}"
     );
     assert!(
-        errors.iter().any(|error| error.message.contains("missing_value")),
+        errors
+            .iter()
+            .any(|error| error.message.contains("missing_value")),
         "{errors:?}"
     );
     assert!(
         errors.iter().any(|error| {
-            matches!(error.kind, CheckErrorKind::MalformedForm)
-                && error.message.contains("t-prim")
+            matches!(error.kind, CheckErrorKind::MalformedForm) && error.message.contains("t-prim")
         }),
         "{errors:?}"
     );

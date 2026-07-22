@@ -6,11 +6,9 @@
 //! [`crate::errors::ErrorWitness`] can never be minted into a throwaway
 //! `Vec<CheckError>`.
 
-use crate::errors::CheckError;
 use crate::context::TypeEnv;
-use crate::infer::{
-    CheckedProgram, InferResult, InferStats, SignatureInferenceMetadata,
-};
+use crate::errors::CheckError;
+use crate::infer::{CheckedProgram, InferResult, InferStats, SignatureInferenceMetadata};
 
 /// The sole destination accepted by witness-minting checker code.
 ///
@@ -85,29 +83,48 @@ mod authoritative_type_stamp_tests {
         let (missing, errors) = run(TypeStampMutationCase::Missing);
         assert!(missing);
         assert_eq!(errors.len(), 1, "missing lookup must report exactly once");
-        assert!(errors[0].message.contains("missing authoritative type stamp"));
+        assert!(
+            errors[0]
+                .message
+                .contains("missing authoritative type stamp")
+        );
     }
 
     #[test]
     fn compatible_repeated_owner_write_is_accepted() {
         let (resolved, errors) = run(TypeStampMutationCase::CompatibleRepeat);
         assert!(resolved);
-        assert!(errors.is_empty(), "compatible writes must agree: {errors:?}");
+        assert!(
+            errors.is_empty(),
+            "compatible writes must agree: {errors:?}"
+        );
     }
 
     #[test]
     fn incompatible_repeated_owner_write_is_loud() {
         let (_, errors) = run(TypeStampMutationCase::IncompatibleRepeat);
         assert_eq!(errors.len(), 1, "conflicting writes must report once");
-        assert!(errors[0].message.contains("conflicting authoritative type writes"));
+        assert!(
+            errors[0]
+                .message
+                .contains("conflicting authoritative type writes")
+        );
     }
 
     #[test]
     fn unregistered_synthesized_node_cannot_enter_owner_registry() {
         let (missing, errors) = run(TypeStampMutationCase::UnregisteredSynthesized);
         assert!(missing);
-        assert_eq!(errors.len(), 1, "unregistered lookup must report exactly once");
-        assert!(errors[0].message.contains("missing authoritative type stamp"));
+        assert_eq!(
+            errors.len(),
+            1,
+            "unregistered lookup must report exactly once"
+        );
+        assert!(
+            errors[0]
+                .message
+                .contains("missing authoritative type stamp")
+        );
     }
 }
 

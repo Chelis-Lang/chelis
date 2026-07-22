@@ -406,6 +406,208 @@ impl<'a> AnnotationResolutionContext<'a> {
     }
 }
 
+/// Semantic role of one tagged Deep node's child in checker-owned type
+/// stamping. This is deliberately distinct from the child's syntactic tag:
+/// a `lit` is a runtime expression under `app`, but the same shape is selector
+/// syntax in `tuple-get`, `grad`, or `vmap`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChildStampRole {
+    /// Traversed by ordinary expression inference.
+    RuntimeExpr,
+    /// Compiler/source syntax which is preserved verbatim.
+    Syntax,
+    /// A field, axis, projection, or transform selector.
+    Selector,
+    /// A declaration, parameter, or binding name.
+    Binder,
+    /// Type/dimension syntax resolved by its owning type consumer.
+    Type,
+    /// Traversed by a dedicated inference owner rather than `infer_expr` on
+    /// the structural parent (module declarations, patterns, helper nodes,
+    /// and synthesized pipe stages).
+    ExplicitInferenceBypass,
+}
+
+/// Exhaustive child-role table for the canonical closed Deep vocabulary.
+///
+/// Returning `None` is a loud version-skew signal, never permission to treat
+/// an unknown child as a runtime expression. The completeness test below
+/// iterates `chelis_deep::validate::VALID_TAGS`, the grammar's single source
+/// of truth, so adding a tag requires an explicit ownership decision here.
+fn child_stamp_role(tag: &str, index: usize, _arity: usize) -> Option<ChildStampRole> {
+    use ChildStampRole::{Binder, ExplicitInferenceBypass, RuntimeExpr, Selector, Syntax, Type};
+
+    Some(match tag {
+        // Module wrappers are not inferred as one expression. Their
+        // declarations each own a separate inference epoch.
+        "module" => {
+            if index == 0 {
+                Binder
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        "import" | "import-all" | "export" => Syntax,
+
+        // Declarations.
+        "def" => {
+            if index == 0 {
+                Binder
+            } else {
+                RuntimeExpr
+            }
+        }
+        "defsig" => {
+            if index == 0 {
+                Binder
+            } else {
+                Type
+            }
+        }
+        "deftype" | "typealias" | "variant" | "field" => {
+            if index == 0 {
+                Binder
+            } else {
+                Type
+            }
+        }
+        "defdim" => Binder,
+
+        // Expressions and their structural helper positions.
+        "fn" => {
+            if index == 0 {
+                Binder
+            } else {
+                RuntimeExpr
+            }
+        }
+        "app" | "if" | "block" | "tuple" | "par" | "handle-effect" | "jit" | "realize" | "copy"
+        | "borrow" | "unquote" | "splice" => RuntimeExpr,
+        "let" => {
+            if index == 0 {
+                ExplicitInferenceBypass
+            } else {
+                RuntimeExpr
+            }
+        }
+        "match" => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        "arm" => {
+            if index == 0 {
+                ExplicitInferenceBypass
+            } else {
+                RuntimeExpr
+            }
+        }
+        "var" | "lit" => Syntax,
+        "record" => {
+            if index == 0 {
+                Type
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        "access" => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Selector
+            }
+        }
+        "pipe" => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        "tuple-get" => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Selector
+            }
+        }
+        "record-update" => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+
+        // Pattern nodes are consumed by the primary pattern traversal.
+        "pat-var" => Binder,
+        "pat-lit" => Syntax,
+        "pat-ctor" | "pat-record" => {
+            if index == 0 {
+                Selector
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        "pat-tuple" => ExplicitInferenceBypass,
+        "pat-wild" => Syntax,
+        "pat-as" => {
+            if index == 0 {
+                Binder
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+
+        // Type and dimension nodes are owned recursively by DeepTypeResolver,
+        // never by expression annotation.
+        "t-prim" | "t-fn" | "t-tensor" | "t-adt" | "t-var" | "t-ref" | "t-unit" | "t-tuple"
+        | "d-name" | "d-var" | "d-lit" | "d-rank" => Type,
+
+        // Transform-specific selector/type positions.
+        "grad" | "vmap" => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Selector
+            }
+        }
+        "cast" => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Type
+            }
+        }
+
+        // Quoted children and effect/resource payloads are syntax data.
+        "quote" | "effects" | "resource" => Syntax,
+
+        // Structural helper nodes. `kv` is also used by pattern records, so
+        // its value/pattern slot is an explicit owning traversal in both
+        // contexts; canonical runtime values still record their normal stamp.
+        "params" => Binder,
+        "bind" => {
+            if index.is_multiple_of(2) {
+                Binder
+            } else {
+                RuntimeExpr
+            }
+        }
+        "kv" => {
+            if index == 0 {
+                Selector
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+
+        _ => return None,
+    })
+}
+
 /// One checker operation's typed inference result. The product is private,
 /// session-local, and never serialized: annotation consumes it immediately
 /// after the owning inference traversal completes.
@@ -447,7 +649,7 @@ impl InferenceProduct {
         }
     }
 
-    fn begin_root(&mut self, root: &deep::Expr) {
+    fn begin_root(&mut self, root: &deep::Expr, errors: &mut DiagnosticSink<'_>) {
         assert!(
             self.active_epoch.is_none(),
             "type-stamp epochs must not overlap"
@@ -459,7 +661,7 @@ impl InferenceProduct {
             required: HashMap::new(),
             writes: HashMap::new(),
         };
-        register_annotation_owners(root, &mut epoch);
+        register_annotation_owners(root, &mut epoch, errors);
         self.active_epoch = Some(epoch);
     }
 
@@ -599,10 +801,14 @@ fn internal_owner_stamp_error(message: String) -> CheckError {
     )
 }
 
-fn register_annotation_owners(expr: &deep::Expr, epoch: &mut TypeStampEpoch) {
+fn register_annotation_owners(
+    expr: &deep::Expr,
+    epoch: &mut TypeStampEpoch,
+    errors: &mut DiagnosticSink<'_>,
+) {
     let deep::Expr::List(list, _) = expr else {
         if let deep::Expr::MetaExpr(meta, _) = expr {
-            register_annotation_owners(&meta.expr, epoch);
+            register_annotation_owners(&meta.expr, epoch, errors);
         }
         return;
     };
@@ -620,10 +826,33 @@ fn register_annotation_owners(expr: &deep::Expr, epoch: &mut TypeStampEpoch) {
             return;
         }
     }
-    // Element 1 is metadata. Metadata is compiler/source context, not a
-    // runtime child owned by the expression inference traversal.
-    for child in list.elements.iter().skip(2) {
-        register_annotation_owners(child, epoch);
+    let kids = children(list);
+    for (index, child) in kids.iter().enumerate() {
+        match child_stamp_role(tag.unwrap_or("<untagged-list>"), index, kids.len()) {
+            Some(ChildStampRole::RuntimeExpr | ChildStampRole::ExplicitInferenceBypass) => {
+                register_annotation_owners(child, epoch, errors);
+            }
+            Some(
+                ChildStampRole::Syntax
+                | ChildStampRole::Selector
+                | ChildStampRole::Binder
+                | ChildStampRole::Type,
+            ) => {}
+            None if tag.is_none() => {
+                // Empty guards and other untagged structural lists carry no
+                // owner themselves. Preserve the historical recursive walk
+                // for malformed nested input; its owning checker will reject
+                // the shape before annotation is returned.
+                register_annotation_owners(child, epoch, errors);
+            }
+            None => {
+                errors.push(internal_owner_stamp_error(format!(
+                    "Deep tag `{}` has no child ownership classification",
+                    tag.unwrap_or("<untagged-list>")
+                )));
+                return;
+            }
+        }
     }
 }
 
@@ -649,7 +878,7 @@ pub(crate) fn run_type_stamp_mutation_case(
 ) -> bool {
     let owner = node_expr("app", vec![]);
     let mut product = InferenceProduct::default();
-    product.begin_root(&owner);
+    product.begin_root(&owner, errors);
     match case {
         TypeStampMutationCase::Missing => {
             product.finish_root(&Subst::new(), errors);
@@ -664,11 +893,7 @@ pub(crate) fn run_type_stamp_mutation_case(
         }
         TypeStampMutationCase::IncompatibleRepeat => {
             product.record_canonical(&owner, Type::Prim(Prim::Int64));
-            product.record_bypass(
-                &owner,
-                Type::Prim(Prim::String),
-                "incompatible test repeat",
-            );
+            product.record_bypass(&owner, Type::Prim(Prim::String), "incompatible test repeat");
             product.finish_root(&Subst::new(), errors);
             true
         }
@@ -704,7 +929,7 @@ pub(crate) fn run_finalization_mutation_case(
         FinalizationMutationCase::MissingRuntimeStamp => vec![runtime],
         FinalizationMutationCase::SilentErrorOwner => {
             let mut product = InferenceProduct::default();
-            product.begin_root(&runtime);
+            product.begin_root(&runtime, errors);
             product.record_canonical(&runtime, crate::errors::error_sentinel_for_test());
             product.finish_root(&Subst::new(), errors);
             annotate_ir_program(std::slice::from_ref(&runtime), &product, errors)
@@ -1059,14 +1284,7 @@ fn infer_program_with_product_in_session(
     // `(module {} name ...)` wrappers so declarations in every idiomatic
     // Surf source (every .ch starts with `module X`) get collected.
     let items = top_level_decl_items_with_modules(exprs);
-    collect_all_declarations(
-        &items,
-        &mut env,
-        &mut vg,
-        &mut subst,
-        &mut adt_reg,
-        errors,
-    );
+    collect_all_declarations(&items, &mut env, &mut vg, &mut subst, &mut adt_reg, errors);
 
     // Checker-enforced opacity (RFC D-CHECK): install the per-run
     // context so the inference hooks see module identity, exports,
@@ -1080,10 +1298,9 @@ fn infer_program_with_product_in_session(
     // declaration pass — without it, the entire HM checker is a no-op on
     // module-wrapped programs.
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
-    let declared_signatures =
-        collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
+    let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
     for (module, expr) in &items {
-        product.begin_root(expr);
+        product.begin_root(expr, errors);
         let decl_name = top_level_decl_name(expr);
         crate::opacity::set_current_item(
             crate::opacity::module_key_for_item(module.as_deref(), decl_name),
@@ -1235,14 +1452,7 @@ pub(crate) fn build_type_env_from_library_in_session(
     let annotation_context = AnnotationResolutionContext::root(&declared_signatures);
     let library_annotated: Vec<deep::Expr> = library_exprs
         .iter()
-        .map(|e| {
-            annotate_expr_with_scope(
-                e,
-                &product,
-                annotation_context,
-                errors,
-            )
-        })
+        .map(|e| annotate_expr_with_scope(e, &product, annotation_context, errors))
         .collect();
     log_sub("annotate_library_exprs_outer_loop", &mut sub_t);
     let library_ir_annotated = build_ir_type_env(&library_annotated);
@@ -1368,14 +1578,7 @@ pub(crate) fn build_compiled_library_context_in_session(
     let annotation_context = AnnotationResolutionContext::root(&declared_signatures);
     let library_annotated: Vec<deep::Expr> = library_exprs
         .iter()
-        .map(|e| {
-            annotate_expr_with_scope(
-                e,
-                &product,
-                annotation_context,
-                errors,
-            )
-        })
+        .map(|e| annotate_expr_with_scope(e, &product, annotation_context, errors))
         .collect();
     // Annotation also recurses (annotate_expr_with_scope); if it bailed on
     // low stack, reject rather than return a partially-annotated program.
@@ -1527,14 +1730,7 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
     let annotation_context = AnnotationResolutionContext::root(&declared_signatures);
     let library_annotated: Vec<deep::Expr> = library_exprs
         .iter()
-        .map(|e| {
-            annotate_expr_with_scope(
-                e,
-                &product,
-                annotation_context,
-                errors,
-            )
-        })
+        .map(|e| annotate_expr_with_scope(e, &product, annotation_context, errors))
         .collect();
     // Annotation also recurses (annotate_expr_with_scope); if it bailed on
     // low stack, reject rather than return a partially-annotated program.
@@ -1754,11 +1950,8 @@ pub(crate) fn check_typed_program_in_session(
         if !errors.is_empty() {
             return Err(stats);
         }
-        let checked = checked_program_from_parts_in_session(
-            annotated_exprs,
-            annotated_type_env,
-            errors,
-        );
+        let checked =
+            checked_program_from_parts_in_session(annotated_exprs, annotated_type_env, errors);
         if !errors.is_empty() {
             return Err(stats);
         }
@@ -1869,11 +2062,7 @@ fn infer_ir_program_with_env(
     let empty_inner = crate::context::TypeEnv::empty();
     let mut state = empty_inner.inner().clone();
     infer_ir_program_with_state(
-        exprs,
-        &mut state,
-        type_env,
-        /* run_validate_passes_on = */ None,
-        errors,
+        exprs, &mut state, type_env, /* run_validate_passes_on = */ None, errors,
     )
     .stats()
 }
@@ -1964,10 +2153,9 @@ fn infer_ir_program_with_state(
         .map(|v| v == "1")
         .unwrap_or(false);
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
-    let declared_signatures =
-        collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
+    let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
     for (declaration_index, (module, expr)) in items.iter().enumerate() {
-        product.begin_root(expr);
+        product.begin_root(expr, errors);
         let t0 = if detail_profile {
             Some(std::time::Instant::now())
         } else {
@@ -2070,7 +2258,11 @@ fn collect_ir_types_with_origins<'a>(
     }
 }
 
-fn validate_ir_program(exprs: &[deep::Expr], type_env: &IrTypeEnv, errors: &mut DiagnosticSink<'_>) {
+fn validate_ir_program(
+    exprs: &[deep::Expr],
+    type_env: &IrTypeEnv,
+    errors: &mut DiagnosticSink<'_>,
+) {
     detect_top_level_binding_cycles(exprs, errors);
     detect_trivial_non_terminating_fns(exprs, errors);
     let mut static_env = HashMap::new();
@@ -4161,10 +4353,7 @@ fn collect_eager_refs(
 /// ascriptions, defsig tensor types, parameter type annotations, literal
 /// type metadata, and any cast target that produces a tensor with an
 /// unsupported element precision.
-fn validate_tensor_precisions_in_program(
-    exprs: &[deep::Expr],
-    errors: &mut impl DiagnosticOutput,
-) {
+fn validate_tensor_precisions_in_program(exprs: &[deep::Expr], errors: &mut impl DiagnosticOutput) {
     let mut seen: HashSet<(String, String)> = HashSet::new();
     // Descend through `(module {} name ...)` wrappers so per-def dedup
     // keeps each def's tensor types in their own key space (otherwise
@@ -5922,8 +6111,7 @@ fn annotate_ir_program(
     errors: &mut DiagnosticSink<'_>,
 ) -> Vec<deep::Expr> {
     let items = top_level_decl_items_with_modules(exprs);
-    let declared_signatures =
-        collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
+    let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
     let annotation_context = AnnotationResolutionContext::root(&declared_signatures);
     exprs
         .iter()
@@ -5986,14 +6174,8 @@ fn annotate_expr_with_scope(
                 def_name.and_then(|name| annotation_context.declared_signature(name));
             let (annotated_children, fn_ty_override) = match tag {
                 Some("fn") => {
-                    let (kids, fn_ty) = annotate_fn_children(
-                        list,
-                        expr,
-                        product,
-                        None,
-                        annotation_context,
-                        errors,
-                    );
+                    let (kids, fn_ty) =
+                        annotate_fn_children(list, expr, product, None, annotation_context, errors);
                     (kids, Some(fn_ty))
                 }
                 // `(def name (fn ...))`: when the def has a separate
@@ -6013,9 +6195,14 @@ fn annotate_expr_with_scope(
                         declared_sig.map(|metadata| metadata.param_types.as_slice());
                     let annotated: Vec<deep::Expr> = kids
                         .iter()
-                        .map(|child| {
-                            if let (Some(declared), deep::Expr::List(fn_list, fn_span)) =
-                                (declared_param_types.as_ref(), child)
+                        .enumerate()
+                        .map(|(index, child)| {
+                            let role = child_stamp_role("def", index, kids.len());
+                            if let (
+                                Some(ChildStampRole::RuntimeExpr),
+                                Some(declared),
+                                deep::Expr::List(fn_list, fn_span),
+                            ) = (role, declared_param_types.as_ref(), child)
                                 && get_tag(fn_list) == Some("fn")
                             {
                                 let (fn_kids, fn_ty) = annotate_fn_children(
@@ -6039,7 +6226,10 @@ fn annotate_expr_with_scope(
                                 elements.extend(fn_kids);
                                 deep::Expr::List(deep::List { elements }, *fn_span)
                             } else {
-                                annotate_expr_with_scope(
+                                annotate_child_for_role(
+                                    "def",
+                                    index,
+                                    kids.len(),
                                     child,
                                     product,
                                     annotation_context,
@@ -6050,58 +6240,72 @@ fn annotate_expr_with_scope(
                         .collect();
                     (annotated, None)
                 }
-                Some("let") => (
-                    annotate_let_children(
-                        list,
-                        product,
-                        annotation_context,
-                        errors,
-                    ),
+                Some(tag) => (
+                    annotate_children_by_role(tag, list, product, annotation_context, errors),
                     None,
                 ),
-                Some("match") => (
-                    annotate_match_children(
-                        list,
-                        product,
-                        annotation_context,
-                        errors,
-                    ),
-                    None,
-                ),
-                // Type declarations and signatures crossed their owning
-                // fail-closed resolver before annotation began. Their `t-*`
-                // and `d-*` children are type syntax, not runtime
-                // expressions; preserve that validated output instead of
-                // redispatching (for example) `d-rank` through `infer_expr`.
-                Some("defsig" | "deftype" | "typealias") => (children(list).to_vec(), None),
-                _ => (
-                    children(list)
-                        .iter()
-                        .map(|child| {
-                            annotate_expr_with_scope(
-                                child,
-                                product,
-                                annotation_context,
-                                errors,
-                            )
-                        })
-                        .collect(),
-                    None,
-                ),
+                None => (children(list).to_vec(), None),
             };
 
             let mut elements = vec![
                 list.elements[0].clone(),
-                annotated_meta_map_with_override(
-                    list,
-                    expr,
-                    product,
-                    fn_ty_override,
-                    errors,
-                ),
+                annotated_meta_map_with_override(list, expr, product, fn_ty_override, errors),
             ];
             elements.extend(annotated_children);
             deep::Expr::List(deep::List { elements }, *span)
+        }
+    }
+}
+
+fn annotate_children_by_role(
+    tag: &str,
+    list: &deep::List,
+    product: &InferenceProduct,
+    annotation_context: AnnotationResolutionContext<'_>,
+    errors: &mut DiagnosticSink<'_>,
+) -> Vec<deep::Expr> {
+    let kids = children(list);
+    kids.iter()
+        .enumerate()
+        .map(|(index, child)| {
+            annotate_child_for_role(
+                tag,
+                index,
+                kids.len(),
+                child,
+                product,
+                annotation_context,
+                errors,
+            )
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn annotate_child_for_role(
+    parent_tag: &str,
+    index: usize,
+    arity: usize,
+    child: &deep::Expr,
+    product: &InferenceProduct,
+    annotation_context: AnnotationResolutionContext<'_>,
+    errors: &mut DiagnosticSink<'_>,
+) -> deep::Expr {
+    match child_stamp_role(parent_tag, index, arity) {
+        Some(ChildStampRole::RuntimeExpr | ChildStampRole::ExplicitInferenceBypass) => {
+            annotate_expr_with_scope(child, product, annotation_context, errors)
+        }
+        Some(
+            ChildStampRole::Syntax
+            | ChildStampRole::Selector
+            | ChildStampRole::Binder
+            | ChildStampRole::Type,
+        ) => child.clone(),
+        None => {
+            errors.push(internal_owner_stamp_error(format!(
+                "Deep tag `{parent_tag}` has no child ownership classification"
+            )));
+            child.clone()
         }
     }
 }
@@ -6267,6 +6471,10 @@ fn annotate_fn_children(
         Some(declared) => annotate_params_node(&kids[0], declared),
         None => kids[0].clone(),
     };
+    debug_assert_eq!(
+        child_stamp_role("fn", 0, kids.len()),
+        Some(ChildStampRole::Binder)
+    );
     // The params node is the binder owner's completed output. A typed
     // parameter is represented as `(name {type: ...})`, which is binder
     // syntax rather than an expression tagged `name`; recursively feeding it
@@ -6275,7 +6483,10 @@ fn annotate_fn_children(
     // the primary parameter owner, exactly once, through the session sink.
     let mut result = vec![annotated_params];
     if let Some(body) = kids.get(1) {
-        result.push(annotate_expr_with_scope(
+        result.push(annotate_child_for_role(
+            "fn",
+            1,
+            kids.len(),
             body,
             product,
             annotation_context,
@@ -6283,249 +6494,6 @@ fn annotate_fn_children(
         ));
     }
     (result, resolved_fn_ty)
-}
-
-fn annotate_let_children(
-    list: &deep::List,
-    product: &InferenceProduct,
-    annotation_context: AnnotationResolutionContext<'_>,
-    errors: &mut DiagnosticSink<'_>,
-) -> Vec<deep::Expr> {
-    let kids = children(list);
-    if kids.len() < 2 {
-        return kids.to_vec();
-    }
-
-    let annotated_bind = if let deep::Expr::List(bind_list, bind_span) = &kids[0] {
-        let bind_kids = children(bind_list);
-        let mut bind_elements = vec![bind_list.elements[0].clone(), bind_list.elements[1].clone()];
-        let mut i = 0;
-        while i + 1 < bind_kids.len() {
-            bind_elements.push(bind_kids[i].clone());
-            let value = annotate_expr_with_scope(
-                &bind_kids[i + 1],
-                product,
-                annotation_context,
-                errors,
-            );
-            bind_elements.push(value);
-            i += 2;
-        }
-        deep::Expr::List(
-            deep::List {
-                elements: bind_elements,
-            },
-            *bind_span,
-        )
-    } else {
-        annotate_expr_with_scope(
-            &kids[0],
-            product,
-            annotation_context,
-            errors,
-        )
-    };
-
-    vec![
-        annotated_bind,
-        annotate_expr_with_scope(
-            &kids[1],
-            product,
-            annotation_context,
-            errors,
-        ),
-    ]
-}
-
-fn annotate_match_children(
-    list: &deep::List,
-    product: &InferenceProduct,
-    annotation_context: AnnotationResolutionContext<'_>,
-    errors: &mut DiagnosticSink<'_>,
-) -> Vec<deep::Expr> {
-    let kids = children(list);
-    if kids.is_empty() {
-        return vec![];
-    }
-
-    let scrutinee = annotate_expr_with_scope(
-        &kids[0],
-        product,
-        annotation_context,
-        errors,
-    );
-    let mut result = vec![scrutinee];
-
-    for arm in &kids[1..] {
-        if let deep::Expr::List(arm_list, arm_span) = arm
-            && get_tag(arm_list) == Some("arm")
-        {
-            let arm_kids = children(arm_list);
-            // `pattern_vg` and `pattern_subst` are clones rather than
-            // shared refs with the outer state. The clone is safe
-            // because the primary inference pass (`infer_program` →
-            // `infer_top_level` → `infer_match`) has already executed
-            // the primary pattern traversal against the unshared outer `subst`,
-            // populating it with the same type-parameter unifications
-            // we're about to (re-)derive here. So the body annotation
-            // below using the outer `subst` sees the same mappings the
-            // pattern-binding stamper would have written to
-            // `pattern_subst`. If a future caller invokes
-            // `annotate_ir_program` against a `Subst` that hasn't been
-            // pre-populated by `infer_program`, this invariant breaks
-            // and body-annotation type variables go stale; that's a bug
-            // in the caller, not here.
-            let mut elements = vec![arm_list.elements[0].clone(), arm_list.elements[1].clone()];
-            if let Some(pattern) = arm_kids.first() {
-                // Stamp pattern-binding types onto `pat-var`/`pat-as`
-                // nodes so the linearity checker (which consumes the
-                // annotated Deep) can declare scope entries with the
-                // resolved binding type rather than `None`. Without
-                // this, a destructured tensor field's `&x` borrow
-                // fails the linearity check because `expr_type` can't
-                // resolve the binding's type. (closes #181)
-                let annotated_pattern = annotate_expr_with_scope(
-                    pattern,
-                    product,
-                    annotation_context,
-                    errors,
-                );
-                let annotated_pattern =
-                    stamp_pattern_binding_types(pattern, &annotated_pattern, product, errors);
-                elements.push(annotated_pattern);
-            }
-            if let Some(guard) = arm_kids.get(1) {
-                elements.push(annotate_expr_with_scope(
-                    guard,
-                    product,
-                    annotation_context,
-                    errors,
-                ));
-            }
-            if let Some(body) = arm_kids.get(2) {
-                elements.push(annotate_expr_with_scope(
-                    body,
-                    product,
-                    annotation_context,
-                    errors,
-                ));
-            }
-            result.push(deep::Expr::List(deep::List { elements }, *arm_span));
-            continue;
-        }
-        result.push(annotate_expr_with_scope(
-            arm,
-            product,
-            annotation_context,
-            errors,
-        ));
-    }
-
-    result
-}
-
-/// Walk a pattern AST and stamp the resolved binding type onto each
-/// `pat-var` (and `pat-as`) node's metadata map under the `type` key.
-///
-/// The binding type is looked up by name in `arm_env`, which was just
-/// populated by the primary pattern traversal. The owner product retains
-/// `pattern_subst` here so any post-unify substitutions (e.g. the ADT
-/// type-parameter pinning that happens when `pat-record` unifies the
-/// constructor's return ADT against the scrutinee) flow into the
-/// stamped metadata.
-///
-/// The downstream consumer is `linearity::check_match`, which reads
-/// each pattern var's stamped `:type` to populate the arm's
-/// `LinearScope`. Without this, destructured field bindings stay
-/// untyped at linearity time and `&field` fails `expr_is_owned_or_borrow_linear`.
-/// (closes #181)
-fn stamp_pattern_binding_types(
-    original: &deep::Expr,
-    annotated: &deep::Expr,
-    product: &InferenceProduct,
-    errors: &mut DiagnosticSink<'_>,
-) -> deep::Expr {
-    stack_guard!("stamp_pattern_binding_types", original, annotated.clone());
-    match (original, annotated) {
-        (deep::Expr::Atom(_, _) | deep::Expr::Map(_, _), _) => annotated.clone(),
-        (deep::Expr::MetaExpr(original_meta, _), deep::Expr::MetaExpr(meta, span)) => deep::Expr::MetaExpr(
-            deep::MetaExpr {
-                expr: Box::new(stamp_pattern_binding_types(
-                    &original_meta.expr,
-                    &meta.expr,
-                    product,
-                    errors,
-                )),
-                entries: meta.entries.clone(),
-            },
-            *span,
-        ),
-        (deep::Expr::List(original_list, _), deep::Expr::List(list, span)) => {
-            let tag = get_tag(list);
-            let kids = children(list);
-            let original_kids = children(original_list);
-            let needs_type_stamp = matches!(tag, Some("pat-var") | Some("pat-as"));
-
-            // The binding's name lives at the first child for both
-            // `pat-var` and `pat-as`. Other pattern tags carry no
-            // direct binding here (their sub-patterns recurse).
-            //
-            // The `Type::Error` filter is intentional: when a pattern
-            // earlier in the same arm raised an error (e.g., unknown
-            // record field), the primary pattern traversal stores `Type::Error`
-            // for the bind name. Stamping that onto the metadata would
-            // round-trip through `type_to_deep_expr` as
-            // `(t-var {} _)` (see line ~4962) and the linearity check
-            // would read it as an opaque type variable, possibly
-            // surfacing a cascading "borrow requires tensor or
-            // tensor-carrying input, got ?N" on top of the original
-            // unknown-field error. Suppressing the stamp here lets the
-            // linearity check fall through to its `None`-typed path,
-            // which already produces a cleaner "borrowed arguments
-            // must be tensor or tensor-carrying values" diagnostic
-            // without inventing a fictional type for the binding.
-            let resolved_ty = if needs_type_stamp {
-                product.owner_type(original, "pattern binding", errors)
-            } else {
-                None
-            };
-
-            let meta_expr =
-                match list.elements.get(1) {
-                    Some(deep::Expr::Map(meta, meta_span)) => {
-                        if let Some(ty) = resolved_ty.as_ref() {
-                            let mut entries = meta.entries.clone();
-                            let ty_expr = type_to_deep_expr(ty);
-                            if let Some((_, existing)) =
-                                entries.iter_mut().find(|(key, _)| key == "type")
-                            {
-                                *existing = ty_expr;
-                            } else {
-                                entries.push(("type".to_string(), ty_expr));
-                            }
-                            deep::Expr::Map(deep::MetaMap { entries }, *meta_span)
-                        } else {
-                            list.elements[1].clone()
-                        }
-                    }
-                    _ => list.elements.get(1).cloned().unwrap_or_else(|| {
-                        deep::Expr::Map(deep::MetaMap { entries: vec![] }, *span)
-                    }),
-                };
-
-            let mut elements = vec![list.elements[0].clone(), meta_expr];
-            for (original_child, child) in original_kids.iter().zip(kids) {
-                elements.push(stamp_pattern_binding_types(
-                    original_child,
-                    child,
-                    product,
-                    errors,
-                ));
-            }
-            deep::Expr::List(deep::List { elements }, *span)
-        }
-        _ => annotated.clone(),
-    }
 }
 
 fn annotated_meta_map_with_override(
@@ -6546,8 +6514,10 @@ fn annotated_meta_map_with_override(
     let ty_for_meta = if let Some(tag) = get_tag(list) {
         match (tag, precomputed_ty) {
             ("fn", Some(ty)) => Some(ty),
-            (t, _) if should_attach_type_metadata(t) =>
-                product.owner_type(expr, "metadata-eligible expression", errors),
+            ("pat-var" | "pat-as", _) => product.owner_type(expr, "pattern binding", errors),
+            (t, _) if should_attach_type_metadata(t) => {
+                product.owner_type(expr, "metadata-eligible expression", errors)
+            }
             _ => None,
         }
     } else {
@@ -7741,9 +7711,8 @@ fn annotated_totality_invariant_traces(exprs: &[deep::Expr]) -> Vec<String> {
                         || should_attach_type_metadata(tag)
                 });
                 if requires_stamp
-                    && !get_meta(list).is_some_and(|meta| {
-                        meta.entries.iter().any(|(key, _)| key == "type")
-                    })
+                    && !get_meta(list)
+                        .is_some_and(|meta| meta.entries.iter().any(|(key, _)| key == "type"))
                 {
                     traces.push(format!(
                         "annotated `{}` node is missing its type stamp",
@@ -7751,13 +7720,27 @@ fn annotated_totality_invariant_traces(exprs: &[deep::Expr]) -> Vec<String> {
                     ));
                 }
 
-                // Metadata entries and type-declaration children are source /
-                // compiler syntax, not runtime inference owners.
-                if matches!(tag, Some("defsig" | "deftype" | "typealias")) {
-                    return;
-                }
-                for child in list.elements.iter().skip(2) {
-                    walk(child, traces);
+                let kids = children(list);
+                for (index, child) in kids.iter().enumerate() {
+                    match child_stamp_role(tag.unwrap_or("<untagged-list>"), index, kids.len()) {
+                        Some(
+                            ChildStampRole::RuntimeExpr | ChildStampRole::ExplicitInferenceBypass,
+                        ) => walk(child, traces),
+                        Some(
+                            ChildStampRole::Syntax
+                            | ChildStampRole::Selector
+                            | ChildStampRole::Binder
+                            | ChildStampRole::Type,
+                        ) => {}
+                        None if tag.is_none() => walk(child, traces),
+                        None => {
+                            traces.push(format!(
+                                "annotated Deep tag `{}` has no child ownership classification",
+                                tag.unwrap_or("<untagged-list>")
+                            ));
+                            return;
+                        }
+                    }
                 }
             }
         }
@@ -9348,15 +9331,7 @@ fn infer_top_level(
             );
             inferred
         } else {
-            infer_expr(
-                &kids[1],
-                &mut body_env,
-                vg,
-                subst,
-                adt_reg,
-                errors,
-                product,
-            )
+            infer_expr(&kids[1], &mut body_env, vg, subst, adt_reg, errors, product)
         };
         // Did the body's inference report any UnboundVariable diagnostic?
         // We use this to discriminate WS-A5 RT-3a F1's masked-by-Error
@@ -9575,15 +9550,7 @@ fn infer_top_level(
         env.bind(name, scheme);
     } else {
         // Any other top-level expression
-        let _ = infer_expr(
-            expr,
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            product,
-        );
+        let _ = infer_expr(expr, env, vg, subst, adt_reg, errors, product);
     }
 }
 
@@ -9617,16 +9584,7 @@ fn infer_expr(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    infer_expr_with_type_metadata_ownership(
-        expr,
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-        None,
-    )
+    infer_expr_with_type_metadata_ownership(expr, env, vg, subst, adt_reg, errors, product, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9661,149 +9619,26 @@ fn infer_expr_with_type_metadata_ownership(
             let tag = get_tag(list);
             match tag {
                 Some("var") => infer_var(list, env, vg, subst, adt_reg, errors),
-                Some("lit") => infer_lit(
-                    list,
-                    env,
-                    vg,
-                    adt_reg,
-                    errors,
-                    type_metadata_resolution,
-                ),
-                Some("app") => infer_app(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                ),
-                Some("fn") => infer_fn(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                ),
-                Some("let") => infer_let(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                ),
-                Some("if") => infer_if(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                ),
-                Some("match") => infer_match(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                ),
-                Some("pipe") => infer_pipe(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                ),
-                Some("tuple") => infer_tuple(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                ),
-                Some("tuple-get") => infer_tuple_get(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                ),
-                Some("record") => infer_record(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                ),
-                Some("access") => infer_access(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                ),
-                Some("record-update") => infer_record_update(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                ),
-                Some("cast") => infer_cast(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                ),
-                Some("grad") => infer_grad(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                ),
-                Some("vmap") => infer_vmap(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                ),
-                Some("def") => infer_def(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                ),
+                Some("lit") => infer_lit(list, env, vg, adt_reg, errors, type_metadata_resolution),
+                Some("app") => infer_app(list, env, vg, subst, adt_reg, errors, product),
+                Some("fn") => infer_fn(list, env, vg, subst, adt_reg, errors, product),
+                Some("let") => infer_let(list, env, vg, subst, adt_reg, errors, product),
+                Some("if") => infer_if(list, env, vg, subst, adt_reg, errors, product),
+                Some("match") => infer_match(list, env, vg, subst, adt_reg, errors, product),
+                Some("pipe") => infer_pipe(list, env, vg, subst, adt_reg, errors, product),
+                Some("tuple") => infer_tuple(list, env, vg, subst, adt_reg, errors, product),
+                Some("tuple-get") => {
+                    infer_tuple_get(list, env, vg, subst, adt_reg, errors, product)
+                }
+                Some("record") => infer_record(list, env, vg, subst, adt_reg, errors, product),
+                Some("access") => infer_access(list, env, vg, subst, adt_reg, errors, product),
+                Some("record-update") => {
+                    infer_record_update(list, env, vg, subst, adt_reg, errors, product)
+                }
+                Some("cast") => infer_cast(list, env, vg, subst, adt_reg, errors, product),
+                Some("grad") => infer_grad(list, env, vg, subst, adt_reg, errors, product),
+                Some("vmap") => infer_vmap(list, env, vg, subst, adt_reg, errors, product),
+                Some("def") => infer_def(list, env, vg, subst, adt_reg, errors, product),
                 Some("defsig") => {
                     // Already handled in first pass
                     Type::Unit
@@ -9830,15 +9665,7 @@ fn infer_expr_with_type_metadata_ownership(
                     let kids = children(list);
                     let mut last_ty = Type::Unit;
                     for kid in kids {
-                        last_ty = infer_expr(
-                            kid,
-                            env,
-                            vg,
-                            subst,
-                            adt_reg,
-                            errors,
-                            product,
-                        );
+                        last_ty = infer_expr(kid, env, vg, subst, adt_reg, errors, product);
                     }
                     last_ty
                 }
@@ -9848,15 +9675,7 @@ fn infer_expr_with_type_metadata_ownership(
                     // wrapped expression.
                     let kids = children(list);
                     if let Some(inner) = kids.first() {
-                        infer_expr(
-                            inner,
-                            env,
-                            vg,
-                            subst,
-                            adt_reg,
-                            errors,
-                            product,
-                        )
+                        infer_expr(inner, env, vg, subst, adt_reg, errors, product)
                     } else {
                         malformed_form(list, "jit", "one wrapped expression", errors)
                     }
@@ -9864,15 +9683,7 @@ fn infer_expr_with_type_metadata_ownership(
                 Some("realize") => {
                     let kids = children(list);
                     if let Some(inner) = kids.first() {
-                        infer_expr(
-                            inner,
-                            env,
-                            vg,
-                            subst,
-                            adt_reg,
-                            errors,
-                            product,
-                        )
+                        infer_expr(inner, env, vg, subst, adt_reg, errors, product)
                     } else {
                         malformed_form(list, "realize", "one wrapped expression", errors)
                     }
@@ -9880,15 +9691,7 @@ fn infer_expr_with_type_metadata_ownership(
                 Some("copy") => {
                     let kids = children(list);
                     if let Some(inner) = kids.first() {
-                        let inner_ty = infer_expr(
-                            inner,
-                            env,
-                            vg,
-                            subst,
-                            adt_reg,
-                            errors,
-                            product,
-                        );
+                        let inner_ty = infer_expr(inner, env, vg, subst, adt_reg, errors, product);
                         let resolved = subst.apply(&inner_ty);
                         match resolved {
                             Type::Tensor(_, _) | Type::Error(_) => resolved,
@@ -9911,15 +9714,7 @@ fn infer_expr_with_type_metadata_ownership(
                 Some("borrow") => {
                     let kids = children(list);
                     if let Some(inner) = kids.first() {
-                        let inner_ty = infer_expr(
-                            inner,
-                            env,
-                            vg,
-                            subst,
-                            adt_reg,
-                            errors,
-                            product,
-                        );
+                        let inner_ty = infer_expr(inner, env, vg, subst, adt_reg, errors, product);
                         let resolved = subst.apply(&inner_ty);
                         match resolved {
                             Type::Ref(_) => resolved,
@@ -9975,15 +9770,9 @@ fn infer_expr_with_type_metadata_ownership(
                         malformed_form(list, "borrow", "one wrapped expression", errors)
                     }
                 }
-                Some("handle-effect") => infer_handle_effect(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                ),
+                Some("handle-effect") => {
+                    infer_handle_effect(list, env, vg, subst, adt_reg, errors, product)
+                }
                 _ => {
                     // chelis#731 [04-TOT-1] / §C1.2: a Deep tag reached
                     // dispatch with no checker case. The parser already
@@ -10009,15 +9798,9 @@ fn infer_expr_with_type_metadata_ownership(
             }
         }
         deep::Expr::Map(_, _) => Type::Unit,
-        deep::Expr::MetaExpr(meta, _) => infer_expr(
-            &meta.expr,
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            product,
-        ),
+        deep::Expr::MetaExpr(meta, _) => {
+            infer_expr(&meta.expr, env, vg, subst, adt_reg, errors, product)
+        }
     };
 
     if !matches!(result, Type::Error(_)) {
@@ -10169,15 +9952,7 @@ fn infer_handle_effect(
     // chelis#709 fix -- the enclosing `def` signature is now enforced against
     // the body, so an int64 body in an `-> f32` def, or a tensor body from a
     // scalar-typed fn, is a type error caught before any backend sees it.
-    infer_expr(
-        body,
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    )
+    infer_expr(body, env, vg, subst, adt_reg, errors, product)
 }
 
 /// Classification of a `random`-effect seed handler for the checker's
@@ -10564,63 +10339,23 @@ fn infer_app(
     };
 
     if matches!(func_name.as_deref(), Some("permute")) {
-        return infer_permute_app(
-            list,
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            product,
-        );
+        return infer_permute_app(list, env, vg, subst, adt_reg, errors, product);
     }
 
     if matches!(func_name.as_deref(), Some("reshape")) {
-        return infer_reshape_app(
-            list,
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            product,
-        );
+        return infer_reshape_app(list, env, vg, subst, adt_reg, errors, product);
     }
 
     if matches!(func_name.as_deref(), Some("shrink")) {
-        return infer_shrink_app(
-            list,
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            product,
-        );
+        return infer_shrink_app(list, env, vg, subst, adt_reg, errors, product);
     }
 
     if matches!(func_name.as_deref(), Some("pad")) {
-        return infer_pad_app(
-            list,
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            product,
-        );
+        return infer_pad_app(list, env, vg, subst, adt_reg, errors, product);
     }
 
     if matches!(func_name.as_deref(), Some("stride")) {
-        return infer_stride_app(
-            list,
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            product,
-        );
+        return infer_stride_app(list, env, vg, subst, adt_reg, errors, product);
     }
 
     // chelis#339: the anchored named-axis expand form `expand(x, new, size,
@@ -10630,15 +10365,7 @@ fn infer_app(
     // `infer_permute_app` pattern); 2-/3-arg expand keeps the generic path,
     // which reaches `check_expand_signature` with the scheme intact.
     if matches!(func_name.as_deref(), Some("expand")) && kids.len() >= 5 {
-        return infer_expand_app(
-            list,
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            product,
-        );
+        return infer_expand_app(list, env, vg, subst, adt_reg, errors, product);
     }
 
     // chelis#339 Part 2: variadic named-axis reduction `sum(x, seq, head)`.
@@ -10769,15 +10496,7 @@ fn infer_app(
         let _ctor_guard = ctor_lookup_name
             .as_ref()
             .map(|_| crate::opacity::suppress_ctor_reference_check());
-        infer_expr(
-            &kids[0],
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            product,
-        )
+        infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product)
     };
     // A reduction's axis argument may name a *dimension* of the operand
     // (`sum(x, seq)`, Tier-3 named-axis reduction, spec §4.5.3), not a bound
@@ -10821,15 +10540,7 @@ fn infer_app(
             {
                 Type::Prim(Prim::Int32)
             } else {
-                infer_expr(
-                    arg,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                )
+                infer_expr(arg, env, vg, subst, adt_reg, errors, product)
             }
         })
         .collect();
@@ -12870,9 +12581,9 @@ fn infer_app(
                                             elements
                                                 .iter()
                                                 .map(|elem| {
-                                                    match product.current_owner_type(
-                                                        elem, subst, errors,
-                                                    ) {
+                                                    match product
+                                                        .current_owner_type(elem, subst, errors)
+                                                    {
                                                         Some(Type::Tensor(dims, _)) => dims,
                                                         _ => Vec::new(),
                                                     }
@@ -14589,15 +14300,7 @@ fn infer_reduction_app(
     }
 
     let kids = children(list);
-    let _func_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
+    let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     let arg_tys: Vec<Type> = kids[1..]
         .iter()
         .enumerate()
@@ -14608,15 +14311,7 @@ fn infer_reduction_app(
             if index >= 1 && symbolic_dim_ref_name(arg).is_some() {
                 Type::Prim(Prim::Int32)
             } else {
-                infer_expr(
-                    arg,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                )
+                infer_expr(arg, env, vg, subst, adt_reg, errors, product)
             }
         })
         .collect();
@@ -14662,15 +14357,7 @@ fn infer_expand_app(
         );
     }
 
-    let _func_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
+    let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     let arg_tys: Vec<Type> = kids[1..]
         .iter()
         .enumerate()
@@ -14683,15 +14370,7 @@ fn infer_expand_app(
             {
                 Type::Prim(Prim::Int32)
             } else {
-                infer_expr(
-                    arg,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                )
+                infer_expr(arg, env, vg, subst, adt_reg, errors, product)
             }
         })
         .collect();
@@ -14782,37 +14461,11 @@ fn infer_permute_app(
         );
     }
 
-    let _func_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
-    let input_ty = infer_expr(
-        &kids[1],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
+    let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    let input_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
     let axis_tys: Vec<Type> = kids[2..]
         .iter()
-        .map(|arg| {
-            infer_expr(
-                arg,
-                env,
-                vg,
-                subst,
-                adt_reg,
-                errors,
-                product,
-            )
-        })
+        .map(|arg| infer_expr(arg, env, vg, subst, adt_reg, errors, product))
         .collect();
 
     if let Some(err) = propagate_if_error(std::iter::once(&input_ty).chain(axis_tys.iter())) {
@@ -14938,37 +14591,13 @@ fn infer_reshape_app(
         );
     }
 
-    let _func_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
-    let input_ty = infer_expr(
-        &kids[1],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
+    let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    let input_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
     let input_var_name = symbolic_dim_ref_name(&kids[1]).map(|s| s.to_string());
     match type_for_readonly_check(&input_ty, subst) {
         Type::Prim(precision) => {
             if let Some(shape_expr) = kids.get(2) {
-                let shape_ty = infer_expr(
-                    shape_expr,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                );
+                let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
                 let expected_shape_ty =
                     Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
                 if let Err(te) = unify(&shape_ty, &expected_shape_ty, subst) {
@@ -14982,15 +14611,7 @@ fn infer_reshape_app(
         }
         Type::Tensor(input_dims, precision) => {
             if let Some(shape_expr) = kids.get(2) {
-                let shape_ty = infer_expr(
-                    shape_expr,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                );
+                let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
                 let expected_shape_ty =
                     Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
                 if let Err(te) = unify(&shape_ty, &expected_shape_ty, subst) {
@@ -15005,15 +14626,7 @@ fn infer_reshape_app(
         }
         Type::Var(_) | Type::Error(_) => {
             if let Some(shape_expr) = kids.get(2) {
-                let shape_ty = infer_expr(
-                    shape_expr,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                );
+                let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
                 let expected_shape_ty =
                     Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
                 if let Err(te) = unify(&shape_ty, &expected_shape_ty, subst) {
@@ -15065,33 +14678,9 @@ fn infer_shrink_app(
         ));
     }
 
-    let _func_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
-    let input_ty = infer_expr(
-        &kids[1],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
-    let bounds_ty = infer_expr(
-        &kids[2],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
+    let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    let input_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
+    let bounds_ty = infer_expr(&kids[2], env, vg, subst, adt_reg, errors, product);
 
     if let Some(err) = propagate_if_error([&input_ty, &bounds_ty]) {
         return err;
@@ -15286,37 +14875,11 @@ fn infer_stride_app(
         );
     }
 
-    let _func_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
-    let input_ty = infer_expr(
-        &kids[1],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
+    let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    let input_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
     let stride_tys: Vec<Type> = kids[2..]
         .iter()
-        .map(|arg| {
-            infer_expr(
-                arg,
-                env,
-                vg,
-                subst,
-                adt_reg,
-                errors,
-                product,
-            )
-        })
+        .map(|arg| infer_expr(arg, env, vg, subst, adt_reg, errors, product))
         .collect();
 
     if let Some(err) = propagate_if_error(std::iter::once(&input_ty).chain(stride_tys.iter())) {
@@ -15466,42 +15029,10 @@ fn infer_pad_app(
         ));
     }
 
-    let _func_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
-    let input_ty = infer_expr(
-        &kids[1],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
-    let padding_ty = infer_expr(
-        &kids[2],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
-    let fill_ty = infer_expr(
-        &kids[3],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
+    let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    let input_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
+    let padding_ty = infer_expr(&kids[2], env, vg, subst, adt_reg, errors, product);
+    let fill_ty = infer_expr(&kids[3], env, vg, subst, adt_reg, errors, product);
 
     if let Some(err) = propagate_if_error([&input_ty, &padding_ty]) {
         return err;
@@ -15701,42 +15232,10 @@ fn infer_reduce_window_app(
             ),
         );
     }
-    let _func_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
-    let input_ty = infer_expr(
-        &kids[1],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
-    let window_ty = infer_expr(
-        &kids[2],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
-    let stride_ty = infer_expr(
-        &kids[3],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
+    let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    let input_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
+    let window_ty = infer_expr(&kids[2], env, vg, subst, adt_reg, errors, product);
+    let stride_ty = infer_expr(&kids[3], env, vg, subst, adt_reg, errors, product);
 
     if let Some(err) = propagate_if_error([&input_ty, &window_ty, &stride_ty]) {
         return err;
@@ -18447,13 +17946,7 @@ fn infer_fn(
 
     // kids[0] = (params {} x1 ... xn)
     // kids[1] = body
-    let params = extract_params(
-        &kids[0],
-        vg,
-        adt_reg,
-        errors,
-        annotation_binder_mode(env),
-    );
+    let params = extract_params(&kids[0], vg, adt_reg, errors, annotation_binder_mode(env));
     let mut param_types = Vec::new();
     let mut fn_env = env.clone();
 
@@ -18492,15 +17985,7 @@ fn infer_fn(
     } else {
         return malformed_form(list, "fn", "a body expression", errors);
     };
-    let body_ty = infer_expr(
-        body,
-        &mut fn_env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
+    let body_ty = infer_expr(body, &mut fn_env, vg, subst, adt_reg, errors, product);
 
     check_declared_dvars_rigid(&declared_dvars, subst, errors);
 
@@ -18535,29 +18020,13 @@ fn infer_def_body_with_sig(
     let fn_list = match body {
         deep::Expr::List(list, _) if get_tag(list) == Some("fn") => list,
         _ => {
-            return infer_expr(
-                body,
-                env,
-                vg,
-                subst,
-                adt_reg,
-                errors,
-                product,
-            );
+            return infer_expr(body, env, vg, subst, adt_reg, errors, product);
         }
     };
     let (decl_args, decl_ret) = match decl_ty {
         Type::Fn(args, ret) => (args, ret.as_ref()),
         _ => {
-            return infer_expr(
-                body,
-                env,
-                vg,
-                subst,
-                adt_reg,
-                errors,
-                product,
-            );
+            return infer_expr(body, env, vg, subst, adt_reg, errors, product);
         }
     };
 
@@ -18565,25 +18034,11 @@ fn infer_def_body_with_sig(
     if kids.len() < 2 {
         return malformed_form(fn_list, "fn", "parameters and a body", errors);
     }
-    let params = extract_params(
-        &kids[0],
-        vg,
-        adt_reg,
-        errors,
-        annotation_binder_mode(env),
-    );
+    let params = extract_params(&kids[0], vg, adt_reg, errors, annotation_binder_mode(env));
     if params.len() != decl_args.len() {
         // Arity mismatch between params and sig: fall back so the post-body
         // unify produces a clear ArityMismatch diagnostic.
-        return infer_expr(
-            body,
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            product,
-        );
+        return infer_expr(body, env, vg, subst, adt_reg, errors, product);
     }
 
     let mut param_types = Vec::with_capacity(params.len());
@@ -18611,15 +18066,7 @@ fn infer_def_body_with_sig(
     // tensor[n, f32] = y`, so checking here (pre-sig-unify) would miss
     // it. Running it only at the caller also avoids double-reporting.
     let body_expr = &kids[1];
-    let body_ty = infer_expr(
-        body_expr,
-        &mut fn_env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
+    let body_ty = infer_expr(body_expr, &mut fn_env, vg, subst, adt_reg, errors, product);
 
     let resolved_params: Vec<Type> = param_types.iter().map(|t| subst.apply(t)).collect();
     let resolved_body = subst.apply(&body_ty);
@@ -18838,15 +18285,7 @@ fn infer_let(
         }
     }
 
-    infer_expr(
-        &kids[1],
-        &mut let_env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    )
+    infer_expr(&kids[1], &mut let_env, vg, subst, adt_reg, errors, product)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -18869,15 +18308,7 @@ fn infer_if(
         );
     }
 
-    let cond_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
+    let cond_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
 
     // Condition should be bool (or tensor[D, bool])
     if let Err(_te) = unify(&cond_ty, &Type::Prim(Prim::Bool), subst) {
@@ -18888,24 +18319,8 @@ fn infer_if(
         ));
     }
 
-    let then_ty = infer_expr(
-        &kids[1],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
-    let else_ty = infer_expr(
-        &kids[2],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
+    let then_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
+    let else_ty = infer_expr(&kids[2], env, vg, subst, adt_reg, errors, product);
 
     match unify(&then_ty, &else_ty, subst) {
         Ok(()) => subst.apply(&then_ty),
@@ -18946,15 +18361,7 @@ fn infer_match(
         );
     }
 
-    let scrutinee_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
+    let scrutinee_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
 
     // chelis#710 [04-TOT-3]: a match with a scrutinee but no arms is
     // malformed. Return early so the exhaustiveness check below cannot also
@@ -19190,11 +18597,11 @@ fn pattern_bindings(
                                             &resolved,
                                             env,
                                             vg,
-                                        subst,
-                                        adt_reg,
-                                        errors,
-                                        product,
-                                        covered_variants,
+                                            subst,
+                                            adt_reg,
+                                            errors,
+                                            product,
+                                            covered_variants,
                                             has_wildcard,
                                         );
                                     }
@@ -19507,15 +18914,7 @@ fn infer_pipe(
         return malformed_form(list, "pipe", "at least one stage", errors);
     }
 
-    let mut current_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
+    let mut current_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
 
     for stage in &kids[1..] {
         // If the stage is the canonical bare-keyword / `cast(type)` pipe-stage
@@ -19541,15 +18940,7 @@ fn infer_pipe(
                 product,
             )
         } else {
-            infer_expr(
-                stage,
-                env,
-                vg,
-                subst,
-                adt_reg,
-                errors,
-                product,
-            )
+            infer_expr(stage, env, vg, subst, adt_reg, errors, product)
         };
         let ret_tv = vg.fresh_type();
         let stage_arg_tys = auto_borrow_call_arg_types(&stage_ty, vec![current_ty.clone()], subst);
@@ -19663,15 +19054,7 @@ fn infer_pipe_stage_lambda(
     // chelis#631: same for a shadowed list-literal length.
     fn_env.clear_list_literal_len(param_name);
 
-    let body_ty = infer_expr(
-        body,
-        &mut fn_env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
+    let body_ty = infer_expr(body, &mut fn_env, vg, subst, adt_reg, errors, product);
 
     let resolved_param = subst.apply(&param_ty);
     let resolved_body = subst.apply(&body_ty);
@@ -19747,15 +19130,7 @@ fn infer_tuple_get(
         return malformed_form(list, "tuple-get", "a tuple expression and an index", errors);
     }
 
-    let tuple_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
+    let tuple_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     let resolved = subst.apply(&tuple_ty);
 
     // The Surf `.N` desugar emits the projection index as a `lit` node
@@ -19791,14 +19166,6 @@ fn infer_tuple_get(
             );
         }
     };
-    if matches!(&kids[1], deep::Expr::List(index_list, _) if get_tag(index_list) == Some("lit")) {
-        product.record_bypass(
-            &kids[1],
-            Type::Prim(Prim::Int32),
-            "tuple projection index syntax",
-        );
-    }
-
     match resolved {
         Type::Tuple(ref elems) => {
             if index < elems.len() {
@@ -19900,15 +19267,7 @@ fn infer_record(
                 && get_tag(kv_list) == Some("kv")
                 && let Some(value) = children(kv_list).get(1)
             {
-                infer_expr(
-                    value,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                );
+                infer_expr(value, env, vg, subst, adt_reg, errors, product);
             }
         }
         return report(
@@ -19934,15 +19293,7 @@ fn infer_record(
                 && get_tag(kv_list) == Some("kv")
                 && let Some(value) = children(kv_list).get(1)
             {
-                infer_expr(
-                    value,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                );
+                infer_expr(value, env, vg, subst, adt_reg, errors, product);
             }
         }
         return report(
@@ -20001,15 +19352,7 @@ fn infer_record(
         else {
             continue;
         };
-        let value_ty = infer_expr(
-            value,
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            product,
-        );
+        let value_ty = infer_expr(value, env, vg, subst, adt_reg, errors, product);
         if known_field_set.contains(field_name) {
             let pos = declared_field_names
                 .iter()
@@ -20125,15 +19468,7 @@ fn infer_access(
             errors,
         );
     }
-    let target_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
+    let target_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     let Some(field_name) = symbol_name(&kids[1]) else {
         return malformed_form(
             list,
@@ -20282,15 +19617,7 @@ fn infer_record_update(
             errors,
         );
     }
-    let target_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
+    let target_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     // Infer the update values regardless of target resolution so
     // nested errors surface exactly once.
     let mut kv_pairs: Vec<(&str, Type)> = Vec::new();
@@ -20307,15 +19634,7 @@ fn infer_record_update(
         else {
             continue;
         };
-        let value_ty = infer_expr(
-            value,
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            product,
-        );
+        let value_ty = infer_expr(value, env, vg, subst, adt_reg, errors, product);
         kv_pairs.push((field_name, value_ty));
     }
     let mut resolved = subst.apply(&target_ty);
@@ -20417,15 +19736,7 @@ fn infer_cast(
         return malformed_form(list, "cast", "an expression and a target type", errors);
     }
 
-    let expr_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
+    let expr_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     let resolved = subst.apply(&expr_ty);
 
     // Every target spelling first crosses the centralized resolver. Bare
@@ -20468,19 +19779,11 @@ fn infer_cast(
                 None if canonical => match cast_target_nominal_name(&name, adt_reg) {
                     Some(target) => Type::Adt(target, Vec::new()),
                     None => {
-                        return report_unknown_cast_target(
-                            errors,
-                            &name,
-                            target_location.as_ref(),
-                        );
+                        return report_unknown_cast_target(errors, &name, target_location.as_ref());
                     }
                 },
                 None => {
-                    return report_unknown_cast_target(
-                        errors,
-                        &name,
-                        target_location.as_ref(),
-                    );
+                    return report_unknown_cast_target(errors, &name, target_location.as_ref());
                 }
             }
         }
@@ -20593,10 +19896,7 @@ fn report_unknown_cast_target(
         ],
     );
     let error = location.map_or(error.clone(), |location| location.attach(error));
-    report(
-        errors,
-        error,
-    )
+    report(errors, error)
 }
 
 /// True if `name` is one of the unsigned integer dtype names that
@@ -20693,15 +19993,7 @@ fn infer_grad(
         return malformed_form(list, "grad", "a function argument to differentiate", errors);
     }
 
-    let f_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
+    let f_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     let resolved = subst.apply(&f_ty);
 
     match resolved {
@@ -20795,7 +20087,10 @@ fn grad_result_type(
     })
 }
 
-fn grad_wrt_indices(list: &deep::List, errors: &mut DiagnosticSink<'_>) -> Option<Option<Vec<usize>>> {
+fn grad_wrt_indices(
+    list: &deep::List,
+    errors: &mut DiagnosticSink<'_>,
+) -> Option<Option<Vec<usize>>> {
     let kids = children(list);
     let Some(wrt_expr) = kids.get(1) else {
         return Some(None);
@@ -20928,15 +20223,7 @@ fn infer_vmap(
     }
     let axis = axis as usize;
 
-    let f_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
+    let f_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     let resolved = subst.apply(&f_ty);
 
     match resolved {
@@ -21050,15 +20337,7 @@ fn infer_def(
         None => return malformed_form(list, "def", "a symbol name as its first child", errors),
     };
 
-    let body_ty = infer_expr(
-        &kids[1],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        product,
-    );
+    let body_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
     let scheme = env.generalize(&body_ty, subst);
     // chelis#397/#469: record the size provenance (see `infer_top_level` /
     // `infer_let`) so a later `expand` size built from this binding can be
@@ -21081,6 +20360,51 @@ fn infer_def(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn child_stamp_roles_cover_the_canonical_deep_vocabulary() {
+        for tag in chelis_deep::validate::VALID_TAGS {
+            assert!(
+                child_stamp_role(tag, 0, 3).is_some(),
+                "canonical Deep tag `{tag}` needs an explicit child ownership classification"
+            );
+        }
+        assert_eq!(child_stamp_role("checker-version-skew", 0, 1), None);
+    }
+
+    #[test]
+    fn structural_child_stamp_roles_match_owner_positions() {
+        use ChildStampRole::{Binder, ExplicitInferenceBypass, RuntimeExpr, Selector, Type};
+        let cases = [
+            ("module", 0, 2, Binder),
+            ("module", 1, 2, ExplicitInferenceBypass),
+            ("def", 0, 2, Binder),
+            ("def", 1, 2, RuntimeExpr),
+            ("fn", 0, 2, Binder),
+            ("fn", 1, 2, RuntimeExpr),
+            ("bind", 0, 4, Binder),
+            ("bind", 1, 4, RuntimeExpr),
+            ("arm", 0, 3, ExplicitInferenceBypass),
+            ("arm", 1, 3, RuntimeExpr),
+            ("record", 0, 2, Type),
+            ("record", 1, 2, ExplicitInferenceBypass),
+            ("access", 1, 2, Selector),
+            ("tuple-get", 1, 2, Selector),
+            ("cast", 1, 2, Type),
+            ("grad", 1, 2, Selector),
+            ("vmap", 1, 2, Selector),
+            ("pat-as", 0, 2, Binder),
+            ("pat-as", 1, 2, ExplicitInferenceBypass),
+            ("t-tensor", 0, 2, Type),
+        ];
+        for (tag, index, arity, expected) in cases {
+            assert_eq!(
+                child_stamp_role(tag, index, arity),
+                Some(expected),
+                "wrong child role for `{tag}` child {index}"
+            );
+        }
+    }
 
     fn check(src: &str) -> InferResult {
         let exprs = chelis_deep::parser::parse_str(src).unwrap();

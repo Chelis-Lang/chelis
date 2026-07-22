@@ -192,7 +192,9 @@ fn structural_child_roles_do_not_require_runtime_owner_stamps() {
     for (label, source) in fixtures {
         let program = chelis_deep::parser::parse_str(source).expect("valid Deep fixture");
         check_ir_program(&program).unwrap_or_else(|result| {
-            panic!("{label} must classify structural children outside runtime ownership: {result:?}")
+            panic!(
+                "{label} must classify structural children outside runtime ownership: {result:?}"
+            )
         });
     }
 }

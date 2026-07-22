@@ -26,16 +26,19 @@ fn parse(source: &str) -> Vec<chelis_deep::Expr> {
 
 fn assert_legal() {
     let exprs = parse(LEGAL);
-    check_ir_program(&exprs).unwrap_or_else(|result| {
-        panic!("legal explicit binder must check: {:?}", result.errors)
-    });
+    check_ir_program(&exprs)
+        .unwrap_or_else(|result| panic!("legal explicit binder must check: {:?}", result.errors));
 }
 
 fn assert_rogue_rejected(result: Result<chelis_types::CheckedProgram, chelis_types::InferResult>) {
     let errors = result
         .expect_err("a sibling without a signature must not inherit `n`")
         .errors;
-    assert_eq!(errors.len(), 1, "undeclared binder must report once: {errors:?}");
+    assert_eq!(
+        errors.len(),
+        1,
+        "undeclared binder must report once: {errors:?}"
+    );
     assert!(
         errors[0]
             .message
@@ -90,16 +93,21 @@ fn serialized_context_drops_transient_binder_scope() {
 
 #[test]
 fn malformed_parameter_is_rejected_once_by_the_binder_owner() {
-    let exprs = parse(
-        "(def {} bad (fn {} (params {} (x {type: (t-prim {} f32 extra)})) (var {} x)))",
-    );
+    let exprs =
+        parse("(def {} bad (fn {} (params {} (x {type: (t-prim {} f32 extra)})) (var {} x)))");
     let errors = check_ir_program(&exprs)
         .expect_err("malformed binder syntax must fail")
         .errors;
-    assert_eq!(errors.len(), 1, "malformed binder must report once: {errors:?}");
+    assert_eq!(
+        errors.len(),
+        1,
+        "malformed binder must report once: {errors:?}"
+    );
     assert!(
-        matches!(errors[0].kind, chelis_types::errors::CheckErrorKind::MalformedForm)
-            && errors[0].message.contains("t-prim"),
+        matches!(
+            errors[0].kind,
+            chelis_types::errors::CheckErrorKind::MalformedForm
+        ) && errors[0].message.contains("t-prim"),
         "unexpected malformed-binder diagnostic: {errors:?}"
     );
 }
