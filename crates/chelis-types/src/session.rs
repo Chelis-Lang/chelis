@@ -111,6 +111,19 @@ mod authoritative_type_stamp_tests {
     }
 }
 
+#[cfg(test)]
+mod annotated_totality_finalization_tests {
+    #[test]
+    fn missing_runtime_stamp_is_rejected_at_shared_finalization() {
+        todo!("red oracle: finalization rejects an unstamped runtime node")
+    }
+
+    #[test]
+    fn silent_error_owner_is_rejected_at_shared_finalization() {
+        todo!("red oracle: an error-typed owner cannot finalize under an empty sink")
+    }
+}
+
 fn run_result<T>(
     run: impl FnOnce(&mut DiagnosticSink<'_>) -> Result<T, InferStats>,
 ) -> Result<T, InferResult> {

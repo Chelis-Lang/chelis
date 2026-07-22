@@ -99,3 +99,21 @@ fn annotation_consumes_owner_stamps_without_semantic_reinference() {
         "the old fresh-substitution annotation inference seam must be deleted"
     );
 }
+
+#[test]
+fn checked_results_share_one_totality_finalizer() {
+    assert!(
+        INFER.contains("fn finalize_checked_program("),
+        "all CheckedProgram results need one totality finalization boundary"
+    );
+    assert!(
+        INFER.contains("annotated_totality_invariant_traces("),
+        "finalization must inspect the authoritative annotated tree"
+    );
+
+    let constructor_calls = INFER.matches("CheckedProgram::from_parts_with_").count();
+    assert_eq!(
+        constructor_calls, 0,
+        "result paths must not bypass finalize_checked_program; found {constructor_calls} direct constructors"
+    );
+}
