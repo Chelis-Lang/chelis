@@ -787,6 +787,26 @@ fn ensure_supported_execution_artifact_inner(
 ) -> Result<(), String> {
     let target = artifact.compile_result.target;
     let supported = supported_execution_dtypes(target);
+    // A callable artifact must expose at least one input or output. An
+    // artifact with neither is a genuinely host-only program (top-level
+    // bindings/globals, or an entry that only the host-program lane can
+    // emit): `compile_and_load` cannot build a callable model from it, and
+    // the old behavior returned a silent empty manifest that failed later
+    // with a confusing "expected 0 positional inputs". Fail loudly here.
+    // (Contrast: the #817/#818 metadata bugs also surfaced as empty
+    // manifests; those are fixed upstream in `compile_for_execution` and no
+    // longer reach this branch.) See chelis#730.
+    if artifact.inputs.is_empty() && artifact.outputs.is_empty() {
+        return Err(
+            "compile_and_load produced no callable interface (no inputs or outputs). \
+             This program requires the host-program lane, which does not expose callable \
+             metadata (for example it is built from top-level bindings/globals rather than \
+             a tensor-signature `def`, or its entry cannot be lowered to a compiled tensor \
+             entry). Wrap the computation in a `def` whose params and result are tensors, \
+             or pass `entry_name=` to select such a def."
+                .to_string(),
+        );
+    }
     for spec in artifact.inputs.iter().chain(artifact.outputs.iter()) {
         if !supported.contains(&spec.dtype.as_str()) {
             return Err(format!(
@@ -2427,6 +2447,89 @@ loss = (mean(x, 0) : tensor[f32])
         assert!(
             err.contains("CHELIS_RUNTIME_DIR"),
             "error must name CHELIS_RUNTIME_DIR, got: {err}"
+        );
+    }
+
+
+    fn run_job_manifest(source: &str, entry: Option<&str>) -> ArtifactManifest {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(&source_path, source).expect("write source");
+        let output = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: entry.map(str::to_string),
+            artifact_dir: Some(PathBuf::from(dir.path())),
+        })
+        .expect("compile and load job");
+        let manifest_text =
+            fs::read_to_string(output.lib_path.with_extension("json")).expect("read manifest");
+        serde_json::from_str(&manifest_text).expect("parse manifest")
+    }
+
+    // Issue #817: a multi-def file compiled through the `compile_and_load`
+    // job path scopes its callable interface to the entry def, not the union
+    // of every def's params. This is the manifest the loaded `CompiledModel`
+    // exposes as `input_names`/`output_names`, and the ABI the runtime calls.
+    #[test]
+    fn compile_and_load_job_scopes_metadata_to_entry_def() {
+        let source = "\
+def helper(x: tensor[1, f32]) -> tensor[1, f32] = mul(x, x)
+def solve(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[1, f32] = add(helper(a), helper(b))
+";
+        let manifest = run_job_manifest(source, Some("solve"));
+        let inputs: Vec<_> = manifest.inputs.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(inputs, vec!["a", "b"], "must scope to `solve`, not merge");
+        assert_eq!(manifest.outputs.len(), 1);
+    }
+
+    // Issue #818: a single def whose body uses `concat` reports its real
+    // inputs/outputs instead of the empty manifest the host-lane early-return
+    // used to write.
+    #[test]
+    fn compile_and_load_job_reports_concat_entry_metadata() {
+        let source = "\
+def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
+  x = mul(copy(a), b)
+  y = add(a, b)
+  concat([x, y], cast(0, int32))
+}
+";
+        let manifest = run_job_manifest(source, None);
+        let inputs: Vec<_> = manifest.inputs.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(inputs, vec!["a", "b"]);
+        assert_eq!(manifest.outputs.len(), 1);
+    }
+
+    // A genuinely host-only program (top-level bindings/globals, no
+    // tensor-signature entry) can't back a callable model. Instead of the old
+    // silent empty manifest that failed later with "expected 0 positional
+    // inputs", the job now fails loudly with an actionable message.
+    #[test]
+    fn compile_and_load_job_rejects_host_only_program_loudly() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "total = add(cast(1, int64), cast(2, int64))\n",
+        )
+        .expect("write source");
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(dir.path())),
+        });
+        let message = match result {
+            Ok(_) => panic!("host-only program must not silently yield a non-callable artifact"),
+            Err(CompileAndLoadError::Message(m)) => m,
+            Err(CompileAndLoadError::Compiler(e)) => format!("{e:?}"),
+        };
+        assert!(
+            message.contains("no callable interface"),
+            "expected a loud host-only error, got: {message}"
         );
     }
 }

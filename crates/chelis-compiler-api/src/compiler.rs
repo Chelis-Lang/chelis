@@ -749,6 +749,94 @@ pub fn compile(request: CompileRequest) -> Result<CompileResult> {
     Ok(compile_for_execution(request)?.compile_result)
 }
 
+/// Map a caller-supplied `entry_name` to the emitted C symbol / file
+/// stem, decoupling def *selection* from the emitted *symbol*.
+///
+/// A def literally named `main` is a valid `entry_name` (and a valid entry
+/// def, see #817/#818), but emitting a C function named `main` collides
+/// with the reserved program entry `int main(int, char**, char**)` and the
+/// native toolchain rejects the translation unit. Rewriting the symbol
+/// keeps the metadata scoped to the requested def while producing a
+/// linkable artifact; the artifact's `host_entry_name` carries the
+/// rewritten symbol so the loader (`dlsym`) stays consistent.
+///
+/// Any character that is not a valid C identifier character is replaced
+/// with `_`; a symbol that would start with a digit (or be empty) is
+/// prefixed. Ordinary names (`solve`, `dloss`, `jsonish`) are returned
+/// unchanged, so existing output-name usage is preserved.
+fn execution_c_symbol(entry_name: Option<&str>) -> String {
+    let Some(name) = entry_name else {
+        return "chelis_main".to_string();
+    };
+    let mut sym: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sym.is_empty() || sym.as_bytes()[0].is_ascii_digit() {
+        sym.insert_str(0, "chelis_");
+    }
+    if sym == "main" {
+        sym = "chelis_main".to_string();
+    }
+    sym
+}
+
+/// Resolve the entry def used to *scope* compiled-execution metadata
+/// (`inputs`/`outputs`), independent of the emitted C symbol.
+///
+/// Only called for programs that do NOT require the host backend, so every
+/// `HostFunction` present is a tensor-signature candidate.
+///
+/// - explicit `entry_name` that names a def → scope to it (#817);
+/// - explicit `entry_name` that names no def, but the program has a
+///   preferred tensor entry → the name is a typo'd selector: error and list
+///   the available entry defs;
+/// - no `entry_name` → the program's preferred tensor entry (`main`, else
+///   the last tensor-signature def), matching the HIP arm's selection.
+fn resolve_execution_entry<'a>(
+    entry_name: Option<&'a str>,
+    host_program: &'a chelis_ir::host::ConcreteHostProgram,
+) -> Result<Option<&'a str>> {
+    match entry_name {
+        Some(name) => {
+            if host_program
+                .functions
+                .iter()
+                .any(|function| function.name == name)
+            {
+                Ok(Some(name))
+            } else if let Some(preferred) =
+                chelis_ir::host::preferred_tensor_entry_name(host_program)
+            {
+                let available = host_program
+                    .functions
+                    .iter()
+                    .map(|function| function.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Err(stage_error(
+                    "compile",
+                    format!(
+                        "unknown entry_name `{name}`; this program's entry defs are: \
+                         {available}. Pass one of these as entry_name, or omit \
+                         entry_name to use `{preferred}`."
+                    ),
+                    "compile_error",
+                ))
+            } else {
+                Ok(None)
+            }
+        }
+        None => Ok(chelis_ir::host::preferred_tensor_entry_name(host_program)),
+    }
+}
+
 pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutionArtifact> {
     let compiled = compile_source(request.source_kind, &request.source)?;
     reject_host_only_builtins_before_host_lowering(&compiled.checked, request.target)?;
@@ -761,9 +849,7 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
                 deep_span_to_schema(diagnostic.span),
             )
         })?;
-    let func_name = request
-        .entry_name
-        .unwrap_or_else(|| "chelis_main".to_string());
+    let func_name = execution_c_symbol(request.entry_name.as_deref());
 
     // Reject host-runtime-only builtins early for any compiled-backend
     // target so both public compiler APIs preserve the owning builtin's
@@ -809,9 +895,64 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
 
     match request.target {
         CompileTarget::C => {
+            let host_only = host_compiled
+                .host
+                .as_ref()
+                .map(chelis_ir::host::host_program_requires_host_backend)
+                .unwrap_or(false);
+
+            // Entry-scoped compiled-execution metadata (#817, #818).
+            //
+            // The legacy path below compiles the WHOLE program: every
+            // lowerable top-level `def`'s body becomes a DAG root and every
+            // def's params become `Load`s, so `execution_input_specs` reports
+            // all defs' inputs merged (#817). And when the entry's body uses a
+            // syntactic host-runtime builtin such as `concat`, the def is
+            // excluded from the pure DAG entirely, `roots()` is empty, and the
+            // host-lane early-return hands back an EMPTY manifest (#818).
+            //
+            // Both are fixed by lowering the single resolved entry def into a
+            // standalone DAG and taking its metadata. This is gated on
+            // `!host_only`: host-backend programs (globals, `grad`, string/ADT
+            // host runtime) keep their existing whole-program host emission,
+            // where `entry_name` remains a plain output symbol. For a
+            // single-def tensor program the scoped DAG equals the whole-program
+            // DAG, so this is a no-op there.
+            if !host_only
+                && let Some(host_program) = host_compiled.host.as_ref()
+                && let Some(entry) =
+                    resolve_execution_entry(request.entry_name.as_deref(), host_program)?
+                && let Some(entry_dag) =
+                    chelis_ir::host::lower_named_tensor_entry_dag(&compiled.checked, entry)
+            {
+                let entry_dag = chelis_ir::optimize::dead_code_eliminate(&entry_dag);
+                reject_symbolic_windowed_reduce(&entry_dag, "c")?;
+                reject_unsupported_reduce_window_precision(&entry_dag, "c")?;
+                reject_unsized_named_dims(&entry_dag, "c")?;
+                let specialized = chelis_ir::specialize::specialize_for_blas(&entry_dag);
+                let fused = chelis_ir::fuse::fuse(&specialized);
+                let result = chelis_backend_c::codegen_with_options(
+                    &fused,
+                    &func_name,
+                    chelis_backend_c::CodegenOptions {
+                        use_blas: true,
+                        ..chelis_backend_c::CodegenOptions::default()
+                    },
+                )
+                .map_err(unsupported_stage_error)?;
+                return Ok(compiled_execution_artifact(
+                    request.target,
+                    &func_name,
+                    None,
+                    compile_result_c(request.target, &func_name, &result),
+                    execution_input_specs(&entry_dag, &result.input_labels)?,
+                    execution_output_specs(&entry_dag, &result.output_labels)?,
+                    result.symbolic_dims,
+                ));
+            }
+
             if let Some(host_program) = host_compiled.host.as_ref()
-                && (chelis_ir::host::host_program_requires_host_backend(host_program)
-                    || compiled.dag.roots().is_empty())
+                && (host_only || compiled.dag.roots().is_empty())
             {
                 let result = chelis_backend_c::codegen_host_program(host_program, &func_name)
                     .map_err(unsupported_stage_error)?;
