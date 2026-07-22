@@ -2285,10 +2285,12 @@ fn reject_unsupported_reduce_window_precision(dag: &Dag, target: &str) -> Result
 const HOST_ONLY_BUILTINS: &[&str] = &["tensor_scan"];
 
 fn reject_host_only_builtins(
-    program: &chelis_ir::host::HostProgram,
+    program: &chelis_ir::host::ConcreteHostProgram,
     target: CompileTarget,
 ) -> Result<()> {
-    use chelis_ir::host::{HostCallback, HostCallbackKind, HostExpr, HostExprKind};
+    use chelis_ir::host::{
+        ConcreteHostCallback, ConcreteHostExpr, ConcreteHostExprKind, HostCallbackKind,
+    };
 
     // A higher-order helper's callback can itself reach a host-only
     // builtin (e.g. `map(fn (x) -> tensor_scan(...), xs)`). An *inline*
@@ -2296,18 +2298,18 @@ fn reject_host_only_builtins(
     // callback refers to a top-level function by name; that function's
     // body is scanned separately when we walk `program.functions`, so we
     // do not need to chase the reference here.
-    fn scan_callback(callback: &HostCallback, found: &mut Option<String>) {
+    fn scan_callback(callback: &ConcreteHostCallback, found: &mut Option<String>) {
         if let HostCallbackKind::Inline { body, .. } = &callback.kind {
             scan_expr(body, found);
         }
     }
 
-    fn scan_expr(expr: &HostExpr, found: &mut Option<String>) {
+    fn scan_expr(expr: &ConcreteHostExpr, found: &mut Option<String>) {
         if found.is_some() {
             return;
         }
         match &expr.kind {
-            HostExprKind::Builtin { name, args, .. } => {
+            ConcreteHostExprKind::Builtin { name, args, .. } => {
                 if HOST_ONLY_BUILTINS.contains(&name.as_str()) {
                     *found = Some(name.clone());
                     return;
@@ -2316,17 +2318,17 @@ fn reject_host_only_builtins(
                     scan_expr(arg, found);
                 }
             }
-            HostExprKind::Call { args, .. } => {
+            ConcreteHostExprKind::Call { args, .. } => {
                 for arg in args {
                     scan_expr(arg, found);
                 }
             }
-            HostExprKind::TensorCall { args, .. } => {
+            ConcreteHostExprKind::TensorCall { args, .. } => {
                 for arg in args {
                     scan_expr(arg, found);
                 }
             }
-            HostExprKind::If {
+            ConcreteHostExprKind::If {
                 cond,
                 then_expr,
                 else_expr,
@@ -2336,24 +2338,24 @@ fn reject_host_only_builtins(
                 scan_expr(then_expr, found);
                 scan_expr(else_expr, found);
             }
-            HostExprKind::Let { bindings, body, .. } => {
+            ConcreteHostExprKind::Let { bindings, body, .. } => {
                 for binding in bindings {
                     scan_expr(&binding.value, found);
                 }
                 scan_expr(body, found);
             }
-            HostExprKind::List(items, _) | HostExprKind::Tuple(items, _) => {
+            ConcreteHostExprKind::List(items, _) | ConcreteHostExprKind::Tuple(items, _) => {
                 for item in items {
                     scan_expr(item, found);
                 }
             }
-            HostExprKind::AdtConstruct { fields, .. } => {
+            ConcreteHostExprKind::AdtConstruct { fields, .. } => {
                 for field in fields {
                     scan_expr(field, found);
                 }
             }
-            HostExprKind::AdtFieldAccess { base, .. } => scan_expr(base, found),
-            HostExprKind::MatchOption {
+            ConcreteHostExprKind::AdtFieldAccess { base, .. } => scan_expr(base, found),
+            ConcreteHostExprKind::MatchOption {
                 scrutinee,
                 some_expr,
                 none_expr,
@@ -2363,7 +2365,7 @@ fn reject_host_only_builtins(
                 scan_expr(some_expr, found);
                 scan_expr(none_expr, found);
             }
-            HostExprKind::MatchAdt {
+            ConcreteHostExprKind::MatchAdt {
                 scrutinee,
                 arms,
                 default_expr,
@@ -2377,20 +2379,20 @@ fn reject_host_only_builtins(
                     scan_expr(d, found);
                 }
             }
-            HostExprKind::Map { callback, list, .. }
-            | HostExprKind::Filter { callback, list, .. }
-            | HostExprKind::Partition { callback, list, .. }
-            | HostExprKind::FlatMap { callback, list, .. } => {
+            ConcreteHostExprKind::Map { callback, list, .. }
+            | ConcreteHostExprKind::Filter { callback, list, .. }
+            | ConcreteHostExprKind::Partition { callback, list, .. }
+            | ConcreteHostExprKind::FlatMap { callback, list, .. } => {
                 scan_callback(callback, found);
                 scan_expr(list, found);
             }
-            HostExprKind::Fold {
+            ConcreteHostExprKind::Fold {
                 callback,
                 init,
                 list,
                 ..
             }
-            | HostExprKind::Scan {
+            | ConcreteHostExprKind::Scan {
                 callback,
                 init,
                 list,
@@ -2400,7 +2402,7 @@ fn reject_host_only_builtins(
                 scan_expr(init, found);
                 scan_expr(list, found);
             }
-            HostExprKind::WithSeed { seed, body, .. } => {
+            ConcreteHostExprKind::WithSeed { seed, body, .. } => {
                 scan_expr(seed, found);
                 scan_expr(body, found);
             }
@@ -4515,23 +4517,28 @@ def load_tokenizer(path: string) -> Option[Tokenizer] =
 
         assert_eq!(
             find_ret("parse_line"),
-            Some(chelis_ir::host::HostType::Option(Box::new(
-                chelis_ir::host::HostType::List(Box::new(chelis_ir::host::HostType::String))
-            ))),
+            Some(chelis_ir::host_type_state::ConcreteHostType::Option(
+                Box::new(chelis_ir::host_type_state::ConcreteHostType::List(
+                    Box::new(chelis_ir::host_type_state::ConcreteHostType::String)
+                ))
+            )),
             "available functions: {available:#?}\nlowered: {lowered_debug:#?}\nchecked:\n{checked_text}"
         );
         assert_eq!(
             find_ret("json_string"),
-            Some(chelis_ir::host::HostType::Option(Box::new(
-                chelis_ir::host::HostType::String
-            ))),
+            Some(chelis_ir::host_type_state::ConcreteHostType::Option(
+                Box::new(chelis_ir::host_type_state::ConcreteHostType::String)
+            )),
             "available functions: {available:#?}\nlowered: {lowered_debug:#?}\nchecked:\n{checked_text}"
         );
         assert_eq!(
             find_ret("load_tokenizer"),
-            Some(chelis_ir::host::HostType::Option(Box::new(
-                chelis_ir::host::HostType::Adt("Tokenizer".to_string(), Vec::new())
-            ))),
+            Some(chelis_ir::host_type_state::ConcreteHostType::Option(
+                Box::new(chelis_ir::host_type_state::ConcreteHostType::Adt(
+                    "Tokenizer".to_string(),
+                    Vec::new()
+                ))
+            )),
             "available functions: {available:#?}\nlowered: {lowered_debug:#?}\nchecked:\n{checked_text}"
         );
     }

@@ -1,13 +1,22 @@
 # Loud Unsupported: the failure-channel contract
 
 **Status:** Phases 0-1 are complete (Phase 0: PR [#746]; Phase 1: PR
-[#791]). Phase 2 is in progress. Its `EffectKind` and `RuntimeDType`
-vocabularies, Result-only boundary decoders, exhaustive consumers, generated
-Rust/C dtype agreement, and immediate runtime ABI decoding are implemented.
-Phase 2 completes only when the HostType state/ABI boundary and private
-structured C-expression representation satisfy §C4 and §C6. The lexical
-lint, count baselines, and token tripwire remain supporting checks; they are
-not completion evidence. Phase 3 is pending. Tracking issue: [#730].
+[#791]). Phase 2's implementation is complete in PR [#799]: the
+`EffectKind`/`RuntimeDType` identities and consumers, generated Rust/C dtype
+agreement, staged `HostTypeTerm -> ConcreteHostType -> HostAbiType` boundary,
+and closed structured C-expression AST are implemented. Phase acceptance
+still requires the authoritative oracle and a fresh adversarial review; this
+status does not claim that validation early. Count baselines and the token
+tripwire are supporting checks, not completion evidence. Phase 3 is pending.
+Tracking issue: [#730].
+
+**Implementation record (re-planned 2026-07-22).** The initial Phase 2 draft
+treated a large source lint as a recurrence proof. Execution demonstrated
+both laundering paths and false positives, so that mechanism was extracted to
+PR [#815] and removed from this phase's acceptance argument. The final design
+is the typed boundary specified here: failures are not type terms, unresolved
+terms cannot enter codegen, target capability selection is fallible, and an
+unknown builtin name has no structured expression identity.
 **Owning specs:** `spec/05-risc-primitives.md` (op support statements;
 its §7 carries this plan's ratified contract as current blockquote authorities
 [05-UNS-1..4], independently of their later chelis#733 migration through the
@@ -18,8 +27,9 @@ must be empty"), and the audit record in
 `docs/investigations/numeric_audit_next_sweeps.md` /
 `docs/investigations/numeric_audit_structural_prevention.md` (items 3, 8).
 **Class:** [#703] (unsupported cases silently substitute a value instead of
-failing). Phase 1 removed the censused live instances; Phase 2's recurrence
-proof is still in progress. Sibling plans: `spec/design/dtype_semantics.md`
+failing). Phase 1 removed the censused live instances; Phase 2 implements the
+typed recurrence proof, with acceptance validation still pending. Sibling
+plans: `spec/design/dtype_semantics.md`
 ([#729]) owns what SUPPORTED cells compute; this plan owns what every
 UNSUPPORTED encounter does. §I1 pins the interlock. [#709]'s checker
 analogue is item 5 of the prevention doc and is NOT this plan (see
@@ -672,11 +682,11 @@ census shrinks to rows 10, 17, 18.
 
 ## Phase 2 - un-writability (typed closed vocabularies)
 
-**Status: IN PROGRESS.** The `EffectKind`/`RuntimeDType` items 1-3 below are
-implemented. The token/count tripwire remains a supporting check while items
-4-5 are incomplete. Phase 2 is complete only
-when unresolved host types cannot enter codegen and unsupported open-set
-dispatch cannot construct an emitted expression.
+**Status: IMPLEMENTED IN PR [#799]; ACCEPTANCE PENDING.** Items 1-5 below are
+implemented. The token/count tripwire remains a supporting check. Phase 2 is
+complete only after the authoritative oracle is green and a fresh adversarial
+review confirms that unresolved host types cannot enter codegen and
+unsupported open-set dispatch cannot construct an emitted expression.
 
 **You inherit:** a tree with no live silent fallbacks (Phase 1) and the
 tripwire proving it.
@@ -862,3 +872,4 @@ an unsupported case and a plausible wrong number.
 [#782]: https://github.com/Chelis-Lang/chelis/pull/782
 [#791]: https://github.com/Chelis-Lang/chelis/pull/791
 [#799]: https://github.com/Chelis-Lang/chelis/pull/799
+[#815]: https://github.com/Chelis-Lang/chelis/pull/815

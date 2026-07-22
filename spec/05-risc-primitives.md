@@ -1187,13 +1187,18 @@ These C implementations are the ground truth. The GPU backend (Phase 1) must pro
 ## 7. The Unsupported-Case Response Contract (Decided 2026-07; Implementation Tracked As chelis#730)
 
 **Status banner - read before citing.** RATIFIED and enforced for the
-censused live sites by chelis#730 Phase 1. Phase 2 is in progress. Its
-dependency-bottom `EffectKind`/`RuntimeDType` identities, Result-only boundary
-decoders, exhaustive consumers, immediate invalid-ID rejection, and generated
-Rust/C dtype agreement are implemented. Phase 2 completes only when the
-HostType state/ABI boundary and private structured C-expression representation
-satisfy `loud_unsupported.md` §C4/§C6. The lint, count baselines, and token
-tripwire are supporting checks, not the authority.
+censused live sites by chelis#730 Phase 1. Phase 2's implementation is complete
+in PR #799: dependency-bottom `EffectKind`/`RuntimeDType` identities,
+Result-only boundary decoders, exhaustive consumers, immediate invalid-ID
+rejection, generated Rust/C dtype agreement, the staged host-type/ABI
+boundary, and the structured C-expression AST. Phase acceptance still
+requires its authoritative oracle and fresh adversarial review. Count
+baselines and the token tripwire are supporting checks, not the authority.
+
+The implementation was explicitly re-planned on 2026-07-22 after execution
+showed that the initial source lint was neither complete nor false-positive
+free. That lint moved to PR #815; it is not part of this atom's proof. The
+final enforcement is the typed construction boundary described below.
 
 The HostType contract consumes checked type metadata, preserves named
 polymorphism, inference identity, bottom, and exact dtype, and permits only a

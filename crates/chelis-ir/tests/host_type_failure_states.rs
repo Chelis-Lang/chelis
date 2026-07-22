@@ -1,9 +1,9 @@
 //! chelis#730 Phase 2 contract tests for the HostType failure-state split.
 //!
-//! The value-level tests lock the new logical and inference vocabulary. The
-//! source-boundary tests are intentionally red until the legacy host lowerer
-//! and C emitter have migrated off their anonymous `Unknown` sentinel. C-host
-//! ABI parity lives in the backend crate's `host_abi_tests` module.
+//! The value-level tests lock the logical and inference vocabulary. The
+//! source-boundary tests lock the completed migration away from the anonymous
+//! `Unknown` sentinel. C-host ABI parity lives in the backend crate's
+//! `host_abi_tests` module.
 
 use std::fs;
 use std::path::Path;

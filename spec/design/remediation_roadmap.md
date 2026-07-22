@@ -74,8 +74,12 @@ the checker-totality boundary.
 Phase 3 (`DeepTag`) remains open. [#732] Phase 1 landed with Wave 1 (above);
 the remaining Wave 2 set is [#732] Phase 2 (the generated C side: fixes
 [#716]/[#723] outright and gives the refactor its byte-exact instrument) in
-parallel with [#731] Phase 3 and [#730] Phase 2 (typed closed vocabularies,
-HostType/ABI separation, and structured emission). [#733]
+parallel with [#731] Phase 3. [#730] Phase 2's final typed implementation is in
+PR [#799] (acceptance validation pending): closed vocabularies, staged
+HostType/ABI separation, and structured emission. Its initial source-lint
+approach was explicitly re-planned after execution showed incomplete and
+false-positive behavior; the lint was extracted to PR [#815] and is not a
+Wave 2 dependency. [#733]
 Phase 1's Buoy shell-side design and fixture preparation may ride alongside:
 OpenSpec still plans new normative text and atom IDs remain stable. The
 executable advisory pilot waits for the selected Buoy revision's standalone
@@ -114,9 +118,9 @@ Dashed arrows are soft interlocks with a recommended direction; the
 alternative order is pinned in the owning docs' §I1 sections. Dotted
 arrowless links are shared-component coordination with no inherent
 order: [#730] Phase 2 delivers `EffectKind` and [#731] Phase 1 consumes
-it (string-match + loud else if it lands first); [#731] Phase 3's
-`DeepTag` joins [#730]'s lint enum list, whose freeze anticipates the
-addition. The thick red edges are the hard dependencies: inside the
+it (string-match + loud else if it lands first). `DeepTag` exhaustiveness is
+owned entirely by [#731] Phase 3; it has no dependency on the extracted
+[#730] source lint. The thick red edges are the hard dependencies: inside the
 plan set, [#719]'s fix precedes [#732] Phase 3's `sqrt = 0` tolerance
 row (SATISFIED 2026-07-17: PR #760 merged, [#719] closed - the row may
 be authored when Phase 3 arrives); downstream of the set, [#754]'s
@@ -554,3 +558,5 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#794]: https://github.com/Chelis-Lang/chelis/issues/794
 [#795]: https://github.com/Chelis-Lang/chelis/issues/795
 [#796]: https://github.com/Chelis-Lang/chelis/issues/796
+[#799]: https://github.com/Chelis-Lang/chelis/pull/799
+[#815]: https://github.com/Chelis-Lang/chelis/pull/815

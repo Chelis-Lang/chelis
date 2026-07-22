@@ -56,14 +56,19 @@ generated formatter ([#732]).
 ### 2. Repo-specific lint rules (gate tier)
 
 `chelis-lint` lints Rust source and runs in the gate (the §8.6 rule
-proves the pattern). **Every incident closes with a lint rule when one
-is expressible.** In flight: `rust-no-wildcard-dispatch` ([#730] Phase 2).
-Repository-wide authority, freshness, and impact analysis instead use the
-pinned Buoy shell plus a one-way, versioned Chelis adapter ([#733] Phases 1-3),
-avoiding both a second provenance engine inside `chelis-lint` and any outward
-Chelis dependency from `buoy-core`. The closing-move checklist
-for any future incident: fix, test, THEN ask "what lint rule makes this
-unwritable?"
+proves the pattern). A repo-specific lint is appropriate only when its
+accepted language can cover the prohibited shape without laundering paths or
+false positives. The attempted `rust-no-wildcard-dispatch` rule did not meet
+that standard under execution; it was extracted from [#730] to [#815] for an
+independent keep-or-delete decision. [#730] is instead closed structurally by
+typed boundaries and exhaustive consumers. The `spec-provenance` family
+([#733] Phase 1) remains a valid lint-shaped contract because it checks an
+explicit document grammar rather than approximating Rust semantics.
+
+The closing-move question for an incident is therefore: "what is the lowest
+typed construction boundary that makes this state unrepresentable?" A lint is
+defense in depth when that boundary cannot express the policy faithfully; it
+is not presumed to be the proof.
 
 ### 3. Tripwires and the duplicate registry (test tier)
 
@@ -215,3 +220,4 @@ Wave 0.
 [#734]: https://github.com/Chelis-Lang/chelis/issues/734
 [#738]: https://github.com/Chelis-Lang/chelis/issues/738
 [#740]: https://github.com/Chelis-Lang/chelis/issues/740
+[#815]: https://github.com/Chelis-Lang/chelis/pull/815

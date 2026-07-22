@@ -2536,7 +2536,7 @@ fn cmd_build(
             .map(|binding| {
                 let mut binding = binding.clone();
                 binding.display_name = match binding.ty {
-                    chelis_ir::host::HostType::Fn(_, _) => None,
+                    chelis_ir::ConcreteHostType::Function(_, _) => None,
                     _ => host_display_root_name(&binding.name, &entry_display_root_names).or_else(
                         || {
                             // Tuple-typed top-level bindings get their root
@@ -2545,7 +2545,7 @@ fn cmd_build(
                             // eval-side behavior). Surface a synthetic
                             // tuple-prefix display name so the C emitter
                             // can render the per-field "name.i = ..." lines.
-                            if matches!(&binding.ty, chelis_ir::host::HostType::Tuple(_)) {
+                            if matches!(&binding.ty, chelis_ir::ConcreteHostType::Tuple(_)) {
                                 host_display_tuple_root_prefix(
                                     &binding.name,
                                     &entry_display_root_names,
@@ -2797,10 +2797,10 @@ fn cmd_build_deep(
             .map(|binding| {
                 let mut binding = binding.clone();
                 binding.display_name = match binding.ty {
-                    chelis_ir::host::HostType::Fn(_, _) => None,
+                    chelis_ir::ConcreteHostType::Function(_, _) => None,
                     _ => host_display_root_name(&binding.name, &entry_display_root_names).or_else(
                         || {
-                            if matches!(&binding.ty, chelis_ir::host::HostType::Tuple(_)) {
+                            if matches!(&binding.ty, chelis_ir::ConcreteHostType::Tuple(_)) {
                                 host_display_tuple_root_prefix(
                                     &binding.name,
                                     &entry_display_root_names,
@@ -7041,7 +7041,7 @@ fn c_backend_supports_precision(precision: chelis_types::types::Prim) -> bool {
 /// silently fall through to `/* unsupported builtin */ 0` (a wrong value,
 /// not a diagnostic). This guard turns that into a clean build error.
 fn reject_eval_only_builtins_host(
-    program: &chelis_ir::host::HostProgram,
+    program: &chelis_ir::host::ConcreteHostProgram,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for builtin in EVAL_ONLY_HOST_BUILTINS {
         if chelis_ir::host::host_program_uses_builtin(program, builtin) {
@@ -7057,13 +7057,13 @@ fn reject_eval_only_builtins_host(
 }
 
 fn reject_unsupported_c_precisions_host(
-    program: &chelis_ir::host::HostProgram,
+    program: &chelis_ir::host::ConcreteHostProgram,
 ) -> Result<(), Box<dyn std::error::Error>> {
     fn check_host_type(
-        ty: &chelis_ir::host::HostType,
+        ty: &chelis_ir::ConcreteHostType,
         context: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        use chelis_ir::host::HostType;
+        use chelis_ir::ConcreteHostType as HostType;
         match ty {
             HostType::Tensor(t) if !c_backend_supports_precision(t.precision) => {
                 return Err(format!(
@@ -7087,7 +7087,7 @@ fn reject_unsupported_c_precisions_host(
                     check_host_type(item, context)?;
                 }
             }
-            HostType::Fn(params, ret) => {
+            HostType::Function(params, ret) => {
                 for p in params {
                     check_host_type(p, context)?;
                 }
@@ -7283,7 +7283,7 @@ fn reject_symbolic_windowed_reduce(
 /// (`codegen_host_program`) lowers `reduce_window_*` from these helper
 /// DAGs, so the pure-DAG guard alone would miss the node.
 fn reject_symbolic_windowed_reduce_host(
-    program: &chelis_ir::host::HostProgram,
+    program: &chelis_ir::host::ConcreteHostProgram,
     target: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for helper in &program.global_tensor_helpers {
@@ -7339,7 +7339,7 @@ fn reject_unsupported_reduce_window_precision(
 /// tensor-helper DAG embedded in a host program, mirroring
 /// [`reject_symbolic_windowed_reduce_host`].
 fn reject_unsupported_reduce_window_precision_host(
-    program: &chelis_ir::host::HostProgram,
+    program: &chelis_ir::host::ConcreteHostProgram,
     target: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for helper in &program.global_tensor_helpers {
@@ -7870,7 +7870,7 @@ fn checked_program_with_effects(
 /// `crates/chelis-cli/tests/cross_library_semantic_gap_diagnostics.rs`);
 /// this function is the human-readable rendering, not the matchable
 /// contract surface.
-fn emit_summary_rejections(host: Option<&chelis_ir::host::HostProgram>) {
+fn emit_summary_rejections(host: Option<&chelis_ir::host::ConcreteHostProgram>) {
     let Some(host) = host else {
         return;
     };
@@ -7894,7 +7894,7 @@ fn expanded_desugared_program(
 
 fn lower_checked_for_cli(
     checked: &chelis_types::CheckedProgram,
-    host_program: Option<&chelis_ir::host::HostProgram>,
+    host_program: Option<&chelis_ir::host::ConcreteHostProgram>,
 ) -> Result<chelis_ir::Dag, Box<dyn std::error::Error>> {
     match chelis_ir::lower::try_lower_program(checked) {
         Ok(dag) => Ok(dag),
