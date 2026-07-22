@@ -124,6 +124,55 @@ fn checked_results_share_one_totality_finalizer() {
 }
 
 #[test]
+fn checked_result_reconstruction_is_fallible_and_session_owned() {
+    assert!(
+        INFER.contains("pub fn try_from_parts("),
+        "public reconstruction must expose the fallible session result"
+    );
+    assert!(
+        INFER.contains("pub fn try_from_parts_with_signature_context("),
+        "signature-aware reconstruction must expose the same fallible boundary"
+    );
+    for forbidden in [
+        "pub fn from_parts(",
+        "pub fn from_parts_with_signature_context(",
+        "pub(crate) fn checked_program_from_parts(",
+        "pub(crate) fn checked_program_from_parts_with_signature_context(",
+    ] {
+        assert!(
+            !INFER.contains(forbidden) && !SESSION.contains(forbidden),
+            "infallible/discarding reconstruction seam must be absent: `{forbidden}`"
+        );
+    }
+    assert!(
+        SESSION.contains("Ok(_) if !errors.is_empty()"),
+        "run_result must centrally veto success after any authoritative diagnostic"
+    );
+}
+
+#[test]
+fn diagnostic_sink_is_append_only_and_cycle_errors_are_never_erased() {
+    for forbidden in [
+        "pub(crate) fn retain(",
+        "pub(crate) fn clear(",
+        "pub(crate) fn truncate(",
+        "pub(crate) fn drain(",
+        "pub(crate) fn take(",
+        "pub(crate) fn replace(",
+        "suppress_unbound_for_cycle_members",
+    ] {
+        assert!(
+            !SESSION.contains(forbidden) && !INFER.contains(forbidden),
+            "the witness-owning diagnostic session must be monotonic: `{forbidden}`"
+        );
+    }
+    assert!(
+        INFER.contains("prebind_recursive_function_schemes("),
+        "known recursive callables must be bound before body inference"
+    );
+}
+
+#[test]
 fn annotation_ownership_uses_the_canonical_exhaustive_child_role_table() {
     for role in [
         "RuntimeExpr",

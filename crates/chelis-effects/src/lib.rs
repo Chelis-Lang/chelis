@@ -1039,6 +1039,22 @@ mod tests {
     }
 
     #[test]
+    fn effect_annotation_reconstruction_preserves_type_context() {
+        let decls = parse_surf(
+            "def add_one(x: int32) -> int32 = add(x, 1)",
+        )
+        .expect("surf parse");
+        let deep = desugar_program(&decls);
+        let typed = chelis_types::check_ir_program(&deep).expect("type check");
+        let expected_type_env = typed.type_env().clone();
+        let expected_signatures = typed.signature_inference().clone();
+
+        let reconstructed = check_program(&typed).expect("effect check");
+        assert_eq!(reconstructed.type_env(), &expected_type_env);
+        assert_eq!(reconstructed.signature_inference(), &expected_signatures);
+    }
+
+    #[test]
     fn infers_random_for_dropout_fn() {
         let exprs = parse_str(
             "(def {} x (lit {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))} 0))
