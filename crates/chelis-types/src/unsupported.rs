@@ -126,6 +126,20 @@ impl Unsupported {
         }
     }
 
+    /// The single target-build diagnostic for a host-runtime-only builtin.
+    /// Both the compiler API and CLI call this before host expression
+    /// lowering, then retain their concrete-HostProgram scans as a second
+    /// boundary. Keeping construction here prevents the two public build
+    /// entry points from drifting in kind, stage, or remediation text.
+    pub fn compiled_host_only_builtin(name: impl Into<String>, target: &'static str) -> Self {
+        Self::new(
+            UnsupportedKind::Builtin(name.into()),
+            format!("`chelis build --target {target}` host emission"),
+            Stage::Codegen(target),
+            "host-only builtin; run it under `chelis eval` or `chelis test`, or rewrite the caller to use tensor-lane primitives (spec/05-risc-primitives.md §3.6; chelis#705)",
+        )
+    }
+
     /// Attach a span reference.
     #[must_use]
     pub fn with_span(mut self, span: SpanRef) -> Self {

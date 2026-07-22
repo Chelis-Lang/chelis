@@ -738,6 +738,7 @@ pub fn compile(request: CompileRequest) -> Result<CompileResult> {
 
 pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutionArtifact> {
     let compiled = compile_source(request.source_kind, &request.source)?;
+    reject_host_only_builtins_before_host_lowering(&compiled.checked, request.target)?;
     let host_compiled =
         chelis_ir::host::try_lower_compiled_program(&compiled.checked).map_err(|diagnostic| {
             stage_error_with_span(
@@ -2292,6 +2293,38 @@ fn reject_unsupported_reduce_window_precision(dag: &Dag, target: &str) -> Result
 /// builtin */ 0` C stub. Spec: `spec/05-risc-primitives.md` §3.6.
 const HOST_ONLY_BUILTINS: &[&str] = &["tensor_scan"];
 
+fn host_only_builtin_error(name: &str, target: CompileTarget) -> CompilerError {
+    let target_label = match target {
+        CompileTarget::C => "c",
+        CompileTarget::Hip => "hip",
+    };
+    let unsupported = chelis_types::unsupported::Unsupported::compiled_host_only_builtin(
+        name,
+        target_label,
+    );
+    stage_error(
+        "compile",
+        unsupported.to_string(),
+        "unsupported_feature",
+    )
+}
+
+/// Reject direct host-runtime-only calls on checked Deep before host lowering
+/// descends into their callback arguments. This preserves the owning builtin
+/// diagnostic even when an argument is itself intentionally unrepresentable
+/// in compiled code (for example `tensor_scan(..., fn (...), ...)`). The
+/// concrete-HostProgram scan below remains the second boundary for aliases
+/// and other shapes materialized by lowering.
+fn reject_host_only_builtins_before_host_lowering(
+    program: &CheckedProgram,
+    target: CompileTarget,
+) -> Result<()> {
+    if let Some(name) = chelis_ir::host::find_direct_builtin_call(program, HOST_ONLY_BUILTINS) {
+        return Err(host_only_builtin_error(&name, target));
+    }
+    Ok(())
+}
+
 fn reject_host_only_builtins(
     program: &chelis_ir::host::ConcreteHostProgram,
     target: CompileTarget,
@@ -2418,11 +2451,6 @@ fn reject_host_only_builtins(
         }
     }
 
-    let target_label = match target {
-        CompileTarget::C => "c",
-        CompileTarget::Hip => "hip",
-    };
-
     // This walk is deliberately whole-program (every global value AND
     // every function body), NOT scoped to the build entry's reachable
     // call graph. That asymmetry with the reachability-scoped AD guard
@@ -2455,17 +2483,7 @@ fn reject_host_only_builtins(
     }
 
     if let Some(name) = found {
-        return Err(stage_error(
-            "compile",
-            format!(
-                "`chelis build --target {target_label}` cannot lower host-runtime-only \
-                 builtin `{name}`; this helper is host-only by design (see \
-                 spec/05-risc-primitives.md §3.6 Host-Runtime Builders). Use `chelis eval` \
-                 / `chelis test` to run programs that call `{name}`, or rewrite the \
-                 caller to use tensor-lane primitives that lower to the RISC DAG."
-            ),
-            "unsupported_feature",
-        ));
+        return Err(host_only_builtin_error(&name, target));
     }
 
     Ok(())

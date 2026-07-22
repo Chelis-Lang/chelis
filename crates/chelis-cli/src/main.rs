@@ -2477,6 +2477,7 @@ fn cmd_build(
     {
         let full_checked = checked_program_with_effects(&full_deep_exprs)
             .map_err(|e| format!("Check errors: {e}"))?;
+        reject_host_only_builtins_before_host_lowering(&full_checked, target)?;
         chelis_ir::host::try_lower_compiled_program(&full_checked)
             .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?
             .host
@@ -2514,6 +2515,7 @@ fn cmd_build(
     };
     chelis_effects::validate_build_target(&checked, target)
         .map_err(|errors| format_effect_errors(&errors))?;
+    reject_host_only_builtins_before_host_lowering(&checked, target)?;
     let mut compiled_program = chelis_ir::host::try_lower_compiled_program(&checked)
         .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?;
     emit_summary_rejections(compiled_program.host.as_ref());
@@ -2757,6 +2759,7 @@ fn cmd_build_deep(
         if target == "c" && pruned_deep_exprs.len() != deep_exprs.len() {
             let full_checked = checked_program_with_effects(&deep_exprs)
                 .map_err(|e| format!("Check errors: {e}"))?;
+            reject_host_only_builtins_before_host_lowering(&full_checked, target)?;
             chelis_ir::host::try_lower_compiled_program(&full_checked)
                 .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?
                 .host
@@ -2776,6 +2779,7 @@ fn cmd_build_deep(
         .map_err(|e| format!("Check errors: {e}"))?;
     chelis_effects::validate_build_target(&checked, target)
         .map_err(|errors| format_effect_errors(&errors))?;
+    reject_host_only_builtins_before_host_lowering(&checked, target)?;
     let mut compiled_program = chelis_ir::host::try_lower_compiled_program(&checked)
         .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?;
     emit_summary_rejections(compiled_program.host.as_ref());
@@ -7023,15 +7027,32 @@ fn c_backend_supports_precision(precision: chelis_types::types::Prim) -> bool {
     )
 }
 
-/// Mirror of `reject_unsupported_c_precisions` for the host-program lane.
-///
-/// The C backend's `codegen_host_program` recursively invokes
-/// `CEmitter::emit_dag_with_options` on every `tensor_helper`'s DAG, which
-/// internally panics on unsupported precisions (`validate_supported_precisions`
-/// at chelis-backend-c::emit). For the DAG-only path the CLI guards the
-/// panic with `reject_unsupported_c_precisions`; this function does the
-/// same for the host-program lane (RT-4 F4: `def f(x: tensor[3, bf16]) ...`
-/// previously panicked with a Rust stack trace).
+/// Target-build builtins that must reject before host lowering examines an
+/// argument with no standalone compiled representation.
+const COMPILED_HOST_ONLY_BUILTINS: &[&str] = &["tensor_scan"];
+
+fn reject_host_only_builtins_before_host_lowering(
+    program: &chelis_types::CheckedProgram,
+    target: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let target = match target {
+        "c" => "c",
+        "hip" => "hip",
+        "metal" => "metal",
+        _ => return Ok(()),
+    };
+    if let Some(name) =
+        chelis_ir::host::find_direct_builtin_call(program, COMPILED_HOST_ONLY_BUILTINS)
+    {
+        return Err(
+            chelis_types::unsupported::Unsupported::compiled_host_only_builtin(name, target)
+                .to_string()
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 /// Reject eval/test-only builtins that have no compiled-target lowering.
 ///
 /// Hull Phase 0a: `process_run` runs a subprocess from the IR evaluator
@@ -7056,6 +7077,15 @@ fn reject_eval_only_builtins_host(
     Ok(())
 }
 
+/// Mirror of `reject_unsupported_c_precisions` for the host-program lane.
+///
+/// The C backend's `codegen_host_program` recursively invokes
+/// `CEmitter::emit_dag_with_options` on every `tensor_helper`'s DAG, which
+/// internally panics on unsupported precisions (`validate_supported_precisions`
+/// at chelis-backend-c::emit). For the DAG-only path the CLI guards the
+/// panic with `reject_unsupported_c_precisions`; this function does the
+/// same for the host-program lane (RT-4 F4: `def f(x: tensor[3, bf16]) ...`
+/// previously panicked with a Rust stack trace).
 fn reject_unsupported_c_precisions_host(
     program: &chelis_ir::host::ConcreteHostProgram,
 ) -> Result<(), Box<dyn std::error::Error>> {

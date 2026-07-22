@@ -303,6 +303,55 @@ fn in_range_int8_named_callback_executes_exactly() {
     assert_eq!(line, "7");
 }
 
+/// A directly-constructed generic record must substitute its applied type
+/// before field access. The host boundary may not expose the declaration's
+/// `a` term as if it were a concrete field type.
+#[test]
+fn in_range_int8_direct_generic_record_access_executes_exactly() {
+    if !c_toolchain_available() {
+        return;
+    }
+    let program = "module M.Main\n\
+         type ReviewBox[a] =\n\
+           | ReviewBox { value: a }\n\
+         def direct() -> int8 = (ReviewBox { value: cast(7, int8) }).value\n\
+         out = print(direct())\n";
+    let (line, stderr, ok) =
+        c_lane(program, "c_i8_direct_generic_access").expect("C generic-record lane");
+    assert!(
+        ok,
+        "direct generic field access must execute; stdout `{line}`, stderr `{stderr}`"
+    );
+    common::assert_elements_in_domain("int8", &line, "direct generic int8 access C");
+    assert_eq!(line, "7");
+}
+
+/// Nested generic fields require recursive substitution at every declaration
+/// boundary, including the final access through `ReviewBox[a]`.
+#[test]
+fn in_range_int8_nested_generic_record_access_executes_exactly() {
+    if !c_toolchain_available() {
+        return;
+    }
+    let program = "module M.Main\n\
+         type ReviewBox[a] =\n\
+           | ReviewBox { value: a }\n\
+         type ReviewEnvelope[a] =\n\
+           | ReviewEnvelope { inner: ReviewBox[a] }\n\
+         def open(envelope: ReviewEnvelope[int8]) -> int8 = envelope.inner.value\n\
+         out = print(open(ReviewEnvelope {\n\
+           inner: ReviewBox { value: cast(7, int8) }\n\
+         }))\n";
+    let (line, stderr, ok) =
+        c_lane(program, "c_i8_nested_generic_access").expect("C nested-generic lane");
+    assert!(
+        ok,
+        "nested generic field access must execute; stdout `{line}`, stderr `{stderr}`"
+    );
+    common::assert_elements_in_domain("int8", &line, "nested generic int8 access C");
+    assert_eq!(line, "7");
+}
+
 /// In-range int16 tensor arithmetic agrees across lanes: both lanes hold
 /// value-100 elements. Since chelis#732 Phase 1, eval prints integer
 /// tensor elements as integers ([05-OBS-2]); the compiled lane keeps its

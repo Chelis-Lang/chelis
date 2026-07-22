@@ -3,8 +3,10 @@
 
 This is intentionally one runner rather than a prose conjunction. It executes
 the focused vocabulary/runtime/host-state/ABI/emission/public-API surfaces,
-the two privacy compile-fail doctests, a zero-occurrence endpoint scan, and a
-controlled added-EffectKind mutation. The mutation touches only the vocabulary
+the two privacy compile-fail doctests, a structural endpoint scan, and a
+controlled added-EffectKind mutation. The endpoint scan rejects the former
+Unit and raw-generic-field escape hatches in addition to the legacy host-type
+and expression-emission endpoints. The mutation touches only the vocabulary
 owner, refuses to run over a dirty owner file, and restores the original bytes
 in a ``finally`` block.
 """
@@ -223,6 +225,23 @@ def endpoint_violations(root: Path) -> list[str]:
         (Path("crates/chelis-compiler-api/src/compiler.rs"), "::host::lower_compiled_program"),
         (Path("crates/chelis-backend-c/src/emitted_expr.rs"), "EmittedExpr::raw"),
         (Path("crates/chelis-backend-c/src/host_emit.rs"), "EmittedExpr::raw"),
+        (
+            Path("crates/chelis-ir/src/host.rs"),
+            "_ => HostExpr::new(HostExprKind::Unit)",
+        ),
+        (
+            Path("crates/chelis-ir/src/host.rs"),
+            "let placeholder = HostExpr::new(HostExprKind::Unit)",
+        ),
+        (Path("crates/chelis-ir/src/host.rs"), "fn lookup_adt_ctor("),
+        (
+            Path("crates/chelis-ir/src/host.rs"),
+            "fn lookup_adt_ctor_details(",
+        ),
+        (
+            Path("crates/chelis-ir/src/host.rs"),
+            "fn lookup_adt_ctor_details_for_type(",
+        ),
     )
     required = (
         (
@@ -236,6 +255,25 @@ def endpoint_violations(root: Path) -> list[str]:
         (
             Path("crates/chelis-ir/src/host.rs"),
             "pub fn try_lower_compiled_program",
+        ),
+        (Path("crates/chelis-ir/src/host.rs"), "fn lower_host_expr("),
+        (Path("crates/chelis-ir/src/host.rs"), "fn lower_host_expr_kind("),
+        (
+            Path("crates/chelis-ir/src/host.rs"),
+            ") -> Result<HostExpr, crate::lower::LowerDiagnostic> {",
+        ),
+        (
+            Path("crates/chelis-ir/src/host.rs"),
+            "struct GenericAdtConstructor",
+        ),
+        (Path("crates/chelis-ir/src/host.rs"), "struct GenericAdtField"),
+        (
+            Path("crates/chelis-ir/src/host.rs"),
+            "struct InstantiatedAdtConstructor",
+        ),
+        (
+            Path("crates/chelis-ir/src/host.rs"),
+            ") -> Result<InstantiatedAdtConstructor, AdtInstantiationError> {",
         ),
     )
     violations: list[str] = []

@@ -543,14 +543,21 @@ only resolved types reach codegen.
 Every production compiler entry point returns host decode, inference,
 resolution, and target-selection failures through its declared `Result`.
 There is no public infallible host-lowering wrapper and no production caller
-may turn one of those failures into a panic. Substitution of a generic ADT's
-type arguments occurs before its constructor fields cross the concrete-type
-boundary, so a field cannot carry a declaration-scoped type variable into
-codegen. Direct anonymous callback applications are specialized before host
-emission; an unresolved callable is never represented by a null function
-pointer or numeric value. An expression node may inhabit only its resolved ABI
-type: in particular, `Unit` emission cannot satisfy a function, callback, or
-numeric ABI expectation.
+may turn one of those failures into a panic. Host-expression lowering is also
+`Result`-typed: an unrecognized or malformed Deep expression returns a lowering
+diagnostic instead of constructing a placeholder expression. `Unit` is created
+only by the language's empty-tuple form and cannot be used as a temporary
+replacement during refinement or conformance.
+
+A generic ADT declaration is not a concrete field layout. Constructor,
+pattern, and direct or nested field-access lowering must supply an applied ADT
+type to one substitution operation, which returns either fully instantiated
+fields or a typed arity/name/unresolved-term error. No lookup API exposes the
+declaration's field terms as concrete fields. Direct anonymous callback
+applications are specialized before host emission; an unresolved callable is
+never represented by a null function pointer or numeric value. An expression
+node may inhabit only its resolved ABI type: in particular, `Unit` emission
+cannot satisfy a function, callback, or numeric ABI expectation.
 
 Positive/negative parity covers: every concrete primitive; each named variable
 kind; missing versus malformed syntax; empty-list inference; `Never`
@@ -725,8 +732,10 @@ tripwire proving it.
    authorized by the target capability decision. Before Table B exists, the
    private exhaustive adapter cites a spec atom or implementation issue for
    every negative decision. Host codegen accepts only the resolved ABI
-   vocabulary; the legacy `Unknown` sentinel and every emitted/default-value
-   conversion from it are deleted.
+   vocabulary; host-expression lowering rejects unhandled forms through its
+   own `Result`; generic ADT fields cross the boundary only after applied-type
+   substitution; and the legacy `Unknown`, placeholder-`Unit`, and emitted
+   default-value escape hatches are deleted.
 5. The private structured C-expression AST described in §C4.4, replacing
    `EmittedExpr::raw` as a general construction path.
 6. Keep the token/count tripwire green as supporting evidence. Its baseline
@@ -750,13 +759,15 @@ formatting ([#732]); capability atom authorship ([#733]).
 Success means exit 0 with the final line `PHASE 2 ORACLE: PASS`. This single
 runner executes the closed-vocabulary suite, generated-header and invalid-ID
 runtime checks, §C6.3 term-state and public-API parity (including generic ADT
-specialization and empty-list failure propagation), exact callback and
+specialization, direct/nested field access, callable-value rejection, and
+empty-list failure propagation), exact inline and named callback and
 reduced-float ABI cells, structured-emission and private-ABI compile-fail
-checks, the zero-occurrence endpoint scan, and a controlled temporary
-`EffectKind` variant mutation. The mutation must produce non-exhaustive-match
-errors in independent semantic consumers and the runner must restore the
-owner source byte-for-byte. The tripwire remains supporting evidence executed
-by the normal gate; it is not a second completion oracle.
+checks, the endpoint scan for unresolved, placeholder-`Unit`, and raw generic
+field escape hatches, and a controlled temporary `EffectKind` variant
+mutation. The mutation must produce non-exhaustive-match errors in independent
+semantic consumers and the runner must restore the owner source byte-for-byte.
+The tripwire remains supporting evidence executed by the normal gate; it is
+not a second completion oracle.
 
 ## Phase 3 - gates become UX, not safety
 

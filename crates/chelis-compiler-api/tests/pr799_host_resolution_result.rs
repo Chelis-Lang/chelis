@@ -186,6 +186,7 @@ fn generic_access_source(dtype: &str, literal: &str) -> String {
            | ReviewBox {{ value: a }}\n\
          type ReviewEnvelope[a] =\n\
            | ReviewEnvelope {{ inner: ReviewBox[a] }}\n\
+         def direct() -> {dtype} = (ReviewBox {{ value: cast({literal}, {dtype}) }}).value\n\
          def open(envelope: ReviewEnvelope[{dtype}]) -> {dtype} = envelope.inner.value\n\
          def out = print(open(ReviewEnvelope {{\n\
            inner: ReviewBox {{ value: cast({literal}, {dtype}) }}\n\
