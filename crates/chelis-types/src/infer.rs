@@ -631,6 +631,7 @@ struct InferenceProduct {
     next_epoch: u64,
     active_epoch: Option<TypeStampEpoch>,
     owner_types: HashMap<usize, FinalOwnerType>,
+    type_headers: TypeResolutionEnv,
 }
 
 struct TypeStampEpoch {
@@ -1005,11 +1006,80 @@ pub(crate) fn run_finalization_mutation_case(
 fn collect_declared_sig_metadata<'a>(
     exprs: impl IntoIterator<Item = &'a deep::Expr>,
 ) -> HashMap<String, DeclaredSigMetadata> {
+    let exprs = exprs.into_iter().collect::<Vec<_>>();
     let mut map: HashMap<String, DeclaredSigMetadata> = HashMap::new();
-    for expr in exprs {
+    for expr in &exprs {
         collect_defsig_param_types(expr, &mut map);
     }
+    for expr in exprs {
+        extend_declared_sig_binders_from_def_params(expr, &mut map);
+    }
     map
+}
+
+/// Merge declaration-owned binders preserved by an explicit generic `def`
+/// into the matching standalone signature's scope. Surf suppresses the
+/// synthesized `defsig` when a same-name explicit `sig` exists; in that case
+/// the `def f[piece](x: tensor[piece, ...])` parameter syntax is the only Deep
+/// node that still distinguishes the bound `d-var piece` from an ordinary
+/// closed annotation. Restricting this merge to names that already own a
+/// `defsig` keeps an unrelated direct-Deep `(d-var ...)` annotation closed.
+fn extend_declared_sig_binders_from_def_params(
+    expr: &deep::Expr,
+    map: &mut HashMap<String, DeclaredSigMetadata>,
+) {
+    let deep::Expr::List(list, _) = expr else {
+        return;
+    };
+    if get_tag(list) == Some("module") {
+        for child in children(list) {
+            extend_declared_sig_binders_from_def_params(child, map);
+        }
+        return;
+    }
+    if get_tag(list) != Some("def") {
+        return;
+    }
+    let kids = children(list);
+    let (Some(name), Some(deep::Expr::List(fn_list, _))) =
+        (kids.first().and_then(symbol_name), kids.get(1))
+    else {
+        return;
+    };
+    if get_tag(fn_list) != Some("fn") {
+        return;
+    }
+    let Some(params) = children(fn_list).first() else {
+        return;
+    };
+    let Some(metadata) = map.get_mut(name) else {
+        return;
+    };
+    let deep::Expr::List(params_list, _) = params else {
+        return;
+    };
+    for param in children(params_list) {
+        let type_expr = match param {
+            deep::Expr::MetaExpr(meta, _) => meta
+                .entries
+                .iter()
+                .find(|(key, _)| key == "type")
+                .map(|(_, value)| value),
+            deep::Expr::List(param_list, _) => param_list.elements.get(1).and_then(|meta| {
+                let deep::Expr::Map(meta, _) = meta else {
+                    return None;
+                };
+                meta.entries
+                    .iter()
+                    .find(|(key, _)| key == "type")
+                    .map(|(_, value)| value)
+            }),
+            _ => None,
+        };
+        if let Some(type_expr) = type_expr {
+            metadata.binders.extend(deep_type_binder_names(type_expr));
+        }
+    }
 }
 
 /// Recursively collect `(defsig name (t-fn arg-exprs... ret))` entries,
@@ -1099,6 +1169,7 @@ pub struct CheckedProgram {
     type_env: HashMap<String, deep::Expr>,
     linearity: LinearityInfo,
     signature_inference: SignatureInferenceMetadata,
+    type_headers: TypeResolutionEnv,
 }
 
 impl CheckedProgram {
@@ -1112,6 +1183,7 @@ impl CheckedProgram {
             type_env,
             linearity: LinearityInfo::default(),
             signature_inference: SignatureInferenceMetadata::default(),
+            type_headers: TypeResolutionEnv::default(),
         }
     }
 
@@ -1146,6 +1218,10 @@ impl CheckedProgram {
 
     pub fn signature_inference(&self) -> &SignatureInferenceMetadata {
         &self.signature_inference
+    }
+
+    pub(crate) fn type_headers(&self) -> &TypeResolutionEnv {
+        &self.type_headers
     }
 
     pub fn with_linearity(mut self, linearity: LinearityInfo) -> Self {
@@ -1202,11 +1278,15 @@ impl CheckedProgram {
                 .insert(name.clone(), sig.clone());
         }
 
+        let mut type_headers = library.type_headers.clone();
+        type_headers.extend_from(&new_code.type_headers);
+
         Self {
             annotated_exprs,
             type_env,
             linearity,
             signature_inference,
+            type_headers,
         }
     }
 }
@@ -1233,6 +1313,7 @@ fn finalize_checked_program(
         type_env,
         linearity: LinearityInfo::default(),
         signature_inference,
+        type_headers: type_headers.clone(),
     };
 
     validate_checked_program_totality(&checked, signature_context, errors);
@@ -1309,6 +1390,7 @@ pub(crate) fn checked_program_with_effect_annotations_in_session(
         type_env: original.type_env.clone(),
         linearity: original.linearity.clone(),
         signature_inference: original.signature_inference.clone(),
+        type_headers: original.type_headers.clone(),
     };
     validate_checked_program_totality(&checked, original.signature_inference(), errors);
     checked
@@ -1467,6 +1549,7 @@ fn infer_program_with_product_in_session(
     // Surf source (every .ch starts with `module X`) get collected.
     let items = top_level_decl_items_with_modules(exprs);
     collect_all_declarations(&items, &mut env, &mut vg, &mut subst, &mut adt_reg, errors);
+    product.type_headers = adt_reg.resolution_env().clone();
 
     // Checker-enforced opacity (RFC D-CHECK): install the per-run
     // context so the inference hooks see module identity, exports,
@@ -1803,7 +1886,6 @@ pub(crate) fn build_compiled_library_context_in_session(
     }
     let library_ir_annotated = build_ir_type_env(&library_annotated);
 
-    let signature_type_headers = TypeResolutionEnv::from_registry(&state.adt_reg);
     let type_env = TypeEnv::from_inner(TypeEnvInner {
         env: state.env,
         var_gen: state.var_gen,
@@ -1823,7 +1905,7 @@ pub(crate) fn build_compiled_library_context_in_session(
         library_annotated,
         library_ir_annotated,
         &SignatureInferenceMetadata::default(),
-        &signature_type_headers,
+        &product.type_headers,
         errors,
     );
     if !errors.is_empty() {
@@ -1959,7 +2041,6 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
             .or_insert_with(|| ty.clone());
     }
 
-    let signature_type_headers = TypeResolutionEnv::from_registry(&state.adt_reg);
     let type_env = TypeEnv::from_inner(TypeEnvInner {
         env: state.env,
         var_gen: state.var_gen,
@@ -1984,7 +2065,7 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
         library_annotated,
         checked_type_env,
         &SignatureInferenceMetadata::default(),
-        &signature_type_headers,
+        &product.type_headers,
         errors,
     );
     if !errors.is_empty() {
@@ -2118,12 +2199,11 @@ pub(crate) fn check_ir_with_signature_context_in_session(
             .or_insert_with(|| ty.clone());
     }
     log_sub("annotated_type_env_build", &mut sub_t);
-    let signature_type_headers = TypeResolutionEnv::from_registry(&state.adt_reg);
     let checked = finalize_checked_program(
         annotated_exprs,
         annotated_type_env,
         signature_context,
-        &signature_type_headers,
+        &product.type_headers,
         errors,
     );
     if !errors.is_empty() {
@@ -2154,12 +2234,11 @@ pub(crate) fn check_typed_program_in_session(
         if !errors.is_empty() {
             return Err(stats);
         }
-        let type_headers = signature_metadata_type_headers(&annotated_exprs);
         let checked = finalize_checked_program(
             annotated_exprs,
             annotated_type_env,
             &SignatureInferenceMetadata::default(),
-            &type_headers,
+            &product.type_headers,
             errors,
         );
         if !errors.is_empty() {
@@ -2244,6 +2323,7 @@ fn infer_ir_program_with_state(
         &mut state.adt_reg,
         errors,
     );
+    product.type_headers = state.adt_reg.resolution_env().clone();
 
     // Checker-enforced opacity (RFC D-CHECK): accumulate this phase's
     // program-shape metadata into the persistent state (so the
@@ -3245,14 +3325,6 @@ fn infer_signature_metadata_with_context_and_headers(
     SignatureInferenceMetadata { functions }
 }
 
-fn signature_metadata_type_headers(exprs: &[deep::Expr]) -> TypeResolutionEnv {
-    let empty = TypeEnv::empty();
-    precollect_type_resolution_env(
-        &top_level_decl_items_with_modules(exprs),
-        &empty.inner().adt_reg,
-    )
-}
-
 struct FunctionInferenceComponent<'a> {
     members: Vec<&'a deep::Expr>,
     recursive: bool,
@@ -3555,8 +3627,15 @@ pub(crate) fn param_has_consuming_use(
     param: &str,
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
+    type_headers: &TypeResolutionEnv,
 ) -> Result<bool, InferResult> {
-    crate::session::param_has_consuming_use(expr, param, available_signatures, type_env)
+    crate::session::param_has_consuming_use(
+        expr,
+        param,
+        available_signatures,
+        type_env,
+        type_headers,
+    )
 }
 
 pub(crate) fn param_has_consuming_use_in_session(
@@ -3564,15 +3643,15 @@ pub(crate) fn param_has_consuming_use_in_session(
     param: &str,
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
+    type_headers: &TypeResolutionEnv,
     errors: &mut DiagnosticSink<'_>,
 ) -> bool {
-    let headers = TypeResolutionEnv::from_registry(&AdtRegistry::new());
     param_has_consuming_use_with_headers(
         expr,
         param,
         available_signatures,
         type_env,
-        &headers,
+        type_headers,
         errors,
     )
 }
@@ -6849,7 +6928,6 @@ fn should_attach_type_metadata(tag: &str) -> bool {
     !matches!(
         tag,
         "module"
-            | "def"
             | "import"
             | "import-all"
             | "export"
@@ -9847,6 +9925,8 @@ fn infer_top_level(
         } else {
             body_ty
         };
+
+        product.record_bypass(expr, scheme_body.clone(), "top-level declaration inference");
 
         // chelis#397/#469: record the size provenance of a top-level value
         // binding (e.g. `zero_count = sub(cast(0, int32), cast(0, int32))`)
@@ -18735,6 +18815,21 @@ fn infer_match(
                     &mut covered_variants,
                     &mut has_wildcard,
                 );
+
+                let guard = &arm_kids[1];
+                let empty_guard = matches!(guard, deep::Expr::List(guard_list, _) if guard_list.elements.is_empty());
+                if !empty_guard {
+                    let guard_ty =
+                        infer_expr(guard, &mut arm_env, vg, subst, adt_reg, errors, product);
+                    let resolved_guard = subst.apply(&guard_ty);
+                    if !matches!(resolved_guard, Type::Prim(Prim::Bool) | Type::Error(_)) {
+                        errors.push(CheckError::new(
+                            CheckErrorKind::TypeMismatch,
+                            format!("match arm guard must be bool, got {resolved_guard}"),
+                            vec![],
+                        ));
+                    }
+                }
 
                 let body_ty = infer_expr(
                     &arm_kids[2],

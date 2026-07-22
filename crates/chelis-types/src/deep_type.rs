@@ -133,7 +133,7 @@ pub(crate) enum BinderMode<'a> {
 /// [`AdtRegistry::aliases`]. The registry's serde representation skips this
 /// environment and reconstructs it from those validated definitions before a
 /// later check.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TypeResolutionEnv {
     arities: HashMap<String, usize>,
 }
@@ -161,6 +161,12 @@ impl TypeResolutionEnv {
 
     pub(crate) fn insert(&mut self, name: impl Into<String>, arity: usize) {
         self.arities.entry(name.into()).or_insert(arity);
+    }
+
+    pub(crate) fn extend_from(&mut self, other: &Self) {
+        for (name, arity) in &other.arities {
+            self.arities.insert(name.clone(), *arity);
+        }
     }
 
     fn arity(&self, name: &str) -> Option<usize> {

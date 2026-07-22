@@ -305,6 +305,7 @@ pub(crate) fn param_has_consuming_use(
     param: &str,
     available_signatures: &std::collections::HashMap<String, crate::types::Type>,
     type_env: &std::collections::HashMap<String, chelis_deep::Expr>,
+    type_headers: &crate::deep_type::TypeResolutionEnv,
 ) -> Result<bool, InferResult> {
     run_result(|sink| {
         Ok(crate::infer::param_has_consuming_use_in_session(
@@ -312,6 +313,7 @@ pub(crate) fn param_has_consuming_use(
             param,
             available_signatures,
             type_env,
+            type_headers,
             sink,
         ))
     })
