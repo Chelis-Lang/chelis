@@ -66,24 +66,48 @@ pub(crate) fn infer_program(exprs: &[chelis_deep::Expr]) -> InferResult {
 
 #[cfg(test)]
 mod authoritative_type_stamp_tests {
+    use super::*;
+    use crate::infer::{TypeStampMutationCase, run_type_stamp_mutation_case};
+
+    fn run(case: TypeStampMutationCase) -> (bool, Vec<CheckError>) {
+        let mut errors = Vec::new();
+        let result = {
+            let mut sink = DiagnosticSink {
+                errors: &mut errors,
+            };
+            run_type_stamp_mutation_case(case, &mut sink)
+        };
+        (result, errors)
+    }
+
     #[test]
     fn missing_registered_owner_stamp_is_loud_and_has_no_fallback() {
-        todo!("red oracle: a required owner lookup emits one internal diagnostic")
+        let (missing, errors) = run(TypeStampMutationCase::Missing);
+        assert!(missing);
+        assert_eq!(errors.len(), 1, "missing lookup must report exactly once");
+        assert!(errors[0].message.contains("missing authoritative type stamp"));
     }
 
     #[test]
     fn compatible_repeated_owner_write_is_accepted() {
-        todo!("red oracle: the same owner may repeat only with a compatible final type")
+        let (resolved, errors) = run(TypeStampMutationCase::CompatibleRepeat);
+        assert!(resolved);
+        assert!(errors.is_empty(), "compatible writes must agree: {errors:?}");
     }
 
     #[test]
     fn incompatible_repeated_owner_write_is_loud() {
-        todo!("red oracle: conflicting writes emit one internal diagnostic")
+        let (_, errors) = run(TypeStampMutationCase::IncompatibleRepeat);
+        assert_eq!(errors.len(), 1, "conflicting writes must report once");
+        assert!(errors[0].message.contains("conflicting authoritative type writes"));
     }
 
     #[test]
     fn unregistered_synthesized_node_cannot_enter_owner_registry() {
-        todo!("red oracle: temporary annotation/inference nodes are never admitted")
+        let (missing, errors) = run(TypeStampMutationCase::UnregisteredSynthesized);
+        assert!(missing);
+        assert_eq!(errors.len(), 1, "unregistered lookup must report exactly once");
+        assert!(errors[0].message.contains("missing authoritative type stamp"));
     }
 }
 

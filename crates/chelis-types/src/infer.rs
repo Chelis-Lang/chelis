@@ -392,38 +392,17 @@ struct DeclaredSigMetadata {
 #[derive(Clone, Copy)]
 struct AnnotationResolutionContext<'a> {
     declared_signatures: &'a HashMap<String, DeclaredSigMetadata>,
-    current_type_binders: Option<&'a HashSet<String>>,
 }
 
 impl<'a> AnnotationResolutionContext<'a> {
     fn root(declared_signatures: &'a HashMap<String, DeclaredSigMetadata>) -> Self {
         Self {
             declared_signatures,
-            current_type_binders: None,
-        }
-    }
-
-    /// Enter exactly one declaration's binder scope. A missing signature
-    /// deliberately resets the scope to closed input instead of inheriting a
-    /// surrounding declaration's names.
-    fn for_def(self, name: &str) -> Self {
-        Self {
-            declared_signatures: self.declared_signatures,
-            current_type_binders: self
-                .declared_signatures
-                .get(name)
-                .map(|metadata| &metadata.binders),
         }
     }
 
     fn declared_signature(self, name: &str) -> Option<&'a DeclaredSigMetadata> {
         self.declared_signatures.get(name)
-    }
-
-    fn binder_mode(self) -> BinderMode<'a> {
-        self.current_type_binders
-            .map(BinderMode::Explicit)
-            .unwrap_or(BinderMode::ClosedInput)
     }
 }
 
@@ -559,8 +538,14 @@ impl InferenceProduct {
                 Some(owner.ty.clone())
             }
             None => {
+                let construct = match expr {
+                    deep::Expr::List(list, _) => get_tag(list).unwrap_or("<untagged-list>"),
+                    deep::Expr::Atom(_, _) => "<atom>",
+                    deep::Expr::Map(_, _) => "<map>",
+                    deep::Expr::MetaExpr(_, _) => "<meta-expr>",
+                };
                 errors.push(internal_owner_stamp_error(format!(
-                    "missing authoritative type stamp for {role}"
+                    "missing authoritative type stamp for {role} `{construct}`"
                 )));
                 None
             }
@@ -647,6 +632,60 @@ fn register_owner(epoch: &mut TypeStampEpoch, expr: &deep::Expr, role: &'static 
         .required
         .entry(expr_key(expr))
         .or_insert(StampRequirement { role });
+}
+
+#[cfg(test)]
+pub(crate) enum TypeStampMutationCase {
+    Missing,
+    CompatibleRepeat,
+    IncompatibleRepeat,
+    UnregisteredSynthesized,
+}
+
+#[cfg(test)]
+pub(crate) fn run_type_stamp_mutation_case(
+    case: TypeStampMutationCase,
+    errors: &mut DiagnosticSink<'_>,
+) -> bool {
+    let owner = node_expr("app", vec![]);
+    let mut product = InferenceProduct::default();
+    product.begin_root(&owner);
+    match case {
+        TypeStampMutationCase::Missing => {
+            product.finish_root(&Subst::new(), errors);
+            product.owner_type(&owner, "test owner", errors).is_none()
+        }
+        TypeStampMutationCase::CompatibleRepeat => {
+            let ty = Type::Prim(Prim::Int64);
+            product.record_canonical(&owner, ty.clone());
+            product.record_bypass(&owner, ty.clone(), "compatible test repeat");
+            product.finish_root(&Subst::new(), errors);
+            product.owner_type(&owner, "test owner", errors) == Some(ty)
+        }
+        TypeStampMutationCase::IncompatibleRepeat => {
+            product.record_canonical(&owner, Type::Prim(Prim::Int64));
+            product.record_bypass(
+                &owner,
+                Type::Prim(Prim::String),
+                "incompatible test repeat",
+            );
+            product.finish_root(&Subst::new(), errors);
+            true
+        }
+        TypeStampMutationCase::UnregisteredSynthesized => {
+            let synthesized = node_expr("var", vec![symbol_expr("temporary")]);
+            product.record_bypass(
+                &synthesized,
+                Type::Prim(Prim::Int64),
+                "unregistered synthesized test node",
+            );
+            product.record_canonical(&owner, Type::Prim(Prim::Int64));
+            product.finish_root(&Subst::new(), errors);
+            product
+                .owner_type(&synthesized, "synthesized test node", errors)
+                .is_none()
+        }
+    }
 }
 
 /// Collect the declared signature metadata owned by one inference or
@@ -5918,9 +5957,6 @@ fn annotate_expr_with_scope(
             let def_name = (tag == Some("def"))
                 .then(|| children(list).first().and_then(symbol_name))
                 .flatten();
-            let annotation_context = def_name
-                .map(|name| annotation_context.for_def(name))
-                .unwrap_or(annotation_context);
             let declared_sig =
                 def_name.and_then(|name| annotation_context.declared_signature(name));
             let (annotated_children, fn_ty_override) = match tag {
@@ -6172,7 +6208,7 @@ fn annotate_fn_children(
     // scoped to exactly where it matters.
     //
     // chelis#773 — why the body pass MUST mint from `param_vg`, not `vg`:
-    // `infer_expr_in_scope` (the per-node re-inference the annotation runs)
+    // The former per-node annotation re-inference
     // CLONES the `VarGen` it is given and instantiates each builtin scheme
     // (`matmul`, `mul`, …) from that clone. If it cloned the un-advanced
     // `vg`, a scheme's fresh parameter/return var would numerically COLLIDE
@@ -6211,7 +6247,7 @@ fn annotate_fn_children(
     // syntax rather than an expression tagged `name`; recursively feeding it
     // back through expression annotation would misreport every valid stamped
     // parameter as `UnknownForm`. Malformed params are rejected by
-    // `extract_params` above, exactly once, through this same session sink.
+    // the primary parameter owner, exactly once, through the session sink.
     let mut result = vec![annotated_params];
     if let Some(body) = kids.get(1) {
         result.push(annotate_expr_with_scope(
@@ -6304,7 +6340,7 @@ fn annotate_match_children(
             // shared refs with the outer state. The clone is safe
             // because the primary inference pass (`infer_program` →
             // `infer_top_level` → `infer_match`) has already executed
-            // `pattern_bindings` against the unshared outer `subst`,
+            // the primary pattern traversal against the unshared outer `subst`,
             // populating it with the same type-parameter unifications
             // we're about to (re-)derive here. So the body annotation
             // below using the outer `subst` sees the same mappings the
@@ -6367,7 +6403,7 @@ fn annotate_match_children(
 /// `pat-var` (and `pat-as`) node's metadata map under the `type` key.
 ///
 /// The binding type is looked up by name in `arm_env`, which was just
-/// populated by `pattern_bindings` against `pattern_subst`. We re-apply
+/// populated by the primary pattern traversal. The owner product retains
 /// `pattern_subst` here so any post-unify substitutions (e.g. the ADT
 /// type-parameter pinning that happens when `pat-record` unifies the
 /// constructor's return ADT against the scrutinee) flow into the
@@ -6411,7 +6447,7 @@ fn stamp_pattern_binding_types(
             //
             // The `Type::Error` filter is intentional: when a pattern
             // earlier in the same arm raised an error (e.g., unknown
-            // record field), `pattern_bindings` stores `Type::Error`
+            // record field), the primary pattern traversal stores `Type::Error`
             // for the bind name. Stamping that onto the metadata would
             // round-trip through `type_to_deep_expr` as
             // `(t-var {} _)` (see line ~4962) and the linearity check
@@ -6511,6 +6547,7 @@ fn should_attach_type_metadata(tag: &str) -> bool {
     !matches!(
         tag,
         "module"
+            | "def"
             | "import"
             | "import-all"
             | "export"
@@ -9241,7 +9278,7 @@ fn infer_top_level(
         let body_ty = if let Some(witness) = prebound_type_failure {
             propagate(witness)
         } else if let Some(decl_ty) = &declared_ty {
-            infer_def_body_with_sig(
+            let inferred = infer_def_body_with_sig(
                 &kids[1],
                 decl_ty,
                 &mut body_env,
@@ -9250,7 +9287,13 @@ fn infer_top_level(
                 adt_reg,
                 errors,
                 product,
-            )
+            );
+            product.record_bypass(
+                &kids[1],
+                inferred.clone(),
+                "declared-signature function inference",
+            );
+            inferred
         } else {
             infer_expr(
                 &kids[1],
@@ -18904,6 +18947,7 @@ fn infer_match(
                     subst,
                     adt_reg,
                     errors,
+                    product,
                     &mut covered_variants,
                     &mut has_wildcard,
                 );
@@ -18986,6 +19030,7 @@ fn pattern_bindings(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
     covered_variants: &mut Vec<String>,
     has_wildcard: &mut bool,
 ) {
@@ -18997,6 +19042,7 @@ fn pattern_bindings(
             "pat-var" => {
                 if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
                     let resolved = subst.apply(scrutinee_ty);
+                    product.record_bypass(pat, resolved.clone(), "pattern binding traversal");
                     env.bind(name.to_string(), Scheme::mono(resolved));
                 }
             }
@@ -19091,10 +19137,11 @@ fn pattern_bindings(
                                             &resolved,
                                             env,
                                             vg,
-                                            subst,
-                                            adt_reg,
-                                            errors,
-                                            covered_variants,
+                                        subst,
+                                        adt_reg,
+                                        errors,
+                                        product,
+                                        covered_variants,
                                             has_wildcard,
                                         );
                                     }
@@ -19112,6 +19159,7 @@ fn pattern_bindings(
                 // (pat-as {} name inner_pat): bind name to scrutinee type, recurse into inner_pat
                 if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
                     let resolved = subst.apply(scrutinee_ty);
+                    product.record_bypass(pat, resolved.clone(), "pattern binding traversal");
                     env.bind(name.to_string(), Scheme::mono(resolved));
                 }
                 if kids.len() >= 2 {
@@ -19123,6 +19171,7 @@ fn pattern_bindings(
                         subst,
                         adt_reg,
                         errors,
+                        product,
                         covered_variants,
                         has_wildcard,
                     );
@@ -19335,6 +19384,7 @@ fn pattern_bindings(
                                     subst,
                                     adt_reg,
                                     errors,
+                                    product,
                                     covered_variants,
                                     has_wildcard,
                                 );
@@ -19378,6 +19428,7 @@ fn pattern_bindings(
                         subst,
                         adt_reg,
                         errors,
+                        product,
                         covered_variants,
                         has_wildcard,
                     );
@@ -19571,7 +19622,9 @@ fn infer_pipe_stage_lambda(
 
     let resolved_param = subst.apply(&param_ty);
     let resolved_body = subst.apply(&body_ty);
-    Type::Fn(vec![resolved_param], Box::new(resolved_body))
+    let stage_ty = Type::Fn(vec![resolved_param], Box::new(resolved_body));
+    product.record_bypass(stage, stage_ty.clone(), "synthesized pipe-stage inference");
+    stage_ty
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -19685,6 +19738,13 @@ fn infer_tuple_get(
             );
         }
     };
+    if matches!(&kids[1], deep::Expr::List(index_list, _) if get_tag(index_list) == Some("lit")) {
+        product.record_bypass(
+            &kids[1],
+            Type::Prim(Prim::Int32),
+            "tuple projection index syntax",
+        );
+    }
 
     match resolved {
         Type::Tuple(ref elems) => {
