@@ -22,6 +22,7 @@ use chelis_ir::host::{
 };
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
+use std::collections::HashSet;
 
 /// A host value whose complete logical type has an implemented C ABI.
 ///
@@ -37,7 +38,14 @@ pub(crate) enum HostAbiType {
     Float64,
     Bool,
     String,
-    Fn(Vec<HostAbiType>, Box<HostAbiType>),
+    /// A typed C function-pointer parameter or direct callback argument.
+    ///
+    /// This is deliberately not a general value representation.  The only
+    /// constructor is [`Self::try_callback_signature`], and projection uses
+    /// it only for declared callback parameters and statically-known callback
+    /// arguments.  Function results, bindings, fields, and container elements
+    /// all cross [`Self::try_from_concrete`], which rejects function values.
+    Callback(Vec<HostAbiType>, Box<HostAbiType>),
     Adt(String, Vec<HostAbiType>),
     List(Box<HostAbiType>),
     Dict(Box<HostAbiType>, Box<HostAbiType>),
@@ -90,13 +98,9 @@ impl HostAbiType {
                     "deferred by spec/04-type-system.md section 1.1.1 ([05-UNS-1])",
                 ));
             }
-            ConcreteHostType::Function(params, ret) => Self::Fn(
-                params
-                    .iter()
-                    .map(Self::try_from_concrete)
-                    .collect::<Result<Vec<_>, _>>()?,
-                Box::new(Self::try_from_concrete(ret)?),
-            ),
+            ConcreteHostType::Function(_, _) => {
+                return Err(unsupported_function_value(ty, "C host ABI value selection"));
+            }
             ConcreteHostType::Adt(name, args) => Self::Adt(
                 name.clone(),
                 args.iter()
@@ -131,36 +135,38 @@ impl HostAbiType {
         })
     }
 
-    pub(crate) fn c_type_name(&self) -> &'static str {
+    /// Return the standalone C type spelling for value ABIs.
+    ///
+    /// A callback has no standalone spelling: C function-pointer syntax
+    /// requires the identifier inside the declarator.  Keeping that state out
+    /// of this method removes the former `Fn -> void *` erasure path.
+    pub(crate) fn c_type_name(&self) -> Option<&'static str> {
         match self {
-            Self::Int8 => "int8_t",
-            Self::Int16 => "int16_t",
-            Self::Int32 => "int32_t",
-            Self::Int64 => "int64_t",
-            Self::Float32 => "float",
-            Self::Float64 => "double",
-            Self::Bool => "bool",
-            Self::String => "chelis_string",
-            // The current callback runtime carries function values as opaque
-            // pointers.  This is the implemented ABI for a *resolved*
-            // function type, not the deleted unresolved-type fallback.
-            Self::Fn(_, _) => "void*",
-            Self::Adt(_, _) => "chelis_adt*",
-            Self::List(_) => "chelis_list*",
-            Self::Dict(_, _) => "chelis_dict*",
-            Self::Tuple(_) => "chelis_tuple*",
-            Self::Tensor(_) => "chelis_tensor*",
-            Self::MappedFile => "chelis_mapped_file*",
+            Self::Int8 => Some("int8_t"),
+            Self::Int16 => Some("int16_t"),
+            Self::Int32 => Some("int32_t"),
+            Self::Int64 => Some("int64_t"),
+            Self::Float32 => Some("float"),
+            Self::Float64 => Some("double"),
+            Self::Bool => Some("bool"),
+            Self::String => Some("chelis_string"),
+            Self::Callback(_, _) => None,
+            Self::Adt(_, _) => Some("chelis_adt*"),
+            Self::List(_) => Some("chelis_list*"),
+            Self::Dict(_, _) => Some("chelis_dict*"),
+            Self::Tuple(_) => Some("chelis_tuple*"),
+            Self::Tensor(_) => Some("chelis_tensor*"),
+            Self::MappedFile => Some("chelis_mapped_file*"),
             Self::Option(inner) => match inner.as_ref() {
-                Self::Int64 => "chelis_option_i64",
-                Self::Float64 => "chelis_option_f64",
+                Self::Int64 => Some("chelis_option_i64"),
+                Self::Float64 => Some("chelis_option_f64"),
                 Self::Int8
                 | Self::Int16
                 | Self::Int32
                 | Self::Float32
                 | Self::Bool
                 | Self::String
-                | Self::Fn(_, _)
+                | Self::Callback(_, _)
                 | Self::Adt(_, _)
                 | Self::List(_)
                 | Self::Dict(_, _)
@@ -168,81 +174,131 @@ impl HostAbiType {
                 | Self::Tensor(_)
                 | Self::Option(_)
                 | Self::MappedFile
-                | Self::Unit => "chelis_option_value",
+                | Self::Unit => Some("chelis_option_value"),
             },
-            Self::Unit => "int",
+            Self::Unit => Some("int"),
         }
+    }
+
+    fn try_callback_signature(ty: &ConcreteHostType) -> Result<Self, Unsupported> {
+        let ConcreteHostType::Function(params, ret) = ty else {
+            return Err(invalid_callback_shape(format!(
+                "callback position carries non-function type {ty:?}"
+            )));
+        };
+        Ok(Self::Callback(
+            params
+                .iter()
+                .map(Self::try_from_concrete)
+                .collect::<Result<Vec<_>, _>>()?,
+            Box::new(Self::try_from_concrete(ret)?),
+        ))
     }
 }
 
 pub(crate) fn project_program(
     program: &ConcreteHostProgram,
 ) -> Result<HostAbiProgram, Unsupported> {
+    let declared_callbacks = program
+        .functions
+        .iter()
+        .map(|function| function.name.clone())
+        .collect::<HashSet<_>>();
     Ok(HostAbiProgram {
         globals: program
             .globals
             .iter()
             .cloned()
-            .map(project_binding)
+            .map(|binding| project_binding(binding, &declared_callbacks))
             .collect::<Result<Vec<_>, _>>()?,
         global_tensor_helpers: program.global_tensor_helpers.clone(),
         functions: program
             .functions
             .iter()
             .cloned()
-            .map(project_function)
+            .map(|function| project_function(function, &declared_callbacks))
             .collect::<Result<Vec<_>, _>>()?,
         summary_rejections: program.summary_rejections.clone(),
     })
 }
 
-fn project_binding(binding: ConcreteHostBinding) -> Result<HostAbiBinding, Unsupported> {
+fn project_binding(
+    binding: ConcreteHostBinding,
+    allowed_callbacks: &HashSet<String>,
+) -> Result<HostAbiBinding, Unsupported> {
     Ok(HostAbiBinding {
         name: binding.name,
         display_name: binding.display_name,
         ty: HostAbiType::try_from_concrete(&binding.ty)?,
-        value: project_expr(binding.value)?,
+        value: project_expr(binding.value, allowed_callbacks)?,
     })
 }
 
-fn project_function(function: ConcreteHostFunction) -> Result<HostAbiFunction, Unsupported> {
+fn project_function(
+    function: ConcreteHostFunction,
+    declared_callbacks: &HashSet<String>,
+) -> Result<HostAbiFunction, Unsupported> {
+    let mut allowed_callbacks = declared_callbacks.clone();
+    for param in &function.params {
+        if matches!(param.ty, ConcreteHostType::Function(_, _)) {
+            allowed_callbacks.insert(param.name.clone());
+        }
+    }
     Ok(HostAbiFunction {
         name: function.name,
         params: function
             .params
             .into_iter()
-            .map(project_param)
+            .map(project_function_param)
             .collect::<Result<Vec<_>, _>>()?,
         ret_ty: HostAbiType::try_from_concrete(&function.ret_ty)?,
-        body: project_expr(function.body)?,
+        body: project_expr(function.body, &allowed_callbacks)?,
         tensor_helpers: function.tensor_helpers,
         specialization: function.specialization,
         summary_rejections: function.summary_rejections,
     })
 }
 
-fn project_param(param: ConcreteHostParam) -> Result<HostAbiParam, Unsupported> {
+fn project_value_param(param: ConcreteHostParam) -> Result<HostAbiParam, Unsupported> {
     Ok(HostAbiParam {
         name: param.name,
         ty: HostAbiType::try_from_concrete(&param.ty)?,
     })
 }
 
-fn project_callback(callback: ConcreteHostCallback) -> Result<HostAbiCallback, Unsupported> {
+fn project_function_param(param: ConcreteHostParam) -> Result<HostAbiParam, Unsupported> {
+    let ty = match &param.ty {
+        ConcreteHostType::Function(_, _) => HostAbiType::try_callback_signature(&param.ty)?,
+        _ => HostAbiType::try_from_concrete(&param.ty)?,
+    };
+    Ok(HostAbiParam {
+        name: param.name,
+        ty,
+    })
+}
+
+fn project_callback(
+    callback: ConcreteHostCallback,
+    allowed_callbacks: &HashSet<String>,
+) -> Result<HostAbiCallback, Unsupported> {
     let kind = match callback.kind {
         ConcreteHostCallbackKind::Named { function, params } => HostAbiCallbackKind::Named {
-            function,
+            function: if allowed_callbacks.contains(&function) {
+                function
+            } else {
+                return Err(unsupported_function_symbol(&function));
+            },
             params: params
                 .into_iter()
-                .map(project_param)
+                .map(project_value_param)
                 .collect::<Result<Vec<_>, _>>()?,
         },
         ConcreteHostCallbackKind::Inline { params, body } => HostAbiCallbackKind::Inline {
             params: params
                 .into_iter()
-                .map(project_param)
+                .map(project_value_param)
                 .collect::<Result<Vec<_>, _>>()?,
-            body: Box::new(project_expr(*body)?),
+            body: Box::new(project_expr(*body, allowed_callbacks)?),
         },
     };
     Ok(HostAbiCallback {
@@ -251,7 +307,10 @@ fn project_callback(callback: ConcreteHostCallback) -> Result<HostAbiCallback, U
     })
 }
 
-fn project_expr(expr: ConcreteHostExpr) -> Result<HostAbiExpr, Unsupported> {
+fn project_expr(
+    expr: ConcreteHostExpr,
+    allowed_callbacks: &HashSet<String>,
+) -> Result<HostAbiExpr, Unsupported> {
     let kind = match expr.kind {
         ConcreteHostExprKind::Int(value) => HostAbiExprKind::Int(value),
         ConcreteHostExprKind::Float(value) => HostAbiExprKind::Float(value),
@@ -260,14 +319,14 @@ fn project_expr(expr: ConcreteHostExpr) -> Result<HostAbiExpr, Unsupported> {
         ConcreteHostExprKind::List(items, ty) => HostAbiExprKind::List(
             items
                 .into_iter()
-                .map(project_expr)
+                .map(|expr| project_expr(expr, allowed_callbacks))
                 .collect::<Result<Vec<_>, _>>()?,
             HostAbiType::try_from_concrete(&ty)?,
         ),
         ConcreteHostExprKind::Tuple(items, ty) => HostAbiExprKind::Tuple(
             items
                 .into_iter()
-                .map(project_expr)
+                .map(|expr| project_expr(expr, allowed_callbacks))
                 .collect::<Result<Vec<_>, _>>()?,
             HostAbiType::try_from_concrete(&ty)?,
         ),
@@ -279,31 +338,61 @@ fn project_expr(expr: ConcreteHostExpr) -> Result<HostAbiExpr, Unsupported> {
             args,
             arg_tys,
             ty,
-        } => HostAbiExprKind::Call {
-            function,
-            args: args
+        } => {
+            if function == "call" || function.starts_with("__unresolved_") {
+                return Err(unsupported_callable_use(&function));
+            }
+            if args.len() != arg_tys.len() {
+                return Err(invalid_callback_shape(format!(
+                    "call `{function}` has {} arguments but {} checked argument types",
+                    args.len(),
+                    arg_tys.len()
+                )));
+            }
+            let (args, arg_tys) = args
                 .into_iter()
-                .map(project_expr)
-                .collect::<Result<Vec<_>, _>>()?,
-            arg_tys: arg_tys
-                .iter()
-                .map(HostAbiType::try_from_concrete)
-                .collect::<Result<Vec<_>, _>>()?,
-            ty: HostAbiType::try_from_concrete(&ty)?,
-        },
-        ConcreteHostExprKind::Builtin { name, args, ty } => HostAbiExprKind::Builtin {
-            name,
-            args: args
+                .zip(arg_tys.iter())
+                .map(|(arg, arg_ty)| {
+                    if matches!(arg_ty, ConcreteHostType::Function(_, _)) {
+                        Ok((
+                            project_callback_argument(arg, arg_ty, allowed_callbacks)?,
+                            HostAbiType::try_callback_signature(arg_ty)?,
+                        ))
+                    } else {
+                        Ok((
+                            project_expr(arg, allowed_callbacks)?,
+                            HostAbiType::try_from_concrete(arg_ty)?,
+                        ))
+                    }
+                })
+                .collect::<Result<Vec<_>, Unsupported>>()?
                 .into_iter()
-                .map(project_expr)
-                .collect::<Result<Vec<_>, _>>()?,
-            ty: HostAbiType::try_from_concrete(&ty)?,
-        },
+                .unzip();
+            HostAbiExprKind::Call {
+                function,
+                args,
+                arg_tys,
+                ty: HostAbiType::try_from_concrete(&ty)?,
+            }
+        }
+        ConcreteHostExprKind::Builtin { name, args, ty } => {
+            if name == "call" || name.starts_with("__unresolved_") {
+                return Err(unsupported_callable_use(&name));
+            }
+            HostAbiExprKind::Builtin {
+                name,
+                args: args
+                    .into_iter()
+                    .map(|expr| project_expr(expr, allowed_callbacks))
+                    .collect::<Result<Vec<_>, _>>()?,
+                ty: HostAbiType::try_from_concrete(&ty)?,
+            }
+        }
         ConcreteHostExprKind::AdtConstruct { ctor, fields, ty } => HostAbiExprKind::AdtConstruct {
             ctor,
             fields: fields
                 .into_iter()
-                .map(project_expr)
+                .map(|expr| project_expr(expr, allowed_callbacks))
                 .collect::<Result<Vec<_>, _>>()?,
             ty: HostAbiType::try_from_concrete(&ty)?,
         },
@@ -312,7 +401,7 @@ fn project_expr(expr: ConcreteHostExpr) -> Result<HostAbiExpr, Unsupported> {
             field_index,
             ty,
         } => HostAbiExprKind::AdtFieldAccess {
-            base: Box::new(project_expr(*base)?),
+            base: Box::new(project_expr(*base, allowed_callbacks)?),
             field_index,
             ty: HostAbiType::try_from_concrete(&ty)?,
         },
@@ -322,9 +411,9 @@ fn project_expr(expr: ConcreteHostExpr) -> Result<HostAbiExpr, Unsupported> {
             else_expr,
             ty,
         } => HostAbiExprKind::If {
-            cond: Box::new(project_expr(*cond)?),
-            then_expr: Box::new(project_expr(*then_expr)?),
-            else_expr: Box::new(project_expr(*else_expr)?),
+            cond: Box::new(project_expr(*cond, allowed_callbacks)?),
+            then_expr: Box::new(project_expr(*then_expr, allowed_callbacks)?),
+            else_expr: Box::new(project_expr(*else_expr, allowed_callbacks)?),
             ty: HostAbiType::try_from_concrete(&ty)?,
         },
         ConcreteHostExprKind::MatchOption {
@@ -334,10 +423,10 @@ fn project_expr(expr: ConcreteHostExpr) -> Result<HostAbiExpr, Unsupported> {
             none_expr,
             ty,
         } => HostAbiExprKind::MatchOption {
-            scrutinee: Box::new(project_expr(*scrutinee)?),
+            scrutinee: Box::new(project_expr(*scrutinee, allowed_callbacks)?),
             bind_name,
-            some_expr: Box::new(project_expr(*some_expr)?),
-            none_expr: Box::new(project_expr(*none_expr)?),
+            some_expr: Box::new(project_expr(*some_expr, allowed_callbacks)?),
+            none_expr: Box::new(project_expr(*none_expr, allowed_callbacks)?),
             ty: HostAbiType::try_from_concrete(&ty)?,
         },
         ConcreteHostExprKind::MatchAdt {
@@ -346,7 +435,7 @@ fn project_expr(expr: ConcreteHostExpr) -> Result<HostAbiExpr, Unsupported> {
             default_expr,
             ty,
         } => HostAbiExprKind::MatchAdt {
-            scrutinee: Box::new(project_expr(*scrutinee)?),
+            scrutinee: Box::new(project_expr(*scrutinee, allowed_callbacks)?),
             arms: arms
                 .into_iter()
                 .map(|arm| {
@@ -363,31 +452,31 @@ fn project_expr(expr: ConcreteHostExpr) -> Result<HostAbiExpr, Unsupported> {
                                 })
                             })
                             .collect::<Result<Vec<_>, Unsupported>>()?,
-                        expr: project_expr(arm.expr)?,
+                        expr: project_expr(arm.expr, allowed_callbacks)?,
                     })
                 })
                 .collect::<Result<Vec<_>, Unsupported>>()?,
             default_expr: default_expr
-                .map(|expr| project_expr(*expr).map(Box::new))
+                .map(|expr| project_expr(*expr, allowed_callbacks).map(Box::new))
                 .transpose()?,
             ty: HostAbiType::try_from_concrete(&ty)?,
         },
         ConcreteHostExprKind::Let { bindings, body, ty } => HostAbiExprKind::Let {
             bindings: bindings
                 .into_iter()
-                .map(project_binding)
+                .map(|binding| project_binding(binding, allowed_callbacks))
                 .collect::<Result<Vec<_>, _>>()?,
-            body: Box::new(project_expr(*body)?),
+            body: Box::new(project_expr(*body, allowed_callbacks)?),
             ty: HostAbiType::try_from_concrete(&ty)?,
         },
         ConcreteHostExprKind::Map { callback, list, ty } => HostAbiExprKind::Map {
-            callback: project_callback(callback)?,
-            list: Box::new(project_expr(*list)?),
+            callback: project_callback(callback, allowed_callbacks)?,
+            list: Box::new(project_expr(*list, allowed_callbacks)?),
             ty: HostAbiType::try_from_concrete(&ty)?,
         },
         ConcreteHostExprKind::Filter { callback, list, ty } => HostAbiExprKind::Filter {
-            callback: project_callback(callback)?,
-            list: Box::new(project_expr(*list)?),
+            callback: project_callback(callback, allowed_callbacks)?,
+            list: Box::new(project_expr(*list, allowed_callbacks)?),
             ty: HostAbiType::try_from_concrete(&ty)?,
         },
         ConcreteHostExprKind::Fold {
@@ -396,9 +485,9 @@ fn project_expr(expr: ConcreteHostExpr) -> Result<HostAbiExpr, Unsupported> {
             list,
             ty,
         } => HostAbiExprKind::Fold {
-            callback: project_callback(callback)?,
-            init: Box::new(project_expr(*init)?),
-            list: Box::new(project_expr(*list)?),
+            callback: project_callback(callback, allowed_callbacks)?,
+            init: Box::new(project_expr(*init, allowed_callbacks)?),
+            list: Box::new(project_expr(*list, allowed_callbacks)?),
             ty: HostAbiType::try_from_concrete(&ty)?,
         },
         ConcreteHostExprKind::Scan {
@@ -407,31 +496,31 @@ fn project_expr(expr: ConcreteHostExpr) -> Result<HostAbiExpr, Unsupported> {
             list,
             ty,
         } => HostAbiExprKind::Scan {
-            callback: project_callback(callback)?,
-            init: Box::new(project_expr(*init)?),
-            list: Box::new(project_expr(*list)?),
+            callback: project_callback(callback, allowed_callbacks)?,
+            init: Box::new(project_expr(*init, allowed_callbacks)?),
+            list: Box::new(project_expr(*list, allowed_callbacks)?),
             ty: HostAbiType::try_from_concrete(&ty)?,
         },
         ConcreteHostExprKind::Partition { callback, list, ty } => HostAbiExprKind::Partition {
-            callback: project_callback(callback)?,
-            list: Box::new(project_expr(*list)?),
+            callback: project_callback(callback, allowed_callbacks)?,
+            list: Box::new(project_expr(*list, allowed_callbacks)?),
             ty: HostAbiType::try_from_concrete(&ty)?,
         },
         ConcreteHostExprKind::FlatMap { callback, list, ty } => HostAbiExprKind::FlatMap {
-            callback: project_callback(callback)?,
-            list: Box::new(project_expr(*list)?),
+            callback: project_callback(callback, allowed_callbacks)?,
+            list: Box::new(project_expr(*list, allowed_callbacks)?),
             ty: HostAbiType::try_from_concrete(&ty)?,
         },
         ConcreteHostExprKind::WithSeed { seed, body, ty } => HostAbiExprKind::WithSeed {
-            seed: Box::new(project_expr(*seed)?),
-            body: Box::new(project_expr(*body)?),
+            seed: Box::new(project_expr(*seed, allowed_callbacks)?),
+            body: Box::new(project_expr(*body, allowed_callbacks)?),
             ty: HostAbiType::try_from_concrete(&ty)?,
         },
         ConcreteHostExprKind::TensorCall { helper, args, ty } => HostAbiExprKind::TensorCall {
             helper,
             args: args
                 .into_iter()
-                .map(project_expr)
+                .map(|expr| project_expr(expr, allowed_callbacks))
                 .collect::<Result<Vec<_>, _>>()?,
             ty: HostAbiType::try_from_concrete(&ty)?,
         },
@@ -439,6 +528,32 @@ fn project_expr(expr: ConcreteHostExpr) -> Result<HostAbiExpr, Unsupported> {
     };
     Ok(HostAbiExpr {
         kind,
+        span_id: expr.span_id,
+        merged_spans: expr.merged_spans,
+    })
+}
+
+fn project_callback_argument(
+    expr: ConcreteHostExpr,
+    expected: &ConcreteHostType,
+    allowed_callbacks: &HashSet<String>,
+) -> Result<HostAbiExpr, Unsupported> {
+    let ConcreteHostExprKind::Var(name, actual) = expr.kind else {
+        return Err(unsupported_function_value(
+            expected,
+            "C host callback argument selection",
+        ));
+    };
+    if &actual != expected {
+        return Err(invalid_callback_shape(format!(
+            "callback `{name}` has type {actual:?}, expected {expected:?}"
+        )));
+    }
+    if !allowed_callbacks.contains(&name) {
+        return Err(unsupported_function_symbol(&name));
+    }
+    Ok(HostAbiExpr {
+        kind: HostAbiExprKind::Var(name, HostAbiType::try_callback_signature(expected)?),
         span_id: expr.span_id,
         merged_spans: expr.merged_spans,
     })
@@ -457,5 +572,47 @@ fn rejected_dtype(precision: Prim, hint: &'static str) -> Unsupported {
         "C host ABI selection",
         Stage::Codegen("c"),
         hint,
+    )
+}
+
+fn unsupported_function_value(ty: &ConcreteHostType, context: &'static str) -> Unsupported {
+    Unsupported::new(
+        UnsupportedKind::HostType(format!("function value `{ty:?}`")),
+        context,
+        Stage::Codegen("c"),
+        "the C host backend supports typed callback parameters and direct statically-known \
+         callback arguments, but no first-class function-value ABI; specialize the call or \
+         reject the containing construct ([05-UNS-1]; chelis#730)",
+    )
+}
+
+fn unsupported_function_symbol(name: &str) -> Unsupported {
+    Unsupported::new(
+        UnsupportedKind::HostType(format!("function value `{name}`")),
+        "C host callback argument selection",
+        Stage::Codegen("c"),
+        "only a declared function symbol or an in-scope typed callback parameter can cross \
+         this boundary; dynamic function values have no C host ABI ([05-UNS-1]; chelis#730)",
+    )
+}
+
+fn unsupported_callable_use(name: &str) -> Unsupported {
+    Unsupported::new(
+        UnsupportedKind::HostType(format!("function value `{name}`")),
+        "C host ABI callable-use projection",
+        Stage::Codegen("c"),
+        "the host lowerer did not resolve this application to a declared function symbol or \
+         typed callback parameter; unresolved callables have no raw C call target \
+         ([05-UNS-1]; chelis#730)",
+    )
+}
+
+fn invalid_callback_shape(detail: String) -> Unsupported {
+    Unsupported::new(
+        UnsupportedKind::Construct(detail),
+        "C host callback ABI projection",
+        Stage::Codegen("c"),
+        "checked callable metadata and the resolved host program disagree; no fallback \
+         callable representation is permitted ([05-UNS-1]; chelis#730)",
     )
 }

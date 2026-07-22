@@ -753,10 +753,11 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
         .unwrap_or_else(|| "chelis_main".to_string());
 
     // Reject host-runtime-only builtins early for any compiled-backend
-    // target. Without this guard `chelis build` silently emits a C stub
-    // like `__binding_0_value = /* unsupported builtin tensor_scan */ 0`
-    // and the compiled program returns garbage at runtime. See
-    // spec/05-risc-primitives.md §3.6 for the host-only contract.
+    // target so both public compiler APIs preserve the owning builtin's
+    // specific diagnostic. The fallible emitter independently rejects an
+    // unknown compiled-lane builtin; this gate improves ordering and context,
+    // and is not the correctness boundary. See spec/05-risc-primitives.md
+    // §3.6 and spec/design/loud_unsupported.md §C6.3.
     if let Some(host_program) = host_compiled.host.as_ref() {
         reject_host_only_builtins(host_program, request.target)?;
     }
@@ -2289,8 +2290,8 @@ fn reject_unsupported_reduce_window_precision(dag: &Dag, target: &str) -> Result
 
 /// Host-only builtins that have no compiled-backend lowering. Calls
 /// to these from a `chelis build` program must fail at compile time
-/// with a clear error rather than silently emit a `/* unsupported
-/// builtin */ 0` C stub. Spec: `spec/05-risc-primitives.md` §3.6.
+/// with the owning early diagnostic. The emitter's Result boundary remains
+/// the independent safety mechanism. Spec: `spec/05-risc-primitives.md` §3.6.
 const HOST_ONLY_BUILTINS: &[&str] = &["tensor_scan"];
 
 fn host_only_builtin_error(name: &str, target: CompileTarget) -> CompilerError {
@@ -2451,15 +2452,13 @@ fn reject_host_only_builtins(
     // in `runtime.rs::find_reachable_host_only_builtin_call` is
     // intentional: `chelis_backend_c::host_emit` emits *every*
     // `program.functions` entry unconditionally (no dead-code pruning),
-    // so a `tensor_scan` call inside an otherwise-unreferenced helper
-    // still reaches the C emitter and produces the silent
-    // `/* unsupported builtin tensor_scan */ 0` stub. Rejecting only the
-    // entry-reachable subset would let that broken stub ship in a build
-    // the user believes succeeded. The AD guard can scope to the
-    // transform target because AD lowers only that target's subgraph;
-    // `chelis build` has no such pruning, so the guard must match the
-    // emitter's whole-program scope. (If backend dead-function pruning
-    // lands later, this can be narrowed to the emitted set in lockstep.)
+    // so a `tensor_scan` call inside an otherwise-unreferenced helper still
+    // reaches the C emitter's fallible builtin boundary. The gate walks the
+    // same emitted set to preserve the earlier, builtin-specific diagnostic;
+    // it is not the sole defense. The AD guard can scope to the transform
+    // target because AD lowers only that target's subgraph. If backend
+    // dead-function pruning lands later, this can be narrowed to the emitted
+    // set in lockstep.
     let mut found: Option<String> = None;
     for global in &program.globals {
         scan_expr(&global.value, &mut found);

@@ -414,7 +414,7 @@ pub(crate) fn emit_host_abi_program(
     let emitted_names = emitted_function_names(program, program_name);
     let function_specializations = function_specializations(program);
     let returns_arg = analyze_returns_arg(program);
-    let header = emit_host_header_with_linkage(program, program_name, internal_linkage);
+    let header = emit_host_header_with_linkage(program, program_name, internal_linkage)?;
     if !header.is_empty() {
         body.push(header);
         body.push(String::new());
@@ -439,7 +439,7 @@ pub(crate) fn emit_host_abi_program(
                 .iter()
                 .find(|binding| binding.name == *name)
                 .expect("captured global name comes from program.globals");
-            body.push(format!("static {};", c_decl(&binding.ty, name)));
+            body.push(format!("static {};", c_decl(&binding.ty, name)?));
         }
         body.push(String::new());
     }
@@ -498,7 +498,7 @@ pub(crate) fn emit_host_abi_program(
                     emitted_name,
                     internal_linkage,
                     &unsupported,
-                );
+                )?;
                 function_bodies.push(String::new());
             }
             Err(unsupported) => return Err(unsupported),
@@ -784,14 +784,13 @@ pub fn emit_host_header(
     program_name: &str,
 ) -> Result<String, Unsupported> {
     let abi_program = project_program(program)?;
-    Ok(emit_host_header_with_linkage(
-        &abi_program,
-        program_name,
-        false,
-    ))
+    emit_host_header_with_linkage(&abi_program, program_name, false)
 }
 
-pub(crate) fn emit_host_abi_header(program: &HostProgram, program_name: &str) -> String {
+pub(crate) fn emit_host_abi_header(
+    program: &HostProgram,
+    program_name: &str,
+) -> Result<String, Unsupported> {
     emit_host_header_with_linkage(program, program_name, false)
 }
 
@@ -799,7 +798,7 @@ fn emit_host_header_with_linkage(
     program: &HostProgram,
     program_name: &str,
     internal_linkage: bool,
-) -> String {
+) -> Result<String, Unsupported> {
     let prefix = if internal_linkage {
         "static inline "
     } else {
@@ -813,18 +812,18 @@ fn emit_host_header_with_linkage(
                 .params
                 .iter()
                 .map(|param| c_decl(&param.ty, &param.name))
-                .collect::<Vec<_>>()
+                .collect::<Result<Vec<_>, _>>()?
                 .join(", ");
             let emitted_name = emitted_function_name(program_name, &function.name);
-            format!(
+            Ok(format!(
                 "{prefix}{} {}({});",
-                c_type(&function.ret_ty),
+                c_type(&function.ret_ty)?,
                 emitted_name,
                 params
-            )
+            ))
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect::<Result<Vec<_>, Unsupported>>()
+        .map(|headers| headers.join("\n"))
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -946,12 +945,12 @@ fn append_unreachable_fn_abort_stub(
     emitted_name: &str,
     internal_linkage: bool,
     unsupported: &Unsupported,
-) {
+) -> Result<(), Unsupported> {
     let params = function
         .params
         .iter()
         .map(|param| c_decl(&param.ty, &param.name))
-        .collect::<Vec<_>>()
+        .collect::<Result<Vec<_>, _>>()?
         .join(", ");
     let prefix = if internal_linkage {
         "static inline "
@@ -960,7 +959,7 @@ fn append_unreachable_fn_abort_stub(
     };
     out.push(format!(
         "{prefix}{} {}({}) {{",
-        c_type(&function.ret_ty),
+        c_type(&function.ret_ty)?,
         emitted_name,
         params
     ));
@@ -969,6 +968,7 @@ fn append_unreachable_fn_abort_stub(
     out.push(format!("    fprintf(stderr, \"%s\\n\", \"{safe}\");"));
     out.push("    abort();".to_string());
     out.push("}".to_string());
+    Ok(())
 }
 
 fn emit_function(
@@ -984,7 +984,7 @@ fn emit_function(
         .params
         .iter()
         .map(|param| c_decl(&param.ty, &param.name))
-        .collect::<Vec<_>>()
+        .collect::<Result<Vec<_>, _>>()?
         .join(", ");
     let prefix = if internal_linkage {
         "static inline "
@@ -993,7 +993,7 @@ fn emit_function(
     };
     out.push(format!(
         "{prefix}{} {}({}) {{",
-        c_type(&function.ret_ty),
+        c_type(&function.ret_ty)?,
         emitted_name,
         params
     ));
@@ -1062,7 +1062,7 @@ fn emit_main(
         } else {
             emitter.lines.push(format!(
                 "    {} = __binding_{index}_value;",
-                c_decl(&binding.ty, &binding.name)
+                c_decl(&binding.ty, &binding.name)?
             ));
         }
     }
@@ -1547,7 +1547,7 @@ impl<'a> HostEmitter<'a> {
         ty: &HostType,
     ) -> Result<(), Unsupported> {
         self.lines
-            .push(format!("{}{};", self.indent, c_decl(ty, target)));
+            .push(format!("{}{};", self.indent, c_decl(ty, target)?));
         self.assign_expr(target, expr, ty)?;
         Ok(())
     }
@@ -1724,7 +1724,7 @@ impl<'a> HostEmitter<'a> {
                         self.lines.push(format!(
                             "{}{} {};",
                             self.indent,
-                            c_type(&inner_ty),
+                            c_type(&inner_ty)?,
                             bind_name
                         ));
                         self.assign_unboxed_value(
@@ -1737,7 +1737,7 @@ impl<'a> HostEmitter<'a> {
                         self.lines.push(format!(
                             "{}{} {} = {}.value;",
                             self.indent,
-                            c_type(&inner_ty),
+                            c_type(&inner_ty)?,
                             bind_name,
                             option_var
                         ));
@@ -1807,7 +1807,7 @@ impl<'a> HostEmitter<'a> {
                     self.lines.push(format!(
                         "{}{};",
                         self.indent,
-                        c_decl(&binding.ty, &binding.name)
+                        c_decl(&binding.ty, &binding.name)?
                     ));
                     // #379: assign to the same mangled identifier the
                     // declaration used (both route through `c_ident`).
@@ -2089,7 +2089,7 @@ impl<'a> HostEmitter<'a> {
             "cast" => {
                 let expr = match (&arg_vars[0].1, ty) {
                     (source, target) if is_integer_abi(source) && is_integer_abi(target) => {
-                        format!("({}){}", c_type(target), arg_vars[0].0)
+                        format!("({}){}", c_type(target)?, arg_vars[0].0)
                     }
                     (source, HostType::Float64) if is_integer_abi(source) => {
                         format!("(double){}", arg_vars[0].0)
@@ -2098,7 +2098,7 @@ impl<'a> HostEmitter<'a> {
                         format!("(float){}", arg_vars[0].0)
                     }
                     (HostType::Float64 | HostType::Float32, target) if is_integer_abi(target) => {
-                        format!("({}){}", c_type(target), arg_vars[0].0)
+                        format!("({}){}", c_type(target)?, arg_vars[0].0)
                     }
                     // WS-4: float entry params can now be `Float32`, so the
                     // int<->float casts must cover both float widths. The C
@@ -2120,7 +2120,7 @@ impl<'a> HostEmitter<'a> {
                         format!("(double){0}", arg_vars[0].0)
                     }
                     (HostType::Bool, target) if is_integer_abi(target) => {
-                        format!("({}){}", c_type(target), arg_vars[0].0)
+                        format!("({}){}", c_type(target)?, arg_vars[0].0)
                     }
                     (source, HostType::Bool) if is_integer_abi(source) => {
                         format!("((bool){})", arg_vars[0].0)
@@ -4244,7 +4244,7 @@ impl<'a> HostEmitter<'a> {
                 self.lines.push(format!(
                     "{}{} {};",
                     self.indent,
-                    c_type(&binding.ty),
+                    c_type(&binding.ty)?,
                     binding.name
                 ));
                 self.assign_unboxed_value(&binding.name, &binding.ty, &field_var)?;
@@ -4408,13 +4408,17 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{}{} {};",
             self.indent,
-            c_type(&callback.ret_ty),
+            c_type(&callback.ret_ty)?,
             result_var
         ));
         let param = callback_param(callback, 0);
         let arg_var = self.next_temp("map_item");
-        self.lines
-            .push(format!("{}{} {};", self.indent, c_type(&param.ty), arg_var));
+        self.lines.push(format!(
+            "{}{} {};",
+            self.indent,
+            c_type(&param.ty)?,
+            arg_var
+        ));
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var)?;
         self.lines.push(format!(
@@ -4459,8 +4463,12 @@ impl<'a> HostEmitter<'a> {
             .push(format!("{}bool {};", self.indent, keep_var));
         let param = callback_param(callback, 0);
         let arg_var = self.next_temp("filter_item");
-        self.lines
-            .push(format!("{}{} {};", self.indent, c_type(&param.ty), arg_var));
+        self.lines.push(format!(
+            "{}{} {};",
+            self.indent,
+            c_type(&param.ty)?,
+            arg_var
+        ));
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &keep_var)?;
         self.lines
@@ -4510,14 +4518,14 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{}{} {} = {target};",
             self.indent,
-            c_type(&params[0].ty),
+            c_type(&params[0].ty)?,
             acc_arg
         ));
         let item_arg = self.next_temp("fold_item");
         self.lines.push(format!(
             "{}{} {};",
             self.indent,
-            c_type(&params[1].ty),
+            c_type(&params[1].ty)?,
             item_arg
         ));
         self.assign_unboxed_value(&item_arg, &params[1].ty, &item_value)?;
@@ -4568,7 +4576,7 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{}{} {} = {};",
             self.indent,
-            c_type(&params[0].ty),
+            c_type(&params[0].ty)?,
             acc_arg,
             acc_var
         ));
@@ -4576,7 +4584,7 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{}{} {};",
             self.indent,
-            c_type(&params[1].ty),
+            c_type(&params[1].ty)?,
             item_arg
         ));
         self.assign_unboxed_value(&item_arg, &params[1].ty, &item_value)?;
@@ -4629,13 +4637,13 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{}{} {} = chelis_list_empty();",
             self.indent,
-            c_type(pass_ty),
+            c_type(pass_ty)?,
             pass_var
         ));
         self.lines.push(format!(
             "{}{} {} = chelis_list_empty();",
             self.indent,
-            c_type(fail_ty),
+            c_type(fail_ty)?,
             fail_var
         ));
         let list_var = self.next_temp("partition_list");
@@ -4661,8 +4669,12 @@ impl<'a> HostEmitter<'a> {
             .push(format!("{}bool {};", self.indent, keep_var));
         let param = callback_param(callback, 0);
         let arg_var = self.next_temp("partition_item");
-        self.lines
-            .push(format!("{}{} {};", self.indent, c_type(&param.ty), arg_var));
+        self.lines.push(format!(
+            "{}{} {};",
+            self.indent,
+            c_type(&param.ty)?,
+            arg_var
+        ));
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &keep_var)?;
         self.lines
@@ -4734,13 +4746,17 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{}{} {};",
             self.indent,
-            c_type(&callback.ret_ty),
+            c_type(&callback.ret_ty)?,
             result_var
         ));
         let param = callback_param(callback, 0);
         let arg_var = self.next_temp("flat_map_item");
-        self.lines
-            .push(format!("{}{} {};", self.indent, c_type(&param.ty), arg_var));
+        self.lines.push(format!(
+            "{}{} {};",
+            self.indent,
+            c_type(&param.ty)?,
+            arg_var
+        ));
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var)?;
         self.lines.push(format!(
@@ -4772,7 +4788,7 @@ impl<'a> HostEmitter<'a> {
                     self.lines.push(format!(
                         "{}{} {} = {};",
                         self.indent,
-                        c_type(&param.ty),
+                        c_type(&param.ty)?,
                         param.name,
                         arg_var
                     ));
@@ -4798,7 +4814,10 @@ impl<'a> HostEmitter<'a> {
             HostType::List(_) => format!("chelis_value_from_list({value})"),
             HostType::Tuple(_) => format!("chelis_value_from_tuple({value})"),
             HostType::Dict(_, _) => format!("chelis_value_from_dict({value})"),
-            HostType::Fn(_, _) | HostType::Option(_) | HostType::MappedFile | HostType::Unit => {
+            HostType::Callback(_, _)
+            | HostType::Option(_)
+            | HostType::MappedFile
+            | HostType::Unit => {
                 return Err(unsupported_value_boxing(ty, "boxing a resolved host value"));
             }
         })
@@ -4812,7 +4831,7 @@ impl<'a> HostEmitter<'a> {
     ) -> Result<(), Unsupported> {
         let expr = match ty {
             HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
-                format!("({})chelis_value_as_int64({value_expr})", c_type(ty))
+                format!("({})chelis_value_as_int64({value_expr})", c_type(ty)?)
             }
             // f32 is unboxed via the f64 accessor (the box stored it as
             // f64); the surrounding `c_decl` narrows back to `float` (WS-4).
@@ -4826,7 +4845,10 @@ impl<'a> HostEmitter<'a> {
             HostType::List(_) => format!("chelis_value_as_list({value_expr})"),
             HostType::Tuple(_) => format!("chelis_value_as_tuple({value_expr})"),
             HostType::Dict(_, _) => format!("chelis_value_as_dict({value_expr})"),
-            HostType::Fn(_, _) | HostType::Option(_) | HostType::MappedFile | HostType::Unit => {
+            HostType::Callback(_, _)
+            | HostType::Option(_)
+            | HostType::MappedFile
+            | HostType::Unit => {
                 return Err(unsupported_value_boxing(
                     ty,
                     "unboxing a resolved host value",
@@ -4919,7 +4941,7 @@ impl<'a> HostEmitter<'a> {
                 self.lines.push(format!(
                     "{}{};",
                     self.indent,
-                    c_decl(field_ty, &field_value)
+                    c_decl(field_ty, &field_value)?
                 ));
                 self.assign_unboxed_value(&field_value, field_ty, &field_var)?;
                 self.emit_labeled_root(&field_name, &field_value, field_ty)?;
@@ -5151,8 +5173,13 @@ fn binding_release(var: &str, ty: &HostType) -> Option<String> {
     release_call(var, ty)
 }
 
-fn c_type(ty: &HostAbiType) -> &'static str {
-    ty.c_type_name()
+fn c_type(ty: &HostAbiType) -> Result<&'static str, Unsupported> {
+    ty.c_type_name().ok_or_else(|| {
+        invalid_abi_shape(
+            format!("callback type {ty:?} used where C requires a standalone value type"),
+            "C host value type emission",
+        )
+    })
 }
 
 fn is_integer_abi(ty: &HostAbiType) -> bool {
@@ -5308,18 +5335,22 @@ fn c_ident(name: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-fn c_decl(ty: &HostType, name: &str) -> String {
+fn c_decl(ty: &HostType, name: &str) -> Result<String, Unsupported> {
     let name = c_ident(name);
     match ty {
-        HostType::Fn(params, ret) => {
+        HostType::Callback(params, ret) => {
             let args = if params.is_empty() {
                 "void".to_string()
             } else {
-                params.iter().map(c_type).collect::<Vec<_>>().join(", ")
+                params
+                    .iter()
+                    .map(c_type)
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join(", ")
             };
-            format!("{} (*{})({})", c_type(ret), name, args)
+            Ok(format!("{} (*{})({})", c_type(ret)?, name, args))
         }
-        _ => format!("{} {}", c_type(ty), name),
+        _ => Ok(format!("{} {}", c_type(ty)?, name)),
     }
 }
 

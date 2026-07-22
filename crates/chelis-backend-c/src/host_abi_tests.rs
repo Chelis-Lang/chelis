@@ -1,8 +1,9 @@
 //! chelis#730 Phase 2 contract for the C-host Table-B type boundary.
 //!
-//! The backend owns an opaque, crate-private `HostAbiType` whose only
-//! constructor is the fallible conversion from a fully resolved
-//! `ConcreteHostType`.
+//! The backend owns an opaque, crate-private `HostAbiType`. General values
+//! have only the fallible conversion from a fully resolved
+//! `ConcreteHostType`; typed callback declarators cross a separate,
+//! position-restricted constructor and have no standalone/opaque C spelling.
 
 use crate::host_abi::HostAbiType;
 use chelis_ir::{ConcreteHostType, TensorType};
@@ -20,26 +21,26 @@ fn abi_conversion_accepts_only_resolved_logical_types() {
 fn supported_concrete_types_map_to_exact_c_host_abis() {
     let i8_abi = HostAbiType::try_from_concrete(&ConcreteHostType::Scalar(Prim::Int8))
         .expect("int8 has an exact C-host representation");
-    assert_eq!(i8_abi.c_type_name(), "int8_t");
+    assert_eq!(i8_abi.c_type_name(), Some("int8_t"));
 
     let i16_abi = HostAbiType::try_from_concrete(&ConcreteHostType::Scalar(Prim::Int16))
         .expect("int16 has an exact C-host representation");
-    assert_eq!(i16_abi.c_type_name(), "int16_t");
+    assert_eq!(i16_abi.c_type_name(), Some("int16_t"));
 
     let f32_abi = HostAbiType::try_from_concrete(&ConcreteHostType::Scalar(Prim::F32))
         .expect("f32 has a C-host representation");
-    assert_eq!(f32_abi.c_type_name(), "float");
+    assert_eq!(f32_abi.c_type_name(), Some("float"));
 
     let i32_abi = HostAbiType::try_from_concrete(&ConcreteHostType::Scalar(Prim::Int32))
         .expect("int32 has a C-host representation");
-    assert_eq!(i32_abi.c_type_name(), "int32_t");
+    assert_eq!(i32_abi.c_type_name(), Some("int32_t"));
 
     let tensor_abi = HostAbiType::try_from_concrete(&ConcreteHostType::Tensor(TensorType {
         dims: Vec::new(),
         precision: Prim::F16,
     }))
     .expect("f16 tensors use the typed tensor runtime and have a pointer ABI");
-    assert_eq!(tensor_abi.c_type_name(), "chelis_tensor*");
+    assert_eq!(tensor_abi.c_type_name(), Some("chelis_tensor*"));
 }
 
 #[test]

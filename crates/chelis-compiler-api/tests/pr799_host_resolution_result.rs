@@ -264,6 +264,28 @@ fn direct_inline_callback_specialization_remains_supported() {
     compile(c_request(source)).expect("a direct inline callback is specialized before codegen");
 }
 
+#[test]
+fn typed_callback_parameter_can_be_forwarded_without_becoming_a_function_value() {
+    let source = "module M.ForwardedCallback\n\
+                  def apply(f: int8 -> int8, x: int8) -> int8 = f(x)\n\
+                  def forward(f: int8 -> int8, x: int8) -> int8 = apply(f, x)\n\
+                  def increment(x: int8) -> int8 = add(x, cast(1, int8))\n\
+                  out = print(forward(increment, cast(6, int8)))\n";
+    compile(c_request(source))
+        .expect("an in-scope typed callback parameter may cross another callback position");
+}
+
+#[test]
+fn dynamically_selected_named_callback_has_no_c_host_value_abi() {
+    let source = "module M.SelectedCallback\n\
+                  def increment(x: int8) -> int8 = add(x, cast(1, int8))\n\
+                  def decrement(x: int8) -> int8 = sub(x, cast(1, int8))\n\
+                  selected = if true then increment else decrement\n\
+                  out = print(selected(cast(6, int8)))\n";
+    assert_named_function_value_has_no_c_abi(compile(c_request(source)));
+    assert_named_function_value_has_no_c_abi(compile_for_execution(c_request(source)));
+}
+
 fn generic_access_source(dtype: &str, literal: &str) -> String {
     format!(
         "type ReviewBox[a] =\n\
