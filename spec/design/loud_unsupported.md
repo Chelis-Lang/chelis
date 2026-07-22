@@ -52,8 +52,8 @@ This plan: (1) gives every stage a **failure channel** (Result-typed
 emission; lowering already has `raise_lowering_error`), (2) converts every
 censused site to the diagnostic row, (3) makes new silent fallbacks
 **structurally unrealizable** through dependency-bottom closed vocabularies,
-fallible boundary decoding, and exhaustive typed consumers, with lexical
-lint/tripwires retained only as defense-in-depth evidence, and (4) demotes the
+fallible boundary decoding, and exhaustive typed consumers, with narrow token
+and count inventories retained only as defense-in-depth evidence, and (4) demotes the
 pre-codegen gates from safety mechanism to early-UX, because a gate that is
 the only line of defense rots (the one-entry `HOST_ONLY_BUILTINS` allowlist
 let five builtins walk past it, [#682]/[#705]).
@@ -135,7 +135,8 @@ layer.
 - **Failure channel** - the typed path by which a stage reports
   "unsupported" to its caller and ultimately to the user.
 - **Ratchet** - a mechanism that makes the count of silent fallbacks
-  monotonically non-increasing (lint, tripwire, type privacy).
+  monotonically non-increasing (typed boundaries, mutation oracles, and the
+  source tripwire).
 
 ---
 
@@ -312,13 +313,12 @@ be represented.
 4. **Structured emission.** Open-set builtin dispatch returns
    `Result<EmittedExpr, Unsupported>`. `EmittedExpr` is a private C AST with
    typed builders and no general raw-string construction path.
-5. **Lexical defenses are temporary evidence.** The current
-   `rust-no-wildcard-dispatch` scanner, count allowlist, and token tripwire stay
-   blocking while the typed migration is incomplete. They are neither a site
-   identity nor an exhaustiveness proof: aliases, bindings, indirection,
+5. **Source inventories are supporting evidence.** The token/count tripwire
+   stays blocking while the typed migration is incomplete. It is neither a
+   site identity nor an exhaustiveness proof: aliases, bindings, indirection,
    equivalent numeric-default spellings, count relocation, and in-crate raw
-   emission can evade them. Phase 2 may remove or narrow them only after the
-   corresponding typed mutation oracle is green.
+   emission can evade it. The corresponding typed mutation oracle is the
+   authority.
 6. **Host types are a staged typed pipeline.** The host-type layer consumes
    checked type metadata; it does not re-infer source types. `HostTypeTerm`
    preserves exact
@@ -545,7 +545,7 @@ negative ABI tests assert the structured `UnsupportedKind::Dtype` and
 | §C3 channel signatures (`Result` plumbing shape) | Phase 1 | this doc |
 | §C5 census (as tripwire baseline) | Phase 0 | append-only via filed issue; removals only with the site's fix |
 | §C4 vocabulary declarations and typed consumer inventory | Phase 2 | this doc + owning active spec, with an added-variant mutation oracle in the same change |
-| §C4.5 lexical defense config | temporary during Phase 2 | this doc + lint-rule spec (`spec/01-nomenclature.md` registration); never a completion oracle |
+| §C4.5 source-inventory tripwire | temporary during Phase 2 | this doc + the tripwire test; never a completion oracle |
 | gate inventory (§C5 rows 17-18 resolution) | Phase 3 | this doc |
 
 ## B2. Invariants that hold across every boundary
@@ -607,7 +607,7 @@ surface.
 **Frozen at your exit:** the census baseline (append-only); the tripwire
 is live in CI.
 
-**Explicitly not yours:** fixing anything; the lint rule; any plumbing.
+**Explicitly not yours:** fixing anything or adding plumbing.
 
 **Oracle:** the tripwire test green on the current tree and demonstrably
 red on a planted `*/ 0` fallback (the test's own negative test); every
@@ -660,7 +660,7 @@ single-dedicated-change rule for diagnostic-wording migration.
 
 **Explicitly not yours:** making any unsupported thing SUPPORTED (that is
 [#729]'s or an op-owner's work; see §I1 for what your rejections do to
-existing red tests); the lint rule; gate deletion.
+existing red tests); gate deletion.
 
 **Oracle:** `issue_703_silent_placeholders.rs` fully green and
 un-ignored; `scalar_stub_matrix.rs`'s stub-marker assertions green
@@ -673,8 +673,8 @@ census shrinks to rows 10, 17, 18.
 ## Phase 2 - un-writability (typed closed vocabularies)
 
 **Status: IN PROGRESS.** The `EffectKind`/`RuntimeDType` items 1-3 below are
-implemented. The lexical scanner, count allowlist, and token tripwire remain
-supporting checks while items 4-5 are incomplete. Phase 2 is complete only
+implemented. The token/count tripwire remains a supporting check while items
+4-5 are incomplete. Phase 2 is complete only
 when unresolved host types cannot enter codegen and unsupported open-set
 dispatch cannot construct an emitted expression.
 
@@ -702,8 +702,8 @@ tripwire proving it.
    conversion from it are deleted.
 5. The private structured C-expression AST described in §C4.4, replacing
    `EmittedExpr::raw` as a general construction path.
-6. Keep the lint and tripwire green as supporting checks. Their allowlists do
-   not freeze as the safety authority.
+6. Keep the token/count tripwire green as supporting evidence. Its baseline
+   does not freeze as the safety authority.
 
 **Frozen at your exit:** the two vocabulary declarations, their external
 spellings/IDs, the typed consumer inventories, and the generated-header
@@ -721,8 +721,8 @@ regenerating the C dtype header is byte-identical; every §C6.3 term-state parit
 test is green; the target selector derives an ABI type only from an
 implemented target decision; and the C emitter's codegen boundary is typed in
 `HostAbiType` so a compile-fail test cannot pass `HostTypeTerm`, `Never`, a
-decode/resolution error, or the deleted legacy sentinel. The lint, tripwire,
-and zero-occurrence endpoint scan are supporting evidence, not the oracle.
+decode/resolution error, or the deleted legacy sentinel. The tripwire and
+zero-occurrence endpoint scan are supporting evidence, not the oracle.
 
 ## Phase 3 - gates become UX, not safety
 
@@ -810,7 +810,7 @@ boundary, pinned:
 |---|---|---|---|
 | 1 | shared error/vocabulary ownership | `Unsupported` remains in `chelis-types`; closed cross-layer identity lives in dependency-free `chelis-vocab`; per-crate mirrors are forbidden | §C2, §C4.1, §C6 |
 | 2 | whether `check` reports target-independent unsupported constructs | yes: Table A rejections are type-level facts; Table B rejections surface at build where the target is known | `capability_table.md` §Derivations |
-| 3 | lint allowlist mechanics | the count registry remains blocking only while typed boundaries are incomplete and is never a completion oracle | lint rule spec + §C4.5 |
+| 3 | source-inventory mechanics | the token/count baseline remains blocking only while typed boundaries are incomplete and is never a completion oracle | tripwire test + §C4.5 |
 | 4 | which gates survive Phase 3 as early-UX vs die | Phase 3 | §C5 rows 17-18 + gate contract |
 
 ## Contract summary

@@ -231,8 +231,7 @@ recorded as the one non-constructor entry point (open question 2).
    validates strings against the closed vocabulary; it starts producing
    `DeepTag` (string kept alongside for spans/printing). `infer_expr`,
    `lower_expr`, and the `.dp` structural validators match the enum
-   **exhaustively - no `_` arm** ([#730]'s `rust-no-wildcard-dispatch`
-   lint adds `DeepTag` to its enum list, §I1). Tag 63 then stops the build
+   **exhaustively - no `_` arm**. Tag 63 then stops the build
    at every consumer that has not chosen a disposition. Raw-string entry
    points (anything that never went through the parser) keep the §C1.2
    loud arm.
@@ -428,9 +427,8 @@ the scratch variant deleted); the canary and full matrix stay green.
   first, it matches the two kind strings with a loud else and migrates to
   the enum when available; the bogus-effect `.dp` repro must be rejected
   by whichever side lands first, and BOTH once both land (checker: unknown
-  kind is `MalformedForm`; lowering: its catch-all raises). `DeepTag`
-  joins the `rust-no-wildcard-dispatch` enum list on landing (their B1
-  freeze anticipates the addition).
+  kind is `MalformedForm`; lowering: its catch-all raises). `DeepTag` remains
+  owned by this plan and its added-variant compile oracle.
 - **With [#729] (`dtype_semantics.md`)**: none structural. Phase 4's
   capability table derives op x dtype acceptance; this plan governs
   CONSTRUCT-level totality. The two meet only in that both make `chelis

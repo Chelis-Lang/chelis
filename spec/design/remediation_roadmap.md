@@ -70,8 +70,7 @@ landed with Wave 1 (above); the remaining Wave 2 set is [#732] Phase 2
 (the generated C side: fixes [#716]/[#723] outright and gives the
 refactor its byte-exact instrument) in parallel with [#731] Phases 2-3 (the
 witness token + DeepTag) and [#730] Phase 2 (typed closed vocabularies,
-HostType/ABI separation, and structured emission; lexical ratchets remain
-supporting checks). [#733]'s
+HostType/ABI separation, and structured emission). [#733]'s
 OpenSpec track rides alongside (per the 2026-07-20 re-scope): new
 normative text Waves 1-2 author is born with atom IDs and goes through
 the OpenSpec claim flow; the rev/lint machinery (the re-scoped Phase 1)
@@ -148,7 +147,7 @@ flowchart TB
     direction TB
     n730p0["P0 · census re-verify + token tripwire<br/>+ rejected-cells corpus stub (LANDED)"]:::w0
     n730p1["P1 · Result channel + live-site sweep (LANDED)"]:::w1
-    n730p2["P2 · lint ratchet + EmittedExpr<br/>+ EffectKind enum"]:::w2
+    n730p2["P2 · typed vocabularies + Host ABI<br/>+ structured emission"]:::w2
     n730p3["P3 · gates become UX"]:::w4
     n730p0 --> n730p1 --> n730p2 --> n730p3
   end

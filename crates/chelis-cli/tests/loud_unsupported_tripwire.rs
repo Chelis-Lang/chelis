@@ -5,9 +5,9 @@
 //! class (unsupported cases silently substitute a value). The verified
 //! section C5 census is frozen here as `BASELINE`; any NEW occurrence of a
 //! recidivist token goes red with a pointer back at the plan. This exists
-//! purely to bridge until the section C4.2 lint rule and the section C3
-//! Result channel land (Phase 1-2), and to catch generated-string contexts
-//! the lint cannot see.
+//! as supporting source-inventory evidence while the section C3 Result channel
+//! and the section C4 typed boundaries land. It is never the structural
+//! authority.
 //!
 //! Also hosted here on behalf of the chelis#732 plan's Phase 0 (its item 3:
 //! "coordinate, do not duplicate", per the roadmap's Wave 0 handshake): the
@@ -26,8 +26,7 @@
 //!   `unwrap_or_default()`s), a decrease just means shrink the baseline
 //!   in the same PR - there is no censused "fix" to ride with.
 //!
-//! Known limits of this bridge (PR #746 review; the section C4.2 lint
-//! replaces this test at Phase 2):
+//! Known limits of this source inventory (PR #746 review):
 //! - FALSE-RED surface: `CFormatNarrowing` scans ALL crates/*/src for the
 //!   very common `%.1f`/`%.16g` tokens. A NEW legitimate use anywhere
 //!   (a timing print, a benchmark) trips the increase branch; if it is
@@ -39,8 +38,9 @@
 //!   `ElemKindWildcardArm` (same-line match only), as do NAMED catch-alls
 //!   (`other =>`) - though a named catch-all emitting a stub is caught by
 //!   `StubZero`, per census row 19; non-quote-adjacent `<value>`
-//!   spellings evade `ValuePlaceholder`. The lint rule closes these
-//!   structurally; do not treat this bridge as airtight.
+//!   spellings evade `ValuePlaceholder`. The typed boundaries and their
+//!   mutation oracles close the semantic class; do not treat this inventory as
+//!   airtight.
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -72,14 +72,12 @@ enum Pat {
     /// chelis#776 exposed (a user value silently replaced by a baked
     /// default). Added at Phase 1 per the census-maintenance obligation;
     /// the baseline annotates each surviving site as proven-structural
-    /// or P1-frozen for the Phase 2 lint audit. Phase 2 (rt791 F6) widens
+    /// or P1-frozen for the Phase 2 typed-boundary audit. Phase 2 (rt791 F6) widens
     /// the class beyond `.unwrap_or(<lit>)` to the closure/`map_or`
     /// spellings that evaded it: `.unwrap_or_else(|| <lit>)` and
     /// `.map_or(<lit>, ...)` - the same silent numeric default wearing a
-    /// closure. The section C4.2 `rust-no-wildcard-dispatch` lint closes
-    /// the AST-shape half (a wildcard manufacturing a closed-enum value);
-    /// this token class stays the bridge for the numeric-default spellings
-    /// that are not an enum construction.
+    /// closure. This token class remains supporting evidence for numeric
+    /// default spellings; the typed boundary is the authority.
     UnwrapOrNumericLiteral,
     /// `%.16g` / `%.1f` / `{value:.1}` anywhere in crate sources - the
     /// f64-shaped observation-channel exits (chelis#716/#723/#728; owned by

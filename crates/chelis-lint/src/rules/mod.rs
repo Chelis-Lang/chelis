@@ -17,7 +17,6 @@ pub mod phase_identifier_case;
 pub mod prefer_pipe_operator;
 pub mod prefix_namespace;
 pub mod redundant_linearity_call;
-pub mod rust_no_wildcard_dispatch;
 pub mod snapshot_filename_pattern;
 pub mod surf_def_arrow_form;
 pub mod surf_test_name_prefix;
