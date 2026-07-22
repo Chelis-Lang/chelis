@@ -96,11 +96,15 @@ pub fn codegen(
 }
 
 pub fn codegen_host_program(
-    program: &chelis_ir::host::HostProgram,
+    program: &chelis_ir::host::ConcreteHostProgram,
     func_name: &str,
 ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
-    let c_source = host_emit::emit_host_program(program, func_name)?;
-    let h_header = host_emit::emit_host_header(program, func_name);
+    // Resolve the backend capability boundary once.  All emission below is
+    // over the private, fully-resolved ABI vocabulary; neither source nor
+    // header generation can re-interpret logical types independently.
+    let abi_program = host_abi::project_program(program)?;
+    let c_source = host_emit::emit_host_abi_program(&abi_program, func_name)?;
+    let h_header = host_emit::emit_host_abi_header(&abi_program, func_name);
     let needs_blas = c_source.contains("#include \"chelis_blas.h\"")
         || c_source.contains("cblas_sgemm(")
         || c_source.contains("cblas_dgemm(")
@@ -426,9 +430,11 @@ mod tests {
         // For a HostProgram with a tensor helper, the emitted `.c` source must
         // mark the helper function as `static` (preventing PLT export) while
         // the user-facing HostFunction entry keeps external linkage.
+        use chelis_ir::ConcreteHostType as HostType;
         use chelis_ir::host::{
-            HostExpr, HostExprKind, HostFunction, HostParam, HostProgram, HostTensorHelper,
-            HostType,
+            ConcreteHostExpr as HostExpr, ConcreteHostExprKind as HostExprKind,
+            ConcreteHostFunction as HostFunction, ConcreteHostParam as HostParam,
+            ConcreteHostProgram as HostProgram, HostTensorHelper,
         };
 
         // Build a simple 1-element scalar DAG for the helper.
@@ -494,9 +500,11 @@ mod tests {
 
     #[test]
     fn host_program_tensor_helper_blas_sets_toolchain_requirement() {
+        use chelis_ir::ConcreteHostType as HostType;
         use chelis_ir::host::{
-            HostExpr, HostExprKind, HostFunction, HostParam, HostProgram, HostTensorHelper,
-            HostTensorInput, HostType,
+            ConcreteHostExpr as HostExpr, ConcreteHostExprKind as HostExprKind,
+            ConcreteHostFunction as HostFunction, ConcreteHostParam as HostParam,
+            ConcreteHostProgram as HostProgram, HostTensorHelper, HostTensorInput,
         };
 
         let a_ty = mat_f32(2, 3);
@@ -3091,9 +3099,11 @@ int main(void) {{
     /// which only tests the no-globals case.
     #[test]
     fn adv_host_program_with_globals_fns_are_static_inline_helpers_remain_static_void() {
+        use chelis_ir::ConcreteHostType as HostType;
         use chelis_ir::host::{
-            HostBinding, HostExpr, HostExprKind, HostFunction, HostParam, HostProgram,
-            HostTensorHelper, HostType,
+            ConcreteHostBinding as HostBinding, ConcreteHostExpr as HostExpr,
+            ConcreteHostExprKind as HostExprKind, ConcreteHostFunction as HostFunction,
+            ConcreteHostParam as HostParam, ConcreteHostProgram as HostProgram, HostTensorHelper,
         };
 
         let mut helper_dag = Dag::new();
@@ -3162,9 +3172,11 @@ int main(void) {{
             eprintln!("skipping: gcc not available");
             return;
         }
+        use chelis_ir::ConcreteHostType as HostType;
         use chelis_ir::host::{
-            HostExpr, HostExprKind, HostFunction, HostParam, HostProgram, HostTensorHelper,
-            HostType,
+            ConcreteHostExpr as HostExpr, ConcreteHostExprKind as HostExprKind,
+            ConcreteHostFunction as HostFunction, ConcreteHostParam as HostParam,
+            ConcreteHostProgram as HostProgram, HostTensorHelper,
         };
 
         let mut helper_dag = Dag::new();

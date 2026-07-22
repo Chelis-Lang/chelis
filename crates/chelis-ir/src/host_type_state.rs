@@ -27,12 +27,17 @@ use crate::dag::{DimInfo, TensorType};
 #[derive(Debug, Clone, PartialEq)]
 pub enum HostTypeTerm {
     Scalar(HostPrecisionTerm),
-    Function(Vec<HostTypeTerm>, Box<HostTypeTerm>),
+    Fn(Vec<HostTypeTerm>, Box<HostTypeTerm>),
     Adt(String, Vec<HostTypeTerm>),
     List(Box<HostTypeTerm>),
     Dict(Box<HostTypeTerm>, Box<HostTypeTerm>),
     Tuple(Vec<HostTypeTerm>),
-    Tensor(HostTensorTypeTerm),
+    /// A tensor whose precision and rank have already been resolved. Named
+    /// runtime dimensions remain concrete logical dimensions.
+    Tensor(TensorType),
+    /// A tensor retaining a named precision or rank variable until call-site
+    /// specialization supplies it.
+    PolymorphicTensor(HostTensorTypeTerm),
     Option(Box<HostTypeTerm>),
     MappedFile,
     Unit,
@@ -177,6 +182,41 @@ impl fmt::Display for HostTypeDecodeError {
 impl std::error::Error for HostTypeDecodeError {}
 
 impl HostTypeTerm {
+    // Compatibility spellings for the scalar variants while the host lowerer
+    // migrates from its former coarse enum.  They are exact logical
+    // precisions, not defaults: int32 and int64 no longer collapse at the
+    // syntax boundary, and the narrow widths remain representable terms.
+    #[allow(non_upper_case_globals)]
+    pub const Int64: Self = Self::Scalar(HostPrecisionTerm::Concrete(Prim::Int64));
+    #[allow(non_upper_case_globals)]
+    pub const Float32: Self = Self::Scalar(HostPrecisionTerm::Concrete(Prim::F32));
+    #[allow(non_upper_case_globals)]
+    pub const Float64: Self = Self::Scalar(HostPrecisionTerm::Concrete(Prim::F64));
+    #[allow(non_upper_case_globals)]
+    pub const Bool: Self = Self::Scalar(HostPrecisionTerm::Concrete(Prim::Bool));
+    #[allow(non_upper_case_globals)]
+    pub const String: Self = Self::Scalar(HostPrecisionTerm::Concrete(Prim::String));
+
+    /// Whether inference, named polymorphism, rank polymorphism, or bottom
+    /// still prevents this term from crossing a concrete value boundary.
+    pub fn is_unresolved(&self) -> bool {
+        match self {
+            Self::TypeVariable(_)
+            | Self::InferenceVariable(_)
+            | Self::Never
+            | Self::Scalar(HostPrecisionTerm::Variable(_)) => true,
+            Self::PolymorphicTensor(_) => true,
+            Self::Fn(params, ret) => params.iter().any(Self::is_unresolved) || ret.is_unresolved(),
+            Self::Adt(_, args) | Self::Tuple(args) => args.iter().any(Self::is_unresolved),
+            Self::List(inner) | Self::Option(inner) => inner.is_unresolved(),
+            Self::Dict(key, value) => key.is_unresolved() || value.is_unresolved(),
+            Self::Scalar(HostPrecisionTerm::Concrete(_))
+            | Self::Tensor(_)
+            | Self::MappedFile
+            | Self::Unit => false,
+        }
+    }
+
     /// Resolve a term only when no polymorphic, inference, or bottom state
     /// remains. This function never chooses a default type.
     pub fn into_concrete(self) -> Result<ConcreteHostType, HostTypeResolutionError> {
@@ -187,7 +227,7 @@ impl HostTypeTerm {
             Self::Scalar(HostPrecisionTerm::Variable(name)) => {
                 Err(HostTypeResolutionError::UnresolvedPrecisionVariable { name })
             }
-            Self::Function(params, ret) => Ok(ConcreteHostType::Function(
+            Self::Fn(params, ret) => Ok(ConcreteHostType::Function(
                 params
                     .into_iter()
                     .map(Self::into_concrete)
@@ -211,7 +251,8 @@ impl HostTypeTerm {
                     .map(Self::into_concrete)
                     .collect::<Result<Vec<_>, _>>()?,
             )),
-            Self::Tensor(HostTensorTypeTerm { precision, shape }) => {
+            Self::Tensor(tensor) => Ok(ConcreteHostType::Tensor(tensor)),
+            Self::PolymorphicTensor(HostTensorTypeTerm { precision, shape }) => {
                 let precision = match precision {
                     HostPrecisionTerm::Concrete(precision) => precision,
                     HostPrecisionTerm::Variable(name) => {
@@ -244,6 +285,24 @@ impl HostTypeTerm {
             Self::Never => Err(HostTypeResolutionError::NeverReachedValueBoundary),
         }
     }
+}
+
+impl ConcreteHostType {
+    // Readable spellings for exact resolved scalar types. These are aliases
+    // for `Scalar(ConcretePrecision)`, not the legacy coarse host enum: each
+    // constant preserves the full logical precision at the ABI boundary.
+    #[allow(non_upper_case_globals)]
+    pub const Int32: Self = Self::Scalar(Prim::Int32);
+    #[allow(non_upper_case_globals)]
+    pub const Int64: Self = Self::Scalar(Prim::Int64);
+    #[allow(non_upper_case_globals)]
+    pub const Float32: Self = Self::Scalar(Prim::F32);
+    #[allow(non_upper_case_globals)]
+    pub const Float64: Self = Self::Scalar(Prim::F64);
+    #[allow(non_upper_case_globals)]
+    pub const Bool: Self = Self::Scalar(Prim::Bool);
+    #[allow(non_upper_case_globals)]
+    pub const String: Self = Self::Scalar(Prim::String);
 }
 
 /// Decode one Deep type node into a logical host-type term.
@@ -290,7 +349,7 @@ pub fn decode_host_type(expr: &Expr) -> Result<HostTypeTerm, HostTypeDecodeError
             let (ret, params) = children
                 .split_last()
                 .ok_or_else(|| malformed("t-fn has no return type"))?;
-            Ok(HostTypeTerm::Function(
+            Ok(HostTypeTerm::Fn(
                 params
                     .iter()
                     .map(decode_host_type)
@@ -365,10 +424,18 @@ fn decode_tensor_type(children: &[Expr]) -> Result<HostTypeTerm, HostTypeDecodeE
                 .collect(),
         )
     };
-    Ok(HostTypeTerm::Tensor(HostTensorTypeTerm {
-        precision,
-        shape,
-    }))
+    match (&precision, &shape) {
+        (HostPrecisionTerm::Concrete(precision), HostShapeTerm::Concrete(dims)) => {
+            Ok(HostTypeTerm::Tensor(TensorType {
+                dims: dims.clone(),
+                precision: *precision,
+            }))
+        }
+        _ => Ok(HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm {
+            precision,
+            shape,
+        })),
+    }
 }
 
 fn decode_precision(expr: &Expr) -> Result<HostPrecisionTerm, HostTypeDecodeError> {

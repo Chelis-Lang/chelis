@@ -17,7 +17,12 @@
 //! `[N]` array form must still be emitted when there *are* elements.
 
 use chelis_backend_c::host_emit::emit_host_program;
-use chelis_ir::host::{HostExpr, HostExprKind, HostFunction, HostParam, HostProgram, HostType};
+use chelis_ir::ConcreteHostType as HostType;
+use chelis_ir::host::{
+    ConcreteHostExpr as HostExpr, ConcreteHostExprKind as HostExprKind,
+    ConcreteHostFunction as HostFunction, ConcreteHostParam as HostParam,
+    ConcreteHostProgram as HostProgram,
+};
 use std::path::PathBuf;
 use std::process::Command;
 

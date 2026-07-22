@@ -1,7 +1,6 @@
 use chelis_ir::host::{
-    HostBlasMatmulSummary, HostCallback, HostCallbackKind, HostExpr, HostExprKind, HostFunction,
-    HostFunctionSpecialization, HostMatchArm, HostParam, HostProgram, HostSparseOpSummary,
-    HostTensorHelper, HostTensorSpecialization, HostType,
+    ConcreteHostProgram, HostBlasMatmulSummary, HostFunctionSpecialization, HostSparseOpSummary,
+    HostTensorHelper, HostTensorSpecialization,
 };
 
 /// Sparse-op kind discriminator for the C summary-derived emission path.
@@ -16,6 +15,12 @@ enum SparseSummaryKind {
 
 use crate::emit::CEmitter;
 use crate::emitted_expr::EmittedExpr;
+use crate::host_abi::{
+    HostAbiCallback as HostCallback, HostAbiCallbackKind as HostCallbackKind,
+    HostAbiExpr as HostExpr, HostAbiExprKind as HostExprKind, HostAbiFunction as HostFunction,
+    HostAbiMatchArm as HostMatchArm, HostAbiParam as HostParam, HostAbiProgram as HostProgram,
+    HostAbiType, HostAbiType as HostType, project_program,
+};
 use chelis_ir::dag::{DimExpr, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
@@ -252,7 +257,18 @@ fn result_alias_set(
     }
 }
 
-pub fn emit_host_program(program: &HostProgram, program_name: &str) -> Result<String, Unsupported> {
+pub fn emit_host_program(
+    program: &ConcreteHostProgram,
+    program_name: &str,
+) -> Result<String, Unsupported> {
+    let abi_program = project_program(program)?;
+    emit_host_abi_program(&abi_program, program_name)
+}
+
+pub(crate) fn emit_host_abi_program(
+    program: &HostProgram,
+    program_name: &str,
+) -> Result<String, Unsupported> {
     // Emit helpers and functions into a body buffer first so we can detect which
     // runtime headers they transitively require (e.g. `chelis_math.h` on macOS
     // when a helper uses the vForce vvexpf/vvlogf path).  The preamble is then
@@ -645,7 +661,19 @@ fn append_tensor_reshape_helper(out: &mut Vec<String>) {
     out.push("}".to_string());
 }
 
-pub fn emit_host_header(program: &HostProgram, program_name: &str) -> String {
+pub fn emit_host_header(
+    program: &ConcreteHostProgram,
+    program_name: &str,
+) -> Result<String, Unsupported> {
+    let abi_program = project_program(program)?;
+    Ok(emit_host_header_with_linkage(
+        &abi_program,
+        program_name,
+        false,
+    ))
+}
+
+pub(crate) fn emit_host_abi_header(program: &HostProgram, program_name: &str) -> String {
     emit_host_header_with_linkage(program, program_name, false)
 }
 
@@ -1468,27 +1496,19 @@ impl<'a> HostEmitter<'a> {
                 self.indent, value
             )),
             HostExprKind::List(items, expr_ty) => {
-                let effective_ty = if !matches!(ty, HostType::Unknown) {
-                    ty
-                } else {
-                    expr_ty
-                };
-                self.assign_list_literal(target, items, effective_ty)?;
+                require_same_abi_type(ty, expr_ty, "list expression")?;
+                self.assign_list_literal(target, items, ty)?;
             }
             HostExprKind::Tuple(items, expr_ty) => {
-                let effective_ty = if !matches!(ty, HostType::Unknown) {
-                    ty
-                } else {
-                    expr_ty
-                };
-                self.assign_tuple_literal(target, items, effective_ty)?;
+                require_same_abi_type(ty, expr_ty, "tuple expression")?;
+                self.assign_tuple_literal(target, items, ty)?;
             }
             HostExprKind::Var(name, var_ty) => {
                 if name == "Nil" {
                     self.lines
                         .push(format!("{}{target} = chelis_list_empty();", self.indent));
                 } else if name == "None" && matches!(ty, HostType::Option(_)) {
-                    self.assign_option_none(target, ty);
+                    self.assign_option_none(target, ty)?;
                 } else if name == "Nil" && matches!(var_ty, HostType::List(_)) {
                     self.lines
                         .push(format!("{}{target} = chelis_list_empty();", self.indent));
@@ -1514,6 +1534,7 @@ impl<'a> HostEmitter<'a> {
                 arg_tys,
                 ty: call_ty,
             } => {
+                require_same_abi_type(ty, call_ty, "call expression")?;
                 self.assign_call(target, function, args, arg_tys, call_ty)?;
             }
             HostExprKind::Builtin {
@@ -1521,36 +1542,24 @@ impl<'a> HostEmitter<'a> {
                 args,
                 ty: expr_ty,
             } => {
-                let effective_ty = if !matches!(ty, HostType::Unknown) {
-                    ty
-                } else {
-                    expr_ty
-                };
-                self.assign_builtin(target, name, args, effective_ty)?;
+                require_same_abi_type(ty, expr_ty, "builtin expression")?;
+                self.assign_builtin(target, name, args, ty)?;
             }
             HostExprKind::AdtConstruct {
                 ctor,
                 fields,
                 ty: expr_ty,
             } => {
-                let effective_ty = if !matches!(ty, HostType::Unknown) {
-                    ty
-                } else {
-                    expr_ty
-                };
-                self.assign_adt_construct(target, ctor, fields, effective_ty)?;
+                require_same_abi_type(ty, expr_ty, "ADT construction")?;
+                self.assign_adt_construct(target, ctor, fields, ty)?;
             }
             HostExprKind::AdtFieldAccess {
                 base,
                 field_index,
                 ty: expr_ty,
             } => {
-                let effective_ty = if !matches!(ty, HostType::Unknown) {
-                    ty
-                } else {
-                    expr_ty
-                };
-                self.assign_adt_field_access(target, base, *field_index, effective_ty)?;
+                require_same_abi_type(ty, expr_ty, "ADT field access")?;
+                self.assign_adt_field_access(target, base, *field_index, ty)?;
             }
             HostExprKind::If {
                 cond,
@@ -1558,23 +1567,19 @@ impl<'a> HostEmitter<'a> {
                 else_expr,
                 ty: expr_ty,
             } => {
-                let effective_ty = if !matches!(ty, HostType::Unknown) {
-                    ty
-                } else {
-                    expr_ty
-                };
+                require_same_abi_type(ty, expr_ty, "if expression")?;
                 let cond_var = self.next_temp("cond");
                 self.emit_expr_to_var(cond, &cond_var, &HostType::Bool)?;
                 self.lines
                     .push(format!("{}if ({cond_var}) {{", self.indent));
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
-                self.assign_expr(target, then_expr, effective_ty)?;
+                self.assign_expr(target, then_expr, ty)?;
                 self.indent = previous.clone();
                 self.lines.push(format!("{}}} else {{", self.indent));
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
-                self.assign_expr(target, else_expr, effective_ty)?;
+                self.assign_expr(target, else_expr, ty)?;
                 self.indent = previous;
                 self.lines.push(format!("{}}}", self.indent));
             }
@@ -1585,11 +1590,7 @@ impl<'a> HostEmitter<'a> {
                 none_expr,
                 ty: expr_ty,
             } => {
-                let effective_ty = if !matches!(ty, HostType::Unknown) {
-                    ty
-                } else {
-                    expr_ty
-                };
+                require_same_abi_type(ty, expr_ty, "option match")?;
                 let option_var = self.next_temp("option");
                 let option_ty = host_type(scrutinee);
                 self.emit_expr_to_var(scrutinee, &option_var, &option_ty)?;
@@ -1597,7 +1598,7 @@ impl<'a> HostEmitter<'a> {
                     .push(format!("{}if ({}.is_some) {{", self.indent, option_var));
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
-                let inner_ty = option_inner_type(option_ty.clone());
+                let inner_ty = option_inner_type(&option_ty)?;
                 match option_ty {
                     HostType::Option(inner)
                         if !matches!(inner.as_ref(), HostType::Int64 | HostType::Float64) =>
@@ -1612,7 +1613,7 @@ impl<'a> HostEmitter<'a> {
                             bind_name,
                             &inner_ty,
                             &format!("{option_var}.value"),
-                        );
+                        )?;
                     }
                     _ => {
                         self.lines.push(format!(
@@ -1624,12 +1625,12 @@ impl<'a> HostEmitter<'a> {
                         ));
                     }
                 }
-                self.assign_expr(target, some_expr, effective_ty)?;
+                self.assign_expr(target, some_expr, ty)?;
                 self.indent = previous.clone();
                 self.lines.push(format!("{}}} else {{", self.indent));
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
-                self.assign_expr(target, none_expr, effective_ty)?;
+                self.assign_expr(target, none_expr, ty)?;
                 self.indent = previous;
                 self.lines.push(format!("{}}}", self.indent));
             }
@@ -1639,29 +1640,15 @@ impl<'a> HostEmitter<'a> {
                 default_expr,
                 ty: expr_ty,
             } => {
-                let effective_ty = if !matches!(ty, HostType::Unknown) {
-                    ty
-                } else {
-                    expr_ty
-                };
-                self.assign_match_adt(
-                    target,
-                    scrutinee,
-                    arms,
-                    default_expr.as_deref(),
-                    effective_ty,
-                )?;
+                require_same_abi_type(ty, expr_ty, "ADT match")?;
+                self.assign_match_adt(target, scrutinee, arms, default_expr.as_deref(), ty)?;
             }
             HostExprKind::Let {
                 bindings,
                 body,
                 ty: expr_ty,
             } => {
-                let effective_ty = if !matches!(ty, HostType::Unknown) {
-                    ty
-                } else {
-                    expr_ty
-                };
+                require_same_abi_type(ty, expr_ty, "let expression")?;
                 self.lines.push(format!("{}{{", self.indent));
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
@@ -1725,7 +1712,7 @@ impl<'a> HostEmitter<'a> {
                         }
                     }
                 }
-                self.assign_expr(target, body, effective_ty)?;
+                self.assign_expr(target, body, ty)?;
                 // Release the block's heap bindings in reverse declaration
                 // order, before closing the C block while they are still in
                 // scope. Last-declared shadows of a reused name win the C
@@ -1808,12 +1795,11 @@ impl<'a> HostEmitter<'a> {
         for (index, arg) in args.iter().enumerate() {
             let arg_name = self.next_temp(&format!("arg{index}"));
             let inferred_ty = host_type(arg);
-            let expected_ty = expected_builtin_arg_ty(name, ty, index);
-            let arg_ty = if has_unknown(&inferred_ty) && !matches!(expected_ty, HostType::Unknown) {
-                expected_ty
-            } else {
-                inferred_ty
-            };
+            // A few builtins carry a type-directed argument (for example
+            // `Some` and `append`).  Use that explicit contract when it is
+            // available; otherwise the already-resolved expression type is
+            // authoritative.  There is no catch-all ABI default.
+            let arg_ty = expected_builtin_arg_ty(name, ty, index).unwrap_or(inferred_ty);
             self.emit_expr_to_var(arg, &arg_name, &arg_ty)?;
             arg_vars.push((arg_name, arg_ty));
         }
@@ -1974,11 +1960,11 @@ impl<'a> HostEmitter<'a> {
 
         match name {
             "Some" => {
-                self.assign_option_some(target, ty, &arg_vars[0].0, &arg_vars[0].1);
+                self.assign_option_some(target, ty, &arg_vars[0].0, &arg_vars[0].1)?;
                 return Ok(());
             }
             "None" => {
-                self.assign_option_none(target, ty);
+                self.assign_option_none(target, ty)?;
                 return Ok(());
             }
             "cast" => {
@@ -2025,7 +2011,7 @@ impl<'a> HostEmitter<'a> {
                     "{}chelis_value {} = chelis_tuple_get({}, {});",
                     self.indent, value_var, arg_vars[0].0, arg_vars[1].0
                 ));
-                self.assign_unboxed_value(target, ty, &value_var);
+                self.assign_unboxed_value(target, ty, &value_var)?;
                 return Ok(());
             }
             "index" => {
@@ -2034,7 +2020,7 @@ impl<'a> HostEmitter<'a> {
                     "{}chelis_value {} = chelis_list_index({}, {});",
                     self.indent, value_var, arg_vars[0].0, arg_vars[1].0
                 ));
-                self.assign_unboxed_value(target, ty, &value_var);
+                self.assign_unboxed_value(target, ty, &value_var)?;
                 return Ok(());
             }
             "append" => {
@@ -2042,7 +2028,7 @@ impl<'a> HostEmitter<'a> {
                     "{}{target} = chelis_list_append({}, {});",
                     self.indent,
                     arg_vars[0].0,
-                    self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)
+                    self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)?
                 ));
                 return Ok(());
             }
@@ -2203,7 +2189,7 @@ impl<'a> HostEmitter<'a> {
                     self.indent,
                     getter,
                     arg_vars[0].0,
-                    self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)
+                    self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)?
                 ));
                 return Ok(());
             }
@@ -2212,7 +2198,7 @@ impl<'a> HostEmitter<'a> {
                     "{}{target} = chelis_dict_contains({}, {});",
                     self.indent,
                     arg_vars[0].0,
-                    self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)
+                    self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)?
                 ));
                 return Ok(());
             }
@@ -2221,7 +2207,7 @@ impl<'a> HostEmitter<'a> {
                     "{}{target} = chelis_dict_remove({}, {});",
                     self.indent,
                     arg_vars[0].0,
-                    self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)
+                    self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)?
                 ));
                 return Ok(());
             }
@@ -2230,8 +2216,8 @@ impl<'a> HostEmitter<'a> {
                     "{}{target} = chelis_dict_insert({}, {}, {});",
                     self.indent,
                     arg_vars[0].0,
-                    self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1),
-                    self.box_value_expr(&arg_vars[2].0, &arg_vars[2].1)
+                    self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)?,
+                    self.box_value_expr(&arg_vars[2].0, &arg_vars[2].1)?
                 ));
                 return Ok(());
             }
@@ -2302,7 +2288,7 @@ impl<'a> HostEmitter<'a> {
                     "{}{target} = chelis_pad_sequences({}, {});",
                     self.indent,
                     arg_vars[0].0,
-                    self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)
+                    self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)?
                 ));
                 return Ok(());
             }
@@ -2312,7 +2298,7 @@ impl<'a> HostEmitter<'a> {
                     self.indent,
                     arg_vars[0].0,
                     arg_vars[1].0,
-                    self.box_value_expr(&arg_vars[2].0, &arg_vars[2].1)
+                    self.box_value_expr(&arg_vars[2].0, &arg_vars[2].1)?
                 ));
                 return Ok(());
             }
@@ -2383,14 +2369,9 @@ impl<'a> HostEmitter<'a> {
             _ => {}
         }
 
-        // chelis#730 Phase 1 (census rows 6/7, chelis#714/#718): scalar
-        // numeric emission over an operand whose host type never resolved
-        // (f16/bf16/int8/int16 scalars parse to `HostType::Unknown`)
-        // previously baked `int64_t`/`double` arithmetic over garbage via
-        // the Int64 type default. The baking point rejects instead;
-        // `HostType::Unknown` stays legal for the genuinely polymorphic
-        // pointer-boxing surfaces (rank/precision-poly defs, `void*`
-        // calling convention) that never reach these scalar operator arms.
+        // Scalar numeric emission is exhaustive over the resolved ABI
+        // vocabulary.  Unsupported narrow scalar types were rejected by
+        // `project_program` and cannot reach this point ([05-UNS-1]).
         const SCALAR_NUMERIC_BUILTINS: &[&str] = &[
             "add",
             "sub",
@@ -2416,21 +2397,6 @@ impl<'a> HostEmitter<'a> {
             "min",
             "max",
         ];
-        if SCALAR_NUMERIC_BUILTINS.contains(&name)
-            && arg_vars
-                .iter()
-                .any(|(_, arg_ty)| matches!(arg_ty, HostType::Unknown))
-        {
-            return Err(Unsupported::new(
-                UnsupportedKind::HostType("Unknown".to_string()),
-                format!("scalar `{name}` in `chelis build` host emission"),
-                Stage::Codegen("c"),
-                "a scalar operand's host type never resolved - narrow-float (f16/bf16) \
-                 and sub-int32 scalars have no C host representation yet \
-                 (chelis#714/#718; support is chelis#729's work). Use f32/f64/int64 \
-                 scalars or the tensor forms",
-            ));
-        }
         // A TENSOR operand reaching these scalar operator arms means the
         // op has no tensor emission arm (the tensor block above returned
         // early for every op that has one) - emitting `cos(ptr)` or
@@ -3167,7 +3133,7 @@ impl<'a> HostEmitter<'a> {
                     "{}{}[{index}] = {};",
                     self.indent,
                     values_name,
-                    self.box_value_expr(&slot_expr, &elem_ty)
+                    self.box_value_expr(&slot_expr, &elem_ty)?
                 ));
             }
             self.lines.push(format!(
@@ -3898,17 +3864,28 @@ impl<'a> HostEmitter<'a> {
         let mut arg_vars: Vec<String> = Vec::with_capacity(args.len());
         for (index, arg) in args.iter().enumerate() {
             let arg_name = self.next_temp(&format!("call_arg{index}"));
-            let inferred_ty = host_type(arg);
-            let expected_ty = arg_tys.get(index).cloned().unwrap_or(HostType::Unknown);
-            let arg_ty = if !matches!(expected_ty, HostType::Unknown)
-                && (has_unknown(&inferred_ty) || inferred_ty != expected_ty)
-            {
-                expected_ty
-            } else {
-                inferred_ty
-            };
-            self.emit_expr_to_var(arg, &arg_name, &arg_ty)?;
+            let expected_ty = arg_tys.get(index).ok_or_else(|| {
+                invalid_abi_shape(
+                    format!(
+                        "call `{function}` has {} arguments but only {} ABI argument types",
+                        args.len(),
+                        arg_tys.len()
+                    ),
+                    "user-function call",
+                )
+            })?;
+            self.emit_expr_to_var(arg, &arg_name, expected_ty)?;
             arg_vars.push(arg_name);
+        }
+        if arg_tys.len() != args.len() {
+            return Err(invalid_abi_shape(
+                format!(
+                    "call `{function}` has {} arguments but {} ABI argument types",
+                    args.len(),
+                    arg_tys.len()
+                ),
+                "user-function call",
+            ));
         }
         self.lines.push(format!(
             "{}{target} = {}({});",
@@ -4021,7 +3998,7 @@ impl<'a> HostEmitter<'a> {
                     "{}{}[{index}] = {};",
                     self.indent,
                     values_name,
-                    self.box_value_expr(&field_var, &field_ty)
+                    self.box_value_expr(&field_var, &field_ty)?
                 ));
             }
             values_name
@@ -4050,7 +4027,7 @@ impl<'a> HostEmitter<'a> {
             "{}chelis_value {} = chelis_adt_get_field({}, {});",
             self.indent, value_var, base_var, field_index
         ));
-        self.assign_unboxed_value(target, ty, &value_var);
+        self.assign_unboxed_value(target, ty, &value_var)?;
         Ok(())
     }
 
@@ -4089,7 +4066,7 @@ impl<'a> HostEmitter<'a> {
                     c_type(&binding.ty),
                     binding.name
                 ));
-                self.assign_unboxed_value(&binding.name, &binding.ty, &field_var);
+                self.assign_unboxed_value(&binding.name, &binding.ty, &field_var)?;
             }
             self.assign_expr(target, &arm.expr, expr_ty)?;
             self.indent = previous;
@@ -4118,6 +4095,12 @@ impl<'a> HostEmitter<'a> {
         items: &[HostExpr],
         ty: &HostType,
     ) -> Result<(), Unsupported> {
+        let HostType::List(item_ty) = ty else {
+            return Err(invalid_abi_shape(
+                format!("list literal carries non-list ABI type `{ty:?}`"),
+                "list literal",
+            ));
+        };
         if items.is_empty() {
             self.lines
                 .push(format!("{}{target} = chelis_list_empty();", self.indent));
@@ -4132,21 +4115,12 @@ impl<'a> HostEmitter<'a> {
         ));
         for (index, item) in items.iter().enumerate() {
             let item_var = self.next_temp(&format!("list_item{index}"));
-            let inferred_ty = host_type(item);
-            let item_ty = if has_unknown(&inferred_ty) {
-                match ty {
-                    HostType::List(inner) => (**inner).clone(),
-                    _ => inferred_ty,
-                }
-            } else {
-                inferred_ty
-            };
-            self.emit_expr_to_var(item, &item_var, &item_ty)?;
+            self.emit_expr_to_var(item, &item_var, item_ty)?;
             self.lines.push(format!(
                 "{}{}[{index}] = {};",
                 self.indent,
                 values_name,
-                self.box_value_expr(&item_var, &item_ty)
+                self.box_value_expr(&item_var, item_ty)?
             ));
         }
         self.lines.push(format!(
@@ -4157,11 +4131,7 @@ impl<'a> HostEmitter<'a> {
         ));
         // issue #406: a freshly-built list temporary in the program root
         // scope is owned by `main` and must be released at scope exit.
-        let list_ty = match ty {
-            HostType::List(_) => ty.clone(),
-            _ => HostType::List(Box::new(HostType::Unknown)),
-        };
-        self.track_owned_alloc(target, &list_ty);
+        self.track_owned_alloc(target, ty);
         Ok(())
     }
 
@@ -4171,6 +4141,22 @@ impl<'a> HostEmitter<'a> {
         items: &[HostExpr],
         ty: &HostType,
     ) -> Result<(), Unsupported> {
+        let HostType::Tuple(item_tys) = ty else {
+            return Err(invalid_abi_shape(
+                format!("tuple literal carries non-tuple ABI type `{ty:?}`"),
+                "tuple literal",
+            ));
+        };
+        if item_tys.len() != items.len() {
+            return Err(invalid_abi_shape(
+                format!(
+                    "tuple literal has {} items but its ABI type has {} fields",
+                    items.len(),
+                    item_tys.len()
+                ),
+                "tuple literal",
+            ));
+        }
         // An empty tuple has no elements. ISO C forbids a zero-length array
         // (`chelis_value tuple_values[0];`), so pass a NULL items pointer with
         // count 0 instead; the runtime helper's `len <= 0` guard never
@@ -4187,23 +4173,13 @@ impl<'a> HostEmitter<'a> {
             ));
             for (index, item) in items.iter().enumerate() {
                 let item_var = self.next_temp(&format!("tuple_item{index}"));
-                let inferred_ty = host_type(item);
-                let item_ty = if has_unknown(&inferred_ty) {
-                    match ty {
-                        HostType::Tuple(item_tys) => {
-                            item_tys.get(index).cloned().unwrap_or(inferred_ty)
-                        }
-                        _ => inferred_ty,
-                    }
-                } else {
-                    inferred_ty
-                };
-                self.emit_expr_to_var(item, &item_var, &item_ty)?;
+                let item_ty = &item_tys[index];
+                self.emit_expr_to_var(item, &item_var, item_ty)?;
                 self.lines.push(format!(
                     "{}{}[{index}] = {};",
                     self.indent,
                     values_name,
-                    self.box_value_expr(&item_var, &item_ty)
+                    self.box_value_expr(&item_var, item_ty)?
                 ));
             }
             values_name
@@ -4216,11 +4192,7 @@ impl<'a> HostEmitter<'a> {
         ));
         // issue #406: a freshly-built tuple temporary in the program root
         // scope is owned by `main` and must be released at scope exit.
-        let tuple_ty = match ty {
-            HostType::Tuple(_) => ty.clone(),
-            _ => HostType::Tuple(Vec::new()),
-        };
-        self.track_owned_alloc(target, &tuple_ty);
+        self.track_owned_alloc(target, ty);
         Ok(())
     }
 
@@ -4262,12 +4234,12 @@ impl<'a> HostEmitter<'a> {
         let arg_var = self.next_temp("map_item");
         self.lines
             .push(format!("{}{} {};", self.indent, c_type(&param.ty), arg_var));
-        self.assign_unboxed_value(&arg_var, &param.ty, &item_value);
+        self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var)?;
         self.lines.push(format!(
             "{}{target} = chelis_list_append({target}, {});",
             self.indent,
-            self.box_value_expr(&result_var, &callback.ret_ty)
+            self.box_value_expr(&result_var, &callback.ret_ty)?
         ));
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
@@ -4308,7 +4280,7 @@ impl<'a> HostEmitter<'a> {
         let arg_var = self.next_temp("filter_item");
         self.lines
             .push(format!("{}{} {};", self.indent, c_type(&param.ty), arg_var));
-        self.assign_unboxed_value(&arg_var, &param.ty, &item_value);
+        self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &keep_var)?;
         self.lines
             .push(format!("{}if ({}) {{", self.indent, keep_var));
@@ -4367,7 +4339,7 @@ impl<'a> HostEmitter<'a> {
             c_type(&params[1].ty),
             item_arg
         ));
-        self.assign_unboxed_value(&item_arg, &params[1].ty, &item_value);
+        self.assign_unboxed_value(&item_arg, &params[1].ty, &item_value)?;
         self.emit_callback_assign(callback, &[acc_arg, item_arg], target)?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
@@ -4426,12 +4398,12 @@ impl<'a> HostEmitter<'a> {
             c_type(&params[1].ty),
             item_arg
         ));
-        self.assign_unboxed_value(&item_arg, &params[1].ty, &item_value);
+        self.assign_unboxed_value(&item_arg, &params[1].ty, &item_value)?;
         self.emit_callback_assign(callback, &[acc_arg, item_arg], &acc_var)?;
         self.lines.push(format!(
             "{}{target} = chelis_list_append({target}, {});",
             self.indent,
-            self.box_value_expr(&acc_var, &acc_ty)
+            self.box_value_expr(&acc_var, &acc_ty)?
         ));
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
@@ -4462,8 +4434,15 @@ impl<'a> HostEmitter<'a> {
                  partition results (chelis#730 census row 15)",
             ));
         };
-        let pass_ty = parts.first().cloned().unwrap_or(HostType::Unknown);
-        let fail_ty = parts.get(1).cloned().unwrap_or(HostType::Unknown);
+        let [pass_ty, fail_ty] = parts.as_slice() else {
+            return Err(invalid_abi_shape(
+                format!(
+                    "partition result must have exactly two fields, found {}",
+                    parts.len()
+                ),
+                "partition result",
+            ));
+        };
         let pass_var = self.next_temp("partition_pass");
         let fail_var = self.next_temp("partition_fail");
         self.lines.push(format!(
@@ -4503,7 +4482,7 @@ impl<'a> HostEmitter<'a> {
         let arg_var = self.next_temp("partition_item");
         self.lines
             .push(format!("{}{} {};", self.indent, c_type(&param.ty), arg_var));
-        self.assign_unboxed_value(&arg_var, &param.ty, &item_value);
+        self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &keep_var)?;
         self.lines
             .push(format!("{}if ({}) {{", self.indent, keep_var));
@@ -4581,7 +4560,7 @@ impl<'a> HostEmitter<'a> {
         let arg_var = self.next_temp("flat_map_item");
         self.lines
             .push(format!("{}{} {};", self.indent, c_type(&param.ty), arg_var));
-        self.assign_unboxed_value(&arg_var, &param.ty, &item_value);
+        self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var)?;
         self.lines.push(format!(
             "{}{target} = chelis_list_concat({target}, {});",
@@ -4623,9 +4602,9 @@ impl<'a> HostEmitter<'a> {
         Ok(())
     }
 
-    fn box_value_expr(&self, value: &str, ty: &HostType) -> String {
-        match ty {
-            HostType::Int64 => format!("chelis_value_from_int64({value})"),
+    fn box_value_expr(&self, value: &str, ty: &HostType) -> Result<String, Unsupported> {
+        Ok(match ty {
+            HostType::Int32 | HostType::Int64 => format!("chelis_value_from_int64({value})"),
             // The boxed value option has no separate f32 slot; an f32
             // promotes losslessly to the f64 box (WS-4).
             HostType::Float64 | HostType::Float32 => format!("chelis_value_from_f64({value})"),
@@ -4636,13 +4615,22 @@ impl<'a> HostEmitter<'a> {
             HostType::List(_) => format!("chelis_value_from_list({value})"),
             HostType::Tuple(_) => format!("chelis_value_from_tuple({value})"),
             HostType::Dict(_, _) => format!("chelis_value_from_dict({value})"),
-            _ => "chelis_value_from_int64(0)".to_string(),
-        }
+            HostType::Fn(_, _) | HostType::Option(_) | HostType::MappedFile | HostType::Unit => {
+                return Err(unsupported_value_boxing(ty, "boxing a resolved host value"));
+            }
+        })
     }
 
-    fn assign_unboxed_value(&mut self, target: &str, ty: &HostType, value_expr: &str) {
+    fn assign_unboxed_value(
+        &mut self,
+        target: &str,
+        ty: &HostType,
+        value_expr: &str,
+    ) -> Result<(), Unsupported> {
         let expr = match ty {
-            HostType::Int64 => format!("chelis_value_as_int64({value_expr})"),
+            HostType::Int32 | HostType::Int64 => {
+                format!("chelis_value_as_int64({value_expr})")
+            }
             // f32 is unboxed via the f64 accessor (the box stored it as
             // f64); the surrounding `c_decl` narrows back to `float` (WS-4).
             HostType::Float64 | HostType::Float32 => {
@@ -4655,10 +4643,16 @@ impl<'a> HostEmitter<'a> {
             HostType::List(_) => format!("chelis_value_as_list({value_expr})"),
             HostType::Tuple(_) => format!("chelis_value_as_tuple({value_expr})"),
             HostType::Dict(_, _) => format!("chelis_value_as_dict({value_expr})"),
-            _ => "0".to_string(),
+            HostType::Fn(_, _) | HostType::Option(_) | HostType::MappedFile | HostType::Unit => {
+                return Err(unsupported_value_boxing(
+                    ty,
+                    "unboxing a resolved host value",
+                ));
+            }
         };
         self.lines
             .push(format!("{}{target} = {expr};", self.indent));
+        Ok(())
     }
 
     fn emit_print_value(&mut self, value: &str, ty: &HostType) -> Result<(), Unsupported> {
@@ -4742,7 +4736,7 @@ impl<'a> HostEmitter<'a> {
                     self.indent,
                     c_decl(field_ty, &field_value)
                 ));
-                self.assign_unboxed_value(&field_value, field_ty, &field_var);
+                self.assign_unboxed_value(&field_value, field_ty, &field_var)?;
                 self.emit_labeled_root(&field_name, &field_value, field_ty)?;
                 // issue #406: `chelis_tuple_get` retains the boxed element
                 // it returns (a no-op for scalar fields). The labeled-root
@@ -4832,7 +4826,7 @@ impl<'a> HostEmitter<'a> {
         ty: &HostType,
         value_var: &str,
         value_ty: &HostType,
-    ) {
+    ) -> Result<(), Unsupported> {
         match ty {
             HostType::Option(inner) if matches!(inner.as_ref(), HostType::Int64) => {
                 self.lines
@@ -4852,16 +4846,20 @@ impl<'a> HostEmitter<'a> {
                 self.lines.push(format!(
                     "{}{target}.value = {};",
                     self.indent,
-                    self.box_value_expr(value_var, value_ty)
+                    self.box_value_expr(value_var, value_ty)?
                 ));
             }
-            _ => self
-                .lines
-                .push(format!("{}{target} = {value_var};", self.indent)),
+            other => {
+                return Err(invalid_abi_shape(
+                    format!("Some constructor carries non-option ABI type `{other:?}`"),
+                    "Some constructor",
+                ));
+            }
         }
+        Ok(())
     }
 
-    fn assign_option_none(&mut self, target: &str, ty: &HostType) {
+    fn assign_option_none(&mut self, target: &str, ty: &HostType) -> Result<(), Unsupported> {
         match ty {
             HostType::Option(inner) if matches!(inner.as_ref(), HostType::Int64) => {
                 self.lines
@@ -4883,8 +4881,14 @@ impl<'a> HostEmitter<'a> {
                     self.indent
                 ));
             }
-            _ => self.lines.push(format!("{}{target} = 0;", self.indent)),
+            other => {
+                return Err(invalid_abi_shape(
+                    format!("None constructor carries non-option ABI type `{other:?}`"),
+                    "None constructor",
+                ));
+            }
         }
+        Ok(())
     }
 }
 
@@ -4960,40 +4964,8 @@ fn binding_release(var: &str, ty: &HostType) -> Option<String> {
     release_call(var, ty)
 }
 
-fn c_type(ty: &HostType) -> &'static str {
-    match ty {
-        HostType::Int64 => "int64_t",
-        // WS-4: a declared `f32` scalar gets a 4-byte C storage type, not
-        // `double`. The host lane previously collapsed every float to
-        // `Float64`/`double`, so an `f32` entry parameter was widened to
-        // 8 bytes on the C boundary.
-        HostType::Float32 => "float",
-        HostType::Float64 => "double",
-        HostType::Bool => "bool",
-        HostType::String => "chelis_string",
-        HostType::Fn(_, _) => "void*",
-        HostType::Adt(_, _) => "chelis_adt*",
-        HostType::List(_) => "chelis_list*",
-        HostType::Dict(_, _) => "chelis_dict*",
-        HostType::Tuple(_) => "chelis_tuple*",
-        HostType::Tensor(_) => "chelis_tensor*",
-        HostType::MappedFile => "chelis_mapped_file*",
-        HostType::Option(inner) => match inner.as_ref() {
-            HostType::Int64 => "chelis_option_i64",
-            // No dedicated `chelis_option_f32` runtime type exists; an
-            // optional f32 boxes through the generic value option, same
-            // as every non-i64/f64 inner. Keep the f64 fast-path intact.
-            HostType::Float64 => "chelis_option_f64",
-            _ => "chelis_option_value",
-        },
-        HostType::Unit => "int",
-        // Unresolved polymorphic type — use `void*` so callers passing
-        // concrete pointer types (chelis_adt*, chelis_tensor*, etc.)
-        // implicitly convert cleanly. Scalars (int64/f64/bool) require
-        // explicit boxing at the callsite; Coral's HAMT / Nautilus's
-        // `a`-valued defs pass only pointer types in practice.
-        HostType::Unknown => "void*",
-    }
+fn c_type(ty: &HostAbiType) -> &'static str {
+    ty.c_type_name()
 }
 
 /// The C / C++ reserved words a Chelis identifier must not collide with
@@ -5186,35 +5158,64 @@ fn host_type(expr: &HostExpr) -> HostType {
     }
 }
 
-fn option_inner_type(ty: HostType) -> HostType {
-    match ty {
-        HostType::Option(inner) => *inner,
-        _ => HostType::Unknown,
+fn invalid_abi_shape(detail: String, context: &'static str) -> Unsupported {
+    Unsupported::new(
+        UnsupportedKind::Construct(detail),
+        context,
+        Stage::Codegen("c"),
+        "the resolved host IR and C ABI projection disagree; this is an internal \
+         compiler error, never a request to select a fallback representation \
+         (chelis#730; [05-UNS-1])",
+    )
+}
+
+fn unsupported_value_boxing(ty: &HostType, context: &'static str) -> Unsupported {
+    Unsupported::new(
+        UnsupportedKind::HostType(format!("{ty:?}")),
+        context,
+        Stage::Codegen("c"),
+        "the resolved C-host ABI has no chelis_value boxing representation for this \
+         type; implement that representation explicitly or reject the containing \
+         construct ([05-UNS-1]; chelis#730, chelis#729)",
+    )
+}
+
+fn require_same_abi_type(
+    expected: &HostType,
+    actual: &HostType,
+    context: &'static str,
+) -> Result<(), Unsupported> {
+    if expected == actual {
+        Ok(())
+    } else {
+        Err(invalid_abi_shape(
+            format!("expected ABI type `{expected:?}`, found `{actual:?}`"),
+            context,
+        ))
     }
 }
 
-fn expected_builtin_arg_ty(name: &str, ty: &HostType, index: usize) -> HostType {
+fn option_inner_type(ty: &HostType) -> Result<HostType, Unsupported> {
+    match ty {
+        HostType::Option(inner) => Ok((**inner).clone()),
+        other => Err(invalid_abi_shape(
+            format!("option match scrutinee has non-option ABI type `{other:?}`"),
+            "option match",
+        )),
+    }
+}
+
+fn expected_builtin_arg_ty(name: &str, ty: &HostType, index: usize) -> Option<HostType> {
     match (name, ty, index) {
-        ("Some", HostType::Option(inner), 0) => (**inner).clone(),
+        ("Some", HostType::Option(inner), 0) => Some((**inner).clone()),
         ("dict_of", HostType::Dict(key, value), 0) => {
-            HostType::List(Box::new(HostType::Tuple(vec![
+            Some(HostType::List(Box::new(HostType::Tuple(vec![
                 (**key).clone(),
                 (**value).clone(),
-            ])))
+            ]))))
         }
-        ("append", HostType::List(inner), 1) => (**inner).clone(),
-        _ => HostType::Unknown,
-    }
-}
-
-fn has_unknown(ty: &HostType) -> bool {
-    match ty {
-        HostType::Unknown => true,
-        HostType::Fn(params, ret) => params.iter().any(has_unknown) || has_unknown(ret),
-        HostType::List(inner) | HostType::Option(inner) => has_unknown(inner),
-        HostType::Dict(key, value) => has_unknown(key) || has_unknown(value),
-        HostType::Tuple(items) => items.iter().any(has_unknown),
-        _ => false,
+        ("append", HostType::List(inner), 1) => Some((**inner).clone()),
+        _ => None,
     }
 }
 
