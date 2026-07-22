@@ -56,10 +56,17 @@ separate host-language embedding model first.
 After Phase `3m`, that C-facing surface is expected to come from `chelis_runtime.h`
 plus the shipped Rust static runtime library rather than a generated `chelis_runtime.c`
 implementation file.
-When object-mode host emission needs to export a source-level `def main(...)`, the
-generated C symbol should be renamed to a file-stem-derived helper such as
-`<program>__main` so downstream C or C++ drivers can still define their own
-process entry `main(void)`.
+When compiled-execution emission (the `compile_and_load` / execution-artifact lane)
+scopes an artifact to a selected `def`, the emitted C symbol is decoupled from the
+def name and always `chelis_`-prefixed: the default entry emits `chelis_main`, and a
+def selected by `entry_name` emits `chelis_<def>` (`chelis_main`, `chelis_free`,
+`chelis_solve`, …). This keeps the translation unit linkable regardless of the def's
+name — a def literally named `main` no longer redefines the reserved process entry
+`int main(int, char**, char**)`, and a def named after a libc symbol (`free`,
+`malloc`) no longer collides at link time. The artifact manifest's `host_entry_name`
+carries the emitted symbol so the loader (`dlsym`) and generated header stay
+consistent. (The legacy free-form host/single-def path, where `entry_name` passes
+through as a raw output symbol, is unchanged and retains the historical behavior.)
 
 ## 3. Embedding the Compiler
 

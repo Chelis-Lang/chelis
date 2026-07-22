@@ -79,10 +79,11 @@ def check_entry_scoped_metadata(root: Path) -> None:
     # Eval-vs-compiled note: `chelis.eval` currently produces NO root for a def
     # whose body uses a host-runtime builtin such as `concat` (the def is
     # excluded from the pure tensor-root set — the same host-lane exclusion
-    # that caused #818's empty manifest). That is a separate eval-path gap, not
-    # part of the compile_and_load metadata contract this test guards, so the
-    # #818 compiled result is validated against the hand-computed ground truth
-    # above rather than against `chelis.eval`.
+    # that caused #818's empty manifest), even when its parameters are bound.
+    # That is a separate eval-path gap tracked as chelis#820, not part of the
+    # compile_and_load metadata contract this test guards, so the #818 compiled
+    # result is validated against the hand-computed ground truth above rather
+    # than against `chelis.eval`.
     concat_eval = chelis.eval(CONCAT_PROGRAM, {"a": a, "b": b})
     assert all(root.name != "main" for root in concat_eval.roots), (
         "if chelis.eval starts exposing the concat def root, tighten this into "

@@ -13,7 +13,7 @@
 //! the available entries, and a def named `main` no longer forces an
 //! un-linkable `main` C symbol.
 
-use chelis_compiler_api::compiler::compile_for_execution;
+use chelis_compiler_api::compiler::{compile, compile_for_execution};
 use chelis_compiler_api::schema::{CompileRequest, CompileTarget, SourceKind};
 
 const HELPER_PLUS_ENTRY: &str = "\
@@ -52,23 +52,53 @@ fn input_names(artifact: &chelis_compiler_api::compiler::CompiledExecutionArtifa
         .collect()
 }
 
-/// #817: a multi-def file with no explicit `entry_name` scopes its metadata
-/// to the preferred entry (`solve`, the last tensor-signature def), NOT the
-/// union of every def's parameters.
+const MAIN_PLUS_HELPER: &str = "\
+def helper(x: tensor[1, f32]) -> tensor[1, f32] = mul(x, x)
+def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[1, f32] = add(helper(a), helper(b))
+";
+
+/// Fix 3: a multi-def file with 2+ tensor-signature defs and NO `main`,
+/// compiled with no explicit `entry_name`, is AMBIGUOUS. The old rule
+/// silently selected the last def; the new rule errors loudly and lists the
+/// candidates so the caller passes `entry_name`. (Was
+/// `multi_def_without_entry_name_scopes_to_preferred_entry`, which pinned the
+/// silent-last-def behavior this fix removes.)
 #[test]
-fn multi_def_without_entry_name_scopes_to_preferred_entry() {
-    let artifact = compile_c(HELPER_PLUS_ENTRY, None);
+fn multi_def_without_entry_name_and_no_main_is_ambiguous_error() {
+    let err = compile_for_execution(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: HELPER_PLUS_ENTRY.to_string(),
+        target: CompileTarget::C,
+        entry_name: None,
+    })
+    .expect_err("ambiguous multi-def default selection must error");
+    let message = &err.errors[0].message;
+    assert!(
+        message.contains("ambiguous entry"),
+        "message must flag the ambiguity, got: {message}"
+    );
+    assert!(
+        message.contains("helper") && message.contains("solve"),
+        "message must list the candidate defs, got: {message}"
+    );
+    assert!(
+        message.contains("entry_name"),
+        "message must point at the remedy, got: {message}"
+    );
+}
+
+/// Fix 3 companion: when a tensor-signature def named `main` is present, the
+/// default selection is unambiguous — it auto-selects `main`, scoping to its
+/// params, NOT the merged set.
+#[test]
+fn multi_def_without_entry_name_auto_selects_main() {
+    let artifact = compile_c(MAIN_PLUS_HELPER, None);
     assert_eq!(
         input_names(&artifact),
         vec!["a".to_string(), "b".to_string()],
-        "expected only `solve`'s params, not the merged `helper`+`solve` set"
+        "expected only `main`'s params, not the merged `helper`+`main` set"
     );
-    assert_eq!(
-        artifact.outputs.len(),
-        1,
-        "expected exactly one output for `solve`, got {:?}",
-        artifact.outputs
-    );
+    assert_eq!(artifact.outputs.len(), 1);
 }
 
 /// #817: an explicit `entry_name` selects that def's scope.
@@ -176,5 +206,161 @@ fn entry_named_main_does_not_emit_reserved_main_symbol() {
     assert!(
         c.contains("chelis_main"),
         "entry function must use the rewritten symbol"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Fix 1: the entry lane must be scoped to the ENTRY, not the whole program.
+// A host-flavored SIBLING def (or a helper the entry calls that itself uses a
+// host-runtime builtin) must NOT disable the lane for a cleanly-lowerable
+// entry. Each of these produced an EMPTY manifest under the old whole-program
+// `!host_program_requires_host_backend` gate.
+// ---------------------------------------------------------------------------
+
+/// (a) A host-flavored sibling (`other` uses `concat`) must not disable the
+/// lane for a pure entry (`solve`) selected by name.
+#[test]
+fn sibling_host_def_does_not_disable_entry_lane() {
+    let artifact = compile_c(
+        "def other(x: tensor[1, f32]) -> tensor[2, f32] = concat([copy(x), x], cast(0, int32))\n\
+         def solve(a: tensor[1, f32]) -> tensor[1, f32] = mul(copy(a), a)\n",
+        Some("solve"),
+    );
+    assert_eq!(input_names(&artifact), vec!["a".to_string()]);
+    assert_eq!(artifact.outputs.len(), 1);
+}
+
+/// (b) #818 factored into a helper: the entry `solve` calls `helper`, and
+/// `helper`'s body uses `concat`. The entry still lowers and reports `(a)`.
+#[test]
+fn entry_calling_concat_helper_reports_real_metadata() {
+    let artifact = compile_c(
+        "def helper(x: tensor[1, f32]) -> tensor[2, f32] = concat([copy(x), x], cast(0, int32))\n\
+         def solve(a: tensor[1, f32]) -> tensor[2, f32] = helper(a)\n",
+        Some("solve"),
+    );
+    assert_eq!(input_names(&artifact), vec!["a".to_string()]);
+    assert_eq!(artifact.outputs.len(), 1);
+}
+
+/// (c) The entry itself uses `concat` and also calls a pure helper.
+#[test]
+fn entry_with_concat_calling_pure_helper_reports_real_metadata() {
+    let artifact = compile_c(
+        "def helper(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)\n\
+         def solve(a: tensor[1, f32]) -> tensor[2, f32] = concat([helper(copy(a)), a], cast(0, int32))\n",
+        Some("solve"),
+    );
+    assert_eq!(input_names(&artifact), vec!["a".to_string()]);
+    assert_eq!(artifact.outputs.len(), 1);
+}
+
+/// (d) An unused scalar-signature sibling (`scale`) must not force the
+/// tensor entry onto the host lane.
+#[test]
+fn unused_scalar_sibling_does_not_disable_entry_lane() {
+    let artifact = compile_c(
+        "def scale(x: f32) -> f32 = mul(x, x)\n\
+         def solve(a: tensor[1, f32]) -> tensor[1, f32] = mul(copy(a), a)\n",
+        Some("solve"),
+    );
+    assert_eq!(input_names(&artifact), vec!["a".to_string()]);
+    assert_eq!(artifact.outputs.len(), 1);
+}
+
+/// Fix 7 (negative): a zero-input entry (`def main() -> tensor[1,f32] =
+/// to_tensor([3.0])`) reports zero inputs and ONE output — it must NOT trip
+/// any host-only / empty-manifest rejection. Pins that the manifest is
+/// callable-shaped (has an output) even with no inputs.
+#[test]
+fn zero_input_entry_reports_one_output_no_inputs() {
+    let artifact = compile_c("def main() -> tensor[1, f32] = to_tensor([3.0])\n", None);
+    assert!(
+        input_names(&artifact).is_empty(),
+        "zero-input entry must report no inputs, got {:?}",
+        input_names(&artifact)
+    );
+    assert_eq!(
+        artifact.outputs.len(),
+        1,
+        "zero-input entry must still expose its single output"
+    );
+}
+
+/// Fix 1 guard: a `grad`-using entry, even selected by its def name, stays on
+/// the host lane (empty compiled-execution metadata) — the pure entry-kernel
+/// lane does not own multi-root grad-tuple emission (#309). This is the line
+/// that keeps "it lowers" from being sufficient to claim the entry lane.
+#[test]
+fn grad_entry_stays_on_host_lane_even_when_selected() {
+    const GRAD_SRC: &str = "module Repro.GradEntry
+def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =
+  tensor_to_scalar(sum(mul(x, w), cast(0, int32)))
+def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = (grad(loss)(x, w)).0
+";
+    let artifact = compile_c(GRAD_SRC, Some("dloss"));
+    assert!(
+        artifact.inputs.is_empty() && artifact.outputs.is_empty(),
+        "grad entry must stay host-lane (empty callable metadata), got inputs={:?} outputs={:?}",
+        artifact.inputs,
+        artifact.outputs
+    );
+}
+
+/// Fix 7 (pre-existing behavior, PINNED not changed): a declared parameter
+/// that never appears in the entry body is dead-code-eliminated and does NOT
+/// appear in the manifest. `solve(a, b) = mul(copy(b), b)` reports only `b`.
+///
+/// This is NOT introduced by the entry-scoping fix — the whole-program lane
+/// dropped unused `Load`s too — and changing it is out of scope. It is pinned
+/// here so the asymmetry is explicit: positional callers must bind by
+/// consulting `input_names`, not declaration order, or a positional argument
+/// misbinds. See `bindings/python/README.md`.
+#[test]
+fn unused_declared_param_is_absent_from_manifest_preexisting() {
+    let artifact = compile_c(
+        "def solve(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[1, f32] = mul(copy(b), b)\n",
+        Some("solve"),
+    );
+    assert_eq!(
+        input_names(&artifact),
+        vec!["b".to_string()],
+        "unused `a` must be DCE'd out of the manifest (pre-existing behavior)"
+    );
+    assert_eq!(artifact.outputs.len(), 1);
+}
+
+/// Fix 6: the entry-scoping change rides `compiler::compile` — the same entry
+/// point tide `/compile`, cove, and python `compile()` call. Pin that a
+/// multi-def source with `main` present emits the entry-scoped kernel (the
+/// `chelis_main` symbol) and does NOT additionally emit the sibling `helper`
+/// def as its own standalone C entry function. This locks the contract change
+/// on the shared `compile()` surface, not just `compile_for_execution`.
+#[test]
+fn compile_emits_entry_scoped_kernel_not_sibling_def() {
+    let result = compile(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: MAIN_PLUS_HELPER.to_string(),
+        target: CompileTarget::C,
+        entry_name: None,
+    })
+    .unwrap_or_else(|err| panic!("compile failed: {err:?}"));
+    let c = result
+        .files
+        .iter()
+        .find(|file| file.path == "chelis_main.c")
+        .expect("chelis_main.c present")
+        .contents
+        .clone();
+    assert!(
+        c.contains("chelis_main"),
+        "must emit the entry-scoped `chelis_main` kernel, got:\n{c}"
+    );
+    // The sibling `helper` def must NOT be emitted as its own standalone
+    // top-level entry function (the whole-program emission would have). It is
+    // inlined into the entry DAG, not a separate callable symbol.
+    assert!(
+        !c.contains("void helper(") && !c.contains("chelis_helper("),
+        "sibling `helper` must not be emitted as a standalone entry, got:\n{c}"
     );
 }

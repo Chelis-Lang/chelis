@@ -798,12 +798,14 @@ fn ensure_supported_execution_artifact_inner(
     // longer reach this branch.) See chelis#730.
     if artifact.inputs.is_empty() && artifact.outputs.is_empty() {
         return Err(
-            "compile_and_load produced no callable interface (no inputs or outputs). \
-             This program requires the host-program lane, which does not expose callable \
-             metadata (for example it is built from top-level bindings/globals rather than \
-             a tensor-signature `def`, or its entry cannot be lowered to a compiled tensor \
-             entry). Wrap the computation in a `def` whose params and result are tensors, \
-             or pass `entry_name=` to select such a def."
+            "compile_and_load produced no callable interface (no inputs or outputs) because \
+             the selected entry requires the host-program lane, which has no callable tensor \
+             ABI. This is the entry itself, not a metadata bug: the host lane owns programs \
+             built from top-level bindings/globals, and entries that use `grad`/`vmap` \
+             (multi-root gradient tuples) or string/record/effect operations. If you meant a \
+             different, tensor-in/tensor-out `def`, select it with `entry_name=`; if this IS \
+             the def you want, its result is not a plain compiled tensor kernel and \
+             compile_and_load cannot expose it as one."
                 .to_string(),
         );
     }
@@ -2500,6 +2502,165 @@ def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
         let inputs: Vec<_> = manifest.inputs.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(inputs, vec!["a", "b"]);
         assert_eq!(manifest.outputs.len(), 1);
+    }
+
+    fn contiguous_strides(shape: &[usize]) -> Vec<usize> {
+        let mut strides = vec![1usize; shape.len()];
+        for axis in (0..shape.len().saturating_sub(1)).rev() {
+            strides[axis] = strides[axis + 1] * shape[axis + 1];
+        }
+        strides
+    }
+
+    /// Compile `source` (selecting `entry`), dlopen the artifact, and call the
+    /// manifest-declared host entry with `inputs` (each a `(data, shape)` pair
+    /// of f32 values), returning the numeric outputs. This exercises the full
+    /// manifest<->ABI agreement: input order/shape from the manifest, the
+    /// `host_entry_name` symbol resolved via `dlsym`, and the runtime-allocated
+    /// output tensors read back. Gated (non-`#[ignore]`) so CI's default
+    /// `cargo test -p chelis-python` verifies numbers, not just metadata.
+    fn run_job_and_call(
+        source: &str,
+        entry: Option<&str>,
+        inputs: &[(Vec<f32>, Vec<usize>)],
+    ) -> Vec<Vec<f32>> {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(&source_path, source).expect("write source");
+        let output = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: entry.map(str::to_string),
+            artifact_dir: Some(PathBuf::from(dir.path())),
+        })
+        .expect("compile and load job");
+        let manifest: ArtifactManifest = serde_json::from_str(
+            &fs::read_to_string(output.lib_path.with_extension("json")).expect("read manifest"),
+        )
+        .expect("parse manifest");
+        assert_eq!(
+            manifest.inputs.len(),
+            inputs.len(),
+            "test must supply one value per manifest input: {:?}",
+            manifest.inputs
+        );
+
+        let library = unsafe { Library::new(&output.lib_path) }.expect("load shared library");
+        let symbol = nul_terminated(&manifest.host_entry_name);
+        let entry_fn = unsafe {
+            library
+                .get::<HostEntry>(symbol.as_bytes())
+                .expect("host entry symbol resolves via dlsym")
+        };
+
+        // Keep input buffers alive across the call.
+        let mut buffers: Vec<Vec<f32>> = inputs.iter().map(|(data, _)| data.clone()).collect();
+        let mut input_tensors: Vec<ChelisTensor> = Vec::with_capacity(inputs.len());
+        for (index, (_, shape)) in inputs.iter().enumerate() {
+            let strides = contiguous_strides(shape);
+            input_tensors.push(ChelisTensor {
+                data: buffers[index].as_mut_ptr(),
+                shape: dims_array(shape).expect("shape fits ABI"),
+                strides: dims_array(&strides).expect("strides fit ABI"),
+                ndim: shape.len() as i32,
+                dtype: CHELIS_F32,
+                size: element_count(shape).expect("element count") as i32,
+                owns_data: 0,
+            });
+        }
+        let mut input_ptrs: Vec<*mut ChelisTensor> =
+            input_tensors.iter_mut().map(|t| t as *mut _).collect();
+        let mut output_ptrs: Vec<*mut ChelisTensor> =
+            vec![std::ptr::null_mut(); manifest.outputs.len()];
+        unsafe {
+            (*entry_fn)(
+                input_ptrs.as_mut_ptr(),
+                input_ptrs.len() as c_int,
+                output_ptrs.as_mut_ptr(),
+                output_ptrs.len() as c_int,
+            );
+        }
+        let results = output_ptrs
+            .iter()
+            .map(|&ptr| {
+                assert!(!ptr.is_null(), "compiled execution returned a NULL output");
+                let tensor = unsafe { &*ptr };
+                let slice =
+                    unsafe { std::slice::from_raw_parts(tensor.data, tensor.size as usize) };
+                slice.to_vec()
+            })
+            .collect::<Vec<_>>();
+        drop(input_tensors);
+        drop(buffers);
+        drop(library);
+        results
+    }
+
+    // Issue #817: end-to-end numeric agreement through the manifest-declared
+    // ABI. `solve(a, b) = helper(a) + helper(b) = a*a + b*b`; with a=3, b=4 the
+    // compiled artifact must return [25.].
+    #[test]
+    fn compile_and_load_job_calls_multi_def_entry_and_returns_numbers() {
+        let source = "\
+def helper(x: tensor[1, f32]) -> tensor[1, f32] = mul(x, x)
+def solve(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[1, f32] = add(helper(a), helper(b))
+";
+        let outputs = run_job_and_call(
+            source,
+            Some("solve"),
+            &[(vec![3.0], vec![1]), (vec![4.0], vec![1])],
+        );
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0], vec![25.0], "helper(3)+helper(4) = 9+16 = 25");
+    }
+
+    // Issue #818: end-to-end numeric agreement for a concat body.
+    // `main(a, b) = concat(mul(copy(a), b), add(a, b))`; with a=[3], b=[4] the
+    // compiled artifact must return [12., 7.].
+    #[test]
+    fn compile_and_load_job_calls_concat_entry_and_returns_numbers() {
+        let source = "\
+def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
+  x = mul(copy(a), b)
+  y = add(a, b)
+  concat([x, y], cast(0, int32))
+}
+";
+        let outputs = run_job_and_call(source, None, &[(vec![3.0], vec![1]), (vec![4.0], vec![1])]);
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0], vec![12.0, 7.0], "concat(3*4, 3+4) = [12, 7]");
+    }
+
+    // Fix 7: an `entry_name` that names no def in a clean tensor program is a
+    // loud error through the job path (the same surface `compile_and_load`
+    // uses), listing the real entry defs — not a silent wrong-def selection.
+    #[test]
+    fn compile_and_load_job_unknown_entry_name_errors() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "def helper(x: tensor[1, f32]) -> tensor[1, f32] = mul(x, x)\n\
+             def solve(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[1, f32] = add(helper(a), helper(b))\n",
+        )
+        .expect("write source");
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: Some("nope".to_string()),
+            artifact_dir: Some(PathBuf::from(dir.path())),
+        });
+        let message = match result {
+            Ok(_) => panic!("unknown entry_name must not silently compile a wrong def"),
+            Err(CompileAndLoadError::Message(m)) => m,
+            Err(CompileAndLoadError::Compiler(e)) => format!("{e:?}"),
+        };
+        assert!(
+            message.contains("unknown entry_name `nope`") && message.contains("solve"),
+            "expected an unknown-entry error listing defs, got: {message}"
+        );
     }
 
     // A genuinely host-only program (top-level bindings/globals, no
