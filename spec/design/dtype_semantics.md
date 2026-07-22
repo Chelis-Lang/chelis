@@ -539,11 +539,14 @@ whose printed strings are the expected values for yours.
 
 **You deliver:**
 
-1. `parse_host_type` (`chelis-ir/src/host.rs:7572`) and
-   `infer_builtin_host_type_from_arg_tys` (`:7861`) lose their defaults;
-   narrow scalar types get real `HostType` representations backed by
-   per-dtype C storage. The `HostType::Unknown -> int64_t/void*` path for
-   numeric types becomes unreachable ([#714]).
+1. Inherit [#730]'s completed
+   `HostTypeTerm -> ConcreteHostType -> HostAbiType` boundary: exact narrow
+   scalar identity already survives host lowering, and the former
+   `HostType::Unknown -> int64_t/void*` route is unrepresentable. This phase
+   adds the per-dtype C storage and operation semantics, then changes the
+   C-host target decision for each newly implemented cell from a structured
+   rejection to the corresponding `HostAbiType` representation ([#714]); it
+   does not reopen or duplicate the host-type boundary.
 2. Scalar C arithmetic at width with generated trap guards emitting §C2's
    frozen strings (the `chelis_int_div_guard` pattern, generalized), and
    f16/bf16 scalar C storage/rounding matching §C1 (likely via uint16

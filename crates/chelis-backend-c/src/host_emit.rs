@@ -49,9 +49,6 @@ enum CExpressionBuiltin {
     ToString,
     ToInt,
     ToFloat,
-    Print,
-    Fail,
-    Debug,
     TensorToScalar,
     ScalarToTensor,
     Len,
@@ -103,9 +100,6 @@ impl CExpressionBuiltin {
             "to_string" => Self::ToString,
             "to_int" => Self::ToInt,
             "to_float" => Self::ToFloat,
-            "print" => Self::Print,
-            "fail" => Self::Fail,
-            "debug" => Self::Debug,
             "tensor_to_scalar" => Self::TensorToScalar,
             "scalar_to_tensor" => Self::ScalarToTensor,
             "len" => Self::Len,
@@ -2545,246 +2539,266 @@ impl<'a> HostEmitter<'a> {
             ));
         }
 
-        // chelis#730 Phase 2 (C3/C4.4): open-set dispatch constructs only
-        // the closed C-expression AST. There is no raw-string node, and the
-        // unmatched arm returns `Err(Unsupported)` before an expression can
-        // exist.
-        let arg = |index: usize| EmittedExpr::identifier(arg_vars[index].0.clone());
-        let binary = |operator, lhs, rhs| EmittedExpr::binary(operator, lhs, rhs);
-        let unary = |operator, operand| EmittedExpr::unary(operator, operand);
-        let expression_builtin = CExpressionBuiltin::decode(name)?;
-        let expr = match expression_builtin {
-            CExpressionBuiltin::Add => binary(BinaryOperator::Add, arg(0), arg(1)),
-            CExpressionBuiltin::Sub => binary(BinaryOperator::Subtract, arg(0), arg(1)),
-            CExpressionBuiltin::Mul => binary(BinaryOperator::Multiply, arg(0), arg(1)),
-            // #387: integer scalar `div`/`mod` trap portably on a zero
-            // divisor (ARM64 does not fault on integer div-by-zero), using the
-            // same clean diagnostic the evaluator emits. `chelis_int_div_guard`
-            // returns the (nonzero) divisor so it composes inline. Float `div`
-            // is IEEE-754 and is never guarded; `mod` is integer-only.
-            // chelis#178: integer `div` is a type error; this arm is dead
-            // (the checker rejects it before host-emit) but kept as a
-            // defensive guard. Float `div` is IEEE-754 and never guarded.
-            CExpressionBuiltin::Div
-                if matches!(arg_vars[0].1, HostType::Int32 | HostType::Int64) =>
-            {
-                binary(
-                    BinaryOperator::Divide,
-                    arg(0),
-                    EmittedExpr::call("chelis_int_div_guard", [arg(1)]),
-                )
-            }
-            CExpressionBuiltin::Div => binary(BinaryOperator::Divide, arg(0), arg(1)),
-            // chelis#178: `trunc_div` is integer-only — the guarded C `/`
-            // quotient (round toward zero).
-            CExpressionBuiltin::TruncDiv => binary(
-                BinaryOperator::Divide,
-                arg(0),
-                EmittedExpr::call("chelis_int_div_guard", [arg(1)]),
-            ),
-            // chelis#178: `floor_div` rounds toward -inf. Integer (host
-            // scalar) operands use the guarded `/` plus a remainder-sign
-            // correction; float operands use `floor(a / b)`.
-            CExpressionBuiltin::FloorDiv
-                if matches!(arg_vars[0].1, HostType::Int32 | HostType::Int64) =>
-            {
-                let guarded_divisor = || EmittedExpr::call("chelis_int_div_guard", [arg(1)]);
-                let quotient = binary(BinaryOperator::Divide, arg(0), guarded_divisor());
-                let remainder = || binary(BinaryOperator::Remainder, arg(0), guarded_divisor());
-                let nonzero = binary(
-                    BinaryOperator::NotEqual,
-                    remainder(),
-                    EmittedExpr::integer(0),
-                );
-                let sign_differs = binary(
-                    BinaryOperator::NotEqual,
-                    binary(BinaryOperator::Less, remainder(), EmittedExpr::integer(0)),
-                    binary(BinaryOperator::Less, arg(1), EmittedExpr::integer(0)),
-                );
-                let correction = EmittedExpr::conditional(
-                    binary(BinaryOperator::LogicalAnd, nonzero, sign_differs),
-                    EmittedExpr::integer(1),
-                    EmittedExpr::integer(0),
-                );
-                binary(BinaryOperator::Subtract, quotient, correction)
-            }
-            CExpressionBuiltin::FloorDiv => {
-                EmittedExpr::call("floor", [binary(BinaryOperator::Divide, arg(0), arg(1))])
-            }
-            CExpressionBuiltin::Mod => binary(
-                BinaryOperator::Remainder,
-                arg(0),
-                EmittedExpr::call("chelis_int_div_guard", [arg(1)]),
-            ),
-            CExpressionBuiltin::CompareLess if matches!(arg_vars[0].1, HostType::Tensor(_)) => {
-                EmittedExpr::call("chelis_tensor_cmplt", [arg(0), arg(1)])
-            }
-            CExpressionBuiltin::CompareLess | CExpressionBuiltin::Less => {
-                binary(BinaryOperator::Less, arg(0), arg(1))
-            }
-            CExpressionBuiltin::Greater => binary(BinaryOperator::Greater, arg(0), arg(1)),
-            CExpressionBuiltin::GreaterEqual => {
-                binary(BinaryOperator::GreaterEqual, arg(0), arg(1))
-            }
-            CExpressionBuiltin::LessEqual => binary(BinaryOperator::LessEqual, arg(0), arg(1)),
-            CExpressionBuiltin::Equal => match (&arg_vars[0].1, &arg_vars[1].1) {
-                (HostType::String, HostType::String) => {
-                    EmittedExpr::call("chelis_string_eq", [arg(0), arg(1)])
-                }
-                _ => binary(BinaryOperator::Equal, arg(0), arg(1)),
-            },
-            CExpressionBuiltin::NotEqual => match (&arg_vars[0].1, &arg_vars[1].1) {
-                (HostType::String, HostType::String) => unary(
-                    UnaryOperator::LogicalNot,
-                    EmittedExpr::call("chelis_string_eq", [arg(0), arg(1)]),
-                ),
-                _ => binary(BinaryOperator::NotEqual, arg(0), arg(1)),
-            },
-            CExpressionBuiltin::And => binary(BinaryOperator::LogicalAnd, arg(0), arg(1)),
-            CExpressionBuiltin::Or => binary(BinaryOperator::LogicalOr, arg(0), arg(1)),
-            CExpressionBuiltin::Not => unary(UnaryOperator::LogicalNot, arg(0)),
-            CExpressionBuiltin::Neg => unary(UnaryOperator::Negate, arg(0)),
-            CExpressionBuiltin::StringConcat => {
-                EmittedExpr::call("chelis_string_concat", [arg(0), arg(1)])
-            }
-            CExpressionBuiltin::StringTrim => EmittedExpr::call("chelis_string_trim", [arg(0)]),
-            CExpressionBuiltin::Reshape => {
-                EmittedExpr::call("chelis_host_reshape_tensor", [arg(0), arg(1)])
-            }
-            CExpressionBuiltin::StringSlice => {
-                EmittedExpr::call("chelis_string_slice", [arg(0), arg(1), arg(2)])
-            }
-            CExpressionBuiltin::StringContains => {
-                EmittedExpr::call("chelis_string_contains", [arg(0), arg(1)])
-            }
-            CExpressionBuiltin::StringStartsWith => {
-                EmittedExpr::call("chelis_string_starts_with", [arg(0), arg(1)])
-            }
-            CExpressionBuiltin::StringEndsWith => {
-                EmittedExpr::call("chelis_string_ends_with", [arg(0), arg(1)])
-            }
-            CExpressionBuiltin::StringLen => EmittedExpr::call("chelis_string_len", [arg(0)]),
-            CExpressionBuiltin::ToString => match &arg_vars[0].1 {
-                HostType::Int32 | HostType::Int64 => {
-                    EmittedExpr::call("chelis_string_from_int64", [arg(0)])
-                }
-                // f32 promotes to double for formatting (lossless); there is
-                // no separate f32 formatter in the runtime.
-                HostType::Float64 | HostType::Float32 => {
-                    EmittedExpr::call("chelis_string_from_f64", [arg(0)])
-                }
-                HostType::Bool => EmittedExpr::call("chelis_string_from_bool", [arg(0)]),
-                HostType::String => arg(0),
-                // chelis#730 Phase 1 (census row 3, chelis#734): to_string
-                // of a tensor/list/other non-scalar has no C rendering yet;
-                // it previously compiled to the literal placeholder string
-                // `<value>`. Real rendering arrives with chelis#732's
-                // generated formatter.
-                other => {
-                    return Err(Unsupported::new(
-                        UnsupportedKind::Construct(format!(
-                            "`to_string` of a `{other:?}`-typed value"
-                        )),
-                        "`chelis build` host emission",
-                        Stage::Codegen("c"),
-                        "the compiled lane stringifies int64/f32/f64/bool/string scalars \
-                         only today; tensor/list rendering is tracked by chelis#732 \
-                         (was the `<value>` placeholder, chelis#734)",
-                    ));
-                }
-            },
-            CExpressionBuiltin::ToInt => EmittedExpr::call("chelis_parse_int64", [arg(0)]),
-            CExpressionBuiltin::ToFloat => EmittedExpr::call("chelis_parse_f64", [arg(0)]),
-            CExpressionBuiltin::Print => {
+        // These three builtins emit statements as part of their semantics,
+        // so they are completed here rather than being admitted to the
+        // expression vocabulary below.  All remaining open-set names must
+        // cross `CExpressionBuiltin::decode` and the Result-typed expression
+        // builder before they can be rendered.
+        match name {
+            "print" => {
                 self.emit_print_value(&arg_vars[0].0, &arg_vars[0].1)?;
-                EmittedExpr::integer(0)
+                self.lines.push(format!("{}{target} = 0;", self.indent));
+                return Ok(());
             }
-            CExpressionBuiltin::Fail => {
+            "fail" => {
                 self.lines
                     .push(format!("{}chelis_fail({});", self.indent, arg_vars[0].0));
                 return Ok(());
             }
-            CExpressionBuiltin::Debug => {
+            "debug" => {
                 self.emit_print_value(&arg_vars[0].0, &arg_vars[0].1)?;
-                arg(0)
+                self.lines
+                    .push(format!("{}{target} = {};", self.indent, arg_vars[0].0));
+                return Ok(());
             }
-            CExpressionBuiltin::TensorToScalar => {
-                EmittedExpr::call("chelis_tensor_to_f64", [arg(0)])
-            }
-            // Issue #300: dispatch on the *result* tensor precision, not just
-            // the (coarse) argument host type. `scalar_to_tensor(cast(c,
-            // f32))` must materialize an f32-backed rank-0 tensor: the f64
-            // constructor stores 8 bytes, and an f32 consumer (e.g. a DAG
-            // `expand` helper lowered at the operand's f32 precision) then
-            // decodes the low 4 bytes -- 0.0 for an exactly-representable
-            // value like 2.5. `Float64` host-classifies both f32 and f64, so
-            // the argument type alone cannot distinguish them; the result
-            // `ty` carries the real precision.
-            CExpressionBuiltin::ScalarToTensor => match ty {
-                HostType::Tensor(tensor_ty) => match tensor_ty.precision {
-                    Prim::Int64 => EmittedExpr::call("chelis_scalar_tensor_from_i64", [arg(0)]),
-                    Prim::F64 => EmittedExpr::call("chelis_scalar_tensor_from_f64", [arg(0)]),
-                    Prim::F32 => EmittedExpr::call("chelis_scalar_tensor_from_f32", [arg(0)]),
-                    precision => {
+            _ => {}
+        }
+
+        // chelis#730 Phase 2 (C3/C4.4): open-set dispatch constructs only
+        // the closed C-expression AST. There is no raw-string node, and the
+        // unmatched arm returns `Err(Unsupported)` before an expression can
+        // exist.
+        let build_expression = || -> Result<EmittedExpr, Unsupported> {
+            let arg = |index: usize| EmittedExpr::identifier(arg_vars[index].0.clone());
+            let binary = |operator, lhs, rhs| EmittedExpr::binary(operator, lhs, rhs);
+            let unary = |operator, operand| EmittedExpr::unary(operator, operand);
+            let expression_builtin = CExpressionBuiltin::decode(name)?;
+            let expr = match expression_builtin {
+                CExpressionBuiltin::Add => binary(BinaryOperator::Add, arg(0), arg(1)),
+                CExpressionBuiltin::Sub => binary(BinaryOperator::Subtract, arg(0), arg(1)),
+                CExpressionBuiltin::Mul => binary(BinaryOperator::Multiply, arg(0), arg(1)),
+                // #387: integer scalar `div`/`mod` trap portably on a zero
+                // divisor (ARM64 does not fault on integer div-by-zero), using the
+                // same clean diagnostic the evaluator emits. `chelis_int_div_guard`
+                // returns the (nonzero) divisor so it composes inline. Float `div`
+                // is IEEE-754 and is never guarded; `mod` is integer-only.
+                // chelis#178: integer `div` is a type error; this arm is dead
+                // (the checker rejects it before host-emit) but kept as a
+                // defensive guard. Float `div` is IEEE-754 and never guarded.
+                CExpressionBuiltin::Div
+                    if matches!(arg_vars[0].1, HostType::Int32 | HostType::Int64) =>
+                {
+                    binary(
+                        BinaryOperator::Divide,
+                        arg(0),
+                        EmittedExpr::call("chelis_int_div_guard", [arg(1)]),
+                    )
+                }
+                CExpressionBuiltin::Div => binary(BinaryOperator::Divide, arg(0), arg(1)),
+                // chelis#178: `trunc_div` is integer-only — the guarded C `/`
+                // quotient (round toward zero).
+                CExpressionBuiltin::TruncDiv => binary(
+                    BinaryOperator::Divide,
+                    arg(0),
+                    EmittedExpr::call("chelis_int_div_guard", [arg(1)]),
+                ),
+                // chelis#178: `floor_div` rounds toward -inf. Integer (host
+                // scalar) operands use the guarded `/` plus a remainder-sign
+                // correction; float operands use `floor(a / b)`.
+                CExpressionBuiltin::FloorDiv
+                    if matches!(arg_vars[0].1, HostType::Int32 | HostType::Int64) =>
+                {
+                    let guarded_divisor = || EmittedExpr::call("chelis_int_div_guard", [arg(1)]);
+                    let quotient = binary(BinaryOperator::Divide, arg(0), guarded_divisor());
+                    let remainder = || binary(BinaryOperator::Remainder, arg(0), guarded_divisor());
+                    let nonzero = binary(
+                        BinaryOperator::NotEqual,
+                        remainder(),
+                        EmittedExpr::integer(0),
+                    );
+                    let sign_differs = binary(
+                        BinaryOperator::NotEqual,
+                        binary(BinaryOperator::Less, remainder(), EmittedExpr::integer(0)),
+                        binary(BinaryOperator::Less, arg(1), EmittedExpr::integer(0)),
+                    );
+                    let correction = EmittedExpr::conditional(
+                        binary(BinaryOperator::LogicalAnd, nonzero, sign_differs),
+                        EmittedExpr::integer(1),
+                        EmittedExpr::integer(0),
+                    );
+                    binary(BinaryOperator::Subtract, quotient, correction)
+                }
+                CExpressionBuiltin::FloorDiv => {
+                    EmittedExpr::call("floor", [binary(BinaryOperator::Divide, arg(0), arg(1))])
+                }
+                CExpressionBuiltin::Mod => binary(
+                    BinaryOperator::Remainder,
+                    arg(0),
+                    EmittedExpr::call("chelis_int_div_guard", [arg(1)]),
+                ),
+                CExpressionBuiltin::CompareLess if matches!(arg_vars[0].1, HostType::Tensor(_)) => {
+                    EmittedExpr::call("chelis_tensor_cmplt", [arg(0), arg(1)])
+                }
+                CExpressionBuiltin::CompareLess | CExpressionBuiltin::Less => {
+                    binary(BinaryOperator::Less, arg(0), arg(1))
+                }
+                CExpressionBuiltin::Greater => binary(BinaryOperator::Greater, arg(0), arg(1)),
+                CExpressionBuiltin::GreaterEqual => {
+                    binary(BinaryOperator::GreaterEqual, arg(0), arg(1))
+                }
+                CExpressionBuiltin::LessEqual => binary(BinaryOperator::LessEqual, arg(0), arg(1)),
+                CExpressionBuiltin::Equal => match (&arg_vars[0].1, &arg_vars[1].1) {
+                    (HostType::String, HostType::String) => {
+                        EmittedExpr::call("chelis_string_eq", [arg(0), arg(1)])
+                    }
+                    _ => binary(BinaryOperator::Equal, arg(0), arg(1)),
+                },
+                CExpressionBuiltin::NotEqual => match (&arg_vars[0].1, &arg_vars[1].1) {
+                    (HostType::String, HostType::String) => unary(
+                        UnaryOperator::LogicalNot,
+                        EmittedExpr::call("chelis_string_eq", [arg(0), arg(1)]),
+                    ),
+                    _ => binary(BinaryOperator::NotEqual, arg(0), arg(1)),
+                },
+                CExpressionBuiltin::And => binary(BinaryOperator::LogicalAnd, arg(0), arg(1)),
+                CExpressionBuiltin::Or => binary(BinaryOperator::LogicalOr, arg(0), arg(1)),
+                CExpressionBuiltin::Not => unary(UnaryOperator::LogicalNot, arg(0)),
+                CExpressionBuiltin::Neg => unary(UnaryOperator::Negate, arg(0)),
+                CExpressionBuiltin::StringConcat => {
+                    EmittedExpr::call("chelis_string_concat", [arg(0), arg(1)])
+                }
+                CExpressionBuiltin::StringTrim => EmittedExpr::call("chelis_string_trim", [arg(0)]),
+                CExpressionBuiltin::Reshape => {
+                    EmittedExpr::call("chelis_host_reshape_tensor", [arg(0), arg(1)])
+                }
+                CExpressionBuiltin::StringSlice => {
+                    EmittedExpr::call("chelis_string_slice", [arg(0), arg(1), arg(2)])
+                }
+                CExpressionBuiltin::StringContains => {
+                    EmittedExpr::call("chelis_string_contains", [arg(0), arg(1)])
+                }
+                CExpressionBuiltin::StringStartsWith => {
+                    EmittedExpr::call("chelis_string_starts_with", [arg(0), arg(1)])
+                }
+                CExpressionBuiltin::StringEndsWith => {
+                    EmittedExpr::call("chelis_string_ends_with", [arg(0), arg(1)])
+                }
+                CExpressionBuiltin::StringLen => EmittedExpr::call("chelis_string_len", [arg(0)]),
+                CExpressionBuiltin::ToString => match &arg_vars[0].1 {
+                    HostType::Int32 | HostType::Int64 => {
+                        EmittedExpr::call("chelis_string_from_int64", [arg(0)])
+                    }
+                    // f32 promotes to double for formatting (lossless); there is
+                    // no separate f32 formatter in the runtime.
+                    HostType::Float64 | HostType::Float32 => {
+                        EmittedExpr::call("chelis_string_from_f64", [arg(0)])
+                    }
+                    HostType::Bool => EmittedExpr::call("chelis_string_from_bool", [arg(0)]),
+                    HostType::String => arg(0),
+                    // chelis#730 Phase 1 (census row 3, chelis#734): to_string
+                    // of a tensor/list/other non-scalar has no C rendering yet;
+                    // it previously compiled to the literal placeholder string
+                    // `<value>`. Real rendering arrives with chelis#732's
+                    // generated formatter.
+                    other => {
                         return Err(Unsupported::new(
-                            UnsupportedKind::HostType(format!(
-                                "scalar_to_tensor<{}>",
-                                precision.name()
+                            UnsupportedKind::Construct(format!(
+                                "`to_string` of a `{other:?}`-typed value"
                             )),
-                            "`scalar_to_tensor` C host emission",
+                            "`chelis build` host emission",
                             Stage::Codegen("c"),
-                            "the resolved result dtype has no scalar-tensor constructor; \
-                             implement the exact target capability instead of selecting f32 \
-                             ([05-UNS-1]; chelis#714, chelis#729)",
+                            "the compiled lane stringifies int64/f32/f64/bool/string scalars \
+                         only today; tensor/list rendering is tracked by chelis#732 \
+                         (was the `<value>` placeholder, chelis#734)",
                         ));
                     }
                 },
-                other => {
-                    return Err(invalid_abi_shape(
-                        format!("scalar_to_tensor carries non-tensor result type `{other:?}`"),
-                        "scalar_to_tensor",
-                    ));
+                CExpressionBuiltin::ToInt => EmittedExpr::call("chelis_parse_int64", [arg(0)]),
+                CExpressionBuiltin::ToFloat => EmittedExpr::call("chelis_parse_f64", [arg(0)]),
+                CExpressionBuiltin::TensorToScalar => {
+                    EmittedExpr::call("chelis_tensor_to_f64", [arg(0)])
                 }
-            },
-            CExpressionBuiltin::Len => match arg_vars[0].1 {
-                HostType::Dict(_, _) => EmittedExpr::call("chelis_dict_len", [arg(0)]),
-                HostType::List(_) => EmittedExpr::call("chelis_list_len", [arg(0)]),
-                ref other => {
-                    return Err(invalid_abi_shape(
-                        format!("len carries non-container argument type `{other:?}`"),
-                        "len builtin",
-                    ));
+                // Issue #300: dispatch on the *result* tensor precision, not just
+                // the (coarse) argument host type. `scalar_to_tensor(cast(c,
+                // f32))` must materialize an f32-backed rank-0 tensor: the f64
+                // constructor stores 8 bytes, and an f32 consumer (e.g. a DAG
+                // `expand` helper lowered at the operand's f32 precision) then
+                // decodes the low 4 bytes -- 0.0 for an exactly-representable
+                // value like 2.5. `Float64` host-classifies both f32 and f64, so
+                // the argument type alone cannot distinguish them; the result
+                // `ty` carries the real precision.
+                CExpressionBuiltin::ScalarToTensor => match ty {
+                    HostType::Tensor(tensor_ty) => match tensor_ty.precision {
+                        Prim::Int64 => EmittedExpr::call("chelis_scalar_tensor_from_i64", [arg(0)]),
+                        Prim::F64 => EmittedExpr::call("chelis_scalar_tensor_from_f64", [arg(0)]),
+                        Prim::F32 => EmittedExpr::call("chelis_scalar_tensor_from_f32", [arg(0)]),
+                        precision => {
+                            return Err(Unsupported::new(
+                                UnsupportedKind::HostType(format!(
+                                    "scalar_to_tensor<{}>",
+                                    precision.name()
+                                )),
+                                "`scalar_to_tensor` C host emission",
+                                Stage::Codegen("c"),
+                                "the resolved result dtype has no scalar-tensor constructor; \
+                             implement the exact target capability instead of selecting f32 \
+                             ([05-UNS-1]; chelis#714, chelis#729)",
+                            ));
+                        }
+                    },
+                    other => {
+                        return Err(invalid_abi_shape(
+                            format!("scalar_to_tensor carries non-tensor result type `{other:?}`"),
+                            "scalar_to_tensor",
+                        ));
+                    }
+                },
+                CExpressionBuiltin::Len => match arg_vars[0].1 {
+                    HostType::Dict(_, _) => EmittedExpr::call("chelis_dict_len", [arg(0)]),
+                    HostType::List(_) => EmittedExpr::call("chelis_list_len", [arg(0)]),
+                    ref other => {
+                        return Err(invalid_abi_shape(
+                            format!("len carries non-container argument type `{other:?}`"),
+                            "len builtin",
+                        ));
+                    }
+                },
+                CExpressionBuiltin::Range => {
+                    EmittedExpr::call("chelis_range_i64", [arg(0), arg(1)])
                 }
-            },
-            CExpressionBuiltin::Range => EmittedExpr::call("chelis_range_i64", [arg(0), arg(1)]),
-            CExpressionBuiltin::Rank => EmittedExpr::call("chelis_tensor_rank", [arg(0)]),
-            CExpressionBuiltin::Shape => EmittedExpr::call("chelis_tensor_shape", [arg(0), arg(1)]),
-            CExpressionBuiltin::Numel => EmittedExpr::call("chelis_tensor_numel", [arg(0)]),
-            // Scalar math — these run on host `double` values in lowered
-            // closures (e.g. the per-element GELU / RMSNorm map bodies).
-            // The RISC DAG variants of these ops are handled separately in
-            // `emit.rs`, but when a Surf `def` body is routed through the
-            // host interpreter, we need the libm names directly.
-            CExpressionBuiltin::Sqrt => EmittedExpr::call("sqrt", [arg(0)]),
-            CExpressionBuiltin::Exp => EmittedExpr::call("exp", [arg(0)]),
-            CExpressionBuiltin::Log => EmittedExpr::call("log", [arg(0)]),
-            CExpressionBuiltin::Sin => EmittedExpr::call("sin", [arg(0)]),
-            CExpressionBuiltin::Cos => EmittedExpr::call("cos", [arg(0)]),
-            CExpressionBuiltin::Tanh => EmittedExpr::call("tanh", [arg(0)]),
-            CExpressionBuiltin::Pow => EmittedExpr::call("pow", [arg(0), arg(1)]),
-            CExpressionBuiltin::Abs => match arg_vars[0].1 {
-                HostType::Int32 | HostType::Int64 => EmittedExpr::call("llabs", [arg(0)]),
-                HostType::Float32 | HostType::Float64 => EmittedExpr::call("fabs", [arg(0)]),
-                ref other => {
-                    return Err(invalid_abi_shape(
-                        format!("abs carries non-numeric argument type `{other:?}`"),
-                        "abs builtin",
-                    ));
+                CExpressionBuiltin::Rank => EmittedExpr::call("chelis_tensor_rank", [arg(0)]),
+                CExpressionBuiltin::Shape => {
+                    EmittedExpr::call("chelis_tensor_shape", [arg(0), arg(1)])
                 }
-            },
-            CExpressionBuiltin::Min => EmittedExpr::call("fmin", [arg(0), arg(1)]),
-            CExpressionBuiltin::Max => EmittedExpr::call("fmax", [arg(0), arg(1)]),
+                CExpressionBuiltin::Numel => EmittedExpr::call("chelis_tensor_numel", [arg(0)]),
+                // Scalar math — these run on host `double` values in lowered
+                // closures (e.g. the per-element GELU / RMSNorm map bodies).
+                // The RISC DAG variants of these ops are handled separately in
+                // `emit.rs`, but when a Surf `def` body is routed through the
+                // host interpreter, we need the libm names directly.
+                CExpressionBuiltin::Sqrt => EmittedExpr::call("sqrt", [arg(0)]),
+                CExpressionBuiltin::Exp => EmittedExpr::call("exp", [arg(0)]),
+                CExpressionBuiltin::Log => EmittedExpr::call("log", [arg(0)]),
+                CExpressionBuiltin::Sin => EmittedExpr::call("sin", [arg(0)]),
+                CExpressionBuiltin::Cos => EmittedExpr::call("cos", [arg(0)]),
+                CExpressionBuiltin::Tanh => EmittedExpr::call("tanh", [arg(0)]),
+                CExpressionBuiltin::Pow => EmittedExpr::call("pow", [arg(0), arg(1)]),
+                CExpressionBuiltin::Abs => match arg_vars[0].1 {
+                    HostType::Int32 | HostType::Int64 => EmittedExpr::call("llabs", [arg(0)]),
+                    HostType::Float32 | HostType::Float64 => EmittedExpr::call("fabs", [arg(0)]),
+                    ref other => {
+                        return Err(invalid_abi_shape(
+                            format!("abs carries non-numeric argument type `{other:?}`"),
+                            "abs builtin",
+                        ));
+                    }
+                },
+                CExpressionBuiltin::Min => EmittedExpr::call("fmin", [arg(0), arg(1)]),
+                CExpressionBuiltin::Max => EmittedExpr::call("fmax", [arg(0), arg(1)]),
+            };
+            Ok(expr)
         };
+        let expr = build_expression()?;
         self.lines
             .push(format!("{}{target} = {};", self.indent, expr.as_c()));
         if matches!(ty, HostType::Unit) {

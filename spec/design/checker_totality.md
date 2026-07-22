@@ -403,8 +403,9 @@ phase is about the NEXT tag, not the current ones.
    Some("...")` chains at those three chokepoints retire. (Printers and
    producers may migrate opportunistically; they are not chokepoints -
    they cannot exempt or substitute.)
-3. `DeepTag` added to [#730]'s lint enum list (§I1); the §C1.2 loud arm
-   retained only at raw-string entry boundaries.
+3. The §C1.2 loud arm is retained only at raw-string entry boundaries.
+   `DeepTag` exhaustiveness is proved by its typed consumers and mutation
+   oracle; it does not depend on [#730]'s extracted source lint.
 
 **Frozen at your exit:** the variant set = the vocabulary, changing only
 per B1's one-change-set rule.

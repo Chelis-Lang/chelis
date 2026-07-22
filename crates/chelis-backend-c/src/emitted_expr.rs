@@ -119,7 +119,7 @@ enum CExpression {
 /// `Default` implementation.  An unsupported dispatch arm cannot construct a
 /// plausible expression payload ([05-UNS-1], chelis#730 C3/C4.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EmittedExpr(CExpression);
+pub(crate) struct EmittedExpr(CExpression);
 
 impl EmittedExpr {
     pub(crate) fn identifier(identifier: impl Into<String>) -> Self {

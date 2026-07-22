@@ -51,10 +51,12 @@ What landed vs. the plan below, with two deliberate divergences:
     an inlined rank-poly body resolves its `(d-rank)` slots to concrete dims.
   - the host lane (`crates/chelis-ir/src/host.rs`) gets the matching guards: a
     rank-poly sig is skipped from standalone emission (`type_expr_has_rank_var`),
-    a rank-poly tensor parses to `HostType::Unknown` rather than tripping the
-    tripwire, and a rank-poly callee is force-inlined at its call site
-    (`callee_is_polymorphic_rank`) so no undefined symbol is emitted — every
-    branch mirrors the precision-var path next to it.
+    a rank-poly tensor decodes to a named
+    `HostTypeTerm::PolymorphicTensor` shape rather than an anonymous sentinel,
+    and a rank-poly callee is force-inlined at its call site
+    (`callee_is_polymorphic_rank`) so resolution sees only the concrete
+    substitution and no undefined symbol is emitted — every branch mirrors
+    the precision-var path next to it.
 
   Because the IR `DimInfo` has no rank variant, no `Dim::Rank` can survive into
   a backend tensor type by construction: a successful lowering *is* a successful
