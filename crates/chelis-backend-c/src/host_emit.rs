@@ -2087,6 +2087,18 @@ impl<'a> HostEmitter<'a> {
             }
             "cast" => {
                 let expr = match (&arg_vars[0].1, ty) {
+                    (source, target) if is_integer_abi(source) && is_integer_abi(target) => {
+                        format!("({}){}", c_type(target), arg_vars[0].0)
+                    }
+                    (source, HostType::Float64) if is_integer_abi(source) => {
+                        format!("(double){}", arg_vars[0].0)
+                    }
+                    (source, HostType::Float32) if is_integer_abi(source) => {
+                        format!("(float){}", arg_vars[0].0)
+                    }
+                    (HostType::Float64 | HostType::Float32, target) if is_integer_abi(target) => {
+                        format!("({}){}", c_type(target), arg_vars[0].0)
+                    }
                     // WS-4: float entry params can now be `Float32`, so the
                     // int<->float casts must cover both float widths. The C
                     // numeric cast handles the narrowing/widening to the
@@ -2106,10 +2118,10 @@ impl<'a> HostEmitter<'a> {
                     (HostType::Float32, HostType::Float64) => {
                         format!("(double){0}", arg_vars[0].0)
                     }
-                    (HostType::Bool, HostType::Int64) => {
-                        format!("(int64_t){0}", arg_vars[0].0)
+                    (HostType::Bool, target) if is_integer_abi(target) => {
+                        format!("({}){}", c_type(target), arg_vars[0].0)
                     }
-                    (HostType::Int64, HostType::Bool) => {
+                    (source, HostType::Bool) if is_integer_abi(source) => {
                         format!("((bool){})", arg_vars[0].0)
                     }
                     _ => arg_vars[0].0.clone(),
@@ -2585,15 +2597,11 @@ impl<'a> HostEmitter<'a> {
                 // chelis#178: integer `div` is a type error; this arm is dead
                 // (the checker rejects it before host-emit) but kept as a
                 // defensive guard. Float `div` is IEEE-754 and never guarded.
-                CExpressionBuiltin::Div
-                    if matches!(arg_vars[0].1, HostType::Int32 | HostType::Int64) =>
-                {
-                    binary(
-                        BinaryOperator::Divide,
-                        arg(0),
-                        EmittedExpr::call("chelis_int_div_guard", [arg(1)]),
-                    )
-                }
+                CExpressionBuiltin::Div if is_integer_abi(&arg_vars[0].1) => binary(
+                    BinaryOperator::Divide,
+                    arg(0),
+                    EmittedExpr::call("chelis_int_div_guard", [arg(1)]),
+                ),
                 CExpressionBuiltin::Div => binary(BinaryOperator::Divide, arg(0), arg(1)),
                 // chelis#178: `trunc_div` is integer-only — the guarded C `/`
                 // quotient (round toward zero).
@@ -2605,9 +2613,7 @@ impl<'a> HostEmitter<'a> {
                 // chelis#178: `floor_div` rounds toward -inf. Integer (host
                 // scalar) operands use the guarded `/` plus a remainder-sign
                 // correction; float operands use `floor(a / b)`.
-                CExpressionBuiltin::FloorDiv
-                    if matches!(arg_vars[0].1, HostType::Int32 | HostType::Int64) =>
-                {
+                CExpressionBuiltin::FloorDiv if is_integer_abi(&arg_vars[0].1) => {
                     let guarded_divisor = || EmittedExpr::call("chelis_int_div_guard", [arg(1)]);
                     let quotient = binary(BinaryOperator::Divide, arg(0), guarded_divisor());
                     let remainder = || binary(BinaryOperator::Remainder, arg(0), guarded_divisor());
@@ -2685,7 +2691,7 @@ impl<'a> HostEmitter<'a> {
                 }
                 CExpressionBuiltin::StringLen => EmittedExpr::call("chelis_string_len", [arg(0)]),
                 CExpressionBuiltin::ToString => match &arg_vars[0].1 {
-                    HostType::Int32 | HostType::Int64 => {
+                    HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
                         EmittedExpr::call("chelis_string_from_int64", [arg(0)])
                     }
                     // f32 promotes to double for formatting (lossless); there is
@@ -2784,7 +2790,9 @@ impl<'a> HostEmitter<'a> {
                 CExpressionBuiltin::Tanh => EmittedExpr::call("tanh", [arg(0)]),
                 CExpressionBuiltin::Pow => EmittedExpr::call("pow", [arg(0), arg(1)]),
                 CExpressionBuiltin::Abs => match arg_vars[0].1 {
-                    HostType::Int32 | HostType::Int64 => EmittedExpr::call("llabs", [arg(0)]),
+                    HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
+                        EmittedExpr::call("llabs", [arg(0)])
+                    }
                     HostType::Float32 | HostType::Float64 => EmittedExpr::call("fabs", [arg(0)]),
                     ref other => {
                         return Err(invalid_abi_shape(
@@ -3185,6 +3193,14 @@ impl<'a> HostEmitter<'a> {
                 // so the bool arm casts to `(float*)` and writes
                 // the 1.0f / 0.0f bit pattern.
                 let (dtype, store) = match inferred_ty {
+                    HostType::Int8 => (
+                        "CHELIS_I8",
+                        format!("((int8_t*){tensor_name}->data)[0] = {value_name};"),
+                    ),
+                    HostType::Int16 => (
+                        "CHELIS_I16",
+                        format!("((int16_t*){tensor_name}->data)[0] = {value_name};"),
+                    ),
                     HostType::Int64 => (
                         "CHELIS_I64",
                         format!("((int64_t*){tensor_name}->data)[0] = {value_name};"),
@@ -4612,13 +4628,13 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{}{} {} = chelis_list_empty();",
             self.indent,
-            c_type(&pass_ty),
+            c_type(pass_ty),
             pass_var
         ));
         self.lines.push(format!(
             "{}{} {} = chelis_list_empty();",
             self.indent,
-            c_type(&fail_ty),
+            c_type(fail_ty),
             fail_var
         ));
         let list_var = self.next_temp("partition_list");
@@ -4768,7 +4784,9 @@ impl<'a> HostEmitter<'a> {
 
     fn box_value_expr(&self, value: &str, ty: &HostType) -> Result<String, Unsupported> {
         Ok(match ty {
-            HostType::Int32 | HostType::Int64 => format!("chelis_value_from_int64({value})"),
+            HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
+                format!("chelis_value_from_int64((int64_t){value})")
+            }
             // The boxed value option has no separate f32 slot; an f32
             // promotes losslessly to the f64 box (WS-4).
             HostType::Float64 | HostType::Float32 => format!("chelis_value_from_f64({value})"),
@@ -4792,8 +4810,8 @@ impl<'a> HostEmitter<'a> {
         value_expr: &str,
     ) -> Result<(), Unsupported> {
         let expr = match ty {
-            HostType::Int32 | HostType::Int64 => {
-                format!("chelis_value_as_int64({value_expr})")
+            HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
+                format!("({})chelis_value_as_int64({value_expr})", c_type(ty))
             }
             // f32 is unboxed via the f64 accessor (the box stored it as
             // f64); the surrounding `c_decl` narrows back to `float` (WS-4).
@@ -4825,10 +4843,12 @@ impl<'a> HostEmitter<'a> {
                 "{}printf(\"%s\\n\", chelis_string_data({}));",
                 self.indent, value
             )),
-            HostType::Int64 => self.lines.push(format!(
-                "{}printf(\"%lld\\n\", (long long){});",
-                self.indent, value
-            )),
+            HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
+                self.lines.push(format!(
+                    "{}printf(\"%lld\\n\", (long long){});",
+                    self.indent, value
+                ))
+            }
             HostType::Float64 | HostType::Float32 => self
                 .lines
                 .push(format!("{}printf(\"%.16g\\n\", {});", self.indent, value)),
@@ -4932,10 +4952,12 @@ impl<'a> HostEmitter<'a> {
                 "{}printf(\"%s\", chelis_string_data({}));",
                 self.indent, value
             )),
-            HostType::Int64 => self.lines.push(format!(
-                "{}printf(\"%lld\", (long long){});",
-                self.indent, value
-            )),
+            HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
+                self.lines.push(format!(
+                    "{}printf(\"%lld\", (long long){});",
+                    self.indent, value
+                ))
+            }
             HostType::Float64 | HostType::Float32 => self
                 .lines
                 .push(format!("{}printf(\"%.16g\", {});", self.indent, value)),
@@ -5130,6 +5152,13 @@ fn binding_release(var: &str, ty: &HostType) -> Option<String> {
 
 fn c_type(ty: &HostAbiType) -> &'static str {
     ty.c_type_name()
+}
+
+fn is_integer_abi(ty: &HostAbiType) -> bool {
+    matches!(
+        ty,
+        HostAbiType::Int8 | HostAbiType::Int16 | HostAbiType::Int32 | HostAbiType::Int64
+    )
 }
 
 /// The C / C++ reserved words a Chelis identifier must not collide with

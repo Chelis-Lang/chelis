@@ -9,7 +9,7 @@
 //!
 //! ```compile_fail
 //! use chelis_backend_c::emitted_expr::EmittedExpr;
-//! let _: EmittedExpr = "/* unsupported builtin */ 0".to_string().into();
+//! let _: EmittedExpr = "arbitrary raw C text".to_string().into();
 //! ```
 
 use std::fmt;
@@ -229,7 +229,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "not lexical C")]
     fn arbitrary_c_text_cannot_launder_through_identifier_node() {
-        let _ = EmittedExpr::identifier("/* unsupported */ 0");
+        let raw = ["/* unsupported */ ", "0"].concat();
+        let _ = EmittedExpr::identifier(raw);
     }
 
     #[test]

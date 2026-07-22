@@ -23,6 +23,8 @@ use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 /// ABI value.  Construction is exclusively through [`Self::try_from_concrete`].
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum HostAbiType {
+    Int8,
+    Int16,
     Int32,
     Int64,
     Float32,
@@ -58,19 +60,21 @@ impl HostAbiType {
     /// changing this fallible boundary.
     pub(crate) fn try_from_concrete(ty: &ConcreteHostType) -> Result<Self, Unsupported> {
         Ok(match ty {
+            ConcreteHostType::Scalar(Prim::Int8) => Self::Int8,
+            ConcreteHostType::Scalar(Prim::Int16) => Self::Int16,
             ConcreteHostType::Scalar(Prim::Int32) => Self::Int32,
             ConcreteHostType::Scalar(Prim::Int64) => Self::Int64,
             ConcreteHostType::Scalar(Prim::F32) => Self::Float32,
             ConcreteHostType::Scalar(Prim::F64) => Self::Float64,
             ConcreteHostType::Scalar(Prim::Bool) => Self::Bool,
             ConcreteHostType::Scalar(Prim::String) => Self::String,
-            // These are known logical scalar types, but the C host lane does
-            // not yet implement scalar storage/boxing for them.  This is an
-            // implementation gap, not a semantic rejection (chelis#714;
-            // [05-UNS-1]).  Keep the exact dtype in the diagnostic.
-            ConcreteHostType::Scalar(
-                precision @ (Prim::F16 | Prim::Bf16 | Prim::Int8 | Prim::Int16),
-            ) => return Err(unimplemented_scalar(*precision)),
+            // No exact C host-scalar storage/rounding contract exists for
+            // reduced floats before chelis#729 Table A/B.  Reject them as
+            // known logical dtypes; never recreate the former widened-double
+            // path that happened to be green for exactly-representable values.
+            ConcreteHostType::Scalar(precision @ (Prim::F16 | Prim::Bf16)) => {
+                return Err(unimplemented_scalar(*precision));
+            }
             // f8e4m3 is deferred and inadmissible in the active language per
             // spec/04-type-system.md section 1.1.1.  It still has a `Prim`
             // identity so this boundary can reject it precisely.
@@ -123,6 +127,8 @@ impl HostAbiType {
 
     pub(crate) fn c_type_name(&self) -> &'static str {
         match self {
+            Self::Int8 => "int8_t",
+            Self::Int16 => "int16_t",
             Self::Int32 => "int32_t",
             Self::Int64 => "int64_t",
             Self::Float32 => "float",
@@ -142,7 +148,9 @@ impl HostAbiType {
             Self::Option(inner) => match inner.as_ref() {
                 Self::Int64 => "chelis_option_i64",
                 Self::Float64 => "chelis_option_f64",
-                Self::Int32
+                Self::Int8
+                | Self::Int16
+                | Self::Int32
                 | Self::Float32
                 | Self::Bool
                 | Self::String

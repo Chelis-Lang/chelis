@@ -339,9 +339,11 @@ be represented.
    any variable or `Never` remains. Target ABI selection consumes only
    `ConcreteHostType` plus the target capability decision and returns
    `Result<HostAbiType, Unsupported>`; backend emitters consume only
-   `HostAbiType`. Thus `f16`, `bf16`, `int8`, and `int16`
-   remain known logical types even while the C-host capability cell rejects
-   their representation. There is no `Unknown` variant, no `Default`, and no
+   `HostAbiType`. `int8` and `int16` select their exact existing
+   `int8_t`/`int16_t` C representations; `f16` and `bf16` remain known
+   logical types while the C-host capability cell rejects their scalar
+   representation pending [#729]'s grounded storage and rounding. There is
+   no `Unknown` variant, no `Default`, and no
    conversion from a decode/resolution failure to a concrete or ABI type.
    Before Table B is generated, the target selector is a private exhaustive
    adapter whose rejection arms cite a spec atom or implementation issue.
@@ -539,8 +541,9 @@ only resolved types reach codegen.
 Positive/negative parity covers: every concrete primitive; each named variable
 kind; missing versus malformed syntax; empty-list inference; `Never`
 value-boundary rejection; supported ABI representations; and known logical
-f16/bf16/int8/int16 values rejected by an unimplemented C-host ABI cell. The
-negative ABI tests assert the structured `UnsupportedKind::Dtype` and
+f16/bf16 values rejected by an unimplemented C-host ABI cell. Exact int8/int16
+ABI selection is positive parity because those representations already exist.
+The negative ABI tests assert the structured `UnsupportedKind::Dtype` and
 `Stage::Codegen("c")`, not diagnostic prose alone.
 
 ---
@@ -785,6 +788,13 @@ boundary, pinned:
 - **Identity is not semantics.** `RuntimeDType` supplies stable ABI identity,
   spelling, and width. [#729] supplies finalization, storage, operation
   semantics, and kernel behavior. Neither layer may duplicate the other.
+- **Existing exact integer ABIs are not reclassified as unsupported.** C
+  already has `int8_t` and `int16_t`, and the checked in-range controls use
+  them without type erasure. Phase 2 therefore selects those exact
+  `HostAbiType` variants. [#729] still owns overflow traps and per-operation
+  semantics. Reduced-float scalars are different: no exact host storage and
+  rounding path exists yet, so their former widened-double green cases are
+  rejected rather than preserved as proof artifacts.
 - **Resolution is not capability policy.** `HostTypeTerm -> ConcreteHostType`
   preserves checked logical identity without consulting a backend.
   `ConcreteHostType -> HostAbiType` consumes the target decision. The private
