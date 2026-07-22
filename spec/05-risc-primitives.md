@@ -921,6 +921,30 @@ whole-program build rejection of a `tensor_scan` call in an
 entry-unreachable helper — alongside the positive 8/20000/40000-element
 cases.
 
+### 3.6.1 The `test_*` assertion family (host-only)
+
+The `Test`-effect assertion builtins — `test_assert`, `test_assert_eq_f32`,
+`test_assert_eq_int`, `test_assert_eq_bool`, `test_assert_eq_string`,
+`test_assert_close_tensor`, and `test_assert_eq_tensor_int64` — are
+**host-only**, the same class as `tensor_scan`. They run inside the
+`chelis test` / `chelis eval` interpreter, where an assertion evaluates its
+condition and aborts the run with a branded label on failure. They have **no
+compiled-lane emission arm**: a `chelis build --target c` (or `hip`) of a
+program that calls a `test_*` builtin on a reachable path is rejected at
+compile time with a branded `unsupported` diagnostic (chelis#703 class),
+never a silently-inert assertion. Before the loud-unsupported sweep the C
+host emitter compiled them to a `/* unsupported builtin test_assert */ 0`
+stub, so a compiled test asserted nothing; that silent stub is gone.
+
+Consequently the `Test`-effect wrappers in `Std.Test` (`assert_true`,
+`assert_eq`, `assert_close`, `assert_shape`, `fail`, … — each a thin
+`test_assert*` call) are eval/check-only: `chelis check` and `chelis test`
+accept them, `chelis build` rejects them. A compiled binary that can fail
+its own assertions (real C assertion helpers, or promoting `test_*` into the
+pre-codegen host-only gate that today rejects `tensor_scan`) is the
+compiled-lane arm tracked by chelis#796; until it lands, assertions are an
+eval-lane contract.
+
 ---
 
 ## 4. Standard Lowerings (Tier 2 → Tier 1)

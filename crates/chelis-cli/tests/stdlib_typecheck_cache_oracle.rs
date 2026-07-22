@@ -82,6 +82,56 @@ fn stdlib_corpus(scratch: &Path) -> Vec<PathBuf> {
     paths
 }
 
+/// The `build`-oracle corpus: [`stdlib_corpus`] minus the Std.Test module
+/// (`src/test.ch`). That module defines the `Test`-effect assertion wrappers
+/// (`def assert_* ... = test_assert*`), and the `test_*` builtins are
+/// host-only: they have no compiled-lane emission arm, so `chelis build`
+/// loudly rejects them (chelis#796; spec/05-risc-primitives.md §3.6). Checking
+/// the module is valid, so it stays in [`stdlib_corpus`] for the check
+/// oracles; only the `build` oracles use this filtered list.
+fn stdlib_build_corpus(scratch: &Path) -> Vec<PathBuf> {
+    stdlib_corpus(scratch)
+        .into_iter()
+        .filter(|p| !p.ends_with("test.ch"))
+        .collect()
+}
+
+/// Locks the contract that justifies excluding `src/test.ch` from
+/// [`stdlib_build_corpus`]: `chelis build` of the Std.Test module must fail
+/// loudly because the `test_*` builtins it wraps are host-only (chelis#796;
+/// spec/05-risc-primitives.md §3.6). Before the loud-unsupported sweep the C
+/// host emitter compiled them to a silently-inert `0` stub, so a compiled
+/// test asserted nothing; dropping `test.ch` from the build oracles above
+/// would otherwise leave no build-lane coverage that the stub cannot return.
+#[test]
+fn std_test_module_build_is_host_only_rejected() {
+    let (_guard, cache_home) = fresh_cache_home();
+    let test_ch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packages/chelis-std/src/test.ch")
+        .canonicalize()
+        .expect("std test.ch must exist");
+    let out_dir = tempdir().expect("out dir");
+    let output = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", &cache_home)
+        .arg("build")
+        .arg(&test_ch)
+        .arg("-o")
+        .arg(out_dir.path())
+        .output()
+        .expect("run chelis build");
+    assert!(
+        !output.status.success(),
+        "`chelis build` of the Std.Test module must be rejected (host-only `test_*`)"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("test_assert") && stderr.contains("unsupported"),
+        "expected a host-only `test_*` build rejection; got stderr:\n{stderr}"
+    );
+}
+
 /// Copy the pseudo_nautilus fixture into `scratch` and return the path
 /// to the staged `src/special.ch`. Staging is required because `chelis
 /// check`/`build` writes `reef.lock` next to the resolved `reef.toml`;
@@ -158,7 +208,7 @@ fn cold_vs_warm_check_byte_identical() {
 #[test]
 fn cold_vs_warm_build_byte_identical() {
     let (_guard, cache_home) = fresh_cache_home();
-    for file in stdlib_corpus(_guard.path()) {
+    for file in stdlib_build_corpus(_guard.path()) {
         // One shared out dir: `chelis build` echoes the resolved `-o`
         // path in its stdout, so cold and warm must build into the SAME
         // directory for the comparison to isolate the cache effect from
@@ -215,7 +265,7 @@ fn monolithic_vs_incontext_check_byte_identical() {
 #[test]
 fn monolithic_vs_incontext_build_byte_identical() {
     let (_guard, cache_home) = fresh_cache_home();
-    for file in stdlib_corpus(_guard.path()) {
+    for file in stdlib_build_corpus(_guard.path()) {
         // One shared out dir for the same reason as
         // `cold_vs_warm_build_byte_identical`: `chelis build` echoes the
         // resolved `-o` path, so the monolithic and in-context runs must
