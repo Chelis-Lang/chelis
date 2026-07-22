@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::Type;
 use crate::unify::{TypeError, TypeErrorKind};
+#[doc(hidden)]
+pub use crate::session::DiagnosticSink;
 
 /// Zero-sized witness that a `Type::Error` was minted HONESTLY: either a
 /// diagnostic reached the error vector (via [`report`]) or an existing
@@ -47,7 +49,7 @@ use crate::unify::{TypeError, TypeErrorKind};
 pub struct ErrorWitness(());
 
 /// The ONLY honest way to turn a *fresh* problem into `Type::Error`: push the
-/// diagnostic onto the error vector and mint the witness in the same
+/// diagnostic onto the authoritative checker-session sink and mint the witness in the same
 /// expression, so the two can never be separated by a later refactor, a
 /// review miss, or a new contributor (spec/design/checker_totality.md §C3).
 /// Returns the `Type::Error` carrying the freshly-minted witness.
@@ -55,7 +57,53 @@ pub struct ErrorWitness(());
 /// This replaces the historical `errors.push(e); return Type::Error;` idiom:
 /// `return report(errors, e);` is exactly that, with the push and the mint
 /// welded into one expression.
-pub fn report(errors: &mut Vec<CheckError>, error: CheckError) -> Type {
+///
+/// An arbitrary vector cannot be substituted for the session capability;
+/// this is the retained hidden-diagnostic mutation oracle:
+///
+/// ```compile_fail
+/// use chelis_types::errors::{CheckError, CheckErrorKind, report};
+/// let mut hidden_errors = Vec::new();
+/// let _ = report(
+///     &mut hidden_errors,
+///     CheckError::new(CheckErrorKind::Other, "hidden".to_string(), vec![]),
+/// );
+/// ```
+///
+/// The capability cannot be directly constructed:
+///
+/// ```compile_fail
+/// use chelis_types::errors::{CheckError, DiagnosticSink};
+/// let mut errors: Vec<CheckError> = Vec::new();
+/// let _ = DiagnosticSink { errors: &mut errors };
+/// ```
+///
+/// Nor can code manufacture or duplicate one through standard conversion
+/// and ownership traits:
+///
+/// ```compile_fail
+/// use chelis_types::errors::DiagnosticSink;
+/// let _ = DiagnosticSink::default();
+/// ```
+///
+/// ```compile_fail
+/// use chelis_types::errors::DiagnosticSink;
+/// fn require_clone<T: Clone>() {}
+/// require_clone::<DiagnosticSink<'static>>();
+/// ```
+///
+/// ```compile_fail
+/// use chelis_types::errors::{CheckError, DiagnosticSink};
+/// let _ = DiagnosticSink::from(Vec::<CheckError>::new());
+/// ```
+///
+/// ```compile_fail
+/// use std::ops::DerefMut;
+/// use chelis_types::errors::{CheckError, DiagnosticSink};
+/// fn require_vec_deref_mut<T: DerefMut<Target = Vec<CheckError>>>() {}
+/// require_vec_deref_mut::<DiagnosticSink<'static>>();
+/// ```
+pub fn report(errors: &mut DiagnosticSink<'_>, error: CheckError) -> Type {
     Type::Error(report_witness(errors, error))
 }
 
@@ -63,7 +111,10 @@ pub fn report(errors: &mut Vec<CheckError>, error: CheckError) -> Type {
 /// cannot manufacture a usable [`Type`] after malformed input, so it returns
 /// this witness through `Result` and requires its caller to propagate the
 /// failure explicitly. The constructor remains private to this module.
-pub(crate) fn report_witness(errors: &mut Vec<CheckError>, error: CheckError) -> ErrorWitness {
+pub(crate) fn report_witness(
+    errors: &mut DiagnosticSink<'_>,
+    error: CheckError,
+) -> ErrorWitness {
     errors.push(error);
     ErrorWitness(())
 }

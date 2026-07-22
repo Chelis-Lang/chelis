@@ -1,0 +1,194 @@
+//! Authoritative checker diagnostic-session boundary.
+//!
+//! `DiagnosticSink` deliberately exposes no constructor, owned storage,
+//! conversion, clone, default, or mutable dereference outside this module.
+//! Lower checker layers can only receive an already-open sink, so a fresh
+//! [`crate::errors::ErrorWitness`] can never be minted into a throwaway
+//! `Vec<CheckError>`.
+
+use crate::errors::CheckError;
+use crate::context::TypeEnv;
+use crate::infer::{
+    CheckedProgram, InferResult, InferStats, SignatureInferenceMetadata,
+};
+
+/// The sole destination accepted by witness-minting checker code.
+///
+/// Its storage and constructor are private to this module.  The narrow
+/// mutation surface is enough for ordinary diagnostics while deliberately
+/// preventing early extraction or replacement of the canonical vector.
+pub struct DiagnosticSink<'session> {
+    errors: &'session mut Vec<CheckError>,
+}
+
+impl DiagnosticSink<'_> {
+    pub(crate) fn push(&mut self, error: CheckError) {
+        self.errors.push(error);
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.errors.is_empty()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.errors.len()
+    }
+
+    pub(crate) fn iter(&self) -> std::slice::Iter<'_, CheckError> {
+        self.errors.iter()
+    }
+
+    pub(crate) fn iter_from(&self, start: usize) -> std::slice::Iter<'_, CheckError> {
+        self.errors[start..].iter()
+    }
+
+    pub(crate) fn retain(&mut self, keep: impl FnMut(&CheckError) -> bool) {
+        self.errors.retain(keep);
+    }
+}
+
+pub(crate) fn infer_program(exprs: &[chelis_deep::Expr]) -> InferResult {
+    crate::infer::run_on_grown_stack(|| {
+        let mut errors = Vec::new();
+        let stats = {
+            let mut sink = DiagnosticSink {
+                errors: &mut errors,
+            };
+            crate::infer::infer_program_in_session(exprs, &mut sink)
+        };
+        InferResult {
+            errors,
+            typed_nodes: stats.typed_nodes,
+            total_nodes: stats.total_nodes,
+        }
+    })
+}
+
+fn run_result<T>(
+    run: impl FnOnce(&mut DiagnosticSink<'_>) -> Result<T, InferStats>,
+) -> Result<T, InferResult> {
+    let mut errors = Vec::new();
+    let result = {
+        let mut sink = DiagnosticSink {
+            errors: &mut errors,
+        };
+        run(&mut sink)
+    };
+    result.map_err(|stats| InferResult {
+        errors,
+        typed_nodes: stats.typed_nodes,
+        total_nodes: stats.total_nodes,
+    })
+}
+
+pub(crate) fn build_type_env_from_library(
+    exprs: &[chelis_deep::Expr],
+) -> Result<TypeEnv, InferResult> {
+    crate::infer::run_on_grown_stack(|| {
+        run_result(|sink| crate::infer::build_type_env_from_library_in_session(exprs, sink))
+    })
+}
+
+pub(crate) fn build_compiled_library_context(
+    exprs: &[chelis_deep::Expr],
+) -> Result<(TypeEnv, CheckedProgram), InferResult> {
+    run_result(|sink| crate::infer::build_compiled_library_context_in_session(exprs, sink))
+}
+
+pub(crate) fn build_compiled_library_context_with_base(
+    base: &TypeEnv,
+    exprs: &[chelis_deep::Expr],
+) -> Result<(TypeEnv, CheckedProgram), InferResult> {
+    run_result(|sink| {
+        crate::infer::build_compiled_library_context_with_base_in_session(base, exprs, sink)
+    })
+}
+
+pub(crate) fn check_ir_with_signature_context(
+    context: &TypeEnv,
+    signature_context: &SignatureInferenceMetadata,
+    exprs: &[chelis_deep::Expr],
+) -> Result<CheckedProgram, InferResult> {
+    crate::infer::run_on_grown_stack(|| {
+        run_result(|sink| {
+            crate::infer::check_ir_with_signature_context_in_session(
+                context,
+                signature_context,
+                exprs,
+                sink,
+            )
+        })
+    })
+}
+
+pub(crate) fn check_typed_program(
+    exprs: &[chelis_deep::Expr],
+) -> Result<CheckedProgram, InferResult> {
+    crate::infer::run_on_grown_stack(|| {
+        run_result(|sink| crate::infer::check_typed_program_in_session(exprs, sink))
+    })
+}
+
+pub(crate) fn infer_ir_program(exprs: &[chelis_deep::Expr]) -> InferResult {
+    crate::infer::run_on_grown_stack(|| {
+        let mut errors = Vec::new();
+        let stats = {
+            let mut sink = DiagnosticSink {
+                errors: &mut errors,
+            };
+            crate::infer::infer_ir_program_in_session(exprs, &mut sink)
+        };
+        InferResult {
+            errors,
+            typed_nodes: stats.typed_nodes,
+            total_nodes: stats.total_nodes,
+        }
+    })
+}
+
+pub(crate) fn checked_program_from_parts(
+    annotated_exprs: Vec<chelis_deep::Expr>,
+    type_env: std::collections::HashMap<String, chelis_deep::Expr>,
+) -> CheckedProgram {
+    let mut errors = Vec::new();
+    let mut sink = DiagnosticSink {
+        errors: &mut errors,
+    };
+    crate::infer::checked_program_from_parts_in_session(annotated_exprs, type_env, &mut sink)
+}
+
+pub(crate) fn checked_program_from_parts_with_signature_context(
+    annotated_exprs: Vec<chelis_deep::Expr>,
+    type_env: std::collections::HashMap<String, chelis_deep::Expr>,
+    signature_context: &SignatureInferenceMetadata,
+) -> CheckedProgram {
+    let mut errors = Vec::new();
+    let mut sink = DiagnosticSink {
+        errors: &mut errors,
+    };
+    crate::infer::checked_program_from_parts_with_signature_context_in_session(
+        annotated_exprs,
+        type_env,
+        signature_context,
+        &mut sink,
+    )
+}
+
+pub(crate) fn param_has_consuming_use(
+    expr: &chelis_deep::Expr,
+    param: &str,
+    available_signatures: &std::collections::HashMap<String, crate::types::Type>,
+    type_env: &std::collections::HashMap<String, chelis_deep::Expr>,
+) -> bool {
+    let mut errors = Vec::new();
+    let mut sink = DiagnosticSink {
+        errors: &mut errors,
+    };
+    crate::infer::param_has_consuming_use_in_session(
+        expr,
+        param,
+        available_signatures,
+        type_env,
+        &mut sink,
+    )
+}

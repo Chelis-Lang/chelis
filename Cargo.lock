@@ -815,6 +815,7 @@ dependencies = [
 name = "chelis-types"
 version = "0.17.1"
 dependencies = [
+ "bincode",
  "chelis-deep",
  "chelis-macros",
  "chelis-pred",

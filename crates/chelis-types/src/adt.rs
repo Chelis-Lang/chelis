@@ -8,7 +8,8 @@ use chelis_deep::ast as deep;
 use serde::{Deserialize, Serialize};
 
 use crate::deep_type::{BinderMode, DeepTypeResolver, TypeResolutionEnv, TypeUseSite};
-use crate::errors::{CheckError, ErrorWitness};
+use crate::errors::ErrorWitness;
+use crate::session::DiagnosticSink;
 use crate::types::*;
 
 /// Information about a single variant of an ADT.
@@ -113,7 +114,7 @@ impl AdtRegistry {
         children: &[deep::Expr],
         vg: &mut VarGen,
         headers: &TypeResolutionEnv,
-        errors: &mut Vec<CheckError>,
+        errors: &mut DiagnosticSink<'_>,
         opaque: bool,
         defining_module: Option<String>,
     ) -> Result<Vec<(String, Scheme)>, ErrorWitness> {

@@ -14,8 +14,9 @@
 //! The opaque map itself lives on [`crate::adt::AdtDef`]
 //! (`opaque` + `defining_module`), which persists through the
 //! compiled-context caches; this context carries only the per-run
-//! program-shape data. Install-guard pattern, precedent:
-//! `DECLARED_SIG_PARAM_TYPES` in `infer.rs`.
+//! program-shape data. Unlike declaration-local type binders and signatures,
+//! opacity is intentionally a whole-check contextual policy; binder/type
+//! resolution state remains explicit on `Env` and annotation contexts.
 //!
 //! When no context is installed (e.g. annotation passes that re-run
 //! `infer_top_level` for stamping), every hook is a no-op, so the
@@ -28,6 +29,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::adt::AdtRegistry;
 use crate::errors::{CheckError, CheckErrorKind};
+use crate::session::DiagnosticSink;
 use crate::types::Type;
 
 /// Program-shape opacity metadata. Accumulated per check phase and
@@ -224,7 +226,7 @@ pub(crate) fn check_opaque_use(
     action: OpaqueAction,
     adt_name: &str,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> bool {
     let Some(def) = adt_reg.lookup(adt_name) else {
         return false;
@@ -261,7 +263,7 @@ pub(crate) fn check_opaque_use(
 pub(crate) fn check_ctor_reference(
     name: &str,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> bool {
     let suppressed = with_context(|ctx| ctx.suppress_ctor_reference).unwrap_or(false);
     if suppressed {
@@ -321,7 +323,7 @@ pub(crate) fn check_unexported_reference(
     name: &str,
     ty: &Type,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> bool {
     let error = with_context(|ctx| {
         // RT-1 F1: canonicalize the reference to its binding key

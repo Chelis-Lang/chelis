@@ -12,6 +12,7 @@ use chelis_deep::ast as deep;
 
 use crate::adt::AdtRegistry;
 use crate::errors::{CheckError, CheckErrorKind, ErrorWitness, report_witness};
+use crate::session::DiagnosticSink;
 use crate::types::{Dim, DimVar, Prim, RankVar, TensorPrec, Type, TypeVar, VarGen};
 
 /// A type that crossed the Deep syntax boundary without a silent fallback.
@@ -59,6 +60,54 @@ impl TypeUseSite {
             Self::CompilerMetadata => "compiler-generated type metadata",
         }
     }
+}
+
+/// Source location owned by one type-resolution root. Explicit producer span
+/// metadata wins; otherwise the structural AST range is retained and exposed
+/// through a stable `source:<start>..<end>` identifier as well as the byte
+/// offset. The value is copied out of the AST so resolver reuse is safe.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TypeDiagnosticLocation {
+    span_offset: Option<usize>,
+    span_id: Option<String>,
+}
+
+impl TypeDiagnosticLocation {
+    fn from_expr(expr: &deep::Expr) -> Option<Self> {
+        let structural = expr.span();
+        let explicit_id = expr.span_id().map(str::to_string);
+        let span_offset = explicit_id
+            .as_deref()
+            .and_then(span_offset_from_id)
+            .or_else(|| (structural.len > 0).then_some(structural.offset));
+        let span_id = explicit_id.or_else(|| {
+            (structural.len > 0)
+                .then(|| format!("source:{}..{}", structural.offset, structural.end()))
+        });
+        (span_offset.is_some() || span_id.is_some()).then_some(Self {
+            span_offset,
+            span_id,
+        })
+    }
+
+    pub(crate) fn attach(&self, mut error: CheckError) -> CheckError {
+        if error.span_offset.is_none() {
+            error.span_offset = self.span_offset;
+        }
+        if error.span_id.is_none() {
+            error.span_id.clone_from(&self.span_id);
+        }
+        error
+    }
+}
+
+fn span_offset_from_id(span_id: &str) -> Option<usize> {
+    span_id
+        .rfind(':')
+        .map(|index| &span_id[index + 1..])
+        .unwrap_or(span_id)
+        .split_once("..")
+        .and_then(|(start, _)| start.parse::<usize>().ok())
 }
 
 /// Which names a Deep type expression may bind.
@@ -121,24 +170,27 @@ impl TypeResolutionEnv {
 
 /// Stateful resolver for one binder scope. Sharing an instance across field
 /// types or signature components preserves repeated variable identity.
-pub(crate) struct DeepTypeResolver<'a> {
+pub(crate) struct DeepTypeResolver<'resolver, 'session, 'binders> {
     use_site: TypeUseSite,
-    binder_mode: BinderMode<'a>,
-    headers: &'a TypeResolutionEnv,
-    vg: &'a mut VarGen,
-    errors: &'a mut Vec<CheckError>,
+    binder_mode: BinderMode<'binders>,
+    headers: &'resolver TypeResolutionEnv,
+    vg: &'resolver mut VarGen,
+    errors: &'resolver mut DiagnosticSink<'session>,
     type_vars: HashMap<String, TypeVar>,
     dim_vars: HashMap<String, DimVar>,
     rank_vars: HashMap<String, RankVar>,
+    owner_location: Option<TypeDiagnosticLocation>,
+    resolution_location: Option<TypeDiagnosticLocation>,
+    current_location: Option<TypeDiagnosticLocation>,
 }
 
-impl<'a> DeepTypeResolver<'a> {
+impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binders> {
     pub(crate) fn new(
         use_site: TypeUseSite,
-        binder_mode: BinderMode<'a>,
-        headers: &'a TypeResolutionEnv,
-        vg: &'a mut VarGen,
-        errors: &'a mut Vec<CheckError>,
+        binder_mode: BinderMode<'binders>,
+        headers: &'resolver TypeResolutionEnv,
+        vg: &'resolver mut VarGen,
+        errors: &'resolver mut DiagnosticSink<'session>,
     ) -> Self {
         let mut resolver = Self {
             use_site,
@@ -149,6 +201,9 @@ impl<'a> DeepTypeResolver<'a> {
             type_vars: HashMap::new(),
             dim_vars: HashMap::new(),
             rank_vars: HashMap::new(),
+            owner_location: None,
+            resolution_location: None,
+            current_location: None,
         };
         if let BinderMode::Explicit(names) = binder_mode {
             // Nominal parameters are type arguments even when their occurrence
@@ -162,7 +217,16 @@ impl<'a> DeepTypeResolver<'a> {
         resolver
     }
 
+    /// Provide the source construct that owns this resolver use site. The
+    /// resolved type expression remains the preferred location; this owner is
+    /// the fallback for synthesized children such as a Surf cast target.
+    pub(crate) fn with_diagnostic_owner(mut self, owner: &deep::Expr) -> Self {
+        self.owner_location = TypeDiagnosticLocation::from_expr(owner);
+        self
+    }
+
     pub(crate) fn resolve(&mut self, expr: &deep::Expr) -> Result<ResolvedDeepType, ErrorWitness> {
+        self.begin_resolution(expr);
         self.resolve_type(expr).map(ResolvedDeepType)
     }
 
@@ -173,6 +237,7 @@ impl<'a> DeepTypeResolver<'a> {
         &mut self,
         expr: &deep::Expr,
     ) -> Result<ResolvedCastTarget, ErrorWitness> {
+        self.begin_resolution(expr);
         if let Some(name) = symbol_name(expr) {
             return Ok(ResolvedCastTarget::PrimitiveSpelling {
                 name: name.to_string(),
@@ -214,7 +279,27 @@ impl<'a> DeepTypeResolver<'a> {
         vars
     }
 
+    pub(crate) fn diagnostic_location(&self) -> Option<TypeDiagnosticLocation> {
+        self.current_location
+            .clone()
+            .or_else(|| self.resolution_location.clone())
+            .or_else(|| self.owner_location.clone())
+    }
+
+    fn begin_resolution(&mut self, expr: &deep::Expr) {
+        self.resolution_location =
+            TypeDiagnosticLocation::from_expr(expr).or_else(|| self.owner_location.clone());
+        self.current_location = self.resolution_location.clone();
+    }
+
+    fn enter_expr(&mut self, expr: &deep::Expr) {
+        self.current_location = TypeDiagnosticLocation::from_expr(expr)
+            .or_else(|| self.resolution_location.clone())
+            .or_else(|| self.owner_location.clone());
+    }
+
     fn resolve_type(&mut self, expr: &deep::Expr) -> Result<Type, ErrorWitness> {
+        self.enter_expr(expr);
         let deep::Expr::List(list, _) = expr else {
             return Err(self.malformed(format!(
                 "{} must use a canonical Deep type form; bare `{}` is not a type",
@@ -323,6 +408,7 @@ impl<'a> DeepTypeResolver<'a> {
     }
 
     fn resolve_dim(&mut self, expr: &deep::Expr) -> Result<Dim, ErrorWitness> {
+        self.enter_expr(expr);
         let deep::Expr::List(list, _) = expr else {
             return Err(self.malformed(format!(
                 "tensor dimension in {} must use a canonical Deep dimension form, got `{}`",
@@ -483,16 +569,24 @@ impl<'a> DeepTypeResolver<'a> {
     }
 
     fn malformed(&mut self, message: String) -> ErrorWitness {
+        let error = CheckError::new(CheckErrorKind::MalformedForm, message, vec![]);
+        let error = self
+            .diagnostic_location()
+            .map_or(error.clone(), |location| location.attach(error));
         report_witness(
             self.errors,
-            CheckError::new(CheckErrorKind::MalformedForm, message, vec![]),
+            error,
         )
     }
 
     fn type_error(&mut self, message: String) -> ErrorWitness {
+        let error = CheckError::new(CheckErrorKind::TypeMismatch, message, vec![]);
+        let error = self
+            .diagnostic_location()
+            .map_or(error.clone(), |location| location.attach(error));
         report_witness(
             self.errors,
-            CheckError::new(CheckErrorKind::TypeMismatch, message, vec![]),
+            error,
         )
     }
 }

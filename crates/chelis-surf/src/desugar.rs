@@ -168,6 +168,31 @@ fn node_meta(tag: &str, meta: deep::Expr, children: Vec<deep::Expr>) -> deep::Ex
     deep::Expr::List(deep::List { elements }, sp())
 }
 
+/// Preserve a Surf type expression's byte range in the structural Deep span
+/// without changing canonical Deep metadata or printer output. Type-resolution
+/// diagnostics use this when no external `span` metadata is present.
+fn with_structural_span(expr: deep::Expr, span: Span) -> deep::Expr {
+    match expr {
+        deep::Expr::Atom(atom, _) => deep::Expr::Atom(atom, span),
+        deep::Expr::List(list, _) => deep::Expr::List(list, span),
+        deep::Expr::Map(map, _) => deep::Expr::Map(map, span),
+        deep::Expr::MetaExpr(meta, _) => deep::Expr::MetaExpr(meta, span),
+    }
+}
+
+fn type_expr_span(ty: &TypeExpr) -> Span {
+    match ty {
+        TypeExpr::Named(_, span)
+        | TypeExpr::Tensor(_, _, span)
+        | TypeExpr::Arrow(_, _, span)
+        | TypeExpr::Ref(_, span)
+        | TypeExpr::App(_, _, span)
+        | TypeExpr::Tuple(_, span)
+        | TypeExpr::Infer(span)
+        | TypeExpr::RankSpread(_, span) => *span,
+    }
+}
+
 /// Variable reference: (var {} name)
 fn dvar(name: &str) -> deep::Expr {
     node("var", vec![sym(name)])
@@ -2022,7 +2047,7 @@ fn desugar_type_with_scope_mode(
     tvar_set: &HashSet<String>,
     implicit_single_letter_dims: bool,
 ) -> deep::Expr {
-    match ty {
+    let desugared = match ty {
         TypeExpr::Named(name, _) => {
             // The contextual rule for type-name positions:
             //
@@ -2160,7 +2185,8 @@ fn desugar_type_with_scope_mode(
         ),
 
         TypeExpr::Infer(_) => node("t-var", vec![sym("_")]),
-    }
+    };
+    with_structural_span(desugared, type_expr_span(ty))
 }
 
 // ---------------------------------------------------------------------------

@@ -11,13 +11,31 @@ use crate::adt::{AdtRegistry, CallShape};
 use crate::builtins;
 use crate::context::{TypeEnv, TypeEnvInner};
 use crate::deep_type::{
-    BinderMode, DeepTypeResolver, ResolvedCastTarget, TypeResolutionEnv, TypeUseSite,
+    BinderMode, DeepTypeResolver, ResolvedCastTarget, TypeDiagnosticLocation, TypeResolutionEnv,
+    TypeUseSite,
 };
 use crate::env::Env;
 use crate::errors::*;
 use crate::linearity::LinearityInfo;
+use crate::session::DiagnosticSink;
 use crate::types::*;
 use crate::unify::*;
+
+trait DiagnosticOutput {
+    fn push(&mut self, error: CheckError);
+}
+
+impl DiagnosticOutput for Vec<CheckError> {
+    fn push(&mut self, error: CheckError) {
+        Vec::push(self, error);
+    }
+}
+
+impl DiagnosticOutput for DiagnosticSink<'_> {
+    fn push(&mut self, error: CheckError) {
+        DiagnosticSink::push(self, error);
+    }
+}
 
 use std::cell::{Cell, RefCell};
 
@@ -250,7 +268,7 @@ impl StackExhaustionScope {
     /// second call is a no-op. Call after the whole pipeline has run and
     /// before the empty-errors gate, so exhaustion always surfaces as a hard
     /// check failure.
-    fn drain_into(&self, errors: &mut Vec<CheckError>) {
+    fn drain_into(&self, errors: &mut impl DiagnosticOutput) {
         if let Some((site, span_id)) = STACK_EXHAUSTED.with(|cell| cell.borrow_mut().take()) {
             errors.push(stack_depth_error(&site, span_id.as_deref()));
         }
@@ -361,82 +379,65 @@ fn stack_depth_error(site: &str, span_id: Option<&str>) -> CheckError {
     )
 }
 
-thread_local! {
-    /// Per-annotation-pass map from a def name to its declared
-    /// parameter type *expressions*, taken verbatim from the matching
-    /// `(defsig name (t-fn arg-exprs... ret))` node.
-    ///
-    /// `annotate_fn_children` consults this when stamping a def's
-    /// `(params ...)` node so a parameter whose type comes from a
-    /// separate `sig` declaration gets the declared type -- preserving
-    /// `&` borrow wrappers -- written where IR lowering reads it.
-    /// Defs with no `defsig` are absent from the map and keep bare
-    /// params, leaving read-only/borrow inference to
-    /// `infer_signature_metadata`.
-    ///
-    /// Populated for the duration of `annotate_ir_program` /
-    /// `annotate_ir_program_with_context` and cleared afterwards.
-    static DECLARED_SIG_PARAM_TYPES: RefCell<HashMap<String, DeclaredSigMetadata>> =
-        RefCell::new(HashMap::new());
-    /// Binder names owned by the top-level def currently being inferred.
-    /// This is transient per-run state: it validates nested ascription
-    /// metadata against the enclosing `defsig` without entering cached or
-    /// serialized checker state.
-    static CURRENT_TYPE_BINDERS: RefCell<Option<HashSet<String>>> = const { RefCell::new(None) };
-}
-
 #[derive(Clone)]
 struct DeclaredSigMetadata {
     param_types: Vec<deep::Expr>,
     binders: HashSet<String>,
 }
 
-struct CurrentTypeBindersGuard {
-    previous: Option<HashSet<String>>,
+/// Explicit annotation-time declaration context. The declared signature map
+/// belongs to one annotation unit; `current_type_binders` is narrowed to the
+/// `def` whose children are being annotated and is passed through every
+/// recursive annotation call.
+#[derive(Clone, Copy)]
+struct AnnotationResolutionContext<'a> {
+    declared_signatures: &'a HashMap<String, DeclaredSigMetadata>,
+    current_type_binders: Option<&'a HashSet<String>>,
 }
 
-fn install_current_type_binders(names: Option<&HashSet<String>>) -> CurrentTypeBindersGuard {
-    let next = names.cloned();
-    let previous =
-        CURRENT_TYPE_BINDERS.with(|cell| std::mem::replace(&mut *cell.borrow_mut(), next));
-    CurrentTypeBindersGuard { previous }
-}
+impl<'a> AnnotationResolutionContext<'a> {
+    fn root(declared_signatures: &'a HashMap<String, DeclaredSigMetadata>) -> Self {
+        Self {
+            declared_signatures,
+            current_type_binders: None,
+        }
+    }
 
-impl Drop for CurrentTypeBindersGuard {
-    fn drop(&mut self) {
-        let previous = self.previous.take();
-        CURRENT_TYPE_BINDERS.with(|cell| *cell.borrow_mut() = previous);
+    /// Enter exactly one declaration's binder scope. A missing signature
+    /// deliberately resets the scope to closed input instead of inheriting a
+    /// surrounding declaration's names.
+    fn for_def(self, name: &str) -> Self {
+        Self {
+            declared_signatures: self.declared_signatures,
+            current_type_binders: self
+                .declared_signatures
+                .get(name)
+                .map(|metadata| &metadata.binders),
+        }
+    }
+
+    fn declared_signature(self, name: &str) -> Option<&'a DeclaredSigMetadata> {
+        self.declared_signatures.get(name)
+    }
+
+    fn binder_mode(self) -> BinderMode<'a> {
+        self.current_type_binders
+            .map(BinderMode::Explicit)
+            .unwrap_or(BinderMode::ClosedInput)
     }
 }
 
-fn current_type_binders() -> Option<HashSet<String>> {
-    CURRENT_TYPE_BINDERS.with(|cell| cell.borrow().clone())
-}
-
-/// Scan `exprs` for `(defsig name (t-fn ...))` nodes and install a
-/// name -> declared-param-type-exprs map into `DECLARED_SIG_PARAM_TYPES`
-/// for the duration of the returned guard. Restores the previous map
-/// (typically empty) on drop so nested / re-entrant annotation passes
-/// do not leak state.
-fn install_declared_sig_param_types(exprs: &[deep::Expr]) -> DeclaredSigGuard {
+/// Collect the declared signature metadata owned by one inference or
+/// annotation unit. The returned map is passed explicitly; nested, sequential,
+/// and parallel checks cannot observe another unit's declarations.
+fn collect_declared_sig_metadata<'a>(
+    exprs: impl IntoIterator<Item = &'a deep::Expr>,
+) -> HashMap<String, DeclaredSigMetadata> {
     let mut map: HashMap<String, DeclaredSigMetadata> = HashMap::new();
     for expr in exprs {
         collect_defsig_param_types(expr, &mut map);
     }
-    let previous =
-        DECLARED_SIG_PARAM_TYPES.with(|cell| std::mem::replace(&mut *cell.borrow_mut(), map));
-    DeclaredSigGuard { previous }
-}
-
-struct DeclaredSigGuard {
-    previous: HashMap<String, DeclaredSigMetadata>,
-}
-
-impl Drop for DeclaredSigGuard {
-    fn drop(&mut self) {
-        let restored = std::mem::take(&mut self.previous);
-        DECLARED_SIG_PARAM_TYPES.with(|cell| *cell.borrow_mut() = restored);
-    }
+    map
 }
 
 /// Recursively collect `(defsig name (t-fn arg-exprs... ret))` entries,
@@ -473,7 +474,7 @@ fn collect_defsig_param_types(expr: &deep::Expr, map: &mut HashMap<String, Decla
                 return;
             }
             let fn_kids = children(fn_list);
-            if fn_kids.len() < 2 {
+            if fn_kids.is_empty() {
                 return;
             }
             // All but the trailing return type are parameter types.
@@ -514,6 +515,12 @@ pub struct InferResult {
     pub total_nodes: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct InferStats {
+    pub(crate) typed_nodes: usize,
+    pub(crate) total_nodes: usize,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CheckedProgram {
     annotated_exprs: Vec<deep::Expr>,
@@ -527,20 +534,21 @@ impl CheckedProgram {
         annotated_exprs: Vec<deep::Expr>,
         type_env: HashMap<String, deep::Expr>,
     ) -> Self {
-        let type_headers = signature_metadata_type_headers(&annotated_exprs);
-        Self::from_parts_with_headers(annotated_exprs, type_env, &type_headers)
+        crate::session::checked_program_from_parts(annotated_exprs, type_env)
     }
 
     fn from_parts_with_headers(
         annotated_exprs: Vec<deep::Expr>,
         type_env: HashMap<String, deep::Expr>,
         type_headers: &TypeResolutionEnv,
+        errors: &mut DiagnosticSink<'_>,
     ) -> Self {
         let signature_inference = infer_signature_metadata_with_context_and_headers(
             &annotated_exprs,
             &type_env,
             &SignatureInferenceMetadata::default(),
             type_headers,
+            errors,
         );
         Self {
             annotated_exprs,
@@ -555,12 +563,10 @@ impl CheckedProgram {
         type_env: HashMap<String, deep::Expr>,
         signature_context: &SignatureInferenceMetadata,
     ) -> Self {
-        let type_headers = signature_metadata_type_headers(&annotated_exprs);
-        Self::from_parts_with_signature_context_and_headers(
+        crate::session::checked_program_from_parts_with_signature_context(
             annotated_exprs,
             type_env,
             signature_context,
-            &type_headers,
         )
     }
 
@@ -569,12 +575,14 @@ impl CheckedProgram {
         type_env: HashMap<String, deep::Expr>,
         signature_context: &SignatureInferenceMetadata,
         type_headers: &TypeResolutionEnv,
+        errors: &mut DiagnosticSink<'_>,
     ) -> Self {
         let signature_inference = infer_signature_metadata_with_context_and_headers(
             &annotated_exprs,
             &type_env,
             signature_context,
             type_headers,
+            errors,
         );
         Self {
             annotated_exprs,
@@ -697,15 +705,43 @@ pub struct ParamSignatureInference {
     pub display_type: Type,
 }
 
+pub(crate) fn checked_program_from_parts_in_session(
+    annotated_exprs: Vec<deep::Expr>,
+    type_env: HashMap<String, deep::Expr>,
+    errors: &mut DiagnosticSink<'_>,
+) -> CheckedProgram {
+    let type_headers = signature_metadata_type_headers(&annotated_exprs);
+    CheckedProgram::from_parts_with_headers(annotated_exprs, type_env, &type_headers, errors)
+}
+
+pub(crate) fn checked_program_from_parts_with_signature_context_in_session(
+    annotated_exprs: Vec<deep::Expr>,
+    type_env: HashMap<String, deep::Expr>,
+    signature_context: &SignatureInferenceMetadata,
+    errors: &mut DiagnosticSink<'_>,
+) -> CheckedProgram {
+    let type_headers = signature_metadata_type_headers(&annotated_exprs);
+    CheckedProgram::from_parts_with_signature_context_and_headers(
+        annotated_exprs,
+        type_env,
+        signature_context,
+        &type_headers,
+        errors,
+    )
+}
+
 /// Run type inference on a list of top-level Deep expressions.
 pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
     // WI-1 follow-up: run the whole pipeline on a grown stack so a deeply
     // nested but finite program checks end-to-end instead of tripping a
     // per-site `stack_guard!` partway through one of the recursive passes.
-    with_grown_stack(|| infer_program_inner(exprs))
+    crate::session::infer_program(exprs)
 }
 
-fn infer_program_inner(exprs: &[deep::Expr]) -> InferResult {
+pub(crate) fn infer_program_in_session(
+    exprs: &[deep::Expr],
+    errors: &mut DiagnosticSink<'_>,
+) -> InferStats {
     // Reset the stack-exhaustion flag for this check unit; `drain` below
     // turns any walker stack bail into a hard located error so deep input
     // can never produce a silent green / partial result.
@@ -714,16 +750,15 @@ fn infer_program_inner(exprs: &[deep::Expr]) -> InferResult {
     let mut subst = Subst::new();
     let mut adt_reg = AdtRegistry::new();
     builtins::register_prelude_adts(&mut env, &mut vg, &mut adt_reg);
-    let mut errors = Vec::new();
     let mut typed_nodes = 0;
     let mut total_nodes = 0;
 
     // RFC v4b (RT-1 F2): reject a named module opened by more than one
     // wrapper in this check unit (module-identity forgery).
-    detect_module_reopens(exprs, &mut errors);
+    detect_module_reopens(exprs, errors);
     // RFC v5 (RT-1 F2 bypass): reject the reef linker's reserved
     // internal-name format in programs not produced by the linker.
-    detect_forged_linker_names(exprs, &mut errors);
+    detect_forged_linker_names(exprs, errors);
 
     // First pass: collect deftype and defsig declarations. Descend through
     // `(module {} name ...)` wrappers so declarations in every idiomatic
@@ -735,7 +770,7 @@ fn infer_program_inner(exprs: &[deep::Expr]) -> InferResult {
         &mut vg,
         &mut subst,
         &mut adt_reg,
-        &mut errors,
+        errors,
     );
 
     // Checker-enforced opacity (RFC D-CHECK): install the per-run
@@ -750,7 +785,8 @@ fn infer_program_inner(exprs: &[deep::Expr]) -> InferResult {
     // declaration pass — without it, the entire HM checker is a no-op on
     // module-wrapped programs.
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
-    let defsig_type_binders = collect_defsig_type_binders(&items);
+    let declared_signatures =
+        collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
     for (module, expr) in &items {
         let decl_name = top_level_decl_name(expr);
         crate::opacity::set_current_item(
@@ -763,19 +799,19 @@ fn infer_program_inner(exprs: &[deep::Expr]) -> InferResult {
             &mut vg,
             &mut subst,
             &adt_reg,
-            &mut errors,
+            errors,
             &mut typed_nodes,
             &mut total_nodes,
             None,
             &user_def_names,
-            &defsig_type_binders,
+            &declared_signatures,
         );
         // Issue #256 round 2: re-check each deferred borrow against the
         // now-complete substitution (see `validate_deferred_borrow_vars`).
-        validate_deferred_borrow_vars(&subst, &adt_reg, &mut errors);
+        validate_deferred_borrow_vars(&subst, &adt_reg, errors);
         // D-CHECK: drain the per-def deferred-access ledger (see
         // `validate_deferred_opaque_uses`).
-        validate_deferred_opaque_uses(&subst, &adt_reg, &mut errors);
+        validate_deferred_opaque_uses(&subst, &adt_reg, errors);
     }
     crate::opacity::set_current_item(None, None);
 
@@ -783,21 +819,20 @@ fn infer_program_inner(exprs: &[deep::Expr]) -> InferResult {
     // by the Phase 0f backend (f16/bf16/f8e4m3). These would silently get
     // downcast to f32 by the current build targets, violating the "no implicit
     // precision promotion" rule. f64 is supported as of v0.2.3.
-    validate_tensor_precisions_in_program(exprs, &mut errors);
-    crate::invariants::validate_type_invariants_in_program(exprs, &mut errors);
+    validate_tensor_precisions_in_program(exprs, errors);
+    crate::invariants::validate_type_invariants_in_program_with_sink(exprs, errors);
 
     // WS-A8 cross-row enforcement: reject `matmul`/transcendental ops that
     // are reached through a polymorphic-precision sig instantiated at a
     // dtype the spec rules forbid (§5.7.2 / §5.4).
     let local_ir_env = build_ir_type_env(exprs);
-    validate_polymorphic_op_constraints(exprs, &local_ir_env, &mut errors);
+    validate_polymorphic_op_constraints(exprs, &local_ir_env, errors);
 
     // If any walker bailed on a nearly-exhausted stack during this run,
     // surface it as a hard located failure (covered-or-rejected).
-    stack_scope.drain_into(&mut errors);
+    stack_scope.drain_into(errors);
 
-    InferResult {
-        errors,
+    InferStats {
         typed_nodes,
         total_nodes,
     }
@@ -819,11 +854,13 @@ pub fn check_ir_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, InferRes
 /// [`check_ir_with_context`]. The library state is `Arc`-shared and
 /// never mutated, so concurrent reads are cheap.
 pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeEnv, InferResult> {
-    // WI-1 follow-up: grow the stack for the whole library pipeline.
-    with_grown_stack(|| build_type_env_from_library_inner(library_exprs))
+    crate::session::build_type_env_from_library(library_exprs)
 }
 
-fn build_type_env_from_library_inner(library_exprs: &[deep::Expr]) -> Result<TypeEnv, InferResult> {
+pub(crate) fn build_type_env_from_library_in_session(
+    library_exprs: &[deep::Expr],
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<TypeEnv, InferStats> {
     // Reset the stack-exhaustion flag for this check unit; drained below
     // before the empty-errors gate (covered-or-rejected on deep input).
     let stack_scope = StackExhaustionScope::enter();
@@ -849,27 +886,28 @@ fn build_type_env_from_library_inner(library_exprs: &[deep::Expr]) -> Result<Typ
     let library_ir = build_ir_type_env(library_exprs);
     log_sub("build_ir_type_env_initial", &mut sub_t);
 
-    let mut result = infer_ir_program_with_state(
+    let stats = infer_ir_program_with_state(
         library_exprs,
         &mut state,
         /* combined_ir_for_validate = */ &library_ir,
         /* run_validate_passes_on = */ None,
+        errors,
     );
     log_sub("infer_ir_program_with_state", &mut sub_t);
-    validate_ir_program(library_exprs, &library_ir, &mut result.errors);
+    validate_ir_program(library_exprs, &library_ir, errors);
     log_sub("validate_ir_program", &mut sub_t);
-    validate_tensor_precisions_in_program(library_exprs, &mut result.errors);
-    crate::invariants::validate_type_invariants_in_program(library_exprs, &mut result.errors);
+    validate_tensor_precisions_in_program(library_exprs, errors);
+    crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
     log_sub("validate_tensor_precisions", &mut sub_t);
-    validate_polymorphic_op_constraints(library_exprs, &library_ir, &mut result.errors);
+    validate_polymorphic_op_constraints(library_exprs, &library_ir, errors);
     log_sub("validate_polymorphic_op_constraints", &mut sub_t);
-    suppress_unbound_for_cycle_members(library_exprs, &mut result.errors);
+    suppress_unbound_for_cycle_members(library_exprs, errors);
     log_sub("suppress_unbound_for_cycle", &mut sub_t);
     // Surface a stack-exhaustion bail from the passes above as a hard
     // located error before the gate (and before the errors drain below).
-    stack_scope.drain_into(&mut result.errors);
-    if !result.errors.is_empty() {
-        return Err(result);
+    stack_scope.drain_into(errors);
+    if !errors.is_empty() {
+        return Err(stats);
     }
 
     // Capture library def names — needed by new-code cycle / unbound
@@ -885,11 +923,6 @@ fn build_type_env_from_library_inner(library_exprs: &[deep::Expr]) -> Result<Typ
     }
     log_sub("collect_library_def_names", &mut sub_t);
 
-    // Drain accumulated errors back into the state's storage; they were
-    // empty above so this is a no-op, but the call site is symmetric
-    // with check_ir_with_context.
-    let _ = result.errors.drain(..);
-
     // Build a richer `ir_types` by annotating library exprs against
     // the now-populated state and re-extracting type metadata. The raw
     // `library_ir` (built from un-annotated source) only catches defs
@@ -901,15 +934,23 @@ fn build_type_env_from_library_inner(library_exprs: &[deep::Expr]) -> Result<Typ
     // calls `annotate_ir_program` then `build_ir_type_env` on
     // the annotated result.
     //
-    // Install the declared-`defsig` parameter type map so library defs
-    // with separate `sig` declarations get borrow-correct
-    // `(params ...)` stamps, consistent with every other annotation
-    // entry point.
-    let _declared_sig_guard = install_declared_sig_param_types(library_exprs);
+    // Pass this unit's declared signatures directly into annotation so
+    // separate-`sig` parameter stamps and binder scopes cannot observe a
+    // different sequential, nested, or parallel check.
+    let declared_signatures = collect_declared_sig_metadata(library_exprs);
+    let annotation_context = AnnotationResolutionContext::root(&declared_signatures);
     let library_annotated: Vec<deep::Expr> = library_exprs
         .iter()
         .map(|e| {
-            annotate_expr_with_scope(e, &state.env, &state.var_gen, &state.subst, &state.adt_reg)
+            annotate_expr_with_scope(
+                e,
+                &state.env,
+                &state.var_gen,
+                &state.subst,
+                &state.adt_reg,
+                annotation_context,
+                errors,
+            )
         })
         .collect();
     log_sub("annotate_library_exprs_outer_loop", &mut sub_t);
@@ -919,14 +960,9 @@ fn build_type_env_from_library_inner(library_exprs: &[deep::Expr]) -> Result<Typ
     // The annotation loop above recurses (annotate_expr_with_scope); if it
     // bailed on low stack, reject rather than return a partially-annotated
     // library context.
-    let mut post_annotate_errors = Vec::new();
-    stack_scope.drain_into(&mut post_annotate_errors);
-    if !post_annotate_errors.is_empty() {
-        return Err(InferResult {
-            errors: post_annotate_errors,
-            typed_nodes: 0,
-            total_nodes: 0,
-        });
+    stack_scope.drain_into(errors);
+    if !errors.is_empty() {
+        return Err(stats);
     }
 
     Ok(TypeEnv::from_inner(TypeEnvInner {
@@ -978,6 +1014,13 @@ fn build_type_env_from_library_inner(library_exprs: &[deep::Expr]) -> Result<Typ
 pub fn build_compiled_library_context(
     library_exprs: &[deep::Expr],
 ) -> Result<(TypeEnv, CheckedProgram), InferResult> {
+    crate::session::build_compiled_library_context(library_exprs)
+}
+
+pub(crate) fn build_compiled_library_context_in_session(
+    library_exprs: &[deep::Expr],
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<(TypeEnv, CheckedProgram), InferStats> {
     // Reset the stack-exhaustion flag for this check unit; drained into the
     // error vector below before the empty-errors gate (and again after the
     // annotation pass) so a deep-input stack bail on the library-compile path
@@ -991,22 +1034,23 @@ pub fn build_compiled_library_context(
 
     let library_ir = build_ir_type_env(library_exprs);
 
-    let mut result = infer_ir_program_with_state(
+    let stats = infer_ir_program_with_state(
         library_exprs,
         &mut state,
         /* combined_ir_for_validate = */ &library_ir,
         /* run_validate_passes_on = */ None,
+        errors,
     );
-    validate_ir_program(library_exprs, &library_ir, &mut result.errors);
-    validate_tensor_precisions_in_program(library_exprs, &mut result.errors);
-    crate::invariants::validate_type_invariants_in_program(library_exprs, &mut result.errors);
-    validate_polymorphic_op_constraints(library_exprs, &library_ir, &mut result.errors);
-    suppress_unbound_for_cycle_members(library_exprs, &mut result.errors);
+    validate_ir_program(library_exprs, &library_ir, errors);
+    validate_tensor_precisions_in_program(library_exprs, errors);
+    crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
+    validate_polymorphic_op_constraints(library_exprs, &library_ir, errors);
+    suppress_unbound_for_cycle_members(library_exprs, errors);
     // Surface any stack-exhaustion bail from the passes above as a hard
     // located error (covered-or-rejected) before the empty-errors gate.
-    stack_scope.drain_into(&mut result.errors);
-    if !result.errors.is_empty() {
-        return Err(result);
+    stack_scope.drain_into(errors);
+    if !errors.is_empty() {
+        return Err(stats);
     }
 
     // Capture library def names before consuming `state` into `TypeEnv`.
@@ -1020,34 +1064,35 @@ pub fn build_compiled_library_context(
         }
     }
 
-    // Drain accumulated errors back into the state's storage; they were
-    // empty above so this is a no-op, but the call site is symmetric
-    // with check_ir_with_context.
-    let _ = result.errors.drain(..);
-
     // SINGLE annotation pass — feeds both the TypeEnv's
     // `ir_types` AND the returned CheckedProgram's `annotated_exprs`.
     // Previously `build_type_env_from_library` did one annotation here
     // (~13.8s on Coral) and `check_ir_with_context(empty, library)`
     // did a separate, redundant inference+annotation pass (~16.8s).
     //
-    // Install the declared-`defsig` parameter type map so the `def`
-    // arm of `annotate_expr_with_scope` stamps borrow-correct types
-    // onto each library def's `(params ...)` node -- the library
-    // compile path is exactly where chelis-std's separate-`sig` defs
-    // (`School.Loss.CrossEntropy.loss` etc.) are annotated.
-    let _declared_sig_guard = install_declared_sig_param_types(library_exprs);
+    // The explicit annotation context supplies this unit's separate-`sig`
+    // parameter metadata and per-def binder scope to the recursive pass.
+    let declared_signatures = collect_declared_sig_metadata(library_exprs);
+    let annotation_context = AnnotationResolutionContext::root(&declared_signatures);
     let library_annotated: Vec<deep::Expr> = library_exprs
         .iter()
         .map(|e| {
-            annotate_expr_with_scope(e, &state.env, &state.var_gen, &state.subst, &state.adt_reg)
+            annotate_expr_with_scope(
+                e,
+                &state.env,
+                &state.var_gen,
+                &state.subst,
+                &state.adt_reg,
+                annotation_context,
+                errors,
+            )
         })
         .collect();
     // Annotation also recurses (annotate_expr_with_scope); if it bailed on
     // low stack, reject rather than return a partially-annotated program.
-    stack_scope.drain_into(&mut result.errors);
-    if !result.errors.is_empty() {
-        return Err(result);
+    stack_scope.drain_into(errors);
+    if !errors.is_empty() {
+        return Err(stats);
     }
     let library_ir_annotated = build_ir_type_env(&library_annotated);
 
@@ -1071,6 +1116,7 @@ pub fn build_compiled_library_context(
         library_annotated,
         library_ir_annotated,
         &signature_type_headers,
+        errors,
     );
 
     Ok((type_env, checked))
@@ -1110,6 +1156,14 @@ pub fn build_compiled_library_context_with_base(
     base: &TypeEnv,
     library_exprs: &[deep::Expr],
 ) -> Result<(TypeEnv, CheckedProgram), InferResult> {
+    crate::session::build_compiled_library_context_with_base(base, library_exprs)
+}
+
+pub(crate) fn build_compiled_library_context_with_base_in_session(
+    base: &TypeEnv,
+    library_exprs: &[deep::Expr],
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<(TypeEnv, CheckedProgram), InferStats> {
     // Reset the stack-exhaustion flag for this check unit; drained into the
     // error vector below before the empty-errors gate (and again after the
     // annotation pass) so a deep-input stack bail on the layered
@@ -1134,26 +1188,27 @@ pub fn build_compiled_library_context_with_base(
     // `library_exprs`' own declared types (base schemes are already in
     // `state.env`); the combined IR env is supplied to the validators so
     // `(var basefoo)` references resolve to the base's declared type.
-    let mut result = infer_ir_program_with_state(
+    let stats = infer_ir_program_with_state(
         library_exprs,
         &mut state,
         &combined_ir,
         /* run_validate_passes_on = */ None,
+        errors,
     );
-    validate_ir_program(library_exprs, &combined_ir, &mut result.errors);
-    validate_tensor_precisions_in_program(library_exprs, &mut result.errors);
-    crate::invariants::validate_type_invariants_in_program(library_exprs, &mut result.errors);
-    validate_polymorphic_op_constraints(library_exprs, &combined_ir, &mut result.errors);
+    validate_ir_program(library_exprs, &combined_ir, errors);
+    validate_tensor_precisions_in_program(library_exprs, errors);
+    crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
+    validate_polymorphic_op_constraints(library_exprs, &combined_ir, errors);
     suppress_unbound_for_cycle_members_against_context(
         library_exprs,
         &base.inner().library_def_names,
-        &mut result.errors,
+        errors,
     );
     // Surface any stack-exhaustion bail from the passes above as a hard
     // located error (covered-or-rejected) before the empty-errors gate.
-    stack_scope.drain_into(&mut result.errors);
-    if !result.errors.is_empty() {
-        return Err(result);
+    stack_scope.drain_into(errors);
+    if !errors.is_empty() {
+        return Err(stats);
     }
 
     // Capture `library_exprs` def names, unioned with the base's, so a
@@ -1169,25 +1224,32 @@ pub fn build_compiled_library_context_with_base(
         }
     }
 
-    let _ = result.errors.drain(..);
-
     // Annotate ONLY the `library_exprs`, starting from the populated
     // `state` so base names resolve during annotation. Install the
-    // declared-`defsig` parameter type map for this layer's exprs so
-    // separate-`sig` defs get borrow-correct `(params ...)` stamps,
-    // matching `build_compiled_library_context`.
-    let _declared_sig_guard = install_declared_sig_param_types(library_exprs);
+    // explicit declared-signature context for this layer's exprs so
+    // separate-`sig` defs get borrow-correct `(params ...)` stamps without
+    // inheriting binders from the base context.
+    let declared_signatures = collect_declared_sig_metadata(library_exprs);
+    let annotation_context = AnnotationResolutionContext::root(&declared_signatures);
     let library_annotated: Vec<deep::Expr> = library_exprs
         .iter()
         .map(|e| {
-            annotate_expr_with_scope(e, &state.env, &state.var_gen, &state.subst, &state.adt_reg)
+            annotate_expr_with_scope(
+                e,
+                &state.env,
+                &state.var_gen,
+                &state.subst,
+                &state.adt_reg,
+                annotation_context,
+                errors,
+            )
         })
         .collect();
     // Annotation also recurses (annotate_expr_with_scope); if it bailed on
     // low stack, reject rather than return a partially-annotated program.
-    stack_scope.drain_into(&mut result.errors);
-    if !result.errors.is_empty() {
-        return Err(result);
+    stack_scope.drain_into(errors);
+    if !errors.is_empty() {
+        return Err(stats);
     }
     let new_ir_annotated = build_ir_type_env(&library_annotated);
 
@@ -1225,6 +1287,7 @@ pub fn build_compiled_library_context_with_base(
         library_annotated,
         checked_type_env,
         &signature_type_headers,
+        errors,
     );
 
     Ok((type_env, checked))
@@ -1265,19 +1328,15 @@ pub fn check_ir_with_signature_context(
     signature_context: &SignatureInferenceMetadata,
     new_exprs: &[deep::Expr],
 ) -> Result<CheckedProgram, InferResult> {
-    // WI-1 follow-up: grow the stack for the whole check pipeline. This is the
-    // funnel for `check_ir_program` and `check_ir_with_context`, so wrapping
-    // here grows the stack for all three.
-    with_grown_stack(|| {
-        check_ir_with_signature_context_inner(context, signature_context, new_exprs)
-    })
+    crate::session::check_ir_with_signature_context(context, signature_context, new_exprs)
 }
 
-fn check_ir_with_signature_context_inner(
+pub(crate) fn check_ir_with_signature_context_in_session(
     context: &TypeEnv,
     signature_context: &SignatureInferenceMetadata,
     new_exprs: &[deep::Expr],
-) -> Result<CheckedProgram, InferResult> {
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<CheckedProgram, InferStats> {
     // Reset the stack-exhaustion flag for this check unit; drained into the
     // error vector below before the empty-errors gate so a deep-input stack
     // bail always fails the check (never a silent green / partial result).
@@ -1311,45 +1370,46 @@ fn check_ir_with_signature_context_inner(
     // Library is already validated; only run validate / inference on
     // new exprs. Inference's canonical collector binds the new-code's
     // own declared types (library schemes are already in state.env).
-    let mut result = infer_ir_program_with_state(
+    let stats = infer_ir_program_with_state(
         new_exprs,
         &mut state,
         &combined_ir,
         /* run_validate_passes_on = */ None,
+        errors,
     );
     log_sub("infer_ir_program_with_state", &mut sub_t);
     // Run cycle / shape / precision validators on new_exprs only. The
     // combined IR env is supplied so `(var libfoo)` references
     // resolve to the library's declared type during shape validation.
-    validate_ir_program(new_exprs, &combined_ir, &mut result.errors);
+    validate_ir_program(new_exprs, &combined_ir, errors);
     log_sub("validate_ir_program", &mut sub_t);
-    validate_tensor_precisions_in_program(new_exprs, &mut result.errors);
-    crate::invariants::validate_type_invariants_in_program(new_exprs, &mut result.errors);
+    validate_tensor_precisions_in_program(new_exprs, errors);
+    crate::invariants::validate_type_invariants_in_program_with_sink(new_exprs, errors);
     log_sub("validate_tensor_precisions", &mut sub_t);
-    validate_polymorphic_op_constraints(new_exprs, &combined_ir, &mut result.errors);
+    validate_polymorphic_op_constraints(new_exprs, &combined_ir, errors);
     log_sub("validate_polymorphic_op_constraints", &mut sub_t);
     suppress_unbound_for_cycle_members_against_context(
         new_exprs,
         &context.inner().library_def_names,
-        &mut result.errors,
+        errors,
     );
     log_sub("suppress_unbound_for_cycle", &mut sub_t);
     // Surface any stack-exhaustion bail from the passes above as a hard
     // located error (covered-or-rejected) before the empty-errors gate.
-    stack_scope.drain_into(&mut result.errors);
-    if !result.errors.is_empty() {
-        return Err(result);
+    stack_scope.drain_into(errors);
+    if !errors.is_empty() {
+        return Err(stats);
     }
 
     // Annotate ONLY the new-code exprs, starting from the library
     // snapshot state so library names resolve during annotation.
-    let annotated_exprs = annotate_ir_program_with_context(context, new_exprs);
+    let annotated_exprs = annotate_ir_program_with_context(context, new_exprs, errors);
     log_sub("annotate_ir_program_with_context", &mut sub_t);
     // Annotation also recurses (annotate_expr_with_scope); if it bailed on
     // low stack, reject rather than return a partially-annotated program.
-    stack_scope.drain_into(&mut result.errors);
-    if !result.errors.is_empty() {
-        return Err(result);
+    stack_scope.drain_into(errors);
+    if !errors.is_empty() {
+        return Err(stats);
     }
     // Surface library declared types in the returned type_env so downstream
     // passes (lower, effects, linearity) can resolve `(var libname)` calls
@@ -1368,6 +1428,7 @@ fn check_ir_with_signature_context_inner(
         annotated_type_env,
         signature_context,
         &signature_type_headers,
+        errors,
     );
     // chelis#731 Phase 2 ([04-TOT-2] / §C4.1): the always-on totality
     // invariant. errors is empty here (we passed the gate above), so any
@@ -1376,67 +1437,70 @@ fn check_ir_with_signature_context_inner(
     // is the reliable surface).
     let totality_traces = totality_invariant_traces(checked.signature_inference());
     if !totality_traces.is_empty() {
-        result
-            .errors
-            .push(totality_violation_error(&totality_traces));
-        return Err(result);
+        errors.push(totality_violation_error(&totality_traces));
+        return Err(stats);
     }
     Ok(checked)
 }
 
 pub fn check_typed_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, InferResult> {
-    // WI-1 follow-up: grow the stack so both the inference call below and the
-    // annotation pass run with headroom on deep input.
-    with_grown_stack(|| check_typed_program_inner(exprs))
+    crate::session::check_typed_program(exprs)
 }
 
-fn check_typed_program_inner(exprs: &[deep::Expr]) -> Result<CheckedProgram, InferResult> {
+pub(crate) fn check_typed_program_in_session(
+    exprs: &[deep::Expr],
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<CheckedProgram, InferStats> {
     // Outermost scope covers both inference (which has its own inner scope)
     // and the annotation pass below, so a bail in either surfaces as a hard
     // located failure rather than a partially-annotated `Ok`.
     let stack_scope = StackExhaustionScope::enter();
-    let mut result = infer_program(exprs);
-    if result.errors.is_empty() {
-        let annotated_exprs = annotate_ir_program(exprs);
+    let stats = infer_program_in_session(exprs, errors);
+    if errors.is_empty() {
+        let annotated_exprs = annotate_ir_program(exprs, errors);
         let annotated_type_env = build_ir_type_env(&annotated_exprs);
         // Annotation recurses; reject if it bailed on low stack.
-        stack_scope.drain_into(&mut result.errors);
-        if !result.errors.is_empty() {
-            return Err(result);
+        stack_scope.drain_into(errors);
+        if !errors.is_empty() {
+            return Err(stats);
         }
-        let checked = CheckedProgram::from_parts(annotated_exprs, annotated_type_env);
+        let checked = checked_program_from_parts_in_session(
+            annotated_exprs,
+            annotated_type_env,
+            errors,
+        );
         // chelis#731 Phase 2 ([04-TOT-2] / §C4.1): the always-on totality
         // invariant (see `totality_invariant_traces`). errors is empty here.
         let totality_traces = totality_invariant_traces(checked.signature_inference());
         if !totality_traces.is_empty() {
-            result
-                .errors
-                .push(totality_violation_error(&totality_traces));
-            return Err(result);
+            errors.push(totality_violation_error(&totality_traces));
+            return Err(stats);
         }
         Ok(checked)
     } else {
-        Err(result)
+        Err(stats)
     }
 }
 
 pub fn infer_ir_program(exprs: &[deep::Expr]) -> InferResult {
-    // WI-1 follow-up: grow the stack for the whole pipeline.
-    with_grown_stack(|| infer_ir_program_inner(exprs))
+    crate::session::infer_ir_program(exprs)
 }
 
-fn infer_ir_program_inner(exprs: &[deep::Expr]) -> InferResult {
+pub(crate) fn infer_ir_program_in_session(
+    exprs: &[deep::Expr],
+    errors: &mut DiagnosticSink<'_>,
+) -> InferStats {
     let stack_scope = StackExhaustionScope::enter();
     let type_env = build_ir_type_env(exprs);
-    let mut result = infer_ir_program_with_env(exprs, &type_env);
-    validate_ir_program(exprs, &type_env, &mut result.errors);
-    validate_tensor_precisions_in_program(exprs, &mut result.errors);
-    crate::invariants::validate_type_invariants_in_program(exprs, &mut result.errors);
-    validate_polymorphic_op_constraints(exprs, &type_env, &mut result.errors);
-    suppress_unbound_for_cycle_members(exprs, &mut result.errors);
+    let stats = infer_ir_program_with_env(exprs, &type_env, errors);
+    validate_ir_program(exprs, &type_env, errors);
+    validate_tensor_precisions_in_program(exprs, errors);
+    crate::invariants::validate_type_invariants_in_program_with_sink(exprs, errors);
+    validate_polymorphic_op_constraints(exprs, &type_env, errors);
+    suppress_unbound_for_cycle_members(exprs, errors);
     // Surface any walker stack bail as a hard located error.
-    stack_scope.drain_into(&mut result.errors);
-    result
+    stack_scope.drain_into(errors);
+    stats
 }
 
 /// When a binding cycle is detected, the inference pass that processed
@@ -1445,7 +1509,7 @@ fn infer_ir_program_inner(exprs: &[deep::Expr]) -> InferResult {
 /// elaborated). Those errors are spurious noise — the names ARE defined,
 /// they're just circularly. Drop any `UnboundVariable` whose name matches
 /// a top-level def.
-fn suppress_unbound_for_cycle_members(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
+fn suppress_unbound_for_cycle_members(exprs: &[deep::Expr], errors: &mut DiagnosticSink<'_>) {
     let mut def_names: HashSet<String> = HashSet::new();
     for expr in top_level_decl_items(exprs) {
         if let deep::Expr::List(list, _) = expr
@@ -1481,7 +1545,7 @@ fn suppress_unbound_for_cycle_members(exprs: &[deep::Expr], errors: &mut Vec<Che
 fn suppress_unbound_for_cycle_members_against_context(
     new_exprs: &[deep::Expr],
     library_def_names: &HashSet<String>,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     let mut def_names: HashSet<String> = library_def_names.clone();
     for expr in top_level_decl_items(new_exprs) {
@@ -1508,14 +1572,22 @@ fn suppress_unbound_for_cycle_members_against_context(
     });
 }
 
-fn infer_ir_program_with_env(exprs: &[deep::Expr], type_env: &IrTypeEnv) -> InferResult {
+fn infer_ir_program_with_env(
+    exprs: &[deep::Expr],
+    type_env: &IrTypeEnv,
+    errors: &mut DiagnosticSink<'_>,
+) -> InferStats {
     // Backwards-compat wrapper. Callers (like `infer_ir_program` and
     // `check_typed_program` callers) run `validate_ir_program`
     // separately, so we pass `None` here to skip the embedded validate.
     let empty_inner = crate::context::TypeEnv::empty();
     let mut state = empty_inner.inner().clone();
     infer_ir_program_with_state(
-        exprs, &mut state, type_env, /* run_validate_passes_on = */ None,
+        exprs,
+        &mut state,
+        type_env,
+        /* run_validate_passes_on = */ None,
+        errors,
     )
 }
 
@@ -1532,18 +1604,18 @@ fn infer_ir_program_with_state(
     state: &mut TypeEnvInner,
     combined_ir: &IrTypeEnv,
     run_validate_passes_on: Option<&[deep::Expr]>,
-) -> InferResult {
-    let mut errors = Vec::new();
+    errors: &mut DiagnosticSink<'_>,
+) -> InferStats {
     let mut typed_nodes = 0;
     let mut total_nodes = 0;
 
     // RFC v4b (RT-1 F2): reject a named module opened by more than one
     // wrapper in this check unit (module-identity forgery). Reef-linked
     // decls carry no wrappers, so this only fires on hand-written `.dp`.
-    detect_module_reopens(exprs, &mut errors);
+    detect_module_reopens(exprs, errors);
     // RFC v5 (RT-1 F2 bypass): reject the reef linker's reserved
     // internal-name format in programs not produced by the linker.
-    detect_forged_linker_names(exprs, &mut errors);
+    detect_forged_linker_names(exprs, errors);
 
     // Descend through `(module {} name ...)` wrappers: every idiomatic
     // Surf source wraps its declarations in `module X`, and without
@@ -1555,7 +1627,7 @@ fn infer_ir_program_with_state(
         &mut state.var_gen,
         &mut state.subst,
         &mut state.adt_reg,
-        &mut errors,
+        errors,
     );
 
     // Checker-enforced opacity (RFC D-CHECK): accumulate this phase's
@@ -1582,7 +1654,7 @@ fn infer_ir_program_with_state(
             &state.adt_reg,
             TypeUseSite::CompilerMetadata,
             BinderMode::TrustedCompilerMetadata,
-            &mut errors,
+            errors,
         ) {
             Ok(ty) => {
                 let scheme = state.env.generalize(&ty, &state.subst);
@@ -1606,7 +1678,8 @@ fn infer_ir_program_with_state(
         .map(|v| v == "1")
         .unwrap_or(false);
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
-    let defsig_type_binders = collect_defsig_type_binders(&items);
+    let declared_signatures =
+        collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
     for (declaration_index, (module, expr)) in items.iter().enumerate() {
         let t0 = if detail_profile {
             Some(std::time::Instant::now())
@@ -1624,12 +1697,12 @@ fn infer_ir_program_with_state(
             &mut state.var_gen,
             &mut state.subst,
             &state.adt_reg,
-            &mut errors,
+            errors,
             &mut typed_nodes,
             &mut total_nodes,
             prebound_type_failures.get(&declaration_index),
             &user_def_names,
-            &defsig_type_binders,
+            &declared_signatures,
         );
         if let Some(t0) = t0 {
             let elapsed = t0.elapsed();
@@ -1640,10 +1713,10 @@ fn infer_ir_program_with_state(
         // def and re-check each recorded variable against the now-complete
         // substitution. Draining per-def keeps error attribution local and
         // prevents one def's deferrals from leaking into the next.
-        validate_deferred_borrow_vars(&state.subst, &state.adt_reg, &mut errors);
+        validate_deferred_borrow_vars(&state.subst, &state.adt_reg, errors);
         // D-CHECK: drain the per-def deferred-access ledger (see
         // `validate_deferred_opaque_uses`).
-        validate_deferred_opaque_uses(&state.subst, &state.adt_reg, &mut errors);
+        validate_deferred_opaque_uses(&state.subst, &state.adt_reg, errors);
     }
     crate::opacity::set_current_item(None, None);
 
@@ -1662,11 +1735,10 @@ fn infer_ir_program_with_state(
     }
 
     if let Some(target_exprs) = run_validate_passes_on {
-        validate_ir_program(target_exprs, combined_ir, &mut errors);
+        validate_ir_program(target_exprs, combined_ir, errors);
     }
 
-    InferResult {
-        errors,
+    InferStats {
         typed_nodes,
         total_nodes,
     }
@@ -1714,7 +1786,7 @@ fn collect_ir_types_with_origins<'a>(
     }
 }
 
-fn validate_ir_program(exprs: &[deep::Expr], type_env: &IrTypeEnv, errors: &mut Vec<CheckError>) {
+fn validate_ir_program(exprs: &[deep::Expr], type_env: &IrTypeEnv, errors: &mut DiagnosticSink<'_>) {
     detect_top_level_binding_cycles(exprs, errors);
     detect_trivial_non_terminating_fns(exprs, errors);
     let mut static_env = HashMap::new();
@@ -1745,7 +1817,7 @@ fn validate_ir_program(exprs: &[deep::Expr], type_env: &IrTypeEnv, errors: &mut 
 /// `(app (var name) ...)` with the def's own name as the callee. Real
 /// recursive fns with a base case inside `if`/`match` (e.g. `fact n = if
 /// n <= 1 then 1 else mul(n, fact(n-1))`) are NOT flagged.
-fn detect_trivial_non_terminating_fns(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
+fn detect_trivial_non_terminating_fns(exprs: &[deep::Expr], errors: &mut DiagnosticSink<'_>) {
     // Collect each def's "terminal callees" — the top-level fn names
     // reached at every tail position of the body. `Some(set)` means
     // every tail is a call; the set is who's called. `None` means the
@@ -2128,13 +2200,13 @@ fn top_level_decl_items_with_modules(exprs: &[deep::Expr]) -> Vec<(Option<String
 /// re-opened name. Surf emits one module per file and reef strips
 /// wrappers before inference, so this only fires on hand-written `.dp`
 /// (the forge surface).
-fn detect_module_reopens(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
+fn detect_module_reopens(exprs: &[deep::Expr], errors: &mut DiagnosticSink<'_>) {
     fn walk(
         expr: &deep::Expr,
         prefix: Option<&str>,
         seen: &mut HashSet<String>,
         reported: &mut HashSet<String>,
-        errors: &mut Vec<CheckError>,
+        errors: &mut DiagnosticSink<'_>,
     ) {
         let deep::Expr::List(list, _) = expr else {
             return;
@@ -2226,7 +2298,7 @@ fn detect_module_reopens(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
 /// linker's own output is accepted). The linker also re-mangles every
 /// user source name, so user code inside a real package cannot smuggle
 /// a clean mangled name into linked output.
-fn detect_forged_linker_names(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
+fn detect_forged_linker_names(exprs: &[deep::Expr], errors: &mut DiagnosticSink<'_>) {
     if crate::opacity::linked_program() {
         return;
     }
@@ -2253,6 +2325,7 @@ fn infer_signature_metadata_with_context_and_headers(
     type_env: &HashMap<String, deep::Expr>,
     signature_context: &SignatureInferenceMetadata,
     type_headers: &TypeResolutionEnv,
+    errors: &mut DiagnosticSink<'_>,
 ) -> SignatureInferenceMetadata {
     let defsig_names = collect_defsig_names(exprs);
     let recursive_members = recursive_call_cycle_members(exprs);
@@ -2284,7 +2357,7 @@ fn infer_signature_metadata_with_context_and_headers(
             };
             let Some(checked_signature) = type_env
                 .get(name)
-                .and_then(|expr| type_from_deep_expr(expr, type_headers))
+                .and_then(|expr| type_from_deep_expr(expr, type_headers, errors))
             else {
                 continue;
             };
@@ -2321,6 +2394,7 @@ fn infer_signature_metadata_with_context_and_headers(
                         &available_signatures,
                         type_env,
                         type_headers,
+                        errors,
                     );
                 let display_type = if inferred_read_only {
                     Type::Ref(Box::new(checked_type.clone()))
@@ -2649,8 +2723,25 @@ pub(crate) fn param_has_consuming_use(
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
 ) -> bool {
+    crate::session::param_has_consuming_use(expr, param, available_signatures, type_env)
+}
+
+pub(crate) fn param_has_consuming_use_in_session(
+    expr: &deep::Expr,
+    param: &str,
+    available_signatures: &HashMap<String, Type>,
+    type_env: &HashMap<String, deep::Expr>,
+    errors: &mut DiagnosticSink<'_>,
+) -> bool {
     let headers = TypeResolutionEnv::from_registry(&AdtRegistry::new());
-    param_has_consuming_use_with_headers(expr, param, available_signatures, type_env, &headers)
+    param_has_consuming_use_with_headers(
+        expr,
+        param,
+        available_signatures,
+        type_env,
+        &headers,
+        errors,
+    )
 }
 
 fn param_has_consuming_use_with_headers(
@@ -2659,6 +2750,7 @@ fn param_has_consuming_use_with_headers(
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
     type_headers: &TypeResolutionEnv,
+    errors: &mut DiagnosticSink<'_>,
 ) -> bool {
     let mut bound = Vec::new();
     param_has_consuming_use_inner(
@@ -2668,6 +2760,7 @@ fn param_has_consuming_use_with_headers(
         available_signatures,
         type_env,
         type_headers,
+        errors,
     )
 }
 
@@ -2678,6 +2771,7 @@ fn param_has_consuming_use_inner(
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
     type_headers: &TypeResolutionEnv,
+    errors: &mut DiagnosticSink<'_>,
 ) -> bool {
     stack_guard!("param_has_consuming_use_inner", expr, false);
     match expr {
@@ -2690,6 +2784,7 @@ fn param_has_consuming_use_inner(
                 available_signatures,
                 type_env,
                 type_headers,
+                errors,
             )
         }),
         deep::Expr::MetaExpr(meta, _) => param_has_consuming_use_inner(
@@ -2699,6 +2794,7 @@ fn param_has_consuming_use_inner(
             available_signatures,
             type_env,
             type_headers,
+            errors,
         ),
         deep::Expr::List(list, _) => match get_tag(list) {
             Some("var") => var_name_list(list) == Some(param) && !is_bound_name(param, bound),
@@ -2710,6 +2806,7 @@ fn param_has_consuming_use_inner(
                     available_signatures,
                     type_env,
                     type_headers,
+                    errors,
                 )
             }),
             Some("drop") | Some("realize") => children(list)
@@ -2722,6 +2819,7 @@ fn param_has_consuming_use_inner(
                 available_signatures,
                 type_env,
                 type_headers,
+                errors,
             ),
             Some("pipe") => pipe_consumes_param(
                 list,
@@ -2730,6 +2828,7 @@ fn param_has_consuming_use_inner(
                 available_signatures,
                 type_env,
                 type_headers,
+                errors,
             ),
             Some("fn") => {
                 let kids = children(list);
@@ -2758,6 +2857,7 @@ fn param_has_consuming_use_inner(
                             available_signatures,
                             type_env,
                             type_headers,
+                            errors,
                         ) {
                             return true;
                         }
@@ -2775,6 +2875,7 @@ fn param_has_consuming_use_inner(
                     available_signatures,
                     type_env,
                     type_headers,
+                    errors,
                 );
                 bound.pop();
                 result
@@ -2803,6 +2904,7 @@ fn param_has_consuming_use_inner(
                         available_signatures,
                         type_env,
                         type_headers,
+                        errors,
                     ) || param_has_consuming_use_inner(
                         &arm_kids[2],
                         param,
@@ -2810,6 +2912,7 @@ fn param_has_consuming_use_inner(
                         available_signatures,
                         type_env,
                         type_headers,
+                        errors,
                     );
                     bound.pop();
                     if consumes {
@@ -2826,6 +2929,7 @@ fn param_has_consuming_use_inner(
                     available_signatures,
                     type_env,
                     type_headers,
+                    errors,
                 )
             }),
         },
@@ -2839,6 +2943,7 @@ fn param_nested_consuming_use(
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
     type_headers: &TypeResolutionEnv,
+    errors: &mut DiagnosticSink<'_>,
 ) -> bool {
     if is_direct_unshadowed_var(expr, param, bound) {
         return false;
@@ -2850,6 +2955,7 @@ fn param_nested_consuming_use(
         available_signatures,
         type_env,
         type_headers,
+        errors,
     )
 }
 
@@ -2860,6 +2966,7 @@ fn app_consumes_param(
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
     type_headers: &TypeResolutionEnv,
+    errors: &mut DiagnosticSink<'_>,
 ) -> bool {
     let kids = children(list);
     let callee = kids.first().and_then(var_name_expr);
@@ -2872,6 +2979,7 @@ fn app_consumes_param(
             available_signatures,
             type_env,
             type_headers,
+            errors,
         )
     {
         return true;
@@ -2883,7 +2991,14 @@ fn app_consumes_param(
             continue;
         }
         if is_direct_unshadowed_var(arg, param, bound) {
-            if callee_arg_is_borrowed(callee, index, available_signatures, type_env, type_headers) {
+            if callee_arg_is_borrowed(
+                callee,
+                index,
+                available_signatures,
+                type_env,
+                type_headers,
+                errors,
+            ) {
                 continue;
             }
             return true;
@@ -2895,6 +3010,7 @@ fn app_consumes_param(
             available_signatures,
             type_env,
             type_headers,
+            errors,
         ) {
             return true;
         }
@@ -2909,6 +3025,7 @@ fn pipe_consumes_param(
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
     type_headers: &TypeResolutionEnv,
+    errors: &mut DiagnosticSink<'_>,
 ) -> bool {
     let kids = children(list);
     if kids.is_empty() {
@@ -2933,6 +3050,7 @@ fn pipe_consumes_param(
                 available_signatures,
                 type_env,
                 type_headers,
+                errors,
             ) {
                 return true;
             }
@@ -2943,6 +3061,7 @@ fn pipe_consumes_param(
             available_signatures,
             type_env,
             type_headers,
+            errors,
         ) {
             return true;
         }
@@ -2957,6 +3076,7 @@ fn callee_arg_is_borrowed(
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
     type_headers: &TypeResolutionEnv,
+    errors: &mut DiagnosticSink<'_>,
 ) -> bool {
     let Some(callee) = callee else {
         return false;
@@ -2968,7 +3088,7 @@ fn callee_arg_is_borrowed(
     }
     if let Some(Type::Fn(args, _)) = type_env
         .get(callee)
-        .and_then(|expr| type_from_deep_expr(expr, type_headers))
+        .and_then(|expr| type_from_deep_expr(expr, type_headers, errors))
         && args.get(index).is_some_and(|ty| matches!(ty, Type::Ref(_)))
     {
         return true;
@@ -3021,15 +3141,18 @@ fn expr_mentions_unshadowed_name(
     }
 }
 
-fn type_from_deep_expr(expr: &deep::Expr, headers: &TypeResolutionEnv) -> Option<Type> {
+fn type_from_deep_expr(
+    expr: &deep::Expr,
+    headers: &TypeResolutionEnv,
+    errors: &mut DiagnosticSink<'_>,
+) -> Option<Type> {
     let mut vg = VarGen::default();
-    let mut errors = Vec::new();
     DeepTypeResolver::new(
         TypeUseSite::CompilerMetadata,
         BinderMode::TrustedCompilerMetadata,
         headers,
         &mut vg,
-        &mut errors,
+        errors,
     )
     .resolve(expr)
     .ok()
@@ -3137,7 +3260,7 @@ fn adt_carrier_set(adt_reg: &AdtRegistry) -> HashSet<String> {
 fn validate_deferred_borrow_vars(
     subst: &Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     let deferred = subst.take_deferred_borrow_vars();
     if deferred.is_empty() {
@@ -3195,7 +3318,7 @@ fn validate_deferred_borrow_vars(
 fn validate_deferred_opaque_uses(
     subst: &Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     let mut any_opaque_in_scope: Option<bool> = None;
     for (tv, use_kind) in subst.take_deferred_opaque_uses() {
@@ -3350,7 +3473,7 @@ fn is_bound_name(name: &str, bound: &[HashSet<String>]) -> bool {
 /// intermediate hops) is treated as a declaration of an external input, not as
 /// a cycle. Any cycle of length >= 2 (e.g. `a -> b -> a`, `a -> b -> c -> a`)
 /// is a real binding cycle and is reported as a `CycleDetected` error.
-fn detect_top_level_binding_cycles(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
+fn detect_top_level_binding_cycles(exprs: &[deep::Expr], errors: &mut DiagnosticSink<'_>) {
     let mut def_names: Vec<String> = Vec::new();
     let mut def_name_set: HashSet<String> = HashSet::new();
     let mut def_bodies: HashMap<String, &deep::Expr> = HashMap::new();
@@ -3504,7 +3627,7 @@ fn detect_top_level_binding_cycles(exprs: &[deep::Expr], errors: &mut Vec<CheckE
         value_stack: &mut Vec<String>,
         path: &mut Vec<String>,
         reported: &mut HashSet<Vec<String>>,
-        errors: &mut Vec<CheckError>,
+        errors: &mut DiagnosticSink<'_>,
     ) {
         color.insert(node.to_string(), Color::Gray);
         let this_is_value = is_value(node);
@@ -3754,7 +3877,10 @@ fn collect_eager_refs(
 /// ascriptions, defsig tensor types, parameter type annotations, literal
 /// type metadata, and any cast target that produces a tensor with an
 /// unsupported element precision.
-fn validate_tensor_precisions_in_program(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
+fn validate_tensor_precisions_in_program(
+    exprs: &[deep::Expr],
+    errors: &mut impl DiagnosticOutput,
+) {
     let mut seen: HashSet<(String, String)> = HashSet::new();
     // Descend through `(module {} name ...)` wrappers so per-def dedup
     // keeps each def's tensor types in their own key space (otherwise
@@ -3781,7 +3907,7 @@ fn validate_tensor_precisions_in_program(exprs: &[deep::Expr], errors: &mut Vec<
 
 fn walk_for_tensor_precision(
     expr: &deep::Expr,
-    errors: &mut Vec<CheckError>,
+    errors: &mut impl DiagnosticOutput,
     seen: &mut HashSet<(String, String)>,
     def_context: &str,
 ) {
@@ -3950,7 +4076,7 @@ fn walk_for_tensor_precision(
 fn validate_polymorphic_op_constraints(
     exprs: &[deep::Expr],
     type_env: &IrTypeEnv,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     let defs_with_bodies = collect_def_bodies(exprs);
     let defsigs = collect_defsig_exprs(exprs);
@@ -4143,7 +4269,7 @@ fn walk_for_poly_op_constraint_violations(
     defs: &DefBodyMap,
     type_env: &IrTypeEnv,
     scope: &HashMap<String, deep::Expr>,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     stack_guard!("walk_for_poly_op_constraint_violations", expr);
     match expr {
@@ -4181,7 +4307,7 @@ fn check_app_for_poly_op_constraint(
     defs: &DefBodyMap,
     type_env: &IrTypeEnv,
     scope: &HashMap<String, deep::Expr>,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     let kids = children(list);
     let Some(callee_expr) = kids.first() else {
@@ -4404,7 +4530,7 @@ fn walk_body_for_restricted_ops(
     subst: &HashMap<String, String>,
     callee_name: &str,
     call_site_list: &deep::List,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     stack_guard!("walk_body_for_restricted_ops", expr);
     if let deep::Expr::List(list, _) = expr
@@ -4505,7 +4631,7 @@ fn check_restricted_op_in_body(
     subst: &HashMap<String, String>,
     callee_name: &str,
     call_site_list: &deep::List,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     if !INTEGER_REJECTED_OPS.contains(&op_name)
         && !TRANSCENDENTAL_FLOAT_ONLY_OPS.contains(&op_name)
@@ -4645,7 +4771,7 @@ fn validate_ir_expr(
     type_env: &IrTypeEnv,
     static_env: &mut HashMap<String, StaticValue>,
     failed_let_names: &mut HashSet<String>,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> StaticValue {
     stack_guard!("validate_ir_expr", expr, StaticValue::Unknown);
     match expr {
@@ -4942,7 +5068,7 @@ fn validate_static_builtin_application(
     name: &str,
     args: &[StaticValue],
     expr: &deep::Expr,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> StaticValue {
     match name {
         "pad_sequences" => static_pad_sequences(args),
@@ -5001,7 +5127,7 @@ fn static_to_tensor(args: &[StaticValue]) -> StaticValue {
 fn static_concat(
     args: &[StaticValue],
     expr: &deep::Expr,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> StaticValue {
     let (Some(StaticValue::List(parts)), Some(StaticValue::Int(axis))) =
         (args.first(), args.get(1))
@@ -5061,7 +5187,7 @@ fn static_concat(
 fn static_split(
     args: &[StaticValue],
     expr: &deep::Expr,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> StaticValue {
     let (
         Some(StaticValue::Tensor(tensor)),
@@ -5101,7 +5227,7 @@ fn static_split(
 fn static_gather(
     args: &[StaticValue],
     expr: &deep::Expr,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> StaticValue {
     let (
         Some(StaticValue::Tensor(tensor)),
@@ -5135,7 +5261,7 @@ fn static_gather(
 fn static_scatter(
     args: &[StaticValue],
     expr: &deep::Expr,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> StaticValue {
     let (
         Some(StaticValue::Tensor(base)),
@@ -5210,7 +5336,7 @@ fn static_scatter(
 fn static_scatter_replace(
     args: &[StaticValue],
     expr: &deep::Expr,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> StaticValue {
     let (
         Some(StaticValue::Tensor(base)),
@@ -5272,7 +5398,7 @@ fn static_scatter_replace(
 fn static_clamp(
     args: &[StaticValue],
     expr: &deep::Expr,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> StaticValue {
     let (
         Some(StaticValue::Tensor(input)),
@@ -5298,7 +5424,7 @@ fn static_clamp(
 fn static_einsum(
     args: &[StaticValue],
     expr: &deep::Expr,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> StaticValue {
     let (
         Some(StaticValue::String(equation)),
@@ -5385,7 +5511,7 @@ fn resolve_axis_pair_member(
     tensor_ty: &Type,
     default: usize,
     list: &deep::List,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Result<usize, Type> {
     // Issue #216: use the cast-aware extractor so `cast(N, int32)`-wrapped
     // axis literals trip the infer-time bounds check instead of slipping
@@ -5438,7 +5564,7 @@ fn resolve_builtin_axis(
     axis_expr: Option<&deep::Expr>,
     tensor_ty: &Type,
     list: &deep::List,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Result<usize, Type> {
     // Issue #216: cast-aware extractor; see `resolve_axis_pair_member`.
     let raw_axis = axis_expr.and_then(extract_int_for_dim);
@@ -5498,7 +5624,7 @@ fn ravel_index(indices: &[usize], shape: &[usize]) -> usize {
     flat
 }
 
-fn push_static_runtime_error(expr: &deep::Expr, errors: &mut Vec<CheckError>, message: String) {
+fn push_static_runtime_error(expr: &deep::Expr, errors: &mut DiagnosticSink<'_>, message: String) {
     errors.push(CheckError::new(
         CheckErrorKind::Other,
         with_macro_provenance(expr, message),
@@ -5506,7 +5632,10 @@ fn push_static_runtime_error(expr: &deep::Expr, errors: &mut Vec<CheckError>, me
     ));
 }
 
-fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
+fn annotate_ir_program(
+    exprs: &[deep::Expr],
+    errors: &mut DiagnosticSink<'_>,
+) -> Vec<deep::Expr> {
     // Preserve historical behavior: build a fresh annotation state from
     // `builtin_env()` + an EMPTY ADT registry (no prelude registration).
     // This is asymmetric with `infer_ir_program_with_env` (which DOES
@@ -5520,12 +5649,7 @@ fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
     let mut subst = Subst::new();
     let mut adt_reg = AdtRegistry::new();
     builtins::register_prelude_adts(&mut env, &mut vg, &mut adt_reg);
-    let mut declaration_errors = Vec::new();
 
-    // Declared `defsig` parameter type expressions, visible to the
-    // `def` arm of `annotate_expr_with_scope` for the duration of this
-    // pass. Restored on drop.
-    let _declared_sig_guard = install_declared_sig_param_types(exprs);
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
 
     // Descend through `(module {} name ...)` wrappers when collecting
@@ -5542,9 +5666,11 @@ fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
         &mut vg,
         &mut subst,
         &mut adt_reg,
-        &mut declaration_errors,
+        errors,
     );
-    let defsig_type_binders = collect_defsig_type_binders(&items);
+    let declared_signatures =
+        collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
+    let annotation_context = AnnotationResolutionContext::root(&declared_signatures);
 
     let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
         .map(|v| v == "1")
@@ -5564,7 +5690,6 @@ fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
         // per-expr alternation (infer THIS decl, then annotate THIS
         // decl) that signature-inference forward-reference assertions
         // depend on. (closes #181)
-        let mut step_errors = Vec::new();
         let mut typed_nodes = 0;
         let mut total_nodes = 0;
         for decl in top_level_decl_items(std::slice::from_ref(expr)) {
@@ -5574,16 +5699,24 @@ fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
                 &mut vg,
                 &mut subst,
                 &adt_reg,
-                &mut step_errors,
+                errors,
                 &mut typed_nodes,
                 &mut total_nodes,
                 None,
                 &user_def_names,
-                &defsig_type_binders,
+                &declared_signatures,
             );
         }
 
-        let annotated_expr = annotate_expr_with_scope(expr, &env, &vg, &subst, &adt_reg);
+        let annotated_expr = annotate_expr_with_scope(
+            expr,
+            &env,
+            &vg,
+            &subst,
+            &adt_reg,
+            annotation_context,
+            errors,
+        );
         if let Some(t0) = t0 {
             let elapsed = t0.elapsed();
             let label = top_level_decl_name(expr)
@@ -5611,13 +5744,13 @@ fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
 /// during annotation and degrades their result types to inference holes.
 /// [`TypeEnv::empty`] contains the same builtin/prelude annotation state as
 /// [`annotate_ir_program`], so the monolithic path retains its metadata shape.
-fn annotate_ir_program_with_context(context: &TypeEnv, exprs: &[deep::Expr]) -> Vec<deep::Expr> {
+fn annotate_ir_program_with_context(
+    context: &TypeEnv,
+    exprs: &[deep::Expr],
+    errors: &mut DiagnosticSink<'_>,
+) -> Vec<deep::Expr> {
     let mut state = context.inner().clone();
-    let mut declaration_errors = Vec::new();
 
-    // Declared `defsig` parameter type expressions for the new-code
-    // exprs being annotated here. Restored on drop.
-    let _declared_sig_guard = install_declared_sig_param_types(exprs);
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
 
     // Descend through `(module {} name ...)` wrappers when collecting
@@ -5630,9 +5763,11 @@ fn annotate_ir_program_with_context(context: &TypeEnv, exprs: &[deep::Expr]) -> 
         &mut state.var_gen,
         &mut state.subst,
         &mut state.adt_reg,
-        &mut declaration_errors,
+        errors,
     );
-    let defsig_type_binders = collect_defsig_type_binders(&items);
+    let declared_signatures =
+        collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
+    let annotation_context = AnnotationResolutionContext::root(&declared_signatures);
 
     let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
         .map(|v| v == "1")
@@ -5648,7 +5783,6 @@ fn annotate_ir_program_with_context(context: &TypeEnv, exprs: &[deep::Expr]) -> 
         // every inner decl of a module wrapper before annotating, so
         // user-declared ADT constructors and defsigs are visible at
         // annotation time; preserve per-expr alternation otherwise.
-        let mut step_errors = Vec::new();
         let mut typed_nodes = 0;
         let mut total_nodes = 0;
         for decl in top_level_decl_items(std::slice::from_ref(expr)) {
@@ -5658,12 +5792,12 @@ fn annotate_ir_program_with_context(context: &TypeEnv, exprs: &[deep::Expr]) -> 
                 &mut state.var_gen,
                 &mut state.subst,
                 &state.adt_reg,
-                &mut step_errors,
+                errors,
                 &mut typed_nodes,
                 &mut total_nodes,
                 None,
                 &user_def_names,
-                &defsig_type_binders,
+                &declared_signatures,
             );
         }
 
@@ -5673,6 +5807,8 @@ fn annotate_ir_program_with_context(context: &TypeEnv, exprs: &[deep::Expr]) -> 
             &state.var_gen,
             &state.subst,
             &state.adt_reg,
+            annotation_context,
+            errors,
         );
         if let Some(t0) = t0 {
             let elapsed = t0.elapsed();
@@ -5711,6 +5847,8 @@ fn annotate_expr_with_scope(
     vg: &VarGen,
     subst: &Subst,
     adt_reg: &AdtRegistry,
+    annotation_context: AnnotationResolutionContext<'_>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> deep::Expr {
     // Bail value is the identity (unannotated) expr: annotation is a
     // best-effort pass and the entry boundary fails the check anyway.
@@ -5725,7 +5863,15 @@ fn annotate_expr_with_scope(
                     .map(|(key, value)| {
                         (
                             key.clone(),
-                            annotate_expr_with_scope(value, env, vg, subst, adt_reg),
+                            annotate_expr_with_scope(
+                                value,
+                                env,
+                                vg,
+                                subst,
+                                adt_reg,
+                                annotation_context,
+                                errors,
+                            ),
                         )
                     })
                     .collect(),
@@ -5735,7 +5881,13 @@ fn annotate_expr_with_scope(
         deep::Expr::MetaExpr(meta, span) => deep::Expr::MetaExpr(
             deep::MetaExpr {
                 expr: Box::new(annotate_expr_with_scope(
-                    &meta.expr, env, vg, subst, adt_reg,
+                    &meta.expr,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    annotation_context,
+                    errors,
                 )),
                 entries: meta
                     .entries
@@ -5743,7 +5895,15 @@ fn annotate_expr_with_scope(
                     .map(|(key, value)| {
                         (
                             key.clone(),
-                            annotate_expr_with_scope(value, env, vg, subst, adt_reg),
+                            annotate_expr_with_scope(
+                                value,
+                                env,
+                                vg,
+                                subst,
+                                adt_reg,
+                                annotation_context,
+                                errors,
+                            ),
                         )
                     })
                     .collect(),
@@ -5758,7 +5918,15 @@ fn annotate_expr_with_scope(
                             .elements
                             .iter()
                             .map(|element| {
-                                annotate_expr_with_scope(element, env, vg, subst, adt_reg)
+                                annotate_expr_with_scope(
+                                    element,
+                                    env,
+                                    vg,
+                                    subst,
+                                    adt_reg,
+                                    annotation_context,
+                                    errors,
+                                )
                             })
                             .collect(),
                     },
@@ -5767,31 +5935,40 @@ fn annotate_expr_with_scope(
             }
 
             let tag = get_tag(list);
-            let declared_sig = if tag == Some("def") {
-                children(list)
-                    .first()
-                    .and_then(symbol_name)
-                    .and_then(|name| {
-                        DECLARED_SIG_PARAM_TYPES.with(|cell| cell.borrow().get(name).cloned())
-                    })
-            } else {
-                None
-            };
-            // Keep the defsig binder scope live for both child annotation and
-            // the outer node's metadata re-inference below.
-            let _def_type_binder_guard = (tag == Some("def")).then(|| {
-                install_current_type_binders(
-                    declared_sig.as_ref().map(|metadata| &metadata.binders),
-                )
+            let def_name = (tag == Some("def"))
+                .then(|| children(list).first().and_then(symbol_name))
+                .flatten();
+            let annotation_context = def_name
+                .map(|name| annotation_context.for_def(name))
+                .unwrap_or(annotation_context);
+            let declared_sig =
+                def_name.and_then(|name| annotation_context.declared_signature(name));
+            // The annotation pass re-infers nodes to stamp metadata. Give that
+            // inference the same lexical binder scope via a declaration-local
+            // Env clone; sibling defs continue to receive closed input.
+            let scoped_env = (tag == Some("def")).then(|| {
+                let mut scoped = env.clone();
+                scoped.set_type_resolution_binders(annotation_context.current_type_binders);
+                scoped
             });
+            let env = scoped_env.as_ref().unwrap_or(env);
             let (annotated_children, fn_ty_override) = match tag {
                 Some("fn") => {
-                    let (kids, fn_ty) = annotate_fn_children(list, env, vg, subst, adt_reg, None);
+                    let (kids, fn_ty) = annotate_fn_children(
+                        list,
+                        env,
+                        vg,
+                        subst,
+                        adt_reg,
+                        None,
+                        annotation_context,
+                        errors,
+                    );
                     (kids, Some(fn_ty))
                 }
                 // `(def name (fn ...))`: when the def has a separate
                 // `defsig`, its declared parameter type expressions
-                // (captured verbatim in `DECLARED_SIG_PARAM_TYPES`)
+                // (captured verbatim in `annotation_context`)
                 // preserve `&` borrow wrappers that neither the bare
                 // `fn` literal nor the inferred function type carry.
                 // Stamp those onto the def's `(params ...)` node so a
@@ -5809,7 +5986,8 @@ fn annotate_expr_with_scope(
                     // `tensor[n, ...]` ascription fails closed only during
                     // annotation and silently degrades the stamped function
                     // return type to an error placeholder.
-                    let declared_param_types = declared_sig.map(|metadata| metadata.param_types);
+                    let declared_param_types =
+                        declared_sig.map(|metadata| metadata.param_types.as_slice());
                     let annotated: Vec<deep::Expr> = kids
                         .iter()
                         .map(|child| {
@@ -5824,6 +6002,8 @@ fn annotate_expr_with_scope(
                                     subst,
                                     adt_reg,
                                     Some(declared),
+                                    annotation_context,
+                                    errors,
                                 );
                                 let mut elements = vec![
                                     fn_list.elements[0].clone(),
@@ -5835,23 +6015,64 @@ fn annotate_expr_with_scope(
                                         subst,
                                         adt_reg,
                                         Some(fn_ty),
+                                        errors,
                                     ),
                                 ];
                                 elements.extend(fn_kids);
                                 deep::Expr::List(deep::List { elements }, *fn_span)
                             } else {
-                                annotate_expr_with_scope(child, env, vg, subst, adt_reg)
+                                annotate_expr_with_scope(
+                                    child,
+                                    env,
+                                    vg,
+                                    subst,
+                                    adt_reg,
+                                    annotation_context,
+                                    errors,
+                                )
                             }
                         })
                         .collect();
                     (annotated, None)
                 }
-                Some("let") => (annotate_let_children(list, env, vg, subst, adt_reg), None),
-                Some("match") => (annotate_match_children(list, env, vg, subst, adt_reg), None),
+                Some("let") => (
+                    annotate_let_children(
+                        list,
+                        env,
+                        vg,
+                        subst,
+                        adt_reg,
+                        annotation_context,
+                        errors,
+                    ),
+                    None,
+                ),
+                Some("match") => (
+                    annotate_match_children(
+                        list,
+                        env,
+                        vg,
+                        subst,
+                        adt_reg,
+                        annotation_context,
+                        errors,
+                    ),
+                    None,
+                ),
                 _ => (
                     children(list)
                         .iter()
-                        .map(|child| annotate_expr_with_scope(child, env, vg, subst, adt_reg))
+                        .map(|child| {
+                            annotate_expr_with_scope(
+                                child,
+                                env,
+                                vg,
+                                subst,
+                                adt_reg,
+                                annotation_context,
+                                errors,
+                            )
+                        })
                         .collect(),
                     None,
                 ),
@@ -5867,6 +6088,7 @@ fn annotate_expr_with_scope(
                     subst,
                     adt_reg,
                     fn_ty_override,
+                    errors,
                 ),
             ];
             elements.extend(annotated_children);
@@ -5965,6 +6187,8 @@ fn annotate_fn_children(
     subst: &Subst,
     adt_reg: &AdtRegistry,
     declared_param_type_exprs: Option<&[deep::Expr]>,
+    annotation_context: AnnotationResolutionContext<'_>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> (Vec<deep::Expr>, Type) {
     let kids = children(list);
     if kids.is_empty() {
@@ -5977,6 +6201,7 @@ fn annotate_fn_children(
         vg,
         subst,
         adt_reg,
+        errors,
     );
     let resolved_fn_ty = subst.apply(&fn_ty);
     let param_types = match &resolved_fn_ty {
@@ -5985,12 +6210,12 @@ fn annotate_fn_children(
     };
 
     let mut param_vg = vg.clone();
-    let mut annotation_resolution_errors = Vec::new();
     let raw_params = extract_params(
         &kids[0],
         &mut param_vg,
         adt_reg,
-        &mut annotation_resolution_errors,
+        errors,
+        annotation_context.binder_mode(),
     );
     // issue #319: when the def carries a separate `sig`, the `fn`
     // literal's params are bare symbols, so the inference above seeds
@@ -6047,11 +6272,11 @@ fn annotate_fn_children(
     let declared_param_types: Vec<Option<Type>> = match declared_param_type_exprs {
         Some(declared) => {
             let mut resolver = DeepTypeResolver::new(
-                TypeUseSite::CompilerMetadata,
-                BinderMode::TrustedCompilerMetadata,
+                TypeUseSite::Annotation,
+                annotation_context.binder_mode(),
                 adt_reg.resolution_env(),
                 &mut param_vg,
-                &mut annotation_resolution_errors,
+                errors,
             );
             declared
                 .iter()
@@ -6100,6 +6325,8 @@ fn annotate_fn_children(
         vg,
         subst,
         adt_reg,
+        annotation_context,
+        errors,
     )];
     if let Some(body) = kids.get(1) {
         // chelis#773: mint body-annotation vars from the advanced
@@ -6113,7 +6340,13 @@ fn annotate_fn_children(
             vg
         };
         result.push(annotate_expr_with_scope(
-            body, &fn_env, body_vg, subst, adt_reg,
+            body,
+            &fn_env,
+            body_vg,
+            subst,
+            adt_reg,
+            annotation_context,
+            errors,
         ));
     }
     (result, resolved_fn_ty)
@@ -6125,6 +6358,8 @@ fn annotate_let_children(
     vg: &VarGen,
     subst: &Subst,
     adt_reg: &AdtRegistry,
+    annotation_context: AnnotationResolutionContext<'_>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Vec<deep::Expr> {
     let kids = children(list);
     if kids.len() < 2 {
@@ -6138,8 +6373,17 @@ fn annotate_let_children(
         let mut i = 0;
         while i + 1 < bind_kids.len() {
             bind_elements.push(bind_kids[i].clone());
-            let value = annotate_expr_with_scope(&bind_kids[i + 1], &let_env, vg, subst, adt_reg);
-            let value_ty = infer_expr_in_scope(&bind_kids[i + 1], &let_env, vg, subst, adt_reg);
+            let value = annotate_expr_with_scope(
+                &bind_kids[i + 1],
+                &let_env,
+                vg,
+                subst,
+                adt_reg,
+                annotation_context,
+                errors,
+            );
+            let value_ty =
+                infer_expr_in_scope(&bind_kids[i + 1], &let_env, vg, subst, adt_reg, errors);
             if let Some(name) = symbol_name(&bind_kids[i]) {
                 // chelis#631: the annotation pass stamps each node's type
                 // through its own env walk (it does not share infer_let's
@@ -6159,12 +6403,28 @@ fn annotate_let_children(
             *bind_span,
         )
     } else {
-        annotate_expr_with_scope(&kids[0], env, vg, subst, adt_reg)
+        annotate_expr_with_scope(
+            &kids[0],
+            env,
+            vg,
+            subst,
+            adt_reg,
+            annotation_context,
+            errors,
+        )
     };
 
     vec![
         annotated_bind,
-        annotate_expr_with_scope(&kids[1], &let_env, vg, subst, adt_reg),
+        annotate_expr_with_scope(
+            &kids[1],
+            &let_env,
+            vg,
+            subst,
+            adt_reg,
+            annotation_context,
+            errors,
+        ),
     ]
 }
 
@@ -6174,14 +6434,24 @@ fn annotate_match_children(
     vg: &VarGen,
     subst: &Subst,
     adt_reg: &AdtRegistry,
+    annotation_context: AnnotationResolutionContext<'_>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Vec<deep::Expr> {
     let kids = children(list);
     if kids.is_empty() {
         return vec![];
     }
 
-    let scrutinee = annotate_expr_with_scope(&kids[0], env, vg, subst, adt_reg);
-    let scrutinee_ty = infer_expr_in_scope(&kids[0], env, vg, subst, adt_reg);
+    let scrutinee = annotate_expr_with_scope(
+        &kids[0],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        annotation_context,
+        errors,
+    );
+    let scrutinee_ty = infer_expr_in_scope(&kids[0], env, vg, subst, adt_reg, errors);
     let mut result = vec![scrutinee];
 
     for arm in &kids[1..] {
@@ -6206,7 +6476,6 @@ fn annotate_match_children(
             // in the caller, not here.
             let mut pattern_vg = vg.clone();
             let mut pattern_subst = subst.clone();
-            let mut pattern_errors = Vec::new();
             let mut covered = Vec::new();
             let mut wildcard = false;
             if let Some(pattern) = arm_kids.first() {
@@ -6217,7 +6486,7 @@ fn annotate_match_children(
                     &mut pattern_vg,
                     &mut pattern_subst,
                     adt_reg,
-                    &mut pattern_errors,
+                    errors,
                     &mut covered,
                     &mut wildcard,
                 );
@@ -6232,23 +6501,53 @@ fn annotate_match_children(
                 // this, a destructured tensor field's `&x` borrow
                 // fails the linearity check because `expr_type` can't
                 // resolve the binding's type. (closes #181)
-                let annotated_pattern = annotate_expr_with_scope(pattern, env, vg, subst, adt_reg);
+                let annotated_pattern = annotate_expr_with_scope(
+                    pattern,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    annotation_context,
+                    errors,
+                );
                 let annotated_pattern =
                     stamp_pattern_binding_types(&annotated_pattern, &arm_env, &pattern_subst);
                 elements.push(annotated_pattern);
             }
             if let Some(guard) = arm_kids.get(1) {
                 elements.push(annotate_expr_with_scope(
-                    guard, &arm_env, vg, subst, adt_reg,
+                    guard,
+                    &arm_env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    annotation_context,
+                    errors,
                 ));
             }
             if let Some(body) = arm_kids.get(2) {
-                elements.push(annotate_expr_with_scope(body, &arm_env, vg, subst, adt_reg));
+                elements.push(annotate_expr_with_scope(
+                    body,
+                    &arm_env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    annotation_context,
+                    errors,
+                ));
             }
             result.push(deep::Expr::List(deep::List { elements }, *arm_span));
             continue;
         }
-        result.push(annotate_expr_with_scope(arm, env, vg, subst, adt_reg));
+        result.push(annotate_expr_with_scope(
+            arm,
+            env,
+            vg,
+            subst,
+            adt_reg,
+            annotation_context,
+            errors,
+        ));
     }
 
     result
@@ -6361,6 +6660,7 @@ fn annotated_meta_map_with_override(
     subst: &Subst,
     adt_reg: &AdtRegistry,
     precomputed_ty: Option<Type>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> deep::Expr {
     let meta_span = match list.elements.get(1) {
         Some(deep::Expr::Map(_, span)) => *span,
@@ -6374,7 +6674,7 @@ fn annotated_meta_map_with_override(
         match (tag, precomputed_ty) {
             ("fn", Some(ty)) => Some(ty),
             (t, _) if should_attach_type_metadata(t) => {
-                Some(infer_expr_in_scope(expr, env, vg, subst, adt_reg))
+                Some(infer_expr_in_scope(expr, env, vg, subst, adt_reg, errors))
             }
             _ => None,
         }
@@ -6402,11 +6702,11 @@ fn infer_expr_in_scope(
     vg: &VarGen,
     _subst: &Subst,
     adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     let mut env = env.clone();
     let mut vg = vg.clone();
     let mut subst = Subst::new();
-    let mut errors = Vec::new();
     let mut typed_nodes = 0;
     let mut total_nodes = 0;
     let ty = infer_expr(
@@ -6415,7 +6715,7 @@ fn infer_expr_in_scope(
         &mut vg,
         &mut subst,
         adt_reg,
-        &mut errors,
+        errors,
         &mut typed_nodes,
         &mut total_nodes,
     );
@@ -6789,7 +7089,7 @@ fn validate_ir_builtin_symbolic_requirements(
     func_name: &str,
     type_env: &IrTypeEnv,
     failed_let_names: &HashSet<String>,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     match func_name {
         "conv2d" => validate_conv2d_symbolic_requirements(list, type_env, failed_let_names, errors),
@@ -6933,7 +7233,7 @@ fn validate_conv2d_symbolic_requirements(
     list: &deep::List,
     type_env: &IrTypeEnv,
     failed_let_names: &HashSet<String>,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     // The inference pass owns builtin arity diagnostics. This validator only
     // owns the symbolic requirements of the canonical 4-argument call:
@@ -7440,7 +7740,7 @@ fn extract_typed_scalar_literal(
     list: &deep::List,
     idx: usize,
     label: &str,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Option<i64> {
     let Some(arg) = list.elements.get(idx) else {
         // Arity mismatch is caught elsewhere; bail without piling on.
@@ -7679,7 +7979,7 @@ fn malformed_form(
     list: &deep::List,
     tag: &str,
     expected: &str,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     let found = children(list).len();
     report(
@@ -7725,7 +8025,7 @@ fn propagate_if_error<'a>(tys: impl IntoIterator<Item = &'a Type>) -> Option<Typ
 /// prose description ("at least 2 arguments", "3 or 4 arguments") since these
 /// guards range over exact and minimum arities.
 fn report_builtin_arity_bare(
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     builtin: &str,
     expected: &str,
     got: usize,
@@ -7744,7 +8044,7 @@ fn report_builtin_arity_bare(
 }
 
 fn report_builtin_arity(
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     list: &deep::List,
     builtin: &str,
     expected: usize,
@@ -8377,7 +8677,7 @@ fn resolve_deep_type(
     adt_reg: &AdtRegistry,
     use_site: TypeUseSite,
     binder_mode: BinderMode<'_>,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Result<Type, ErrorWitness> {
     let mut resolver =
         DeepTypeResolver::new(use_site, binder_mode, adt_reg.resolution_env(), vg, errors);
@@ -8413,7 +8713,7 @@ fn collect_all_declarations(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &mut AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     // chelis#258 (main): duplicate-def / builtin-shadowing rejection runs
     // over the bare item list. Our `items` is paired with module keys, so
@@ -8488,32 +8788,6 @@ fn precollect_type_resolution_env(
         }
     }
     headers
-}
-
-/// Binder names introduced by each `defsig`. The Deep signature grammar uses
-/// implicit quantification, so every named `t-var`, `d-var`, and `d-rank`
-/// inside the signature is an actual binder for nested annotations in the
-/// matching def body.
-fn collect_defsig_type_binders(
-    items: &[(Option<String>, &deep::Expr)],
-) -> HashMap<String, HashSet<String>> {
-    let mut by_def = HashMap::new();
-    for (_, expr) in items {
-        let deep::Expr::List(list, _) = expr else {
-            continue;
-        };
-        if get_tag(list) != Some("defsig") {
-            continue;
-        }
-        let kids = children(list);
-        let (Some(name), Some(type_expr)) = (kids.first().and_then(symbol_name), kids.get(1))
-        else {
-            continue;
-        };
-        let names = deep_type_binder_names(type_expr);
-        by_def.entry(name.to_string()).or_insert(names);
-    }
-    by_def
 }
 
 /// Build the program-shape opacity metadata (RFC D-CHECK) from the
@@ -8656,7 +8930,7 @@ fn build_opacity_meta(
 /// on its own a duplicate definition. `items` is already flattened past
 /// `module` wrappers, and the prelude lives in the builtin env rather than as
 /// `def` nodes here, so only genuine in-program user redefinitions match.
-fn report_duplicate_defs(items: &[&deep::Expr], errors: &mut Vec<CheckError>) {
+fn report_duplicate_defs(items: &[&deep::Expr], errors: &mut DiagnosticSink<'_>) {
     let mut seen: HashSet<&str> = HashSet::new();
     for expr in items {
         let deep::Expr::List(list, _) = expr else {
@@ -8687,7 +8961,7 @@ fn report_duplicate_defs(items: &[&deep::Expr], errors: &mut Vec<CheckError>) {
 /// `defsig`s for a name otherwise feed several last-write-wins maps
 /// (`collect_declarations`, declared-param-type collection, signature metadata)
 /// and make the enforced signature order-dependent.
-fn report_duplicate_defsigs(items: &[&deep::Expr], errors: &mut Vec<CheckError>) {
+fn report_duplicate_defsigs(items: &[&deep::Expr], errors: &mut DiagnosticSink<'_>) {
     let mut seen: HashSet<&str> = HashSet::new();
     for expr in items {
         let deep::Expr::List(list, _) = expr else {
@@ -8737,7 +9011,7 @@ fn report_duplicate_defsigs(items: &[&deep::Expr], errors: &mut Vec<CheckError>)
 ///
 /// An inline-annotated `def` desugars to a `defsig` AND a `def` with the
 /// same name; report once per name, as the `def` (what the user wrote).
-fn report_builtin_shadowing(items: &[&deep::Expr], errors: &mut Vec<CheckError>) {
+fn report_builtin_shadowing(items: &[&deep::Expr], errors: &mut DiagnosticSink<'_>) {
     let decl_name = |expr: &deep::Expr, tag: &str| -> Option<String> {
         let deep::Expr::List(list, _) = expr else {
             return None;
@@ -8796,7 +9070,7 @@ fn collect_declarations(
     subst: &mut Subst,
     adt_reg: &mut AdtRegistry,
     headers: &TypeResolutionEnv,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     phase: DeclPhase,
 ) {
     let list = match expr {
@@ -8997,7 +9271,7 @@ fn check_rank_body_discipline(
     def_name: &str,
     expr: &deep::Expr,
     user_def_names: &HashSet<String>,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     stack_guard!("check_rank_body_discipline", expr);
     let deep::Expr::List(list, _) = expr else {
@@ -9115,12 +9389,12 @@ fn infer_top_level(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
     prebound_type_failure: Option<&ErrorWitness>,
     user_def_names: &HashSet<String>,
-    defsig_type_binders: &HashMap<String, HashSet<String>>,
+    declared_signatures: &HashMap<String, DeclaredSigMetadata>,
 ) {
     let list = match expr {
         deep::Expr::List(list, _) => list,
@@ -9144,13 +9418,22 @@ fn infer_top_level(
             Some(n) => n.to_string(),
             None => return,
         };
-        let _type_binder_guard = install_current_type_binders(defsig_type_binders.get(&name));
 
         // Save declared type from defsig BEFORE inferring (it may get overwritten)
         let declared_ty = env.lookup(&name).map(|s| {
             let s = s.clone();
             env.instantiate(&s, vg)
         });
+        // A declaration's signature owns the only named binders legal in its
+        // nested source annotations. Infer against a lexical clone so the
+        // scope follows nested env clones but cannot leak to the next `def`
+        // or into the reusable top-level environment.
+        let mut body_env = env.clone();
+        body_env.set_type_resolution_binders(
+            declared_signatures
+                .get(&name)
+                .map(|metadata| &metadata.binders),
+        );
 
         let errors_before_body = errors.len();
         // WS-A7: when the body is a bare-arg `(fn (params) body)` and the
@@ -9177,7 +9460,7 @@ fn infer_top_level(
             infer_def_body_with_sig(
                 &kids[1],
                 decl_ty,
-                env,
+                &mut body_env,
                 vg,
                 subst,
                 adt_reg,
@@ -9188,7 +9471,7 @@ fn infer_top_level(
         } else {
             infer_expr(
                 &kids[1],
-                env,
+                &mut body_env,
                 vg,
                 subst,
                 adt_reg,
@@ -9206,8 +9489,8 @@ fn infer_top_level(
         // F1 detector double-reports on legitimate code that exercises
         // type-checker gaps (record construction, region effects) which
         // the permissive unify rule was implicitly tolerating.
-        let body_has_unbound_diagnostic = errors[errors_before_body..]
-            .iter()
+        let body_has_unbound_diagnostic = errors
+            .iter_from(errors_before_body)
             .any(|e| matches!(e.kind, CheckErrorKind::UnboundVariable));
 
         // Enforce defsig: body must match declared signature.
@@ -9438,6 +9721,15 @@ enum OwnedTypeMetadataResolution {
     Failed(ErrorWitness),
 }
 
+/// Named type/dimension/rank variables in source annotations are closed by
+/// default. Only the lexical environment cloned for a matching `defsig` body
+/// exposes an explicit binder set.
+fn annotation_binder_mode(env: &Env) -> BinderMode<'_> {
+    env.type_resolution_binders()
+        .map(BinderMode::Explicit)
+        .unwrap_or(BinderMode::ClosedInput)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn infer_expr(
     expr: &deep::Expr,
@@ -9445,7 +9737,7 @@ fn infer_expr(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -9469,7 +9761,7 @@ fn infer_expr_with_type_metadata_ownership(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
     type_metadata_resolution: Option<&mut Option<OwnedTypeMetadataResolution>>,
@@ -9495,7 +9787,14 @@ fn infer_expr_with_type_metadata_ownership(
             let tag = get_tag(list);
             match tag {
                 Some("var") => infer_var(list, env, vg, subst, adt_reg, errors),
-                Some("lit") => infer_lit(list, vg, adt_reg, errors, type_metadata_resolution),
+                Some("lit") => infer_lit(
+                    list,
+                    env,
+                    vg,
+                    adt_reg,
+                    errors,
+                    type_metadata_resolution,
+                ),
                 Some("app") => infer_app(
                     list,
                     env,
@@ -9909,7 +10208,7 @@ fn infer_handle_effect(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -10123,7 +10422,7 @@ fn infer_var(
     vg: &mut VarGen,
     subst: &Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     let kids = children(list);
     if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
@@ -10194,9 +10493,10 @@ fn infer_var(
 
 fn infer_lit(
     list: &deep::List,
+    env: &Env,
     vg: &mut VarGen,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     mut type_metadata_resolution: Option<&mut Option<OwnedTypeMetadataResolution>>,
 ) -> Type {
     let meta = get_meta(list);
@@ -10301,17 +10601,12 @@ fn infer_lit(
     if let Some(meta) = meta {
         for (key, val) in &meta.entries {
             if key == "type" {
-                let enclosing_binders = current_type_binders();
-                let binder_mode = enclosing_binders
-                    .as_ref()
-                    .map(BinderMode::Explicit)
-                    .unwrap_or(BinderMode::ClosedInput);
                 let resolved = match resolve_deep_type(
                     val,
                     vg,
                     adt_reg,
                     TypeUseSite::Annotation,
-                    binder_mode,
+                    annotation_binder_mode(env),
                     errors,
                 ) {
                     Ok(ty) => ty,
@@ -10395,7 +10690,7 @@ fn infer_app(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -12740,7 +13035,7 @@ fn infer_app(
                                                 .iter()
                                                 .map(|elem| {
                                                     match subst.apply(&infer_expr_in_scope(
-                                                        elem, env, vg, subst, adt_reg,
+                                                        elem, env, vg, subst, adt_reg, errors,
                                                     )) {
                                                         Type::Tensor(dims, _) => dims,
                                                         _ => Vec::new(),
@@ -14438,7 +14733,7 @@ fn infer_reduction_app(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -14515,7 +14810,7 @@ fn infer_expand_app(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -14642,7 +14937,7 @@ fn infer_permute_app(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -14802,7 +15097,7 @@ fn infer_reshape_app(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -14937,7 +15232,7 @@ fn infer_shrink_app(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -15159,7 +15454,7 @@ fn infer_stride_app(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -15347,7 +15642,7 @@ fn infer_pad_app(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -15582,7 +15877,7 @@ fn infer_reduce_window_app(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -16354,7 +16649,7 @@ fn check_layer_norm_signature(
     result_ty: &Type,
     _vg: &mut VarGen,
     subst: &mut Subst,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     if arg_tys.len() != 3 {
         return report_builtin_arity_bare(errors, "layer_norm", "3 arguments", arg_tys.len());
@@ -16540,7 +16835,7 @@ fn check_conv2d_signature(
     result_ty: &Type,
     vg: &mut VarGen,
     subst: &mut Subst,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     if arg_tys.len() < 2 {
         return report_builtin_arity_bare(errors, "conv2d", "at least 2 arguments", arg_tys.len());
@@ -16692,7 +16987,7 @@ fn check_matmul_signature(
     arg_tys: &[Type],
     result_ty: &Type,
     subst: &mut Subst,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     if arg_tys.len() != 2 {
         return report_builtin_arity_bare(errors, "matmul", "2 arguments", arg_tys.len());
@@ -16842,7 +17137,7 @@ fn check_reduction_signature(
     arg_tys: &[Type],
     result_ty: &Type,
     subst: &mut Subst,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     if arg_tys.len() < 2 {
         return report_builtin_arity_bare(errors, name, "at least 2 arguments", arg_tys.len());
@@ -17132,7 +17427,7 @@ fn check_expand_signature(
     size_class: SizeClass,
     env: &Env,
     subst: &mut Subst,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     if arg_tys.len() != 3 && arg_tys.len() != 4 {
         return report_builtin_arity_bare(errors, "expand", "3 or 4 arguments", arg_tys.len());
@@ -17405,7 +17700,7 @@ fn check_named_expand_signature(
     input_prec: TensorPrec,
     result_ty: &Type,
     subst: &mut Subst,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     // The inserted name must not collide with an existing named axis: a
     // duplicate dim name would make every later by-name lookup (reduction,
@@ -18086,7 +18381,7 @@ fn describe_axis_arg(axis_expr: Option<&deep::Expr>) -> String {
 fn check_declared_dvars_rigid(
     declared_dvars: &[DimVar],
     subst: &Subst,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     // First resolved dim seen -> the declared dvar that produced it.
     // A second declared dvar resolving to the same dim is a collapse.
@@ -18179,7 +18474,7 @@ fn check_return_only_dvars_rigid(
     decl_ty: &Type,
     param_dvars: &[DimVar],
     subst: &Subst,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     let Type::Fn(decl_params, decl_ret) = decl_ty else {
         return;
@@ -18276,7 +18571,7 @@ fn check_return_only_dvars_rigid(
 fn check_list_elem_rigid_dim_vs_wildcard(
     decl_ty: &Type,
     body_ty: &Type,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     match (decl_ty, body_ty) {
         // Descend through the function type to its return position.
@@ -18340,7 +18635,7 @@ fn infer_fn(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -18351,7 +18646,13 @@ fn infer_fn(
 
     // kids[0] = (params {} x1 ... xn)
     // kids[1] = body
-    let params = extract_params(&kids[0], vg, adt_reg, errors);
+    let params = extract_params(
+        &kids[0],
+        vg,
+        adt_reg,
+        errors,
+        annotation_binder_mode(env),
+    );
     let mut param_types = Vec::new();
     let mut fn_env = env.clone();
 
@@ -18427,7 +18728,7 @@ fn infer_def_body_with_sig(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -18467,7 +18768,13 @@ fn infer_def_body_with_sig(
     if kids.len() < 2 {
         return malformed_form(fn_list, "fn", "parameters and a body", errors);
     }
-    let params = extract_params(&kids[0], vg, adt_reg, errors);
+    let params = extract_params(
+        &kids[0],
+        vg,
+        adt_reg,
+        errors,
+        annotation_binder_mode(env),
+    );
     if params.len() != decl_args.len() {
         // Arity mismatch between params and sig: fall back so the post-body
         // unify produces a clear ArityMismatch diagnostic.
@@ -18533,7 +18840,8 @@ fn extract_params(
     expr: &deep::Expr,
     vg: &mut VarGen,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
+    binder_mode: BinderMode<'_>,
 ) -> Vec<(String, Option<Type>)> {
     let deep::Expr::List(list, _) = expr else {
         return vec![];
@@ -18545,7 +18853,7 @@ fn extract_params(
     };
     let mut resolver = DeepTypeResolver::new(
         TypeUseSite::Annotation,
-        BinderMode::ImplicitGeneric,
+        binder_mode,
         adt_reg.resolution_env(),
         vg,
         errors,
@@ -18603,7 +18911,7 @@ fn infer_let(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -18653,11 +18961,6 @@ fn infer_let(
                         .find(|(k, _)| k == "type")
                         .map(|(_, v)| v)
                 {
-                    let enclosing_binders = current_type_binders();
-                    let binder_mode = enclosing_binders
-                        .as_ref()
-                        .map(BinderMode::Explicit)
-                        .unwrap_or(BinderMode::ClosedInput);
                     let declared_ty = match &rhs_type_metadata_resolution {
                         // A root metadata-aware RHS consumer records the exact
                         // result it owns. Reuse that result here so the same
@@ -18672,7 +18975,7 @@ fn infer_let(
                             vg,
                             adt_reg,
                             TypeUseSite::Annotation,
-                            binder_mode,
+                            annotation_binder_mode(&let_env),
                             errors,
                         ) {
                             Ok(ty) => ty,
@@ -18761,7 +19064,7 @@ fn infer_if(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -18842,7 +19145,7 @@ fn infer_match(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -18993,7 +19296,7 @@ fn pattern_bindings(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     covered_variants: &mut Vec<String>,
     has_wildcard: &mut bool,
 ) {
@@ -19403,7 +19706,7 @@ fn infer_pipe(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -19542,7 +19845,7 @@ fn infer_pipe_stage_lambda(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -19595,7 +19898,7 @@ fn infer_tuple(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -19648,7 +19951,7 @@ fn infer_tuple_get(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -19783,7 +20086,7 @@ fn infer_record(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -20021,7 +20324,7 @@ fn infer_access(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -20180,7 +20483,7 @@ fn infer_record_update(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -20322,7 +20625,7 @@ fn infer_cast(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -20347,18 +20650,21 @@ fn infer_cast(
     // primitive symbols are retained for historical compatibility; canonical
     // `t-prim` still goes through the resolver's metadata and exact-arity
     // checks before semantic cast classification.
-    let resolved_target = {
+    let cast_owner = deep::Expr::List(list.clone(), span_of_list(list));
+    let (resolved_target, target_location) = {
         let mut resolver = DeepTypeResolver::new(
             TypeUseSite::CastTarget,
             BinderMode::ClosedInput,
             adt_reg.resolution_env(),
             vg,
             errors,
-        );
-        match resolver.resolve_cast_target(&kids[1]) {
+        )
+        .with_diagnostic_owner(&cast_owner);
+        let target = match resolver.resolve_cast_target(&kids[1]) {
             Ok(target) => target,
             Err(witness) => return propagate(&witness),
-        }
+        };
+        (target, resolver.diagnostic_location())
     };
     let target_ty = match resolved_target {
         ResolvedCastTarget::PrimitiveSpelling { name, canonical } => {
@@ -20366,6 +20672,9 @@ fn infer_cast(
             // unsigned integer types remain explicitly out of scope. Keep the
             // owning precision diagnostic after syntax has validated.
             if let Some(diag) = unsigned_family_diagnostic(&name, /* tensor = */ false) {
+                let diag = target_location
+                    .as_ref()
+                    .map_or(diag.clone(), |location| location.attach(diag));
                 return report(errors, diag);
             }
             match Prim::parse_name(&name) {
@@ -20376,9 +20685,21 @@ fn infer_cast(
                 // registered zero-arity ADT or transparent alias target.
                 None if canonical => match cast_target_nominal_name(&name, adt_reg) {
                     Some(target) => Type::Adt(target, Vec::new()),
-                    None => return report_unknown_cast_target(errors, &name),
+                    None => {
+                        return report_unknown_cast_target(
+                            errors,
+                            &name,
+                            target_location.as_ref(),
+                        );
+                    }
                 },
-                None => return report_unknown_cast_target(errors, &name),
+                None => {
+                    return report_unknown_cast_target(
+                        errors,
+                        &name,
+                        target_location.as_ref(),
+                    );
+                }
             }
         }
         ResolvedCastTarget::Type(ty) => resolve_type_aliases(&ty.into_type(), adt_reg),
@@ -20475,18 +20796,24 @@ fn cast_target_nominal_name(name: &str, adt_reg: &AdtRegistry) -> Option<String>
         })
 }
 
-fn report_unknown_cast_target(errors: &mut Vec<CheckError>, name: &str) -> Type {
+fn report_unknown_cast_target(
+    errors: &mut DiagnosticSink<'_>,
+    name: &str,
+    location: Option<&TypeDiagnosticLocation>,
+) -> Type {
+    let error = CheckError::new(
+        CheckErrorKind::CastNonTensor,
+        format!("cast target `{name}` is not a recognized primitive type (chelis#756)"),
+        vec![
+            "cast targets a scalar primitive: f32, f64, bf16, f16, bool, \
+             int8, int16, int32, int64"
+                .to_string(),
+        ],
+    );
+    let error = location.map_or(error.clone(), |location| location.attach(error));
     report(
         errors,
-        CheckError::new(
-            CheckErrorKind::CastNonTensor,
-            format!("cast target `{name}` is not a recognized primitive type (chelis#756)"),
-            vec![
-                "cast targets a scalar primitive: f32, f64, bf16, f16, bool, \
-                 int8, int16, int32, int64"
-                    .to_string(),
-            ],
-        ),
+        error,
     )
 }
 
@@ -20535,7 +20862,7 @@ fn unsigned_family_diagnostic(name: &str, tensor: bool) -> Option<CheckError> {
 /// push_unsupported_precision_error(...)`, so the push and the error return
 /// are one expression.
 fn push_unsupported_precision_error(
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     new_prec: Prim,
     tensor: bool,
 ) -> Type {
@@ -20576,7 +20903,7 @@ fn infer_grad(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -20639,7 +20966,7 @@ fn grad_result_type(
     list: &deep::List,
     args: &[Type],
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Option<Type> {
     let targets = if let Some(indices) = grad_wrt_indices(list, errors)? {
         let mut selected = Vec::with_capacity(indices.len());
@@ -20688,7 +21015,7 @@ fn grad_result_type(
     })
 }
 
-fn grad_wrt_indices(list: &deep::List, errors: &mut Vec<CheckError>) -> Option<Option<Vec<usize>>> {
+fn grad_wrt_indices(list: &deep::List, errors: &mut DiagnosticSink<'_>) -> Option<Option<Vec<usize>>> {
     let kids = children(list);
     let Some(wrt_expr) = kids.get(1) else {
         return Some(None);
@@ -20796,7 +21123,7 @@ fn infer_vmap(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -20932,7 +21259,7 @@ fn infer_def(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
@@ -24147,7 +24474,7 @@ out = f(to_tensor([1.0, 2.0, 3.0]))
     #[test]
     fn surf_polymorphic_tuple_fold_with_tensor_slot_annotates_ir() {
         let program = surf_tuple_fold_tensor_slot_program();
-        let _ = annotate_ir_program(&program);
+        check_typed_program(&program).expect("annotation should succeed without overflowing");
     }
 
     #[test]

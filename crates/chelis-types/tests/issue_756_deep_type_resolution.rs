@@ -74,6 +74,10 @@ fn assert_one_type_resolution_error(source: &str, needle: &str, label: &str) {
         error.message.contains(needle),
         "{label}: diagnostic must name `{needle}`, got {error:?}"
     );
+    assert!(
+        error.span_offset.is_some() || error.span_id.is_some(),
+        "{label}: the owning Deep type use site must provide a stable location: {error:?}"
+    );
 }
 
 fn field_type(type_expr: &str) -> String {
