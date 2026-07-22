@@ -23,6 +23,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 pub mod exceptions;
+pub mod policy;
 pub mod registry;
 pub mod rules;
 pub mod surface;
@@ -382,19 +383,29 @@ pub(crate) fn lint_directive(line: &str, surface: Surface) -> Option<&str> {
 #[derive(Debug)]
 pub enum LintError {
     Io(std::io::Error),
-    Walk(walkdir::Error),
+    Policy(policy::TraversalPolicyError),
+    Walk(ignore::Error),
 }
 
 impl fmt::Display for LintError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LintError::Io(e) => write!(f, "io error: {e}"),
+            LintError::Policy(e) => write!(f, "traversal policy error: {e}"),
             LintError::Walk(e) => write!(f, "walk error: {e}"),
         }
     }
 }
 
-impl std::error::Error for LintError {}
+impl std::error::Error for LintError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(source) => Some(source),
+            Self::Policy(source) => Some(source),
+            Self::Walk(source) => Some(source),
+        }
+    }
+}
 
 impl From<std::io::Error> for LintError {
     fn from(e: std::io::Error) -> Self {
@@ -402,8 +413,14 @@ impl From<std::io::Error> for LintError {
     }
 }
 
-impl From<walkdir::Error> for LintError {
-    fn from(e: walkdir::Error) -> Self {
+impl From<policy::TraversalPolicyError> for LintError {
+    fn from(e: policy::TraversalPolicyError) -> Self {
+        LintError::Policy(e)
+    }
+}
+
+impl From<ignore::Error> for LintError {
+    fn from(e: ignore::Error) -> Self {
         LintError::Walk(e)
     }
 }

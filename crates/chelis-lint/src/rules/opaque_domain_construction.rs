@@ -143,7 +143,19 @@ fn check_surf(ctx: &Context<'_>, source: &str) -> Vec<Violation> {
     let Ok(decls) = chelis_surf::parser::parse_str(source) else {
         return Vec::new();
     };
-    let mut catalog = collect_surf_catalog(ctx.root);
+    let mut catalog = match collect_surf_catalog(ctx.root) {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            return vec![Violation {
+                rule_id: "opaque-domain-construction".to_string(),
+                spec_ref: "§12.1".to_string(),
+                path: ctx.path.to_path_buf(),
+                line: None,
+                col: None,
+                message: format!("could not prepare opaque catalog: {error}"),
+            }];
+        }
+    };
     if catalog.is_empty() {
         collect_surf_decls_catalog(&decls, None, &mut catalog);
     }
@@ -195,12 +207,19 @@ fn surf_module_less_leaves(decls: &[surf::Decl]) -> HashSet<String> {
     out
 }
 
-fn collect_surf_catalog(root: &Path) -> Catalog {
-    let Ok(entries) = crate::walker::walk(root) else {
-        return Catalog::default();
-    };
-    let entries: Vec<crate::walker::Entry> = entries.into_iter().filter_map(Result::ok).collect();
-    collect_surf_catalog_from_entries(&entries)
+fn collect_surf_catalog(root: &Path) -> Result<Catalog, LintError> {
+    // Direct `Rule::check` callers may supply in-memory source with a
+    // not-yet-written file path. Validate any ancestor policy, then let the
+    // caller seed the catalog from that current source instead of treating
+    // the absent synthetic root as a filesystem walk failure.
+    if !root.exists() {
+        crate::policy::TraversalPolicy::load_for(root)?;
+        return Ok(Catalog::default());
+    }
+    let entries: Vec<crate::walker::Entry> = crate::walker::walk(root)?
+        .into_iter()
+        .collect::<Result<_, _>>()?;
+    Ok(collect_surf_catalog_from_entries(&entries))
 }
 
 fn collect_surf_catalog_from_entries(entries: &[crate::walker::Entry]) -> Catalog {
@@ -1104,6 +1123,17 @@ def bad(x: f32) -> Secret = Secret { value: x }
     #[test]
     fn catalog_ignores_surf_sources_in_every_canonical_skipped_tree() {
         let temp = tempdir().expect("tempdir");
+        std::fs::create_dir_all(temp.path().join("spec")).expect("create policy spec dir");
+        std::fs::write(
+            temp.path().join("spec/lint.md"),
+            "# Test lint policy\n\n### 12.2 Traversal exclusions\n",
+        )
+        .expect("write policy spec");
+        std::fs::write(
+            temp.path().join("chelis-lint.toml"),
+            "version = 1\nspec = \"spec/lint.md\"\n\n[[exclude]]\npattern = \"tests/corpus/opaque_invariants/programs/\"\nclass = \"generated\"\ncross_ref = \"§12.2\"\n",
+        )
+        .expect("write repository traversal policy");
         let skipped = [
             ("target", "TargetSecret", "target_secret"),
             (".git", "GitSecret", "git_secret"),

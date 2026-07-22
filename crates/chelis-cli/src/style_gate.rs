@@ -253,11 +253,21 @@ pub fn strip_deep_lint_directive_lines(source: &str) -> String {
 
 fn run_lint_for_single_file(file: &Path) -> Vec<Violation> {
     let rules = chelis_lint::registry::all_rules();
-    // Lint the file directly. `WalkDir` accepts file roots, and this avoids
-    // path-shape mismatches between `message.ch` and `./message.ch`.
+    // Lint the file directly. The canonical walker admits explicit file
+    // roots, which avoids path-shape mismatches between `message.ch` and
+    // `./message.ch`.
     let raw = match chelis_lint::lint(file, &rules) {
         Ok(v) => v,
-        Err(_) => return Vec::new(),
+        Err(error) => {
+            return vec![Violation {
+                rule_id: "lint-traversal-policy".to_string(),
+                spec_ref: "§12.2".to_string(),
+                path: file.to_path_buf(),
+                line: None,
+                col: None,
+                message: error.to_string(),
+            }];
+        }
     };
     let exceptions_list = exceptions();
     // Anchor exception matching against the detected Cargo workspace
@@ -392,6 +402,30 @@ mod tests {
         ));
         let res = chelis_lint::exceptions::verify_cross_refs(&exceptions(), spec);
         assert!(res.is_ok(), "unresolvable cross_refs: {:?}", res.err());
+    }
+
+    #[test]
+    fn malformed_traversal_policy_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("spec")).unwrap();
+        std::fs::write(
+            dir.path().join("spec/lint.md"),
+            "# Lint\n\n### 12.2 Traversal exclusions\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("chelis-lint.toml"),
+            "version = 2\nspec = \"spec/lint.md\"\n",
+        )
+        .unwrap();
+        let path = dir.path().join("clean.ch");
+        let canonical = chelis_surf::format::format_program(&[]);
+        std::fs::write(&path, &canonical).unwrap();
+
+        let outcome = run_gate(&path, &canonical);
+        assert_eq!(outcome.lint_violations.len(), 1);
+        assert_eq!(outcome.lint_violations[0].rule_id, "lint-traversal-policy");
+        assert!(outcome.lint_violations[0].message.contains("unsupported"));
     }
 
     #[test]

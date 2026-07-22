@@ -1279,7 +1279,50 @@ Advisory (non-blocking) lint rules support the invariant workflow:
 The authoritative design record is
 `spec/design/opaque_invariants_rfc.md`.
 
-### 12.2 Future rule queue
+### 12.2 Lint traversal exclusions
+
+Whole-tree exclusions are stronger than diagnostic exceptions: a matched
+nested path is pruned before classification, rule preparation, or rule
+checks, so no rule sees it. They are permitted only for infrastructure,
+build output, dependencies, generated artifacts, or immutable inputs that
+should not be part of the editable lint corpus. They must not be added merely
+to hide current violations.
+
+`chelis-lint` composes its shipped baseline policy with the nearest ancestor
+`chelis-lint.toml`. Repository patterns are gitignore-style and anchored to
+the directory containing that file. The schema is versioned and strict:
+
+```toml
+version = 1
+spec = "spec/01-nomenclature.md"
+
+[[exclude]]
+pattern = "path/to/generated/"
+class = "generated"
+cross_ref = "§12.2"
+```
+
+Every entry requires a pattern, a class from `infrastructure`, `build`,
+`dependency`, `generated`, or `immutable`, and a cross-reference resolving
+in the declared spec. Unknown fields, unsupported versions or classes,
+invalid patterns, missing specs, and unresolved references fail lint before
+traversal. Loose targets without repository policy receive only the shipped
+baseline.
+
+The traversal engine must not consult `.gitignore`, `.ignore`, parent or
+global Git configuration, `.git/info/exclude`, or hidden-file defaults. This
+keeps local and CI scope identical and keeps hidden source such as
+`.github/workflows/` visible unless Chelis policy explicitly excludes it.
+An explicitly named file or directory is always admitted at traversal depth
+zero; separately excluded descendants under an explicit directory remain
+pruned.
+
+Traversal policy does not replace rule-specific `Exception` entries or inline
+`allow` and `keep` directives. Those mechanisms act after a path has entered
+the canonical corpus and retain their existing per-rule diagnostic or autofix
+semantics.
+
+### 12.3 Future rule queue
 
 The following rules are intentionally queued, not currently part of
 the blocking registry:

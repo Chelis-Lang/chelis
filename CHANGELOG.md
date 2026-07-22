@@ -107,6 +107,15 @@ now rejected at the offending site — see **Changed** for the migration.
 
 ### Fixed
 
+- **Lint traversal exclusions are structured and configurable (chelis#740).**
+  `walker.rs` no longer hard-codes generated, dependency, build, or
+  infrastructure directory names. `chelis-lint` now composes a shipped
+  baseline with the nearest strict `chelis-lint.toml`; every repository entry
+  has a typed class and resolvable spec cross-reference. BurntSushi's `ignore`
+  engine performs matching and pruning with ambient `.gitignore`, `.ignore`,
+  parent/global Git, Git-exclude, and hidden-file filters disabled, so local
+  and CI scope is identical. Explicit targets remain lintable, and all rules
+  plus prepared catalogs consume one policy-admitted corpus.
 - **`opaque-domain-construction` repository linting is linear and honors
   canonical skip filters (chelis#603).** The rule now prepares its Surf
   declaration catalog once per `chelis_lint::lint` invocation from the main

@@ -129,10 +129,12 @@ Two rules that met in practice the day the probe corpus landed:
    are archived as TESTS, not as parallel fixture copies.
 2. **An artifact that is never edited again should cost the gate
    nothing**: the fixtures were also the lint stage's long pole
-   (`chelis lint --check .` re-walks the tree per checked file - the
-   known quadratic behavior). The dedup resolved this instance; the
-   general lint-side ignore mechanism for genuinely un-editable archive
-   directories stays on [#740]'s backlog for the next case.
+   (`chelis lint --check .` re-walked the tree per checked file before
+   [#603]). The dedup resolved this instance. The general mechanism now
+   composes `crates/chelis-lint/default_policy.toml` with the nearest
+   strict `chelis-lint.toml` ([#740], §12.2); use it only for genuinely
+   uneditable infrastructure, build, dependency, generated, or immutable
+   trees. `.gitignore` remains version-control policy, not lint policy.
 
 ### 6. Standing detection (because prevention leaks)
 
@@ -181,6 +183,7 @@ table are part of landing any new canonical mechanism.
 | HIP narrow-float rejection / Metal f64 rejection | `chelis-backend-hip` gate / `chelis-backend-metal` dtype | the calibration examples for unsupported diagnostics | silent `ElemKind` fallbacks ([#689]) |
 | eval/c lane drivers (verbatim strings) | `crates/chelis-cli/tests/precision_matrix.rs` + sweep files, `docs/investigations/probes/` | any cross-lane numeric assertion | comparing through f64/tolerance ([#687]) or trusting printed tensors for int64/f16 ([#723]/[#716]) until [#732] lands |
 | the conform MANIFEST tripwire | `chelis-conformance` | any doc<->machine-form lockstep | hand-mirroring a doc into code with no diff test |
+| `TraversalPolicy` + `chelis-lint.toml` | `chelis-lint/src/policy.rs`, shipped baseline, repository root | whole-tree lint exclusion for genuinely uneditable content, with class + spec cross-reference | inherit `.gitignore`/machine filters, hide editable violations, or start a rule-local walk ([#740], §12.2) |
 | spec atoms + status banners | spec/04 §9-§10, spec/05 §7-§8 | citing decided semantics; adding new normative text | writing MUST/SHALL prose outside atoms in atomized files ([#733]) |
 
 ## Relationship to the plan set
@@ -193,6 +196,7 @@ should land alongside Wave 1 of `spec/design/remediation_roadmap.md`
 create), and mechanism 6's ratchets are cheap enough to land with
 Wave 0.
 
+[#603]: https://github.com/Chelis-Lang/chelis/issues/603
 [#680]: https://github.com/Chelis-Lang/chelis/issues/680
 [#687]: https://github.com/Chelis-Lang/chelis/issues/687
 [#689]: https://github.com/Chelis-Lang/chelis/issues/689

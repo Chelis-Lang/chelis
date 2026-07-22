@@ -20,6 +20,31 @@ Chelis ships one CLI with machine-facing and human-facing subcommands.
 - `chelis build` emits C or HIP source plus runtime artifacts and compile flags.
 - `chelis tide` exposes the HTTP/MCP tooling surface.
 
+## Lint Traversal Policy
+
+Directory linting composes Chelis's shipped baseline exclusions with the nearest
+ancestor `chelis-lint.toml`. Repository entries are strict, versioned TOML with
+a gitignore-style pattern, a closed class, and a cross-reference resolving in
+the policy's declared spec:
+
+```toml
+version = 1
+spec = "spec/01-nomenclature.md"
+
+[[exclude]]
+pattern = "path/to/generated/"
+class = "generated"
+cross_ref = "§12.2"
+```
+
+The allowed classes are `infrastructure`, `build`, `dependency`, `generated`,
+and `immutable`. Invalid policy fails lint before the walk. `.gitignore`,
+`.ignore`, parent and global Git ignores, `.git/info/exclude`, and hidden-file
+defaults do not affect lint scope. A directly named file or directory remains
+lintable even when its path matches an exclusion; matching nested descendants
+are pruned. Use rule-specific exceptions or inline `allow`/`keep` when a path
+must still contribute to other lint rules.
+
 ## Style Gate (Built-In on Every Build)
 
 `chelis build`, `chelis check`, `chelis validate`, and
