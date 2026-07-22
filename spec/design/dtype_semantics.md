@@ -541,12 +541,13 @@ whose printed strings are the expected values for yours.
 
 1. Inherit [#730]'s completed
    `HostTypeTerm -> ConcreteHostType -> HostAbiType` boundary: exact narrow
-   scalar identity already survives host lowering, and the former
+   scalar identity already survives host lowering, `int8`/`int16` already
+   select their exact existing C integer ABIs, and the former
    `HostType::Unknown -> int64_t/void*` route is unrepresentable. This phase
-   adds the per-dtype C storage and operation semantics, then changes the
-   C-host target decision for each newly implemented cell from a structured
-   rejection to the corresponding `HostAbiType` representation ([#714]); it
-   does not reopen or duplicate the host-type boundary.
+   adds the per-dtype operation semantics and overflow traps for those integer
+   ABIs. For f16/bf16 it adds exact C storage and rounding, then changes the
+   target decision from structured rejection to the new ABI representation
+   ([#714]); it does not reopen or duplicate the host-type boundary.
 2. Scalar C arithmetic at width with generated trap guards emitting §C2's
    frozen strings (the `chelis_int_div_guard` pattern, generalized), and
    f16/bf16 scalar C storage/rounding matching §C1 (likely via uint16

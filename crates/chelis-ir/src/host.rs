@@ -6250,8 +6250,7 @@ fn lower_app_host_expr(
     };
     if ctor_info.is_some() && !matches!(name.as_str(), "Some" | "None") {
         let expected_fields = lookup_adt_ctor_details_for_type(program, &name, Some(&construct_ty))
-            .map(|(_, fields)| fields)
-            .unwrap_or_default();
+            .map_or_else(Vec::new, |(_, fields)| fields);
         let fields = args
             .into_iter()
             .enumerate()
@@ -8286,9 +8285,12 @@ fn conform_builtin_arguments(
                     ]))))
                 }
                 ("to_tensor", HostTypeTerm::Tensor(tensor), 0) => {
-                    Some(HostTypeTerm::List(Box::new(HostTypeTerm::Scalar(
-                        HostPrecisionTerm::Concrete(tensor.precision),
-                    ))))
+                    let mut source =
+                        HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(tensor.precision));
+                    for _ in &tensor.dims {
+                        source = HostTypeTerm::List(Box::new(source));
+                    }
+                    Some(source)
                 }
                 ("scalar_to_tensor", HostTypeTerm::Tensor(tensor), 0) => Some(
                     HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(tensor.precision)),
@@ -8877,15 +8879,15 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         },
         "pad_sequences" => match arg_tys.first() {
             Some(HostTypeTerm::List(inner)) => match &**inner {
-                HostTypeTerm::List(nested) => match &**nested {
-                    &HostTypeTerm::Int64 => Some(HostTypeTerm::Tensor(TensorType {
+                HostTypeTerm::List(nested) => match **nested {
+                    HostTypeTerm::Int64 => Some(HostTypeTerm::Tensor(TensorType {
                         dims: vec![
                             crate::dag::DimInfo::Named("batch".to_string(), None),
                             crate::dag::DimInfo::Named("seq".to_string(), None),
                         ],
                         precision: chelis_types::types::Prim::Int64,
                     })),
-                    &HostTypeTerm::Float64 => Some(HostTypeTerm::Tensor(TensorType {
+                    HostTypeTerm::Float64 => Some(HostTypeTerm::Tensor(TensorType {
                         dims: vec![
                             crate::dag::DimInfo::Named("batch".to_string(), None),
                             crate::dag::DimInfo::Named("seq".to_string(), None),
@@ -8900,15 +8902,15 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         },
         "pad_sequences_to" => match arg_tys.first() {
             Some(HostTypeTerm::List(inner)) => match &**inner {
-                HostTypeTerm::List(nested) => match &**nested {
-                    &HostTypeTerm::Int64 => Some(HostTypeTerm::Tensor(TensorType {
+                HostTypeTerm::List(nested) => match **nested {
+                    HostTypeTerm::Int64 => Some(HostTypeTerm::Tensor(TensorType {
                         dims: vec![
                             crate::dag::DimInfo::Named("batch".to_string(), None),
                             crate::dag::DimInfo::Named("seq".to_string(), None),
                         ],
                         precision: chelis_types::types::Prim::Int64,
                     })),
-                    &HostTypeTerm::Float64 => Some(HostTypeTerm::Tensor(TensorType {
+                    HostTypeTerm::Float64 => Some(HostTypeTerm::Tensor(TensorType {
                         dims: vec![
                             crate::dag::DimInfo::Named("batch".to_string(), None),
                             crate::dag::DimInfo::Named("seq".to_string(), None),

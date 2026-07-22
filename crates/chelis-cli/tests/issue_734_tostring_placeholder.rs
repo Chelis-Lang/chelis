@@ -9,10 +9,13 @@
 //! (previously "unknown - probe"): LIVE. The fix arrives via that plan's
 //! Phase 1 (the arm becomes Err through the emitter failure channel).
 //!
-//! Controls: to_string of int64/f64/bool scalars is correct in both
-//! lanes, and to_string(cast(1.5, f16)) prints 1.5 in both lanes (the
-//! f16 scalar resolves through the f64 formatter arm here, so #714's
-//! Unknown path does not compound).
+//! Controls: to_string of int64/f64/bool scalars is correct in both lanes.
+//! The former f16 "control" passed only because the C host silently widened
+//! the value through the Unknown/f64 path; Phase 2 replaces that accidental
+//! green with an explicit ABI rejection until chelis#729 supplies real
+//! reduced-float storage and rounding. That negative boundary is locked by
+//! `loud_unsupported_phase1::narrow_scalar_arithmetic_rejects_or_computes_never_zero`
+//! and the f16 row in `issue_687_rejected_cells_corpus`.
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -138,7 +141,6 @@ fn to_string_scalar_arms_agree_across_lanes() {
         ("to_string(cast(7, int64))", "7"),
         ("to_string(cast(1.5, f64))", "1.5"),
         ("to_string(true)", "true"),
-        ("to_string(cast(1.5, f16))", "1.5"),
     ];
     let have_cc = c_toolchain_available();
     for (i, (expr, expected)) in rows.iter().enumerate() {

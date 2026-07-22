@@ -280,19 +280,11 @@ fn to_string_scalar_arms_still_work() {
 
 /// Rows 6/7, adjudicated by execution at Phase 1 (B2.5):
 ///
-/// * The PARAM-typed narrow scalar (the annotation parses to
-///   `HostType::Unknown` and the value flows Unknown into the operator
-///   arm) is REJECTED at the emission baking point with the branded
-///   diagnostic - this is the guard's contract.
-/// * The CAST-LITERAL shape (chelis#714's headline repro,
-///   `add(cast(0.5, f16), cast(0.25, f16))`, formerly a binary printing
-///   0 via the int64_t default) no longer substitutes: with the Int64
-///   guess removed, the values flow as doubles and 0.5 + 0.25 prints
-///   0.75. The RESIDUAL is that the compiled lane computes at double
-///   without f16 per-op rounding (eval: 2048 + 1 -> 2048; C: 2049) -
-///   that is the chelis#714/#717 dtype-SEMANTICS half owned by
-///   chelis#729, locked red by narrow_dtype_matrix's ignored boundary
-///   rows, not a value substitution.
+/// Both parameter and cast-literal shapes now stop at the same typed target
+/// boundary. The old cast-literal "success" was a widened-double accident,
+/// not proof of an f16 ABI: it disagreed whenever f16 rounding mattered.
+/// chelis#729 changes this cell from a structured rejection to a real
+/// representation once grounded storage and per-op rounding land.
 #[test]
 fn narrow_scalar_arithmetic_rejects_or_computes_never_zero() {
     // Param-typed shape: branded rejection.
@@ -304,11 +296,10 @@ fn narrow_scalar_arithmetic_rejects_or_computes_never_zero() {
         !ok,
         "param-typed f16 scalar arithmetic must fail the build (census rows 6/7)"
     );
-    assert_branded_rejection(&stderr, "mul", "f16_param_p1");
+    assert_branded_rejection(&stderr, "dtype `f16`", "f16_param_p1");
 
-    // Cast-literal shape: the int64_t zero substitution is dead - the
-    // program either rejects loudly or computes the true value; it must
-    // never print the chelis#714 zero again.
+    // Cast-literal shape reaches the identical target decision; there is no
+    // second widened representation that can accidentally appear to work.
     let f16_program = "module M.Main\n\
          def f() -> f16 = add(cast(0.5, f16), cast(0.25, f16))\n\
          out = print(f())\n";
@@ -316,18 +307,9 @@ fn narrow_scalar_arithmetic_rejects_or_computes_never_zero() {
         eval_first_line(f16_program).expect("eval computes f16 scalars"),
         "0.75"
     );
-    if c_toolchain_available() {
-        match c_run_first_line(f16_program, "f16_add_p1") {
-            Err(stderr) => assert!(
-                stderr.contains("unsupported:") || stderr.contains("error:"),
-                "a rejection must be loud; got: {stderr}"
-            ),
-            Ok(line) => assert_eq!(
-                line, "0.75",
-                "the compiled lane must never substitute zero (chelis#714)"
-            ),
-        }
-    }
+    let (ok, stderr, _) = c_build(f16_program, "f16_add_p1");
+    assert!(!ok, "f16 has no C host-scalar ABI before chelis#729");
+    assert_branded_rejection(&stderr, "dtype `f16`", "f16_add_p1");
 }
 
 /// Control: f32/f64/int64 scalar arithmetic - the resolved host types -

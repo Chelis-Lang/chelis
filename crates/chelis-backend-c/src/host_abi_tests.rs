@@ -1,8 +1,8 @@
-//! chelis#730 Phase 2 red contract for the C-host Table-B type boundary.
+//! chelis#730 Phase 2 contract for the C-host Table-B type boundary.
 //!
-//! This test module is intentionally uncompilable until the backend owns an
-//! opaque, crate-private `HostAbiType` whose only constructor is the fallible
-//! conversion from a fully resolved `ConcreteHostType`.
+//! The backend owns an opaque, crate-private `HostAbiType` whose only
+//! constructor is the fallible conversion from a fully resolved
+//! `ConcreteHostType`.
 
 use crate::host_abi::HostAbiType;
 use chelis_ir::{ConcreteHostType, TensorType};
@@ -18,6 +18,14 @@ fn abi_conversion_accepts_only_resolved_logical_types() {
 
 #[test]
 fn supported_concrete_types_map_to_exact_c_host_abis() {
+    let i8_abi = HostAbiType::try_from_concrete(&ConcreteHostType::Scalar(Prim::Int8))
+        .expect("int8 has an exact C-host representation");
+    assert_eq!(i8_abi.c_type_name(), "int8_t");
+
+    let i16_abi = HostAbiType::try_from_concrete(&ConcreteHostType::Scalar(Prim::Int16))
+        .expect("int16 has an exact C-host representation");
+    assert_eq!(i16_abi.c_type_name(), "int16_t");
+
     let f32_abi = HostAbiType::try_from_concrete(&ConcreteHostType::Scalar(Prim::F32))
         .expect("f32 has a C-host representation");
     assert_eq!(f32_abi.c_type_name(), "float");
@@ -36,7 +44,7 @@ fn supported_concrete_types_map_to_exact_c_host_abis() {
 
 #[test]
 fn unsupported_scalar_abis_return_the_shared_typed_diagnostic() {
-    for precision in [Prim::F16, Prim::Bf16, Prim::Int8, Prim::Int16] {
+    for precision in [Prim::F16, Prim::Bf16] {
         let logical = ConcreteHostType::Scalar(precision);
         let err = HostAbiType::try_from_concrete(&logical)
             .expect_err("this scalar C-host representation is unimplemented");

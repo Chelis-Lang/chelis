@@ -1205,7 +1205,11 @@ polymorphism, inference identity, bottom, and exact dtype, and permits only a
 resolved `ConcreteHostType` plus an authoritative target capability decision
 to produce `HostAbiType`. Codegen accepts only the ABI vocabulary. This
 contract owns failure representation; grounded dtype semantics and Table A/B
-policy remain owned by chelis#729.
+policy remain owned by chelis#729. The current C decision selects exact
+`int8_t`/`int16_t` ABI variants because those representations already exist,
+while f16/bf16 scalar values reject at selection until chelis#729 supplies
+exact storage and rounding; an accidentally-green widened value is not a
+supported ABI cell.
 Residuals are per-atom noted below; [05-UNS-4]'s gate demotion is that
 plan's Phase 3. The delivery plan and full elaboration (the failure
 channel, the census, the typed ratchets) is
