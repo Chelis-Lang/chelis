@@ -926,24 +926,37 @@ cases.
 The `Test`-effect assertion builtins — `test_assert`, `test_assert_eq_f32`,
 `test_assert_eq_int`, `test_assert_eq_bool`, `test_assert_eq_string`,
 `test_assert_close_tensor`, and `test_assert_eq_tensor_int64` — are
-**host-only**, the same class as `tensor_scan`. They run inside the
-`chelis test` / `chelis eval` interpreter, where an assertion evaluates its
-condition and aborts the run with a branded label on failure. They have **no
-compiled-lane emission arm**: a `chelis build --target c` (or `hip`) of a
-program that calls a `test_*` builtin on a reachable path is rejected at
-compile time with a branded `unsupported` diagnostic (chelis#703 class),
-never a silently-inert assertion. Before the loud-unsupported sweep the C
-host emitter compiled them to a `/* unsupported builtin test_assert */ 0`
-stub, so a compiled test asserted nothing; that silent stub is gone.
+**host-only**. They run inside the `chelis test` / `chelis eval` interpreter,
+where an assertion evaluates its condition and aborts the run with a branded
+label on failure. They have **no compiled-lane emission arm**.
+
+Their build rejection is enforced *differently* from `tensor_scan`'s. They
+are **not** in the whole-program pre-codegen host-only gate
+(`reject_host_only_builtins`; `HOST_ONLY_BUILTINS = ["tensor_scan"]`).
+Instead the rejection is the C host emitter's unsupported-builtin catch-all
+(`chelis_backend_c::host_emit`): a `test_*` call in a function the emitter
+emits is a build error with a branded `unsupported` diagnostic (chelis#703
+class), never a silently-inert assertion. That makes it **liveness-scoped** —
+the opposite of `tensor_scan`'s whole-program gate. A `test_*` in a function
+reachable from the build entry, or in *any* function of an entry-less
+object-mode module such as `Std.Test` itself (where every function is live),
+is rejected at `chelis build`; a `test_*` in an entry-unreachable helper is
+emitted as an abort stub and the build succeeds (the stub aborts only if
+reached). Before the loud-unsupported sweep the emitter compiled every such
+call to a `/* unsupported builtin test_assert */ 0` stub, so a compiled test
+asserted nothing; that silent stub is gone.
 
 Consequently the `Test`-effect wrappers in `Std.Test` (`assert_true`,
 `assert_eq`, `assert_close`, `assert_shape`, `fail`, … — each a thin
 `test_assert*` call) are eval/check-only: `chelis check` and `chelis test`
-accept them, `chelis build` rejects them. A compiled binary that can fail
-its own assertions (real C assertion helpers, or promoting `test_*` into the
-pre-codegen host-only gate that today rejects `tensor_scan`) is the
-compiled-lane arm tracked by chelis#796; until it lands, assertions are an
-eval-lane contract.
+accept them, and `chelis build` of the module rejects them (it is
+object-mode, so every wrapper is live). The compiled-lane arm — a compiled
+binary that can *fail its own assertions* — requires real C assertion helpers
+(compare + branded abort on mismatch) and is tracked by chelis#796.
+(Separately, promoting `test_*` into the pre-codegen host-only gate would only
+make the build reject them *whole-program* like `tensor_scan`, not make them
+assertable — a rejection-cleanliness change, not the compiled-lane arm.)
+Until the compiled-lane helpers land, assertions are an eval-lane contract.
 
 ---
 

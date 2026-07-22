@@ -86,23 +86,32 @@ fn stdlib_corpus(scratch: &Path) -> Vec<PathBuf> {
 /// (`src/test.ch`). That module defines the `Test`-effect assertion wrappers
 /// (`def assert_* ... = test_assert*`), and the `test_*` builtins are
 /// host-only: they have no compiled-lane emission arm, so `chelis build`
-/// loudly rejects them (chelis#796; spec/05-risc-primitives.md §3.6). Checking
-/// the module is valid, so it stays in [`stdlib_corpus`] for the check
-/// oracles; only the `build` oracles use this filtered list.
+/// loudly rejects them (chelis#796; spec/05-risc-primitives.md §3.6.1).
+/// Checking the module is valid, so it stays in [`stdlib_corpus`] for the
+/// check oracles; only the `build` oracles use this filtered list. Excluded
+/// by exact canonical path, not a `test.ch` filename match, so an unrelated
+/// future `.../test.ch` is never silently dropped.
 fn stdlib_build_corpus(scratch: &Path) -> Vec<PathBuf> {
+    let std_test = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packages/chelis-std/src/test.ch")
+        .canonicalize()
+        .expect("std test.ch must exist");
     stdlib_corpus(scratch)
         .into_iter()
-        .filter(|p| !p.ends_with("test.ch"))
+        .filter(|p| *p != std_test)
         .collect()
 }
 
 /// Locks the contract that justifies excluding `src/test.ch` from
 /// [`stdlib_build_corpus`]: `chelis build` of the Std.Test module must fail
 /// loudly because the `test_*` builtins it wraps are host-only (chelis#796;
-/// spec/05-risc-primitives.md §3.6). Before the loud-unsupported sweep the C
-/// host emitter compiled them to a silently-inert `0` stub, so a compiled
-/// test asserted nothing; dropping `test.ch` from the build oracles above
-/// would otherwise leave no build-lane coverage that the stub cannot return.
+/// spec/05-risc-primitives.md §3.6.1). The C host emitter returns on the
+/// first unsupported builtin, so this is a module-level guard (representative
+/// via `test_assert`, the first wrapper) rather than per-builtin coverage of
+/// all seven. Before the loud-unsupported sweep that emitter compiled such
+/// calls to a silently-inert `0` stub, so a compiled test asserted nothing;
+/// dropping `test.ch` from the build oracles above would otherwise leave
+/// nothing on the build lane asserting that the stub stays gone.
 #[test]
 fn std_test_module_build_is_host_only_rejected() {
     let (_guard, cache_home) = fresh_cache_home();
@@ -127,8 +136,10 @@ fn std_test_module_build_is_host_only_rejected() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("test_assert") && stderr.contains("unsupported"),
-        "expected a host-only `test_*` build rejection; got stderr:\n{stderr}"
+        stderr.contains("test_assert")
+            && stderr.contains("unsupported")
+            && stderr.contains("host emission"),
+        "expected the host-only `test_*` emitter rejection; got stderr:\n{stderr}"
     );
 }
 
