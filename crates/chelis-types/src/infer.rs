@@ -823,7 +823,7 @@ fn register_annotation_owners(
     epoch: &mut TypeStampEpoch,
     errors: &mut DiagnosticSink<'_>,
 ) {
-    stack_guard!("register_annotation_owners", expr, ());
+    stack_guard!("register_annotation_owners", expr);
     let deep::Expr::List(list, _) = expr else {
         if let deep::Expr::MetaExpr(meta, _) = expr {
             register_annotation_owners(&meta.expr, epoch, errors);
@@ -946,8 +946,8 @@ pub(crate) fn run_type_stamp_mutation_case(
                 unreachable!("node_expr produces a list")
             };
             let runtime_child = &children(root_list)[0];
-            product.record_canonical(&runtime_child, Type::Prim(Prim::Int64));
-            product.current_owner_type(&runtime_child, &Subst::new(), errors)
+            product.record_canonical(runtime_child, Type::Prim(Prim::Int64));
+            product.current_owner_type(runtime_child, &Subst::new(), errors)
                 == Some(Type::Prim(Prim::Int64))
         }
     }
@@ -9648,10 +9648,7 @@ fn infer_top_level(
         _ => return None,
     };
 
-    let tag = match get_tag(list) {
-        Some(t) => t,
-        None => return None,
-    };
+    let tag = get_tag(list)?;
 
     // Skip deftype/defsig/typealias (already processed in first pass)
     if tag == "deftype" || tag == "defsig" || tag == "typealias" {
@@ -9661,10 +9658,7 @@ fn infer_top_level(
     let kids = children(list);
 
     if tag == "def" && kids.len() >= 2 {
-        let name = match symbol_name(&kids[0]) {
-            Some(n) => n.to_string(),
-            None => return None,
-        };
+        let name = symbol_name(&kids[0])?.to_string();
 
         // Save declared type from defsig BEFORE inferring (it may get overwritten)
         let declared_ty = if provisional_recursive_type.is_none() {

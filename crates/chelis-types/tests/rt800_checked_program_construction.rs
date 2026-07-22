@@ -171,8 +171,10 @@ fn effect_only_reannotation_preserves_every_checked_context() {
 
 #[test]
 fn non_effect_reannotation_mutations_are_rejected_exactly_once() {
+    type MutationCase = (&'static str, fn(&mut [Expr]));
+
     let checked = checked_program();
-    let cases: [(&str, fn(&mut [Expr])); 6] = [
+    let cases: [MutationCase; 6] = [
         ("body", mutate_body),
         ("structure", mutate_structure),
         ("type metadata", mutate_type_metadata),
