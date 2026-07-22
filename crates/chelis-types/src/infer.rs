@@ -688,6 +688,37 @@ pub(crate) fn run_type_stamp_mutation_case(
     }
 }
 
+#[cfg(test)]
+pub(crate) enum FinalizationMutationCase {
+    MissingRuntimeStamp,
+    SilentErrorOwner,
+}
+
+#[cfg(test)]
+pub(crate) fn run_finalization_mutation_case(
+    case: FinalizationMutationCase,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    let runtime = node_expr("app", vec![]);
+    let annotated = match case {
+        FinalizationMutationCase::MissingRuntimeStamp => vec![runtime],
+        FinalizationMutationCase::SilentErrorOwner => {
+            let mut product = InferenceProduct::default();
+            product.begin_root(&runtime);
+            product.record_canonical(&runtime, crate::errors::error_sentinel_for_test());
+            product.finish_root(&Subst::new(), errors);
+            annotate_ir_program(std::slice::from_ref(&runtime), &product, errors)
+        }
+    };
+    let _ = finalize_checked_program(
+        annotated,
+        HashMap::new(),
+        &SignatureInferenceMetadata::default(),
+        &TypeResolutionEnv::default(),
+        errors,
+    );
+}
+
 /// Collect the declared signature metadata owned by one inference or
 /// annotation unit. The returned map is passed explicitly; nested, sequential,
 /// and parallel checks cannot observe another unit's declarations.
@@ -798,27 +829,6 @@ impl CheckedProgram {
         crate::session::checked_program_from_parts(annotated_exprs, type_env)
     }
 
-    fn from_parts_with_headers(
-        annotated_exprs: Vec<deep::Expr>,
-        type_env: HashMap<String, deep::Expr>,
-        type_headers: &TypeResolutionEnv,
-        errors: &mut DiagnosticSink<'_>,
-    ) -> Self {
-        let signature_inference = infer_signature_metadata_with_context_and_headers(
-            &annotated_exprs,
-            &type_env,
-            &SignatureInferenceMetadata::default(),
-            type_headers,
-            errors,
-        );
-        Self {
-            annotated_exprs,
-            type_env,
-            linearity: LinearityInfo::default(),
-            signature_inference,
-        }
-    }
-
     pub fn from_parts_with_signature_context(
         annotated_exprs: Vec<deep::Expr>,
         type_env: HashMap<String, deep::Expr>,
@@ -829,28 +839,6 @@ impl CheckedProgram {
             type_env,
             signature_context,
         )
-    }
-
-    fn from_parts_with_signature_context_and_headers(
-        annotated_exprs: Vec<deep::Expr>,
-        type_env: HashMap<String, deep::Expr>,
-        signature_context: &SignatureInferenceMetadata,
-        type_headers: &TypeResolutionEnv,
-        errors: &mut DiagnosticSink<'_>,
-    ) -> Self {
-        let signature_inference = infer_signature_metadata_with_context_and_headers(
-            &annotated_exprs,
-            &type_env,
-            signature_context,
-            type_headers,
-            errors,
-        );
-        Self {
-            annotated_exprs,
-            type_env,
-            linearity: LinearityInfo::default(),
-            signature_inference,
-        }
     }
 
     pub fn exprs(&self) -> &[deep::Expr] {
@@ -936,6 +924,40 @@ impl CheckedProgram {
     }
 }
 
+/// The sole construction boundary for checked results. It observes the
+/// authoritative session sink before adding an invariant diagnostic, so a
+/// real root error is never duplicated by the totality backstop.
+fn finalize_checked_program(
+    annotated_exprs: Vec<deep::Expr>,
+    type_env: HashMap<String, deep::Expr>,
+    signature_context: &SignatureInferenceMetadata,
+    type_headers: &TypeResolutionEnv,
+    errors: &mut DiagnosticSink<'_>,
+) -> CheckedProgram {
+    let signature_inference = infer_signature_metadata_with_context_and_headers(
+        &annotated_exprs,
+        &type_env,
+        signature_context,
+        type_headers,
+        errors,
+    );
+    let checked = CheckedProgram {
+        annotated_exprs,
+        type_env,
+        linearity: LinearityInfo::default(),
+        signature_inference,
+    };
+
+    if errors.is_empty() {
+        let mut traces = annotated_totality_invariant_traces(checked.annotated_exprs());
+        traces.extend(totality_invariant_traces(checked.signature_inference()));
+        if !traces.is_empty() {
+            errors.push(totality_violation_error(&traces));
+        }
+    }
+    checked
+}
+
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SignatureInferenceMetadata {
     pub functions: BTreeMap<String, FunctionSignatureInference>,
@@ -972,7 +994,13 @@ pub(crate) fn checked_program_from_parts_in_session(
     errors: &mut DiagnosticSink<'_>,
 ) -> CheckedProgram {
     let type_headers = signature_metadata_type_headers(&annotated_exprs);
-    CheckedProgram::from_parts_with_headers(annotated_exprs, type_env, &type_headers, errors)
+    finalize_checked_program(
+        annotated_exprs,
+        type_env,
+        &SignatureInferenceMetadata::default(),
+        &type_headers,
+        errors,
+    )
 }
 
 pub(crate) fn checked_program_from_parts_with_signature_context_in_session(
@@ -982,7 +1010,7 @@ pub(crate) fn checked_program_from_parts_with_signature_context_in_session(
     errors: &mut DiagnosticSink<'_>,
 ) -> CheckedProgram {
     let type_headers = signature_metadata_type_headers(&annotated_exprs);
-    CheckedProgram::from_parts_with_signature_context_and_headers(
+    finalize_checked_program(
         annotated_exprs,
         type_env,
         signature_context,
@@ -1373,12 +1401,16 @@ pub(crate) fn build_compiled_library_context_in_session(
     // empty outer scope, `context.inner().ir_types` is empty, so the
     // union step is a no-op and `annotated_type_env ==
     // library_ir_annotated`.
-    let checked = CheckedProgram::from_parts_with_headers(
+    let checked = finalize_checked_program(
         library_annotated,
         library_ir_annotated,
+        &SignatureInferenceMetadata::default(),
         &signature_type_headers,
         errors,
     );
+    if !errors.is_empty() {
+        return Err(stats);
+    }
 
     Ok((type_env, checked))
 }
@@ -1542,12 +1574,16 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
             .entry(name.clone())
             .or_insert_with(|| ty.clone());
     }
-    let checked = CheckedProgram::from_parts_with_headers(
+    let checked = finalize_checked_program(
         library_annotated,
         checked_type_env,
+        &SignatureInferenceMetadata::default(),
         &signature_type_headers,
         errors,
     );
+    if !errors.is_empty() {
+        return Err(stats);
+    }
 
     Ok((type_env, checked))
 }
@@ -1683,21 +1719,14 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     }
     log_sub("annotated_type_env_build", &mut sub_t);
     let signature_type_headers = TypeResolutionEnv::from_registry(&state.adt_reg);
-    let checked = CheckedProgram::from_parts_with_signature_context_and_headers(
+    let checked = finalize_checked_program(
         annotated_exprs,
         annotated_type_env,
         signature_context,
         &signature_type_headers,
         errors,
     );
-    // chelis#731 Phase 2 ([04-TOT-2] / §C4.1): the always-on totality
-    // invariant. errors is empty here (we passed the gate above), so any
-    // silent Type::Error surviving in the typed signature results is a
-    // violation (see `totality_invariant_traces` for why the signature table
-    // is the reliable surface).
-    let totality_traces = totality_invariant_traces(checked.signature_inference());
-    if !totality_traces.is_empty() {
-        errors.push(totality_violation_error(&totality_traces));
+    if !errors.is_empty() {
         return Err(stats);
     }
     Ok(checked)
@@ -1730,11 +1759,7 @@ pub(crate) fn check_typed_program_in_session(
             annotated_type_env,
             errors,
         );
-        // chelis#731 Phase 2 ([04-TOT-2] / §C4.1): the always-on totality
-        // invariant (see `totality_invariant_traces`). errors is empty here.
-        let totality_traces = totality_invariant_traces(checked.signature_inference());
-        if !totality_traces.is_empty() {
-            errors.push(totality_violation_error(&totality_traces));
+        if !errors.is_empty() {
             return Err(stats);
         }
         Ok(checked)
@@ -7698,25 +7723,53 @@ fn type_expr_is_ir_concrete(expr: &deep::Expr) -> bool {
 /// the standing tripwire that verifies the claim -- it is a pushed internal
 /// error, never a panic (the checker is reachable-input territory).
 ///
-/// Detection surface: the SIGNATURE-INFERENCE table, which carries resolved
-/// `Type` VALUES (not Deep `type:` encodings). This is the reliable typed
-/// surface for an always-on check: every function's `checked_signature`,
-/// `display_signature`, and per-parameter types are real `Type`s, so a silent
-/// `Type::Error` in any of them is unambiguous ([`type_carries_error`]).
-///
-/// Why NOT walk the annotated Deep tree (the Phase 0 harness's approach): the
-/// annotator RE-INFERS each node in a fresh scope and skips the `type:` stamp
-/// when that re-inference returns `Type::Error`. A node whose type depends on
-/// dataflow the annotation scope does not reproduce -- a synthesized
-/// pipe-stage lambda body whose parameter is pinned only by the piped input,
-/// a top-level declaration node which is not an expression at all -- is then
-/// UNSTAMPED even in a program that checks perfectly clean. "Missing stamp" is
-/// therefore not a reliable silent-`Type::Error` signal for arbitrary
-/// programs; it only holds on the harness's curated corpus, where it stays as
-/// the test-side approximation. The signature table has no such re-inference
-/// gap. With the §C3 witness token the whole guarantee is structural anyway
-/// (a `Type::Error` cannot be minted without a pushed diagnostic), so this
-/// always-on pass is the reliable-surface backstop that verifies the claim.
+/// The shared finalizer checks both authoritative surfaces: every runtime
+/// expression/pattern/function node in annotated Deep must carry the stamp
+/// produced by its owning inference epoch, and the signature-inference table
+/// must contain no structural `Type::Error`. The signature table remains the
+/// value-level backstop; the annotated tree now has no re-inference gap.
+fn annotated_totality_invariant_traces(exprs: &[deep::Expr]) -> Vec<String> {
+    fn walk(expr: &deep::Expr, traces: &mut Vec<String>) {
+        match expr {
+            deep::Expr::Atom(_, _) | deep::Expr::Map(_, _) => {}
+            deep::Expr::MetaExpr(meta, _) => walk(&meta.expr, traces),
+            deep::Expr::List(list, _) => {
+                let tag = get_tag(list);
+                let requires_stamp = tag.is_some_and(|tag| {
+                    tag == "fn"
+                        || matches!(tag, "pat-var" | "pat-as")
+                        || should_attach_type_metadata(tag)
+                });
+                if requires_stamp
+                    && !get_meta(list).is_some_and(|meta| {
+                        meta.entries.iter().any(|(key, _)| key == "type")
+                    })
+                {
+                    traces.push(format!(
+                        "annotated `{}` node is missing its type stamp",
+                        tag.unwrap_or("<untagged-list>")
+                    ));
+                }
+
+                // Metadata entries and type-declaration children are source /
+                // compiler syntax, not runtime inference owners.
+                if matches!(tag, Some("defsig" | "deftype" | "typealias")) {
+                    return;
+                }
+                for child in list.elements.iter().skip(2) {
+                    walk(child, traces);
+                }
+            }
+        }
+    }
+
+    let mut traces = Vec::new();
+    for expr in exprs {
+        walk(expr, &mut traces);
+    }
+    traces
+}
+
 fn totality_invariant_traces(sig: &SignatureInferenceMetadata) -> Vec<String> {
     let mut out = Vec::new();
     for (name, f) in &sig.functions {

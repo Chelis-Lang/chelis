@@ -113,14 +113,32 @@ mod authoritative_type_stamp_tests {
 
 #[cfg(test)]
 mod annotated_totality_finalization_tests {
+    use super::*;
+    use crate::infer::{FinalizationMutationCase, run_finalization_mutation_case};
+
+    fn errors_for(case: FinalizationMutationCase) -> Vec<CheckError> {
+        let mut errors = Vec::new();
+        {
+            let mut sink = DiagnosticSink {
+                errors: &mut errors,
+            };
+            run_finalization_mutation_case(case, &mut sink);
+        }
+        errors
+    }
+
     #[test]
     fn missing_runtime_stamp_is_rejected_at_shared_finalization() {
-        todo!("red oracle: finalization rejects an unstamped runtime node")
+        let errors = errors_for(FinalizationMutationCase::MissingRuntimeStamp);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.contains("missing its type stamp"));
     }
 
     #[test]
     fn silent_error_owner_is_rejected_at_shared_finalization() {
-        todo!("red oracle: an error-typed owner cannot finalize under an empty sink")
+        let errors = errors_for(FinalizationMutationCase::SilentErrorOwner);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.contains("missing its type stamp"));
     }
 }
 
