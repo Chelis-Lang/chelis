@@ -49,8 +49,18 @@ direct parent of `apt-get`, inside the same session, means the kill actually
 reaches `apt-get`; the kernel releases its flock on death (even a SIGKILL),
 so the next retry can re-acquire the lock. `--kill-after` escalates SIGTERM
 to SIGKILL if apt-get does not exit on the polite signal. If the `timeout`
-binary is somehow absent the command fails fast (exit 127) and is retried --
-apt-get never launches unbounded, so the no-6h-hang invariant still holds.
+binary is somehow absent the command fails fast and non-zero (127 under
+`sudo`, or 1 on the `--no-sudo` path where the missing binary surfaces as an
+OSError) and is retried -- apt-get never launches unbounded, so the
+no-6h-hang invariant still holds either way.
+
+Scope: the ceiling defends against a stalled DOWNLOAD (the realistic and
+observed failure -- the wedge that motivated this was on `apt-get update`,
+which only fetches indices). A kill that landed mid-`dpkg` unpack/configure
+would not auto-recover: the next `apt-get install` could report "dpkg was
+interrupted, you must manually run 'dpkg --configure -a'". That window is
+seconds wide for these few small packages, so it is knowingly out of scope;
+if it ever bites, add a `dpkg --configure -a` recovery before the retry.
 
 Usage (single-line `run:` step, mirroring the ci_free_disk.py /
 ci_setup_uv_python.py convention so the gate's no-hand-inlined-command lock
@@ -102,11 +112,14 @@ PER_COMMAND_TIMEOUT_SECONDS = 300
 # its ceiling and poison the retries.
 KILL_AFTER_SECONDS = 30
 
-# Exit codes coreutils `timeout(1)` uses when it had to stop the command:
-# 124 = the command timed out (killed by the requested signal), 137 = the
-# command was still alive at --kill-after and got SIGKILL (128+9). Both are
-# non-zero, so the retry loop already treats them as a failed attempt; we
-# special-case them only to print an accurate "timed out" diagnostic.
+# Exit codes that read as "the wall-clock ceiling stopped the command":
+# 124 = coreutils `timeout(1)` timed the command out (killed by the requested
+# signal); 137 = 128+9, the command was SIGKILLed -- usually our --kill-after
+# escalation when apt-get ignored SIGTERM. Note 137 is NOT unambiguous: any
+# external SIGKILL (e.g. the kernel OOM killer) also yields 137, so the
+# "timed out" log line below is a best-effort label, not a proof. It does not
+# matter for control flow: the retry loop fires on ANY non-zero exit, so these
+# are special-cased purely to print a more accurate diagnostic.
 TIMEOUT_EXIT_CODES = (124, 137)
 
 
@@ -128,7 +141,13 @@ def _run(cmd: list[str]) -> int:
 def _timeout_wrapper(timeout: float | None) -> list[str]:
     """The coreutils `timeout` prefix tokens for one apt-get command, or []
     when the ceiling is disabled. Placed AFTER any `sudo` so `timeout` is
-    apt-get's direct parent and the kill actually reaches apt-get."""
+    apt-get's direct parent and the kill actually reaches apt-get.
+
+    `--foreground` is deliberately NOT passed: without it `timeout` puts the
+    command in its own process group and signals the WHOLE group, so apt-get's
+    `/usr/lib/apt/methods/*` fetcher children are cleaned up with it. That is
+    what we want in a non-interactive `run:` step (there is no TTY to hand
+    back); `--foreground` would leave those children un-timed-out."""
     if timeout is None:
         return []
     return ["timeout", f"--kill-after={KILL_AFTER_SECONDS:g}s", f"{timeout:g}s"]
@@ -191,11 +210,12 @@ def apt_get(
         if last_rc == 0:
             return 0
         if i < attempts:
-            cause = (
-                "timed out and was killed by the wall-clock ceiling"
-                if last_rc in TIMEOUT_EXIT_CODES
-                else "likely a transient mirror/network reset"
-            )
+            if last_rc == 124:
+                cause = "timed out at the wall-clock ceiling"
+            elif last_rc == 137:
+                cause = "SIGKILLed (--kill-after, or an external signal such as OOM)"
+            else:
+                cause = "likely a transient mirror/network reset"
             print(
                 f"ci_apt_get: apt-get exited {last_rc} "
                 f"({cause}); retrying in {backoff_seconds:g}s",

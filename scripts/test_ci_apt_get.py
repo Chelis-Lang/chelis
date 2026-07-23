@@ -217,6 +217,21 @@ class TimeoutTests(unittest.TestCase):
                 f"{cag.PER_COMMAND_TIMEOUT_SECONDS:g}s", call.args[0]
             )
 
+    def test_shipped_default_wrapper_tokens_are_pinned_literally(self):
+        # Everything else derives the wrapper tokens from the constants and so
+        # would move silently with them. Pin the SHIPPED values literally here
+        # so an accidental change to PER_COMMAND_TIMEOUT_SECONDS (300) or
+        # KILL_AFTER_SECONDS (30) trips this test instead of shipping quietly.
+        with mock.patch.object(
+            cag.subprocess, "run", return_value=_completed()
+        ) as run:
+            cag.apt_get(["gcc"], sleep=lambda _s: None)
+        update_cmd = run.call_args_list[0].args[0]
+        self.assertEqual(
+            update_cmd[:5],
+            ["sudo", "timeout", "--kill-after=30s", "300s", "apt-get"],
+        )
+
     def test_timed_out_command_is_retried_and_self_heals(self):
         # attempt 1 `update` is killed by the wrapper (coreutils `timeout`
         # returns 124); the loop must treat it as a failed attempt and retry,
