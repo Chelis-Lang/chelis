@@ -190,28 +190,33 @@ fn write_release_tarball(base: &Path, ver: &str, slug: &str) {
 /// `reef setup` delegates installs to. Nextest exposes `CARGO_BIN_EXE_*`
 /// only for the package under test, so this cross-package helper resolves
 /// Cargo's target directory after building instead of asking assert_cmd for
-/// an unset `CARGO_BIN_EXE_chelisup`. A fresh isolated target starts without
-/// chelisup; when it is already built this is a fast no-op.
+/// an unset `CARGO_BIN_EXE_chelisup`. The build runs from the workspace root so
+/// a relative `CARGO_TARGET_DIR` cannot create an untracked crate-local target.
+/// A fresh isolated target starts without chelisup; when it is already built
+/// this is a fast no-op.
 fn chelisup_bin() -> PathBuf {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let status = Proc::new(cargo)
-        .args(["build", "-p", "chelisup", "--bin", "chelisup"])
-        .status()
-        .expect("spawn cargo build for chelisup");
-    assert!(status.success(), "building chelisup failed");
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root");
     let target_dir = match std::env::var_os("CARGO_TARGET_DIR") {
         Some(value) => {
             let path = PathBuf::from(value);
             if path.is_absolute() {
                 path
             } else {
-                std::env::current_dir()
-                    .expect("current test directory")
-                    .join(path)
+                workspace_root.join(path)
             }
         }
-        None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+        None => workspace_root.join("target"),
     };
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let status = Proc::new(cargo)
+        .current_dir(&workspace_root)
+        .args(["build", "-p", "chelisup", "--bin", "chelisup"])
+        .status()
+        .expect("spawn cargo build for chelisup");
+    assert!(status.success(), "building chelisup failed");
     let path = target_dir
         .join("debug")
         .join(format!("chelisup{}", std::env::consts::EXE_SUFFIX));
