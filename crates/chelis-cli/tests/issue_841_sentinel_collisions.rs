@@ -151,3 +151,29 @@ fn eval_agrees_with_the_compiled_def_named_call() {
         "eval must compute 6"
     );
 }
+
+/// chelis#841 review, finding 1: a plain callable bug keeps the frozen
+/// function-value diagnostic even when an unrelated (and fully
+/// supported) `grad` exists elsewhere in the program; the transform
+/// marker, not whole-program state, routes the AD workaround text.
+#[test]
+fn an_unrelated_grad_does_not_reclassify_a_callable_bug() {
+    let err = c_build_source(
+        "def increment(x: int8) -> int8 = add(x, cast(1, int8))\n\
+         def choose() -> int8 -> int8 = increment\n\
+         def square(theta: f32) -> f32 = mul(theta, theta)\n\
+         def gradient(theta: f32) -> f32 = grad(square)(theta)\n\
+         chosen = choose()\n\
+         out = print(chosen(cast(6, int8)))\n",
+        "mixed_grad_callable",
+    )
+    .expect_err("the returned callable still rejects");
+    assert!(
+        err.contains("unsupported:") && err.contains("function value"),
+        "the callable bug keeps the frozen diagnostic:\n{err}"
+    );
+    assert!(
+        !err.contains("applies/binds"),
+        "an unrelated grad must not reclassify the callable bug as an AD failure:\n{err}"
+    );
+}

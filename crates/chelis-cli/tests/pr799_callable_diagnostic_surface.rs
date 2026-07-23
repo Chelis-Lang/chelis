@@ -5,12 +5,13 @@
 //! The compiler API rejects a used returned/dynamically-selected function
 //! value with the frozen `unsupported:` function-value diagnostic
 //! (`pr799_host_resolution_result.rs`). `chelis build --target c` must
-//! surface the SAME class of diagnostic for the same source: the legacy
-//! grad/vmap gate text is reserved for defs carrying an
-//! `__unresolved_grad`/`__unresolved_vmap` transform marker
-//! (`host_program_unresolved_transform_sites`), and a plain unresolved
-//! callable falls through to ABI projection's frozen rejection. Every
-//! rejection here must also leave zero emitted artifacts.
+//! surface the SAME class of diagnostic for the same source: the
+//! grad/vmap gate text is reserved for defs carrying the unspellable
+//! transform marker (`HOST_UNRESOLVED_TRANSFORM_MARKER`, scanned by
+//! `host_program_unresolved_transform_sites`), and a plain unresolved
+//! callable carries the callable marker and falls through to ABI
+//! projection's frozen rejection (chelis#841). Every rejection here must
+//! also leave zero emitted artifacts.
 
 #![allow(clippy::uninlined_format_args)]
 
