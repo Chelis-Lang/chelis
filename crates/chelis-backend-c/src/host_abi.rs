@@ -339,8 +339,8 @@ fn project_expr(
             arg_tys,
             ty,
         } => {
-            if function == chelis_ir::host::HOST_UNRESOLVED_CALLABLE_MARKER {
-                return Err(unsupported_callable_use());
+            if chelis_ir::host::is_host_unresolved_marker(&function) {
+                return Err(unsupported_callable_use(&function));
             }
             if args.len() != arg_tys.len() {
                 return Err(invalid_callback_shape(format!(
@@ -376,8 +376,8 @@ fn project_expr(
             }
         }
         ConcreteHostExprKind::Builtin { name, args, ty } => {
-            if name == chelis_ir::host::HOST_UNRESOLVED_CALLABLE_MARKER {
-                return Err(unsupported_callable_use());
+            if chelis_ir::host::is_host_unresolved_marker(&name) {
+                return Err(unsupported_callable_use(&name));
             }
             HostAbiExprKind::Builtin {
                 name,
@@ -596,7 +596,20 @@ fn unsupported_function_symbol(name: &str) -> Unsupported {
     )
 }
 
-fn unsupported_callable_use() -> Unsupported {
+/// The frozen rejection for an internal unresolved-callee marker. The
+/// marker spelling never enters the diagnostic; the payload names the
+/// semantic class instead, per marker kind.
+fn unsupported_callable_use(marker: &str) -> Unsupported {
+    if marker == chelis_ir::host::HOST_UNRESOLVED_TRANSFORM_MARKER {
+        return Unsupported::new(
+            UnsupportedKind::HostAbi("unresolved `grad`/`vmap` transform application".to_string()),
+            "C host ABI callable-use projection",
+            Stage::Codegen("c"),
+            "the host lane recognized an AD transform it could not lower; rewrite the \
+             differentiated body to pure tensor ops (sum, add, mul, einsum) or run under \
+             `chelis eval` ([05-UNS-1]; chelis#730)",
+        );
+    }
     Unsupported::new(
         UnsupportedKind::HostAbi("unresolved function value".to_string()),
         "C host ABI callable-use projection",

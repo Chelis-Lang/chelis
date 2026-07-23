@@ -2589,21 +2589,16 @@ fn cmd_build(
                     || dag.roots().is_empty()
                     || !host_program.functions.is_empty())
             {
-                // AD-transform UX only: when a program that directly
-                // applies `grad`/`vmap` carries an unresolved-callable
-                // marker (grad through host-lane fold/map lowers to the
-                // generic fallback), name the affected defs with the
-                // workaround text. A program applying NEITHER transform
-                // falls through to `codegen_host_program`, whose ABI
-                // projection rejects the marker with the frozen
-                // `unsupported:` diagnostic; both public surfaces then
-                // agree (chelis#730, chelis#841).
-                let unresolved = if chelis_ir::host::checked_program_applies_ad_transform(&checked)
-                {
-                    chelis_ir::host::host_program_unresolved_call_sites(host_program)
-                } else {
-                    Vec::new()
-                };
+                // AD-transform UX only: the lowerer marks an AD transform
+                // it could not resolve with the dedicated transform
+                // marker, so the workaround text names exactly those
+                // defs. A plain unresolved callable value falls through
+                // to `codegen_host_program`, whose ABI projection rejects
+                // its marker with the frozen `unsupported:` diagnostic,
+                // regardless of whether an unrelated grad/vmap exists
+                // elsewhere in the program (chelis#730, chelis#841).
+                let unresolved =
+                    chelis_ir::host::host_program_unresolved_transform_sites(host_program);
                 if !unresolved.is_empty() {
                     return Err(format!(
                         "`chelis build --target c` can't lower these defs. Their body \
@@ -2860,16 +2855,12 @@ fn cmd_build_deep(
                     || dag.roots().is_empty()
                     || !host_program.functions.is_empty())
             {
-                // Same split as the Surf lane: grad/vmap workaround text
-                // for grad/vmap-applying programs; other unresolved
-                // callable markers reach ABI projection's frozen
-                // diagnostic instead (chelis#841).
-                let unresolved = if chelis_ir::host::checked_program_applies_ad_transform(&checked)
-                {
-                    chelis_ir::host::host_program_unresolved_call_sites(host_program)
-                } else {
-                    Vec::new()
-                };
+                // Same split as the Surf lane: the transform marker earns
+                // the grad/vmap workaround text; plain callable markers
+                // reach ABI projection's frozen diagnostic instead
+                // (chelis#841).
+                let unresolved =
+                    chelis_ir::host::host_program_unresolved_transform_sites(host_program);
                 if !unresolved.is_empty() {
                     return Err(format!(
                         "`chelis build --deep --target c` can't lower these defs: \

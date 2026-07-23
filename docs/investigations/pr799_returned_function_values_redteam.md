@@ -219,3 +219,15 @@ byte-for-byte, verified via `git status`).
 - **F6 and the `.dp` build lane** - recorded on
   [chelis#730](https://github.com/Chelis-Lang/chelis/issues/730) for the
   Phase 3 gate-dedupe inventory.
+
+## 7. Amendment (2026-07-23, chelis#841 / PR #843)
+
+The F1 disposition above describes the mechanism as of PR #799's head:
+`host_program_unresolved_transform_sites` keyed on `__unresolved_*` marker
+builtins plus a whole-program grad/vmap tag detector. PR #843 (closing
+chelis#841) replaced both in-band string sentinels with unspellable
+markers (`#chelis-unresolved-callable` / `#chelis-unresolved-transform`)
+chosen per call site by the callee's tag; the transform scan is re-keyed
+to the transform marker, the tag detector is gone, and the F3 collision
+class is closed structurally. This section records the drift so the
+disposition text stays readable as history.

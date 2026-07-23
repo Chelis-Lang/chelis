@@ -82,3 +82,51 @@ fn first_class_function_type_has_no_general_c_host_value_abi() {
     assert!(error.to_string().contains("function value"));
     assert!(!error.to_string().contains("unresolved"));
 }
+
+/// chelis#841 review, finding 5: the marker guards in `project_expr` are
+/// defense in depth with no CLI-reachable trigger; lock them directly so
+/// a marker can never emit as a C symbol.
+#[test]
+fn unresolved_callee_markers_are_rejected_at_projection_in_both_positions() {
+    use chelis_ir::host::{
+        ConcreteHostProgram, HOST_UNRESOLVED_CALLABLE_MARKER, HOST_UNRESOLVED_TRANSFORM_MARKER,
+        HostBinding, HostExpr, HostExprKind,
+    };
+
+    let program_with = |kind: chelis_ir::host::HostExprKind<ConcreteHostType>| {
+        let mut program = ConcreteHostProgram::default();
+        program.globals.push(HostBinding {
+            name: "probe".into(),
+            display_name: None,
+            ty: ConcreteHostType::Scalar(Prim::Int32),
+            value: HostExpr::new(kind),
+        });
+        program
+    };
+
+    let call_marker = program_with(HostExprKind::Call {
+        function: HOST_UNRESOLVED_CALLABLE_MARKER.into(),
+        args: Vec::new(),
+        arg_tys: Vec::new(),
+        ty: ConcreteHostType::Scalar(Prim::Int32),
+    });
+    let err = crate::host_abi::project_program(&call_marker)
+        .expect_err("a callable marker in Call position must never project");
+    let rendered = err.to_string();
+    assert!(rendered.contains("unresolved function value"), "{rendered}");
+    assert!(!rendered.contains("#chelis-unresolved"), "{rendered}");
+
+    let builtin_marker = program_with(HostExprKind::Builtin {
+        name: HOST_UNRESOLVED_TRANSFORM_MARKER.into(),
+        args: Vec::new(),
+        ty: ConcreteHostType::Scalar(Prim::Int32),
+    });
+    let err = crate::host_abi::project_program(&builtin_marker)
+        .expect_err("a transform marker in Builtin position must never project");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("transform application"),
+        "the transform marker carries its own semantic payload: {rendered}"
+    );
+    assert!(!rendered.contains("#chelis-unresolved"), "{rendered}");
+}

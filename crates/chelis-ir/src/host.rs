@@ -1785,33 +1785,55 @@ pub fn host_program_summary_rejections<T>(program: &HostProgram<T>) -> &[Summary
     &program.summary_rejections
 }
 
-/// The internal marker name `lower_app_host_expr` gives its generic
-/// fallback `Builtin` when it cannot resolve the callee (a non-`var`
-/// callee such as `grad(f)(x)`, or an application of a value with no
-/// known function signature). The leading `#` cannot appear in a Surf or
-/// Deep identifier, so no user definition can collide with the marker
-/// (chelis#841); the C backend's ABI projection rejects it with the
-/// frozen `unsupported:` diagnostic before emission.
+/// The internal marker names `lower_app_host_expr` gives its generic
+/// fallback when it cannot resolve the callee. The leading `#` cannot
+/// appear in a Surf or Deep identifier, so no user definition can
+/// collide with either marker (chelis#841); the C backend's ABI
+/// projection rejects both with the frozen `unsupported:` diagnostic
+/// before emission.
+///
+/// Two markers, routed at the fallback site by what the callee was:
+/// an AD transform in callee position (`grad(f)(x)` whose transform the
+/// host lane could not lower) takes [`HOST_UNRESOLVED_TRANSFORM_MARKER`]
+/// and earns the CLI's grad/vmap workaround text; every other
+/// unresolved callee takes [`HOST_UNRESOLVED_CALLABLE_MARKER`] and the
+/// function-value diagnostic. Keeping the split in the marker itself
+/// means a plain callable bug is never misdescribed as an AD failure
+/// just because an unrelated transform exists elsewhere in the program.
 pub const HOST_UNRESOLVED_CALLABLE_MARKER: &str = "#chelis-unresolved-callable";
+pub const HOST_UNRESOLVED_TRANSFORM_MARKER: &str = "#chelis-unresolved-transform";
+
+/// True for exactly the internal unresolved-callee marker names.
+pub fn is_host_unresolved_marker(name: &str) -> bool {
+    name == HOST_UNRESOLVED_CALLABLE_MARKER || name == HOST_UNRESOLVED_TRANSFORM_MARKER
+}
 
 /// Scan a host program for any function or global whose body still
-/// contains the [`HOST_UNRESOLVED_CALLABLE_MARKER`] fallback. These
-/// sites never reach emission: ABI projection rejects them with the
-/// frozen `unsupported:` function-value diagnostic. The CLI's
-/// pre-codegen UX gate consults this scan only for programs that
-/// directly apply `grad`/`vmap` (see
-/// [`checked_program_applies_ad_transform`]), so a plain callable-value
-/// case is not misdescribed as an AD-transform failure (chelis#730,
-/// chelis#841).
+/// contains an unresolved-callee marker (either kind). These sites
+/// never reach emission: ABI projection rejects them with the frozen
+/// `unsupported:` diagnostic.
 pub fn host_program_unresolved_call_sites<T>(program: &HostProgram<T>) -> Vec<String> {
-    // The marker appears as a `Builtin` when nothing about the callee
+    // Markers appear as a `Builtin` when nothing about the callee
     // resolved, and as a `Call` function when the callee's TYPE resolved
-    // but the callee itself did not (e.g. `grad(f)(x)` over an
-    // unsupported body). No user identifier can spell it either way.
+    // but the callee itself did not.
     host_program_call_name_sites(
         program,
-        &|name| name == HOST_UNRESOLVED_CALLABLE_MARKER,
-        &|function| function == HOST_UNRESOLVED_CALLABLE_MARKER,
+        &is_host_unresolved_marker,
+        &is_host_unresolved_marker,
+    )
+}
+
+/// Scan a host program for defs whose bodies carry the transform marker:
+/// an AD transform the host lane recognized in callee position but could
+/// not lower. The CLI's pre-codegen UX gate names exactly these defs in
+/// its grad/vmap workaround text; plain callable markers fall through to
+/// ABI projection's function-value diagnostic instead (chelis#730,
+/// chelis#841).
+pub fn host_program_unresolved_transform_sites<T>(program: &HostProgram<T>) -> Vec<String> {
+    host_program_call_name_sites(
+        program,
+        &|name| name == HOST_UNRESOLVED_TRANSFORM_MARKER,
+        &|function| function == HOST_UNRESOLVED_TRANSFORM_MARKER,
     )
 }
 
@@ -1884,29 +1906,6 @@ pub fn find_direct_builtin_call(program: &CheckedProgram, builtins: &[&str]) -> 
     }
 
     program.exprs().iter().find_map(|expr| find(expr, builtins))
-}
-
-/// Report whether the checked program contains any AD-transform node
-/// (`grad`, `vmap`, or `vmap-grad` Deep tags). After checking, `grad(f)`
-/// is a dedicated tagged node rather than an `app` of a `var`, so a
-/// builtin-call scan cannot detect it; the CLI's pre-codegen UX gate uses
-/// this to reserve the grad/vmap workaround text for programs that
-/// actually apply a transform (chelis#730 Phase 2).
-pub fn checked_program_applies_ad_transform(program: &CheckedProgram) -> bool {
-    fn walk(expr: &Expr) -> bool {
-        match expr {
-            Expr::List(list, _) => {
-                matches!(tag(list), Some("grad" | "vmap" | "vmap-grad"))
-                    || list.elements.iter().any(walk)
-            }
-            Expr::Map(map, _) => map.entries.iter().any(|(_, value)| walk(value)),
-            Expr::MetaExpr(meta, _) => {
-                walk(&meta.expr) || meta.entries.iter().any(|(_, value)| walk(value))
-            }
-            Expr::Atom(_, _) => false,
-        }
-    }
-    program.exprs().iter().any(walk)
 }
 
 fn host_callback_uses_builtin<T>(callback: &HostCallback<T>, builtin: &str) -> bool {
@@ -6249,7 +6248,24 @@ fn lower_app_host_expr(
                 None
             }
         })
-        .unwrap_or(HOST_UNRESOLVED_CALLABLE_MARKER)
+        .unwrap_or_else(|| {
+            // Route the fallback by what the callee actually was: an AD
+            // transform in callee position earns the transform marker
+            // (and the CLI's grad/vmap workaround text), anything else
+            // is a plain unresolved callable. Both markers are
+            // unspellable, so per-site routing survives without
+            // consulting whole-program state (chelis#841 review,
+            // finding 1).
+            if kids
+                .first()
+                .and_then(as_list)
+                .is_some_and(|inner| matches!(tag(inner), Some("grad" | "vmap" | "vmap-grad")))
+            {
+                HOST_UNRESOLVED_TRANSFORM_MARKER
+            } else {
+                HOST_UNRESOLVED_CALLABLE_MARKER
+            }
+        })
         .to_string();
     let fn_sig = scope
         .get(&name)
@@ -10837,14 +10853,26 @@ mod tests {
         program
     }
 
-    /// Only the unspellable marker is an unresolved call site; builtin
-    /// or call nodes whose names a user could spell (`call`,
-    /// `__unresolved_grad`) are ordinary identifiers (chelis#841).
+    /// Only the unspellable markers are unresolved call sites; names a
+    /// user could spell (`call`, `__unresolved_grad`) are ordinary
+    /// identifiers (chelis#841). The transform marker routes to the
+    /// transform scan; the callable marker does not.
     #[test]
-    fn unresolved_call_sites_match_only_the_unspellable_marker() {
-        let marker = program_with_global_builtin(HOST_UNRESOLVED_CALLABLE_MARKER);
+    fn unresolved_call_sites_match_only_the_unspellable_markers() {
+        let callable = program_with_global_builtin(HOST_UNRESOLVED_CALLABLE_MARKER);
         assert_eq!(
-            host_program_unresolved_call_sites(&marker),
+            host_program_unresolved_call_sites(&callable),
+            vec!["probe".to_string()]
+        );
+        assert!(host_program_unresolved_transform_sites(&callable).is_empty());
+
+        let transform = program_with_global_builtin(HOST_UNRESOLVED_TRANSFORM_MARKER);
+        assert_eq!(
+            host_program_unresolved_call_sites(&transform),
+            vec!["probe".to_string()]
+        );
+        assert_eq!(
+            host_program_unresolved_transform_sites(&transform),
             vec!["probe".to_string()]
         );
 
@@ -10871,32 +10899,7 @@ mod tests {
         assert_eq!(
             host_program_unresolved_call_sites(&marker_call),
             vec!["probe".to_string()],
-            "a typed-but-unresolved callee carries the marker in `Call` position"
+            "a typed-but-unresolved callee carries a marker in `Call` position"
         );
-    }
-
-    /// `grad` is a Deep tag after checking; the AD-transform detector
-    /// must see it where a builtin-call scan cannot, and stay quiet on
-    /// programs without a transform.
-    #[test]
-    fn ad_transform_detector_matches_tags_not_builtin_calls() {
-        let with_grad = surf_check(
-            "def sumsq(theta: f32) -> f32 = mul(theta, theta)\n\
-             def gradient(theta: f32) -> f32 = grad(sumsq)(theta)\n\
-             out = print(gradient(3.0))\n",
-        );
-        assert!(checked_program_applies_ad_transform(&with_grad));
-        assert_eq!(
-            find_direct_builtin_call(&with_grad, &["grad", "vmap"]),
-            None,
-            "the builtin-call scan cannot see tag-form transforms; if this \
-             starts matching, the detector split can be revisited"
-        );
-
-        let without = surf_check(
-            "def double_it(x: f32) -> f32 = mul(x, 2.0)\n\
-             out = print(double_it(3.0))\n",
-        );
-        assert!(!checked_program_applies_ad_transform(&without));
     }
 }
