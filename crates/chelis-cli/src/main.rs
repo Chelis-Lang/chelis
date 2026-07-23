@@ -8438,22 +8438,33 @@ fn cmd_lint(
     // unifies the two walks and forecloses the bug class for any future
     // rule that does path-segment dispatch.
     //
-    // This must be `std::path::absolute`, not `fs::canonicalize`:
-    // canonicalizing resolves symlinks, which erases a link target's
-    // identity before the traversal policy's depth-zero boundary check
-    // can see it — an explicitly named link escaping the repository
-    // policy root would lint its resolved external tree as a loose
-    // target instead of failing loudly (§12.2).
+    // Non-link targets are then canonicalized so exception matching
+    // strips the same real-path prefix `detect_lint_workspace_root`
+    // reports (macOS tempdirs spell `/var/...` for `/private/var/...`).
+    // A target whose final component is a symlink is deliberately NOT
+    // canonicalized: resolving it would erase the link's identity before
+    // the traversal policy's depth-zero boundary check can see it — an
+    // explicitly named link escaping the repository policy root would
+    // lint its resolved external tree as a loose target instead of
+    // failing loudly (§12.2).
     let targets: Vec<PathBuf> = raw_targets
         .into_iter()
-        .map(|p| match std::path::absolute(&p) {
-            Ok(abs) => abs,
-            Err(err) => {
-                eprintln!(
-                    "warning: failed to absolutize {}: {err}; using as-is",
-                    p.display()
-                );
-                p
+        .map(|p| {
+            let absolute = match std::path::absolute(&p) {
+                Ok(absolute) => absolute,
+                Err(err) => {
+                    eprintln!(
+                        "warning: failed to absolutize {}: {err}; using as-is",
+                        p.display()
+                    );
+                    p
+                }
+            };
+            match std::fs::symlink_metadata(&absolute) {
+                Ok(metadata) if !metadata.file_type().is_symlink() => {
+                    std::fs::canonicalize(&absolute).unwrap_or(absolute)
+                }
+                _ => absolute,
             }
         })
         .collect();

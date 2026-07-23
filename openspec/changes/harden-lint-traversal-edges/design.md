@@ -36,7 +36,7 @@ Two smaller review nits ride along as implementation-only cleanups: `TraversalPo
 
 *Breaking surface:* `walker::walk` and `lint()` callers that relied on silent-empty. The only in-tree caller with that reliance is the test suite; the style gate already surfaces `LintError` loudly.
 
-*Discovered during apply:* `cmd_lint` canonicalized targets at the CLI boundary (for path-substring rule dispatch), which resolved symlinks and erased a link root's identity before the walker's boundary check ran — an escaping link target linted its resolved external tree as a loose target and exited 0. The CLI now uses `std::path::absolute` instead of `fs::canonicalize`: same normalization benefit, no symlink resolution, so the depth-zero check sees the link.
+*Discovered during apply:* `cmd_lint` canonicalized targets at the CLI boundary (for path-substring rule dispatch), which resolved symlinks and erased a link root's identity before the walker's boundary check ran — an escaping link target linted its resolved external tree as a loose target and exited 0. The CLI now absolutizes every target (`std::path::absolute`) and canonicalizes only targets whose final component is not a symlink: non-link targets keep the real-path spelling that workspace-rooted exception matching depends on (macOS `/var` vs `/private/var`, locked by `le_leak_fix_sibling_path_invocation_matches_workspace_root_invocation`), while a link-final target keeps its identity so the depth-zero check sees the link.
 
 ### D2: cwd-resolve the discovery start, keep matcher roots lexical
 

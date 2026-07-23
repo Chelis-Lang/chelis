@@ -50,8 +50,8 @@ exclusion pattern would reject it; it must still be a regular file or directory
 that exists but fails that admission — a socket or FIFO, a link resolving to
 a different entry kind, an escaping link, or a broken link — fails
 `chelis lint` loudly with the root path and rejection reason, exactly like a
-nonexistent root; it never exits 0 as an empty lint. Targets are absolutized
-without resolving symlinks so a link's identity reaches that boundary check.
+nonexistent root; it never exits 0 as an empty lint. A link-final target is
+not resolved before the walk, so its identity reaches that boundary check.
 Matching nested
 descendants are pruned. Non-explicit discovered entries must be directories,
 regular files, or symlinks resolving to the same entry kind. Special entries
