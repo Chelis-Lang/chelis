@@ -1,6 +1,10 @@
 use chelis_lint::policy::{TraversalClass, TraversalPolicy};
 use chelis_lint::{
-    Context, Rule, Surface, rules::opaque_domain_construction::OpaqueDomainConstruction,
+    Context, Rule, Surface,
+    rules::{
+        doc_filename_convention::DocFilenameConvention,
+        opaque_domain_construction::OpaqueDomainConstruction,
+    },
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -124,6 +128,10 @@ fn relative_subdirectory_child_probe() {
     let names = walked(Path::new("src"));
     assert!(names.iter().any(|path| path == "keep.ch"));
     assert!(!names.iter().any(|path| path == "generated/drop.ch"));
+
+    let policy = TraversalPolicy::load_for(Path::new("src/keep.ch")).unwrap();
+    assert!(policy.is_excluded_or_parent(Path::new("src/generated/Cargo.toml"), false));
+    assert!(!policy.is_excluded_or_parent(Path::new("src/Cargo.toml"), false));
 }
 
 #[test]
@@ -527,8 +535,16 @@ fn shipped_policy_migrates_every_previous_walker_exclusion() {
 
 #[test]
 fn crate_guardrail_locks_rule_registration_and_canonical_traversal_protocol() {
-    let guardrail = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("CLAUDE.md"))
-        .expect("crates/chelis-lint/CLAUDE.md must provide edit-time rule guardrails");
+    let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let agents_path = crate_root.join("AGENTS.md");
+    let claude_path = crate_root.join("CLAUDE.md");
+    let guardrail = fs::read_to_string(&agents_path)
+        .expect("crates/chelis-lint/AGENTS.md must provide edit-time rule guardrails");
+    assert_eq!(
+        fs::read_link(&claude_path).expect("crates/chelis-lint/CLAUDE.md must be a symlink"),
+        PathBuf::from("AGENTS.md"),
+        "AGENTS.md is canonical; CLAUDE.md must resolve to it"
+    );
     for required in [
         "registry::all_rules",
         "positive and negative",
@@ -598,5 +614,107 @@ fn configured_exclusion_controls_opaque_prepared_catalog() {
         violations.len(),
         1,
         "admitted declaration must reach catalog"
+    );
+}
+
+fn lint_doc_filenames(root: &Path) -> Vec<chelis_lint::Violation> {
+    let rules: Vec<Box<dyn Rule>> = vec![Box::new(DocFilenameConvention)];
+    chelis_lint::lint(root, &rules).expect("lint doc filenames")
+}
+
+#[test]
+fn excluded_manifest_cannot_grant_package_name_exception_to_admitted_doc() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    write_policy(root, &exclusion("crates/generated/", "generated", "§12.2"));
+    fs::create_dir_all(root.join("docs")).unwrap();
+    let doc = root.join("docs/foo-bar.md");
+    fs::write(&doc, "# Docs\n").unwrap();
+    fs::create_dir_all(root.join("crates/generated")).unwrap();
+    fs::write(
+        root.join("crates/generated/Cargo.toml"),
+        "[package]\nname = \"foo-bar\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+
+    let violations = lint_doc_filenames(root);
+    assert_eq!(
+        violations.len(),
+        1,
+        "a policy-excluded manifest must not affect an admitted doc: {violations:?}"
+    );
+    assert_eq!(violations[0].rule_id, "doc-filename-convention");
+
+    let direct_ctx = Context {
+        root,
+        path: &doc,
+        source: None,
+        surface: Surface::DocFile,
+    };
+    assert_eq!(
+        DocFilenameConvention.check(&direct_ctx).len(),
+        1,
+        "the direct Rule::check compatibility path must enforce the same ancillary-file policy"
+    );
+}
+
+#[test]
+fn admitted_manifest_still_grants_package_name_exception_to_admitted_doc() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::write(root.join("docs/foo-bar.md"), "# Docs\n").unwrap();
+    fs::create_dir_all(root.join("crates/foo-bar")).unwrap();
+    fs::write(
+        root.join("crates/foo-bar/Cargo.toml"),
+        "[package]\nname = \"foo-bar\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+
+    assert!(
+        lint_doc_filenames(root).is_empty(),
+        "an admitted matching Cargo manifest must retain the §8.3 package-name exception"
+    );
+}
+
+#[test]
+fn explicit_doc_file_lint_preserves_ancestor_package_name_exception() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    fs::create_dir_all(root.join("docs")).unwrap();
+    let doc = root.join("docs/foo-bar.md");
+    fs::write(&doc, "# Docs\n").unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"foo-bar\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+
+    assert!(
+        lint_doc_filenames(&doc).is_empty(),
+        "explicit-file lint must retain the ancestor Cargo-package exception"
+    );
+}
+
+#[test]
+fn explicit_doc_does_not_admit_manifest_from_its_excluded_parent_tree() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    write_policy(root, &exclusion("generated/", "generated", "§12.2"));
+    let generated_docs = root.join("generated/docs");
+    fs::create_dir_all(&generated_docs).unwrap();
+    let doc = generated_docs.join("foo-bar.md");
+    fs::write(&doc, "# Docs\n").unwrap();
+    fs::write(
+        root.join("generated/Cargo.toml"),
+        "[package]\nname = \"foo-bar\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+
+    let violations = lint_doc_filenames(&doc);
+    assert_eq!(
+        violations.len(),
+        1,
+        "depth-zero admission applies only to the explicit doc, not an excluded ancestor manifest"
     );
 }

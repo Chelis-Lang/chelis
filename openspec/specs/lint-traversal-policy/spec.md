@@ -97,7 +97,7 @@ The standalone `chelis lint` command SHALL use the canonical traversal policy an
 - **THEN** it exits nonzero and reports the policy path and validation reason
 
 ### Requirement: Traversal exclusions remain distinct from diagnostic exceptions
-A traversal exclusion SHALL prevent all rule dispatch for its matched descendants. A rule-specific `Exception`, inline `allow`, or inline `keep` SHALL NOT alter traversal and SHALL retain its existing diagnostic or autofix semantics.
+A traversal exclusion SHALL prevent all rule dispatch for its matched descendants. A rule-specific `Exception`, inline `allow`, or inline `keep` SHALL NOT alter traversal and SHALL retain its existing diagnostic or autofix semantics. Ancillary files consulted by a rule MUST come from the canonical admitted entry set or pass parent-aware traversal-policy admission, so excluded content cannot change an admitted entry's verdict indirectly.
 
 #### Scenario: Rule exception does not prune corpus discovery
 - **WHEN** a source path has a rule-specific exception but no traversal exclusion
@@ -106,3 +106,11 @@ A traversal exclusion SHALL prevent all rule dispatch for its matched descendant
 #### Scenario: Traversal exclusion suppresses every rule
 - **WHEN** a path is excluded by traversal policy
 - **THEN** no rule checks it and no rule-specific exception is required
+
+#### Scenario: Excluded ancillary manifest cannot affect an admitted document
+- **WHEN** an excluded Cargo manifest names a package whose kebab-case name matches an admitted documentation filename
+- **THEN** `doc-filename-convention` ignores that manifest and reports the same verdict as if the excluded tree were absent
+
+#### Scenario: Admitted ancillary manifest retains its documented effect
+- **WHEN** an admitted Cargo manifest names a package whose kebab-case name matches an admitted documentation filename
+- **THEN** `doc-filename-convention` retains the package-name exception from §8.3

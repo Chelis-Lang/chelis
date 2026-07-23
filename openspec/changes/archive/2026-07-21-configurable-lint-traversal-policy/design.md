@@ -60,7 +60,7 @@ Alternative rejected: a plain `.chelis-lintignore`. It would externalize pattern
 
 The filter always admits depth zero. Therefore a directly named excluded file or directory remains auditable. Nested matches are pruned. Paths are normalized relative to the policy root, not the per-target walk root, mirroring the existing workspace-root fix for diagnostic exceptions.
 
-`walker::walk` remains the only discovery entry point. Rules receive only its resulting entry vector. The opaque direct-check compatibility path may invoke the same canonical walker, never construct an independent traversal.
+`walker::walk` remains the only recursive discovery entry point. Rules receive its resulting entry vector for corpus-wide state. A bounded ancillary lookup needed to preserve direct or explicit-file behavior must pass `TraversalPolicy` admission for the file and its parents; excluded content may not influence an admitted verdict indirectly. The opaque direct-check compatibility path may invoke the same canonical walker, never construct an independent traversal.
 
 ### 5. Separate policy errors from filesystem walk errors
 

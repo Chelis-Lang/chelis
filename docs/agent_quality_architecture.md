@@ -77,10 +77,11 @@ pattern to known-bad code shapes.
 
 ### 4. Context injection where agents actually look (checklist tier)
 
-- **Nested `CLAUDE.md` files per crate.** Claude Code loads a
-  directory's CLAUDE.md when working there - guidance delivered at edit
-  time, which root-level prose cannot do. The `crates/chelis-lint/`
-  rule-registration and canonical-traversal protocol is landed. Remaining
+- **Nested canonical `AGENTS.md` plus `CLAUDE.md` symlinks per crate.**
+  Agent harnesses load their directory-local entry point when working there,
+  delivering guidance at edit time that root-level prose cannot. The
+  `crates/chelis-lint/` rule-registration and canonical-traversal protocol is
+  landed for both AGENTS-style and Claude-style harnesses. Remaining
   backlog: guardrail files for `crates/chelis-backend-c/` (emitted helpers are
   generated, never hand-write a dtype switch; the failure channel is
   Result-typed), `crates/chelis-ir/` (lowering must raise, never placeholder;

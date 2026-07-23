@@ -14,11 +14,15 @@ fn write_spec(root: &Path) {
     .unwrap();
 }
 
-fn chelis_lint(root: &Path) -> Command {
+fn chelis_lint_rule(root: &Path, rule: &str) -> Command {
     let mut command = Command::cargo_bin("chelis").expect("chelis binary");
-    command.args(["lint", "--check", "--rule", "surf-value-snake-case"]);
+    command.args(["lint", "--check", "--rule", rule]);
     command.arg(root);
     command
+}
+
+fn chelis_lint(root: &Path) -> Command {
+    chelis_lint_rule(root, "surf-value-snake-case")
 }
 
 #[test]
@@ -49,6 +53,51 @@ fn unexcluded_violation_still_fails_through_standalone_cli() {
         .failure()
         .stdout(predicate::str::contains("surf-value-snake-case"))
         .stdout(predicate::str::contains("addOne"));
+}
+
+#[test]
+fn excluded_manifest_cannot_grant_doc_package_exception_through_cli() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    write_spec(root);
+    fs::write(
+        root.join("chelis-lint.toml"),
+        "version = 1\nspec = \"spec/01-nomenclature.md\"\n\n[[exclude]]\npattern = \"crates/generated/\"\nclass = \"generated\"\ncross_ref = \"§12.2\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::write(root.join("docs/foo-bar.md"), "# Docs\n").unwrap();
+    fs::create_dir_all(root.join("crates/generated")).unwrap();
+    fs::write(
+        root.join("crates/generated/Cargo.toml"),
+        "[package]\nname = \"foo-bar\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+
+    chelis_lint_rule(root, "doc-filename-convention")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("doc-filename-convention"))
+        .stdout(predicate::str::contains("foo-bar.md"));
+}
+
+#[test]
+fn admitted_manifest_retains_doc_package_exception_through_cli() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::write(root.join("docs/foo-bar.md"), "# Docs\n").unwrap();
+    fs::create_dir_all(root.join("crates/foo-bar")).unwrap();
+    fs::write(
+        root.join("crates/foo-bar/Cargo.toml"),
+        "[package]\nname = \"foo-bar\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+
+    chelis_lint_rule(root, "doc-filename-convention")
+        .assert()
+        .success()
+        .stdout("");
 }
 
 #[cfg(unix)]

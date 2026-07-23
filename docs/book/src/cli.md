@@ -44,8 +44,10 @@ fail; internal links remain valid. `.gitignore`, `.ignore`, parent and global Gi
 ignores, `.git/info/exclude`, and hidden-file defaults do not affect lint
 scope. A directly named file or directory remains
 lintable even when its path matches an exclusion; matching nested descendants
-are pruned. Use rule-specific exceptions or inline `allow`/`keep` when a path
-must still contribute to other lint rules.
+are pruned. Rules also apply this policy to ancillary metadata: for example,
+an excluded Cargo manifest cannot grant the §8.3 package-name exception to an
+admitted documentation filename. Use rule-specific exceptions or inline
+`allow`/`keep` when a path must still contribute to other lint rules.
 
 ## Style Gate (Built-In on Every Build)
 

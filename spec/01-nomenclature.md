@@ -1322,7 +1322,10 @@ pruned.
 Traversal policy does not replace rule-specific `Exception` entries or inline
 `allow` and `keep` directives. Those mechanisms act after a path has entered
 the canonical corpus and retain their existing per-rule diagnostic or autofix
-semantics.
+semantics. Rule-side catalogs and ancillary metadata must derive from the same
+canonical entry set or pass a parent-aware traversal-policy admission check;
+content under an excluded directory must not change an admitted entry's
+verdict indirectly.
 
 ### 12.3 Future rule queue
 

@@ -2,6 +2,10 @@
 
 `chelis-lint` currently embeds repository-specific directory names directly in `walker.rs`, so adding or retiring generated, vendored, or immutable trees requires a Rust code change and risks another rule-specific traversal fork. Part of chelis#740 is to make whole-tree lint scope explicit, reviewable, and mechanically justified without conflating lint policy with `.gitignore` or machine-local Git configuration.
 
+## Enforcement Rung
+
+Primary enforcement is the **gate/lint tier**: every lint invocation loads the policy and excluded paths cannot enter rule dispatch or prepared state. Behavioral and source **tripwire tests** prevent alternate rule-local discovery. Compile-time enforcement is not applicable because admission depends on the runtime lint target, repository policy, and filesystem paths; typed policy parsing and closed enums push schema errors as high as that runtime boundary permits.
+
 ## What Changes
 
 - Add a versioned root `chelis-lint.toml` containing structured traversal exclusions with a pattern, closed classification, and mandatory spec cross-reference.

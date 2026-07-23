@@ -49,6 +49,7 @@ struct CompiledExclusion {
 #[derive(Debug)]
 pub struct TraversalPolicy {
     repository_root: Option<PathBuf>,
+    scope_root: PathBuf,
     matcher: Gitignore,
     may_exclude_files: bool,
     exclusions: Vec<CompiledExclusion>,
@@ -112,9 +113,11 @@ impl TraversalPolicy {
         let may_exclude_files = exclusions
             .iter()
             .any(|compiled| !is_directory_only_pattern(&compiled.exclusion.pattern));
+        let scope_root = baseline_root.to_path_buf();
 
         Ok(Self {
             repository_root,
+            scope_root,
             matcher,
             may_exclude_files,
             exclusions,
@@ -128,6 +131,51 @@ impl TraversalPolicy {
     /// Return whether `path` is excluded using the combined hot-path matcher.
     pub fn is_excluded(&self, path: &Path, is_dir: bool) -> bool {
         (is_dir || self.may_exclude_files) && self.matcher.matched(path, is_dir).is_ignore()
+    }
+
+    /// Return whether `path` or one of its governed parents is excluded.
+    ///
+    /// Recursive traversal normally needs only [`Self::is_excluded`] because
+    /// the walker prunes a matching directory before visiting descendants.
+    /// Rules that consult an ancillary file outside the entry vector must use
+    /// this parent-aware form so an excluded directory cannot influence an
+    /// admitted entry indirectly.
+    pub fn is_excluded_or_parent(&self, path: &Path, is_dir: bool) -> bool {
+        let Some(mut relative) = self.path_relative_to_scope(path) else {
+            return false;
+        };
+        if self.matcher.matched(&relative, is_dir).is_ignore() {
+            return true;
+        }
+        while let Some(parent) = relative.parent() {
+            if self.matcher.matched(parent, true).is_ignore() {
+                return true;
+            }
+            relative = parent.to_path_buf();
+        }
+        false
+    }
+
+    fn path_relative_to_scope(&self, path: &Path) -> Option<PathBuf> {
+        let scope = if self.scope_root.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            &self.scope_root
+        };
+        if path.is_absolute() {
+            let absolute_scope = if scope.is_absolute() {
+                scope.to_path_buf()
+            } else {
+                std::env::current_dir().ok()?.join(scope)
+            };
+            path.strip_prefix(absolute_scope)
+                .ok()
+                .map(Path::to_path_buf)
+        } else if scope == Path::new(".") {
+            Some(path.to_path_buf())
+        } else {
+            path.strip_prefix(scope).ok().map(Path::to_path_buf)
+        }
     }
 
     /// Explain the first policy entry excluding `path`.

@@ -25,3 +25,9 @@
 - [x] 4.3 Inspect orphaned processes, build the current CLI, and run the authoritative `chelis-lint` oracle in `target/agents/issue-740`.
 - [x] 4.4 Run `cargo fmt --all -- --check`, focused clippy with `-D warnings`, strict OpenSpec validation, and `.venv/bin/python scripts/gate.py --local`.
 - [x] 4.5 Run a fresh local red-team agent with `target/agents/redteam-740`; execute adversarial policy, CLI, hidden-source, explicit-root, and prepared-catalog probes and record residual limitations.
+
+### Adversarial Validation Record
+
+The original fresh local red-team run used `target/agents/redteam-740` and exercised malformed and escaping policy paths, hidden and Git-ignored sources, explicit excluded roots, standalone CLI failure behavior, and the opaque prepared catalog. A later independent follow-up found two missed architecture gaps: `doc-filename-convention` could read an excluded Cargo manifest through its bounded package-name scan, and the crate guardrail existed only as a regular `CLAUDE.md` instead of the repository-standard canonical `AGENTS.md` plus symlink.
+
+The follow-up adds an executable admitted-versus-excluded manifest pair, parent-aware policy admission for ancillary manifests, canonical prepared package-name state, and a symlink tripwire for the crate guardrail. Residual limitation: elapsed-time behavior is not benchmarked against a massive generated tree; the traversal and ancillary-input boundaries are locked structurally instead. Future rules that consult ancillary files must consume canonical entries or add the same parent-aware admission proof.
