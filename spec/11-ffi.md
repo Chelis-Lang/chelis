@@ -46,13 +46,21 @@ The Phase 3 Python path is split into two cuts:
   variable`. `compile_and_load` auto-discovers the root by walking up from the source
   file, but only when the (Surf) source contains an `import` declaration; an import-free
   or non-Surf source, or `project_root=False`, takes the bare self-contained path. An
-  explicit `project_root=` path forces in-context resolution regardless. `eval` (raw
+  explicit `project_root=` path forces in-context resolution regardless (an
+  empty/whitespace `project_root=""` is rejected outright). `eval` (raw
   text) requires an explicit `project_root=`. With no applicable root the bare
   self-contained behavior is unchanged **except** that a rank-0 (scalar-out) tensor
   entry is now rejected with wrap-as-`tensor[1, f32]` guidance on every path, bare
-  included (rather than emitting an unbuildable scalar kernel). Default in-context entry
+  included (rather than emitting an unbuildable scalar kernel), and that when
+  auto-discovery found no root for an importing source, a failing bare compile's
+  error gains a hint naming `project_root=` (error text only; same failure). Default in-context entry
   selection prefers a tensor def named `main`. A scalar-signature entry has no callable
-  tensor kernel and is rejected with tensor-wrap guidance; `eval` runs it. Roots sourced
+  tensor kernel and is rejected with tensor-wrap guidance; `eval` runs it. The
+  in-context lane is entry-scoped where the monolithic lane is whole-program: a
+  top-level (non-`def`) value binding in the new source does not decline compilation
+  (monolithically it does, `HasGlobals`) — the artifact is scoped to the selected
+  entry, and an unreferenced sibling global's computation is simply not part of it.
+  Run `eval` for whole-program semantics. Roots sourced
   from the reef library graph keep their linker-mangled names; entries from the
   package's own source keep their bare names. Reef-context resolution is **C-target
   only**: a HIP reef-context compile (`target="hip"` with a `project_root=`) is rejected

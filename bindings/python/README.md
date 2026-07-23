@@ -62,7 +62,11 @@ Reef dependency resolution (chelis#816):
     context-compile cost nor is coupled to a broken sibling file. Pass a
     `project_root=` path to force in-context resolution regardless of imports, or
     `project_root=False` to force the bare path even for an importing source. A
-    `project_root` with no `reef.toml` is a loud error naming `project_root=`.
+    `project_root` with no `reef.toml` is a loud error naming `project_root=`, and an
+    empty/whitespace `project_root=""` is rejected outright (it would otherwise probe
+    for `reef.toml` relative to the process CWD). When auto-discovery finds no root
+    and the bare compile of an importing source then fails, the error carries a hint
+    that discovery came up empty and that `project_root=` names the remedy.
   - `eval` takes raw text with no file to walk from, so it does **not** auto-discover:
     pass `project_root=` explicitly, or omit it (or pass `False`) for the
     self-contained path.
@@ -77,6 +81,14 @@ Reef dependency resolution (chelis#816):
   has no callable tensor kernel; `compile_and_load` rejects it with guidance to wrap
   scalars as rank-1 tensors (`tensor[1, f32]`). The same program runs through `eval`,
   which supports scalar and host-only entries.
+- **Top-level globals (entry-scoped semantics).** In-context compilation is
+  entry-scoped: a top-level (non-`def`) binding in the compiled source (e.g.
+  `glb = 2.0` next to `def main`) does not block compilation, and the compiled
+  artifact runs only the selected entry — an unreferenced sibling global's
+  computation is not part of it. This is deliberately more permissive than the
+  bare/monolithic path, where top-level bindings decline the entry lane and keep
+  whole-program host-lane routing. Use `eval` when the sibling globals'
+  computations matter.
 - **Mangled names.** Roots that come from the reef **library** graph carry
   linker-mangled names (`pkg__<pkg>__<Module>__<name>`), matching the CLI (no
   demangling); entries from the package's **own** source keep their bare names. A

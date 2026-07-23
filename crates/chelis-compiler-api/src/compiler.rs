@@ -1234,6 +1234,15 @@ fn compile_for_execution_impl(
 /// codegen (including the entry-scoped metadata lane, #817/#818) is shared
 /// with the monolithic path via [`execution_artifact_from_compiled`]. See
 /// issue #816.
+///
+/// One deliberate divergence from the monolithic lane: this path is
+/// entry-scoped from the start (`resolve_in_context_entry` slices the
+/// new-code DAG to the selected root), so a top-level (non-`def`) value
+/// binding in `new_source` does NOT decline compilation the way the
+/// monolithic `entry_lane_decision` does (`HasGlobals`). The artifact is
+/// scoped to the entry; an unreferenced sibling global's computation is
+/// simply not part of it. Use [`eval_in_context`] for whole-program
+/// semantics. (Documented in `spec/11-ffi.md` and the python README.)
 pub fn compile_for_execution_in_context(
     context: &crate::context::CompiledContext,
     new_source: &str,
@@ -1271,13 +1280,41 @@ pub fn compile_for_execution_in_context(
 /// - no `entry_name`, no `main`, exactly one tensor root → that root;
 /// - no `entry_name`, no `main`, several tensor roots → error asking for
 ///   `entry_name` (no silent "merge every def", cf. #817);
-/// - no tensor roots at all → `Ok(None)`; the caller rejects with the
-///   scalar/host-only guidance (a scalar or host-only entry).
+/// - no tensor roots at all → `Ok(None)` **only when the lowered DAG is also
+///   rootless**; the caller then rejects with the scalar/host-only guidance
+///   (a scalar or host-only entry). Zero names with a NON-rootless DAG is an
+///   internal error (see the guard below), never a silent `Ok(None)`.
 fn resolve_in_context_entry<'a>(
     compiled: &'a CompiledSource,
     entry_name: Option<&str>,
 ) -> Result<Option<(&'a str, Dag)>> {
     let roots = &compiled.tensor_root_names;
+    // Invariant guard (#822 review, Fix A): zero named tensor roots while the
+    // lowered DAG HAS roots. Returning `Ok(None)` here would skip the caller's
+    // rootless reject (it checks `dag.roots()`, which is non-empty) and fall
+    // through to whole-DAG codegen with every root merged — the #817-class
+    // regression this lane exists to prevent. The state should be unreachable
+    // through public APIs: `new_tensor_root_names` and the lowered roots both
+    // derive from the same `top_level_lowering_map_with_context` classification
+    // in `compile_new_source_in_context` (which also enforces 1:1 alignment
+    // whenever the name list is non-empty), the in-context path is Surf-only
+    // and every Surf top-level decl is named (no anonymous roots), and the
+    // absorbed-lowering fallback contributes zero new-code roots. Decline
+    // loudly rather than emit a merged artifact if a future lowering change
+    // ever breaks that agreement.
+    if roots.is_empty() && !compiled.dag.roots().is_empty() {
+        return Err(stage_error(
+            "compile",
+            format!(
+                "internal: in-context lowering produced {} new-code DAG root(s) but zero \
+                 named tensor roots; refusing to fall through to whole-program codegen, \
+                 which would merge every root's inputs (#817). This indicates a root-name \
+                 vs lowering classification mismatch; please report it.",
+                compiled.dag.roots().len()
+            ),
+            "compile_error",
+        ));
+    }
     let index = match entry_name {
         Some(name) => {
             // Exact match wins. Otherwise fall back to a linker-mangled root
@@ -1475,8 +1512,38 @@ fn execution_artifact_from_compiled(
                 // so the metadata / dim checks run on the entry's reachable
                 // subgraph only (not unreachable library helper nodes, which
                 // may carry polymorphic symbolic dims).
-                resolve_in_context_entry(&compiled, entry_name)?
-                    .filter(|(_, dag)| !dag.roots().is_empty())
+                //
+                // Invariant guard, symmetric to Fix A in
+                // `resolve_in_context_entry` (#822 review): a RESOLVED entry
+                // whose scoped DAG comes back rootless (set_roots + DCE
+                // emptied it) must fail loudly, not be silently dropped. The
+                // previous `.filter(!roots.is_empty())` did exactly that
+                // silent drop: with the claim gone, execution skips the
+                // rootless in-context reject below (`compiled.dag.roots()` is
+                // still non-empty — only the SCOPED dag is rootless) and
+                // falls through to whole-DAG codegen with every new-code
+                // root's inputs merged — the same #817 class Fix A closes,
+                // via a different door. Should be unreachable: the root the
+                // entry was scoped to IS a root, so DCE keeps it. The
+                // legitimate paths are untouched: no entry resolved with a
+                // rootless DAG still reaches the friendly scalar/host-only
+                // reject below.
+                match resolve_in_context_entry(&compiled, entry_name)? {
+                    Some((entry, dag)) if dag.roots().is_empty() => {
+                        return Err(stage_error(
+                            "compile",
+                            format!(
+                                "internal: in-context entry `{entry}` resolved but its \
+                                 entry-scoped DAG has no roots after scoping/DCE; refusing to \
+                                 fall through to whole-program codegen, which would merge every \
+                                 root's inputs (#817). This indicates a root-scoping vs DCE \
+                                 mismatch; please report it."
+                            ),
+                            "compile_error",
+                        ));
+                    }
+                    resolved => resolved,
+                }
             } else if let Some(host_program) = host_compiled.host.as_ref() {
                 match entry_lane_decision(
                     entry_name,
@@ -5102,6 +5169,31 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
         assert!(
             message.contains("ambiguous entry") && message.contains("none named `main`"),
             "expected ambiguity guidance, got: {message}"
+        );
+    }
+
+    // Fix A invariant guard (#822 review): zero named tensor roots while the
+    // lowered DAG HAS roots must be a loud internal error, never a silent
+    // `Ok(None)` (which would skip the rootless reject and fall through to
+    // whole-DAG codegen with every root merged, #817-class). The state is
+    // unreachable through public APIs — the name filter and the lowering share
+    // one classification map and Surf top-level decls are all named — so the
+    // mismatch is synthesized directly on the `CompiledSource`.
+    #[test]
+    fn resolve_in_context_entry_rejects_rootful_dag_with_zero_names() {
+        let mut compiled = compile_source(
+            SourceKind::Surf,
+            "def main(x: tensor[2, f32]) -> tensor[2, f32] = realize(x)\n",
+        )
+        .expect("compile");
+        assert_eq!(compiled.dag.roots().len(), 1, "fixture must lower one root");
+        compiled.tensor_root_names.clear();
+        let err = resolve_in_context_entry(&compiled, None)
+            .expect_err("zero names with a rootful DAG must error, not fall through");
+        let message = &err.errors[0].message;
+        assert!(
+            message.contains("zero named tensor roots") && message.contains("#817"),
+            "expected the invariant-guard message, got: {message}"
         );
     }
 

@@ -16,8 +16,8 @@ use chelis_compiler_api::schema::{
     EvalResult, SourceKind, TensorValue, ValidateMode, ValidateRequest,
 };
 use chelis_compiler_api::{
-    CompiledContext, compile_for_execution_in_context, compile_reef_context,
-    eval_in_context_with_bindings, find_package_root_for_input, load_or_compile_for_package,
+    CompiledContext, compile_for_execution_in_context, eval_in_context_with_bindings,
+    find_package_root_for_input, load_or_compile_with_local_registry_fallback,
     surf_source_has_import,
 };
 use chelis_vocab::RuntimeDType;
@@ -751,13 +751,17 @@ fn parse_validate_mode(value: &str) -> PyResult<ValidateMode> {
     }
 }
 
-fn compiler_error(err: CompilerError) -> PyErr {
+fn compiler_error_message(err: &CompilerError) -> String {
     let detail = err
         .errors
         .first()
         .map(|diagnostic| diagnostic.message.as_str())
         .unwrap_or("unknown compiler error");
-    ChelisError::new_err(format!("{}: {detail}", err.stage))
+    format!("{}: {detail}", err.stage)
+}
+
+fn compiler_error(err: CompilerError) -> PyErr {
+    ChelisError::new_err(compiler_error_message(&err))
 }
 
 #[derive(Debug)]
@@ -783,10 +787,28 @@ fn reef_home_from_env() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(""))
 }
 
+/// Reject an empty / whitespace-only `project_root=` explicitly (#822 review,
+/// Fix C). Python `project_root=""` reaches Rust as `PathBuf::from("")`, and
+/// the `reef.toml` probe would then resolve against the process CWD —
+/// producing a confusing "no reef.toml found at project_root=``" (or worse,
+/// silently picking up an unrelated `reef.toml` in the CWD).
+fn reject_blank_project_root(root: &Path) -> Result<(), CompileAndLoadError> {
+    if root.as_os_str().to_string_lossy().trim().is_empty() {
+        return Err(CompileAndLoadError::Message(
+            "project_root= is empty; pass the path to the directory containing your \
+             project's reef.toml, pass project_root=False to force the bare \
+             self-contained path, or omit it to auto-discover"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Build (or load from cache) the compiled reef context for `root`, mapping a
 /// missing/invalid `reef.toml` to an actionable message that names
 /// `project_root=`. Verbose corruption logging is off (bindings run silent).
 fn load_reef_context(root: &Path) -> Result<CompiledContext, CompileAndLoadError> {
+    reject_blank_project_root(root)?;
     if !root.join("reef.toml").exists() {
         return Err(CompileAndLoadError::Message(format!(
             "no reef.toml found at project_root=`{}`. Point project_root= at the \
@@ -795,33 +817,15 @@ fn load_reef_context(root: &Path) -> Result<CompiledContext, CompileAndLoadError
         )));
     }
     let reef_home = reef_home_from_env();
-    match load_or_compile_for_package(&reef_home, root, false) {
-        Ok(context) => Ok(context),
-        // Precedent: the `chelis test` worker site (`cmd_internal_test_file`
-        // in crates/chelis-cli/src/main.rs, ~4448-4454), which on a
-        // LocalRegistry hash gap falls back from `load_or_compile_for_package`
-        // to `compile_reef_context`. A dependency resolved from the
-        // LocalRegistry (e.g. `chelis-std`) can't be source-hashed yet, so the
-        // disk-cache probe errors; that is not a real failure — fall back to an
-        // uncached in-memory `compile_reef_context`, which handles the
-        // LocalRegistry case (digests = None). Any other error is a genuine
-        // compile failure and propagates.
-        //
-        // NOTE the eval CLI site (`run_eval_in_context`, main.rs ~1104-1124)
-        // does NOT share this fallback: it drops to the legacy `prepare_eval`
-        // path instead. These bindings deliberately follow the `chelis test`
-        // worker (a compiled reef context), not the eval site — a divergence to
-        // watch if the CLI paths are later unified.
-        Err(err)
-            if err
-                .errors
-                .iter()
-                .any(|d| d.kind == "hash_error" && d.message.contains("LocalRegistry")) =>
-        {
-            compile_reef_context(&reef_home, root).map_err(CompileAndLoadError::Compiler)
-        }
-        Err(err) => Err(CompileAndLoadError::Compiler(err)),
-    }
+    // The LocalRegistry hash-gap fallback (cache probe errors on a
+    // LocalRegistry dep such as `chelis-std` → uncached `compile_reef_context`)
+    // lives in the shared compiler-api helper; see its doc for the precedent
+    // (`chelis test` worker, NOT the CLI eval site, which drops to legacy
+    // `prepare_eval` instead — a divergence to watch if the CLI paths are
+    // later unified).
+    load_or_compile_with_local_registry_fallback(&reef_home, root, false)
+        .map(|(context, _path)| context)
+        .map_err(CompileAndLoadError::Compiler)
 }
 
 /// Resolve the reef package root for a `compile_and_load` job (issue #816).
@@ -851,6 +855,7 @@ fn resolve_compile_reef_root(
     }
     match &job.project_root {
         Some(explicit) => {
+            reject_blank_project_root(explicit)?;
             if job.source_kind != SourceKind::Surf {
                 return Err(CompileAndLoadError::Message(
                     "project_root= reef resolution applies to Surf source only; \
@@ -899,6 +904,19 @@ fn run_compile_and_load_job(
     let source = fs::read_to_string(&job.source_path)
         .map_err(|err| CompileAndLoadError::Message(format!("read source failed: {err}")))?;
     let reef_root = resolve_compile_reef_root(&job, &source)?;
+    // #822 review, Fix B: auto-discovery was attempted (importing Surf source,
+    // no explicit root, no opt-out) but found no enclosing reef project — e.g.
+    // the walk stopped at a nested `.git` or filesystem boundary before any
+    // `reef.toml`. The bare compile that follows will most likely fail on the
+    // unresolved imports (`unbound variable`); annotate that failure with a
+    // hint naming `project_root=` so the user learns discovery came up empty
+    // instead of guessing. Non-importing sources and explicit-root paths keep
+    // their errors untouched.
+    let discovery_found_no_root = reef_root.is_none()
+        && !job.force_bare
+        && job.project_root.is_none()
+        && job.source_kind == SourceKind::Surf
+        && surf_source_has_import(&source);
     let artifact = match &reef_root {
         Some(root) => {
             let context = load_reef_context(root)?;
@@ -916,7 +934,21 @@ fn run_compile_and_load_job(
             target: job.target,
             entry_name: job.entry_name,
         })
-        .map_err(CompileAndLoadError::Compiler)?,
+        .map_err(|err| {
+            if discovery_found_no_root {
+                CompileAndLoadError::Message(format!(
+                    "{}\nhint: this source contains `import` declarations, but reef \
+                     auto-discovery found no enclosing project (no reef.toml walking up \
+                     from `{}`; discovery stops at a .git or filesystem boundary). If the \
+                     source belongs to a reef project, pass \
+                     project_root=<path-to-project>.",
+                    compiler_error_message(&err),
+                    job.source_path.display()
+                ))
+            } else {
+                CompileAndLoadError::Compiler(err)
+            }
+        })?,
     };
     ensure_supported_execution_artifact_inner(&artifact).map_err(CompileAndLoadError::Message)?;
 
@@ -3145,6 +3177,137 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
             message.contains("no reef.toml") && message.contains("project_root="),
             "expected an actionable no-reef.toml error naming project_root=, got: {message}"
         );
+    }
+
+    // #822 review, Fix C: an empty `project_root` (Python `project_root=""`)
+    // must be rejected explicitly, not resolved against the process CWD into a
+    // confusing "no reef.toml found at project_root=``" error.
+    #[test]
+    fn compile_and_load_empty_project_root_is_rejected_explicitly() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "def main(x: tensor[1, f32]) -> tensor[1, f32] = mul(x, x)\n",
+        )
+        .expect("write source");
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: Some(PathBuf::from("")),
+            force_bare: false,
+        });
+        let message = match result {
+            Ok(_) => panic!("empty project_root must be rejected, not compiled"),
+            Err(CompileAndLoadError::Message(m)) => m,
+            Err(CompileAndLoadError::Compiler(e)) => format!("{e:?}"),
+        };
+        assert!(
+            message.contains("project_root= is empty"),
+            "expected the explicit empty-project_root rejection, got: {message}"
+        );
+        assert!(
+            !message.contains("no reef.toml"),
+            "must not fall through to the CWD-relative reef.toml probe: {message}"
+        );
+    }
+
+    // Fix C, eval lane: `eval(..., project_root=\"  \")` goes through
+    // `run_eval_in_context_job` → `load_reef_context`, which must apply the
+    // same blank-root rejection.
+    #[test]
+    fn eval_whitespace_project_root_is_rejected_explicitly() {
+        let result = run_eval_in_context_job(
+            Path::new("   "),
+            "def main(x: tensor[1, f32]) -> tensor[1, f32] = mul(x, x)\n",
+            BTreeMap::new(),
+        );
+        let message = match result {
+            Ok(_) => panic!("whitespace project_root must be rejected"),
+            Err(CompileAndLoadError::Message(m)) => m,
+            Err(CompileAndLoadError::Compiler(e)) => format!("{e:?}"),
+        };
+        assert!(
+            message.contains("project_root= is empty"),
+            "expected the explicit empty-project_root rejection, got: {message}"
+        );
+    }
+
+    // #822 review, Fix B: an importing Surf source with NO discoverable reef
+    // root (auto-discovery attempted, found nothing — here the walk stops at
+    // the temp-dir boundary) takes the bare path; when that bare compile then
+    // fails, the error must carry a hint that discovery came up empty and that
+    // project_root= names the remedy.
+    #[test]
+    fn bare_path_importing_source_failure_names_project_root_hint() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "import Shoals.Pricing (bs_call)\n\n\
+             def main(x: tensor[2, f32]) -> tensor[2, f32] = bs_call(x)\n",
+        )
+        .expect("write source");
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
+        });
+        let message = match result {
+            Ok(_) => panic!("importing source with no discoverable root must fail bare"),
+            Err(CompileAndLoadError::Message(m)) => m,
+            Err(CompileAndLoadError::Compiler(e)) => {
+                panic!("expected the hint-annotated Message error, got {e:?}")
+            }
+        };
+        assert!(
+            message.contains("auto-discovery found no enclosing project")
+                && message.contains("project_root=<path-to-project>"),
+            "expected the discovery-miss hint naming project_root=, got: {message}"
+        );
+    }
+
+    // Fix B negative sidecar: a NON-importing source that fails to compile on
+    // the bare path keeps its plain compiler error — no project_root= hint
+    // (discovery was never attempted for it).
+    #[test]
+    fn bare_path_non_importing_failure_has_no_project_root_hint() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "def main(x: tensor[2, f32]) -> tensor[2, f32] = bogus_helper(x)\n",
+        )
+        .expect("write source");
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
+        });
+        match result {
+            Ok(_) => panic!("unbound-variable source must fail"),
+            Err(CompileAndLoadError::Compiler(err)) => {
+                let rendered = compiler_error_message(&err);
+                assert!(
+                    !rendered.contains("project_root="),
+                    "non-importing failure must not carry the discovery hint: {rendered}"
+                );
+            }
+            Err(CompileAndLoadError::Message(m)) => {
+                panic!("expected a plain Compiler error without the hint, got: {m}")
+            }
+        }
     }
 
     // Issue #816 no-regression (cheap, no Shoals): with `project_root=None` and
