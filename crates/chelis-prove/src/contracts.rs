@@ -23,6 +23,9 @@ pub const EXP_MONOTONICITY: &str = "std.exp.monotonicity";
 pub const EXP_ZERO: &str = "std.exp.zero";
 pub const LOG_MONOTONICITY: &str = "std.log.monotonicity";
 pub const LOG_ONE: &str = "std.log.one";
+pub const QUANTILE_RANGE: &str = "std.quantile.range";
+pub const QUANTILE_MONOTONICITY: &str = "std.quantile.monotonicity";
+pub const QUANTILE_BOUNDARY: &str = "std.quantile.boundary";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StandardContract {
@@ -106,6 +109,36 @@ pub fn standard_contracts() -> Vec<StandardContract> {
                     "chelis_intrinsic.log",
                     64,
                     0x10_2026,
+                ),
+            ],
+        },
+        StandardContract {
+            id: "std.quantile".to_string(),
+            function: "quantile".to_string(),
+            invariants: vec![
+                fuzz_invariant(
+                    QUANTILE_RANGE,
+                    "quantile range boundedness",
+                    "forall xs q. 0 <= q <= 1 => min(xs) <= quantile(xs, q) <= max(xs)",
+                    "chelis_intrinsic.quantile",
+                    8192,
+                    0xCA_2026,
+                ),
+                fuzz_invariant(
+                    QUANTILE_MONOTONICITY,
+                    "quantile monotonicity in q",
+                    "forall xs p q. 0 <= p <= q <= 1 => quantile(xs, p) <= quantile(xs, q)",
+                    "chelis_intrinsic.quantile",
+                    8192,
+                    0xCB_2026,
+                ),
+                fuzz_invariant(
+                    QUANTILE_BOUNDARY,
+                    "quantile boundary values",
+                    "forall xs. quantile(xs, 0) = min(xs) and quantile(xs, 1) = max(xs)",
+                    "chelis_intrinsic.quantile",
+                    4096,
+                    0xCC_2026,
                 ),
             ],
         },
@@ -349,6 +382,9 @@ fn run_fuzz_discharge(id: &str, samples: usize, seed: u64) -> FuzzOutcome {
                 domain: "log anchor x = 1",
             }
         }
+        QUANTILE_RANGE => fuzz_quantile_range(samples, seed),
+        QUANTILE_MONOTONICITY => fuzz_quantile_monotonicity(samples, seed),
+        QUANTILE_BOUNDARY => fuzz_quantile_boundary(samples, seed),
         _ => FuzzOutcome {
             checked_samples: 0,
             max_error: f64::INFINITY,
@@ -448,6 +484,111 @@ fn fuzz_ordered_positive_pair(
         max_error,
         counterexample: None,
         domain,
+    }
+}
+
+fn fuzz_quantile_range(samples: usize, seed: u64) -> FuzzOutcome {
+    use crate::concrete_eval;
+    let mut rng = Lcg::new(seed);
+    let mut max_error = 0.0_f64;
+    for i in 0..samples {
+        // Generate a random data vector of size 3-8 and a quantile level
+        let n = 3 + (rng.next_unit() * 5.0) as usize;
+        let data: Vec<f64> = (0..n).map(|_| (rng.next_unit() - 0.5) * 20.0).collect();
+        let q = rng.next_unit();
+        let result = concrete_eval::quantile_linear_pub(&data, q);
+        let min_val = data.iter().copied().fold(f64::INFINITY, f64::min);
+        let max_val = data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let low_err = (min_val - result).max(0.0);
+        let high_err = (result - max_val).max(0.0);
+        let err = low_err.max(high_err);
+        max_error = max_error.max(err);
+        if err > FUZZ_TOLERANCE {
+            return FuzzOutcome {
+                checked_samples: i + 1,
+                max_error,
+                counterexample: Some(serde_json::json!({
+                    "data": data, "q": q, "result": result,
+                    "min": min_val, "max": max_val, "error": err
+                })),
+                domain: "quantile range bounded by [min, max]",
+            };
+        }
+    }
+    FuzzOutcome {
+        checked_samples: samples,
+        max_error,
+        counterexample: None,
+        domain: "quantile range bounded by [min, max]",
+    }
+}
+
+fn fuzz_quantile_monotonicity(samples: usize, seed: u64) -> FuzzOutcome {
+    use crate::concrete_eval;
+    let mut rng = Lcg::new(seed);
+    let mut max_error = 0.0_f64;
+    for i in 0..samples {
+        let n = 3 + (rng.next_unit() * 5.0) as usize;
+        let data: Vec<f64> = (0..n).map(|_| (rng.next_unit() - 0.5) * 20.0).collect();
+        let a = rng.next_unit();
+        let b = rng.next_unit();
+        let (p, q) = if a <= b { (a, b) } else { (b, a) };
+        let rp = concrete_eval::quantile_linear_pub(&data, p);
+        let rq = concrete_eval::quantile_linear_pub(&data, q);
+        let err = (rp - rq).max(0.0);
+        max_error = max_error.max(err);
+        if err > FUZZ_TOLERANCE {
+            return FuzzOutcome {
+                checked_samples: i + 1,
+                max_error,
+                counterexample: Some(serde_json::json!({
+                    "data": data, "p": p, "q": q,
+                    "quantile_p": rp, "quantile_q": rq, "error": err
+                })),
+                domain: "quantile monotone in q: p <= q => quantile(p) <= quantile(q)",
+            };
+        }
+    }
+    FuzzOutcome {
+        checked_samples: samples,
+        max_error,
+        counterexample: None,
+        domain: "quantile monotone in q: p <= q => quantile(p) <= quantile(q)",
+    }
+}
+
+fn fuzz_quantile_boundary(samples: usize, seed: u64) -> FuzzOutcome {
+    use crate::concrete_eval;
+    let mut rng = Lcg::new(seed);
+    let mut max_error = 0.0_f64;
+    for i in 0..samples {
+        let n = 3 + (rng.next_unit() * 5.0) as usize;
+        let data: Vec<f64> = (0..n).map(|_| (rng.next_unit() - 0.5) * 20.0).collect();
+        let min_val = data.iter().copied().fold(f64::INFINITY, f64::min);
+        let max_val = data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let q0 = concrete_eval::quantile_linear_pub(&data, 0.0);
+        let q1 = concrete_eval::quantile_linear_pub(&data, 1.0);
+        let err = (q0 - min_val).abs().max((q1 - max_val).abs());
+        max_error = max_error.max(err);
+        if err > FUZZ_TOLERANCE {
+            return FuzzOutcome {
+                checked_samples: i + 1,
+                max_error,
+                counterexample: Some(serde_json::json!({
+                    "data": data,
+                    "quantile_0": q0, "min": min_val,
+                    "quantile_1": q1, "max": max_val,
+                    "error": err
+                })),
+                domain: "quantile boundary: q=0 -> min, q=1 -> max",
+            };
+        }
+    }
+    FuzzOutcome {
+        checked_samples: samples,
+        max_error,
+        counterexample: None,
+        domain: "quantile boundary: q=0 -> min, q=1 -> max",
     }
 }
 
