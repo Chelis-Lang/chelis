@@ -35,6 +35,11 @@ def _completed(returncode=0):
     return mock.Mock(returncode=returncode, stdout="", stderr="")
 
 
+def _wrap(timeout=cag.PER_COMMAND_TIMEOUT_SECONDS):
+    """The coreutils `timeout` prefix the helper inserts before apt-get."""
+    return ["timeout", f"--kill-after={cag.KILL_AFTER_SECONDS:g}s", f"{timeout:g}s"]
+
+
 class CommandShapeTests(unittest.TestCase):
     def test_first_success_runs_update_then_install_with_sudo(self):
         with mock.patch.object(
@@ -43,22 +48,25 @@ class CommandShapeTests(unittest.TestCase):
             rc = cag.apt_get(["gcc", "libopenblas-dev"], sleep=lambda _s: None)
         self.assertEqual(rc, 0)
         cmds = [call.args[0] for call in run.call_args_list]
-        self.assertEqual(cmds[0], ["sudo", "apt-get", "update"])
+        # `timeout` sits AFTER `sudo` so it is apt-get's direct parent.
+        self.assertEqual(cmds[0], ["sudo", *_wrap(), "apt-get", "update"])
         self.assertEqual(
-            cmds[1], ["sudo", "apt-get", "install", "-y", "gcc", "libopenblas-dev"]
+            cmds[1],
+            ["sudo", *_wrap(), "apt-get", "install", "-y", "gcc", "libopenblas-dev"],
         )
         # Exactly the update+install pair on a clean first attempt.
         self.assertEqual(len(cmds), 2)
 
-    def test_no_sudo_drops_the_sudo_prefix(self):
-        # The debian:11 container job runs as root and has no `sudo`.
+    def test_no_sudo_drops_the_sudo_prefix_but_keeps_the_timeout(self):
+        # The debian:11 container job runs as root and has no `sudo`, but the
+        # timeout wrapper must still bound the command.
         with mock.patch.object(
             cag.subprocess, "run", return_value=_completed()
         ) as run:
             cag.apt_get(["m4"], sudo=False, sleep=lambda _s: None)
         cmds = [call.args[0] for call in run.call_args_list]
-        self.assertEqual(cmds[0], ["apt-get", "update"])
-        self.assertEqual(cmds[1], ["apt-get", "install", "-y", "m4"])
+        self.assertEqual(cmds[0], [*_wrap(), "apt-get", "update"])
+        self.assertEqual(cmds[1], [*_wrap(), "apt-get", "install", "-y", "m4"])
 
     def test_no_install_recommends_is_forwarded_to_install_only(self):
         with mock.patch.object(
@@ -73,11 +81,25 @@ class CommandShapeTests(unittest.TestCase):
         cmds = [call.args[0] for call in run.call_args_list]
         # update never carries --no-install-recommends; install does, before
         # the package names.
-        self.assertEqual(cmds[0], ["apt-get", "update"])
+        self.assertEqual(cmds[0], [*_wrap(), "apt-get", "update"])
         self.assertEqual(
             cmds[1],
-            ["apt-get", "install", "-y", "--no-install-recommends", "cmake", "git"],
+            [*_wrap(), "apt-get", "install", "-y", "--no-install-recommends",
+             "cmake", "git"],
         )
+
+    def test_disabled_timeout_omits_the_wrapper(self):
+        # `timeout=None` (from `--timeout 0`) runs apt-get unbounded: no
+        # `timeout` token at all.
+        with mock.patch.object(
+            cag.subprocess, "run", return_value=_completed()
+        ) as run:
+            cag.apt_get(["gcc"], timeout=None, sleep=lambda _s: None)
+        cmds = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(cmds[0], ["sudo", "apt-get", "update"])
+        self.assertEqual(cmds[1], ["sudo", "apt-get", "install", "-y", "gcc"])
+        for cmd in cmds:
+            self.assertNotIn("timeout", cmd)
 
     def test_empty_package_list_is_a_noop(self):
         with mock.patch.object(cag.subprocess, "run") as run:
@@ -161,16 +183,29 @@ class RetryTests(unittest.TestCase):
 
 
 class TimeoutTests(unittest.TestCase):
-    def test_timeout_is_forwarded_to_every_subprocess_run(self):
-        # The per-command ceiling must reach subprocess.run, or a hung
-        # apt-get would still block forever.
+    # The ceiling is enforced by the coreutils `timeout` binary baked into the
+    # command (NOT subprocess.run(timeout=)), because SIGKILLing our direct
+    # child `sudo` would orphan the apt-get it spawned and leave the apt lock
+    # held -- exactly the failure these tests pin down. So a "timed out"
+    # attempt manifests as `timeout` exiting non-zero (124/137), which the mock
+    # returns as an ordinary returncode.
+
+    def test_custom_timeout_is_baked_into_the_command(self):
         with mock.patch.object(
             cag.subprocess, "run", return_value=_completed()
         ) as run:
             cag.apt_get(["gcc"], timeout=42, sleep=lambda _s: None)
         self.assertEqual(run.call_count, 2)  # update + install
         for call in run.call_args_list:
-            self.assertEqual(call.kwargs.get("timeout"), 42)
+            cmd = call.args[0]
+            # `timeout` immediately follows `sudo`, carrying the ceiling and
+            # the --kill-after escalation.
+            self.assertEqual(cmd[0], "sudo")
+            self.assertEqual(cmd[1], "timeout")
+            self.assertEqual(cmd[2], f"--kill-after={cag.KILL_AFTER_SECONDS:g}s")
+            self.assertEqual(cmd[3], "42s")
+            # subprocess.run is never given a Python-level timeout kwarg.
+            self.assertNotIn("timeout", call.kwargs)
 
     def test_default_timeout_is_the_module_constant(self):
         with mock.patch.object(
@@ -178,16 +213,17 @@ class TimeoutTests(unittest.TestCase):
         ) as run:
             cag.apt_get(["gcc"], sleep=lambda _s: None)
         for call in run.call_args_list:
-            self.assertEqual(
-                call.kwargs.get("timeout"), cag.PER_COMMAND_TIMEOUT_SECONDS
+            self.assertIn(
+                f"{cag.PER_COMMAND_TIMEOUT_SECONDS:g}s", call.args[0]
             )
 
-    def test_hung_command_times_out_and_is_retried(self):
-        # attempt 1 `update` hangs past the ceiling (TimeoutExpired); the loop
-        # must treat it as a failed attempt and retry, not inherit the hang.
-        # attempt 2: both succeed.
+    def test_timed_out_command_is_retried_and_self_heals(self):
+        # attempt 1 `update` is killed by the wrapper (coreutils `timeout`
+        # returns 124); the loop must treat it as a failed attempt and retry,
+        # NOT poison the retry the way an orphaned apt-get would. attempt 2:
+        # both succeed.
         results = [
-            cag.subprocess.TimeoutExpired(["sudo", "apt-get", "update"], 300),
+            _completed(returncode=124),  # attempt 1 update: timed out + killed
             _completed(returncode=0),  # attempt 2 update
             _completed(returncode=0),  # attempt 2 install
         ]
@@ -198,19 +234,27 @@ class TimeoutTests(unittest.TestCase):
         self.assertEqual(run.call_count, 3)
         self.assertEqual(sleeps, [cag.BACKOFF_SECONDS])
 
-    def test_persistent_hang_exhausts_attempts_and_returns_timeout_code(self):
-        # A mirror that hangs on every attempt must not wedge forever: each
-        # attempt is killed by the timeout and the helper gives up with the
-        # conventional timeout exit code, so the job goes red instead of
-        # burning the 6-hour runner cap.
+    def test_persistent_timeout_exhausts_attempts_and_returns_the_code(self):
+        # A mirror that stalls on every attempt must not wedge forever: each
+        # attempt is killed by the wrapper (124), and the helper gives up with
+        # that code so the job goes red instead of burning the 6-hour cap.
         with mock.patch.object(
-            cag.subprocess,
-            "run",
-            side_effect=cag.subprocess.TimeoutExpired(["apt-get", "update"], 300),
+            cag.subprocess, "run", return_value=_completed(returncode=124)
         ) as run:
             rc = cag.apt_get(["gcc"], attempts=3, sleep=lambda _s: None)
-        self.assertEqual(rc, cag.TIMEOUT_EXIT_CODE)
+        self.assertEqual(rc, 124)
+        self.assertIn(rc, cag.TIMEOUT_EXIT_CODES)
         self.assertEqual(run.call_count, 3)
+
+    def test_kill_after_exit_code_is_recognised_as_a_timeout(self):
+        # 137 (128+9) is what `timeout` returns when apt-get ignored SIGTERM
+        # and had to be SIGKILLed at --kill-after; it is still a timeout kill.
+        self.assertIn(137, cag.TIMEOUT_EXIT_CODES)
+        with mock.patch.object(
+            cag.subprocess, "run", return_value=_completed(returncode=137)
+        ):
+            rc = cag.apt_get(["gcc"], attempts=2, sleep=lambda _s: None)
+        self.assertEqual(rc, 137)
 
 
 class CliTests(unittest.TestCase):

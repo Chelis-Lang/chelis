@@ -28,7 +28,7 @@ out a flaky download.
 Each individual `apt-get` invocation runs under a per-command WALL-CLOCK
 TIMEOUT. A connection *reset* returns a non-zero exit that the retry loop
 already handles, but a stalled mirror that accepts the TCP socket and then
-stops sending data produces no exit at all: the bare `subprocess.run` would
+stops sending data produces no exit at all: an unbounded `apt-get` would
 block forever and hang the whole job until GitHub's 6-hour runner cap kills
 it (observed: a 2h20m wedge on the "Install C dependencies" step). The
 timeout kills a hung attempt and feeds it back into the retry loop as a
@@ -36,6 +36,21 @@ failed attempt, so a stall self-heals on the next attempt instead of
 wedging the job. A normal update+install for the C prerequisites finishes in
 well under a minute, so the default timeout is pure headroom for a working
 mirror and only ever bites a genuine hang.
+
+The timeout is enforced by the coreutils `timeout(1)` binary, inserted
+AFTER any `sudo` (`sudo timeout --kill-after=Ns Ms apt-get ...`), NOT by
+Python's `subprocess.run(timeout=)`. That distinction is essential: Python's
+timeout SIGKILLs the direct child, which is `sudo`, and Ubuntu's default
+`Defaults use_pty` runs `apt-get` in a separate pty session, so killing
+`sudo` leaves `apt-get` ORPHANED and still holding `/var/lib/apt/lists/lock`
+-- every retry then dies instantly on "Could not get lock ... held by
+process N (apt-get)" and the step fails anyway. Placing `timeout` as the
+direct parent of `apt-get`, inside the same session, means the kill actually
+reaches `apt-get`; the kernel releases its flock on death (even a SIGKILL),
+so the next retry can re-acquire the lock. `--kill-after` escalates SIGTERM
+to SIGKILL if apt-get does not exit on the polite signal. If the `timeout`
+binary is somehow absent the command fails fast (exit 127) and is retried --
+apt-get never launches unbounded, so the no-6h-hang invariant still holds.
 
 Usage (single-line `run:` step, mirroring the ci_free_disk.py /
 ci_setup_uv_python.py convention so the gate's no-hand-inlined-command lock
@@ -72,41 +87,51 @@ DEFAULT_ATTEMPTS = 4
 BACKOFF_SECONDS = 5
 
 # Wall-clock ceiling for a single `apt-get update` or `apt-get install`
-# invocation. A working update+install of the C prerequisites finishes in
-# well under a minute on the hosted runners, so 300s is generous headroom for
-# a slow-but-alive mirror while still bounding a genuine hang (a stalled
-# connection that never returns) to a few minutes instead of the 6-hour
-# runner cap. Pass 0 (or a negative value) via --timeout to disable.
+# invocation, enforced by the coreutils `timeout(1)` binary. A working
+# update+install of the C prerequisites finishes in well under a minute on
+# the hosted runners, so 300s is generous headroom for a slow-but-alive
+# mirror while still bounding a genuine hang (a stalled connection that never
+# returns) to a few minutes instead of the 6-hour runner cap. Pass 0 (or a
+# negative value) via --timeout to disable.
 PER_COMMAND_TIMEOUT_SECONDS = 300
 
-# Conventional shell exit code for "killed by a timeout" (matches coreutils
-# `timeout(1)`). The value is non-zero, so the retry loop treats a timed-out
-# attempt exactly like any other transient failure.
-TIMEOUT_EXIT_CODE = 124
+# After the timeout fires, `timeout` sends SIGTERM; if apt-get has not exited
+# within this grace period it escalates to SIGKILL. apt-get normally releases
+# its lock and exits on SIGTERM; the SIGKILL backstop guarantees termination
+# (the kernel releases the flock on death) so a wedged apt-get cannot outlive
+# its ceiling and poison the retries.
+KILL_AFTER_SECONDS = 30
+
+# Exit codes coreutils `timeout(1)` uses when it had to stop the command:
+# 124 = the command timed out (killed by the requested signal), 137 = the
+# command was still alive at --kill-after and got SIGKILL (128+9). Both are
+# non-zero, so the retry loop already treats them as a failed attempt; we
+# special-case them only to print an accurate "timed out" diagnostic.
+TIMEOUT_EXIT_CODES = (124, 137)
 
 
-def _run(cmd: list[str], *, timeout: float | None = None) -> int:
+def _run(cmd: list[str]) -> int:
     """Run `cmd`, inheriting stdio so apt's output lands in the CI log.
-    Returns the exit code (or 1 if it could not even be spawned, or
-    TIMEOUT_EXIT_CODE if it exceeded `timeout` and was killed)."""
+    Returns the exit code (or 1 if it could not even be spawned).
+
+    The wall-clock ceiling is NOT enforced here via subprocess.run(timeout=):
+    that would SIGKILL our direct child (`sudo`) and orphan the apt-get it
+    spawned, leaving the apt lock held. The ceiling is baked into `cmd`
+    itself as a coreutils `timeout` wrapper (see _timeout_wrapper)."""
     try:
-        return subprocess.run(cmd, check=False, timeout=timeout).returncode
-    except subprocess.TimeoutExpired:
-        # subprocess.run has already sent SIGKILL and reaped the child. Report
-        # it as a failed attempt so the retry loop rides it out rather than
-        # inheriting the hang. This is the whole point of the timeout: a
-        # mirror that accepts the socket and then stops sending data yields no
-        # exit code, so without this the bare run would block until the
-        # 6-hour runner cap.
-        print(
-            f"ci_apt_get: {' '.join(cmd)} exceeded {timeout:g}s and was killed "
-            f"(likely a stalled mirror connection); treating as a failed attempt.",
-            file=sys.stderr,
-        )
-        return TIMEOUT_EXIT_CODE
+        return subprocess.run(cmd, check=False).returncode
     except OSError as exc:
         print(f"ci_apt_get: could not run {cmd!r}: {exc}", file=sys.stderr)
         return 1
+
+
+def _timeout_wrapper(timeout: float | None) -> list[str]:
+    """The coreutils `timeout` prefix tokens for one apt-get command, or []
+    when the ceiling is disabled. Placed AFTER any `sudo` so `timeout` is
+    apt-get's direct parent and the kill actually reaches apt-get."""
+    if timeout is None:
+        return []
+    return ["timeout", f"--kill-after={KILL_AFTER_SECONDS:g}s", f"{timeout:g}s"]
 
 
 def _attempt(
@@ -118,17 +143,19 @@ def _attempt(
 ) -> int:
     """One full update+install attempt. Returns the first non-zero exit of
     the pair, or 0 if both succeed."""
-    prefix = ["sudo"] if sudo else []
+    # `sudo` first (privilege), then `timeout` (so it parents apt-get), then
+    # the apt-get command itself.
+    prefix = (["sudo"] if sudo else []) + _timeout_wrapper(timeout)
     update = prefix + ["apt-get", "update"]
     install = prefix + ["apt-get", "install", "-y"]
     if no_install_recommends:
         install.append("--no-install-recommends")
     install += packages
 
-    rc = _run(update, timeout=timeout)
+    rc = _run(update)
     if rc != 0:
         return rc
-    return _run(install, timeout=timeout)
+    return _run(install)
 
 
 def apt_get(
@@ -164,10 +191,14 @@ def apt_get(
         if last_rc == 0:
             return 0
         if i < attempts:
+            cause = (
+                "timed out and was killed by the wall-clock ceiling"
+                if last_rc in TIMEOUT_EXIT_CODES
+                else "likely a transient mirror/network reset"
+            )
             print(
                 f"ci_apt_get: apt-get exited {last_rc} "
-                f"(likely a transient mirror/network reset); "
-                f"retrying in {backoff_seconds:g}s",
+                f"({cause}); retrying in {backoff_seconds:g}s",
                 file=sys.stderr,
             )
             sleep(backoff_seconds)
@@ -220,8 +251,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str]) -> int:
     args = _parse_args(argv)
-    # A non-positive --timeout disables the ceiling (subprocess.run treats
-    # None as "no timeout").
+    # A non-positive --timeout disables the ceiling: _timeout_wrapper returns
+    # no `timeout` prefix and apt-get runs unbounded.
     timeout = args.timeout if args.timeout and args.timeout > 0 else None
     return apt_get(
         args.packages,
