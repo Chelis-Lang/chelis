@@ -107,19 +107,20 @@ fn dynamically_selected_named_callback_gets_the_frozen_callable_diagnostic() {
     assert_frozen_callable_rejection(&stderr, &emitted);
 }
 
-/// A user def legitimately named `call` collides with the lowerer's
-/// in-band fallback sentinel. Until the sentinel becomes a typed marker,
-/// the collision must at least stay inside the branded unsupported
-/// family and never claim an AD transform was involved.
+/// A def named `call` no longer collides with the lowerer's fallback
+/// marker (unspellable since chelis#841); the supported program builds.
+/// The full end-to-end lock lives in `issue_841_sentinel_collisions.rs`.
 #[test]
-fn a_def_named_call_is_not_misdescribed_as_an_ad_transform() {
-    let (ok, stderr, emitted) = c_build(
+fn a_def_named_call_is_an_ordinary_supported_program() {
+    let (ok, stderr, _emitted) = c_build(
         "def call(x: int32) -> int32 = add(x, 1)\n\
          out = print(call(5))\n",
         "def_named_call",
     );
-    assert!(!ok, "the sentinel collision still rejects the build");
-    assert_frozen_callable_rejection(&stderr, &emitted);
+    assert!(
+        ok,
+        "a legal identifier must not read as a compiler marker:\n{stderr}"
+    );
 }
 
 /// Control: a program that actually applies `grad` in a position the
