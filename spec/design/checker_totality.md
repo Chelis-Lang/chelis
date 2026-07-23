@@ -41,7 +41,15 @@ silent `Type::Error` unconstructible by coupling fresh error types to the
 authoritative diagnostic session, preserving inferred type provenance through
 annotation, and validating every successful checked result. Phase 3 adds the
 `DeepTag` enum at dispatch chokepoints so that a new tag makes every undecided
-consumer fail to compile. The Deep AST representation remains unchanged.
+consumer fail to compile. The Deep AST representation remains unchanged: the
+canonical serialized form (the 3-tuple shape and spec/03's closed string-tag
+vocabulary) is frozen, and `DeepTag` is an in-memory artifact of parsing.
+Whether the parsed node carries the enum alongside its validated string
+(§C4.2's reading) or the dispatch chokepoints derive it on demand is Phase 3's
+implementation choice; the typed-vocabulary pattern from [#730] Phase 2
+(PR #799), a single declaration whose exhaustive typed consumers turn a new
+variant into a compile-time work-list, is the same shape proven for
+`EffectKind`.
 
 ## Phase 2 architecture
 
