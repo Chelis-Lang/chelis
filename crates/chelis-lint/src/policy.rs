@@ -50,6 +50,8 @@ struct CompiledExclusion {
 pub struct TraversalPolicy {
     repository_root: Option<PathBuf>,
     scope_root: PathBuf,
+    canonical_scope_root: Option<PathBuf>,
+    canonical_explicit_root: Option<PathBuf>,
     matcher: Gitignore,
     may_exclude_files: bool,
     exclusions: Vec<CompiledExclusion>,
@@ -64,6 +66,16 @@ impl TraversalPolicy {
             .and_then(Path::parent)
             .map(Path::to_path_buf);
         let baseline_root = repository_root.as_deref().unwrap_or(start);
+        // Existing lint roots always have a canonical scope. The optional form
+        // preserves direct Rule::check callers that use a not-yet-written
+        // synthetic path; those callers have no discovered entries to admit.
+        let canonical_scope_root = (baseline_root.as_os_str().is_empty() || baseline_root.exists())
+            .then(|| canonicalize_policy_root(baseline_root))
+            .transpose()?;
+        let canonical_explicit_root = target
+            .is_dir()
+            .then(|| canonicalize_input(target))
+            .transpose()?;
 
         let shipped = parse_policy(SHIPPED_POLICY, Path::new(SHIPPED_POLICY_PATH), false)?;
         let mut exclusions = compile_exclusions(
@@ -118,6 +130,8 @@ impl TraversalPolicy {
         Ok(Self {
             repository_root,
             scope_root,
+            canonical_scope_root,
+            canonical_explicit_root,
             matcher,
             may_exclude_files,
             exclusions,
@@ -133,13 +147,61 @@ impl TraversalPolicy {
         (is_dir || self.may_exclude_files) && self.matcher.matched(path, is_dir).is_ignore()
     }
 
+    /// Admit one recursively discovered entry.
+    ///
+    /// Lexical policy matching handles ordinary entries. Existing inputs are
+    /// also resolved before use so a symlink alias cannot import content from
+    /// an excluded directory or from outside the policy root. Internal links
+    /// whose targets remain policy-admitted preserve their existing behavior.
+    pub(crate) fn is_admitted_entry(
+        &self,
+        path: &Path,
+        is_dir: bool,
+        resolve_target: bool,
+    ) -> bool {
+        !self.is_excluded(path, is_dir)
+            && (!resolve_target || self.resolved_input_is_admitted(path, is_dir, true))
+    }
+
+    /// Admit an ancillary input, including its governed parents.
+    pub fn is_admitted_ancillary(&self, path: &Path, is_dir: bool) -> bool {
+        !self.is_excluded_or_parent(path, is_dir)
+            && self.resolved_input_is_admitted(path, is_dir, false)
+    }
+
+    /// Return policy-admitted `Cargo.toml` files one level below
+    /// `<root>/crates` for the documented package-name compatibility path.
+    ///
+    /// This intentionally exposes a purpose-specific bounded query, not a
+    /// generic directory API that rules could compose into recursive traversal.
+    /// Recursive discovery remains owned by `walker::walk`.
+    pub(crate) fn admitted_workspace_cargo_manifests(&self, root: &Path) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(root.join("crates")) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|entry| {
+                let crate_path = entry.path();
+                let is_dir = entry.file_type().ok()?.is_dir();
+                if !self.is_admitted_ancillary(&crate_path, is_dir) {
+                    return None;
+                }
+                let manifest = crate_path.join("Cargo.toml");
+                self.is_admitted_ancillary(&manifest, false)
+                    .then_some(manifest)
+            })
+            .collect()
+    }
+
     /// Return whether `path` or one of its governed parents is excluded.
     ///
-    /// Recursive traversal normally needs only [`Self::is_excluded`] because
-    /// the walker prunes a matching directory before visiting descendants.
-    /// Rules that consult an ancillary file outside the entry vector must use
-    /// this parent-aware form so an excluded directory cannot influence an
-    /// admitted entry indirectly.
+    /// Recursive traversal reaches this parent-aware path only when a symlink
+    /// resolves to a different governed location; ordinary directories are
+    /// pruned on their direct match before descendants are visited. Rules that
+    /// consult an ancillary file outside the entry vector must use
+    /// [`Self::is_admitted_ancillary`] so an excluded directory cannot
+    /// influence an admitted entry indirectly.
     pub fn is_excluded_or_parent(&self, path: &Path, is_dir: bool) -> bool {
         let Some(mut relative) = self.path_relative_to_scope(path) else {
             return false;
@@ -168,14 +230,85 @@ impl TraversalPolicy {
             } else {
                 std::env::current_dir().ok()?.join(scope)
             };
-            path.strip_prefix(absolute_scope)
+            path.strip_prefix(&absolute_scope)
                 .ok()
+                .or_else(|| {
+                    self.canonical_scope_root
+                        .as_deref()
+                        .and_then(|root| path.strip_prefix(root).ok())
+                })
                 .map(Path::to_path_buf)
         } else if scope == Path::new(".") {
             Some(path.to_path_buf())
         } else {
             path.strip_prefix(scope).ok().map(Path::to_path_buf)
         }
+    }
+
+    fn resolved_input_is_admitted(
+        &self,
+        path: &Path,
+        is_dir: bool,
+        honor_explicit_root: bool,
+    ) -> bool {
+        let Ok(link_metadata) = std::fs::symlink_metadata(path) else {
+            return false;
+        };
+        let lexical_relative = self.path_relative_to_scope(path);
+        let governed = lexical_relative.is_some();
+        let is_symlink = link_metadata.file_type().is_symlink();
+        if !governed && !is_symlink {
+            // Preserve the documented ancestor-manifest compatibility path for
+            // explicit file/subdirectory lint targets.
+            return true;
+        }
+        let Some(canonical_scope_root) = self.canonical_scope_root.as_deref() else {
+            return false;
+        };
+        let Ok(resolved) = std::fs::canonicalize(path) else {
+            return false;
+        };
+        let Ok(metadata) = std::fs::metadata(&resolved) else {
+            return false;
+        };
+        let resolved_is_dir = metadata.is_dir();
+        let Ok(resolved_relative) = resolved.strip_prefix(canonical_scope_root) else {
+            return false;
+        };
+        if resolved_is_dir != is_dir {
+            return false;
+        }
+        let traverses_alias = lexical_relative.as_deref() != Some(resolved_relative);
+        if !traverses_alias {
+            return !self.is_excluded(resolved_relative, resolved_is_dir);
+        }
+        if honor_explicit_root {
+            !self.is_excluded_or_parent_below_explicit_root(resolved_relative, resolved_is_dir)
+        } else {
+            !self.is_excluded_or_parent(&resolved, resolved_is_dir)
+        }
+    }
+
+    fn is_excluded_or_parent_below_explicit_root(&self, path: &Path, is_dir: bool) -> bool {
+        if self.matcher.matched(path, is_dir).is_ignore() {
+            return true;
+        }
+        let explicit_root = self
+            .canonical_explicit_root
+            .as_deref()
+            .zip(self.canonical_scope_root.as_deref())
+            .and_then(|(explicit, scope)| explicit.strip_prefix(scope).ok());
+        let mut relative = path.to_path_buf();
+        while let Some(parent) = relative.parent() {
+            if explicit_root == Some(parent) {
+                break;
+            }
+            if self.matcher.matched(parent, true).is_ignore() {
+                return true;
+            }
+            relative = parent.to_path_buf();
+        }
+        false
     }
 
     /// Explain the first policy entry excluding `path`.

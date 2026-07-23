@@ -120,8 +120,12 @@ now rejected at the offending site — see **Changed** for the migration.
   rules plus prepared catalogs consume one policy-admitted corpus. Ancillary
   Cargo manifests used by `doc-filename-convention` now come from admitted
   entries or pass a parent-aware policy check, so an excluded generated crate
-  cannot suppress an admitted documentation violation. A crate-local canonical
-  `AGENTS.md` plus `CLAUDE.md` symlink locks the rule-registration and
+  cannot suppress an admitted documentation violation. Discovered symlink
+  targets are resolved through the same policy: internal admitted file links
+  remain usable, while aliases into excluded or machine-local content cannot
+  affect prepared catalogs or ancillary metadata. Rule modules are tripwired
+  against independent walker and directory-discovery primitives. A crate-local
+  canonical `AGENTS.md` plus `CLAUDE.md` symlink locks the rule-registration and
   canonical-traversal protocol for both agent entry points at edit time.
 - **`opaque-domain-construction` repository linting is linear and honors
   canonical skip filters (chelis#603).** The rule now prepares its Surf

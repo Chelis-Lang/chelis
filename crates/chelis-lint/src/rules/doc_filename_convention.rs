@@ -135,21 +135,17 @@ fn filename_matches_cargo_package(root: &Path, path: &Path) -> bool {
     let Ok(policy) = TraversalPolicy::load_for(root) else {
         return false;
     };
-    let is_admitted = |manifest: &Path| !policy.is_excluded_or_parent(manifest, false);
+    let is_admitted = |manifest: &Path| policy.is_admitted_ancillary(manifest, false);
     // Scan workspace crates first — this is the common case. The
     // `root/crates/` layout is what the chelis ecosystem uses. Direct
     // Rule::check callers retain this bounded compatibility path, but every
-    // ancillary manifest still passes traversal-policy admission.
-    let crates_dir = root.join("crates");
-    if let Ok(entries) = std::fs::read_dir(&crates_dir) {
-        for entry in entries.flatten() {
-            let manifest = entry.path().join("Cargo.toml");
-            if is_admitted(&manifest)
-                && let Some(name) = read_cargo_package_name(&manifest)
-                && name == stem
-            {
-                return true;
-            }
+    // directory and ancillary manifest still passes traversal-policy
+    // admission through the centralized non-recursive discovery API.
+    for manifest in policy.admitted_workspace_cargo_manifests(root) {
+        if let Some(name) = read_cargo_package_name(&manifest)
+            && name == stem
+        {
+            return true;
         }
     }
     // Fallback: walk ancestors looking for any admitted Cargo.toml whose
@@ -209,7 +205,7 @@ fn prepare_doc_filename_state(
         while let Some(directory) = cursor {
             let manifest = directory.join("Cargo.toml");
             if visited_manifests.insert(manifest.clone())
-                && !policy.is_excluded_or_parent(&manifest, false)
+                && policy.is_admitted_ancillary(&manifest, false)
                 && let Some(name) = read_cargo_package_name(&manifest)
             {
                 package_names.insert(name);

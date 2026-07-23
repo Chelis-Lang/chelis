@@ -36,6 +36,18 @@ fn exclusion(pattern: &str, class: &str, cross_ref: &str) -> String {
     )
 }
 
+fn rust_sources_below(directory: &Path, out: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(directory).unwrap() {
+        let path = entry.unwrap().path();
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        if metadata.is_dir() {
+            rust_sources_below(&path, out);
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+            out.push(path);
+        }
+    }
+}
+
 fn walked(root: &Path) -> Vec<String> {
     chelis_lint::walker::walk(root)
         .expect("walk")
@@ -429,6 +441,40 @@ fn explicit_excluded_roots_are_linted_but_nested_exclusions_still_prune() {
     assert_eq!(explicit_file, vec![String::new()]);
 }
 
+#[cfg(unix)]
+#[test]
+fn explicit_excluded_directory_preserves_internal_symlink_root_override_only() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    write_policy(
+        root,
+        &format!(
+            "{}\n{}",
+            exclusion("generated/", "generated", "§12.2"),
+            exclusion("nested/", "generated", "§12.2")
+        ),
+    );
+    let generated = root.join("generated");
+    fs::create_dir_all(generated.join("shared")).unwrap();
+    fs::create_dir_all(generated.join("nested")).unwrap();
+    fs::write(generated.join("shared/admitted.txt"), "admitted\n").unwrap();
+    fs::write(generated.join("nested/excluded.txt"), "excluded\n").unwrap();
+    symlink("shared/admitted.txt", generated.join("admitted.ch")).unwrap();
+    symlink("nested/excluded.txt", generated.join("excluded.ch")).unwrap();
+
+    let names = walked(&generated);
+    assert!(
+        names.iter().any(|path| path == "admitted.ch"),
+        "the explicit directory's own exclusion is overridden for an internal admitted target: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|path| path == "excluded.ch"),
+        "a separately excluded descendant target must remain excluded: {names:?}"
+    );
+}
+
 #[test]
 fn exact_file_patterns_prune_nested_files_but_not_explicit_file_roots() {
     let temp = tempdir().unwrap();
@@ -516,21 +562,67 @@ fn shipped_policy_migrates_every_previous_walker_exclusion() {
             "walker.rs must not hard-code exclusion value {forbidden}"
         );
     }
-    let rules_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/rules");
-    for entry in fs::read_dir(&rules_dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
-            continue;
-        }
+    let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let rules_dir = crate_root.join("src/rules");
+    let mut rule_paths = Vec::new();
+    rust_sources_below(&rules_dir, &mut rule_paths);
+    for path in rule_paths {
         let rule_source = fs::read_to_string(&path).unwrap();
-        for forbidden in ["WalkBuilder", "WalkDir", "WalkParallel", "ignore::Walk"] {
+        for forbidden in [
+            "WalkBuilder",
+            "WalkDir",
+            "WalkParallel",
+            "ignore::Walk",
+            "read_dir",
+            "glob::",
+            "globwalk",
+            "jwalk",
+            "wax::",
+        ] {
             assert!(
                 !rule_source.contains(forbidden),
-                "lint rule {} must consume canonical entries, not create an independent walker with {forbidden}",
+                "lint rule {} must consume canonical entries or a centralized bounded-discovery API, not use independent discovery primitive {forbidden}",
                 path.display()
             );
         }
     }
+
+    let manifest = fs::read_to_string(crate_root.join("Cargo.toml")).unwrap();
+    let manifest: toml::Value = toml::from_str(&manifest).unwrap();
+    for dependency_section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        let Some(dependencies) = manifest
+            .get(dependency_section)
+            .and_then(toml::Value::as_table)
+        else {
+            continue;
+        };
+        for (name, specification) in dependencies {
+            let package = specification
+                .get("package")
+                .and_then(toml::Value::as_str)
+                .unwrap_or(name);
+            assert!(
+                !matches!(package, "walkdir" | "glob" | "globwalk" | "jwalk" | "wax"),
+                "chelis-lint must not add independent traversal dependency {package}"
+            );
+        }
+    }
+}
+
+#[test]
+fn source_tripwire_discovery_reaches_nested_rule_modules() {
+    let temp = tempdir().unwrap();
+    fs::create_dir_all(temp.path().join("nested/deeper")).unwrap();
+    let top = temp.path().join("top.rs");
+    let nested = temp.path().join("nested/deeper/rule.rs");
+    fs::write(&top, "// top\n").unwrap();
+    fs::write(&nested, "// nested\n").unwrap();
+    fs::write(temp.path().join("nested/ignored.txt"), "not Rust\n").unwrap();
+
+    let mut sources = Vec::new();
+    rust_sources_below(temp.path(), &mut sources);
+    sources.sort();
+    assert_eq!(sources, vec![nested, top]);
 }
 
 #[test]
@@ -617,6 +709,95 @@ fn configured_exclusion_controls_opaque_prepared_catalog() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn excluded_or_external_surf_symlink_targets_cannot_influence_opaque_catalog() {
+    use std::os::unix::fs::symlink;
+
+    let repository = tempdir().unwrap();
+    let external = tempdir().unwrap();
+    let root = repository.path();
+    write_policy(root, &exclusion("generated/", "generated", "§12.2"));
+    fs::create_dir_all(root.join("generated")).unwrap();
+    fs::write(
+        root.join("generated/opaque.ch"),
+        "module Hidden.Types\n@opaque\ntype HiddenSecret = | HiddenSecret { value: f32 }\n",
+    )
+    .unwrap();
+    fs::write(
+        external.path().join("opaque.ch"),
+        "module External.Types\n@opaque\ntype ExternalSecret = | ExternalSecret { value: f32 }\n",
+    )
+    .unwrap();
+    symlink("generated/opaque.ch", root.join("linked_excluded.ch")).unwrap();
+    symlink(
+        external.path().join("opaque.ch"),
+        root.join("linked_external.ch"),
+    )
+    .unwrap();
+    fs::write(
+        root.join("agent.ch"),
+        "module Agent.Strategy\ndef forge_hidden(x: f32) -> HiddenSecret = HiddenSecret { value: x }\ndef forge_external(x: f32) -> ExternalSecret = ExternalSecret { value: x }\n",
+    )
+    .unwrap();
+    let rules: Vec<Box<dyn Rule>> = vec![Box::new(OpaqueDomainConstruction)];
+
+    let violations = chelis_lint::lint(root, &rules).unwrap();
+    assert!(
+        violations.is_empty(),
+        "excluded or machine-local symlink targets must not enter the prepared catalog: {violations:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn broken_or_entry_kind_changing_source_symlinks_are_omitted() {
+    use std::os::unix::fs::symlink;
+
+    let repository = tempdir().unwrap();
+    let root = repository.path();
+    write_policy(root, "");
+    fs::create_dir_all(root.join("directory-target")).unwrap();
+    symlink("missing.ch", root.join("broken.ch")).unwrap();
+    symlink("directory-target", root.join("directory-as-file.ch")).unwrap();
+    fs::write(root.join("visible.ch"), "def visible() = 1\n").unwrap();
+
+    let names = walked(root);
+    assert!(names.iter().any(|path| path == "visible.ch"));
+    assert!(!names.iter().any(|path| path == "broken.ch"));
+    assert!(!names.iter().any(|path| path == "directory-as-file.ch"));
+}
+
+#[cfg(unix)]
+#[test]
+fn internal_admitted_surf_symlink_target_still_contributes_to_opaque_catalog() {
+    use std::os::unix::fs::symlink;
+
+    let repository = tempdir().unwrap();
+    let root = repository.path();
+    write_policy(root, "");
+    fs::create_dir_all(root.join("shared")).unwrap();
+    fs::write(
+        root.join("shared/opaque.txt"),
+        "module Shared.Types\n@opaque\ntype Secret = | Secret { value: f32 }\n",
+    )
+    .unwrap();
+    symlink("shared/opaque.txt", root.join("linked.ch")).unwrap();
+    fs::write(
+        root.join("agent.ch"),
+        "module Agent.Strategy\ndef forge(x: f32) -> Secret = Secret { value: x }\n",
+    )
+    .unwrap();
+    let rules: Vec<Box<dyn Rule>> = vec![Box::new(OpaqueDomainConstruction)];
+
+    let violations = chelis_lint::lint(root, &rules).unwrap();
+    assert_eq!(
+        violations.len(),
+        1,
+        "an internal policy-admitted symlink target must retain existing source-link behavior"
+    );
+}
+
 fn lint_doc_filenames(root: &Path) -> Vec<chelis_lint::Violation> {
     let rules: Vec<Box<dyn Rule>> = vec![Box::new(DocFilenameConvention)];
     chelis_lint::lint(root, &rules).expect("lint doc filenames")
@@ -655,6 +836,79 @@ fn excluded_manifest_cannot_grant_package_name_exception_to_admitted_doc() {
         DocFilenameConvention.check(&direct_ctx).len(),
         1,
         "the direct Rule::check compatibility path must enforce the same ancillary-file policy"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn excluded_or_external_manifest_symlink_targets_cannot_grant_doc_exception() {
+    use std::os::unix::fs::symlink;
+
+    let repository = tempdir().unwrap();
+    let external = tempdir().unwrap();
+    let root = repository.path();
+    write_policy(root, &exclusion("generated/", "generated", "§12.2"));
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::write(root.join("docs/foo-bar.md"), "# Docs\n").unwrap();
+    fs::write(root.join("docs/external-bar.md"), "# Docs\n").unwrap();
+    fs::create_dir_all(root.join("generated")).unwrap();
+    fs::write(
+        root.join("generated/Cargo.toml"),
+        "[package]\nname = \"foo-bar\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        external.path().join("Cargo.toml"),
+        "[package]\nname = \"external-bar\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("crates/excluded-link")).unwrap();
+    fs::create_dir_all(root.join("crates/external-link")).unwrap();
+    symlink(
+        "../../generated/Cargo.toml",
+        root.join("crates/excluded-link/Cargo.toml"),
+    )
+    .unwrap();
+    symlink(
+        external.path().join("Cargo.toml"),
+        root.join("crates/external-link/Cargo.toml"),
+    )
+    .unwrap();
+
+    let violations = lint_doc_filenames(root);
+    assert_eq!(
+        violations.len(),
+        2,
+        "excluded and machine-local manifest contents must not suppress admitted doc violations: {violations:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn internal_admitted_manifest_symlink_target_still_grants_doc_exception() {
+    use std::os::unix::fs::symlink;
+
+    let repository = tempdir().unwrap();
+    let root = repository.path();
+    write_policy(root, "");
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::write(root.join("docs/foo-bar.md"), "# Docs\n").unwrap();
+    fs::create_dir_all(root.join("config")).unwrap();
+    fs::write(
+        root.join("config/package.toml"),
+        "[package]\nname = \"foo-bar\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("crates/foo-bar")).unwrap();
+    symlink(
+        "../../config/package.toml",
+        root.join("crates/foo-bar/Cargo.toml"),
+    )
+    .unwrap();
+
+    assert!(
+        lint_doc_filenames(root).is_empty(),
+        "an internal policy-admitted manifest link must retain the §8.3 exception"
     );
 }
 

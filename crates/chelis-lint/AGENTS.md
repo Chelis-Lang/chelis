@@ -31,8 +31,12 @@ These instructions refine the repository-root `AGENTS.md` for changes under
 - Policy discovery and referenced specs fail closed. Do not add silent
   fallbacks for malformed, unreadable, escaping, or machine-local inputs.
 - Ancillary files consulted by a rule must come from the canonical entry set
-  or pass a parent-aware `TraversalPolicy` admission check. An excluded path
-  must not influence an admitted entry indirectly.
+  or pass `TraversalPolicy::is_admitted_ancillary`, which checks governed
+  parents and resolved symlink targets. An excluded path must not influence an
+  admitted entry indirectly.
+- Rules must not call filesystem discovery primitives such as `read_dir`.
+  Recursive discovery belongs only to `walker::walk`; use the purpose-specific
+  policy query for the documented workspace-manifest compatibility path.
 
 ## Minimum focused gate
 

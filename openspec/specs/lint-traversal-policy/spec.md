@@ -60,7 +60,7 @@ The `ignore` traversal engine MUST disable hidden-file filtering, `.gitignore`, 
 - **THEN** the canonical walker still admits that path
 
 ### Requirement: Policy matching is workspace-anchored and prunes descendants
-Repository patterns SHALL be interpreted relative to the directory containing `chelis-lint.toml`. A matching nested directory SHALL be omitted and not descended into. The same admitted entry set SHALL feed rule preparation and per-entry checks.
+Repository patterns SHALL be interpreted relative to the directory containing `chelis-lint.toml`. A matching nested directory SHALL be omitted and not descended into. The same admitted entry set SHALL feed rule preparation and per-entry checks. A non-explicit symlink entry MUST resolve to the same entry kind inside the policy root, and its resolved target plus governed parents MUST be policy-admitted; broken links, links escaping the policy root, and aliases into excluded content SHALL be omitted. Internal links to admitted regular-file targets SHALL retain their link-path surface classification. When the lint root is an explicitly named excluded directory, that root's exclusion remains overridden for an internal symlink target while separately excluded descendants remain effective.
 
 #### Scenario: Nested excluded directory is pruned
 - **WHEN** a repository exclusion matches a nested generated directory
@@ -74,6 +74,14 @@ Repository patterns SHALL be interpreted relative to the directory containing `c
 - **WHEN** one directory matches an exclusion and a sibling does not
 - **THEN** the walker prunes only the matching directory
 
+#### Scenario: Symlink cannot alias excluded or machine-local content
+- **WHEN** a discovered source or manifest symlink resolves under an excluded directory or outside the policy root
+- **THEN** the symlink is omitted before rule preparation or checks can read its target
+
+#### Scenario: Internal admitted file symlink remains visible
+- **WHEN** a discovered source or manifest symlink resolves to an admitted regular file inside the policy root
+- **THEN** the entry remains admitted and is classified using the symlink path
+
 ### Requirement: Explicit targets override traversal exclusions at depth zero
 A file or directory explicitly supplied as a lint root SHALL be admitted even when a policy exclusion matches that root. Policy exclusions SHALL continue to apply to matching descendants beneath an explicit directory root.
 
@@ -83,7 +91,7 @@ A file or directory explicitly supplied as a lint root SHALL be admitted even wh
 
 #### Scenario: Explicit excluded directory is entered
 - **WHEN** the user names an otherwise excluded directory directly
-- **THEN** the directory is entered while separately excluded nested descendants remain pruned
+- **THEN** the directory is entered while separately excluded nested descendants remain pruned, including for resolved symlink targets
 
 ### Requirement: Standalone CLI preserves traversal-policy behavior
 The standalone `chelis lint` command SHALL use the canonical traversal policy and SHALL expose policy failures as nonzero command failures containing the policy path and reason.
@@ -108,7 +116,7 @@ A traversal exclusion SHALL prevent all rule dispatch for its matched descendant
 - **THEN** no rule checks it and no rule-specific exception is required
 
 #### Scenario: Excluded ancillary manifest cannot affect an admitted document
-- **WHEN** an excluded Cargo manifest names a package whose kebab-case name matches an admitted documentation filename
+- **WHEN** an excluded Cargo manifest names a package whose kebab-case name matches an admitted documentation filename, directly or through an admitted-path symlink alias
 - **THEN** `doc-filename-convention` ignores that manifest and reports the same verdict as if the excluded tree were absent
 
 #### Scenario: Admitted ancillary manifest retains its documented effect

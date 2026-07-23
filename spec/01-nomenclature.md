@@ -1317,7 +1317,14 @@ keeps local and CI scope identical and keeps hidden source such as
 `.github/workflows/` visible unless Chelis policy explicitly excludes it.
 An explicitly named file or directory is always admitted at traversal depth
 zero; separately excluded descendants under an explicit directory remain
-pruned.
+pruned. A non-explicit symlink entry is resolved before admission: its target
+must be the same entry kind inside the policy root, and both the target and its
+governed parents must remain policy-admitted. Broken links, links escaping the
+policy root, and aliases into excluded content are omitted before any rule can
+read them. Internal links to admitted regular files remain visible and are
+classified by the link path. Under an explicitly named excluded directory,
+that root's exclusion remains overridden for an internal symlink target while
+separately excluded descendants remain effective.
 
 Traversal policy does not replace rule-specific `Exception` entries or inline
 `allow` and `keep` directives. Those mechanisms act after a path has entered

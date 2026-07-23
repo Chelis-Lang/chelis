@@ -33,8 +33,10 @@ pub fn walk(
             if entry.depth() == 0 {
                 return true;
             }
-            let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
-            !policy_for_filter.is_excluded(entry.path(), is_dir)
+            let file_type = entry.file_type();
+            let is_dir = file_type.is_some_and(|kind| kind.is_dir());
+            let resolve_target = file_type.is_none_or(|kind| kind.is_symlink());
+            policy_for_filter.is_admitted_entry(entry.path(), is_dir, resolve_target)
         });
 
     let mut out = Vec::new();
