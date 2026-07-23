@@ -247,8 +247,9 @@ recorded as the one non-constructor entry point (open question 2).
    test what they claim, never removed or weakened).
 4. **The fitness-honesty corpus** (2026-07 review integration): a CI
    suite of known-ill-typed programs - the wrapper battery plus every
-   census-verified silent-hole repro ([#709]/[#710]/[#755]/[#756] and
-   future finds) - asserting every member scores strictly below 1.0;
+   census-verified silent-hole repro ([#709]/[#710]/[#755]/[#756],
+   [#833]'s declaration-only `total_nodes == 0` hole, and future
+   finds) - asserting every member scores strictly below 1.0;
    any member scoring 1.0 fails the build. This is the continuous,
    corpus-level enforcement of §C1.3, standing even after §C3 makes
    violations unconstructible. Margin thresholds (e.g. < 0.9) are
@@ -475,3 +476,4 @@ tree) standing guard over both claims.
 [#731]: https://github.com/Chelis-Lang/chelis/issues/731
 [#755]: https://github.com/Chelis-Lang/chelis/issues/755
 [#756]: https://github.com/Chelis-Lang/chelis/issues/756
+[#833]: https://github.com/Chelis-Lang/chelis/issues/833
