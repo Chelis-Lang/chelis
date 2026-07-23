@@ -134,10 +134,13 @@ pub trait Rule: Send + Sync {
     ///
     /// The default state is empty. Rules that need corpus-wide context can
     /// override this hook and consume their state in [`Rule::check_prepared`].
+    /// The shared `policy` is the invocation's single loaded traversal
+    /// policy; rules must not reload it.
     fn prepare_run(
         &self,
         _root: &Path,
         _entries: &[walker::Entry],
+        _policy: &policy::TraversalPolicy,
     ) -> Result<PreparedRuleState, LintError> {
         Ok(Box::new(()))
     }
@@ -230,10 +233,13 @@ pub struct Exception {
 /// Walk `root`, classify each entry, dispatch to every matching rule, and
 /// collect violations. Returns violations sorted by path (stable across runs).
 pub fn lint(root: &Path, rules: &[Box<dyn Rule>]) -> Result<Vec<Violation>, LintError> {
-    let entries: Vec<walker::Entry> = walker::walk(root)?.into_iter().collect::<Result<_, _>>()?;
+    let policy = std::sync::Arc::new(policy::TraversalPolicy::load_for(root)?);
+    let entries: Vec<walker::Entry> = walker::walk_with_policy(root, &policy)?
+        .into_iter()
+        .collect::<Result<_, _>>()?;
     let prepared: Vec<PreparedRuleState> = rules
         .iter()
-        .map(|rule| rule.prepare_run(root, &entries))
+        .map(|rule| rule.prepare_run(root, &entries, &policy))
         .collect::<Result<_, _>>()?;
 
     let mut violations = Vec::new();
@@ -458,6 +464,7 @@ mod tests {
             &self,
             _root: &Path,
             _entries: &[walker::Entry],
+            _policy: &policy::TraversalPolicy,
         ) -> Result<PreparedRuleState, LintError> {
             let generation = self.prepare_calls.fetch_add(1, Ordering::SeqCst) + 1;
             Ok(Box::new(generation))
@@ -571,6 +578,7 @@ mod tests {
             &self,
             _root: &Path,
             _entries: &[walker::Entry],
+            _policy: &policy::TraversalPolicy,
         ) -> Result<PreparedRuleState, LintError> {
             Ok(Box::new(603usize))
         }
@@ -615,6 +623,7 @@ mod tests {
             &self,
             _root: &Path,
             _entries: &[walker::Entry],
+            _policy: &policy::TraversalPolicy,
         ) -> Result<PreparedRuleState, LintError> {
             Ok(Box::new(String::from("opaque-catalog")))
         }
@@ -664,5 +673,34 @@ mod tests {
         assert_eq!(default_checks.load(Ordering::SeqCst), 2);
         assert_eq!(usize_checks.load(Ordering::SeqCst), 2);
         assert_eq!(string_checks.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn lint_invocation_loads_traversal_policy_exactly_once() {
+        let temp = tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("agent.ch"), "def agent() = 1\n")
+            .expect("write source");
+        std::fs::create_dir_all(temp.path().join("docs")).expect("create docs");
+        std::fs::write(temp.path().join("docs/overview.md"), "# Overview\n")
+            .expect("write doc");
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(crate::rules::doc_filename_convention::DocFilenameConvention),
+            Box::new(crate::rules::opaque_domain_construction::OpaqueDomainConstruction),
+        ];
+
+        policy::reset_policy_load_count();
+        lint(temp.path(), &rules).expect("first lint invocation");
+        assert_eq!(
+            policy::policy_load_count(),
+            1,
+            "one lint invocation must load the traversal policy exactly once, shared by the walker and every prepare_run hook"
+        );
+
+        lint(temp.path(), &rules).expect("second lint invocation");
+        assert_eq!(
+            policy::policy_load_count(),
+            2,
+            "each invocation loads fresh policy; no cross-invocation caching"
+        );
     }
 }

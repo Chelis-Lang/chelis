@@ -38,16 +38,31 @@ pub fn walk(
     root: &std::path::Path,
 ) -> Result<Vec<Result<Entry, ignore::Error>>, TraversalPolicyError> {
     let policy = Arc::new(TraversalPolicy::load_for(root)?);
+    walk_with_policy(root, &policy)
+}
+
+/// Walk `root` with an already-loaded traversal policy.
+///
+/// [`crate::lint`] loads one policy per invocation and shares it between
+/// this walk and every rule's `prepare_run` hook.
+pub fn walk_with_policy(
+    root: &std::path::Path,
+    policy: &Arc<TraversalPolicy>,
+) -> Result<Vec<Result<Entry, ignore::Error>>, TraversalPolicyError> {
     // `ignore` does not apply `filter_entry` to an explicitly supplied root
-    // before deciding whether to descend. Validate it first so a symlinked
-    // directory root cannot import an external tree and a source-shaped
-    // special file never reaches source loading.
+    // before deciding whether to descend. Admit it first, and loudly: a
+    // named root that exists but is rejected (special file, escaping or
+    // broken link) must fail like a nonexistent root does, never lint as
+    // successfully empty.
     if std::fs::symlink_metadata(root).is_ok()
-        && !policy.is_admitted_explicit_entry(root, root.is_dir())
+        && let Err(reason) = policy.admit_explicit_entry(root, root.is_dir())
     {
-        return Ok(Vec::new());
+        return Err(TraversalPolicyError::InadmissibleExplicitRoot {
+            path: root.to_path_buf(),
+            reason,
+        });
     }
-    let policy_for_filter = Arc::clone(&policy);
+    let policy_for_filter = Arc::clone(policy);
     let mut builder = WalkBuilder::new(root);
     builder
         .standard_filters(false)
@@ -59,9 +74,10 @@ pub fn walk(
         match result {
             Ok(entry) => {
                 // `ignore` may still yield an explicitly supplied root even
-                // when its filter rejects that root. Recheck before exposing
-                // an entry to source loading or prepared catalogs.
-                if !is_admitted(&policy, &entry) {
+                // when its filter rejects that root; deeper entries were
+                // already vetted by `filter_entry`. Recheck only depth zero
+                // before exposing an entry to source loading.
+                if entry.depth() == 0 && !is_admitted(policy, &entry) {
                     continue;
                 }
                 let path = entry.path().to_path_buf();

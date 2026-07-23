@@ -438,6 +438,102 @@ fn external_parent_manifest_symlink_pointing_inward_cannot_grant_doc_exception()
 
 #[cfg(unix)]
 #[test]
+fn inadmissible_explicit_special_root_fails_loudly_through_cli() {
+    use std::os::unix::net::UnixListener;
+
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    write_spec(root);
+    fs::write(
+        root.join("chelis-lint.toml"),
+        "version = 1\nspec = \"spec/01-nomenclature.md\"\n",
+    )
+    .unwrap();
+    let socket_path = root.join("explicit.ch");
+    let _socket = UnixListener::bind(&socket_path).unwrap();
+
+    chelis_lint(&socket_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("explicit.ch"))
+        .stderr(predicate::str::contains("not a regular file or directory"));
+}
+
+#[cfg(unix)]
+#[test]
+fn escaping_explicit_symlink_root_fails_loudly_through_cli() {
+    use std::os::unix::fs::symlink;
+
+    let repository = tempdir().unwrap();
+    let external = tempdir().unwrap();
+    let root = repository.path();
+    write_spec(root);
+    fs::write(
+        root.join("chelis-lint.toml"),
+        "version = 1\nspec = \"spec/01-nomenclature.md\"\n",
+    )
+    .unwrap();
+    fs::write(external.path().join("outside.ch"), "def outside() = 1\n").unwrap();
+    let external_link = root.join("external-link");
+    symlink(external.path(), &external_link).unwrap();
+
+    chelis_lint(&external_link)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("external-link"))
+        .stderr(predicate::str::contains(
+            "outside the repository policy boundary",
+        ));
+}
+
+#[test]
+fn subdirectory_cwd_lint_applies_repository_policy_through_cli() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    write_spec(root);
+    fs::write(
+        root.join("chelis-lint.toml"),
+        "version = 1\nspec = \"spec/01-nomenclature.md\"\n\n[[exclude]]\npattern = \"sub/generated/\"\nclass = \"generated\"\ncross_ref = \"§12.2\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("sub/generated")).unwrap();
+    fs::write(root.join("sub/keep.ch"), "def keep() = 1\n").unwrap();
+    fs::write(root.join("sub/generated/bad.ch"), "def addOne() = 1\n").unwrap();
+
+    let mut command = Command::cargo_bin("chelis").expect("chelis binary");
+    command
+        .args(["lint", "--check", "--rule", "surf-value-snake-case", "."])
+        .current_dir(root.join("sub"));
+    command.assert().success().stdout("");
+}
+
+#[test]
+fn subdirectory_cwd_lint_still_reports_admitted_violations_through_cli() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    write_spec(root);
+    fs::write(
+        root.join("chelis-lint.toml"),
+        "version = 1\nspec = \"spec/01-nomenclature.md\"\n\n[[exclude]]\npattern = \"sub/generated/\"\nclass = \"generated\"\ncross_ref = \"§12.2\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("sub/generated")).unwrap();
+    fs::write(root.join("sub/bad.ch"), "def addOne() = 1\n").unwrap();
+    fs::write(root.join("sub/generated/bad.ch"), "def addTwo() = 2\n").unwrap();
+
+    let mut command = Command::cargo_bin("chelis").expect("chelis binary");
+    command
+        .args(["lint", "--check", "--rule", "surf-value-snake-case", "."])
+        .current_dir(root.join("sub"));
+    command
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("addOne"))
+        .stdout(predicate::str::contains("addTwo").not());
+}
+
+#[cfg(unix)]
+#[test]
 fn external_policy_symlink_fails_standalone_cli() {
     use std::os::unix::fs::symlink;
 

@@ -404,6 +404,28 @@ mod tests {
         assert!(res.is_ok(), "unresolvable cross_refs: {:?}", res.err());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn inadmissible_lint_root_fails_closed() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("socket.ch");
+        let _socket = UnixListener::bind(&path).unwrap();
+        let canonical = chelis_surf::format::format_program(&[]);
+
+        let outcome = run_gate(&path, &canonical);
+        assert_eq!(outcome.lint_violations.len(), 1);
+        assert_eq!(outcome.lint_violations[0].rule_id, "lint-traversal-policy");
+        assert!(
+            outcome.lint_violations[0]
+                .message
+                .contains("not a regular file or directory"),
+            "the gate must surface the depth-zero rejection reason: {}",
+            outcome.lint_violations[0].message
+        );
+    }
+
     #[test]
     fn malformed_traversal_policy_fails_closed() {
         let dir = tempfile::tempdir().unwrap();

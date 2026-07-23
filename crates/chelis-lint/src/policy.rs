@@ -46,12 +46,48 @@ struct CompiledExclusion {
     matcher: Gitignore,
 }
 
+/// Why an explicitly named lint root failed depth-zero admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExplicitRootRejection {
+    NonRegularEntryKind,
+    KindMismatchedLinkTarget,
+    EscapesPolicyBoundary,
+    Unresolvable,
+}
+
+impl fmt::Display for ExplicitRootRejection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::NonRegularEntryKind => "is not a regular file or directory",
+            Self::KindMismatchedLinkTarget => "is a link resolving to a different entry kind",
+            Self::EscapesPolicyBoundary => "resolves outside the repository policy boundary",
+            Self::Unresolvable => "cannot be resolved to an existing filesystem entry",
+        })
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static POLICY_LOAD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_policy_load_count() {
+    POLICY_LOAD_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn policy_load_count() -> usize {
+    POLICY_LOAD_COUNT.with(std::cell::Cell::get)
+}
+
 #[derive(Debug)]
 pub struct TraversalPolicy {
     repository_root: Option<PathBuf>,
     scope_root: PathBuf,
     canonical_scope_root: Option<PathBuf>,
     canonical_explicit_root: Option<PathBuf>,
+    invocation_dir: Option<PathBuf>,
     matcher: Gitignore,
     may_exclude_files: bool,
     exclusions: Vec<CompiledExclusion>,
@@ -59,8 +95,34 @@ pub struct TraversalPolicy {
 
 impl TraversalPolicy {
     pub fn load_for(target: &Path) -> Result<Self, TraversalPolicyError> {
+        #[cfg(test)]
+        POLICY_LOAD_COUNT.with(|count| count.set(count.get() + 1));
         let start = policy_search_start(target);
-        let repository_policy = find_repository_policy(start)?;
+        let invocation_dir = match std::env::current_dir() {
+            Ok(directory) => Some(directory),
+            Err(_) if start.is_absolute() => None,
+            Err(source) => {
+                return Err(TraversalPolicyError::Io {
+                    path: start.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        // Repository discovery must not depend on how the target was
+        // spelled: a relative target's lexical ancestors stop at the
+        // invocation cwd, so resolve the search start against the cwd
+        // before walking ancestors.
+        let discovery_start: PathBuf = if start.is_absolute() {
+            start.to_path_buf()
+        } else {
+            invocation_dir
+                .as_deref()
+                .expect("relative targets return early when the cwd is unavailable")
+                .join(start)
+                .components()
+                .collect()
+        };
+        let repository_policy = find_repository_policy(&discovery_start)?;
         let repository_root = repository_policy
             .as_deref()
             .and_then(Path::parent)
@@ -132,6 +194,7 @@ impl TraversalPolicy {
             scope_root,
             canonical_scope_root,
             canonical_explicit_root,
+            invocation_dir,
             matcher,
             may_exclude_files,
             exclusions,
@@ -143,8 +206,22 @@ impl TraversalPolicy {
     }
 
     /// Return whether `path` is excluded using the combined hot-path matcher.
+    ///
+    /// Paths are expressed relative to the policy scope before matching so
+    /// cwd-relative walker entries and absolute paths agree on anchoring.
     pub fn is_excluded(&self, path: &Path, is_dir: bool) -> bool {
-        (is_dir || self.may_exclude_files) && self.matcher.matched(path, is_dir).is_ignore()
+        if !is_dir && !self.may_exclude_files {
+            return false;
+        }
+        match self.path_relative_to_scope(path) {
+            Some(relative) => self.scope_relative_excluded(&relative, is_dir),
+            None => self.matcher.matched(path, is_dir).is_ignore(),
+        }
+    }
+
+    /// Match a path already expressed relative to the policy scope root.
+    fn scope_relative_excluded(&self, relative: &Path, is_dir: bool) -> bool {
+        (is_dir || self.may_exclude_files) && self.matcher.matched(relative, is_dir).is_ignore()
     }
 
     /// Admit one recursively discovered entry.
@@ -168,21 +245,49 @@ impl TraversalPolicy {
     /// Explicit targets still have to be regular files/directories (or links
     /// resolving to one) inside the repository policy boundary.
     pub(crate) fn is_admitted_explicit_entry(&self, path: &Path, is_dir: bool) -> bool {
+        self.admit_explicit_entry(path, is_dir).is_ok()
+    }
+
+    /// Admit an explicit walk root, or explain why it is rejected.
+    ///
+    /// The reason feeds the loud invocation-level failure for explicitly
+    /// named roots: rejection must never look like a successful empty lint.
+    pub(crate) fn admit_explicit_entry(
+        &self,
+        path: &Path,
+        is_dir: bool,
+    ) -> Result<(), ExplicitRootRejection> {
+        let Ok(link_metadata) = std::fs::symlink_metadata(path) else {
+            return Err(ExplicitRootRejection::Unresolvable);
+        };
+        let link_type = link_metadata.file_type();
+        if !link_type.is_dir() && !link_type.is_file() && !link_type.is_symlink() {
+            return Err(ExplicitRootRejection::NonRegularEntryKind);
+        }
         let Some(canonical_scope_root) = self.canonical_scope_root.as_deref() else {
-            return false;
+            return Err(ExplicitRootRejection::Unresolvable);
         };
         let Ok(resolved) = std::fs::canonicalize(path) else {
-            return false;
+            return Err(ExplicitRootRejection::Unresolvable);
         };
         let Ok(metadata) = std::fs::metadata(&resolved) else {
-            return false;
+            return Err(ExplicitRootRejection::Unresolvable);
         };
+        if !metadata.is_dir() && !metadata.is_file() {
+            return Err(ExplicitRootRejection::NonRegularEntryKind);
+        }
+        if !resolved.starts_with(canonical_scope_root) {
+            return Err(ExplicitRootRejection::EscapesPolicyBoundary);
+        }
         let resolved_kind_matches = if is_dir {
             metadata.is_dir()
         } else {
             metadata.is_file()
         };
-        resolved_kind_matches && resolved.starts_with(canonical_scope_root)
+        if !resolved_kind_matches {
+            return Err(ExplicitRootRejection::KindMismatchedLinkTarget);
+        }
+        Ok(())
     }
 
     /// Admit an ancillary input, including its governed parents.
@@ -254,7 +359,7 @@ impl TraversalPolicy {
             let absolute_scope = if scope.is_absolute() {
                 scope.to_path_buf()
             } else {
-                std::env::current_dir().ok()?.join(scope)
+                self.invocation_dir.as_deref()?.join(scope)
             };
             path.strip_prefix(&absolute_scope)
                 .ok()
@@ -266,8 +371,21 @@ impl TraversalPolicy {
                 .map(Path::to_path_buf)
         } else if scope == Path::new(".") {
             Some(path.to_path_buf())
+        } else if let Ok(stripped) = path.strip_prefix(scope) {
+            Some(stripped.to_path_buf())
+        } else if scope.is_absolute() {
+            // cwd-resolved discovery can anchor the scope above the
+            // invocation cwd; relative paths are spelled from the cwd, so
+            // absolutize them the same way before stripping.
+            let absolute: PathBuf = self
+                .invocation_dir
+                .as_deref()?
+                .join(path)
+                .components()
+                .collect();
+            absolute.strip_prefix(scope).ok().map(Path::to_path_buf)
         } else {
-            path.strip_prefix(scope).ok().map(Path::to_path_buf)
+            None
         }
     }
 
@@ -319,7 +437,7 @@ impl TraversalPolicy {
         }
         let traverses_alias = lexical_relative.as_deref() != Some(resolved_relative);
         if !traverses_alias {
-            return !self.is_excluded(resolved_relative, resolved_is_dir);
+            return !self.scope_relative_excluded(resolved_relative, resolved_is_dir);
         }
         if honor_explicit_root {
             !self.is_excluded_or_parent_below_explicit_root(resolved_relative, resolved_is_dir)
@@ -356,9 +474,11 @@ impl TraversalPolicy {
     /// one combined glob set. Per-entry matchers are retained only for this
     /// lower-frequency explainability path.
     pub fn exclusion_for(&self, path: &Path, is_dir: bool) -> Option<&TraversalExclusion> {
+        let relative = self.path_relative_to_scope(path);
+        let candidate = relative.as_deref().unwrap_or(path);
         self.exclusions
             .iter()
-            .find(|compiled| compiled.matcher.matched(path, is_dir).is_ignore())
+            .find(|compiled| compiled.matcher.matched(candidate, is_dir).is_ignore())
             .map(|compiled| &compiled.exclusion)
     }
 
@@ -579,6 +699,10 @@ pub enum TraversalPolicyError {
         path: PathBuf,
         spec: PathBuf,
     },
+    InadmissibleExplicitRoot {
+        path: PathBuf,
+        reason: ExplicitRootRejection,
+    },
     Pattern {
         path: PathBuf,
         pattern: String,
@@ -632,6 +756,11 @@ impl fmt::Display for TraversalPolicyError {
                 path.display(),
                 spec.display()
             ),
+            Self::InadmissibleExplicitRoot { path, reason } => write!(
+                f,
+                "explicitly named lint root {} {reason}",
+                path.display()
+            ),
             Self::Pattern {
                 path,
                 pattern,
@@ -677,6 +806,54 @@ impl std::error::Error for TraversalPolicyError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn kind_mismatched_explicit_link_is_rejected_with_its_reason() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::write(root.join("target.ch"), "def target() = 1\n").unwrap();
+        symlink("target.ch", root.join("dir-link")).unwrap();
+        let policy = TraversalPolicy::load_for(root).unwrap();
+
+        assert_eq!(
+            policy.admit_explicit_entry(&root.join("dir-link"), true),
+            Err(ExplicitRootRejection::KindMismatchedLinkTarget),
+            "a file link queried as a directory root must state the kind mismatch"
+        );
+        assert_eq!(
+            policy.admit_explicit_entry(&root.join("dir-link"), false),
+            Ok(()),
+            "the same link queried with its resolved kind remains admitted"
+        );
+    }
+
+    #[test]
+    fn every_explicit_rejection_reason_has_a_distinct_message() {
+        let reasons = [
+            ExplicitRootRejection::NonRegularEntryKind,
+            ExplicitRootRejection::KindMismatchedLinkTarget,
+            ExplicitRootRejection::EscapesPolicyBoundary,
+            ExplicitRootRejection::Unresolvable,
+        ];
+        let mut messages: Vec<String> = reasons
+            .iter()
+            .map(|reason| {
+                let message = TraversalPolicyError::InadmissibleExplicitRoot {
+                    path: PathBuf::from("explicit.ch"),
+                    reason: *reason,
+                }
+                .to_string();
+                assert!(message.contains("explicit.ch"), "must name the root: {message}");
+                message
+            })
+            .collect();
+        messages.sort();
+        messages.dedup();
+        assert_eq!(messages.len(), reasons.len(), "reasons must stay distinguishable");
+    }
 
     #[test]
     fn directory_only_fast_path_matches_ignore_parser_edges() {

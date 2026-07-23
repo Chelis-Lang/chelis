@@ -180,11 +180,13 @@ fn read_cargo_package_name(manifest: &Path) -> Option<String> {
 /// Ancestor manifests preserve explicit-file and subdirectory lint behavior,
 /// but are admitted only when traversal policy does not exclude them or one of
 /// their parents. No rule-local recursive filesystem discovery is permitted.
+/// `policy` is the invocation's shared traversal policy; this hook must not
+/// reload it.
 fn prepare_doc_filename_state(
     root: &Path,
     entries: &[crate::walker::Entry],
-) -> Result<DocFilenameState, LintError> {
-    let policy = TraversalPolicy::load_for(root)?;
+    policy: &TraversalPolicy,
+) -> DocFilenameState {
     let mut package_names = HashSet::new();
     let mut visited_manifests = HashSet::<PathBuf>::new();
 
@@ -226,7 +228,7 @@ fn prepare_doc_filename_state(
         }
     }
 
-    Ok(DocFilenameState { package_names })
+    DocFilenameState { package_names }
 }
 
 fn filename_matches_known_cargo_package(path: &Path, package_names: &HashSet<String>) -> bool {
@@ -354,8 +356,9 @@ impl Rule for DocFilenameConvention {
         &self,
         root: &Path,
         entries: &[crate::walker::Entry],
+        policy: &TraversalPolicy,
     ) -> Result<PreparedRuleState, LintError> {
-        Ok(Box::new(prepare_doc_filename_state(root, entries)?))
+        Ok(Box::new(prepare_doc_filename_state(root, entries, policy)))
     }
 
     fn check(&self, ctx: &Context<'_>) -> Vec<Violation> {

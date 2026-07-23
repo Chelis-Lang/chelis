@@ -107,6 +107,7 @@ impl Rule for OpaqueDomainConstruction {
         &self,
         _root: &Path,
         entries: &[crate::walker::Entry],
+        _policy: &crate::policy::TraversalPolicy,
     ) -> Result<PreparedRuleState, LintError> {
         Ok(Box::new(collect_surf_catalog_from_entries(entries)))
     }

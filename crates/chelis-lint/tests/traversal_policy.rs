@@ -147,6 +147,53 @@ fn relative_subdirectory_child_probe() {
 }
 
 #[test]
+fn subdirectory_cwd_relative_target_discovers_repository_policy() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("workspace");
+    fs::create_dir_all(root.join("sub/generated")).unwrap();
+    write_policy(&root, &exclusion("sub/generated/", "generated", "§12.2"));
+    fs::write(root.join("sub/keep.ch"), "def keep() = 1\n").unwrap();
+    fs::write(root.join("sub/generated/drop.ch"), "def drop() = 1\n").unwrap();
+
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "subdirectory_cwd_child_probe", "--nocapture"])
+        .current_dir(root.join("sub"))
+        .env("CHELIS_LINT_SUBDIR_CWD_PROBE", "1")
+        .status()
+        .unwrap();
+    assert!(status.success(), "subdirectory-cwd child probe failed");
+}
+
+#[test]
+fn subdirectory_cwd_child_probe() {
+    if std::env::var_os("CHELIS_LINT_SUBDIR_CWD_PROBE").is_none() {
+        return;
+    }
+    let policy = TraversalPolicy::load_for(Path::new(".")).unwrap();
+    assert!(
+        policy
+            .repository_root()
+            .is_some_and(|repository| repository.ends_with("workspace")),
+        "a relative target below the policy root must discover the repository policy"
+    );
+
+    let mut relative = walked(Path::new("."));
+    assert!(relative.iter().any(|path| path == "keep.ch"));
+    assert!(
+        !relative.iter().any(|path| path == "generated/drop.ch"),
+        "the repository exclusion must apply to a relative subdirectory-cwd target: {relative:?}"
+    );
+
+    let mut absolute = walked(&std::env::current_dir().unwrap());
+    relative.sort();
+    absolute.sort();
+    assert_eq!(
+        relative, absolute,
+        "relative and absolute spellings of the same target must admit identical entry sets"
+    );
+}
+
+#[test]
 fn malformed_policies_fail_loudly() {
     let cases = [
         (
@@ -499,10 +546,21 @@ fn explicit_symlink_directory_root_must_resolve_inside_policy_boundary() {
     let external_link = root.join("external-link");
     symlink(external.path(), &external_link).unwrap();
 
-    let external_entries = walked(&external_link);
+    let rules: Vec<Box<dyn Rule>> = Vec::new();
+    let error = chelis_lint::lint(&external_link, &rules)
+        .expect_err("an explicit escaping symlink root must fail loudly, not lint as empty");
     assert!(
-        external_entries.is_empty(),
-        "an explicit symlink directory must not import entries outside the policy root: {external_entries:?}"
+        matches!(error, chelis_lint::LintError::Policy(_)),
+        "rejection must be a traversal-policy failure: {error}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("external-link"),
+        "rejection must name the explicit root: {message}"
+    );
+    assert!(
+        message.contains("outside the repository policy boundary"),
+        "rejection must state the boundary-escape reason: {message}"
     );
 
     fs::create_dir_all(root.join("shared")).unwrap();
@@ -837,7 +895,7 @@ fn non_regular_source_entries_and_symlink_targets_are_omitted() {
 
 #[cfg(unix)]
 #[test]
-fn explicit_source_shaped_special_entry_is_omitted() {
+fn explicit_source_shaped_special_entry_fails_loudly() {
     use std::os::unix::net::UnixListener;
 
     let repository = tempdir().unwrap();
@@ -846,10 +904,80 @@ fn explicit_source_shaped_special_entry_is_omitted() {
     let socket_path = root.join("explicit.ch");
     let _socket = UnixListener::bind(&socket_path).unwrap();
 
+    let rules: Vec<Box<dyn Rule>> = Vec::new();
+    let error = chelis_lint::lint(&socket_path, &rules)
+        .expect_err("an explicitly named special file must fail loudly, not lint as empty");
     assert!(
-        walked(&socket_path).is_empty(),
-        "depth-zero admission must not classify a socket or FIFO as readable source"
+        matches!(error, chelis_lint::LintError::Policy(_)),
+        "rejection must be a traversal-policy failure: {error}"
     );
+    let message = error.to_string();
+    assert!(
+        message.contains("explicit.ch"),
+        "rejection must name the explicit root: {message}"
+    );
+    assert!(
+        message.contains("not a regular file or directory"),
+        "rejection must state the non-regular-kind reason: {message}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_broken_symlink_root_fails_loudly() {
+    use std::os::unix::fs::symlink;
+
+    let repository = tempdir().unwrap();
+    let root = repository.path();
+    write_policy(root, "");
+    let broken = root.join("broken.ch");
+    symlink("missing-target.ch", &broken).unwrap();
+
+    let rules: Vec<Box<dyn Rule>> = Vec::new();
+    let error = chelis_lint::lint(&broken, &rules)
+        .expect_err("an explicitly named broken link must fail loudly, not lint as empty");
+    assert!(
+        matches!(error, chelis_lint::LintError::Policy(_)),
+        "rejection must be a traversal-policy failure: {error}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("broken.ch"),
+        "rejection must name the explicit root: {message}"
+    );
+    assert!(
+        message.contains("cannot be resolved"),
+        "rejection must state the unresolvable-link reason: {message}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn discovered_inadmissible_entries_stay_silent_below_an_admitted_root() {
+    use std::os::unix::fs::symlink;
+    use std::os::unix::net::UnixListener;
+
+    let repository = tempdir().unwrap();
+    let external = tempdir().unwrap();
+    let root = repository.path();
+    write_policy(root, "");
+    let _socket = UnixListener::bind(root.join("special.ch")).unwrap();
+    symlink("missing.ch", root.join("broken.ch")).unwrap();
+    fs::write(external.path().join("outside.ch"), "def outside() = 1\n").unwrap();
+    symlink(external.path().join("outside.ch"), root.join("escaping.ch")).unwrap();
+    fs::write(root.join("visible.ch"), "def visible() = 1\n").unwrap();
+
+    let rules: Vec<Box<dyn Rule>> = Vec::new();
+    chelis_lint::lint(root, &rules)
+        .expect("discovered inadmissible entries must not fail the invocation");
+    let names = walked(root);
+    assert!(names.iter().any(|path| path == "visible.ch"));
+    for omitted in ["special.ch", "broken.ch", "escaping.ch"] {
+        assert!(
+            !names.iter().any(|path| path == omitted),
+            "discovered inadmissible entry {omitted} must be silently omitted: {names:?}"
+        );
+    }
 }
 
 #[cfg(unix)]
