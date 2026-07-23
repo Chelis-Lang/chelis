@@ -38,6 +38,50 @@ now rejected at the offending site — see **Changed** for the migration.
 
 ### Fixed
 
+- **Lint traversal exclusions are structured and configurable (chelis#740).**
+  `walker.rs` no longer hard-codes generated, dependency, build, or
+  infrastructure directory names. `chelis-lint` now composes a shipped
+  baseline with the nearest strict `chelis-lint.toml`; every repository entry
+  has a typed class and resolvable spec cross-reference. BurntSushi's `ignore`
+  engine performs matching and pruning with ambient `.gitignore`, `.ignore`,
+  parent/global Git, Git-exclude, and hidden-file filters disabled, so local
+  and CI scope is identical. Policy and spec links are resolved inside the
+  policy root; non-file paths and broken or escaping links fail closed instead
+  of importing machine-local policy. Explicit targets remain lintable, and all
+  rules plus prepared catalogs consume one policy-admitted corpus. Ancillary
+  Cargo manifests used by `doc-filename-convention` now come from admitted
+  entries or pass a parent-aware policy check. Admitted sibling workspace
+  manifests remain visible to subdirectory and explicit-file lint targets,
+  including crates exposed through internal directory symlinks, while external
+  directory links, excluded crates, and machine-local ancestors above the
+  policy root cannot suppress an admitted documentation violation. Discovered symlink
+  targets are resolved through the same policy: internal admitted regular-file
+  links remain usable, while special files and aliases into excluded or
+  machine-local content cannot affect prepared catalogs or ancillary metadata.
+  Depth-zero targets override exclusion matching only; special-file roots and
+  symlinked directory roots escaping the policy boundary are rejected before
+  traversal. Ancillary governance follows the lexical path, so an above-root
+  link cannot gain authority by pointing inward. Rule modules are tripwired
+  against independent walker and directory-discovery primitives. A crate-local
+  canonical `AGENTS.md` plus `CLAUDE.md` symlink locks the rule-registration and
+  canonical-traversal protocol for both agent entry points at edit time.
+- **Repeated CLI builds can replace staged runtime archives on read-only-artifact
+  hosts.** `chelis build` now restores owner-write permission on an existing
+  staged `libchelis_runtime.a` before copying the current Cargo artifact. This
+  preserves stale-runtime replacement and lets repeated builds target the same
+  output directory on macOS, where Rust static libraries are emitted read-only.
+- **`opaque-domain-construction` repository linting is linear and honors
+  canonical skip filters (chelis#603).** The rule now prepares its Surf
+  declaration catalog once per `chelis_lint::lint` invocation from the main
+  walker's admitted entries, then reuses that immutable catalog for every
+  checked Surf file. It no longer starts an unfiltered `WalkDir` per file or
+  descends into `target/`, `.git/`, `.venv*`, dependency trees, agent
+  worktrees, and generated opaque-invariant programs. Opaque definitions are
+  indexed by type leaf and defining module, so each construction, cast, or
+  update lookup is independent of unrelated declarations instead of rescanning
+  the catalog. Prepared state remains invocation-local so repeated `--fix`
+  passes and reused rule objects observe source edits without stale-cache
+  behavior.
 - **Correctly-rounded f32 `sqrt`** in the C backend; the Accelerate `vvsqrtf`
   path is dropped (chelis#719).
 - **`uniform_like` is bit-identical across the eval, C, and HIP lanes** — a
@@ -107,50 +151,6 @@ now rejected at the offending site — see **Changed** for the migration.
 
 ### Fixed
 
-- **Lint traversal exclusions are structured and configurable (chelis#740).**
-  `walker.rs` no longer hard-codes generated, dependency, build, or
-  infrastructure directory names. `chelis-lint` now composes a shipped
-  baseline with the nearest strict `chelis-lint.toml`; every repository entry
-  has a typed class and resolvable spec cross-reference. BurntSushi's `ignore`
-  engine performs matching and pruning with ambient `.gitignore`, `.ignore`,
-  parent/global Git, Git-exclude, and hidden-file filters disabled, so local
-  and CI scope is identical. Policy and spec links are resolved inside the
-  policy root; non-file paths and broken or escaping links fail closed instead
-  of importing machine-local policy. Explicit targets remain lintable, and all
-  rules plus prepared catalogs consume one policy-admitted corpus. Ancillary
-  Cargo manifests used by `doc-filename-convention` now come from admitted
-  entries or pass a parent-aware policy check. Admitted sibling workspace
-  manifests remain visible to subdirectory and explicit-file lint targets,
-  including crates exposed through internal directory symlinks, while external
-  directory links, excluded crates, and machine-local ancestors above the
-  policy root cannot suppress an admitted documentation violation. Discovered symlink
-  targets are resolved through the same policy: internal admitted regular-file
-  links remain usable, while special files and aliases into excluded or
-  machine-local content cannot affect prepared catalogs or ancillary metadata.
-  Depth-zero targets override exclusion matching only; special-file roots and
-  symlinked directory roots escaping the policy boundary are rejected before
-  traversal. Ancillary governance follows the lexical path, so an above-root
-  link cannot gain authority by pointing inward. Rule modules are tripwired
-  against independent walker and directory-discovery primitives. A crate-local
-  canonical `AGENTS.md` plus `CLAUDE.md` symlink locks the rule-registration and
-  canonical-traversal protocol for both agent entry points at edit time.
-- **Repeated CLI builds can replace staged runtime archives on read-only-artifact
-  hosts.** `chelis build` now restores owner-write permission on an existing
-  staged `libchelis_runtime.a` before copying the current Cargo artifact. This
-  preserves stale-runtime replacement and lets repeated builds target the same
-  output directory on macOS, where Rust static libraries are emitted read-only.
-- **`opaque-domain-construction` repository linting is linear and honors
-  canonical skip filters (chelis#603).** The rule now prepares its Surf
-  declaration catalog once per `chelis_lint::lint` invocation from the main
-  walker's admitted entries, then reuses that immutable catalog for every
-  checked Surf file. It no longer starts an unfiltered `WalkDir` per file or
-  descends into `target/`, `.git/`, `.venv*`, dependency trees, agent
-  worktrees, and generated opaque-invariant programs. Opaque definitions are
-  indexed by type leaf and defining module, so each construction, cast, or
-  update lookup is independent of unrelated declarations instead of rescanning
-  the catalog. Prepared state remains invocation-local so repeated `--fix`
-  passes and reused rule objects observe source edits without stale-cache
-  behavior.
 - **Deep DAGs from the bounded unroll no longer overflow the stack in
   consumer passes (chelis#620 red team).** Lowering's per-level
   `stacker::maybe_grow` protected the unroll itself, but the passes that
