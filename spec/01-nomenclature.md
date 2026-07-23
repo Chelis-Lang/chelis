@@ -1339,9 +1339,12 @@ content under an excluded directory must not change an admitted entry's
 verdict indirectly. When repository policy exists, its root bounds ancillary
 workspace discovery: admitted sibling workspace manifests remain visible when
 lint targets a subdirectory or explicit file, while machine-local ancestors
-above the policy root cannot grant lint exceptions. Governance follows the
-ancillary link path as well as its resolved target: a link above the policy root
-remains machine-local even when it points to an admitted file inside the root.
+above the policy root cannot grant lint exceptions. A workspace crate entry's
+kind is determined from its resolved metadata, so an internal symlinked crate
+directory remains visible while a directory link resolving outside the policy
+root is rejected. Governance follows the ancillary link path as well as its
+resolved target: a link above the policy root remains machine-local even when
+it points to an admitted file inside the root.
 
 ### 12.3 Future rule queue
 

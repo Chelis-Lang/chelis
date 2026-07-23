@@ -55,9 +55,11 @@ excluded descendants still apply. Rules also apply this policy to ancillary
 metadata: an excluded Cargo manifest or machine-local manifest above the
 policy root cannot grant the §8.3 package-name exception to an admitted
 documentation filename. A link path above the policy root remains machine-local
-even when its target resolves to an admitted internal manifest. Admitted sibling workspace manifests remain visible
-when lint targets a documentation subdirectory or explicit file. Use
-rule-specific exceptions or inline
+even when its target resolves to an admitted internal manifest. Admitted sibling
+workspace manifests remain visible when lint targets a documentation
+subdirectory or explicit file, including crates exposed through an internal
+directory symlink. A crate directory link resolving outside the policy root is
+rejected. Use rule-specific exceptions or inline
 `allow`/`keep` when a path must still contribute to other lint rules.
 
 ## Style Gate (Built-In on Every Build)

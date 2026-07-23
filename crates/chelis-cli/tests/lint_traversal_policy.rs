@@ -254,6 +254,76 @@ fn internal_manifest_symlink_target_retains_doc_exception_through_cli() {
         .stdout("");
 }
 
+#[cfg(unix)]
+#[test]
+fn internal_symlinked_workspace_crate_retains_doc_exception_through_cli() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    write_spec(root);
+    fs::write(
+        root.join("chelis-lint.toml"),
+        "version = 1\nspec = \"spec/01-nomenclature.md\"\n",
+    )
+    .unwrap();
+    let docs = root.join("docs");
+    fs::create_dir_all(&docs).unwrap();
+    let doc = docs.join("foo-bar.md");
+    fs::write(&doc, "# Docs\n").unwrap();
+    fs::create_dir_all(root.join("crates")).unwrap();
+    fs::create_dir_all(root.join("real/foo-bar")).unwrap();
+    fs::write(
+        root.join("real/foo-bar/Cargo.toml"),
+        "[package]\nname = \"foo-bar\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    symlink("../real/foo-bar", root.join("crates/foo-bar")).unwrap();
+
+    for target in [&docs, &doc] {
+        chelis_lint_rule(target, "doc-filename-convention")
+            .assert()
+            .success()
+            .stdout("");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn external_symlinked_workspace_crate_cannot_grant_doc_exception_through_cli() {
+    use std::os::unix::fs::symlink;
+
+    let repository = tempdir().unwrap();
+    let external = tempdir().unwrap();
+    let root = repository.path();
+    write_spec(root);
+    fs::write(
+        root.join("chelis-lint.toml"),
+        "version = 1\nspec = \"spec/01-nomenclature.md\"\n",
+    )
+    .unwrap();
+    let docs = root.join("docs");
+    fs::create_dir_all(&docs).unwrap();
+    let doc = docs.join("foo-bar.md");
+    fs::write(&doc, "# Docs\n").unwrap();
+    fs::create_dir_all(root.join("crates")).unwrap();
+    fs::create_dir_all(external.path().join("foo-bar")).unwrap();
+    fs::write(
+        external.path().join("foo-bar/Cargo.toml"),
+        "[package]\nname = \"foo-bar\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    symlink(external.path().join("foo-bar"), root.join("crates/foo-bar")).unwrap();
+
+    for target in [&docs, &doc] {
+        chelis_lint_rule(target, "doc-filename-convention")
+            .assert()
+            .failure()
+            .stdout(predicate::str::contains("doc-filename-convention"))
+            .stdout(predicate::str::contains("foo-bar.md"));
+    }
+}
+
 #[test]
 fn admitted_manifest_retains_doc_package_exception_through_cli() {
     let temp = tempdir().unwrap();

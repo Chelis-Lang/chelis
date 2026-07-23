@@ -60,7 +60,7 @@ Alternative rejected: a plain `.chelis-lintignore`. It would externalize pattern
 
 Depth zero overrides exclusion matching only. Therefore a directly named excluded regular file or directory remains auditable, while entry-kind and canonical policy-boundary validation still apply before traversal or source loading. Nested matches are pruned. Paths are normalized relative to the policy root, not the per-target walk root, mirroring the existing workspace-root fix for diagnostic exceptions.
 
-`walker::walk` remains the only recursive discovery entry point. Rules receive its resulting entry vector for corpus-wide state. A bounded ancillary lookup needed to preserve direct or explicit-file behavior must pass `TraversalPolicy` admission for the file and its parents; excluded content may not influence an admitted verdict indirectly. The opaque direct-check compatibility path may invoke the same canonical walker, never construct an independent traversal.
+`walker::walk` remains the only recursive discovery entry point. Rules receive its resulting entry vector for corpus-wide state. A bounded ancillary lookup needed to preserve direct or explicit-file behavior must pass `TraversalPolicy` admission for the file and its parents; excluded content may not influence an admitted verdict indirectly. Workspace crate entries use resolved metadata for their directory kind, preserving internal symlinked crate layouts without admitting links to external directories. The opaque direct-check compatibility path may invoke the same canonical walker, never construct an independent traversal.
 
 ### 5. Separate policy errors from filesystem walk errors
 
@@ -68,7 +68,7 @@ Introduce `TraversalPolicyError` for discovery, I/O, TOML, pattern, spec, versio
 
 ### 6. Lock policy with behavioral and tripwire tests
 
-Tests will cover every migrated baseline entry, repository extension, no-config defaults, all disabled ambient ignore sources, hidden workflows, malformed schema, invalid patterns, unresolved references, subdirectory and absolute targets, explicit-root override, sibling parity, and interaction with the prepared opaque catalog. A source tripwire will reject reintroducing skip-name literals in `walker.rs`.
+Tests will cover every migrated baseline entry, repository extension, no-config defaults, all disabled ambient ignore sources, hidden workflows, malformed schema, invalid patterns, unresolved references, subdirectory and absolute targets, explicit-root override, sibling parity including internal-versus-external symlinked crate directories, and interaction with the prepared opaque catalog. A source tripwire will reject reintroducing skip-name literals in `walker.rs`.
 
 The authoritative acceptance oracle is:
 

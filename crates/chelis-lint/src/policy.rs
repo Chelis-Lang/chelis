@@ -205,8 +205,12 @@ impl TraversalPolicy {
             .flatten()
             .filter_map(|entry| {
                 let crate_path = entry.path();
-                let is_dir = entry.file_type().ok()?.is_dir();
-                if !self.is_admitted_ancillary(&crate_path, is_dir) {
+                // Workspace layouts may expose an internal crate directory
+                // through a symlink. Resolve its kind before policy admission;
+                // `DirEntry::file_type` reports only the lexical link kind.
+                if !std::fs::metadata(&crate_path).ok()?.is_dir()
+                    || !self.is_admitted_ancillary(&crate_path, true)
+                {
                     return None;
                 }
                 let manifest = crate_path.join("Cargo.toml");

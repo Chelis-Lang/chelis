@@ -121,8 +121,9 @@ now rejected at the offending site — see **Changed** for the migration.
   Cargo manifests used by `doc-filename-convention` now come from admitted
   entries or pass a parent-aware policy check. Admitted sibling workspace
   manifests remain visible to subdirectory and explicit-file lint targets,
-  while excluded crates and machine-local ancestors above the policy root
-  cannot suppress an admitted documentation violation. Discovered symlink
+  including crates exposed through internal directory symlinks, while external
+  directory links, excluded crates, and machine-local ancestors above the
+  policy root cannot suppress an admitted documentation violation. Discovered symlink
   targets are resolved through the same policy: internal admitted regular-file
   links remain usable, while special files and aliases into excluded or
   machine-local content cannot affect prepared catalogs or ancillary metadata.
@@ -133,6 +134,11 @@ now rejected at the offending site — see **Changed** for the migration.
   against independent walker and directory-discovery primitives. A crate-local
   canonical `AGENTS.md` plus `CLAUDE.md` symlink locks the rule-registration and
   canonical-traversal protocol for both agent entry points at edit time.
+- **Repeated CLI builds can replace staged runtime archives on read-only-artifact
+  hosts.** `chelis build` now restores owner-write permission on an existing
+  staged `libchelis_runtime.a` before copying the current Cargo artifact. This
+  preserves stale-runtime replacement and lets repeated builds target the same
+  output directory on macOS, where Rust static libraries are emitted read-only.
 - **`opaque-domain-construction` repository linting is linear and honors
   canonical skip filters (chelis#603).** The rule now prepares its Surf
   declaration catalog once per `chelis_lint::lint` invocation from the main

@@ -119,6 +119,25 @@ struct ExtraRuntimeArtifacts {
     metal: bool,
 }
 
+fn make_existing_copy_destination_writable(path: &Path) -> std::io::Result<()> {
+    let mut permissions = match fs::metadata(path) {
+        Ok(metadata) => metadata.permissions(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !permissions.readonly() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(permissions.mode() | 0o200);
+    }
+    #[cfg(not(unix))]
+    permissions.set_readonly(false);
+    fs::set_permissions(path, permissions)
+}
+
 fn copy_runtime_artifacts(
     runtime_dir: &Path,
     extras: ExtraRuntimeArtifacts,
@@ -135,6 +154,10 @@ fn copy_runtime_artifacts(
     }
     let source = find_runtime_library()?;
     let dest = runtime_dir.join("libchelis_runtime.a");
+    // Rust static-library artifacts are read-only on some hosts, and
+    // `fs::copy` preserves that mode. Restore owner-write before replacing a
+    // previous build's staged archive so rebuilding into one directory works.
+    make_existing_copy_destination_writable(&dest)?;
     fs::copy(&source, &dest)?;
     Ok(dest)
 }

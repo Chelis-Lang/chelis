@@ -1026,6 +1026,91 @@ fn internal_admitted_manifest_symlink_target_still_grants_doc_exception() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn internal_symlinked_workspace_crate_retains_sibling_package_exception() {
+    use std::os::unix::fs::symlink;
+
+    let repository = tempdir().unwrap();
+    let root = repository.path();
+    write_policy(root, "");
+    let docs = root.join("docs");
+    fs::create_dir_all(&docs).unwrap();
+    let doc = docs.join("foo-bar.md");
+    fs::write(&doc, "# Docs\n").unwrap();
+    fs::create_dir_all(root.join("crates")).unwrap();
+    fs::create_dir_all(root.join("real/foo-bar")).unwrap();
+    fs::write(
+        root.join("real/foo-bar/Cargo.toml"),
+        "[package]\nname = \"foo-bar\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    symlink("../real/foo-bar", root.join("crates/foo-bar")).unwrap();
+
+    for target in [&docs, &doc] {
+        assert!(
+            lint_doc_filenames(target).is_empty(),
+            "an internal symlinked workspace crate must remain visible from target {}",
+            target.display()
+        );
+    }
+    let direct_ctx = Context {
+        root: &docs,
+        path: &doc,
+        source: None,
+        surface: Surface::DocFile,
+    };
+    assert!(
+        DocFilenameConvention.check(&direct_ctx).is_empty(),
+        "direct Rule::check must resolve an internal symlinked workspace crate directory"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn external_symlinked_workspace_crate_cannot_grant_sibling_package_exception() {
+    use std::os::unix::fs::symlink;
+
+    let repository = tempdir().unwrap();
+    let external = tempdir().unwrap();
+    let root = repository.path();
+    write_policy(root, "");
+    let docs = root.join("docs");
+    fs::create_dir_all(&docs).unwrap();
+    let doc = docs.join("foo-bar.md");
+    fs::write(&doc, "# Docs\n").unwrap();
+    fs::create_dir_all(root.join("crates")).unwrap();
+    fs::create_dir_all(external.path().join("foo-bar")).unwrap();
+    fs::write(
+        external.path().join("foo-bar/Cargo.toml"),
+        "[package]\nname = \"foo-bar\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    symlink(external.path().join("foo-bar"), root.join("crates/foo-bar")).unwrap();
+
+    for target in [&docs, &doc] {
+        let violations = lint_doc_filenames(target);
+        assert_eq!(
+            violations.len(),
+            1,
+            "an external symlinked workspace crate must not influence target {}: {violations:?}",
+            target.display()
+        );
+        assert_eq!(violations[0].rule_id, "doc-filename-convention");
+    }
+    let direct_ctx = Context {
+        root: &docs,
+        path: &doc,
+        source: None,
+        surface: Surface::DocFile,
+    };
+    assert_eq!(
+        DocFilenameConvention.check(&direct_ctx).len(),
+        1,
+        "direct Rule::check must reject an external symlinked workspace crate directory"
+    );
+}
+
 #[test]
 fn admitted_manifest_still_grants_package_name_exception_to_admitted_doc() {
     let temp = tempdir().unwrap();
