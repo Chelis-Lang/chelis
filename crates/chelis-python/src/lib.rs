@@ -8,7 +8,7 @@ use std::rc::Rc;
 use std::sync::OnceLock;
 
 use chelis_compiler_api::compiler::{
-    self, CompiledExecutionArtifact, CompilerError, ExecutionTensorSpec,
+    self, CompiledExecutionArtifact, CompilerError, EntryLaneDecline, ExecutionTensorSpec,
 };
 use chelis_compiler_api::schema::{
     CheckRequest, CompileRequest, CompileTarget, DecompileRequest, DesugarRequest, EvalRequest,
@@ -788,26 +788,72 @@ fn ensure_supported_execution_artifact_inner(
     let target = artifact.compile_result.target;
     let supported = supported_execution_dtypes(target);
     // A callable artifact must expose at least one input or output. An
-    // artifact with neither is a genuinely host-only program (top-level
-    // bindings/globals, or an entry that only the host-program lane can
-    // emit): `compile_and_load` cannot build a callable model from it, and
-    // the old behavior returned a silent empty manifest that failed later
-    // with a confusing "expected 0 positional inputs". Fail loudly here.
-    // (Contrast: the #817/#818 metadata bugs also surfaced as empty
+    // artifact with neither is a genuinely host-lane program: `compile_and_load`
+    // cannot build a callable model from it, and the old behavior returned a
+    // silent empty manifest that failed later with a confusing "expected 0
+    // positional inputs". Fail loudly here, reporting the entry lane's ACTUAL
+    // recorded decline reason (`entry_lane_decline`, #819 Fix 2) rather than a
+    // generic guess that blamed globals/grad for, e.g., a scalar-signature
+    // entry. (Contrast: the #817/#818 metadata bugs also surfaced as empty
     // manifests; those are fixed upstream in `compile_for_execution` and no
     // longer reach this branch.) See chelis#730.
     if artifact.inputs.is_empty() && artifact.outputs.is_empty() {
-        return Err(
-            "compile_and_load produced no callable interface (no inputs or outputs) because \
-             the selected entry requires the host-program lane, which has no callable tensor \
-             ABI. This is the entry itself, not a metadata bug: the host lane owns programs \
-             built from top-level bindings/globals, and entries that use `grad`/`vmap` \
-             (multi-root gradient tuples) or string/record/effect operations. If you meant a \
-             different, tensor-in/tensor-out `def`, select it with `entry_name=`; if this IS \
-             the def you want, its result is not a plain compiled tensor kernel and \
-             compile_and_load cannot expose it as one."
-                .to_string(),
-        );
+        let prefix = "compile_and_load produced no callable interface (no inputs or outputs)";
+        return Err(match &artifact.entry_lane_decline {
+            Some(EntryLaneDecline::NotTensorSignature { entry }) => format!(
+                "{prefix}: the selected entry `{entry}` has a scalar (non-tensor) \
+                 signature, which has no compiled tensor ABI. Wrap its scalar \
+                 parameters and result as rank-1 tensors (e.g. `f32` -> \
+                 `tensor[1, f32]`), or select a tensor-in/tensor-out `def` with \
+                 `entry_name=`."
+            ),
+            Some(EntryLaneDecline::GradLike { entry }) => format!(
+                "{prefix}: entry `{entry}` uses a `grad`/`vmap` form, which only the \
+                 host-program lane can emit (multi-root gradient tuples); its result \
+                 is not a plain compiled tensor kernel and compile_and_load cannot \
+                 expose it as one. If you meant a different, tensor-in/tensor-out \
+                 `def`, select it with `entry_name=`."
+            ),
+            Some(EntryLaneDecline::HasGlobals) => format!(
+                "{prefix}: the program has top-level (non-`def`) bindings, which only \
+                 the host-program lane can emit; a standalone entry kernel would \
+                 either demote a referenced global to a required runtime input or \
+                 drop an independent global's computation. Move the computation into \
+                 tensor-in/tensor-out `def`s to get a callable artifact."
+            ),
+            Some(EntryLaneDecline::NoEntryResolved) => format!(
+                "{prefix}: no tensor-in/tensor-out entry `def` resolved for this \
+                 host-lane program. Define one (or select an existing one with \
+                 `entry_name=`) to get a callable artifact."
+            ),
+            Some(
+                EntryLaneDecline::LoweringFailed { entry }
+                | EntryLaneDecline::EmptyAfterDce { entry }
+                | EntryLaneDecline::InputsOutsideParams { entry, .. },
+            ) => format!(
+                "{prefix}: entry `{entry}` could not be lowered as a standalone \
+                 compiled tensor kernel and stays on the host-program lane, which \
+                 has no callable tensor ABI. If you meant a different, \
+                 tensor-in/tensor-out `def`, select it with `entry_name=`."
+            ),
+            // `EntryLaneDecline` is `#[non_exhaustive]` (future tiering
+            // variants, chelis#828/#830): report any unrecognized decline
+            // reason generically rather than failing to compile against a
+            // newer chelis-compiler-api.
+            Some(other) => format!(
+                "{prefix}: the entry lane declined this compilation \
+                 ({other:?}) and it stays on the host-program lane, which has \
+                 no callable tensor ABI. If you meant a different, \
+                 tensor-in/tensor-out `def`, select it with `entry_name=`."
+            ),
+            None => format!(
+                "{prefix} because the selected entry requires the host-program lane, \
+                 which has no callable tensor ABI. If you meant a different, \
+                 tensor-in/tensor-out `def`, select it with `entry_name=`; if this IS \
+                 the def you want, its result is not a plain compiled tensor kernel \
+                 and compile_and_load cannot expose it as one."
+            ),
+        });
     }
     for spec in artifact.inputs.iter().chain(artifact.outputs.iter()) {
         if !supported.contains(&spec.dtype.as_str()) {
@@ -2487,7 +2533,6 @@ loss = (mean(x, 0) : tensor[f32])
         );
     }
 
-
     fn run_job_manifest(source: &str, entry: Option<&str>) -> ArtifactManifest {
         let dir = tempdir().expect("tempdir");
         let source_path = dir.path().join("model.ch");
@@ -2709,11 +2754,14 @@ def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
     // translation unit linked, and we dlopen+call it ([9.] for free(3) =
     // mul(3,3)).
     //
-    // (The single-def program `def free(x) = ...` goes through the legacy
-    // free-form path instead, where `entry_name` passes through as a raw
-    // symbol and STILL collides — a documented pre-existing tide contract left
-    // unchanged; see `execution_c_symbol`. That is why this fixture is
-    // multi-def, forcing the entry lane.)
+    // (The single-def pure program `def free(x) = ...` lowers no host program
+    // at all and takes the free-form pure-DAG path instead, where the emitted
+    // symbol is `entry_name` after sanitization only — `main` -> `chelis_main`,
+    // non-identifier characters -> `_` — so `free` passes through unchanged
+    // and STILL collides with libc, a documented pre-existing tide contract
+    // left unchanged; see `execution_c_symbol`. That is why this fixture is
+    // multi-def: per-def host wrappers force a host program, and the entry
+    // lane claims it.)
     #[test]
     fn compile_and_load_job_def_named_free_links_and_calls() {
         let source = "\
@@ -2728,6 +2776,82 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
         let outputs = run_job_and_call(source, Some("free"), &[(vec![3.0], vec![1])]);
         assert_eq!(outputs.len(), 1);
         assert_eq!(outputs[0], vec![9.0], "free(3) = 3*3 = 9");
+    }
+
+    // #819 Fix 2: an explicit `entry_name` naming an existing def with a
+    // scalar (non-tensor) signature used to yield the generic empty-manifest
+    // error blaming globals/grad/string-record-effect. The error must now
+    // report the ACTUAL recorded decline reason: the scalar signature, with
+    // the `tensor[1, f32]` wrap guidance.
+    #[test]
+    fn compile_and_load_job_scalar_entry_reports_scalar_signature_error() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "def scale(x: f32) -> f32 = mul(x, x)\n\
+             def solve(a: tensor[1, f32]) -> tensor[1, f32] = mul(copy(a), a)\n",
+        )
+        .expect("write source");
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: Some("scale".to_string()),
+            artifact_dir: Some(PathBuf::from(dir.path())),
+        });
+        let message = match result {
+            Ok(_) => panic!("scalar-signature entry must not silently compile"),
+            Err(CompileAndLoadError::Message(m)) => m,
+            Err(CompileAndLoadError::Compiler(e)) => format!("{e:?}"),
+        };
+        assert!(
+            message.contains("`scale`") && message.contains("scalar"),
+            "error must name the entry and its scalar signature, got: {message}"
+        );
+        assert!(
+            message.contains("tensor[1, f32]"),
+            "error must give the tensor[1, f32] wrap guidance, got: {message}"
+        );
+        assert!(
+            !message.contains("grad") && !message.contains("globals"),
+            "error must not blame grad/globals for a scalar signature, got: {message}"
+        );
+    }
+
+    // Negative-parity sibling of the scalar case: a `grad` entry selected by
+    // name compiles WITHOUT error (host lane owns it, #309), and the job-path
+    // rejection reports the grad-specific reason, not the scalar one.
+    #[test]
+    fn compile_and_load_job_grad_entry_reports_grad_reason() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "module Repro.GradEntry\n\
+             def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =\n  \
+             tensor_to_scalar(sum(mul(x, w), cast(0, int32)))\n\
+             def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = (grad(loss)(x, w)).0\n",
+        )
+        .expect("write source");
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: Some("dloss".to_string()),
+            artifact_dir: Some(PathBuf::from(dir.path())),
+        });
+        let message = match result {
+            Ok(_) => panic!("grad entry has no callable tensor ABI and must be rejected"),
+            Err(CompileAndLoadError::Message(m)) => m,
+            Err(CompileAndLoadError::Compiler(e)) => {
+                panic!("grad entry must compile host-lane without a compiler error, got: {e:?}")
+            }
+        };
+        assert!(
+            message.contains("`dloss`") && message.contains("grad"),
+            "error must name the entry and the grad reason, got: {message}"
+        );
     }
 
     // A genuinely host-only program (top-level bindings/globals, no

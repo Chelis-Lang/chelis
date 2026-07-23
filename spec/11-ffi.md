@@ -67,9 +67,14 @@ entry `int main(int, char**, char**)`, a def named after a libc symbol (`free`,
 runtime symbol in the `chelis_*` namespace (`chelis_runtime.h` declares
 `chelis_free`, `chelis_tuple_get`, …). The artifact manifest's `host_entry_name`
 carries `chelis_main` so the loader (`dlsym`) and generated header stay consistent.
-(The legacy free-form host/single-def path, where `entry_name` passes through as a
-raw output symbol, is unchanged and retains the historical behavior — including its
-pre-existing lack of collision protection.)
+(Outside the entry-scoped lane — the host-program lane that owns top-level globals
+and scalar/`grad` entries, and the free-form pure-DAG path taken by a program that
+lowers no host program, such as a single fully-DAG-lowerable `def` — `entry_name`
+becomes the output symbol after sanitization only: `main` maps to `chelis_main`,
+non-identifier characters map to `_`, and a digit-leading or empty name gains a
+`chelis_` prefix. Any other name passes through unchanged, so
+those paths retain their pre-existing lack of libc collision protection: a
+single-def pure program whose def is named `free` still emits `void free(...)`.)
 
 ## 3. Embedding the Compiler
 

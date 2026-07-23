@@ -1458,6 +1458,37 @@ pub fn named_entry_uses_grad_like(program: &CheckedProgram, name: &str) -> bool 
     }
 }
 
+/// Does the checked program bind any top-level VALUE binding — a
+/// `(def name body)` whose body is not a `fn`, i.e. a global like
+/// `glb = 2.0` or `total = add(...)`?
+///
+/// This is the SOURCE-LEVEL predicate, deliberately distinct from
+/// checking the lowered `HostProgram::globals`: `lower_host_program`
+/// drops a top-level value binding from `host.globals` when it is
+/// DAG-lowerable, uncaptured by any `fn` def, and the program emits no
+/// host `main` (`skip_for_lowered` in `lower_host_program` below), so a
+/// lowered-artifact check
+/// misses exactly those bindings. The compiled-execution entry lane
+/// (#819) keys its `HasGlobals` decline on this predicate because its
+/// standalone entry lowering would silently drop such a binding's
+/// computation. Top-level type signatures are separate items (not
+/// `def`-tagged) and do not count; a `def` with an `fn` body is a
+/// function definition, not a value binding.
+pub fn program_has_top_level_value_bindings(program: &CheckedProgram) -> bool {
+    top_level_items(program.exprs()).iter().any(|expr| {
+        let Expr::List(list, _) = expr else {
+            return false;
+        };
+        if tag(list) != Some(DeepTag::Def) {
+            return false;
+        }
+        !matches!(
+            children(list).get(1),
+            Some(Expr::List(body_list, _)) if tag(body_list) == Some(DeepTag::Fn)
+        )
+    })
+}
+
 fn lower_host_program(
     program: &CheckedProgram,
     lowered_names: &HashMap<String, bool>,

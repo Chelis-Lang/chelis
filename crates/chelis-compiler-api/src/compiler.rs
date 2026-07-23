@@ -76,6 +76,24 @@ pub struct CompiledExecutionArtifact {
     pub inputs: Vec<ExecutionTensorSpec>,
     pub outputs: Vec<ExecutionTensorSpec>,
     pub symbolic_dims: Vec<String>,
+    /// Why the entry-scoped metadata lane declined this compilation, when
+    /// it did. `None` means the lane claimed the compilation — or never
+    /// ran: the lane is C-target-only, so e.g. a HIP artifact always
+    /// carries `None`. `Some` means the lane did NOT produce the
+    /// entry-scoped artifact; it does not by itself mean "no callable
+    /// interface". On the legacy whole-DAG path the artifact can carry
+    /// real (whole-program, merged) `inputs`/`outputs` alongside
+    /// `Some(decline)` — reachable for `HasGlobals` (a fully-DAG-lowerable
+    /// scalar-global program) and for `LoweringFailed`/`EmptyAfterDce`/
+    /// `InputsOutsideParams` (the whole-program DAG can still have roots
+    /// when the entry-scoped lowering fails). Consumers deciding
+    /// callability must check `inputs`/`outputs`, not this field.
+    ///
+    /// [`EntryLaneDecline`] is deliberately `#[non_exhaustive]`: the
+    /// #828/#830 tiering work will add variants, so downstream matches
+    /// need a generic wildcard arm.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub entry_lane_decline: Option<EntryLaneDecline>,
 }
 
 #[derive(Debug, Clone)]
@@ -765,15 +783,25 @@ pub fn compile(request: CompileRequest) -> Result<CompileResult> {
 /// prefixed. Ordinary names (`solve`, `dloss`, `jsonish`) are returned
 /// unchanged, so existing output-name usage is preserved.
 ///
-/// ASYMMETRY (Fix 2, #817): this legacy free-form mapping is used by the
-/// HOST lane and the single-def pure-DAG lane, where `resolve_execution_entry`
-/// does not run and `entry_name` passes through as a raw output symbol — a
-/// public `chelis build`/tide contract left intact. It does NOT guard against
-/// a libc collision (`free`, `malloc`, …): a single-def program whose def is
-/// named `free`, compiled via that raw path, still emits `void free(...)`.
-/// The entry-scoped metadata lane instead uses the fixed, collision-free
-/// [`EXECUTION_ENTRY_C_SYMBOL`] (`chelis_main`), because there `entry_name` is
-/// a def *selector* the user must pass and so cannot avoid such names.
+/// ASYMMETRY (Fix 2, #817): this sanitizing mapping is used by the HOST
+/// lane and by the free-form pure-DAG lane. The free-form lane is every
+/// program that lowers NO host program — a file with no top-level `def`s,
+/// or exactly one fully-DAG-lowerable `def` (multiple lowerable defs get
+/// per-def host wrappers, so a host program exists for them); there
+/// `entry_name` becomes the output symbol after sanitization only, a
+/// public `chelis build`/tide contract left intact. The host lane covers
+/// everything the entry-scoped lane declines (see [`EntryLaneDecline`]:
+/// top-level globals, scalar/`grad` entries, host-only programs). The
+/// sanitization rewrites `main` -> `chelis_main`, non-identifier
+/// characters -> `_`, and prefixes a digit-leading or empty name with
+/// `chelis_`, but does NOT guard a libc collision (`free`,
+/// `malloc`, …): a single-def program whose def is named `free`, compiled
+/// via the free-form path, still emits `void free(...)`. The entry-scoped
+/// metadata lane — which claims multi-def tensor programs and single-def
+/// programs whose body needs host lowering (e.g. `concat`) — instead uses
+/// the fixed, collision-free [`EXECUTION_ENTRY_C_SYMBOL`] (`chelis_main`),
+/// because there `entry_name` is a def *selector* the user must pass and
+/// so cannot avoid such names.
 fn execution_c_symbol(entry_name: Option<&str>) -> String {
     let Some(name) = entry_name else {
         return "chelis_main".to_string();
@@ -909,6 +937,167 @@ fn resolve_execution_entry<'a>(
     }
 }
 
+/// Why the entry-scoped compiled-execution lane declined a compilation and
+/// left it to the host lane.
+///
+/// The decline is not an error: the host lane legitimately owns these
+/// program classes. But it used to be *silent* — the artifact came back
+/// with an empty callable interface and downstream surfaces could only
+/// guess why. The reason is recorded on
+/// [`CompiledExecutionArtifact::entry_lane_decline`] so consumers
+/// (chelis-python's callable-interface guard today, the #828/#830 tiering
+/// work next) can report or query the actual cause.
+///
+/// The enum is `#[non_exhaustive]` on purpose: the #828/#830 tiering work
+/// will add finer-grained decline reasons, and downstream crates (e.g.
+/// chelis-python's error reporting) must keep a wildcard arm with a
+/// generic fallback message rather than break on a new variant.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum EntryLaneDecline {
+    /// The SOURCE program has top-level (non-`def`) value bindings. The
+    /// host lane owns those: [`chelis_ir::host::lower_named_tensor_entry_dag`]
+    /// seeds its scope with the entry's params only, so a free reference to
+    /// a global would lower as a phantom `Load` — silently demoting the
+    /// global to a required caller-supplied runtime input — and an
+    /// independent global's computation would vanish from the emitted
+    /// artifact entirely. Declining restores the pre-#817 routing for this
+    /// program class. Detection is source-level
+    /// ([`chelis_ir::host::program_has_top_level_value_bindings`]), not
+    /// `host_program.globals`: lowering drops a DAG-lowerable, uncaptured
+    /// scalar global (e.g. `glb = 2.0`) from `host.globals` entirely, and
+    /// exactly that shape used to slip past the lowered check.
+    HasGlobals,
+    /// No entry def resolved: either `entry_name` named no def in a
+    /// host-requiring program (a file-stem output symbol, see issue #309)
+    /// or the program has no tensor-signature def to default to.
+    NoEntryResolved,
+    /// The selected entry def's signature is not tensor-in/tensor-out
+    /// (e.g. a scalar `f32 -> f32` def selected by name).
+    NotTensorSignature { entry: String },
+    /// The selected entry uses a `grad`/`vmap` form; the host lane owns
+    /// multi-root grad-tuple emission (issue #309).
+    GradLike { entry: String },
+    /// `lower_named_tensor_entry_dag` could not lower the entry body.
+    LoweringFailed { entry: String },
+    /// The entry lowered, but its DAG had no roots after dead-code
+    /// elimination.
+    EmptyAfterDce { entry: String },
+    /// Belt-and-braces: the entry DAG demanded input labels beyond the
+    /// def's declared parameters, which would surface as phantom manifest
+    /// inputs. `HasGlobals` catches every known cause of this before
+    /// lowering; this guards against unknown ones.
+    InputsOutsideParams { entry: String, extra: Vec<String> },
+}
+
+/// The entry lane's claim/decline decision for one compilation.
+enum EntryLaneOutcome<'a> {
+    /// The lane claims the compilation: emit `dag` scoped to `entry`.
+    Claim { entry: &'a str, dag: Dag },
+    /// The lane declines; the host lane owns the compilation.
+    Decline(EntryLaneDecline),
+}
+
+/// Decide whether the entry-scoped compiled-execution lane (#817/#818)
+/// claims this compilation, and if not, why (Fix 2 of the #819 review
+/// round: the predicate is named and queryable instead of inline and
+/// silent).
+///
+/// The lane claims the compilation iff ALL hold:
+///   - the SOURCE program has NO top-level (non-`def`) value bindings
+///     (`HasGlobals` otherwise) — see the variant doc for the
+///     phantom-input / vanishing-global failure modes this prevents, and
+///     for why the check is source-level rather than
+///     `host_program.globals`;
+///   - a single entry def resolves via [`resolve_execution_entry`]
+///     (`NoEntryResolved` otherwise; a typo'd or ambiguous selector in a
+///     clean tensor program is a loud `Err`, not a decline);
+///   - that def is tensor-signature (`NotTensorSignature` otherwise) — a
+///     scalar/record/ADT entry stays on the host lane;
+///   - the def does NOT use a `grad`/`vmap` form (`GradLike` otherwise) —
+///     the host lane owns multi-root grad-tuple emission (#309), which
+///     `lower_named_tensor_entry_dag` can technically lower but must not
+///     here;
+///   - the def lowers to a DAG (`LoweringFailed`) that is non-empty after
+///     DCE (`EmptyAfterDce`);
+///   - the DAG's `Load` labels are a subset of the def's declared param
+///     names (`InputsOutsideParams`) — an internal consistency guard that
+///     should be unreachable once `HasGlobals` has declined, but declining
+///     beats emitting phantom inputs if it ever fires.
+///
+/// A DAG-lowerable host-runtime builtin such as `concat` is NOT excluded —
+/// it lowers cleanly (that is the #818 fix).
+fn entry_lane_decision<'a>(
+    entry_name: Option<&'a str>,
+    checked: &CheckedProgram,
+    host_program: &'a chelis_ir::host::ConcreteHostProgram,
+    host_only: bool,
+) -> Result<EntryLaneOutcome<'a>> {
+    use EntryLaneOutcome::Decline;
+
+    // The `HasGlobals` decline is keyed on SOURCE-LEVEL top-level value
+    // bindings, not on the lowered `host_program.globals`: lowering drops
+    // a DAG-lowerable, uncaptured value binding from `host.globals` when
+    // the program emits no host `main` (`skip_for_lowered`), so a scalar
+    // global like `glb = 2.0` in a multi-def program was invisible to the
+    // lowered check — the lane claimed the program and `glb`'s computation
+    // vanished from the emitted C. ANY top-level value binding declines,
+    // regardless of how lowering classified it. The lowered check stays as
+    // belt-and-braces (it is a strict subset of the source-level one).
+    if chelis_ir::host::program_has_top_level_value_bindings(checked)
+        || !host_program.globals.is_empty()
+    {
+        return Ok(Decline(EntryLaneDecline::HasGlobals));
+    }
+    let Some(entry) = resolve_execution_entry(entry_name, host_program, host_only)? else {
+        return Ok(Decline(EntryLaneDecline::NoEntryResolved));
+    };
+    if !chelis_ir::host::function_has_tensor_signature(host_program, entry) {
+        return Ok(Decline(EntryLaneDecline::NotTensorSignature {
+            entry: entry.to_string(),
+        }));
+    }
+    if chelis_ir::host::named_entry_uses_grad_like(checked, entry) {
+        return Ok(Decline(EntryLaneDecline::GradLike {
+            entry: entry.to_string(),
+        }));
+    }
+    let Some(dag) = chelis_ir::host::lower_named_tensor_entry_dag(checked, entry) else {
+        return Ok(Decline(EntryLaneDecline::LoweringFailed {
+            entry: entry.to_string(),
+        }));
+    };
+    let dag = chelis_ir::optimize::dead_code_eliminate(&dag);
+    if dag.roots().is_empty() {
+        return Ok(Decline(EntryLaneDecline::EmptyAfterDce {
+            entry: entry.to_string(),
+        }));
+    }
+    let declared_params: HashSet<&str> = host_program
+        .functions
+        .iter()
+        .find(|function| function.name == entry)
+        .map(|function| function.params.iter().map(|p| p.name.as_str()).collect())
+        .unwrap_or_default();
+    let mut extra: Vec<String> = Vec::new();
+    for node in dag.nodes() {
+        if let RiscOp::Load { name } = &node.op
+            && !declared_params.contains(name.as_str())
+            && !extra.iter().any(|seen| seen == name.as_str())
+        {
+            extra.push(name.as_str().to_string());
+        }
+    }
+    if !extra.is_empty() {
+        return Ok(Decline(EntryLaneDecline::InputsOutsideParams {
+            entry: entry.to_string(),
+            extra,
+        }));
+    }
+    Ok(EntryLaneOutcome::Claim { entry, dag })
+}
+
 pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutionArtifact> {
     let compiled = compile_source(request.source_kind, &request.source)?;
     reject_host_only_builtins_before_host_lowering(&compiled.checked, request.target)?;
@@ -991,39 +1180,26 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
             // lane even when the requested entry lowers cleanly — the #817/#818
             // regression this PR round fixes.
             //
-            // The entry lane claims the compilation iff ALL hold:
-            //   - a single entry def resolves (`resolve_execution_entry`);
-            //   - that def is tensor-signature (`function_has_tensor_signature`)
-            //     — a scalar/record/ADT entry stays on the host lane;
-            //   - the def does NOT use a `grad`/`vmap` form
-            //     (`named_entry_uses_grad_like`) — the host lane owns multi-root
-            //     grad-tuple emission (#309), which `lower_named_tensor_entry_dag`
-            //     can technically lower but must not here;
-            //   - the def lowers to a NON-EMPTY DAG.
-            // A DAG-lowerable host-runtime builtin such as `concat` is NOT
-            // excluded — it lowers cleanly (that is the #818 fix). Anything the
-            // entry lane declines falls through to the host lane below. For a
-            // single-def tensor program the scoped DAG equals the whole-program
-            // DAG, so this is a no-op there.
+            // The claim/decline predicate lives in `entry_lane_decision` (see
+            // its doc for the full rule set). Anything the entry lane declines
+            // falls through to the host lane below, carrying the decline
+            // reason on the artifact so downstream surfaces can report it
+            // instead of guessing from an empty manifest. For a single-def
+            // tensor program the scoped DAG equals the whole-program DAG, so
+            // this is a no-op there.
+            let mut entry_lane_decline = None;
             let scoped_entry = if let Some(host_program) = host_compiled.host.as_ref() {
-                match resolve_execution_entry(
+                match entry_lane_decision(
                     request.entry_name.as_deref(),
+                    &compiled.checked,
                     host_program,
                     host_only,
                 )? {
-                    Some(entry)
-                        if chelis_ir::host::function_has_tensor_signature(host_program, entry)
-                            && !chelis_ir::host::named_entry_uses_grad_like(
-                                &compiled.checked,
-                                entry,
-                            ) =>
-                    {
-                        chelis_ir::host::lower_named_tensor_entry_dag(&compiled.checked, entry)
-                            .map(|dag| chelis_ir::optimize::dead_code_eliminate(&dag))
-                            .filter(|dag| !dag.roots().is_empty())
-                            .map(|dag| (entry, dag))
+                    EntryLaneOutcome::Claim { entry, dag } => Some((entry, dag)),
+                    EntryLaneOutcome::Decline(reason) => {
+                        entry_lane_decline = Some(reason);
+                        None
                     }
-                    _ => None,
                 }
             } else {
                 None
@@ -1063,7 +1239,7 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
             {
                 let result = chelis_backend_c::codegen_host_program(host_program, &func_name)
                     .map_err(unsupported_stage_error)?;
-                return Ok(compiled_execution_artifact(
+                let mut artifact = compiled_execution_artifact(
                     request.target,
                     &func_name,
                     None,
@@ -1071,7 +1247,9 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
-                ));
+                );
+                artifact.entry_lane_decline = entry_lane_decline;
+                return Ok(artifact);
             }
             reject_unsized_named_dims(&compiled.dag, "c")?;
             let specialized = chelis_ir::specialize::specialize_for_blas(&compiled.dag);
@@ -1085,7 +1263,7 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
                 },
             )
             .map_err(unsupported_stage_error)?;
-            Ok(compiled_execution_artifact(
+            let mut artifact = compiled_execution_artifact(
                 request.target,
                 &func_name,
                 None,
@@ -1093,7 +1271,30 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
                 execution_input_specs(&compiled.dag, &result.input_labels)?,
                 execution_output_specs(&compiled.dag, &result.output_labels)?,
                 result.symbolic_dims,
-            ))
+            );
+            // On this legacy whole-DAG path a `Some(decline)` co-occurs with
+            // a real (whole-program, merged) manifest — see the
+            // `entry_lane_decline` field doc. Only declines that leave the
+            // whole-program DAG rooted can get here: `HasGlobals` (a
+            // fully-DAG-lowerable scalar-global program) and the
+            // entry-lowering failures. A resolution/signature decline
+            // (`NoEntryResolved`/`NotTensorSignature`/`GradLike`) implies a
+            // host-requiring program, which takes the host early-return
+            // above instead.
+            if let Some(reason) = &entry_lane_decline {
+                debug_assert!(
+                    matches!(
+                        reason,
+                        EntryLaneDecline::HasGlobals
+                            | EntryLaneDecline::LoweringFailed { .. }
+                            | EntryLaneDecline::EmptyAfterDce { .. }
+                            | EntryLaneDecline::InputsOutsideParams { .. }
+                    ),
+                    "unexpected entry-lane decline {reason:?} on the legacy whole-DAG path"
+                );
+            }
+            artifact.entry_lane_decline = entry_lane_decline;
+            Ok(artifact)
         }
         CompileTarget::Hip => {
             let host_requires_host_backend = host_compiled
@@ -2035,6 +2236,10 @@ fn compiled_execution_artifact(
         inputs,
         outputs,
         symbolic_dims,
+        // Set after construction on the C paths where the entry lane ran
+        // and declined; `None` (the lane claimed it, or does not run on
+        // this path) everywhere else.
+        entry_lane_decline: None,
     }
 }
 

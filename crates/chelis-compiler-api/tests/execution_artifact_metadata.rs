@@ -13,7 +13,7 @@
 //! the available entries, and a def named `main` no longer forces an
 //! un-linkable `main` C symbol.
 
-use chelis_compiler_api::compiler::{compile, compile_for_execution};
+use chelis_compiler_api::compiler::{EntryLaneDecline, compile, compile_for_execution};
 use chelis_compiler_api::schema::{CompileRequest, CompileTarget, SourceKind};
 
 const HELPER_PLUS_ENTRY: &str = "\
@@ -161,6 +161,10 @@ fn concat_body_reports_real_inputs_and_outputs() {
         "expected one output, got {:?}",
         artifact.outputs
     );
+    assert_eq!(
+        artifact.entry_lane_decline, None,
+        "a claimed compilation must record no decline reason"
+    );
 }
 
 /// Regression: a single composed-expression def (no block, no host-runtime
@@ -304,6 +308,174 @@ def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = (grad(loss)(
         "grad entry must stay host-lane (empty callable metadata), got inputs={:?} outputs={:?}",
         artifact.inputs,
         artifact.outputs
+    );
+    // #819 Fix 2: the decline is recorded, not silent — and it is the
+    // grad-specific reason, so downstream error text can say WHY instead of
+    // guessing from the empty manifest.
+    assert_eq!(
+        artifact.entry_lane_decline,
+        Some(EntryLaneDecline::GradLike {
+            entry: "dloss".to_string()
+        }),
+        "grad decline must be recorded with the GradLike reason"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Fix 1 (#819 review): a program with TOP-LEVEL GLOBALS must DECLINE the
+// entry lane and keep its merge-base host-lane routing. The entry lane's
+// standalone lowering (`lower_named_tensor_entry_dag`) seeds scope with the
+// entry's params only, so claiming such a program would (repro A) demote a
+// referenced global to a phantom required runtime input, or (repro B) drop an
+// independent global's computation from the emitted program entirely.
+// ---------------------------------------------------------------------------
+
+/// Repro A: `def main` references the top-level global `two`. Before this fix
+/// the entry lane claimed the program and the manifest became
+/// `inputs=["a","two"]` — the global silently became a caller-supplied input.
+/// It must instead route host-lane (empty callable metadata, the merge-base
+/// behavior), with the global's initialization emitted by the host program.
+#[test]
+fn global_referenced_by_entry_declines_entry_lane_no_phantom_input() {
+    let artifact = compile_c(
+        "two = to_tensor([2.0])\n\
+         def main(a: tensor[1, f32]) -> tensor[1, f32] = mul(copy(a), two)\n",
+        None,
+    );
+    assert!(
+        artifact.inputs.is_empty() && artifact.outputs.is_empty(),
+        "globals program must stay host-lane; `two` must NOT surface as a \
+         required input, got inputs={:?}",
+        input_names(&artifact)
+    );
+    assert_eq!(
+        artifact.entry_lane_decline,
+        Some(EntryLaneDecline::HasGlobals),
+        "the decline reason must be recorded as HasGlobals"
+    );
+    // The host lane owns the global: its definition is in the emitted C.
+    let c = &artifact
+        .compile_result
+        .files
+        .iter()
+        .find(|file| file.path.ends_with(".c"))
+        .expect("emitted C present")
+        .contents;
+    assert!(
+        c.contains("two"),
+        "the global `two` must be emitted by the host program, not dropped"
+    );
+}
+
+/// Repro B: an independent global `total` alongside `def main`. Before this
+/// fix the entry lane emitted only the kernel and `total`'s computation
+/// vanished from the compiled output entirely. Host-lane routing keeps it.
+#[test]
+fn independent_global_computation_survives_host_lane_routing() {
+    let artifact = compile_c(
+        "total = add(to_tensor([1.0]), to_tensor([2.0]))\n\
+         def main(a: tensor[1, f32]) -> tensor[1, f32] = mul(copy(a), a)\n",
+        None,
+    );
+    assert!(
+        artifact.inputs.is_empty() && artifact.outputs.is_empty(),
+        "globals program must stay host-lane (empty callable metadata), got \
+         inputs={:?} outputs={}",
+        input_names(&artifact),
+        artifact.outputs.len()
+    );
+    assert_eq!(
+        artifact.entry_lane_decline,
+        Some(EntryLaneDecline::HasGlobals),
+        "the decline reason must be recorded as HasGlobals"
+    );
+    let c = &artifact
+        .compile_result
+        .files
+        .iter()
+        .find(|file| file.path.ends_with(".c"))
+        .expect("emitted C present")
+        .contents;
+    assert!(
+        c.contains("total"),
+        "`total`'s computation must not vanish from the compiled output"
+    );
+}
+
+/// Repro C (#819 round 2): a SCALAR global `glb = 2.0` in a multi-def
+/// program. Unlike the tensor globals above, lowering classifies a scalar
+/// literal binding as DAG-lowerable and — uncaptured, with no host `main`
+/// emitted — drops it from `host_program.globals` (`skip_for_lowered`), so
+/// the old lowered-artifact check saw "no globals", the entry lane CLAIMED
+/// the program, and `glb`'s computation vanished from the emitted C. The
+/// decline is now keyed on SOURCE-LEVEL top-level value bindings
+/// (`chelis_ir::host::program_has_top_level_value_bindings`), so ANY
+/// top-level value binding declines regardless of its lowered
+/// classification.
+#[test]
+fn scalar_global_multi_def_declines_entry_lane() {
+    let artifact = compile_c(
+        "glb = 2.0\n\
+         def helper(x: tensor[1, f32]) -> tensor[1, f32] = mul(x, x)\n\
+         def main(a: tensor[1, f32]) -> tensor[1, f32] = mul(copy(a), a)\n",
+        None,
+    );
+    assert_eq!(
+        artifact.entry_lane_decline,
+        Some(EntryLaneDecline::HasGlobals),
+        "a scalar top-level binding must decline the entry lane as HasGlobals"
+    );
+    // The decline routes the program to the legacy whole-DAG path (the DAG
+    // is fully lowerable, so there is no host early-return here): the
+    // manifest is the merged whole-program one, and — the point of the fix
+    // — `glb`'s computation survives as a DAG root instead of vanishing.
+    // The C body does not carry binding names, so pin the computation by
+    // its value: a fill with the f32 bit pattern of 2.0 (0x40000000).
+    let c = &artifact
+        .compile_result
+        .files
+        .iter()
+        .find(|file| file.path.ends_with(".c"))
+        .expect("emitted C present")
+        .contents;
+    assert!(
+        c.contains("chelis_fill_f32_bits") && c.contains("0x40000000"),
+        "`glb`'s computation (2.0f fill) must not vanish from the compiled \
+         output, got:\n{c}"
+    );
+    assert_eq!(
+        artifact.outputs.len(),
+        3,
+        "whole-DAG path must keep all three roots (glb, helper, main), got {:?}",
+        artifact
+            .outputs
+            .iter()
+            .map(|spec| spec.name.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Fix 2 (#819): an explicit `entry_name` naming a def with a scalar
+/// (non-tensor) signature declines with the signature-specific reason —
+/// recorded on the artifact so the python layer can report it — instead of a
+/// silent empty manifest.
+#[test]
+fn scalar_entry_by_name_declines_with_not_tensor_signature() {
+    let artifact = compile_c(
+        "def scale(x: f32) -> f32 = mul(x, x)\n\
+         def solve(a: tensor[1, f32]) -> tensor[1, f32] = mul(copy(a), a)\n",
+        Some("scale"),
+    );
+    assert!(
+        artifact.inputs.is_empty() && artifact.outputs.is_empty(),
+        "scalar entry must stay host-lane (empty callable metadata)"
+    );
+    assert_eq!(
+        artifact.entry_lane_decline,
+        Some(EntryLaneDecline::NotTensorSignature {
+            entry: "scale".to_string()
+        }),
+        "the decline reason must name the scalar-signature entry"
     );
 }
 
