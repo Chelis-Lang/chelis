@@ -339,8 +339,8 @@ fn project_expr(
             arg_tys,
             ty,
         } => {
-            if function == "call" || function.starts_with("__unresolved_") {
-                return Err(unsupported_callable_use(&function));
+            if function == chelis_ir::host::HOST_UNRESOLVED_CALLABLE_MARKER {
+                return Err(unsupported_callable_use());
             }
             if args.len() != arg_tys.len() {
                 return Err(invalid_callback_shape(format!(
@@ -376,8 +376,8 @@ fn project_expr(
             }
         }
         ConcreteHostExprKind::Builtin { name, args, ty } => {
-            if name == "call" || name.starts_with("__unresolved_") {
-                return Err(unsupported_callable_use(&name));
+            if name == chelis_ir::host::HOST_UNRESOLVED_CALLABLE_MARKER {
+                return Err(unsupported_callable_use());
             }
             HostAbiExprKind::Builtin {
                 name,
@@ -596,9 +596,9 @@ fn unsupported_function_symbol(name: &str) -> Unsupported {
     )
 }
 
-fn unsupported_callable_use(name: &str) -> Unsupported {
+fn unsupported_callable_use() -> Unsupported {
     Unsupported::new(
-        UnsupportedKind::HostAbi(format!("function value `{name}`")),
+        UnsupportedKind::HostAbi("unresolved function value".to_string()),
         "C host ABI callable-use projection",
         Stage::Codegen("c"),
         "the host lowerer did not resolve this application to a declared function symbol or \

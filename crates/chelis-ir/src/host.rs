@@ -1785,37 +1785,34 @@ pub fn host_program_summary_rejections<T>(program: &HostProgram<T>) -> &[Summary
     &program.summary_rejections
 }
 
+/// The internal marker name `lower_app_host_expr` gives its generic
+/// fallback `Builtin` when it cannot resolve the callee (a non-`var`
+/// callee such as `grad(f)(x)`, or an application of a value with no
+/// known function signature). The leading `#` cannot appear in a Surf or
+/// Deep identifier, so no user definition can collide with the marker
+/// (chelis#841); the C backend's ABI projection rejects it with the
+/// frozen `unsupported:` diagnostic before emission.
+pub const HOST_UNRESOLVED_CALLABLE_MARKER: &str = "#chelis-unresolved-callable";
+
 /// Scan a host program for any function or global whose body still
-/// contains an unresolved call: the generic `Builtin { name: "call" }`
-/// fallback that `lower_app_host_expr` emits when it doesn't recognize
-/// the callee, or an `__unresolved_grad`/`__unresolved_vmap` transform
-/// marker. These sites never reach emission: the C backend's ABI
-/// projection rejects them with the frozen `unsupported:` function-value
-/// diagnostic. The CLI's pre-codegen UX gate prefers
-/// [`host_program_unresolved_transform_sites`] and consults this scan only
-/// for programs that directly apply `grad`/`vmap`, so a plain
-/// callable-value case is not misdescribed as an AD-transform failure.
+/// contains the [`HOST_UNRESOLVED_CALLABLE_MARKER`] fallback. These
+/// sites never reach emission: ABI projection rejects them with the
+/// frozen `unsupported:` function-value diagnostic. The CLI's
+/// pre-codegen UX gate consults this scan only for programs that
+/// directly apply `grad`/`vmap` (see
+/// [`checked_program_applies_ad_transform`]), so a plain callable-value
+/// case is not misdescribed as an AD-transform failure (chelis#730,
+/// chelis#841).
 pub fn host_program_unresolved_call_sites<T>(program: &HostProgram<T>) -> Vec<String> {
+    // The marker appears as a `Builtin` when nothing about the callee
+    // resolved, and as a `Call` function when the callee's TYPE resolved
+    // but the callee itself did not (e.g. `grad(f)(x)` over an
+    // unsupported body). No user identifier can spell it either way.
     host_program_call_name_sites(
         program,
-        &|name| name == "call" || name.starts_with("__unresolved_"),
-        &|function| function == "call",
+        &|name| name == HOST_UNRESOLVED_CALLABLE_MARKER,
+        &|function| function == HOST_UNRESOLVED_CALLABLE_MARKER,
     )
-}
-
-/// Scan a host program for defs whose bodies carry an
-/// `__unresolved_grad`/`__unresolved_vmap` marker builtin: the host lane
-/// recognized an AD transform in a position it could not resolve. Distinct
-/// from the generic `call` fallback of an unresolved callable value, which
-/// earns the frozen function-value diagnostic at ABI projection rather
-/// than AD-transform guidance (chelis#730 Phase 2).
-pub fn host_program_unresolved_transform_sites<T>(program: &HostProgram<T>) -> Vec<String> {
-    // Transform markers are emitted as `Builtin` nodes only; a `Call`
-    // whose function happens to start with `__unresolved_` is a user
-    // identifier, not a marker.
-    host_program_call_name_sites(program, &|name| name.starts_with("__unresolved_"), &|_| {
-        false
-    })
 }
 
 fn host_program_call_name_sites<T>(
@@ -2569,10 +2566,10 @@ fn lower_host_function(
     // into the body before lowering. The host backend only recognizes
     // grad/vmap forms in direct callee position of an `app`, so an alias
     // like `let g = grad(f); g(x)` must be rewritten to the inline
-    // `(grad(f))(x)` form. Without this pass `g` lowers to an
-    // `__unresolved_grad` builtin and the call falls through to a
-    // generic `call(g, …)` host builtin, which `host_program_unresolved_call_sites`
-    // rejects pre-codegen.
+    // `(grad(f))(x)` form. Without this pass `g` lowers to the
+    // unresolved-callable marker builtin
+    // (`HOST_UNRESOLVED_CALLABLE_MARKER`), which ABI projection rejects
+    // pre-emission.
     let body_expr = inline_local_callable_lets(&body_expr);
     // If the declared return type is a tensor, the body must produce a
     // tensor even when downstream type-metadata annotations are missing
@@ -5686,7 +5683,7 @@ fn lower_tuple_get_host_expr(
 // forward-mode dual numbers. A scalar function `f: f32 -> f32` (or
 // multi-scalar-param) that lands in the host lane has no reverse-mode
 // transform, so `grad(f, wrt=(p))(args)` previously rejected with the
-// `__unresolved_grad` marker. This pass implements the dual transform
+// unresolved-callable marker. This pass implements the dual transform
 // entirely at compile time: it walks `f`'s pure-scalar body and produces
 // two parallel HostExpr trees — a value tree and a derivative tree — using
 // only the existing host scalar builtins (`add`/`mul`/`sub`/`div`/`neg`/
@@ -5701,7 +5698,7 @@ fn lower_tuple_get_host_expr(
 // combines them into a host tuple — the gradient tuple.
 //
 // `wrt` over a host container (list/dict/ADT/tuple) is rejected: this pass
-// returns `None`, the caller falls through to the `__unresolved_grad`
+// returns `None`, the caller falls through to the unresolved-callable
 // marker, and the existing `cmd_build` guard surfaces the clean diagnostic.
 // Tensor-lane reverse-mode AD is untouched: a grad whose differentiated fn
 // is tensor-typed is handled by `lower_grad_callable_app` on the DAG path
@@ -5803,7 +5800,7 @@ fn resolve_scalar_def<'a>(
 /// forward-mode derivative. Returns `Some(host_expr)` on success, `None`
 /// when this is not a scalar-grad app this pass handles (tensor lane,
 /// container `wrt`, unsupported op, unresolvable callee — all fall through
-/// to the existing `__unresolved_grad` rejection path).
+/// to the existing unresolved-callable-marker rejection path).
 fn try_lower_scalar_grad_app(
     list: &List,
     program: &CheckedProgram,
@@ -5954,7 +5951,7 @@ fn collect_wrt_names(expr: &Expr, out: &mut Vec<String>) -> Option<()> {
 /// Maximum nesting of inlined user-defined scalar calls and `let` blocks the
 /// dual transform will follow. A non-recursive scalar def nests shallowly;
 /// the cap exists so a (mutually) recursive scalar callee fails closed —
-/// falling through to the `__unresolved_grad` rejection — instead of looping
+/// falling through to the unresolved-callable-marker rejection, not looping
 /// forever or producing an unbounded dual tree.
 const MAX_DUAL_INLINE_DEPTH: usize = 64;
 
@@ -6173,7 +6170,7 @@ fn dual_eval_app(
         // carried by the argument derivatives). `resolve_scalar_def` rejects
         // non-scalar parameters, and `dual_eval` rejects any body construct
         // this pass does not support, so an unsupported callee falls through
-        // to `None` (the `__unresolved_grad` rejection path).
+        // to `None` (the unresolved-callable-marker rejection path).
         _ => dual_eval_user_call(op, &args, program, depth),
     }
 }
@@ -6225,8 +6222,10 @@ fn lower_app_host_expr(
     // `grad(...)` form differentiating a scalar `f32 -> f32` (or
     // multi-scalar-param) top-level def, emit the dual-propagated derivative
     // directly. A `None` return falls through to the generic path, which
-    // produces the `__unresolved_grad` marker for the `cmd_build` guard to
-    // reject (container `wrt`, tensor-lane grad, unsupported op).
+    // produces the unresolved-callable marker; grad/vmap-applying
+    // programs get the `cmd_build` workaround text and everything else
+    // is rejected at ABI projection (container `wrt`, tensor-lane grad,
+    // unsupported op).
     if let Some(grad_lowered) = try_lower_scalar_grad_app(list, program, scope, tensor_helpers)? {
         return Ok(grad_lowered);
     }
@@ -6250,7 +6249,7 @@ fn lower_app_host_expr(
                 None
             }
         })
-        .unwrap_or("call")
+        .unwrap_or(HOST_UNRESOLVED_CALLABLE_MARKER)
         .to_string();
     let fn_sig = scope
         .get(&name)
@@ -10838,46 +10837,42 @@ mod tests {
         program
     }
 
-    /// The AD-transform classifier must separate `__unresolved_grad`
-    /// markers (grad/vmap UX text) from the generic `call` fallback of an
-    /// unresolved callable value (frozen ABI-projection diagnostic).
+    /// Only the unspellable marker is an unresolved call site; builtin
+    /// or call nodes whose names a user could spell (`call`,
+    /// `__unresolved_grad`) are ordinary identifiers (chelis#841).
     #[test]
-    fn transform_sites_exclude_the_generic_call_fallback() {
-        let call_fallback = program_with_global_builtin("call");
+    fn unresolved_call_sites_match_only_the_unspellable_marker() {
+        let marker = program_with_global_builtin(HOST_UNRESOLVED_CALLABLE_MARKER);
         assert_eq!(
-            host_program_unresolved_call_sites(&call_fallback),
+            host_program_unresolved_call_sites(&marker),
             vec!["probe".to_string()]
         );
-        assert!(host_program_unresolved_transform_sites(&call_fallback).is_empty());
 
-        let grad_marker = program_with_global_builtin("__unresolved_grad");
-        assert_eq!(
-            host_program_unresolved_call_sites(&grad_marker),
-            vec!["probe".to_string()]
-        );
-        assert_eq!(
-            host_program_unresolved_transform_sites(&grad_marker),
-            vec!["probe".to_string()]
-        );
-    }
+        for spellable in ["call", "__unresolved_grad"] {
+            let program = program_with_global_builtin(spellable);
+            assert!(
+                host_program_unresolved_call_sites(&program).is_empty(),
+                "user-spellable name {spellable:?} must not read as a marker"
+            );
+        }
 
-    /// A user identifier that merely spells the marker prefix in `Call`
-    /// position is not a transform marker.
-    #[test]
-    fn transform_sites_ignore_marker_spelled_user_calls() {
-        let mut program = HostProgram::default();
-        program.globals.push(HostBinding {
+        let mut marker_call = HostProgram::default();
+        marker_call.globals.push(HostBinding {
             name: "probe".into(),
             display_name: None,
             ty: HostTypeTerm::Unit,
             value: HostExpr::new(HostExprKind::Call {
-                function: "__unresolved_x".into(),
+                function: HOST_UNRESOLVED_CALLABLE_MARKER.into(),
                 args: Vec::new(),
                 arg_tys: Vec::new(),
                 ty: HostTypeTerm::Unit,
             }),
         });
-        assert!(host_program_unresolved_transform_sites(&program).is_empty());
+        assert_eq!(
+            host_program_unresolved_call_sites(&marker_call),
+            vec!["probe".to_string()],
+            "a typed-but-unresolved callee carries the marker in `Call` position"
+        );
     }
 
     /// `grad` is a Deep tag after checking; the AD-transform detector
