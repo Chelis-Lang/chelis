@@ -600,9 +600,10 @@ sandboxed runtime exec helper) is tracked in Chelis-Lang/chelis#267.
 
 #### Seed determinism atom
 
-Provisional-atom grammar per `spec/design/spec_provenance.md` §C1, matching
-the §7/§8 atoms of this file; rev hashes arrive with chelis#733 Phase 1, so no
-rev is embedded here (as for every sibling atom).
+Transitional blockquote authority per `spec/design/spec_provenance.md` §C1,
+matching the §7/§8 atoms of this file. The block remains normative until it is
+selected for fixture-proven migration through the pinned Buoy shell-side
+integration in chelis#733 Phase 1; no semantic revision is embedded here.
 
 > **[05-RNG-1]** For a fixed compiler version and target, evaluating a
 > `with seed(N)` program twice SHALL yield byte-identical output, and two
@@ -1192,8 +1193,10 @@ sweep; PR chelis#791). Residuals are per-atom noted below; the ratchets
 that make regressions unwritable ([05-UNS-4]'s gate demotion, the lint
 rule) are that plan's Phases 2-3. The delivery plan and full
 elaboration (the failure channel, the census, the ratchets) is
-`spec/design/loud_unsupported.md`. Atom IDs are stable and are the
-citation grammar (chelis#733 re-scope: no rev hashes).
+`spec/design/loud_unsupported.md`. Atom IDs are stable, and the current
+blockquote authorities remain normative until selected for chelis#733 Phase 1
+migration. Full revisions are attached and checked through the pinned Buoy
+shell-side integration, not a Chelis provenance lint.
 
 > **[05-UNS-1]** When any stage encounters a case it does not support -
 > an op, builtin, dtype, kernel, construct, or parameter shape - it
@@ -1248,9 +1251,10 @@ Phase 1 (2026-07-20), which landed `format_element` (the single
 renderer, `chelis-types::observation`) and routed every EVAL-lane exit
 through it. The eval lane conforms; the compiled C lane still renders
 through its pre-contract paths (chelis#716, #723, #726's C half, #748,
-#749) until chelis#732 Phase 2 lands the generated print helper. Atom
-IDs are stable; rev hashes follow the chelis#733 OpenSpec re-scope
-(2026-07-20: atom IDs yes, rev hashes no). The delivery plan and full
+#749) until chelis#732 Phase 2 lands the generated print helper. Atom IDs are
+stable, and the current blockquote authorities remain normative until selected
+for chelis#733 Phase 1 migration. Full revisions are attached and checked
+through the pinned Buoy shell-side integration. The delivery plan and full
 elaboration is `spec/design/faithful_observation.md` (meta chelis#728).
 
 > **[05-OBS-1]** Every exit that renders a stored numeric value as text -

@@ -2207,13 +2207,15 @@ Scope:
 normative semantics, authored 2026-07-16 out of the numeric audit
 (chelis#680-#734; metas #695/#727). They are NOT yet implemented: today's
 behavior diverges per the issue references in each atom's note, and the
-divergences are locked as issue-linked `#[ignore]`d tests (the
-"specified, not yet honored" state of `spec/design/spec_provenance.md`
-§C4.2). The delivery plan and the full elaboration (finalize semantics,
-kernel signatures, storage) is `spec/design/dtype_semantics.md`. Atom IDs
-are stable; rev hashes arrive with the provenance lint (chelis#733
-Phase 1) - the atom grammar is provisional until that plan's Phase 1
-ratifies it.
+divergences are locked as issue-linked `#[ignore]`d tests. Those tests are
+visible known-failure records only: under `spec/design/spec_provenance.md`
+§C3-§C4, registration, freshness, execution, debt, and waiver remain separate,
+and an ignored test does not satisfy coverage. The delivery plan and the full
+elaboration (finalize semantics, kernel signatures, storage) is
+`spec/design/dtype_semantics.md`. Atom IDs are stable, and the current
+blockquote authorities remain normative until selected for fixture-proven
+migration in chelis#733 Phase 1. The pinned Buoy shell-side integration—not a
+`chelis-lint` rule—attaches and checks full semantic revisions.
 
 > **[04-NUM-1]** Every numeric op result SHALL be finalized into its
 > declared dtype - rounding for floats, width and domain checks for
@@ -2287,10 +2289,11 @@ in-tree witness of the need. Tracked by chelis#753.)*
 
 ## 10. Checker Totality (Decided 2026-07; Ratified At chelis#731 Phase 1)
 
-**Status banner:** same provisional-atom and honesty rules as §9. The
+**Status banner:** same transitional-blockquote and honesty rules as §9. The
 delivery plan is `spec/design/checker_totality.md`. chelis#731 Phase 1
-ratifies this section as its contract text; the atom IDs are the citation
-grammar (no rev/hash machinery, per the chelis#733 re-scope 2026-07-20).
+ratifies this section's semantics; the atom IDs remain the citation grammar and
+the blockquotes remain normative until chelis#733 Phase 1 migrates them through
+the pinned Buoy shell-side integration and attaches full revisions.
 
 > **[04-TOT-1]** Every Deep tag in the closed vocabulary
 > (spec/03-deep-syntax.md) SHALL have an explicit checker disposition: a
