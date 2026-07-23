@@ -550,7 +550,11 @@ fn emitted_function_name(program_name: &str, function_name: &str) -> String {
     if function_name == "main" {
         format!("{program_name}__main")
     } else {
-        function_name.to_string()
+        // chelis#840: def names are C identifiers too. Route them through
+        // the same #379 mapping as bindings and parameters so a def named
+        // `double` declares, references, and prototypes consistently as
+        // `chelis_user__double` instead of emitting a C keyword verbatim.
+        c_ident(function_name).into_owned()
     }
 }
 
@@ -1026,10 +1030,14 @@ fn emit_main(
     hoisted: &HashSet<&str>,
 ) -> Result<(), Unsupported> {
     out.push("int main(void) {".to_string());
+    // chelis#840: the globals emitter needs the same original-to-emitted
+    // function-name map as function bodies, or a global calling a def
+    // whose name was mangled (`double`) or renamed (`main`) emits the raw
+    // name and the C cannot compile.
     let mut emitter = HostEmitter::new(
         BASE_MAIN_INDENT.to_string(),
         &format!("{program_name}__global"),
-        HashMap::new(),
+        emitted_function_names(program, program_name),
         function_specializations(program),
         returns_arg.clone(),
         &program.global_tensor_helpers,
@@ -4779,7 +4787,13 @@ impl<'a> HostEmitter<'a> {
                 self.lines.push(format!(
                     "{}{target} = {}({});",
                     self.indent,
-                    function,
+                    // chelis#840: same original-to-emitted mapping as
+                    // `assign_call`, so a mangled or renamed def is
+                    // referenced consistently from callback position.
+                    self.emitted_names
+                        .get(function)
+                        .map(String::as_str)
+                        .unwrap_or(function),
                     arg_vars.join(", ")
                 ));
             }
@@ -5285,6 +5299,26 @@ const C_RESERVED_WORDS: &[&str] = &[
     "xor",
     // The generated entry point
     "main",
+    // Typedefs and macros the emitted translation unit includes via
+    // stdint/stddef and the chelis runtime headers (chelis#840): a user
+    // def, binding, or parameter spelled like one of these shadows or
+    // redefines the typedef and the C cannot compile.
+    "int8_t",
+    "int16_t",
+    "int32_t",
+    "int64_t",
+    "uint8_t",
+    "uint16_t",
+    "uint32_t",
+    "uint64_t",
+    "intmax_t",
+    "uintmax_t",
+    "intptr_t",
+    "uintptr_t",
+    "size_t",
+    "ssize_t",
+    "ptrdiff_t",
+    "offsetof",
 ];
 
 /// Prefix applied to a user identifier that would otherwise be illegal or
