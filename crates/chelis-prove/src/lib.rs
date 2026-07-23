@@ -12,6 +12,7 @@
 pub mod ad_rail;
 pub mod arb_oracle;
 pub mod artifact;
+pub mod beacon_contract_prover;
 pub mod beacon_shim;
 // WI-15 SoS certificate engine (Clarabel). The whole module is behind the
 // `clarabel` feature so the default / smt / solver-free builds link none of it.
@@ -49,6 +50,7 @@ pub mod tier_a;
 pub mod tier_b;
 pub mod tier_b_lower;
 pub mod tier_c;
+pub mod tier_d;
 pub mod transformation;
 pub mod transformation_harness;
 pub mod transformations;
@@ -80,6 +82,7 @@ pub use special_fn_envelope::{
 };
 // chelis#439: the Beacon subprocess shim (transport-only DischargeEngine for
 // GoalShape::BoxRange) and its dispatch-site-owned content-addressed byte store.
+pub use beacon_contract_prover::BeaconContractProver;
 pub use beacon_shim::{
     BEACON_BIN_ENV, BeaconOracleMode, BeaconShim, RequestTransport, WireDagByteStore,
 };
@@ -90,7 +93,8 @@ pub use composition::{
 };
 pub use concrete_eval::{eval_arith, eval_bool};
 pub use contracts::{
-    ContractInvariant, StandardContract, standard_contract_registry, standard_contracts,
+    ContractInvariant, StandardContract, standard_contract_registry,
+    standard_contract_registry_with_prover, standard_contracts,
 };
 pub use discharge::{
     Discharge, DischargeEngine, DischargeError, Goal, GoalError, GoalShape, IntervalBox, IrHandle,

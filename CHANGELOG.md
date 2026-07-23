@@ -4,6 +4,84 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.17.1] — 2026-07-23
+
+The first cut of the numeric-remediation "loud checking" work: cases that
+used to substitute a plausible value or silently skip checking now fail
+loudly. Some programs that previously compiled or scored a perfect check are
+now rejected at the offending site — see **Changed** for the migration.
+
+### Changed
+
+- **Unsupported cases fail loudly instead of substituting a value**
+  (chelis#730 Phase 1). `chelis build` / `chelis eval` now return a branded
+  `unsupported:` error where a stage used to emit a plausible default (a
+  literal `0`, a dropped operand, an f32 kernel over an int64 buffer, an
+  empty window, a discarded effect handler). A program that "worked" by
+  relying on one of these silent substitutions now errors at that site.
+- **`with seed(...)` requires an int64-suffixed integer literal**
+  (chelis#731 Phase 1). `with seed(42)` is rejected; write
+  `with seed(42i64)`. The seed width is now explicit in the source
+  (spec/02 §P10a); an unsuffixed literal defaults to `int32` and is a type
+  error naming the suffix.
+- **`with seed` / `with device` bodies are now type-checked** (chelis#709,
+  chelis#710). An ill-typed body inside a handler — previously invisible to
+  the checker, so `chelis check` reported a perfect score — is caught, and
+  the enclosing function's declared return type is enforced. Malformed
+  `fn` / `let` / `if` / `app` forms and unknown effect kinds are rejected
+  with `MalformedForm` / `UnknownForm` diagnostics rather than a silent
+  `Type::Error`.
+- **`chelis eval` output is dtype-faithful** (chelis#732 Phase 1). Integers
+  print as integers (not `750.0`), `bool` prints `true` / `false`, and floats
+  print shortest-round-trip for their own width. The compiled-C lane is
+  brought to byte-identical rendering in a later release.
+
+### Fixed
+
+- **Correctly-rounded f32 `sqrt`** in the C backend; the Accelerate `vvsqrtf`
+  path is dropped (chelis#719).
+- **`uniform_like` is bit-identical across the eval, C, and HIP lanes** — a
+  single correctly-rounded FMA, independent of `-ffp-contract` (chelis#770,
+  chelis#771, chelis#776). Literal `with seed` values are read at full i64
+  width so every lane derives identical seeds. A `uniform_like` whose range
+  bounds are wrapped in a non-static expression now resolves them at lowering
+  time or fails loudly, never silently defaulting to `[0, 1)` (chelis#776).
+- **Labeled roots for `def`-call-valued top-level bindings** in compiled C
+  (chelis#750).
+- **Nominal typing through tuple projection `.N`** is restored (chelis#707).
+- **Top-level `def`s apply past the lowered tensor-root shadow** (chelis#721).
+- **Bare, non-tail expression statements are rejected** with a targeted
+  diagnostic instead of being silently dropped (chelis#706).
+- Shape-computed builtin overrides return `Error` on `Error` operands, and
+  sibling arguments past an `Error`-typed argument are still checked
+  (chelis#773; conv2d annotation-clobber hotfix).
+- **`chelis prove --capabilities` no longer reports `beacon` as dispatchable**
+  (chelis#673).
+- The stale `WireDag` schema-version references are corrected to the current
+  v3 (chelis#701).
+- The std init self-test corpus migrates to `seed(Ni64)`, and the build-cache
+  oracles skip the host-only `Std.Test` module, now documented as eval-only
+  (chelis#796, spec/05 §3.6.1).
+
+### Added
+
+- **`chelis prove` gains Beacon-certified contract discharge** (chelis#831).
+  Normal-CDF contract obligations can be proof-discharged by Beacon's
+  certified envelope (`DischargeMethod::CertifiedEnvelope`), promoting
+  Black-Scholes composites from `ProvenModuloFuzzValidatedContract` to
+  `ProvenModuloCertifiedEnvelope`; plus monotonicity relational injection
+  into the SMT lowering.
+- The **numeric-remediation design set** — five class plans (dtype semantics,
+  loud unsupported, checker totality, faithful observation, spec provenance),
+  the capability-table schema, and the sequencing roadmap with its
+  release-slicing plan (chelis#729–#733, #740; docs and spec atoms), together
+  with the Phase-0 detector harnesses (the `Type::Error` census + totality
+  invariant, the loud-unsupported census + token tripwire, the observation
+  round-trip harness, and the dtype domain-validity checker).
+- **[05-OBS-1..5]**, the faithful-observation atoms that define the eval
+  rendering contract (chelis#732).
+- **[05-RNG-1]**, the per-lane with-seed determinism atom (chelis#735).
+
 ## [0.16.1] — 2026-07-12
 
 ### Added

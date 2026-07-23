@@ -16,7 +16,9 @@ use std::cell::RefCell;
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, List as DeepList};
 use chelis_surf::ast::{BinOp, Decl, Expr, LetPattern, Literal, Param, UnaryOp};
 
-use crate::contracts::{NORMAL_CDF_IMPLEMENTATION, NORMAL_CDF_RANGE, NORMAL_CDF_REFLECTION};
+use crate::contracts::{
+    NORMAL_CDF_IMPLEMENTATION, NORMAL_CDF_MONOTONICITY, NORMAL_CDF_RANGE, NORMAL_CDF_REFLECTION,
+};
 use crate::solver::{ArithOp, CmpOp, SmtExpr, SmtSort};
 
 pub(super) struct InlineCtx<'a> {
@@ -45,6 +47,7 @@ pub(super) struct ContractAbstraction {
     normal_cdf_enabled: bool,
     normal_cdf_range: bool,
     normal_cdf_reflection: bool,
+    normal_cdf_monotonicity: bool,
     normal_cdf_symbols: Vec<String>,
     normal_cdf_calls: Vec<ContractCall>,
 }
@@ -54,10 +57,14 @@ impl ContractAbstraction {
         let normal_cdf_reflection = contracts.iter().any(|id| id == NORMAL_CDF_REFLECTION);
         let normal_cdf_range =
             normal_cdf_reflection || contracts.iter().any(|id| id == NORMAL_CDF_RANGE);
+        let normal_cdf_monotonicity = contracts.iter().any(|id| id == NORMAL_CDF_MONOTONICITY);
         Self {
-            normal_cdf_enabled: normal_cdf_range || normal_cdf_reflection,
+            normal_cdf_enabled: normal_cdf_range
+                || normal_cdf_reflection
+                || normal_cdf_monotonicity,
             normal_cdf_range,
             normal_cdf_reflection,
+            normal_cdf_monotonicity,
             normal_cdf_symbols: trusted_normal_cdf_symbols(trusted_contract_decls),
             normal_cdf_calls: Vec::new(),
         }
@@ -122,6 +129,47 @@ impl ContractAbstraction {
                             )),
                         ));
                     }
+                }
+            }
+        }
+        // chelis#674: monotonicity relational injection. For every ordered pair
+        // of CDF calls, inject (=> (<= arg_i arg_j) (<= N(arg_i) N(arg_j))).
+        // This enables the SMT solver to use argument ordering to derive output
+        // ordering, which is needed for price-positivity proofs.
+        if self.normal_cdf_monotonicity {
+            for (idx, left) in self.normal_cdf_calls.iter().enumerate() {
+                for right in self.normal_cdf_calls.iter().skip(idx + 1) {
+                    // Inject: (arg_left <= arg_right) => (N_left <= N_right)
+                    let arg_le = SmtExpr::Cmp(
+                        CmpOp::Le,
+                        Box::new(left.arg.clone()),
+                        Box::new(right.arg.clone()),
+                    );
+                    let output_le = SmtExpr::Cmp(
+                        CmpOp::Le,
+                        Box::new(SmtExpr::Var(left.symbol.clone())),
+                        Box::new(SmtExpr::Var(right.symbol.clone())),
+                    );
+                    out.push(SmtExpr::Bool(
+                        crate::solver::BoolOp::Implies,
+                        vec![arg_le, output_le],
+                    ));
+
+                    // Inject the reverse: (arg_right <= arg_left) => (N_right <= N_left)
+                    let arg_ge = SmtExpr::Cmp(
+                        CmpOp::Le,
+                        Box::new(right.arg.clone()),
+                        Box::new(left.arg.clone()),
+                    );
+                    let output_ge = SmtExpr::Cmp(
+                        CmpOp::Le,
+                        Box::new(SmtExpr::Var(right.symbol.clone())),
+                        Box::new(SmtExpr::Var(left.symbol.clone())),
+                    );
+                    out.push(SmtExpr::Bool(
+                        crate::solver::BoolOp::Implies,
+                        vec![arg_ge, output_ge],
+                    ));
                 }
             }
         }

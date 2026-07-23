@@ -115,6 +115,21 @@ fn main() {
             // Echo the received request so a test can assert its exact shape.
             print!("{request}");
         }
+        "crash" => {
+            // Simulate a process abort (e.g., OOM kill, SIGABRT from a C
+            // library assertion). The shim must produce an honest
+            // `TierBResult::Error` with a reason naming the signal, not a
+            // hang or a silent pass. (chelis_plan Task 2.)
+            std::process::abort();
+        }
+        "partial_output" => {
+            // Emit partial (incomplete) JSON, then exit. Simulates a child
+            // that crashes mid-output (e.g., stack overflow while serializing
+            // the CheckReport). The shim must produce an honest unparseable-
+            // report error, not a hang. (chelis_plan Task 2.)
+            print!(r#"{{"verdict":"prov"#);
+            std::process::exit(0);
+        }
         other => {
             eprint!("mock beacon: unknown scenario `{other}`");
             std::process::exit(2);

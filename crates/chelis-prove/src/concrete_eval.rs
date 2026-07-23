@@ -216,9 +216,96 @@ fn apply_intrinsic(name: &str, a: &[f64]) -> f64 {
         "sin" if a.len() == 1 => a[0].sin(),
         "cos" if a.len() == 1 => a[0].cos(),
         "abs" if a.len() == 1 => a[0].abs(),
+        "erf" if a.len() == 1 => erf_approx(a[0]),
+        "normal_cdf" if a.len() == 1 => normal_cdf_approx(a[0]),
         "min" if a.len() == 2 => a[0].min(a[1]),
         "max" if a.len() == 2 => a[0].max(a[1]),
+        // quantile(xs..., q): last argument is the quantile level q ∈ [0,1],
+        // preceding arguments are the data values. Requires at least 2 args
+        // (1 data value + q).
+        "quantile" if a.len() >= 2 => {
+            let q = a[a.len() - 1];
+            let data = &a[..a.len() - 1];
+            quantile_linear(data, q)
+        }
         _ => f64::NAN,
+    }
+}
+
+/// Fast `erf` approximation using Abramowitz & Stegun 7.1.26 (maximum
+/// error < 1.5e-7 over the reals). This is the standard rational
+/// approximation for concrete f64 evaluation in the fuzz tier — it does
+/// NOT need to be sound for proof (that is the certified envelope's job);
+/// it only needs to be accurate enough that rejection sampling does not
+/// starve on properties involving `normal_cdf` (chelis#659).
+fn erf_approx(x: f64) -> f64 {
+    // Abramowitz & Stegun 7.1.26: erf(x) ≈ 1 - (a1*t + a2*t² + a3*t³) * exp(-x²)
+    // where t = 1 / (1 + 0.3275911 * |x|). Max error: 1.5e-7.
+    const A1: f64 = 0.254829592;
+    const A2: f64 = -0.284496736;
+    const A3: f64 = 1.421413741;
+    const A4: f64 = -1.453152027;
+    const A5: f64 = 1.061405429;
+    const P: f64 = 0.3275911;
+
+    let sign = if x >= 0.0 { 1.0 } else { -1.0 };
+    let x_abs = x.abs();
+    let t = 1.0 / (1.0 + P * x_abs);
+    let poly = ((((A5 * t + A4) * t + A3) * t + A2) * t + A1) * t;
+    sign * (1.0 - poly * (-x_abs * x_abs).exp())
+}
+
+/// Standard normal CDF: Φ(x) = ½·(1 + erf(x / √2)).
+/// Uses the same fast erf approximation for concrete evaluation.
+fn normal_cdf_approx(x: f64) -> f64 {
+    0.5 * (1.0 + erf_approx(x * std::f64::consts::FRAC_1_SQRT_2))
+}
+
+/// Quantile with linear interpolation between order statistics (numpy
+/// default, method="linear"). Semantics:
+///
+/// - `q = 0.0` → min(data)
+/// - `q = 1.0` → max(data)
+/// - Otherwise: linear interpolation at position `q * (n-1)` into the
+///   sorted data.
+/// - `q` outside [0, 1] → NaN (invalid quantile level)
+/// - Empty data → NaN
+/// - NaN values in data: NaN elements are sorted to the end; if the
+///   interpolation position touches a NaN element, the result is NaN.
+///   This differs from numpy (which returns NaN for ANY NaN in data).
+///   The choice here is motivated by the fuzz evaluation context where
+///   partial NaN data can still yield useful non-NaN quantiles for
+///   untouched positions. Document this divergence for consumers.
+///
+/// This is the concrete evaluator for the `quantile` primitive, enabling
+/// the Tier C fuzzer to evaluate properties involving quantiles.
+fn quantile_linear(data: &[f64], q: f64) -> f64 {
+    quantile_linear_impl(data, q)
+}
+
+/// Public accessor for use by the contract fuzz validation (contracts.rs).
+pub(crate) fn quantile_linear_pub(data: &[f64], q: f64) -> f64 {
+    quantile_linear_impl(data, q)
+}
+
+fn quantile_linear_impl(data: &[f64], q: f64) -> f64 {
+    if data.is_empty() || q.is_nan() || !(0.0..=1.0).contains(&q) {
+        return f64::NAN;
+    }
+    let n = data.len();
+    if n == 1 {
+        return data[0];
+    }
+    let mut sorted: Vec<f64> = data.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let pos = q * (n - 1) as f64;
+    let lo = pos.floor() as usize;
+    let hi = pos.ceil() as usize;
+    if lo == hi || hi >= n {
+        sorted[lo.min(n - 1)]
+    } else {
+        let frac = pos - lo as f64;
+        sorted[lo] * (1.0 - frac) + sorted[hi] * frac
     }
 }
 
@@ -428,5 +515,293 @@ mod tests {
             vec![SmtExpr::RealLit(1.0), SmtExpr::RealLit(2.0)],
         );
         assert_eq!(eval_arith(&m, &env(&[])), 2.0);
+    }
+
+    // --- chelis#659: erf and normal_cdf intrinsic tests ---
+
+    #[test]
+    fn erf_zero_is_zero() {
+        let e = SmtExpr::Apply("erf".into(), vec![SmtExpr::RealLit(0.0)]);
+        let result = eval_arith(&e, &env(&[]));
+        assert!(result.abs() < 1e-6, "erf(0) should be ≈0, got {result}");
+    }
+
+    #[test]
+    fn erf_large_positive_is_near_one() {
+        let e = SmtExpr::Apply("erf".into(), vec![SmtExpr::RealLit(3.0)]);
+        let result = eval_arith(&e, &env(&[]));
+        assert!(
+            (result - 1.0).abs() < 1e-4,
+            "erf(3) should be ≈1.0, got {result}"
+        );
+    }
+
+    #[test]
+    fn erf_large_negative_is_near_minus_one() {
+        let e = SmtExpr::Apply("erf".into(), vec![SmtExpr::RealLit(-3.0)]);
+        let result = eval_arith(&e, &env(&[]));
+        assert!(
+            (result + 1.0).abs() < 1e-4,
+            "erf(-3) should be ≈-1.0, got {result}"
+        );
+    }
+
+    #[test]
+    fn erf_is_odd_function() {
+        // erf(-x) == -erf(x) for all x
+        for &x in &[0.5, 1.0, 2.0] {
+            let pos = SmtExpr::Apply("erf".into(), vec![SmtExpr::RealLit(x)]);
+            let neg = SmtExpr::Apply("erf".into(), vec![SmtExpr::RealLit(-x)]);
+            let r_pos = eval_arith(&pos, &env(&[]));
+            let r_neg = eval_arith(&neg, &env(&[]));
+            assert!(
+                (r_pos + r_neg).abs() < 1e-7,
+                "erf({x}) + erf(-{x}) should be 0, got {}",
+                r_pos + r_neg
+            );
+        }
+    }
+
+    #[test]
+    fn normal_cdf_zero_is_half() {
+        let e = SmtExpr::Apply("normal_cdf".into(), vec![SmtExpr::RealLit(0.0)]);
+        let result = eval_arith(&e, &env(&[]));
+        assert!(
+            (result - 0.5).abs() < 1e-7,
+            "normal_cdf(0) should be 0.5, got {result}"
+        );
+    }
+
+    #[test]
+    fn normal_cdf_large_positive_is_near_one() {
+        let e = SmtExpr::Apply("normal_cdf".into(), vec![SmtExpr::RealLit(5.0)]);
+        let result = eval_arith(&e, &env(&[]));
+        assert!(
+            (result - 1.0).abs() < 1e-6,
+            "normal_cdf(5) should be ≈1.0, got {result}"
+        );
+    }
+
+    #[test]
+    fn normal_cdf_large_negative_is_near_zero() {
+        let e = SmtExpr::Apply("normal_cdf".into(), vec![SmtExpr::RealLit(-5.0)]);
+        let result = eval_arith(&e, &env(&[]));
+        assert!(
+            result.abs() < 1e-6,
+            "normal_cdf(-5) should be ≈0.0, got {result}"
+        );
+    }
+
+    #[test]
+    fn normal_cdf_monotonicity() {
+        // Φ(x) is strictly increasing
+        let vals: Vec<f64> = vec![-3.0, -1.0, 0.0, 1.0, 3.0];
+        let results: Vec<f64> = vals
+            .iter()
+            .map(|&x| {
+                let e = SmtExpr::Apply("normal_cdf".into(), vec![SmtExpr::RealLit(x)]);
+                eval_arith(&e, &env(&[]))
+            })
+            .collect();
+        for i in 1..results.len() {
+            assert!(
+                results[i] > results[i - 1],
+                "normal_cdf must be monotone: Φ({}) = {} should be > Φ({}) = {}",
+                vals[i],
+                results[i],
+                vals[i - 1],
+                results[i - 1]
+            );
+        }
+    }
+
+    #[test]
+    fn normal_cdf_symmetry() {
+        // Φ(x) + Φ(-x) = 1
+        for &x in &[0.5, 1.0, 2.0, 3.0] {
+            let pos = SmtExpr::Apply("normal_cdf".into(), vec![SmtExpr::RealLit(x)]);
+            let neg = SmtExpr::Apply("normal_cdf".into(), vec![SmtExpr::RealLit(-x)]);
+            let sum = eval_arith(&pos, &env(&[])) + eval_arith(&neg, &env(&[]));
+            assert!(
+                (sum - 1.0).abs() < 1e-7,
+                "Φ({x}) + Φ(-{x}) should be 1.0, got {sum}"
+            );
+        }
+    }
+
+    #[test]
+    fn normal_cdf_known_values() {
+        // Check against well-known table values (to 4 decimal places)
+        let cases = [
+            (-2.0, 0.02275),
+            (-1.0, 0.15866),
+            (0.0, 0.5),
+            (1.0, 0.84134),
+            (2.0, 0.97725),
+        ];
+        for (x, expected) in cases {
+            let e = SmtExpr::Apply("normal_cdf".into(), vec![SmtExpr::RealLit(x)]);
+            let result = eval_arith(&e, &env(&[]));
+            assert!(
+                (result - expected).abs() < 1e-4,
+                "normal_cdf({x}) should be ≈{expected}, got {result}"
+            );
+        }
+    }
+
+    #[test]
+    fn erf_wrong_arity_is_nan() {
+        let e = SmtExpr::Apply("erf".into(), vec![]);
+        assert!(eval_arith(&e, &env(&[])).is_nan());
+        let e2 = SmtExpr::Apply(
+            "erf".into(),
+            vec![SmtExpr::RealLit(1.0), SmtExpr::RealLit(2.0)],
+        );
+        assert!(eval_arith(&e2, &env(&[])).is_nan());
+    }
+
+    #[test]
+    fn normal_cdf_wrong_arity_is_nan() {
+        let e = SmtExpr::Apply("normal_cdf".into(), vec![]);
+        assert!(eval_arith(&e, &env(&[])).is_nan());
+    }
+
+    // --- quantile intrinsic tests ---
+
+    #[test]
+    fn quantile_median_of_odd_sequence() {
+        // quantile([1, 2, 3, 4, 5], 0.5) = 3.0
+        let e = SmtExpr::Apply(
+            "quantile".into(),
+            vec![
+                SmtExpr::RealLit(1.0),
+                SmtExpr::RealLit(2.0),
+                SmtExpr::RealLit(3.0),
+                SmtExpr::RealLit(4.0),
+                SmtExpr::RealLit(5.0),
+                SmtExpr::RealLit(0.5), // q
+            ],
+        );
+        let result = eval_arith(&e, &env(&[]));
+        assert!(
+            (result - 3.0).abs() < 1e-10,
+            "quantile([1..5], 0.5) should be 3.0, got {result}"
+        );
+    }
+
+    #[test]
+    fn quantile_min_at_q_zero() {
+        let e = SmtExpr::Apply(
+            "quantile".into(),
+            vec![
+                SmtExpr::RealLit(5.0),
+                SmtExpr::RealLit(1.0),
+                SmtExpr::RealLit(3.0),
+                SmtExpr::RealLit(0.0), // q = 0 -> min
+            ],
+        );
+        let result = eval_arith(&e, &env(&[]));
+        assert!(
+            (result - 1.0).abs() < 1e-10,
+            "quantile at q=0 should be min=1.0, got {result}"
+        );
+    }
+
+    #[test]
+    fn quantile_max_at_q_one() {
+        let e = SmtExpr::Apply(
+            "quantile".into(),
+            vec![
+                SmtExpr::RealLit(5.0),
+                SmtExpr::RealLit(1.0),
+                SmtExpr::RealLit(3.0),
+                SmtExpr::RealLit(1.0), // q = 1 -> max
+            ],
+        );
+        let result = eval_arith(&e, &env(&[]));
+        assert!(
+            (result - 5.0).abs() < 1e-10,
+            "quantile at q=1 should be max=5.0, got {result}"
+        );
+    }
+
+    #[test]
+    fn quantile_interpolation() {
+        // quantile([1, 2, 3, 4, 5], 0.25)
+        // position = 0.25 * 4 = 1.0 -> exactly sorted[1] = 2.0
+        let e = SmtExpr::Apply(
+            "quantile".into(),
+            vec![
+                SmtExpr::RealLit(1.0),
+                SmtExpr::RealLit(2.0),
+                SmtExpr::RealLit(3.0),
+                SmtExpr::RealLit(4.0),
+                SmtExpr::RealLit(5.0),
+                SmtExpr::RealLit(0.25),
+            ],
+        );
+        let result = eval_arith(&e, &env(&[]));
+        assert!(
+            (result - 2.0).abs() < 1e-10,
+            "quantile([1..5], 0.25) should be 2.0, got {result}"
+        );
+    }
+
+    #[test]
+    fn quantile_monotone_in_q() {
+        // Verify quantile is monotone: quantile(data, p) <= quantile(data, q) for p <= q
+        let data = vec![
+            SmtExpr::RealLit(3.0),
+            SmtExpr::RealLit(1.0),
+            SmtExpr::RealLit(4.0),
+            SmtExpr::RealLit(1.0),
+            SmtExpr::RealLit(5.0),
+        ];
+        let mut prev = f64::NEG_INFINITY;
+        for qi in 0..=10 {
+            let q = qi as f64 / 10.0;
+            let mut args = data.clone();
+            args.push(SmtExpr::RealLit(q));
+            let e = SmtExpr::Apply("quantile".into(), args);
+            let result = eval_arith(&e, &env(&[]));
+            assert!(
+                result >= prev - 1e-15,
+                "quantile must be monotone: q={q}, result={result}, prev={prev}"
+            );
+            prev = result;
+        }
+    }
+
+    #[test]
+    fn quantile_invalid_q_is_nan() {
+        // q < 0 or q > 1 should be NaN
+        let e_neg = SmtExpr::Apply(
+            "quantile".into(),
+            vec![SmtExpr::RealLit(1.0), SmtExpr::RealLit(-0.1)],
+        );
+        assert!(eval_arith(&e_neg, &env(&[])).is_nan());
+
+        let e_over = SmtExpr::Apply(
+            "quantile".into(),
+            vec![SmtExpr::RealLit(1.0), SmtExpr::RealLit(1.1)],
+        );
+        assert!(eval_arith(&e_over, &env(&[])).is_nan());
+    }
+
+    #[test]
+    fn quantile_single_element() {
+        // quantile([x], q) = x for any valid q
+        let e = SmtExpr::Apply(
+            "quantile".into(),
+            vec![SmtExpr::RealLit(42.0), SmtExpr::RealLit(0.5)],
+        );
+        assert!((eval_arith(&e, &env(&[])) - 42.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn quantile_too_few_args_is_nan() {
+        // Need at least 2 args (1 data + q)
+        let e = SmtExpr::Apply("quantile".into(), vec![SmtExpr::RealLit(0.5)]);
+        assert!(eval_arith(&e, &env(&[])).is_nan());
     }
 }

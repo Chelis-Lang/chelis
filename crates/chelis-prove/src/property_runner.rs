@@ -30,11 +30,15 @@ use smt_lower::{
 };
 
 mod injection;
+use crate::beacon_contract_prover::BeaconContractProver;
 use crate::composition::{
     AssumptionDischarge, AssumptionRecord, CompositeVerdict, DischargeMethod, FUZZ_TOLERANCE,
     NonVacuityRecord, NonVacuityStatus, base_verdict_from_discharge, rollup_composite,
 };
-use crate::contracts::{NORMAL_CDF_RANGE, NORMAL_CDF_REFLECTION, standard_contract_registry};
+use crate::contracts::{
+    NORMAL_CDF_RANGE, NORMAL_CDF_REFLECTION, standard_contract_registry,
+    standard_contract_registry_with_prover,
+};
 use crate::discharge::QualifierSet;
 
 /// The verification status of one user property.
@@ -679,7 +683,10 @@ fn contract_assumptions(property: &Property) -> Result<Vec<AssumptionRecord>, St
     if contracts.is_empty() {
         return Ok(Vec::new());
     }
-    let registry = standard_contract_registry();
+    let registry = match BeaconContractProver::from_env() {
+        Some(prover) => standard_contract_registry_with_prover(&prover),
+        None => standard_contract_registry(),
+    };
     let probe = registry.probe_consumer(
         &property.name,
         CompositeVerdict::Proven,

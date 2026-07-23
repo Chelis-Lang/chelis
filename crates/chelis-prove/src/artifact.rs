@@ -14,6 +14,8 @@ pub enum ProofTier {
     Smt,
     /// Randomized fuzz testing.
     Fuzz,
+    /// Structural induction over recursive definitions.
+    Induction,
 }
 
 /// Verification outcome.
