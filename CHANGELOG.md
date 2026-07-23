@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.17.0] — 2026-07-22
+## [0.17.1] — 2026-07-23
 
 The first cut of the numeric-remediation "loud checking" work: cases that
 used to substitute a plausible value or silently skip checking now fail
