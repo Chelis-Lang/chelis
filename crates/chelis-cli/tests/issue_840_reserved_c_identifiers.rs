@@ -192,3 +192,95 @@ fn eval_still_accepts_a_def_named_double() {
         "eval must compute the right value"
     );
 }
+
+/// chelis#840 review, finding 1: a typed callback PARAMETER named like a
+/// C reserved word must reference the same mangled identifier its
+/// declarator used, at the direct-call site.
+#[test]
+fn a_reserved_callback_parameter_name_stays_consistent_at_the_call_site() {
+    let (source, _dir, out_dir) = c_build_source(
+        "def apply(double: int32 -> int32, x: int32) -> int32 = double(x)\n\
+         def inc(y: int32) -> int32 = add(y, 1)\n\
+         out = print(apply(inc, 41))\n",
+        "kw_cb_param",
+    )
+    .expect("a reserved-word callback parameter must build via the #379 mapping");
+    assert!(
+        source.contains("(*chelis_user__double)"),
+        "the parameter declarator must be mangled:\n{source}"
+    );
+    assert!(
+        !source.contains("= double("),
+        "the call site must not reference the raw C keyword:\n{source}"
+    );
+    if c_toolchain_available() {
+        assert_eq!(link_and_run(&out_dir, "kw_cb_param"), "42");
+    }
+}
+
+/// chelis#840 review, finding 2: two defs landing on the same emitted C
+/// symbol (`double` mangles onto a literal `chelis_user__double`) must
+/// reject loudly instead of emitting a whole-TU redefinition from a
+/// build that reported success.
+#[test]
+fn colliding_user_spelling_of_the_mangled_name_rejects_loudly() {
+    let err = c_build_source(
+        "def double(x: int32) -> int32 = mul(x, 2)\n\
+         def chelis_user__double(x: int32) -> int32 = add(x, 100)\n\
+         out = print(add(double(21), chelis_user__double(0)))\n",
+        "kw_collision",
+    )
+    .expect_err("a duplicate emitted symbol must not report build success");
+    assert!(
+        err.contains("unsupported:") && err.contains("colliding emitted C symbol"),
+        "the rejection must carry the frozen branded shape:\n{err}"
+    );
+    assert!(
+        err.contains("chelis_user__double"),
+        "the diagnostic must name the colliding symbol:\n{err}"
+    );
+}
+
+/// chelis#840 review, finding 2 control: the eval lane still computes
+/// the collision program's value.
+#[test]
+fn eval_still_accepts_the_colliding_spelling_program() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("kw_collision_eval.ch");
+    write_file(
+        &path,
+        "def double(x: int32) -> int32 = mul(x, 2)\n\
+         def chelis_user__double(x: int32) -> int32 = add(x, 100)\n\
+         out = print(add(double(21), chelis_user__double(0)))\n",
+    );
+    let out = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("chelis eval should run");
+    assert!(out.status.success(), "eval accepts both names");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("142"),
+        "eval must compute 142"
+    );
+}
+
+/// chelis#840 review, finding 3: the least/fast stdint families are in
+/// the emitted include set and must mangle like the fixed-width names.
+#[test]
+fn a_def_named_int_fast8_t_builds_with_a_mangled_c_identifier() {
+    let (source, _dir, out_dir) = c_build_source(
+        "def int_fast8_t(x: int32) -> int32 = add(x, 1)\n\
+         out = print(int_fast8_t(41))\n",
+        "kw_fast_typedef",
+    )
+    .expect("a least/fast typedef def name must build via the #379 mapping");
+    assert!(
+        source.contains("chelis_user__int_fast8_t"),
+        "the def must declare and reference through the mangled name:\n{source}"
+    );
+    if c_toolchain_available() {
+        assert_eq!(link_and_run(&out_dir, "kw_fast_typedef"), "42");
+    }
+}
