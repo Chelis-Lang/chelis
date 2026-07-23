@@ -74,11 +74,13 @@ the checker-totality boundary.
 Phase 3 (`DeepTag`) remains open. [#732] Phase 1 landed with Wave 1 (above);
 the remaining Wave 2 set is [#732] Phase 2 (the generated C side: fixes
 [#716]/[#723] outright and gives the refactor its byte-exact instrument) in
-parallel with [#731] Phase 3 and [#730] Phase 2 (the lint ratchets). [#733]'s
-OpenSpec track rides alongside (per the 2026-07-20 re-scope): new
-normative text Waves 1-2 author is born with atom IDs and goes through
-the OpenSpec claim flow; the rev/lint machinery (the re-scoped Phase 1)
-stays deferred.
+parallel with [#731] Phase 3 and [#730] Phase 2 (in PR #799). [#733]
+Phase 1's Buoy shell-side design and fixture preparation may ride alongside:
+OpenSpec still plans new normative text and atom IDs remain stable. The
+executable advisory pilot waits for the selected Buoy revision's standalone
+`devenv test` final oracle and the shell-adapter prerequisites; once admitted,
+it reports malformed authorities and stale registrations without blocking
+existing Chelis commands or coupling `buoy-core` back to Chelis.
 [#732] Phase 2 additionally gates the ECOSYSTEM's compiled-lane
 validation: no shell runs a compiled binary today, and [#754]'s
 cross-lane agreement gate (the mechanism [#738]'s conform row points
