@@ -577,7 +577,7 @@ fn rejected_dtype(precision: Prim, hint: &'static str) -> Unsupported {
 
 fn unsupported_function_value(ty: &ConcreteHostType, context: &'static str) -> Unsupported {
     Unsupported::new(
-        UnsupportedKind::HostType(format!("function value `{ty:?}`")),
+        UnsupportedKind::HostAbi(format!("function value `{ty:?}`")),
         context,
         Stage::Codegen("c"),
         "the C host backend supports typed callback parameters and direct statically-known \
@@ -588,7 +588,7 @@ fn unsupported_function_value(ty: &ConcreteHostType, context: &'static str) -> U
 
 fn unsupported_function_symbol(name: &str) -> Unsupported {
     Unsupported::new(
-        UnsupportedKind::HostType(format!("function value `{name}`")),
+        UnsupportedKind::HostAbi(format!("function value `{name}`")),
         "C host callback argument selection",
         Stage::Codegen("c"),
         "only a declared function symbol or an in-scope typed callback parameter can cross \
@@ -598,7 +598,7 @@ fn unsupported_function_symbol(name: &str) -> Unsupported {
 
 fn unsupported_callable_use(name: &str) -> Unsupported {
     Unsupported::new(
-        UnsupportedKind::HostType(format!("function value `{name}`")),
+        UnsupportedKind::HostAbi(format!("function value `{name}`")),
         "C host ABI callable-use projection",
         Stage::Codegen("c"),
         "the host lowerer did not resolve this application to a declared function symbol or \

@@ -68,14 +68,34 @@ class LoudUnsupportedPhase2OracleTests(unittest.TestCase):
         self.assertIn('Self::Phase2OracleMutation => "phase2-oracle-mutation"', mutated)
         self.assertNotIn("_ =>", mutated.split("impl EffectKind", 1)[1].split("}", 1)[0])
 
+    def test_dtype_mutation_updates_owner_without_a_default_arm(self) -> None:
+        source = (oracle.REPO_ROOT / oracle.VOCAB_SOURCE).read_text(encoding="utf-8")
+        mutated = oracle.mutate_runtime_dtype(source)
+        self.assertNotEqual(mutated, source)
+        self.assertIn("Phase2OracleDType = 9", mutated)
+        self.assertIn("pub const ALL: [Self; 10]", mutated)
+        self.assertIn("9 => Ok(Self::Phase2OracleDType)", mutated)
+        self.assertIn('Self::Phase2OracleDType => "phase2-oracle-dtype"', mutated)
+        self.assertNotIn(
+            "_ =>", mutated.split("impl RuntimeDType", 1)[1].split("\n}\n", 1)[0]
+        )
+
+    def test_dtype_mutation_refuses_a_drifted_owner_shape(self) -> None:
+        source = (oracle.REPO_ROOT / oracle.VOCAB_SOURCE).read_text(encoding="utf-8")
+        drifted = source.replace("8 => Ok(Self::I16),", "8 => Ok(Self::I16), /* moved */")
+        with self.assertRaisesRegex(oracle.OracleFailure, "RuntimeDType owner shape drifted"):
+            oracle.mutate_runtime_dtype(drifted)
+
     def test_controlled_mutation_restores_original_bytes_on_failure(self) -> None:
         source = (oracle.REPO_ROOT / oracle.VOCAB_SOURCE).read_bytes()
         with tempfile.TemporaryDirectory() as raw_dir:
             path = Path(raw_dir) / "lib.rs"
             path.write_bytes(source)
             with self.assertRaisesRegex(RuntimeError, "probe failed"):
-                with oracle.temporary_effect_mutation(path):
-                    self.assertIn("Phase2OracleMutation", path.read_text(encoding="utf-8"))
+                with oracle.temporary_vocab_mutation(path):
+                    mutated = path.read_text(encoding="utf-8")
+                    self.assertIn("Phase2OracleMutation", mutated)
+                    self.assertIn("Phase2OracleDType", mutated)
                     raise RuntimeError("probe failed")
             self.assertEqual(path.read_bytes(), source)
 

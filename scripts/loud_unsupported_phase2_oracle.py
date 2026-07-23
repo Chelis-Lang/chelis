@@ -4,9 +4,12 @@
 This is intentionally one runner rather than a prose conjunction. It executes
 the focused vocabulary/runtime/host-state/ABI/emission/public-API surfaces,
 the two privacy compile-fail doctests, a structural endpoint scan, and a
-controlled added-EffectKind mutation. The endpoint scan rejects the former
-Unit and raw-generic-field escape hatches in addition to the legacy host-type
-and expression-emission endpoints. The mutation touches only the vocabulary
+controlled vocabulary mutation that adds one fully-decodable variant to BOTH
+closed vocabularies (``EffectKind`` and ``RuntimeDType``) in a single
+workspace check, requiring non-exhaustive compile errors at each vocabulary's
+independent consumers. The endpoint scan rejects the former Unit and
+raw-generic-field escape hatches in addition to the legacy host-type and
+expression-emission endpoints. The mutation touches only the vocabulary
 owner, refuses to run over a dirty owner file, and restores the original bytes
 in a ``finally`` block.
 """
@@ -139,12 +142,78 @@ def mutate_effect_kind(source: str) -> str:
             "            }\n",
         ),
     )
+    return apply_anchored_replacements(source, replacements, "EffectKind")
+
+
+def mutate_runtime_dtype(source: str) -> str:
+    """Add one fully-decodable dtype variant so downstream matches go red."""
+
+    replacements = (
+        (
+            "pub enum RuntimeDType {\n"
+            "    F32 = 0,\n"
+            "    F64 = 1,\n"
+            "    I32 = 2,\n"
+            "    Bool = 3,\n"
+            "    I64 = 4,\n"
+            "    Bf16 = 5,\n"
+            "    F16 = 6,\n"
+            "    I8 = 7,\n"
+            "    I16 = 8,\n"
+            "}",
+            "pub enum RuntimeDType {\n"
+            "    F32 = 0,\n"
+            "    F64 = 1,\n"
+            "    I32 = 2,\n"
+            "    Bool = 3,\n"
+            "    I64 = 4,\n"
+            "    Bf16 = 5,\n"
+            "    F16 = 6,\n"
+            "    I8 = 7,\n"
+            "    I16 = 8,\n"
+            "    Phase2OracleDType = 9,\n"
+            "}",
+        ),
+        (
+            "    pub const ALL: [Self; 9] = [\n",
+            "    pub const ALL: [Self; 10] = [\n",
+        ),
+        (
+            "        Self::I16,\n    ];",
+            "        Self::I16,\n        Self::Phase2OracleDType,\n    ];",
+        ),
+        (
+            '            Self::I16 => "int16",\n',
+            '            Self::I16 => "int16",\n'
+            '            Self::Phase2OracleDType => "phase2-oracle-dtype",\n',
+        ),
+        (
+            '            Self::I16 => "CHELIS_I16",\n',
+            '            Self::I16 => "CHELIS_I16",\n'
+            '            Self::Phase2OracleDType => "CHELIS_PHASE2_ORACLE_DTYPE",\n',
+        ),
+        (
+            "            Self::I8 => 1,\n",
+            "            Self::I8 => 1,\n            Self::Phase2OracleDType => 4,\n",
+        ),
+        (
+            "            8 => Ok(Self::I16),\n",
+            "            8 => Ok(Self::I16),\n"
+            "            9 => Ok(Self::Phase2OracleDType),\n",
+        ),
+    )
+    return apply_anchored_replacements(source, replacements, "RuntimeDType")
+
+
+def apply_anchored_replacements(
+    source: str, replacements: tuple[tuple[str, str], ...], owner: str
+) -> str:
     mutated = source
     for old, new in replacements:
         count = mutated.count(old)
         if count != 1:
             raise OracleFailure(
-                "EffectKind owner shape drifted: expected exactly one mutation "
+                f"{owner} owner shape drifted: expected exactly one mutation "
                 f"anchor, found {count}: {old!r}"
             )
         mutated = mutated.replace(old, new, 1)
@@ -152,10 +221,10 @@ def mutate_effect_kind(source: str) -> str:
 
 
 @contextmanager
-def temporary_effect_mutation(path: Path) -> Iterator[None]:
+def temporary_vocab_mutation(path: Path) -> Iterator[None]:
     original = path.read_bytes()
-    mutated = mutate_effect_kind(original.decode("utf-8")).encode("utf-8")
-    path.write_bytes(mutated)
+    mutated_text = mutate_runtime_dtype(mutate_effect_kind(original.decode("utf-8")))
+    path.write_bytes(mutated_text.encode("utf-8"))
     try:
         yield
     finally:
@@ -183,12 +252,15 @@ def assert_vocab_source_clean(env: dict[str, str]) -> None:
         )
 
 
-def run_effect_mutation(env: dict[str, str]) -> None:
+def run_vocab_mutation(env: dict[str, str]) -> None:
     assert_vocab_source_clean(env)
     source_path = REPO_ROOT / VOCAB_SOURCE
     command = ("cargo", "check", "--workspace", "--all-targets", "--keep-going")
-    print(f"+ controlled EffectKind mutation: {command_text(command)}", flush=True)
-    with temporary_effect_mutation(source_path):
+    print(
+        f"+ controlled EffectKind + RuntimeDType mutation: {command_text(command)}",
+        flush=True,
+    )
+    with temporary_vocab_mutation(source_path):
         completed = subprocess.run(
             command,
             cwd=REPO_ROOT,
@@ -200,17 +272,22 @@ def run_effect_mutation(env: dict[str, str]) -> None:
         )
         output = completed.stdout
         if completed.returncode == 0:
-            raise OracleFailure("added EffectKind variant compiled successfully")
+            raise OracleFailure("added closed-vocabulary variants compiled successfully")
         required_evidence = (
             "non-exhaustive patterns",
+            # EffectKind: the two independently-checkable consumer roots.
             "crates/chelis-surf/src/decompile.rs",
             "crates/chelis-types/src/infer.rs",
+            # RuntimeDType: every runtime FFI dtype boundary matches
+            # exhaustively; an added dtype must go red there before any
+            # sizing, allocation, or element-access decision exists for it.
+            "crates/chelis-runtime/src/lib.rs",
         )
         missing = [needle for needle in required_evidence if needle not in output]
         if missing:
             tail = "\n".join(output.splitlines()[-80:])
             raise OracleFailure(
-                "EffectKind mutation failed without the required exhaustive "
+                "vocabulary mutation failed without the required exhaustive "
                 f"consumer evidence {missing}:\n{tail}"
             )
     print("  mutation produced the expected downstream compile failures", flush=True)
@@ -316,7 +393,7 @@ def main() -> int:
         for command in FOCUSED_COMMANDS:
             run_success(command, env=env)
         run_endpoint_scan()
-        run_effect_mutation(env)
+        run_vocab_mutation(env)
     except OracleFailure as error:
         print(f"PHASE 2 ORACLE: FAIL: {error}", file=sys.stderr)
         return 1

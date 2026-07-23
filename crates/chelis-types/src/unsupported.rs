@@ -38,6 +38,13 @@ pub enum UnsupportedKind {
     Construct(String),
     /// A host-lane type that never resolved to a concrete representation.
     HostType(String),
+    /// A fully resolved host-lane value class with no ABI representation
+    /// on the requesting target (the section C6.3 "known logical type
+    /// without target representation" state). Distinct from [`HostType`],
+    /// whose term never resolved at all.
+    ///
+    /// [`HostType`]: UnsupportedKind::HostType
+    HostAbi(String),
 }
 
 impl fmt::Display for UnsupportedKind {
@@ -49,6 +56,9 @@ impl fmt::Display for UnsupportedKind {
             UnsupportedKind::EffectKind(name) => write!(f, "effect kind `{name}`"),
             UnsupportedKind::Construct(what) => write!(f, "{what}"),
             UnsupportedKind::HostType(name) => write!(f, "unresolved host type `{name}`"),
+            UnsupportedKind::HostAbi(name) => {
+                write!(f, "{name} with no target ABI representation")
+            }
         }
     }
 }
@@ -194,6 +204,7 @@ mod tests {
             UnsupportedKind::EffectKind("teleport".into()),
             UnsupportedKind::Construct("a non-literal window list".into()),
             UnsupportedKind::HostType("f16".into()),
+            UnsupportedKind::HostAbi("function value `increment`".into()),
         ];
         for kind in kinds {
             let rendered =

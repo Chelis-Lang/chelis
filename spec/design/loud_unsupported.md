@@ -501,7 +501,12 @@ fragment byte-for-byte with its checked-in artifact.
 The runtime subprocess suite drives every raw dtype argument boundary plus a
 tensor-field read with ID `9` and requires nonzero exit carrying the raw ID.
 The added-dtype mutation oracle requires a compile error at every exhaustive
-consumer until the new representation identity is handled explicitly.
+consumer until the new representation identity is handled explicitly. It is
+executed by the Phase 2 oracle's controlled vocabulary mutation, which adds a
+fully-decodable tenth `RuntimeDType` variant alongside the `EffectKind`
+mutation in one workspace check and requires non-exhaustive-match errors in
+`crates/chelis-runtime/src/lib.rs`, the runtime FFI's exhaustive dtype
+boundary.
 
 ### C6.3 Host-type state and ABI boundary
 
@@ -577,7 +582,10 @@ value-boundary rejection; supported ABI representations; and known logical
 f16/bf16 values rejected by an unimplemented C-host ABI cell. Exact int8/int16
 ABI selection is positive parity because those representations already exist.
 The negative ABI tests assert the structured `UnsupportedKind::Dtype` and
-`Stage::Codegen("c")`, not diagnostic prose alone.
+`Stage::Codegen("c")`, not diagnostic prose alone. Resolved non-scalar value
+classes the target cannot represent (function values) carry the distinct
+`UnsupportedKind::HostAbi`; the unresolved-term `UnsupportedKind::HostType`
+state is never used for a type that did resolve.
 
 ---
 
@@ -775,9 +783,11 @@ specialization, direct/nested field access, callable-value rejection, and
 empty-list failure propagation), exact inline and named callback and
 reduced-float ABI cells, structured-emission and private-ABI compile-fail
 checks, the endpoint scan for unresolved, placeholder-`Unit`, and raw generic
-field escape hatches, and a controlled temporary `EffectKind` variant
-mutation. The mutation must produce non-exhaustive-match errors in independent
-semantic consumers and the runner must restore the owner source byte-for-byte.
+field escape hatches, and a controlled temporary vocabulary mutation that adds
+one fully-decodable variant to each closed vocabulary (`EffectKind` and
+`RuntimeDType`) in a single workspace check. The mutation must produce
+non-exhaustive-match errors in each vocabulary's independent semantic
+consumers and the runner must restore the owner source byte-for-byte.
 The tripwire remains supporting evidence executed by the normal gate; it is
 not a second completion oracle.
 

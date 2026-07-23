@@ -1785,26 +1785,52 @@ pub fn host_program_summary_rejections<T>(program: &HostProgram<T>) -> &[Summary
     &program.summary_rejections
 }
 
-/// Walk a HostExpr and report whether any node is the generic-fallback
-/// `Builtin { name: "call", ... }` that `lower_app_host_expr` emits when
-/// it doesn't recognize the callee. A wrapper containing this node would
-/// emit broken C (`__result = call(...);`) downstream — preferring the
-/// DAG path's inline specialization is safer than emitting that wrapper.
-/// Scan a host program for any function whose body still contains the
-/// `Builtin { name: "call" }` fallback — the lowerer emits this when
-/// it can't recognize the callee (typically `grad(f)(theta)` where the
-/// callee is itself an application). Emitting such a wrapper produces
-/// `__result = call(...)` C code that doesn't link. The CLI uses this
-/// to surface a clean error instead of shipping broken C.
+/// Scan a host program for any function or global whose body still
+/// contains an unresolved call: the generic `Builtin { name: "call" }`
+/// fallback that `lower_app_host_expr` emits when it doesn't recognize
+/// the callee, or an `__unresolved_grad`/`__unresolved_vmap` transform
+/// marker. These sites never reach emission: the C backend's ABI
+/// projection rejects them with the frozen `unsupported:` function-value
+/// diagnostic. The CLI's pre-codegen UX gate prefers
+/// [`host_program_unresolved_transform_sites`] and consults this scan only
+/// for programs that directly apply `grad`/`vmap`, so a plain
+/// callable-value case is not misdescribed as an AD-transform failure.
 pub fn host_program_unresolved_call_sites<T>(program: &HostProgram<T>) -> Vec<String> {
+    host_program_call_name_sites(
+        program,
+        &|name| name == "call" || name.starts_with("__unresolved_"),
+        &|function| function == "call",
+    )
+}
+
+/// Scan a host program for defs whose bodies carry an
+/// `__unresolved_grad`/`__unresolved_vmap` marker builtin: the host lane
+/// recognized an AD transform in a position it could not resolve. Distinct
+/// from the generic `call` fallback of an unresolved callable value, which
+/// earns the frozen function-value diagnostic at ABI projection rather
+/// than AD-transform guidance (chelis#730 Phase 2).
+pub fn host_program_unresolved_transform_sites<T>(program: &HostProgram<T>) -> Vec<String> {
+    // Transform markers are emitted as `Builtin` nodes only; a `Call`
+    // whose function happens to start with `__unresolved_` is a user
+    // identifier, not a marker.
+    host_program_call_name_sites(program, &|name| name.starts_with("__unresolved_"), &|_| {
+        false
+    })
+}
+
+fn host_program_call_name_sites<T>(
+    program: &HostProgram<T>,
+    builtin_matches: &dyn Fn(&str) -> bool,
+    function_matches: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
     let mut out = Vec::new();
     for function in &program.functions {
-        if host_body_has_fallback_call(&function.body) {
+        if host_body_has_call_matching(&function.body, builtin_matches, function_matches) {
             out.push(function.name.clone());
         }
     }
     for binding in &program.globals {
-        if host_body_has_fallback_call(&binding.value) {
+        if host_body_has_call_matching(&binding.value, builtin_matches, function_matches) {
             out.push(binding.name.clone());
         }
     }
@@ -1861,6 +1887,29 @@ pub fn find_direct_builtin_call(program: &CheckedProgram, builtins: &[&str]) -> 
     }
 
     program.exprs().iter().find_map(|expr| find(expr, builtins))
+}
+
+/// Report whether the checked program contains any AD-transform node
+/// (`grad`, `vmap`, or `vmap-grad` Deep tags). After checking, `grad(f)`
+/// is a dedicated tagged node rather than an `app` of a `var`, so a
+/// builtin-call scan cannot detect it; the CLI's pre-codegen UX gate uses
+/// this to reserve the grad/vmap workaround text for programs that
+/// actually apply a transform (chelis#730 Phase 2).
+pub fn checked_program_applies_ad_transform(program: &CheckedProgram) -> bool {
+    fn walk(expr: &Expr) -> bool {
+        match expr {
+            Expr::List(list, _) => {
+                matches!(tag(list), Some("grad" | "vmap" | "vmap-grad"))
+                    || list.elements.iter().any(walk)
+            }
+            Expr::Map(map, _) => map.entries.iter().any(|(_, value)| walk(value)),
+            Expr::MetaExpr(meta, _) => {
+                walk(&meta.expr) || meta.entries.iter().any(|(_, value)| walk(value))
+            }
+            Expr::Atom(_, _) => false,
+        }
+    }
+    program.exprs().iter().any(walk)
 }
 
 fn host_callback_uses_builtin<T>(callback: &HostCallback<T>, builtin: &str) -> bool {
@@ -2380,71 +2429,56 @@ fn host_type_is_unresolved(ty: &HostTypeTerm) -> bool {
     ty.is_unresolved()
 }
 
-fn host_body_has_fallback_call<T>(expr: &HostExpr<T>) -> bool {
+fn host_body_has_call_matching<T>(
+    expr: &HostExpr<T>,
+    builtin_matches: &dyn Fn(&str) -> bool,
+    function_matches: &dyn Fn(&str) -> bool,
+) -> bool {
+    let recurse =
+        |e: &HostExpr<T>| host_body_has_call_matching(e, builtin_matches, function_matches);
     match &expr.kind {
         HostExprKind::Builtin { name, args, .. } => {
-            name == "call"
-                || name.starts_with("__unresolved_")
-                || args.iter().any(host_body_has_fallback_call)
+            builtin_matches(name) || args.iter().any(recurse)
         }
         HostExprKind::Call { function, args, .. } => {
-            function == "call" || args.iter().any(host_body_has_fallback_call)
+            function_matches(function) || args.iter().any(recurse)
         }
         HostExprKind::Let { bindings, body, .. } => {
-            bindings
-                .iter()
-                .any(|b| host_body_has_fallback_call(&b.value))
-                || host_body_has_fallback_call(body)
+            bindings.iter().any(|b| recurse(&b.value)) || recurse(body)
         }
         HostExprKind::If {
             cond,
             then_expr,
             else_expr,
             ..
-        } => {
-            host_body_has_fallback_call(cond)
-                || host_body_has_fallback_call(then_expr)
-                || host_body_has_fallback_call(else_expr)
-        }
-        HostExprKind::Tuple(items, _) | HostExprKind::List(items, _) => {
-            items.iter().any(host_body_has_fallback_call)
-        }
+        } => recurse(cond) || recurse(then_expr) || recurse(else_expr),
+        HostExprKind::Tuple(items, _) | HostExprKind::List(items, _) => items.iter().any(recurse),
         HostExprKind::Map { list, .. }
         | HostExprKind::Filter { list, .. }
         | HostExprKind::Fold { list, .. }
         | HostExprKind::Scan { list, .. }
         | HostExprKind::Partition { list, .. }
-        | HostExprKind::FlatMap { list, .. } => host_body_has_fallback_call(list),
-        HostExprKind::TensorCall { args, .. } => args.iter().any(host_body_has_fallback_call),
-        HostExprKind::AdtFieldAccess { base, .. } => host_body_has_fallback_call(base),
+        | HostExprKind::FlatMap { list, .. } => recurse(list),
+        HostExprKind::TensorCall { args, .. } => args.iter().any(recurse),
+        HostExprKind::AdtFieldAccess { base, .. } => recurse(base),
         HostExprKind::MatchOption {
             scrutinee,
             some_expr,
             none_expr,
             ..
-        } => {
-            host_body_has_fallback_call(scrutinee)
-                || host_body_has_fallback_call(some_expr)
-                || host_body_has_fallback_call(none_expr)
-        }
+        } => recurse(scrutinee) || recurse(some_expr) || recurse(none_expr),
         HostExprKind::MatchAdt {
             scrutinee,
             arms,
             default_expr,
             ..
         } => {
-            host_body_has_fallback_call(scrutinee)
-                || arms
-                    .iter()
-                    .any(|arm| host_body_has_fallback_call(&arm.expr))
-                || default_expr
-                    .as_ref()
-                    .is_some_and(|d| host_body_has_fallback_call(d))
+            recurse(scrutinee)
+                || arms.iter().any(|arm| recurse(&arm.expr))
+                || default_expr.as_ref().is_some_and(|d| recurse(d))
         }
-        HostExprKind::AdtConstruct { fields, .. } => fields.iter().any(host_body_has_fallback_call),
-        HostExprKind::WithSeed { seed, body, .. } => {
-            host_body_has_fallback_call(seed) || host_body_has_fallback_call(body)
-        }
+        HostExprKind::AdtConstruct { fields, .. } => fields.iter().any(recurse),
+        HostExprKind::WithSeed { seed, body, .. } => recurse(seed) || recurse(body),
         _ => false,
     }
 }
@@ -10787,5 +10821,87 @@ mod tests {
             "user-facing symbolic sizes are not synthetic and must not \
              be rewritten"
         );
+    }
+
+    fn program_with_global_builtin(builtin: &str) -> HostProgram {
+        let mut program = HostProgram::default();
+        program.globals.push(HostBinding {
+            name: "probe".into(),
+            display_name: None,
+            ty: HostTypeTerm::Unit,
+            value: HostExpr::new(HostExprKind::Builtin {
+                name: builtin.into(),
+                args: Vec::new(),
+                ty: HostTypeTerm::Unit,
+            }),
+        });
+        program
+    }
+
+    /// The AD-transform classifier must separate `__unresolved_grad`
+    /// markers (grad/vmap UX text) from the generic `call` fallback of an
+    /// unresolved callable value (frozen ABI-projection diagnostic).
+    #[test]
+    fn transform_sites_exclude_the_generic_call_fallback() {
+        let call_fallback = program_with_global_builtin("call");
+        assert_eq!(
+            host_program_unresolved_call_sites(&call_fallback),
+            vec!["probe".to_string()]
+        );
+        assert!(host_program_unresolved_transform_sites(&call_fallback).is_empty());
+
+        let grad_marker = program_with_global_builtin("__unresolved_grad");
+        assert_eq!(
+            host_program_unresolved_call_sites(&grad_marker),
+            vec!["probe".to_string()]
+        );
+        assert_eq!(
+            host_program_unresolved_transform_sites(&grad_marker),
+            vec!["probe".to_string()]
+        );
+    }
+
+    /// A user identifier that merely spells the marker prefix in `Call`
+    /// position is not a transform marker.
+    #[test]
+    fn transform_sites_ignore_marker_spelled_user_calls() {
+        let mut program = HostProgram::default();
+        program.globals.push(HostBinding {
+            name: "probe".into(),
+            display_name: None,
+            ty: HostTypeTerm::Unit,
+            value: HostExpr::new(HostExprKind::Call {
+                function: "__unresolved_x".into(),
+                args: Vec::new(),
+                arg_tys: Vec::new(),
+                ty: HostTypeTerm::Unit,
+            }),
+        });
+        assert!(host_program_unresolved_transform_sites(&program).is_empty());
+    }
+
+    /// `grad` is a Deep tag after checking; the AD-transform detector
+    /// must see it where a builtin-call scan cannot, and stay quiet on
+    /// programs without a transform.
+    #[test]
+    fn ad_transform_detector_matches_tags_not_builtin_calls() {
+        let with_grad = surf_check(
+            "def sumsq(theta: f32) -> f32 = mul(theta, theta)\n\
+             def gradient(theta: f32) -> f32 = grad(sumsq)(theta)\n\
+             out = print(gradient(3.0))\n",
+        );
+        assert!(checked_program_applies_ad_transform(&with_grad));
+        assert_eq!(
+            find_direct_builtin_call(&with_grad, &["grad", "vmap"]),
+            None,
+            "the builtin-call scan cannot see tag-form transforms; if this \
+             starts matching, the detector split can be revisited"
+        );
+
+        let without = surf_check(
+            "def double_it(x: f32) -> f32 = mul(x, 2.0)\n\
+             out = print(double_it(3.0))\n",
+        );
+        assert!(!checked_program_applies_ad_transform(&without));
     }
 }
