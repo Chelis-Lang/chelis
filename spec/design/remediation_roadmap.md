@@ -392,6 +392,8 @@ the capability table's seed decisions, or by being closed.
 | [#794] | `.dp`-reachable lowering-side value substitutions the PR #793 red team confirmed: `extract_f64_value`'s catch-all folds a `(par ...)` bound's FIRST child (spec/03 says last), and `extract_usize_value` silently maps a negative `.dp` int64 seed to 0 | [#730] census extension rows. The checker side is already closed (PR #793 narrowed its accept-set to `lit` and rejects negative literal seeds), so both are checker-unreachable today - the lowering fix is defense-in-depth per §C1.4 |
 | [#795] | conv2d's present-but-non-literal stride/padding fall to `unwrap_or(1)`/`unwrap_or(0)` in lower.rs (the [#776] value-default shape; census row 23, discovered in [#730] Phase 1's sweep) | [#730] census row 23; liveness honestly not-execution-confirmed (the checker's shape rules may cover it) - §C1.4 raise-or-prove; tripwire-baselined interim |
 | [#796] | compiled-lane `test_*` assertion builtins: pre-[#730]-P1 binaries compiled assertions to inert `0` stubs (could never fail); now loudly rejected | op-owner work: real C emission arms, or an authored eval-only contract + an earlier gate; surfaced by [#730] Phase 1's bucket3 adjudication |
+| [#840] | `chelis build` reports success but emits non-compiling C for defs named after C keywords (`double`, `long`, ...) - the identifier cousin of [#751] | standalone `chelis-backend-c` emission fix at the `CIdentifier`/`EmittedExpr` chokepoint (mangle or reject loudly, never uncompilable C from exit 0); joins [#751]/[#761] in [#763]'s corpus curation; found by the PR [#799] red team (F2), likely pre-existing |
+| [#841] | host lowering's in-band `call`/`__unresolved_*` string sentinels collide with legal user identifiers and freeze wrong-reason diagnostics (fail-closed, but violates the supported-neighbor discipline) | [#730] family; durable fix is a typed marker vocabulary (the [#731] Phase 2 `ErrorWitness` shape, sequenced after PR #800); natural moment [#730] Phase 3's gate dedupe; found by the PR [#799] red team (F3) |
 
 Also tracked to closure but already claimed (listed for completeness):
 [#680]/[#684]/[#685]/[#686]/[#688] -> [#729]; [#682]/[#692]/[#697]/[#698]/[#699]/[#704]/[#705]/[#725] ->
@@ -556,3 +558,5 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#796]: https://github.com/Chelis-Lang/chelis/issues/796
 [#799]: https://github.com/Chelis-Lang/chelis/pull/799
 [#815]: https://github.com/Chelis-Lang/chelis/pull/815
+[#840]: https://github.com/Chelis-Lang/chelis/issues/840
+[#841]: https://github.com/Chelis-Lang/chelis/issues/841

@@ -2589,7 +2589,22 @@ fn cmd_build(
                     || dag.roots().is_empty()
                     || !host_program.functions.is_empty())
             {
-                let unresolved = chelis_ir::host::host_program_unresolved_call_sites(host_program);
+                // AD-transform UX only: the grad/vmap workaround text fires
+                // for defs carrying an `__unresolved_grad`/`__unresolved_vmap`
+                // marker, or for any unresolved site in a program that
+                // directly applies `grad`/`vmap` (grad through host-lane
+                // fold/map lowers to the generic fallback). A program with
+                // NEITHER transform falls through to `codegen_host_program`,
+                // whose ABI projection rejects the unresolved callable value
+                // with the frozen `unsupported:` diagnostic; both public
+                // surfaces then agree (chelis#730).
+                let mut unresolved =
+                    chelis_ir::host::host_program_unresolved_transform_sites(host_program);
+                if unresolved.is_empty()
+                    && chelis_ir::host::checked_program_applies_ad_transform(&checked)
+                {
+                    unresolved = chelis_ir::host::host_program_unresolved_call_sites(host_program);
+                }
                 if !unresolved.is_empty() {
                     return Err(format!(
                         "`chelis build --target c` can't lower these defs. Their body \
@@ -2846,7 +2861,17 @@ fn cmd_build_deep(
                     || dag.roots().is_empty()
                     || !host_program.functions.is_empty())
             {
-                let unresolved = chelis_ir::host::host_program_unresolved_call_sites(host_program);
+                // Same split as the Surf lane: grad/vmap workaround text for
+                // transform markers or grad/vmap-applying programs; other
+                // unresolved callable values reach ABI projection's frozen
+                // diagnostic instead.
+                let mut unresolved =
+                    chelis_ir::host::host_program_unresolved_transform_sites(host_program);
+                if unresolved.is_empty()
+                    && chelis_ir::host::checked_program_applies_ad_transform(&checked)
+                {
+                    unresolved = chelis_ir::host::host_program_unresolved_call_sites(host_program);
+                }
                 if !unresolved.is_empty() {
                     return Err(format!(
                         "`chelis build --deep --target c` can't lower these defs: \

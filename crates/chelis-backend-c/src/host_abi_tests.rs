@@ -75,6 +75,10 @@ fn first_class_function_type_has_no_general_c_host_value_abi() {
     let error = HostAbiType::try_from_concrete(&function)
         .expect_err("function values must not acquire an opaque C representation");
     assert_eq!(error.stage, Stage::Codegen("c"));
-    assert!(matches!(error.what, UnsupportedKind::HostType(_)));
+    // The type RESOLVED; the C target has no ABI for it. That is the
+    // `HostAbi` state, never the unresolved `HostType` state (chelis#730
+    // Phase 2 red team, finding F5).
+    assert!(matches!(error.what, UnsupportedKind::HostAbi(_)));
     assert!(error.to_string().contains("function value"));
+    assert!(!error.to_string().contains("unresolved"));
 }
