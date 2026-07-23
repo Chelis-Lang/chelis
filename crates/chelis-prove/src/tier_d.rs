@@ -70,9 +70,7 @@ pub enum InductionResult {
         base_failure: String,
     },
     /// The property is not amenable to structural induction.
-    NotAmenable {
-        reason: String,
-    },
+    NotAmenable { reason: String },
     /// Inconclusive — could not determine structural recursion pattern.
     Inconclusive,
 }
@@ -123,9 +121,7 @@ pub enum RecursionClass {
         parameter: String,
     },
     /// Not structurally recursive in the sense this tier handles.
-    NonStructural {
-        reason: String,
-    },
+    NonStructural { reason: String },
 }
 
 /// Attempt structural induction on a property.
@@ -173,12 +169,8 @@ pub fn attempt_induction(
     };
 
     // Phase 2: Verify step case (P(k) => P(k+1))
-    let step_result = verify_step_case(
-        property_source,
-        property_name,
-        &induction_variable,
-        options,
-    );
+    let step_result =
+        verify_step_case(property_source, property_name, &induction_variable, options);
     let step_case = match step_result {
         CaseResult::Proved(case) => case,
         CaseResult::Failed(reason) => {
@@ -250,9 +242,8 @@ fn verify_step_case(
 ) -> CaseResult {
     CaseResult::Proved(InductionCase {
         method: "stub@step".to_string(),
-        evidence:
-            "step case P(k)=>P(k+1) ASSUMED (stub: not yet wired to tier_b/tier_c dispatch)"
-                .to_string(),
+        evidence: "step case P(k)=>P(k+1) ASSUMED (stub: not yet wired to tier_b/tier_c dispatch)"
+            .to_string(),
     })
 }
 

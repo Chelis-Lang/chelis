@@ -494,9 +494,7 @@ fn fuzz_quantile_range(samples: usize, seed: u64) -> FuzzOutcome {
     for i in 0..samples {
         // Generate a random data vector of size 3-8 and a quantile level
         let n = 3 + (rng.next_unit() * 5.0) as usize;
-        let data: Vec<f64> = (0..n)
-            .map(|_| (rng.next_unit() - 0.5) * 20.0)
-            .collect();
+        let data: Vec<f64> = (0..n).map(|_| (rng.next_unit() - 0.5) * 20.0).collect();
         let q = rng.next_unit();
         let result = concrete_eval::quantile_linear_pub(&data, q);
         let min_val = data.iter().copied().fold(f64::INFINITY, f64::min);
@@ -531,9 +529,7 @@ fn fuzz_quantile_monotonicity(samples: usize, seed: u64) -> FuzzOutcome {
     let mut max_error = 0.0_f64;
     for i in 0..samples {
         let n = 3 + (rng.next_unit() * 5.0) as usize;
-        let data: Vec<f64> = (0..n)
-            .map(|_| (rng.next_unit() - 0.5) * 20.0)
-            .collect();
+        let data: Vec<f64> = (0..n).map(|_| (rng.next_unit() - 0.5) * 20.0).collect();
         let a = rng.next_unit();
         let b = rng.next_unit();
         let (p, q) = if a <= b { (a, b) } else { (b, a) };
@@ -567,9 +563,7 @@ fn fuzz_quantile_boundary(samples: usize, seed: u64) -> FuzzOutcome {
     let mut max_error = 0.0_f64;
     for i in 0..samples {
         let n = 3 + (rng.next_unit() * 5.0) as usize;
-        let data: Vec<f64> = (0..n)
-            .map(|_| (rng.next_unit() - 0.5) * 20.0)
-            .collect();
+        let data: Vec<f64> = (0..n).map(|_| (rng.next_unit() - 0.5) * 20.0).collect();
         let min_val = data.iter().copied().fold(f64::INFINITY, f64::min);
         let max_val = data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         let q0 = concrete_eval::quantile_linear_pub(&data, 0.0);

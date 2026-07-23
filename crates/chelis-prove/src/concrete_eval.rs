@@ -284,12 +284,12 @@ fn quantile_linear(data: &[f64], q: f64) -> f64 {
 }
 
 /// Public accessor for use by the contract fuzz validation (contracts.rs).
-pub fn quantile_linear_pub(data: &[f64], q: f64) -> f64 {
+pub(crate) fn quantile_linear_pub(data: &[f64], q: f64) -> f64 {
     quantile_linear_impl(data, q)
 }
 
 fn quantile_linear_impl(data: &[f64], q: f64) -> f64 {
-    if data.is_empty() || q.is_nan() || q < 0.0 || q > 1.0 {
+    if data.is_empty() || q.is_nan() || !(0.0..=1.0).contains(&q) {
         return f64::NAN;
     }
     let n = data.len();
@@ -523,10 +523,7 @@ mod tests {
     fn erf_zero_is_zero() {
         let e = SmtExpr::Apply("erf".into(), vec![SmtExpr::RealLit(0.0)]);
         let result = eval_arith(&e, &env(&[]));
-        assert!(
-            result.abs() < 1e-6,
-            "erf(0) should be ≈0, got {result}"
-        );
+        assert!(result.abs() < 1e-6, "erf(0) should be ≈0, got {result}");
     }
 
     #[test]
@@ -559,7 +556,8 @@ mod tests {
             let r_neg = eval_arith(&neg, &env(&[]));
             assert!(
                 (r_pos + r_neg).abs() < 1e-7,
-                "erf({x}) + erf(-{x}) should be 0, got {}", r_pos + r_neg
+                "erf({x}) + erf(-{x}) should be 0, got {}",
+                r_pos + r_neg
             );
         }
     }
@@ -609,7 +607,10 @@ mod tests {
             assert!(
                 results[i] > results[i - 1],
                 "normal_cdf must be monotone: Φ({}) = {} should be > Φ({}) = {}",
-                vals[i], results[i], vals[i - 1], results[i - 1]
+                vals[i],
+                results[i],
+                vals[i - 1],
+                results[i - 1]
             );
         }
     }
