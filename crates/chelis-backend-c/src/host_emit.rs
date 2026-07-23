@@ -412,6 +412,7 @@ pub(crate) fn emit_host_abi_program(
     // linker.
     let internal_linkage = !program.globals.is_empty();
     let emitted_names = emitted_function_names(program, program_name);
+    reject_duplicate_emitted_function_names(&emitted_names)?;
     let function_specializations = function_specializations(program);
     let returns_arg = analyze_returns_arg(program);
     let header = emit_host_header_with_linkage(program, program_name, internal_linkage)?;
@@ -556,6 +557,44 @@ fn emitted_function_name(program_name: &str, function_name: &str) -> String {
         // `chelis_user__double` instead of emitting a C keyword verbatim.
         c_ident(function_name).into_owned()
     }
+}
+
+/// Reject the program when two defs land on the same emitted C symbol
+/// (chelis#840 review, finding 2): the `chelis_user__` mapping is not
+/// collision-free, so `def double` next to `def chelis_user__double`
+/// would otherwise emit a whole-TU symbol redefinition from a build that
+/// reported success.
+fn reject_duplicate_emitted_function_names(
+    emitted_names: &HashMap<String, String>,
+) -> Result<(), Unsupported> {
+    let mut by_emitted: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (original, emitted) in emitted_names {
+        by_emitted.entry(emitted).or_default().push(original);
+    }
+    let mut collisions: Vec<String> = by_emitted
+        .into_iter()
+        .filter(|(_, originals)| originals.len() > 1)
+        .map(|(emitted, mut originals)| {
+            originals.sort_unstable();
+            format!("`{}` (from `{}`)", emitted, originals.join("`, `"))
+        })
+        .collect();
+    if collisions.is_empty() {
+        return Ok(());
+    }
+    collisions.sort();
+    Err(Unsupported::new(
+        UnsupportedKind::Construct(format!(
+            "colliding emitted C symbol{} {}",
+            if collisions.len() == 1 { "" } else { "s" },
+            collisions.join(", ")
+        )),
+        "C host identifier emission",
+        Stage::Codegen("c"),
+        "the reserved-word mapping prefixes with `chelis_user__` and cannot disambiguate a \
+         definition that literally spells the mangled name; rename one definition \
+         (chelis#840)",
+    ))
 }
 
 fn emitted_function_names(program: &HostProgram, program_name: &str) -> HashMap<String, String> {
@@ -4079,10 +4118,15 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{}{target} = {}({});",
             self.indent,
+            // A def resolves through the emitted-name map; anything else
+            // (a typed callback parameter, a local binding) was declared
+            // through `c_ident`, so the reference must take the same
+            // mapping or a reserved-word name diverges from its
+            // declarator (chelis#840 review, finding 1).
             self.emitted_names
                 .get(function)
-                .map(String::as_str)
-                .unwrap_or(function),
+                .map(|name| std::borrow::Cow::Borrowed(name.as_str()))
+                .unwrap_or_else(|| c_ident(function)),
             arg_vars.join(", ")
         ));
         self.retain_call_escaped_args(target, function, args, ty);
@@ -4788,12 +4832,13 @@ impl<'a> HostEmitter<'a> {
                     "{}{target} = {}({});",
                     self.indent,
                     // chelis#840: same original-to-emitted mapping as
-                    // `assign_call`, so a mangled or renamed def is
-                    // referenced consistently from callback position.
+                    // `assign_call`, with the same `c_ident` fallback so a
+                    // reserved-word callback PARAMETER referenced by name
+                    // matches its mangled declarator.
                     self.emitted_names
                         .get(function)
-                        .map(String::as_str)
-                        .unwrap_or(function),
+                        .map(|name| std::borrow::Cow::Borrowed(name.as_str()))
+                        .unwrap_or_else(|| c_ident(function)),
                     arg_vars.join(", ")
                 ));
             }
@@ -5299,10 +5344,11 @@ const C_RESERVED_WORDS: &[&str] = &[
     "xor",
     // The generated entry point
     "main",
-    // Typedefs and macros the emitted translation unit includes via
-    // stdint/stddef and the chelis runtime headers (chelis#840): a user
-    // def, binding, or parameter spelled like one of these shadows or
-    // redefines the typedef and the C cannot compile.
+    // Typedefs and macros live in the emitted translation unit's include
+    // set (stdbool/stdint/stdio/stdlib/string plus assert/math, with
+    // stddef arriving transitively; `ssize_t` is POSIX) - chelis#840: a
+    // user def, binding, or parameter spelled like one of these shadows
+    // or redefines the typedef and the C cannot compile.
     "int8_t",
     "int16_t",
     "int32_t",
@@ -5319,11 +5365,33 @@ const C_RESERVED_WORDS: &[&str] = &[
     "ssize_t",
     "ptrdiff_t",
     "offsetof",
+    "sig_atomic_t",
+    "int_least8_t",
+    "int_least16_t",
+    "int_least32_t",
+    "int_least64_t",
+    "uint_least8_t",
+    "uint_least16_t",
+    "uint_least32_t",
+    "uint_least64_t",
+    "int_fast8_t",
+    "int_fast16_t",
+    "int_fast32_t",
+    "int_fast64_t",
+    "uint_fast8_t",
+    "uint_fast16_t",
+    "uint_fast32_t",
+    "uint_fast64_t",
 ];
 
 /// Prefix applied to a user identifier that would otherwise be illegal or
-/// colliding in emitted C. The double underscore keeps it distinct from
-/// any plausible user name and from the runtime's `chelis_*` symbols.
+/// colliding in emitted C. The double underscore keeps it out of the
+/// runtime's `chelis_*` symbol space, but the mapping is not
+/// collision-free: a user name that literally spells `chelis_user__<kw>`
+/// lands on the same emitted symbol as a mangled `<kw>`. Def-level
+/// duplicates are detected and rejected loudly before emission
+/// (chelis#840); parameter/binding-level duplicates remain a documented
+/// #379 limit.
 const C_USER_IDENT_PREFIX: &str = "chelis_user__";
 
 /// Map a Chelis identifier to a legal, collision-free C identifier (#379).
