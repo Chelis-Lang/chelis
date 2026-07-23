@@ -22,6 +22,14 @@
 //! unknown type name) silent holes JOIN here, now that the `ErrorWitness`
 //! migration has made their sites `report(...)` diagnostics -- the property
 //! they assert (score < 1.0) is one the tree now has.
+//!
+//! Membership (chelis#833): declaration-only ill-typed programs
+//! (`total_nodes == 0`, e.g. a duplicate `deftype` / `defsig` / `typealias`).
+//! The Phase 1 corpus asserted every member below 1.0 but every member had a
+//! runtime body, so the `total_nodes == 0` regime -- where the coverage
+//! components are all vacuously 1.0 -- went uncovered while `chelis check`
+//! scored those programs a dishonest 1.0. Covered by the §C4.4 honesty cap in
+//! `chelis_types::fitness`.
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -244,6 +252,38 @@ fn malformed_dp_forms_score_below_one() {
                  (lit {type: (t-prim {} f32)} 2.5) (lit {type: (t-prim {} f32)} 9.0))",
             ),
             ".dp",
+        ),
+    ];
+    assert_below_one(&cases);
+}
+
+/// chelis#833 regression: declaration-only ill-typed programs
+/// (`total_nodes == 0`). These are the fitness-honesty regime the Phase 1
+/// corpus missed: with no runtime nodes, every coverage component is
+/// vacuously 1.0, so a declaration-level diagnostic (a duplicate
+/// `deftype` / `defsig` / `typealias`) let the weighted score read a
+/// perfect 1.0 while the error was reported and the exit code was 2. The
+/// §C4.4 honesty cap in `chelis_types::fitness` closes it; every member
+/// here must score strictly below 1.0.
+#[test]
+fn declaration_only_known_bad_programs_score_below_one() {
+    let cases: Vec<(&str, String, &str)> = vec![
+        (
+            "dup_deftype",
+            "(deftype {} Foo () (variant {} Foo)) (deftype {} Foo () (variant {} Foo))".to_string(),
+            ".dp",
+        ),
+        (
+            "dup_defsig",
+            "(defsig {} foo (t-fn {} (t-prim {} int32) (t-prim {} int32))) \
+             (defsig {} foo (t-fn {} (t-prim {} int32) (t-prim {} int32)))"
+                .to_string(),
+            ".dp",
+        ),
+        (
+            "dup_typealias",
+            "type Foo = f32\ntype Foo = int32\n".to_string(),
+            ".ch",
         ),
     ];
     assert_below_one(&cases);

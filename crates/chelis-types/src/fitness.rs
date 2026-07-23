@@ -12,6 +12,40 @@ const W_STRUCTURE: f64 = 0.1;
 const W_NAMES: f64 = 0.2;
 const W_TYPES: f64 = 0.6;
 
+/// Backstop upper bound for the §C4.4 fitness-honesty invariant: the
+/// strict ceiling a score is forced to if a diagnostic was reported but
+/// the weighted components still sum to a perfect 1.0. See
+/// [`weighted_score`]. The primary honesty signal is the `types`
+/// component, which scores 0.0 for a runtime-nodeless failed unit
+/// (chelis#833); this ceiling only guards the residual case where every
+/// runtime node typed individually yet a declaration-level diagnostic was
+/// still pushed (reachable through the non-IR `check_program` path).
+const HONEST_ERROR_CEILING: f64 = 0.99;
+
+/// Weighted component sum, subject to the §C4.4 fitness-honesty invariant
+/// (spec/design/checker_totality.md, open question 4 / chelis#731;
+/// regression chelis#833): a non-empty error vector forces the score
+/// strictly below 1.0, independent of node counts.
+///
+/// A declaration-level error on a program with no runtime nodes -- a
+/// duplicate `deftype` / `defsig` / `typealias` yields `total_nodes == 0`
+/// -- is scored honestly upstream by driving the `types` component to 0.0
+/// (see [`FitnessReport::from_infer_result_with_structure`] and
+/// [`check_ir_program`]), so such a unit lands near 0.4 rather than a
+/// vacuous 1.0. This function is the final backstop: if some residual path
+/// still sums to 1.0 with a reported error, cap it strictly below 1.0.
+fn weighted_score(components: &FitnessComponents, has_errors: bool) -> f64 {
+    let raw = W_PARSE * components.parse
+        + W_STRUCTURE * components.structure
+        + W_NAMES * components.names
+        + W_TYPES * components.types;
+    if has_errors && raw >= 1.0 {
+        HONEST_ERROR_CEILING
+    } else {
+        raw
+    }
+}
+
 /// Full fitness report for a compilation attempt.
 #[derive(Debug, Clone)]
 pub struct FitnessReport {
@@ -72,14 +106,28 @@ impl FitnessReport {
             1.0 - (unbound_count as f64 / total as f64).min(1.0)
         };
 
-        // Types: fraction of nodes that typed successfully.
+        // Types: fraction of nodes that typed successfully. With no runtime
+        // nodes there is no coverage fraction: a clean program is vacuously
+        // fully typed (1.0), but a reported declaration-level error (a
+        // duplicate `deftype` / `defsig` / `typealias`) means type checking
+        // failed with nothing salvageable, so it scores 0.0 rather than a
+        // vacuous 1.0 (chelis#833 / §C4.4).
         let types = if result.total_nodes == 0 {
-            1.0
+            if result.errors.is_empty() { 1.0 } else { 0.0 }
         } else {
             result.typed_nodes as f64 / result.total_nodes as f64
         };
 
-        let score = W_PARSE * parse + W_STRUCTURE * structure + W_NAMES * names + W_TYPES * types;
+        let components = FitnessComponents {
+            parse,
+            structure,
+            names,
+            types,
+        };
+        // §C4.4 (chelis#833): a reported error forces score < 1.0 even when
+        // the coverage components sum to a perfect 1.0 (declaration-only
+        // failures have no runtime node to lower `types`).
+        let score = weighted_score(&components, !result.errors.is_empty());
 
         // Collect unresolved names from UnboundVariable errors
         let unresolved_names: Vec<String> = result
@@ -95,12 +143,7 @@ impl FitnessReport {
 
         FitnessReport {
             score,
-            components: FitnessComponents {
-                parse,
-                structure,
-                names,
-                types,
-            },
+            components,
             errors: result.errors.clone(),
             typed_nodes: result.typed_nodes,
             untyped_nodes: result.total_nodes.saturating_sub(result.typed_nodes),
@@ -152,15 +195,17 @@ pub fn check_ir_program(exprs: &[chelis_deep::Expr]) -> FitnessReport {
 
     report.typed_nodes = effective_typed;
     report.untyped_nodes = effective_untyped;
+    // This branch is only reached with a non-empty error vector (the clean
+    // case returned above). A runtime-nodeless unit here therefore failed to
+    // type at declaration level, so its `types` component is 0.0, not a
+    // vacuous 1.0 (chelis#833 / §C4.4) -- the score lands near 0.4 rather
+    // than a near-perfect ceiling.
     report.components.types = if report.total_nodes == 0 {
-        1.0
+        0.0
     } else {
         effective_typed as f64 / report.total_nodes as f64
     };
-    report.score = W_PARSE * report.components.parse
-        + W_STRUCTURE * report.components.structure
-        + W_NAMES * report.components.names
-        + W_TYPES * report.components.types;
+    report.score = weighted_score(&report.components, !report.errors.is_empty());
 
     report
 }
@@ -341,5 +386,74 @@ mod tests {
         assert!(!r.errors.is_empty(), "{r:?}");
         assert!(r.score < 1.0, "{r:?}");
         assert!(r.untyped_nodes > 0, "{r:?}");
+    }
+
+    /// chelis#833 / §C4.4: a duplicate `deftype` is a declaration-level error
+    /// with NO runtime nodes (`total_nodes == 0`). Every coverage component is
+    /// vacuously 1.0, so before the honesty cap the weighted sum read a
+    /// perfect 1.0 while the `DuplicateDefinition` error was in the vector.
+    #[test]
+    fn declaration_only_error_forces_score_below_one_ir() {
+        let exprs = chelis_deep::parser::parse_str(
+            "(deftype {} Foo () (variant {} Foo)) (deftype {} Foo () (variant {} Foo))",
+        )
+        .unwrap();
+        let r = check_ir_program(&exprs);
+        assert!(!r.errors.is_empty(), "duplicate deftype must report: {r:?}");
+        assert_eq!(
+            r.total_nodes, 0,
+            "a declaration-only program has no runtime nodes: {r:?}"
+        );
+        // types is 0.0 (type-check failed), so the score is the residual
+        // parse+structure+names weight only: at most 0.1+0.1+0.2 = 0.4, well
+        // below both 1.0 and the 0.99 backstop ceiling.
+        assert!(
+            r.score < 0.5,
+            "a declaration-level failure must score near 0.4, not near 1.0, got {}",
+            r.score
+        );
+    }
+
+    /// The non-IR `check_program` path must honor the same invariant.
+    #[test]
+    fn declaration_only_error_forces_score_below_one_non_ir() {
+        let exprs = chelis_deep::parser::parse_str(
+            "(deftype {} Foo () (variant {} Foo)) (deftype {} Foo () (variant {} Foo))",
+        )
+        .unwrap();
+        let r = check_program(&exprs);
+        assert!(!r.errors.is_empty(), "{r:?}");
+        assert!(r.score < 0.5, "got {}", r.score);
+    }
+
+    /// Positive parity: a well-formed declaration-only program (empty error
+    /// vector) is unaffected by the honesty fix and still scores a clean 1.0.
+    #[test]
+    fn clean_declaration_only_program_still_scores_one() {
+        let exprs = chelis_deep::parser::parse_str("(deftype {} Foo () (variant {} Foo))").unwrap();
+        let r = check_ir_program(&exprs);
+        assert!(r.errors.is_empty(), "{r:?}");
+        assert!((r.score - 1.0).abs() < 1e-9, "got {}", r.score);
+    }
+
+    /// The cap must not flatten an already-honest sub-1.0 score: a program
+    /// with runtime nodes and a type error keeps its coverage-based score
+    /// (which is below the ceiling), proving the cap only rescues the
+    /// degenerate perfect-sum case rather than overwriting calibration.
+    #[test]
+    fn honesty_cap_leaves_coverage_scored_failures_untouched() {
+        let exprs = chelis_deep::parser::parse_str(
+            "(def {} f (app {} (var {} add) (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} bool)} true)))",
+        )
+        .unwrap();
+        let r = check_ir_program(&exprs);
+        assert!(!r.errors.is_empty(), "{r:?}");
+        assert!(r.total_nodes > 0, "{r:?}");
+        assert!(
+            r.score < HONEST_ERROR_CEILING,
+            "coverage score for this program is below the ceiling, so the cap \
+             did not manufacture it: got {}",
+            r.score
+        );
     }
 }
