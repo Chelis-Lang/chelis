@@ -160,16 +160,70 @@ class RetryTests(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
 
 
+class TimeoutTests(unittest.TestCase):
+    def test_timeout_is_forwarded_to_every_subprocess_run(self):
+        # The per-command ceiling must reach subprocess.run, or a hung
+        # apt-get would still block forever.
+        with mock.patch.object(
+            cag.subprocess, "run", return_value=_completed()
+        ) as run:
+            cag.apt_get(["gcc"], timeout=42, sleep=lambda _s: None)
+        self.assertEqual(run.call_count, 2)  # update + install
+        for call in run.call_args_list:
+            self.assertEqual(call.kwargs.get("timeout"), 42)
+
+    def test_default_timeout_is_the_module_constant(self):
+        with mock.patch.object(
+            cag.subprocess, "run", return_value=_completed()
+        ) as run:
+            cag.apt_get(["gcc"], sleep=lambda _s: None)
+        for call in run.call_args_list:
+            self.assertEqual(
+                call.kwargs.get("timeout"), cag.PER_COMMAND_TIMEOUT_SECONDS
+            )
+
+    def test_hung_command_times_out_and_is_retried(self):
+        # attempt 1 `update` hangs past the ceiling (TimeoutExpired); the loop
+        # must treat it as a failed attempt and retry, not inherit the hang.
+        # attempt 2: both succeed.
+        results = [
+            cag.subprocess.TimeoutExpired(["sudo", "apt-get", "update"], 300),
+            _completed(returncode=0),  # attempt 2 update
+            _completed(returncode=0),  # attempt 2 install
+        ]
+        sleeps: list[float] = []
+        with mock.patch.object(cag.subprocess, "run", side_effect=results) as run:
+            rc = cag.apt_get(["gcc"], sleep=sleeps.append)
+        self.assertEqual(rc, 0)
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(sleeps, [cag.BACKOFF_SECONDS])
+
+    def test_persistent_hang_exhausts_attempts_and_returns_timeout_code(self):
+        # A mirror that hangs on every attempt must not wedge forever: each
+        # attempt is killed by the timeout and the helper gives up with the
+        # conventional timeout exit code, so the job goes red instead of
+        # burning the 6-hour runner cap.
+        with mock.patch.object(
+            cag.subprocess,
+            "run",
+            side_effect=cag.subprocess.TimeoutExpired(["apt-get", "update"], 300),
+        ) as run:
+            rc = cag.apt_get(["gcc"], attempts=3, sleep=lambda _s: None)
+        self.assertEqual(rc, cag.TIMEOUT_EXIT_CODE)
+        self.assertEqual(run.call_count, 3)
+
+
 class CliTests(unittest.TestCase):
     def test_main_parses_packages_and_flags(self):
         captured = {}
 
-        def fake_apt_get(packages, *, sudo, no_install_recommends, attempts):
+        def fake_apt_get(packages, *, sudo, no_install_recommends, attempts, timeout):
             captured.update(
                 packages=packages,
                 sudo=sudo,
                 no_install_recommends=no_install_recommends,
                 attempts=attempts,
+                timeout=timeout,
             )
             return 0
 
@@ -181,11 +235,13 @@ class CliTests(unittest.TestCase):
         self.assertEqual(captured["packages"], ["cmake", "libclang-dev"])
         self.assertFalse(captured["sudo"])
         self.assertTrue(captured["no_install_recommends"])
+        # Default timeout is the module constant when --timeout is not passed.
+        self.assertEqual(captured["timeout"], cag.PER_COMMAND_TIMEOUT_SECONDS)
 
     def test_main_defaults_to_sudo_and_recommends(self):
         captured = {}
 
-        def fake_apt_get(packages, *, sudo, no_install_recommends, attempts):
+        def fake_apt_get(packages, *, sudo, no_install_recommends, attempts, timeout):
             captured.update(sudo=sudo, no_install_recommends=no_install_recommends)
             return 0
 
@@ -193,6 +249,29 @@ class CliTests(unittest.TestCase):
             cag.main(["gcc"])
         self.assertTrue(captured["sudo"])
         self.assertFalse(captured["no_install_recommends"])
+
+    def test_main_forwards_custom_timeout(self):
+        captured = {}
+
+        def fake_apt_get(packages, *, sudo, no_install_recommends, attempts, timeout):
+            captured.update(timeout=timeout)
+            return 0
+
+        with mock.patch.object(cag, "apt_get", fake_apt_get):
+            cag.main(["--timeout", "90", "gcc"])
+        self.assertEqual(captured["timeout"], 90)
+
+    def test_main_zero_timeout_disables_the_ceiling(self):
+        # `--timeout 0` maps to None so subprocess.run applies no ceiling.
+        captured = {}
+
+        def fake_apt_get(packages, *, sudo, no_install_recommends, attempts, timeout):
+            captured.update(timeout=timeout)
+            return 0
+
+        with mock.patch.object(cag, "apt_get", fake_apt_get):
+            cag.main(["--timeout", "0", "gcc"])
+        self.assertIsNone(captured["timeout"])
 
 
 if __name__ == "__main__":
