@@ -69,7 +69,7 @@ finding folded in before merge; the red teams' discoveries are filed as
 landed with Wave 1 (above); the remaining Wave 2 set is [#732] Phase 2
 (the generated C side: fixes [#716]/[#723] outright and gives the
 refactor its byte-exact instrument) in parallel with [#731] Phases 2-3 (the
-witness token + DeepTag) and [#730] Phase 2 (the lint ratchets). [#733]'s
+witness token + DeepTag) and [#730] Phase 2 (the lint ratchets). [#733]
 Phase 1's Buoy shell-side design and fixture preparation may ride alongside:
 OpenSpec still plans new normative text and atom IDs remain stable. The
 executable advisory pilot waits for the selected Buoy revision's standalone

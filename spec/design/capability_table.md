@@ -41,8 +41,8 @@ One row per **(builtin, surface, dtype)**:
     hand-mirrored lists (`TRANSCENDENTAL_FLOAT_ONLY_OPS` becomes a view).
   - `atom`: the controlling current atom revision ([#733] §C5 item 1). The
     machine-readable table schema requires this field, and the pinned Buoy
-    shell-side integration checks authority and freshness. A row without an atom fails table construction or the blocking
-    provenance policy. This is the authoring-forcing function: an undecided
+    shell-side integration checks authority and freshness. A row without an
+    atom fails table construction or the blocking provenance policy. This is the authoring-forcing function: an undecided
     cell (integer `mean` [#724], bool `add` [#726]) cannot be made `Supported`
     OR `Rejected` without someone writing the normative sentence and crossing
     the `spec/**` signoff.

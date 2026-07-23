@@ -2214,8 +2214,8 @@ and an ignored test does not satisfy coverage. The delivery plan and the full
 elaboration (finalize semantics, kernel signatures, storage) is
 `spec/design/dtype_semantics.md`. Atom IDs are stable, and the current
 blockquote authorities remain normative until selected for fixture-proven
-migration in chelis#733 Phase 1. The pinned Buoy shell-side integration—not a `chelis-lint` rule—attaches and
-checks full semantic revisions.
+migration in chelis#733 Phase 1. The pinned Buoy shell-side integration—not a
+`chelis-lint` rule—attaches and checks full semantic revisions.
 
 > **[04-NUM-1]** Every numeric op result SHALL be finalized into its
 > declared dtype - rounding for floats, width and domain checks for

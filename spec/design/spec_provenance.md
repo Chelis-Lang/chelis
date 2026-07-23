@@ -5,8 +5,8 @@ integration design. This PR defines but does not activate Phase 0. Once Phase
 0's configuration, instructions, review routing, validation suite, and PR gate
 land, OpenSpec becomes the required planning and agent-communication workflow.
 At the reviewed [Buoy snapshot `61b2c25a`][Buoy-61b2c25a] (workspace version
-0.2.0), Buoy itself exposes the `static` / `change` / `execute` CLI, the versioned
-`buoy.adapter-sdk/v1` shell contract, deterministic reports, and the
+0.2.0), Buoy itself exposes the `static` / `change` / `execute` CLI, the
+versioned `buoy.adapter-sdk/v1` shell contract, deterministic reports, and the
 repository-independent `buoy-core`. That snapshot is design evidence, not the
 Chelis adoption pin: no Buoy revision, Chelis adapter, configuration, or command
 integration is pinned here. Buoy production hardening and the parsed-item
