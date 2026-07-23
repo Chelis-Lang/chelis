@@ -23,7 +23,9 @@ Chelis ships one CLI with machine-facing and human-facing subcommands.
 ## Lint Traversal Policy
 
 Directory linting composes Chelis's shipped baseline exclusions with the nearest
-ancestor `chelis-lint.toml`. Repository entries are strict, versioned TOML with
+ancestor `chelis-lint.toml`. Discovery resolves relative targets against the
+invocation working directory first, so `chelis lint --check .` from a
+subdirectory applies the same repository policy as the absolute spelling. Repository entries are strict, versioned TOML with
 a gitignore-style pattern, a closed class, and a cross-reference resolving in
 the policy's declared spec:
 
@@ -44,7 +46,13 @@ fail; internal links remain valid. `.gitignore`, `.ignore`, parent and global Gi
 ignores, `.git/info/exclude`, and hidden-file defaults do not affect lint
 scope. A directly named file or directory remains lintable when only its
 exclusion pattern would reject it; it must still be a regular file or directory
-(or a link resolving to one) inside the policy root. Matching nested
+(or a link resolving to one) inside the policy root. A directly named root
+that exists but fails that admission — a socket or FIFO, a link resolving to
+a different entry kind, an escaping link, or a broken link — fails
+`chelis lint` loudly with the root path and rejection reason, exactly like a
+nonexistent root; it never exits 0 as an empty lint. Targets are absolutized
+without resolving symlinks so a link's identity reaches that boundary check.
+Matching nested
 descendants are pruned. Non-explicit discovered entries must be directories,
 regular files, or symlinks resolving to the same entry kind. Special entries
 such as sockets and FIFOs, aliases into an excluded tree, broken links, and

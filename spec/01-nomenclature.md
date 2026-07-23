@@ -1289,7 +1289,10 @@ should not be part of the editable lint corpus. They must not be added merely
 to hide current violations.
 
 `chelis-lint` composes its shipped baseline policy with the nearest ancestor
-`chelis-lint.toml`. Repository patterns are gitignore-style and anchored to
+`chelis-lint.toml`. Nearest-ancestor discovery resolves a relative lint
+target against the invocation working directory before walking ancestors, so
+relative and absolute spellings of the same target discover the same policy.
+Repository patterns are gitignore-style and anchored to
 the directory containing that file. The schema is versioned and strict:
 
 ```toml
@@ -1317,7 +1320,13 @@ keeps local and CI scope identical and keeps hidden source such as
 `.github/workflows/` visible unless Chelis policy explicitly excludes it.
 An explicitly named file or directory overrides exclusion matching at
 traversal depth zero; it must still be a regular file or directory (or a link
-resolving to one) inside the policy root. Separately excluded descendants under
+resolving to one) inside the policy root. An explicitly named root that
+exists but fails that admission — a socket, FIFO, device, or other
+non-regular entry, a link resolving to a different entry kind or outside the
+policy root, or an unresolvable link — fails the lint invocation loudly with
+the root path and rejection reason, matching the nonexistent-root failure; it
+never produces a successful empty result. Only discovered (non-explicit)
+inadmissible entries are silently omitted. Separately excluded descendants under
 an explicit directory remain pruned. Non-explicit discovered entries must be
 directories, regular files, or symlinks that resolve to the same entry kind
 inside the policy root. Sockets, FIFOs, devices, and other special entries or

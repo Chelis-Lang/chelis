@@ -756,11 +756,9 @@ impl fmt::Display for TraversalPolicyError {
                 path.display(),
                 spec.display()
             ),
-            Self::InadmissibleExplicitRoot { path, reason } => write!(
-                f,
-                "explicitly named lint root {} {reason}",
-                path.display()
-            ),
+            Self::InadmissibleExplicitRoot { path, reason } => {
+                write!(f, "explicitly named lint root {} {reason}", path.display())
+            }
             Self::Pattern {
                 path,
                 pattern,
@@ -846,13 +844,20 @@ mod tests {
                     reason: *reason,
                 }
                 .to_string();
-                assert!(message.contains("explicit.ch"), "must name the root: {message}");
+                assert!(
+                    message.contains("explicit.ch"),
+                    "must name the root: {message}"
+                );
                 message
             })
             .collect();
         messages.sort();
         messages.dedup();
-        assert_eq!(messages.len(), reasons.len(), "reasons must stay distinguishable");
+        assert_eq!(
+            messages.len(),
+            reasons.len(),
+            "reasons must stay distinguishable"
+        );
     }
 
     #[test]

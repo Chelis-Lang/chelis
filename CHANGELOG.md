@@ -82,6 +82,22 @@ now rejected at the offending site — see **Changed** for the migration.
   the catalog. Prepared state remains invocation-local so repeated `--fix`
   passes and reused rule objects observe source edits without stale-cache
   behavior.
+- **Rejected explicit lint roots fail loudly.** An explicitly named lint root
+  that exists but fails depth-zero admission — a socket or FIFO, a link
+  resolving to a different entry kind, an escaping link, or a broken link —
+  now fails `chelis lint` and the built-in style gate with the root path and
+  rejection reason instead of exiting 0 with no entries, matching the
+  nonexistent-root failure. Discovered inadmissible entries below an admitted
+  root remain silently omitted. The standalone CLI absolutizes targets without
+  resolving symlinks so a link's identity reaches the traversal-policy
+  boundary check. BREAKING for callers that relied on a silent empty walk of
+  a rejected explicit root.
+- **Repository lint policy discovery is cwd-insensitive.** `chelis-lint`
+  resolves relative lint targets against the invocation working directory
+  before searching ancestors for `chelis-lint.toml`, so
+  `cd sub && chelis lint --check .` applies the same repository exclusions as
+  the absolute spelling. One traversal policy load is now shared per lint
+  invocation across the walker and every rule's `prepare_run` hook.
 - **Correctly-rounded f32 `sqrt`** in the C backend; the Accelerate `vvsqrtf`
   path is dropped (chelis#719).
 - **`uniform_like` is bit-identical across the eval, C, and HIP lanes** — a

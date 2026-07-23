@@ -678,11 +678,9 @@ mod tests {
     #[test]
     fn lint_invocation_loads_traversal_policy_exactly_once() {
         let temp = tempdir().expect("tempdir");
-        std::fs::write(temp.path().join("agent.ch"), "def agent() = 1\n")
-            .expect("write source");
+        std::fs::write(temp.path().join("agent.ch"), "def agent() = 1\n").expect("write source");
         std::fs::create_dir_all(temp.path().join("docs")).expect("create docs");
-        std::fs::write(temp.path().join("docs/overview.md"), "# Overview\n")
-            .expect("write doc");
+        std::fs::write(temp.path().join("docs/overview.md"), "# Overview\n").expect("write doc");
         let rules: Vec<Box<dyn Rule>> = vec![
             Box::new(crate::rules::doc_filename_convention::DocFilenameConvention),
             Box::new(crate::rules::opaque_domain_construction::OpaqueDomainConstruction),

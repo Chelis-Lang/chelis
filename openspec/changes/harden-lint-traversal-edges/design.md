@@ -36,6 +36,8 @@ Two smaller review nits ride along as implementation-only cleanups: `TraversalPo
 
 *Breaking surface:* `walker::walk` and `lint()` callers that relied on silent-empty. The only in-tree caller with that reliance is the test suite; the style gate already surfaces `LintError` loudly.
 
+*Discovered during apply:* `cmd_lint` canonicalized targets at the CLI boundary (for path-substring rule dispatch), which resolved symlinks and erased a link root's identity before the walker's boundary check ran — an escaping link target linted its resolved external tree as a loose target and exited 0. The CLI now uses `std::path::absolute` instead of `fs::canonicalize`: same normalization benefit, no symlink resolution, so the depth-zero check sees the link.
+
 ### D2: cwd-resolve the discovery start, keep matcher roots lexical
 
 In `TraversalPolicy::load_for`, compute `search_start = if target.is_absolute() { start } else { std::env::current_dir()?.join(start) }` and run `find_repository_policy` over that absolute path. Everything downstream (baseline root, matcher anchoring, `path_relative_to_scope`) keeps working on the lexical paths it already handles; only the *ancestor search* is absolutized. This preserves the existing behavior of relative walk roots producing relative entry paths (entries and matcher roots stay consistent), while fixing discovery.

@@ -8431,19 +8431,26 @@ fn cmd_lint(
     // `/spec/design/` in `path.to_string_lossy()`). Without
     // normalization, the same file tree produces different violations
     // depending on whether the user typed `chelis lint --check .` or
-    // `chelis lint --check docs/`: WalkDir prefixes yielded paths with
-    // the literal target argument, so `.` yields `./docs/...` (substring
-    // `/docs/` matches) while `docs/` yields `docs/...` (no leading
-    // slash, no match). Canonicalizing at the CLI boundary unifies the
-    // two walks and forecloses the bug class for any future rule that
-    // does path-segment dispatch.
+    // `chelis lint --check docs/`: the walker prefixes yielded paths
+    // with the literal target argument, so `.` yields `./docs/...`
+    // (substring `/docs/` matches) while `docs/` yields `docs/...` (no
+    // leading slash, no match). Absolutizing at the CLI boundary
+    // unifies the two walks and forecloses the bug class for any future
+    // rule that does path-segment dispatch.
+    //
+    // This must be `std::path::absolute`, not `fs::canonicalize`:
+    // canonicalizing resolves symlinks, which erases a link target's
+    // identity before the traversal policy's depth-zero boundary check
+    // can see it — an explicitly named link escaping the repository
+    // policy root would lint its resolved external tree as a loose
+    // target instead of failing loudly (§12.2).
     let targets: Vec<PathBuf> = raw_targets
         .into_iter()
-        .map(|p| match std::fs::canonicalize(&p) {
+        .map(|p| match std::path::absolute(&p) {
             Ok(abs) => abs,
             Err(err) => {
                 eprintln!(
-                    "warning: failed to canonicalize {}: {err}; using as-is",
+                    "warning: failed to absolutize {}: {err}; using as-is",
                     p.display()
                 );
                 p
