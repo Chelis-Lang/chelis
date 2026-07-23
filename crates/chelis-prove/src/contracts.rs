@@ -132,23 +132,27 @@ pub fn standard_contract_registry_with_prover(
     for contract in standard_contracts() {
         for invariant in contract.invariants {
             // Try to upgrade fuzz-discharged contracts
-            if invariant.record.discharge.as_ref().is_some_and(|d| d.method == DischargeMethod::Fuzz) {
-                if let Some(discharge) = prover.prove_contract(&invariant.id) {
-                    // Successfully proved by Beacon — use the certified discharge
-                    let upgraded = AssumptionRecord::new(
-                        &invariant.id,
-                        Some(discharge),
-                        invariant.record.non_vacuity.clone(),
-                    )
-                    .with_source("std_contract", &invariant.id)
-                    .with_discharge_tier(DischargeTier::new(
-                        DischargeMethod::CertifiedEnvelope.engine(),
-                        DischargeMethod::CertifiedEnvelope,
-                        Some(invariant.id.clone()),
-                    ));
-                    registry.insert(upgraded);
-                    continue;
-                }
+            if invariant
+                .record
+                .discharge
+                .as_ref()
+                .is_some_and(|d| d.method == DischargeMethod::Fuzz)
+                && let Some(discharge) = prover.prove_contract(&invariant.id)
+            {
+                // Successfully proved by Beacon — use the certified discharge
+                let upgraded = AssumptionRecord::new(
+                    &invariant.id,
+                    Some(discharge),
+                    invariant.record.non_vacuity.clone(),
+                )
+                .with_source("std_contract", &invariant.id)
+                .with_discharge_tier(DischargeTier::new(
+                    DischargeMethod::CertifiedEnvelope.engine(),
+                    DischargeMethod::CertifiedEnvelope,
+                    Some(invariant.id.clone()),
+                ));
+                registry.insert(upgraded);
+                continue;
             }
             // Fall through: keep original discharge (fuzz, smt, axiom)
             registry.insert(invariant.record);

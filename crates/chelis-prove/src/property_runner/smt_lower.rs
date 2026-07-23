@@ -59,7 +59,9 @@ impl ContractAbstraction {
             normal_cdf_reflection || contracts.iter().any(|id| id == NORMAL_CDF_RANGE);
         let normal_cdf_monotonicity = contracts.iter().any(|id| id == NORMAL_CDF_MONOTONICITY);
         Self {
-            normal_cdf_enabled: normal_cdf_range || normal_cdf_reflection || normal_cdf_monotonicity,
+            normal_cdf_enabled: normal_cdf_range
+                || normal_cdf_reflection
+                || normal_cdf_monotonicity,
             normal_cdf_range,
             normal_cdf_reflection,
             normal_cdf_monotonicity,

@@ -30,11 +30,11 @@ use smt_lower::{
 };
 
 mod injection;
+use crate::beacon_contract_prover::BeaconContractProver;
 use crate::composition::{
     AssumptionDischarge, AssumptionRecord, CompositeVerdict, DischargeMethod, FUZZ_TOLERANCE,
     NonVacuityRecord, NonVacuityStatus, base_verdict_from_discharge, rollup_composite,
 };
-use crate::beacon_contract_prover::BeaconContractProver;
 use crate::contracts::{
     NORMAL_CDF_RANGE, NORMAL_CDF_REFLECTION, standard_contract_registry,
     standard_contract_registry_with_prover,
