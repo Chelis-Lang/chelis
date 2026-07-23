@@ -476,6 +476,47 @@ fn explicit_excluded_directory_preserves_internal_symlink_root_override_only() {
 }
 
 #[test]
+fn nonexistent_explicit_root_still_reports_a_walk_error() {
+    let temp = tempdir().unwrap();
+    let missing = temp.path().join("missing.ch");
+    let rules: Vec<Box<dyn Rule>> = Vec::new();
+
+    let error = chelis_lint::lint(&missing, &rules)
+        .expect_err("a missing explicit target must not become a successful empty lint");
+    assert!(error.to_string().contains("walk error"));
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_symlink_directory_root_must_resolve_inside_policy_boundary() {
+    use std::os::unix::fs::symlink;
+
+    let repository = tempdir().unwrap();
+    let external = tempdir().unwrap();
+    let root = repository.path();
+    write_policy(root, "");
+    fs::write(external.path().join("outside.ch"), "def outside() = 1\n").unwrap();
+    let external_link = root.join("external-link");
+    symlink(external.path(), &external_link).unwrap();
+
+    let external_entries = walked(&external_link);
+    assert!(
+        external_entries.is_empty(),
+        "an explicit symlink directory must not import entries outside the policy root: {external_entries:?}"
+    );
+
+    fs::create_dir_all(root.join("shared")).unwrap();
+    fs::write(root.join("shared/inside.ch"), "def inside() = 1\n").unwrap();
+    let internal_link = root.join("internal-link");
+    symlink("shared", &internal_link).unwrap();
+    assert_eq!(
+        walked(&internal_link),
+        vec!["inside.ch"],
+        "an explicit symlink directory resolving inside the policy root remains lintable"
+    );
+}
+
+#[test]
 fn exact_file_patterns_prune_nested_files_but_not_explicit_file_roots() {
     let temp = tempdir().unwrap();
     let root = temp.path();
@@ -796,6 +837,23 @@ fn non_regular_source_entries_and_symlink_targets_are_omitted() {
 
 #[cfg(unix)]
 #[test]
+fn explicit_source_shaped_special_entry_is_omitted() {
+    use std::os::unix::net::UnixListener;
+
+    let repository = tempdir().unwrap();
+    let root = repository.path();
+    write_policy(root, "");
+    let socket_path = root.join("explicit.ch");
+    let _socket = UnixListener::bind(&socket_path).unwrap();
+
+    assert!(
+        walked(&socket_path).is_empty(),
+        "depth-zero admission must not classify a socket or FIFO as readable source"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn internal_admitted_surf_symlink_target_still_contributes_to_opaque_catalog() {
     use std::os::unix::fs::symlink;
 
@@ -906,6 +964,36 @@ fn excluded_or_external_manifest_symlink_targets_cannot_grant_doc_exception() {
         violations.len(),
         2,
         "excluded and machine-local manifest contents must not suppress admitted doc violations: {violations:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn external_ancillary_link_path_cannot_be_governed_by_its_internal_target() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("repository");
+    write_policy(&root, "");
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::write(root.join("docs/foo-bar.md"), "# Docs\n").unwrap();
+    fs::create_dir_all(root.join("config")).unwrap();
+    fs::write(
+        root.join("config/package.toml"),
+        "[package]\nname = \"foo-bar\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    symlink(
+        root.join("config/package.toml"),
+        temp.path().join("Cargo.toml"),
+    )
+    .unwrap();
+
+    let violations = lint_doc_filenames(&root.join("docs"));
+    assert_eq!(
+        violations.len(),
+        1,
+        "an ancillary link above the policy root remains machine-local even when it points inward: {violations:?}"
     );
 }
 

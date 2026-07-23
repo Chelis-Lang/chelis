@@ -163,6 +163,28 @@ impl TraversalPolicy {
             && (!resolve_target || self.resolved_input_is_admitted(path, is_dir, true))
     }
 
+    /// Admit an explicit walk root while overriding only exclusion matching.
+    ///
+    /// Explicit targets still have to be regular files/directories (or links
+    /// resolving to one) inside the repository policy boundary.
+    pub(crate) fn is_admitted_explicit_entry(&self, path: &Path, is_dir: bool) -> bool {
+        let Some(canonical_scope_root) = self.canonical_scope_root.as_deref() else {
+            return false;
+        };
+        let Ok(resolved) = std::fs::canonicalize(path) else {
+            return false;
+        };
+        let Ok(metadata) = std::fs::metadata(&resolved) else {
+            return false;
+        };
+        let resolved_kind_matches = if is_dir {
+            metadata.is_dir()
+        } else {
+            metadata.is_file()
+        };
+        resolved_kind_matches && resolved.starts_with(canonical_scope_root)
+    }
+
     /// Admit an ancillary input, including its governed parents.
     pub fn is_admitted_ancillary(&self, path: &Path, is_dir: bool) -> bool {
         !self.is_excluded_or_parent(path, is_dir)
@@ -257,12 +279,18 @@ impl TraversalPolicy {
         let lexical_relative = self.path_relative_to_scope(path);
         let governed = lexical_relative.is_some();
         let is_symlink = link_metadata.file_type().is_symlink();
-        if !governed && !is_symlink {
-            // A discovered repository policy defines the workspace boundary:
-            // ordinary machine-local ancestors above it cannot contribute
-            // ancillary metadata. Loose targets without repository policy keep
-            // the historical ancestor-manifest compatibility path.
-            return self.repository_root.is_none();
+        if !governed {
+            // A discovered repository policy governs lexical paths, not only
+            // their resolved targets. Machine-local ancestors above that
+            // boundary cannot contribute ancillary metadata, even when a link
+            // points back into the repository. Loose targets without a policy
+            // retain the historical ancestor-manifest compatibility path.
+            if self.repository_root.is_some() {
+                return false;
+            }
+            if !is_symlink {
+                return true;
+            }
         }
         let Some(canonical_scope_root) = self.canonical_scope_root.as_deref() else {
             return false;

@@ -187,12 +187,11 @@ fn write_release_tarball(base: &Path, ver: &str, slug: &str) {
 }
 
 /// Build and return the path to the real `chelisup` binary that
-/// `reef setup` delegates installs to. The build runs *before* the
-/// assert_cmd resolution: `cargo_bin` panics (rather than returning a
-/// candidate path) when the binary is absent, so a build-on-miss fallback
-/// after it is unreachable, and a fresh target dir (e.g. an isolated
-/// `CARGO_TARGET_DIR`) starts without chelisup built. When it is already
-/// built this is a fast no-op.
+/// `reef setup` delegates installs to. Nextest exposes `CARGO_BIN_EXE_*`
+/// only for the package under test, so this cross-package helper resolves
+/// Cargo's target directory after building instead of asking assert_cmd for
+/// an unset `CARGO_BIN_EXE_chelisup`. A fresh isolated target starts without
+/// chelisup; when it is already built this is a fast no-op.
 fn chelisup_bin() -> PathBuf {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let status = Proc::new(cargo)
@@ -200,7 +199,22 @@ fn chelisup_bin() -> PathBuf {
         .status()
         .expect("spawn cargo build for chelisup");
     assert!(status.success(), "building chelisup failed");
-    let path = assert_cmd::cargo::cargo_bin("chelisup");
+    let target_dir = match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(value) => {
+            let path = PathBuf::from(value);
+            if path.is_absolute() {
+                path
+            } else {
+                std::env::current_dir()
+                    .expect("current test directory")
+                    .join(path)
+            }
+        }
+        None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+    };
+    let path = target_dir
+        .join("debug")
+        .join(format!("chelisup{}", std::env::consts::EXE_SUFFIX));
     assert!(path.exists(), "chelisup binary at {}", path.display());
     path
 }

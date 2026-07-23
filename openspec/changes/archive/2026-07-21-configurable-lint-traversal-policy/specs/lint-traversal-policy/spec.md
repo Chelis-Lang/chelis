@@ -56,19 +56,27 @@ Repository patterns SHALL be interpreted relative to the directory containing `c
 - **WHEN** one directory matches an exclusion and a sibling does not
 - **THEN** the walker prunes only the matching directory
 
-### Requirement: Explicit targets override traversal exclusions at depth zero
-A file or directory explicitly supplied as a lint root SHALL be admitted even when a policy exclusion matches that root. Policy exclusions SHALL continue to apply to matching descendants beneath an explicit directory root.
+### Requirement: Explicit targets override only traversal exclusions at depth zero
+A file or directory explicitly supplied as a lint root SHALL override a policy exclusion matching that root. The root MUST still be a regular file or directory, or a link resolving to the same kind inside the repository policy boundary. Policy exclusions SHALL continue to apply to matching descendants beneath an explicit directory root.
 
 #### Scenario: Explicit excluded file is linted
-- **WHEN** the user names an otherwise excluded source file directly
+- **WHEN** the user names an otherwise excluded regular source file directly
 - **THEN** applicable rules check that file
 
 #### Scenario: Explicit excluded directory is entered
 - **WHEN** the user names an otherwise excluded directory directly
 - **THEN** the directory is entered while separately excluded nested descendants remain pruned
 
+#### Scenario: Explicit special file is rejected
+- **WHEN** an explicitly named source-shaped path is a socket, FIFO, device, or another non-regular entry
+- **THEN** the walker omits it before any rule can read it
+
+#### Scenario: Explicit symlink directory cannot escape policy
+- **WHEN** an explicitly named directory link resolves outside the repository policy root
+- **THEN** the walker does not enter or import the target tree
+
 ### Requirement: Traversal exclusions remain distinct from diagnostic exceptions
-A traversal exclusion SHALL prevent all rule dispatch for its matched descendants. A rule-specific `Exception`, inline `allow`, or inline `keep` SHALL NOT alter traversal and SHALL retain its existing diagnostic or autofix semantics. Ancillary files consulted by a rule MUST come from the canonical admitted entry set or pass parent-aware traversal-policy admission, so excluded content cannot change an admitted entry's verdict indirectly.
+A traversal exclusion SHALL prevent all rule dispatch for its matched descendants. A rule-specific `Exception`, inline `allow`, or inline `keep` SHALL NOT alter traversal and SHALL retain its existing diagnostic or autofix semantics. Ancillary files consulted by a rule MUST come from the canonical admitted entry set or pass parent-aware traversal-policy admission, so excluded content cannot change an admitted entry's verdict indirectly. When repository policy exists, paths above its root remain machine-local even when they are symlinks resolving inward.
 
 #### Scenario: Rule exception does not prune corpus discovery
 - **WHEN** a source path has a rule-specific exception but no traversal exclusion
@@ -81,6 +89,10 @@ A traversal exclusion SHALL prevent all rule dispatch for its matched descendant
 #### Scenario: Excluded ancillary manifest cannot affect an admitted document
 - **WHEN** an excluded Cargo manifest names a package whose kebab-case name matches an admitted documentation filename
 - **THEN** `doc-filename-convention` ignores that manifest and reports the same verdict as if the excluded tree were absent
+
+#### Scenario: External ancillary link path remains ungoverned
+- **WHEN** a Cargo manifest link path is above the repository policy root but resolves to an admitted file inside that root
+- **THEN** `doc-filename-convention` rejects the link as machine-local and does not grant the package-name exception
 
 #### Scenario: Admitted ancillary manifest retains its documented effect
 - **WHEN** an admitted Cargo manifest names a package whose kebab-case name matches an admitted documentation filename

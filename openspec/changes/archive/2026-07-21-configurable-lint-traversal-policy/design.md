@@ -58,7 +58,7 @@ Alternative rejected: a plain `.chelis-lintignore`. It would externalize pattern
 
 ### 4. Preserve explicit-root and canonical-entry invariants
 
-The filter always admits depth zero. Therefore a directly named excluded file or directory remains auditable. Nested matches are pruned. Paths are normalized relative to the policy root, not the per-target walk root, mirroring the existing workspace-root fix for diagnostic exceptions.
+Depth zero overrides exclusion matching only. Therefore a directly named excluded regular file or directory remains auditable, while entry-kind and canonical policy-boundary validation still apply before traversal or source loading. Nested matches are pruned. Paths are normalized relative to the policy root, not the per-target walk root, mirroring the existing workspace-root fix for diagnostic exceptions.
 
 `walker::walk` remains the only recursive discovery entry point. Rules receive its resulting entry vector for corpus-wide state. A bounded ancillary lookup needed to preserve direct or explicit-file behavior must pass `TraversalPolicy` admission for the file and its parents; excluded content may not influence an admitted verdict indirectly. The opaque direct-check compatibility path may invoke the same canonical walker, never construct an independent traversal.
 
@@ -75,6 +75,7 @@ The authoritative acceptance oracle is:
 ```text
 CARGO_TARGET_DIR=target/agents/issue-740 cargo build -p chelis-cli --bin chelis
 CARGO_BIN_EXE_chelis="$PWD/target/agents/issue-740/debug/chelis" CARGO_TARGET_DIR=target/agents/issue-740 cargo nextest run -p chelis-lint
+CARGO_BIN_EXE_chelis="$PWD/target/agents/issue-740/debug/chelis" CARGO_TARGET_DIR=target/agents/issue-740 cargo nextest run -p chelis-cli --test lint_traversal_policy
 ```
 
 ## Risks / Trade-offs

@@ -3,6 +3,7 @@
 - [x] 1.1 Add a lint-driver test rule that proves preparation runs exactly once while checks run for multiple admitted files, plus negative parity proving a second `lint` invocation prepares fresh state.
 - [x] 1.2 Add opaque-domain tests proving declarations under every canonical skipped-tree class cannot influence the catalog, while an equivalent admitted declaration still causes an out-of-module forge violation.
 - [x] 1.3 Add invocation-level parity tests for defining-module allowance, out-of-module rejection, single-file roots, file-scoped module-less shadowing, unreadable or unparsable candidates, and corpus-independent Deep checking.
+- [x] 1.4 Add an index-shape regression covering many distinct opaque leaves plus multiple defining modules for one shared leaf.
 
 ## 2. Add Lint-Run Preparation
 
@@ -16,6 +17,7 @@
 - [x] 3.2 Split immutable corpus-wide catalog data from `current_file_module_less_leaves`, passing the latter as per-file state so CR2-7 remains file-scoped without cloning or mutating the shared catalog.
 - [x] 3.3 Route prepared Surf checks through the shared catalog, retain one-off direct-check and single-file behavior, and leave Deep checks on their existing local-expression path.
 - [x] 3.4 Run the focused lifecycle, skip-filter, and semantic parity tests until every positive and negative case from section 1 is green.
+- [x] 3.5 Replace per-site opaque declaration scans with type-leaf and defining-module hash indices, including the fail-closed untyped Deep update query.
 
 ## 4. Documentation and Acceptance
 
@@ -26,4 +28,4 @@
 
 ### Adversarial Validation Record
 
-Fresh local red-team validation used `target/agents/redteam-603`, added default-hook/state-pairing, empty-catalog, malformed/unreadable-candidate, Deep-independence, and exact CR2-7 path probes, and passed 299/299 crate tests plus CLI admitted/skipped corpus probes. It reported no findings at any severity. Residual limitations: no wall-clock benchmark against a genuinely massive `target/`; linearity is instead locked mechanically by preparation and catalog-parse counts, and the unreadable-candidate probe uses a Unix-only broken symlink.
+Fresh local red-team validation used `target/agents/redteam-603`, added default-hook/state-pairing, empty-catalog, malformed/unreadable-candidate, Deep-independence, and exact CR2-7 path probes, and passed its then-current crate and CLI probes. A later PR review found one remaining P2 complexity gap: each construction site still scanned the opaque declaration vector. The follow-up replaced that scan with leaf/module hash indices, added an executable index-shape regression, and passed 337/337 `chelis-lint` tests plus 14/14 standalone traversal-policy CLI tests. Residual limitation: there is no wall-clock benchmark against a genuinely massive `target/`; linearity is locked mechanically by preparation counts, catalog-parse counts, and indexed construction-site lookups. The unreadable-candidate probe uses a Unix-only broken symlink.

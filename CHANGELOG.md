@@ -126,7 +126,10 @@ now rejected at the offending site — see **Changed** for the migration.
   targets are resolved through the same policy: internal admitted regular-file
   links remain usable, while special files and aliases into excluded or
   machine-local content cannot affect prepared catalogs or ancillary metadata.
-  Rule modules are tripwired
+  Depth-zero targets override exclusion matching only; special-file roots and
+  symlinked directory roots escaping the policy boundary are rejected before
+  traversal. Ancillary governance follows the lexical path, so an above-root
+  link cannot gain authority by pointing inward. Rule modules are tripwired
   against independent walker and directory-discovery primitives. A crate-local
   canonical `AGENTS.md` plus `CLAUDE.md` symlink locks the rule-registration and
   canonical-traversal protocol for both agent entry points at edit time.
@@ -136,9 +139,12 @@ now rejected at the offending site — see **Changed** for the migration.
   walker's admitted entries, then reuses that immutable catalog for every
   checked Surf file. It no longer starts an unfiltered `WalkDir` per file or
   descends into `target/`, `.git/`, `.venv*`, dependency trees, agent
-  worktrees, and generated opaque-invariant programs. Prepared state remains
-  invocation-local so repeated `--fix` passes and reused rule objects observe
-  source edits without stale-cache behavior.
+  worktrees, and generated opaque-invariant programs. Opaque definitions are
+  indexed by type leaf and defining module, so each construction, cast, or
+  update lookup is independent of unrelated declarations instead of rescanning
+  the catalog. Prepared state remains invocation-local so repeated `--fix`
+  passes and reused rule objects observe source edits without stale-cache
+  behavior.
 - **Deep DAGs from the bounded unroll no longer overflow the stack in
   consumer passes (chelis#620 red team).** Lowering's per-level
   `stacker::maybe_grow` protected the unroll itself, but the passes that

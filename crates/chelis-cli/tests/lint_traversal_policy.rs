@@ -333,6 +333,41 @@ fn external_parent_manifest_cannot_grant_doc_exception_through_cli() {
 
 #[cfg(unix)]
 #[test]
+fn external_parent_manifest_symlink_pointing_inward_cannot_grant_doc_exception() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("repository");
+    write_spec(&root);
+    fs::write(
+        root.join("chelis-lint.toml"),
+        "version = 1\nspec = \"spec/01-nomenclature.md\"\n",
+    )
+    .unwrap();
+    let docs = root.join("docs");
+    fs::create_dir_all(&docs).unwrap();
+    fs::write(docs.join("foo-bar.md"), "# Docs\n").unwrap();
+    fs::create_dir_all(root.join("config")).unwrap();
+    fs::write(
+        root.join("config/package.toml"),
+        "[package]\nname = \"foo-bar\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    symlink(
+        root.join("config/package.toml"),
+        temp.path().join("Cargo.toml"),
+    )
+    .unwrap();
+
+    chelis_lint_rule(&docs, "doc-filename-convention")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("doc-filename-convention"))
+        .stdout(predicate::str::contains("foo-bar.md"));
+}
+
+#[cfg(unix)]
+#[test]
 fn external_policy_symlink_fails_standalone_cli() {
     use std::os::unix::fs::symlink;
 

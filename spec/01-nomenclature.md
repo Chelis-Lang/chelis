@@ -1315,15 +1315,17 @@ The traversal engine must not consult `.gitignore`, `.ignore`, parent or
 global Git configuration, `.git/info/exclude`, or hidden-file defaults. This
 keeps local and CI scope identical and keeps hidden source such as
 `.github/workflows/` visible unless Chelis policy explicitly excludes it.
-An explicitly named file or directory is always admitted at traversal depth
-zero; separately excluded descendants under an explicit directory remain
-pruned. Non-explicit discovered entries must be directories, regular files, or
-symlinks that resolve to the same entry kind inside the policy root. Sockets,
-FIFOs, devices, and other special entries or targets are omitted before a rule
-can open or read them. A symlink's target and governed parents must remain
-policy-admitted. Broken links, links escaping the policy root, and aliases into
-excluded content are omitted before any rule can read them. Internal links to
-admitted regular files remain visible and are classified by the link path.
+An explicitly named file or directory overrides exclusion matching at
+traversal depth zero; it must still be a regular file or directory (or a link
+resolving to one) inside the policy root. Separately excluded descendants under
+an explicit directory remain pruned. Non-explicit discovered entries must be
+directories, regular files, or symlinks that resolve to the same entry kind
+inside the policy root. Sockets, FIFOs, devices, and other special entries or
+targets are omitted before a rule can open or read them. A symlink's target and
+governed parents must remain policy-admitted. Broken links, links escaping the
+policy root, and aliases into excluded content are omitted before any rule can
+read them. Internal links to admitted regular files remain visible and are
+classified by the link path.
 Under an explicitly named excluded directory, that root's exclusion remains
 overridden for an internal symlink target while separately excluded
 descendants remain effective.
@@ -1337,7 +1339,9 @@ content under an excluded directory must not change an admitted entry's
 verdict indirectly. When repository policy exists, its root bounds ancillary
 workspace discovery: admitted sibling workspace manifests remain visible when
 lint targets a subdirectory or explicit file, while machine-local ancestors
-above the policy root cannot grant lint exceptions.
+above the policy root cannot grant lint exceptions. Governance follows the
+ancillary link path as well as its resolved target: a link above the policy root
+remains machine-local even when it points to an admitted file inside the root.
 
 ### 12.3 Future rule queue
 

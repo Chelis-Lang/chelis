@@ -8,20 +8,17 @@ use crate::{Context, LintError, PreparedRuleState, Rule, Surface, Violation};
 use chelis_deep::Span;
 use chelis_deep::ast as deep;
 use chelis_surf::ast as surf;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::path::Path;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct OpaqueType {
-    name: String,
-    module: Option<String>,
-}
-
-/// The lint's opaque catalog, keyed by (type leaf, defining module)
-/// rather than bare leaf (CR-9).
+/// The lint's opaque catalog, keyed by type leaf and defining module
+/// (CR-9).
 ///
-/// `opaque` lists the opaque types and their defining modules.
+/// `opaque_modules_by_leaf` maps each opaque type leaf to its defining
+/// modules, making each construction-site lookup independent of the total
+/// corpus size. `opaque_defining_modules` supports the untyped Deep
+/// `record-update` check without scanning all opaque declarations.
 /// `declared_leaves` is the set of `(module, leaf)` for EVERY type
 /// declaration (opaque, non-opaque, alias) -- it records that a module
 /// declares a local type of that leaf. A construction site in module M
@@ -38,13 +35,22 @@ struct OpaqueType {
 /// corpus-wide shadow bucket. Named-module shadow remains corpus-wide.
 #[derive(Debug, Default)]
 struct Catalog {
-    opaque: Vec<OpaqueType>,
+    opaque_modules_by_leaf: HashMap<String, HashSet<String>>,
+    opaque_defining_modules: HashSet<String>,
     declared_leaves: HashSet<(Option<String>, String)>,
 }
 
 impl Catalog {
     fn is_empty(&self) -> bool {
-        self.opaque.is_empty()
+        self.opaque_modules_by_leaf.is_empty()
+    }
+
+    fn insert_opaque(&mut self, name: &str, module: &str) {
+        self.opaque_modules_by_leaf
+            .entry(type_leaf(name).to_string())
+            .or_default()
+            .insert(module.to_string());
+        self.opaque_defining_modules.insert(module.to_string());
     }
 }
 
@@ -258,11 +264,8 @@ fn collect_surf_decls_catalog(decls: &[surf::Decl], module: Option<String>, out:
                 // declaration. Catalog opaque types only from named
                 // modules; defer the invalid module-less declaration to
                 // the checker.
-                if *opaque && module.is_some() {
-                    out.opaque.push(OpaqueType {
-                        name: name.clone(),
-                        module: module.clone(),
-                    });
+                if *opaque && let Some(module) = module.as_deref() {
+                    out.insert_opaque(name, module);
                 }
             }
             surf::Decl::TypeAlias { name, .. } => {
@@ -483,7 +486,7 @@ fn collect_deep_decls_catalog(expr: &deep::Expr, module: Option<String>, out: &m
         }
         // Every `deftype`/`typealias` records that its module declares a
         // local type of that leaf (CR-9); opaque deftypes also enter the
-        // opaque list.
+        // leaf/module indices.
         Some("deftype") => {
             if let Some(name) = children(list).first().and_then(sym_str) {
                 out.declared_leaves
@@ -492,11 +495,10 @@ fn collect_deep_decls_catalog(expr: &deep::Expr, module: Option<String>, out: &m
                 // a module-less @opaque is a checker declaration error
                 // and would collapse distinct module-less files under
                 // the shared `None` key. See the Surf collector.
-                if meta_bool(list, "opaque") && module.is_some() {
-                    out.opaque.push(OpaqueType {
-                        name: name.to_string(),
-                        module,
-                    });
+                if meta_bool(list, "opaque")
+                    && let Some(module) = module.as_deref()
+                {
+                    out.insert_opaque(name, module);
                 }
             }
         }
@@ -627,12 +629,16 @@ fn is_outside_opaque_module(
     if shadowed {
         return false;
     }
-    // No local shadow: flag iff an opaque same-leaf type is defined in
-    // another module (the genuine out-of-module forge).
-    catalog
-        .opaque
-        .iter()
-        .any(|opaque| type_leaf(&opaque.name) == leaf && opaque.module.as_deref() != current_module)
+    // No local shadow: use the leaf index to determine whether at least one
+    // opaque definition belongs to another module. This remains constant-time
+    // with respect to unrelated opaque declarations.
+    let Some(defining_modules) = catalog.opaque_modules_by_leaf.get(leaf) else {
+        return false;
+    };
+    match current_module {
+        Some(module) => defining_modules.len() > usize::from(defining_modules.contains(module)),
+        None => !defining_modules.is_empty(),
+    }
 }
 
 /// Whether `current_module` is outside the defining module of EVERY
@@ -642,10 +648,7 @@ fn is_outside_all_opaque_modules(
     current_module: Option<&str>,
     catalog: &CatalogContext<'_>,
 ) -> bool {
-    !catalog
-        .opaque
-        .iter()
-        .any(|opaque| opaque.module.as_deref() == current_module)
+    current_module.is_none_or(|module| !catalog.opaque_defining_modules.contains(module))
 }
 
 fn type_leaf(name: &str) -> &str {
@@ -960,6 +963,46 @@ type Probability = | Probability { value: f32 }
 def probability(x: f32) -> Probability = Probability { value: x }
 "#;
         assert!(run_surf(src).is_empty());
+    }
+
+    #[test]
+    fn catalog_indexes_opaque_definitions_by_leaf_and_module() {
+        let mut catalog = Catalog::default();
+        for index in 0..256 {
+            let source = format!(
+                "module Domain{index}\n@opaque\ntype Type{index} = | Type{index} {{ value: f32 }}\n"
+            );
+            let decls = chelis_surf::parser::parse_str(&source).expect("parse indexed type");
+            collect_surf_decls_catalog(&decls, None, &mut catalog);
+        }
+        for module in ["First.Domain", "Second.Domain"] {
+            let source =
+                format!("module {module}\n@opaque\ntype Shared = | Shared {{ value: f32 }}\n");
+            let decls = chelis_surf::parser::parse_str(&source).expect("parse shared type");
+            collect_surf_decls_catalog(&decls, None, &mut catalog);
+        }
+
+        assert_eq!(catalog.opaque_modules_by_leaf.len(), 257);
+        assert_eq!(catalog.opaque_defining_modules.len(), 258);
+        assert_eq!(
+            catalog
+                .opaque_modules_by_leaf
+                .get("Type173")
+                .expect("leaf index")
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["Domain173"]
+        );
+        assert_eq!(
+            catalog
+                .opaque_modules_by_leaf
+                .get("Shared")
+                .expect("shared leaf index")
+                .len(),
+            2,
+            "same-leaf opaque definitions retain each defining module without a corpus scan"
+        );
     }
 
     // ── CR2-7: module-less files must not share one None shadow bucket ──

@@ -42,18 +42,20 @@ and `immutable`. Invalid policy fails lint before the walk. Non-file or broken
 policy paths and policy or spec links resolving outside the policy root also
 fail; internal links remain valid. `.gitignore`, `.ignore`, parent and global Git
 ignores, `.git/info/exclude`, and hidden-file defaults do not affect lint
-scope. A directly named file or directory remains
-lintable even when its path matches an exclusion; matching nested descendants
-are pruned. Non-explicit discovered entries must be directories, regular
-files, or symlinks resolving to the same entry kind. Special entries such as
-sockets and FIFOs, aliases into an excluded tree, broken links, and targets
-outside the policy root are omitted, while internal links to admitted regular
-files retain their link-path surface. An explicitly named excluded directory
+scope. A directly named file or directory remains lintable when only its
+exclusion pattern would reject it; it must still be a regular file or directory
+(or a link resolving to one) inside the policy root. Matching nested
+descendants are pruned. Non-explicit discovered entries must be directories,
+regular files, or symlinks resolving to the same entry kind. Special entries
+such as sockets and FIFOs, aliases into an excluded tree, broken links, and
+targets outside the policy root are omitted, while internal links to admitted
+regular files retain their link-path surface. An explicitly named excluded directory
 keeps its depth-zero override for internal link targets, but separately
 excluded descendants still apply. Rules also apply this policy to ancillary
 metadata: an excluded Cargo manifest or machine-local manifest above the
 policy root cannot grant the §8.3 package-name exception to an admitted
-documentation filename. Admitted sibling workspace manifests remain visible
+documentation filename. A link path above the policy root remains machine-local
+even when its target resolves to an admitted internal manifest. Admitted sibling workspace manifests remain visible
 when lint targets a documentation subdirectory or explicit file. Use
 rule-specific exceptions or inline
 `allow`/`keep` when a path must still contribute to other lint rules.

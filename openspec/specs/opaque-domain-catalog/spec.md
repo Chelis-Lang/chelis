@@ -28,6 +28,17 @@ For a directory lint root, `opaque-domain-construction` SHALL derive its Surf ca
 - **WHEN** a lint invocation admits `N` Surf files
 - **THEN** catalog discovery and catalog parsing are bounded by the admitted corpus size rather than being repeated `N` times
 
+### Requirement: Opaque-site lookup is indexed by leaf and defining module
+The prepared catalog MUST index opaque definitions by type leaf and defining module. Checking one record construction, cast, or typed update MUST NOT scan opaque declarations with unrelated leaves. The fail-closed untyped Deep update check MUST use an index of defining modules rather than scan every declaration.
+
+#### Scenario: Distinct declarations and sites remain linear
+- **WHEN** the admitted corpus contains `N` distinct opaque type leaves and `N` construction sites
+- **THEN** catalog construction is bounded by the declarations and each site performs a bounded leaf/module lookup rather than an `N`-element catalog scan
+
+#### Scenario: Same-leaf definitions retain module identity
+- **WHEN** multiple modules define opaque types with the same leaf
+- **THEN** the leaf index retains every defining module and preserves defining-module allowance plus out-of-module rejection
+
 ### Requirement: Catalog state is isolated to one invocation
 Prepared opaque-domain catalog state MUST NOT outlive or leak across `chelis_lint::lint` invocations. A later invocation SHALL rebuild from its own admitted entries so file additions, removals, and edits are visible without process restart.
 

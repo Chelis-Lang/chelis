@@ -49,12 +49,19 @@ The prepared path is authoritative for `chelis_lint::lint`. The existing direct 
 
 Deep checking will bypass the prepared Surf catalog and continue deriving its catalog from the checked Deep expressions.
 
-### 5. Test observables rather than elapsed time
+### 5. Index construction-site queries
+
+The prepared catalog will map each opaque type leaf to its defining-module set and separately index all opaque-defining modules. A record, cast, or typed update performs one leaf lookup plus one defining-module membership check; an untyped Deep update performs one module-set lookup. No construction site scans opaque declarations with unrelated leaves.
+
+This closes the remaining `N` declarations by `N` sites path. The earlier once-per-invocation preparation removed repeated walks and parses, but a vector scan at every site would still have made the broad repository-linearity claim false.
+
+### 6. Test observables rather than elapsed time
 
 Regression tests will prove the complexity boundary mechanically:
 
 - a test rule will verify that preparation is invoked once while checks run for multiple entries;
 - opaque-rule tests will verify that skipped-tree `.ch` declarations cannot influence the catalog and admitted declarations still can;
+- an index-shape test will populate many distinct leaves plus duplicate-leaf modules and verify the leaf/module indices directly;
 - repeated invocations with the same rule objects will verify that catalog state is rebuilt rather than retained;
 - existing allow/reject, module-less shadow, and Deep tests will remain semantic parity coverage.
 
