@@ -72,7 +72,7 @@ fixtures, format, and oracle. No previous contract survives by implication.
 
 | Previous #733 contract | Disposition in this design | Owning phase or section |
 |---|---|---|
-| PR trailers, docs-only detection, `spec-exempt`, `CODEOWNERS`, and the PR template | **Retained as provider-level review routing.** Exact parsing, authorization, reporting, and planted cases remain Phase 0 deliverables. Provider state never becomes canonical authority. | Phase 0; §C7 |
+| PR trailers, nonnormative docs-only detection, `spec-exempt`, `CODEOWNERS`, and the PR template | **Retained as provider-level review routing, with the docs-only bypass narrowed.** A PR touching `spec/**` always follows the cited OpenSpec path even when every changed file is Markdown; only changes outside `spec/**` may qualify as nonnormative docs-only. Exact parsing, authorization, reporting, and planted cases remain Phase 0 deliverables. Provider state never becomes canonical authority. | Phase 0; §C7 |
 | Stable Chelis atom IDs | **Retained.** Existing IDs remain allocated; Phase 1 freezes the registry, namespaces, and migration mapping. | Phase 1; §C1 |
 | Markdown blockquote atoms | **Retained only as migration input.** Existing blocks remain normative Chelis text until selected; final Buoy authority uses a parser-backed, fixture-proven form. | Phase 1; §C1 |
 | EARS-shaped normative statements | **Retained as authoring guidance, not parser authority.** Normative meaning lives in the atom statement and its approved scope/kind. | Phase 1; §C1 |
@@ -334,6 +334,11 @@ useful review-routing controls, but they are provider-level process evidence.
 manifest. They do not replace that committed manifest once change checking is
 blocking.
 
+Mechanically docs-only detection applies only when no changed path is under
+`spec/**`. A `spec/**` edit is normative even when every changed file is
+Markdown and must follow the cited OpenSpec path. Phase 0 includes a planted
+negative case proving that such an edit cannot take the docs-only bypass.
+
 Likewise, a `spec-exempt` label may support the pre-integration process gate,
 but blocking provenance adoption requires a repository-owned debt or waiver
 record. Provider state cannot be the only durable exemption ledger.
@@ -354,9 +359,13 @@ not make OpenSpec or provider metadata canonical product authority.
 
 **Oracle:** the named `openspec_adoption` suite plus the PR-gate suite prove
 that valid changes pass strict OpenSpec validation; missing requirement
-deltas, positive or negative scenarios, and implementation-PR change links
-fail; and cited, docs-only, and explicitly exempted PR cases follow their
-defined paths.
+deltas, positive or negative scenarios, implementation-PR change links, or
+specific requirement/design citations fail; planted proposal/design/spec/task
+drift fails; and an implementation PR whose linked change has not entered the
+human review queue—or whose production commit predates that entry—fails.
+Cited PRs, nonnormative docs-only PRs that do not touch `spec/**`, and
+explicitly exempted PRs follow their defined paths, while a docs-only `spec/**`
+edit is rejected from the docs-only path.
 
 ## Phase 1 — advisory Buoy shell-side pilot
 
@@ -424,7 +433,11 @@ Promotion requires:
 
 **Oracle:** the named `chelis_provenance_blocking_policy` suite proves that a
 planted uncovered atom, missing surface member, stale carrier, and silent
-policy weakening each fail while the complete selected scope passes.
+policy weakening each fail. It also proves that a required oracle which is
+unselected or reports `not-run`, `fail`, `error`, or `timeout` cannot satisfy
+the obligation; an active waiver over any nonpassing verdict remains visible
+but cannot synthesize satisfaction; and only the complete selected scope with
+every required oracle selected, exactly bound, and passing succeeds.
 
 ## Phase 4 — stronger evidence
 

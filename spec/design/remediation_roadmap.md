@@ -258,7 +258,7 @@ decisions 0.19 already made, so it is behavior-preserving by construction.
 | **v0.17.0 - loud checking + canonical eval rendering** (ship now) | [#730] P1 + [#731] P1 + [#732] P1, and everything else merged since 0.16.1 | **source migration** (wave 1) | breaking deltas only: loud rejections (incl. the new loud compiled-lane `test_*` assert, [#796] - the old inert-`0` stub is gone, so anything leaning on it fails heavily in E2E), `with seed(n)` -> `42i64` ([#731] P1 - the Shoals / Whale / hello-chelis HEAD canaries fail on unsuffixed seeds), and dtype-faithful eval rendering. Seed form frozen ([#735] changes only meaning); eval render frozen (C matches it at 0.18) |
 | **v0.18.0 - checker totality, DeepTag, host-type/ABI boundary, compiled rendering** | [#731] P2 (PR #800) + [#731] P3 (DeepTag) + [#730] P2 (PR #799 vocab + host-type/ABI state) + [#732] P2 (compiled render) | **mechanical** for shells | no wire break ([#730] P2 preserves the `CHELIS_*` ids); the added loudness lands on already-broken code, so no *expected* source migration. Completes byte-identical rendering. Release-hygiene gate: the tarball must now ship `chelis_runtime_dtype.h` - PR 799's public `chelis_runtime.h` `#include`s it, but the release workflow currently copies only `chelis_runtime.h` |
 | **v0.19.0 - grounded dtype storage/wire break + every behavior-changing capability decision** | [#729] P1-P3 landed atomic per §C3, **plus every capability decision that changes behavior** - integer-overflow traps and each supported-vs-`Unimplemented` disposition (int `mean` [#724], bool arithmetic [#726], the [#715] rows, the HIP/Metal/C reject cells) | **source migration** (wave 2) | the one wire break, isolated from the checker-loudness cuts; class E resolves here, not at the 0.20 table. Bindings adapt to the per-dtype payload once; capability behavior is final |
-| **v0.20.0 - behavior-preserving permanent guards** | [#729] P4 (the capability *table*, mechanizing 0.19's decisions) + [#730] P3 (gates -> UX) + [#732] P3 (tolerance / cross-lane oracle) + [#733] provenance | **mechanical** for shells | guaranteed behavior-preserving: no decision, rejection, or rendered byte changes here - 0.19 shipped them all. `tests_blocked/` probes are re-adjudicated against the now-standing table |
+| **v0.20.0 - behavior-preserving permanent guards** | [#729] P4 (the capability *table*, mechanizing 0.19's decisions) + [#730] P3 (gates -> UX) + [#732] P3 (tolerance / cross-lane oracle) + [#733] P3 (first blocking provenance ratchet) | **mechanical** for shells | guaranteed behavior-preserving: no decision, rejection, or rendered byte changes here - 0.19 shipped them all. [#733] P0 lands independently before this cut, while its P1-P2 advisory integration is a prerequisite rather than v0.20 release payload. `tests_blocked/` probes are re-adjudicated against the now-standing table |
 
 Net downstream shape: there are **four mechanical `conform` bump waves** - one
 per cut, each a pin bump plus a probe re-run and an inventory refresh - but only
@@ -333,8 +333,9 @@ Migration-note stubs (the breaking delta per cut):
   payload shape changed), narrow dtypes preserved end-to-end; every op x dtype
   capability decision is now fixed (supported, or a cited stable rejection)."
 - **0.20** (mechanical) - "pin bump only: the capability table, gates-as-UX,
-  provenance, and the cross-lane oracle land, all encoding decisions already
-  shipped in 0.19 - no behavior change."
+  [#733] Phase 3 blocking provenance ratchet, and the cross-lane oracle land;
+  Phase 0 landed independently and Phases 1-2 were advisory prerequisites. All
+  encoding decisions already shipped in 0.19 - no behavior change."
 
 ### Tag gate and the 0.17 sequence
 
